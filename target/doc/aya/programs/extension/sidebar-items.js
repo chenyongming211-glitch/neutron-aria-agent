@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ExtensionError"],"struct":["Extension","ExtensionLink","ExtensionLinkId"]};

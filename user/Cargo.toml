@@ -1,0 +1,22 @@
+[package]
+name = "firewall-ctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+aya.workspace = true
+aya-log.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+libc.workspace = true
+fslock.workspace = true
+
+[profile.release]
+lto = true
+codegen-units = 1

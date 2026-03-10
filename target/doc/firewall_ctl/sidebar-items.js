@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_EBPF_PATH","DEFAULT_PIN_PATH","DEFAULT_STATE_PATH"],"enum":["Commands","GroupCommands","PolicyCommands","SystemCommands"],"fn":["get_ebpf_path","get_pin_path","get_state_path","main"],"mod":["common","manager","state"],"struct":["Cli"]};

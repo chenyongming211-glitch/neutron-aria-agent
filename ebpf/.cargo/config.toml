@@ -1,0 +1,8 @@
+[build]
+target = "bpfel-unknown-none"
+
+[alias]
+bpf = "build --release"
+
+[env]
+CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER = "bpf-linker"

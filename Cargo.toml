@@ -1,0 +1,31 @@
+[workspace]
+members = ["user", "ebpf"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Your Name <email@example.com>"]
+
+[workspace.dependencies]
+aya = "0.13.1"
+aya-log = "0.2"
+aya-ebpf = "0.1"
+network-types = "0.1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+libc = "0.2"
+fslock = "0.2"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

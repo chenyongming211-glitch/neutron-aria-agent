@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CgroupSkbAttachType"],"struct":["CgroupSkb","CgroupSkbLink","CgroupSkbLinkId"]};

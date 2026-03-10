@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["kernel_symbols","nr_cpus","online_cpus","syscall_prefix"],"struct":["KernelVersion"]};
