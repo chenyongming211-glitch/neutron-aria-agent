@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use aya::maps::{Array, HashMap, LpmTrie};
 use aya::maps::lpm_trie::Key;
 use aya::Pod;
+use tokio::signal::unix::{signal, SignalKind};
 use crate::common::{PolicyKey, PolicyValue};
 
 // 加载 eBPF 程序，并设置 pin 路径以复用已有的 map
@@ -91,17 +92,11 @@ pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str) -> Resul
 
     println!("XDP attached successfully (link_id: {:?})", link_id);
 
-    let mut link = xdp.take_link(link_id)
+    // 保持 link 存活，但不再尝试 pin
+    let _link = xdp.take_link(link_id)
         .map_err(|e| format!("take_link error: {:?}", e))?;
 
-    let link_path = format!("{}/xdp_link", pin_path);
-    if let Err(e) = link.pin(&link_path) {
-        eprintln!("Warning: failed to pin link: {}, firewall may detach on exit", e);
-        std::mem::forget(link); // 降级方案
-    } else {
-        println!("XDP link pinned to {}", link_path);
-    }
-
+    // 将 maps 和 programs pin 到文件系统，供后续无状态 CLI 使用
     let map_names = ["SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE", "POLICY_TABLE", "PORT_BITMAP_POOL"];
     for name in map_names {
         if let Some(mut map) = bpf.map_mut(name) {
@@ -118,8 +113,20 @@ pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str) -> Resul
 
     println!("eBPF system started successfully");
     println!("Pin path: {}", pin_path);
-    println!("Firewall attached to {}. User-plane exiting, kernel processing continues.", iface);
+    println!("Firewall attached to {}. Waiting for stop signal...", iface);
 
+    // 监听 SIGTERM 和 SIGINT 信号，实现优雅退出
+    let mut term = signal(SignalKind::terminate())
+        .map_err(|e| format!("failed to create signal handler: {}", e))?;
+    let mut int = signal(SignalKind::interrupt())
+        .map_err(|e| format!("failed to create signal handler: {}", e))?;
+
+    tokio::select! {
+        _ = term.recv() => println!("Received SIGTERM"),
+        _ = int.recv() => println!("Received SIGINT"),
+    }
+
+    println!("Shutting down firewall, XDP detached automatically.");
     Ok(())
 }
 
@@ -178,7 +185,7 @@ pub async fn add_network(direction: &str, cidr: &str, id: u32, pin_path: &str, e
     Ok(())
 }
 
-pub async fn delete_network(direction: &str, cidr: &str, id: u32, pin_path: &str, ebpf_path: &str) -> Result<(), String> {
+pub async fn delete_network(direction: &str, cidr: &str, _id: u32, pin_path: &str, ebpf_path: &str) -> Result<(), String> {
     let prog_path = format!("{}/xdp_firewall", pin_path);
     if !std::path::Path::new(&prog_path).exists() {
         return Err("Firewall not started. Run 'system start' first.".to_string());

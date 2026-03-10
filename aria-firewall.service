@@ -1,0 +1,13 @@
+[Unit]
+Description=Aria Firewall Core
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/firewall-ctl system start --iface eth0
+Restart=always
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
