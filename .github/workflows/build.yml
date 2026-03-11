@@ -17,12 +17,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: master
+          toolchain: nightly
+          components: rust-src
 
       - name: Install bpf target
-        run: rustup target add bpfel-unknown-none
+        run: rustup target add bpfel-unknown-none --toolchain nightly
 
       - name: Install LLVM and Clang
         run: |
