@@ -24,11 +24,33 @@ pub struct RuleInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortSetInfo {
+    pub bitmap_idx: u32,
+    pub ports_normalized: String,
+    pub ref_count: u32,
+}
+
+pub struct AddRuleResult {
+    pub bitmap_idx: Option<u32>,
+    pub is_new_port_set: bool,
+}
+
+fn default_max_port_policies() -> u32 {
+    64
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallState {
     pub groups: HashMap<String, GroupInfo>,
     pub rules: Vec<RuleInfo>,
     pub next_group_id: u32,
     pub next_bitmap_idx: u32,
+    #[serde(default)]
+    pub port_sets: HashMap<String, PortSetInfo>,
+    #[serde(default)]
+    pub free_bitmap_indices: Vec<u32>,
+    #[serde(default = "default_max_port_policies")]
+    pub max_port_policies: u32,
 }
 
 impl Default for FirewallState {
@@ -38,6 +60,68 @@ impl Default for FirewallState {
             rules: Vec::new(),
             next_group_id: 1, // ID 0 保留给通配符 "any"
             next_bitmap_idx: 0,
+            port_sets: HashMap::new(),
+            free_bitmap_indices: Vec::new(),
+            max_port_policies: default_max_port_policies(),
+        }
+    }
+}
+
+/// 将用户输入的端口规则归一化为唯一规范形式。
+/// 解析 → 按 (start, end, bpf_action) 排序 → 序列化为 "start[-end]:bpf_action,..." 形式。
+fn normalize_ports(ports_str: &str) -> Result<String, String> {
+    let mut entries: Vec<(u16, u16, u8)> = Vec::new();
+    for part in ports_str.split(',') {
+        let parts: Vec<&str> = part.trim().split(':').collect();
+        if parts[0].contains('-') {
+            let range: Vec<&str> = parts[0].split('-').collect();
+            if range.len() != 2 {
+                return Err("Invalid range format".to_string());
+            }
+            let start = range[0].trim().parse::<u16>().map_err(|_| "Invalid port")?;
+            let end = range[1].trim().parse::<u16>().map_err(|_| "Invalid port")?;
+            if start > end {
+                return Err(format!("Invalid port range: {}-{}", start, end));
+            }
+            let action = parts.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
+            let bpf_action: u8 = if action == 0 { 2 } else { 1 };
+            entries.push((start, end, bpf_action));
+        } else {
+            let port = parts[0].trim().parse::<u16>().map_err(|_| "Invalid port")?;
+            let action = parts.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
+            let bpf_action: u8 = if action == 0 { 2 } else { 1 };
+            entries.push((port, port, bpf_action));
+        }
+    }
+    entries.sort();
+    let normalized = entries
+        .iter()
+        .map(|(start, end, act)| {
+            if start == end {
+                format!("{}:{}", start, act)
+            } else {
+                format!("{}-{}:{}", start, end, act)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(normalized)
+}
+
+/// 减少端口集引用计数，计数归零时回收 bitmap_idx
+fn release_port_set(state: &mut FirewallState, bitmap_idx: u32) {
+    let key_to_remove = state
+        .port_sets
+        .iter()
+        .find(|(_, ps)| ps.bitmap_idx == bitmap_idx)
+        .map(|(k, _)| k.clone());
+    if let Some(key) = key_to_remove {
+        if let Some(ps) = state.port_sets.get_mut(&key) {
+            ps.ref_count -= 1;
+            if ps.ref_count == 0 {
+                state.free_bitmap_indices.push(bitmap_idx);
+                state.port_sets.remove(&key);
+            }
         }
     }
 }
@@ -128,9 +212,28 @@ impl StateManager {
         Ok(id)
     }
 
+    pub fn remove_cidr_from_group(&self, name: &str, cidr: &str) -> Result<(), String> {
+        self.with_state(|state| {
+            if let Some(group) = state.groups.get_mut(name) {
+                group.cidrs.retain(|c| c != cidr);
+                if group.cidrs.is_empty() {
+                    state.groups.remove(name);
+                }
+            }
+            Ok(())
+        })
+    }
+
     pub fn delete_group(&self, name: &str) -> Result<(), String> {
         self.with_state(|state| {
             state.groups.remove(name);
+            Ok(())
+        })
+    }
+
+    pub fn set_max_port_policies(&self, max: u32) -> Result<(), String> {
+        self.with_state(|state| {
+            state.max_port_policies = max;
             Ok(())
         })
     }
@@ -142,51 +245,116 @@ impl StateManager {
         proto: u8,
         action: u8,
         ports: Option<&str>,
-    ) -> Result<Option<u32>, String> {
-        let mut result = None;
+    ) -> Result<AddRuleResult, String> {
+        let mut result = AddRuleResult {
+            bitmap_idx: None,
+            is_new_port_set: false,
+        };
         self.with_state(|state| {
-            // 检测重复规则：相同 (src_group_id, dst_group_id, proto)
+            let (bitmap_idx, is_new) = if let Some(p) = ports {
+                if p != "all" && !p.is_empty() {
+                    let normalized = normalize_ports(p)?;
+
+                    if let Some(existing_ps) = state.port_sets.get_mut(&normalized) {
+                        existing_ps.ref_count += 1;
+                        (Some(existing_ps.bitmap_idx), false)
+                    } else {
+                        let idx = if let Some(recycled) = state.free_bitmap_indices.pop() {
+                            recycled
+                        } else {
+                            if state.next_bitmap_idx >= state.max_port_policies {
+                                return Err(format!(
+                                    "Port set limit ({}) reached. Unique port combinations: {}",
+                                    state.max_port_policies,
+                                    state.port_sets.len()
+                                ));
+                            }
+                            let idx = state.next_bitmap_idx;
+                            state.next_bitmap_idx += 1;
+                            idx
+                        };
+                        state.port_sets.insert(
+                            normalized.clone(),
+                            PortSetInfo {
+                                bitmap_idx: idx,
+                                ports_normalized: normalized,
+                                ref_count: 1,
+                            },
+                        );
+                        (Some(idx), true)
+                    }
+                } else {
+                    (None, false)
+                }
+            } else {
+                (None, false)
+            };
+
+            // 检测重复规则：相同 (src_group_id, dst_group_id, proto) → 更新
             if let Some(existing) = state.rules.iter_mut().find(|r| {
                 r.src_group_id == src_group_id
                     && r.dst_group_id == dst_group_id
                     && r.proto == proto
             }) {
-                // 更新现有规则，复用已有的 bitmap_idx
+                // 旧规则有 bitmap → 减引用计数
+                if let Some(old_idx) = existing.bitmap_idx {
+                    // 只有当新旧 bitmap_idx 不同时才释放旧的
+                    if bitmap_idx != Some(old_idx) {
+                        release_port_set(state, old_idx);
+                    } else {
+                        // 新旧相同 bitmap_idx，说明端口集相同，撤销上面多加的 ref_count
+                        // (上面已 +1，但实际无需增加，因为是替换同一规则)
+                        // 不过上面的逻辑会找到已有 port_set 并 +1，这里需要 -1 还原
+                        if let Some(key) = state
+                            .port_sets
+                            .iter()
+                            .find(|(_, ps)| ps.bitmap_idx == old_idx)
+                            .map(|(k, _)| k.clone())
+                        {
+                            if let Some(ps) = state.port_sets.get_mut(&key) {
+                                ps.ref_count -= 1;
+                            }
+                        }
+                    }
+                }
                 existing.action = action;
                 existing.ports = ports.map(|s| s.to_string());
-                result = existing.bitmap_idx;
-                return Ok(());
+                existing.bitmap_idx = bitmap_idx;
+            } else {
+                state.rules.push(RuleInfo {
+                    name: None,
+                    src_group_id,
+                    dst_group_id,
+                    proto,
+                    action,
+                    ports: ports.map(|s| s.to_string()),
+                    bitmap_idx,
+                });
             }
 
-            let bitmap_idx = if let Some(p) = ports {
-                if p != "all" && !p.is_empty() {
-                    // 边界检查：最多 64 个位图（与 eBPF PORT_BITMAP_POOL 容量一致）
-                    if state.next_bitmap_idx >= 64 {
-                        return Err("Maximum port filtering limits (64 policies) reached.".to_string());
-                    }
-                    let idx = state.next_bitmap_idx;
-                    state.next_bitmap_idx += 1;
-                    Some(idx)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            let rule = RuleInfo {
-                name: None,
-                src_group_id,
-                dst_group_id,
-                proto,
-                action,
-                ports: ports.map(|s| s.to_string()),
+            result = AddRuleResult {
                 bitmap_idx,
+                is_new_port_set: is_new,
             };
-            state.rules.push(rule);
-            result = bitmap_idx;
             Ok(())
         })?;
         Ok(result)
+    }
+
+    pub fn remove_rule(&self, src_group_id: u32, dst_group_id: u32, proto: u8) -> Result<(), String> {
+        self.with_state(|state| {
+            if let Some(pos) = state.rules.iter().position(|r| {
+                r.src_group_id == src_group_id
+                    && r.dst_group_id == dst_group_id
+                    && r.proto == proto
+            }) {
+                let rule = state.rules.remove(pos);
+                if let Some(idx) = rule.bitmap_idx {
+                    release_port_set(state, idx);
+                }
+            }
+            Ok(())
+        })
     }
 
     pub fn get_group(&self, name: &str) -> Result<Option<GroupInfo>, String> {

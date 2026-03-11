@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 EnvironmentFile=-/etc/aria-firewall/config
-ExecStart=/usr/local/bin/firewall-ctl system start --iface ${IFACE}
+ExecStart=/usr/local/bin/firewall-ctl system start --iface ${IFACE} --max-port-policies ${MAX_PORT_POLICIES:-64}
 Restart=always
 User=root
 Group=root

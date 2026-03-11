@@ -55,6 +55,8 @@ enum SystemCommands {
         iface: String,
         #[arg(short = 'e', long, help = "Path to eBPF binary")]
         ebpf_path: Option<String>,
+        #[arg(long, default_value = "64")]
+        max_port_policies: u32,
     },
     Stop,
 }
@@ -104,9 +106,11 @@ async fn main() {
 
     let result = match cli.command {
         Commands::System { action } => match action {
-            SystemCommands::Start { iface, ebpf_path } => {
+            SystemCommands::Start { iface, ebpf_path, max_port_policies } => {
                 let actual_ebpf_path = ebpf_path.unwrap_or_else(get_ebpf_path);
-                manager::system_start(&iface, &actual_ebpf_path, &pin_path).await
+                // 先持久化 max_port_policies，replay 读取 state.json 时即可用
+                let _ = state_manager.set_max_port_policies(max_port_policies);
+                manager::system_start(&iface, &actual_ebpf_path, &pin_path, max_port_policies, &state_path).await
             }
             SystemCommands::Stop => manager::system_stop(&pin_path).await,
         },
@@ -119,28 +123,7 @@ async fn main() {
                     std::process::exit(1);
                 }
 
-                // 先获取或分配 group ID（但不写入状态）
-                let existing = state_manager.get_group(&name).unwrap_or(None);
-                let id = if let Some(ref g) = existing {
-                    g.id
-                } else {
-                    // 预分配 ID，但尚未写入状态
-                    let groups = state_manager.list_groups().unwrap_or_default();
-                    let max_id = groups.iter().map(|g| g.id).max().unwrap_or(0);
-                    max_id + 1
-                };
-
-                // 先写入内核 map
-                if let Err(e) = manager::add_network("src", &cidr, id, &pin_path, &get_ebpf_path()).await {
-                    eprintln!("Error (src): {}", e);
-                    std::process::exit(1);
-                }
-                if let Err(e) = manager::add_network("dst", &cidr, id, &pin_path, &get_ebpf_path()).await {
-                    eprintln!("Error (dst): {}", e);
-                    std::process::exit(1);
-                }
-
-                // 内核写入成功后再更新状态
+                // 1. 先写状态，获取唯一 ID
                 let id = match state_manager.add_group(&name, &cidr) {
                     Ok(id) => id,
                     Err(e) => {
@@ -148,6 +131,22 @@ async fn main() {
                         std::process::exit(1);
                     }
                 };
+
+                // 2. 用正确的 ID 写内核
+                if let Err(e) = manager::add_network("src", &cidr, id, &pin_path, &get_ebpf_path()).await {
+                    // 回滚状态
+                    let _ = state_manager.remove_cidr_from_group(&name, &cidr);
+                    eprintln!("Error (src): {}", e);
+                    std::process::exit(1);
+                }
+                if let Err(e) = manager::add_network("dst", &cidr, id, &pin_path, &get_ebpf_path()).await {
+                    // 回滚：删除 src 内核条目 + 状态
+                    let _ = manager::delete_network("src", &cidr, id, &pin_path, &get_ebpf_path()).await;
+                    let _ = state_manager.remove_cidr_from_group(&name, &cidr);
+                    eprintln!("Error (dst): {}", e);
+                    std::process::exit(1);
+                }
+
                 println!("Added group '{}' with id {}", name, id);
                 Ok(())
             }
@@ -264,14 +263,19 @@ async fn main() {
                         }
                     }
                 };
-                let bitmap_idx = match state_manager.add_rule(src_id, dst_id, proto_num, action_num, ports.as_deref()) {
-                    Ok(idx) => idx,
+                // 1. 写状态，获取 bitmap_idx 和 is_new_port_set
+                let add_result = match state_manager.add_rule(src_id, dst_id, proto_num, action_num, ports.as_deref()) {
+                    Ok(r) => r,
                     Err(e) => {
                         eprintln!("Error: {}", e);
                         std::process::exit(1);
                     }
                 };
-                if let Err(e) = manager::add_policy(src_id, dst_id, proto_num, action_num, ports.as_deref(), bitmap_idx, &pin_path, &get_ebpf_path()).await {
+
+                // 2. 写内核（只在新端口集时写位图）
+                if let Err(e) = manager::add_policy(src_id, dst_id, proto_num, action_num, ports.as_deref(), add_result.bitmap_idx, add_result.is_new_port_set, &pin_path, &get_ebpf_path()).await {
+                    // 回滚状态
+                    let _ = state_manager.remove_rule(src_id, dst_id, proto_num);
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 }
