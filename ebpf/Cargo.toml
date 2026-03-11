@@ -9,7 +9,7 @@ authors.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-aya-ebpf = { version = "0.1", features = ["btf"] }
+aya-ebpf = "0.1"
 network-types.workspace = true
 
 [profile.dev]
