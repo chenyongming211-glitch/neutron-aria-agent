@@ -18,6 +18,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: master
 
       - name: Install bpf target
         run: rustup target add bpfel-unknown-none
