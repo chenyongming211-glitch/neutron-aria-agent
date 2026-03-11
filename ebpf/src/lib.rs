@@ -101,6 +101,11 @@ fn apply_policy(policy: &PolicyValue, dst_port: u16) -> u32 {
         return if policy.action == 0 { XDP_PASS } else { XDP_DROP };
     }
 
+    // 边界检查：bitmap_idx 必须 < 64（PORT_BITMAP_POOL 容量）
+    if policy.bitmap_idx >= 64 {
+        return if policy.action == 0 { XDP_PASS } else { XDP_DROP };
+    }
+
     // O(1) 寻址：策略组基址 + 端口号
     let index = (policy.bitmap_idx * 65536) + (dst_port as u32);
     let rule_action = PORT_BITMAP_POOL.get(index).copied().unwrap_or(0);

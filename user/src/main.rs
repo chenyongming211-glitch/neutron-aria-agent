@@ -112,19 +112,42 @@ async fn main() {
         },
         Commands::Group { action } => match action {
             GroupCommands::Add { name, cidr } => {
-                let id = match state_manager.add_group(&name, &cidr) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                        std::process::exit(1);
-                    }
+                // 先检查防火墙是否启动
+                let prog_path = format!("{}/xdp_firewall", pin_path);
+                if !std::path::Path::new(&prog_path).exists() {
+                    eprintln!("Error: Firewall not started. Run 'system start' first.");
+                    std::process::exit(1);
+                }
+
+                // 先获取或分配 group ID（但不写入状态）
+                let existing = state_manager.get_group(&name).unwrap_or(None);
+                let id = if let Some(ref g) = existing {
+                    g.id
+                } else {
+                    // 预分配 ID，但尚未写入状态
+                    let groups = state_manager.list_groups().unwrap_or_default();
+                    let max_id = groups.iter().map(|g| g.id).max().unwrap_or(0);
+                    max_id + 1
                 };
+
+                // 先写入内核 map
                 if let Err(e) = manager::add_network("src", &cidr, id, &pin_path, &get_ebpf_path()).await {
                     eprintln!("Error (src): {}", e);
+                    std::process::exit(1);
                 }
                 if let Err(e) = manager::add_network("dst", &cidr, id, &pin_path, &get_ebpf_path()).await {
                     eprintln!("Error (dst): {}", e);
+                    std::process::exit(1);
                 }
+
+                // 内核写入成功后再更新状态
+                let id = match state_manager.add_group(&name, &cidr) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!("Error saving state: {}", e);
+                        std::process::exit(1);
+                    }
+                };
                 println!("Added group '{}' with id {}", name, id);
                 Ok(())
             }

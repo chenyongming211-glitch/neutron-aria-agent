@@ -4,7 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/firewall-ctl system start --iface eth0
+EnvironmentFile=-/etc/aria-firewall/config
+ExecStart=/usr/local/bin/firewall-ctl system start --iface ${IFACE}
 Restart=always
 User=root
 Group=root

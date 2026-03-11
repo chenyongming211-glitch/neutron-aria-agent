@@ -45,6 +45,9 @@ fn parse_ports(ports_str: &str) -> Result<Vec<(u16, u16, u8)>, String> {
             }
             let start = range[0].trim().parse::<u16>().map_err(|_| "Invalid port")?;
             let end = range[1].trim().parse::<u16>().map_err(|_| "Invalid port")?;
+            if start > end {
+                return Err(format!("Invalid port range: {}-{} (start must be <= end)", start, end));
+            }
             let action = parts.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
             if action > 1 {
                 return Err(format!("Invalid action {}: must be 0 or 1", action));
@@ -131,6 +134,24 @@ pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str) -> Resul
 }
 
 pub async fn system_stop(pin_path: &str) -> Result<(), String> {
+    // 尝试从所有网卡分离 XDP 程序
+    let output = std::process::Command::new("ip")
+        .args(["link", "show"])
+        .output()
+        .map_err(|e| format!("Failed to run ip link show: {}", e))?;
+    let link_output = String::from_utf8_lossy(&output.stdout);
+    for line in link_output.lines() {
+        if line.contains("xdp") {
+            // 提取网卡名（格式: "N: ifname: <flags>"）
+            if let Some(iface) = line.split(':').nth(1).map(|s| s.trim()) {
+                let _ = std::process::Command::new("ip")
+                    .args(["link", "set", "dev", iface, "xdp", "off"])
+                    .output();
+                println!("Detached XDP from {}", iface);
+            }
+        }
+    }
+
     if std::path::Path::new(pin_path).exists() {
         fs::remove_dir_all(pin_path)
             .map_err(|e| format!("Failed to remove pin directory: {}", e))?;

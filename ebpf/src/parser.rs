@@ -62,6 +62,13 @@ pub fn parse_eth_ipv4(data: usize, data_end: usize, offset: usize) -> Option<Pac
 
         let ip_offset = eth_offset + ETH_HLEN;
         let ihl = ((read8(ip_offset, 0) & 0x0F) as usize) * 4;
+        if ihl < 20 {
+            return None; // 最小 IP 头长度为 20 字节
+        }
+        // 确保完整的 IP 头在包范围内
+        if ip_offset + ihl > data_end {
+            return None;
+        }
         let proto = read8(ip_offset, 9);
         
         let src_ip = read_be32(ip_offset, 12);
@@ -93,17 +100,24 @@ pub fn parse_eth_ipv4(data: usize, data_end: usize, offset: usize) -> Option<Pac
     }
 }
 
+// IPv6 扩展头类型
+const IPPROTO_HOPOPTS: u8 = 0;   // Hop-by-Hop Options
+const IPPROTO_ROUTING: u8 = 43;  // Routing Header
+const IPPROTO_DSTOPTS: u8 = 60;  // Destination Options
+
+#[inline]
+fn is_ipv6_extension_header(next_header: u8) -> bool {
+    matches!(next_header, IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS)
+}
+
 #[inline]
 pub fn parse_eth_ipv6(data: usize, data_end: usize, offset: usize) -> Option<PacketInfo> {
-    // NOTE: This parser assumes transport layer (TCP/UDP) follows directly after IPv6 fixed header.
-    // IPv6 extension headers (Hop-by-Hop, Routing, Fragment, etc.) are not handled.
-    // For production use, extension header parsing should be added.
     if data + offset + ETH_HLEN + 40 > data_end {
         return None;
     }
 
     let eth_offset = data + offset;
-    
+
     unsafe {
         let eth_type = read_be16(eth_offset, 12);
         if eth_type != 0x86DD {
@@ -111,18 +125,35 @@ pub fn parse_eth_ipv6(data: usize, data_end: usize, offset: usize) -> Option<Pac
         }
 
         let ip_offset = eth_offset + ETH_HLEN;
-        let next_header = read8(ip_offset, 6);
+        let mut next_header = read8(ip_offset, 6);
 
         let mut src_ip_v6 = [0u8; 16];
         let mut dst_ip_v6 = [0u8; 16];
-        
+
         for i in 0..16 {
             src_ip_v6[i] = read8(ip_offset, 8 + i);
             dst_ip_v6[i] = read8(ip_offset, 24 + i);
         }
 
+        // 跳过 IPv6 扩展头（最多跳过 4 层，防止 BPF 验证器拒绝无界循环）
+        let mut transport_offset = ip_offset + 40;
+        let mut i = 0u8;
+        while i < 4 && is_ipv6_extension_header(next_header) {
+            // 扩展头格式: [next_header: u8, hdr_len: u8, ...]
+            // hdr_len 以 8 字节为单位（不含首 8 字节）
+            if transport_offset + 2 > data_end {
+                return None;
+            }
+            next_header = read8(transport_offset, 0);
+            let ext_len = (read8(transport_offset, 1) as usize + 1) * 8;
+            transport_offset += ext_len;
+            if transport_offset > data_end {
+                return None;
+            }
+            i += 1;
+        }
+
         let (src_port, dst_port) = if next_header == IPPROTO_TCP || next_header == IPPROTO_UDP {
-            let transport_offset = ip_offset + 40;
             if transport_offset + 4 <= data_end {
                 (
                     read_be16(transport_offset, 0),

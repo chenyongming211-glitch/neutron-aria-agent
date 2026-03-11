@@ -23,12 +23,23 @@ pub struct RuleInfo {
     pub bitmap_idx: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallState {
     pub groups: HashMap<String, GroupInfo>,
     pub rules: Vec<RuleInfo>,
     pub next_group_id: u32,
     pub next_bitmap_idx: u32,
+}
+
+impl Default for FirewallState {
+    fn default() -> Self {
+        Self {
+            groups: HashMap::new(),
+            rules: Vec::new(),
+            next_group_id: 1, // ID 0 保留给通配符 "any"
+            next_bitmap_idx: 0,
+        }
+    }
 }
 
 pub struct StateManager {
@@ -134,11 +145,24 @@ impl StateManager {
     ) -> Result<Option<u32>, String> {
         let mut result = None;
         self.with_state(|state| {
+            // 检测重复规则：相同 (src_group_id, dst_group_id, proto)
+            if let Some(existing) = state.rules.iter_mut().find(|r| {
+                r.src_group_id == src_group_id
+                    && r.dst_group_id == dst_group_id
+                    && r.proto == proto
+            }) {
+                // 更新现有规则，复用已有的 bitmap_idx
+                existing.action = action;
+                existing.ports = ports.map(|s| s.to_string());
+                result = existing.bitmap_idx;
+                return Ok(());
+            }
+
             let bitmap_idx = if let Some(p) = ports {
                 if p != "all" && !p.is_empty() {
-                    // 边界检查：最多 1024 个位图
-                    if state.next_bitmap_idx >= 1024 {
-                        return Err("Maximum port filtering limits (1024 policies) reached.".to_string());
+                    // 边界检查：最多 64 个位图（与 eBPF PORT_BITMAP_POOL 容量一致）
+                    if state.next_bitmap_idx >= 64 {
+                        return Err("Maximum port filtering limits (64 policies) reached.".to_string());
                     }
                     let idx = state.next_bitmap_idx;
                     state.next_bitmap_idx += 1;
@@ -189,7 +213,7 @@ impl StateManager {
         let lock_path = self.state_file.with_extension("lock");
         let mut lock = LockFile::open(&lock_path)
             .map_err(|e| format!("Failed to open lock file: {}", e))?;
-        lock.lock().map_err(|e| format!("Failed to acquire lock: {}", e))?;
+        lock.lock_shared().map_err(|e| format!("Failed to acquire shared lock: {}", e))?;
 
         let state = if self.state_file.exists() {
             let mut file = File::open(&self.state_file)
