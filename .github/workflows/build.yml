@@ -31,7 +31,9 @@ jobs:
         run: cargo install bpf-linker
 
       - name: Build eBPF
-        run: cargo build --release -p ebpf-firewall --target bpfel-unknown-none
+        run: |
+          cd ebpf
+          cargo build --release
 
       - name: Build user-space
         run: cargo build --release -p firewall-ctl
@@ -41,5 +43,5 @@ jobs:
         with:
           name: firewall-binaries
           path: |
-            target/bpfel-unknown-none/release/libebpf_firewall.so
+            ebpf/target/bpfel-unknown-none/release/libebpf_firewall.so
             target/release/firewall-ctl
