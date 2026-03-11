@@ -7,6 +7,7 @@ pub struct PacketInfo {
     pub src_ip_v6: [u8; 16],
     pub dst_ip_v6: [u8; 16],
     pub proto: u8,
+    #[allow(dead_code)]
     pub src_port: u16,
     pub dst_port: u16,
     pub is_ipv6: bool,

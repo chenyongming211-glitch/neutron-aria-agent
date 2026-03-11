@@ -3,7 +3,6 @@ use std::fs;
 use std::net::IpAddr;
 use aya::maps::{Array, HashMap, LpmTrie};
 use aya::maps::lpm_trie::Key;
-use aya::Pod;
 use tokio::signal::unix::{signal, SignalKind};
 use crate::common::{PolicyKey, PolicyValue};
 use crate::state::FirewallState;
@@ -105,7 +104,7 @@ pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str, max_port
     // 将 maps 和 programs pin 到文件系统，供后续无状态 CLI 使用
     let map_names = ["SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE", "POLICY_TABLE", "PORT_BITMAP_POOL"];
     for name in map_names {
-        if let Some(mut map) = bpf.map_mut(name) {
+        if let Some(map) = bpf.map_mut(name) {
             if let Err(e) = map.pin(format!("{}/{}", pin_path, name)) {
                 eprintln!("Warning: failed to pin map {}: {}", name, e);
             }

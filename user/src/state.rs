@@ -375,6 +375,7 @@ impl StateManager {
         Ok(state.rules.clone())
     }
 
+    #[allow(dead_code)]
     pub fn get_group_by_id(&self, id: u32) -> Result<Option<GroupInfo>, String> {
         let state = self._load_readonly()?;
         Ok(state.groups.values().find(|g| g.id == id).cloned())
