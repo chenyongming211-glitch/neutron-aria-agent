@@ -18,6 +18,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: bpfel-unknown-none
 
       - name: Install LLVM and Clang
         run: |
@@ -27,13 +29,16 @@ jobs:
       - name: Install bpf-linker
         run: cargo install bpf-linker
 
-      - name: Build
-        run: cargo build --release
+      - name: Build eBPF
+        run: cargo build --release -p ebpf-firewall --target bpfel-unknown-none
+
+      - name: Build user-space
+        run: cargo build --release -p firewall-ctl
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: firewall-binaries
           path: |
-            target/release/libebpf_firewall.so
+            target/bpfel-unknown-none/release/libebpf_firewall.so
             target/release/firewall-ctl
