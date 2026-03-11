@@ -104,10 +104,11 @@ pub fn parse_eth_ipv4(data: usize, data_end: usize, offset: usize) -> Option<Pac
 const IPPROTO_HOPOPTS: u8 = 0;   // Hop-by-Hop Options
 const IPPROTO_ROUTING: u8 = 43;  // Routing Header
 const IPPROTO_DSTOPTS: u8 = 60;  // Destination Options
+const IPPROTO_FRAGMENT: u8 = 44; // Fragment Header
 
 #[inline]
 fn is_ipv6_extension_header(next_header: u8) -> bool {
-    matches!(next_header, IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS)
+    matches!(next_header, IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS | IPPROTO_FRAGMENT)
 }
 
 #[inline]

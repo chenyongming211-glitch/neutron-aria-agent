@@ -109,18 +109,21 @@ fn normalize_ports(ports_str: &str) -> Result<String, String> {
 }
 
 /// 减少端口集引用计数，计数归零时回收 bitmap_idx
-fn release_port_set(state: &mut FirewallState, bitmap_idx: u32) {
-    let key_to_remove = state
-        .port_sets
+fn release_port_set(
+    port_sets: &mut HashMap<String, PortSetInfo>,
+    free_indices: &mut Vec<u32>,
+    bitmap_idx: u32,
+) {
+    let key_to_remove = port_sets
         .iter()
         .find(|(_, ps)| ps.bitmap_idx == bitmap_idx)
         .map(|(k, _)| k.clone());
     if let Some(key) = key_to_remove {
-        if let Some(ps) = state.port_sets.get_mut(&key) {
+        if let Some(ps) = port_sets.get_mut(&key) {
             ps.ref_count -= 1;
             if ps.ref_count == 0 {
-                state.free_bitmap_indices.push(bitmap_idx);
-                state.port_sets.remove(&key);
+                free_indices.push(bitmap_idx);
+                port_sets.remove(&key);
             }
         }
     }
@@ -300,7 +303,7 @@ impl StateManager {
                 if let Some(old_idx) = existing.bitmap_idx {
                     // 只有当新旧 bitmap_idx 不同时才释放旧的
                     if bitmap_idx != Some(old_idx) {
-                        release_port_set(state, old_idx);
+                        release_port_set(&mut state.port_sets, &mut state.free_bitmap_indices, old_idx);
                     } else {
                         // 新旧相同 bitmap_idx，说明端口集相同，撤销上面多加的 ref_count
                         // (上面已 +1，但实际无需增加，因为是替换同一规则)
@@ -350,7 +353,7 @@ impl StateManager {
             }) {
                 let rule = state.rules.remove(pos);
                 if let Some(idx) = rule.bitmap_idx {
-                    release_port_set(state, idx);
+                    release_port_set(&mut state.port_sets, &mut state.free_bitmap_indices, idx);
                 }
             }
             Ok(())
@@ -381,7 +384,7 @@ impl StateManager {
         let lock_path = self.state_file.with_extension("lock");
         let mut lock = LockFile::open(&lock_path)
             .map_err(|e| format!("Failed to open lock file: {}", e))?;
-        lock.lock_shared().map_err(|e| format!("Failed to acquire shared lock: {}", e))?;
+        lock.lock().map_err(|e| format!("Failed to acquire lock: {}", e))?;
 
         let state = if self.state_file.exists() {
             let mut file = File::open(&self.state_file)

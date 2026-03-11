@@ -109,7 +109,9 @@ async fn main() {
             SystemCommands::Start { iface, ebpf_path, max_port_policies } => {
                 let actual_ebpf_path = ebpf_path.unwrap_or_else(get_ebpf_path);
                 // 先持久化 max_port_policies，replay 读取 state.json 时即可用
-                let _ = state_manager.set_max_port_policies(max_port_policies);
+                if let Err(e) = state_manager.set_max_port_policies(max_port_policies) {
+                    eprintln!("Warning: Failed to persist max_port_policies: {}", e);
+                }
                 manager::system_start(&iface, &actual_ebpf_path, &pin_path, max_port_policies, &state_path).await
             }
             SystemCommands::Stop => manager::system_stop(&pin_path).await,
