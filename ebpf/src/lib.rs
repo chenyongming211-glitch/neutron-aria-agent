@@ -103,7 +103,7 @@ fn apply_policy(policy: &PolicyValue, dst_port: u16) -> u32 {
 
     // HashMap lookup：(bitmap_idx, port) → action
     let key = PortKey { idx: policy.bitmap_idx, port: dst_port, pad: 0 };
-    let rule_action = PORT_BITMAP_POOL.get(&key).copied().unwrap_or(0);
+    let rule_action = unsafe { PORT_BITMAP_POOL.get(&key).copied().unwrap_or(0) };
 
     match rule_action {
         1 => XDP_DROP,
