@@ -7,44 +7,57 @@ on:
     branches: [main]
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Rust nightly (eBPF)
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
           components: rust-src
 
-      - name: Install bpf target
-        run: rustup target add bpfel-unknown-none --toolchain nightly
+      - name: Install Rust stable (userspace)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
 
-      - name: Install LLVM and Clang
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm-dev clang libelf-dev libbpf-dev
+          sudo apt-get install -y llvm-dev clang libelf-dev libbpf-dev musl-tools
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/bpf-linker
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       - name: Install bpf-linker
-        run: cargo install bpf-linker
+        run: |
+          command -v bpf-linker >/dev/null 2>&1 || cargo +nightly install bpf-linker
 
       - name: Build eBPF
-        run: |
-          cd ebpf
-          cargo build --release
+        run: cd ebpf && cargo +nightly build --release
 
-      - name: Build user-space
-        run: cargo build --release -p firewall-ctl
+      - name: Build userspace (static)
+        run: cargo +stable build --release -p firewall-ctl --target x86_64-unknown-linux-musl
+
+      - name: Verify static binary
+        run: |
+          file target/x86_64-unknown-linux-musl/release/firewall-ctl
+          ldd target/x86_64-unknown-linux-musl/release/firewall-ctl 2>&1 || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: firewall-binaries
+          name: firewall-binaries-x86_64
           path: |
             ebpf/target/bpfel-unknown-none/release/libebpf_firewall.so
-            target/release/firewall-ctl
+            target/x86_64-unknown-linux-musl/release/firewall-ctl
