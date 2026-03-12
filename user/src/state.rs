@@ -36,7 +36,7 @@ pub struct AddRuleResult {
 }
 
 fn default_max_port_policies() -> u32 {
-    64
+    16384
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

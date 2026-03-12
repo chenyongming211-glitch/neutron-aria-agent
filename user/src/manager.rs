@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 use std::fs;
 use std::net::IpAddr;
-use aya::maps::{Array, HashMap, LpmTrie};
+use aya::maps::{HashMap, LpmTrie};
 use aya::maps::lpm_trie::Key;
 use tokio::signal::unix::{signal, SignalKind};
-use crate::common::{PolicyKey, PolicyValue};
+use crate::common::{PolicyKey, PolicyValue, PortKey};
 use crate::state::FirewallState;
 
 // 加载 eBPF 程序，并设置 pin 路径以复用已有的 map
@@ -68,14 +68,13 @@ fn parse_ports(ports_str: &str) -> Result<Vec<(u16, u16, u8)>, String> {
     Ok(rules)
 }
 
-pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str, max_port_policies: u32, state_path: &str) -> Result<(), String> {
+pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str, _max_port_policies: u32, state_path: &str) -> Result<(), String> {
     fs::create_dir_all(pin_path)
         .map_err(|e| format!("Failed to create pin directory: {}", e))?;
 
     println!("Loading eBPF from: {}", ebpf_path);
     let bpf_bytes = std::fs::read(ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
     let mut bpf = aya::EbpfLoader::new()
-        .set_max_entries("PORT_BITMAP_POOL", max_port_policies * 65536)
         .map_pin_path(pin_path)
         .load(&bpf_bytes)
         .map_err(|e| format!("load error: {:?}", e))?;
@@ -284,26 +283,18 @@ fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
         let mut written_bitmaps: HashSet<u32> = HashSet::new();
         match bpf.map_mut("PORT_BITMAP_POOL")
             .ok_or_else(|| "PORT_BITMAP_POOL not found".to_string())
-            .and_then(|m| Array::<_, u8>::try_from(m).map_err(|e| format!("{:?}", e)))
+            .and_then(|m| HashMap::<_, PortKey, u8>::try_from(m).map_err(|e| format!("{:?}", e)))
         {
             Ok(mut port_pool) => {
                 for rule in &state.rules {
                     if let (Some(idx), Some(ref ports)) = (rule.bitmap_idx, &rule.ports) {
                         if !ports.is_empty() && ports != "all" && !written_bitmaps.contains(&idx) {
-                            // 先清零整个 65536 范围，防止残留脏数据
-                            for port in 0u32..65536 {
-                                let index = idx * 65536 + port;
-                                if let Err(e) = port_pool.set(index, 0u8, 0) {
-                                    errors.push(format!("PORT_BITMAP_POOL clear idx={} port={}: {:?}", idx, port, e));
-                                    break;
-                                }
-                            }
                             match parse_ports(ports) {
                                 Ok(port_rules) => {
                                     for (start, end, action) in port_rules {
                                         for port in start..=end {
-                                            let index = idx * 65536 + port as u32;
-                                            if let Err(e) = port_pool.set(index, action, 0) {
+                                            let key = PortKey { idx, port, pad: 0 };
+                                            if let Err(e) = port_pool.insert(&key, &action, 0) {
                                                 errors.push(format!("PORT_BITMAP_POOL idx={} port={}: {:?}", idx, port, e));
                                             }
                                         }
@@ -534,22 +525,15 @@ pub async fn add_policy(
             let ports_str = ports.unwrap_or("");
             if !ports_str.is_empty() {
                 let rules = parse_ports(ports_str)?;
-                let mut port_pool: Array<_, u8> = bpf.map_mut("PORT_BITMAP_POOL")
+                let mut port_pool: HashMap<_, PortKey, u8> = bpf.map_mut("PORT_BITMAP_POOL")
                     .ok_or("PORT_BITMAP_POOL not found")?
                     .try_into()
-                    .map_err(|e| format!("convert to Array: {:?}", e))?;
-
-                // 先清零整个 65536 范围，防止回收索引残留脏数据
-                for port in 0u32..65536 {
-                    let index = idx * 65536 + port;
-                    port_pool.set(index, 0u8, 0)
-                        .map_err(|e| format!("clear port bitmap error: {:?}", e))?;
-                }
+                    .map_err(|e| format!("convert to HashMap: {:?}", e))?;
 
                 for (start, end, rule_action) in rules {
                     for port in start..=end {
-                        let index = idx * 65536 + port as u32;
-                        port_pool.set(index, rule_action, 0)
+                        let key = PortKey { idx, port, pad: 0 };
+                        port_pool.insert(&key, &rule_action, 0)
                             .map_err(|e| format!("set port bitmap error: {:?}", e))?;
                     }
                     println!("  Set ports {}-{} to action {}", start, end, rule_action);
@@ -639,6 +623,36 @@ pub async fn show_stats(pin_path: &str, state_path: &str) -> Result<(), String> 
         let path = format!("{}/{}", pin_path, name);
         let status = if std::path::Path::new(&path).exists() { "pinned" } else { "missing" };
         println!("  {}: {}", name, status);
+    }
+
+    Ok(())
+}
+
+/// 删除指定 bitmap_idx 的所有端口条目。
+/// ports_normalized 格式: "80:1,443:1,8000-9000:2"
+pub fn delete_port_set(
+    bitmap_idx: u32,
+    ports_normalized: &str,
+    pin_path: &str,
+    ebpf_path: &str,
+) -> Result<(), String> {
+    let prog_path = format!("{}/xdp_firewall", pin_path);
+    if !std::path::Path::new(&prog_path).exists() {
+        return Ok(()); // firewall not running, nothing to clean
+    }
+
+    let mut bpf = load_bpf_with_pin(pin_path, ebpf_path)?;
+    let mut port_pool: HashMap<_, PortKey, u8> = bpf.map_mut("PORT_BITMAP_POOL")
+        .ok_or("PORT_BITMAP_POOL not found")?
+        .try_into()
+        .map_err(|e| format!("convert to HashMap: {:?}", e))?;
+
+    let rules = parse_ports(ports_normalized)?;
+    for (start, end, _) in rules {
+        for port in start..=end {
+            let key = PortKey { idx: bitmap_idx, port, pad: 0 };
+            let _ = port_pool.remove(&key);
+        }
     }
 
     Ok(())

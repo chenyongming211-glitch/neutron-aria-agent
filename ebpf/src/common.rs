@@ -21,3 +21,11 @@ pub const XDP_DROP: u32 = 1;
 
 pub const IPPROTO_TCP: u8 = 6;
 pub const IPPROTO_UDP: u8 = 17;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PortKey {
+    pub idx: u32,
+    pub port: u16,
+    pub pad: u16,
+}

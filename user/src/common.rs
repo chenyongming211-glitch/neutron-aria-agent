@@ -19,3 +19,12 @@ pub struct PolicyValue {
     pub bitmap_idx: u32,
 }
 unsafe impl Pod for PolicyValue {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct PortKey {
+    pub idx: u32,
+    pub port: u16,
+    pub pad: u16,
+}
+unsafe impl Pod for PortKey {}

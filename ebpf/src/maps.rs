@@ -1,7 +1,7 @@
-use aya_ebpf::maps::{Array, HashMap, LpmTrie};
+use aya_ebpf::maps::{HashMap, LpmTrie};
 use aya_ebpf::macros::map;
 
-pub use crate::common::{PolicyKey, PolicyValue};
+pub use crate::common::{PolicyKey, PolicyValue, PortKey};
 
 #[map(name = "SRC_IPV4_TRIE")]
 pub static SRC_IPV4_TRIE: LpmTrie<[u8; 4], u32> = LpmTrie::with_max_entries(10000, 0);
@@ -18,8 +18,7 @@ pub static DST_IPV6_TRIE: LpmTrie<[u8; 16], u32> = LpmTrie::with_max_entries(500
 #[map(name = "POLICY_TABLE")]
 pub static POLICY_TABLE: HashMap<PolicyKey, PolicyValue> = HashMap::with_max_entries(65536, 0);
 
-// 扁平位图池：64 个策略组 × 65536 端口 = 4MB
-// 注意：aya-ebpf 0.1 不支持 ArrayOfMaps，使用 flat Array 方案
-// 如果升级到支持 ArrayOfMaps 的版本，应改为嵌套结构以减少内存占用
+// 端口匹配 HashMap：key=(bitmap_idx, port) → value=action
+// BPF_F_NO_PREALLOC (1) 只为实际条目分配内存
 #[map(name = "PORT_BITMAP_POOL")]
-pub static PORT_BITMAP_POOL: Array<u8> = Array::with_max_entries(64 * 65536, 0);
+pub static PORT_BITMAP_POOL: HashMap<PortKey, u8> = HashMap::with_max_entries(2_000_000, 1);

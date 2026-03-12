@@ -10,7 +10,7 @@ mod common;
 mod maps;
 mod parser;
 
-use common::{PolicyKey, PolicyValue, XDP_PASS, XDP_DROP};
+use common::{PolicyKey, PolicyValue, PortKey, XDP_PASS, XDP_DROP};
 use maps::{
     DST_IPV4_TRIE, SRC_IPV4_TRIE, DST_IPV6_TRIE, SRC_IPV6_TRIE,
     POLICY_TABLE, PORT_BITMAP_POOL,
@@ -101,9 +101,9 @@ fn apply_policy(policy: &PolicyValue, dst_port: u16) -> u32 {
         return if policy.action == 0 { XDP_PASS } else { XDP_DROP };
     }
 
-    // O(1) 寻址：策略组基址 + 端口号
-    let index = (policy.bitmap_idx * 65536) + (dst_port as u32);
-    let rule_action = PORT_BITMAP_POOL.get(index).copied().unwrap_or(0);
+    // HashMap lookup：(bitmap_idx, port) → action
+    let key = PortKey { idx: policy.bitmap_idx, port: dst_port, pad: 0 };
+    let rule_action = PORT_BITMAP_POOL.get(&key).copied().unwrap_or(0);
 
     match rule_action {
         1 => XDP_DROP,

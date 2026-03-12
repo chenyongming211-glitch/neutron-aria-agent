@@ -55,7 +55,7 @@ enum SystemCommands {
         iface: String,
         #[arg(short = 'e', long, help = "Path to eBPF binary")]
         ebpf_path: Option<String>,
-        #[arg(long, default_value = "64")]
+        #[arg(long, default_value = "16384")]
         max_port_policies: u32,
     },
     Stop,
