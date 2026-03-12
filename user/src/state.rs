@@ -83,12 +83,18 @@ fn normalize_ports(ports_str: &str) -> Result<String, String> {
             if start > end {
                 return Err(format!("Invalid port range: {}-{}", start, end));
             }
-            let action = parts.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
+            let action: u8 = parts.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
+            if action > 1 {
+                return Err(format!("Invalid action {}: must be 0 or 1", action));
+            }
             let bpf_action: u8 = if action == 0 { 2 } else { 1 };
             entries.push((start, end, bpf_action));
         } else {
             let port = parts[0].trim().parse::<u16>().map_err(|_| "Invalid port")?;
-            let action = parts.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
+            let action: u8 = parts.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
+            if action > 1 {
+                return Err(format!("Invalid action {}: must be 0 or 1", action));
+            }
             let bpf_action: u8 = if action == 0 { 2 } else { 1 };
             entries.push((port, port, bpf_action));
         }
@@ -385,7 +391,7 @@ impl StateManager {
         let lock_path = self.state_file.with_extension("lock");
         let mut lock = LockFile::open(&lock_path)
             .map_err(|e| format!("Failed to open lock file: {}", e))?;
-        lock.lock().map_err(|e| format!("Failed to acquire lock: {}", e))?;
+        lock.lock_shared().map_err(|e| format!("Failed to acquire shared lock: {}", e))?;
 
         let state = if self.state_file.exists() {
             let mut file = File::open(&self.state_file)

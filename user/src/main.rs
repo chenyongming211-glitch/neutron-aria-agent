@@ -107,6 +107,10 @@ async fn main() {
     let result = match cli.command {
         Commands::System { action } => match action {
             SystemCommands::Start { iface, ebpf_path, max_port_policies } => {
+                if max_port_policies == 0 || max_port_policies > 65535 {
+                    eprintln!("Error: max-port-policies must be between 1 and 65535");
+                    std::process::exit(1);
+                }
                 let actual_ebpf_path = ebpf_path.unwrap_or_else(get_ebpf_path);
                 // 先持久化 max_port_policies，replay 读取 state.json 时即可用
                 if let Err(e) = state_manager.set_max_port_policies(max_port_policies) {

@@ -290,6 +290,14 @@ fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
                 for rule in &state.rules {
                     if let (Some(idx), Some(ref ports)) = (rule.bitmap_idx, &rule.ports) {
                         if !ports.is_empty() && ports != "all" && !written_bitmaps.contains(&idx) {
+                            // 先清零整个 65536 范围，防止残留脏数据
+                            for port in 0u32..65536 {
+                                let index = idx * 65536 + port;
+                                if let Err(e) = port_pool.set(index, 0u8, 0) {
+                                    errors.push(format!("PORT_BITMAP_POOL clear idx={} port={}: {:?}", idx, port, e));
+                                    break;
+                                }
+                            }
                             match parse_ports(ports) {
                                 Ok(port_rules) => {
                                     for (start, end, action) in port_rules {
@@ -512,6 +520,13 @@ pub async fn add_policy(
                     .ok_or("PORT_BITMAP_POOL not found")?
                     .try_into()
                     .map_err(|e| format!("convert to Array: {:?}", e))?;
+
+                // 先清零整个 65536 范围，防止回收索引残留脏数据
+                for port in 0u32..65536 {
+                    let index = idx * 65536 + port;
+                    port_pool.set(index, 0u8, 0)
+                        .map_err(|e| format!("clear port bitmap error: {:?}", e))?;
+                }
 
                 for (start, end, rule_action) in rules {
                     for port in start..=end {
