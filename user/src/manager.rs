@@ -630,6 +630,7 @@ pub async fn show_stats(pin_path: &str, state_path: &str) -> Result<(), String> 
 
 /// 删除指定 bitmap_idx 的所有端口条目。
 /// ports_normalized 格式: "80:1,443:1,8000-9000:2"
+#[allow(dead_code)]
 pub fn delete_port_set(
     bitmap_idx: u32,
     ports_normalized: &str,
