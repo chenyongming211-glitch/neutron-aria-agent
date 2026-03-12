@@ -45,14 +45,14 @@ jobs:
           command -v bpf-linker >/dev/null 2>&1 || cargo +nightly install bpf-linker
 
       - name: Build eBPF
-        run: cd ebpf && cargo +nightly build --release
+        run: cd ebpf && cargo +nightly build --release --target-dir target
 
       - name: Find eBPF artifacts
         run: |
-          echo "=== ebpf/target/bpfel-unknown-none/release/ ==="
-          ls -la ebpf/target/bpfel-unknown-none/release/ 2>/dev/null || echo "directory not found"
-          echo "=== all .so and .o files ==="
-          find ebpf/target -name "*.so" -o -name "*.o" -o -name "ebpf*" 2>/dev/null | head -20
+          echo "=== ebpf/target/ ==="
+          find ebpf/target -type f ! -path "*/deps/*" ! -path "*/.fingerprint/*" ! -name "*.d" ! -name "*.rlib" 2>/dev/null | head -20
+          echo "=== workspace target/bpfel* ==="
+          find target/bpfel-unknown-none -type f ! -path "*/deps/*" ! -path "*/.fingerprint/*" ! -name "*.d" ! -name "*.rlib" 2>/dev/null | head -20
 
       - name: Build userspace (static)
         run: cargo +stable build --release -p firewall-ctl --target x86_64-unknown-linux-musl
@@ -66,8 +66,11 @@ jobs:
         run: |
           mkdir -p release
           cp target/x86_64-unknown-linux-musl/release/firewall-ctl release/
-          # eBPF 产物可能是 .so 或其他格式，全部复制
-          find ebpf/target/bpfel-unknown-none/release -maxdepth 1 -name "*ebpf_firewall*" -type f ! -name "*.d" -exec cp {} release/ \;
+          # eBPF 产物搜索 ebpf/target 和 workspace target 两个位置
+          find ebpf/target target/bpfel-unknown-none -maxdepth 3 -name "*ebpf_firewall*" -type f ! -name "*.d" 2>/dev/null | while read f; do
+            cp "$f" release/
+          done
+          echo "=== release contents ==="
           ls -la release/
 
       - name: Upload artifacts
