@@ -391,7 +391,7 @@ impl StateManager {
         let lock_path = self.state_file.with_extension("lock");
         let mut lock = LockFile::open(&lock_path)
             .map_err(|e| format!("Failed to open lock file: {}", e))?;
-        lock.lock_shared().map_err(|e| format!("Failed to acquire shared lock: {}", e))?;
+        lock.lock().map_err(|e| format!("Failed to acquire lock: {}", e))?;
 
         let state = if self.state_file.exists() {
             let mut file = File::open(&self.state_file)
