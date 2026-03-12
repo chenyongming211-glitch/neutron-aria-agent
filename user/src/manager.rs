@@ -469,8 +469,17 @@ pub async fn delete_network(direction: &str, cidr: &str, _id: u32, pin_path: &st
                 .ok_or(format!("map {} not found", map_name))?
                 .try_into()
                 .map_err(|e| format!("convert to LpmTrie: {:?}", e))?;
-            lpm_map.remove(&key).map_err(|e| format!("LPM remove error: {:?}", e))?;
-            println!("Deleted IPv4 network {} from {}", cidr, map_name);
+            match lpm_map.remove(&key) {
+                Ok(()) => println!("Deleted IPv4 network {} from {}", cidr, map_name),
+                Err(e) => {
+                    let err_str = format!("{:?}", e);
+                    if err_str.contains("No such file or directory") || err_str.contains("os error 2") {
+                        println!("IPv4 network {} not found in {}, skipping", cidr, map_name);
+                    } else {
+                        return Err(format!("LPM remove error: {:?}", e));
+                    }
+                }
+            }
         }
         IpAddr::V6(v6) => {
             let map_name = match direction {
@@ -483,8 +492,17 @@ pub async fn delete_network(direction: &str, cidr: &str, _id: u32, pin_path: &st
                 .ok_or(format!("map {} not found", map_name))?
                 .try_into()
                 .map_err(|e| format!("convert to LpmTrie: {:?}", e))?;
-            lpm_map.remove(&key).map_err(|e| format!("LPM remove error: {:?}", e))?;
-            println!("Deleted IPv6 network {} from {}", cidr, map_name);
+            match lpm_map.remove(&key) {
+                Ok(()) => println!("Deleted IPv6 network {} from {}", cidr, map_name),
+                Err(e) => {
+                    let err_str = format!("{:?}", e);
+                    if err_str.contains("No such file or directory") || err_str.contains("os error 2") {
+                        println!("IPv6 network {} not found in {}, skipping", cidr, map_name);
+                    } else {
+                        return Err(format!("LPM remove error: {:?}", e));
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -565,10 +583,63 @@ pub async fn add_policy(
     Ok(())
 }
 
-pub async fn show_stats(pin_path: &str) -> Result<(), String> {
+pub async fn show_stats(pin_path: &str, state_path: &str) -> Result<(), String> {
     if !std::path::Path::new(pin_path).exists() {
         return Err("Firewall not started. Run 'system start' first.".to_string());
     }
-    println!("Stats not implemented yet");
+
+    let state_file = format!("{}/state.json", state_path);
+
+    let state: FirewallState = if std::path::Path::new(&state_file).exists() {
+        let contents = std::fs::read_to_string(&state_file)
+            .map_err(|e| format!("Failed to read state file: {}", e))?;
+        if contents.is_empty() {
+            FirewallState::default()
+        } else {
+            serde_json::from_str(&contents)
+                .map_err(|e| format!("Failed to parse state file: {}", e))?
+        }
+    } else {
+        FirewallState::default()
+    };
+
+    println!("=== Aria Firewall Stats ===");
+    println!();
+
+    // Groups
+    println!("Groups: {}", state.groups.len());
+    let total_cidrs: usize = state.groups.values().map(|g| g.cidrs.len()).sum();
+    println!("  Total CIDRs: {}", total_cidrs);
+    let ipv4_cidrs = state.groups.values()
+        .flat_map(|g| g.cidrs.iter())
+        .filter(|c| !c.contains(':'))
+        .count();
+    let ipv6_cidrs = total_cidrs - ipv4_cidrs;
+    println!("  IPv4: {}, IPv6: {}", ipv4_cidrs, ipv6_cidrs);
+    println!();
+
+    // Policies
+    println!("Policies: {}", state.rules.len());
+    let allow_count = state.rules.iter().filter(|r| r.action == 0).count();
+    let drop_count = state.rules.iter().filter(|r| r.action == 1).count();
+    println!("  Allow: {}, Drop: {}", allow_count, drop_count);
+    let with_ports = state.rules.iter().filter(|r| r.bitmap_idx.is_some()).count();
+    println!("  With port filter: {}", with_ports);
+    println!();
+
+    // Port sets
+    println!("Port bitmap pool: {}/{} slots used", state.port_sets.len(), state.max_port_policies);
+    println!("  Free recycled slots: {}", state.free_bitmap_indices.len());
+    println!();
+
+    // Pinned maps
+    let map_names = ["SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE", "POLICY_TABLE", "PORT_BITMAP_POOL"];
+    println!("Kernel maps:");
+    for name in map_names {
+        let path = format!("{}/{}", pin_path, name);
+        let status = if std::path::Path::new(&path).exists() { "pinned" } else { "missing" };
+        println!("  {}: {}", name, status);
+    }
+
     Ok(())
 }

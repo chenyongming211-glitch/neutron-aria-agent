@@ -129,6 +129,19 @@ async fn main() {
                     std::process::exit(1);
                 }
 
+                // 检查 group 名称是否已存在
+                match state_manager.get_group(&name) {
+                    Ok(Some(_)) => {
+                        eprintln!("Error: Group '{}' already exists", name);
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                    Ok(None) => {}
+                }
+
                 // 1. 先写状态，获取唯一 ID
                 let id = match state_manager.add_group(&name, &cidr) {
                     Ok(id) => id,
@@ -313,7 +326,7 @@ async fn main() {
                 }
             }
         },
-        Commands::Stats => manager::show_stats(&pin_path).await,
+        Commands::Stats => manager::show_stats(&pin_path, &state_path).await,
     };
 
     if let Err(e) = result {
