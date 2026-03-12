@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -52,8 +53,6 @@ jobs:
           ls -la ebpf/target/bpfel-unknown-none/release/ 2>/dev/null || echo "directory not found"
           echo "=== all .so and .o files ==="
           find ebpf/target -name "*.so" -o -name "*.o" -o -name "ebpf*" 2>/dev/null | head -20
-          echo "=== deps directory ==="
-          ls -la ebpf/target/bpfel-unknown-none/release/deps/ 2>/dev/null | head -20
 
       - name: Build userspace (static)
         run: cargo +stable build --release -p firewall-ctl --target x86_64-unknown-linux-musl
@@ -63,10 +62,23 @@ jobs:
           file target/x86_64-unknown-linux-musl/release/firewall-ctl
           ldd target/x86_64-unknown-linux-musl/release/firewall-ctl 2>&1 || true
 
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          cp target/x86_64-unknown-linux-musl/release/firewall-ctl release/
+          # eBPF 产物可能是 .so 或其他格式，全部复制
+          find ebpf/target/bpfel-unknown-none/release -maxdepth 1 -name "*ebpf_firewall*" -type f ! -name "*.d" -exec cp {} release/ \;
+          ls -la release/
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: firewall-binaries-x86_64
-          path: |
-            ebpf/target/bpfel-unknown-none/release/*ebpf_firewall*
-            target/x86_64-unknown-linux-musl/release/firewall-ctl
+          path: release/
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
