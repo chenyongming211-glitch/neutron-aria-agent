@@ -46,6 +46,15 @@ jobs:
       - name: Build eBPF
         run: cd ebpf && cargo +nightly build --release
 
+      - name: Find eBPF artifacts
+        run: |
+          echo "=== ebpf/target/bpfel-unknown-none/release/ ==="
+          ls -la ebpf/target/bpfel-unknown-none/release/ 2>/dev/null || echo "directory not found"
+          echo "=== all .so and .o files ==="
+          find ebpf/target -name "*.so" -o -name "*.o" -o -name "ebpf*" 2>/dev/null | head -20
+          echo "=== deps directory ==="
+          ls -la ebpf/target/bpfel-unknown-none/release/deps/ 2>/dev/null | head -20
+
       - name: Build userspace (static)
         run: cargo +stable build --release -p firewall-ctl --target x86_64-unknown-linux-musl
 
@@ -59,5 +68,5 @@ jobs:
         with:
           name: firewall-binaries-x86_64
           path: |
-            ebpf/target/bpfel-unknown-none/release/libebpf_firewall.so
+            ebpf/target/bpfel-unknown-none/release/*ebpf_firewall*
             target/x86_64-unknown-linux-musl/release/firewall-ctl
