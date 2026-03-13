@@ -21,7 +21,7 @@ fn open_pinned_lpm_v4(pin_path: &str, map_name: &str) -> Result<LpmTrie<MapData,
     let map_path = format!("{}/{}", pin_path, map_name);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open pinned map {}: {:?}", map_name, e))?;
-    LpmTrie::try_from(map_data)
+    LpmTrie::try_from(aya::maps::Map::LpmTrie(map_data))
         .map_err(|e| format!("convert {} to LpmTrie: {:?}", map_name, e))
 }
 
@@ -29,7 +29,7 @@ fn open_pinned_lpm_v6(pin_path: &str, map_name: &str) -> Result<LpmTrie<MapData,
     let map_path = format!("{}/{}", pin_path, map_name);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open pinned map {}: {:?}", map_name, e))?;
-    LpmTrie::try_from(map_data)
+    LpmTrie::try_from(aya::maps::Map::LpmTrie(map_data))
         .map_err(|e| format!("convert {} to LpmTrie: {:?}", map_name, e))
 }
 
@@ -37,7 +37,7 @@ fn open_pinned_policy_table(pin_path: &str) -> Result<HashMap<MapData, PolicyKey
     let map_path = format!("{}/POLICY_TABLE", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open pinned POLICY_TABLE: {:?}", e))?;
-    HashMap::try_from(map_data)
+    HashMap::try_from(aya::maps::Map::HashMap(map_data))
         .map_err(|e| format!("convert POLICY_TABLE to HashMap: {:?}", e))
 }
 
@@ -45,7 +45,7 @@ fn open_pinned_port_pool(pin_path: &str) -> Result<HashMap<MapData, PortKey, u8>
     let map_path = format!("{}/PORT_BITMAP_POOL", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open pinned PORT_BITMAP_POOL: {:?}", e))?;
-    HashMap::try_from(map_data)
+    HashMap::try_from(aya::maps::Map::HashMap(map_data))
         .map_err(|e| format!("convert PORT_BITMAP_POOL to HashMap: {:?}", e))
 }
 
