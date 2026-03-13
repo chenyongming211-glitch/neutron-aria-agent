@@ -9,6 +9,9 @@ const DEFAULT_EBPF_PATH: &str = "/root/ebpf-firewall/ebpf/target/bpfel-unknown-n
 const DEFAULT_PIN_PATH: &str = "/sys/fs/bpf/aria_firewall";
 const DEFAULT_STATE_PATH: &str = "/var/run/ebpf-firewall";
 
+const TAP_BASE_PIN_PATH: &str = "/sys/fs/bpf/aria";
+const TAP_BASE_STATE_PATH: &str = "/var/lib/aria-agent";
+
 fn get_ebpf_path() -> String {
     env::var("EBPF_FIREWALL_PATH").unwrap_or_else(|_| DEFAULT_EBPF_PATH.to_string())
 }
@@ -29,6 +32,8 @@ struct Cli {
     command: Commands,
     #[arg(short = 'p', long, help = "Path to pin directory")]
     pin_path: Option<String>,
+    #[arg(long, help = "Operate on a specific tap instance managed by aria-agent")]
+    tap: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -46,6 +51,11 @@ enum Commands {
         action: PolicyCommands,
     },
     Stats,
+    /// List all tap instances managed by aria-agent
+    Tap {
+        #[command(subcommand)]
+        action: TapCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -101,12 +111,30 @@ enum PolicyCommands {
     List,
 }
 
+#[derive(Subcommand)]
+enum TapCommands {
+    /// List all tap instances (scan pin directory)
+    List,
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
 
-    let pin_path = cli.pin_path.unwrap_or_else(get_pin_path);
-    let state_path = get_state_path();
+    // Determine pin_path and state_path based on --tap flag
+    let (pin_path, state_path) = if let Some(ref tap_name) = cli.tap {
+        let pin = format!("{}/{}", TAP_BASE_PIN_PATH, tap_name);
+        let state = format!("{}/{}", TAP_BASE_STATE_PATH, tap_name);
+        (
+            cli.pin_path.unwrap_or(pin),
+            state,
+        )
+    } else {
+        (
+            cli.pin_path.unwrap_or_else(get_pin_path),
+            get_state_path(),
+        )
+    };
 
     std::fs::create_dir_all(&state_path).ok();
 
@@ -115,6 +143,10 @@ async fn main() {
     let result = match cli.command {
         Commands::System { action } => match action {
             SystemCommands::Start { iface, ebpf_path, max_port_policies } => {
+                if cli.tap.is_some() {
+                    eprintln!("Error: 'system start' is not supported in --tap mode. Use aria-agent to manage tap instances.");
+                    std::process::exit(1);
+                }
                 if max_port_policies == 0 || max_port_policies > 65535 {
                     eprintln!("Error: max-port-policies must be between 1 and 65535");
                     std::process::exit(1);
@@ -126,7 +158,13 @@ async fn main() {
                 }
                 manager::system_start(&iface, &actual_ebpf_path, &pin_path, max_port_policies, &state_path).await
             }
-            SystemCommands::Stop => manager::system_stop(&pin_path, &state_path).await,
+            SystemCommands::Stop => {
+                if cli.tap.is_some() {
+                    eprintln!("Error: 'system stop' is not supported in --tap mode. Use aria-agent to manage tap instances.");
+                    std::process::exit(1);
+                }
+                manager::system_stop(&pin_path, &state_path).await
+            }
         },
         Commands::Group { action } => match action {
             GroupCommands::Add { name, cidr } => {
@@ -136,6 +174,15 @@ async fn main() {
                     eprintln!("Error: Firewall not started. Run 'system start' first.");
                     std::process::exit(1);
                 }
+
+                // Acquire ops lock for atomic state+kernel operation
+                let _ops_lock = match state_manager.acquire_ops_lock() {
+                    Ok(lock) => lock,
+                    Err(e) => {
+                        eprintln!("Error acquiring ops lock: {}", e);
+                        std::process::exit(1);
+                    }
+                };
 
                 // 1. 先写状态，获取唯一 ID（add_group 支持向已有组追加 CIDR）
                 let id = match state_manager.add_group(&name, &cidr) {
@@ -147,15 +194,15 @@ async fn main() {
                 };
 
                 // 2. 用正确的 ID 写内核
-                if let Err(e) = manager::add_network("src", &cidr, id, &pin_path, &get_ebpf_path()).await {
+                if let Err(e) = manager::add_network("src", &cidr, id, &pin_path, &get_ebpf_path()) {
                     // 回滚状态
                     let _ = state_manager.remove_cidr_from_group(&name, &cidr);
                     eprintln!("Error (src): {}", e);
                     std::process::exit(1);
                 }
-                if let Err(e) = manager::add_network("dst", &cidr, id, &pin_path, &get_ebpf_path()).await {
+                if let Err(e) = manager::add_network("dst", &cidr, id, &pin_path, &get_ebpf_path()) {
                     // 回滚：删除 src 内核条目 + 状态
-                    let _ = manager::delete_network("src", &cidr, id, &pin_path, &get_ebpf_path()).await;
+                    let _ = manager::delete_network("src", &cidr, id, &pin_path, &get_ebpf_path());
                     let _ = state_manager.remove_cidr_from_group(&name, &cidr);
                     eprintln!("Error (dst): {}", e);
                     std::process::exit(1);
@@ -189,12 +236,22 @@ async fn main() {
                         std::process::exit(1);
                     }
                 }
+
+                // Acquire ops lock for atomic state+kernel operation
+                let _ops_lock = match state_manager.acquire_ops_lock() {
+                    Ok(lock) => lock,
+                    Err(e) => {
+                        eprintln!("Error acquiring ops lock: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
                 let mut errors = Vec::new();
                 for cidr in &group.cidrs {
-                    if let Err(e) = manager::delete_network("src", cidr, group.id, &pin_path, &get_ebpf_path()).await {
+                    if let Err(e) = manager::delete_network("src", cidr, group.id, &pin_path, &get_ebpf_path()) {
                         errors.push(format!("src {}: {}", cidr, e));
                     }
-                    if let Err(e) = manager::delete_network("dst", cidr, group.id, &pin_path, &get_ebpf_path()).await {
+                    if let Err(e) = manager::delete_network("dst", cidr, group.id, &pin_path, &get_ebpf_path()) {
                         errors.push(format!("dst {}: {}", cidr, e));
                     }
                 }
@@ -283,6 +340,16 @@ async fn main() {
                         }
                     }
                 };
+
+                // Acquire ops lock for atomic state+kernel operation
+                let _ops_lock = match state_manager.acquire_ops_lock() {
+                    Ok(lock) => lock,
+                    Err(e) => {
+                        eprintln!("Error acquiring ops lock: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
                 // 1. 写状态，获取 bitmap_idx 和 is_new_port_set
                 let add_result = match state_manager.add_rule(src_id, dst_id, proto_num, action_num, ports.as_deref()) {
                     Ok(r) => r,
@@ -293,7 +360,7 @@ async fn main() {
                 };
 
                 // 2. 写内核（只在新端口集时写位图）
-                if let Err(e) = manager::add_policy(src_id, dst_id, proto_num, action_num, ports.as_deref(), add_result.bitmap_idx, add_result.is_new_port_set, &pin_path, &get_ebpf_path()).await {
+                if let Err(e) = manager::add_policy(src_id, dst_id, proto_num, action_num, ports.as_deref(), add_result.bitmap_idx, add_result.is_new_port_set, &pin_path, &get_ebpf_path()) {
                     // 回滚状态
                     let _ = state_manager.remove_rule(src_id, dst_id, proto_num);
                     eprintln!("Error: {}", e);
@@ -352,8 +419,17 @@ async fn main() {
                     }
                 };
 
+                // Acquire ops lock for atomic state+kernel operation
+                let _ops_lock = match state_manager.acquire_ops_lock() {
+                    Ok(lock) => lock,
+                    Err(e) => {
+                        eprintln!("Error acquiring ops lock: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
                 // 1. 从内核 POLICY_TABLE 删除
-                if let Err(e) = manager::delete_policy(src_id, dst_id, proto_num, &pin_path, &get_ebpf_path()).await {
+                if let Err(e) = manager::delete_policy(src_id, dst_id, proto_num, &pin_path, &get_ebpf_path()) {
                     eprintln!("Error deleting from kernel: {}", e);
                     std::process::exit(1);
                 }
@@ -406,7 +482,50 @@ async fn main() {
                 }
             }
         },
-        Commands::Stats => manager::show_stats(&pin_path, &state_path).await,
+        Commands::Stats => manager::show_stats(&pin_path, &state_path),
+        Commands::Tap { action } => match action {
+            TapCommands::List => {
+                let base_pin = TAP_BASE_PIN_PATH;
+                let base_pin_path = std::path::Path::new(base_pin);
+                if !base_pin_path.exists() {
+                    println!("No tap instances found (pin directory {} does not exist)", base_pin);
+                    return;
+                }
+                let entries = match std::fs::read_dir(base_pin_path) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        eprintln!("Error reading pin directory: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+                let mut taps: Vec<String> = Vec::new();
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        if entry.path().is_dir() {
+                            if let Some(name) = entry.file_name().to_str() {
+                                taps.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+                taps.sort();
+                if taps.is_empty() {
+                    println!("No tap instances found");
+                } else {
+                    println!("{:<20} {:<10} {}", "TAP", "Maps", "State");
+                    for tap in &taps {
+                        let pin_dir = format!("{}/{}", base_pin, tap);
+                        let state_dir = format!("{}/{}", TAP_BASE_STATE_PATH, tap);
+                        let maps_ok = std::path::Path::new(&format!("{}/POLICY_TABLE", pin_dir)).exists();
+                        let state_ok = std::path::Path::new(&format!("{}/state.json", state_dir)).exists();
+                        let maps_str = if maps_ok { "ok" } else { "missing" };
+                        let state_str = if state_ok { "ok" } else { "missing" };
+                        println!("{:<20} {:<10} {}", tap, maps_str, state_str);
+                    }
+                }
+                Ok(())
+            }
+        },
     };
 
     if let Err(e) = result {

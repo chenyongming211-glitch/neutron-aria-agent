@@ -1,5 +1,5 @@
 [package]
-name = "firewall-ctl"
+name = "aria-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,6 @@ authors.workspace = true
 [dependencies]
 aria-core.workspace = true
 aya.workspace = true
-aya-log.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -17,7 +16,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 libc.workspace = true
 fslock.workspace = true
-
-[profile.release]
-lto = true
-codegen-units = 1
+rtnetlink.workspace = true
+netlink-packet-route.workspace = true
+netlink-packet-core.workspace = true
+netlink-sys.workspace = true
+futures.workspace = true
+regex.workspace = true
+toml.workspace = true

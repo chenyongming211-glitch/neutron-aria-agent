@@ -1,0 +1,22 @@
+[Unit]
+Description=Aria Firewall Agent (multi-tap XDP firewall daemon)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/aria-agent --config /etc/aria-agent/config.toml
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+
+# eBPF required
+LimitMEMLOCK=infinity
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/sys/fs/bpf /var/lib/aria-agent
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

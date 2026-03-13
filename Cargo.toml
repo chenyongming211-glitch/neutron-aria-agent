@@ -1,5 +1,5 @@
 [workspace]
-members = ["user", "ebpf"]
+members = ["user", "ebpf", "core", "agent"]
 resolver = "2"
 
 [workspace.package]
@@ -21,6 +21,14 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 libc = "0.2"
 fslock = "0.2"
+aria-core = { path = "core" }
+rtnetlink = "0.14"
+netlink-packet-route = "0.19"
+netlink-packet-core = "0.7"
+netlink-sys = "0.8"
+futures = "0.3"
+regex = "1"
+toml = "0.8"
 
 [profile.dev]
 panic = "abort"

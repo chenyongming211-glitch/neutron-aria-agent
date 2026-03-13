@@ -1,0 +1,20 @@
+# Aria Agent Configuration
+# /etc/aria-agent/config.toml
+
+# Path to the compiled eBPF binary
+ebpf_path = "/usr/local/lib/libebpf_firewall.so"
+
+# Base path for pinning eBPF maps (per-tap subdirectories created automatically)
+pin_path = "/sys/fs/bpf/aria"
+
+# Base path for state files (per-tap subdirectories created automatically)
+state_path = "/var/lib/aria-agent"
+
+# Regex pattern to match tap interface names
+# Default: "^tap" matches tap0, tap-vm-001, tapXXXXXXXX-XX, etc.
+# For libvirt: "^(tap|vnet)"
+# For OpenStack: "^tap"
+iface_pattern = "^tap"
+
+# Maximum number of unique port filter combinations per tap instance
+max_port_policies = 16384
