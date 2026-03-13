@@ -5,7 +5,7 @@ mod common;
 mod manager;
 mod state;
 
-const DEFAULT_EBPF_PATH: &str = "/root/ebpf-firewall/ebpf/target/bpfel-unknown-none/release/ebpf-firewall";
+const DEFAULT_EBPF_PATH: &str = "/usr/local/lib/libebpf_firewall.so";
 const DEFAULT_PIN_PATH: &str = "/sys/fs/bpf/aria_firewall";
 const DEFAULT_STATE_PATH: &str = "/var/run/ebpf-firewall";
 
