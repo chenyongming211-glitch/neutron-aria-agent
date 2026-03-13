@@ -1,0 +1,6 @@
+# Build artifacts
+/target/
+
+# macOS resource forks and metadata
+._*
+.DS_Store

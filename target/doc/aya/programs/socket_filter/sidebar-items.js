@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["SocketFilterError"],"struct":["SocketFilter","SocketFilterLink","SocketFilterLinkId"]};

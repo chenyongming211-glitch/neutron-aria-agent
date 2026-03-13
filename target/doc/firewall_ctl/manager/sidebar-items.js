@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["add_network","add_policy","delete_network","parse_cidr","parse_ports","show_stats","system_start","system_stop"]};

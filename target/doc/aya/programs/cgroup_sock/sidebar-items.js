@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["CgroupSockAttachType"],"struct":["CgroupSock","CgroupSockLink","CgroupSockLinkId"]};

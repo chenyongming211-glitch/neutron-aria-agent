@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["CgroupAttachMode","LinkError"],"struct":["FdLink","FdLinkId","LinkOrder","PinnedLink","ProgAttachLink","ProgAttachLinkId"],"trait":["Link"]};

@@ -1,9 +1,0 @@
-(function() {
-    const implementors = Object.fromEntries([["aya",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.94.0/std/os/fd/owned/trait.AsFd.html\" title=\"trait std::os::fd::owned::AsFd\">AsFd</a> for <a class=\"struct\" href=\"aya/maps/sock/struct.SockMapFd.html\" title=\"struct aya::maps::sock::SockMapFd\">SockMapFd</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.94.0/std/os/fd/owned/trait.AsFd.html\" title=\"trait std::os::fd::owned::AsFd\">AsFd</a> for <a class=\"struct\" href=\"aya/maps/struct.MapFd.html\" title=\"struct aya::maps::MapFd\">MapFd</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.94.0/std/os/fd/owned/trait.AsFd.html\" title=\"trait std::os::fd::owned::AsFd\">AsFd</a> for <a class=\"struct\" href=\"aya/programs/struct.ProgramFd.html\" title=\"struct aya::programs::ProgramFd\">ProgramFd</a>",0],["impl&lt;T: <a class=\"trait\" href=\"https://doc.rust-lang.org/1.94.0/core/borrow/trait.BorrowMut.html\" title=\"trait core::borrow::BorrowMut\">BorrowMut</a>&lt;<a class=\"struct\" href=\"aya/maps/struct.MapData.html\" title=\"struct aya::maps::MapData\">MapData</a>&gt;&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.94.0/std/os/fd/owned/trait.AsFd.html\" title=\"trait std::os::fd::owned::AsFd\">AsFd</a> for <a class=\"struct\" href=\"aya/maps/perf/struct.PerfEventArrayBuffer.html\" title=\"struct aya::maps::perf::PerfEventArrayBuffer\">PerfEventArrayBuffer</a>&lt;T&gt;",0]]]]);
-    if (window.register_implementors) {
-        window.register_implementors(implementors);
-    } else {
-        window.pending_implementors = implementors;
-    }
-})()
-//{"start":59,"fragment_lengths":[1420]}
