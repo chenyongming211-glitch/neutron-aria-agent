@@ -1,8 +1,10 @@
 use std::sync::Arc;
+use futures::stream::TryStreamExt;
 use futures::stream::StreamExt;
 use netlink_packet_core::NetlinkPayload;
 use netlink_packet_route::RouteNetlinkMessage;
 use netlink_packet_route::link::LinkAttribute;
+use netlink_sys::AsyncSocket;
 use crate::tap_registry::TapRegistry;
 
 /// Enumerate all current network interfaces and return names matching the pattern
@@ -19,13 +21,11 @@ async fn scan_existing_interfaces(registry: &TapRegistry) -> Vec<String> {
     let mut links = handle.link().get().execute();
     let mut matched = Vec::new();
 
-    while let Some(msg) = links.next().await {
-        if let Ok(msg) = msg {
-            for nla in &msg.attributes {
-                if let LinkAttribute::IfName(name) = nla {
-                    if registry.matches_pattern(name) {
-                        matched.push(name.clone());
-                    }
+    while let Ok(Some(msg)) = links.try_next().await {
+        for nla in &msg.attributes {
+            if let LinkAttribute::IfName(name) = nla {
+                if registry.matches_pattern(name) {
+                    matched.push(name.clone());
                 }
             }
         }
