@@ -4,7 +4,8 @@ use tokio::signal::unix::{signal, SignalKind};
 // Re-export shared functions from aria-core for use by main.rs
 pub use aria_core::ebpf_ops::{
     add_network, delete_network, add_policy, delete_policy,
-    delete_port_set, show_stats, replay_state,
+    delete_port_set, show_stats, replay_state, ALL_MAP_NAMES,
+    attach_tc_egress, detach_tc_egress, setup_fq_qdisc,
 };
 
 pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str, _max_port_policies: u32, state_path: &str) -> Result<(), String> {
@@ -18,6 +19,7 @@ pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str, _max_por
         .load(&bpf_bytes)
         .map_err(|e| format!("load error: {:?}", e))?;
 
+    // Attach XDP
     println!("Attaching XDP to {}...", iface);
     let xdp_program = bpf
         .program_mut("xdp_firewall")
@@ -35,13 +37,21 @@ pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str, _max_por
 
     println!("XDP attached successfully (link_id: {:?})", link_id);
 
-    // 保持 link 存活，但不再尝试 pin
     let _link = xdp.take_link(link_id)
         .map_err(|e| format!("take_link error: {:?}", e))?;
 
-    // 将 maps 和 programs pin 到文件系统，供后续无状态 CLI 使用
-    let map_names = ["SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE", "POLICY_TABLE", "PORT_BITMAP_POOL"];
-    for name in map_names {
+    // Attach TC egress
+    if let Err(e) = attach_tc_egress(&mut bpf, iface) {
+        eprintln!("Warning: TC egress attach failed: {}. Egress control disabled.", e);
+    }
+
+    // Setup FQ qdisc for QoS EDT
+    if let Err(e) = setup_fq_qdisc(iface) {
+        eprintln!("Warning: FQ qdisc setup failed: {}. QoS EDT disabled.", e);
+    }
+
+    // Pin all maps (including new CT, stats, QoS maps)
+    for name in ALL_MAP_NAMES {
         if let Some(map) = bpf.map_mut(name) {
             if let Err(e) = map.pin(format!("{}/{}", pin_path, name)) {
                 eprintln!("Warning: failed to pin map {}: {}", name, e);
@@ -49,6 +59,7 @@ pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str, _max_por
         }
     }
 
+    // Pin programs
     for (name, prog) in bpf.programs_mut() {
         prog.pin(format!("{}/{}", pin_path, name))
             .map_err(|e| format!("Failed to pin program {}: {:?}", name, e))?;
@@ -84,10 +95,10 @@ pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str, _max_por
 }
 
 pub async fn system_stop(pin_path: &str, state_path: &str) -> Result<(), String> {
-    // 从状态文件读取挂载的网卡名，只卸载 aria-firewall 的 XDP 程序
     let state_manager = aria_core::state::StateManager::new(state_path);
     match state_manager.get_attached_iface() {
         Ok(Some(iface)) => {
+            // Detach XDP
             let output = std::process::Command::new("ip")
                 .args(["link", "set", "dev", &iface, "xdp", "off"])
                 .output();
@@ -97,16 +108,20 @@ pub async fn system_stop(pin_path: &str, state_path: &str) -> Result<(), String>
                     iface, String::from_utf8_lossy(&o.stderr)),
                 Err(e) => eprintln!("Warning: failed to run ip command: {}", e),
             }
+
+            // Detach TC egress
+            detach_tc_egress(&iface);
+
             if let Err(e) = state_manager.clear_attached_iface() {
                 eprintln!("Warning: failed to clear attached interface record: {}", e);
             }
         }
         Ok(None) => {
-            println!("No attached interface recorded, skipping XDP detach");
+            println!("No attached interface recorded, skipping XDP/TC detach");
         }
         Err(e) => {
             eprintln!("Warning: failed to read state: {}", e);
-            println!("Skipping XDP detach (could not determine attached interface)");
+            println!("Skipping XDP/TC detach (could not determine attached interface)");
         }
     }
 

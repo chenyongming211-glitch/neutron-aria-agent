@@ -1,7 +1,14 @@
-use aya_ebpf::maps::{HashMap, LpmTrie};
+use aya_ebpf::maps::{HashMap, LpmTrie, LruHashMap, PerCpuHashMap, LruPerCpuHashMap};
 use aya_ebpf::macros::map;
 
-pub use crate::common::{PolicyKey, PolicyValue, PortKey};
+pub use crate::common::{
+    PolicyKey, PolicyValue, PortKey,
+    CtKey4, CtKey6, CtValue, CtConfig,
+    RuleStatsValue, FlowStatsValue,
+    QosKey, QosConfig, TokenBucket,
+};
+
+// --- Existing maps ---
 
 #[map(name = "SRC_IPV4_TRIE")]
 pub static SRC_IPV4_TRIE: LpmTrie<[u8; 4], u32> = LpmTrie::with_max_entries(10000, 0);
@@ -22,3 +29,36 @@ pub static POLICY_TABLE: HashMap<PolicyKey, PolicyValue> = HashMap::with_max_ent
 // BPF_F_NO_PREALLOC (1) 只为实际条目分配内存
 #[map(name = "PORT_BITMAP_POOL")]
 pub static PORT_BITMAP_POOL: HashMap<PortKey, u8> = HashMap::with_max_entries(2_000_000, 1);
+
+// --- Connection tracking maps ---
+
+#[map(name = "CT_TABLE_V4")]
+pub static CT_TABLE_V4: LruHashMap<CtKey4, CtValue> = LruHashMap::with_max_entries(262144, 0);
+
+#[map(name = "CT_TABLE_V6")]
+pub static CT_TABLE_V6: LruHashMap<CtKey6, CtValue> = LruHashMap::with_max_entries(65536, 0);
+
+// CT_CONFIG: Array with 1 entry for timeout configuration
+// Using HashMap with u32 key as a workaround (key=0 → config)
+#[map(name = "CT_CONFIG")]
+pub static CT_CONFIG: HashMap<u32, CtConfig> = HashMap::with_max_entries(1, 0);
+
+// --- Traffic statistics maps ---
+
+#[map(name = "RULE_STATS")]
+pub static RULE_STATS: PerCpuHashMap<PolicyKey, RuleStatsValue> = PerCpuHashMap::with_max_entries(65536, 0);
+
+// BPF_F_NO_PREALLOC (1) for LRU per-CPU maps
+#[map(name = "FLOW_STATS_V4")]
+pub static FLOW_STATS_V4: LruPerCpuHashMap<CtKey4, FlowStatsValue> = LruPerCpuHashMap::with_max_entries(16384, 0);
+
+#[map(name = "FLOW_STATS_V6")]
+pub static FLOW_STATS_V6: LruPerCpuHashMap<CtKey6, FlowStatsValue> = LruPerCpuHashMap::with_max_entries(4096, 0);
+
+// --- QoS maps ---
+
+#[map(name = "QOS_CONFIG")]
+pub static QOS_CONFIG: HashMap<QosKey, QosConfig> = HashMap::with_max_entries(1024, 0);
+
+#[map(name = "QOS_TOKEN_BUCKET")]
+pub static QOS_TOKEN_BUCKET: PerCpuHashMap<QosKey, TokenBucket> = PerCpuHashMap::with_max_entries(1024, 0);

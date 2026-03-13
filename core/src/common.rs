@@ -6,7 +6,8 @@ pub struct PolicyKey {
     pub src_id: u32,
     pub dst_id: u32,
     pub proto: u8,
-    pub pad: [u8; 3],
+    pub direction: u8,     // 0=ingress, 1=egress
+    pub pad: [u8; 2],
 }
 unsafe impl Pod for PolicyKey {}
 
@@ -28,3 +29,104 @@ pub struct PortKey {
     pub pad: u16,
 }
 unsafe impl Pod for PortKey {}
+
+// --- Connection tracking ---
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct CtKey4 {
+    pub src_ip: u32,
+    pub dst_ip: u32,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub pad: [u8; 3],
+}
+unsafe impl Pod for CtKey4 {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct CtKey6 {
+    pub src_ip: [u8; 16],
+    pub dst_ip: [u8; 16],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub pad: [u8; 3],
+}
+unsafe impl Pod for CtKey6 {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct CtValue {
+    pub state: u8,
+    pub flags: u8,
+    pub pad: [u8; 2],
+    pub last_seen: u64,
+    pub pkt_count: u64,
+    pub byte_count: u64,
+}
+unsafe impl Pod for CtValue {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct CtConfig {
+    pub tcp_established_ns: u64,
+    pub tcp_new_ns: u64,
+    pub udp_ns: u64,
+    pub icmp_ns: u64,
+}
+unsafe impl Pod for CtConfig {}
+
+// --- Traffic statistics ---
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct RuleStatsValue {
+    pub packets: u64,
+    pub bytes: u64,
+}
+unsafe impl Pod for RuleStatsValue {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct FlowStatsValue {
+    pub packets: u64,
+    pub bytes: u64,
+    pub last_seen: u64,
+}
+unsafe impl Pod for FlowStatsValue {}
+
+// --- QoS ---
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct QosKey {
+    pub group_id: u32,
+    pub direction: u8,
+    pub pad: [u8; 3],
+}
+unsafe impl Pod for QosKey {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct QosConfig {
+    pub rate_bps: u64,
+    pub burst_bytes: u64,
+    pub priority: u8,
+    pub pad: [u8; 7],
+}
+unsafe impl Pod for QosConfig {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct TokenBucket {
+    pub tokens: u64,
+    pub last_refill_ns: u64,
+}
+unsafe impl Pod for TokenBucket {}
+
+pub const CT_NEW: u8 = 1;
+pub const CT_ESTABLISHED: u8 = 2;
+pub const DIR_INGRESS: u8 = 0;
+pub const DIR_EGRESS: u8 = 1;

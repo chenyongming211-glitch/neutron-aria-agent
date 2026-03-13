@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use aria_core::ebpf_ops::ALL_MAP_NAMES;
 
 /// Represents a single tap interface with its attached XDP firewall instance.
 /// The XDP link is pinned to bpffs so it survives agent crashes.
@@ -17,7 +18,7 @@ impl FirewallInstance {
         }
     }
 
-    /// Attach XDP to this interface: load eBPF, attach, pin maps + link.
+    /// Attach XDP and TC egress to this interface: load eBPF, attach, pin maps + link.
     pub fn attach(&self, ebpf_path: &str) -> Result<(), String> {
         std::fs::create_dir_all(&self.pin_path)
             .map_err(|e| format!("Failed to create pin directory {:?}: {}", self.pin_path, e))?;
@@ -30,8 +31,6 @@ impl FirewallInstance {
         // Check if XDP link is already pinned (recovery from crash)
         if std::path::Path::new(&xdp_link_pin).exists() {
             println!("[{}] Found pinned XDP link, recovering...", self.iface);
-            // Link is already pinned and XDP is running.
-            // Just replay state to ensure maps are populated.
             self.replay_state_to_pinned_maps(ebpf_path)?;
             println!("[{}] Recovery complete", self.iface);
             return Ok(());
@@ -45,6 +44,7 @@ impl FirewallInstance {
             .load(&bpf_bytes)
             .map_err(|e| format!("[{}] load error: {:?}", self.iface, e))?;
 
+        // Attach XDP
         let xdp_program = bpf
             .program_mut("xdp_firewall")
             .ok_or_else(|| format!("[{}] XDP program not found", self.iface))?;
@@ -70,9 +70,18 @@ impl FirewallInstance {
         let _pinned_link = fd_link.pin(&xdp_link_pin)
             .map_err(|e| format!("[{}] pin link error: {:?}", self.iface, e))?;
 
-        // Pin maps
-        let map_names = ["SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE", "POLICY_TABLE", "PORT_BITMAP_POOL"];
-        for name in map_names {
+        // Attach TC egress
+        if let Err(e) = aria_core::ebpf_ops::attach_tc_egress(&mut bpf, &self.iface) {
+            eprintln!("[{}] Warning: TC egress attach failed: {}. Egress control disabled.", self.iface, e);
+        }
+
+        // Setup FQ qdisc for QoS EDT
+        if let Err(e) = aria_core::ebpf_ops::setup_fq_qdisc(&self.iface) {
+            eprintln!("[{}] Warning: FQ qdisc setup failed: {}. QoS EDT disabled.", self.iface, e);
+        }
+
+        // Pin all maps (including new CT, stats, QoS maps)
+        for name in ALL_MAP_NAMES {
             if let Some(map) = bpf.map_mut(name) {
                 if let Err(e) = map.pin(format!("{}/{}", pin_path_str, name)) {
                     eprintln!("[{}] Warning: failed to pin map {}: {}", self.iface, name, e);
@@ -80,7 +89,7 @@ impl FirewallInstance {
             }
         }
 
-        // Pin program
+        // Pin programs
         for (name, prog) in bpf.programs_mut() {
             if let Err(e) = prog.pin(format!("{}/{}", pin_path_str, name)) {
                 eprintln!("[{}] Warning: failed to pin program {}: {:?}", self.iface, name, e);
@@ -105,7 +114,7 @@ impl FirewallInstance {
         Ok(())
     }
 
-    /// Detach XDP: unpin link (causes XDP detach), clean up pin directory.
+    /// Detach XDP and TC: unpin link (causes XDP detach), clean up pin directory.
     pub fn detach(&self) -> Result<(), String> {
         let pin_path_str = self.pin_path.to_str().unwrap();
         let xdp_link_pin = format!("{}/xdp_link", pin_path_str);
@@ -116,6 +125,9 @@ impl FirewallInstance {
                 .map_err(|e| format!("[{}] Failed to remove pinned link: {}", self.iface, e))?;
             println!("[{}] XDP link unpinned (XDP detached)", self.iface);
         }
+
+        // Detach TC egress
+        aria_core::ebpf_ops::detach_tc_egress(&self.iface);
 
         // Clean up all pinned maps and programs
         if self.pin_path.exists() {

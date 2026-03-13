@@ -21,6 +21,18 @@ pub struct RuleInfo {
     pub action: u8,
     pub ports: Option<String>,
     pub bitmap_idx: Option<u32>,
+    #[serde(default)]
+    pub direction: u8,              // 0=ingress, 1=egress
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QosRuleInfo {
+    pub group_name: String,
+    pub group_id: u32,
+    pub direction: u8,
+    pub rate_bps: u64,
+    pub burst_bytes: u64,
+    pub priority: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +75,12 @@ pub struct FirewallState {
     /// XDP 程序挂载的网卡名
     #[serde(default)]
     pub attached_iface: Option<String>,
+    #[serde(default)]
+    pub qos_rules: Vec<QosRuleInfo>,
+    #[serde(default)]
+    pub conntrack_enabled: bool,
+    #[serde(default)]
+    pub monitoring_enabled: bool,
 }
 
 impl Default for FirewallState {
@@ -76,6 +94,9 @@ impl Default for FirewallState {
             free_bitmap_indices: Vec::new(),
             max_port_policies: default_max_port_policies(),
             attached_iface: None,
+            qos_rules: Vec::new(),
+            conntrack_enabled: true,
+            monitoring_enabled: true,
         }
     }
 }
@@ -295,6 +316,7 @@ impl StateManager {
         proto: u8,
         action: u8,
         ports: Option<&str>,
+        direction: u8,
     ) -> Result<AddRuleResult, String> {
         let mut result = AddRuleResult {
             bitmap_idx: None,
@@ -341,11 +363,12 @@ impl StateManager {
                 (None, false)
             };
 
-            // 检测重复规则：相同 (src_group_id, dst_group_id, proto) → 更新
+            // 检测重复规则：相同 (src_group_id, dst_group_id, proto, direction) → 更新
             if let Some(existing) = state.rules.iter_mut().find(|r| {
                 r.src_group_id == src_group_id
                     && r.dst_group_id == dst_group_id
                     && r.proto == proto
+                    && r.direction == direction
             }) {
                 // 旧规则有 bitmap → 减引用计数
                 if let Some(old_idx) = existing.bitmap_idx {
@@ -391,6 +414,7 @@ impl StateManager {
                     action,
                     ports: ports.map(|s| s.to_string()),
                     bitmap_idx,
+                    direction,
                 });
             }
 
@@ -404,7 +428,7 @@ impl StateManager {
         Ok(result)
     }
 
-    pub fn remove_rule(&self, src_group_id: u32, dst_group_id: u32, proto: u8) -> Result<RemoveRuleResult, String> {
+    pub fn remove_rule(&self, src_group_id: u32, dst_group_id: u32, proto: u8, direction: u8) -> Result<RemoveRuleResult, String> {
         let mut result = RemoveRuleResult {
             bitmap_idx: None,
             port_set_released: None,
@@ -414,6 +438,7 @@ impl StateManager {
                 r.src_group_id == src_group_id
                     && r.dst_group_id == dst_group_id
                     && r.proto == proto
+                    && r.direction == direction
             }) {
                 let rule = state.rules.remove(pos);
                 if let Some(idx) = rule.bitmap_idx {
@@ -433,8 +458,8 @@ impl StateManager {
                 }
             } else {
                 return Err(format!(
-                    "Policy not found: src_id={}, dst_id={}, proto={}",
-                    src_group_id, dst_group_id, proto
+                    "Policy not found: src_id={}, dst_id={}, proto={}, direction={}",
+                    src_group_id, dst_group_id, proto, direction
                 ));
             }
             Ok(())
@@ -486,5 +511,47 @@ impl StateManager {
         };
 
         Ok(state)
+    }
+
+    // --- QoS state management ---
+
+    pub fn add_qos_rule(
+        &self,
+        group_name: &str,
+        group_id: u32,
+        direction: u8,
+        rate_bps: u64,
+        burst_bytes: u64,
+        priority: u8,
+    ) -> Result<(), String> {
+        self.with_state(|state| {
+            // Remove existing rule with same group+direction
+            state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
+            state.qos_rules.push(QosRuleInfo {
+                group_name: group_name.to_string(),
+                group_id,
+                direction,
+                rate_bps,
+                burst_bytes,
+                priority,
+            });
+            Ok(())
+        })
+    }
+
+    pub fn remove_qos_rule(&self, group_id: u32, direction: u8) -> Result<(), String> {
+        self.with_state(|state| {
+            let before = state.qos_rules.len();
+            state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
+            if state.qos_rules.len() == before {
+                return Err(format!("QoS rule not found: group_id={}, direction={}", group_id, direction));
+            }
+            Ok(())
+        })
+    }
+
+    pub fn list_qos_rules(&self) -> Result<Vec<QosRuleInfo>, String> {
+        let state = self._load_readonly()?;
+        Ok(state.qos_rules.clone())
     }
 }

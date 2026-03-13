@@ -4,7 +4,8 @@ pub struct PolicyKey {
     pub src_id: u32,
     pub dst_id: u32,
     pub proto: u8,
-    pub pad: [u8; 3],
+    pub direction: u8,     // 0=ingress, 1=egress
+    pub pad: [u8; 2],
 }
 
 #[repr(C)]
@@ -21,6 +22,11 @@ pub const XDP_DROP: u32 = 1;
 
 pub const IPPROTO_TCP: u8 = 6;
 pub const IPPROTO_UDP: u8 = 17;
+pub const IPPROTO_ICMP: u8 = 1;
+pub const IPPROTO_ICMPV6: u8 = 58;
+
+pub const DIR_INGRESS: u8 = 0;
+pub const DIR_EGRESS: u8 = 1;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -28,4 +34,94 @@ pub struct PortKey {
     pub idx: u32,
     pub port: u16,
     pub pad: u16,
+}
+
+// --- Connection tracking ---
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct CtKey4 {
+    pub src_ip: u32,
+    pub dst_ip: u32,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub pad: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct CtKey6 {
+    pub src_ip: [u8; 16],
+    pub dst_ip: [u8; 16],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub pad: [u8; 3],
+}
+
+pub const CT_NEW: u8 = 1;
+pub const CT_ESTABLISHED: u8 = 2;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct CtValue {
+    pub state: u8,
+    pub flags: u8,          // bit 0: seen_reply
+    pub pad: [u8; 2],
+    pub last_seen: u64,
+    pub pkt_count: u64,
+    pub byte_count: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct CtConfig {
+    pub tcp_established_ns: u64,
+    pub tcp_new_ns: u64,
+    pub udp_ns: u64,
+    pub icmp_ns: u64,
+}
+
+// --- Traffic statistics ---
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct RuleStatsValue {
+    pub packets: u64,
+    pub bytes: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct FlowStatsValue {
+    pub packets: u64,
+    pub bytes: u64,
+    pub last_seen: u64,
+}
+
+// --- QoS ---
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct QosKey {
+    pub group_id: u32,
+    pub direction: u8,
+    pub pad: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct QosConfig {
+    pub rate_bps: u64,
+    pub burst_bytes: u64,
+    pub priority: u8,
+    pub pad: [u8; 7],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TokenBucket {
+    pub tokens: u64,
+    pub last_refill_ns: u64,
 }

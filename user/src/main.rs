@@ -50,11 +50,37 @@ enum Commands {
         #[command(subcommand)]
         action: PolicyCommands,
     },
-    Stats,
+    Stats {
+        #[arg(long, help = "Show per-rule packet/byte counts")]
+        rules: bool,
+        #[arg(long, help = "Show top-N flows by bytes")]
+        flows: bool,
+        #[arg(long, help = "Show conntrack table summary")]
+        conntrack: bool,
+        #[arg(long, help = "Show QoS token bucket status")]
+        qos: bool,
+        #[arg(long, default_value = "20", help = "Number of top flows to show")]
+        top: usize,
+    },
     /// List all tap instances managed by aria-agent
     Tap {
         #[command(subcommand)]
         action: TapCommands,
+    },
+    /// Connection tracking operations
+    Conntrack {
+        #[command(subcommand)]
+        action: ConntrackCommands,
+    },
+    /// QoS rate limiting operations
+    Qos {
+        #[command(subcommand)]
+        action: QosCommands,
+    },
+    /// Real-time monitoring
+    Monitor {
+        #[arg(long, default_value = "2", help = "Refresh interval in seconds")]
+        interval: u64,
     },
 }
 
@@ -97,8 +123,10 @@ enum PolicyCommands {
         proto: String,
         #[arg(short, long)]
         action: String,
-        #[arg(short, long)]
+        #[arg(short = 'o', long)]
         ports: Option<String>,
+        #[arg(long, default_value = "ingress", help = "Direction: ingress or egress")]
+        direction: String,
     },
     Delete {
         #[arg(short, long)]
@@ -107,6 +135,8 @@ enum PolicyCommands {
         dst_group: String,
         #[arg(short, long)]
         proto: String,
+        #[arg(long, default_value = "ingress", help = "Direction: ingress or egress")]
+        direction: String,
     },
     List,
 }
@@ -115,6 +145,48 @@ enum PolicyCommands {
 enum TapCommands {
     /// List all tap instances (scan pin directory)
     List,
+}
+
+#[derive(Subcommand)]
+enum ConntrackCommands {
+    /// List active connections
+    List,
+    /// Flush all connections
+    Flush,
+}
+
+#[derive(Subcommand)]
+enum QosCommands {
+    /// Add or update a QoS rate limit
+    Add {
+        #[arg(long, help = "Group name (or 'default' for global)")]
+        group: String,
+        #[arg(long, default_value = "egress", help = "Direction: ingress or egress")]
+        direction: String,
+        #[arg(long, help = "Rate limit (e.g., 100mbps, 1gbps)")]
+        rate: String,
+        #[arg(long, default_value = "0", help = "Burst size (e.g., 1mb, 512kb). 0=auto")]
+        burst: String,
+        #[arg(long, default_value = "0", help = "Priority (0=highest, 7=lowest)")]
+        priority: u8,
+    },
+    /// Delete a QoS rate limit
+    Delete {
+        #[arg(long)]
+        group: String,
+        #[arg(long, default_value = "egress")]
+        direction: String,
+    },
+    /// List all QoS rules
+    List,
+}
+
+fn parse_direction(s: &str) -> Result<u8, String> {
+    match s.to_lowercase().as_str() {
+        "ingress" | "in" => Ok(0),
+        "egress" | "out" => Ok(1),
+        _ => Err(format!("Invalid direction '{}': must be 'ingress' or 'egress'", s)),
+    }
 }
 
 #[tokio::main]
@@ -152,7 +224,6 @@ async fn main() {
                     std::process::exit(1);
                 }
                 let actual_ebpf_path = ebpf_path.unwrap_or_else(get_ebpf_path);
-                // 先持久化 max_port_policies，replay 读取 state.json 时即可用
                 if let Err(e) = state_manager.set_max_port_policies(max_port_policies) {
                     eprintln!("Warning: Failed to persist max_port_policies: {}", e);
                 }
@@ -168,14 +239,12 @@ async fn main() {
         },
         Commands::Group { action } => match action {
             GroupCommands::Add { name, cidr } => {
-                // 先检查防火墙是否启动
                 let prog_path = format!("{}/xdp_firewall", pin_path);
                 if !std::path::Path::new(&prog_path).exists() {
                     eprintln!("Error: Firewall not started. Run 'system start' first.");
                     std::process::exit(1);
                 }
 
-                // Acquire ops lock for atomic state+kernel operation
                 let _ops_lock = match state_manager.acquire_ops_lock() {
                     Ok(lock) => lock,
                     Err(e) => {
@@ -184,7 +253,6 @@ async fn main() {
                     }
                 };
 
-                // 1. 先写状态，获取唯一 ID（add_group 支持向已有组追加 CIDR）
                 let id = match state_manager.add_group(&name, &cidr) {
                     Ok(id) => id,
                     Err(e) => {
@@ -193,15 +261,12 @@ async fn main() {
                     }
                 };
 
-                // 2. 用正确的 ID 写内核
                 if let Err(e) = manager::add_network("src", &cidr, id, &pin_path, &get_ebpf_path()) {
-                    // 回滚状态
                     let _ = state_manager.remove_cidr_from_group(&name, &cidr);
                     eprintln!("Error (src): {}", e);
                     std::process::exit(1);
                 }
                 if let Err(e) = manager::add_network("dst", &cidr, id, &pin_path, &get_ebpf_path()) {
-                    // 回滚：删除 src 内核条目 + 状态
                     let _ = manager::delete_network("src", &cidr, id, &pin_path, &get_ebpf_path());
                     let _ = state_manager.remove_cidr_from_group(&name, &cidr);
                     eprintln!("Error (dst): {}", e);
@@ -237,7 +302,6 @@ async fn main() {
                     }
                 }
 
-                // Acquire ops lock for atomic state+kernel operation
                 let _ops_lock = match state_manager.acquire_ops_lock() {
                     Ok(lock) => lock,
                     Err(e) => {
@@ -291,7 +355,14 @@ async fn main() {
             }
         },
         Commands::Policy { action } => match action {
-            PolicyCommands::Add { src_group, dst_group, proto, action, ports } => {
+            PolicyCommands::Add { src_group, dst_group, proto, action, ports, direction } => {
+                let direction_num = match parse_direction(&direction) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                };
                 let proto_num = match proto.to_lowercase().as_str() {
                     "tcp" => 6,
                     "udp" => 17,
@@ -341,7 +412,6 @@ async fn main() {
                     }
                 };
 
-                // Acquire ops lock for atomic state+kernel operation
                 let _ops_lock = match state_manager.acquire_ops_lock() {
                     Ok(lock) => lock,
                     Err(e) => {
@@ -350,8 +420,7 @@ async fn main() {
                     }
                 };
 
-                // 1. 写状态，获取 bitmap_idx 和 is_new_port_set
-                let add_result = match state_manager.add_rule(src_id, dst_id, proto_num, action_num, ports.as_deref()) {
+                let add_result = match state_manager.add_rule(src_id, dst_id, proto_num, action_num, ports.as_deref(), direction_num) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("Error: {}", e);
@@ -359,25 +428,29 @@ async fn main() {
                     }
                 };
 
-                // 2. 写内核（只在新端口集时写位图）
-                if let Err(e) = manager::add_policy(src_id, dst_id, proto_num, action_num, ports.as_deref(), add_result.bitmap_idx, add_result.is_new_port_set, &pin_path, &get_ebpf_path()) {
-                    // 回滚状态
-                    let _ = state_manager.remove_rule(src_id, dst_id, proto_num);
+                if let Err(e) = manager::add_policy(src_id, dst_id, proto_num, action_num, ports.as_deref(), add_result.bitmap_idx, add_result.is_new_port_set, direction_num, &pin_path, &get_ebpf_path()) {
+                    let _ = state_manager.remove_rule(src_id, dst_id, proto_num, direction_num);
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 }
 
-                // 3. 如果更新规则导致旧 port set 引用归零，清理内核 PORT_BITMAP_POOL
                 if let Some((old_idx, ref ports_normalized)) = add_result.old_port_set_released {
                     if let Err(e) = manager::delete_port_set(old_idx, ports_normalized, &pin_path, &get_ebpf_path()) {
                         eprintln!("Warning: failed to clean old port bitmap: {}", e);
                     }
                 }
 
-                println!("Added policy: {} -> {}", src_group, dst_group);
+                println!("Added policy: {} -> {} ({})", src_group, dst_group, direction);
                 Ok(())
             }
-            PolicyCommands::Delete { src_group, dst_group, proto } => {
+            PolicyCommands::Delete { src_group, dst_group, proto, direction } => {
+                let direction_num = match parse_direction(&direction) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                };
                 let proto_num = match proto.to_lowercase().as_str() {
                     "tcp" => 6,
                     "udp" => 17,
@@ -419,7 +492,6 @@ async fn main() {
                     }
                 };
 
-                // Acquire ops lock for atomic state+kernel operation
                 let _ops_lock = match state_manager.acquire_ops_lock() {
                     Ok(lock) => lock,
                     Err(e) => {
@@ -428,14 +500,12 @@ async fn main() {
                     }
                 };
 
-                // 1. 从内核 POLICY_TABLE 删除
-                if let Err(e) = manager::delete_policy(src_id, dst_id, proto_num, &pin_path, &get_ebpf_path()) {
+                if let Err(e) = manager::delete_policy(src_id, dst_id, proto_num, direction_num, &pin_path, &get_ebpf_path()) {
                     eprintln!("Error deleting from kernel: {}", e);
                     std::process::exit(1);
                 }
 
-                // 2. 从状态中删除（并获取需要清理的 port set 信息）
-                let remove_result = match state_manager.remove_rule(src_id, dst_id, proto_num) {
+                let remove_result = match state_manager.remove_rule(src_id, dst_id, proto_num, direction_num) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("Error removing from state: {}", e);
@@ -443,14 +513,13 @@ async fn main() {
                     }
                 };
 
-                // 3. 如果 port set 引用计数归零，清理内核 PORT_BITMAP_POOL
                 if let (Some(idx), Some(ref ports_normalized)) = (remove_result.bitmap_idx, &remove_result.port_set_released) {
                     if let Err(e) = manager::delete_port_set(idx, ports_normalized, &pin_path, &get_ebpf_path()) {
                         eprintln!("Warning: failed to clean port bitmap: {}", e);
                     }
                 }
 
-                println!("Deleted policy: {} -> {} proto {}", src_group, dst_group, proto);
+                println!("Deleted policy: {} -> {} proto {} ({})", src_group, dst_group, proto, direction);
                 Ok(())
             }
             PolicyCommands::List => {
@@ -459,18 +528,19 @@ async fn main() {
                         if rules.is_empty() {
                             println!("No policies configured");
                         } else {
-                            println!("{:<10} {:<10} {:<8} {:<8} {:<8} {}",
-                                "SrcID", "DstID", "Proto", "Action", "Bitmap", "Ports");
+                            println!("{:<10} {:<10} {:<8} {:<8} {:<10} {:<8} {}",
+                                "SrcID", "DstID", "Proto", "Action", "Direction", "Bitmap", "Ports");
                             for rule in rules {
                                 let action_str = if rule.action == 0 { "allow" } else { "drop" };
+                                let dir_str = if rule.direction == 1 { "egress" } else { "ingress" };
                                 let ports_str = rule.ports.as_deref().unwrap_or("");
                                 let bitmap_str = match rule.bitmap_idx {
                                     Some(idx) => idx.to_string(),
                                     None => "-".to_string(),
                                 };
-                                println!("{:<10} {:<10} {:<8} {:<8} {:<8} {}",
+                                println!("{:<10} {:<10} {:<8} {:<8} {:<10} {:<8} {}",
                                     rule.src_group_id, rule.dst_group_id,
-                                    rule.proto, action_str, bitmap_str, ports_str);
+                                    rule.proto, action_str, dir_str, bitmap_str, ports_str);
                             }
                         }
                         Ok(())
@@ -482,7 +552,333 @@ async fn main() {
                 }
             }
         },
-        Commands::Stats => manager::show_stats(&pin_path, &state_path),
+        Commands::Stats { rules, flows, conntrack, qos, top } => {
+            // If no specific flag, show the basic stats
+            if !rules && !flows && !conntrack && !qos {
+                return match manager::show_stats(&pin_path, &state_path) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+            }
+
+            if rules {
+                match aria_core::monitoring::get_rule_stats(&pin_path) {
+                    Ok(entries) => {
+                        println!("=== Per-Rule Statistics ===");
+                        if entries.is_empty() {
+                            println!("  No rule statistics collected yet");
+                        } else {
+                            println!("{:<10} {:<10} {:<8} {:<10} {:<15} {}",
+                                "SrcID", "DstID", "Proto", "Direction", "Packets", "Bytes");
+                            for e in &entries {
+                                let dir = aria_core::monitoring::direction_name(e.key.direction);
+                                let proto = aria_core::monitoring::proto_name(e.key.proto);
+                                println!("{:<10} {:<10} {:<8} {:<10} {:<15} {}",
+                                    e.key.src_id, e.key.dst_id, proto, dir,
+                                    e.packets, aria_core::monitoring::format_bytes(e.bytes));
+                            }
+                        }
+                        println!();
+                    }
+                    Err(e) => eprintln!("Error reading rule stats: {}", e),
+                }
+            }
+
+            if flows {
+                match aria_core::monitoring::get_top_flows_v4(&pin_path, top) {
+                    Ok(entries) => {
+                        println!("=== Top {} Flows (IPv4) ===", top);
+                        if entries.is_empty() {
+                            println!("  No flow statistics collected yet");
+                        } else {
+                            println!("{:<18} {:<18} {:<8} {:<8} {:<8} {:<15} {}",
+                                "Source", "Destination", "SPort", "DPort", "Proto", "Packets", "Bytes");
+                            for e in &entries {
+                                let proto = aria_core::monitoring::proto_name(e.proto);
+                                println!("{:<18} {:<18} {:<8} {:<8} {:<8} {:<15} {}",
+                                    e.src_ip, e.dst_ip, e.src_port, e.dst_port, proto,
+                                    e.packets, aria_core::monitoring::format_bytes(e.bytes));
+                            }
+                        }
+                        println!();
+                    }
+                    Err(e) => eprintln!("Error reading flow stats: {}", e),
+                }
+            }
+
+            if conntrack {
+                match aria_core::monitoring::get_conntrack_stats(&pin_path) {
+                    Ok(summary) => {
+                        println!("=== Connection Tracking ===");
+                        println!("  IPv4 connections: {}", summary.total_v4);
+                        println!("  IPv6 connections: {}", summary.total_v6);
+                        println!("  State NEW: {}", summary.new_count);
+                        println!("  State ESTABLISHED: {}", summary.established_count);
+                        println!();
+                    }
+                    Err(e) => eprintln!("Error reading conntrack stats: {}", e),
+                }
+            }
+
+            if qos {
+                match aria_core::qos_ops::list_qos_rules(&pin_path) {
+                    Ok(entries) => {
+                        println!("=== QoS Configuration ===");
+                        if entries.is_empty() {
+                            println!("  No QoS rules configured");
+                        } else {
+                            println!("{:<12} {:<10} {:<15} {:<15} {}",
+                                "GroupID", "Direction", "Rate (B/s)", "Burst (B)", "Priority");
+                            for (key, config) in &entries {
+                                let dir = aria_core::monitoring::direction_name(key.direction);
+                                println!("{:<12} {:<10} {:<15} {:<15} {}",
+                                    key.group_id, dir, config.rate_bps, config.burst_bytes, config.priority);
+                            }
+                        }
+                        println!();
+                    }
+                    Err(e) => eprintln!("Error reading QoS config: {}", e),
+                }
+            }
+
+            Ok(())
+        },
+        Commands::Conntrack { action } => match action {
+            ConntrackCommands::List => {
+                match aria_core::ct_ops::ct_list(&pin_path) {
+                    Ok(entries) => {
+                        if entries.is_empty() {
+                            println!("No active connections");
+                        } else {
+                            println!("{:<20} {:<20} {:<8} {:<8} {:<8} {:<12} {:<15} {}",
+                                "Source", "Destination", "SPort", "DPort", "Proto", "State",
+                                "Packets", "Bytes");
+                            for e in &entries {
+                                let state_str = match e.state {
+                                    1 => "NEW",
+                                    2 => "ESTABLISHED",
+                                    _ => "UNKNOWN",
+                                };
+                                let proto = aria_core::monitoring::proto_name(e.proto);
+                                println!("{:<20} {:<20} {:<8} {:<8} {:<8} {:<12} {:<15} {}",
+                                    e.src_ip, e.dst_ip, e.src_port, e.dst_port, proto,
+                                    state_str, e.pkt_count,
+                                    aria_core::monitoring::format_bytes(e.byte_count));
+                            }
+                            println!("\nTotal: {} connections", entries.len());
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            ConntrackCommands::Flush => {
+                match aria_core::ct_ops::ct_flush(&pin_path) {
+                    Ok(count) => {
+                        println!("Flushed {} connections", count);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        },
+        Commands::Qos { action } => match action {
+            QosCommands::Add { group, direction, rate, burst, priority } => {
+                let direction_num = match parse_direction(&direction) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+                let rate_bps = match aria_core::qos_ops::parse_rate(&rate) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+                let burst_bytes = if burst == "0" {
+                    0 // auto
+                } else {
+                    match aria_core::qos_ops::parse_burst(&burst) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                };
+
+                let group_id = if group == "default" || group == "any" {
+                    0
+                } else {
+                    match state_manager.get_group(&group) {
+                        Ok(Some(g)) => g.id,
+                        Ok(None) => {
+                            eprintln!("Error: group '{}' not found", group);
+                            std::process::exit(1);
+                        }
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                };
+
+                let _ops_lock = match state_manager.acquire_ops_lock() {
+                    Ok(lock) => lock,
+                    Err(e) => {
+                        eprintln!("Error acquiring ops lock: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                // Write to kernel map
+                if let Err(e) = aria_core::qos_ops::add_qos_rule(group_id, direction_num, rate_bps, burst_bytes, priority, &pin_path) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+
+                // Persist to state
+                if let Err(e) = state_manager.add_qos_rule(&group, group_id, direction_num, rate_bps, burst_bytes, priority) {
+                    eprintln!("Warning: failed to persist QoS rule: {}", e);
+                }
+
+                println!("Added QoS rule: group={} direction={} rate={} B/s burst={} B priority={}",
+                    group, direction, rate_bps, burst_bytes, priority);
+                Ok(())
+            }
+            QosCommands::Delete { group, direction } => {
+                let direction_num = match parse_direction(&direction) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                let group_id = if group == "default" || group == "any" {
+                    0
+                } else {
+                    match state_manager.get_group(&group) {
+                        Ok(Some(g)) => g.id,
+                        Ok(None) => {
+                            eprintln!("Error: group '{}' not found", group);
+                            std::process::exit(1);
+                        }
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                };
+
+                let _ops_lock = match state_manager.acquire_ops_lock() {
+                    Ok(lock) => lock,
+                    Err(e) => {
+                        eprintln!("Error acquiring ops lock: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                if let Err(e) = aria_core::qos_ops::delete_qos_rule(group_id, direction_num, &pin_path) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+
+                if let Err(e) = state_manager.remove_qos_rule(group_id, direction_num) {
+                    eprintln!("Warning: failed to remove QoS rule from state: {}", e);
+                }
+
+                println!("Deleted QoS rule: group={} direction={}", group, direction);
+                Ok(())
+            }
+            QosCommands::List => {
+                match state_manager.list_qos_rules() {
+                    Ok(rules) => {
+                        if rules.is_empty() {
+                            println!("No QoS rules configured");
+                        } else {
+                            println!("{:<15} {:<10} {:<10} {:<15} {:<15} {}",
+                                "Group", "GroupID", "Direction", "Rate (B/s)", "Burst (B)", "Priority");
+                            for r in &rules {
+                                let dir = if r.direction == 1 { "egress" } else { "ingress" };
+                                println!("{:<15} {:<10} {:<10} {:<15} {:<15} {}",
+                                    r.group_name, r.group_id, dir, r.rate_bps, r.burst_bytes, r.priority);
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        },
+        Commands::Monitor { interval } => {
+            println!("Monitoring (refresh every {}s, press Ctrl+C to stop)...", interval);
+            loop {
+                // Clear screen
+                print!("\x1b[2J\x1b[H");
+
+                println!("=== Aria Firewall Monitor ===\n");
+
+                // Conntrack summary
+                if let Ok(summary) = aria_core::monitoring::get_conntrack_stats(&pin_path) {
+                    println!("Connections: {} IPv4, {} IPv6 (NEW: {}, ESTABLISHED: {})",
+                        summary.total_v4, summary.total_v6, summary.new_count, summary.established_count);
+                }
+
+                // Top 10 flows
+                if let Ok(flows) = aria_core::monitoring::get_top_flows_v4(&pin_path, 10) {
+                    println!("\nTop 10 Flows:");
+                    if flows.is_empty() {
+                        println!("  (none)");
+                    } else {
+                        println!("  {:<18} {:<18} {:<8} {:<8} {:<8} {:<12} {}",
+                            "Source", "Dest", "SPort", "DPort", "Proto", "Packets", "Bytes");
+                        for f in &flows {
+                            println!("  {:<18} {:<18} {:<8} {:<8} {:<8} {:<12} {}",
+                                f.src_ip, f.dst_ip, f.src_port, f.dst_port,
+                                aria_core::monitoring::proto_name(f.proto),
+                                f.packets, aria_core::monitoring::format_bytes(f.bytes));
+                        }
+                    }
+                }
+
+                // Rule stats (top 10 by bytes)
+                if let Ok(mut entries) = aria_core::monitoring::get_rule_stats(&pin_path) {
+                    entries.truncate(10);
+                    println!("\nTop 10 Rules:");
+                    if entries.is_empty() {
+                        println!("  (none)");
+                    } else {
+                        println!("  {:<10} {:<10} {:<8} {:<10} {:<12} {}",
+                            "SrcID", "DstID", "Proto", "Direction", "Packets", "Bytes");
+                        for e in &entries {
+                            println!("  {:<10} {:<10} {:<8} {:<10} {:<12} {}",
+                                e.key.src_id, e.key.dst_id,
+                                aria_core::monitoring::proto_name(e.key.proto),
+                                aria_core::monitoring::direction_name(e.key.direction),
+                                e.packets, aria_core::monitoring::format_bytes(e.bytes));
+                        }
+                    }
+                }
+
+                tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
+            }
+        },
         Commands::Tap { action } => match action {
             TapCommands::List => {
                 let base_pin = TAP_BASE_PIN_PATH;

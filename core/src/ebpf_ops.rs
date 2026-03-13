@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use aya::maps::{HashMap, LpmTrie, MapData};
 use aya::maps::lpm_trie::Key;
-use crate::common::{PolicyKey, PolicyValue, PortKey};
+use crate::common::{PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig};
 use crate::state::FirewallState;
 
 /// 加载 eBPF 程序，并设置 pin 路径以复用已有的 map。
@@ -184,6 +184,7 @@ pub fn add_policy(
     ports: Option<&str>,
     bitmap_idx: Option<u32>,
     is_new_port_set: bool,
+    direction: u8,
     pin_path: &str,
     _ebpf_path: &str,
 ) -> Result<(), String> {
@@ -220,7 +221,8 @@ pub fn add_policy(
         src_id,
         dst_id,
         proto,
-        pad: [0; 3],
+        direction,
+        pad: [0; 2],
     };
     let value = PolicyValue {
         action,
@@ -231,8 +233,9 @@ pub fn add_policy(
     policy_table.insert(&key, &value, 0)
         .map_err(|e| format!("insert error: {:?}", e))?;
 
-    println!("Added policy: src_id={}, dst_id={}, proto={}, action={}, ports={:?}",
-        src_id, dst_id, proto, action, ports);
+    let dir_str = if direction == 1 { "egress" } else { "ingress" };
+    println!("Added policy: src_id={}, dst_id={}, proto={}, action={}, direction={}, ports={:?}",
+        src_id, dst_id, proto, action, dir_str, ports);
     Ok(())
 }
 
@@ -241,6 +244,7 @@ pub fn delete_policy(
     src_id: u32,
     dst_id: u32,
     proto: u8,
+    direction: u8,
     pin_path: &str,
     _ebpf_path: &str,
 ) -> Result<(), String> {
@@ -255,12 +259,13 @@ pub fn delete_policy(
         src_id,
         dst_id,
         proto,
-        pad: [0; 3],
+        direction,
+        pad: [0; 2],
     };
     policy_table.remove(&key)
         .map_err(|e| format!("remove policy error: {:?}", e))?;
 
-    println!("Deleted policy: src_id={}, dst_id={}, proto={}", src_id, dst_id, proto);
+    println!("Deleted policy: src_id={}, dst_id={}, proto={}, direction={}", src_id, dst_id, proto, direction);
     Ok(())
 }
 
@@ -288,6 +293,15 @@ pub fn delete_port_set(
 
     Ok(())
 }
+
+/// All map names that need to be pinned
+pub const ALL_MAP_NAMES: &[&str] = &[
+    "SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE",
+    "POLICY_TABLE", "PORT_BITMAP_POOL",
+    "CT_TABLE_V4", "CT_TABLE_V6", "CT_CONFIG",
+    "RULE_STATS", "FLOW_STATS_V4", "FLOW_STATS_V6",
+    "QOS_CONFIG", "QOS_TOKEN_BUCKET",
+];
 
 /// 从 state.json 重放所有组和规则到已加载的 eBPF maps。
 pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
@@ -317,12 +331,13 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
         }
     };
 
-    if state.groups.is_empty() && state.rules.is_empty() {
+    if state.groups.is_empty() && state.rules.is_empty() && state.qos_rules.is_empty() {
         println!("State is empty, nothing to replay");
         return;
     }
 
-    println!("Replaying state: {} groups, {} rules...", state.groups.len(), state.rules.len());
+    println!("Replaying state: {} groups, {} rules, {} QoS rules...",
+        state.groups.len(), state.rules.len(), state.qos_rules.len());
 
     let mut errors: Vec<String> = Vec::new();
     let mut group_count: u32 = 0;
@@ -479,7 +494,8 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
                         src_id: rule.src_group_id,
                         dst_id: rule.dst_group_id,
                         proto: rule.proto,
-                        pad: [0; 3],
+                        direction: rule.direction,
+                        pad: [0; 2],
                     };
                     let value = PolicyValue {
                         action: rule.action,
@@ -489,8 +505,8 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
                     };
                     if let Err(e) = policy_table.insert(&key, &value, 0) {
                         errors.push(format!(
-                            "POLICY_TABLE src={} dst={} proto={}: {:?}",
-                            rule.src_group_id, rule.dst_group_id, rule.proto, e
+                            "POLICY_TABLE src={} dst={} proto={} dir={}: {:?}",
+                            rule.src_group_id, rule.dst_group_id, rule.proto, rule.direction, e
                         ));
                     } else {
                         rule_count += 1;
@@ -501,9 +517,58 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
         }
     }
 
+    // 写 CT_CONFIG（初始化默认超时）
+    {
+        let config = CtConfig {
+            tcp_established_ns: 300_000_000_000,
+            tcp_new_ns: 30_000_000_000,
+            udp_ns: 60_000_000_000,
+            icmp_ns: 30_000_000_000,
+        };
+        match bpf.map_mut("CT_CONFIG")
+            .ok_or_else(|| "CT_CONFIG not found".to_string())
+            .and_then(|m| aya::maps::HashMap::<_, u32, CtConfig>::try_from(m).map_err(|e| format!("{:?}", e)))
+        {
+            Ok(mut map) => {
+                if let Err(e) = map.insert(&0u32, &config, 0) {
+                    errors.push(format!("CT_CONFIG: {:?}", e));
+                }
+            }
+            Err(e) => errors.push(format!("CT_CONFIG: {}", e)),
+        }
+    }
+
+    // 写 QOS_CONFIG
+    if !state.qos_rules.is_empty() {
+        match bpf.map_mut("QOS_CONFIG")
+            .ok_or_else(|| "QOS_CONFIG not found".to_string())
+            .and_then(|m| aya::maps::HashMap::<_, QosKey, QosConfig>::try_from(m).map_err(|e| format!("{:?}", e)))
+        {
+            Ok(mut map) => {
+                for qr in &state.qos_rules {
+                    let key = QosKey {
+                        group_id: qr.group_id,
+                        direction: qr.direction,
+                        pad: [0; 3],
+                    };
+                    let config = QosConfig {
+                        rate_bps: qr.rate_bps,
+                        burst_bytes: qr.burst_bytes,
+                        priority: qr.priority,
+                        pad: [0; 7],
+                    };
+                    if let Err(e) = map.insert(&key, &config, 0) {
+                        errors.push(format!("QOS_CONFIG group={}: {:?}", qr.group_name, e));
+                    }
+                }
+            }
+            Err(e) => errors.push(format!("QOS_CONFIG: {}", e)),
+        }
+    }
+
     println!(
-        "Replay complete: {} group CIDRs, {} rules, {} port bitmaps written",
-        group_count, rule_count, bitmap_count
+        "Replay complete: {} group CIDRs, {} rules, {} port bitmaps, {} QoS rules written",
+        group_count, rule_count, bitmap_count, state.qos_rules.len()
     );
     if !errors.is_empty() {
         eprintln!("Replay encountered {} errors:", errors.len());
@@ -548,6 +613,9 @@ pub fn show_stats(pin_path: &str, state_path: &str) -> Result<(), String> {
     println!();
 
     println!("Policies: {}", state.rules.len());
+    let ingress_count = state.rules.iter().filter(|r| r.direction == 0).count();
+    let egress_count = state.rules.iter().filter(|r| r.direction == 1).count();
+    println!("  Ingress: {}, Egress: {}", ingress_count, egress_count);
     let allow_count = state.rules.iter().filter(|r| r.action == 0).count();
     let drop_count = state.rules.iter().filter(|r| r.action == 1).count();
     println!("  Allow: {}, Drop: {}", allow_count, drop_count);
@@ -555,17 +623,74 @@ pub fn show_stats(pin_path: &str, state_path: &str) -> Result<(), String> {
     println!("  With port filter: {}", with_ports);
     println!();
 
+    println!("QoS rules: {}", state.qos_rules.len());
+    println!();
+
     println!("Port bitmap pool: {}/{} slots used", state.port_sets.len(), state.max_port_policies);
     println!("  Free recycled slots: {}", state.free_bitmap_indices.len());
     println!();
 
-    let map_names = ["SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE", "POLICY_TABLE", "PORT_BITMAP_POOL"];
     println!("Kernel maps:");
-    for name in map_names {
+    for name in ALL_MAP_NAMES {
         let path = format!("{}/{}", pin_path, name);
         let status = if std::path::Path::new(&path).exists() { "pinned" } else { "missing" };
         println!("  {}: {}", name, status);
     }
 
+    Ok(())
+}
+
+/// Setup TC egress: add clsact qdisc and attach the classifier program
+pub fn attach_tc_egress(bpf: &mut aya::Ebpf, iface: &str) -> Result<(), String> {
+    // Add clsact qdisc using aya's API
+    if let Err(e) = aya::programs::tc::qdisc_add_clsact(iface) {
+        let err_str = format!("{:?}", e);
+        // "File exists" is OK — clsact already added
+        if !err_str.contains("File exists") {
+            return Err(format!("qdisc_add_clsact failed: {}", err_str));
+        }
+    }
+
+    let tc_program = bpf
+        .program_mut("tc_egress")
+        .ok_or("TC egress program not found")?;
+
+    let tc: &mut aya::programs::SchedClassifier = tc_program
+        .try_into()
+        .map_err(|e: aya::programs::ProgramError| format!("tc try_into error: {:?}", e))?;
+
+    tc.load().map_err(|e| format!("tc.load error: {:?}", e))?;
+
+    tc.attach(iface, aya::programs::tc::TcAttachType::Egress)
+        .map_err(|e| format!("tc attach error: {:?}", e))?;
+
+    println!("TC egress attached to {}", iface);
+    Ok(())
+}
+
+/// Remove TC egress filter and clsact qdisc
+pub fn detach_tc_egress(iface: &str) {
+    // Remove TC filter using tc command
+    let _ = std::process::Command::new("tc")
+        .args(["filter", "del", "dev", iface, "egress"])
+        .output();
+
+    // Remove clsact qdisc
+    let _ = std::process::Command::new("tc")
+        .args(["qdisc", "del", "dev", iface, "clsact"])
+        .output();
+}
+
+/// Setup FQ qdisc for EDT-based QoS
+pub fn setup_fq_qdisc(iface: &str) -> Result<(), String> {
+    let output = std::process::Command::new("tc")
+        .args(["qdisc", "replace", "dev", iface, "root", "fq"])
+        .output()
+        .map_err(|e| format!("Failed to run tc: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("tc qdisc replace fq failed: {}", stderr));
+    }
+    println!("FQ qdisc configured on {}", iface);
     Ok(())
 }
