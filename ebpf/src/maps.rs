@@ -58,7 +58,7 @@ pub static FLOW_STATS_V6: LruPerCpuHashMap<CtKey6, FlowStatsValue> = LruPerCpuHa
 // --- QoS maps ---
 
 #[map(name = "QOS_CONFIG")]
-pub static QOS_CONFIG: HashMap<QosKey, QosConfig> = HashMap::with_max_entries(1024, 0);
+pub static QOS_CONFIG: HashMap<QosKey, QosConfig> = HashMap::with_max_entries(16384, 0);
 
 #[map(name = "QOS_TOKEN_BUCKET")]
-pub static QOS_TOKEN_BUCKET: PerCpuHashMap<QosKey, TokenBucket> = PerCpuHashMap::with_max_entries(1024, 0);
+pub static QOS_TOKEN_BUCKET: PerCpuHashMap<QosKey, TokenBucket> = PerCpuHashMap::with_max_entries(16384, 0);
