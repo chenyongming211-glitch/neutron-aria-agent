@@ -1,0 +1,6 @@
+# GitHub linguist overrides
+# Mark generated/vendored files so they don't skew language stats
+
+Cargo.lock linguist-generated=true
+Dockerfile.builder linguist-language=Dockerfile
+*.spec linguist-detectable=false
