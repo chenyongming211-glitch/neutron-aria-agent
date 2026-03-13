@@ -118,6 +118,12 @@ pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str, _max_por
     println!("eBPF system started successfully");
     println!("Pin path: {}", pin_path);
 
+    // 记录挂载的网卡名到状态文件
+    let state_manager = crate::state::StateManager::new(state_path);
+    if let Err(e) = state_manager.set_attached_iface(iface) {
+        eprintln!("Warning: failed to record attached interface: {}", e);
+    }
+
     // 从 state.json 重放状态到内核 maps
     replay_state(&mut bpf, state_path);
 
@@ -365,22 +371,30 @@ fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
     }
 }
 
-pub async fn system_stop(pin_path: &str) -> Result<(), String> {
-    // 尝试从所有网卡分离 XDP 程序
-    let output = std::process::Command::new("ip")
-        .args(["link", "show"])
-        .output()
-        .map_err(|e| format!("Failed to run ip link show: {}", e))?;
-    let link_output = String::from_utf8_lossy(&output.stdout);
-    for line in link_output.lines() {
-        if line.contains("xdp") {
-            // 提取网卡名（格式: "N: ifname: <flags>"）
-            if let Some(iface) = line.split(':').nth(1).map(|s| s.trim()) {
-                let _ = std::process::Command::new("ip")
-                    .args(["link", "set", "dev", iface, "xdp", "off"])
-                    .output();
-                println!("Detached XDP from {}", iface);
+pub async fn system_stop(pin_path: &str, state_path: &str) -> Result<(), String> {
+    // 从状态文件读取挂载的网卡名，只卸载 aria-firewall 的 XDP 程序
+    let state_manager = crate::state::StateManager::new(state_path);
+    match state_manager.get_attached_iface() {
+        Ok(Some(iface)) => {
+            let output = std::process::Command::new("ip")
+                .args(["link", "set", "dev", &iface, "xdp", "off"])
+                .output();
+            match output {
+                Ok(o) if o.status.success() => println!("Detached XDP from {}", iface),
+                Ok(o) => eprintln!("Warning: failed to detach XDP from {}: {}",
+                    iface, String::from_utf8_lossy(&o.stderr)),
+                Err(e) => eprintln!("Warning: failed to run ip command: {}", e),
             }
+            if let Err(e) = state_manager.clear_attached_iface() {
+                eprintln!("Warning: failed to clear attached interface record: {}", e);
+            }
+        }
+        Ok(None) => {
+            println!("No attached interface recorded, skipping XDP detach");
+        }
+        Err(e) => {
+            eprintln!("Warning: failed to read state: {}", e);
+            println!("Skipping XDP detach (could not determine attached interface)");
         }
     }
 
@@ -462,14 +476,7 @@ pub async fn delete_network(direction: &str, cidr: &str, _id: u32, pin_path: &st
                 .map_err(|e| format!("convert to LpmTrie: {:?}", e))?;
             match lpm_map.remove(&key) {
                 Ok(()) => println!("Deleted IPv4 network {} from {}", cidr, map_name),
-                Err(e) => {
-                    let err_str = format!("{:?}", e);
-                    if err_str.contains("No such file or directory") || err_str.contains("os error 2") {
-                        println!("IPv4 network {} not found in {}, skipping", cidr, map_name);
-                    } else {
-                        return Err(format!("LPM remove error: {:?}", e));
-                    }
-                }
+                Err(_) => println!("IPv4 network {} not found in {}, skipping", cidr, map_name),
             }
         }
         IpAddr::V6(v6) => {
@@ -485,14 +492,7 @@ pub async fn delete_network(direction: &str, cidr: &str, _id: u32, pin_path: &st
                 .map_err(|e| format!("convert to LpmTrie: {:?}", e))?;
             match lpm_map.remove(&key) {
                 Ok(()) => println!("Deleted IPv6 network {} from {}", cidr, map_name),
-                Err(e) => {
-                    let err_str = format!("{:?}", e);
-                    if err_str.contains("No such file or directory") || err_str.contains("os error 2") {
-                        println!("IPv6 network {} not found in {}, skipping", cidr, map_name);
-                    } else {
-                        return Err(format!("LPM remove error: {:?}", e));
-                    }
-                }
+                Err(_) => println!("IPv6 network {} not found in {}, skipping", cidr, map_name),
             }
         }
     }
@@ -567,6 +567,39 @@ pub async fn add_policy(
     Ok(())
 }
 
+/// 从内核 POLICY_TABLE 中删除指定策略条目
+pub async fn delete_policy(
+    src_id: u32,
+    dst_id: u32,
+    proto: u8,
+    pin_path: &str,
+    ebpf_path: &str,
+) -> Result<(), String> {
+    let prog_path = format!("{}/xdp_firewall", pin_path);
+    if !std::path::Path::new(&prog_path).exists() {
+        return Err("Firewall not started. Run 'system start' first.".to_string());
+    }
+
+    let mut bpf = load_bpf_with_pin(pin_path, ebpf_path)?;
+
+    let mut policy_table: aya::maps::HashMap<_, PolicyKey, PolicyValue> = bpf.map_mut("POLICY_TABLE")
+        .ok_or("POLICY_TABLE not found")?
+        .try_into()
+        .map_err(|e| format!("convert to HashMap: {:?}", e))?;
+
+    let key = PolicyKey {
+        src_id,
+        dst_id,
+        proto,
+        pad: [0; 3],
+    };
+    policy_table.remove(&key)
+        .map_err(|e| format!("remove policy error: {:?}", e))?;
+
+    println!("Deleted policy: src_id={}, dst_id={}, proto={}", src_id, dst_id, proto);
+    Ok(())
+}
+
 pub async fn show_stats(pin_path: &str, state_path: &str) -> Result<(), String> {
     if !std::path::Path::new(pin_path).exists() {
         return Err("Firewall not started. Run 'system start' first.".to_string());
@@ -630,7 +663,6 @@ pub async fn show_stats(pin_path: &str, state_path: &str) -> Result<(), String> 
 
 /// 删除指定 bitmap_idx 的所有端口条目。
 /// ports_normalized 格式: "80:1,443:1,8000-9000:2"
-#[allow(dead_code)]
 pub fn delete_port_set(
     bitmap_idx: u32,
     ports_normalized: &str,

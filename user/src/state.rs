@@ -33,6 +33,15 @@ pub struct PortSetInfo {
 pub struct AddRuleResult {
     pub bitmap_idx: Option<u32>,
     pub is_new_port_set: bool,
+    /// 如果更新规则导致旧 port set 引用归零，需要清理内核
+    pub old_port_set_released: Option<(u32, String)>,
+}
+
+pub struct RemoveRuleResult {
+    /// 被删除规则的 bitmap_idx（如果有端口过滤）
+    pub bitmap_idx: Option<u32>,
+    /// 如果 port set 引用计数归零，需要清理内核中的端口条目
+    pub port_set_released: Option<String>,
 }
 
 fn default_max_port_policies() -> u32 {
@@ -51,6 +60,9 @@ pub struct FirewallState {
     pub free_bitmap_indices: Vec<u32>,
     #[serde(default = "default_max_port_policies")]
     pub max_port_policies: u32,
+    /// XDP 程序挂载的网卡名
+    #[serde(default)]
+    pub attached_iface: Option<String>,
 }
 
 impl Default for FirewallState {
@@ -63,6 +75,7 @@ impl Default for FirewallState {
             port_sets: HashMap::new(),
             free_bitmap_indices: Vec::new(),
             max_port_policies: default_max_port_policies(),
+            attached_iface: None,
         }
     }
 }
@@ -247,6 +260,25 @@ impl StateManager {
         })
     }
 
+    pub fn set_attached_iface(&self, iface: &str) -> Result<(), String> {
+        self.with_state(|state| {
+            state.attached_iface = Some(iface.to_string());
+            Ok(())
+        })
+    }
+
+    pub fn clear_attached_iface(&self) -> Result<(), String> {
+        self.with_state(|state| {
+            state.attached_iface = None;
+            Ok(())
+        })
+    }
+
+    pub fn get_attached_iface(&self) -> Result<Option<String>, String> {
+        let state = self._load_readonly()?;
+        Ok(state.attached_iface)
+    }
+
     pub fn add_rule(
         &self,
         src_group_id: u32,
@@ -258,6 +290,7 @@ impl StateManager {
         let mut result = AddRuleResult {
             bitmap_idx: None,
             is_new_port_set: false,
+            old_port_set_released: None,
         };
         self.with_state(|state| {
             let (bitmap_idx, is_new) = if let Some(p) = ports {
@@ -309,7 +342,20 @@ impl StateManager {
                 if let Some(old_idx) = existing.bitmap_idx {
                     // 只有当新旧 bitmap_idx 不同时才释放旧的
                     if bitmap_idx != Some(old_idx) {
+                        // 记录旧 port set 信息，以便清理内核
+                        let old_ports_normalized = state.port_sets
+                            .iter()
+                            .find(|(_, ps)| ps.bitmap_idx == old_idx)
+                            .map(|(_, ps)| ps.ports_normalized.clone());
+
                         release_port_set(&mut state.port_sets, &mut state.free_bitmap_indices, old_idx);
+
+                        // 如果 old_idx 被回收，说明 ref_count 归零
+                        if state.free_bitmap_indices.contains(&old_idx) {
+                            if let Some(ports_norm) = old_ports_normalized {
+                                result.old_port_set_released = Some((old_idx, ports_norm));
+                            }
+                        }
                     } else {
                         // 新旧相同 bitmap_idx，说明端口集相同，撤销上面多加的 ref_count
                         // (上面已 +1，但实际无需增加，因为是替换同一规则)
@@ -344,13 +390,18 @@ impl StateManager {
             result = AddRuleResult {
                 bitmap_idx,
                 is_new_port_set: is_new,
+                old_port_set_released: result.old_port_set_released.take(),
             };
             Ok(())
         })?;
         Ok(result)
     }
 
-    pub fn remove_rule(&self, src_group_id: u32, dst_group_id: u32, proto: u8) -> Result<(), String> {
+    pub fn remove_rule(&self, src_group_id: u32, dst_group_id: u32, proto: u8) -> Result<RemoveRuleResult, String> {
+        let mut result = RemoveRuleResult {
+            bitmap_idx: None,
+            port_set_released: None,
+        };
         self.with_state(|state| {
             if let Some(pos) = state.rules.iter().position(|r| {
                 r.src_group_id == src_group_id
@@ -359,11 +410,29 @@ impl StateManager {
             }) {
                 let rule = state.rules.remove(pos);
                 if let Some(idx) = rule.bitmap_idx {
+                    // 查找对应的 port_set，记录 normalized ports 以便清理内核
+                    let ports_normalized = state.port_sets
+                        .iter()
+                        .find(|(_, ps)| ps.bitmap_idx == idx)
+                        .map(|(_, ps)| ps.ports_normalized.clone());
+
                     release_port_set(&mut state.port_sets, &mut state.free_bitmap_indices, idx);
+
+                    result.bitmap_idx = Some(idx);
+                    // 如果 idx 被回收（出现在 free list 中），说明 ref_count 归零，需要清理内核
+                    if state.free_bitmap_indices.contains(&idx) {
+                        result.port_set_released = ports_normalized;
+                    }
                 }
+            } else {
+                return Err(format!(
+                    "Policy not found: src_id={}, dst_id={}, proto={}",
+                    src_group_id, dst_group_id, proto
+                ));
             }
             Ok(())
-        })
+        })?;
+        Ok(result)
     }
 
     pub fn get_group(&self, name: &str) -> Result<Option<GroupInfo>, String> {

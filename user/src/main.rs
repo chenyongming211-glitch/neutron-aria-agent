@@ -90,6 +90,14 @@ enum PolicyCommands {
         #[arg(short, long)]
         ports: Option<String>,
     },
+    Delete {
+        #[arg(short, long)]
+        src_group: String,
+        #[arg(short, long)]
+        dst_group: String,
+        #[arg(short, long)]
+        proto: String,
+    },
     List,
 }
 
@@ -118,7 +126,7 @@ async fn main() {
                 }
                 manager::system_start(&iface, &actual_ebpf_path, &pin_path, max_port_policies, &state_path).await
             }
-            SystemCommands::Stop => manager::system_stop(&pin_path).await,
+            SystemCommands::Stop => manager::system_stop(&pin_path, &state_path).await,
         },
         Commands::Group { action } => match action {
             GroupCommands::Add { name, cidr } => {
@@ -129,20 +137,7 @@ async fn main() {
                     std::process::exit(1);
                 }
 
-                // 检查 group 名称是否已存在
-                match state_manager.get_group(&name) {
-                    Ok(Some(_)) => {
-                        eprintln!("Error: Group '{}' already exists", name);
-                        std::process::exit(1);
-                    }
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                        std::process::exit(1);
-                    }
-                    Ok(None) => {}
-                }
-
-                // 1. 先写状态，获取唯一 ID
+                // 1. 先写状态，获取唯一 ID（add_group 支持向已有组追加 CIDR）
                 let id = match state_manager.add_group(&name, &cidr) {
                     Ok(id) => id,
                     Err(e) => {
@@ -181,7 +176,13 @@ async fn main() {
                         std::process::exit(1);
                     }
                 };
-                let rules = state_manager.list_rules().unwrap_or_default();
+                let rules = match state_manager.list_rules() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("Error reading rules: {}", e);
+                        std::process::exit(1);
+                    }
+                };
                 for rule in rules {
                     if rule.src_group_id == group.id || rule.dst_group_id == group.id {
                         eprintln!("Error: Group '{}' is referenced by a rule", name);
@@ -298,7 +299,82 @@ async fn main() {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 }
+
+                // 3. 如果更新规则导致旧 port set 引用归零，清理内核 PORT_BITMAP_POOL
+                if let Some((old_idx, ref ports_normalized)) = add_result.old_port_set_released {
+                    if let Err(e) = manager::delete_port_set(old_idx, ports_normalized, &pin_path, &get_ebpf_path()) {
+                        eprintln!("Warning: failed to clean old port bitmap: {}", e);
+                    }
+                }
+
                 println!("Added policy: {} -> {}", src_group, dst_group);
+                Ok(())
+            }
+            PolicyCommands::Delete { src_group, dst_group, proto } => {
+                let proto_num = match proto.to_lowercase().as_str() {
+                    "tcp" => 6,
+                    "udp" => 17,
+                    "icmp" => 1,
+                    "any" => 0,
+                    _ => {
+                        eprintln!("Error: invalid protocol '{}'", proto);
+                        std::process::exit(1);
+                    }
+                };
+                let src_id = if src_group == "any" {
+                    0
+                } else {
+                    match state_manager.get_group(&src_group) {
+                        Ok(Some(g)) => g.id,
+                        Ok(None) => {
+                            eprintln!("Error: group '{}' not found", src_group);
+                            std::process::exit(1);
+                        }
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                };
+                let dst_id = if dst_group == "any" {
+                    0
+                } else {
+                    match state_manager.get_group(&dst_group) {
+                        Ok(Some(g)) => g.id,
+                        Ok(None) => {
+                            eprintln!("Error: group '{}' not found", dst_group);
+                            std::process::exit(1);
+                        }
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                };
+
+                // 1. 从内核 POLICY_TABLE 删除
+                if let Err(e) = manager::delete_policy(src_id, dst_id, proto_num, &pin_path, &get_ebpf_path()).await {
+                    eprintln!("Error deleting from kernel: {}", e);
+                    std::process::exit(1);
+                }
+
+                // 2. 从状态中删除（并获取需要清理的 port set 信息）
+                let remove_result = match state_manager.remove_rule(src_id, dst_id, proto_num) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("Error removing from state: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                // 3. 如果 port set 引用计数归零，清理内核 PORT_BITMAP_POOL
+                if let (Some(idx), Some(ref ports_normalized)) = (remove_result.bitmap_idx, &remove_result.port_set_released) {
+                    if let Err(e) = manager::delete_port_set(idx, ports_normalized, &pin_path, &get_ebpf_path()) {
+                        eprintln!("Warning: failed to clean port bitmap: {}", e);
+                    }
+                }
+
+                println!("Deleted policy: {} -> {} proto {}", src_group, dst_group, proto);
                 Ok(())
             }
             PolicyCommands::List => {
@@ -307,14 +383,18 @@ async fn main() {
                         if rules.is_empty() {
                             println!("No policies configured");
                         } else {
-                            println!("{:<10} {:<10} {:<8} {:<8} {:<8?} {}",
+                            println!("{:<10} {:<10} {:<8} {:<8} {:<8} {}",
                                 "SrcID", "DstID", "Proto", "Action", "Bitmap", "Ports");
                             for rule in rules {
                                 let action_str = if rule.action == 0 { "allow" } else { "drop" };
                                 let ports_str = rule.ports.as_deref().unwrap_or("");
-                                println!("{:<10} {:<10} {:<8} {:<8} {:<8?} {}",
+                                let bitmap_str = match rule.bitmap_idx {
+                                    Some(idx) => idx.to_string(),
+                                    None => "-".to_string(),
+                                };
+                                println!("{:<10} {:<10} {:<8} {:<8} {:<8} {}",
                                     rule.src_group_id, rule.dst_group_id,
-                                    rule.proto, action_str, rule.bitmap_idx, ports_str);
+                                    rule.proto, action_str, bitmap_str, ports_str);
                             }
                         }
                         Ok(())

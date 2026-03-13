@@ -139,23 +139,47 @@ pub fn parse_eth_ipv6(data: usize, data_end: usize, offset: usize) -> Option<Pac
 
         // 跳过 IPv6 扩展头（最多跳过 4 层，防止 BPF 验证器拒绝无界循环）
         let mut transport_offset = ip_offset + 40;
+        let mut is_fragment = false; // 非首分片标记
         let mut i = 0u8;
         while i < 4 && is_ipv6_extension_header(next_header) {
-            // 扩展头格式: [next_header: u8, hdr_len: u8, ...]
-            // hdr_len 以 8 字节为单位（不含首 8 字节）
             if transport_offset + 2 > data_end {
                 return None;
             }
-            next_header = read8(transport_offset, 0);
-            let ext_len = (read8(transport_offset, 1) as usize + 1) * 8;
-            transport_offset += ext_len;
+
+            if next_header == IPPROTO_FRAGMENT {
+                // Fragment Header 格式（固定 8 字节）:
+                //   [0] next_header
+                //   [1] reserved
+                //   [2..4] frag_offset(13bit) | res(2bit) | MF(1bit)
+                //   [4..8] identification
+                if transport_offset + 8 > data_end {
+                    return None;
+                }
+                let frag_off_flags = read_be16(transport_offset, 2);
+                let frag_offset = frag_off_flags >> 3;
+                if frag_offset != 0 {
+                    // 非首分片：传输层头不在此分片中，无法获取端口
+                    is_fragment = true;
+                }
+                next_header = read8(transport_offset, 0);
+                transport_offset += 8; // Fragment Header 固定 8 字节
+            } else {
+                // 其它扩展头: hdr_len 以 8 字节为单位（不含首 8 字节）
+                next_header = read8(transport_offset, 0);
+                let ext_len = (read8(transport_offset, 1) as usize + 1) * 8;
+                transport_offset += ext_len;
+            }
+
             if transport_offset > data_end {
                 return None;
             }
             i += 1;
         }
 
-        let (src_port, dst_port) = if next_header == IPPROTO_TCP || next_header == IPPROTO_UDP {
+        let (src_port, dst_port) = if is_fragment {
+            // 非首分片，无法获取端口，回退到 (0, 0) 走默认策略动作
+            (0, 0)
+        } else if next_header == IPPROTO_TCP || next_header == IPPROTO_UDP {
             if transport_offset + 4 <= data_end {
                 (
                     read_be16(transport_offset, 0),
