@@ -53,6 +53,10 @@ fn cleanup_orphaned_pins(base_pin_path: &str, existing_ifaces: &[String]) {
         if let Ok(entry) = entry {
             if entry.path().is_dir() {
                 if let Some(name) = entry.file_name().to_str() {
+                    // Skip "system" directory (managed by system_start/stop, not tap)
+                    if name == "system" {
+                        continue;
+                    }
                     if !existing_ifaces.contains(&name.to_string()) {
                         println!("Cleaning orphaned pin directory: {}", name);
                         if let Err(e) = std::fs::remove_dir_all(entry.path()) {

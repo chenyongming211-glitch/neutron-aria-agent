@@ -131,17 +131,18 @@ pub async fn list_policies(
 ) -> impl IntoResponse {
     match cp.list_policies(&instance).await {
         Ok((rules, groups)) => {
+            let find_name = |id: u32| -> String {
+                if id == 0 { return "any".to_string(); }
+                groups.values()
+                    .find(|g| g.id == id)
+                    .map(|g| g.name.clone())
+                    .unwrap_or_else(|| format!("id:{}", id))
+            };
             let policies = rules.into_iter().map(|r| {
                 PolicyEntry {
-                    src_group: ControlPlane::group_name_by_id(&aria_core::state::FirewallState {
-                        groups: groups.clone(),
-                        ..Default::default()
-                    }, r.src_group_id),
+                    src_group: find_name(r.src_group_id),
                     src_group_id: r.src_group_id,
-                    dst_group: ControlPlane::group_name_by_id(&aria_core::state::FirewallState {
-                        groups: groups.clone(),
-                        ..Default::default()
-                    }, r.dst_group_id),
+                    dst_group: find_name(r.dst_group_id),
                     dst_group_id: r.dst_group_id,
                     proto: proto_to_string(r.proto),
                     action: action_to_string(r.action),

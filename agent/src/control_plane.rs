@@ -268,6 +268,12 @@ impl ControlPlane {
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
 
+        // Snapshot state for rollback (clone the parts that apply_add_rule mutates)
+        let snapshot_rules = state.state.rules.clone();
+        let snapshot_port_sets = state.state.port_sets.clone();
+        let snapshot_free_indices = state.state.free_bitmap_indices.clone();
+        let snapshot_next_bitmap_idx = state.state.next_bitmap_idx;
+
         // Operate directly on in-memory state (no StateManager disk round-trip)
         let add_result = state.state.apply_add_rule(src_id, dst_id, proto, action, ports, direction)
             .map_err(|e| ControlPlaneError::ValidationError(e))?;
@@ -278,8 +284,11 @@ impl ControlPlane {
             add_result.bitmap_idx, add_result.is_new_port_set,
             direction, &state.pin_path, &self.ebpf_path,
         ) {
-            // Rollback in-memory state
-            let _ = state.state.apply_remove_rule(src_id, dst_id, proto, direction);
+            // Rollback: restore snapshotted state
+            state.state.rules = snapshot_rules;
+            state.state.port_sets = snapshot_port_sets;
+            state.state.free_bitmap_indices = snapshot_free_indices;
+            state.state.next_bitmap_idx = snapshot_next_bitmap_idx;
             return Err(ControlPlaneError::KernelError(e));
         }
 
@@ -540,10 +549,22 @@ impl ControlPlane {
 
     fn write_state_to_disk(state: &FirewallState, state_path: &str, name: &str) {
         let state_file = format!("{}/state.json", state_path);
+        let tmp_file = format!("{}/state.json.tmp", state_path);
         match serde_json::to_string_pretty(state) {
             Ok(contents) => {
-                if let Err(e) = std::fs::write(&state_file, contents) {
+                // Atomic write: write to temp file, fsync, then rename
+                use std::io::Write;
+                let write_result = (|| -> Result<(), std::io::Error> {
+                    let mut f = std::fs::File::create(&tmp_file)?;
+                    f.write_all(contents.as_bytes())?;
+                    f.sync_all()?;
+                    std::fs::rename(&tmp_file, &state_file)?;
+                    Ok(())
+                })();
+                if let Err(e) = write_result {
                     eprintln!("[ControlPlane] Failed to flush {}: {}", name, e);
+                    // Clean up temp file on failure
+                    let _ = std::fs::remove_file(&tmp_file);
                 }
             }
             Err(e) => {
