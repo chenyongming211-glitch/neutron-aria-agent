@@ -261,16 +261,21 @@ async fn main() {
                 let json_str = if file == "-" {
                     use std::io::Read;
                     let mut buf = String::new();
-                    std::io::stdin().read_to_string(&mut buf)
-                        .map_err(|e| format!("Failed to read stdin: {}", e))?;
-                    buf
+                    match std::io::stdin().read_to_string(&mut buf) {
+                        Ok(_) => buf,
+                        Err(e) => return { eprintln!("Error: Failed to read stdin: {}", e); std::process::exit(1); },
+                    }
                 } else {
-                    std::fs::read_to_string(&file)
-                        .map_err(|e| format!("Failed to read file '{}': {}", file, e))?
+                    match std::fs::read_to_string(&file) {
+                        Ok(s) => s,
+                        Err(e) => return { eprintln!("Error: Failed to read file '{}': {}", file, e); std::process::exit(1); },
+                    }
                 };
 
-                let policies: Vec<aria_api::AddPolicyRequest> = serde_json::from_str(&json_str)
-                    .map_err(|e| format!("Invalid JSON: {}", e))?;
+                let policies: Vec<aria_api::AddPolicyRequest> = match serde_json::from_str(&json_str) {
+                    Ok(p) => p,
+                    Err(e) => return { eprintln!("Error: Invalid JSON: {}", e); std::process::exit(1); },
+                };
 
                 match client.batch_add_policies(&instance, &aria_api::BatchAddPoliciesRequest { policies }).await {
                     Ok(resp) => {
