@@ -2,8 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
+use std::time::Instant;
 
-use crate::state::FirewallState;
+/// Time-based compact interval (5 minutes)
+const WAL_COMPACT_INTERVAL_SECS: u64 = 300;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum WalEntry {
@@ -23,6 +25,7 @@ pub struct WalWriter {
     file: BufWriter<File>,
     wal_path: PathBuf,
     entry_count: u64,
+    last_compact_time: Instant,
 }
 
 impl WalWriter {
@@ -54,6 +57,7 @@ impl WalWriter {
             file: BufWriter::new(file),
             wal_path,
             entry_count,
+            last_compact_time: Instant::now(),
         })
     }
 
@@ -74,20 +78,28 @@ impl WalWriter {
         self.entry_count
     }
 
+    /// Check if compact is needed based on entry count threshold or time interval.
+    pub fn needs_compact(&self, threshold: u64) -> bool {
+        if self.entry_count == 0 {
+            return false;
+        }
+        self.entry_count >= threshold
+            || self.last_compact_time.elapsed().as_secs() >= WAL_COMPACT_INTERVAL_SECS
+    }
+
     /// Write a full snapshot to state.json and truncate the WAL.
-    pub fn compact(&mut self, state: &FirewallState) -> Result<(), String> {
+    /// Accepts pre-serialized JSON to avoid borrow conflicts when wal and state
+    /// are fields of the same struct.
+    pub fn compact(&mut self, state_json: &str) -> Result<(), String> {
         let state_dir = self.wal_path.parent()
             .ok_or_else(|| "WAL path has no parent directory".to_string())?;
         let state_file = state_dir.join("state.json");
         let tmp_file = state_dir.join("state.json.tmp");
 
         // Atomic write: tmp + fsync + rename
-        let contents = serde_json::to_string_pretty(state)
-            .map_err(|e| format!("Failed to serialize state for compact: {}", e))?;
-
         let write_result = (|| -> Result<(), std::io::Error> {
             let mut f = File::create(&tmp_file)?;
-            f.write_all(contents.as_bytes())?;
+            f.write_all(state_json.as_bytes())?;
             f.sync_all()?;
             fs::rename(&tmp_file, &state_file)?;
             Ok(())
@@ -106,6 +118,7 @@ impl WalWriter {
             .map_err(|e| format!("Failed to truncate WAL: {}", e))?;
         self.file = BufWriter::new(file);
         self.entry_count = 0;
+        self.last_compact_time = Instant::now();
 
         Ok(())
     }
@@ -305,7 +318,8 @@ mod tests {
         state.add_group("cache", "10.0.2.0/24").unwrap();
 
         // Compact
-        wal.compact(&state).unwrap();
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        wal.compact(&json).unwrap();
         assert_eq!(wal.entry_count(), 0);
 
         // WAL file should be empty

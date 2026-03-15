@@ -15,6 +15,22 @@ struct InstanceState {
     wal: WalWriter,
 }
 
+impl InstanceState {
+    /// Serialize state then compact WAL. Avoids borrow conflict between wal and state.
+    fn do_compact(&mut self) {
+        match serde_json::to_string_pretty(&self.state) {
+            Ok(json) => {
+                if let Err(e) = self.wal.compact(&json) {
+                    eprintln!("[ControlPlane] Failed to compact {}: {}", self.state_path, e);
+                }
+            }
+            Err(e) => {
+                eprintln!("[ControlPlane] Failed to serialize state for compact: {}", e);
+            }
+        }
+    }
+}
+
 pub struct ControlPlane {
     instances: RwLock<HashMap<String, Arc<tokio::sync::RwLock<InstanceState>>>>,
     pub ebpf_path: String,
@@ -80,21 +96,33 @@ impl ControlPlane {
             let instances = self.instances.read().await;
             if let Some(existing) = instances.get(name) {
                 let mut st = existing.write().await;
-                if let Err(e) = st.wal.compact(&st.state) {
-                    eprintln!("[ControlPlane] Failed to compact {} on re-register: {}", name, e);
-                }
+                st.do_compact();
             }
         }
 
         let state = aria_core::wal::load_with_wal(&state_path);
 
-        let wal = match WalWriter::open(&state_path) {
+        let mut wal = match WalWriter::open(&state_path) {
             Ok(w) => w,
             Err(e) => {
                 eprintln!("[ControlPlane] Failed to open WAL for {}: {}", name, e);
                 return;
             }
         };
+
+        // Compact on startup if WAL had replayed entries
+        if wal.entry_count() > 0 {
+            match serde_json::to_string_pretty(&state) {
+                Ok(json) => {
+                    if let Err(e) = wal.compact(&json) {
+                        eprintln!("[ControlPlane] Failed to compact {} on register: {}", name, e);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[ControlPlane] Failed to serialize {} on register: {}", name, e);
+                }
+            }
+        }
 
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
@@ -112,13 +140,27 @@ impl ControlPlane {
     pub async fn register_system_instance(&self, pin_path: &str, state_path: &str) {
         let state = aria_core::wal::load_with_wal(state_path);
 
-        let wal = match WalWriter::open(state_path) {
+        let mut wal = match WalWriter::open(state_path) {
             Ok(w) => w,
             Err(e) => {
                 eprintln!("[ControlPlane] Failed to open WAL for system: {}", e);
                 return;
             }
         };
+
+        // Compact on startup if WAL had replayed entries
+        if wal.entry_count() > 0 {
+            match serde_json::to_string_pretty(&state) {
+                Ok(json) => {
+                    if let Err(e) = wal.compact(&json) {
+                        eprintln!("[ControlPlane] Failed to compact system on register: {}", e);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[ControlPlane] Failed to serialize system on register: {}", e);
+                }
+            }
+        }
 
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
@@ -193,10 +235,12 @@ impl ControlPlane {
             return Err(ControlPlaneError::KernelError(format!("dst: {}", e)));
         }
 
-        state.wal.append(&WalEntry::AddGroup {
+        if let Err(e) = state.wal.append(&WalEntry::AddGroup {
             name: name.to_string(),
             cidr: cidr.to_string(),
-        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
+        }) {
+            eprintln!("[ControlPlane] WAL append failed (add_group): {}", e);
+        }
         Ok(id)
     }
 
@@ -242,9 +286,11 @@ impl ControlPlane {
         }
 
         state.state.groups.remove(name);
-        state.wal.append(&WalEntry::DeleteGroup {
+        if let Err(e) = state.wal.append(&WalEntry::DeleteGroup {
             name: name.to_string(),
-        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
+        }) {
+            eprintln!("[ControlPlane] WAL append failed (delete_group): {}", e);
+        }
         Ok(())
     }
 
@@ -304,14 +350,16 @@ impl ControlPlane {
             }
         }
 
-        state.wal.append(&WalEntry::AddRule {
-            src_id: src_id,
-            dst_id: dst_id,
+        if let Err(e) = state.wal.append(&WalEntry::AddRule {
+            src_id,
+            dst_id,
             proto,
             action,
             ports: ports.map(|s| s.to_string()),
             direction,
-        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
+        }) {
+            eprintln!("[ControlPlane] WAL append failed (add_policy): {}", e);
+        }
         Ok(())
     }
 
@@ -358,12 +406,14 @@ impl ControlPlane {
             }
         }
 
-        state.wal.append(&WalEntry::RemoveRule {
-            src_id: src_id,
-            dst_id: dst_id,
+        if let Err(e) = state.wal.append(&WalEntry::RemoveRule {
+            src_id,
+            dst_id,
             proto,
             direction,
-        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
+        }) {
+            eprintln!("[ControlPlane] WAL append failed (delete_policy): {}", e);
+        }
         Ok(())
     }
 
@@ -412,14 +462,16 @@ impl ControlPlane {
             priority,
         });
 
-        state.wal.append(&WalEntry::AddQos {
+        if let Err(e) = state.wal.append(&WalEntry::AddQos {
             group_name: group_name.to_string(),
             group_id,
             direction,
             rate_bps,
             burst_bytes,
             priority,
-        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
+        }) {
+            eprintln!("[ControlPlane] WAL append failed (add_qos): {}", e);
+        }
         Ok(())
     }
 
@@ -454,10 +506,12 @@ impl ControlPlane {
         }
 
         state.state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
-        state.wal.append(&WalEntry::DeleteQos {
+        if let Err(e) = state.wal.append(&WalEntry::DeleteQos {
             group_id,
             direction,
-        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
+        }) {
+            eprintln!("[ControlPlane] WAL append failed (delete_qos): {}", e);
+        }
         Ok(())
     }
 
@@ -507,10 +561,12 @@ impl ControlPlane {
             state.state.monitoring_enabled = mon;
         }
 
-        state.wal.append(&WalEntry::UpdateConfig {
+        if let Err(e) = state.wal.append(&WalEntry::UpdateConfig {
             conntrack,
             monitoring,
-        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
+        }) {
+            eprintln!("[ControlPlane] WAL append failed (update_config): {}", e);
+        }
         Ok(())
     }
 
@@ -554,28 +610,24 @@ impl ControlPlane {
 
     // ── Compact (WAL persistence) ──
 
-    /// Compact all instances that exceed the WAL entry threshold
+    /// Compact all instances unconditionally (used on shutdown)
     pub async fn compact_all(&self) {
         let instances = self.instances.read().await;
-        for (name, inst) in instances.iter() {
+        for (_name, inst) in instances.iter() {
             let mut state = inst.write().await;
             if state.wal.entry_count() > 0 {
-                if let Err(e) = state.wal.compact(&state.state) {
-                    eprintln!("[ControlPlane] Failed to compact {}: {}", name, e);
-                }
+                state.do_compact();
             }
         }
     }
 
-    /// Compact instances whose WAL exceeds the threshold
+    /// Compact instances whose WAL exceeds the entry count threshold or time interval
     pub async fn compact_if_needed(&self) {
         let instances = self.instances.read().await;
-        for (name, inst) in instances.iter() {
+        for (_name, inst) in instances.iter() {
             let mut state = inst.write().await;
-            if state.wal.entry_count() >= WAL_COMPACT_THRESHOLD {
-                if let Err(e) = state.wal.compact(&state.state) {
-                    eprintln!("[ControlPlane] Failed to compact {}: {}", name, e);
-                }
+            if state.wal.needs_compact(WAL_COMPACT_THRESHOLD) {
+                state.do_compact();
             }
         }
     }
@@ -586,9 +638,7 @@ impl ControlPlane {
         if let Some(inst) = instances.get(name) {
             let mut state = inst.write().await;
             if state.wal.entry_count() > 0 {
-                if let Err(e) = state.wal.compact(&state.state) {
-                    eprintln!("[ControlPlane] Failed to compact {}: {}", name, e);
-                }
+                state.do_compact();
             }
         }
     }
