@@ -80,6 +80,19 @@ pub struct MatchedPolicy {
     pub direction: u8,
 }
 
+impl MatchedPolicy {
+    #[inline(always)]
+    pub fn to_policy_key(&self) -> PolicyKey {
+        PolicyKey {
+            src_id: self.src_id,
+            dst_id: self.dst_id,
+            proto: self.proto,
+            direction: self.direction,
+            pad: [0; 2],
+        }
+    }
+}
+
 /// CT lookup result
 pub enum CtLookupResult {
     /// Established connection — fast path, skip policy. Carries cached matched policy.
