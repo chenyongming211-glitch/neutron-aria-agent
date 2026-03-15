@@ -76,7 +76,7 @@ pub unsafe fn apply_qos_egress(
                 let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
                 let refill = compute_refill(rate_per_cpu, elapsed);
                 let new_tokens = (*bucket).tokens + refill;
-                let mut tokens = if new_tokens > burst { burst } else { new_tokens };
+                let tokens = if new_tokens > burst { burst } else { new_tokens };
 
                 let (tstamp, final_tokens) = if tokens >= pkt_len as u64 {
                     (0u64, tokens - pkt_len as u64)
@@ -149,7 +149,7 @@ pub unsafe fn apply_qos_ingress(
                 let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
                 let refill = compute_refill(rate_per_cpu, elapsed);
                 let new_tokens = (*bucket).tokens + refill;
-                let mut tokens = if new_tokens > burst { burst } else { new_tokens };
+                let tokens = if new_tokens > burst { burst } else { new_tokens };
 
                 if tokens >= pkt_len as u64 {
                     (*bucket).tokens = tokens - pkt_len as u64;

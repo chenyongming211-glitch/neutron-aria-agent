@@ -18,7 +18,7 @@ mod qos;
 mod policy;
 
 use common::{
-    PolicyKey, CtKey4, CtKey6,
+    CtKey4, CtKey6,
     XDP_PASS, XDP_DROP, DIR_INGRESS, DIR_EGRESS,
 };
 use maps::{
