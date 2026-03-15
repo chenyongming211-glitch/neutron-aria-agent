@@ -11,11 +11,16 @@ fn sync_qos_enabled(pin_path: &str, enabled: bool) -> Result<(), String> {
         aya::maps::Map::HashMap(map_data)
     ).map_err(|e| format!("convert FIREWALL_CONFIG: {:?}", e))?;
 
-    if let Ok(mut cfg) = map.get(&0u32, 0) {
-        cfg.qos_enabled = if enabled { 1 } else { 0 };
-        map.insert(&0u32, &cfg, 0)
-            .map_err(|e| format!("FIREWALL_CONFIG update qos_enabled: {:?}", e))?;
-    }
+    let mut cfg = map.get(&0u32, 0).unwrap_or(FirewallConfig {
+        conntrack_enabled: 1,
+        monitoring_enabled: 1,
+        num_cpus: 1,
+        qos_enabled: 0,
+        pad: [0; 3],
+    });
+    cfg.qos_enabled = if enabled { 1 } else { 0 };
+    map.insert(&0u32, &cfg, 0)
+        .map_err(|e| format!("FIREWALL_CONFIG update qos_enabled: {:?}", e))?;
     Ok(())
 }
 

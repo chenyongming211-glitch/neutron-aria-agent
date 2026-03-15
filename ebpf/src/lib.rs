@@ -69,6 +69,9 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
         match conntrack::ct_lookup_v6(&ct_key, now, pkt_len) {
             CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
+                // Stats first — count all packets regardless of QoS outcome
+                stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
+                stats::update_flow_stats_v6(&ct_key, pkt_len, now);
                 if qos_on {
                     let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
                     let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
@@ -76,8 +79,6 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
                         return XDP_DROP;
                     }
                 }
-                stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
-                stats::update_flow_stats_v6(&ct_key, pkt_len, now);
                 return XDP_PASS;
             }
             CtLookupResult::NotFound => {}
@@ -88,11 +89,12 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
         let (result, matched) = policy::evaluate_policy(src_id, dst_id, info.proto, DIR_INGRESS, info.dst_port, pkt_len);
 
         if result == XDP_PASS {
+            // Stats before QoS — dropped packets are still counted
+            stats::update_flow_stats_v6(&ct_key, pkt_len, now);
             if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 return XDP_DROP;
             }
             conntrack::ct_create_v6(&ct_key, now, pkt_len, &matched);
-            stats::update_flow_stats_v6(&ct_key, pkt_len, now);
         }
 
         result
@@ -108,6 +110,8 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
         match conntrack::ct_lookup_v4(&ct_key, now, pkt_len) {
             CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
+                stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
+                stats::update_flow_stats_v4(&ct_key, pkt_len, now);
                 if qos_on {
                     let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
                     let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
@@ -115,8 +119,6 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
                         return XDP_DROP;
                     }
                 }
-                stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
-                stats::update_flow_stats_v4(&ct_key, pkt_len, now);
                 return XDP_PASS;
             }
             CtLookupResult::NotFound => {}
@@ -127,11 +129,11 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
         let (result, matched) = policy::evaluate_policy(src_id, dst_id, info.proto, DIR_INGRESS, info.dst_port, pkt_len);
 
         if result == XDP_PASS {
+            stats::update_flow_stats_v4(&ct_key, pkt_len, now);
             if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 return XDP_DROP;
             }
             conntrack::ct_create_v4(&ct_key, now, pkt_len, &matched);
-            stats::update_flow_stats_v4(&ct_key, pkt_len, now);
         }
 
         result
@@ -173,6 +175,8 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
         match conntrack::ct_lookup_v6(&ct_key, now, pkt_len) {
             CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
+                stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
+                stats::update_flow_stats_v6(&ct_key, pkt_len, now);
                 if qos_on {
                     let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
                     let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
@@ -180,8 +184,6 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                         return action;
                     }
                 }
-                stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
-                stats::update_flow_stats_v6(&ct_key, pkt_len, now);
                 return TC_ACT_OK;
             }
             CtLookupResult::NotFound => {}
@@ -194,13 +196,13 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
         );
 
         if result == TC_ACT_OK {
+            stats::update_flow_stats_v6(&ct_key, pkt_len, now);
             if qos_on {
                 if let Some(action) = apply_egress_qos(&ctx, src_id, dst_id, pkt_len, now) {
                     return action;
                 }
             }
             conntrack::ct_create_v6(&ct_key, now, pkt_len, &matched);
-            stats::update_flow_stats_v6(&ct_key, pkt_len, now);
         }
 
         result
@@ -216,6 +218,8 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
         match conntrack::ct_lookup_v4(&ct_key, now, pkt_len) {
             CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
+                stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
+                stats::update_flow_stats_v4(&ct_key, pkt_len, now);
                 if qos_on {
                     let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
                     let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
@@ -223,8 +227,6 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                         return action;
                     }
                 }
-                stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
-                stats::update_flow_stats_v4(&ct_key, pkt_len, now);
                 return TC_ACT_OK;
             }
             CtLookupResult::NotFound => {}
@@ -237,13 +239,13 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
         );
 
         if result == TC_ACT_OK {
+            stats::update_flow_stats_v4(&ct_key, pkt_len, now);
             if qos_on {
                 if let Some(action) = apply_egress_qos(&ctx, src_id, dst_id, pkt_len, now) {
                     return action;
                 }
             }
             conntrack::ct_create_v4(&ct_key, now, pkt_len, &matched);
-            stats::update_flow_stats_v4(&ct_key, pkt_len, now);
         }
 
         result
