@@ -1,6 +1,5 @@
 use aria_api::*;
 
-#[allow(dead_code)]
 pub struct ApiClient {
     base_url: String,
     client: reqwest::Client,

@@ -55,6 +55,8 @@ enum Commands {
     },
     /// List all instances
     Instances,
+    /// Check aria-agent health
+    Health,
 }
 
 #[derive(Subcommand)]
@@ -108,6 +110,11 @@ enum PolicyCommands {
         proto: String,
         #[arg(long, default_value = "ingress", help = "Direction: ingress or egress")]
         direction: String,
+    },
+    /// Batch add policies from JSON file or stdin
+    Batch {
+        #[arg(short, long, help = "JSON file with policies array (use - for stdin)")]
+        file: String,
     },
     List,
 }
@@ -239,6 +246,35 @@ async fn main() {
                     direction,
                 }).await {
                     Ok(resp) => { println!("{}", resp.message); Ok(()) }
+                    Err(e) => Err(e),
+                }
+            }
+            PolicyCommands::Batch { file } => {
+                let json_str = if file == "-" {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    std::io::stdin().read_to_string(&mut buf)
+                        .map_err(|e| format!("Failed to read stdin: {}", e))?;
+                    buf
+                } else {
+                    std::fs::read_to_string(&file)
+                        .map_err(|e| format!("Failed to read file '{}': {}", file, e))?
+                };
+
+                let policies: Vec<aria_api::AddPolicyRequest> = serde_json::from_str(&json_str)
+                    .map_err(|e| format!("Invalid JSON: {}", e))?;
+
+                match client.batch_add_policies(&instance, &aria_api::BatchAddPoliciesRequest { policies }).await {
+                    Ok(resp) => {
+                        println!("Batch complete: {} added", resp.added);
+                        if !resp.errors.is_empty() {
+                            eprintln!("Errors:");
+                            for err in &resp.errors {
+                                eprintln!("  {}", err);
+                            }
+                        }
+                        Ok(())
+                    }
                     Err(e) => Err(e),
                 }
             }
@@ -455,6 +491,17 @@ async fn main() {
                             println!("{:<20} {}", inst.name, status);
                         }
                     }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        Commands::Health => {
+            match client.health().await {
+                Ok(resp) => {
+                    println!("Status:    {}", resp.status);
+                    println!("Version:   {}", resp.version);
+                    println!("Instances: {}", resp.instances);
                     Ok(())
                 }
                 Err(e) => Err(e),
