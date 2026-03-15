@@ -105,14 +105,6 @@ pub struct FlowStatsValue {
 
 // --- QoS ---
 
-/// BPF spin lock for protecting shared map values across CPUs.
-/// Must be named `bpf_spin_lock` in BTF for the verifier to recognize it.
-/// Layout matches kernel's `struct bpf_spin_lock { __u32 val; }`.
-#[repr(C)]
-pub struct bpf_spin_lock {
-    pub val: u32,
-}
-
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct QosKey {
@@ -131,11 +123,13 @@ pub struct QosConfig {
     pub pad: [u8; 6],
 }
 
-/// Token bucket with spin lock for safe cross-CPU access.
+/// Token bucket protected by bpf_spin_lock for safe cross-CPU access.
+/// The `lock` field uses the kernel's bpf_spin_lock type from aya bindings
+/// so that BTF matches the verifier's expectation.
 /// Layout: lock(4) + _pad(4) + tokens(8) + last_refill_ns(8) = 24 bytes.
 #[repr(C)]
 pub struct TokenBucket {
-    pub lock: bpf_spin_lock,
+    pub lock: aya_ebpf::bindings::bpf_spin_lock,
     pub _pad: u32,
     pub tokens: u64,
     pub last_refill_ns: u64,

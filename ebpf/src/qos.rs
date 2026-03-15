@@ -1,28 +1,14 @@
-use crate::common::{QosKey, TokenBucket, DIR_EGRESS, DIR_INGRESS, bpf_spin_lock};
+use crate::common::{QosKey, TokenBucket, DIR_EGRESS, DIR_INGRESS};
 use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, FIREWALL_CONFIG};
+use aya_ebpf::bindings::bpf_spin_lock;
 
 /// QoS mode constants
 const QOS_MODE_POLICING: u8 = 0;
 const QOS_MODE_SHAPING: u8 = 1;
 
-// Raw BPF helper function IDs from kernel UAPI headers
-const BPF_FUNC_spin_lock: u64 = 93;
-const BPF_FUNC_spin_unlock: u64 = 94;
-
-/// Call bpf_spin_lock() kernel helper directly via function pointer cast.
-#[inline(always)]
-unsafe fn spin_lock(lock: *mut bpf_spin_lock) {
-    let f: unsafe extern "C" fn(*mut bpf_spin_lock) -> i64 =
-        core::mem::transmute(BPF_FUNC_spin_lock as usize);
-    f(lock);
-}
-
-/// Call bpf_spin_unlock() kernel helper directly via function pointer cast.
-#[inline(always)]
-unsafe fn spin_unlock(lock: *mut bpf_spin_lock) {
-    let f: unsafe extern "C" fn(*mut bpf_spin_lock) -> i64 =
-        core::mem::transmute(BPF_FUNC_spin_unlock as usize);
-    f(lock);
+extern "C" {
+    fn bpf_spin_lock(lock: *mut bpf_spin_lock) -> i64;
+    fn bpf_spin_unlock(lock: *mut bpf_spin_lock) -> i64;
 }
 
 /// Check if QoS is globally enabled. When no QoS rules are configured,
@@ -90,8 +76,7 @@ pub unsafe fn apply_qos_egress(
             let mode = config.mode;
 
             if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
-                // Lock protects tokens + last_refill_ns from concurrent CPU access
-                spin_lock(&mut (*bucket).lock);
+                bpf_spin_lock(&mut (*bucket).lock);
 
                 let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
                 let refill = compute_refill(rate, elapsed);
@@ -121,19 +106,14 @@ pub unsafe fn apply_qos_egress(
                 }
                 (*bucket).last_refill_ns = now_ns;
 
-                spin_unlock(&mut (*bucket).lock);
+                bpf_spin_unlock(&mut (*bucket).lock);
                 return result;
             } else {
-                // First packet: initialize bucket (no lock needed, insert is atomic)
-                let tokens = if burst >= pkt_len as u64 {
-                    burst - pkt_len as u64
-                } else {
-                    0
-                };
+                // First packet: initialize bucket (insert is atomic, no lock needed)
                 let new_bucket = TokenBucket {
-                    lock: bpf_spin_lock { val: 0 },
+                    lock: aya_ebpf::bindings::bpf_spin_lock { val: 0 },
                     _pad: 0,
-                    tokens,
+                    tokens: if burst >= pkt_len as u64 { burst - pkt_len as u64 } else { 0 },
                     last_refill_ns: now_ns,
                 };
                 let _ = QOS_TOKEN_BUCKET.insert(&qos_key, &new_bucket, 0);
@@ -172,7 +152,7 @@ pub unsafe fn apply_qos_ingress(
             let burst = config.burst_bytes;
 
             if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
-                spin_lock(&mut (*bucket).lock);
+                bpf_spin_lock(&mut (*bucket).lock);
 
                 let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
                 let refill = compute_refill(rate, elapsed);
@@ -189,18 +169,13 @@ pub unsafe fn apply_qos_ingress(
                 }
                 (*bucket).last_refill_ns = now_ns;
 
-                spin_unlock(&mut (*bucket).lock);
+                bpf_spin_unlock(&mut (*bucket).lock);
                 return pass;
             } else {
-                let tokens = if burst >= pkt_len as u64 {
-                    burst - pkt_len as u64
-                } else {
-                    0
-                };
                 let new_bucket = TokenBucket {
-                    lock: bpf_spin_lock { val: 0 },
+                    lock: aya_ebpf::bindings::bpf_spin_lock { val: 0 },
                     _pad: 0,
-                    tokens,
+                    tokens: if burst >= pkt_len as u64 { burst - pkt_len as u64 } else { 0 },
                     last_refill_ns: now_ns,
                 };
                 let _ = QOS_TOKEN_BUCKET.insert(&qos_key, &new_bucket, 0);
