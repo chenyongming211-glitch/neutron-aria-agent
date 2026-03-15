@@ -591,7 +591,8 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
 
     // 写 FIREWALL_CONFIG（功能开关）
     {
-        let num_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as u16;
+        let raw_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        let num_cpus = if raw_cpus > 0 { raw_cpus as u16 } else { 1u16 };
         let cfg = FirewallConfig {
             conntrack_enabled: if state.conntrack_enabled { 1 } else { 0 },
             monitoring_enabled: if state.monitoring_enabled { 1 } else { 0 },
@@ -756,8 +757,10 @@ pub fn update_firewall_config(
 
     // Read current config or use defaults
     let current = map.get(&0u32, 0).ok();
-    let num_cpus_val = current.as_ref().map(|c| c.num_cpus)
-        .unwrap_or(unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as u16);
+    let num_cpus_val = current.as_ref().map(|c| c.num_cpus).unwrap_or_else(|| {
+        let raw = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        if raw > 0 { raw as u16 } else { 1u16 }
+    });
     let ct = conntrack_enabled.map(|b| if b { 1u8 } else { 0 })
         .unwrap_or_else(|| current.as_ref().map(|c| c.conntrack_enabled).unwrap_or(1));
     let mon = monitoring_enabled.map(|b| if b { 1u8 } else { 0 })
