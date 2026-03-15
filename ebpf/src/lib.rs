@@ -6,6 +6,8 @@ use aya_ebpf::programs::{XdpContext, TcContext};
 use aya_ebpf::maps::LpmTrie;
 use aya_ebpf::maps::lpm_trie::Key;
 use aya_ebpf::helpers::bpf_ktime_get_ns;
+use aya_ebpf::EbpfContext;
+use aya_ebpf::bindings::__sk_buff;
 
 mod common;
 mod maps;
@@ -236,7 +238,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                     return TC_ACT_SHOT;
                 }
                 if edt != 0 || prio != 0 {
-                    let skb = ctx.skb;
+                    let skb = ctx.as_ptr() as *mut __sk_buff;
                     if edt != 0 {
                         (*skb).tstamp = edt;
                     }
@@ -262,7 +264,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             }
 
             if edt != 0 || prio != 0 {
-                let skb = ctx.skb;
+                let skb = ctx.as_ptr() as *mut __sk_buff;
                 if edt != 0 {
                     (*skb).tstamp = edt;
                 }
@@ -296,7 +298,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                     return TC_ACT_SHOT;
                 }
                 if edt != 0 || prio != 0 {
-                    let skb = ctx.skb;
+                    let skb = ctx.as_ptr() as *mut __sk_buff;
                     if edt != 0 {
                         (*skb).tstamp = edt;
                     }
@@ -322,7 +324,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             }
 
             if edt != 0 || prio != 0 {
-                let skb = ctx.skb;
+                let skb = ctx.as_ptr() as *mut __sk_buff;
                 if edt != 0 {
                     (*skb).tstamp = edt;
                 }

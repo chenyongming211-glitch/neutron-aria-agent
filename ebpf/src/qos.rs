@@ -1,4 +1,4 @@
-use crate::common::{QosKey, QosConfig, TokenBucket, DIR_EGRESS, DIR_INGRESS};
+use crate::common::{QosKey, TokenBucket, DIR_EGRESS, DIR_INGRESS};
 use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, FIREWALL_CONFIG};
 
 #[inline(always)]

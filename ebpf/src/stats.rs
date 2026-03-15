@@ -1,5 +1,5 @@
 use crate::common::{PolicyKey, RuleStatsValue, FlowStatsValue, CtKey4, CtKey6};
-use crate::maps::{RULE_STATS, FLOW_STATS_V4, FLOW_STATS_V6, FIREWALL_CONFIG, FirewallConfig};
+use crate::maps::{RULE_STATS, FLOW_STATS_V4, FLOW_STATS_V6, FIREWALL_CONFIG};
 
 #[inline(always)]
 fn monitoring_enabled() -> bool {

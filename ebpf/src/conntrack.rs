@@ -1,9 +1,9 @@
 use crate::common::{
-    CtKey4, CtKey6, CtValue, CtConfig,
+    CtKey4, CtKey6, CtValue,
     CT_NEW, CT_ESTABLISHED,
     IPPROTO_TCP, IPPROTO_UDP, IPPROTO_ICMP, IPPROTO_ICMPV6,
 };
-use crate::maps::{CT_TABLE_V4, CT_TABLE_V6, CT_CONFIG, FIREWALL_CONFIG, FirewallConfig};
+use crate::maps::{CT_TABLE_V4, CT_TABLE_V6, CT_CONFIG, FIREWALL_CONFIG};
 
 const CT_FLAG_SEEN_REPLY: u8 = 1;
 
