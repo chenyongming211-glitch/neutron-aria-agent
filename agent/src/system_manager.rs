@@ -52,8 +52,14 @@ pub async fn system_start(
 
     println!("XDP attached successfully (link_id: {:?})", link_id);
 
-    let _link = xdp.take_link(link_id)
+    // Pin the XDP link so it survives for the lifetime of the process
+    let xdp_link = xdp.take_link(link_id)
         .map_err(|e| format!("take_link error: {:?}", e))?;
+    let xdp_link_pin = format!("{}/xdp_link", pin_path);
+    let fd_link: aya::programs::links::FdLink = xdp_link.try_into()
+        .map_err(|e: aya::programs::links::LinkError| format!("convert to FdLink error: {:?}", e))?;
+    let _pinned_link = fd_link.pin(&xdp_link_pin)
+        .map_err(|e| format!("pin link error: {:?}", e))?;
 
     // Attach TC egress
     if let Err(e) = attach_tc_egress(&mut bpf, iface) {
@@ -105,15 +111,25 @@ pub async fn system_stop(
     let sm = aria_core::state::StateManager::new(state_path);
     match sm.get_attached_iface() {
         Ok(Some(iface)) => {
-            // Detach XDP
-            let output = std::process::Command::new("ip")
-                .args(["link", "set", "dev", &iface, "xdp", "off"])
-                .output();
-            match output {
-                Ok(o) if o.status.success() => println!("Detached XDP from {}", iface),
-                Ok(o) => eprintln!("Warning: failed to detach XDP from {}: {}",
-                    iface, String::from_utf8_lossy(&o.stderr)),
-                Err(e) => eprintln!("Warning: failed to run ip command: {}", e),
+            // Remove pinned XDP link (this detaches XDP from the interface)
+            let xdp_link_pin = format!("{}/xdp_link", pin_path);
+            if std::path::Path::new(&xdp_link_pin).exists() {
+                if let Err(e) = fs::remove_file(&xdp_link_pin) {
+                    eprintln!("Warning: failed to remove pinned XDP link: {}", e);
+                } else {
+                    println!("XDP link unpinned (detached from {})", iface);
+                }
+            } else {
+                // Fallback: use ip command if pin file doesn't exist
+                let output = std::process::Command::new("ip")
+                    .args(["link", "set", "dev", &iface, "xdp", "off"])
+                    .output();
+                match output {
+                    Ok(o) if o.status.success() => println!("Detached XDP from {}", iface),
+                    Ok(o) => eprintln!("Warning: failed to detach XDP from {}: {}",
+                        iface, String::from_utf8_lossy(&o.stderr)),
+                    Err(e) => eprintln!("Warning: failed to run ip command: {}", e),
+                }
             }
 
             detach_tc_egress(&iface);
