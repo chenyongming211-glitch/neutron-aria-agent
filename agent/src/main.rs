@@ -34,8 +34,6 @@ struct Config {
     max_port_policies: u32,
     #[serde(default = "default_listen_addr")]
     listen_addr: String,
-    #[serde(default = "default_flush_debounce_ms")]
-    flush_debounce_ms: u64,
 }
 
 fn default_ebpf_path() -> String {
@@ -62,10 +60,6 @@ fn default_listen_addr() -> String {
     "127.0.0.1:8080".to_string()
 }
 
-fn default_flush_debounce_ms() -> u64 {
-    100
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -75,7 +69,6 @@ impl Default for Config {
             iface_pattern: default_iface_pattern(),
             max_port_policies: default_max_port_policies(),
             listen_addr: default_listen_addr(),
-            flush_debounce_ms: default_flush_debounce_ms(),
         }
     }
 }
@@ -165,13 +158,12 @@ async fn main() {
         }
     });
 
-    // Start background flush task
-    let flush_cp = control_plane.clone();
-    let flush_interval = config.flush_debounce_ms;
-    let flush_task = tokio::spawn(async move {
+    // Start background compact task (WAL → snapshot when threshold reached or periodically)
+    let compact_cp = control_plane.clone();
+    let compact_task = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(flush_interval)).await;
-            flush_cp.flush_all().await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            compact_cp.compact_if_needed().await;
         }
     });
 
@@ -210,10 +202,10 @@ async fn main() {
     // Abort tasks
     netlink_task.abort();
     http_task.abort();
-    flush_task.abort();
+    compact_task.abort();
 
-    // Final flush
-    control_plane.flush_all().await;
+    // Final compact: ensure WAL is flushed to snapshot
+    control_plane.compact_all().await;
 
     // Graceful shutdown: detach all instances
     registry.shutdown().await;

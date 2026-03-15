@@ -1,22 +1,18 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use aria_core::state::{FirewallState, GroupInfo, RuleInfo, QosRuleInfo};
+use aria_core::wal::{WalEntry, WalWriter};
+
+const WAL_COMPACT_THRESHOLD: u64 = 1000;
 
 /// Per-instance in-memory state
 struct InstanceState {
     state: FirewallState,
     pin_path: String,
     state_path: String,
-    dirty: AtomicBool,
-}
-
-impl InstanceState {
-    fn mark_dirty(&self) {
-        self.dirty.store(true, Ordering::Release);
-    }
+    wal: WalWriter,
 }
 
 pub struct ControlPlane {
@@ -74,29 +70,37 @@ impl ControlPlane {
     }
 
     /// Register an instance (called when TapRegistry attaches a tap).
-    /// If already registered, flushes dirty state first to avoid data loss.
+    /// If already registered, compacts state first to avoid data loss.
     pub async fn register_instance(&self, name: &str) {
         let pin_path = format!("{}/{}", self.base_pin_path, name);
         let state_path = format!("{}/{}", self.base_state_path, name);
 
-        // If already registered, flush dirty state before replacing
+        // If already registered, compact before replacing
         {
             let instances = self.instances.read().await;
             if let Some(existing) = instances.get(name) {
-                let st = existing.read().await;
-                if st.dirty.swap(false, Ordering::AcqRel) {
-                    Self::write_state_to_disk(&st.state, &st.state_path, name);
+                let mut st = existing.write().await;
+                if let Err(e) = st.wal.compact(&st.state) {
+                    eprintln!("[ControlPlane] Failed to compact {} on re-register: {}", name, e);
                 }
             }
         }
 
-        let state = Self::load_state_from_disk(&state_path);
+        let state = aria_core::wal::load_with_wal(&state_path);
+
+        let wal = match WalWriter::open(&state_path) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("[ControlPlane] Failed to open WAL for {}: {}", name, e);
+                return;
+            }
+        };
 
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             pin_path,
             state_path,
-            dirty: AtomicBool::new(false),
+            wal,
         }));
 
         let mut instances = self.instances.write().await;
@@ -106,13 +110,21 @@ impl ControlPlane {
 
     /// Register the "system" instance (standalone mode)
     pub async fn register_system_instance(&self, pin_path: &str, state_path: &str) {
-        let state = Self::load_state_from_disk(state_path);
+        let state = aria_core::wal::load_with_wal(state_path);
+
+        let wal = match WalWriter::open(state_path) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("[ControlPlane] Failed to open WAL for system: {}", e);
+                return;
+            }
+        };
 
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             pin_path: pin_path.to_string(),
             state_path: state_path.to_string(),
-            dirty: AtomicBool::new(false),
+            wal,
         }));
 
         let mut instances = self.instances.write().await;
@@ -122,8 +134,8 @@ impl ControlPlane {
 
     /// Unregister an instance (called when TapRegistry detaches)
     pub async fn unregister_instance(&self, name: &str) {
-        // Flush before removing
-        self.flush_instance(name).await;
+        // Compact before removing
+        self.compact_instance(name).await;
         let mut instances = self.instances.write().await;
         instances.remove(name);
         println!("[ControlPlane] Unregistered instance: {}", name);
@@ -135,18 +147,6 @@ impl ControlPlane {
         let mut names: Vec<String> = instances.keys().cloned().collect();
         names.sort();
         names
-    }
-
-    fn load_state_from_disk(state_path: &str) -> FirewallState {
-        let state_file = format!("{}/state.json", state_path);
-        if let Ok(contents) = std::fs::read_to_string(&state_file) {
-            if !contents.is_empty() {
-                if let Ok(state) = serde_json::from_str(&contents) {
-                    return state;
-                }
-            }
-        }
-        FirewallState::default()
     }
 
     async fn get_instance(&self, name: &str) -> Result<Arc<tokio::sync::RwLock<InstanceState>>, ControlPlaneError> {
@@ -193,7 +193,10 @@ impl ControlPlane {
             return Err(ControlPlaneError::KernelError(format!("dst: {}", e)));
         }
 
-        state.mark_dirty();
+        state.wal.append(&WalEntry::AddGroup {
+            name: name.to_string(),
+            cidr: cidr.to_string(),
+        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
         Ok(id)
     }
 
@@ -239,7 +242,9 @@ impl ControlPlane {
         }
 
         state.state.groups.remove(name);
-        state.mark_dirty();
+        state.wal.append(&WalEntry::DeleteGroup {
+            name: name.to_string(),
+        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
         Ok(())
     }
 
@@ -299,7 +304,14 @@ impl ControlPlane {
             }
         }
 
-        state.mark_dirty();
+        state.wal.append(&WalEntry::AddRule {
+            src_id: src_id,
+            dst_id: dst_id,
+            proto,
+            action,
+            ports: ports.map(|s| s.to_string()),
+            direction,
+        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
         Ok(())
     }
 
@@ -346,7 +358,12 @@ impl ControlPlane {
             }
         }
 
-        state.mark_dirty();
+        state.wal.append(&WalEntry::RemoveRule {
+            src_id: src_id,
+            dst_id: dst_id,
+            proto,
+            direction,
+        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
         Ok(())
     }
 
@@ -395,7 +412,14 @@ impl ControlPlane {
             priority,
         });
 
-        state.mark_dirty();
+        state.wal.append(&WalEntry::AddQos {
+            group_name: group_name.to_string(),
+            group_id,
+            direction,
+            rate_bps,
+            burst_bytes,
+            priority,
+        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
         Ok(())
     }
 
@@ -430,7 +454,10 @@ impl ControlPlane {
         }
 
         state.state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
-        state.mark_dirty();
+        state.wal.append(&WalEntry::DeleteQos {
+            group_id,
+            direction,
+        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
         Ok(())
     }
 
@@ -480,7 +507,10 @@ impl ControlPlane {
             state.state.monitoring_enabled = mon;
         }
 
-        state.mark_dirty();
+        state.wal.append(&WalEntry::UpdateConfig {
+            conntrack,
+            monitoring,
+        }).map_err(|e| ControlPlaneError::KernelError(format!("WAL append failed: {}", e)))?;
         Ok(())
     }
 
@@ -522,53 +552,43 @@ impl ControlPlane {
         Ok((v4, v6))
     }
 
-    // ── Flush (persistence) ──
+    // ── Compact (WAL persistence) ──
 
-    /// Flush all dirty instances to disk
-    pub async fn flush_all(&self) {
+    /// Compact all instances that exceed the WAL entry threshold
+    pub async fn compact_all(&self) {
         let instances = self.instances.read().await;
         for (name, inst) in instances.iter() {
-            // Use write lock for flush to prevent concurrent modification during I/O
-            let state = inst.write().await;
-            if state.dirty.swap(false, Ordering::AcqRel) {
-                Self::write_state_to_disk(&state.state, &state.state_path, name);
-            }
-        }
-    }
-
-    /// Flush a specific instance to disk
-    async fn flush_instance(&self, name: &str) {
-        let instances = self.instances.read().await;
-        if let Some(inst) = instances.get(name) {
-            let state = inst.write().await;
-            if state.dirty.swap(false, Ordering::AcqRel) {
-                Self::write_state_to_disk(&state.state, &state.state_path, name);
-            }
-        }
-    }
-
-    fn write_state_to_disk(state: &FirewallState, state_path: &str, name: &str) {
-        let state_file = format!("{}/state.json", state_path);
-        let tmp_file = format!("{}/state.json.tmp", state_path);
-        match serde_json::to_string_pretty(state) {
-            Ok(contents) => {
-                // Atomic write: write to temp file, fsync, then rename
-                use std::io::Write;
-                let write_result = (|| -> Result<(), std::io::Error> {
-                    let mut f = std::fs::File::create(&tmp_file)?;
-                    f.write_all(contents.as_bytes())?;
-                    f.sync_all()?;
-                    std::fs::rename(&tmp_file, &state_file)?;
-                    Ok(())
-                })();
-                if let Err(e) = write_result {
-                    eprintln!("[ControlPlane] Failed to flush {}: {}", name, e);
-                    // Clean up temp file on failure
-                    let _ = std::fs::remove_file(&tmp_file);
+            let mut state = inst.write().await;
+            if state.wal.entry_count() > 0 {
+                if let Err(e) = state.wal.compact(&state.state) {
+                    eprintln!("[ControlPlane] Failed to compact {}: {}", name, e);
                 }
             }
-            Err(e) => {
-                eprintln!("[ControlPlane] Failed to serialize {}: {}", name, e);
+        }
+    }
+
+    /// Compact instances whose WAL exceeds the threshold
+    pub async fn compact_if_needed(&self) {
+        let instances = self.instances.read().await;
+        for (name, inst) in instances.iter() {
+            let mut state = inst.write().await;
+            if state.wal.entry_count() >= WAL_COMPACT_THRESHOLD {
+                if let Err(e) = state.wal.compact(&state.state) {
+                    eprintln!("[ControlPlane] Failed to compact {}: {}", name, e);
+                }
+            }
+        }
+    }
+
+    /// Compact a specific instance
+    async fn compact_instance(&self, name: &str) {
+        let instances = self.instances.read().await;
+        if let Some(inst) = instances.get(name) {
+            let mut state = inst.write().await;
+            if state.wal.entry_count() > 0 {
+                if let Err(e) = state.wal.compact(&state.state) {
+                    eprintln!("[ControlPlane] Failed to compact {}: {}", name, e);
+                }
             }
         }
     }
