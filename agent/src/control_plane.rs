@@ -433,6 +433,7 @@ impl ControlPlane {
         rate_bps: u64,
         burst_bytes: u64,
         priority: u8,
+        mode: u8,
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
@@ -447,7 +448,7 @@ impl ControlPlane {
         };
 
         // Write to kernel
-        if let Err(e) = aria_core::qos_ops::add_qos_rule(group_id, direction, rate_bps, burst_bytes, priority, &state.pin_path) {
+        if let Err(e) = aria_core::qos_ops::add_qos_rule(group_id, direction, rate_bps, burst_bytes, priority, mode, &state.pin_path) {
             return Err(ControlPlaneError::KernelError(e));
         }
 
@@ -460,6 +461,7 @@ impl ControlPlane {
             rate_bps,
             burst_bytes,
             priority,
+            mode,
         });
 
         if let Err(e) = state.wal.append(&WalEntry::AddQos {
@@ -469,6 +471,7 @@ impl ControlPlane {
             rate_bps,
             burst_bytes,
             priority,
+            mode,
         }) {
             eprintln!("[ControlPlane] WAL append failed (add_qos): {}", e);
         }

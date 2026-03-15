@@ -33,6 +33,8 @@ pub struct QosRuleInfo {
     pub rate_bps: u64,
     pub burst_bytes: u64,
     pub priority: u8,
+    #[serde(default)]
+    pub mode: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,6 +592,7 @@ impl StateManager {
         rate_bps: u64,
         burst_bytes: u64,
         priority: u8,
+        mode: u8,
     ) -> Result<(), String> {
         self.with_state(|state| {
             // Remove existing rule with same group+direction
@@ -601,6 +604,7 @@ impl StateManager {
                 rate_bps,
                 burst_bytes,
                 priority,
+                mode,
             });
             Ok(())
         })

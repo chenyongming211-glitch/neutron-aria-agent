@@ -578,7 +578,8 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
                         rate_bps: qr.rate_bps,
                         burst_bytes: qr.burst_bytes,
                         priority: qr.priority,
-                        pad: [0; 7],
+                        mode: qr.mode,
+                        pad: [0; 6],
                     };
                     if let Err(e) = map.insert(&key, &config, 0) {
                         errors.push(format!("QOS_CONFIG group={}: {:?}", qr.group_name, e));

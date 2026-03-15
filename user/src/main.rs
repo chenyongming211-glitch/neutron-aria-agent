@@ -141,6 +141,8 @@ enum QosCommands {
         burst: String,
         #[arg(long, default_value = "0", help = "Priority (0=highest, 7=lowest)")]
         priority: u8,
+        #[arg(long, default_value = "policing", help = "Mode: policing (drop excess, works everywhere) or shaping (EDT delay, needs FQ qdisc)")]
+        mode: String,
     },
     /// Delete a QoS rate limit
     Delete {
@@ -405,13 +407,14 @@ async fn main() {
             }
         },
         Commands::Qos { action } => match action {
-            QosCommands::Add { group, direction, rate, burst, priority } => {
+            QosCommands::Add { group, direction, rate, burst, priority, mode } => {
                 match client.add_qos(&instance, &aria_api::AddQosRequest {
                     group,
                     direction,
                     rate,
                     burst,
                     priority,
+                    mode,
                 }).await {
                     Ok(resp) => { println!("{}", resp.message); Ok(()) }
                     Err(e) => Err(e),
@@ -432,11 +435,11 @@ async fn main() {
                         if resp.rules.is_empty() {
                             println!("No QoS rules configured");
                         } else {
-                            println!("{:<15} {:<10} {:<10} {:<15} {:<15} {}",
-                                "Group", "GroupID", "Direction", "Rate (B/s)", "Burst (B)", "Priority");
+                            println!("{:<15} {:<10} {:<10} {:<15} {:<15} {:<10} {}",
+                                "Group", "GroupID", "Direction", "Rate (B/s)", "Burst (B)", "Mode", "Priority");
                             for r in &resp.rules {
-                                println!("{:<15} {:<10} {:<10} {:<15} {:<15} {}",
-                                    r.group, r.group_id, r.direction, r.rate_bps, r.burst_bytes, r.priority);
+                                println!("{:<15} {:<10} {:<10} {:<15} {:<15} {:<10} {}",
+                                    r.group, r.group_id, r.direction, r.rate_bps, r.burst_bytes, r.mode, r.priority);
                             }
                         }
                         Ok(())

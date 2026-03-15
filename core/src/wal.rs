@@ -15,7 +15,7 @@ pub enum WalEntry {
     DeleteGroup { name: String },
     AddRule { src_id: u32, dst_id: u32, proto: u8, action: u8, ports: Option<String>, direction: u8 },
     RemoveRule { src_id: u32, dst_id: u32, proto: u8, direction: u8 },
-    AddQos { group_name: String, group_id: u32, direction: u8, rate_bps: u64, burst_bytes: u64, priority: u8 },
+    AddQos { group_name: String, group_id: u32, direction: u8, rate_bps: u64, burst_bytes: u64, priority: u8, #[serde(default)] mode: u8 },
     DeleteQos { group_id: u32, direction: u8 },
     UpdateConfig { conntrack: Option<bool>, monitoring: Option<bool> },
     SetMaxPortPolicies { max: u32 },
@@ -149,7 +149,7 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) {
                 eprintln!("[WAL replay] RemoveRule error: {}", e);
             }
         }
-        WalEntry::AddQos { group_name, group_id, direction, rate_bps, burst_bytes, priority } => {
+        WalEntry::AddQos { group_name, group_id, direction, rate_bps, burst_bytes, priority, mode } => {
             use crate::state::QosRuleInfo;
             state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
             state.qos_rules.push(QosRuleInfo {
@@ -159,6 +159,7 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) {
                 rate_bps,
                 burst_bytes,
                 priority,
+                mode,
             });
         }
         WalEntry::DeleteQos { group_id, direction } => {
@@ -415,6 +416,7 @@ mod tests {
             rate_bps: 1_000_000,
             burst_bytes: 125_000,
             priority: 1,
+            mode: 0,
         });
         assert_eq!(state.qos_rules.len(), 1);
 

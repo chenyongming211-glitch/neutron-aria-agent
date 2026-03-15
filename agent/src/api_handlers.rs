@@ -252,6 +252,7 @@ pub async fn list_qos(
                 rate_bps: r.rate_bps,
                 burst_bytes: r.burst_bytes,
                 priority: r.priority,
+                mode: if r.mode == 1 { "shaping".to_string() } else { "policing".to_string() },
             }).collect(),
         })),
         Err(e) => Err(err_response(e)),
@@ -279,8 +280,15 @@ pub async fn add_qos(
             Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
         }
     };
+    let mode: u8 = match req.mode.to_lowercase().as_str() {
+        "policing" | "" => 0,
+        "shaping" => 1,
+        other => return Err(err_response(ControlPlaneError::ValidationError(
+            format!("Invalid mode '{}': must be 'policing' or 'shaping'", other)
+        ))),
+    };
 
-    match cp.add_qos(&instance, &req.group, direction, rate_bps, burst_bytes, req.priority).await {
+    match cp.add_qos(&instance, &req.group, direction, rate_bps, burst_bytes, req.priority, mode).await {
         Ok(()) => Ok((StatusCode::CREATED, Json(MessageResponse {
             message: format!("Added QoS rule for group '{}'", req.group),
         }))),

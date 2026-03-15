@@ -40,6 +40,7 @@ pub fn add_qos_rule(
     rate_bps: u64,
     burst_bytes: u64,
     priority: u8,
+    mode: u8,
     pin_path: &str,
 ) -> Result<(), String> {
     let map_path = format!("{}/QOS_CONFIG", pin_path);
@@ -58,7 +59,8 @@ pub fn add_qos_rule(
         rate_bps,
         burst_bytes,
         priority,
-        pad: [0; 7],
+        mode,
+        pad: [0; 6],
     };
 
     map.insert(&key, &config, 0)
@@ -115,7 +117,7 @@ pub fn list_qos_rules(pin_path: &str) -> Result<Vec<(QosKey, QosConfig)>, String
     Ok(entries)
 }
 
-pub fn replay_qos_rules(bpf: &mut aya::Ebpf, rules: &[(u32, u8, u64, u64, u8)]) -> Vec<String> {
+pub fn replay_qos_rules(bpf: &mut aya::Ebpf, rules: &[(u32, u8, u64, u64, u8, u8)]) -> Vec<String> {
     let mut errors = Vec::new();
 
     match bpf.map_mut("QOS_CONFIG")
@@ -123,7 +125,7 @@ pub fn replay_qos_rules(bpf: &mut aya::Ebpf, rules: &[(u32, u8, u64, u64, u8)]) 
         .and_then(|m| HashMap::<_, QosKey, QosConfig>::try_from(m).map_err(|e| format!("{:?}", e)))
     {
         Ok(mut map) => {
-            for &(group_id, direction, rate_bps, burst_bytes, priority) in rules {
+            for &(group_id, direction, rate_bps, burst_bytes, priority, mode) in rules {
                 let key = QosKey {
                     group_id,
                     direction,
@@ -133,7 +135,8 @@ pub fn replay_qos_rules(bpf: &mut aya::Ebpf, rules: &[(u32, u8, u64, u64, u8)]) 
                     rate_bps,
                     burst_bytes,
                     priority,
-                    pad: [0; 7],
+                    mode,
+                    pad: [0; 6],
                 };
                 if let Err(e) = map.insert(&key, &config, 0) {
                     errors.push(format!("QOS_CONFIG group_id={} dir={}: {:?}", group_id, direction, e));

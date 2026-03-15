@@ -117,7 +117,8 @@ pub struct QosConfig {
     pub rate_bps: u64,
     pub burst_bytes: u64,
     pub priority: u8,
-    pub pad: [u8; 7],
+    pub mode: u8,            // 0=policing, 1=shaping
+    pub pad: [u8; 6],
 }
 unsafe impl Pod for QosConfig {}
 

@@ -116,6 +116,10 @@ fn default_direction() -> String {
     "ingress".to_string()
 }
 
+fn default_mode_string() -> String {
+    "policing".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeletePolicyRequest {
     pub src_group: String,
@@ -146,6 +150,8 @@ pub struct QosEntry {
     pub rate_bps: u64,
     pub burst_bytes: u64,
     pub priority: u8,
+    #[serde(default = "default_mode_string")]
+    pub mode: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -163,6 +169,8 @@ pub struct AddQosRequest {
     pub burst: String,
     #[serde(default)]
     pub priority: u8,
+    #[serde(default = "default_mode_string")]
+    pub mode: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
