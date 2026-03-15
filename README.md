@@ -13,7 +13,7 @@
 - **QoS 限速** — 出向 EDT shaping + 入向 policing，令牌桶算法，多核感知
 - **实时监控** — 按规则/流/连接维度统计，快速路径也计入 rule stats
 - **运行时配置** — conntrack/monitoring 开关可热切换，无需重启
-- **状态持久化** — 服务重启后自动恢复规则、组、QoS 配置
+- **WAL 增量持久化** — 操作追加写入日志（O(1)），定期 compact 为快照，crash-safe
 - **Tap 模式** — aria-agent 守护进程管理多实例，支持 veth/tap 网卡
 
 ## 系统要求
@@ -152,9 +152,9 @@ sudo firewall-ctl monitor --interval 2
                        ▼                          ▼
               ┌─────────────────────────────────────────────┐
               │              aria-core (共享库)               │
-              │  ebpf_ops · state · monitoring · qos_ops    │
+              │  ebpf_ops · state · wal · monitoring · qos_ops │
               └─────────────────────────────────────────────┘
-                       │  pinned maps + state.json
+                       │  pinned maps + state.json + state.wal
                        ▼
               ┌─────────────────────────────────────────────┐
               │           libebpf_firewall.so (eBPF)        │
@@ -179,8 +179,8 @@ sudo firewall-ctl monitor --interval 2
 ## 项目结构
 
 ```
-aria-firewall/           5,305 行 Rust
-├── ebpf/src/            1,274 行 — eBPF 数据面
+aria-firewall/
+├── ebpf/src/            — eBPF 数据面
 │   ├── lib.rs           入口调度（XDP ingress / TC egress）
 │   ├── policy.rs        8 级 fallback 策略匹配
 │   ├── conntrack.rs     连接跟踪（CT lookup/create + 超时）
@@ -189,20 +189,25 @@ aria-firewall/           5,305 行 Rust
 │   ├── stats.rs         统计更新（rule stats / flow stats）
 │   ├── maps.rs          eBPF map 定义
 │   └── common.rs        共享数据结构
-├── core/src/            2,174 行 — 共享业务库
+├── core/src/            — 共享业务库
 │   ├── ebpf_ops.rs      eBPF 加载、map 读写、replay_state
-│   ├── state.rs         状态持久化（JSON + 文件锁）
+│   ├── state.rs         状态管理（FirewallState + StateManager）
+│   ├── wal.rs           WAL 增量持久化（append + compact + replay）
 │   ├── monitoring.rs    监控数据读取与格式化
 │   ├── qos_ops.rs       QoS map 操作 + 速率解析
 │   ├── ct_ops.rs        连接跟踪 map 操作
 │   └── common.rs        共享数据结构（与 eBPF 侧 repr(C) 对齐）
-├── user/src/            1,207 行 — CLI 控制面
+├── user/src/            — CLI 控制面
 │   ├── main.rs          firewall-ctl 命令实现
 │   └── manager.rs       系统启停管理
-├── agent/src/             650 行 — 多实例守护进程
+├── agent/src/           — 多实例守护进程
 │   ├── main.rs          aria-agent 入口
+│   ├── control_plane.rs ControlPlane（状态 mutation + WAL + compact）
+│   ├── api_handlers.rs  REST API handler
+│   ├── api_routes.rs    路由注册
 │   ├── netlink.rs       Netlink 网卡监听
 │   ├── tap_registry.rs  tap 实例注册表
+│   ├── system_manager.rs 独立模式管理
 │   └── instance.rs      实例生命周期管理
 └── Cargo.toml           Workspace 配置
 ```
