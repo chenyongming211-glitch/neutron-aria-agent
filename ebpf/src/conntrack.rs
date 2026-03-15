@@ -1,5 +1,5 @@
 use crate::common::{
-    CtKey4, CtKey6, CtValue,
+    CtKey4, CtKey6, CtValue, PolicyKey,
     CT_NEW, CT_ESTABLISHED,
     IPPROTO_TCP, IPPROTO_UDP, IPPROTO_ICMP, IPPROTO_ICMPV6,
 };
@@ -16,7 +16,6 @@ const DEFAULT_ICMP_NS: u64 = 30_000_000_000;             // 30s
 #[inline(always)]
 fn conntrack_enabled() -> bool {
     let key: u32 = 0;
-    // 默认开启 CT，仅当配置显式关闭时才禁用
     if let Some(cfg) = unsafe { FIREWALL_CONFIG.get(&key) } {
         cfg.conntrack_enabled != 0
     } else {
@@ -72,18 +71,36 @@ fn reverse_key6(key: &CtKey6) -> CtKey6 {
     }
 }
 
+/// Matched policy info cached in CT entry, returned on fast-path hit.
+#[derive(Copy, Clone)]
+pub struct MatchedPolicy {
+    pub src_id: u32,
+    pub dst_id: u32,
+    pub proto: u8,
+    pub direction: u8,
+}
+
 /// CT lookup result
 pub enum CtLookupResult {
-    /// Established connection — fast path, skip policy
-    Established,
+    /// Established connection — fast path, skip policy. Carries cached matched policy.
+    Established(MatchedPolicy),
     /// New entry just seen reply — transition to established
-    SeenReply,
+    SeenReply(MatchedPolicy),
     /// Not found or expired — needs policy evaluation
     NotFound,
 }
 
-/// Lookup CT for IPv4 packet. Checks forward and reverse keys.
-/// Returns Established if the connection is tracked and not expired.
+#[inline(always)]
+fn extract_matched(entry: &CtValue) -> MatchedPolicy {
+    MatchedPolicy {
+        src_id: entry.matched_src_id,
+        dst_id: entry.matched_dst_id,
+        proto: entry.matched_proto,
+        direction: entry.direction,
+    }
+}
+
+/// Lookup CT for IPv4 packet.
 #[inline(always)]
 pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResult {
     if !conntrack_enabled() {
@@ -99,10 +116,11 @@ pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResu
         (*entry).last_seen = now;
         (*entry).pkt_count += 1;
         (*entry).byte_count += pkt_len as u64;
+        let matched = extract_matched(&*entry);
         if (*entry).state == CT_ESTABLISHED {
-            return CtLookupResult::Established;
+            return CtLookupResult::Established(matched);
         }
-        return CtLookupResult::SeenReply;
+        return CtLookupResult::SeenReply(matched);
     }
 
     // Reverse lookup
@@ -120,7 +138,8 @@ pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResu
         if (*entry).state == CT_NEW {
             (*entry).state = CT_ESTABLISHED;
         }
-        return CtLookupResult::Established;
+        let matched = extract_matched(&*entry);
+        return CtLookupResult::Established(matched);
     }
 
     CtLookupResult::NotFound
@@ -142,10 +161,11 @@ pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResu
         (*entry).last_seen = now;
         (*entry).pkt_count += 1;
         (*entry).byte_count += pkt_len as u64;
+        let matched = extract_matched(&*entry);
         if (*entry).state == CT_ESTABLISHED {
-            return CtLookupResult::Established;
+            return CtLookupResult::Established(matched);
         }
-        return CtLookupResult::SeenReply;
+        return CtLookupResult::SeenReply(matched);
     }
 
     // Reverse lookup
@@ -163,22 +183,26 @@ pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResu
         if (*entry).state == CT_NEW {
             (*entry).state = CT_ESTABLISHED;
         }
-        return CtLookupResult::Established;
+        let matched = extract_matched(&*entry);
+        return CtLookupResult::Established(matched);
     }
 
     CtLookupResult::NotFound
 }
 
-/// Create a new CT entry for IPv4 (called after policy allows the packet).
+/// Create a new CT entry for IPv4 with matched policy info.
 #[inline(always)]
-pub unsafe fn ct_create_v4(key: &CtKey4, now: u64, pkt_len: u32) {
+pub unsafe fn ct_create_v4(key: &CtKey4, now: u64, pkt_len: u32, matched: &MatchedPolicy) {
     if !conntrack_enabled() {
         return;
     }
     let val = CtValue {
         state: CT_NEW,
         flags: 0,
-        pad: [0; 2],
+        direction: matched.direction,
+        matched_proto: matched.proto,
+        matched_src_id: matched.src_id,
+        matched_dst_id: matched.dst_id,
         last_seen: now,
         pkt_count: 1,
         byte_count: pkt_len as u64,
@@ -186,16 +210,19 @@ pub unsafe fn ct_create_v4(key: &CtKey4, now: u64, pkt_len: u32) {
     let _ = CT_TABLE_V4.insert(key, &val, 0);
 }
 
-/// Create a new CT entry for IPv6.
+/// Create a new CT entry for IPv6 with matched policy info.
 #[inline(always)]
-pub unsafe fn ct_create_v6(key: &CtKey6, now: u64, pkt_len: u32) {
+pub unsafe fn ct_create_v6(key: &CtKey6, now: u64, pkt_len: u32, matched: &MatchedPolicy) {
     if !conntrack_enabled() {
         return;
     }
     let val = CtValue {
         state: CT_NEW,
         flags: 0,
-        pad: [0; 2],
+        direction: matched.direction,
+        matched_proto: matched.proto,
+        matched_src_id: matched.src_id,
+        matched_dst_id: matched.dst_id,
         last_seen: now,
         pkt_count: 1,
         byte_count: pkt_len as u64,

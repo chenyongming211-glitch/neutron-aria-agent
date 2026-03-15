@@ -24,7 +24,7 @@ use maps::{
     DST_IPV4_TRIE, SRC_IPV4_TRIE, DST_IPV6_TRIE, SRC_IPV6_TRIE,
     POLICY_TABLE, PORT_BITMAP_POOL,
 };
-use conntrack::CtLookupResult;
+use conntrack::{CtLookupResult, MatchedPolicy};
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -55,7 +55,6 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
     let now = bpf_ktime_get_ns();
 
-    // Build CT key and check conntrack fast path
     if info.is_ipv6 {
         let ct_key = CtKey6 {
             src_ip: info.src_ip_v6,
@@ -67,13 +66,21 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
         };
 
         match conntrack::ct_lookup_v6(&ct_key, now, pkt_len) {
-            CtLookupResult::Established | CtLookupResult::SeenReply => {
-                // Fast path: established connection, skip policy but apply ingress QoS
+            CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
+                // Fast path: skip policy, but apply ingress QoS + rule stats
                 let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
                 let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
                 if !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                     return XDP_DROP;
                 }
+                let rule_key = PolicyKey {
+                    src_id: matched.src_id,
+                    dst_id: matched.dst_id,
+                    proto: matched.proto,
+                    direction: matched.direction,
+                    pad: [0; 2],
+                };
+                stats::update_rule_stats(&rule_key, pkt_len);
                 stats::update_flow_stats_v6(&ct_key, pkt_len, now);
                 return XDP_PASS;
             }
@@ -83,15 +90,14 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
         // Slow path: policy evaluation
         let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
         let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
-        let proto = info.proto;
 
-        let result = evaluate_policy(src_id, dst_id, proto, DIR_INGRESS, info.dst_port, pkt_len);
+        let (result, matched) = evaluate_policy(src_id, dst_id, info.proto, DIR_INGRESS, info.dst_port, pkt_len);
 
         if result == XDP_PASS {
             if !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 return XDP_DROP;
             }
-            conntrack::ct_create_v6(&ct_key, now, pkt_len);
+            conntrack::ct_create_v6(&ct_key, now, pkt_len, &matched);
             stats::update_flow_stats_v6(&ct_key, pkt_len, now);
         }
 
@@ -107,13 +113,20 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
         };
 
         match conntrack::ct_lookup_v4(&ct_key, now, pkt_len) {
-            CtLookupResult::Established | CtLookupResult::SeenReply => {
-                // Fast path: established connection, skip policy but apply ingress QoS
+            CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
                 let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
                 let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
                 if !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                     return XDP_DROP;
                 }
+                let rule_key = PolicyKey {
+                    src_id: matched.src_id,
+                    dst_id: matched.dst_id,
+                    proto: matched.proto,
+                    direction: matched.direction,
+                    pad: [0; 2],
+                };
+                stats::update_rule_stats(&rule_key, pkt_len);
                 stats::update_flow_stats_v4(&ct_key, pkt_len, now);
                 return XDP_PASS;
             }
@@ -122,15 +135,14 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
         let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
         let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
-        let proto = info.proto;
 
-        let result = evaluate_policy(src_id, dst_id, proto, DIR_INGRESS, info.dst_port, pkt_len);
+        let (result, matched) = evaluate_policy(src_id, dst_id, info.proto, DIR_INGRESS, info.dst_port, pkt_len);
 
         if result == XDP_PASS {
             if !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 return XDP_DROP;
             }
-            conntrack::ct_create_v4(&ct_key, now, pkt_len);
+            conntrack::ct_create_v4(&ct_key, now, pkt_len, &matched);
             stats::update_flow_stats_v4(&ct_key, pkt_len, now);
         }
 
@@ -138,7 +150,9 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
     }
 }
 
-/// 8-level fallback policy matching with direction support and rule stats
+/// 8-level fallback policy matching. Returns (action, matched_policy).
+/// The matched_policy records the exact key that hit (including wildcards),
+/// so the CT fast path can replay rule stats without re-evaluating.
 #[inline(always)]
 unsafe fn evaluate_policy(
     src_id: u32,
@@ -147,7 +161,7 @@ unsafe fn evaluate_policy(
     direction: u8,
     dst_port: u16,
     pkt_len: u32,
-) -> u32 {
+) -> (u32, MatchedPolicy) {
     let candidates: [(u32, u32, u8); 8] = [
         (src_id, dst_id, proto),
         (0,      dst_id, proto),
@@ -172,12 +186,25 @@ unsafe fn evaluate_policy(
         if let Some(policy) = POLICY_TABLE.get(&key) {
             let result = apply_policy(policy, dst_port);
             stats::update_rule_stats(&key, pkt_len);
-            return result;
+            let matched = MatchedPolicy {
+                src_id: s,
+                dst_id: d,
+                proto: p,
+                direction,
+            };
+            return (result, matched);
         }
         i += 1;
     }
 
-    XDP_PASS
+    // Default pass — no specific rule matched
+    let matched = MatchedPolicy {
+        src_id: 0,
+        dst_id: 0,
+        proto: 0,
+        direction,
+    };
+    (XDP_PASS, matched)
 }
 
 fn apply_policy(policy: &PolicyValue, dst_port: u16) -> u32 {
@@ -185,7 +212,6 @@ fn apply_policy(policy: &PolicyValue, dst_port: u16) -> u32 {
         return if policy.action == 0 { XDP_PASS } else { XDP_DROP };
     }
 
-    // HashMap lookup：(bitmap_idx, port) → action
     let key = PortKey { idx: policy.bitmap_idx, port: dst_port, pad: 0 };
     let rule_action = unsafe { PORT_BITMAP_POOL.get(&key).copied().unwrap_or(0) };
 
@@ -229,8 +255,8 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
         };
 
         match conntrack::ct_lookup_v6(&ct_key, now, pkt_len) {
-            CtLookupResult::Established | CtLookupResult::SeenReply => {
-                // Fast path: still apply QoS for established connections
+            CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
+                // Fast path: apply QoS + rule stats
                 let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
                 let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
                 let (edt, prio) = qos::apply_qos_egress(src_id, dst_id, pkt_len, now);
@@ -246,6 +272,14 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                         (*skb).priority = prio as u32;
                     }
                 }
+                let rule_key = PolicyKey {
+                    src_id: matched.src_id,
+                    dst_id: matched.dst_id,
+                    proto: matched.proto,
+                    direction: matched.direction,
+                    pad: [0; 2],
+                };
+                stats::update_rule_stats(&rule_key, pkt_len);
                 stats::update_flow_stats_v6(&ct_key, pkt_len, now);
                 return TC_ACT_OK;
             }
@@ -255,7 +289,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
         let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
         let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
 
-        let result = evaluate_policy_tc(src_id, dst_id, info.proto, DIR_EGRESS, info.dst_port, pkt_len);
+        let (result, matched) = evaluate_policy_tc(src_id, dst_id, info.proto, DIR_EGRESS, info.dst_port, pkt_len);
 
         if result == TC_ACT_OK {
             let (edt, prio) = qos::apply_qos_egress(src_id, dst_id, pkt_len, now);
@@ -273,7 +307,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                 }
             }
 
-            conntrack::ct_create_v6(&ct_key, now, pkt_len);
+            conntrack::ct_create_v6(&ct_key, now, pkt_len, &matched);
             stats::update_flow_stats_v6(&ct_key, pkt_len, now);
         }
 
@@ -289,8 +323,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
         };
 
         match conntrack::ct_lookup_v4(&ct_key, now, pkt_len) {
-            CtLookupResult::Established | CtLookupResult::SeenReply => {
-                // Fast path: still apply QoS for established connections
+            CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
                 let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
                 let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
                 let (edt, prio) = qos::apply_qos_egress(src_id, dst_id, pkt_len, now);
@@ -306,6 +339,14 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                         (*skb).priority = prio as u32;
                     }
                 }
+                let rule_key = PolicyKey {
+                    src_id: matched.src_id,
+                    dst_id: matched.dst_id,
+                    proto: matched.proto,
+                    direction: matched.direction,
+                    pad: [0; 2],
+                };
+                stats::update_rule_stats(&rule_key, pkt_len);
                 stats::update_flow_stats_v4(&ct_key, pkt_len, now);
                 return TC_ACT_OK;
             }
@@ -315,7 +356,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
         let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
         let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
 
-        let result = evaluate_policy_tc(src_id, dst_id, info.proto, DIR_EGRESS, info.dst_port, pkt_len);
+        let (result, matched) = evaluate_policy_tc(src_id, dst_id, info.proto, DIR_EGRESS, info.dst_port, pkt_len);
 
         if result == TC_ACT_OK {
             let (edt, prio) = qos::apply_qos_egress(src_id, dst_id, pkt_len, now);
@@ -333,7 +374,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                 }
             }
 
-            conntrack::ct_create_v4(&ct_key, now, pkt_len);
+            conntrack::ct_create_v4(&ct_key, now, pkt_len, &matched);
             stats::update_flow_stats_v4(&ct_key, pkt_len, now);
         }
 
@@ -341,7 +382,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
     }
 }
 
-/// Evaluate egress policy, returning TC action codes
+/// Evaluate egress policy, returning (TC action, matched_policy).
 #[inline(always)]
 unsafe fn evaluate_policy_tc(
     src_id: u32,
@@ -350,7 +391,7 @@ unsafe fn evaluate_policy_tc(
     direction: u8,
     dst_port: u16,
     pkt_len: u32,
-) -> i32 {
+) -> (i32, MatchedPolicy) {
     let candidates: [(u32, u32, u8); 8] = [
         (src_id, dst_id, proto),
         (0,      dst_id, proto),
@@ -375,12 +416,25 @@ unsafe fn evaluate_policy_tc(
         if let Some(policy) = POLICY_TABLE.get(&key) {
             let xdp_result = apply_policy(policy, dst_port);
             stats::update_rule_stats(&key, pkt_len);
-            return if xdp_result == XDP_PASS { TC_ACT_OK } else { TC_ACT_SHOT };
+            let matched = MatchedPolicy {
+                src_id: s,
+                dst_id: d,
+                proto: p,
+                direction,
+            };
+            let tc_result = if xdp_result == XDP_PASS { TC_ACT_OK } else { TC_ACT_SHOT };
+            return (tc_result, matched);
         }
         i += 1;
     }
 
-    TC_ACT_OK
+    let matched = MatchedPolicy {
+        src_id: 0,
+        dst_id: 0,
+        proto: 0,
+        direction,
+    };
+    (TC_ACT_OK, matched)
 }
 
 unsafe fn lookup_ipv4(map: &LpmTrie<[u8; 4], u32>, ip: u32) -> Option<u32> {

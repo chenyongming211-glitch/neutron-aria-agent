@@ -68,7 +68,10 @@ pub const CT_ESTABLISHED: u8 = 2;
 pub struct CtValue {
     pub state: u8,
     pub flags: u8,          // bit 0: seen_reply
-    pub pad: [u8; 2],
+    pub direction: u8,      // direction of the matched policy rule
+    pub matched_proto: u8,  // proto of the matched policy rule (0 = wildcard)
+    pub matched_src_id: u32,
+    pub matched_dst_id: u32,
     pub last_seen: u64,
     pub pkt_count: u64,
     pub byte_count: u64,
