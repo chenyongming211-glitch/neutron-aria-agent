@@ -1,6 +1,5 @@
 use crate::common::{QosKey, TokenBucket, DIR_EGRESS, DIR_INGRESS};
 use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, FIREWALL_CONFIG};
-use core::sync::atomic::{AtomicU64, Ordering};
 
 /// QoS mode constants
 const QOS_MODE_POLICING: u8 = 0;
@@ -18,12 +17,12 @@ pub fn qos_enabled() -> bool {
     }
 }
 
-/// Atomic swap on a u64 via AtomicU64 pointer cast.
-/// Used for last_refill_ns to ensure only one CPU claims each time window.
+/// Atomic exchange on a u64 via core intrinsic.
+/// BPF target's AtomicU64 lacks `swap`, so use the raw intrinsic directly.
+/// LLVM BPF backend emits BPF_STX_ATOMIC | BPF_XCHG (kernel 5.12+).
 #[inline(always)]
 unsafe fn atomic_xchg(ptr: *mut u64, new_val: u64) -> u64 {
-    let atomic = &*(ptr as *const AtomicU64);
-    atomic.swap(new_val, Ordering::Relaxed)
+    core::intrinsics::atomic_xchg_relaxed(ptr, new_val)
 }
 
 /// Compute token refill without 128-bit multiplication.
