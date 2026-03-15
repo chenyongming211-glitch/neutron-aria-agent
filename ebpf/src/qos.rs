@@ -1,5 +1,6 @@
 use crate::common::{QosKey, TokenBucket, DIR_EGRESS, DIR_INGRESS};
 use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, FIREWALL_CONFIG};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// QoS mode constants
 const QOS_MODE_POLICING: u8 = 0;
@@ -17,6 +18,14 @@ pub fn qos_enabled() -> bool {
     }
 }
 
+/// Atomic swap on a u64 via AtomicU64 pointer cast.
+/// Used for last_refill_ns to ensure only one CPU claims each time window.
+#[inline(always)]
+unsafe fn atomic_xchg(ptr: *mut u64, new_val: u64) -> u64 {
+    let atomic = &*(ptr as *const AtomicU64);
+    atomic.swap(new_val, Ordering::Relaxed)
+}
+
 /// Compute token refill without 128-bit multiplication.
 /// refill = rate * elapsed_ns / 1_000_000_000
 ///
@@ -26,8 +35,6 @@ pub fn qos_enabled() -> bool {
 fn compute_refill(rate: u64, elapsed_ns: u64) -> u64 {
     let secs = elapsed_ns / 1_000_000_000;
     let frac_ns = elapsed_ns % 1_000_000_000;
-    // rate * secs: safe for practical rates (<18 GB/s) and elapsed (<~580 years)
-    // rate * frac_ns: frac_ns < 1e9, so product < rate * 1e9, fits u64 for rate < ~18 GB/s
     rate * secs + rate * frac_ns / 1_000_000_000
 }
 
@@ -38,6 +45,21 @@ fn compute_refill(rate: u64, elapsed_ns: u64) -> u64 {
 #[inline(always)]
 fn compute_delay_ns(deficit: u64, rate: u64) -> u64 {
     deficit * 1_000_000_000 / rate
+}
+
+/// Refill tokens using atomic swap on last_refill_ns.
+///
+/// The atomic swap ensures only one CPU "claims" each time window's refill.
+/// Other CPUs racing on the same bucket get elapsed≈0, so no double-counting.
+/// Token read/write is non-atomic — bounded race (at most one packet per event).
+#[inline(always)]
+unsafe fn refill_tokens(bucket: *mut TokenBucket, rate: u64, burst: u64, now_ns: u64) -> u64 {
+    // Atomic swap: only one CPU gets the real elapsed time
+    let old_refill = atomic_xchg(&mut (*bucket).last_refill_ns, now_ns);
+    let elapsed = now_ns.wrapping_sub(old_refill);
+    let refill = compute_refill(rate, elapsed);
+    let new_tokens = (*bucket).tokens + refill;
+    if new_tokens > burst { burst } else { new_tokens }
 }
 
 /// Apply QoS rate limiting for egress. Returns (EDT timestamp, priority).
@@ -68,10 +90,7 @@ pub unsafe fn apply_qos_egress(
             let burst = config.burst_bytes;
 
             if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
-                let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
-                let refill = compute_refill(rate, elapsed);
-                let new_tokens = (*bucket).tokens + refill;
-                let tokens = if new_tokens > burst { burst } else { new_tokens };
+                let tokens = refill_tokens(bucket, rate, burst, now_ns);
 
                 if config.mode == QOS_MODE_SHAPING {
                     // Shaping mode: use EDT timestamps (requires FQ qdisc)
@@ -84,19 +103,14 @@ pub unsafe fn apply_qos_egress(
                     };
 
                     (*bucket).tokens = final_tokens;
-                    (*bucket).last_refill_ns = now_ns;
                     return (tstamp, config.priority);
                 } else {
                     // Policing mode: drop excess packets (works on veth)
                     if tokens >= pkt_len as u64 {
                         (*bucket).tokens = tokens - pkt_len as u64;
-                        (*bucket).last_refill_ns = now_ns;
                         return (0, config.priority);
                     } else {
-                        // Deduct packet cost even on drop for accurate accounting
                         (*bucket).tokens = 0;
-                        (*bucket).last_refill_ns = now_ns;
-                        // u64::MAX signals drop
                         return (u64::MAX, config.priority);
                     }
                 }
@@ -146,19 +160,13 @@ pub unsafe fn apply_qos_ingress(
             let burst = config.burst_bytes;
 
             if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
-                let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
-                let refill = compute_refill(rate, elapsed);
-                let new_tokens = (*bucket).tokens + refill;
-                let tokens = if new_tokens > burst { burst } else { new_tokens };
+                let tokens = refill_tokens(bucket, rate, burst, now_ns);
 
                 if tokens >= pkt_len as u64 {
                     (*bucket).tokens = tokens - pkt_len as u64;
-                    (*bucket).last_refill_ns = now_ns;
                     return true;
                 } else {
-                    // Deduct packet cost even on drop for accurate accounting
                     (*bucket).tokens = 0;
-                    (*bucket).last_refill_ns = now_ns;
                     return false;
                 }
             } else {
