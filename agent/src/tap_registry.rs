@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use regex::Regex;
 use crate::instance::FirewallInstance;
+use crate::control_plane::ControlPlane;
 
 pub struct TapRegistry {
     instances: RwLock<HashMap<String, FirewallInstance>>,
@@ -14,6 +15,7 @@ pub struct TapRegistry {
     pub base_state_path: PathBuf,
     pub iface_pattern: Regex,
     pub max_port_policies: u32,
+    control_plane: Arc<ControlPlane>,
 }
 
 impl TapRegistry {
@@ -23,6 +25,7 @@ impl TapRegistry {
         base_state_path: &str,
         iface_pattern: &str,
         max_port_policies: u32,
+        control_plane: Arc<ControlPlane>,
     ) -> Self {
         Self {
             instances: RwLock::new(HashMap::new()),
@@ -33,6 +36,7 @@ impl TapRegistry {
             iface_pattern: Regex::new(iface_pattern)
                 .unwrap_or_else(|_| Regex::new("^tap").unwrap()),
             max_port_policies,
+            control_plane,
         }
     }
 
@@ -93,6 +97,9 @@ impl TapRegistry {
 
         instance.attach(self.ebpf_path.to_str().unwrap())?;
 
+        // Register with ControlPlane
+        self.control_plane.register_instance(iface).await;
+
         let mut instances = self.instances.write().await;
         instances.insert(iface.to_string(), instance);
 
@@ -103,6 +110,9 @@ impl TapRegistry {
     pub async fn detach(&self, iface: &str) -> Result<(), String> {
         let iface_lock = self.get_iface_lock(iface).await;
         let _guard = iface_lock.lock().await;
+
+        // Unregister from ControlPlane
+        self.control_plane.unregister_instance(iface).await;
 
         let instance = {
             let mut instances = self.instances.write().await;

@@ -1,16 +1,31 @@
 use std::fs;
-use tokio::signal::unix::{signal, SignalKind};
+use std::sync::Arc;
+use crate::control_plane::ControlPlane;
 
-// Re-export shared functions from aria-core for use by main.rs
-pub use aria_core::ebpf_ops::{
-    add_network, delete_network, add_policy, delete_policy,
-    delete_port_set, show_stats, replay_state, ALL_MAP_NAMES,
+use aria_core::ebpf_ops::{
     attach_tc_egress, detach_tc_egress, setup_fq_qdisc,
+    replay_state, ALL_MAP_NAMES,
 };
 
-pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str, _max_port_policies: u32, state_path: &str) -> Result<(), String> {
+/// Start the system firewall (standalone mode, not tap-managed)
+pub async fn system_start(
+    iface: &str,
+    ebpf_path: &str,
+    pin_path: &str,
+    state_path: &str,
+    max_port_policies: u32,
+    control_plane: Arc<ControlPlane>,
+) -> Result<(), String> {
     fs::create_dir_all(pin_path)
         .map_err(|e| format!("Failed to create pin directory: {}", e))?;
+    fs::create_dir_all(state_path)
+        .map_err(|e| format!("Failed to create state directory: {}", e))?;
+
+    // Set max_port_policies
+    let sm = aria_core::state::StateManager::new(state_path);
+    if let Err(e) = sm.set_max_port_policies(max_port_policies) {
+        eprintln!("Warning: Failed to persist max_port_policies: {}", e);
+    }
 
     println!("Loading eBPF from: {}", ebpf_path);
     let bpf_bytes = std::fs::read(ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
@@ -50,7 +65,7 @@ pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str, _max_por
         eprintln!("Warning: FQ qdisc setup failed: {}. QoS EDT disabled.", e);
     }
 
-    // Pin all maps (including new CT, stats, QoS maps)
+    // Pin all maps
     for name in ALL_MAP_NAMES {
         if let Some(map) = bpf.map_mut(name) {
             if let Err(e) = map.pin(format!("{}/{}", pin_path, name)) {
@@ -65,38 +80,33 @@ pub async fn system_start(iface: &str, ebpf_path: &str, pin_path: &str, _max_por
             .map_err(|e| format!("Failed to pin program {}: {:?}", name, e))?;
     }
 
-    println!("eBPF system started successfully");
-    println!("Pin path: {}", pin_path);
-
-    // 记录挂载的网卡名到状态文件
-    let state_manager = aria_core::state::StateManager::new(state_path);
-    if let Err(e) = state_manager.set_attached_iface(iface) {
+    // Record attached iface
+    let sm = aria_core::state::StateManager::new(state_path);
+    if let Err(e) = sm.set_attached_iface(iface) {
         eprintln!("Warning: failed to record attached interface: {}", e);
     }
 
-    // 从 state.json 重放状态到内核 maps
+    // Replay state
     replay_state(&mut bpf, state_path);
 
-    println!("Firewall attached to {}. Waiting for stop signal...", iface);
+    // Register with control plane
+    control_plane.register_system_instance(pin_path, state_path).await;
 
-    // 监听 SIGTERM 和 SIGINT 信号，实现优雅退出
-    let mut term = signal(SignalKind::terminate())
-        .map_err(|e| format!("failed to create signal handler: {}", e))?;
-    let mut int = signal(SignalKind::interrupt())
-        .map_err(|e| format!("failed to create signal handler: {}", e))?;
-
-    tokio::select! {
-        _ = term.recv() => println!("Received SIGTERM"),
-        _ = int.recv() => println!("Received SIGINT"),
-    }
-
-    println!("Shutting down firewall, XDP detached automatically.");
+    println!("eBPF system started successfully on {}", iface);
     Ok(())
 }
 
-pub async fn system_stop(pin_path: &str, state_path: &str) -> Result<(), String> {
-    let state_manager = aria_core::state::StateManager::new(state_path);
-    match state_manager.get_attached_iface() {
+/// Stop the system firewall
+pub async fn system_stop(
+    pin_path: &str,
+    state_path: &str,
+    control_plane: Arc<ControlPlane>,
+) -> Result<(), String> {
+    // Flush and unregister
+    control_plane.unregister_instance("system").await;
+
+    let sm = aria_core::state::StateManager::new(state_path);
+    match sm.get_attached_iface() {
         Ok(Some(iface)) => {
             // Detach XDP
             let output = std::process::Command::new("ip")
@@ -109,10 +119,9 @@ pub async fn system_stop(pin_path: &str, state_path: &str) -> Result<(), String>
                 Err(e) => eprintln!("Warning: failed to run ip command: {}", e),
             }
 
-            // Detach TC egress
             detach_tc_egress(&iface);
 
-            if let Err(e) = state_manager.clear_attached_iface() {
+            if let Err(e) = sm.clear_attached_iface() {
                 eprintln!("Warning: failed to clear attached interface record: {}", e);
             }
         }
@@ -121,7 +130,6 @@ pub async fn system_stop(pin_path: &str, state_path: &str) -> Result<(), String>
         }
         Err(e) => {
             eprintln!("Warning: failed to read state: {}", e);
-            println!("Skipping XDP/TC detach (could not determine attached interface)");
         }
     }
 
