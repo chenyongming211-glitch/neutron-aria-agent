@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(core_intrinsics)]
 
 use aya_ebpf::macros::{xdp, classifier};
 use aya_ebpf::programs::{XdpContext, TcContext};

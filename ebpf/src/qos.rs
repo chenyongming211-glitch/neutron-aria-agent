@@ -17,14 +17,6 @@ pub fn qos_enabled() -> bool {
     }
 }
 
-/// Atomic exchange on a u64 via core intrinsic.
-/// BPF target's AtomicU64 lacks `swap`, so use the raw intrinsic directly.
-/// LLVM BPF backend emits BPF_STX_ATOMIC | BPF_XCHG (kernel 5.12+).
-#[inline(always)]
-unsafe fn atomic_xchg(ptr: *mut u64, new_val: u64) -> u64 {
-    core::intrinsics::atomic_xchg_relaxed(ptr, new_val)
-}
-
 /// Compute token refill without 128-bit multiplication.
 /// refill = rate * elapsed_ns / 1_000_000_000
 ///
@@ -46,24 +38,12 @@ fn compute_delay_ns(deficit: u64, rate: u64) -> u64 {
     deficit * 1_000_000_000 / rate
 }
 
-/// Refill tokens using atomic swap on last_refill_ns.
-///
-/// The atomic swap ensures only one CPU "claims" each time window's refill.
-/// Other CPUs racing on the same bucket get elapsed≈0, so no double-counting.
-/// Token read/write is non-atomic — bounded race (at most one packet per event).
-#[inline(always)]
-unsafe fn refill_tokens(bucket: *mut TokenBucket, rate: u64, burst: u64, now_ns: u64) -> u64 {
-    // Atomic swap: only one CPU gets the real elapsed time
-    let old_refill = atomic_xchg(&mut (*bucket).last_refill_ns, now_ns);
-    let elapsed = now_ns.wrapping_sub(old_refill);
-    let refill = compute_refill(rate, elapsed);
-    let new_tokens = (*bucket).tokens + refill;
-    if new_tokens > burst { burst } else { new_tokens }
-}
-
 /// Apply QoS rate limiting for egress. Returns (EDT timestamp, priority).
 /// EDT=0 means no delay needed. EDT=u64::MAX means packet should be dropped.
 /// No QoS config → pass through (0, 0).
+///
+/// Uses PerCpuHashMap for lock-free token buckets. Each CPU independently
+/// enforces at full rate, which is accurate for single-flow (same-CPU) traffic.
 #[inline(always)]
 pub unsafe fn apply_qos_egress(
     _src_id: u32,
@@ -89,7 +69,10 @@ pub unsafe fn apply_qos_egress(
             let burst = config.burst_bytes;
 
             if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
-                let tokens = refill_tokens(bucket, rate, burst, now_ns);
+                let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
+                let refill = compute_refill(rate, elapsed);
+                let new_tokens = (*bucket).tokens + refill;
+                let tokens = if new_tokens > burst { burst } else { new_tokens };
 
                 if config.mode == QOS_MODE_SHAPING {
                     // Shaping mode: use EDT timestamps (requires FQ qdisc)
@@ -102,14 +85,17 @@ pub unsafe fn apply_qos_egress(
                     };
 
                     (*bucket).tokens = final_tokens;
+                    (*bucket).last_refill_ns = now_ns;
                     return (tstamp, config.priority);
                 } else {
                     // Policing mode: drop excess packets (works on veth)
                     if tokens >= pkt_len as u64 {
                         (*bucket).tokens = tokens - pkt_len as u64;
+                        (*bucket).last_refill_ns = now_ns;
                         return (0, config.priority);
                     } else {
                         (*bucket).tokens = 0;
+                        (*bucket).last_refill_ns = now_ns;
                         return (u64::MAX, config.priority);
                     }
                 }
@@ -159,13 +145,18 @@ pub unsafe fn apply_qos_ingress(
             let burst = config.burst_bytes;
 
             if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
-                let tokens = refill_tokens(bucket, rate, burst, now_ns);
+                let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
+                let refill = compute_refill(rate, elapsed);
+                let new_tokens = (*bucket).tokens + refill;
+                let tokens = if new_tokens > burst { burst } else { new_tokens };
 
                 if tokens >= pkt_len as u64 {
                     (*bucket).tokens = tokens - pkt_len as u64;
+                    (*bucket).last_refill_ns = now_ns;
                     return true;
                 } else {
                     (*bucket).tokens = 0;
+                    (*bucket).last_refill_ns = now_ns;
                     return false;
                 }
             } else {
