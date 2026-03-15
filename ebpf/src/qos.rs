@@ -40,12 +40,12 @@ fn compute_delay_ns(deficit: u64, rate: u64) -> u64 {
     deficit * 1_000_000_000 / rate
 }
 
-/// Compute default burst: max(rate / 4, 65536) — at least 64KB, allows 250ms burst.
-/// A larger burst window reduces TCP over-backoff from policing drops.
+/// Compute default burst: max(rate / 6, 65536) — at least 64KB, allows ~167ms burst.
+/// Balances between TCP recovery headroom and rate accuracy.
 #[inline(always)]
 fn default_burst(rate: u64) -> u64 {
-    let quarter = rate / 4;
-    if quarter > 65536 { quarter } else { 65536 }
+    let sixth = rate / 6;
+    if sixth > 65536 { sixth } else { 65536 }
 }
 
 /// Apply QoS rate limiting for egress. Returns (EDT timestamp, priority).
