@@ -1,5 +1,5 @@
 use aya::maps::{HashMap, MapData};
-use crate::common::{QosKey, QosConfig, DIR_EGRESS};
+use crate::common::{QosKey, QosConfig};
 
 pub fn add_qos_rule(
     group_id: u32,
