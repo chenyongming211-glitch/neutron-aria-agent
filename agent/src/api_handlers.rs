@@ -429,8 +429,8 @@ pub async fn stats_flows(
             let mut flows: Vec<FlowEntry> = Vec::new();
             for e in v4 {
                 flows.push(FlowEntry {
-                    src_ip: e.src_ip,
-                    dst_ip: e.dst_ip,
+                    src_ip: e.src_ip.to_string(),
+                    dst_ip: e.dst_ip.to_string(),
                     src_port: e.src_port,
                     dst_port: e.dst_port,
                     proto: proto_to_string(e.proto),
@@ -440,8 +440,8 @@ pub async fn stats_flows(
             }
             for e in v6 {
                 flows.push(FlowEntry {
-                    src_ip: e.src_ip,
-                    dst_ip: e.dst_ip,
+                    src_ip: e.src_ip.to_string(),
+                    dst_ip: e.dst_ip.to_string(),
                     src_port: e.src_port,
                     dst_port: e.dst_port,
                     proto: proto_to_string(e.proto),
