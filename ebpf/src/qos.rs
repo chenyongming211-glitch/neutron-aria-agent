@@ -106,8 +106,8 @@ pub unsafe fn apply_qos_egress(
                         (*bucket).last_refill_ns = now_ns;
                         return (0, config.priority);
                     } else {
-                        // Keep partial tokens — zeroing would double-penalize
-                        (*bucket).tokens = tokens;
+                        // Deduct packet cost even on drop for accurate accounting
+                        (*bucket).tokens = 0;
                         (*bucket).last_refill_ns = now_ns;
                         // u64::MAX signals drop
                         return (u64::MAX, config.priority);
@@ -174,8 +174,8 @@ pub unsafe fn apply_qos_ingress(
                     (*bucket).last_refill_ns = now_ns;
                     return true;
                 } else {
-                    // Keep partial tokens — zeroing would double-penalize
-                    (*bucket).tokens = tokens;
+                    // Deduct packet cost even on drop for accurate accounting
+                    (*bucket).tokens = 0;
                     (*bucket).last_refill_ns = now_ns;
                     return false;
                 }
