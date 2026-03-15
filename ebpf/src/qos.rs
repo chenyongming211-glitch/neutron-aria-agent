@@ -40,11 +40,12 @@ fn compute_delay_ns(deficit: u64, rate: u64) -> u64 {
     deficit * 1_000_000_000 / rate
 }
 
-/// Compute default burst: max(rate / 8, 65536) — at least 64KB, allows 125ms burst.
+/// Compute default burst: max(rate / 4, 65536) — at least 64KB, allows 250ms burst.
+/// A larger burst window reduces TCP over-backoff from policing drops.
 #[inline(always)]
 fn default_burst(rate: u64) -> u64 {
-    let eighth = rate / 8;
-    if eighth > 65536 { eighth } else { 65536 }
+    let quarter = rate / 4;
+    if quarter > 65536 { quarter } else { 65536 }
 }
 
 /// Apply QoS rate limiting for egress. Returns (EDT timestamp, priority).
@@ -105,7 +106,8 @@ pub unsafe fn apply_qos_egress(
                         (*bucket).last_refill_ns = now_ns;
                         return (0, config.priority);
                     } else {
-                        (*bucket).tokens = 0;
+                        // Keep partial tokens — zeroing would double-penalize
+                        (*bucket).tokens = tokens;
                         (*bucket).last_refill_ns = now_ns;
                         // u64::MAX signals drop
                         return (u64::MAX, config.priority);
@@ -172,7 +174,8 @@ pub unsafe fn apply_qos_ingress(
                     (*bucket).last_refill_ns = now_ns;
                     return true;
                 } else {
-                    (*bucket).tokens = 0;
+                    // Keep partial tokens — zeroing would double-penalize
+                    (*bucket).tokens = tokens;
                     (*bucket).last_refill_ns = now_ns;
                     return false;
                 }
