@@ -129,6 +129,10 @@ pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResu
         (*entry).last_seen = now;
         (*entry).pkt_count += 1;
         (*entry).byte_count += pkt_len as u64;
+        // Promote to ESTABLISHED when forward direction sees a packet after reply was seen
+        if (*entry).state == CT_NEW && ((*entry).flags & CT_FLAG_SEEN_REPLY) != 0 {
+            (*entry).state = CT_ESTABLISHED;
+        }
         let matched = extract_matched(&*entry);
         if (*entry).state == CT_ESTABLISHED {
             return CtLookupResult::Established(matched);
@@ -136,7 +140,7 @@ pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResu
         return CtLookupResult::SeenReply(matched);
     }
 
-    // Reverse lookup
+    // Reverse lookup — only set SEEN_REPLY flag, do NOT promote state
     let rev = reverse_key4(key);
     if let Some(entry) = CT_TABLE_V4.get_ptr_mut(&rev) {
         let timeout = get_timeout(rev.proto, (*entry).state);
@@ -148,11 +152,8 @@ pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResu
         (*entry).pkt_count += 1;
         (*entry).byte_count += pkt_len as u64;
         (*entry).flags |= CT_FLAG_SEEN_REPLY;
-        if (*entry).state == CT_NEW {
-            (*entry).state = CT_ESTABLISHED;
-        }
         let matched = extract_matched(&*entry);
-        return CtLookupResult::Established(matched);
+        return CtLookupResult::SeenReply(matched);
     }
 
     CtLookupResult::NotFound
@@ -174,6 +175,9 @@ pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResu
         (*entry).last_seen = now;
         (*entry).pkt_count += 1;
         (*entry).byte_count += pkt_len as u64;
+        if (*entry).state == CT_NEW && ((*entry).flags & CT_FLAG_SEEN_REPLY) != 0 {
+            (*entry).state = CT_ESTABLISHED;
+        }
         let matched = extract_matched(&*entry);
         if (*entry).state == CT_ESTABLISHED {
             return CtLookupResult::Established(matched);
@@ -181,7 +185,7 @@ pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResu
         return CtLookupResult::SeenReply(matched);
     }
 
-    // Reverse lookup
+    // Reverse lookup — only set SEEN_REPLY flag, do NOT promote state
     let rev = reverse_key6(key);
     if let Some(entry) = CT_TABLE_V6.get_ptr_mut(&rev) {
         let timeout = get_timeout(rev.proto, (*entry).state);
@@ -193,11 +197,8 @@ pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResu
         (*entry).pkt_count += 1;
         (*entry).byte_count += pkt_len as u64;
         (*entry).flags |= CT_FLAG_SEEN_REPLY;
-        if (*entry).state == CT_NEW {
-            (*entry).state = CT_ESTABLISHED;
-        }
         let matched = extract_matched(&*entry);
-        return CtLookupResult::Established(matched);
+        return CtLookupResult::SeenReply(matched);
     }
 
     CtLookupResult::NotFound

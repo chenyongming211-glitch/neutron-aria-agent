@@ -148,38 +148,45 @@ pub fn replay_qos_rules(bpf: &mut aya::Ebpf, rules: &[(u32, u8, u64, u64, u8)]) 
 
 pub fn parse_rate(rate_str: &str) -> Result<u64, String> {
     let s = rate_str.trim().to_lowercase();
-    if let Some(num) = s.strip_suffix("gbps") {
+    let bytes_per_sec = if let Some(num) = s.strip_suffix("gbps") {
         let n: f64 = num.trim().parse().map_err(|_| format!("Invalid rate: {}", rate_str))?;
-        Ok((n * 1_000_000_000.0 / 8.0) as u64)
+        n * 1_000_000_000.0 / 8.0
     } else if let Some(num) = s.strip_suffix("mbps") {
         let n: f64 = num.trim().parse().map_err(|_| format!("Invalid rate: {}", rate_str))?;
-        Ok((n * 1_000_000.0 / 8.0) as u64)
+        n * 1_000_000.0 / 8.0
     } else if let Some(num) = s.strip_suffix("kbps") {
         let n: f64 = num.trim().parse().map_err(|_| format!("Invalid rate: {}", rate_str))?;
-        Ok((n * 1_000.0 / 8.0) as u64)
+        n * 1_000.0 / 8.0
     } else if let Some(num) = s.strip_suffix("bps") {
         let n: f64 = num.trim().parse().map_err(|_| format!("Invalid rate: {}", rate_str))?;
-        Ok((n / 8.0) as u64)
+        n / 8.0
     } else {
-        // Assume bytes per second
-        s.parse::<u64>().map_err(|_| format!("Invalid rate: {}. Use format like 100mbps, 1gbps", rate_str))
+        return s.parse::<u64>().map_err(|_| format!("Invalid rate: {}. Use format like 100mbps, 1gbps", rate_str));
+    };
+    if bytes_per_sec < 0.0 {
+        return Err(format!("Rate must be positive: {}", rate_str));
     }
+    Ok(bytes_per_sec as u64)
 }
 
 pub fn parse_burst(burst_str: &str) -> Result<u64, String> {
     let s = burst_str.trim().to_lowercase();
-    if let Some(num) = s.strip_suffix("gb") {
+    let bytes = if let Some(num) = s.strip_suffix("gb") {
         let n: f64 = num.trim().parse().map_err(|_| format!("Invalid burst: {}", burst_str))?;
-        Ok((n * 1_073_741_824.0) as u64)
+        n * 1_073_741_824.0
     } else if let Some(num) = s.strip_suffix("mb") {
         let n: f64 = num.trim().parse().map_err(|_| format!("Invalid burst: {}", burst_str))?;
-        Ok((n * 1_048_576.0) as u64)
+        n * 1_048_576.0
     } else if let Some(num) = s.strip_suffix("kb") {
         let n: f64 = num.trim().parse().map_err(|_| format!("Invalid burst: {}", burst_str))?;
-        Ok((n * 1024.0) as u64)
+        n * 1024.0
     } else {
-        s.parse::<u64>().map_err(|_| format!("Invalid burst: {}. Use format like 1mb, 512kb", burst_str))
+        return s.parse::<u64>().map_err(|_| format!("Invalid burst: {}. Use format like 1mb, 512kb", burst_str));
+    };
+    if bytes < 0.0 {
+        return Err(format!("Burst must be positive: {}", burst_str));
     }
+    Ok(bytes as u64)
 }
 
 #[cfg(test)]
