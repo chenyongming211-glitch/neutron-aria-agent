@@ -152,17 +152,17 @@ pub fn replay_qos_rules(bpf: &mut aya::Ebpf, rules: &[(u32, u8, u64, u64, u8, u8
 /// Compute a sensible default burst size based on rate (bytes/sec).
 ///
 /// Different rate tiers use different burst ratios:
-/// - < 12.5 MB/s  (100 Mbps): rate/5 (200ms) — TCP needs headroom at low rates
-/// - < 125 MB/s     (1 Gbps): rate/8 (125ms) — standard for mid-range rates
-/// - ≥ 125 MB/s     (1 Gbps): rate/10 (100ms) — high rates have large absolute burst
+/// - < 25 MB/s  (200 Mbps): rate/5 (200ms) — TCP needs headroom at low rates
+/// - < 125 MB/s   (1 Gbps): rate/8 (125ms) — standard for mid-range rates
+/// - ≥ 125 MB/s   (1 Gbps): rate/10 (100ms) — high rates have large absolute burst
 ///
 /// Minimum burst is always 64 KB to handle at least one jumbo frame.
 pub fn compute_default_burst(rate_bps: u64) -> u64 {
-    let burst = if rate_bps < 12_500_000 {
-        // < 100 Mbps: generous burst for TCP recovery
+    let burst = if rate_bps < 25_000_000 {
+        // < 200 Mbps: generous burst for TCP recovery
         rate_bps / 5
     } else if rate_bps < 125_000_000 {
-        // 100 Mbps ~ 1 Gbps
+        // 200 Mbps ~ 1 Gbps
         rate_bps / 8
     } else {
         // ≥ 1 Gbps
@@ -256,6 +256,10 @@ mod tests {
         // Low rate (10 Mbps = 1.25 MB/s): rate/5
         let b = compute_default_burst(1_250_000);
         assert_eq!(b, 250_000); // 200ms burst
+
+        // Still low rate (100 Mbps = 12.5 MB/s): rate/5
+        let b = compute_default_burst(12_500_000);
+        assert_eq!(b, 2_500_000);
 
         // Mid rate (500 Mbps = 62.5 MB/s): rate/8
         let b = compute_default_burst(62_500_000);
