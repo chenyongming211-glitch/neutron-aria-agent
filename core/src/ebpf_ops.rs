@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use aya::maps::{HashMap, LpmTrie, MapData};
 use aya::maps::lpm_trie::Key;
-use crate::common::{PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig};
+use crate::common::{PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig};
 use crate::state::FirewallState;
 
 /// 加载 eBPF 程序，并设置 pin 路径以复用已有的 map。
@@ -98,6 +98,28 @@ pub fn parse_ports(ports_str: &str) -> Result<Vec<(u16, u16, u8)>, String> {
         }
     }
     Ok(rules)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ports;
+
+    #[test]
+    fn parse_ports_single_and_range() {
+        let r = parse_ports("80,100-200:0").unwrap();
+        assert_eq!(r.len(), 2);
+        // 默认 action=1 → bpf_action=1
+        assert_eq!(r[0], (80, 80, 1));
+        // 显式 0 → bpf_action=2
+        assert_eq!(r[1], (100, 200, 2));
+    }
+
+    #[test]
+    fn parse_ports_rejects_invalid_formats() {
+        assert!(parse_ports("200-100").is_err(), "start>end 应报错");
+        assert!(parse_ports("80:2").is_err(), "action>1 应报错");
+        assert!(parse_ports("bad").is_err(), "非数字端口应报错");
+    }
 }
 
 pub fn add_network(direction: &str, cidr: &str, id: u32, pin_path: &str, _ebpf_path: &str) -> Result<(), String> {
@@ -301,6 +323,7 @@ pub const ALL_MAP_NAMES: &[&str] = &[
     "CT_TABLE_V4", "CT_TABLE_V6", "CT_CONFIG",
     "RULE_STATS", "FLOW_STATS_V4", "FLOW_STATS_V6",
     "QOS_CONFIG", "QOS_TOKEN_BUCKET",
+    "FIREWALL_CONFIG",
 ];
 
 /// 从 state.json 重放所有组和规则到已加载的 eBPF maps。
@@ -566,6 +589,28 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
         }
     }
 
+    // 写 FIREWALL_CONFIG（功能开关）
+    {
+        let num_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as u16;
+        let cfg = FirewallConfig {
+            conntrack_enabled: if state.conntrack_enabled { 1 } else { 0 },
+            monitoring_enabled: if state.monitoring_enabled { 1 } else { 0 },
+            num_cpus,
+            pad: [0; 4],
+        };
+        match bpf.map_mut("FIREWALL_CONFIG")
+            .ok_or_else(|| "FIREWALL_CONFIG not found".to_string())
+            .and_then(|m| aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(m).map_err(|e| format!("{:?}", e)))
+        {
+            Ok(mut map) => {
+                if let Err(e) = map.insert(&0u32, &cfg, 0) {
+                    errors.push(format!("FIREWALL_CONFIG: {:?}", e));
+                }
+            }
+            Err(e) => errors.push(format!("FIREWALL_CONFIG: {}", e)),
+        }
+    }
+
     println!(
         "Replay complete: {} group CIDRs, {} rules, {} port bitmaps, {} QoS rules written",
         group_count, rule_count, bitmap_count, state.qos_rules.len()
@@ -693,4 +738,52 @@ pub fn setup_fq_qdisc(iface: &str) -> Result<(), String> {
     }
     println!("FQ qdisc configured on {}", iface);
     Ok(())
+}
+
+/// Update FIREWALL_CONFIG map at runtime via pinned map.
+/// Reads the current config, applies the changes, and writes back.
+pub fn update_firewall_config(
+    pin_path: &str,
+    conntrack_enabled: Option<bool>,
+    monitoring_enabled: Option<bool>,
+) -> Result<(), String> {
+    let map_path = format!("{}/FIREWALL_CONFIG", pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open FIREWALL_CONFIG: {:?}", e))?;
+    let mut map = aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(
+        aya::maps::Map::HashMap(map_data)
+    ).map_err(|e| format!("convert FIREWALL_CONFIG: {:?}", e))?;
+
+    // Read current config or use defaults
+    let current = map.get(&0u32, 0).ok();
+    let num_cpus_val = current.as_ref().map(|c| c.num_cpus)
+        .unwrap_or(unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as u16);
+    let ct = conntrack_enabled.map(|b| if b { 1u8 } else { 0 })
+        .unwrap_or_else(|| current.as_ref().map(|c| c.conntrack_enabled).unwrap_or(1));
+    let mon = monitoring_enabled.map(|b| if b { 1u8 } else { 0 })
+        .unwrap_or_else(|| current.as_ref().map(|c| c.monitoring_enabled).unwrap_or(1));
+
+    let cfg = FirewallConfig {
+        conntrack_enabled: ct,
+        monitoring_enabled: mon,
+        num_cpus: num_cpus_val,
+        pad: [0; 4],
+    };
+    map.insert(&0u32, &cfg, 0)
+        .map_err(|e| format!("FIREWALL_CONFIG insert: {:?}", e))?;
+
+    Ok(())
+}
+
+/// Read the current FIREWALL_CONFIG from pinned map.
+pub fn read_firewall_config(pin_path: &str) -> Result<FirewallConfig, String> {
+    let map_path = format!("{}/FIREWALL_CONFIG", pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open FIREWALL_CONFIG: {:?}", e))?;
+    let map = aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(
+        aya::maps::Map::HashMap(map_data)
+    ).map_err(|e| format!("convert FIREWALL_CONFIG: {:?}", e))?;
+
+    map.get(&0u32, 0)
+        .map_err(|e| format!("read FIREWALL_CONFIG: {:?}", e))
 }

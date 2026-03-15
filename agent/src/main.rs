@@ -27,7 +27,6 @@ struct Config {
     #[serde(default = "default_iface_pattern")]
     iface_pattern: String,
     #[serde(default = "default_max_port_policies")]
-    #[allow(dead_code)]
     max_port_policies: u32,
 }
 
@@ -105,6 +104,7 @@ async fn main() {
     println!("  Pin path:  {}", config.pin_path);
     println!("  State path: {}", config.state_path);
     println!("  Interface pattern: {}", config.iface_pattern);
+    println!("  Max port policies: {}", config.max_port_policies);
 
     // Verify eBPF binary exists
     if !std::path::Path::new(&config.ebpf_path).exists() {
@@ -121,6 +121,7 @@ async fn main() {
         &config.pin_path,
         &config.state_path,
         &config.iface_pattern,
+        config.max_port_policies,
     ));
 
     // Start netlink monitoring (includes initial scan + event listening + periodic reconciliation)

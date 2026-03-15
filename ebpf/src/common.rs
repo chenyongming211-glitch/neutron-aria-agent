@@ -125,3 +125,14 @@ pub struct TokenBucket {
     pub tokens: u64,
     pub last_refill_ns: u64,
 }
+
+// --- Global firewall config (feature switches) ---
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct FirewallConfig {
+    pub conntrack_enabled: u8,
+    pub monitoring_enabled: u8,
+    pub num_cpus: u16,
+    pub pad: [u8; 4],
+}

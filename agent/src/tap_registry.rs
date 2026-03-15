@@ -13,6 +13,7 @@ pub struct TapRegistry {
     pub base_pin_path: PathBuf,
     pub base_state_path: PathBuf,
     pub iface_pattern: Regex,
+    pub max_port_policies: u32,
 }
 
 impl TapRegistry {
@@ -21,6 +22,7 @@ impl TapRegistry {
         base_pin_path: &str,
         base_state_path: &str,
         iface_pattern: &str,
+        max_port_policies: u32,
     ) -> Self {
         Self {
             instances: RwLock::new(HashMap::new()),
@@ -30,6 +32,7 @@ impl TapRegistry {
             base_state_path: PathBuf::from(base_state_path),
             iface_pattern: Regex::new(iface_pattern)
                 .unwrap_or_else(|_| Regex::new("^tap").unwrap()),
+            max_port_policies,
         }
     }
 
@@ -78,6 +81,15 @@ impl TapRegistry {
             self.base_pin_path.to_str().unwrap(),
             self.base_state_path.to_str().unwrap(),
         );
+
+        // 为该 tap 实例设置端口策略上限（写入对应 state.json）
+        let state_dir = self.base_state_path.join(iface);
+        if let Some(state_str) = state_dir.to_str() {
+            let sm = aria_core::state::StateManager::new(state_str);
+            if let Err(e) = sm.set_max_port_policies(self.max_port_policies) {
+                eprintln!("[{}] Warning: failed to set max_port_policies: {}", iface, e);
+            }
+        }
 
         instance.attach(self.ebpf_path.to_str().unwrap())?;
 

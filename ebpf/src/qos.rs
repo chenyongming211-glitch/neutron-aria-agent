@@ -1,17 +1,28 @@
-use crate::common::{QosKey, QosConfig, TokenBucket, DIR_EGRESS};
-use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET};
+use crate::common::{QosKey, QosConfig, TokenBucket, DIR_EGRESS, DIR_INGRESS};
+use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, FIREWALL_CONFIG};
 
-/// Apply QoS rate limiting for egress. Returns the EDT timestamp to write to skb->tstamp,
-/// or 0 if no delay needed. Returns u64::MAX if packet should be dropped (no config found
-/// is treated as no QoS — pass through).
+#[inline(always)]
+fn get_num_cpus() -> u32 {
+    let key: u32 = 0;
+    if let Some(cfg) = unsafe { FIREWALL_CONFIG.get(&key) } {
+        if cfg.num_cpus > 0 { cfg.num_cpus as u32 } else { 1 }
+    } else {
+        1
+    }
+}
+
+/// Apply QoS rate limiting for egress. Returns (EDT timestamp, priority).
+/// EDT=0 means no delay needed. EDT=u64::MAX means packet should be dropped.
+/// No QoS config → pass through (0, 0).
 #[inline(always)]
 pub unsafe fn apply_qos_egress(
     _src_id: u32,
     dst_id: u32,
     pkt_len: u32,
     now_ns: u64,
-    num_cpus: u32,
 ) -> (u64, u8) {
+    let num_cpus = get_num_cpus();
+
     // Try specific group first, then global default (group_id=0)
     let group_ids = [dst_id, 0u32];
     for &gid in &group_ids {
@@ -26,11 +37,7 @@ pub unsafe fn apply_qos_egress(
                 continue;
             }
 
-            let rate_per_cpu = if num_cpus > 0 {
-                config.rate_bps / num_cpus as u64
-            } else {
-                config.rate_bps
-            };
+            let rate_per_cpu = config.rate_bps / num_cpus as u64;
 
             if rate_per_cpu == 0 {
                 continue;
@@ -83,4 +90,80 @@ pub unsafe fn apply_qos_egress(
 
     // No QoS config found — pass through
     (0, 0)
+}
+
+/// Apply QoS policing for ingress. Returns true if packet should pass, false if it should be dropped.
+/// Ingress can only police (drop), not shape (delay).
+/// Looks up src_id first (rate-limit by source), then fallback to group_id=0.
+#[inline(always)]
+pub unsafe fn apply_qos_ingress(
+    src_id: u32,
+    _dst_id: u32,
+    pkt_len: u32,
+    now_ns: u64,
+) -> bool {
+    let num_cpus = get_num_cpus();
+
+    let group_ids = [src_id, 0u32];
+    for &gid in &group_ids {
+        let qos_key = QosKey {
+            group_id: gid,
+            direction: DIR_INGRESS,
+            pad: [0; 3],
+        };
+
+        if let Some(config) = QOS_CONFIG.get(&qos_key) {
+            if config.rate_bps == 0 {
+                continue;
+            }
+
+            let rate_per_cpu = config.rate_bps / num_cpus as u64;
+
+            if rate_per_cpu == 0 {
+                continue;
+            }
+
+            let burst = if config.burst_bytes > 0 {
+                config.burst_bytes
+            } else {
+                rate_per_cpu / 100
+            };
+
+            if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
+                let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
+                let refill = rate_per_cpu.saturating_mul(elapsed) / 1_000_000_000;
+                let mut tokens = (*bucket).tokens.saturating_add(refill);
+                if tokens > burst {
+                    tokens = burst;
+                }
+
+                if tokens >= pkt_len as u64 {
+                    (*bucket).tokens = tokens - pkt_len as u64;
+                    (*bucket).last_refill_ns = now_ns;
+                    return true;
+                } else {
+                    // No tokens — drop
+                    (*bucket).tokens = 0;
+                    (*bucket).last_refill_ns = now_ns;
+                    return false;
+                }
+            } else {
+                // First packet: initialize token bucket
+                let tokens = if burst >= pkt_len as u64 {
+                    burst - pkt_len as u64
+                } else {
+                    0
+                };
+                let new_bucket = TokenBucket {
+                    tokens,
+                    last_refill_ns: now_ns,
+                };
+                let _ = QOS_TOKEN_BUCKET.insert(&qos_key, &new_bucket, 0);
+                return true;
+            }
+        }
+    }
+
+    // No QoS config — pass through
+    true
 }

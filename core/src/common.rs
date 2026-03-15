@@ -126,6 +126,16 @@ pub struct TokenBucket {
 }
 unsafe impl Pod for TokenBucket {}
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct FirewallConfig {
+    pub conntrack_enabled: u8,
+    pub monitoring_enabled: u8,
+    pub num_cpus: u16,
+    pub pad: [u8; 4],
+}
+unsafe impl Pod for FirewallConfig {}
+
 pub const CT_NEW: u8 = 1;
 pub const CT_ESTABLISHED: u8 = 2;
 pub const DIR_INGRESS: u8 = 0;

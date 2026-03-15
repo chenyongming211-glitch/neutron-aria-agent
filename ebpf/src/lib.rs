@@ -66,7 +66,12 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
         match conntrack::ct_lookup_v6(&ct_key, now, pkt_len) {
             CtLookupResult::Established | CtLookupResult::SeenReply => {
-                // Fast path: established connection, skip policy
+                // Fast path: established connection, skip policy but apply ingress QoS
+                let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
+                let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
+                if !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
+                    return XDP_DROP;
+                }
                 stats::update_flow_stats_v6(&ct_key, pkt_len, now);
                 return XDP_PASS;
             }
@@ -81,6 +86,9 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
         let result = evaluate_policy(src_id, dst_id, proto, DIR_INGRESS, info.dst_port, pkt_len);
 
         if result == XDP_PASS {
+            if !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
+                return XDP_DROP;
+            }
             conntrack::ct_create_v6(&ct_key, now, pkt_len);
             stats::update_flow_stats_v6(&ct_key, pkt_len, now);
         }
@@ -98,6 +106,12 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
         match conntrack::ct_lookup_v4(&ct_key, now, pkt_len) {
             CtLookupResult::Established | CtLookupResult::SeenReply => {
+                // Fast path: established connection, skip policy but apply ingress QoS
+                let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
+                let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
+                if !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
+                    return XDP_DROP;
+                }
                 stats::update_flow_stats_v4(&ct_key, pkt_len, now);
                 return XDP_PASS;
             }
@@ -111,6 +125,9 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
         let result = evaluate_policy(src_id, dst_id, proto, DIR_INGRESS, info.dst_port, pkt_len);
 
         if result == XDP_PASS {
+            if !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
+                return XDP_DROP;
+            }
             conntrack::ct_create_v4(&ct_key, now, pkt_len);
             stats::update_flow_stats_v4(&ct_key, pkt_len, now);
         }
@@ -211,6 +228,22 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
         match conntrack::ct_lookup_v6(&ct_key, now, pkt_len) {
             CtLookupResult::Established | CtLookupResult::SeenReply => {
+                // Fast path: still apply QoS for established connections
+                let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
+                let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
+                let (edt, prio) = qos::apply_qos_egress(src_id, dst_id, pkt_len, now);
+                if edt == u64::MAX {
+                    return TC_ACT_SHOT;
+                }
+                if edt != 0 || prio != 0 {
+                    let skb = ctx.skb;
+                    if edt != 0 {
+                        (*skb).tstamp = edt;
+                    }
+                    if prio != 0 {
+                        (*skb).priority = prio as u32;
+                    }
+                }
                 stats::update_flow_stats_v6(&ct_key, pkt_len, now);
                 return TC_ACT_OK;
             }
@@ -223,6 +256,21 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
         let result = evaluate_policy_tc(src_id, dst_id, info.proto, DIR_EGRESS, info.dst_port, pkt_len);
 
         if result == TC_ACT_OK {
+            let (edt, prio) = qos::apply_qos_egress(src_id, dst_id, pkt_len, now);
+            if edt == u64::MAX {
+                return TC_ACT_SHOT;
+            }
+
+            if edt != 0 || prio != 0 {
+                let skb = ctx.skb;
+                if edt != 0 {
+                    (*skb).tstamp = edt;
+                }
+                if prio != 0 {
+                    (*skb).priority = prio as u32;
+                }
+            }
+
             conntrack::ct_create_v6(&ct_key, now, pkt_len);
             stats::update_flow_stats_v6(&ct_key, pkt_len, now);
         }
@@ -240,6 +288,22 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
         match conntrack::ct_lookup_v4(&ct_key, now, pkt_len) {
             CtLookupResult::Established | CtLookupResult::SeenReply => {
+                // Fast path: still apply QoS for established connections
+                let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
+                let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
+                let (edt, prio) = qos::apply_qos_egress(src_id, dst_id, pkt_len, now);
+                if edt == u64::MAX {
+                    return TC_ACT_SHOT;
+                }
+                if edt != 0 || prio != 0 {
+                    let skb = ctx.skb;
+                    if edt != 0 {
+                        (*skb).tstamp = edt;
+                    }
+                    if prio != 0 {
+                        (*skb).priority = prio as u32;
+                    }
+                }
                 stats::update_flow_stats_v4(&ct_key, pkt_len, now);
                 return TC_ACT_OK;
             }
@@ -252,6 +316,21 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
         let result = evaluate_policy_tc(src_id, dst_id, info.proto, DIR_EGRESS, info.dst_port, pkt_len);
 
         if result == TC_ACT_OK {
+            let (edt, prio) = qos::apply_qos_egress(src_id, dst_id, pkt_len, now);
+            if edt == u64::MAX {
+                return TC_ACT_SHOT;
+            }
+
+            if edt != 0 || prio != 0 {
+                let skb = ctx.skb;
+                if edt != 0 {
+                    (*skb).tstamp = edt;
+                }
+                if prio != 0 {
+                    (*skb).priority = prio as u32;
+                }
+            }
+
             conntrack::ct_create_v4(&ct_key, now, pkt_len);
             stats::update_flow_stats_v4(&ct_key, pkt_len, now);
         }

@@ -1,6 +1,6 @@
 use aya::maps::{HashMap, MapData, PerCpuHashMap, PerCpuValues};
 use crate::common::{PolicyKey, RuleStatsValue, FlowStatsValue, CtKey4, CtKey6, CtValue, CT_NEW, CT_ESTABLISHED};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub struct RuleStatsEntry {
     pub key: PolicyKey,
@@ -11,6 +11,17 @@ pub struct RuleStatsEntry {
 pub struct FlowStatsEntry {
     pub src_ip: Ipv4Addr,
     pub dst_ip: Ipv4Addr,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub packets: u64,
+    pub bytes: u64,
+    pub last_seen: u64,
+}
+
+pub struct FlowStatsEntryV6 {
+    pub src_ip: Ipv6Addr,
+    pub dst_ip: Ipv6Addr,
     pub src_port: u16,
     pub dst_port: u16,
     pub proto: u8,
@@ -111,6 +122,43 @@ pub fn get_top_flows_v4(pin_path: &str, n: usize) -> Result<Vec<FlowStatsEntry>,
     Ok(entries)
 }
 
+pub fn get_top_flows_v6(pin_path: &str, n: usize) -> Result<Vec<FlowStatsEntryV6>, String> {
+    let map_path = format!("{}/FLOW_STATS_V6", pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open FLOW_STATS_V6: {:?}", e))?;
+    // 内核端是 LruPerCpuHashMap，这里对应 PerCpuLruHashMap 分支。
+    let map = PerCpuHashMap::<_, CtKey6, FlowStatsValue>::try_from(
+        aya::maps::Map::PerCpuLruHashMap(map_data),
+    )
+    .map_err(|e| format!("convert FLOW_STATS_V6: {:?}", e))?;
+
+    let mut entries = Vec::new();
+    for item in map.iter() {
+        match item {
+            Ok((key, values)) => {
+                let (packets, bytes, last_seen) = sum_per_cpu_flow_stats(values);
+                if packets > 0 {
+                    entries.push(FlowStatsEntryV6 {
+                        src_ip: Ipv6Addr::from(key.src_ip),
+                        dst_ip: Ipv6Addr::from(key.dst_ip),
+                        src_port: key.src_port,
+                        dst_port: key.dst_port,
+                        proto: key.proto,
+                        packets,
+                        bytes,
+                        last_seen,
+                    });
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    entries.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    entries.truncate(n);
+    Ok(entries)
+}
+
 pub fn get_conntrack_stats(pin_path: &str) -> Result<ConntrackSummary, String> {
     let mut summary = ConntrackSummary {
         total_v4: 0,
@@ -188,5 +236,31 @@ pub fn direction_name(direction: u8) -> &'static str {
         0 => "ingress",
         1 => "egress",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_bytes_human_readable() {
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(2048), "2.0 KB");
+        assert_eq!(format_bytes(2_097_152), "2.0 MB");
+        assert_eq!(format_bytes(2_147_483_648), "2.0 GB");
+    }
+
+    #[test]
+    fn proto_and_direction_names() {
+        assert_eq!(proto_name(6), "TCP");
+        assert_eq!(proto_name(17), "UDP");
+        assert_eq!(proto_name(1), "ICMP");
+        assert_eq!(proto_name(58), "ICMPv6");
+        assert_eq!(proto_name(123), "other");
+
+        assert_eq!(direction_name(0), "ingress");
+        assert_eq!(direction_name(1), "egress");
+        assert_eq!(direction_name(5), "unknown");
     }
 }

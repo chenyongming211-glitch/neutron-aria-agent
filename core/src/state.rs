@@ -554,4 +554,100 @@ impl StateManager {
         let state = self._load_readonly()?;
         Ok(state.qos_rules.clone())
     }
+
+    pub fn set_conntrack_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.with_state(|state| {
+            state.conntrack_enabled = enabled;
+            Ok(())
+        })
+    }
+
+    pub fn set_monitoring_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.with_state(|state| {
+            state.monitoring_enabled = enabled;
+            Ok(())
+        })
+    }
+
+    pub fn get_config(&self) -> Result<(bool, bool), String> {
+        let state = self._load_readonly()?;
+        Ok((state.conntrack_enabled, state.monitoring_enabled))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_state_path() -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("/tmp/aria-firewall-test-{}", nanos)
+    }
+
+    #[test]
+    fn normalize_ports_sorts_and_encodes_actions() {
+        // 默认 action=1 → bpf_action=1, 显式 0 → bpf_action=2
+        let s = "100-200:0,80,443:1";
+        let normalized = normalize_ports(s).unwrap();
+        // 按 (start,end,act) 排序后应该是 80,100-200,443
+        assert_eq!(normalized, "80:1,100-200:2,443:1");
+    }
+
+    #[test]
+    fn normalize_ports_rejects_invalid_range_and_action() {
+        assert!(normalize_ports("200-100").is_err(), "start>end 应报错");
+        assert!(normalize_ports("80:2").is_err(), "action>1 应报错");
+    }
+
+    #[test]
+    fn port_sets_refcount_and_reuse_bitmap_idx() {
+        let state_path = unique_state_path();
+        let mgr = StateManager::new(&state_path);
+
+        // 新建两条规则，端口集字符串相同，应共享同一个 bitmap_idx，ref_count=2
+        let r1 = mgr
+            .add_rule(1, 2, 6, 0, Some("80,100-200"), 0)
+            .expect("add_rule 1");
+        let r2 = mgr
+            .add_rule(3, 4, 6, 0, Some("80,100-200"), 0)
+            .expect("add_rule 2");
+
+        let idx1 = r1.bitmap_idx.expect("bitmap_idx for r1");
+        let idx2 = r2.bitmap_idx.expect("bitmap_idx for r2");
+        assert_eq!(idx1, idx2, "相同端口集应复用同一 bitmap_idx");
+
+        // 删除第一条规则，不应释放 port set（引用从 2→1）
+        let rm1 = mgr
+            .remove_rule(1, 2, 6, 0)
+            .expect("remove_rule 1");
+        assert_eq!(rm1.bitmap_idx, Some(idx1));
+        assert!(
+            rm1.port_set_released.is_none(),
+            "仍有引用时不应标记 port_set_released"
+        );
+
+        // 删除第二条规则，引用归零，应回收 bitmap_idx 并报告释放的端口集
+        let rm2 = mgr
+            .remove_rule(3, 4, 6, 0)
+            .expect("remove_rule 2");
+        assert_eq!(rm2.bitmap_idx, Some(idx1));
+        assert!(
+            rm2.port_set_released.is_some(),
+            "最后一个引用删除后应标记 port_set_released"
+        );
+
+        // 再添加一个不同端口集的规则，应复用刚刚回收的 bitmap_idx（free list）
+        let r3 = mgr
+            .add_rule(5, 6, 6, 0, Some("443"), 0)
+            .expect("add_rule 3");
+        let idx3 = r3.bitmap_idx.expect("bitmap_idx for r3");
+        assert_eq!(
+            idx3, idx1,
+            "新端口集应优先复用 free_bitmap_indices 中的 idx"
+        );
+    }
 }

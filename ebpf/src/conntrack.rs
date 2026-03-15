@@ -3,7 +3,7 @@ use crate::common::{
     CT_NEW, CT_ESTABLISHED,
     IPPROTO_TCP, IPPROTO_UDP, IPPROTO_ICMP, IPPROTO_ICMPV6,
 };
-use crate::maps::{CT_TABLE_V4, CT_TABLE_V6, CT_CONFIG};
+use crate::maps::{CT_TABLE_V4, CT_TABLE_V6, CT_CONFIG, FIREWALL_CONFIG, FirewallConfig};
 
 const CT_FLAG_SEEN_REPLY: u8 = 1;
 
@@ -12,6 +12,17 @@ const DEFAULT_TCP_ESTABLISHED_NS: u64 = 300_000_000_000; // 300s
 const DEFAULT_TCP_NEW_NS: u64 = 30_000_000_000;          // 30s
 const DEFAULT_UDP_NS: u64 = 60_000_000_000;              // 60s
 const DEFAULT_ICMP_NS: u64 = 30_000_000_000;             // 30s
+
+#[inline(always)]
+fn conntrack_enabled() -> bool {
+    let key: u32 = 0;
+    // 默认开启 CT，仅当配置显式关闭时才禁用
+    if let Some(cfg) = unsafe { FIREWALL_CONFIG.get(&key) } {
+        cfg.conntrack_enabled != 0
+    } else {
+        true
+    }
+}
 
 #[inline(always)]
 fn get_timeout(proto: u8, state: u8) -> u64 {
@@ -75,6 +86,9 @@ pub enum CtLookupResult {
 /// Returns Established if the connection is tracked and not expired.
 #[inline(always)]
 pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResult {
+    if !conntrack_enabled() {
+        return CtLookupResult::NotFound;
+    }
     // Forward lookup
     if let Some(entry) = CT_TABLE_V4.get_ptr_mut(key) {
         let timeout = get_timeout(key.proto, (*entry).state);
@@ -115,6 +129,9 @@ pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResu
 /// Lookup CT for IPv6 packet.
 #[inline(always)]
 pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResult {
+    if !conntrack_enabled() {
+        return CtLookupResult::NotFound;
+    }
     // Forward lookup
     if let Some(entry) = CT_TABLE_V6.get_ptr_mut(key) {
         let timeout = get_timeout(key.proto, (*entry).state);
@@ -155,6 +172,9 @@ pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResu
 /// Create a new CT entry for IPv4 (called after policy allows the packet).
 #[inline(always)]
 pub unsafe fn ct_create_v4(key: &CtKey4, now: u64, pkt_len: u32) {
+    if !conntrack_enabled() {
+        return;
+    }
     let val = CtValue {
         state: CT_NEW,
         flags: 0,
@@ -169,6 +189,9 @@ pub unsafe fn ct_create_v4(key: &CtKey4, now: u64, pkt_len: u32) {
 /// Create a new CT entry for IPv6.
 #[inline(always)]
 pub unsafe fn ct_create_v6(key: &CtKey6, now: u64, pkt_len: u32) {
+    if !conntrack_enabled() {
+        return;
+    }
     let val = CtValue {
         state: CT_NEW,
         flags: 0,

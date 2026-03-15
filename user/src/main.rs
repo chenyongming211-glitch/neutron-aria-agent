@@ -77,6 +77,11 @@ enum Commands {
         #[command(subcommand)]
         action: QosCommands,
     },
+    /// Firewall configuration (conntrack/monitoring switches)
+    Config {
+        #[command(subcommand)]
+        action: ConfigCommands,
+    },
     /// Real-time monitoring
     Monitor {
         #[arg(long, default_value = "2", help = "Refresh interval in seconds")]
@@ -179,6 +184,19 @@ enum QosCommands {
     },
     /// List all QoS rules
     List,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Show current firewall configuration
+    Show,
+    /// Set a configuration value
+    Set {
+        #[arg(help = "Configuration key: conntrack or monitoring")]
+        key: String,
+        #[arg(help = "Value: on or off")]
+        value: String,
+    },
 }
 
 fn parse_direction(s: &str) -> Result<u8, String> {
@@ -588,11 +606,12 @@ async fn main() {
             }
 
             if flows {
+                // IPv4 flows
                 match aria_core::monitoring::get_top_flows_v4(&pin_path, top) {
                     Ok(entries) => {
                         println!("=== Top {} Flows (IPv4) ===", top);
                         if entries.is_empty() {
-                            println!("  No flow statistics collected yet");
+                            println!("  No IPv4 flow statistics collected yet");
                         } else {
                             println!("{:<18} {:<18} {:<8} {:<8} {:<8} {:<15} {}",
                                 "Source", "Destination", "SPort", "DPort", "Proto", "Packets", "Bytes");
@@ -605,7 +624,28 @@ async fn main() {
                         }
                         println!();
                     }
-                    Err(e) => eprintln!("Error reading flow stats: {}", e),
+                    Err(e) => eprintln!("Error reading IPv4 flow stats: {}", e),
+                }
+
+                // IPv6 flows
+                match aria_core::monitoring::get_top_flows_v6(&pin_path, top) {
+                    Ok(entries) => {
+                        println!("=== Top {} Flows (IPv6) ===", top);
+                        if entries.is_empty() {
+                            println!("  No IPv6 flow statistics collected yet");
+                        } else {
+                            println!("{:<39} {:<39} {:<8} {:<8} {:<8} {:<15} {}",
+                                "Source", "Destination", "SPort", "DPort", "Proto", "Packets", "Bytes");
+                            for e in &entries {
+                                let proto = aria_core::monitoring::proto_name(e.proto);
+                                println!("{:<39} {:<39} {:<8} {:<8} {:<8} {:<15} {}",
+                                    e.src_ip, e.dst_ip, e.src_port, e.dst_port, proto,
+                                    e.packets, aria_core::monitoring::format_bytes(e.bytes));
+                            }
+                        }
+                        println!();
+                    }
+                    Err(e) => eprintln!("Error reading IPv6 flow stats: {}", e),
                 }
             }
 
@@ -826,6 +866,87 @@ async fn main() {
                 }
             }
         },
+        Commands::Config { action } => match action {
+            ConfigCommands::Show => {
+                let prog_path = format!("{}/xdp_firewall", pin_path);
+                if !std::path::Path::new(&prog_path).exists() {
+                    eprintln!("Error: Firewall not started. Run 'system start' first.");
+                    std::process::exit(1);
+                }
+
+                // Read from kernel map
+                match aria_core::ebpf_ops::read_firewall_config(&pin_path) {
+                    Ok(cfg) => {
+                        println!("=== Firewall Configuration ===");
+                        println!("  conntrack:  {}", if cfg.conntrack_enabled != 0 { "on" } else { "off" });
+                        println!("  monitoring: {}", if cfg.monitoring_enabled != 0 { "on" } else { "off" });
+                        println!("  num_cpus:   {}", cfg.num_cpus);
+                    }
+                    Err(e) => {
+                        // Fallback to state file
+                        match state_manager.get_config() {
+                            Ok((ct, mon)) => {
+                                println!("=== Firewall Configuration (from state) ===");
+                                println!("  conntrack:  {}", if ct { "on" } else { "off" });
+                                println!("  monitoring: {}", if mon { "on" } else { "off" });
+                                eprintln!("  (kernel map unavailable: {})", e);
+                            }
+                            Err(e2) => {
+                                eprintln!("Error: {}", e2);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            ConfigCommands::Set { key, value } => {
+                let prog_path = format!("{}/xdp_firewall", pin_path);
+                if !std::path::Path::new(&prog_path).exists() {
+                    eprintln!("Error: Firewall not started. Run 'system start' first.");
+                    std::process::exit(1);
+                }
+
+                let enabled = match value.to_lowercase().as_str() {
+                    "on" | "true" | "1" | "yes" => true,
+                    "off" | "false" | "0" | "no" => false,
+                    _ => {
+                        eprintln!("Error: invalid value '{}': must be 'on' or 'off'", value);
+                        std::process::exit(1);
+                    }
+                };
+
+                let (ct_opt, mon_opt) = match key.to_lowercase().as_str() {
+                    "conntrack" | "ct" => (Some(enabled), None),
+                    "monitoring" | "mon" => (None, Some(enabled)),
+                    _ => {
+                        eprintln!("Error: unknown config key '{}': must be 'conntrack' or 'monitoring'", key);
+                        std::process::exit(1);
+                    }
+                };
+
+                // Update kernel map
+                if let Err(e) = aria_core::ebpf_ops::update_firewall_config(&pin_path, ct_opt, mon_opt) {
+                    eprintln!("Error updating kernel config: {}", e);
+                    std::process::exit(1);
+                }
+
+                // Persist to state
+                if let Some(ct) = ct_opt {
+                    if let Err(e) = state_manager.set_conntrack_enabled(ct) {
+                        eprintln!("Warning: failed to persist config: {}", e);
+                    }
+                }
+                if let Some(mon) = mon_opt {
+                    if let Err(e) = state_manager.set_monitoring_enabled(mon) {
+                        eprintln!("Warning: failed to persist config: {}", e);
+                    }
+                }
+
+                println!("Set {} = {}", key, if enabled { "on" } else { "off" });
+                Ok(())
+            }
+        },
         Commands::Monitor { interval } => {
             println!("Monitoring (refresh every {}s, press Ctrl+C to stop)...", interval);
             loop {
@@ -840,16 +961,33 @@ async fn main() {
                         summary.total_v4, summary.total_v6, summary.new_count, summary.established_count);
                 }
 
-                // Top 10 flows
-                if let Ok(flows) = aria_core::monitoring::get_top_flows_v4(&pin_path, 10) {
-                    println!("\nTop 10 Flows:");
-                    if flows.is_empty() {
+                // Top 10 flows (IPv4)
+                if let Ok(flows_v4) = aria_core::monitoring::get_top_flows_v4(&pin_path, 10) {
+                    println!("\nTop 10 Flows (IPv4):");
+                    if flows_v4.is_empty() {
                         println!("  (none)");
                     } else {
                         println!("  {:<18} {:<18} {:<8} {:<8} {:<8} {:<12} {}",
                             "Source", "Dest", "SPort", "DPort", "Proto", "Packets", "Bytes");
-                        for f in &flows {
+                        for f in &flows_v4 {
                             println!("  {:<18} {:<18} {:<8} {:<8} {:<8} {:<12} {}",
+                                f.src_ip, f.dst_ip, f.src_port, f.dst_port,
+                                aria_core::monitoring::proto_name(f.proto),
+                                f.packets, aria_core::monitoring::format_bytes(f.bytes));
+                        }
+                    }
+                }
+
+                // Top 10 flows (IPv6)
+                if let Ok(flows_v6) = aria_core::monitoring::get_top_flows_v6(&pin_path, 10) {
+                    println!("\nTop 10 Flows (IPv6):");
+                    if flows_v6.is_empty() {
+                        println!("  (none)");
+                    } else {
+                        println!("  {:<39} {:<39} {:<8} {:<8} {:<8} {:<12} {}",
+                            "Source", "Dest", "SPort", "DPort", "Proto", "Packets", "Bytes");
+                        for f in &flows_v6 {
+                            println!("  {:<39} {:<39} {:<8} {:<8} {:<8} {:<12} {}",
                                 f.src_ip, f.dst_ip, f.src_port, f.dst_port,
                                 aria_core::monitoring::proto_name(f.proto),
                                 f.packets, aria_core::monitoring::format_bytes(f.bytes));

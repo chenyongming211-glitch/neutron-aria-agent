@@ -142,3 +142,41 @@ pub fn parse_burst(burst_str: &str) -> Result<u64, String> {
         s.parse::<u64>().map_err(|_| format!("Invalid burst: {}. Use format like 1mb, 512kb", burst_str))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_rate_supports_common_units() {
+        assert_eq!(parse_rate("8bps").unwrap(), 1); // 8 bit/s = 1 B/s
+        assert_eq!(parse_rate("1kbps").unwrap(), 1_000 / 8);
+        assert_eq!(parse_rate("2mbps").unwrap(), 2_000_000 / 8);
+        assert_eq!(parse_rate("1gbps").unwrap(), 1_000_000_000 / 8);
+
+        // bare number → bytes per second
+        assert_eq!(parse_rate("1024").unwrap(), 1024);
+    }
+
+    #[test]
+    fn parse_rate_rejects_invalid() {
+        assert!(parse_rate("abc").is_err());
+        assert!(parse_rate("10mpbs").is_err()); // typo
+    }
+
+    #[test]
+    fn parse_burst_supports_common_units() {
+        assert_eq!(parse_burst("1kb").unwrap(), 1024);
+        assert_eq!(parse_burst("1mb").unwrap(), 1_048_576);
+        assert_eq!(parse_burst("1gb").unwrap(), 1_073_741_824);
+
+        // bare number → bytes
+        assert_eq!(parse_burst("4096").unwrap(), 4096);
+    }
+
+    #[test]
+    fn parse_burst_rejects_invalid() {
+        assert!(parse_burst("xyz").is_err());
+        assert!(parse_burst("10mbps").is_err());
+    }
+}

@@ -6,6 +6,7 @@ pub use crate::common::{
     CtKey4, CtKey6, CtValue, CtConfig,
     RuleStatsValue, FlowStatsValue,
     QosKey, QosConfig, TokenBucket,
+    FirewallConfig,
 };
 
 // --- Existing maps ---
@@ -42,6 +43,10 @@ pub static CT_TABLE_V6: LruHashMap<CtKey6, CtValue> = LruHashMap::with_max_entri
 // Using HashMap with u32 key as a workaround (key=0 → config)
 #[map(name = "CT_CONFIG")]
 pub static CT_CONFIG: HashMap<u32, CtConfig> = HashMap::with_max_entries(1, 0);
+
+// 全局配置：特性开关等（key=0）
+#[map(name = "FIREWALL_CONFIG")]
+pub static FIREWALL_CONFIG: HashMap<u32, FirewallConfig> = HashMap::with_max_entries(1, 0);
 
 // --- Traffic statistics maps ---
 
