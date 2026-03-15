@@ -1,4 +1,5 @@
 use std::sync::Arc;
+#[allow(unused_imports)]
 use axum::{
     Router,
     routing::{get, post, put, delete},
