@@ -62,7 +62,7 @@ pub async fn system_start(
         .map_err(|e| format!("pin link error: {:?}", e))?;
 
     // Attach TC egress
-    if let Err(e) = attach_tc_egress(&mut bpf, iface) {
+    if let Err(e) = attach_tc_egress(&mut bpf, iface, pin_path) {
         eprintln!("Warning: TC egress attach failed: {}. Egress control disabled.", e);
     }
 
@@ -129,6 +129,14 @@ pub async fn system_stop(
                     Ok(o) => eprintln!("Warning: failed to detach XDP from {}: {}",
                         iface, String::from_utf8_lossy(&o.stderr)),
                     Err(e) => eprintln!("Warning: failed to run ip command: {}", e),
+                }
+            }
+
+            // Remove pinned TC egress link
+            let tc_link_pin = format!("{}/tc_egress_link", pin_path);
+            if std::path::Path::new(&tc_link_pin).exists() {
+                if let Err(e) = fs::remove_file(&tc_link_pin) {
+                    eprintln!("Warning: failed to remove pinned TC link: {}", e);
                 }
             }
 

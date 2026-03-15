@@ -71,7 +71,7 @@ impl FirewallInstance {
             .map_err(|e| format!("[{}] pin link error: {:?}", self.iface, e))?;
 
         // Attach TC egress
-        if let Err(e) = aria_core::ebpf_ops::attach_tc_egress(&mut bpf, &self.iface) {
+        if let Err(e) = aria_core::ebpf_ops::attach_tc_egress(&mut bpf, &self.iface, pin_path_str) {
             eprintln!("[{}] Warning: TC egress attach failed: {}. Egress control disabled.", self.iface, e);
         }
 

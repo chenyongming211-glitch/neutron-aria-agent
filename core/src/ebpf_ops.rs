@@ -687,8 +687,9 @@ pub fn show_stats(pin_path: &str, state_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Setup TC egress: add clsact qdisc and attach the classifier program
-pub fn attach_tc_egress(bpf: &mut aya::Ebpf, iface: &str) -> Result<(), String> {
+/// Setup TC egress: add clsact qdisc and attach the classifier program.
+/// The TC link is pinned to `{pin_path}/tc_egress_link` to prevent detach on drop.
+pub fn attach_tc_egress(bpf: &mut aya::Ebpf, iface: &str, pin_path: &str) -> Result<(), String> {
     // Add clsact qdisc using aya's API
     if let Err(e) = aya::programs::tc::qdisc_add_clsact(iface) {
         let err_str = format!("{:?}", e);
@@ -708,10 +709,19 @@ pub fn attach_tc_egress(bpf: &mut aya::Ebpf, iface: &str) -> Result<(), String> 
 
     tc.load().map_err(|e| format!("tc.load error: {:?}", e))?;
 
-    tc.attach(iface, aya::programs::tc::TcAttachType::Egress)
+    let link_id = tc.attach(iface, aya::programs::tc::TcAttachType::Egress)
         .map_err(|e| format!("tc attach error: {:?}", e))?;
 
-    println!("TC egress attached to {}", iface);
+    // Pin the TC link so it survives for the lifetime of the process
+    let tc_link = tc.take_link(link_id)
+        .map_err(|e| format!("tc take_link error: {:?}", e))?;
+    let fd_link: aya::programs::links::FdLink = tc_link.try_into()
+        .map_err(|e: aya::programs::links::LinkError| format!("tc convert to FdLink error: {:?}", e))?;
+    let tc_link_pin = format!("{}/tc_egress_link", pin_path);
+    let _pinned = fd_link.pin(&tc_link_pin)
+        .map_err(|e| format!("tc pin link error: {:?}", e))?;
+
+    println!("TC egress attached to {} (link pinned)", iface);
     Ok(())
 }
 
