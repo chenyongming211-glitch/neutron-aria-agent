@@ -1,5 +1,33 @@
 use aya::maps::{HashMap, MapData};
-use crate::common::{QosKey, QosConfig};
+use crate::common::{QosKey, QosConfig, FirewallConfig};
+
+/// Update the qos_enabled flag in FIREWALL_CONFIG map.
+/// Called after every add/delete of a QoS rule to keep the flag in sync.
+fn sync_qos_enabled(pin_path: &str, enabled: bool) -> Result<(), String> {
+    let map_path = format!("{}/FIREWALL_CONFIG", pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open FIREWALL_CONFIG: {:?}", e))?;
+    let mut map = HashMap::<_, u32, FirewallConfig>::try_from(
+        aya::maps::Map::HashMap(map_data)
+    ).map_err(|e| format!("convert FIREWALL_CONFIG: {:?}", e))?;
+
+    if let Ok(mut cfg) = map.get(&0u32, 0) {
+        cfg.qos_enabled = if enabled { 1 } else { 0 };
+        map.insert(&0u32, &cfg, 0)
+            .map_err(|e| format!("FIREWALL_CONFIG update qos_enabled: {:?}", e))?;
+    }
+    Ok(())
+}
+
+/// Check if any QoS rules remain in the QOS_CONFIG map.
+fn has_qos_rules(pin_path: &str) -> bool {
+    let map_path = format!("{}/QOS_CONFIG", pin_path);
+    let Ok(map_data) = MapData::from_pin(&map_path) else { return false };
+    let Ok(map) = HashMap::<_, QosKey, QosConfig>::try_from(
+        aya::maps::Map::HashMap(map_data)
+    ) else { return false };
+    map.iter().next().is_some()
+}
 
 pub fn add_qos_rule(
     group_id: u32,
@@ -31,6 +59,9 @@ pub fn add_qos_rule(
     map.insert(&key, &config, 0)
         .map_err(|e| format!("QOS_CONFIG insert: {:?}", e))?;
 
+    // After adding a rule, QoS is definitely active
+    sync_qos_enabled(pin_path, true)?;
+
     Ok(())
 }
 
@@ -54,6 +85,9 @@ pub fn delete_qos_rule(
 
     map.remove(&key)
         .map_err(|e| format!("QOS_CONFIG remove: {:?}", e))?;
+
+    // After deleting, check if any rules remain
+    sync_qos_enabled(pin_path, has_qos_rules(pin_path))?;
 
     Ok(())
 }

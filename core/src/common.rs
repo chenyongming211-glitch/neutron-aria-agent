@@ -135,7 +135,8 @@ pub struct FirewallConfig {
     pub conntrack_enabled: u8,
     pub monitoring_enabled: u8,
     pub num_cpus: u16,
-    pub pad: [u8; 4],
+    pub qos_enabled: u8,
+    pub pad: [u8; 3],
 }
 unsafe impl Pod for FirewallConfig {}
 

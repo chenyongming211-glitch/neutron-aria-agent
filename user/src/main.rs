@@ -880,6 +880,7 @@ async fn main() {
                         println!("=== Firewall Configuration ===");
                         println!("  conntrack:  {}", if cfg.conntrack_enabled != 0 { "on" } else { "off" });
                         println!("  monitoring: {}", if cfg.monitoring_enabled != 0 { "on" } else { "off" });
+                        println!("  qos:        {}", if cfg.qos_enabled != 0 { "on" } else { "off" });
                         println!("  num_cpus:   {}", cfg.num_cpus);
                     }
                     Err(e) => {

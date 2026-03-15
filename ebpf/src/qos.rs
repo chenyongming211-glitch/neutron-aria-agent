@@ -1,6 +1,18 @@
 use crate::common::{QosKey, TokenBucket, DIR_EGRESS, DIR_INGRESS};
 use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, FIREWALL_CONFIG};
 
+/// Check if QoS is globally enabled. When no QoS rules are configured,
+/// the control plane sets this to 0, allowing fast-path to skip LPM lookups entirely.
+#[inline(always)]
+pub fn qos_enabled() -> bool {
+    let key: u32 = 0;
+    if let Some(cfg) = unsafe { FIREWALL_CONFIG.get(&key) } {
+        cfg.qos_enabled != 0
+    } else {
+        false
+    }
+}
+
 #[inline(always)]
 fn get_num_cpus() -> u32 {
     let key: u32 = 0;

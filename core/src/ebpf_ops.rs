@@ -597,7 +597,8 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
             conntrack_enabled: if state.conntrack_enabled { 1 } else { 0 },
             monitoring_enabled: if state.monitoring_enabled { 1 } else { 0 },
             num_cpus,
-            pad: [0; 4],
+            qos_enabled: if state.qos_rules.is_empty() { 0 } else { 1 },
+            pad: [0; 3],
         };
         match bpf.map_mut("FIREWALL_CONFIG")
             .ok_or_else(|| "FIREWALL_CONFIG not found".to_string())
@@ -770,7 +771,8 @@ pub fn update_firewall_config(
         conntrack_enabled: ct,
         monitoring_enabled: mon,
         num_cpus: num_cpus_val,
-        pad: [0; 4],
+        qos_enabled: current.as_ref().map(|c| c.qos_enabled).unwrap_or(0),
+        pad: [0; 3],
     };
     map.insert(&0u32, &cfg, 0)
         .map_err(|e| format!("FIREWALL_CONFIG insert: {:?}", e))?;
