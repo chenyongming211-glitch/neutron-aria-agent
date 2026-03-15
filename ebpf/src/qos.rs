@@ -1,9 +1,29 @@
-use crate::common::{QosKey, TokenBucket, DIR_EGRESS, DIR_INGRESS};
+use crate::common::{QosKey, TokenBucket, DIR_EGRESS, DIR_INGRESS, bpf_spin_lock};
 use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, FIREWALL_CONFIG};
 
 /// QoS mode constants
 const QOS_MODE_POLICING: u8 = 0;
 const QOS_MODE_SHAPING: u8 = 1;
+
+// Raw BPF helper function IDs from kernel UAPI headers
+const BPF_FUNC_spin_lock: u64 = 93;
+const BPF_FUNC_spin_unlock: u64 = 94;
+
+/// Call bpf_spin_lock() kernel helper directly via function pointer cast.
+#[inline(always)]
+unsafe fn spin_lock(lock: *mut bpf_spin_lock) {
+    let f: unsafe extern "C" fn(*mut bpf_spin_lock) -> i64 =
+        core::mem::transmute(BPF_FUNC_spin_lock as usize);
+    f(lock);
+}
+
+/// Call bpf_spin_unlock() kernel helper directly via function pointer cast.
+#[inline(always)]
+unsafe fn spin_unlock(lock: *mut bpf_spin_lock) {
+    let f: unsafe extern "C" fn(*mut bpf_spin_lock) -> i64 =
+        core::mem::transmute(BPF_FUNC_spin_unlock as usize);
+    f(lock);
+}
 
 /// Check if QoS is globally enabled. When no QoS rules are configured,
 /// the control plane sets this to 0, allowing fast-path to skip LPM lookups entirely.
@@ -42,8 +62,7 @@ fn compute_delay_ns(deficit: u64, rate: u64) -> u64 {
 /// EDT=0 means no delay needed. EDT=u64::MAX means packet should be dropped.
 /// No QoS config → pass through (0, 0).
 ///
-/// Uses PerCpuHashMap for lock-free token buckets. Each CPU independently
-/// enforces at full rate, which is accurate for single-flow (same-CPU) traffic.
+/// Uses global HashMap with bpf_spin_lock for precise cross-CPU rate enforcement.
 #[inline(always)]
 pub unsafe fn apply_qos_egress(
     _src_id: u32,
@@ -67,50 +86,58 @@ pub unsafe fn apply_qos_egress(
 
             let rate = config.rate_bps;
             let burst = config.burst_bytes;
+            let priority = config.priority;
+            let mode = config.mode;
 
             if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
+                // Lock protects tokens + last_refill_ns from concurrent CPU access
+                spin_lock(&mut (*bucket).lock);
+
                 let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
                 let refill = compute_refill(rate, elapsed);
                 let new_tokens = (*bucket).tokens + refill;
                 let tokens = if new_tokens > burst { burst } else { new_tokens };
 
-                if config.mode == QOS_MODE_SHAPING {
-                    // Shaping mode: use EDT timestamps (requires FQ qdisc)
-                    let (tstamp, final_tokens) = if tokens >= pkt_len as u64 {
-                        (0u64, tokens - pkt_len as u64)
+                let result;
+                if mode == QOS_MODE_SHAPING {
+                    if tokens >= pkt_len as u64 {
+                        (*bucket).tokens = tokens - pkt_len as u64;
+                        result = (0u64, priority);
                     } else {
                         let deficit = pkt_len as u64 - tokens;
                         let delay_ns = compute_delay_ns(deficit, rate);
-                        (now_ns + delay_ns, 0u64)
-                    };
-
-                    (*bucket).tokens = final_tokens;
-                    (*bucket).last_refill_ns = now_ns;
-                    return (tstamp, config.priority);
+                        (*bucket).tokens = 0;
+                        result = (now_ns + delay_ns, priority);
+                    }
                 } else {
-                    // Policing mode: drop excess packets (works on veth)
+                    // Policing mode
                     if tokens >= pkt_len as u64 {
                         (*bucket).tokens = tokens - pkt_len as u64;
-                        (*bucket).last_refill_ns = now_ns;
-                        return (0, config.priority);
+                        result = (0u64, priority);
                     } else {
                         (*bucket).tokens = 0;
-                        (*bucket).last_refill_ns = now_ns;
-                        return (u64::MAX, config.priority);
+                        result = (u64::MAX, priority);
                     }
                 }
+                (*bucket).last_refill_ns = now_ns;
+
+                spin_unlock(&mut (*bucket).lock);
+                return result;
             } else {
+                // First packet: initialize bucket (no lock needed, insert is atomic)
                 let tokens = if burst >= pkt_len as u64 {
                     burst - pkt_len as u64
                 } else {
                     0
                 };
                 let new_bucket = TokenBucket {
+                    lock: bpf_spin_lock { val: 0 },
+                    _pad: 0,
                     tokens,
                     last_refill_ns: now_ns,
                 };
                 let _ = QOS_TOKEN_BUCKET.insert(&qos_key, &new_bucket, 0);
-                return (0, config.priority);
+                return (0, priority);
             }
         }
     }
@@ -145,20 +172,25 @@ pub unsafe fn apply_qos_ingress(
             let burst = config.burst_bytes;
 
             if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
+                spin_lock(&mut (*bucket).lock);
+
                 let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
                 let refill = compute_refill(rate, elapsed);
                 let new_tokens = (*bucket).tokens + refill;
                 let tokens = if new_tokens > burst { burst } else { new_tokens };
 
+                let pass;
                 if tokens >= pkt_len as u64 {
                     (*bucket).tokens = tokens - pkt_len as u64;
-                    (*bucket).last_refill_ns = now_ns;
-                    return true;
+                    pass = true;
                 } else {
                     (*bucket).tokens = 0;
-                    (*bucket).last_refill_ns = now_ns;
-                    return false;
+                    pass = false;
                 }
+                (*bucket).last_refill_ns = now_ns;
+
+                spin_unlock(&mut (*bucket).lock);
+                return pass;
             } else {
                 let tokens = if burst >= pkt_len as u64 {
                     burst - pkt_len as u64
@@ -166,6 +198,8 @@ pub unsafe fn apply_qos_ingress(
                     0
                 };
                 let new_bucket = TokenBucket {
+                    lock: bpf_spin_lock { val: 0 },
+                    _pad: 0,
                     tokens,
                     last_refill_ns: now_ns,
                 };
