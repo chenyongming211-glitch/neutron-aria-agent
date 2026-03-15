@@ -4,6 +4,8 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::state::FirewallState;
+
 /// Time-based compact interval (5 minutes)
 const WAL_COMPACT_INTERVAL_SECS: u64 = 300;
 
