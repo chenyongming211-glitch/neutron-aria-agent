@@ -142,19 +142,8 @@ async fn main() {
         &config.state_path,
     ));
 
-    // Load existing state files into memory
-    if let Ok(entries) = std::fs::read_dir(&config.state_path) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    let state_file = entry.path().join("state.json");
-                    if state_file.exists() {
-                        control_plane.register_instance(name).await;
-                    }
-                }
-            }
-        }
-    }
+    // Note: instances are registered by TapRegistry::attach when XDP is actually attached.
+    // Pre-loading state files without XDP would expose stale data via the API.
 
     let registry = Arc::new(tap_registry::TapRegistry::new(
         &config.ebpf_path,

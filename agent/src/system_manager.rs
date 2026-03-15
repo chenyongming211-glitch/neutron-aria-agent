@@ -102,9 +102,6 @@ pub async fn system_stop(
     state_path: &str,
     control_plane: Arc<ControlPlane>,
 ) -> Result<(), String> {
-    // Flush and unregister
-    control_plane.unregister_instance("system").await;
-
     let sm = aria_core::state::StateManager::new(state_path);
     match sm.get_attached_iface() {
         Ok(Some(iface)) => {
@@ -138,6 +135,10 @@ pub async fn system_stop(
             .map_err(|e| format!("Failed to remove pin directory: {}", e))?;
         println!("Removed pinned maps and programs from {}", pin_path);
     }
+
+    // Unregister AFTER cleanup succeeds, so retry is possible on failure
+    control_plane.unregister_instance("system").await;
+
     println!("eBPF system stopped");
     Ok(())
 }

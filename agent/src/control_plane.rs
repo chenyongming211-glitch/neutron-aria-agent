@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use aria_core::state::{FirewallState, StateManager, GroupInfo, RuleInfo, QosRuleInfo};
+use aria_core::state::{FirewallState, GroupInfo, RuleInfo, QosRuleInfo};
 
 /// Per-instance in-memory state
 struct InstanceState {
@@ -73,12 +73,23 @@ impl ControlPlane {
         }
     }
 
-    /// Register an instance (called when TapRegistry attaches a tap)
+    /// Register an instance (called when TapRegistry attaches a tap).
+    /// If already registered, flushes dirty state first to avoid data loss.
     pub async fn register_instance(&self, name: &str) {
         let pin_path = format!("{}/{}", self.base_pin_path, name);
         let state_path = format!("{}/{}", self.base_state_path, name);
 
-        // Load existing state from disk
+        // If already registered, flush dirty state before replacing
+        {
+            let instances = self.instances.read().await;
+            if let Some(existing) = instances.get(name) {
+                let st = existing.read().await;
+                if st.dirty.swap(false, Ordering::AcqRel) {
+                    Self::write_state_to_disk(&st.state, &st.state_path, name);
+                }
+            }
+        }
+
         let state = Self::load_state_from_disk(&state_path);
 
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
@@ -160,50 +171,25 @@ impl ControlPlane {
     }
 
     pub async fn add_group(&self, instance: &str, name: &str, cidr: &str) -> Result<u32, ControlPlaneError> {
-        if name == "any" {
-            return Err(ControlPlaneError::ValidationError("Group name 'any' is reserved".to_string()));
-        }
-
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
         Self::check_xdp_ready(&state.pin_path)?;
 
+        // Check if this is a new group (for rollback)
+        let was_new_group = !state.state.groups.contains_key(name);
+
         // Modify in-memory state
-        let id = if let Some(existing) = state.state.groups.get_mut(name) {
-            if !existing.cidrs.contains(&cidr.to_string()) {
-                existing.cidrs.push(cidr.to_string());
-            }
-            existing.id
-        } else {
-            let id = state.state.next_group_id;
-            state.state.next_group_id += 1;
-            state.state.groups.insert(name.to_string(), GroupInfo {
-                id,
-                name: name.to_string(),
-                cidrs: vec![cidr.to_string()],
-            });
-            id
-        };
+        let id = state.state.add_group(name, cidr)
+            .map_err(|e| ControlPlaneError::ValidationError(e))?;
 
         // Write to kernel maps
         if let Err(e) = aria_core::ebpf_ops::add_network("src", cidr, id, &state.pin_path, &self.ebpf_path) {
-            // Rollback
-            if let Some(g) = state.state.groups.get_mut(name) {
-                g.cidrs.retain(|c| c != cidr);
-                if g.cidrs.is_empty() {
-                    state.state.groups.remove(name);
-                }
-            }
+            state.state.rollback_add_group(name, cidr, was_new_group);
             return Err(ControlPlaneError::KernelError(format!("src: {}", e)));
         }
         if let Err(e) = aria_core::ebpf_ops::add_network("dst", cidr, id, &state.pin_path, &self.ebpf_path) {
             let _ = aria_core::ebpf_ops::delete_network("src", cidr, id, &state.pin_path, &self.ebpf_path);
-            if let Some(g) = state.state.groups.get_mut(name) {
-                g.cidrs.retain(|c| c != cidr);
-                if g.cidrs.is_empty() {
-                    state.state.groups.remove(name);
-                }
-            }
+            state.state.rollback_add_group(name, cidr, was_new_group);
             return Err(ControlPlaneError::KernelError(format!("dst: {}", e)));
         }
 
@@ -214,6 +200,7 @@ impl ControlPlane {
     pub async fn delete_group(&self, instance: &str, name: &str) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        Self::check_xdp_ready(&state.pin_path)?;
 
         let group = state.state.groups.get(name)
             .ok_or_else(|| ControlPlaneError::GroupNotFound(name.to_string()))?
@@ -281,10 +268,8 @@ impl ControlPlane {
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
 
-        // Use StateManager's logic via direct state manipulation
-        // We need to use the StateManager for the complex port set logic
-        let sm = StateManager::new(&state.state_path);
-        let add_result = sm.add_rule(src_id, dst_id, proto, action, ports, direction)
+        // Operate directly on in-memory state (no StateManager disk round-trip)
+        let add_result = state.state.apply_add_rule(src_id, dst_id, proto, action, ports, direction)
             .map_err(|e| ControlPlaneError::ValidationError(e))?;
 
         // Write to kernel
@@ -293,8 +278,8 @@ impl ControlPlane {
             add_result.bitmap_idx, add_result.is_new_port_set,
             direction, &state.pin_path, &self.ebpf_path,
         ) {
-            // Rollback state
-            let _ = sm.remove_rule(src_id, dst_id, proto, direction);
+            // Rollback in-memory state
+            let _ = state.state.apply_remove_rule(src_id, dst_id, proto, direction);
             return Err(ControlPlaneError::KernelError(e));
         }
 
@@ -305,10 +290,7 @@ impl ControlPlane {
             }
         }
 
-        // Reload state from disk (StateManager wrote it)
-        state.state = Self::load_state_from_disk(&state.state_path);
-        // No need to mark dirty since StateManager already persisted
-
+        state.mark_dirty();
         Ok(())
     }
 
@@ -322,17 +304,31 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        Self::check_xdp_ready(&state.pin_path)?;
 
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
 
-        // Delete from kernel first
+        // Validate rule exists in state before touching kernel
+        let rule_exists = state.state.rules.iter().any(|r| {
+            r.src_group_id == src_id
+                && r.dst_group_id == dst_id
+                && r.proto == proto
+                && r.direction == direction
+        });
+        if !rule_exists {
+            return Err(ControlPlaneError::PolicyNotFound(
+                format!("Policy not found: src={}, dst={}, proto={}, direction={}", src_group, dst_group, proto, direction)
+            ));
+        }
+
+        // Delete from kernel
         if let Err(e) = aria_core::ebpf_ops::delete_policy(src_id, dst_id, proto, direction, &state.pin_path, &self.ebpf_path) {
             return Err(ControlPlaneError::KernelError(e));
         }
 
-        let sm = StateManager::new(&state.state_path);
-        let remove_result = sm.remove_rule(src_id, dst_id, proto, direction)
+        // Remove from in-memory state
+        let remove_result = state.state.apply_remove_rule(src_id, dst_id, proto, direction)
             .map_err(|e| ControlPlaneError::PolicyNotFound(e))?;
 
         if let (Some(idx), Some(ref ports_normalized)) = (remove_result.bitmap_idx, &remove_result.port_set_released) {
@@ -341,9 +337,7 @@ impl ControlPlane {
             }
         }
 
-        // Reload state from disk
-        state.state = Self::load_state_from_disk(&state.state_path);
-
+        state.mark_dirty();
         Ok(())
     }
 
@@ -404,6 +398,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        Self::check_xdp_ready(&state.pin_path)?;
 
         let group_id = if group_name == "default" || group_name == "any" {
             0
@@ -413,18 +408,19 @@ impl ControlPlane {
                 .ok_or_else(|| ControlPlaneError::GroupNotFound(group_name.to_string()))?
         };
 
-        if let Err(e) = aria_core::qos_ops::delete_qos_rule(group_id, direction, &state.pin_path) {
-            return Err(ControlPlaneError::KernelError(e));
-        }
-
-        let before = state.state.qos_rules.len();
-        state.state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
-        if state.state.qos_rules.len() == before {
+        // Validate rule exists in state BEFORE deleting from kernel
+        let exists = state.state.qos_rules.iter().any(|r| r.group_id == group_id && r.direction == direction);
+        if !exists {
             return Err(ControlPlaneError::PolicyNotFound(
                 format!("QoS rule not found: group={}, direction={}", group_name, direction)
             ));
         }
 
+        if let Err(e) = aria_core::qos_ops::delete_qos_rule(group_id, direction, &state.pin_path) {
+            return Err(ControlPlaneError::KernelError(e));
+        }
+
+        state.state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
         state.mark_dirty();
         Ok(())
     }
@@ -523,7 +519,8 @@ impl ControlPlane {
     pub async fn flush_all(&self) {
         let instances = self.instances.read().await;
         for (name, inst) in instances.iter() {
-            let state = inst.read().await;
+            // Use write lock for flush to prevent concurrent modification during I/O
+            let state = inst.write().await;
             if state.dirty.swap(false, Ordering::AcqRel) {
                 Self::write_state_to_disk(&state.state, &state.state_path, name);
             }
@@ -534,7 +531,7 @@ impl ControlPlane {
     async fn flush_instance(&self, name: &str) {
         let instances = self.instances.read().await;
         if let Some(inst) = instances.get(name) {
-            let state = inst.read().await;
+            let state = inst.write().await;
             if state.dirty.swap(false, Ordering::AcqRel) {
                 Self::write_state_to_disk(&state.state, &state.state_path, name);
             }

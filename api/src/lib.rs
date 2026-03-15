@@ -273,7 +273,7 @@ pub fn proto_from_string(proto: &str) -> Result<u8, String> {
         "udp" => Ok(17),
         "icmp" => Ok(1),
         "any" => Ok(0),
-        _ => Err(format!("Invalid protocol '{}'", proto)),
+        _ => proto.parse::<u8>().map_err(|_| format!("Invalid protocol '{}'", proto)),
     }
 }
 

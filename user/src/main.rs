@@ -179,6 +179,10 @@ async fn main() {
     let result: Result<(), String> = match cli.command {
         Commands::System { action } => match action {
             SystemCommands::Start { iface, max_port_policies } => {
+                if cli.tap.is_some() {
+                    eprintln!("Error: 'system start' cannot be used with --tap. Use aria-agent to manage tap instances.");
+                    std::process::exit(1);
+                }
                 match client.system_start(&aria_api::SystemStartRequest {
                     iface,
                     max_port_policies,
@@ -188,6 +192,10 @@ async fn main() {
                 }
             }
             SystemCommands::Stop => {
+                if cli.tap.is_some() {
+                    eprintln!("Error: 'system stop' cannot be used with --tap. Use aria-agent to manage tap instances.");
+                    std::process::exit(1);
+                }
                 match client.system_stop().await {
                     Ok(resp) => { println!("{}", resp.message); Ok(()) }
                     Err(e) => Err(e),
@@ -318,6 +326,7 @@ async fn main() {
                     Err(e) => Err(e),
                 }
             } else {
+                let mut has_error = false;
                 if rules {
                     match client.stats_rules(&instance).await {
                         Ok(resp) => {
@@ -335,7 +344,7 @@ async fn main() {
                             }
                             println!();
                         }
-                        Err(e) => eprintln!("Error reading rule stats: {}", e),
+                        Err(e) => { eprintln!("Error reading rule stats: {}", e); has_error = true; }
                     }
                 }
                 if flows {
@@ -355,10 +364,10 @@ async fn main() {
                             }
                             println!();
                         }
-                        Err(e) => eprintln!("Error reading flow stats: {}", e),
+                        Err(e) => { eprintln!("Error reading flow stats: {}", e); has_error = true; }
                     }
                 }
-                Ok(())
+                if has_error { Err("Some stats queries failed".to_string()) } else { Ok(()) }
             }
         },
         Commands::Conntrack { action } => match action {
