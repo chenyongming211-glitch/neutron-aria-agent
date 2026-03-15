@@ -273,7 +273,7 @@ pub async fn add_qos(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
     let burst_bytes = if req.burst.is_empty() || req.burst == "0" {
-        0
+        aria_core::qos_ops::compute_default_burst(rate_bps)
     } else {
         match aria_core::qos_ops::parse_burst(&req.burst) {
             Ok(b) => b,

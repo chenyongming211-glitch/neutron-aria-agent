@@ -149,6 +149,28 @@ pub fn replay_qos_rules(bpf: &mut aya::Ebpf, rules: &[(u32, u8, u64, u64, u8, u8
     errors
 }
 
+/// Compute a sensible default burst size based on rate (bytes/sec).
+///
+/// Different rate tiers use different burst ratios:
+/// - < 12.5 MB/s  (100 Mbps): rate/5 (200ms) — TCP needs headroom at low rates
+/// - < 125 MB/s     (1 Gbps): rate/8 (125ms) — standard for mid-range rates
+/// - ≥ 125 MB/s     (1 Gbps): rate/10 (100ms) — high rates have large absolute burst
+///
+/// Minimum burst is always 64 KB to handle at least one jumbo frame.
+pub fn compute_default_burst(rate_bps: u64) -> u64 {
+    let burst = if rate_bps < 12_500_000 {
+        // < 100 Mbps: generous burst for TCP recovery
+        rate_bps / 5
+    } else if rate_bps < 125_000_000 {
+        // 100 Mbps ~ 1 Gbps
+        rate_bps / 8
+    } else {
+        // ≥ 1 Gbps
+        rate_bps / 10
+    };
+    if burst > 65536 { burst } else { 65536 }
+}
+
 pub fn parse_rate(rate_str: &str) -> Result<u64, String> {
     let s = rate_str.trim().to_lowercase();
     let bytes_per_sec = if let Some(num) = s.strip_suffix("gbps") {
@@ -227,5 +249,24 @@ mod tests {
     fn parse_burst_rejects_invalid() {
         assert!(parse_burst("xyz").is_err());
         assert!(parse_burst("10mbps").is_err());
+    }
+
+    #[test]
+    fn compute_default_burst_tiers() {
+        // Low rate (10 Mbps = 1.25 MB/s): rate/5
+        let b = compute_default_burst(1_250_000);
+        assert_eq!(b, 250_000); // 200ms burst
+
+        // Mid rate (500 Mbps = 62.5 MB/s): rate/8
+        let b = compute_default_burst(62_500_000);
+        assert_eq!(b, 7_812_500); // 125ms burst
+
+        // High rate (10 Gbps = 1.25 GB/s): rate/10
+        let b = compute_default_burst(1_250_000_000);
+        assert_eq!(b, 125_000_000); // 100ms burst
+
+        // Very low rate: minimum 64KB
+        let b = compute_default_burst(1000);
+        assert_eq!(b, 65536);
     }
 }

@@ -40,14 +40,6 @@ fn compute_delay_ns(deficit: u64, rate: u64) -> u64 {
     deficit * 1_000_000_000 / rate
 }
 
-/// Compute default burst: max(rate / 6, 65536) — at least 64KB, allows ~167ms burst.
-/// Balances between TCP recovery headroom and rate accuracy.
-#[inline(always)]
-fn default_burst(rate: u64) -> u64 {
-    let sixth = rate / 6;
-    if sixth > 65536 { sixth } else { 65536 }
-}
-
 /// Apply QoS rate limiting for egress. Returns (EDT timestamp, priority).
 /// EDT=0 means no delay needed. EDT=u64::MAX means packet should be dropped.
 /// No QoS config → pass through (0, 0).
@@ -73,12 +65,7 @@ pub unsafe fn apply_qos_egress(
             }
 
             let rate = config.rate_bps;
-
-            let burst = if config.burst_bytes > 0 {
-                config.burst_bytes
-            } else {
-                default_burst(rate)
-            };
+            let burst = config.burst_bytes;
 
             if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
                 let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
@@ -156,12 +143,7 @@ pub unsafe fn apply_qos_ingress(
             }
 
             let rate = config.rate_bps;
-
-            let burst = if config.burst_bytes > 0 {
-                config.burst_bytes
-            } else {
-                default_burst(rate)
-            };
+            let burst = config.burst_bytes;
 
             if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
                 let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
