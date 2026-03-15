@@ -263,18 +263,18 @@ async fn main() {
                     let mut buf = String::new();
                     match std::io::stdin().read_to_string(&mut buf) {
                         Ok(_) => buf,
-                        Err(e) => return { eprintln!("Error: Failed to read stdin: {}", e); std::process::exit(1); },
+                        Err(e) => { eprintln!("Error: Failed to read stdin: {}", e); std::process::exit(1); },
                     }
                 } else {
                     match std::fs::read_to_string(&file) {
                         Ok(s) => s,
-                        Err(e) => return { eprintln!("Error: Failed to read file '{}': {}", file, e); std::process::exit(1); },
+                        Err(e) => { eprintln!("Error: Failed to read file '{}': {}", file, e); std::process::exit(1); },
                     }
                 };
 
                 let policies: Vec<aria_api::AddPolicyRequest> = match serde_json::from_str(&json_str) {
                     Ok(p) => p,
-                    Err(e) => return { eprintln!("Error: Invalid JSON: {}", e); std::process::exit(1); },
+                    Err(e) => { eprintln!("Error: Invalid JSON: {}", e); std::process::exit(1); },
                 };
 
                 match client.batch_add_policies(&instance, &aria_api::BatchAddPoliciesRequest { policies }).await {
