@@ -125,8 +125,6 @@ unsafe impl Pod for QosConfig {}
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct TokenBucket {
-    pub lock: u32,           // matches bpf_spin_lock { val: u32 }
-    pub _pad: u32,
     pub tokens: u64,
     pub last_refill_ns: u64,
     pub last_edt: u64,

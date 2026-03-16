@@ -1,6 +1,5 @@
 use crate::common::{QosKey, TokenBucket, DIR_EGRESS, DIR_INGRESS};
 use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, FIREWALL_CONFIG};
-use aya_ebpf::helpers::gen::{bpf_spin_lock, bpf_spin_unlock};
 
 /// QoS mode constants
 const QOS_MODE_POLICING: u8 = 0;
@@ -15,6 +14,18 @@ pub fn qos_enabled() -> bool {
         cfg.qos_enabled != 0
     } else {
         false
+    }
+}
+
+/// Read num_cpus from FIREWALL_CONFIG (fallback to 1).
+#[inline(always)]
+fn get_num_cpus() -> u64 {
+    let key: u32 = 0;
+    if let Some(cfg) = unsafe { FIREWALL_CONFIG.get(&key) } {
+        let n = cfg.num_cpus as u64;
+        if n > 0 { n } else { 1 }
+    } else {
+        1
     }
 }
 
@@ -43,7 +54,7 @@ fn compute_delay_ns(deficit: u64, rate: u64) -> u64 {
 /// EDT=0 means no delay needed. EDT=u64::MAX means packet should be dropped.
 /// No QoS config → pass through (0, 0).
 ///
-/// Uses global HashMap with bpf_spin_lock for precise cross-CPU rate enforcement.
+/// Uses PerCpuHashMap so each CPU has its own token bucket with rate/num_cpus quota.
 #[inline(always)]
 pub unsafe fn apply_qos_egress(
     _src_id: u32,
@@ -51,6 +62,8 @@ pub unsafe fn apply_qos_egress(
     pkt_len: u32,
     now_ns: u64,
 ) -> (u64, u8) {
+    let num_cpus = get_num_cpus();
+
     // Try specific group first, then global default (group_id=0)
     let group_ids = [dst_id, 0u32];
     for &gid in &group_ids {
@@ -65,14 +78,17 @@ pub unsafe fn apply_qos_egress(
                 continue;
             }
 
-            let rate = config.rate_bps;
-            let burst = config.burst_bytes;
+            // Divide rate and burst by num_cpus for per-CPU fairness
+            let rate = config.rate_bps / num_cpus;
+            let burst = config.burst_bytes / num_cpus;
             let priority = config.priority;
             let mode = config.mode;
 
-            if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
-                bpf_spin_lock(&mut (*bucket).lock);
+            // Ensure per-CPU rate is at least 1 to avoid division by zero
+            let rate = if rate > 0 { rate } else { 1 };
+            let burst = if burst > 0 { burst } else { rate };
 
+            if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
                 let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
                 let refill = compute_refill(rate, elapsed);
                 let new_tokens = (*bucket).tokens + refill;
@@ -119,13 +135,10 @@ pub unsafe fn apply_qos_egress(
                 }
                 // else: refill == 0, don't advance (accumulate fractional nanoseconds)
 
-                bpf_spin_unlock(&mut (*bucket).lock);
                 return result;
             } else {
-                // First packet: initialize bucket (insert is atomic, no lock needed)
+                // First packet: initialize bucket
                 let new_bucket = TokenBucket {
-                    lock: aya_ebpf::bindings::bpf_spin_lock { val: 0 },
-                    _pad: 0,
                     tokens: if burst >= pkt_len as u64 { burst - pkt_len as u64 } else { 0 },
                     last_refill_ns: now_ns,
                     last_edt: 0,
@@ -149,6 +162,8 @@ pub unsafe fn apply_qos_ingress(
     pkt_len: u32,
     now_ns: u64,
 ) -> bool {
+    let num_cpus = get_num_cpus();
+
     let group_ids = [src_id, 0u32];
     for &gid in &group_ids {
         let qos_key = QosKey {
@@ -162,12 +177,13 @@ pub unsafe fn apply_qos_ingress(
                 continue;
             }
 
-            let rate = config.rate_bps;
-            let burst = config.burst_bytes;
+            let rate = config.rate_bps / num_cpus;
+            let burst = config.burst_bytes / num_cpus;
+
+            let rate = if rate > 0 { rate } else { 1 };
+            let burst = if burst > 0 { burst } else { rate };
 
             if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
-                bpf_spin_lock(&mut (*bucket).lock);
-
                 let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
                 let refill = compute_refill(rate, elapsed);
                 let new_tokens = (*bucket).tokens + refill;
@@ -189,12 +205,9 @@ pub unsafe fn apply_qos_ingress(
                     (*bucket).last_refill_ns += refill * 1_000_000_000 / rate;
                 }
 
-                bpf_spin_unlock(&mut (*bucket).lock);
                 return pass;
             } else {
                 let new_bucket = TokenBucket {
-                    lock: aya_ebpf::bindings::bpf_spin_lock { val: 0 },
-                    _pad: 0,
                     tokens: if burst >= pkt_len as u64 { burst - pkt_len as u64 } else { 0 },
                     last_refill_ns: now_ns,
                     last_edt: 0,

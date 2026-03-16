@@ -123,14 +123,12 @@ pub struct QosConfig {
     pub pad: [u8; 6],
 }
 
-/// Token bucket protected by bpf_spin_lock for safe cross-CPU access.
-/// The `lock` field uses the kernel's bpf_spin_lock type from aya bindings
-/// so that BTF matches the verifier's expectation.
-/// Layout: lock(4) + _pad(4) + tokens(8) + last_refill_ns(8) + last_edt(8) = 32 bytes.
+/// Per-CPU token bucket for QoS rate limiting.
+/// Each CPU maintains its own bucket with rate/num_cpus quota.
+/// Layout: tokens(8) + last_refill_ns(8) + last_edt(8) = 24 bytes.
 #[repr(C)]
+#[derive(Copy, Clone)]
 pub struct TokenBucket {
-    pub lock: aya_ebpf::bindings::bpf_spin_lock,
-    pub _pad: u32,
     pub tokens: u64,
     pub last_refill_ns: u64,
     pub last_edt: u64,
