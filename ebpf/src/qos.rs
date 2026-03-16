@@ -88,11 +88,12 @@ unsafe fn update_qos_stats(key: &QosKey, pkt_len: u32, outcome: u8) {
 /// EDT=0 means no delay needed. EDT=u64::MAX means packet should be dropped.
 /// No QoS config → pass through (0, 0).
 ///
-/// Each CPU's token bucket uses the full configured rate so that unbalanced
-/// CPU scheduling does not cause under-policing.  The trade-off is that
-/// aggregate throughput across all CPUs can theoretically reach rate × num_cpus
-/// when traffic is perfectly balanced, but in practice single-flow traffic
-/// lands on one CPU and is policed precisely at the configured rate.
+/// Uses a shared (non-per-CPU) HashMap for the token bucket so that all CPUs
+/// coordinate on a single rate limit.  Without bpf_spin_lock the read-modify-
+/// write is not atomic, but the race window is only a few nanoseconds, so the
+/// worst-case overshoot per race is (num_cpus - 1) × pkt_len — negligible
+/// compared to the alternative of per-CPU full-rate buckets which can overshoot
+/// by rate × num_cpus indefinitely.
 #[inline(always)]
 pub unsafe fn apply_qos_egress(
     _src_id: u32,
@@ -191,9 +192,7 @@ pub unsafe fn apply_qos_egress(
 /// Apply QoS policing for ingress. Returns true if packet should pass, false if dropped.
 /// Ingress can only police (drop), not shape (delay).
 /// Looks up src_id first (rate-limit by source), then fallback to group_id=0.
-///
-/// Each CPU's token bucket uses the full configured rate (see apply_qos_egress
-/// comment for rationale).
+/// See apply_qos_egress for the shared-bucket rationale.
 #[inline(always)]
 pub unsafe fn apply_qos_ingress(
     src_id: u32,

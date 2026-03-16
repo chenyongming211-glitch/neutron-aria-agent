@@ -66,8 +66,11 @@ pub static FLOW_STATS_V6: LruPerCpuHashMap<CtKey6, FlowStatsValue> = LruPerCpuHa
 #[map(name = "QOS_CONFIG")]
 pub static QOS_CONFIG: HashMap<QosKey, QosConfig> = HashMap::with_max_entries(16384, 0);
 
+// Shared (non-per-CPU) token bucket: all CPUs race on the same bucket.
+// The TOCTOU window is a few nanoseconds, bounding overshoot to
+// (num_cpus - 1) × MTU per race — negligible for a policer.
 #[map(name = "QOS_TOKEN_BUCKET")]
-pub static QOS_TOKEN_BUCKET: PerCpuHashMap<QosKey, TokenBucket> = PerCpuHashMap::with_max_entries(16384, 0);
+pub static QOS_TOKEN_BUCKET: HashMap<QosKey, TokenBucket> = HashMap::with_max_entries(16384, 0);
 
 // --- QoS statistics ---
 

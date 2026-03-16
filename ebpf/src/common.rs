@@ -123,8 +123,7 @@ pub struct QosConfig {
     pub pad: [u8; 6],
 }
 
-/// Per-CPU token bucket for QoS rate limiting.
-/// Each CPU maintains its own bucket with the full configured rate.
+/// Token bucket for QoS rate limiting (shared across CPUs, lock-free).
 /// Layout: tokens(8) + last_refill_ns(8) + last_edt(8) = 24 bytes.
 #[repr(C)]
 #[derive(Copy, Clone)]
