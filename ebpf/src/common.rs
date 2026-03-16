@@ -124,7 +124,7 @@ pub struct QosConfig {
 }
 
 /// Per-CPU token bucket for QoS rate limiting.
-/// Each CPU maintains its own bucket with rate/num_cpus quota.
+/// Each CPU maintains its own bucket with the full configured rate.
 /// Layout: tokens(8) + last_refill_ns(8) + last_edt(8) = 24 bytes.
 #[repr(C)]
 #[derive(Copy, Clone)]

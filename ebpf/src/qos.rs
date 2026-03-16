@@ -17,18 +17,6 @@ pub fn qos_enabled() -> bool {
     }
 }
 
-/// Read num_cpus from FIREWALL_CONFIG (fallback to 1).
-#[inline(always)]
-fn get_num_cpus() -> u64 {
-    let key: u32 = 0;
-    if let Some(cfg) = unsafe { FIREWALL_CONFIG.get(&key) } {
-        let n = cfg.num_cpus as u64;
-        if n > 0 { n } else { 1 }
-    } else {
-        1
-    }
-}
-
 /// Compute token refill without 128-bit multiplication.
 /// refill = rate * elapsed_ns / 1_000_000_000
 ///
@@ -100,7 +88,11 @@ unsafe fn update_qos_stats(key: &QosKey, pkt_len: u32, outcome: u8) {
 /// EDT=0 means no delay needed. EDT=u64::MAX means packet should be dropped.
 /// No QoS config → pass through (0, 0).
 ///
-/// Uses PerCpuHashMap so each CPU has its own token bucket with rate/num_cpus quota.
+/// Each CPU's token bucket uses the full configured rate so that unbalanced
+/// CPU scheduling does not cause under-policing.  The trade-off is that
+/// aggregate throughput across all CPUs can theoretically reach rate × num_cpus
+/// when traffic is perfectly balanced, but in practice single-flow traffic
+/// lands on one CPU and is policed precisely at the configured rate.
 #[inline(always)]
 pub unsafe fn apply_qos_egress(
     _src_id: u32,
@@ -108,8 +100,6 @@ pub unsafe fn apply_qos_egress(
     pkt_len: u32,
     now_ns: u64,
 ) -> (u64, u8) {
-    let num_cpus = get_num_cpus();
-
     // Try specific group first, then global default (group_id=0)
     let group_ids = [dst_id, 0u32];
     for &gid in &group_ids {
@@ -124,13 +114,14 @@ pub unsafe fn apply_qos_egress(
                 continue;
             }
 
-            // Divide rate and burst by num_cpus for per-CPU fairness
-            let rate = config.rate_bps / num_cpus;
-            let burst = config.burst_bytes / num_cpus;
+            // Use the full rate per CPU – avoids under-policing when traffic
+            // is not evenly distributed across CPUs.
+            let rate = config.rate_bps;
+            let burst = config.burst_bytes;
             let priority = config.priority;
             let mode = config.mode;
 
-            // Ensure per-CPU rate is at least 1 to avoid division by zero
+            // Ensure rate is at least 1 to avoid division by zero
             let rate = if rate > 0 { rate } else { 1 };
             let burst = if burst > 0 { burst } else { rate };
 
@@ -200,6 +191,9 @@ pub unsafe fn apply_qos_egress(
 /// Apply QoS policing for ingress. Returns true if packet should pass, false if dropped.
 /// Ingress can only police (drop), not shape (delay).
 /// Looks up src_id first (rate-limit by source), then fallback to group_id=0.
+///
+/// Each CPU's token bucket uses the full configured rate (see apply_qos_egress
+/// comment for rationale).
 #[inline(always)]
 pub unsafe fn apply_qos_ingress(
     src_id: u32,
@@ -207,8 +201,6 @@ pub unsafe fn apply_qos_ingress(
     pkt_len: u32,
     now_ns: u64,
 ) -> bool {
-    let num_cpus = get_num_cpus();
-
     let group_ids = [src_id, 0u32];
     for &gid in &group_ids {
         let qos_key = QosKey {
@@ -222,8 +214,8 @@ pub unsafe fn apply_qos_ingress(
                 continue;
             }
 
-            let rate = config.rate_bps / num_cpus;
-            let burst = config.burst_bytes / num_cpus;
+            let rate = config.rate_bps;
+            let burst = config.burst_bytes;
 
             let rate = if rate > 0 { rate } else { 1 };
             let burst = if burst > 0 { burst } else { rate };
