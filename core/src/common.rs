@@ -131,6 +131,39 @@ pub struct TokenBucket {
 }
 unsafe impl Pod for TokenBucket {}
 
+// --- QoS statistics ---
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct QosStatsValue {
+    pub passed_packets: u64,
+    pub passed_bytes: u64,
+    pub dropped_packets: u64,
+    pub dropped_bytes: u64,
+    pub shaped_packets: u64,
+    pub shaped_bytes: u64,
+}
+unsafe impl Pod for QosStatsValue {}
+
+// --- Per-group statistics ---
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct GroupStatsKey {
+    pub group_id: u32,
+    pub direction: u8,
+    pub pad: [u8; 3],
+}
+unsafe impl Pod for GroupStatsKey {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct GroupStatsValue {
+    pub packets: u64,
+    pub bytes: u64,
+}
+unsafe impl Pod for GroupStatsValue {}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct FirewallConfig {

@@ -37,6 +37,10 @@ enum Commands {
         flows: bool,
         #[arg(long, default_value = "20", help = "Number of top flows to show")]
         top: usize,
+        #[arg(long, help = "Show QoS per-rule pass/drop/shaped counts")]
+        qos: bool,
+        #[arg(long, help = "Show per-group bandwidth statistics")]
+        groups: bool,
     },
     /// Connection tracking operations
     Conntrack {
@@ -318,8 +322,8 @@ async fn main() {
                 }
             }
         },
-        Commands::Stats { rules, flows, top } => {
-            if !rules && !flows {
+        Commands::Stats { rules, flows, top, qos, groups } => {
+            if !rules && !flows && !qos && !groups {
                 // Show overview
                 match client.stats_overview(&instance).await {
                     Ok(stats) => {
@@ -341,17 +345,59 @@ async fn main() {
                             if resp.rules.is_empty() {
                                 println!("  No rule statistics collected yet");
                             } else {
-                                println!("{:<10} {:<10} {:<8} {:<10} {:<15} {}",
-                                    "SrcID", "DstID", "Proto", "Direction", "Packets", "Bytes");
+                                println!("{:<12} {:<12} {:<8} {:<10} {:<15} {}",
+                                    "SrcGroup", "DstGroup", "Proto", "Direction", "Packets", "Bytes");
                                 for e in &resp.rules {
-                                    println!("{:<10} {:<10} {:<8} {:<10} {:<15} {}",
-                                        e.src_id, e.dst_id, e.proto, e.direction,
+                                    println!("{:<12} {:<12} {:<8} {:<10} {:<15} {}",
+                                        e.src_group, e.dst_group, e.proto, e.direction,
                                         e.packets, e.bytes);
                                 }
                             }
                             println!();
                         }
                         Err(e) => { eprintln!("Error reading rule stats: {}", e); has_error = true; }
+                    }
+                }
+                if qos {
+                    match client.stats_qos(&instance).await {
+                        Ok(resp) => {
+                            println!("=== QoS Statistics ===");
+                            if resp.rules.is_empty() {
+                                println!("  No QoS statistics collected yet");
+                            } else {
+                                println!("{:<12} {:<10} {:<10} {:<12} {:<10} {:<12} {:<10} {}",
+                                    "Group", "Direction", "PassPkts", "PassBytes", "DropPkts", "DropBytes", "ShapePkts", "ShapeBytes");
+                                for e in &resp.rules {
+                                    println!("{:<12} {:<10} {:<10} {:<12} {:<10} {:<12} {:<10} {}",
+                                        e.group, e.direction,
+                                        e.passed_packets, e.passed_bytes,
+                                        e.dropped_packets, e.dropped_bytes,
+                                        e.shaped_packets, e.shaped_bytes);
+                                }
+                            }
+                            println!();
+                        }
+                        Err(e) => { eprintln!("Error reading QoS stats: {}", e); has_error = true; }
+                    }
+                }
+                if groups {
+                    match client.stats_groups(&instance).await {
+                        Ok(resp) => {
+                            println!("=== Per-Group Statistics ===");
+                            if resp.groups.is_empty() {
+                                println!("  No group statistics collected yet");
+                            } else {
+                                println!("{:<15} {:<10} {:<15} {}",
+                                    "Group", "Direction", "Packets", "Bytes");
+                                for e in &resp.groups {
+                                    println!("{:<15} {:<10} {:<15} {}",
+                                        e.group, e.direction,
+                                        e.packets, e.bytes);
+                                }
+                            }
+                            println!();
+                        }
+                        Err(e) => { eprintln!("Error reading group stats: {}", e); has_error = true; }
                     }
                 }
                 if flows {

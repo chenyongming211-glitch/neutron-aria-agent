@@ -5,7 +5,8 @@ pub use crate::common::{
     PolicyKey, PolicyValue, PortKey,
     CtKey4, CtKey6, CtValue, CtConfig,
     RuleStatsValue, FlowStatsValue,
-    QosKey, QosConfig, TokenBucket,
+    QosKey, QosConfig, TokenBucket, QosStatsValue,
+    GroupStatsKey, GroupStatsValue,
     FirewallConfig,
 };
 
@@ -67,3 +68,13 @@ pub static QOS_CONFIG: HashMap<QosKey, QosConfig> = HashMap::with_max_entries(16
 
 #[map(name = "QOS_TOKEN_BUCKET")]
 pub static QOS_TOKEN_BUCKET: PerCpuHashMap<QosKey, TokenBucket> = PerCpuHashMap::with_max_entries(16384, 0);
+
+// --- QoS statistics ---
+
+#[map(name = "QOS_STATS")]
+pub static QOS_STATS: PerCpuHashMap<QosKey, QosStatsValue> = PerCpuHashMap::with_max_entries(16384, 0);
+
+// --- Per-group statistics ---
+
+#[map(name = "GROUP_STATS")]
+pub static GROUP_STATS: PerCpuHashMap<GroupStatsKey, GroupStatsValue> = PerCpuHashMap::with_max_entries(8192, 0);

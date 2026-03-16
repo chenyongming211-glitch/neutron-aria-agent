@@ -27,5 +27,7 @@ pub fn build_router(control_plane: Arc<ControlPlane>) -> Router {
         .route("/api/v1/{instance}/stats", get(api_handlers::stats_overview))
         .route("/api/v1/{instance}/stats/rules", get(api_handlers::stats_rules))
         .route("/api/v1/{instance}/stats/flows", get(api_handlers::stats_flows))
+        .route("/api/v1/{instance}/stats/qos", get(api_handlers::stats_qos))
+        .route("/api/v1/{instance}/stats/groups", get(api_handlers::stats_groups))
         .with_state(control_plane)
 }

@@ -193,6 +193,20 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    pub async fn stats_qos(&self, instance: &str) -> Result<QosStatsResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/stats/qos", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn stats_groups(&self, instance: &str) -> Result<GroupStatsResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/stats/groups", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── Internal ──
 
     fn connection_error(&self, e: reqwest::Error) -> String {

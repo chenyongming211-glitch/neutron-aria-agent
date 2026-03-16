@@ -1,5 +1,5 @@
-use crate::common::{QosKey, TokenBucket, DIR_EGRESS, DIR_INGRESS};
-use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, FIREWALL_CONFIG};
+use crate::common::{QosKey, QosStatsValue, TokenBucket, DIR_EGRESS, DIR_INGRESS};
+use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, QOS_STATS, FIREWALL_CONFIG};
 
 /// QoS mode constants
 const QOS_MODE_POLICING: u8 = 0;
@@ -48,6 +48,52 @@ fn compute_refill(rate: u64, elapsed_ns: u64) -> u64 {
 #[inline(always)]
 fn compute_delay_ns(deficit: u64, rate: u64) -> u64 {
     deficit * 1_000_000_000 / rate
+}
+
+/// Update QoS per-rule statistics.
+/// outcome: 0=pass, 1=drop, 2=shaped
+#[inline(always)]
+unsafe fn update_qos_stats(key: &QosKey, pkt_len: u32, outcome: u8) {
+    if let Some(s) = QOS_STATS.get_ptr_mut(key) {
+        match outcome {
+            0 => {
+                (*s).passed_packets += 1;
+                (*s).passed_bytes += pkt_len as u64;
+            }
+            1 => {
+                (*s).dropped_packets += 1;
+                (*s).dropped_bytes += pkt_len as u64;
+            }
+            _ => {
+                (*s).shaped_packets += 1;
+                (*s).shaped_bytes += pkt_len as u64;
+            }
+        }
+    } else {
+        let mut val = QosStatsValue {
+            passed_packets: 0,
+            passed_bytes: 0,
+            dropped_packets: 0,
+            dropped_bytes: 0,
+            shaped_packets: 0,
+            shaped_bytes: 0,
+        };
+        match outcome {
+            0 => {
+                val.passed_packets = 1;
+                val.passed_bytes = pkt_len as u64;
+            }
+            1 => {
+                val.dropped_packets = 1;
+                val.dropped_bytes = pkt_len as u64;
+            }
+            _ => {
+                val.shaped_packets = 1;
+                val.shaped_bytes = pkt_len as u64;
+            }
+        }
+        let _ = QOS_STATS.insert(key, &val, 0);
+    }
 }
 
 /// Apply QoS rate limiting for egress. Returns (EDT timestamp, priority).
@@ -102,6 +148,7 @@ pub unsafe fn apply_qos_egress(
                         if (*bucket).last_edt < now_ns {
                             (*bucket).last_edt = 0;
                         }
+                        update_qos_stats(&qos_key, pkt_len, 0);
                         result = (0u64, priority);
                     } else {
                         let deficit = pkt_len as u64 - tokens;
@@ -111,18 +158,21 @@ pub unsafe fn apply_qos_egress(
                         let base = if (*bucket).last_edt > now_ns { (*bucket).last_edt } else { now_ns };
                         let edt = base + delay_ns;
                         (*bucket).last_edt = edt;
+                        update_qos_stats(&qos_key, pkt_len, 2);
                         result = (edt, priority);
                     }
                 } else {
                     // Policing mode
                     if tokens >= pkt_len as u64 {
                         (*bucket).tokens = tokens - pkt_len as u64;
+                        update_qos_stats(&qos_key, pkt_len, 0);
                         result = (0u64, priority);
                     } else {
                         // Drop: write back refilled tokens (don't deduct pkt_len)
                         // Packet was dropped so no bandwidth was consumed,
                         // but the refill MUST be persisted or it's lost.
                         (*bucket).tokens = tokens;
+                        update_qos_stats(&qos_key, pkt_len, 1);
                         result = (u64::MAX, priority);
                     }
                 }
@@ -138,6 +188,7 @@ pub unsafe fn apply_qos_egress(
                     last_edt: 0,
                 };
                 let _ = QOS_TOKEN_BUCKET.insert(&qos_key, &new_bucket, 0);
+                update_qos_stats(&qos_key, pkt_len, 0);
                 return (0, priority);
             }
         }
@@ -186,10 +237,12 @@ pub unsafe fn apply_qos_ingress(
                 let pass;
                 if tokens >= pkt_len as u64 {
                     (*bucket).tokens = tokens - pkt_len as u64;
+                    update_qos_stats(&qos_key, pkt_len, 0);
                     pass = true;
                 } else {
                     // Drop: write back refilled tokens (don't deduct pkt_len)
                     (*bucket).tokens = tokens;
+                    update_qos_stats(&qos_key, pkt_len, 1);
                     pass = false;
                 }
 
@@ -202,6 +255,7 @@ pub unsafe fn apply_qos_ingress(
                     last_edt: 0,
                 };
                 let _ = QOS_TOKEN_BUCKET.insert(&qos_key, &new_bucket, 0);
+                update_qos_stats(&qos_key, pkt_len, 0);
                 return true;
             }
         }

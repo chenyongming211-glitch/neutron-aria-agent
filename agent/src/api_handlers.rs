@@ -406,16 +406,27 @@ pub async fn stats_rules(
     Path(instance): Path<String>,
 ) -> impl IntoResponse {
     match cp.get_rule_stats(&instance).await {
-        Ok(entries) => Ok(Json(RuleStatsResponse {
-            rules: entries.into_iter().map(|e| aria_api::RuleStatsEntry {
-                src_id: e.key.src_id,
-                dst_id: e.key.dst_id,
-                proto: proto_to_string(e.key.proto),
-                direction: direction_to_string(e.key.direction),
-                packets: e.packets,
-                bytes: e.bytes,
-            }).collect(),
-        })),
+        Ok((entries, groups)) => {
+            let find_name = |id: u32| -> String {
+                if id == 0 { return "any".to_string(); }
+                groups.values()
+                    .find(|g| g.id == id)
+                    .map(|g| g.name.clone())
+                    .unwrap_or_else(|| format!("id:{}", id))
+            };
+            Ok(Json(RuleStatsResponse {
+                rules: entries.into_iter().map(|e| aria_api::RuleStatsEntry {
+                    src_group: find_name(e.key.src_id),
+                    src_id: e.key.src_id,
+                    dst_group: find_name(e.key.dst_id),
+                    dst_id: e.key.dst_id,
+                    proto: proto_to_string(e.key.proto),
+                    direction: direction_to_string(e.key.direction),
+                    packets: e.packets,
+                    bytes: e.bytes,
+                }).collect(),
+            }))
+        }
         Err(e) => Err(err_response(e)),
     }
 }
@@ -459,6 +470,64 @@ pub async fn stats_flows(
                 });
             }
             Ok(Json(FlowStatsResponse { flows }))
+        }
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+pub async fn stats_qos(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    match cp.get_qos_stats(&instance).await {
+        Ok((entries, groups)) => {
+            let find_name = |id: u32| -> String {
+                if id == 0 { return "any".to_string(); }
+                groups.values()
+                    .find(|g| g.id == id)
+                    .map(|g| g.name.clone())
+                    .unwrap_or_else(|| format!("id:{}", id))
+            };
+            Ok(Json(QosStatsResponse {
+                rules: entries.into_iter().map(|e| aria_api::QosStatsEntry {
+                    group: find_name(e.key.group_id),
+                    group_id: e.key.group_id,
+                    direction: direction_to_string(e.key.direction),
+                    passed_packets: e.passed_packets,
+                    passed_bytes: e.passed_bytes,
+                    dropped_packets: e.dropped_packets,
+                    dropped_bytes: e.dropped_bytes,
+                    shaped_packets: e.shaped_packets,
+                    shaped_bytes: e.shaped_bytes,
+                }).collect(),
+            }))
+        }
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+pub async fn stats_groups(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    match cp.get_group_stats(&instance).await {
+        Ok((entries, groups)) => {
+            let find_name = |id: u32| -> String {
+                if id == 0 { return "any".to_string(); }
+                groups.values()
+                    .find(|g| g.id == id)
+                    .map(|g| g.name.clone())
+                    .unwrap_or_else(|| format!("id:{}", id))
+            };
+            Ok(Json(GroupStatsResponse {
+                groups: entries.into_iter().map(|e| aria_api::GroupStatsEntry {
+                    group: find_name(e.key.group_id),
+                    group_id: e.key.group_id,
+                    direction: direction_to_string(e.key.direction),
+                    packets: e.packets,
+                    bytes: e.bytes,
+                }).collect(),
+            }))
         }
         Err(e) => Err(err_response(e)),
     }

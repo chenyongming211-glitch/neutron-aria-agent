@@ -594,11 +594,12 @@ impl ControlPlane {
         ))
     }
 
-    pub async fn get_rule_stats(&self, instance: &str) -> Result<Vec<aria_core::monitoring::RuleStatsEntry>, ControlPlaneError> {
+    pub async fn get_rule_stats(&self, instance: &str) -> Result<(Vec<aria_core::monitoring::RuleStatsEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        aria_core::monitoring::get_rule_stats(&state.pin_path)
-            .map_err(|e| ControlPlaneError::KernelError(e))
+        let stats = aria_core::monitoring::get_rule_stats(&state.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))?;
+        Ok((stats, state.state.groups.clone()))
     }
 
     pub async fn get_top_flows(&self, instance: &str, top: usize) -> Result<(Vec<aria_core::monitoring::FlowStatsEntry>, Vec<aria_core::monitoring::FlowStatsEntryV6>), ControlPlaneError> {
@@ -609,6 +610,22 @@ impl ControlPlane {
         let v6 = aria_core::monitoring::get_top_flows_v6(&state.pin_path, top)
             .map_err(|e| ControlPlaneError::KernelError(e))?;
         Ok((v4, v6))
+    }
+
+    pub async fn get_qos_stats(&self, instance: &str) -> Result<(Vec<aria_core::monitoring::QosStatsEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        let stats = aria_core::monitoring::get_qos_stats(&state.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))?;
+        Ok((stats, state.state.groups.clone()))
+    }
+
+    pub async fn get_group_stats(&self, instance: &str) -> Result<(Vec<aria_core::monitoring::GroupStatsEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        let stats = aria_core::monitoring::get_group_stats(&state.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))?;
+        Ok((stats, state.state.groups.clone()))
     }
 
     // ── Compact (WAL persistence) ──

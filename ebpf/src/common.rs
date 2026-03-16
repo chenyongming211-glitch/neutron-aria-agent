@@ -134,6 +134,36 @@ pub struct TokenBucket {
     pub last_edt: u64,
 }
 
+// --- QoS statistics ---
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct QosStatsValue {
+    pub passed_packets: u64,
+    pub passed_bytes: u64,
+    pub dropped_packets: u64,
+    pub dropped_bytes: u64,
+    pub shaped_packets: u64,
+    pub shaped_bytes: u64,
+}
+
+// --- Per-group statistics ---
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct GroupStatsKey {
+    pub group_id: u32,
+    pub direction: u8,
+    pub pad: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct GroupStatsValue {
+    pub packets: u64,
+    pub bytes: u64,
+}
+
 // --- Global firewall config (feature switches) ---
 
 #[repr(C)]

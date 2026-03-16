@@ -1,5 +1,8 @@
 use aya::maps::{HashMap, MapData, PerCpuHashMap, PerCpuValues};
-use crate::common::{PolicyKey, RuleStatsValue, FlowStatsValue, CtKey4, CtKey6, CtValue, CT_NEW, CT_ESTABLISHED};
+use crate::common::{
+    PolicyKey, RuleStatsValue, FlowStatsValue, CtKey4, CtKey6, CtValue, CT_NEW, CT_ESTABLISHED,
+    QosKey, QosStatsValue, GroupStatsKey, GroupStatsValue,
+};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub struct RuleStatsEntry {
@@ -206,6 +209,112 @@ pub fn get_conntrack_stats(pin_path: &str) -> Result<ConntrackSummary, String> {
     }
 
     Ok(summary)
+}
+
+// --- QoS Statistics ---
+
+pub struct QosStatsEntry {
+    pub key: QosKey,
+    pub passed_packets: u64,
+    pub passed_bytes: u64,
+    pub dropped_packets: u64,
+    pub dropped_bytes: u64,
+    pub shaped_packets: u64,
+    pub shaped_bytes: u64,
+}
+
+fn sum_per_cpu_qos_stats(values: PerCpuValues<QosStatsValue>) -> (u64, u64, u64, u64, u64, u64) {
+    let mut pp = 0u64;
+    let mut pb = 0u64;
+    let mut dp = 0u64;
+    let mut db = 0u64;
+    let mut sp = 0u64;
+    let mut sb = 0u64;
+    for v in values.iter() {
+        pp += v.passed_packets;
+        pb += v.passed_bytes;
+        dp += v.dropped_packets;
+        db += v.dropped_bytes;
+        sp += v.shaped_packets;
+        sb += v.shaped_bytes;
+    }
+    (pp, pb, dp, db, sp, sb)
+}
+
+pub fn get_qos_stats(pin_path: &str) -> Result<Vec<QosStatsEntry>, String> {
+    let map_path = format!("{}/QOS_STATS", pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open QOS_STATS: {:?}", e))?;
+    let map = PerCpuHashMap::<_, QosKey, QosStatsValue>::try_from(
+        aya::maps::Map::PerCpuHashMap(map_data)
+    ).map_err(|e| format!("convert QOS_STATS: {:?}", e))?;
+
+    let mut entries = Vec::new();
+    for item in map.iter() {
+        match item {
+            Ok((key, values)) => {
+                let (pp, pb, dp, db, sp, sb) = sum_per_cpu_qos_stats(values);
+                if pp > 0 || dp > 0 || sp > 0 {
+                    entries.push(QosStatsEntry {
+                        key,
+                        passed_packets: pp,
+                        passed_bytes: pb,
+                        dropped_packets: dp,
+                        dropped_bytes: db,
+                        shaped_packets: sp,
+                        shaped_bytes: sb,
+                    });
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    entries.sort_by(|a, b| b.passed_bytes.cmp(&a.passed_bytes));
+    Ok(entries)
+}
+
+// --- Per-Group Statistics ---
+
+pub struct GroupStatsEntry {
+    pub key: GroupStatsKey,
+    pub packets: u64,
+    pub bytes: u64,
+}
+
+fn sum_per_cpu_group_stats(values: PerCpuValues<GroupStatsValue>) -> (u64, u64) {
+    let mut packets = 0u64;
+    let mut bytes = 0u64;
+    for v in values.iter() {
+        packets += v.packets;
+        bytes += v.bytes;
+    }
+    (packets, bytes)
+}
+
+pub fn get_group_stats(pin_path: &str) -> Result<Vec<GroupStatsEntry>, String> {
+    let map_path = format!("{}/GROUP_STATS", pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open GROUP_STATS: {:?}", e))?;
+    let map = PerCpuHashMap::<_, GroupStatsKey, GroupStatsValue>::try_from(
+        aya::maps::Map::PerCpuHashMap(map_data)
+    ).map_err(|e| format!("convert GROUP_STATS: {:?}", e))?;
+
+    let mut entries = Vec::new();
+    for item in map.iter() {
+        match item {
+            Ok((key, values)) => {
+                let (packets, bytes) = sum_per_cpu_group_stats(values);
+                if packets > 0 {
+                    entries.push(GroupStatsEntry { key, packets, bytes });
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    entries.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    Ok(entries)
 }
 
 pub fn format_bytes(bytes: u64) -> String {

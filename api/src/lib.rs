@@ -234,7 +234,9 @@ pub struct StatsOverview {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RuleStatsEntry {
+    pub src_group: String,
     pub src_id: u32,
+    pub dst_group: String,
     pub dst_id: u32,
     pub proto: String,
     pub direction: String,
@@ -261,6 +263,42 @@ pub struct FlowEntry {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FlowStatsResponse {
     pub flows: Vec<FlowEntry>,
+}
+
+// --- QoS Statistics ---
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QosStatsEntry {
+    pub group: String,
+    pub group_id: u32,
+    pub direction: String,
+    pub passed_packets: u64,
+    pub passed_bytes: u64,
+    pub dropped_packets: u64,
+    pub dropped_bytes: u64,
+    pub shaped_packets: u64,
+    pub shaped_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QosStatsResponse {
+    pub rules: Vec<QosStatsEntry>,
+}
+
+// --- Per-Group Statistics ---
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GroupStatsEntry {
+    pub group: String,
+    pub group_id: u32,
+    pub direction: String,
+    pub packets: u64,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GroupStatsResponse {
+    pub groups: Vec<GroupStatsEntry>,
 }
 
 // ── Helpers ──
