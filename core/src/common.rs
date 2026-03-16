@@ -129,6 +129,7 @@ pub struct TokenBucket {
     pub _pad: u32,
     pub tokens: u64,
     pub last_refill_ns: u64,
+    pub last_edt: u64,
 }
 unsafe impl Pod for TokenBucket {}
 

@@ -87,24 +87,42 @@ pub unsafe fn apply_qos_egress(
                 if mode == QOS_MODE_SHAPING {
                     if tokens >= pkt_len as u64 {
                         (*bucket).tokens = tokens - pkt_len as u64;
+                        // Reset last_edt when not queueing — no backlog
+                        if (*bucket).last_edt < now_ns {
+                            (*bucket).last_edt = 0;
+                        }
                         result = (0u64, priority);
                     } else {
                         let deficit = pkt_len as u64 - tokens;
                         let delay_ns = compute_delay_ns(deficit, rate);
                         (*bucket).tokens = 0;
-                        result = (now_ns + delay_ns, priority);
+                        // Stagger from the later of now or last scheduled packet
+                        let base = if (*bucket).last_edt > now_ns { (*bucket).last_edt } else { now_ns };
+                        let edt = base + delay_ns;
+                        (*bucket).last_edt = edt;
+                        result = (edt, priority);
                     }
                 } else {
-                    // Policing mode
+                    // Policing mode — don't zero tokens on drop;
+                    // packet was dropped so no bandwidth was consumed.
                     if tokens >= pkt_len as u64 {
                         (*bucket).tokens = tokens - pkt_len as u64;
                         result = (0u64, priority);
                     } else {
-                        (*bucket).tokens = 0;
+                        // tokens unchanged — packet dropped, no bandwidth consumed
                         result = (u64::MAX, priority);
                     }
                 }
-                (*bucket).last_refill_ns = now_ns;
+
+                // Precise last_refill_ns advancement to avoid truncation
+                if new_tokens >= burst {
+                    // Tokens capped at burst — snap to now, no fractional loss
+                    (*bucket).last_refill_ns = now_ns;
+                } else if refill > 0 {
+                    // Advance only by time consumed for actual refill (preserves remainder)
+                    (*bucket).last_refill_ns += refill * 1_000_000_000 / rate;
+                }
+                // else: refill == 0, don't advance (accumulate fractional nanoseconds)
 
                 bpf_spin_unlock(&mut (*bucket).lock);
                 return result;
@@ -115,6 +133,7 @@ pub unsafe fn apply_qos_egress(
                     _pad: 0,
                     tokens: if burst >= pkt_len as u64 { burst - pkt_len as u64 } else { 0 },
                     last_refill_ns: now_ns,
+                    last_edt: 0,
                 };
                 let _ = QOS_TOKEN_BUCKET.insert(&qos_key, &new_bucket, 0);
                 return (0, priority);
@@ -164,10 +183,16 @@ pub unsafe fn apply_qos_ingress(
                     (*bucket).tokens = tokens - pkt_len as u64;
                     pass = true;
                 } else {
-                    (*bucket).tokens = 0;
+                    // tokens unchanged — packet dropped, no bandwidth consumed
                     pass = false;
                 }
-                (*bucket).last_refill_ns = now_ns;
+
+                // Precise last_refill_ns advancement to avoid truncation
+                if new_tokens >= burst {
+                    (*bucket).last_refill_ns = now_ns;
+                } else if refill > 0 {
+                    (*bucket).last_refill_ns += refill * 1_000_000_000 / rate;
+                }
 
                 bpf_spin_unlock(&mut (*bucket).lock);
                 return pass;
@@ -177,6 +202,7 @@ pub unsafe fn apply_qos_ingress(
                     _pad: 0,
                     tokens: if burst >= pkt_len as u64 { burst - pkt_len as u64 } else { 0 },
                     last_refill_ns: now_ns,
+                    last_edt: 0,
                 };
                 let _ = QOS_TOKEN_BUCKET.insert(&qos_key, &new_bucket, 0);
                 return true;
