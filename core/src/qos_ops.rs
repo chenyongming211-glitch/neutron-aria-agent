@@ -151,24 +151,29 @@ pub fn replay_qos_rules(bpf: &mut aya::Ebpf, rules: &[(u32, u8, u64, u64, u8, u8
 
 /// Compute a sensible default burst size based on rate (bytes/sec).
 ///
-/// Different rate tiers use different burst ratios:
-/// - < 25 MB/s  (200 Mbps): rate/5 (200ms) — TCP needs headroom at low rates
-/// - < 125 MB/s   (1 Gbps): rate/8 (125ms) — standard for mid-range rates
-/// - ≥ 125 MB/s   (1 Gbps): rate/10 (100ms) — high rates have large absolute burst
+/// TCP sends in bursts equal to its congestion window (cwnd).  The burst
+/// must be large enough to absorb a full cwnd without triggering policer
+/// drops, otherwise TCP's congestion control over-reacts and throughput
+/// collapses well below the configured rate.
 ///
-/// Minimum burst is always 64 KB to handle at least one jumbo frame.
+/// Empirical testing showed that ~500 ms worth of tokens is the sweet spot:
+/// - Small enough that the policer still converges quickly
+/// - Large enough to absorb TCP bursts at any rate
+///
+/// Minimum burst is 5 MB to handle TCP at low rates; capped at 100 MB.
 pub fn compute_default_burst(rate_bps: u64) -> u64 {
-    let burst = if rate_bps < 25_000_000 {
-        // < 200 Mbps: generous burst for TCP recovery
-        rate_bps / 5
-    } else if rate_bps < 125_000_000 {
-        // 200 Mbps ~ 1 Gbps
-        rate_bps / 8
+    // 500ms worth of tokens at the configured rate
+    let burst = rate_bps / 2;
+    // Clamp: at least 5 MB, at most 100 MB
+    let min_burst: u64 = 5 * 1024 * 1024;       // 5 MB
+    let max_burst: u64 = 100 * 1024 * 1024;      // 100 MB
+    if burst < min_burst {
+        min_burst
+    } else if burst > max_burst {
+        max_burst
     } else {
-        // ≥ 1 Gbps
-        rate_bps / 10
-    };
-    if burst > 65536 { burst } else { 65536 }
+        burst
+    }
 }
 
 pub fn parse_rate(rate_str: &str) -> Result<u64, String> {
@@ -253,24 +258,24 @@ mod tests {
 
     #[test]
     fn compute_default_burst_tiers() {
-        // Low rate (10 Mbps = 1.25 MB/s): rate/5
+        // Low rate (10 Mbps = 1.25 MB/s): clamped to min 5 MB
         let b = compute_default_burst(1_250_000);
-        assert_eq!(b, 250_000); // 200ms burst
+        assert_eq!(b, 5 * 1024 * 1024);
 
-        // Still low rate (100 Mbps = 12.5 MB/s): rate/5
+        // 100 Mbps = 12.5 MB/s: rate/2 = 6.25 MB
         let b = compute_default_burst(12_500_000);
-        assert_eq!(b, 2_500_000);
+        assert_eq!(b, 6_250_000);
 
-        // Mid rate (500 Mbps = 62.5 MB/s): rate/8
+        // 500 Mbps = 62.5 MB/s: rate/2 = 31.25 MB
         let b = compute_default_burst(62_500_000);
-        assert_eq!(b, 7_812_500); // 125ms burst
+        assert_eq!(b, 31_250_000);
 
-        // High rate (10 Gbps = 1.25 GB/s): rate/10
+        // 10 Gbps = 1.25 GB/s: rate/2 = 625 MB, capped to 100 MB
         let b = compute_default_burst(1_250_000_000);
-        assert_eq!(b, 125_000_000); // 100ms burst
+        assert_eq!(b, 100 * 1024 * 1024);
 
-        // Very low rate: minimum 64KB
+        // Very low rate: clamped to min 5 MB
         let b = compute_default_burst(1000);
-        assert_eq!(b, 65536);
+        assert_eq!(b, 5 * 1024 * 1024);
     }
 }
