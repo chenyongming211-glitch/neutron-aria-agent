@@ -1,15 +1,10 @@
 use crate::common::{QosKey, TokenBucket, DIR_EGRESS, DIR_INGRESS};
 use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, FIREWALL_CONFIG};
-use aya_ebpf::bindings::bpf_spin_lock;
+use aya_ebpf::helpers::gen::{bpf_spin_lock, bpf_spin_unlock};
 
 /// QoS mode constants
 const QOS_MODE_POLICING: u8 = 0;
 const QOS_MODE_SHAPING: u8 = 1;
-
-extern "C" {
-    fn bpf_spin_lock(lock: *mut bpf_spin_lock) -> i64;
-    fn bpf_spin_unlock(lock: *mut bpf_spin_lock) -> i64;
-}
 
 /// Check if QoS is globally enabled. When no QoS rules are configured,
 /// the control plane sets this to 0, allowing fast-path to skip LPM lookups entirely.
