@@ -95,7 +95,6 @@ pub unsafe fn apply_qos_egress(
                 let tokens = if new_tokens > burst { burst } else { new_tokens };
 
                 let result;
-                let mut pass = false;
                 if mode == QOS_MODE_SHAPING {
                     if tokens >= pkt_len as u64 {
                         (*bucket).tokens = tokens - pkt_len as u64;
@@ -103,7 +102,6 @@ pub unsafe fn apply_qos_egress(
                         if (*bucket).last_edt < now_ns {
                             (*bucket).last_edt = 0;
                         }
-                        pass = true;
                         result = (0u64, priority);
                     } else {
                         let deficit = pkt_len as u64 - tokens;
@@ -114,27 +112,22 @@ pub unsafe fn apply_qos_egress(
                         let edt = base + delay_ns;
                         (*bucket).last_edt = edt;
                         result = (edt, priority);
-                        // Shaping still "sends" the packet delayed, so advance time
-                        pass = true;
                     }
                 } else {
                     // Policing mode
                     if tokens >= pkt_len as u64 {
                         (*bucket).tokens = tokens - pkt_len as u64;
-                        pass = true;
                         result = (0u64, priority);
                     } else {
-                        // Drop: zero tokens, but DON'T advance last_refill_ns
-                        // so elapsed time accumulates across drops
-                        (*bucket).tokens = 0;
+                        // Drop: write back refilled tokens (don't deduct pkt_len)
+                        // Packet was dropped so no bandwidth was consumed,
+                        // but the refill MUST be persisted or it's lost.
+                        (*bucket).tokens = tokens;
                         result = (u64::MAX, priority);
                     }
                 }
 
-                // Only advance last_refill_ns when packet is passed/shaped
-                if pass {
-                    (*bucket).last_refill_ns = now_ns;
-                }
+                (*bucket).last_refill_ns = now_ns;
 
                 return result;
             } else {
@@ -193,15 +186,14 @@ pub unsafe fn apply_qos_ingress(
                 let pass;
                 if tokens >= pkt_len as u64 {
                     (*bucket).tokens = tokens - pkt_len as u64;
-                    (*bucket).last_refill_ns = now_ns;
                     pass = true;
                 } else {
-                    // Drop: zero tokens, don't advance last_refill_ns
-                    // so elapsed time accumulates across drops
-                    (*bucket).tokens = 0;
+                    // Drop: write back refilled tokens (don't deduct pkt_len)
+                    (*bucket).tokens = tokens;
                     pass = false;
                 }
 
+                (*bucket).last_refill_ns = now_ns;
                 return pass;
             } else {
                 let new_bucket = TokenBucket {
