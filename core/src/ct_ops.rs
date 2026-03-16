@@ -25,8 +25,8 @@ pub fn ct_list(pin_path: &str) -> Result<Vec<CtEntry>, String> {
             for item in map.iter() {
                 if let Ok((key, val)) = item {
                     entries.push(CtEntry {
-                        src_ip: format!("{}", Ipv4Addr::from(key.src_ip.to_be())),
-                        dst_ip: format!("{}", Ipv4Addr::from(key.dst_ip.to_be())),
+                        src_ip: format!("{}", Ipv4Addr::from(key.src_ip)),
+                        dst_ip: format!("{}", Ipv4Addr::from(key.dst_ip)),
                         src_port: key.src_port,
                         dst_port: key.dst_port,
                         proto: key.proto,

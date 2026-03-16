@@ -102,8 +102,8 @@ pub fn get_top_flows_v4(pin_path: &str, n: usize) -> Result<Vec<FlowStatsEntry>,
                 let (packets, bytes, last_seen) = sum_per_cpu_flow_stats(values);
                 if packets > 0 {
                     entries.push(FlowStatsEntry {
-                        src_ip: Ipv4Addr::from(key.src_ip.to_be()),
-                        dst_ip: Ipv4Addr::from(key.dst_ip.to_be()),
+                        src_ip: Ipv4Addr::from(key.src_ip),
+                        dst_ip: Ipv4Addr::from(key.dst_ip),
                         src_port: key.src_port,
                         dst_port: key.dst_port,
                         proto: key.proto,
