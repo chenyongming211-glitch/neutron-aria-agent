@@ -125,15 +125,8 @@ pub unsafe fn apply_qos_egress(
                     }
                 }
 
-                // Precise last_refill_ns advancement to avoid truncation
-                if new_tokens >= burst {
-                    // Tokens capped at burst — snap to now, no fractional loss
-                    (*bucket).last_refill_ns = now_ns;
-                } else if refill > 0 {
-                    // Advance only by time consumed for actual refill (preserves remainder)
-                    (*bucket).last_refill_ns += refill * 1_000_000_000 / rate;
-                }
-                // else: refill == 0, don't advance (accumulate fractional nanoseconds)
+                // Always advance last_refill_ns to now
+                (*bucket).last_refill_ns = now_ns;
 
                 return result;
             } else {
