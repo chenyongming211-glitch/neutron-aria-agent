@@ -5,7 +5,7 @@ mod api_client;
 const DEFAULT_API_URL: &str = "http://127.0.0.1:8080";
 
 #[derive(Parser)]
-#[command(name = "firewall-ctl")]
+#[command(name = "ariactl")]
 #[command(about = "eBPF/XDP Firewall Control Plane")]
 struct Cli {
     #[command(subcommand)]

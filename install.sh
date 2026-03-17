@@ -23,9 +23,9 @@ mkdir -p "$AGENT_STATE_DIR"
 mkdir -p "$AGENT_CONFIG_DIR"
 
 # Install binary
-echo "Installing firewall-ctl to $INSTALL_DIR..."
-cp target/x86_64-unknown-linux-gnu/release/firewall-ctl "$INSTALL_DIR/"
-chmod +x "$INSTALL_DIR/firewall-ctl"
+echo "Installing ariactl to $INSTALL_DIR..."
+cp target/x86_64-unknown-linux-gnu/release/ariactl "$INSTALL_DIR/"
+chmod +x "$INSTALL_DIR/ariactl"
 
 # Install agent binary (if built)
 if [ -f target/x86_64-unknown-linux-gnu/release/aria-agent ]; then
@@ -55,7 +55,7 @@ systemctl daemon-reload
 echo ""
 echo "Installation complete!"
 echo ""
-echo "=== Single-interface mode (firewall-ctl) ==="
+echo "=== Single-interface mode (ariactl) ==="
 echo "  sudo systemctl enable aria-firewall"
 echo "  sudo systemctl start aria-firewall"
 echo ""

@@ -42,91 +42,91 @@ cargo build --release
 
 ```bash
 # 启动防火墙
-sudo firewall-ctl system start --iface eth0
+sudo ariactl system start --iface eth0
 
 # 添加 IP 组
-sudo firewall-ctl group add --name web --cidr 10.0.0.0/8
-sudo firewall-ctl group add --name db --cidr 192.168.1.0/24
+sudo ariactl group add --name web --cidr 10.0.0.0/8
+sudo ariactl group add --name db --cidr 192.168.1.0/24
 
 # 添加策略（入向：允许 web 到 db 的 TCP 3306）
-sudo firewall-ctl policy add \
+sudo ariactl policy add \
   --src-group web --dst-group db \
   --proto tcp --ports 3306 \
   --action accept --direction ingress
 
 # 添加策略（出向：允许所有到 web 的 HTTP/HTTPS）
-sudo firewall-ctl policy add \
+sudo ariactl policy add \
   --src-group any --dst-group web \
   --proto tcp --ports 80,443 \
   --action accept --direction egress
 
 # 查看
-sudo firewall-ctl policy list
-sudo firewall-ctl group list
+sudo ariactl policy list
+sudo ariactl group list
 
 # 停止
-sudo firewall-ctl system stop
+sudo ariactl system stop
 ```
 
 ### QoS 限速
 
 ```bash
 # 出向限速（EDT shaping）
-sudo firewall-ctl qos add --group web --direction egress --rate 100mbps --burst 1mb
+sudo ariactl qos add --group web --direction egress --rate 100mbps --burst 1mb
 
 # 入向限速（policing，超限直接丢包）
-sudo firewall-ctl qos add --group web --direction ingress --rate 50mbps
+sudo ariactl qos add --group web --direction ingress --rate 50mbps
 
 # 查看 QoS 规则
-sudo firewall-ctl qos list
+sudo ariactl qos list
 
 # 删除
-sudo firewall-ctl qos delete --group web --direction egress
+sudo ariactl qos delete --group web --direction egress
 ```
 
 ### 连接跟踪
 
 ```bash
 # 查看活跃连接
-sudo firewall-ctl conntrack list
+sudo ariactl conntrack list
 
 # 清空连接表
-sudo firewall-ctl conntrack flush
+sudo ariactl conntrack flush
 ```
 
 ### 运行时配置
 
 ```bash
 # 查看当前配置（conntrack/monitoring 开关、CPU 数）
-sudo firewall-ctl config show
+sudo ariactl config show
 
 # 关闭连接跟踪
-sudo firewall-ctl config set conntrack off
+sudo ariactl config set conntrack off
 
 # 关闭流量监控
-sudo firewall-ctl config set monitoring off
+sudo ariactl config set monitoring off
 ```
 
 ### 监控与统计
 
 ```bash
 # 概览
-sudo firewall-ctl stats
+sudo ariactl stats
 
 # 按规则统计
-sudo firewall-ctl stats --rules
+sudo ariactl stats --rules
 
 # Top 流量
-sudo firewall-ctl stats --flows --top 20
+sudo ariactl stats --flows --top 20
 
 # 连接跟踪摘要
-sudo firewall-ctl stats --conntrack
+sudo ariactl stats --conntrack
 
 # QoS 状态
-sudo firewall-ctl stats --qos
+sudo ariactl stats --qos
 
 # 实时仪表盘（2 秒刷新）
-sudo firewall-ctl monitor --interval 2
+sudo ariactl monitor --interval 2
 ```
 
 ## 命令参考
@@ -147,7 +147,7 @@ sudo firewall-ctl monitor --interval 2
 ## 技术架构
 
 ```
-                 firewall-ctl (CLI)          aria-agent (daemon)
+                 ariactl (CLI)          aria-agent (daemon)
                        │                          │
                        ▼                          ▼
               ┌─────────────────────────────────────────────┐
@@ -198,7 +198,7 @@ aria-firewall/
 │   ├── ct_ops.rs        连接跟踪 map 操作
 │   └── common.rs        共享数据结构（与 eBPF 侧 repr(C) 对齐）
 ├── user/src/            — CLI 控制面
-│   ├── main.rs          firewall-ctl 命令实现
+│   ├── main.rs          ariactl 命令实现
 │   └── manager.rs       系统启停管理
 ├── agent/src/           — 多实例守护进程
 │   ├── main.rs          aria-agent 入口

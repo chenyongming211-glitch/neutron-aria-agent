@@ -24,7 +24,7 @@ cp -r * %{_builddir}/aria-firewall-%{version}/
 
 %install
 # Install binary
-install -Dm755 %{_builddir}/aria-firewall-%{version}/target/x86_64-unknown-linux-gnu/release/firewall-ctl %{buildroot}%{_bindir}/firewall-ctl
+install -Dm755 %{_builddir}/aria-firewall-%{version}/target/x86_64-unknown-linux-gnu/release/ariactl %{buildroot}%{_bindir}/ariactl
 
 # Install eBPF library
 install -Dm755 %{_builddir}/aria-firewall-%{version}/target/x86_64-unknown-linux-gnu/release/libebpf_firewall.so %{buildroot}%{_libdir}/libebpf_firewall.so
@@ -37,7 +37,7 @@ mkdir -p %{buildroot}%{_localstatedir}/lib/aria-firewall
 mkdir -p %{buildroot}%{_sysconfdir}/aria-firewall
 
 %files
-%{_bindir}/firewall-ctl
+%{_bindir}/ariactl
 %{_libdir}/libebpf_firewall.so
 %{_unitdir}/aria-firewall.service
 %dir %attr(0755,root,root) %{_localstatedir}/lib/aria-firewall

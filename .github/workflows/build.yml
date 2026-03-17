@@ -58,22 +58,22 @@ jobs:
           find target/bpfel-unknown-none -type f ! -path "*/deps/*" ! -path "*/.fingerprint/*" ! -name "*.d" ! -name "*.rlib" 2>/dev/null | head -20
 
       - name: Build userspace (static)
-        run: cargo +stable build --release -p firewall-ctl --target x86_64-unknown-linux-musl
+        run: cargo +stable build --release -p ariactl --target x86_64-unknown-linux-musl
 
       - name: Build agent (static)
         run: cargo +stable build --release -p aria-agent --target x86_64-unknown-linux-musl
 
       - name: Verify static binaries
         run: |
-          file target/x86_64-unknown-linux-musl/release/firewall-ctl
-          ldd target/x86_64-unknown-linux-musl/release/firewall-ctl 2>&1 || true
+          file target/x86_64-unknown-linux-musl/release/ariactl
+          ldd target/x86_64-unknown-linux-musl/release/ariactl 2>&1 || true
           file target/x86_64-unknown-linux-musl/release/aria-agent
           ldd target/x86_64-unknown-linux-musl/release/aria-agent 2>&1 || true
 
       - name: Prepare release files
         run: |
           mkdir -p release
-          cp target/x86_64-unknown-linux-musl/release/firewall-ctl release/
+          cp target/x86_64-unknown-linux-musl/release/ariactl release/
           cp target/x86_64-unknown-linux-musl/release/aria-agent release/
           # eBPF 产物搜索 ebpf/target 和 workspace target 两个位置
           find ebpf/target target/bpfel-unknown-none -maxdepth 3 -name "*ebpf_firewall*" -type f ! -name "*.d" 2>/dev/null | while read f; do
