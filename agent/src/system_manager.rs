@@ -66,6 +66,11 @@ pub async fn system_start(
         eprintln!("Warning: TC egress attach failed: {}. Egress control disabled.", e);
     }
 
+    // Attach TC ingress (mirror)
+    if let Err(e) = aria_core::ebpf_ops::attach_tc_ingress(&mut bpf, iface, pin_path) {
+        eprintln!("Warning: TC ingress attach failed: {}. Ingress mirror disabled.", e);
+    }
+
     // Setup FQ qdisc for QoS EDT
     if let Err(e) = setup_fq_qdisc(iface) {
         eprintln!("Warning: FQ qdisc setup failed: {}. QoS EDT disabled.", e);
@@ -136,7 +141,15 @@ pub async fn system_stop(
             let tc_link_pin = format!("{}/tc_egress_link", pin_path);
             if std::path::Path::new(&tc_link_pin).exists() {
                 if let Err(e) = fs::remove_file(&tc_link_pin) {
-                    eprintln!("Warning: failed to remove pinned TC link: {}", e);
+                    eprintln!("Warning: failed to remove pinned TC egress link: {}", e);
+                }
+            }
+
+            // Remove pinned TC ingress link
+            let tc_ingress_link_pin = format!("{}/tc_ingress_link", pin_path);
+            if std::path::Path::new(&tc_ingress_link_pin).exists() {
+                if let Err(e) = fs::remove_file(&tc_ingress_link_pin) {
+                    eprintln!("Warning: failed to remove pinned TC ingress link: {}", e);
                 }
             }
 

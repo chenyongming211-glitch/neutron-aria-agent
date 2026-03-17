@@ -38,6 +38,19 @@ pub struct QosRuleInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirrorRuleInfo {
+    pub src_group_name: String,
+    pub src_group_id: u32,
+    pub dst_group_name: String,
+    pub dst_group_id: u32,
+    pub proto: u8,
+    pub direction: u8,
+    pub target_iface: String,
+    pub target_ifindex: u32,
+    pub is_global: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortSetInfo {
     pub bitmap_idx: u32,
     pub ports_normalized: String,
@@ -87,6 +100,10 @@ pub struct FirewallState {
     pub acl_enabled: bool,
     #[serde(default = "default_true")]
     pub qos_enabled: bool,
+    #[serde(default)]
+    pub mirror_rules: Vec<MirrorRuleInfo>,
+    #[serde(default = "default_true")]
+    pub mirror_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -109,6 +126,8 @@ impl Default for FirewallState {
             monitoring_enabled: true,
             acl_enabled: true,
             qos_enabled: true,
+            mirror_rules: Vec::new(),
+            mirror_enabled: true,
         }
     }
 }
@@ -650,9 +669,9 @@ impl StateManager {
         })
     }
 
-    pub fn get_config(&self) -> Result<(bool, bool, bool, bool), String> {
+    pub fn get_config(&self) -> Result<(bool, bool, bool, bool, bool), String> {
         let state = self._load_readonly()?;
-        Ok((state.conntrack_enabled, state.monitoring_enabled, state.acl_enabled, state.qos_enabled))
+        Ok((state.conntrack_enabled, state.monitoring_enabled, state.acl_enabled, state.qos_enabled, state.mirror_enabled))
     }
 
     pub fn set_acl_enabled(&self, enabled: bool) -> Result<(), String> {
@@ -665,6 +684,15 @@ impl StateManager {
     pub fn set_qos_enabled(&self, enabled: bool) -> Result<(), String> {
         self.with_state(|state| {
             state.qos_enabled = enabled;
+            Ok(())
+        })
+    }
+
+    // --- Mirror state management ---
+
+    pub fn set_mirror_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.with_state(|state| {
+            state.mirror_enabled = enabled;
             Ok(())
         })
     }

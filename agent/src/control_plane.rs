@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use aria_core::state::{FirewallState, GroupInfo, RuleInfo, QosRuleInfo};
+use aria_core::state::{FirewallState, GroupInfo, RuleInfo, QosRuleInfo, MirrorRuleInfo};
 use aria_core::wal::{WalEntry, WalWriter};
 
 const WAL_COMPACT_THRESHOLD: u64 = 1000;
@@ -271,6 +271,15 @@ impl ControlPlane {
             }
         }
 
+        // Also check mirror rules
+        for mr in &state.state.mirror_rules {
+            if mr.src_group_id == group.id || mr.dst_group_id == group.id {
+                return Err(ControlPlaneError::GroupInUse(
+                    format!("Group '{}' is referenced by a mirror rule", name)
+                ));
+            }
+        }
+
         // Delete from kernel
         let mut errors = Vec::new();
         for cidr in &group.cidrs {
@@ -518,6 +527,142 @@ impl ControlPlane {
         Ok(())
     }
 
+    // ── Mirror ──
+
+    pub async fn list_mirror(&self, instance: &str) -> Result<Vec<MirrorRuleInfo>, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        Ok(state.state.mirror_rules.clone())
+    }
+
+    pub async fn add_mirror(
+        &self,
+        instance: &str,
+        src_group: &str,
+        dst_group: &str,
+        proto: u8,
+        direction: u8,
+        target_iface: &str,
+    ) -> Result<(), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        Self::check_xdp_ready(&state.pin_path)?;
+
+        let src_id = self.resolve_group_id(&state.state, src_group)?;
+        let dst_id = self.resolve_group_id(&state.state, dst_group)?;
+
+        let target_ifindex = aria_core::mirror_ops::resolve_ifindex(target_iface)
+            .map_err(|e| ControlPlaneError::ValidationError(e))?;
+
+        let is_global = src_id == 0 && dst_id == 0 && proto == 0;
+
+        if is_global {
+            if let Err(e) = aria_core::mirror_ops::add_global_mirror(direction, target_ifindex, &state.pin_path, state.state.mirror_enabled) {
+                return Err(ControlPlaneError::KernelError(e));
+            }
+        } else {
+            if let Err(e) = aria_core::mirror_ops::add_mirror_rule(src_id, dst_id, proto, direction, target_ifindex, &state.pin_path, state.state.mirror_enabled) {
+                return Err(ControlPlaneError::KernelError(e));
+            }
+        }
+
+        // Update in-memory state
+        if is_global {
+            state.state.mirror_rules.retain(|r| !(r.is_global && r.direction == direction));
+        } else {
+            state.state.mirror_rules.retain(|r| !(r.src_group_id == src_id && r.dst_group_id == dst_id && r.proto == proto && r.direction == direction && !r.is_global));
+        }
+        state.state.mirror_rules.push(MirrorRuleInfo {
+            src_group_name: src_group.to_string(),
+            src_group_id: src_id,
+            dst_group_name: dst_group.to_string(),
+            dst_group_id: dst_id,
+            proto,
+            direction,
+            target_iface: target_iface.to_string(),
+            target_ifindex,
+            is_global,
+        });
+
+        if let Err(e) = state.wal.append(&WalEntry::AddMirror {
+            src_group_name: src_group.to_string(),
+            src_group_id: src_id,
+            dst_group_name: dst_group.to_string(),
+            dst_group_id: dst_id,
+            proto,
+            direction,
+            target_iface: target_iface.to_string(),
+            target_ifindex,
+            is_global,
+        }) {
+            eprintln!("[ControlPlane] WAL append failed (add_mirror): {}", e);
+        }
+        Ok(())
+    }
+
+    pub async fn delete_mirror(
+        &self,
+        instance: &str,
+        src_group: &str,
+        dst_group: &str,
+        proto: u8,
+        direction: u8,
+    ) -> Result<(), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        Self::check_xdp_ready(&state.pin_path)?;
+
+        let src_id = self.resolve_group_id(&state.state, src_group)?;
+        let dst_id = self.resolve_group_id(&state.state, dst_group)?;
+
+        let is_global = src_id == 0 && dst_id == 0 && proto == 0;
+
+        // Validate rule exists
+        let exists = if is_global {
+            state.state.mirror_rules.iter().any(|r| r.is_global && r.direction == direction)
+        } else {
+            state.state.mirror_rules.iter().any(|r| r.src_group_id == src_id && r.dst_group_id == dst_id && r.proto == proto && r.direction == direction && !r.is_global)
+        };
+        if !exists {
+            return Err(ControlPlaneError::PolicyNotFound("Mirror rule not found".to_string()));
+        }
+
+        if is_global {
+            if let Err(e) = aria_core::mirror_ops::delete_global_mirror(direction, &state.pin_path, state.state.mirror_enabled) {
+                return Err(ControlPlaneError::KernelError(e));
+            }
+        } else {
+            if let Err(e) = aria_core::mirror_ops::delete_mirror_rule(src_id, dst_id, proto, direction, &state.pin_path, state.state.mirror_enabled) {
+                return Err(ControlPlaneError::KernelError(e));
+            }
+        }
+
+        if is_global {
+            state.state.mirror_rules.retain(|r| !(r.is_global && r.direction == direction));
+        } else {
+            state.state.mirror_rules.retain(|r| !(r.src_group_id == src_id && r.dst_group_id == dst_id && r.proto == proto && r.direction == direction && !r.is_global));
+        }
+
+        if let Err(e) = state.wal.append(&WalEntry::DeleteMirror {
+            src_group_id: src_id,
+            dst_group_id: dst_id,
+            proto,
+            direction,
+            is_global,
+        }) {
+            eprintln!("[ControlPlane] WAL append failed (delete_mirror): {}", e);
+        }
+        Ok(())
+    }
+
+    pub async fn get_mirror_stats(&self, instance: &str) -> Result<(Vec<aria_core::monitoring::MirrorStatsEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        let stats = aria_core::monitoring::get_mirror_stats(&state.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))?;
+        Ok((stats, state.state.groups.clone()))
+    }
+
     // ── Conntrack ──
 
     pub async fn list_conntrack(&self, instance: &str) -> Result<Vec<aria_core::ct_ops::CtEntry>, ControlPlaneError> {
@@ -550,6 +695,7 @@ impl ControlPlane {
         monitoring: Option<bool>,
         acl: Option<bool>,
         qos: Option<bool>,
+        mirror: Option<bool>,
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
@@ -557,8 +703,10 @@ impl ControlPlane {
 
         // For QoS, the kernel flag = user_wants_qos && has_rules
         let kernel_qos = qos.map(|q| q && !state.state.qos_rules.is_empty());
+        // For mirror, the kernel flag = user_wants_mirror && has_rules
+        let kernel_mirror = mirror.map(|m| m && !state.state.mirror_rules.is_empty());
 
-        if let Err(e) = aria_core::ebpf_ops::update_firewall_config(&state.pin_path, conntrack, monitoring, acl, kernel_qos) {
+        if let Err(e) = aria_core::ebpf_ops::update_firewall_config(&state.pin_path, conntrack, monitoring, acl, kernel_qos, kernel_mirror) {
             return Err(ControlPlaneError::KernelError(e));
         }
 
@@ -574,12 +722,16 @@ impl ControlPlane {
         if let Some(q) = qos {
             state.state.qos_enabled = q;
         }
+        if let Some(m) = mirror {
+            state.state.mirror_enabled = m;
+        }
 
         if let Err(e) = state.wal.append(&WalEntry::UpdateConfig {
             conntrack,
             monitoring,
             acl,
             qos,
+            mirror,
         }) {
             eprintln!("[ControlPlane] WAL append failed (update_config): {}", e);
         }
@@ -588,7 +740,7 @@ impl ControlPlane {
 
     // ── Stats ──
 
-    pub async fn get_stats_overview(&self, instance: &str) -> Result<(usize, usize, usize, u64, u64), ControlPlaneError> {
+    pub async fn get_stats_overview(&self, instance: &str) -> Result<(usize, usize, usize, usize, u64, u64), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
 
@@ -602,6 +754,7 @@ impl ControlPlane {
             state.state.groups.len(),
             state.state.rules.len(),
             state.state.qos_rules.len(),
+            state.state.mirror_rules.len(),
             ct_summary.total_v4,
             ct_summary.total_v6,
         ))

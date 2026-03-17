@@ -7,6 +7,7 @@ pub use crate::common::{
     RuleStatsValue, FlowStatsValue,
     QosKey, QosConfig, TokenBucket, QosStatsValue,
     GroupStatsKey, GroupStatsValue,
+    MirrorKey, GlobalMirrorKey, MirrorConfig, MirrorStatsValue,
     FirewallConfig,
 };
 
@@ -81,3 +82,17 @@ pub static QOS_STATS: PerCpuHashMap<QosKey, QosStatsValue> = PerCpuHashMap::with
 
 #[map(name = "GROUP_STATS")]
 pub static GROUP_STATS: PerCpuHashMap<GroupStatsKey, GroupStatsValue> = PerCpuHashMap::with_max_entries(8192, 0);
+
+// --- Mirror (Port SPAN) maps ---
+
+#[map(name = "MIRROR_POLICY")]
+pub static MIRROR_POLICY: HashMap<MirrorKey, MirrorConfig> = HashMap::with_max_entries(4096, 0);
+
+#[map(name = "MIRROR_GLOBAL")]
+pub static MIRROR_GLOBAL: HashMap<GlobalMirrorKey, MirrorConfig> = HashMap::with_max_entries(2, 0);
+
+#[map(name = "MIRROR_STATS")]
+pub static MIRROR_STATS: PerCpuHashMap<MirrorKey, MirrorStatsValue> = PerCpuHashMap::with_max_entries(4096, 0);
+
+#[map(name = "MIRROR_GLOBAL_STATS")]
+pub static MIRROR_GLOBAL_STATS: PerCpuHashMap<GlobalMirrorKey, MirrorStatsValue> = PerCpuHashMap::with_max_entries(2, 0);

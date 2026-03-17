@@ -17,7 +17,8 @@ fn sync_qos_enabled(pin_path: &str, enabled: bool) -> Result<(), String> {
         num_cpus: 1,
         qos_enabled: 0,
         acl_enabled: 1,
-        pad: [0; 2],
+        mirror_enabled: 0,
+        pad: [0; 1],
     });
     cfg.qos_enabled = if enabled { 1 } else { 0 };
     map.insert(&0u32, &cfg, 0)

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use aya::maps::{HashMap, LpmTrie, MapData};
 use aya::maps::lpm_trie::Key;
-use crate::common::{PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig};
+use crate::common::{PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig, MirrorKey, GlobalMirrorKey, MirrorConfig};
 use crate::state::FirewallState;
 
 /// 加载 eBPF 程序，并设置 pin 路径以复用已有的 map。
@@ -324,6 +324,7 @@ pub const ALL_MAP_NAMES: &[&str] = &[
     "RULE_STATS", "FLOW_STATS_V4", "FLOW_STATS_V6",
     "QOS_CONFIG", "QOS_TOKEN_BUCKET", "QOS_STATS",
     "GROUP_STATS",
+    "MIRROR_POLICY", "MIRROR_GLOBAL", "MIRROR_STATS", "MIRROR_GLOBAL_STATS",
     "FIREWALL_CONFIG",
 ];
 
@@ -355,7 +356,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
         }
     };
 
-    if state.groups.is_empty() && state.rules.is_empty() && state.qos_rules.is_empty() {
+    if state.groups.is_empty() && state.rules.is_empty() && state.qos_rules.is_empty() && state.mirror_rules.is_empty() {
         println!("State is empty, nothing to replay");
         return;
     }
@@ -591,6 +592,31 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
         }
     }
 
+    // 写 MIRROR_POLICY / MIRROR_GLOBAL
+    if !state.mirror_rules.is_empty() {
+        let mut policy_rules: Vec<(u32, u32, u8, u8, u32)> = Vec::new();
+        let mut global_rules: Vec<(u8, u32)> = Vec::new();
+
+        for mr in &state.mirror_rules {
+            // Re-resolve ifindex at replay time
+            let ifindex = match crate::mirror_ops::resolve_ifindex(&mr.target_iface) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    eprintln!("Warning: mirror target '{}' not found during replay: {}", mr.target_iface, e);
+                    continue;
+                }
+            };
+            if mr.is_global {
+                global_rules.push((mr.direction, ifindex));
+            } else {
+                policy_rules.push((mr.src_group_id, mr.dst_group_id, mr.proto, mr.direction, ifindex));
+            }
+        }
+
+        let mirror_errors = crate::mirror_ops::replay_mirror_rules(bpf, &policy_rules, &global_rules);
+        errors.extend(mirror_errors);
+    }
+
     // 写 FIREWALL_CONFIG（功能开关）
     {
         let raw_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
@@ -601,7 +627,8 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
             num_cpus,
             qos_enabled: if state.qos_enabled && !state.qos_rules.is_empty() { 1 } else { 0 },
             acl_enabled: if state.acl_enabled { 1 } else { 0 },
-            pad: [0; 2],
+            mirror_enabled: if state.mirror_enabled && !state.mirror_rules.is_empty() { 1 } else { 0 },
+            pad: [0; 1],
         };
         match bpf.map_mut("FIREWALL_CONFIG")
             .ok_or_else(|| "FIREWALL_CONFIG not found".to_string())
@@ -617,8 +644,8 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
     }
 
     println!(
-        "Replay complete: {} group CIDRs, {} rules, {} port bitmaps, {} QoS rules written",
-        group_count, rule_count, bitmap_count, state.qos_rules.len()
+        "Replay complete: {} group CIDRs, {} rules, {} port bitmaps, {} QoS rules, {} mirror rules written",
+        group_count, rule_count, bitmap_count, state.qos_rules.len(), state.mirror_rules.len()
     );
     if !errors.is_empty() {
         eprintln!("Replay encountered {} errors:", errors.len());
@@ -687,6 +714,42 @@ pub fn show_stats(pin_path: &str, state_path: &str) -> Result<(), String> {
         println!("  {}: {}", name, status);
     }
 
+    Ok(())
+}
+
+/// Setup TC ingress: add clsact qdisc and attach the tc_ingress classifier program (mirror only).
+/// The TC link is pinned to `{pin_path}/tc_ingress_link` to prevent detach on drop.
+pub fn attach_tc_ingress(bpf: &mut aya::Ebpf, iface: &str, pin_path: &str) -> Result<(), String> {
+    // Add clsact qdisc (idempotent — ignore "File exists")
+    if let Err(e) = aya::programs::tc::qdisc_add_clsact(iface) {
+        let err_str = format!("{:?}", e);
+        if !err_str.contains("File exists") {
+            return Err(format!("qdisc_add_clsact failed: {}", err_str));
+        }
+    }
+
+    let tc_program = bpf
+        .program_mut("tc_ingress")
+        .ok_or("TC ingress program not found")?;
+
+    let tc: &mut aya::programs::SchedClassifier = tc_program
+        .try_into()
+        .map_err(|e: aya::programs::ProgramError| format!("tc_ingress try_into error: {:?}", e))?;
+
+    tc.load().map_err(|e| format!("tc_ingress.load error: {:?}", e))?;
+
+    let link_id = tc.attach(iface, aya::programs::tc::TcAttachType::Ingress)
+        .map_err(|e| format!("tc_ingress attach error: {:?}", e))?;
+
+    let tc_link = tc.take_link(link_id)
+        .map_err(|e| format!("tc_ingress take_link error: {:?}", e))?;
+    let fd_link: aya::programs::links::FdLink = tc_link.try_into()
+        .map_err(|e: aya::programs::links::LinkError| format!("tc_ingress convert to FdLink error: {:?}", e))?;
+    let tc_link_pin = format!("{}/tc_ingress_link", pin_path);
+    let _pinned = fd_link.pin(&tc_link_pin)
+        .map_err(|e| format!("tc_ingress pin link error: {:?}", e))?;
+
+    println!("TC ingress attached to {} (link pinned)", iface);
     Ok(())
 }
 
@@ -763,6 +826,7 @@ pub fn update_firewall_config(
     monitoring_enabled: Option<bool>,
     acl_enabled: Option<bool>,
     qos_enabled: Option<bool>,
+    mirror_enabled: Option<bool>,
 ) -> Result<(), String> {
     let map_path = format!("{}/FIREWALL_CONFIG", pin_path);
     let map_data = MapData::from_pin(&map_path)
@@ -785,6 +849,8 @@ pub fn update_firewall_config(
         .unwrap_or_else(|| current.as_ref().map(|c| c.acl_enabled).unwrap_or(1));
     let qos = qos_enabled.map(|b| if b { 1u8 } else { 0 })
         .unwrap_or_else(|| current.as_ref().map(|c| c.qos_enabled).unwrap_or(0));
+    let mir = mirror_enabled.map(|b| if b { 1u8 } else { 0 })
+        .unwrap_or_else(|| current.as_ref().map(|c| c.mirror_enabled).unwrap_or(0));
 
     let cfg = FirewallConfig {
         conntrack_enabled: ct,
@@ -792,7 +858,8 @@ pub fn update_firewall_config(
         num_cpus: num_cpus_val,
         qos_enabled: qos,
         acl_enabled: acl,
-        pad: [0; 2],
+        mirror_enabled: mir,
+        pad: [0; 1],
     };
     map.insert(&0u32, &cfg, 0)
         .map_err(|e| format!("FIREWALL_CONFIG insert: {:?}", e))?;

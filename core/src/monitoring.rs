@@ -2,6 +2,7 @@ use aya::maps::{HashMap, MapData, PerCpuHashMap, PerCpuValues};
 use crate::common::{
     PolicyKey, RuleStatsValue, FlowStatsValue, CtKey4, CtKey6, CtValue, CT_NEW, CT_ESTABLISHED,
     QosKey, QosStatsValue, GroupStatsKey, GroupStatsValue,
+    MirrorKey, GlobalMirrorKey, MirrorStatsValue,
 };
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -346,6 +347,90 @@ pub fn direction_name(direction: u8) -> &'static str {
         1 => "egress",
         _ => "unknown",
     }
+}
+
+// --- Mirror Statistics ---
+
+pub struct MirrorStatsEntry {
+    pub src_id: u32,
+    pub dst_id: u32,
+    pub proto: u8,
+    pub direction: u8,
+    pub mirrored_packets: u64,
+    pub mirrored_bytes: u64,
+    pub errors: u64,
+    pub is_global: bool,
+}
+
+fn sum_per_cpu_mirror_stats(values: PerCpuValues<MirrorStatsValue>) -> (u64, u64, u64) {
+    let mut mp = 0u64;
+    let mut mb = 0u64;
+    let mut err = 0u64;
+    for v in values.iter() {
+        mp += v.mirrored_packets;
+        mb += v.mirrored_bytes;
+        err += v.errors;
+    }
+    (mp, mb, err)
+}
+
+pub fn get_mirror_stats(pin_path: &str) -> Result<Vec<MirrorStatsEntry>, String> {
+    let mut entries = Vec::new();
+
+    // Per-rule mirror stats
+    let map_path = format!("{}/MIRROR_STATS", pin_path);
+    if let Ok(map_data) = MapData::from_pin(&map_path) {
+        if let Ok(map) = PerCpuHashMap::<_, MirrorKey, MirrorStatsValue>::try_from(
+            aya::maps::Map::PerCpuHashMap(map_data)
+        ) {
+            for item in map.iter() {
+                if let Ok((key, values)) = item {
+                    let (mp, mb, err) = sum_per_cpu_mirror_stats(values);
+                    if mp > 0 || err > 0 {
+                        entries.push(MirrorStatsEntry {
+                            src_id: key.src_id,
+                            dst_id: key.dst_id,
+                            proto: key.proto,
+                            direction: key.direction,
+                            mirrored_packets: mp,
+                            mirrored_bytes: mb,
+                            errors: err,
+                            is_global: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Global mirror stats
+    let map_path = format!("{}/MIRROR_GLOBAL_STATS", pin_path);
+    if let Ok(map_data) = MapData::from_pin(&map_path) {
+        if let Ok(map) = PerCpuHashMap::<_, GlobalMirrorKey, MirrorStatsValue>::try_from(
+            aya::maps::Map::PerCpuHashMap(map_data)
+        ) {
+            for item in map.iter() {
+                if let Ok((key, values)) = item {
+                    let (mp, mb, err) = sum_per_cpu_mirror_stats(values);
+                    if mp > 0 || err > 0 {
+                        entries.push(MirrorStatsEntry {
+                            src_id: 0,
+                            dst_id: 0,
+                            proto: 0,
+                            direction: key.direction,
+                            mirrored_packets: mp,
+                            mirrored_bytes: mb,
+                            errors: err,
+                            is_global: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| b.mirrored_bytes.cmp(&a.mirrored_bytes));
+    Ok(entries)
 }
 
 #[cfg(test)]

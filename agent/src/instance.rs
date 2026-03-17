@@ -75,6 +75,11 @@ impl FirewallInstance {
             eprintln!("[{}] Warning: TC egress attach failed: {}. Egress control disabled.", self.iface, e);
         }
 
+        // Attach TC ingress (mirror)
+        if let Err(e) = aria_core::ebpf_ops::attach_tc_ingress(&mut bpf, &self.iface, pin_path_str) {
+            eprintln!("[{}] Warning: TC ingress attach failed: {}. Ingress mirror disabled.", self.iface, e);
+        }
+
         // Setup FQ qdisc for QoS EDT
         if let Err(e) = aria_core::ebpf_ops::setup_fq_qdisc(&self.iface) {
             eprintln!("[{}] Warning: FQ qdisc setup failed: {}. QoS EDT disabled.", self.iface, e);
@@ -128,6 +133,8 @@ impl FirewallInstance {
 
         // Detach TC egress
         aria_core::ebpf_ops::detach_tc_egress(&self.iface);
+
+        // Note: TC ingress link is cleaned up when pin directory is removed
 
         // Clean up all pinned maps and programs
         if self.pin_path.exists() {

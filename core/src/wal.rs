@@ -17,7 +17,9 @@ pub enum WalEntry {
     RemoveRule { src_id: u32, dst_id: u32, proto: u8, direction: u8 },
     AddQos { group_name: String, group_id: u32, direction: u8, rate_bps: u64, burst_bytes: u64, priority: u8, #[serde(default)] mode: u8 },
     DeleteQos { group_id: u32, direction: u8 },
-    UpdateConfig { conntrack: Option<bool>, monitoring: Option<bool>, #[serde(default)] acl: Option<bool>, #[serde(default)] qos: Option<bool> },
+    AddMirror { src_group_name: String, src_group_id: u32, dst_group_name: String, dst_group_id: u32, proto: u8, direction: u8, target_iface: String, target_ifindex: u32, is_global: bool },
+    DeleteMirror { src_group_id: u32, dst_group_id: u32, proto: u8, direction: u8, is_global: bool },
+    UpdateConfig { conntrack: Option<bool>, monitoring: Option<bool>, #[serde(default)] acl: Option<bool>, #[serde(default)] qos: Option<bool>, #[serde(default)] mirror: Option<bool> },
     SetMaxPortPolicies { max: u32 },
     SetAttachedIface { iface: String },
     ClearAttachedIface,
@@ -165,7 +167,33 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) {
         WalEntry::DeleteQos { group_id, direction } => {
             state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
         }
-        WalEntry::UpdateConfig { conntrack, monitoring, acl, qos } => {
+        WalEntry::AddMirror { src_group_name, src_group_id, dst_group_name, dst_group_id, proto, direction, target_iface, target_ifindex, is_global } => {
+            use crate::state::MirrorRuleInfo;
+            if is_global {
+                state.mirror_rules.retain(|r| !(r.is_global && r.direction == direction));
+            } else {
+                state.mirror_rules.retain(|r| !(r.src_group_id == src_group_id && r.dst_group_id == dst_group_id && r.proto == proto && r.direction == direction && !r.is_global));
+            }
+            state.mirror_rules.push(MirrorRuleInfo {
+                src_group_name,
+                src_group_id,
+                dst_group_name,
+                dst_group_id,
+                proto,
+                direction,
+                target_iface,
+                target_ifindex,
+                is_global,
+            });
+        }
+        WalEntry::DeleteMirror { src_group_id, dst_group_id, proto, direction, is_global } => {
+            if is_global {
+                state.mirror_rules.retain(|r| !(r.is_global && r.direction == direction));
+            } else {
+                state.mirror_rules.retain(|r| !(r.src_group_id == src_group_id && r.dst_group_id == dst_group_id && r.proto == proto && r.direction == direction && !r.is_global));
+            }
+        }
+        WalEntry::UpdateConfig { conntrack, monitoring, acl, qos, mirror } => {
             if let Some(ct) = conntrack {
                 state.conntrack_enabled = ct;
             }
@@ -177,6 +205,9 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) {
             }
             if let Some(q) = qos {
                 state.qos_enabled = q;
+            }
+            if let Some(m) = mirror {
+                state.mirror_enabled = m;
             }
         }
         WalEntry::SetMaxPortPolicies { max } => {

@@ -164,6 +164,43 @@ pub struct GroupStatsValue {
 }
 unsafe impl Pod for GroupStatsValue {}
 
+// --- Mirror (Port SPAN) ---
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct MirrorKey {
+    pub src_id: u32,
+    pub dst_id: u32,
+    pub proto: u8,
+    pub direction: u8,
+    pub pad: [u8; 2],
+}
+unsafe impl Pod for MirrorKey {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct GlobalMirrorKey {
+    pub direction: u8,
+    pub pad: [u8; 3],
+}
+unsafe impl Pod for GlobalMirrorKey {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct MirrorConfig {
+    pub target_ifindex: u32,
+}
+unsafe impl Pod for MirrorConfig {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct MirrorStatsValue {
+    pub mirrored_packets: u64,
+    pub mirrored_bytes: u64,
+    pub errors: u64,
+}
+unsafe impl Pod for MirrorStatsValue {}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct FirewallConfig {
@@ -172,7 +209,8 @@ pub struct FirewallConfig {
     pub num_cpus: u16,
     pub qos_enabled: u8,
     pub acl_enabled: u8,
-    pub pad: [u8; 2],
+    pub mirror_enabled: u8,
+    pub pad: [u8; 1],
 }
 unsafe impl Pod for FirewallConfig {}
 

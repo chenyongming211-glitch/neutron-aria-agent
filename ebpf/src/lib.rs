@@ -16,6 +16,7 @@ mod conntrack;
 mod stats;
 mod qos;
 mod policy;
+mod mirror;
 
 use common::{
     CtKey4, CtKey6,
@@ -197,6 +198,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
     let now = bpf_ktime_get_ns();
     let qos_on = qos::qos_enabled();
+    let mirror_on = mirror::mirror_enabled();
 
     if info.is_ipv6 {
         let ct_key = CtKey6 {
@@ -212,7 +214,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
                 stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
                 stats::update_flow_stats_v6(&ct_key, pkt_len, now);
-                let need_ids = qos_on || stats::monitoring_enabled();
+                let need_ids = qos_on || mirror_on || stats::monitoring_enabled();
                 if need_ids {
                     let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
                     let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
@@ -224,6 +226,10 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                     // Group stats after QoS
                     stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
                     stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
+                    if mirror_on {
+                        let skb = ctx.as_ptr() as *mut __sk_buff;
+                        mirror::try_mirror_tc(skb, src_id, dst_id, info.proto, DIR_EGRESS, pkt_len);
+                    }
                 }
                 return TC_ACT_OK;
             }
@@ -242,6 +248,10 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             }
             stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
             stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
+            if mirror_on {
+                let skb = ctx.as_ptr() as *mut __sk_buff;
+                mirror::try_mirror_tc(skb, src_id, dst_id, info.proto, DIR_EGRESS, pkt_len);
+            }
             return TC_ACT_OK;
         }
 
@@ -259,6 +269,10 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             // Group stats after QoS
             stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
             stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
+            if mirror_on {
+                let skb = ctx.as_ptr() as *mut __sk_buff;
+                mirror::try_mirror_tc(skb, src_id, dst_id, info.proto, DIR_EGRESS, pkt_len);
+            }
             conntrack::ct_create_v6(&ct_key, now, pkt_len, &matched);
         }
 
@@ -277,7 +291,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
                 stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
                 stats::update_flow_stats_v4(&ct_key, pkt_len, now);
-                let need_ids = qos_on || stats::monitoring_enabled();
+                let need_ids = qos_on || mirror_on || stats::monitoring_enabled();
                 if need_ids {
                     let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
                     let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
@@ -289,6 +303,10 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                     // Group stats after QoS
                     stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
                     stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
+                    if mirror_on {
+                        let skb = ctx.as_ptr() as *mut __sk_buff;
+                        mirror::try_mirror_tc(skb, src_id, dst_id, info.proto, DIR_EGRESS, pkt_len);
+                    }
                 }
                 return TC_ACT_OK;
             }
@@ -307,6 +325,10 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             }
             stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
             stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
+            if mirror_on {
+                let skb = ctx.as_ptr() as *mut __sk_buff;
+                mirror::try_mirror_tc(skb, src_id, dst_id, info.proto, DIR_EGRESS, pkt_len);
+            }
             return TC_ACT_OK;
         }
 
@@ -324,11 +346,55 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             // Group stats after QoS
             stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
             stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
+            if mirror_on {
+                let skb = ctx.as_ptr() as *mut __sk_buff;
+                mirror::try_mirror_tc(skb, src_id, dst_id, info.proto, DIR_EGRESS, pkt_len);
+            }
             conntrack::ct_create_v4(&ct_key, now, pkt_len, &matched);
         }
 
         result
     }
+}
+
+// --- TC Ingress (mirror only) ---
+
+#[classifier]
+pub fn tc_ingress(ctx: TcContext) -> i32 {
+    unsafe { try_tc_ingress(ctx) }
+}
+
+unsafe fn try_tc_ingress(ctx: TcContext) -> i32 {
+    if !mirror::mirror_enabled() {
+        return TC_ACT_OK;
+    }
+
+    let data = ctx.data();
+    let data_end = ctx.data_end();
+    let pkt_len = ctx.len();
+
+    let info = match parser::parse_eth_ipv4(data, data_end, 0) {
+        Some(i) => i,
+        None => match parser::parse_eth_ipv6(data, data_end, 0) {
+            Some(i) => i,
+            None => return TC_ACT_OK,
+        },
+    };
+
+    let (src_id, dst_id) = if info.is_ipv6 {
+        let s = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
+        let d = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
+        (s, d)
+    } else {
+        let s = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
+        let d = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
+        (s, d)
+    };
+
+    let skb = ctx.as_ptr() as *mut __sk_buff;
+    mirror::try_mirror_tc(skb, src_id, dst_id, info.proto, DIR_INGRESS, pkt_len);
+
+    TC_ACT_OK
 }
 
 // --- Helpers ---

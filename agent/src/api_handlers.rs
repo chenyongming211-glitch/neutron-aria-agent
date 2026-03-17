@@ -381,6 +381,7 @@ pub async fn get_config(
             monitoring: cfg.monitoring_enabled != 0,
             acl: cfg.acl_enabled != 0,
             qos: cfg.qos_enabled != 0,
+            mirror: cfg.mirror_enabled != 0,
             num_cpus: cfg.num_cpus,
         })),
         Err(e) => Err(err_response(e)),
@@ -392,7 +393,7 @@ pub async fn update_config(
     Path(instance): Path<String>,
     Json(req): Json<UpdateConfigRequest>,
 ) -> impl IntoResponse {
-    match cp.update_config(&instance, req.conntrack, req.monitoring, req.acl, req.qos).await {
+    match cp.update_config(&instance, req.conntrack, req.monitoring, req.acl, req.qos, req.mirror).await {
         Ok(()) => Ok(Json(MessageResponse {
             message: "Configuration updated".to_string(),
         })),
@@ -407,10 +408,11 @@ pub async fn stats_overview(
     Path(instance): Path<String>,
 ) -> impl IntoResponse {
     match cp.get_stats_overview(&instance).await {
-        Ok((groups, policies, qos_rules, ct_v4, ct_v6)) => Ok(Json(StatsOverview {
+        Ok((groups, policies, qos_rules, mirror_rules, ct_v4, ct_v6)) => Ok(Json(StatsOverview {
             groups,
             policies,
             qos_rules,
+            mirror_rules,
             conntrack_v4: ct_v4,
             conntrack_v6: ct_v6,
         })),
@@ -543,6 +545,119 @@ pub async fn stats_groups(
                     direction: direction_to_string(e.key.direction),
                     packets: e.packets,
                     bytes: e.bytes,
+                }).collect(),
+            }))
+        }
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+// ── Mirror ──
+
+pub async fn list_mirror(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    match cp.list_mirror(&instance).await {
+        Ok(rules) => Ok(Json(MirrorListResponse {
+            rules: rules.into_iter().map(|r| MirrorEntry {
+                src_group: r.src_group_name,
+                src_group_id: r.src_group_id,
+                dst_group: r.dst_group_name,
+                dst_group_id: r.dst_group_id,
+                proto: proto_to_string(r.proto),
+                direction: direction_to_string(r.direction),
+                target_iface: r.target_iface,
+                target_ifindex: r.target_ifindex,
+                is_global: r.is_global,
+            }).collect(),
+        })),
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+pub async fn add_mirror(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+    Json(req): Json<AddMirrorRequest>,
+) -> impl IntoResponse {
+    let proto = match proto_from_string(&req.proto) {
+        Ok(p) => p,
+        Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
+    };
+    let direction = match direction_from_string(&req.direction) {
+        Ok(d) => d,
+        Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
+    };
+
+    // direction=2 means "both": apply to ingress and egress
+    let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
+
+    for dir in &directions {
+        if let Err(e) = cp.add_mirror(&instance, &req.src_group, &req.dst_group, proto, *dir, &req.target).await {
+            return Err(err_response(e));
+        }
+    }
+
+    let dir_label = if direction == 2 { "both" } else { &req.direction };
+    Ok((StatusCode::CREATED, Json(MessageResponse {
+        message: format!("Added mirror rule ({}) -> target '{}'", dir_label, req.target),
+    })))
+}
+
+pub async fn delete_mirror(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+    Json(req): Json<DeleteMirrorRequest>,
+) -> impl IntoResponse {
+    let proto = match proto_from_string(&req.proto) {
+        Ok(p) => p,
+        Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
+    };
+    let direction = match direction_from_string(&req.direction) {
+        Ok(d) => d,
+        Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
+    };
+
+    let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
+
+    for dir in &directions {
+        if let Err(e) = cp.delete_mirror(&instance, &req.src_group, &req.dst_group, proto, *dir).await {
+            return Err(err_response(e));
+        }
+    }
+
+    let dir_label = if direction == 2 { "both" } else { &req.direction };
+    Ok(Json(MessageResponse {
+        message: format!("Deleted mirror rule ({})", dir_label),
+    }))
+}
+
+pub async fn stats_mirror(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    match cp.get_mirror_stats(&instance).await {
+        Ok((entries, groups)) => {
+            let find_name = |id: u32| -> String {
+                if id == 0 { return "any".to_string(); }
+                groups.values()
+                    .find(|g| g.id == id)
+                    .map(|g| g.name.clone())
+                    .unwrap_or_else(|| format!("id:{}", id))
+            };
+            Ok(Json(MirrorStatsResponse {
+                rules: entries.into_iter().map(|e| aria_api::MirrorStatsEntry {
+                    src_group: find_name(e.src_id),
+                    src_id: e.src_id,
+                    dst_group: find_name(e.dst_id),
+                    dst_id: e.dst_id,
+                    proto: proto_to_string(e.proto),
+                    direction: direction_to_string(e.direction),
+                    mirrored_packets: e.mirrored_packets,
+                    mirrored_bytes: e.mirrored_bytes,
+                    errors: e.errors,
+                    is_global: e.is_global,
                 }).collect(),
             }))
         }

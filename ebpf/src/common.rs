@@ -163,6 +163,39 @@ pub struct GroupStatsValue {
     pub bytes: u64,
 }
 
+// --- Mirror (Port SPAN) ---
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct MirrorKey {
+    pub src_id: u32,
+    pub dst_id: u32,
+    pub proto: u8,
+    pub direction: u8,
+    pub pad: [u8; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct GlobalMirrorKey {
+    pub direction: u8,
+    pub pad: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct MirrorConfig {
+    pub target_ifindex: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct MirrorStatsValue {
+    pub mirrored_packets: u64,
+    pub mirrored_bytes: u64,
+    pub errors: u64,
+}
+
 // --- Global firewall config (feature switches) ---
 
 #[repr(C)]
@@ -173,5 +206,6 @@ pub struct FirewallConfig {
     pub num_cpus: u16,
     pub qos_enabled: u8,
     pub acl_enabled: u8,
-    pub pad: [u8; 2],
+    pub mirror_enabled: u8,
+    pub pad: [u8; 1],
 }

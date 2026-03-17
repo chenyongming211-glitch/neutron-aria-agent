@@ -211,6 +211,7 @@ pub struct ConfigResponse {
     pub monitoring: bool,
     pub acl: bool,
     pub qos: bool,
+    pub mirror: bool,
     pub num_cpus: u16,
 }
 
@@ -220,6 +221,7 @@ pub struct UpdateConfigRequest {
     pub monitoring: Option<bool>,
     pub acl: Option<bool>,
     pub qos: Option<bool>,
+    pub mirror: Option<bool>,
 }
 
 // ── Stats ──
@@ -229,6 +231,7 @@ pub struct StatsOverview {
     pub groups: usize,
     pub policies: usize,
     pub qos_rules: usize,
+    pub mirror_rules: usize,
     pub conntrack_v4: u64,
     pub conntrack_v6: u64,
 }
@@ -300,6 +303,76 @@ pub struct GroupStatsEntry {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GroupStatsResponse {
     pub groups: Vec<GroupStatsEntry>,
+}
+
+// ── Mirror ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirrorEntry {
+    pub src_group: String,
+    pub src_group_id: u32,
+    pub dst_group: String,
+    pub dst_group_id: u32,
+    pub proto: String,
+    pub direction: String,
+    pub target_iface: String,
+    pub target_ifindex: u32,
+    pub is_global: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MirrorListResponse {
+    pub rules: Vec<MirrorEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AddMirrorRequest {
+    #[serde(default = "default_any")]
+    pub src_group: String,
+    #[serde(default = "default_any")]
+    pub dst_group: String,
+    #[serde(default = "default_any_proto")]
+    pub proto: String,
+    pub direction: String,
+    pub target: String,
+}
+
+fn default_any() -> String {
+    "any".to_string()
+}
+
+fn default_any_proto() -> String {
+    "any".to_string()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteMirrorRequest {
+    #[serde(default = "default_any")]
+    pub src_group: String,
+    #[serde(default = "default_any")]
+    pub dst_group: String,
+    #[serde(default = "default_any_proto")]
+    pub proto: String,
+    pub direction: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MirrorStatsEntry {
+    pub src_group: String,
+    pub src_id: u32,
+    pub dst_group: String,
+    pub dst_id: u32,
+    pub proto: String,
+    pub direction: String,
+    pub mirrored_packets: u64,
+    pub mirrored_bytes: u64,
+    pub errors: u64,
+    pub is_global: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MirrorStatsResponse {
+    pub rules: Vec<MirrorStatsEntry>,
 }
 
 // ── Helpers ──

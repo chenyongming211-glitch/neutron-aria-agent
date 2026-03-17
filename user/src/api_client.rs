@@ -137,6 +137,38 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    // ── Mirror ──
+
+    pub async fn list_mirror(&self, instance: &str) -> Result<MirrorListResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/mirror", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn add_mirror(&self, instance: &str, req: &AddMirrorRequest) -> Result<MessageResponse, String> {
+        let resp = self.client.post(self.url(&format!("/api/v1/{}/mirror", instance)))
+            .json(req)
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn delete_mirror(&self, instance: &str, req: &DeleteMirrorRequest) -> Result<MessageResponse, String> {
+        let resp = self.client.delete(self.url(&format!("/api/v1/{}/mirror", instance)))
+            .json(req)
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn stats_mirror(&self, instance: &str) -> Result<MirrorStatsResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/stats/mirror", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── Conntrack ──
 
     pub async fn list_conntrack(&self, instance: &str) -> Result<ConntrackResponse, String> {
