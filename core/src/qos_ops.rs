@@ -156,24 +156,12 @@ pub fn replay_qos_rules(bpf: &mut aya::Ebpf, rules: &[(u32, u8, u64, u64, u8, u8
 /// drops, otherwise TCP's congestion control over-reacts and throughput
 /// collapses well below the configured rate.
 ///
-/// Empirical testing showed that ~500 ms worth of tokens is the sweet spot:
-/// - Small enough that the policer still converges quickly
-/// - Large enough to absorb TCP bursts at any rate
-///
-/// Minimum burst is 5 MB to handle TCP at low rates; capped at 100 MB.
+/// We use a fixed 500 ms time window: burst = rate / 2.  This scales
+/// linearly from 10 Mbps to 10 Gbps+ without any clamping distortion.
+/// Minimum 256 KB to handle at least a few jumbo frames at very low rates.
 pub fn compute_default_burst(rate_bps: u64) -> u64 {
-    // 500ms worth of tokens at the configured rate
     let burst = rate_bps / 2;
-    // Clamp: at least 5 MB, at most 100 MB
-    let min_burst: u64 = 5 * 1024 * 1024;       // 5 MB
-    let max_burst: u64 = 100 * 1024 * 1024;      // 100 MB
-    if burst < min_burst {
-        min_burst
-    } else if burst > max_burst {
-        max_burst
-    } else {
-        burst
-    }
+    if burst > 256 * 1024 { burst } else { 256 * 1024 }
 }
 
 pub fn parse_rate(rate_str: &str) -> Result<u64, String> {
@@ -258,9 +246,9 @@ mod tests {
 
     #[test]
     fn compute_default_burst_tiers() {
-        // Low rate (10 Mbps = 1.25 MB/s): clamped to min 5 MB
+        // 10 Mbps = 1.25 MB/s: rate/2 = 625 KB (500ms window)
         let b = compute_default_burst(1_250_000);
-        assert_eq!(b, 5 * 1024 * 1024);
+        assert_eq!(b, 625_000);
 
         // 100 Mbps = 12.5 MB/s: rate/2 = 6.25 MB
         let b = compute_default_burst(12_500_000);
@@ -270,12 +258,12 @@ mod tests {
         let b = compute_default_burst(62_500_000);
         assert_eq!(b, 31_250_000);
 
-        // 10 Gbps = 1.25 GB/s: rate/2 = 625 MB, capped to 100 MB
+        // 10 Gbps = 1.25 GB/s: rate/2 = 625 MB (no cap)
         let b = compute_default_burst(1_250_000_000);
-        assert_eq!(b, 100 * 1024 * 1024);
+        assert_eq!(b, 625_000_000);
 
-        // Very low rate: clamped to min 5 MB
+        // Very low rate: minimum 256 KB
         let b = compute_default_burst(1000);
-        assert_eq!(b, 5 * 1024 * 1024);
+        assert_eq!(b, 256 * 1024);
     }
 }
