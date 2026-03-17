@@ -288,12 +288,21 @@ pub async fn add_qos(
         ))),
     };
 
-    match cp.add_qos(&instance, &req.group, direction, rate_bps, burst_bytes, req.priority, mode).await {
-        Ok(()) => Ok((StatusCode::CREATED, Json(MessageResponse {
-            message: format!("Added QoS rule for group '{}'", req.group),
-        }))),
-        Err(e) => Err(err_response(e)),
+    // direction=2 means "both": apply to ingress and egress
+    let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
+
+    for dir in &directions {
+        // Ingress does not support shaping mode
+        let effective_mode = if *dir == 0 && mode == 1 { 0 } else { mode };
+        if let Err(e) = cp.add_qos(&instance, &req.group, *dir, rate_bps, burst_bytes, req.priority, effective_mode).await {
+            return Err(err_response(e));
+        }
     }
+
+    let dir_label = if direction == 2 { "both" } else { &req.direction };
+    Ok((StatusCode::CREATED, Json(MessageResponse {
+        message: format!("Added QoS rule for group '{}' ({})", req.group, dir_label),
+    })))
 }
 
 pub async fn delete_qos(
@@ -306,12 +315,19 @@ pub async fn delete_qos(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
 
-    match cp.delete_qos(&instance, &req.group, direction).await {
-        Ok(()) => Ok(Json(MessageResponse {
-            message: format!("Deleted QoS rule for group '{}'", req.group),
-        })),
-        Err(e) => Err(err_response(e)),
+    // direction=2 means "both": delete ingress and egress
+    let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
+
+    for dir in &directions {
+        if let Err(e) = cp.delete_qos(&instance, &req.group, *dir).await {
+            return Err(err_response(e));
+        }
     }
+
+    let dir_label = if direction == 2 { "both" } else { &req.direction };
+    Ok(Json(MessageResponse {
+        message: format!("Deleted QoS rule for group '{}' ({})", req.group, dir_label),
+    }))
 }
 
 // ── Conntrack ──

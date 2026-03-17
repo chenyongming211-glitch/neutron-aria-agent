@@ -162,7 +162,6 @@ pub struct QosListResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AddQosRequest {
     pub group: String,
-    #[serde(default = "default_direction")]
     pub direction: String,
     pub rate: String,
     #[serde(default)]
@@ -176,7 +175,6 @@ pub struct AddQosRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteQosRequest {
     pub group: String,
-    #[serde(default = "default_direction")]
     pub direction: String,
 }
 
@@ -354,6 +352,7 @@ pub fn direction_from_string(direction: &str) -> Result<u8, String> {
     match direction.to_lowercase().as_str() {
         "ingress" | "in" => Ok(0),
         "egress" | "out" => Ok(1),
-        _ => Err(format!("Invalid direction '{}': must be 'ingress' or 'egress'", direction)),
+        "both" | "all" => Ok(2),
+        _ => Err(format!("Invalid direction '{}': must be 'ingress', 'egress', or 'both'", direction)),
     }
 }

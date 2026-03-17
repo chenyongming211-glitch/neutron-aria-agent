@@ -137,7 +137,7 @@ enum QosCommands {
     Add {
         #[arg(long, help = "Group name (or 'default' for global)")]
         group: String,
-        #[arg(long, default_value = "egress", help = "Direction: ingress or egress")]
+        #[arg(long, help = "Direction: ingress, egress, or both")]
         direction: String,
         #[arg(long, help = "Rate limit (e.g., 100mbps, 1gbps)")]
         rate: String,
@@ -152,7 +152,7 @@ enum QosCommands {
     Delete {
         #[arg(long)]
         group: String,
-        #[arg(long, default_value = "egress")]
+        #[arg(long, help = "Direction: ingress, egress, or both")]
         direction: String,
     },
     /// List all QoS rules
