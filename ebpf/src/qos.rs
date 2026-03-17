@@ -2,7 +2,6 @@ use crate::common::{QosKey, QosStatsValue, TokenBucket, DIR_EGRESS, DIR_INGRESS}
 use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, QOS_STATS, FIREWALL_CONFIG};
 
 /// QoS mode constants
-const QOS_MODE_POLICING: u8 = 0;
 const QOS_MODE_SHAPING: u8 = 1;
 
 /// Check if QoS is globally enabled. When no QoS rules are configured,
