@@ -17,7 +17,7 @@ pub enum WalEntry {
     RemoveRule { src_id: u32, dst_id: u32, proto: u8, direction: u8 },
     AddQos { group_name: String, group_id: u32, direction: u8, rate_bps: u64, burst_bytes: u64, priority: u8, #[serde(default)] mode: u8 },
     DeleteQos { group_id: u32, direction: u8 },
-    UpdateConfig { conntrack: Option<bool>, monitoring: Option<bool> },
+    UpdateConfig { conntrack: Option<bool>, monitoring: Option<bool>, #[serde(default)] acl: Option<bool>, #[serde(default)] qos: Option<bool> },
     SetMaxPortPolicies { max: u32 },
     SetAttachedIface { iface: String },
     ClearAttachedIface,
@@ -165,12 +165,18 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) {
         WalEntry::DeleteQos { group_id, direction } => {
             state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
         }
-        WalEntry::UpdateConfig { conntrack, monitoring } => {
+        WalEntry::UpdateConfig { conntrack, monitoring, acl, qos } => {
             if let Some(ct) = conntrack {
                 state.conntrack_enabled = ct;
             }
             if let Some(mon) = monitoring {
                 state.monitoring_enabled = mon;
+            }
+            if let Some(a) = acl {
+                state.acl_enabled = a;
+            }
+            if let Some(q) = qos {
+                state.qos_enabled = q;
             }
         }
         WalEntry::SetMaxPortPolicies { max } => {
@@ -428,7 +434,7 @@ mod tests {
 
         // UpdateConfig
         apply_wal_entry(&mut state, WalEntry::UpdateConfig {
-            conntrack: Some(false), monitoring: None,
+            conntrack: Some(false), monitoring: None, acl: None, qos: None,
         });
         assert!(!state.conntrack_enabled);
         assert!(state.monitoring_enabled);

@@ -211,6 +211,7 @@ pub struct ConntrackFlushResponse {
 pub struct ConfigResponse {
     pub conntrack: bool,
     pub monitoring: bool,
+    pub acl: bool,
     pub qos: bool,
     pub num_cpus: u16,
 }
@@ -219,6 +220,8 @@ pub struct ConfigResponse {
 pub struct UpdateConfigRequest {
     pub conntrack: Option<bool>,
     pub monitoring: Option<bool>,
+    pub acl: Option<bool>,
+    pub qos: Option<bool>,
 }
 
 // ── Stats ──

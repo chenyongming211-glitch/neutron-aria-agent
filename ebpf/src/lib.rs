@@ -89,6 +89,18 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
         let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
         let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
+
+        if !policy::acl_enabled() {
+            // ACL disabled: skip policy evaluation, still do QoS and group stats
+            stats::update_flow_stats_v6(&ct_key, pkt_len, now);
+            if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
+                return XDP_DROP;
+            }
+            stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
+            stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
+            return XDP_PASS;
+        }
+
         let (result, matched) = policy::evaluate_policy(src_id, dst_id, info.proto, DIR_INGRESS, info.dst_port, pkt_len);
 
         if result == XDP_PASS {
@@ -135,6 +147,17 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
         let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
         let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
+
+        if !policy::acl_enabled() {
+            stats::update_flow_stats_v4(&ct_key, pkt_len, now);
+            if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
+                return XDP_DROP;
+            }
+            stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
+            stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
+            return XDP_PASS;
+        }
+
         let (result, matched) = policy::evaluate_policy(src_id, dst_id, info.proto, DIR_INGRESS, info.dst_port, pkt_len);
 
         if result == XDP_PASS {
@@ -209,6 +232,19 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
         let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
         let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
+
+        if !policy::acl_enabled() {
+            stats::update_flow_stats_v6(&ct_key, pkt_len, now);
+            if qos_on {
+                if let Some(action) = apply_egress_qos(&ctx, src_id, dst_id, pkt_len, now) {
+                    return action;
+                }
+            }
+            stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
+            stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
+            return TC_ACT_OK;
+        }
+
         let (result, matched) = policy::evaluate_policy_tc(
             src_id, dst_id, info.proto, DIR_EGRESS, info.dst_port, pkt_len, TC_ACT_OK, TC_ACT_SHOT,
         );
@@ -261,6 +297,19 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
         let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
         let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
+
+        if !policy::acl_enabled() {
+            stats::update_flow_stats_v4(&ct_key, pkt_len, now);
+            if qos_on {
+                if let Some(action) = apply_egress_qos(&ctx, src_id, dst_id, pkt_len, now) {
+                    return action;
+                }
+            }
+            stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
+            stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
+            return TC_ACT_OK;
+        }
+
         let (result, matched) = policy::evaluate_policy_tc(
             src_id, dst_id, info.proto, DIR_EGRESS, info.dst_port, pkt_len, TC_ACT_OK, TC_ACT_SHOT,
         );

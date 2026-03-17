@@ -448,7 +448,7 @@ impl ControlPlane {
         };
 
         // Write to kernel
-        if let Err(e) = aria_core::qos_ops::add_qos_rule(group_id, direction, rate_bps, burst_bytes, priority, mode, &state.pin_path) {
+        if let Err(e) = aria_core::qos_ops::add_qos_rule(group_id, direction, rate_bps, burst_bytes, priority, mode, &state.pin_path, state.state.qos_enabled) {
             return Err(ControlPlaneError::KernelError(e));
         }
 
@@ -504,7 +504,7 @@ impl ControlPlane {
             ));
         }
 
-        if let Err(e) = aria_core::qos_ops::delete_qos_rule(group_id, direction, &state.pin_path) {
+        if let Err(e) = aria_core::qos_ops::delete_qos_rule(group_id, direction, &state.pin_path, state.state.qos_enabled) {
             return Err(ControlPlaneError::KernelError(e));
         }
 
@@ -548,12 +548,17 @@ impl ControlPlane {
         instance: &str,
         conntrack: Option<bool>,
         monitoring: Option<bool>,
+        acl: Option<bool>,
+        qos: Option<bool>,
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
         Self::check_xdp_ready(&state.pin_path)?;
 
-        if let Err(e) = aria_core::ebpf_ops::update_firewall_config(&state.pin_path, conntrack, monitoring) {
+        // For QoS, the kernel flag = user_wants_qos && has_rules
+        let kernel_qos = qos.map(|q| q && !state.state.qos_rules.is_empty());
+
+        if let Err(e) = aria_core::ebpf_ops::update_firewall_config(&state.pin_path, conntrack, monitoring, acl, kernel_qos) {
             return Err(ControlPlaneError::KernelError(e));
         }
 
@@ -563,10 +568,18 @@ impl ControlPlane {
         if let Some(mon) = monitoring {
             state.state.monitoring_enabled = mon;
         }
+        if let Some(a) = acl {
+            state.state.acl_enabled = a;
+        }
+        if let Some(q) = qos {
+            state.state.qos_enabled = q;
+        }
 
         if let Err(e) = state.wal.append(&WalEntry::UpdateConfig {
             conntrack,
             monitoring,
+            acl,
+            qos,
         }) {
             eprintln!("[ControlPlane] WAL append failed (update_config): {}", e);
         }

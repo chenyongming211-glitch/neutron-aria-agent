@@ -363,6 +363,7 @@ pub async fn get_config(
         Ok(cfg) => Ok(Json(ConfigResponse {
             conntrack: cfg.conntrack_enabled != 0,
             monitoring: cfg.monitoring_enabled != 0,
+            acl: cfg.acl_enabled != 0,
             qos: cfg.qos_enabled != 0,
             num_cpus: cfg.num_cpus,
         })),
@@ -375,7 +376,7 @@ pub async fn update_config(
     Path(instance): Path<String>,
     Json(req): Json<UpdateConfigRequest>,
 ) -> impl IntoResponse {
-    match cp.update_config(&instance, req.conntrack, req.monitoring).await {
+    match cp.update_config(&instance, req.conntrack, req.monitoring, req.acl, req.qos).await {
         Ok(()) => Ok(Json(MessageResponse {
             message: "Configuration updated".to_string(),
         })),

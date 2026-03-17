@@ -171,7 +171,8 @@ pub struct FirewallConfig {
     pub monitoring_enabled: u8,
     pub num_cpus: u16,
     pub qos_enabled: u8,
-    pub pad: [u8; 3],
+    pub acl_enabled: u8,
+    pub pad: [u8; 2],
 }
 unsafe impl Pod for FirewallConfig {}
 

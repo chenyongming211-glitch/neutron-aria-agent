@@ -16,7 +16,8 @@ fn sync_qos_enabled(pin_path: &str, enabled: bool) -> Result<(), String> {
         monitoring_enabled: 1,
         num_cpus: 1,
         qos_enabled: 0,
-        pad: [0; 3],
+        acl_enabled: 1,
+        pad: [0; 2],
     });
     cfg.qos_enabled = if enabled { 1 } else { 0 };
     map.insert(&0u32, &cfg, 0)
@@ -42,6 +43,7 @@ pub fn add_qos_rule(
     priority: u8,
     mode: u8,
     pin_path: &str,
+    user_qos_enabled: bool,
 ) -> Result<(), String> {
     let map_path = format!("{}/QOS_CONFIG", pin_path);
     let map_data = MapData::from_pin(&map_path)
@@ -66,8 +68,8 @@ pub fn add_qos_rule(
     map.insert(&key, &config, 0)
         .map_err(|e| format!("QOS_CONFIG insert: {:?}", e))?;
 
-    // After adding a rule, QoS is definitely active
-    sync_qos_enabled(pin_path, true)?;
+    // After adding a rule, QoS is active only if user wants it
+    sync_qos_enabled(pin_path, user_qos_enabled)?;
 
     Ok(())
 }
@@ -76,6 +78,7 @@ pub fn delete_qos_rule(
     group_id: u32,
     direction: u8,
     pin_path: &str,
+    user_qos_enabled: bool,
 ) -> Result<(), String> {
     let map_path = format!("{}/QOS_CONFIG", pin_path);
     let map_data = MapData::from_pin(&map_path)
@@ -93,8 +96,8 @@ pub fn delete_qos_rule(
     map.remove(&key)
         .map_err(|e| format!("QOS_CONFIG remove: {:?}", e))?;
 
-    // After deleting, check if any rules remain
-    sync_qos_enabled(pin_path, has_qos_rules(pin_path))?;
+    // After deleting, check if any rules remain and user wants QoS
+    sync_qos_enabled(pin_path, user_qos_enabled && has_qos_rules(pin_path))?;
 
     Ok(())
 }

@@ -165,7 +165,7 @@ enum ConfigCommands {
     Show,
     /// Set a configuration value
     Set {
-        #[arg(help = "Configuration key: conntrack or monitoring")]
+        #[arg(help = "Configuration key: conntrack, monitoring, acl, or qos")]
         key: String,
         #[arg(help = "Value: on or off")]
         value: String,
@@ -501,6 +501,7 @@ async fn main() {
                         println!("=== Firewall Configuration ===");
                         println!("  conntrack:  {}", if cfg.conntrack { "on" } else { "off" });
                         println!("  monitoring: {}", if cfg.monitoring { "on" } else { "off" });
+                        println!("  acl:        {}", if cfg.acl { "on" } else { "off" });
                         println!("  qos:        {}", if cfg.qos { "on" } else { "off" });
                         println!("  num_cpus:   {}", cfg.num_cpus);
                         Ok(())
@@ -522,13 +523,29 @@ async fn main() {
                     "conntrack" | "ct" => aria_api::UpdateConfigRequest {
                         conntrack: Some(enabled),
                         monitoring: None,
+                        acl: None,
+                        qos: None,
                     },
                     "monitoring" | "mon" => aria_api::UpdateConfigRequest {
                         conntrack: None,
                         monitoring: Some(enabled),
+                        acl: None,
+                        qos: None,
+                    },
+                    "acl" | "policy" => aria_api::UpdateConfigRequest {
+                        conntrack: None,
+                        monitoring: None,
+                        acl: Some(enabled),
+                        qos: None,
+                    },
+                    "qos" => aria_api::UpdateConfigRequest {
+                        conntrack: None,
+                        monitoring: None,
+                        acl: None,
+                        qos: Some(enabled),
                     },
                     _ => {
-                        eprintln!("Error: unknown config key '{}': must be 'conntrack' or 'monitoring'", key);
+                        eprintln!("Error: unknown config key '{}': must be 'conntrack', 'monitoring', 'acl', or 'qos'", key);
                         std::process::exit(1);
                     }
                 };

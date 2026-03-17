@@ -83,6 +83,14 @@ pub struct FirewallState {
     pub conntrack_enabled: bool,
     #[serde(default)]
     pub monitoring_enabled: bool,
+    #[serde(default = "default_true")]
+    pub acl_enabled: bool,
+    #[serde(default = "default_true")]
+    pub qos_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for FirewallState {
@@ -99,6 +107,8 @@ impl Default for FirewallState {
             qos_rules: Vec::new(),
             conntrack_enabled: true,
             monitoring_enabled: true,
+            acl_enabled: true,
+            qos_enabled: true,
         }
     }
 }
@@ -640,9 +650,23 @@ impl StateManager {
         })
     }
 
-    pub fn get_config(&self) -> Result<(bool, bool), String> {
+    pub fn get_config(&self) -> Result<(bool, bool, bool, bool), String> {
         let state = self._load_readonly()?;
-        Ok((state.conntrack_enabled, state.monitoring_enabled))
+        Ok((state.conntrack_enabled, state.monitoring_enabled, state.acl_enabled, state.qos_enabled))
+    }
+
+    pub fn set_acl_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.with_state(|state| {
+            state.acl_enabled = enabled;
+            Ok(())
+        })
+    }
+
+    pub fn set_qos_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.with_state(|state| {
+            state.qos_enabled = enabled;
+            Ok(())
+        })
     }
 }
 

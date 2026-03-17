@@ -599,8 +599,9 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
             conntrack_enabled: if state.conntrack_enabled { 1 } else { 0 },
             monitoring_enabled: if state.monitoring_enabled { 1 } else { 0 },
             num_cpus,
-            qos_enabled: if state.qos_rules.is_empty() { 0 } else { 1 },
-            pad: [0; 3],
+            qos_enabled: if state.qos_enabled && !state.qos_rules.is_empty() { 1 } else { 0 },
+            acl_enabled: if state.acl_enabled { 1 } else { 0 },
+            pad: [0; 2],
         };
         match bpf.map_mut("FIREWALL_CONFIG")
             .ok_or_else(|| "FIREWALL_CONFIG not found".to_string())
@@ -760,6 +761,8 @@ pub fn update_firewall_config(
     pin_path: &str,
     conntrack_enabled: Option<bool>,
     monitoring_enabled: Option<bool>,
+    acl_enabled: Option<bool>,
+    qos_enabled: Option<bool>,
 ) -> Result<(), String> {
     let map_path = format!("{}/FIREWALL_CONFIG", pin_path);
     let map_data = MapData::from_pin(&map_path)
@@ -778,13 +781,18 @@ pub fn update_firewall_config(
         .unwrap_or_else(|| current.as_ref().map(|c| c.conntrack_enabled).unwrap_or(1));
     let mon = monitoring_enabled.map(|b| if b { 1u8 } else { 0 })
         .unwrap_or_else(|| current.as_ref().map(|c| c.monitoring_enabled).unwrap_or(1));
+    let acl = acl_enabled.map(|b| if b { 1u8 } else { 0 })
+        .unwrap_or_else(|| current.as_ref().map(|c| c.acl_enabled).unwrap_or(1));
+    let qos = qos_enabled.map(|b| if b { 1u8 } else { 0 })
+        .unwrap_or_else(|| current.as_ref().map(|c| c.qos_enabled).unwrap_or(0));
 
     let cfg = FirewallConfig {
         conntrack_enabled: ct,
         monitoring_enabled: mon,
         num_cpus: num_cpus_val,
-        qos_enabled: current.as_ref().map(|c| c.qos_enabled).unwrap_or(0),
-        pad: [0; 3],
+        qos_enabled: qos,
+        acl_enabled: acl,
+        pad: [0; 2],
     };
     map.insert(&0u32, &cfg, 0)
         .map_err(|e| format!("FIREWALL_CONFIG insert: {:?}", e))?;
