@@ -69,18 +69,18 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
         match conntrack::ct_lookup_v6(&ct_key, now, pkt_len) {
             CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
-                // Stats first — count all packets regardless of QoS outcome
                 stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
                 stats::update_flow_stats_v6(&ct_key, pkt_len, now);
                 let need_ids = qos_on || stats::monitoring_enabled();
                 if need_ids {
                     let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
                     let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
-                    stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
-                    stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
                     if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                         return XDP_DROP;
                     }
+                    // Group stats after QoS — only count packets that actually pass
+                    stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
+                    stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
                 }
                 return XDP_PASS;
             }
@@ -92,13 +92,13 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
         let (result, matched) = policy::evaluate_policy(src_id, dst_id, info.proto, DIR_INGRESS, info.dst_port, pkt_len);
 
         if result == XDP_PASS {
-            // Stats before QoS — dropped packets are still counted
             stats::update_flow_stats_v6(&ct_key, pkt_len, now);
-            stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
-            stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
             if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 return XDP_DROP;
             }
+            // Group stats after QoS
+            stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
+            stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
             conntrack::ct_create_v6(&ct_key, now, pkt_len, &matched);
         }
 
@@ -121,11 +121,12 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
                 if need_ids {
                     let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
                     let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
-                    stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
-                    stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
                     if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                         return XDP_DROP;
                     }
+                    // Group stats after QoS
+                    stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
+                    stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
                 }
                 return XDP_PASS;
             }
@@ -138,11 +139,12 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
         if result == XDP_PASS {
             stats::update_flow_stats_v4(&ct_key, pkt_len, now);
-            stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
-            stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
             if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 return XDP_DROP;
             }
+            // Group stats after QoS
+            stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
+            stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
             conntrack::ct_create_v4(&ct_key, now, pkt_len, &matched);
         }
 
@@ -191,13 +193,14 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                 if need_ids {
                     let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
                     let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
-                    stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
-                    stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
                     if qos_on {
                         if let Some(action) = apply_egress_qos(&ctx, src_id, dst_id, pkt_len, now) {
                             return action;
                         }
                     }
+                    // Group stats after QoS
+                    stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
+                    stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
                 }
                 return TC_ACT_OK;
             }
@@ -212,13 +215,14 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
         if result == TC_ACT_OK {
             stats::update_flow_stats_v6(&ct_key, pkt_len, now);
-            stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
-            stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
             if qos_on {
                 if let Some(action) = apply_egress_qos(&ctx, src_id, dst_id, pkt_len, now) {
                     return action;
                 }
             }
+            // Group stats after QoS
+            stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
+            stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
             conntrack::ct_create_v6(&ct_key, now, pkt_len, &matched);
         }
 
@@ -241,13 +245,14 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                 if need_ids {
                     let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
                     let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
-                    stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
-                    stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
                     if qos_on {
                         if let Some(action) = apply_egress_qos(&ctx, src_id, dst_id, pkt_len, now) {
                             return action;
                         }
                     }
+                    // Group stats after QoS
+                    stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
+                    stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
                 }
                 return TC_ACT_OK;
             }
@@ -262,13 +267,14 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
         if result == TC_ACT_OK {
             stats::update_flow_stats_v4(&ct_key, pkt_len, now);
-            stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
-            stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
             if qos_on {
                 if let Some(action) = apply_egress_qos(&ctx, src_id, dst_id, pkt_len, now) {
                     return action;
                 }
             }
+            // Group stats after QoS
+            stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
+            stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
             conntrack::ct_create_v4(&ct_key, now, pkt_len, &matched);
         }
 
