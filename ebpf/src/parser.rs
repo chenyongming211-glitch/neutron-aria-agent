@@ -1,19 +1,20 @@
 use crate::common::{IPPROTO_TCP, IPPROTO_UDP};
 
-#[derive(Debug, Copy, Clone)]
+#[repr(C)]
+#[derive(Copy, Clone)]
 pub struct PacketInfo {
     pub src_ip: u32,
     pub dst_ip: u32,
     pub src_ip_v6: [u8; 16],
     pub dst_ip_v6: [u8; 16],
-    pub proto: u8,
-    #[allow(dead_code)]
+    pub tcp_seq: u32,
     pub src_port: u16,
     pub dst_port: u16,
+    pub payload_len: u16,
+    pub proto: u8,
     pub is_ipv6: bool,
-    pub tcp_flags: u8,      // TCP flags byte (SYN, ACK, FIN, RST, etc.)
-    pub tcp_seq: u32,        // TCP sequence number
-    pub payload_len: u16,    // L4 payload length
+    pub tcp_flags: u8,
+    pub _pad: [u8; 3],
 }
 
 impl Default for PacketInfo {
@@ -23,13 +24,14 @@ impl Default for PacketInfo {
             dst_ip: 0,
             src_ip_v6: [0; 16],
             dst_ip_v6: [0; 16],
-            proto: 0,
+            tcp_seq: 0,
             src_port: 0,
             dst_port: 0,
+            payload_len: 0,
+            proto: 0,
             is_ipv6: false,
             tcp_flags: 0,
-            tcp_seq: 0,
-            payload_len: 0,
+            _pad: [0; 3],
         }
     }
 }

@@ -13,6 +13,12 @@ pub use crate::common::{
     DropKey, DropValue,
     TraceFilter, TraceEvent,
 };
+use crate::parser::PacketInfo;
+
+// --- Scratch buffer for PacketInfo (avoids stack allocation) ---
+
+#[map(name = "PKT_SCRATCH")]
+pub static PKT_SCRATCH: PerCpuArray<PacketInfo> = PerCpuArray::with_max_entries(1, 0);
 
 // --- Existing maps ---
 

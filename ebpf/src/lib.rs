@@ -49,14 +49,22 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     let data = ctx.data();
     let data_end = ctx.data_end();
     let pkt_len = (data_end - data) as u32;
-    let info = match parser::parse_eth_ipv4(data, data_end, 0) {
+    let parsed = match parser::parse_eth_ipv4(data, data_end, 0) {
         Some(i) => i,
         None => match parser::parse_eth_ipv6(data, data_end, 0) {
             Some(i) => i,
             None => return XDP_PASS,
         },
     };
-    match unsafe { try_xdp_firewall(&ctx, &info, pkt_len) } {
+    let info = unsafe {
+        let ptr = match maps::PKT_SCRATCH.get_ptr_mut(0) {
+            Some(p) => p,
+            None => return XDP_PASS,
+        };
+        *ptr = parsed;
+        &*ptr
+    };
+    match unsafe { try_xdp_firewall(&ctx, info, pkt_len) } {
         Ok(ret) => ret,
         Err(_) => XDP_PASS,
     }
@@ -265,14 +273,22 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
     let data = ctx.data();
     let data_end = ctx.data_end();
     let pkt_len = ctx.len();
-    let info = match parser::parse_eth_ipv4(data, data_end, 0) {
+    let parsed = match parser::parse_eth_ipv4(data, data_end, 0) {
         Some(i) => i,
         None => match parser::parse_eth_ipv6(data, data_end, 0) {
             Some(i) => i,
             None => return TC_ACT_OK,
         },
     };
-    match unsafe { try_tc_egress(&ctx, &info, pkt_len) } {
+    let info = unsafe {
+        let ptr = match maps::PKT_SCRATCH.get_ptr_mut(0) {
+            Some(p) => p,
+            None => return TC_ACT_OK,
+        };
+        *ptr = parsed;
+        &*ptr
+    };
+    match unsafe { try_tc_egress(&ctx, info, pkt_len) } {
         Ok(ret) => ret,
         Err(_) => TC_ACT_OK,
     }
@@ -508,14 +524,22 @@ pub fn tc_ingress(ctx: TcContext) -> i32 {
     let data = ctx.data();
     let data_end = ctx.data_end();
     let pkt_len = ctx.len();
-    let info = match parser::parse_eth_ipv4(data, data_end, 0) {
+    let parsed = match parser::parse_eth_ipv4(data, data_end, 0) {
         Some(i) => i,
         None => match parser::parse_eth_ipv6(data, data_end, 0) {
             Some(i) => i,
             None => return TC_ACT_OK,
         },
     };
-    match unsafe { try_tc_ingress(&ctx, &info, pkt_len) } {
+    let info = unsafe {
+        let ptr = match maps::PKT_SCRATCH.get_ptr_mut(0) {
+            Some(p) => p,
+            None => return TC_ACT_OK,
+        };
+        *ptr = parsed;
+        &*ptr
+    };
+    match unsafe { try_tc_ingress(&ctx, info, pkt_len) } {
         Ok(ret) => ret,
         Err(_) => TC_ACT_OK,
     }
