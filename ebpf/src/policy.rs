@@ -69,7 +69,7 @@ pub unsafe fn evaluate_policy(
             let (result, drop_reason) = apply_policy(policy, args.dst_port);
             stats::update_rule_stats(&key, args.pkt_len);
             if result == XDP_DROP {
-                drops::record_drop(drop_reason, args.direction, args.proto, args.src_id, args.dst_id, args.pkt_len, args.now);
+                drops::record_drop(&drops::DropArgs { reason: drop_reason, direction: args.direction, proto: args.proto, src_id: args.src_id, dst_id: args.dst_id, pkt_len: args.pkt_len, now: args.now, _pad: 0 });
             }
             let matched = MatchedPolicy {
                 src_id: s,
