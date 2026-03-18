@@ -70,6 +70,6 @@ pub unsafe fn trace_event(
             drop_reason,
             pad: [0; 2],
         };
-        let _ = TRACE_LOG.insert(seq, &event, 0);
+        let _ = TRACE_LOG.insert(&*seq, &event, 0);
     }
 }
