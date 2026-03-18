@@ -39,7 +39,7 @@ fn compute_delay_ns(deficit: u64, rate: u64) -> u64 {
 
 /// Update QoS per-rule statistics.
 /// outcome: 0=pass, 1=drop, 2=shaped
-#[inline(always)]
+#[inline(never)]
 unsafe fn update_qos_stats(key: &QosKey, pkt_len: u32, outcome: u8) {
     if let Some(s) = QOS_STATS.get_ptr_mut(key) {
         match outcome {
