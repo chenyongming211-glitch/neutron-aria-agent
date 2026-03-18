@@ -250,6 +250,7 @@ pub fn parse_eth_ipv6(data: usize, data_end: usize, offset: usize) -> Option<Pac
             tcp_flags,
             tcp_seq,
             payload_len,
+            _pad: [0; 3],
         })
     }
 }
