@@ -484,15 +484,15 @@ async fn main() {
                             if resp.flows.is_empty() {
                                 println!("  No TCP-RT data collected yet");
                             } else {
-                                println!("{:<20} {:<20} {:<8} {:<8} {:<12} {:<12} {:<12} {:<12} {:<8} {:<8} {}",
+                                println!("{:<20} {:<20} {:<8} {:<8} {:<12} {:<12} {:<12} {:<12} {:<8} {:<8} {:<8} {}",
                                     "Source", "Destination", "SPort", "DPort",
                                     "Handshake", "cRTT", "sRTT", "ART",
-                                    "Retrans", "Reqs", "State");
+                                    "ReqRT", "RspRT", "Reqs", "State");
                                 for e in &resp.flows {
-                                    println!("{:<20} {:<20} {:<8} {:<8} {:<12.1} {:<12.1} {:<12.1} {:<12.1} {:<8} {:<8} {}",
+                                    println!("{:<20} {:<20} {:<8} {:<8} {:<12.1} {:<12.1} {:<12.1} {:<12.1} {:<8} {:<8} {:<8} {}",
                                         e.src_ip, e.dst_ip, e.src_port, e.dst_port,
                                         e.handshake_us, e.rtt_client_us, e.rtt_server_us, e.art_us,
-                                        e.retransmissions, e.request_count, e.state);
+                                        e.retrans_req, e.retrans_resp, e.request_count, e.state);
                                 }
                             }
                             println!();
@@ -646,15 +646,15 @@ async fn main() {
                         if resp.flows.is_empty() {
                             println!("No TCP-RT data collected yet");
                         } else {
-                            println!("{:<20} {:<20} {:<8} {:<8} {:<12} {:<12} {:<12} {:<12} {:<8} {:<8} {}",
+                            println!("{:<20} {:<20} {:<8} {:<8} {:<12} {:<12} {:<12} {:<12} {:<8} {:<8} {:<8} {}",
                                 "Source", "Destination", "SPort", "DPort",
                                 "HS (us)", "cRTT (us)", "sRTT (us)", "ART (us)",
-                                "Retrans", "Reqs", "State");
+                                "ReqRT", "RspRT", "Reqs", "State");
                             for e in &resp.flows {
-                                println!("{:<20} {:<20} {:<8} {:<8} {:<12.1} {:<12.1} {:<12.1} {:<12.1} {:<8} {:<8} {}",
+                                println!("{:<20} {:<20} {:<8} {:<8} {:<12.1} {:<12.1} {:<12.1} {:<12.1} {:<8} {:<8} {:<8} {}",
                                     e.src_ip, e.dst_ip, e.src_port, e.dst_port,
                                     e.handshake_us, e.rtt_client_us, e.rtt_server_us, e.art_us,
-                                    e.retransmissions, e.request_count, e.state);
+                                    e.retrans_req, e.retrans_resp, e.request_count, e.state);
                             }
                         }
                         Ok(())

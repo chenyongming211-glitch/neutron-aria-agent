@@ -684,7 +684,8 @@ pub async fn list_tcprt(
                 rtt_client_us: e.rtt_client_us,
                 rtt_server_us: e.rtt_server_us,
                 art_us: e.art_us,
-                retransmissions: e.retransmissions,
+                retrans_req: e.retrans_req,
+                retrans_resp: e.retrans_resp,
                 request_count: e.request_count,
                 state: e.state,
             }).collect();

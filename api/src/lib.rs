@@ -389,7 +389,8 @@ pub struct TcpRtEntry {
     pub rtt_client_us: f64,
     pub rtt_server_us: f64,
     pub art_us: f64,
-    pub retransmissions: u32,
+    pub retrans_req: u32,
+    pub retrans_resp: u32,
     pub request_count: u32,
     pub state: String,
 }

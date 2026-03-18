@@ -11,7 +11,8 @@ pub struct TcpRtEntry {
     pub rtt_client_us: f64,
     pub rtt_server_us: f64,
     pub art_us: f64,
-    pub retransmissions: u32,
+    pub retrans_req: u32,
+    pub retrans_resp: u32,
     pub request_count: u32,
     pub state: String,
 }
@@ -45,7 +46,8 @@ pub fn get_tcprt_flows_v4(pin_path: &str) -> Result<Vec<TcpRtEntry>, String> {
                 rtt_client_us: val.rtt_client_ns as f64 / 1000.0,
                 rtt_server_us: val.rtt_server_ns as f64 / 1000.0,
                 art_us: val.art_ns as f64 / 1000.0,
-                retransmissions: val.retransmissions,
+                retrans_req: val.retrans_req,
+                retrans_resp: val.retrans_resp,
                 request_count: val.request_count,
                 state: state_name(val.state),
             });
@@ -74,7 +76,8 @@ pub fn get_tcprt_flows_v6(pin_path: &str) -> Result<Vec<TcpRtEntry>, String> {
                 rtt_client_us: val.rtt_client_ns as f64 / 1000.0,
                 rtt_server_us: val.rtt_server_ns as f64 / 1000.0,
                 art_us: val.art_ns as f64 / 1000.0,
-                retransmissions: val.retransmissions,
+                retrans_req: val.retrans_req,
+                retrans_resp: val.retrans_resp,
                 request_count: val.request_count,
                 state: state_name(val.state),
             });

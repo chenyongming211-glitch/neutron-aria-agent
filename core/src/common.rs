@@ -216,14 +216,16 @@ pub struct TcpRtValue {
     pub rtt_client_ns: u64,
     pub rtt_server_ns: u64,
     pub art_ns: u64,
-    pub retransmissions: u32,
+    pub retrans_req: u32,
+    pub retrans_resp: u32,
     pub request_count: u32,
     pub state: u8,
     pub flags: u8,
     pub pad: [u8; 2],
     pub last_seq: u32,
     pub last_payload_len: u16,
-    pub pad2: [u8; 2],
+    pub last_resp_seq: u32,
+    pub last_resp_payload_len: u16,
 }
 unsafe impl Pod for TcpRtValue {}
 

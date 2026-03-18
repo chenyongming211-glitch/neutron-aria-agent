@@ -40,14 +40,16 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
             rtt_client_ns: 0,
             rtt_server_ns: 0,
             art_ns: 0,
-            retransmissions: 0,
+            retrans_req: 0,
+            retrans_resp: 0,
             request_count: 0,
             state: TCPRT_STATE_HANDSHAKE,
             flags: TCPRT_FLAG_SYN_SEEN,
             pad: [0; 2],
             last_seq: info.tcp_seq,
             last_payload_len: 0,
-            pad2: [0; 2],
+            last_resp_seq: 0,
+            last_resp_payload_len: 0,
         };
         let _ = TCPRT_TABLE_V4.insert(ct_key, &val, 0);
         return;
@@ -92,14 +94,12 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
     }
 
     if is_forward {
-        // Request direction (client → server through security device)
+        // Request direction (client → server)
         if info.payload_len > 0 {
-            // Retransmission detection: same seq + has payload
             if (*entry).last_seq == info.tcp_seq && (*entry).last_payload_len > 0 {
-                (*entry).retransmissions += 1;
+                (*entry).retrans_req += 1;
             }
 
-            // If previous response was received, finalize that cycle
             if (*entry).first_response_ts > 0 {
                 (*entry).request_count += 1;
                 (*entry).first_response_ts = 0;
@@ -111,9 +111,20 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
         }
     } else {
         // Response direction (server → client)
-        if info.payload_len > 0 && (*entry).first_response_ts == 0 && (*entry).last_request_ts > 0 {
-            (*entry).first_response_ts = now;
-            (*entry).art_ns = now.wrapping_sub((*entry).last_request_ts);
+        if info.payload_len > 0 {
+            // Retransmission detection for response direction
+            if (*entry).last_resp_seq == info.tcp_seq && (*entry).last_resp_payload_len > 0 {
+                (*entry).retrans_resp += 1;
+            }
+
+            // ART: first response after last request
+            if (*entry).first_response_ts == 0 && (*entry).last_request_ts > 0 {
+                (*entry).first_response_ts = now;
+                (*entry).art_ns = now.wrapping_sub((*entry).last_request_ts);
+            }
+
+            (*entry).last_resp_seq = info.tcp_seq;
+            (*entry).last_resp_payload_len = info.payload_len;
         }
     }
 }
@@ -128,7 +139,6 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
     let is_fin = (flags & TCP_FLAG_FIN) != 0;
     let is_rst = (flags & TCP_FLAG_RST) != 0;
 
-    // SYN (no ACK) — new connection, forward direction
     if is_syn && !is_ack && is_forward {
         let val = TcpRtValue {
             syn_ts: now,
@@ -140,14 +150,16 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
             rtt_client_ns: 0,
             rtt_server_ns: 0,
             art_ns: 0,
-            retransmissions: 0,
+            retrans_req: 0,
+            retrans_resp: 0,
             request_count: 0,
             state: TCPRT_STATE_HANDSHAKE,
             flags: TCPRT_FLAG_SYN_SEEN,
             pad: [0; 2],
             last_seq: info.tcp_seq,
             last_payload_len: 0,
-            pad2: [0; 2],
+            last_resp_seq: 0,
+            last_resp_payload_len: 0,
         };
         let _ = TCPRT_TABLE_V6.insert(ct_key, &val, 0);
         return;
@@ -189,7 +201,7 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
     if is_forward {
         if info.payload_len > 0 {
             if (*entry).last_seq == info.tcp_seq && (*entry).last_payload_len > 0 {
-                (*entry).retransmissions += 1;
+                (*entry).retrans_req += 1;
             }
             if (*entry).first_response_ts > 0 {
                 (*entry).request_count += 1;
@@ -200,9 +212,16 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
             (*entry).last_payload_len = info.payload_len;
         }
     } else {
-        if info.payload_len > 0 && (*entry).first_response_ts == 0 && (*entry).last_request_ts > 0 {
-            (*entry).first_response_ts = now;
-            (*entry).art_ns = now.wrapping_sub((*entry).last_request_ts);
+        if info.payload_len > 0 {
+            if (*entry).last_resp_seq == info.tcp_seq && (*entry).last_resp_payload_len > 0 {
+                (*entry).retrans_resp += 1;
+            }
+            if (*entry).first_response_ts == 0 && (*entry).last_request_ts > 0 {
+                (*entry).first_response_ts = now;
+                (*entry).art_ns = now.wrapping_sub((*entry).last_request_ts);
+            }
+            (*entry).last_resp_seq = info.tcp_seq;
+            (*entry).last_resp_payload_len = info.payload_len;
         }
     }
 }

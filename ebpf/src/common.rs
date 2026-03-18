@@ -216,14 +216,16 @@ pub struct TcpRtValue {
     pub rtt_client_ns: u64,     // Client-side RTT (ack_ts - synack_ts)
     pub rtt_server_ns: u64,     // Server-side RTT (synack_ts - syn_ts)
     pub art_ns: u64,            // Application response time (first_response_ts - last_request_ts)
-    pub retransmissions: u32,   // Retransmission count
+    pub retrans_req: u32,       // Request direction retransmissions (client → server)
+    pub retrans_resp: u32,      // Response direction retransmissions (server → client)
     pub request_count: u32,     // Completed request-response cycles
     pub state: u8,              // 0=handshake, 1=established, 2=closing
     pub flags: u8,              // bit 0: syn_seen, bit 1: synack_seen, bit 2: established
     pub pad: [u8; 2],
-    pub last_seq: u32,          // Last seq number (for retransmission detection)
-    pub last_payload_len: u16,  // Last payload length
-    pub pad2: [u8; 2],
+    pub last_seq: u32,          // Last forward seq (for retransmission detection)
+    pub last_payload_len: u16,  // Last forward payload length
+    pub last_resp_seq: u32,     // Last reverse seq (for retransmission detection)
+    pub last_resp_payload_len: u16, // Last reverse payload length
 }
 
 pub const TCPRT_STATE_HANDSHAKE: u8 = 0;
