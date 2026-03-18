@@ -12,6 +12,7 @@ pub use crate::common::{
     TcpRtValue,
     DropKey, DropValue,
     TraceFilter, TraceEvent,
+    PipelineCtx,
 };
 use crate::parser::PacketInfo;
 
@@ -19,6 +20,11 @@ use crate::parser::PacketInfo;
 
 #[map(name = "PKT_SCRATCH")]
 pub static PKT_SCRATCH: PerCpuArray<PacketInfo> = PerCpuArray::with_max_entries(1, 0);
+
+// --- Pipeline scratch context (inter-phase communication) ---
+
+#[map(name = "PIPE_SCRATCH")]
+pub static PIPE_SCRATCH: PerCpuArray<PipelineCtx> = PerCpuArray::with_max_entries(1, 0);
 
 // --- Existing maps ---
 

@@ -309,6 +309,48 @@ pub struct TraceEvent {
     pub pad: [u8; 2],
 }
 
+// --- Pipeline scratch context (per-CPU, inter-phase communication) ---
+
+/// Feature flag bits for PipelineCtx.flags
+pub const FLAG_QOS_ON: u16 = 1 << 0;
+pub const FLAG_TCPRT_ON: u16 = 1 << 1;
+pub const FLAG_TRACING: u16 = 1 << 2;
+pub const FLAG_ACL_ON: u16 = 1 << 3;
+pub const FLAG_MIRROR_ON: u16 = 1 << 4;
+pub const FLAG_CT_HIT: u16 = 1 << 5;
+pub const FLAG_IS_FORWARD: u16 = 1 << 6;
+pub const FLAG_NEED_IDS: u16 = 1 << 7;
+
+/// Per-CPU scratch buffer for passing state between pipeline phases.
+/// Lives in PIPE_SCRATCH PerCpuArray — zero stack overhead.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PipelineCtx {
+    // ID lookup results
+    pub src_id: u32,
+    pub dst_id: u32,
+
+    // Common parameters
+    pub pkt_len: u32,
+    pub now: u64,
+    pub proto: u8,
+    pub direction: u8,
+    pub flags: u16,
+
+    // CT / policy results
+    pub ct_state: u8,       // 0=not_found, 1=new, 2=established
+    pub drop_reason: u8,
+    pub _pad: [u8; 2],
+    pub action: u32,
+
+    // Matched policy (from CT fast-path or evaluate_policy)
+    pub matched_src_id: u32,
+    pub matched_dst_id: u32,
+    pub matched_proto: u8,
+    pub matched_direction: u8,
+    pub _pad2: [u8; 2],
+}
+
 // --- Global firewall config (feature switches) ---
 
 #[repr(C)]

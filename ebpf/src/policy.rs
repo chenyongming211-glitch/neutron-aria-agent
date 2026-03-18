@@ -40,24 +40,24 @@ pub fn acl_enabled() -> bool {
 /// Tries 8 candidate keys from most-specific to least-specific (wildcarding
 /// src_id, dst_id, proto with 0). The matched_policy records the exact key
 /// that hit (including wildcards) so the CT fast path can replay rule stats.
+///
+/// Priority order (bitmask: bit0=src_wildcard, bit1=dst_wildcard, bit2=proto_wildcard):
+///   0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111
 #[inline(never)]
 pub unsafe fn evaluate_policy(
     args: &PolicyArgs,
 ) -> (u32, u8, MatchedPolicy) {
-    let candidates: [(u32, u32, u8); 8] = [
-        (args.src_id, args.dst_id, args.proto),
-        (0,           args.dst_id, args.proto),
-        (args.src_id, 0,           args.proto),
-        (args.src_id, args.dst_id, 0),
-        (0,           0,           args.proto),
-        (0,           args.dst_id, 0),
-        (args.src_id, 0,           0),
-        (0,           0,           0),
-    ];
+    // Priority-ordered bitmask: which fields to wildcard (0=specific value, 1=wildcard to 0)
+    // bit 0: src_id, bit 1: dst_id, bit 2: proto
+    const ORDER: [u8; 8] = [0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111];
 
     let mut i = 0u8;
     while i < 8 {
-        let (s, d, p) = candidates[i as usize];
+        let mask = ORDER[i as usize];
+        let s = if (mask & 1) != 0 { 0 } else { args.src_id };
+        let d = if (mask & 2) != 0 { 0 } else { args.dst_id };
+        let p = if (mask & 4) != 0 { 0 } else { args.proto };
+
         let key = PolicyKey {
             src_id: s,
             dst_id: d,
@@ -89,18 +89,6 @@ pub unsafe fn evaluate_policy(
         direction: args.direction,
     };
     (XDP_PASS, 0, matched)
-}
-
-/// Same 8-level fallback, but returns TC action codes (TC_ACT_OK / TC_ACT_SHOT).
-#[inline(never)]
-pub unsafe fn evaluate_policy_tc(
-    args: &PolicyArgs,
-    tc_act_ok: i32,
-    tc_act_shot: i32,
-) -> (i32, u8, MatchedPolicy) {
-    let (xdp_result, drop_reason, matched) = evaluate_policy(args);
-    let tc_result = if xdp_result == XDP_PASS { tc_act_ok } else { tc_act_shot };
-    (tc_result, drop_reason, matched)
 }
 
 /// Returns (XDP action, drop_reason). drop_reason is 0 for PASS.
