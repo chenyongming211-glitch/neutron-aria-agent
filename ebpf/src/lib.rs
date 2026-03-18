@@ -45,7 +45,7 @@ const TC_ACT_SHOT: i32 = 2;
 // --- XDP Ingress ---
 
 #[xdp]
-pub unsafe fn xdp_firewall(ctx: XdpContext) -> u32 {
+pub fn xdp_firewall(ctx: XdpContext) -> u32 { unsafe {
     let data = ctx.data();
     let data_end = ctx.data_end();
     let pkt_len = (data_end - data) as u32;
@@ -250,12 +250,12 @@ pub unsafe fn xdp_firewall(ctx: XdpContext) -> u32 {
 
         result
     }
-}
+} }
 
 // --- TC Egress ---
 
 #[classifier]
-pub unsafe fn tc_egress(ctx: TcContext) -> i32 {
+pub fn tc_egress(ctx: TcContext) -> i32 { unsafe {
     let data = ctx.data();
     let data_end = ctx.data_end();
     let pkt_len = ctx.len();
@@ -487,12 +487,12 @@ pub unsafe fn tc_egress(ctx: TcContext) -> i32 {
 
         result
     }
-}
+} }
 
 // --- TC Ingress (mirror only) ---
 
 #[classifier]
-pub unsafe fn tc_ingress(ctx: TcContext) -> i32 {
+pub fn tc_ingress(ctx: TcContext) -> i32 { unsafe {
     let data = ctx.data();
     let data_end = ctx.data_end();
     let pkt_len = ctx.len();
@@ -528,7 +528,7 @@ pub unsafe fn tc_ingress(ctx: TcContext) -> i32 {
     }
 
     TC_ACT_OK
-}
+} }
 
 // --- Helpers ---
 
