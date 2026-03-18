@@ -239,6 +239,22 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    // ── TCP-RT ──
+
+    pub async fn list_tcprt(&self, instance: &str, top: usize) -> Result<TcpRtResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/tcprt?top={}", instance, top)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn flush_tcprt(&self, instance: &str) -> Result<TcpRtFlushResponse, String> {
+        let resp = self.client.delete(self.url(&format!("/api/v1/{}/tcprt", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── Internal ──
 
     fn connection_error(&self, e: reqwest::Error) -> String {

@@ -212,6 +212,7 @@ pub struct ConfigResponse {
     pub acl: bool,
     pub qos: bool,
     pub mirror: bool,
+    pub tcprt: bool,
     pub num_cpus: u16,
 }
 
@@ -222,6 +223,7 @@ pub struct UpdateConfigRequest {
     pub acl: Option<bool>,
     pub qos: Option<bool>,
     pub mirror: Option<bool>,
+    pub tcprt: Option<bool>,
 }
 
 // ── Stats ──
@@ -373,6 +375,32 @@ pub struct MirrorStatsEntry {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MirrorStatsResponse {
     pub rules: Vec<MirrorStatsEntry>,
+}
+
+// ── TCP-RT ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtEntry {
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub handshake_us: f64,
+    pub rtt_us: f64,
+    pub art_us: f64,
+    pub retransmissions: u32,
+    pub request_count: u32,
+    pub state: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtResponse {
+    pub flows: Vec<TcpRtEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtFlushResponse {
+    pub flushed: u64,
 }
 
 // ── Helpers ──

@@ -201,6 +201,31 @@ pub struct MirrorStatsValue {
 }
 unsafe impl Pod for MirrorStatsValue {}
 
+// --- TCP-RT (TCP Response Time) ---
+
+/// TCP-RT per-flow tracking state (mirrors ebpf/src/common.rs TcpRtValue)
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct TcpRtValue {
+    pub syn_ts: u64,
+    pub synack_ts: u64,
+    pub ack_ts: u64,
+    pub last_request_ts: u64,
+    pub first_response_ts: u64,
+    pub handshake_ns: u64,
+    pub rtt_ns: u64,
+    pub art_ns: u64,
+    pub retransmissions: u32,
+    pub request_count: u32,
+    pub state: u8,
+    pub flags: u8,
+    pub pad: [u8; 2],
+    pub last_seq: u32,
+    pub last_payload_len: u16,
+    pub pad2: [u8; 2],
+}
+unsafe impl Pod for TcpRtValue {}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct FirewallConfig {
@@ -210,7 +235,7 @@ pub struct FirewallConfig {
     pub qos_enabled: u8,
     pub acl_enabled: u8,
     pub mirror_enabled: u8,
-    pub pad: [u8; 1],
+    pub tcprt_enabled: u8,
 }
 unsafe impl Pod for FirewallConfig {}
 

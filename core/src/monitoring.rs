@@ -433,6 +433,17 @@ pub fn get_mirror_stats(pin_path: &str) -> Result<Vec<MirrorStatsEntry>, String>
     Ok(entries)
 }
 
+// --- TCP-RT Statistics ---
+
+pub fn get_tcprt_stats(pin_path: &str, top_n: usize) -> Result<Vec<crate::tcprt_ops::TcpRtEntry>, String> {
+    let mut entries = crate::tcprt_ops::get_tcprt_flows_v4(pin_path).unwrap_or_default();
+    entries.extend(crate::tcprt_ops::get_tcprt_flows_v6(pin_path).unwrap_or_default());
+    // Sort by ART descending (slowest responses first)
+    entries.sort_by(|a, b| b.art_us.partial_cmp(&a.art_us).unwrap_or(std::cmp::Ordering::Equal));
+    entries.truncate(top_n);
+    Ok(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

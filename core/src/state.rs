@@ -104,6 +104,8 @@ pub struct FirewallState {
     pub mirror_rules: Vec<MirrorRuleInfo>,
     #[serde(default = "default_true")]
     pub mirror_enabled: bool,
+    #[serde(default = "default_true")]
+    pub tcprt_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -128,6 +130,7 @@ impl Default for FirewallState {
             qos_enabled: true,
             mirror_rules: Vec::new(),
             mirror_enabled: true,
+            tcprt_enabled: true,
         }
     }
 }

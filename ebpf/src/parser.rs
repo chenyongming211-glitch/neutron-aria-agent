@@ -11,6 +11,9 @@ pub struct PacketInfo {
     pub src_port: u16,
     pub dst_port: u16,
     pub is_ipv6: bool,
+    pub tcp_flags: u8,      // TCP flags byte (SYN, ACK, FIN, RST, etc.)
+    pub tcp_seq: u32,        // TCP sequence number
+    pub payload_len: u16,    // L4 payload length
 }
 
 impl Default for PacketInfo {
@@ -24,6 +27,9 @@ impl Default for PacketInfo {
             src_port: 0,
             dst_port: 0,
             is_ipv6: false,
+            tcp_flags: 0,
+            tcp_seq: 0,
+            payload_len: 0,
         }
     }
 }
@@ -75,18 +81,35 @@ pub fn parse_eth_ipv4(data: usize, data_end: usize, offset: usize) -> Option<Pac
         let src_ip = read_be32(ip_offset, 12);
         let dst_ip = read_be32(ip_offset, 16);
 
-        let (src_port, dst_port) = if proto == IPPROTO_TCP || proto == IPPROTO_UDP {
+        let (src_port, dst_port, tcp_flags, tcp_seq, payload_len) = if proto == IPPROTO_TCP {
+            let transport_offset = ip_offset + ihl;
+            if transport_offset + 14 <= data_end {
+                let sp = read_be16(transport_offset, 0);
+                let dp = read_be16(transport_offset, 2);
+                let seq = read_be32(transport_offset, 4);
+                let flags = read8(transport_offset, 13);
+                let data_off = (read8(transport_offset, 12) >> 4) as usize * 4;
+                let ip_total_len = read_be16(ip_offset, 2) as usize;
+                let pl = if data_off >= 20 && ip_total_len > ihl + data_off {
+                    (ip_total_len - ihl - data_off) as u16
+                } else {
+                    0
+                };
+                (sp, dp, flags, seq, pl)
+            } else if transport_offset + 4 <= data_end {
+                (read_be16(transport_offset, 0), read_be16(transport_offset, 2), 0, 0, 0)
+            } else {
+                (0, 0, 0, 0, 0)
+            }
+        } else if proto == IPPROTO_UDP {
             let transport_offset = ip_offset + ihl;
             if transport_offset + 4 <= data_end {
-                (
-                    read_be16(transport_offset, 0),
-                    read_be16(transport_offset, 2),
-                )
+                (read_be16(transport_offset, 0), read_be16(transport_offset, 2), 0, 0, 0)
             } else {
-                (0, 0)
+                (0, 0, 0, 0, 0)
             }
         } else {
-            (0, 0)
+            (0, 0, 0, 0, 0)
         };
 
         Some(PacketInfo {
@@ -96,6 +119,9 @@ pub fn parse_eth_ipv4(data: usize, data_end: usize, offset: usize) -> Option<Pac
             src_port,
             dst_port,
             is_ipv6: false,
+            tcp_flags,
+            tcp_seq,
+            payload_len,
             ..Default::default()
         })
     }
@@ -176,20 +202,38 @@ pub fn parse_eth_ipv6(data: usize, data_end: usize, offset: usize) -> Option<Pac
             i += 1;
         }
 
-        let (src_port, dst_port) = if is_fragment {
-            // 非首分片，无法获取端口，回退到 (0, 0) 走默认策略动作
-            (0, 0)
-        } else if next_header == IPPROTO_TCP || next_header == IPPROTO_UDP {
-            if transport_offset + 4 <= data_end {
-                (
-                    read_be16(transport_offset, 0),
-                    read_be16(transport_offset, 2),
-                )
+        let (src_port, dst_port, tcp_flags, tcp_seq, payload_len) = if is_fragment {
+            (0, 0, 0, 0, 0)
+        } else if next_header == IPPROTO_TCP {
+            if transport_offset + 14 <= data_end {
+                let sp = read_be16(transport_offset, 0);
+                let dp = read_be16(transport_offset, 2);
+                let seq = read_be32(transport_offset, 4);
+                let flags = read8(transport_offset, 13);
+                let data_off = (read8(transport_offset, 12) >> 4) as usize * 4;
+                // IPv6 payload_length = everything after the 40-byte fixed header
+                let ipv6_payload_len = read_be16(ip_offset, 4) as usize;
+                // transport payload offset relative to start of IPv6 payload
+                let transport_rel = transport_offset - (ip_offset + 40);
+                let pl = if data_off >= 20 && ipv6_payload_len > transport_rel + data_off {
+                    (ipv6_payload_len - transport_rel - data_off) as u16
+                } else {
+                    0
+                };
+                (sp, dp, flags, seq, pl)
+            } else if transport_offset + 4 <= data_end {
+                (read_be16(transport_offset, 0), read_be16(transport_offset, 2), 0, 0, 0)
             } else {
-                (0, 0)
+                (0, 0, 0, 0, 0)
+            }
+        } else if next_header == IPPROTO_UDP {
+            if transport_offset + 4 <= data_end {
+                (read_be16(transport_offset, 0), read_be16(transport_offset, 2), 0, 0, 0)
+            } else {
+                (0, 0, 0, 0, 0)
             }
         } else {
-            (0, 0)
+            (0, 0, 0, 0, 0)
         };
 
         Some(PacketInfo {
@@ -201,6 +245,9 @@ pub fn parse_eth_ipv6(data: usize, data_end: usize, offset: usize) -> Option<Pac
             src_port,
             dst_port,
             is_ipv6: true,
+            tcp_flags,
+            tcp_seq,
+            payload_len,
         })
     }
 }

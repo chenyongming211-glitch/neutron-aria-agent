@@ -696,6 +696,7 @@ impl ControlPlane {
         acl: Option<bool>,
         qos: Option<bool>,
         mirror: Option<bool>,
+        tcprt: Option<bool>,
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
@@ -706,7 +707,7 @@ impl ControlPlane {
         // For mirror, the kernel flag = user_wants_mirror && has_rules
         let kernel_mirror = mirror.map(|m| m && !state.state.mirror_rules.is_empty());
 
-        if let Err(e) = aria_core::ebpf_ops::update_firewall_config(&state.pin_path, conntrack, monitoring, acl, kernel_qos, kernel_mirror) {
+        if let Err(e) = aria_core::ebpf_ops::update_firewall_config(&state.pin_path, conntrack, monitoring, acl, kernel_qos, kernel_mirror, tcprt) {
             return Err(ControlPlaneError::KernelError(e));
         }
 
@@ -725,6 +726,9 @@ impl ControlPlane {
         if let Some(m) = mirror {
             state.state.mirror_enabled = m;
         }
+        if let Some(t) = tcprt {
+            state.state.tcprt_enabled = t;
+        }
 
         if let Err(e) = state.wal.append(&WalEntry::UpdateConfig {
             conntrack,
@@ -732,6 +736,7 @@ impl ControlPlane {
             acl,
             qos,
             mirror,
+            tcprt,
         }) {
             eprintln!("[ControlPlane] WAL append failed (update_config): {}", e);
         }
@@ -792,6 +797,22 @@ impl ControlPlane {
         let stats = aria_core::monitoring::get_group_stats(&state.pin_path)
             .map_err(|e| ControlPlaneError::KernelError(e))?;
         Ok((stats, state.state.groups.clone()))
+    }
+
+    // ── TCP-RT ──
+
+    pub async fn list_tcprt(&self, instance: &str, top: usize) -> Result<Vec<aria_core::tcprt_ops::TcpRtEntry>, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        aria_core::monitoring::get_tcprt_stats(&state.pin_path, top)
+            .map_err(|e| ControlPlaneError::KernelError(e))
+    }
+
+    pub async fn flush_tcprt(&self, instance: &str) -> Result<u64, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        aria_core::tcprt_ops::flush_tcprt(&state.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
     // ── Compact (WAL persistence) ──

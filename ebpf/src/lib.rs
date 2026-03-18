@@ -17,10 +17,12 @@ mod stats;
 mod qos;
 mod policy;
 mod mirror;
+mod tcprt;
 
 use common::{
     CtKey4, CtKey6,
     XDP_PASS, XDP_DROP, DIR_INGRESS, DIR_EGRESS,
+    IPPROTO_TCP,
 };
 use maps::{
     DST_IPV4_TRIE, SRC_IPV4_TRIE, DST_IPV6_TRIE, SRC_IPV6_TRIE,
@@ -57,6 +59,7 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
     let now = bpf_ktime_get_ns();
     let qos_on = qos::qos_enabled();
+    let tcprt_on = tcprt::tcprt_enabled();
 
     if info.is_ipv6 {
         let ct_key = CtKey6 {
@@ -69,9 +72,24 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
         };
 
         match conntrack::ct_lookup_v6(&ct_key, now, pkt_len) {
-            CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
+            CtLookupResult::Established(matched, is_forward) | CtLookupResult::SeenReply(matched, is_forward) => {
                 stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
                 stats::update_flow_stats_v6(&ct_key, pkt_len, now);
+                if tcprt_on && info.proto == IPPROTO_TCP {
+                    if is_forward {
+                        tcprt::track_tcp_rt_v6(&ct_key, &info, now, true);
+                    } else {
+                        let fwd_key = CtKey6 {
+                            src_ip: info.dst_ip_v6,
+                            dst_ip: info.src_ip_v6,
+                            src_port: info.dst_port,
+                            dst_port: info.src_port,
+                            proto: info.proto,
+                            pad: [0; 3],
+                        };
+                        tcprt::track_tcp_rt_v6(&fwd_key, &info, now, false);
+                    }
+                }
                 let need_ids = qos_on || stats::monitoring_enabled();
                 if need_ids {
                     let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
@@ -94,6 +112,9 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
         if !policy::acl_enabled() {
             // ACL disabled: skip policy evaluation, still do QoS and group stats
             stats::update_flow_stats_v6(&ct_key, pkt_len, now);
+            if tcprt_on && info.proto == IPPROTO_TCP {
+                tcprt::track_tcp_rt_v6(&ct_key, &info, now, true);
+            }
             if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 return XDP_DROP;
             }
@@ -106,6 +127,9 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
         if result == XDP_PASS {
             stats::update_flow_stats_v6(&ct_key, pkt_len, now);
+            if tcprt_on && info.proto == IPPROTO_TCP {
+                tcprt::track_tcp_rt_v6(&ct_key, &info, now, true);
+            }
             if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 return XDP_DROP;
             }
@@ -127,9 +151,24 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
         };
 
         match conntrack::ct_lookup_v4(&ct_key, now, pkt_len) {
-            CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
+            CtLookupResult::Established(matched, is_forward) | CtLookupResult::SeenReply(matched, is_forward) => {
                 stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
                 stats::update_flow_stats_v4(&ct_key, pkt_len, now);
+                if tcprt_on && info.proto == IPPROTO_TCP {
+                    if is_forward {
+                        tcprt::track_tcp_rt_v4(&ct_key, &info, now, true);
+                    } else {
+                        let fwd_key = CtKey4 {
+                            src_ip: info.dst_ip,
+                            dst_ip: info.src_ip,
+                            src_port: info.dst_port,
+                            dst_port: info.src_port,
+                            proto: info.proto,
+                            pad: [0; 3],
+                        };
+                        tcprt::track_tcp_rt_v4(&fwd_key, &info, now, false);
+                    }
+                }
                 let need_ids = qos_on || stats::monitoring_enabled();
                 if need_ids {
                     let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
@@ -151,6 +190,9 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
         if !policy::acl_enabled() {
             stats::update_flow_stats_v4(&ct_key, pkt_len, now);
+            if tcprt_on && info.proto == IPPROTO_TCP {
+                tcprt::track_tcp_rt_v4(&ct_key, &info, now, true);
+            }
             if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 return XDP_DROP;
             }
@@ -163,6 +205,9 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
         if result == XDP_PASS {
             stats::update_flow_stats_v4(&ct_key, pkt_len, now);
+            if tcprt_on && info.proto == IPPROTO_TCP {
+                tcprt::track_tcp_rt_v4(&ct_key, &info, now, true);
+            }
             if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 return XDP_DROP;
             }
@@ -199,6 +244,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
     let now = bpf_ktime_get_ns();
     let qos_on = qos::qos_enabled();
     let mirror_on = mirror::mirror_enabled();
+    let tcprt_on = tcprt::tcprt_enabled();
 
     if info.is_ipv6 {
         let ct_key = CtKey6 {
@@ -211,9 +257,24 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
         };
 
         match conntrack::ct_lookup_v6(&ct_key, now, pkt_len) {
-            CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
+            CtLookupResult::Established(matched, is_forward) | CtLookupResult::SeenReply(matched, is_forward) => {
                 stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
                 stats::update_flow_stats_v6(&ct_key, pkt_len, now);
+                if tcprt_on && info.proto == IPPROTO_TCP {
+                    if is_forward {
+                        tcprt::track_tcp_rt_v6(&ct_key, &info, now, true);
+                    } else {
+                        let fwd_key = CtKey6 {
+                            src_ip: info.dst_ip_v6,
+                            dst_ip: info.src_ip_v6,
+                            src_port: info.dst_port,
+                            dst_port: info.src_port,
+                            proto: info.proto,
+                            pad: [0; 3],
+                        };
+                        tcprt::track_tcp_rt_v6(&fwd_key, &info, now, false);
+                    }
+                }
                 let need_ids = qos_on || mirror_on || stats::monitoring_enabled();
                 if need_ids {
                     let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
@@ -241,6 +302,9 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
         if !policy::acl_enabled() {
             stats::update_flow_stats_v6(&ct_key, pkt_len, now);
+            if tcprt_on && info.proto == IPPROTO_TCP {
+                tcprt::track_tcp_rt_v6(&ct_key, &info, now, true);
+            }
             if qos_on {
                 if let Some(action) = apply_egress_qos(&ctx, src_id, dst_id, pkt_len, now) {
                     return action;
@@ -261,6 +325,9 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
         if result == TC_ACT_OK {
             stats::update_flow_stats_v6(&ct_key, pkt_len, now);
+            if tcprt_on && info.proto == IPPROTO_TCP {
+                tcprt::track_tcp_rt_v6(&ct_key, &info, now, true);
+            }
             if qos_on {
                 if let Some(action) = apply_egress_qos(&ctx, src_id, dst_id, pkt_len, now) {
                     return action;
@@ -288,9 +355,24 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
         };
 
         match conntrack::ct_lookup_v4(&ct_key, now, pkt_len) {
-            CtLookupResult::Established(matched) | CtLookupResult::SeenReply(matched) => {
+            CtLookupResult::Established(matched, is_forward) | CtLookupResult::SeenReply(matched, is_forward) => {
                 stats::update_rule_stats(&matched.to_policy_key(), pkt_len);
                 stats::update_flow_stats_v4(&ct_key, pkt_len, now);
+                if tcprt_on && info.proto == IPPROTO_TCP {
+                    if is_forward {
+                        tcprt::track_tcp_rt_v4(&ct_key, &info, now, true);
+                    } else {
+                        let fwd_key = CtKey4 {
+                            src_ip: info.dst_ip,
+                            dst_ip: info.src_ip,
+                            src_port: info.dst_port,
+                            dst_port: info.src_port,
+                            proto: info.proto,
+                            pad: [0; 3],
+                        };
+                        tcprt::track_tcp_rt_v4(&fwd_key, &info, now, false);
+                    }
+                }
                 let need_ids = qos_on || mirror_on || stats::monitoring_enabled();
                 if need_ids {
                     let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
@@ -318,6 +400,9 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
         if !policy::acl_enabled() {
             stats::update_flow_stats_v4(&ct_key, pkt_len, now);
+            if tcprt_on && info.proto == IPPROTO_TCP {
+                tcprt::track_tcp_rt_v4(&ct_key, &info, now, true);
+            }
             if qos_on {
                 if let Some(action) = apply_egress_qos(&ctx, src_id, dst_id, pkt_len, now) {
                     return action;
@@ -338,6 +423,9 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
         if result == TC_ACT_OK {
             stats::update_flow_stats_v4(&ct_key, pkt_len, now);
+            if tcprt_on && info.proto == IPPROTO_TCP {
+                tcprt::track_tcp_rt_v4(&ct_key, &info, now, true);
+            }
             if qos_on {
                 if let Some(action) = apply_egress_qos(&ctx, src_id, dst_id, pkt_len, now) {
                     return action;

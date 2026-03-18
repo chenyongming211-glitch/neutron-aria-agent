@@ -382,6 +382,7 @@ pub async fn get_config(
             acl: cfg.acl_enabled != 0,
             qos: cfg.qos_enabled != 0,
             mirror: cfg.mirror_enabled != 0,
+            tcprt: cfg.tcprt_enabled != 0,
             num_cpus: cfg.num_cpus,
         })),
         Err(e) => Err(err_response(e)),
@@ -393,7 +394,7 @@ pub async fn update_config(
     Path(instance): Path<String>,
     Json(req): Json<UpdateConfigRequest>,
 ) -> impl IntoResponse {
-    match cp.update_config(&instance, req.conntrack, req.monitoring, req.acl, req.qos, req.mirror).await {
+    match cp.update_config(&instance, req.conntrack, req.monitoring, req.acl, req.qos, req.mirror, req.tcprt).await {
         Ok(()) => Ok(Json(MessageResponse {
             message: "Configuration updated".to_string(),
         })),
@@ -661,6 +662,43 @@ pub async fn stats_mirror(
                 }).collect(),
             }))
         }
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+// ── TCP-RT ──
+
+pub async fn list_tcprt(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+    Query(query): Query<TopQuery>,
+) -> impl IntoResponse {
+    match cp.list_tcprt(&instance, query.top).await {
+        Ok(entries) => {
+            let flows = entries.into_iter().map(|e| aria_api::TcpRtEntry {
+                src_ip: e.src_ip,
+                dst_ip: e.dst_ip,
+                src_port: e.src_port,
+                dst_port: e.dst_port,
+                handshake_us: e.handshake_us,
+                rtt_us: e.rtt_us,
+                art_us: e.art_us,
+                retransmissions: e.retransmissions,
+                request_count: e.request_count,
+                state: e.state,
+            }).collect();
+            Ok(Json(aria_api::TcpRtResponse { flows }))
+        }
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+pub async fn flush_tcprt(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    match cp.flush_tcprt(&instance).await {
+        Ok(count) => Ok(Json(aria_api::TcpRtFlushResponse { flushed: count })),
         Err(e) => Err(err_response(e)),
     }
 }

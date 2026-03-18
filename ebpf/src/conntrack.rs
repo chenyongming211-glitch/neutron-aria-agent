@@ -95,10 +95,10 @@ impl MatchedPolicy {
 
 /// CT lookup result
 pub enum CtLookupResult {
-    /// Established connection — fast path, skip policy. Carries cached matched policy.
-    Established(MatchedPolicy),
+    /// Established connection — fast path, skip policy. Carries cached matched policy + is_forward.
+    Established(MatchedPolicy, bool),
     /// New entry just seen reply — transition to established
-    SeenReply(MatchedPolicy),
+    SeenReply(MatchedPolicy, bool),
     /// Not found or expired — needs policy evaluation
     NotFound,
 }
@@ -135,9 +135,9 @@ pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResu
         }
         let matched = extract_matched(&*entry);
         if (*entry).state == CT_ESTABLISHED {
-            return CtLookupResult::Established(matched);
+            return CtLookupResult::Established(matched, true);
         }
-        return CtLookupResult::SeenReply(matched);
+        return CtLookupResult::SeenReply(matched, true);
     }
 
     // Reverse lookup — only set SEEN_REPLY flag, do NOT promote state
@@ -153,7 +153,7 @@ pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResu
         (*entry).byte_count += pkt_len as u64;
         (*entry).flags |= CT_FLAG_SEEN_REPLY;
         let matched = extract_matched(&*entry);
-        return CtLookupResult::SeenReply(matched);
+        return CtLookupResult::SeenReply(matched, false);
     }
 
     CtLookupResult::NotFound
@@ -180,9 +180,9 @@ pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResu
         }
         let matched = extract_matched(&*entry);
         if (*entry).state == CT_ESTABLISHED {
-            return CtLookupResult::Established(matched);
+            return CtLookupResult::Established(matched, true);
         }
-        return CtLookupResult::SeenReply(matched);
+        return CtLookupResult::SeenReply(matched, true);
     }
 
     // Reverse lookup — only set SEEN_REPLY flag, do NOT promote state
@@ -198,7 +198,7 @@ pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResu
         (*entry).byte_count += pkt_len as u64;
         (*entry).flags |= CT_FLAG_SEEN_REPLY;
         let matched = extract_matched(&*entry);
-        return CtLookupResult::SeenReply(matched);
+        return CtLookupResult::SeenReply(matched, false);
     }
 
     CtLookupResult::NotFound

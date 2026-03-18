@@ -43,6 +43,8 @@ enum Commands {
         groups: bool,
         #[arg(long, help = "Show mirror statistics")]
         mirror: bool,
+        #[arg(long, help = "Show TCP-RT (response time) statistics")]
+        tcprt: bool,
     },
     /// Connection tracking operations
     Conntrack {
@@ -58,6 +60,11 @@ enum Commands {
     Mirror {
         #[command(subcommand)]
         action: MirrorCommands,
+    },
+    /// TCP response time monitoring
+    Tcprt {
+        #[command(subcommand)]
+        action: TcprtCommands,
     },
     /// Firewall configuration
     Config {
@@ -194,6 +201,17 @@ enum MirrorCommands {
     },
     /// List all mirror rules
     List,
+}
+
+#[derive(Subcommand)]
+enum TcprtCommands {
+    /// List TCP-RT flows sorted by application response time
+    List {
+        #[arg(long, default_value = "20", help = "Number of top flows to show")]
+        top: usize,
+    },
+    /// Flush all TCP-RT tracking entries
+    Flush,
 }
 
 #[derive(Subcommand)]
@@ -359,8 +377,8 @@ async fn main() {
                 }
             }
         },
-        Commands::Stats { rules, flows, top, qos, groups, mirror } => {
-            if !rules && !flows && !qos && !groups && !mirror {
+        Commands::Stats { rules, flows, top, qos, groups, mirror, tcprt } => {
+            if !rules && !flows && !qos && !groups && !mirror && !tcprt {
                 // Show overview
                 match client.stats_overview(&instance).await {
                     Ok(stats) => {
@@ -457,6 +475,29 @@ async fn main() {
                             println!();
                         }
                         Err(e) => { eprintln!("Error reading mirror stats: {}", e); has_error = true; }
+                    }
+                }
+                if tcprt {
+                    match client.list_tcprt(&instance, top).await {
+                        Ok(resp) => {
+                            println!("=== TCP-RT Statistics (top {}) ===", top);
+                            if resp.flows.is_empty() {
+                                println!("  No TCP-RT data collected yet");
+                            } else {
+                                println!("{:<20} {:<20} {:<8} {:<8} {:<12} {:<12} {:<12} {:<8} {:<8} {}",
+                                    "Source", "Destination", "SPort", "DPort",
+                                    "Handshake", "RTT", "ART",
+                                    "Retrans", "Reqs", "State");
+                                for e in &resp.flows {
+                                    println!("{:<20} {:<20} {:<8} {:<8} {:<12.1} {:<12.1} {:<12.1} {:<8} {:<8} {}",
+                                        e.src_ip, e.dst_ip, e.src_port, e.dst_port,
+                                        e.handshake_us, e.rtt_us, e.art_us,
+                                        e.retransmissions, e.request_count, e.state);
+                                }
+                            }
+                            println!();
+                        }
+                        Err(e) => { eprintln!("Error reading TCP-RT stats: {}", e); has_error = true; }
                     }
                 }
                 if flows {
@@ -598,6 +639,36 @@ async fn main() {
                 }
             }
         },
+        Commands::Tcprt { action } => match action {
+            TcprtCommands::List { top } => {
+                match client.list_tcprt(&instance, top).await {
+                    Ok(resp) => {
+                        if resp.flows.is_empty() {
+                            println!("No TCP-RT data collected yet");
+                        } else {
+                            println!("{:<20} {:<20} {:<8} {:<8} {:<12} {:<12} {:<12} {:<8} {:<8} {}",
+                                "Source", "Destination", "SPort", "DPort",
+                                "HS (us)", "RTT (us)", "ART (us)",
+                                "Retrans", "Reqs", "State");
+                            for e in &resp.flows {
+                                println!("{:<20} {:<20} {:<8} {:<8} {:<12.1} {:<12.1} {:<12.1} {:<8} {:<8} {}",
+                                    e.src_ip, e.dst_ip, e.src_port, e.dst_port,
+                                    e.handshake_us, e.rtt_us, e.art_us,
+                                    e.retransmissions, e.request_count, e.state);
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            TcprtCommands::Flush => {
+                match client.flush_tcprt(&instance).await {
+                    Ok(resp) => { println!("Flushed {} TCP-RT entries", resp.flushed); Ok(()) }
+                    Err(e) => Err(e),
+                }
+            }
+        },
         Commands::Config { action } => match action {
             ConfigCommands::Show => {
                 match client.get_config(&instance).await {
@@ -608,6 +679,7 @@ async fn main() {
                         println!("  acl:        {}", if cfg.acl { "on" } else { "off" });
                         println!("  qos:        {}", if cfg.qos { "on" } else { "off" });
                         println!("  mirror:     {}", if cfg.mirror { "on" } else { "off" });
+                        println!("  tcprt:      {}", if cfg.tcprt { "on" } else { "off" });
                         println!("  num_cpus:   {}", cfg.num_cpus);
                         Ok(())
                     }
@@ -631,6 +703,7 @@ async fn main() {
                         acl: None,
                         qos: None,
                         mirror: None,
+                        tcprt: None,
                     },
                     "monitoring" | "mon" => aria_api::UpdateConfigRequest {
                         conntrack: None,
@@ -638,6 +711,7 @@ async fn main() {
                         acl: None,
                         qos: None,
                         mirror: None,
+                        tcprt: None,
                     },
                     "acl" | "policy" => aria_api::UpdateConfigRequest {
                         conntrack: None,
@@ -645,6 +719,7 @@ async fn main() {
                         acl: Some(enabled),
                         qos: None,
                         mirror: None,
+                        tcprt: None,
                     },
                     "qos" => aria_api::UpdateConfigRequest {
                         conntrack: None,
@@ -652,6 +727,7 @@ async fn main() {
                         acl: None,
                         qos: Some(enabled),
                         mirror: None,
+                        tcprt: None,
                     },
                     "mirror" => aria_api::UpdateConfigRequest {
                         conntrack: None,
@@ -659,9 +735,18 @@ async fn main() {
                         acl: None,
                         qos: None,
                         mirror: Some(enabled),
+                        tcprt: None,
+                    },
+                    "tcprt" | "tcp-rt" => aria_api::UpdateConfigRequest {
+                        conntrack: None,
+                        monitoring: None,
+                        acl: None,
+                        qos: None,
+                        mirror: None,
+                        tcprt: Some(enabled),
                     },
                     _ => {
-                        eprintln!("Error: unknown config key '{}': must be 'conntrack', 'monitoring', 'acl', 'qos', or 'mirror'", key);
+                        eprintln!("Error: unknown config key '{}': must be 'conntrack', 'monitoring', 'acl', 'qos', 'mirror', or 'tcprt'", key);
                         std::process::exit(1);
                     }
                 };

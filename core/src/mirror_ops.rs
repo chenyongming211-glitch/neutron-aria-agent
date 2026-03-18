@@ -26,7 +26,7 @@ fn sync_mirror_enabled(pin_path: &str, enabled: bool) -> Result<(), String> {
         qos_enabled: 0,
         acl_enabled: 1,
         mirror_enabled: 0,
-        pad: [0; 1],
+        tcprt_enabled: 1,
     });
     cfg.mirror_enabled = if enabled { 1 } else { 0 };
     map.insert(&0u32, &cfg, 0)

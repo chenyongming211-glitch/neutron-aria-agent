@@ -9,6 +9,7 @@ pub use crate::common::{
     GroupStatsKey, GroupStatsValue,
     MirrorKey, GlobalMirrorKey, MirrorConfig, MirrorStatsValue,
     FirewallConfig,
+    TcpRtValue,
 };
 
 // --- Existing maps ---
@@ -96,3 +97,11 @@ pub static MIRROR_STATS: PerCpuHashMap<MirrorKey, MirrorStatsValue> = PerCpuHash
 
 #[map(name = "MIRROR_GLOBAL_STATS")]
 pub static MIRROR_GLOBAL_STATS: PerCpuHashMap<GlobalMirrorKey, MirrorStatsValue> = PerCpuHashMap::with_max_entries(2, 0);
+
+// --- TCP-RT (TCP Response Time) maps ---
+
+#[map(name = "TCPRT_TABLE_V4")]
+pub static TCPRT_TABLE_V4: LruHashMap<CtKey4, TcpRtValue> = LruHashMap::with_max_entries(65536, 0);
+
+#[map(name = "TCPRT_TABLE_V6")]
+pub static TCPRT_TABLE_V6: LruHashMap<CtKey6, TcpRtValue> = LruHashMap::with_max_entries(16384, 0);

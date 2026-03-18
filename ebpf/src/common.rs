@@ -196,6 +196,43 @@ pub struct MirrorStatsValue {
     pub errors: u64,
 }
 
+// --- TCP-RT (TCP Response Time) ---
+
+pub const TCP_FLAG_FIN: u8 = 0x01;
+pub const TCP_FLAG_SYN: u8 = 0x02;
+pub const TCP_FLAG_RST: u8 = 0x04;
+pub const TCP_FLAG_ACK: u8 = 0x10;
+
+/// TCP-RT per-flow tracking state (stored in TCPRT_TABLE_V4/V6)
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TcpRtValue {
+    pub syn_ts: u64,            // SYN timestamp
+    pub synack_ts: u64,         // SYN-ACK timestamp
+    pub ack_ts: u64,            // Handshake completion ACK timestamp
+    pub last_request_ts: u64,   // Last request data packet timestamp
+    pub first_response_ts: u64, // First response packet timestamp
+    pub handshake_ns: u64,      // Handshake total time (ack_ts - syn_ts)
+    pub rtt_ns: u64,            // RTT estimate (ack_ts - synack_ts)
+    pub art_ns: u64,            // Application response time (first_response_ts - last_request_ts)
+    pub retransmissions: u32,   // Retransmission count
+    pub request_count: u32,     // Completed request-response cycles
+    pub state: u8,              // 0=handshake, 1=established, 2=closing
+    pub flags: u8,              // bit 0: syn_seen, bit 1: synack_seen, bit 2: established
+    pub pad: [u8; 2],
+    pub last_seq: u32,          // Last seq number (for retransmission detection)
+    pub last_payload_len: u16,  // Last payload length
+    pub pad2: [u8; 2],
+}
+
+pub const TCPRT_STATE_HANDSHAKE: u8 = 0;
+pub const TCPRT_STATE_ESTABLISHED: u8 = 1;
+pub const TCPRT_STATE_CLOSING: u8 = 2;
+
+pub const TCPRT_FLAG_SYN_SEEN: u8 = 1;
+pub const TCPRT_FLAG_SYNACK_SEEN: u8 = 2;
+pub const TCPRT_FLAG_ESTABLISHED: u8 = 4;
+
 // --- Global firewall config (feature switches) ---
 
 #[repr(C)]
@@ -207,5 +244,5 @@ pub struct FirewallConfig {
     pub qos_enabled: u8,
     pub acl_enabled: u8,
     pub mirror_enabled: u8,
-    pub pad: [u8; 1],
+    pub tcprt_enabled: u8,
 }
