@@ -212,6 +212,17 @@ enum TcprtCommands {
     },
     /// Flush all TCP-RT tracking entries
     Flush,
+    /// Cross-observation-point analysis with latency breakdown and packet loss
+    Analyze {
+        #[arg(long, default_value = "10", help = "Number of top flows to show")]
+        top: usize,
+        #[arg(long, help = "Filter by group name for detailed per-flow cross-point analysis")]
+        group: Option<String>,
+        #[arg(long, help = "Enable dynamic refresh mode (like top)")]
+        watch: bool,
+        #[arg(long, default_value = "2", help = "Refresh interval in seconds (with --watch)")]
+        interval: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -229,6 +240,321 @@ enum ConfigCommands {
 
 fn get_instance(cli: &Cli) -> String {
     cli.tap.clone().unwrap_or_else(|| "system".to_string())
+}
+
+// ── TCP-RT Analyze helpers ──
+
+/// 5-tuple flow key for cross-instance matching
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct FlowKey {
+    src_ip: String,
+    dst_ip: String,
+    src_port: u16,
+    dst_port: u16,
+}
+
+struct InstanceFlows {
+    name: String,
+    flows: std::collections::HashMap<FlowKey, aria_api::TcpRtEntry>,
+}
+
+fn ip_in_cidr(ip: &str, cidr: &str) -> bool {
+    let parts: Vec<&str> = cidr.split('/').collect();
+    if parts.len() != 2 { return false; }
+    let prefix_len: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => return false };
+
+    // IPv4
+    if let (Ok(ip_addr), Ok(net_addr)) = (ip.parse::<std::net::Ipv4Addr>(), parts[0].parse::<std::net::Ipv4Addr>()) {
+        if prefix_len > 32 { return false; }
+        if prefix_len == 0 { return true; }
+        let mask = !0u32 << (32 - prefix_len);
+        return (u32::from(ip_addr) & mask) == (u32::from(net_addr) & mask);
+    }
+    // IPv6
+    if let (Ok(ip_addr), Ok(net_addr)) = (ip.parse::<std::net::Ipv6Addr>(), parts[0].parse::<std::net::Ipv6Addr>()) {
+        if prefix_len > 128 { return false; }
+        if prefix_len == 0 { return true; }
+        let ip_bits = u128::from(ip_addr);
+        let net_bits = u128::from(net_addr);
+        let mask = !0u128 << (128 - prefix_len);
+        return (ip_bits & mask) == (net_bits & mask);
+    }
+    false
+}
+
+fn find_group(ip: &str, groups: &[aria_api::GroupEntry]) -> String {
+    for g in groups {
+        for cidr in &g.cidrs {
+            if ip_in_cidr(ip, cidr) {
+                return g.name.clone();
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() { return 0.0; }
+    let idx = ((sorted.len() as f64 - 1.0) * p).ceil() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+async fn run_analyze(
+    client: &api_client::ApiClient,
+    current_instance: &str,
+    top: usize,
+    group_filter: Option<&str>,
+) -> Result<(), String> {
+    // 1. Discover all active instances
+    let instances_resp = client.list_instances().await?;
+    let active: Vec<String> = instances_resp.instances.iter()
+        .filter(|i| i.active)
+        .map(|i| i.name.clone())
+        .collect();
+
+    if active.is_empty() {
+        println!("No active instances found");
+        return Ok(());
+    }
+
+    // 2. Pull groups from current instance (for IP→group mapping)
+    let groups = client.list_groups(current_instance).await
+        .map(|r| r.groups)
+        .unwrap_or_default();
+
+    // 3. Pull tcprt data from all instances
+    let mut all_instances: Vec<InstanceFlows> = Vec::new();
+    for inst_name in &active {
+        let resp = match client.list_tcprt(inst_name, 65536).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let mut flows = std::collections::HashMap::new();
+        for f in resp.flows {
+            let key = FlowKey {
+                src_ip: f.src_ip.clone(),
+                dst_ip: f.dst_ip.clone(),
+                src_port: f.src_port,
+                dst_port: f.dst_port,
+            };
+            flows.insert(key, f);
+        }
+        all_instances.push(InstanceFlows { name: inst_name.clone(), flows });
+    }
+
+    let now = {
+        use std::time::SystemTime;
+        let d = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+        let secs = d.as_secs();
+        let h = (secs / 3600) % 24;
+        let m = (secs / 60) % 60;
+        let s = secs % 60;
+        format!("{:02}:{:02}:{:02}", h, m, s)
+    };
+
+    if let Some(grp) = group_filter {
+        // ── Detailed per-flow cross-point analysis for a specific group ──
+        println!("=== TCP-RT Analysis [{}] — group: {} ===\n", now, grp);
+
+        // Collect all flow keys from all instances that belong to this group
+        let mut flow_keys: Vec<FlowKey> = Vec::new();
+        for inst in &all_instances {
+            for (key, entry) in &inst.flows {
+                let src_grp = find_group(&entry.src_ip, &groups);
+                let dst_grp = find_group(&entry.dst_ip, &groups);
+                if (src_grp == grp || dst_grp == grp) && !flow_keys.contains(key) {
+                    flow_keys.push(key.clone());
+                }
+            }
+        }
+
+        // Sort by max ART across instances
+        flow_keys.sort_by(|a, b| {
+            let art_a: f64 = all_instances.iter()
+                .filter_map(|inst| inst.flows.get(a).map(|f| f.art_us))
+                .fold(0.0f64, f64::max);
+            let art_b: f64 = all_instances.iter()
+                .filter_map(|inst| inst.flows.get(b).map(|f| f.art_us))
+                .fold(0.0f64, f64::max);
+            art_b.partial_cmp(&art_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        flow_keys.truncate(top);
+
+        for key in &flow_keys {
+            println!("Flow: {}:{} → {}:{}", key.src_ip, key.src_port, key.dst_ip, key.dst_port);
+
+            // Header
+            let inst_names: Vec<&str> = all_instances.iter()
+                .filter(|i| i.flows.contains_key(key))
+                .map(|i| i.name.as_str())
+                .collect();
+
+            if inst_names.is_empty() { continue; }
+
+            print!("{:<20}", "");
+            for name in &inst_names { print!(" {:>12}", name); }
+            println!();
+            print!("{:<20}", "────────────────────");
+            for _ in &inst_names { print!(" {:>12}", "────────────"); }
+            println!();
+
+            // Rows
+            let metrics: &[(&str, Box<dyn Fn(&aria_api::TcpRtEntry) -> String>)] = &[
+                ("cRTT (us)", Box::new(|f: &aria_api::TcpRtEntry| format!("{:.1}", f.rtt_client_us))),
+                ("sRTT (us)", Box::new(|f| format!("{:.1}", f.rtt_server_us))),
+                ("ART (us)", Box::new(|f| format!("{:.1}", f.art_us))),
+                ("ReqRT", Box::new(|f| format!("{}", f.retrans_req))),
+                ("RspRT", Box::new(|f| format!("{}", f.retrans_resp))),
+            ];
+
+            for (label, extractor) in metrics {
+                print!("{:<20}", label);
+                for inst in &all_instances {
+                    if let Some(f) = inst.flows.get(key) {
+                        print!(" {:>12}", extractor(f));
+                    }
+                }
+                println!();
+            }
+
+            // Breakdown (need at least 2 observation points)
+            let points: Vec<(&str, &aria_api::TcpRtEntry)> = all_instances.iter()
+                .filter_map(|i| i.flows.get(key).map(|f| (i.name.as_str(), f)))
+                .collect();
+
+            if points.len() >= 2 {
+                println!("{:<20}", "────────────────────");
+                println!("Latency Breakdown:");
+
+                // Find bond/physical (first), tap-in (middle), tap-out (last by sRTT ascending)
+                let mut sorted_points = points.clone();
+                sorted_points.sort_by(|a, b| b.1.rtt_server_us.partial_cmp(&a.1.rtt_server_us).unwrap_or(std::cmp::Ordering::Equal));
+
+                for i in 0..sorted_points.len() - 1 {
+                    let (outer_name, outer) = sorted_points[i];
+                    let (inner_name, inner) = sorted_points[i + 1];
+                    let latency = (outer.art_us - outer.rtt_server_us) - (inner.art_us - inner.rtt_server_us);
+                    let host_overhead = outer.rtt_server_us - inner.rtt_server_us;
+                    println!("  {} → {}: network={:.1}us  processing={:.1}us",
+                        outer_name, inner_name, host_overhead, latency.max(0.0));
+                }
+
+                // Last point (closest to server)
+                let (last_name, last) = sorted_points.last().unwrap();
+                let server_processing = last.art_us - last.rtt_server_us;
+                println!("  {} → server: processing={:.1}us", last_name, server_processing.max(0.0));
+
+                // Client-side (first point)
+                let (first_name, first) = sorted_points.first().unwrap();
+                println!("  client → {}: cRTT={:.1}us", first_name, first.rtt_client_us);
+
+                // Packet loss
+                println!("Packet Loss:");
+                for i in 0..sorted_points.len() - 1 {
+                    let (outer_name, outer) = sorted_points[i];
+                    let (inner_name, inner) = sorted_points[i + 1];
+                    let req_loss = outer.retrans_req as i64 - inner.retrans_req as i64;
+                    let resp_loss = outer.retrans_resp as i64 - inner.retrans_resp as i64;
+                    println!("  {} → {}: req={} resp={}", outer_name, inner_name, req_loss.max(0), resp_loss.max(0));
+                }
+                let (last_name, last) = sorted_points.last().unwrap();
+                println!("  {} → server: req={} resp={}", last_name, last.retrans_req, last.retrans_resp);
+            }
+            println!();
+        }
+
+        if flow_keys.is_empty() {
+            println!("No flows found for group '{}'", grp);
+        }
+    } else {
+        // ── Per-group aggregated summary ──
+        println!("=== TCP-RT Analysis [{}] ===\n", now);
+
+        // Use the instance with the most flows for aggregation (typically tap-in or current)
+        let best_inst = all_instances.iter()
+            .max_by_key(|i| i.flows.len());
+
+        let best_inst = match best_inst {
+            Some(i) => i,
+            None => { println!("No TCP-RT data collected yet"); return Ok(()); }
+        };
+
+        if best_inst.flows.is_empty() {
+            println!("No TCP-RT data collected yet");
+            return Ok(());
+        }
+
+        // Aggregate by group
+        struct GroupAgg {
+            flows: usize,
+            crtt_vals: Vec<f64>,
+            srtt_vals: Vec<f64>,
+            art_vals: Vec<f64>,
+            retrans_req: u32,
+            retrans_resp: u32,
+        }
+
+        let mut agg: std::collections::HashMap<String, GroupAgg> = std::collections::HashMap::new();
+
+        for (_key, entry) in &best_inst.flows {
+            let grp = find_group(&entry.dst_ip, &groups);
+            let g = agg.entry(grp).or_insert(GroupAgg {
+                flows: 0, crtt_vals: Vec::new(), srtt_vals: Vec::new(),
+                art_vals: Vec::new(), retrans_req: 0, retrans_resp: 0,
+            });
+            g.flows += 1;
+            g.crtt_vals.push(entry.rtt_client_us);
+            g.srtt_vals.push(entry.rtt_server_us);
+            g.art_vals.push(entry.art_us);
+            g.retrans_req += entry.retrans_req;
+            g.retrans_resp += entry.retrans_resp;
+        }
+
+        // Sort by P95 ART descending
+        let mut groups_sorted: Vec<(String, GroupAgg)> = agg.into_iter().collect();
+        groups_sorted.sort_by(|a, b| {
+            let mut a_arts = a.1.art_vals.clone(); a_arts.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+            let mut b_arts = b.1.art_vals.clone(); b_arts.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+            percentile(&b_arts, 0.95).partial_cmp(&percentile(&a_arts, 0.95)).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        println!("Per-Group Summary (from {}):", best_inst.name);
+        println!("{:<15} {:>6} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
+            "Group", "Flows", "Avg cRTT", "Avg sRTT", "Avg ART", "P95 ART", "ReqRT", "RspRT");
+        println!("{:<15} {:>6} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
+            "───────────────", "──────", "────────────", "────────────", "────────────", "────────────", "────────", "────────");
+
+        for (name, g) in &groups_sorted {
+            let avg_crtt = g.crtt_vals.iter().sum::<f64>() / g.flows as f64;
+            let avg_srtt = g.srtt_vals.iter().sum::<f64>() / g.flows as f64;
+            let avg_art = g.art_vals.iter().sum::<f64>() / g.flows as f64;
+            let mut sorted_arts = g.art_vals.clone();
+            sorted_arts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let p95_art = percentile(&sorted_arts, 0.95);
+            println!("{:<15} {:>6} {:>12.1} {:>12.1} {:>12.1} {:>12.1} {:>8} {:>8}",
+                name, g.flows, avg_crtt, avg_srtt, avg_art, p95_art, g.retrans_req, g.retrans_resp);
+        }
+
+        // Top N slowest flows
+        let mut all_flows: Vec<&aria_api::TcpRtEntry> = best_inst.flows.values().collect();
+        all_flows.sort_by(|a, b| b.art_us.partial_cmp(&a.art_us).unwrap_or(std::cmp::Ordering::Equal));
+        all_flows.truncate(top);
+
+        println!("\nSlowest Flows (top {} by ART):", top);
+        println!("{:<20} {:<20} {:>6} {:>6} {:>12} {:>8} {:>8} {}",
+            "Source", "Destination", "SPort", "DPort", "ART (us)", "ReqRT", "RspRT", "Group");
+        println!("{:<20} {:<20} {:>6} {:>6} {:>12} {:>8} {:>8} {}",
+            "────────────────────", "────────────────────", "──────", "──────", "────────────", "────────", "────────", "───────");
+
+        for f in &all_flows {
+            let grp = find_group(&f.dst_ip, &groups);
+            println!("{:<20} {:<20} {:>6} {:>6} {:>12.1} {:>8} {:>8} {}",
+                f.src_ip, f.dst_ip, f.src_port, f.dst_port, f.art_us,
+                f.retrans_req, f.retrans_resp, grp);
+        }
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -666,6 +992,19 @@ async fn main() {
                 match client.flush_tcprt(&instance).await {
                     Ok(resp) => { println!("Flushed {} TCP-RT entries", resp.flushed); Ok(()) }
                     Err(e) => Err(e),
+                }
+            }
+            TcprtCommands::Analyze { top, group, watch, interval } => {
+                if watch {
+                    loop {
+                        print!("\x1B[2J\x1B[H"); // clear screen
+                        if let Err(e) = run_analyze(&client, &instance, top, group.as_deref()).await {
+                            eprintln!("Error: {}", e);
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                    }
+                } else {
+                    run_analyze(&client, &instance, top, group.as_deref()).await
                 }
             }
         },
