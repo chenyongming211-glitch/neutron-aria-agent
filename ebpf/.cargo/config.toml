@@ -9,3 +9,6 @@ bpf = "build --release"
 
 [env]
 CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER = "bpf-linker"
+
+[target.bpfel-unknown-none]
+rustflags = ["-C", "link-arg=-O2"]
