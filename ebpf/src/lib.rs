@@ -479,7 +479,7 @@ unsafe fn phase_ct_fastpath_xdp_v4(info: &parser::PacketInfo, p: &mut PipelineCt
         if (p.flags & FLAG_IS_FORWARD) != 0 {
             tcprt::track_tcp_rt_v4(ct_key, info, p.now, true);
         } else {
-            tcprt::track_tcp_rt_v4_rev(info, p.now);
+            tcprt::track_tcp_rt_v4(ct_key, info, p.now, false);
         }
     }
 
@@ -515,7 +515,7 @@ unsafe fn phase_ct_fastpath_xdp_v6(info: &parser::PacketInfo, p: &mut PipelineCt
         if (p.flags & FLAG_IS_FORWARD) != 0 {
             tcprt::track_tcp_rt_v6(ct_key, info, p.now, true);
         } else {
-            tcprt::track_tcp_rt_v6_rev(info, p.now);
+            tcprt::track_tcp_rt_v6(ct_key, info, p.now, false);
         }
     }
 
@@ -539,10 +539,9 @@ unsafe fn phase_ct_fastpath_xdp_v6(info: &parser::PacketInfo, p: &mut PipelineCt
     p.action = XDP_PASS;
 }
 
-/// CT fast-path for TC egress IPv4.
+/// CT fast-path for TC egress IPv4 — stats + tcprt portion.
 #[inline(never)]
 unsafe fn phase_ct_fastpath_tc_v4(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
-    let tracing = (p.flags & FLAG_TRACING) != 0;
     let matched = get_matched(p);
     stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len);
     stats::update_flow_stats_v4(ct_key, p.pkt_len, p.now);
@@ -551,7 +550,7 @@ unsafe fn phase_ct_fastpath_tc_v4(ctx: &TcContext, info: &parser::PacketInfo, p:
         if (p.flags & FLAG_IS_FORWARD) != 0 {
             tcprt::track_tcp_rt_v4(ct_key, info, p.now, true);
         } else {
-            tcprt::track_tcp_rt_v4_rev(info, p.now);
+            tcprt::track_tcp_rt_v4(ct_key, info, p.now, false);
         }
     }
 
@@ -559,34 +558,39 @@ unsafe fn phase_ct_fastpath_tc_v4(ctx: &TcContext, info: &parser::PacketInfo, p:
     if need_ids {
         p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
         p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
-        if (p.flags & FLAG_QOS_ON) != 0 {
-            let (edt, prio) = qos::apply_qos_egress(p.src_id, p.dst_id, p.pkt_len, p.now);
-            if edt == u64::MAX {
-                p.drop_reason = DROP_QOS_EGRESS;
-                p.action = TC_ACT_SHOT as u32;
-                emit_drop(p);
-                if tracing { emit_trace(info, p, TRACE_TC_DROP, TRACE_RESULT_DROP_QOS); }
-                return;
-            }
-            apply_edt_prio(ctx, edt, prio);
-        }
-        stats::update_group_stats(p.src_id, DIR_EGRESS, p.pkt_len);
-        stats::update_group_stats(p.dst_id, DIR_INGRESS, p.pkt_len);
-        if (p.flags & FLAG_MIRROR_ON) != 0 {
-            let skb = ctx.as_ptr() as *mut __sk_buff;
-            mirror::try_mirror_tc(skb, p.src_id, p.dst_id, info.proto, DIR_EGRESS, p.pkt_len);
-        }
-        if tracing { emit_trace(info, p, TRACE_TC_EGRESS, TRACE_RESULT_PASS); }
-    } else if tracing {
+        phase_ct_fastpath_tc_v4_ids(ctx, info, p);
+    } else if (p.flags & FLAG_TRACING) != 0 {
         emit_trace(info, p, TRACE_TC_EGRESS, TRACE_RESULT_PASS);
     }
     p.action = TC_ACT_OK as u32;
 }
 
-/// CT fast-path for TC egress IPv6.
+/// CT fast-path for TC egress IPv4 — ids/qos/mirror/stats portion.
+#[inline(never)]
+unsafe fn phase_ct_fastpath_tc_v4_ids(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx) {
+    if (p.flags & FLAG_QOS_ON) != 0 {
+        let (edt, prio) = qos::apply_qos_egress(p.src_id, p.dst_id, p.pkt_len, p.now);
+        if edt == u64::MAX {
+            p.drop_reason = DROP_QOS_EGRESS;
+            p.action = TC_ACT_SHOT as u32;
+            emit_drop(p);
+            if (p.flags & FLAG_TRACING) != 0 { emit_trace(info, p, TRACE_TC_DROP, TRACE_RESULT_DROP_QOS); }
+            return;
+        }
+        apply_edt_prio(ctx, edt, prio);
+    }
+    stats::update_group_stats(p.src_id, DIR_EGRESS, p.pkt_len);
+    stats::update_group_stats(p.dst_id, DIR_INGRESS, p.pkt_len);
+    if (p.flags & FLAG_MIRROR_ON) != 0 {
+        let skb = ctx.as_ptr() as *mut __sk_buff;
+        mirror::try_mirror_tc(skb, p.src_id, p.dst_id, info.proto, DIR_EGRESS, p.pkt_len);
+    }
+    if (p.flags & FLAG_TRACING) != 0 { emit_trace(info, p, TRACE_TC_EGRESS, TRACE_RESULT_PASS); }
+}
+
+/// CT fast-path for TC egress IPv6 — stats + tcprt portion.
 #[inline(never)]
 unsafe fn phase_ct_fastpath_tc_v6(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
-    let tracing = (p.flags & FLAG_TRACING) != 0;
     let matched = get_matched(p);
     stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len);
     stats::update_flow_stats_v6(ct_key, p.pkt_len, p.now);
@@ -595,7 +599,7 @@ unsafe fn phase_ct_fastpath_tc_v6(ctx: &TcContext, info: &parser::PacketInfo, p:
         if (p.flags & FLAG_IS_FORWARD) != 0 {
             tcprt::track_tcp_rt_v6(ct_key, info, p.now, true);
         } else {
-            tcprt::track_tcp_rt_v6_rev(info, p.now);
+            tcprt::track_tcp_rt_v6(ct_key, info, p.now, false);
         }
     }
 
@@ -603,28 +607,34 @@ unsafe fn phase_ct_fastpath_tc_v6(ctx: &TcContext, info: &parser::PacketInfo, p:
     if need_ids {
         p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
         p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
-        if (p.flags & FLAG_QOS_ON) != 0 {
-            let (edt, prio) = qos::apply_qos_egress(p.src_id, p.dst_id, p.pkt_len, p.now);
-            if edt == u64::MAX {
-                p.drop_reason = DROP_QOS_EGRESS;
-                p.action = TC_ACT_SHOT as u32;
-                emit_drop(p);
-                if tracing { emit_trace(info, p, TRACE_TC_DROP, TRACE_RESULT_DROP_QOS); }
-                return;
-            }
-            apply_edt_prio(ctx, edt, prio);
-        }
-        stats::update_group_stats(p.src_id, DIR_EGRESS, p.pkt_len);
-        stats::update_group_stats(p.dst_id, DIR_INGRESS, p.pkt_len);
-        if (p.flags & FLAG_MIRROR_ON) != 0 {
-            let skb = ctx.as_ptr() as *mut __sk_buff;
-            mirror::try_mirror_tc(skb, p.src_id, p.dst_id, info.proto, DIR_EGRESS, p.pkt_len);
-        }
-        if tracing { emit_trace(info, p, TRACE_TC_EGRESS, TRACE_RESULT_PASS); }
-    } else if tracing {
+        phase_ct_fastpath_tc_v6_ids(ctx, info, p);
+    } else if (p.flags & FLAG_TRACING) != 0 {
         emit_trace(info, p, TRACE_TC_EGRESS, TRACE_RESULT_PASS);
     }
     p.action = TC_ACT_OK as u32;
+}
+
+/// CT fast-path for TC egress IPv6 — ids/qos/mirror/stats portion.
+#[inline(never)]
+unsafe fn phase_ct_fastpath_tc_v6_ids(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx) {
+    if (p.flags & FLAG_QOS_ON) != 0 {
+        let (edt, prio) = qos::apply_qos_egress(p.src_id, p.dst_id, p.pkt_len, p.now);
+        if edt == u64::MAX {
+            p.drop_reason = DROP_QOS_EGRESS;
+            p.action = TC_ACT_SHOT as u32;
+            emit_drop(p);
+            if (p.flags & FLAG_TRACING) != 0 { emit_trace(info, p, TRACE_TC_DROP, TRACE_RESULT_DROP_QOS); }
+            return;
+        }
+        apply_edt_prio(ctx, edt, prio);
+    }
+    stats::update_group_stats(p.src_id, DIR_EGRESS, p.pkt_len);
+    stats::update_group_stats(p.dst_id, DIR_INGRESS, p.pkt_len);
+    if (p.flags & FLAG_MIRROR_ON) != 0 {
+        let skb = ctx.as_ptr() as *mut __sk_buff;
+        mirror::try_mirror_tc(skb, p.src_id, p.dst_id, info.proto, DIR_EGRESS, p.pkt_len);
+    }
+    if (p.flags & FLAG_TRACING) != 0 { emit_trace(info, p, TRACE_TC_EGRESS, TRACE_RESULT_PASS); }
 }
 
 /// Phase: Policy evaluation for XDP (sets p.action, p.drop_reason, p.matched_*).
