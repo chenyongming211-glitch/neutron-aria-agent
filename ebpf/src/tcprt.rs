@@ -37,7 +37,8 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
             last_request_ts: 0,
             first_response_ts: 0,
             handshake_ns: 0,
-            rtt_ns: 0,
+            rtt_client_ns: 0,
+            rtt_server_ns: 0,
             art_ns: 0,
             retransmissions: 0,
             request_count: 0,
@@ -67,6 +68,7 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
     // SYN-ACK — reverse direction (server response)
     if is_syn && is_ack && !is_forward {
         (*entry).synack_ts = now;
+        (*entry).rtt_server_ns = now.wrapping_sub((*entry).syn_ts);
         (*entry).flags |= TCPRT_FLAG_SYNACK_SEEN;
         return;
     }
@@ -78,9 +80,7 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
     {
         (*entry).ack_ts = now;
         (*entry).handshake_ns = now.wrapping_sub((*entry).syn_ts);
-        if (*entry).synack_ts > 0 {
-            (*entry).rtt_ns = now.wrapping_sub((*entry).synack_ts);
-        }
+        (*entry).rtt_client_ns = now.wrapping_sub((*entry).synack_ts);
         (*entry).state = TCPRT_STATE_ESTABLISHED;
         (*entry).flags |= TCPRT_FLAG_ESTABLISHED;
         return;
@@ -137,7 +137,8 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
             last_request_ts: 0,
             first_response_ts: 0,
             handshake_ns: 0,
-            rtt_ns: 0,
+            rtt_client_ns: 0,
+            rtt_server_ns: 0,
             art_ns: 0,
             retransmissions: 0,
             request_count: 0,
@@ -164,6 +165,7 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
 
     if is_syn && is_ack && !is_forward {
         (*entry).synack_ts = now;
+        (*entry).rtt_server_ns = now.wrapping_sub((*entry).syn_ts);
         (*entry).flags |= TCPRT_FLAG_SYNACK_SEEN;
         return;
     }
@@ -174,9 +176,7 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
     {
         (*entry).ack_ts = now;
         (*entry).handshake_ns = now.wrapping_sub((*entry).syn_ts);
-        if (*entry).synack_ts > 0 {
-            (*entry).rtt_ns = now.wrapping_sub((*entry).synack_ts);
-        }
+        (*entry).rtt_client_ns = now.wrapping_sub((*entry).synack_ts);
         (*entry).state = TCPRT_STATE_ESTABLISHED;
         (*entry).flags |= TCPRT_FLAG_ESTABLISHED;
         return;

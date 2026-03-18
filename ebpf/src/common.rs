@@ -213,7 +213,8 @@ pub struct TcpRtValue {
     pub last_request_ts: u64,   // Last request data packet timestamp
     pub first_response_ts: u64, // First response packet timestamp
     pub handshake_ns: u64,      // Handshake total time (ack_ts - syn_ts)
-    pub rtt_ns: u64,            // RTT estimate (ack_ts - synack_ts)
+    pub rtt_client_ns: u64,     // Client-side RTT (ack_ts - synack_ts)
+    pub rtt_server_ns: u64,     // Server-side RTT (synack_ts - syn_ts)
     pub art_ns: u64,            // Application response time (first_response_ts - last_request_ts)
     pub retransmissions: u32,   // Retransmission count
     pub request_count: u32,     // Completed request-response cycles
