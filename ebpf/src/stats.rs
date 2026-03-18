@@ -12,7 +12,7 @@ pub(crate) fn monitoring_enabled() -> bool {
     }
 }
 
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn update_rule_stats(key: &PolicyKey, pkt_len: u32) {
     if !monitoring_enabled() {
         return;
@@ -29,7 +29,7 @@ pub unsafe fn update_rule_stats(key: &PolicyKey, pkt_len: u32) {
     }
 }
 
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn update_flow_stats_v4(key: &CtKey4, pkt_len: u32, now: u64) {
     if !monitoring_enabled() {
         return;
@@ -48,7 +48,7 @@ pub unsafe fn update_flow_stats_v4(key: &CtKey4, pkt_len: u32, now: u64) {
     }
 }
 
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn update_flow_stats_v6(key: &CtKey6, pkt_len: u32, now: u64) {
     if !monitoring_enabled() {
         return;
@@ -67,7 +67,7 @@ pub unsafe fn update_flow_stats_v6(key: &CtKey6, pkt_len: u32, now: u64) {
     }
 }
 
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn update_group_stats(group_id: u32, direction: u8, pkt_len: u32) {
     if !monitoring_enabled() {
         return;
