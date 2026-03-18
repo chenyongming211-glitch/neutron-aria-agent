@@ -37,7 +37,7 @@ pub unsafe fn should_trace(info: &PacketInfo) -> bool {
 }
 
 /// Record a trace event into the TRACE_LOG LRU map.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn trace_event(
     info: &PacketInfo,
     hook: u8,

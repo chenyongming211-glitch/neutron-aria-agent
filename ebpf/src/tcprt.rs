@@ -20,7 +20,7 @@ pub fn tcprt_enabled() -> bool {
 /// Track TCP response time for an IPv4 flow.
 /// `ct_key` must be the forward (original direction) key.
 /// `is_forward` indicates whether this packet is in the original direction.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_forward: bool) {
     let flags = info.tcp_flags;
     let is_syn = (flags & TCP_FLAG_SYN) != 0;
@@ -131,7 +131,7 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
 
 /// Track TCP response time for an IPv6 flow.
 /// Same logic as V4, different map.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_forward: bool) {
     let flags = info.tcp_flags;
     let is_syn = (flags & TCP_FLAG_SYN) != 0;

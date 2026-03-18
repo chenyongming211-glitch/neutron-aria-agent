@@ -27,7 +27,7 @@ pub fn acl_enabled() -> bool {
 /// Tries 8 candidate keys from most-specific to least-specific (wildcarding
 /// src_id, dst_id, proto with 0). The matched_policy records the exact key
 /// that hit (including wildcards) so the CT fast path can replay rule stats.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn evaluate_policy(
     src_id: u32,
     dst_id: u32,
@@ -85,7 +85,7 @@ pub unsafe fn evaluate_policy(
 }
 
 /// Same 8-level fallback, but returns TC action codes (TC_ACT_OK / TC_ACT_SHOT).
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn evaluate_policy_tc(
     src_id: u32,
     dst_id: u32,
