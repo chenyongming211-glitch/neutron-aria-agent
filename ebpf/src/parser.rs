@@ -55,7 +55,7 @@ unsafe fn read_be32(data: usize, offset: usize) -> u32 {
     u32::from_be_bytes([*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)])
 }
 
-#[inline(always)]
+#[inline(never)]
 pub fn parse_eth_ipv4(data: usize, data_end: usize, offset: usize) -> Option<PacketInfo> {
     if data + offset + ETH_HLEN + 20 > data_end {
         return None;
@@ -140,7 +140,7 @@ fn is_ipv6_extension_header(next_header: u8) -> bool {
     matches!(next_header, IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS | IPPROTO_FRAGMENT)
 }
 
-#[inline(always)]
+#[inline(never)]
 pub fn parse_eth_ipv6(data: usize, data_end: usize, offset: usize) -> Option<PacketInfo> {
     if data + offset + ETH_HLEN + 40 > data_end {
         return None;
