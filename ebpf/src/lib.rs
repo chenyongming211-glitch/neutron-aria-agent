@@ -437,7 +437,7 @@ unsafe fn lookup_ipv6(map: &LpmTrie<[u8; 16], u32>, ip: [u8; 16]) -> Option<u32>
 
 /// Phase: CT lookup for IPv4. Sets p.ct_state, p.matched_*, p.flags (CT_HIT, IS_FORWARD).
 #[inline(never)]
-unsafe fn phase_ct_v4(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
+unsafe fn phase_ct_v4(_info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
     match conntrack::ct_lookup_v4(ct_key, p.now, p.pkt_len) {
         CtLookupResult::Established(matched, is_forward) | CtLookupResult::SeenReply(matched, is_forward) => {
             p.ct_state = 2;
@@ -453,7 +453,7 @@ unsafe fn phase_ct_v4(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &C
 
 /// Phase: CT lookup for IPv6.
 #[inline(never)]
-unsafe fn phase_ct_v6(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
+unsafe fn phase_ct_v6(_info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
     match conntrack::ct_lookup_v6(ct_key, p.now, p.pkt_len) {
         CtLookupResult::Established(matched, is_forward) | CtLookupResult::SeenReply(matched, is_forward) => {
             p.ct_state = 2;

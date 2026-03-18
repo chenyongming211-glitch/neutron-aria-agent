@@ -272,8 +272,11 @@ pub const TRACE_TC_DROP: u8 = 4;
 pub const TRACE_TC_INGRESS: u8 = 5;
 
 pub const TRACE_RESULT_PASS: u8 = 0;
+#[allow(dead_code)]
 pub const TRACE_RESULT_DROP_ACL: u8 = 1;
+#[allow(dead_code)]
 pub const TRACE_RESULT_DROP_ACL_PORT: u8 = 2;
+#[allow(dead_code)]
 pub const TRACE_RESULT_DROP_ACL_DEFAULT: u8 = 3;
 pub const TRACE_RESULT_DROP_QOS: u8 = 4;
 
@@ -319,6 +322,7 @@ pub const FLAG_ACL_ON: u16 = 1 << 3;
 pub const FLAG_MIRROR_ON: u16 = 1 << 4;
 pub const FLAG_CT_HIT: u16 = 1 << 5;
 pub const FLAG_IS_FORWARD: u16 = 1 << 6;
+#[allow(dead_code)]
 pub const FLAG_NEED_IDS: u16 = 1 << 7;
 
 /// Per-CPU scratch buffer for passing state between pipeline phases.
