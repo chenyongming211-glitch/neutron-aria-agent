@@ -114,7 +114,7 @@ fn extract_matched(entry: &CtValue) -> MatchedPolicy {
 }
 
 /// Lookup CT for IPv4 packet.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResult {
     if !conntrack_enabled() {
         return CtLookupResult::NotFound;
@@ -160,7 +160,7 @@ pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResu
 }
 
 /// Lookup CT for IPv6 packet.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResult {
     if !conntrack_enabled() {
         return CtLookupResult::NotFound;
@@ -205,7 +205,7 @@ pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResu
 }
 
 /// Create a new CT entry for IPv4 with matched policy info.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn ct_create_v4(key: &CtKey4, now: u64, pkt_len: u32, matched: &MatchedPolicy) {
     if !conntrack_enabled() {
         return;
@@ -225,7 +225,7 @@ pub unsafe fn ct_create_v4(key: &CtKey4, now: u64, pkt_len: u32, matched: &Match
 }
 
 /// Create a new CT entry for IPv6 with matched policy info.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn ct_create_v6(key: &CtKey6, now: u64, pkt_len: u32, matched: &MatchedPolicy) {
     if !conntrack_enabled() {
         return;
