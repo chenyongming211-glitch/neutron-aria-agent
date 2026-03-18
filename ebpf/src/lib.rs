@@ -49,6 +49,7 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     unsafe { try_xdp_firewall(ctx) }
 }
 
+#[inline(always)]
 unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
     let data = ctx.data();
     let data_end = ctx.data_end();
@@ -263,6 +264,7 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
     unsafe { try_tc_egress(ctx) }
 }
 
+#[inline(always)]
 unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
     let data = ctx.data();
     let data_end = ctx.data_end();
@@ -504,6 +506,7 @@ pub fn tc_ingress(ctx: TcContext) -> i32 {
     unsafe { try_tc_ingress(ctx) }
 }
 
+#[inline(always)]
 unsafe fn try_tc_ingress(ctx: TcContext) -> i32 {
     let data = ctx.data();
     let data_end = ctx.data_end();
