@@ -96,17 +96,9 @@ unsafe fn try_xdp_firewall(info: &parser::PacketInfo, pkt_len: u32) -> Result<u3
             stats::update_flow_stats_v4(&ct_key, pkt_len, now);
             if tcprt_on && info.proto == IPPROTO_TCP {
                 if is_forward {
-                    tcprt::track_tcp_rt_v4(&ct_key, &info, now, true);
+                    tcprt::track_tcp_rt_v4(&ct_key, info, now, true);
                 } else {
-                    let fwd_key = CtKey4 {
-                        src_ip: info.dst_ip,
-                        dst_ip: info.src_ip,
-                        src_port: info.dst_port,
-                        dst_port: info.src_port,
-                        proto: info.proto,
-                        pad: [0; 3],
-                    };
-                    tcprt::track_tcp_rt_v4(&fwd_key, &info, now, false);
+                    tcprt::track_tcp_rt_v4_rev(info, now);
                 }
             }
             let need_ids = qos_on || stats::monitoring_enabled();
@@ -196,17 +188,9 @@ unsafe fn xdp_ingress_v6(info: &parser::PacketInfo, pkt_len: u32) -> Result<u32,
             stats::update_flow_stats_v6(&ct_key, pkt_len, now);
             if tcprt_on && info.proto == IPPROTO_TCP {
                 if is_forward {
-                    tcprt::track_tcp_rt_v6(&ct_key, &info, now, true);
+                    tcprt::track_tcp_rt_v6(&ct_key, info, now, true);
                 } else {
-                    let fwd_key = CtKey6 {
-                        src_ip: info.dst_ip_v6,
-                        dst_ip: info.src_ip_v6,
-                        src_port: info.dst_port,
-                        dst_port: info.src_port,
-                        proto: info.proto,
-                        pad: [0; 3],
-                    };
-                    tcprt::track_tcp_rt_v6(&fwd_key, &info, now, false);
+                    tcprt::track_tcp_rt_v6_rev(info, now);
                 }
             }
             let need_ids = qos_on || stats::monitoring_enabled();
@@ -329,17 +313,9 @@ unsafe fn try_tc_egress(ctx: &TcContext, info: &parser::PacketInfo, pkt_len: u32
             stats::update_flow_stats_v4(&ct_key, pkt_len, now);
             if tcprt_on && info.proto == IPPROTO_TCP {
                 if is_forward {
-                    tcprt::track_tcp_rt_v4(&ct_key, &info, now, true);
+                    tcprt::track_tcp_rt_v4(&ct_key, info, now, true);
                 } else {
-                    let fwd_key = CtKey4 {
-                        src_ip: info.dst_ip,
-                        dst_ip: info.src_ip,
-                        src_port: info.dst_port,
-                        dst_port: info.src_port,
-                        proto: info.proto,
-                        pad: [0; 3],
-                    };
-                    tcprt::track_tcp_rt_v4(&fwd_key, &info, now, false);
+                    tcprt::track_tcp_rt_v4_rev(info, now);
                 }
             }
             let need_ids = qos_on || mirror_on || stats::monitoring_enabled();
@@ -444,17 +420,9 @@ unsafe fn tc_egress_v6(ctx: &TcContext, info: &parser::PacketInfo, pkt_len: u32)
             stats::update_flow_stats_v6(&ct_key, pkt_len, now);
             if tcprt_on && info.proto == IPPROTO_TCP {
                 if is_forward {
-                    tcprt::track_tcp_rt_v6(&ct_key, &info, now, true);
+                    tcprt::track_tcp_rt_v6(&ct_key, info, now, true);
                 } else {
-                    let fwd_key = CtKey6 {
-                        src_ip: info.dst_ip_v6,
-                        dst_ip: info.src_ip_v6,
-                        src_port: info.dst_port,
-                        dst_port: info.src_port,
-                        proto: info.proto,
-                        pad: [0; 3],
-                    };
-                    tcprt::track_tcp_rt_v6(&fwd_key, &info, now, false);
+                    tcprt::track_tcp_rt_v6_rev(info, now);
                 }
             }
             let need_ids = qos_on || mirror_on || stats::monitoring_enabled();
