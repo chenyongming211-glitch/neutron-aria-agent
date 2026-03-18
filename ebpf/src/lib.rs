@@ -46,26 +46,24 @@ const TC_ACT_SHOT: i32 = 2;
 
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
-    match unsafe { try_xdp_firewall(&ctx) } {
+    let data = ctx.data();
+    let data_end = ctx.data_end();
+    let pkt_len = (data_end - data) as u32;
+    let info = match parser::parse_eth_ipv4(data, data_end, 0) {
+        Some(i) => i,
+        None => match parser::parse_eth_ipv6(data, data_end, 0) {
+            Some(i) => i,
+            None => return XDP_PASS,
+        },
+    };
+    match unsafe { try_xdp_firewall(&ctx, &info, pkt_len) } {
         Ok(ret) => ret,
         Err(_) => XDP_PASS,
     }
 }
 
 #[inline(never)]
-unsafe fn try_xdp_firewall(ctx: &XdpContext) -> Result<u32, ()> {
-    let data = ctx.data();
-    let data_end = ctx.data_end();
-    let pkt_len = (data_end - data) as u32;
-
-    let info = match parser::parse_eth_ipv4(data, data_end, 0) {
-        Some(i) => i,
-        None => match parser::parse_eth_ipv6(data, data_end, 0) {
-            Some(i) => i,
-            None => return Ok(XDP_PASS),
-        },
-    };
-
+unsafe fn try_xdp_firewall(_ctx: &XdpContext, info: &parser::PacketInfo, pkt_len: u32) -> Result<u32, ()> {
     let now = bpf_ktime_get_ns();
     let qos_on = qos::qos_enabled();
     let tcprt_on = tcprt::tcprt_enabled();
@@ -264,26 +262,24 @@ unsafe fn try_xdp_firewall(ctx: &XdpContext) -> Result<u32, ()> {
 
 #[classifier]
 pub fn tc_egress(ctx: TcContext) -> i32 {
-    match unsafe { try_tc_egress(&ctx) } {
+    let data = ctx.data();
+    let data_end = ctx.data_end();
+    let pkt_len = ctx.len();
+    let info = match parser::parse_eth_ipv4(data, data_end, 0) {
+        Some(i) => i,
+        None => match parser::parse_eth_ipv6(data, data_end, 0) {
+            Some(i) => i,
+            None => return TC_ACT_OK,
+        },
+    };
+    match unsafe { try_tc_egress(&ctx, &info, pkt_len) } {
         Ok(ret) => ret,
         Err(_) => TC_ACT_OK,
     }
 }
 
 #[inline(never)]
-unsafe fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
-    let data = ctx.data();
-    let data_end = ctx.data_end();
-    let pkt_len = ctx.len();
-
-    let info = match parser::parse_eth_ipv4(data, data_end, 0) {
-        Some(i) => i,
-        None => match parser::parse_eth_ipv6(data, data_end, 0) {
-            Some(i) => i,
-            None => return Ok(TC_ACT_OK),
-        },
-    };
-
+unsafe fn try_tc_egress(ctx: &TcContext, info: &parser::PacketInfo, pkt_len: u32) -> Result<i32, ()> {
     let now = bpf_ktime_get_ns();
     let qos_on = qos::qos_enabled();
     let mirror_on = mirror::mirror_enabled();
@@ -509,27 +505,25 @@ unsafe fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
 
 #[classifier]
 pub fn tc_ingress(ctx: TcContext) -> i32 {
-    match unsafe { try_tc_ingress(&ctx) } {
+    let data = ctx.data();
+    let data_end = ctx.data_end();
+    let pkt_len = ctx.len();
+    let info = match parser::parse_eth_ipv4(data, data_end, 0) {
+        Some(i) => i,
+        None => match parser::parse_eth_ipv6(data, data_end, 0) {
+            Some(i) => i,
+            None => return TC_ACT_OK,
+        },
+    };
+    match unsafe { try_tc_ingress(&ctx, &info, pkt_len) } {
         Ok(ret) => ret,
         Err(_) => TC_ACT_OK,
     }
 }
 
 #[inline(never)]
-unsafe fn try_tc_ingress(ctx: &TcContext) -> Result<i32, ()> {
-    let data = ctx.data();
-    let data_end = ctx.data_end();
-    let pkt_len = ctx.len();
-
-    let info = match parser::parse_eth_ipv4(data, data_end, 0) {
-        Some(i) => i,
-        None => match parser::parse_eth_ipv6(data, data_end, 0) {
-            Some(i) => i,
-            None => return Ok(TC_ACT_OK),
-        },
-    };
-
-    let tracing = trace::should_trace(&info);
+unsafe fn try_tc_ingress(ctx: &TcContext, info: &parser::PacketInfo, pkt_len: u32) -> Result<i32, ()> {
+    let tracing = trace::should_trace(info);
 
     let (src_id, dst_id) = if info.is_ipv6 {
         let s = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
