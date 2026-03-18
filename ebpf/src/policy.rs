@@ -43,7 +43,7 @@ pub fn acl_enabled() -> bool {
 ///
 /// Priority order (bitmask: bit0=src_wildcard, bit1=dst_wildcard, bit2=proto_wildcard):
 ///   0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111
-#[inline(never)]
+#[inline(always)]
 pub unsafe fn evaluate_policy(
     args: &PolicyArgs,
 ) -> (u32, u8, MatchedPolicy) {

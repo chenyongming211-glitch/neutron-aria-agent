@@ -53,7 +53,7 @@ pub struct TraceArgs {
 }
 
 /// Record a trace event into the TRACE_LOG LRU map.
-#[inline(never)]
+#[inline(always)]
 pub unsafe fn trace_event(
     info: &PacketInfo,
     args: &TraceArgs,

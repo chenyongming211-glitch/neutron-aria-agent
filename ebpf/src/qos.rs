@@ -39,7 +39,7 @@ fn compute_delay_ns(deficit: u64, rate: u64) -> u64 {
 
 /// Update QoS per-rule statistics.
 /// outcome: 0=pass, 1=drop, 2=shaped
-#[inline(never)]
+#[inline(always)]
 unsafe fn update_qos_stats(key: &QosKey, pkt_len: u32, outcome: u8) {
     if let Some(s) = QOS_STATS.get_ptr_mut(key) {
         match outcome {
@@ -93,7 +93,7 @@ unsafe fn update_qos_stats(key: &QosKey, pkt_len: u32, outcome: u8) {
 /// worst-case overshoot per race is (num_cpus - 1) × pkt_len — negligible
 /// compared to the alternative of per-CPU full-rate buckets which can overshoot
 /// by rate × num_cpus indefinitely.
-#[inline(never)]
+#[inline(always)]
 pub unsafe fn apply_qos_egress(
     _src_id: u32,
     dst_id: u32,
@@ -192,7 +192,7 @@ pub unsafe fn apply_qos_egress(
 /// Ingress can only police (drop), not shape (delay).
 /// Looks up src_id first (rate-limit by source), then fallback to group_id=0.
 /// See apply_qos_egress for the shared-bucket rationale.
-#[inline(never)]
+#[inline(always)]
 pub unsafe fn apply_qos_ingress(
     src_id: u32,
     _dst_id: u32,

@@ -15,7 +15,7 @@ pub struct DropArgs {
 }
 
 /// Record a drop event in the DROP_REASON_STATS per-CPU hash map.
-#[inline(never)]
+#[inline(always)]
 pub unsafe fn record_drop(args: &DropArgs) {
     let key = DropKey {
         reason: args.reason,
