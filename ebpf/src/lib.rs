@@ -46,10 +46,14 @@ const TC_ACT_SHOT: i32 = 2;
 
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
-    unsafe { try_xdp_firewall(ctx) }
+    match unsafe { try_xdp_firewall(&ctx) } {
+        Ok(ret) => ret,
+        Err(_) => XDP_PASS,
+    }
 }
 
-unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
+#[inline(never)]
+unsafe fn try_xdp_firewall(ctx: &XdpContext) -> Result<u32, ()> {
     let data = ctx.data();
     let data_end = ctx.data_end();
     let pkt_len = (data_end - data) as u32;
@@ -58,7 +62,7 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
         Some(i) => i,
         None => match parser::parse_eth_ipv6(data, data_end, 0) {
             Some(i) => i,
-            None => return XDP_PASS,
+            None => return Ok(XDP_PASS),
         },
     };
 
@@ -104,7 +108,7 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
                     if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                         drops::record_drop(DROP_QOS_INGRESS, DIR_INGRESS, info.proto, src_id, dst_id, pkt_len, now);
                         if tracing { trace::trace_event(&info, TRACE_XDP_DROP, TRACE_RESULT_DROP_QOS, DIR_INGRESS, src_id, dst_id, pkt_len, 2, DROP_QOS_INGRESS, now); }
-                        return XDP_DROP;
+                        return Ok(XDP_DROP);
                     }
                     // Group stats after QoS — only count packets that actually pass
                     stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
@@ -113,7 +117,7 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
                 } else if tracing {
                     trace::trace_event(&info, TRACE_XDP_INGRESS, TRACE_RESULT_PASS, DIR_INGRESS, 0, 0, pkt_len, 2, 0, now);
                 }
-                return XDP_PASS;
+                return Ok(XDP_PASS);
             }
             CtLookupResult::NotFound => {}
         }
@@ -130,12 +134,12 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
             if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 drops::record_drop(DROP_QOS_INGRESS, DIR_INGRESS, info.proto, src_id, dst_id, pkt_len, now);
                 if tracing { trace::trace_event(&info, TRACE_XDP_DROP, TRACE_RESULT_DROP_QOS, DIR_INGRESS, src_id, dst_id, pkt_len, 0, DROP_QOS_INGRESS, now); }
-                return XDP_DROP;
+                return Ok(XDP_DROP);
             }
             stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
             stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
             if tracing { trace::trace_event(&info, TRACE_XDP_INGRESS, TRACE_RESULT_PASS, DIR_INGRESS, src_id, dst_id, pkt_len, 0, 0, now); }
-            return XDP_PASS;
+            return Ok(XDP_PASS);
         }
 
         let (result, drop_reason, matched) = policy::evaluate_policy(src_id, dst_id, info.proto, DIR_INGRESS, info.dst_port, pkt_len, now);
@@ -148,7 +152,7 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
             if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 drops::record_drop(DROP_QOS_INGRESS, DIR_INGRESS, info.proto, src_id, dst_id, pkt_len, now);
                 if tracing { trace::trace_event(&info, TRACE_XDP_DROP, TRACE_RESULT_DROP_QOS, DIR_INGRESS, src_id, dst_id, pkt_len, 1, DROP_QOS_INGRESS, now); }
-                return XDP_DROP;
+                return Ok(XDP_DROP);
             }
             // Group stats after QoS
             stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
@@ -160,7 +164,7 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
             trace::trace_event(&info, TRACE_XDP_DROP, trace_result, DIR_INGRESS, src_id, dst_id, pkt_len, 0, drop_reason, now);
         }
 
-        result
+        Ok(result)
     } else {
         let ct_key = CtKey4 {
             src_ip: info.src_ip,
@@ -197,7 +201,7 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
                     if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                         drops::record_drop(DROP_QOS_INGRESS, DIR_INGRESS, info.proto, src_id, dst_id, pkt_len, now);
                         if tracing { trace::trace_event(&info, TRACE_XDP_DROP, TRACE_RESULT_DROP_QOS, DIR_INGRESS, src_id, dst_id, pkt_len, 2, DROP_QOS_INGRESS, now); }
-                        return XDP_DROP;
+                        return Ok(XDP_DROP);
                     }
                     // Group stats after QoS
                     stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
@@ -206,7 +210,7 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
                 } else if tracing {
                     trace::trace_event(&info, TRACE_XDP_INGRESS, TRACE_RESULT_PASS, DIR_INGRESS, 0, 0, pkt_len, 2, 0, now);
                 }
-                return XDP_PASS;
+                return Ok(XDP_PASS);
             }
             CtLookupResult::NotFound => {}
         }
@@ -222,12 +226,12 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
             if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 drops::record_drop(DROP_QOS_INGRESS, DIR_INGRESS, info.proto, src_id, dst_id, pkt_len, now);
                 if tracing { trace::trace_event(&info, TRACE_XDP_DROP, TRACE_RESULT_DROP_QOS, DIR_INGRESS, src_id, dst_id, pkt_len, 0, DROP_QOS_INGRESS, now); }
-                return XDP_DROP;
+                return Ok(XDP_DROP);
             }
             stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
             stats::update_group_stats(dst_id, DIR_INGRESS, pkt_len);
             if tracing { trace::trace_event(&info, TRACE_XDP_INGRESS, TRACE_RESULT_PASS, DIR_INGRESS, src_id, dst_id, pkt_len, 0, 0, now); }
-            return XDP_PASS;
+            return Ok(XDP_PASS);
         }
 
         let (result, drop_reason, matched) = policy::evaluate_policy(src_id, dst_id, info.proto, DIR_INGRESS, info.dst_port, pkt_len, now);
@@ -240,7 +244,7 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
             if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
                 drops::record_drop(DROP_QOS_INGRESS, DIR_INGRESS, info.proto, src_id, dst_id, pkt_len, now);
                 if tracing { trace::trace_event(&info, TRACE_XDP_DROP, TRACE_RESULT_DROP_QOS, DIR_INGRESS, src_id, dst_id, pkt_len, 1, DROP_QOS_INGRESS, now); }
-                return XDP_DROP;
+                return Ok(XDP_DROP);
             }
             // Group stats after QoS
             stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
@@ -252,7 +256,7 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
             trace::trace_event(&info, TRACE_XDP_DROP, trace_result, DIR_INGRESS, src_id, dst_id, pkt_len, 0, drop_reason, now);
         }
 
-        result
+        Ok(result)
     }
 }
 
@@ -260,10 +264,14 @@ unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
 
 #[classifier]
 pub fn tc_egress(ctx: TcContext) -> i32 {
-    unsafe { try_tc_egress(ctx) }
+    match unsafe { try_tc_egress(&ctx) } {
+        Ok(ret) => ret,
+        Err(_) => TC_ACT_OK,
+    }
 }
 
-unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
+#[inline(never)]
+unsafe fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
     let data = ctx.data();
     let data_end = ctx.data_end();
     let pkt_len = ctx.len();
@@ -272,7 +280,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
         Some(i) => i,
         None => match parser::parse_eth_ipv6(data, data_end, 0) {
             Some(i) => i,
-            None => return TC_ACT_OK,
+            None => return Ok(TC_ACT_OK),
         },
     };
 
@@ -317,7 +325,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                     let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
                     if qos_on {
                         if let Some(action) = apply_egress_qos(&ctx, &info, src_id, dst_id, info.proto, pkt_len, now, tracing) {
-                            return action;
+                            return Ok(action);
                         }
                     }
                     // Group stats after QoS
@@ -331,7 +339,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                 } else if tracing {
                     trace::trace_event(&info, TRACE_TC_EGRESS, TRACE_RESULT_PASS, DIR_EGRESS, 0, 0, pkt_len, 2, 0, now);
                 }
-                return TC_ACT_OK;
+                return Ok(TC_ACT_OK);
             }
             CtLookupResult::NotFound => {}
         }
@@ -346,7 +354,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             }
             if qos_on {
                 if let Some(action) = apply_egress_qos(&ctx, &info, src_id, dst_id, info.proto, pkt_len, now, tracing) {
-                    return action;
+                    return Ok(action);
                 }
             }
             stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
@@ -356,7 +364,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                 mirror::try_mirror_tc(skb, src_id, dst_id, info.proto, DIR_EGRESS, pkt_len);
             }
             if tracing { trace::trace_event(&info, TRACE_TC_EGRESS, TRACE_RESULT_PASS, DIR_EGRESS, src_id, dst_id, pkt_len, 0, 0, now); }
-            return TC_ACT_OK;
+            return Ok(TC_ACT_OK);
         }
 
         let (result, drop_reason, matched) = policy::evaluate_policy_tc(
@@ -370,7 +378,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             }
             if qos_on {
                 if let Some(action) = apply_egress_qos(&ctx, &info, src_id, dst_id, info.proto, pkt_len, now, tracing) {
-                    return action;
+                    return Ok(action);
                 }
             }
             // Group stats after QoS
@@ -387,7 +395,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             trace::trace_event(&info, TRACE_TC_DROP, trace_result, DIR_EGRESS, src_id, dst_id, pkt_len, 0, drop_reason, now);
         }
 
-        result
+        Ok(result)
     } else {
         let ct_key = CtKey4 {
             src_ip: info.src_ip,
@@ -423,7 +431,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                     let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
                     if qos_on {
                         if let Some(action) = apply_egress_qos(&ctx, &info, src_id, dst_id, info.proto, pkt_len, now, tracing) {
-                            return action;
+                            return Ok(action);
                         }
                     }
                     // Group stats after QoS
@@ -437,7 +445,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                 } else if tracing {
                     trace::trace_event(&info, TRACE_TC_EGRESS, TRACE_RESULT_PASS, DIR_EGRESS, 0, 0, pkt_len, 2, 0, now);
                 }
-                return TC_ACT_OK;
+                return Ok(TC_ACT_OK);
             }
             CtLookupResult::NotFound => {}
         }
@@ -452,7 +460,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             }
             if qos_on {
                 if let Some(action) = apply_egress_qos(&ctx, &info, src_id, dst_id, info.proto, pkt_len, now, tracing) {
-                    return action;
+                    return Ok(action);
                 }
             }
             stats::update_group_stats(src_id, DIR_EGRESS, pkt_len);
@@ -462,7 +470,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
                 mirror::try_mirror_tc(skb, src_id, dst_id, info.proto, DIR_EGRESS, pkt_len);
             }
             if tracing { trace::trace_event(&info, TRACE_TC_EGRESS, TRACE_RESULT_PASS, DIR_EGRESS, src_id, dst_id, pkt_len, 0, 0, now); }
-            return TC_ACT_OK;
+            return Ok(TC_ACT_OK);
         }
 
         let (result, drop_reason, matched) = policy::evaluate_policy_tc(
@@ -476,7 +484,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             }
             if qos_on {
                 if let Some(action) = apply_egress_qos(&ctx, &info, src_id, dst_id, info.proto, pkt_len, now, tracing) {
-                    return action;
+                    return Ok(action);
                 }
             }
             // Group stats after QoS
@@ -493,7 +501,7 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
             trace::trace_event(&info, TRACE_TC_DROP, trace_result, DIR_EGRESS, src_id, dst_id, pkt_len, 0, drop_reason, now);
         }
 
-        result
+        Ok(result)
     }
 }
 
@@ -501,10 +509,14 @@ unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
 
 #[classifier]
 pub fn tc_ingress(ctx: TcContext) -> i32 {
-    unsafe { try_tc_ingress(ctx) }
+    match unsafe { try_tc_ingress(&ctx) } {
+        Ok(ret) => ret,
+        Err(_) => TC_ACT_OK,
+    }
 }
 
-unsafe fn try_tc_ingress(ctx: TcContext) -> i32 {
+#[inline(never)]
+unsafe fn try_tc_ingress(ctx: &TcContext) -> Result<i32, ()> {
     let data = ctx.data();
     let data_end = ctx.data_end();
     let pkt_len = ctx.len();
@@ -513,7 +525,7 @@ unsafe fn try_tc_ingress(ctx: TcContext) -> i32 {
         Some(i) => i,
         None => match parser::parse_eth_ipv6(data, data_end, 0) {
             Some(i) => i,
-            None => return TC_ACT_OK,
+            None => return Ok(TC_ACT_OK),
         },
     };
 
@@ -539,7 +551,7 @@ unsafe fn try_tc_ingress(ctx: TcContext) -> i32 {
         trace::trace_event(&info, TRACE_TC_INGRESS, TRACE_RESULT_PASS, DIR_INGRESS, src_id, dst_id, pkt_len, 0, 0, now);
     }
 
-    TC_ACT_OK
+    Ok(TC_ACT_OK)
 }
 
 // --- Helpers ---
