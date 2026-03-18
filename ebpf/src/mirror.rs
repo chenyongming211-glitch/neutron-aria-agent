@@ -1,9 +1,6 @@
 use crate::common::{MirrorKey, GlobalMirrorKey, MirrorStatsValue};
 use crate::maps::{FIREWALL_CONFIG, MIRROR_POLICY, MIRROR_GLOBAL, MIRROR_STATS, MIRROR_GLOBAL_STATS};
-
-extern "C" {
-    fn bpf_clone_redirect(skb: *mut aya_ebpf::bindings::__sk_buff, ifindex: u32, flags: u64) -> i64;
-}
+use aya_ebpf::helpers::gen::bpf_clone_redirect;
 
 /// Check if mirror is globally enabled via FIREWALL_CONFIG.
 #[inline(always)]
