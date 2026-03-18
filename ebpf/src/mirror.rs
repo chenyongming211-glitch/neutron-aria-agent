@@ -14,7 +14,7 @@ pub fn mirror_enabled() -> bool {
 }
 
 /// Update per-rule mirror stats (MIRROR_STATS).
-#[inline(always)]
+#[inline(never)]
 unsafe fn update_mirror_stats(key: &MirrorKey, pkt_len: u32, success: bool) {
     if let Some(s) = MIRROR_STATS.get_ptr_mut(key) {
         if success {
@@ -34,7 +34,7 @@ unsafe fn update_mirror_stats(key: &MirrorKey, pkt_len: u32, success: bool) {
 }
 
 /// Update global mirror stats (MIRROR_GLOBAL_STATS).
-#[inline(always)]
+#[inline(never)]
 unsafe fn update_global_mirror_stats(key: &GlobalMirrorKey, pkt_len: u32, success: bool) {
     if let Some(s) = MIRROR_GLOBAL_STATS.get_ptr_mut(key) {
         if success {
@@ -60,7 +60,7 @@ unsafe fn update_global_mirror_stats(key: &GlobalMirrorKey, pkt_len: u32, succes
 ///
 /// `skb_ptr` must be the raw `*mut __sk_buff` from TcContext.
 /// This function always returns — the original packet is never consumed.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn try_mirror_tc(
     skb_ptr: *mut aya_ebpf::bindings::__sk_buff,
     src_id: u32,
