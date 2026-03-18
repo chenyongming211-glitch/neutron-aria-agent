@@ -45,7 +45,13 @@ const TC_ACT_SHOT: i32 = 2;
 // --- XDP Ingress ---
 
 #[xdp]
-pub fn xdp_firewall(ctx: XdpContext) -> u32 { unsafe {
+pub fn xdp_firewall(ctx: XdpContext) -> u32 {
+    unsafe { try_xdp_firewall(ctx) }
+}
+
+#[link_section = "xdp"]
+#[inline(always)]
+unsafe fn try_xdp_firewall(ctx: XdpContext) -> u32 {
     let data = ctx.data();
     let data_end = ctx.data_end();
     let pkt_len = (data_end - data) as u32;
@@ -250,12 +256,18 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 { unsafe {
 
         result
     }
-} }
+}
 
 // --- TC Egress ---
 
 #[classifier]
-pub fn tc_egress(ctx: TcContext) -> i32 { unsafe {
+pub fn tc_egress(ctx: TcContext) -> i32 {
+    unsafe { try_tc_egress(ctx) }
+}
+
+#[link_section = "classifier"]
+#[inline(always)]
+unsafe fn try_tc_egress(ctx: TcContext) -> i32 {
     let data = ctx.data();
     let data_end = ctx.data_end();
     let pkt_len = ctx.len();
@@ -487,12 +499,18 @@ pub fn tc_egress(ctx: TcContext) -> i32 { unsafe {
 
         result
     }
-} }
+}
 
 // --- TC Ingress (mirror only) ---
 
 #[classifier]
-pub fn tc_ingress(ctx: TcContext) -> i32 { unsafe {
+pub fn tc_ingress(ctx: TcContext) -> i32 {
+    unsafe { try_tc_ingress(ctx) }
+}
+
+#[link_section = "classifier"]
+#[inline(always)]
+unsafe fn try_tc_ingress(ctx: TcContext) -> i32 {
     let data = ctx.data();
     let data_end = ctx.data_end();
     let pkt_len = ctx.len();
@@ -528,7 +546,7 @@ pub fn tc_ingress(ctx: TcContext) -> i32 { unsafe {
     }
 
     TC_ACT_OK
-} }
+}
 
 // --- Helpers ---
 
