@@ -114,7 +114,7 @@ unsafe fn try_xdp_firewall(info: &parser::PacketInfo, pkt_len: u32) -> Result<u3
                 let src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
                 let dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
                 if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
-                    drops::record_drop(DROP_QOS_INGRESS, DIR_INGRESS, info.proto, src_id, dst_id, pkt_len, now);
+                    drops::record_drop(&drops::DropArgs { reason: DROP_QOS_INGRESS, direction: DIR_INGRESS, proto: info.proto, src_id, dst_id, pkt_len, now, _pad: 0 });
                     if tracing { trace::trace_event(&info, &trace::TraceArgs { hook: TRACE_XDP_DROP, result: TRACE_RESULT_DROP_QOS, direction: DIR_INGRESS, ct_state: 2, drop_reason: DROP_QOS_INGRESS, _pad: [0;3], src_id, dst_id, pkt_len, now }); }
                     return Ok(XDP_DROP);
                 }
@@ -139,7 +139,7 @@ unsafe fn try_xdp_firewall(info: &parser::PacketInfo, pkt_len: u32) -> Result<u3
             tcprt::track_tcp_rt_v4(&ct_key, &info, now, true);
         }
         if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
-            drops::record_drop(DROP_QOS_INGRESS, DIR_INGRESS, info.proto, src_id, dst_id, pkt_len, now);
+            drops::record_drop(&drops::DropArgs { reason: DROP_QOS_INGRESS, direction: DIR_INGRESS, proto: info.proto, src_id, dst_id, pkt_len, now, _pad: 0 });
             if tracing { trace::trace_event(&info, &trace::TraceArgs { hook: TRACE_XDP_DROP, result: TRACE_RESULT_DROP_QOS, direction: DIR_INGRESS, ct_state: 0, drop_reason: DROP_QOS_INGRESS, _pad: [0;3], src_id, dst_id, pkt_len, now }); }
             return Ok(XDP_DROP);
         }
@@ -157,7 +157,7 @@ unsafe fn try_xdp_firewall(info: &parser::PacketInfo, pkt_len: u32) -> Result<u3
             tcprt::track_tcp_rt_v4(&ct_key, &info, now, true);
         }
         if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
-            drops::record_drop(DROP_QOS_INGRESS, DIR_INGRESS, info.proto, src_id, dst_id, pkt_len, now);
+            drops::record_drop(&drops::DropArgs { reason: DROP_QOS_INGRESS, direction: DIR_INGRESS, proto: info.proto, src_id, dst_id, pkt_len, now, _pad: 0 });
             if tracing { trace::trace_event(&info, &trace::TraceArgs { hook: TRACE_XDP_DROP, result: TRACE_RESULT_DROP_QOS, direction: DIR_INGRESS, ct_state: 1, drop_reason: DROP_QOS_INGRESS, _pad: [0;3], src_id, dst_id, pkt_len, now }); }
             return Ok(XDP_DROP);
         }
@@ -214,7 +214,7 @@ unsafe fn xdp_ingress_v6(info: &parser::PacketInfo, pkt_len: u32) -> Result<u32,
                 let src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
                 let dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
                 if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
-                    drops::record_drop(DROP_QOS_INGRESS, DIR_INGRESS, info.proto, src_id, dst_id, pkt_len, now);
+                    drops::record_drop(&drops::DropArgs { reason: DROP_QOS_INGRESS, direction: DIR_INGRESS, proto: info.proto, src_id, dst_id, pkt_len, now, _pad: 0 });
                     if tracing { trace::trace_event(&info, &trace::TraceArgs { hook: TRACE_XDP_DROP, result: TRACE_RESULT_DROP_QOS, direction: DIR_INGRESS, ct_state: 2, drop_reason: DROP_QOS_INGRESS, _pad: [0;3], src_id, dst_id, pkt_len, now }); }
                     return Ok(XDP_DROP);
                 }
@@ -239,7 +239,7 @@ unsafe fn xdp_ingress_v6(info: &parser::PacketInfo, pkt_len: u32) -> Result<u32,
             tcprt::track_tcp_rt_v6(&ct_key, &info, now, true);
         }
         if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
-            drops::record_drop(DROP_QOS_INGRESS, DIR_INGRESS, info.proto, src_id, dst_id, pkt_len, now);
+            drops::record_drop(&drops::DropArgs { reason: DROP_QOS_INGRESS, direction: DIR_INGRESS, proto: info.proto, src_id, dst_id, pkt_len, now, _pad: 0 });
             if tracing { trace::trace_event(&info, &trace::TraceArgs { hook: TRACE_XDP_DROP, result: TRACE_RESULT_DROP_QOS, direction: DIR_INGRESS, ct_state: 0, drop_reason: DROP_QOS_INGRESS, _pad: [0;3], src_id, dst_id, pkt_len, now }); }
             return Ok(XDP_DROP);
         }
@@ -257,7 +257,7 @@ unsafe fn xdp_ingress_v6(info: &parser::PacketInfo, pkt_len: u32) -> Result<u32,
             tcprt::track_tcp_rt_v6(&ct_key, &info, now, true);
         }
         if qos_on && !qos::apply_qos_ingress(src_id, dst_id, pkt_len, now) {
-            drops::record_drop(DROP_QOS_INGRESS, DIR_INGRESS, info.proto, src_id, dst_id, pkt_len, now);
+            drops::record_drop(&drops::DropArgs { reason: DROP_QOS_INGRESS, direction: DIR_INGRESS, proto: info.proto, src_id, dst_id, pkt_len, now, _pad: 0 });
             if tracing { trace::trace_event(&info, &trace::TraceArgs { hook: TRACE_XDP_DROP, result: TRACE_RESULT_DROP_QOS, direction: DIR_INGRESS, ct_state: 1, drop_reason: DROP_QOS_INGRESS, _pad: [0;3], src_id, dst_id, pkt_len, now }); }
             return Ok(XDP_DROP);
         }
@@ -597,7 +597,7 @@ unsafe fn try_tc_ingress(ctx: &TcContext, info: &parser::PacketInfo, pkt_len: u3
 unsafe fn apply_egress_qos(ctx: &TcContext, info: &parser::PacketInfo, src_id: u32, dst_id: u32, proto: u8, pkt_len: u32, now: u64, tracing: bool) -> Option<i32> {
     let (edt, prio) = qos::apply_qos_egress(src_id, dst_id, pkt_len, now);
     if edt == u64::MAX {
-        drops::record_drop(DROP_QOS_EGRESS, DIR_EGRESS, proto, src_id, dst_id, pkt_len, now);
+        drops::record_drop(&drops::DropArgs { reason: DROP_QOS_EGRESS, direction: DIR_EGRESS, proto, src_id, dst_id, pkt_len, now, _pad: 0 });
         if tracing { trace::trace_event(info, &trace::TraceArgs { hook: TRACE_TC_DROP, result: TRACE_RESULT_DROP_QOS, direction: DIR_EGRESS, ct_state: 0, drop_reason: DROP_QOS_EGRESS, _pad: [0;3], src_id, dst_id, pkt_len, now }); }
         return Some(TC_ACT_SHOT);
     }
