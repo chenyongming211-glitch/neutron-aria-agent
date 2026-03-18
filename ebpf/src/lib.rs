@@ -379,7 +379,7 @@ unsafe fn try_tc_ingress(ctx: &TcContext, info: *const parser::PacketInfo, pipe:
 
 // --- Helpers ---
 
-#[inline(always)]
+#[inline(never)]
 unsafe fn load_feature_flags(p: &mut PipelineCtx, info: &parser::PacketInfo) {
     if qos::qos_enabled() { p.flags |= FLAG_QOS_ON; }
     if tcprt::tcprt_enabled() { p.flags |= FLAG_TCPRT_ON; }
@@ -406,7 +406,7 @@ fn get_matched(p: &PipelineCtx) -> conntrack::MatchedPolicy {
     }
 }
 
-#[inline(always)]
+#[inline(never)]
 unsafe fn emit_trace(info: &parser::PacketInfo, p: &PipelineCtx, hook: u8, result: u8) {
     trace::trace_event(info, &trace::TraceArgs {
         hook, result, direction: p.direction, ct_state: p.ct_state,
@@ -415,7 +415,7 @@ unsafe fn emit_trace(info: &parser::PacketInfo, p: &PipelineCtx, hook: u8, resul
     });
 }
 
-#[inline(always)]
+#[inline(never)]
 unsafe fn emit_drop(p: &PipelineCtx) {
     drops::record_drop(&drops::DropArgs {
         reason: p.drop_reason, direction: p.direction, proto: p.proto,
