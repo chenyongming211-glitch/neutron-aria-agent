@@ -36,38 +36,46 @@ pub unsafe fn should_trace(info: &PacketInfo) -> bool {
     true
 }
 
+/// Packed parameters for trace_event to stay within BPF's 5-argument limit.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TraceArgs {
+    pub hook: u8,
+    pub result: u8,
+    pub direction: u8,
+    pub ct_state: u8,
+    pub drop_reason: u8,
+    pub _pad: [u8; 3],
+    pub src_id: u32,
+    pub dst_id: u32,
+    pub pkt_len: u32,
+    pub now: u64,
+}
+
 /// Record a trace event into the TRACE_LOG LRU map.
 #[inline(never)]
 pub unsafe fn trace_event(
     info: &PacketInfo,
-    hook: u8,
-    result: u8,
-    direction: u8,
-    src_id: u32,
-    dst_id: u32,
-    pkt_len: u32,
-    ct_state: u8,
-    drop_reason: u8,
-    now: u64,
+    args: &TraceArgs,
 ) {
     let seq_key: u32 = 0;
     if let Some(seq) = TRACE_SEQ.get_ptr_mut(seq_key) {
         *seq += 1;
         let event = TraceEvent {
-            timestamp: now,
+            timestamp: args.now,
             src_ip: info.src_ip,
             dst_ip: info.dst_ip,
             src_port: info.src_port,
             dst_port: info.dst_port,
             proto: info.proto,
-            hook,
-            result,
-            direction,
-            src_id,
-            dst_id,
-            pkt_len,
-            ct_state,
-            drop_reason,
+            hook: args.hook,
+            result: args.result,
+            direction: args.direction,
+            src_id: args.src_id,
+            dst_id: args.dst_id,
+            pkt_len: args.pkt_len,
+            ct_state: args.ct_state,
+            drop_reason: args.drop_reason,
             pad: [0; 2],
         };
         let _ = TRACE_LOG.insert(&*seq, &event, 0);

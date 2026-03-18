@@ -8,6 +8,19 @@ use crate::conntrack::MatchedPolicy;
 use crate::stats;
 use crate::drops;
 
+/// Packed parameters for evaluate_policy to stay within BPF's 5-argument limit.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PolicyArgs {
+    pub src_id: u32,
+    pub dst_id: u32,
+    pub pkt_len: u32,
+    pub now: u64,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub direction: u8,
+}
+
 /// Check if ACL (policy evaluation) is enabled.
 /// When disabled, all traffic is passed without policy evaluation.
 #[inline(always)]
@@ -29,23 +42,17 @@ pub fn acl_enabled() -> bool {
 /// that hit (including wildcards) so the CT fast path can replay rule stats.
 #[inline(never)]
 pub unsafe fn evaluate_policy(
-    src_id: u32,
-    dst_id: u32,
-    proto: u8,
-    direction: u8,
-    dst_port: u16,
-    pkt_len: u32,
-    now: u64,
+    args: &PolicyArgs,
 ) -> (u32, u8, MatchedPolicy) {
     let candidates: [(u32, u32, u8); 8] = [
-        (src_id, dst_id, proto),
-        (0,      dst_id, proto),
-        (src_id, 0,      proto),
-        (src_id, dst_id, 0),
-        (0,      0,      proto),
-        (0,      dst_id, 0),
-        (src_id, 0,      0),
-        (0,      0,      0),
+        (args.src_id, args.dst_id, args.proto),
+        (0,           args.dst_id, args.proto),
+        (args.src_id, 0,           args.proto),
+        (args.src_id, args.dst_id, 0),
+        (0,           0,           args.proto),
+        (0,           args.dst_id, 0),
+        (args.src_id, 0,           0),
+        (0,           0,           0),
     ];
 
     let mut i = 0u8;
@@ -55,20 +62,20 @@ pub unsafe fn evaluate_policy(
             src_id: s,
             dst_id: d,
             proto: p,
-            direction,
+            direction: args.direction,
             pad: [0; 2],
         };
         if let Some(policy) = POLICY_TABLE.get(&key) {
-            let (result, drop_reason) = apply_policy(policy, dst_port);
-            stats::update_rule_stats(&key, pkt_len);
+            let (result, drop_reason) = apply_policy(policy, args.dst_port);
+            stats::update_rule_stats(&key, args.pkt_len);
             if result == XDP_DROP {
-                drops::record_drop(drop_reason, direction, proto, src_id, dst_id, pkt_len, now);
+                drops::record_drop(drop_reason, args.direction, args.proto, args.src_id, args.dst_id, args.pkt_len, args.now);
             }
             let matched = MatchedPolicy {
                 src_id: s,
                 dst_id: d,
                 proto: p,
-                direction,
+                direction: args.direction,
             };
             return (result, drop_reason, matched);
         }
@@ -79,7 +86,7 @@ pub unsafe fn evaluate_policy(
         src_id: 0,
         dst_id: 0,
         proto: 0,
-        direction,
+        direction: args.direction,
     };
     (XDP_PASS, 0, matched)
 }
@@ -87,17 +94,11 @@ pub unsafe fn evaluate_policy(
 /// Same 8-level fallback, but returns TC action codes (TC_ACT_OK / TC_ACT_SHOT).
 #[inline(never)]
 pub unsafe fn evaluate_policy_tc(
-    src_id: u32,
-    dst_id: u32,
-    proto: u8,
-    direction: u8,
-    dst_port: u16,
-    pkt_len: u32,
+    args: &PolicyArgs,
     tc_act_ok: i32,
     tc_act_shot: i32,
-    now: u64,
 ) -> (i32, u8, MatchedPolicy) {
-    let (xdp_result, drop_reason, matched) = evaluate_policy(src_id, dst_id, proto, direction, dst_port, pkt_len, now);
+    let (xdp_result, drop_reason, matched) = evaluate_policy(args);
     let tc_result = if xdp_result == XDP_PASS { tc_act_ok } else { tc_act_shot };
     (tc_result, drop_reason, matched)
 }
