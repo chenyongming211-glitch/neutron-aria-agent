@@ -236,6 +236,79 @@ pub const TCPRT_FLAG_SYN_SEEN: u8 = 1;
 pub const TCPRT_FLAG_SYNACK_SEEN: u8 = 2;
 pub const TCPRT_FLAG_ESTABLISHED: u8 = 4;
 
+// --- Drop Reason Profiler ---
+
+pub const DROP_ACL_DENY: u8 = 1;          // ACL rule deny (no port filter)
+pub const DROP_ACL_PORT_DENY: u8 = 2;     // ACL port match deny
+pub const DROP_ACL_DEFAULT_DENY: u8 = 3;  // ACL default deny (port not matched)
+pub const DROP_QOS_INGRESS: u8 = 4;       // QoS ingress rate limit drop
+pub const DROP_QOS_EGRESS: u8 = 5;        // QoS egress rate limit drop
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct DropKey {
+    pub reason: u8,
+    pub direction: u8,
+    pub proto: u8,
+    pub pad: u8,
+    pub src_id: u32,
+    pub dst_id: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct DropValue {
+    pub packets: u64,
+    pub bytes: u64,
+    pub last_seen: u64,
+}
+
+// --- Packet Trace ---
+
+pub const TRACE_XDP_INGRESS: u8 = 1;
+pub const TRACE_XDP_DROP: u8 = 2;
+pub const TRACE_TC_EGRESS: u8 = 3;
+pub const TRACE_TC_DROP: u8 = 4;
+pub const TRACE_TC_INGRESS: u8 = 5;
+
+pub const TRACE_RESULT_PASS: u8 = 0;
+pub const TRACE_RESULT_DROP_ACL: u8 = 1;
+pub const TRACE_RESULT_DROP_ACL_PORT: u8 = 2;
+pub const TRACE_RESULT_DROP_ACL_DEFAULT: u8 = 3;
+pub const TRACE_RESULT_DROP_QOS: u8 = 4;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TraceFilter {
+    pub src_ip: u32,        // 0 = any
+    pub dst_ip: u32,        // 0 = any
+    pub src_port: u16,      // 0 = any
+    pub dst_port: u16,      // 0 = any
+    pub proto: u8,          // 0 = any
+    pub enabled: u8,        // 1 = tracing active
+    pub pad: [u8; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TraceEvent {
+    pub timestamp: u64,
+    pub src_ip: u32,
+    pub dst_ip: u32,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub hook: u8,           // TRACE_XDP_INGRESS / TRACE_TC_EGRESS / etc.
+    pub result: u8,         // TRACE_RESULT_PASS / TRACE_RESULT_DROP_*
+    pub direction: u8,
+    pub src_id: u32,
+    pub dst_id: u32,
+    pub pkt_len: u32,
+    pub ct_state: u8,       // 0=none, 1=new, 2=established
+    pub drop_reason: u8,    // DROP_* code if dropped, 0 if passed
+    pub pad: [u8; 2],
+}
+
 // --- Global firewall config (feature switches) ---
 
 #[repr(C)]

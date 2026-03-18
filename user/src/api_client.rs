@@ -255,6 +255,53 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    // ── Drop Reason Profiler ──
+
+    pub async fn list_drops(&self, instance: &str) -> Result<DropStatsResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/stats/drops", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn flush_drops(&self, instance: &str) -> Result<DropFlushResponse, String> {
+        let resp = self.client.delete(self.url(&format!("/api/v1/{}/stats/drops", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    // ── Packet Trace ──
+
+    pub async fn start_trace(&self, instance: &str, req: &TraceStartRequest) -> Result<MessageResponse, String> {
+        let resp = self.client.post(self.url(&format!("/api/v1/{}/trace", instance)))
+            .json(req)
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn stop_trace(&self, instance: &str) -> Result<MessageResponse, String> {
+        let resp = self.client.delete(self.url(&format!("/api/v1/{}/trace", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn list_trace(&self, instance: &str, top: usize) -> Result<TraceResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/trace?top={}", instance, top)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn flush_trace(&self, instance: &str) -> Result<TraceFlushResponse, String> {
+        let resp = self.client.delete(self.url(&format!("/api/v1/{}/trace/flush", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── Internal ──
 
     fn connection_error(&self, e: reqwest::Error) -> String {

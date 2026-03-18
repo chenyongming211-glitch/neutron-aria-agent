@@ -1,4 +1,4 @@
-use aya_ebpf::maps::{HashMap, LpmTrie, LruHashMap, PerCpuHashMap, LruPerCpuHashMap};
+use aya_ebpf::maps::{HashMap, LpmTrie, LruHashMap, PerCpuHashMap, LruPerCpuHashMap, PerCpuArray};
 use aya_ebpf::macros::map;
 
 pub use crate::common::{
@@ -10,6 +10,8 @@ pub use crate::common::{
     MirrorKey, GlobalMirrorKey, MirrorConfig, MirrorStatsValue,
     FirewallConfig,
     TcpRtValue,
+    DropKey, DropValue,
+    TraceFilter, TraceEvent,
 };
 
 // --- Existing maps ---
@@ -105,3 +107,19 @@ pub static TCPRT_TABLE_V4: LruHashMap<CtKey4, TcpRtValue> = LruHashMap::with_max
 
 #[map(name = "TCPRT_TABLE_V6")]
 pub static TCPRT_TABLE_V6: LruHashMap<CtKey6, TcpRtValue> = LruHashMap::with_max_entries(16384, 0);
+
+// --- Drop Reason Profiler ---
+
+#[map(name = "DROP_REASON_STATS")]
+pub static DROP_REASON_STATS: PerCpuHashMap<DropKey, DropValue> = PerCpuHashMap::with_max_entries(1024, 0);
+
+// --- Packet Trace ---
+
+#[map(name = "TRACE_FILTER")]
+pub static TRACE_FILTER: HashMap<u32, TraceFilter> = HashMap::with_max_entries(1, 0);
+
+#[map(name = "TRACE_LOG")]
+pub static TRACE_LOG: LruHashMap<u64, TraceEvent> = LruHashMap::with_max_entries(4096, 0);
+
+#[map(name = "TRACE_SEQ")]
+pub static TRACE_SEQ: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);

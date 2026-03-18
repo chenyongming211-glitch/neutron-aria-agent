@@ -45,6 +45,8 @@ enum Commands {
         mirror: bool,
         #[arg(long, help = "Show TCP-RT (response time) statistics")]
         tcprt: bool,
+        #[arg(long, help = "Show drop reason statistics")]
+        drops: bool,
     },
     /// Connection tracking operations
     Conntrack {
@@ -65,6 +67,16 @@ enum Commands {
     Tcprt {
         #[command(subcommand)]
         action: TcprtCommands,
+    },
+    /// Drop reason profiler
+    Drops {
+        #[command(subcommand)]
+        action: DropsCommands,
+    },
+    /// Packet trace for debugging
+    Trace {
+        #[command(subcommand)]
+        action: TraceCommands,
     },
     /// Firewall configuration
     Config {
@@ -223,6 +235,40 @@ enum TcprtCommands {
         #[arg(long, default_value = "2", help = "Refresh interval in seconds (with --watch)")]
         interval: u64,
     },
+}
+
+#[derive(Subcommand)]
+enum DropsCommands {
+    /// List drop reason statistics
+    List,
+    /// Flush all drop statistics
+    Flush,
+}
+
+#[derive(Subcommand)]
+enum TraceCommands {
+    /// Start tracing packets matching a filter
+    Start {
+        #[arg(long, default_value = "", help = "Source IP to trace")]
+        src: String,
+        #[arg(long, default_value = "", help = "Destination IP to trace")]
+        dst: String,
+        #[arg(long, default_value = "0", help = "Source port to trace")]
+        sport: u16,
+        #[arg(long, default_value = "0", help = "Destination port to trace")]
+        dport: u16,
+        #[arg(long, default_value = "", help = "Protocol: tcp, udp, icmp, or any")]
+        proto: String,
+    },
+    /// Show trace events
+    Show {
+        #[arg(long, default_value = "100", help = "Number of events to show")]
+        top: usize,
+    },
+    /// Stop tracing (clear filter)
+    Stop,
+    /// Flush trace log
+    Flush,
 }
 
 #[derive(Subcommand)]
@@ -703,8 +749,8 @@ async fn main() {
                 }
             }
         },
-        Commands::Stats { rules, flows, top, qos, groups, mirror, tcprt } => {
-            if !rules && !flows && !qos && !groups && !mirror && !tcprt {
+        Commands::Stats { rules, flows, top, qos, groups, mirror, tcprt, drops } => {
+            if !rules && !flows && !qos && !groups && !mirror && !tcprt && !drops {
                 // Show overview
                 match client.stats_overview(&instance).await {
                     Ok(stats) => {
@@ -824,6 +870,27 @@ async fn main() {
                             println!();
                         }
                         Err(e) => { eprintln!("Error reading TCP-RT stats: {}", e); has_error = true; }
+                    }
+                }
+                if drops {
+                    match client.list_drops(&instance).await {
+                        Ok(resp) => {
+                            println!("=== Drop Reason Statistics ===");
+                            if resp.drops.is_empty() {
+                                println!("  No drops recorded");
+                            } else {
+                                println!("{:<25} {:<10} {:<8} {:<12} {:<12} {:<12} {}",
+                                    "Reason", "Direction", "Proto", "SrcGroup", "DstGroup", "Packets", "Bytes");
+                                for e in &resp.drops {
+                                    println!("{:<25} {:<10} {:<8} {:<12} {:<12} {:<12} {}",
+                                        e.reason, e.direction, e.proto,
+                                        e.src_group, e.dst_group,
+                                        e.packets, e.bytes);
+                                }
+                            }
+                            println!();
+                        }
+                        Err(e) => { eprintln!("Error reading drop stats: {}", e); has_error = true; }
                     }
                 }
                 if flows {
@@ -1005,6 +1072,81 @@ async fn main() {
                     }
                 } else {
                     run_analyze(&client, &instance, top, group.as_deref()).await
+                }
+            }
+        },
+        Commands::Drops { action } => match action {
+            DropsCommands::List => {
+                match client.list_drops(&instance).await {
+                    Ok(resp) => {
+                        if resp.drops.is_empty() {
+                            println!("No drops recorded");
+                        } else {
+                            println!("{:<25} {:<10} {:<8} {:<12} {:<12} {:<12} {}",
+                                "Reason", "Direction", "Proto", "SrcGroup", "DstGroup", "Packets", "Bytes");
+                            for e in &resp.drops {
+                                println!("{:<25} {:<10} {:<8} {:<12} {:<12} {:<12} {}",
+                                    e.reason, e.direction, e.proto,
+                                    e.src_group, e.dst_group,
+                                    e.packets, e.bytes);
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            DropsCommands::Flush => {
+                match client.flush_drops(&instance).await {
+                    Ok(resp) => { println!("Flushed {} drop entries", resp.flushed); Ok(()) }
+                    Err(e) => Err(e),
+                }
+            }
+        },
+        Commands::Trace { action } => match action {
+            TraceCommands::Start { src, dst, sport, dport, proto } => {
+                match client.start_trace(&instance, &aria_api::TraceStartRequest {
+                    src_ip: src,
+                    dst_ip: dst,
+                    src_port: sport,
+                    dst_port: dport,
+                    proto,
+                }).await {
+                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
+                    Err(e) => Err(e),
+                }
+            }
+            TraceCommands::Show { top } => {
+                match client.list_trace(&instance, top).await {
+                    Ok(resp) => {
+                        if resp.events.is_empty() {
+                            println!("No trace events captured");
+                        } else {
+                            println!("{:<6} {:<12} {:<16} {:<16} {:<6} {:<6} {:<12} {:<8} {:<10} {:<14} {:<14} {}",
+                                "Seq", "Hook", "Source", "Destination", "SPort", "DPort",
+                                "Result", "Dir", "CT State", "SrcGroup", "DstGroup", "Drop Reason");
+                            for e in &resp.events {
+                                println!("{:<6} {:<12} {:<16} {:<16} {:<6} {:<6} {:<12} {:<8} {:<10} {:<14} {:<14} {}",
+                                    e.seq, e.hook, e.src_ip, e.dst_ip, e.src_port, e.dst_port,
+                                    e.result, e.direction, e.ct_state,
+                                    e.src_group, e.dst_group, e.drop_reason);
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            TraceCommands::Stop => {
+                match client.stop_trace(&instance).await {
+                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
+                    Err(e) => Err(e),
+                }
+            }
+            TraceCommands::Flush => {
+                match client.flush_trace(&instance).await {
+                    Ok(resp) => { println!("Flushed {} trace events", resp.flushed); Ok(()) }
+                    Err(e) => Err(e),
                 }
             }
         },

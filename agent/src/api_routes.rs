@@ -32,5 +32,8 @@ pub fn build_router(control_plane: Arc<ControlPlane>) -> Router {
         .route("/api/v1/{instance}/stats/groups", get(api_handlers::stats_groups))
         .route("/api/v1/{instance}/stats/mirror", get(api_handlers::stats_mirror))
         .route("/api/v1/{instance}/tcprt", get(api_handlers::list_tcprt).delete(api_handlers::flush_tcprt))
+        .route("/api/v1/{instance}/stats/drops", get(api_handlers::list_drops).delete(api_handlers::flush_drops))
+        .route("/api/v1/{instance}/trace", get(api_handlers::list_trace).post(api_handlers::start_trace).delete(api_handlers::stop_trace))
+        .route("/api/v1/{instance}/trace/flush", delete(api_handlers::flush_trace))
         .with_state(control_plane)
 }

@@ -242,6 +242,71 @@ pub struct FirewallConfig {
 }
 unsafe impl Pod for FirewallConfig {}
 
+// --- Drop Reason Profiler ---
+
+pub const DROP_ACL_DENY: u8 = 1;
+pub const DROP_ACL_PORT_DENY: u8 = 2;
+pub const DROP_ACL_DEFAULT_DENY: u8 = 3;
+pub const DROP_QOS_INGRESS: u8 = 4;
+pub const DROP_QOS_EGRESS: u8 = 5;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct DropKey {
+    pub reason: u8,
+    pub direction: u8,
+    pub proto: u8,
+    pub pad: u8,
+    pub src_id: u32,
+    pub dst_id: u32,
+}
+unsafe impl Pod for DropKey {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct DropValue {
+    pub packets: u64,
+    pub bytes: u64,
+    pub last_seen: u64,
+}
+unsafe impl Pod for DropValue {}
+
+// --- Packet Trace ---
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct TraceFilter {
+    pub src_ip: u32,
+    pub dst_ip: u32,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub enabled: u8,
+    pub pad: [u8; 2],
+}
+unsafe impl Pod for TraceFilter {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct TraceEvent {
+    pub timestamp: u64,
+    pub src_ip: u32,
+    pub dst_ip: u32,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub hook: u8,
+    pub result: u8,
+    pub direction: u8,
+    pub src_id: u32,
+    pub dst_id: u32,
+    pub pkt_len: u32,
+    pub ct_state: u8,
+    pub drop_reason: u8,
+    pub pad: [u8; 2],
+}
+unsafe impl Pod for TraceEvent {}
+
 pub const CT_NEW: u8 = 1;
 pub const CT_ESTABLISHED: u8 = 2;
 pub const DIR_INGRESS: u8 = 0;

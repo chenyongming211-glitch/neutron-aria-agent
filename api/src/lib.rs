@@ -405,6 +405,78 @@ pub struct TcpRtFlushResponse {
     pub flushed: u64,
 }
 
+// ── Drop Reason Profiler ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DropStatsEntry {
+    pub reason: String,
+    pub direction: String,
+    pub proto: String,
+    pub src_group: String,
+    pub src_id: u32,
+    pub dst_group: String,
+    pub dst_id: u32,
+    pub packets: u64,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DropStatsResponse {
+    pub drops: Vec<DropStatsEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DropFlushResponse {
+    pub flushed: u64,
+}
+
+// ── Packet Trace ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TraceStartRequest {
+    #[serde(default)]
+    pub src_ip: String,
+    #[serde(default)]
+    pub dst_ip: String,
+    #[serde(default)]
+    pub src_port: u16,
+    #[serde(default)]
+    pub dst_port: u16,
+    #[serde(default)]
+    pub proto: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TraceEventEntry {
+    pub seq: u64,
+    pub timestamp: u64,
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: String,
+    pub hook: String,
+    pub result: String,
+    pub direction: String,
+    pub src_group: String,
+    pub src_id: u32,
+    pub dst_group: String,
+    pub dst_id: u32,
+    pub pkt_len: u32,
+    pub ct_state: String,
+    pub drop_reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TraceResponse {
+    pub events: Vec<TraceEventEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TraceFlushResponse {
+    pub flushed: u64,
+}
+
 // ── Helpers ──
 
 pub fn proto_to_string(proto: u8) -> String {

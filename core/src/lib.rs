@@ -6,4 +6,6 @@ pub mod ct_ops;
 pub mod qos_ops;
 pub mod mirror_ops;
 pub mod tcprt_ops;
+pub mod drop_ops;
+pub mod trace_ops;
 pub mod wal;

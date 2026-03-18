@@ -815,6 +815,62 @@ impl ControlPlane {
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
+    // ── Drop Reason Profiler ──
+
+    pub async fn get_drop_stats(&self, instance: &str) -> Result<(Vec<aria_core::drop_ops::DropStatsEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        let stats = aria_core::drop_ops::get_drop_stats(&state.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))?;
+        Ok((stats, state.state.groups.clone()))
+    }
+
+    pub async fn flush_drop_stats(&self, instance: &str) -> Result<u64, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        aria_core::drop_ops::flush_drop_stats(&state.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))
+    }
+
+    // ── Packet Trace ──
+
+    pub async fn start_trace(
+        &self,
+        instance: &str,
+        src_ip: u32,
+        dst_ip: u32,
+        src_port: u16,
+        dst_port: u16,
+        proto: u8,
+    ) -> Result<(), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        aria_core::trace_ops::set_trace_filter(&state.pin_path, src_ip, dst_ip, src_port, dst_port, proto, true)
+            .map_err(|e| ControlPlaneError::KernelError(e))
+    }
+
+    pub async fn stop_trace(&self, instance: &str) -> Result<(), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        aria_core::trace_ops::clear_trace_filter(&state.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))
+    }
+
+    pub async fn get_trace_events(&self, instance: &str, limit: usize) -> Result<(Vec<aria_core::trace_ops::TraceEventEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        let events = aria_core::trace_ops::get_trace_events(&state.pin_path, limit)
+            .map_err(|e| ControlPlaneError::KernelError(e))?;
+        Ok((events, state.state.groups.clone()))
+    }
+
+    pub async fn flush_trace(&self, instance: &str) -> Result<u64, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        aria_core::trace_ops::flush_trace_log(&state.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))
+    }
+
     // ── Compact (WAL persistence) ──
 
     /// Compact all instances unconditionally (used on shutdown)
