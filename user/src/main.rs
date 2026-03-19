@@ -217,24 +217,30 @@ enum MirrorCommands {
 
 #[derive(Subcommand)]
 enum TcprtCommands {
-    /// List TCP-RT flows sorted by application response time
-    List {
-        #[arg(long, default_value = "20", help = "Number of top flows to show")]
-        top: usize,
-    },
-    /// Flush all TCP-RT tracking entries
-    Flush,
-    /// Cross-observation-point analysis with latency breakdown and packet loss
-    Analyze {
+    /// Cross-instance TopN summary sorted by a chosen metric
+    Top {
+        #[arg(long, default_value = "art", help = "Sort dimension: art, crtt, srtt, hs, retrans")]
+        by: String,
         #[arg(long, default_value = "10", help = "Number of top flows to show")]
         top: usize,
-        #[arg(long, help = "Filter by group name for detailed per-flow cross-point analysis")]
-        group: Option<String>,
         #[arg(long, help = "Enable dynamic refresh mode (like top)")]
         watch: bool,
         #[arg(long, default_value = "2", help = "Refresh interval in seconds (with --watch)")]
         interval: u64,
     },
+    /// Cross-instance single flow detail with latency/loss breakdown
+    Flow {
+        #[arg(long, help = "Source IP")]
+        src: String,
+        #[arg(long, help = "Destination IP")]
+        dst: String,
+        #[arg(long, help = "Source port")]
+        sport: u16,
+        #[arg(long, help = "Destination port")]
+        dport: u16,
+    },
+    /// Flush all TCP-RT tracking entries (requires --tap)
+    Flush,
 }
 
 #[derive(Subcommand)]
@@ -304,72 +310,17 @@ struct InstanceFlows {
     flows: std::collections::HashMap<FlowKey, aria_api::TcpRtEntry>,
 }
 
-fn ip_in_cidr(ip: &str, cidr: &str) -> bool {
-    let parts: Vec<&str> = cidr.split('/').collect();
-    if parts.len() != 2 { return false; }
-    let prefix_len: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => return false };
-
-    // IPv4
-    if let (Ok(ip_addr), Ok(net_addr)) = (ip.parse::<std::net::Ipv4Addr>(), parts[0].parse::<std::net::Ipv4Addr>()) {
-        if prefix_len > 32 { return false; }
-        if prefix_len == 0 { return true; }
-        let mask = !0u32 << (32 - prefix_len);
-        return (u32::from(ip_addr) & mask) == (u32::from(net_addr) & mask);
-    }
-    // IPv6
-    if let (Ok(ip_addr), Ok(net_addr)) = (ip.parse::<std::net::Ipv6Addr>(), parts[0].parse::<std::net::Ipv6Addr>()) {
-        if prefix_len > 128 { return false; }
-        if prefix_len == 0 { return true; }
-        let ip_bits = u128::from(ip_addr);
-        let net_bits = u128::from(net_addr);
-        let mask = !0u128 << (128 - prefix_len);
-        return (ip_bits & mask) == (net_bits & mask);
-    }
-    false
-}
-
-fn find_group(ip: &str, groups: &[aria_api::GroupEntry]) -> String {
-    for g in groups {
-        for cidr in &g.cidrs {
-            if ip_in_cidr(ip, cidr) {
-                return g.name.clone();
-            }
-        }
-    }
-    "unknown".to_string()
-}
-
-fn percentile(sorted: &[f64], p: f64) -> f64 {
-    if sorted.is_empty() { return 0.0; }
-    let idx = ((sorted.len() as f64 - 1.0) * p).ceil() as usize;
-    sorted[idx.min(sorted.len() - 1)]
-}
-
-async fn run_analyze(
+/// Fetch TCP-RT data from all active instances, return (instance_name, flows_map) pairs.
+async fn fetch_all_instance_flows(
     client: &api_client::ApiClient,
-    current_instance: &str,
-    top: usize,
-    group_filter: Option<&str>,
-) -> Result<(), String> {
-    // 1. Discover all active instances
+) -> Result<Vec<InstanceFlows>, String> {
     let instances_resp = client.list_instances().await?;
     let active: Vec<String> = instances_resp.instances.iter()
         .filter(|i| i.active)
         .map(|i| i.name.clone())
         .collect();
 
-    if active.is_empty() {
-        println!("No active instances found");
-        return Ok(());
-    }
-
-    // 2. Pull groups from current instance (for IP→group mapping)
-    let groups = client.list_groups(current_instance).await
-        .map(|r| r.groups)
-        .unwrap_or_default();
-
-    // 3. Pull tcprt data from all instances
-    let mut all_instances: Vec<InstanceFlows> = Vec::new();
+    let mut all = Vec::new();
     for inst_name in &active {
         let resp = match client.list_tcprt(inst_name, 65536).await {
             Ok(r) => r,
@@ -385,194 +336,264 @@ async fn run_analyze(
             };
             flows.insert(key, f);
         }
-        all_instances.push(InstanceFlows { name: inst_name.clone(), flows });
+        all.push(InstanceFlows { name: inst_name.clone(), flows });
+    }
+    Ok(all)
+}
+
+/// Sort key extractor for a given dimension name.
+fn sort_value(entry: &aria_api::TcpRtEntry, dim: &str) -> f64 {
+    match dim {
+        "crtt" => entry.rtt_client_us,
+        "srtt" => entry.rtt_server_us,
+        "hs" => entry.handshake_us,
+        "retrans" => (entry.retrans_req + entry.retrans_resp) as f64,
+        _ /* art */ => entry.art_us,
+    }
+}
+
+async fn run_tcprt_top(
+    client: &api_client::ApiClient,
+    by: &str,
+    top: usize,
+) -> Result<(), String> {
+    let all_instances = fetch_all_instance_flows(client).await?;
+    if all_instances.is_empty() {
+        println!("No active instances found");
+        return Ok(());
     }
 
-    let now = {
-        use std::time::SystemTime;
-        let d = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
-        let secs = d.as_secs();
-        let h = (secs / 3600) % 24;
-        let m = (secs / 60) % 60;
-        let s = secs % 60;
-        format!("{:02}:{:02}:{:02}", h, m, s)
+    // Collect unique flow keys
+    let mut unique_keys: Vec<FlowKey> = Vec::new();
+    for inst in &all_instances {
+        for key in inst.flows.keys() {
+            if !unique_keys.contains(key) {
+                unique_keys.push(key.clone());
+            }
+        }
+    }
+
+    if unique_keys.is_empty() {
+        println!("No TCP-RT data collected yet");
+        return Ok(());
+    }
+
+    // Sort by max value of the chosen dimension across all instances (descending)
+    unique_keys.sort_by(|a, b| {
+        let val_a: f64 = all_instances.iter()
+            .filter_map(|inst| inst.flows.get(a).map(|f| sort_value(f, by)))
+            .fold(0.0f64, f64::max);
+        let val_b: f64 = all_instances.iter()
+            .filter_map(|inst| inst.flows.get(b).map(|f| sort_value(f, by)))
+            .fold(0.0f64, f64::max);
+        val_b.partial_cmp(&val_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    unique_keys.truncate(top);
+
+    // Build flat rows: one row per (flow, instance), grouped by flow
+    struct Row {
+        src_ip: String,
+        dst_ip: String,
+        src_port: u16,
+        dst_port: u16,
+        instance: String,
+        art: f64,
+        crtt: f64,
+        srtt: f64,
+        hs: f64,
+        req_rt: u32,
+        rsp_rt: u32,
+        state: String,
+    }
+
+    let mut rows: Vec<Row> = Vec::new();
+    for key in &unique_keys {
+        // Collect points for this flow, sorted by sRTT descending (outermost first)
+        let mut points: Vec<(&str, &aria_api::TcpRtEntry)> = all_instances.iter()
+            .filter_map(|i| i.flows.get(key).map(|f| (i.name.as_str(), f)))
+            .collect();
+        points.sort_by(|a, b| b.1.rtt_server_us.partial_cmp(&a.1.rtt_server_us).unwrap_or(std::cmp::Ordering::Equal));
+
+        for (inst_name, entry) in points {
+            rows.push(Row {
+                src_ip: key.src_ip.clone(),
+                dst_ip: key.dst_ip.clone(),
+                src_port: key.src_port,
+                dst_port: key.dst_port,
+                instance: inst_name.to_string(),
+                art: entry.art_us,
+                crtt: entry.rtt_client_us,
+                srtt: entry.rtt_server_us,
+                hs: entry.handshake_us,
+                req_rt: entry.retrans_req,
+                rsp_rt: entry.retrans_resp,
+                state: entry.state.clone(),
+            });
+        }
+    }
+
+    println!("{:<20} {:<20} {:<7} {:<7} {:<12} {:<10} {:<10} {:<10} {:<10} {:<7} {:<7} {}",
+        "Source", "Destination", "SPort", "DPort", "Instance",
+        "ART (us)", "cRTT", "sRTT", "HS", "ReqRT", "RspRT", "State");
+    for r in &rows {
+        let art_str = if r.art == 0.0 { "-".to_string() } else { format!("{:.1}", r.art) };
+        println!("{:<20} {:<20} {:<7} {:<7} {:<12} {:<10} {:<10.1} {:<10.1} {:<10.1} {:<7} {:<7} {}",
+            r.src_ip, r.dst_ip, r.src_port, r.dst_port, r.instance,
+            art_str, r.crtt, r.srtt, r.hs, r.req_rt, r.rsp_rt, r.state);
+    }
+
+    Ok(())
+}
+
+async fn run_tcprt_flow(
+    client: &api_client::ApiClient,
+    src: &str,
+    dst: &str,
+    sport: u16,
+    dport: u16,
+) -> Result<(), String> {
+    let all_instances = fetch_all_instance_flows(client).await?;
+    if all_instances.is_empty() {
+        println!("No active instances found");
+        return Ok(());
+    }
+
+    let key = FlowKey {
+        src_ip: src.to_string(),
+        dst_ip: dst.to_string(),
+        src_port: sport,
+        dst_port: dport,
     };
 
-    if let Some(grp) = group_filter {
-        // ── Detailed per-flow cross-point analysis for a specific group ──
-        println!("=== TCP-RT Analysis [{}] — group: {} ===\n", now, grp);
+    // Collect observation points sorted by sRTT descending (outermost first)
+    let mut points: Vec<(&str, &aria_api::TcpRtEntry)> = all_instances.iter()
+        .filter_map(|i| i.flows.get(&key).map(|f| (i.name.as_str(), f)))
+        .collect();
+    points.sort_by(|a, b| b.1.rtt_server_us.partial_cmp(&a.1.rtt_server_us).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Collect all flow keys from all instances that belong to this group
-        let mut flow_keys: Vec<FlowKey> = Vec::new();
-        for inst in &all_instances {
-            for (key, entry) in &inst.flows {
-                let src_grp = find_group(&entry.src_ip, &groups);
-                let dst_grp = find_group(&entry.dst_ip, &groups);
-                if (src_grp == grp || dst_grp == grp) && !flow_keys.contains(key) {
-                    flow_keys.push(key.clone());
-                }
-            }
-        }
-
-        // Sort by max ART across instances
-        flow_keys.sort_by(|a, b| {
-            let art_a: f64 = all_instances.iter()
-                .filter_map(|inst| inst.flows.get(a).map(|f| f.art_us))
-                .fold(0.0f64, f64::max);
-            let art_b: f64 = all_instances.iter()
-                .filter_map(|inst| inst.flows.get(b).map(|f| f.art_us))
-                .fold(0.0f64, f64::max);
-            art_b.partial_cmp(&art_a).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        flow_keys.truncate(top);
-
-        for key in &flow_keys {
-            println!("Flow: {}:{} → {}:{}\n", key.src_ip, key.src_port, key.dst_ip, key.dst_port);
-
-            // Collect observation points, sorted by sRTT descending (outermost first)
-            let mut points: Vec<(&str, &aria_api::TcpRtEntry)> = all_instances.iter()
-                .filter_map(|i| i.flows.get(key).map(|f| (i.name.as_str(), f)))
-                .collect();
-            points.sort_by(|a, b| b.1.rtt_server_us.partial_cmp(&a.1.rtt_server_us).unwrap_or(std::cmp::Ordering::Equal));
-
-            if points.is_empty() { continue; }
-
-            // ── Cross-point metrics table ──
-            let col_w = 12;
-            print!("  {:<14}", "");
-            for (name, _) in &points { print!(" {:>w$}", name, w = col_w); }
-            println!();
-            print!("  {:<14}", "──────────────");
-            for _ in &points { print!(" {:>w$}", "────────────", w = col_w); }
-            println!();
-
-            let metrics: &[(&str, Box<dyn Fn(&aria_api::TcpRtEntry) -> String>)] = &[
-                ("cRTT (us)", Box::new(|f: &aria_api::TcpRtEntry| format!("{:.1}", f.rtt_client_us))),
-                ("sRTT (us)", Box::new(|f| format!("{:.1}", f.rtt_server_us))),
-                ("ART (us)", Box::new(|f| format!("{:.1}", f.art_us))),
-                ("ReqRT", Box::new(|f| format!("{}", f.retrans_req))),
-                ("RspRT", Box::new(|f| format!("{}", f.retrans_resp))),
-            ];
-            for (label, extractor) in metrics {
-                print!("  {:<14}", label);
-                for (_, f) in &points { print!(" {:>w$}", extractor(f), w = col_w); }
-                println!();
-            }
-
-            // ── Latency Breakdown ──
-            if points.len() >= 2 {
-                println!("\n  Latency Breakdown:");
-                for i in 0..points.len() - 1 {
-                    let (outer_name, outer) = points[i];
-                    let (inner_name, inner) = points[i + 1];
-                    let host_overhead = outer.rtt_server_us - inner.rtt_server_us;
-                    let processing = (outer.art_us - outer.rtt_server_us) - (inner.art_us - inner.rtt_server_us);
-                    println!("    {} → {}:  network={:.1}us  processing={:.1}us",
-                        outer_name, inner_name, host_overhead.max(0.0), processing.max(0.0));
-                }
-                // Last point → server
-                let (last_name, last) = points.last().unwrap();
-                let server_processing = last.art_us - last.rtt_server_us;
-                println!("    {} → server:  processing={:.1}us", last_name, server_processing.max(0.0));
-                // Client → first point
-                let (first_name, first) = points.first().unwrap();
-                println!("    client → {}:  cRTT={:.1}us", first_name, first.rtt_client_us);
-
-                // ── Packet Loss Breakdown ──
-                println!("\n  Packet Loss:");
-                for i in 0..points.len() - 1 {
-                    let (outer_name, outer) = points[i];
-                    let (inner_name, inner) = points[i + 1];
-                    let req_loss = outer.retrans_req as i64 - inner.retrans_req as i64;
-                    let resp_loss = outer.retrans_resp as i64 - inner.retrans_resp as i64;
-                    println!("    {} → {}:  req_retrans={} resp_retrans={}",
-                        outer_name, inner_name, req_loss.max(0), resp_loss.max(0));
-                }
-                let (last_name, last) = points.last().unwrap();
-                println!("    {} → server:  req_retrans={} resp_retrans={}",
-                    last_name, last.retrans_req, last.retrans_resp);
-            }
-            println!();
-        }
-
-        if flow_keys.is_empty() {
-            println!("No flows found for group '{}'", grp);
-        }
-    } else {
-        // ── Per-group aggregated summary ──
-        println!("=== TCP-RT Analysis [{}] ===\n", now);
-
-        // Use the instance with the most flows for aggregation (typically tap-in or current)
-        let best_inst = all_instances.iter()
-            .max_by_key(|i| i.flows.len());
-
-        let best_inst = match best_inst {
-            Some(i) => i,
-            None => { println!("No TCP-RT data collected yet"); return Ok(()); }
-        };
-
-        if best_inst.flows.is_empty() {
-            println!("No TCP-RT data collected yet");
-            return Ok(());
-        }
-
-        // Aggregate by group
-        struct GroupAgg {
-            flows: usize,
-            crtt_vals: Vec<f64>,
-            srtt_vals: Vec<f64>,
-            art_vals: Vec<f64>,
-            retrans_req: u32,
-            retrans_resp: u32,
-        }
-
-        let mut agg: std::collections::HashMap<String, GroupAgg> = std::collections::HashMap::new();
-
-        for (_key, entry) in &best_inst.flows {
-            let grp = find_group(&entry.dst_ip, &groups);
-            let g = agg.entry(grp).or_insert(GroupAgg {
-                flows: 0, crtt_vals: Vec::new(), srtt_vals: Vec::new(),
-                art_vals: Vec::new(), retrans_req: 0, retrans_resp: 0,
-            });
-            g.flows += 1;
-            g.crtt_vals.push(entry.rtt_client_us);
-            g.srtt_vals.push(entry.rtt_server_us);
-            g.art_vals.push(entry.art_us);
-            g.retrans_req += entry.retrans_req;
-            g.retrans_resp += entry.retrans_resp;
-        }
-
-        // Sort by P95 ART descending
-        let mut groups_sorted: Vec<(String, GroupAgg)> = agg.into_iter().collect();
-        groups_sorted.sort_by(|a, b| {
-            let mut a_arts = a.1.art_vals.clone(); a_arts.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-            let mut b_arts = b.1.art_vals.clone(); b_arts.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-            percentile(&b_arts, 0.95).partial_cmp(&percentile(&a_arts, 0.95)).unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        println!("Per-Group Summary (from {}):", best_inst.name);
-        println!("{:<15} {:>6} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
-            "Group", "Flows", "Avg cRTT", "Avg sRTT", "Avg ART", "P95 ART", "ReqRT", "RspRT");
-        println!("{:<15} {:>6} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
-            "───────────────", "──────", "────────────", "────────────", "────────────", "────────────", "────────", "────────");
-
-        for (name, g) in &groups_sorted {
-            let avg_crtt = g.crtt_vals.iter().sum::<f64>() / g.flows as f64;
-            let avg_srtt = g.srtt_vals.iter().sum::<f64>() / g.flows as f64;
-            let avg_art = g.art_vals.iter().sum::<f64>() / g.flows as f64;
-            let mut sorted_arts = g.art_vals.clone();
-            sorted_arts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let p95_art = percentile(&sorted_arts, 0.95);
-            println!("{:<15} {:>6} {:>12.1} {:>12.1} {:>12.1} {:>12.1} {:>8} {:>8}",
-                name, g.flows, avg_crtt, avg_srtt, avg_art, p95_art, g.retrans_req, g.retrans_resp);
-        }
-
-        // Hint: use --group <name> to drill into a specific group
-        if groups_sorted.len() > 0 {
-            println!("\nUse 'tcprt analyze --group <name>' to drill into per-flow cross-point analysis.");
-        }
+    if points.is_empty() {
+        println!("Flow {}:{} → {}:{} not found in any instance", src, sport, dst, dport);
+        return Ok(());
     }
 
+    println!("Flow: {}:{} → {}:{}\n", src, sport, dst, dport);
+
+    // ── Cross-point metrics table ──
+    let col_w = 12;
+    print!("  {:<14}", "");
+    for (name, _) in &points { print!(" {:>w$}", name, w = col_w); }
+    println!();
+    print!("  {:<14}", "──────────────");
+    for _ in &points { print!(" {:>w$}", "────────────", w = col_w); }
+    println!();
+
+    let metrics: &[(&str, Box<dyn Fn(&aria_api::TcpRtEntry) -> String>)] = &[
+        ("cRTT (us)", Box::new(|f: &aria_api::TcpRtEntry| format!("{:.1}", f.rtt_client_us))),
+        ("sRTT (us)", Box::new(|f| format!("{:.1}", f.rtt_server_us))),
+        ("ART (us)", Box::new(|f| if f.art_us == 0.0 { "-".to_string() } else { format!("{:.1}", f.art_us) })),
+        ("HS (us)", Box::new(|f| format!("{:.1}", f.handshake_us))),
+        ("ReqRT", Box::new(|f| format!("{}", f.retrans_req))),
+        ("RspRT", Box::new(|f| format!("{}", f.retrans_resp))),
+    ];
+    for (label, extractor) in metrics {
+        print!("  {:<14}", label);
+        for (_, f) in &points { print!(" {:>w$}", extractor(f), w = col_w); }
+        println!();
+    }
+
+    // ── Latency Breakdown ──
+    if points.len() >= 2 {
+        println!();
+        print!("  {:<14}", "──────────────");
+        for _ in &points { print!(" {:>w$}", "────────────", w = col_w); }
+        println!();
+        println!("  Breakdown      Component            Latency (us)");
+        println!("  ─────────────  ───────────────────  ────────────");
+
+        let n = points.len();
+        struct Segment {
+            label: String,
+            value: f64,
+        }
+        let mut segments: Vec<Segment> = Vec::new();
+
+        // External network: cRTT of outermost point
+        let (_, outermost) = points[0];
+        segments.push(Segment {
+            label: "External Network".to_string(),
+            value: outermost.rtt_client_us,
+        });
+
+        // Inter-point segments: sRTT difference between adjacent points
+        if n == 2 {
+            let (_, outer) = points[0];
+            let (_, inner) = points[1];
+            segments.push(Segment {
+                label: "Host Overhead".to_string(),
+                value: (outer.rtt_server_us - inner.rtt_server_us).max(0.0),
+            });
+        } else {
+            // 3+ points: first gap = host overhead, middle gaps = security device, etc.
+            for i in 0..n - 1 {
+                let (_, outer) = points[i];
+                let (_, inner) = points[i + 1];
+                let diff = (outer.rtt_server_us - inner.rtt_server_us).max(0.0);
+                let label = if i == 0 {
+                    "Host Overhead".to_string()
+                } else {
+                    format!("Security DPI #{}", i)
+                };
+                segments.push(Segment { label, value: diff });
+            }
+        }
+
+        // Innermost point → server: ART - sRTT of innermost
+        let (_, innermost) = points[n - 1];
+        let vm_processing = (innermost.art_us - innermost.rtt_server_us).max(0.0);
+        segments.push(Segment {
+            label: "App Processing".to_string(),
+            value: vm_processing,
+        });
+
+        // Find bottleneck (max latency segment)
+        let max_val = segments.iter().map(|s| s.value).fold(0.0f64, f64::max);
+
+        for seg in &segments {
+            let marker = if seg.value >= max_val && max_val > 0.0 { " ← bottleneck" } else { "" };
+            println!("                 {:<21} {:.1}{}",
+                seg.label, seg.value, marker);
+        }
+
+        // ── Packet Loss Breakdown ──
+        println!();
+        print!("  {:<14}", "──────────────");
+        for _ in &points { print!(" {:>w$}", "────────────", w = col_w); }
+        println!();
+        println!("  Packet Loss    Location             Req Loss   Rsp Loss");
+        println!("  ─────────────  ───────────────────  ─────────  ─────────");
+
+        for i in 0..n - 1 {
+            let (_, outer) = points[i];
+            let (_, inner) = points[i + 1];
+            let req_loss = (outer.retrans_req as i64 - inner.retrans_req as i64).max(0);
+            let resp_loss = (outer.retrans_resp as i64 - inner.retrans_resp as i64).max(0);
+            let label = if n == 2 {
+                "Host".to_string()
+            } else if i == 0 {
+                "Host".to_string()
+            } else {
+                format!("Security #{}", i)
+            };
+            println!("                 {:<21} {:<10} {}",
+                label, req_loss, resp_loss);
+        }
+        // Innermost → server
+        let (_, innermost) = points[n - 1];
+        println!("                 {:<21} {:<10} {}",
+            "App Side", innermost.retrans_req, innermost.retrans_resp);
+    }
+
+    println!();
     Ok(())
 }
 
@@ -1006,45 +1027,26 @@ async fn main() {
             }
         },
         Commands::Tcprt { action } => match action {
-            TcprtCommands::List { top } => {
-                match client.list_tcprt(&instance, top).await {
-                    Ok(resp) => {
-                        if resp.flows.is_empty() {
-                            println!("No TCP-RT data collected yet");
-                        } else {
-                            println!("{:<20} {:<20} {:<8} {:<8} {:<12} {:<12} {:<12} {:<12} {:<8} {:<8} {:<8} {}",
-                                "Source", "Destination", "SPort", "DPort",
-                                "HS (us)", "cRTT (us)", "sRTT (us)", "ART (us)",
-                                "ReqRT", "RspRT", "Reqs", "State");
-                            for e in &resp.flows {
-                                println!("{:<20} {:<20} {:<8} {:<8} {:<12.1} {:<12.1} {:<12.1} {:<12.1} {:<8} {:<8} {:<8} {}",
-                                    e.src_ip, e.dst_ip, e.src_port, e.dst_port,
-                                    e.handshake_us, e.rtt_client_us, e.rtt_server_us, e.art_us,
-                                    e.retrans_req, e.retrans_resp, e.request_count, e.state);
-                            }
-                        }
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            TcprtCommands::Flush => {
-                match client.flush_tcprt(&instance).await {
-                    Ok(resp) => { println!("Flushed {} TCP-RT entries", resp.flushed); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-            TcprtCommands::Analyze { top, group, watch, interval } => {
+            TcprtCommands::Top { by, top, watch, interval } => {
                 if watch {
                     loop {
-                        print!("\x1B[2J\x1B[H"); // clear screen
-                        if let Err(e) = run_analyze(&client, &instance, top, group.as_deref()).await {
+                        print!("\x1B[2J\x1B[H");
+                        if let Err(e) = run_tcprt_top(&client, &by, top).await {
                             eprintln!("Error: {}", e);
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
                     }
                 } else {
-                    run_analyze(&client, &instance, top, group.as_deref()).await
+                    run_tcprt_top(&client, &by, top).await
+                }
+            }
+            TcprtCommands::Flow { src, dst, sport, dport } => {
+                run_tcprt_flow(&client, &src, &dst, sport, dport).await
+            }
+            TcprtCommands::Flush => {
+                match client.flush_tcprt(&instance).await {
+                    Ok(resp) => { println!("Flushed {} TCP-RT entries", resp.flushed); Ok(()) }
+                    Err(e) => Err(e),
                 }
             }
         },
