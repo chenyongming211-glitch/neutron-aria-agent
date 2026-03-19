@@ -533,7 +533,7 @@ pub struct TraceStartRequest {
     pub proto: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceEventEntry {
     pub seq: u64,
     pub timestamp: u64,

@@ -277,8 +277,10 @@ enum ChainCommands {
 
 #[derive(Subcommand)]
 enum TraceCommands {
-    /// Start tracing packets matching a filter
+    /// Start cross-instance packet trace
     Start {
+        #[arg(long, help = "Tap instance (omit for all instances)")]
+        tap: Option<String>,
         #[arg(long, default_value = "", help = "Source IP to trace")]
         src: String,
         #[arg(long, default_value = "", help = "Destination IP to trace")]
@@ -287,18 +289,11 @@ enum TraceCommands {
         sport: u16,
         #[arg(long, default_value = "0", help = "Destination port to trace")]
         dport: u16,
-        #[arg(long, default_value = "", help = "Protocol: tcp, udp, icmp, or any")]
+        #[arg(long, default_value = "", help = "Protocol: tcp, udp, icmp")]
         proto: String,
+        #[arg(long, help = "Seconds to trace (omit for continuous)")]
+        wait: Option<u64>,
     },
-    /// Show trace events
-    Show {
-        #[arg(long, default_value = "100", help = "Number of events to show")]
-        top: usize,
-    },
-    /// Stop tracing (clear filter)
-    Stop,
-    /// Flush trace log
-    Flush,
 }
 
 #[derive(Subcommand)]
@@ -700,6 +695,179 @@ async fn run_tcprt_flow_with_chain(
     println!();
 
     Ok(())
+}
+
+/// Collect trace events from all taps, keyed by instance name.
+async fn collect_trace_events(
+    client: &api_client::ApiClient,
+    taps: &[String],
+) -> Result<std::collections::HashMap<String, Vec<aria_api::TraceEventEntry>>, String> {
+    let mut all = std::collections::HashMap::new();
+    for tap in taps {
+        match client.list_trace(tap, 65536).await {
+            Ok(resp) => { all.insert(tap.clone(), resp.events); }
+            Err(_) => { all.insert(tap.clone(), Vec::new()); }
+        }
+    }
+    Ok(all)
+}
+
+/// Display the live summary table (no detail section).
+fn display_trace_live(
+    src: &str,
+    dst: &str,
+    events: &std::collections::HashMap<String, Vec<aria_api::TraceEventEntry>>,
+    taps: &[String],
+) {
+    let src_label = if src.is_empty() { "*" } else { src };
+    let dst_label = if dst.is_empty() { "*" } else { dst };
+    println!("Trace: {} → {}  (live, Ctrl+C to stop)\n", src_label, dst_label);
+    println!("  {:<20} {:<10} {:<10} {}",
+        "Instance", "In", "Out", "Verdict");
+    println!("  {:<20} {:<10} {:<10} {}",
+        "────────────────", "────────", "────────", "──────────────");
+    for tap in taps {
+        let evts = events.get(tap.as_str()).map(|v| v.as_slice()).unwrap_or(&[]);
+        print_instance_summary(tap, evts);
+    }
+}
+
+/// Display the final summary with detail section for instances that have drops.
+fn display_trace_summary(
+    src: &str,
+    dst: &str,
+    events: &std::collections::HashMap<String, Vec<aria_api::TraceEventEntry>>,
+    taps: &[String],
+) {
+    let src_label = if src.is_empty() { "*" } else { src };
+    let dst_label = if dst.is_empty() { "*" } else { dst };
+    println!("Trace: {} → {}\n", src_label, dst_label);
+    println!("  {:<20} {:<10} {:<10} {}",
+        "Instance", "In", "Out", "Verdict");
+    println!("  {:<20} {:<10} {:<10} {}",
+        "────────────────", "────────", "────────", "──────────────");
+    for tap in taps {
+        let evts = events.get(tap.as_str()).map(|v| v.as_slice()).unwrap_or(&[]);
+        print_instance_summary(tap, evts);
+    }
+
+    // Detail section for instances with drops
+    for tap in taps {
+        let evts = events.get(tap.as_str()).map(|v| v.as_slice()).unwrap_or(&[]);
+        let drops: Vec<&aria_api::TraceEventEntry> = evts.iter()
+            .filter(|e| e.result.contains("drop"))
+            .collect();
+        if drops.is_empty() {
+            continue;
+        }
+        println!("\n  Detail ({}):", tap);
+        println!("  {:<6} {:<16} {:<16} {:<6} {:<10} {:<14} {}",
+            "Seq", "Source", "Destination", "Proto", "Result", "Drop Reason", "Hook");
+        for e in &drops {
+            println!("  {:<6} {:<16} {:<16} {:<6} {:<10} {:<14} {}",
+                e.seq, e.src_ip, e.dst_ip, e.proto, e.result, e.drop_reason, e.hook);
+        }
+    }
+}
+
+fn print_instance_summary(tap: &str, evts: &[aria_api::TraceEventEntry]) {
+    if evts.is_empty() {
+        println!("  {:<20} {:<10} {:<10} {}",
+            tap, "0 pkts", "0 pkts", "no data");
+        return;
+    }
+    let ingress = evts.iter().filter(|e| e.direction == "ingress").count();
+    let egress = evts.iter().filter(|e| e.direction == "egress").count();
+    let has_drop = evts.iter().any(|e| e.result.contains("drop"));
+    let verdict = if has_drop {
+        let reason = evts.iter()
+            .find(|e| e.result.contains("drop"))
+            .map(|e| e.drop_reason.as_str())
+            .unwrap_or("unknown");
+        format!("← drop:{}", reason)
+    } else {
+        "pass".to_string()
+    };
+    println!("  {:<20} {:<10} {:<10} {}",
+        tap,
+        format!("{} pkts", ingress),
+        format!("{} pkts", egress),
+        verdict);
+}
+
+async fn run_trace(
+    client: &api_client::ApiClient,
+    taps: &[String],
+    src: &str,
+    dst: &str,
+    sport: u16,
+    dport: u16,
+    proto: &str,
+    wait: Option<u64>,
+) -> Result<(), String> {
+    let req = aria_api::TraceStartRequest {
+        src_ip: src.to_string(),
+        dst_ip: dst.to_string(),
+        src_port: sport,
+        dst_port: dport,
+        proto: proto.to_string(),
+    };
+
+    // Flush + start on all taps
+    for tap in taps {
+        let _ = client.flush_trace(tap).await;
+        client.start_trace(tap, &req).await
+            .map_err(|e| format!("Failed to start trace on {}: {}", tap, e))?;
+    }
+
+    let tap_list = taps.join(", ");
+    println!("Tracing on [{}] ...", tap_list);
+
+    let result = match wait {
+        Some(secs) => {
+            // Timed mode: sleep then collect
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+            let events = collect_trace_events(client, taps).await?;
+            display_trace_summary(src, dst, &events, taps);
+            Ok(())
+        }
+        None => {
+            // Continuous mode: refresh every 2s, Ctrl+C to stop
+            let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let r = running.clone();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                r.store(false, std::sync::atomic::Ordering::SeqCst);
+            });
+
+            while running.load(std::sync::atomic::Ordering::SeqCst) {
+                let events = collect_trace_events(client, taps).await?;
+                // Clear screen and redraw
+                print!("\x1B[2J\x1B[H");
+                display_trace_live(src, dst, &events, taps);
+                // Sleep 2s in small increments so we can break quickly on Ctrl+C
+                for _ in 0..20 {
+                    if !running.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+
+            // Final collection and display
+            println!();
+            let events = collect_trace_events(client, taps).await?;
+            display_trace_summary(src, dst, &events, taps);
+            Ok(())
+        }
+    };
+
+    // Stop trace on all taps
+    for tap in taps {
+        let _ = client.stop_trace(tap).await;
+    }
+
+    result
 }
 
 #[tokio::main]
@@ -1242,49 +1410,25 @@ async fn main() {
             }
         },
         Commands::Trace { action } => match action {
-            TraceCommands::Start { src, dst, sport, dport, proto } => {
-                match client.start_trace(&instance, &aria_api::TraceStartRequest {
-                    src_ip: src,
-                    dst_ip: dst,
-                    src_port: sport,
-                    dst_port: dport,
-                    proto,
-                }).await {
-                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-            TraceCommands::Show { top } => {
-                match client.list_trace(&instance, top).await {
-                    Ok(resp) => {
-                        if resp.events.is_empty() {
-                            println!("No trace events captured");
-                        } else {
-                            println!("{:<6} {:<12} {:<16} {:<16} {:<6} {:<6} {:<12} {:<8} {:<10} {:<14} {:<14} {}",
-                                "Seq", "Hook", "Source", "Destination", "SPort", "DPort",
-                                "Result", "Dir", "CT State", "SrcGroup", "DstGroup", "Drop Reason");
-                            for e in &resp.events {
-                                println!("{:<6} {:<12} {:<16} {:<16} {:<6} {:<6} {:<12} {:<8} {:<10} {:<14} {:<14} {}",
-                                    e.seq, e.hook, e.src_ip, e.dst_ip, e.src_port, e.dst_port,
-                                    e.result, e.direction, e.ct_state,
-                                    e.src_group, e.dst_group, e.drop_reason);
-                            }
+            TraceCommands::Start { tap, src, dst, sport, dport, proto, wait } => {
+                let taps = if let Some(t) = tap {
+                    vec![t]
+                } else {
+                    match client.list_instances().await {
+                        Ok(resp) => resp.instances.iter()
+                            .filter(|i| i.active)
+                            .map(|i| i.name.clone())
+                            .collect(),
+                        Err(e) => {
+                            eprintln!("Error: Failed to list instances: {}", e);
+                            std::process::exit(1);
                         }
-                        Ok(())
                     }
-                    Err(e) => Err(e),
-                }
-            }
-            TraceCommands::Stop => {
-                match client.stop_trace(&instance).await {
-                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-            TraceCommands::Flush => {
-                match client.flush_trace(&instance).await {
-                    Ok(resp) => { println!("Flushed {} trace events", resp.flushed); Ok(()) }
-                    Err(e) => Err(e),
+                };
+                if taps.is_empty() {
+                    Err("No active instances found".to_string())
+                } else {
+                    run_trace(&client, &taps, &src, &dst, sport, dport, &proto, wait).await
                 }
             }
         },
