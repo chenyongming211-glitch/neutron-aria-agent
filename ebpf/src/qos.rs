@@ -134,20 +134,21 @@ pub unsafe fn apply_qos_egress(
                 let result;
                 if mode == QOS_MODE_SHAPING {
                     if tokens >= pkt_len as u64 {
+                        // Burst: have tokens, send immediately
                         (*bucket).tokens = tokens - pkt_len as u64;
-                        // Reset last_edt when not queueing — no backlog
+                        // Reset last_edt when burst is available and no backlog
                         if (*bucket).last_edt < now_ns {
-                            (*bucket).last_edt = 0;
+                            (*bucket).last_edt = now_ns;
                         }
                         update_qos_stats(&qos_key, pkt_len, 0);
                         result = (0u64, priority);
                     } else {
-                        let deficit = pkt_len as u64 - tokens;
-                        let delay_ns = compute_delay_ns(deficit, rate);
+                        // No tokens: schedule via EDT at rate-limited interval
+                        // Each packet spaced by pkt_len * 1e9 / rate
+                        let pkt_delay_ns = compute_delay_ns(pkt_len as u64, rate);
                         (*bucket).tokens = 0;
-                        // Stagger from the later of now or last scheduled packet
                         let base = if (*bucket).last_edt > now_ns { (*bucket).last_edt } else { now_ns };
-                        let edt = base + delay_ns;
+                        let edt = base + pkt_delay_ns;
                         (*bucket).last_edt = edt;
                         update_qos_stats(&qos_key, pkt_len, 2);
                         result = (edt, priority);
