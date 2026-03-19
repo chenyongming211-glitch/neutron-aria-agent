@@ -18,6 +18,11 @@ pub fn build_router(control_plane: Arc<ControlPlane>) -> Router {
         .route("/api/v1/system/stop", post(api_handlers::system_stop))
         // Batch query (no instance path param)
         .route("/api/v1/tcprt/query", post(api_handlers::batch_query_tcprt))
+        // TCP-RT filter by service address (no instance path param)
+        .route("/api/v1/tcprt/filter", post(api_handlers::filter_tcprt))
+        // Service chains (no instance path param)
+        .route("/api/v1/chains", get(api_handlers::list_chains).post(api_handlers::create_chain))
+        .route("/api/v1/chains/{name}", get(api_handlers::get_chain).delete(api_handlers::delete_chain))
         // Per-instance routes
         .route("/api/v1/{instance}/groups", get(api_handlers::list_groups).post(api_handlers::add_group))
         .route("/api/v1/{instance}/groups/{name}", delete(api_handlers::delete_group))

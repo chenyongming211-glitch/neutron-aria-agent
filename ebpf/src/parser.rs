@@ -11,10 +11,11 @@ pub struct PacketInfo {
     pub src_port: u16,
     pub dst_port: u16,
     pub payload_len: u16,
+    pub vlan_id: u16,
     pub proto: u8,
     pub is_ipv6: bool,
     pub tcp_flags: u8,
-    pub _pad: [u8; 3],
+    pub _pad: [u8; 1],
 }
 
 const ETH_HLEN: usize = 14;
@@ -46,12 +47,24 @@ pub unsafe fn parse_eth_ipv4(data: usize, data_end: usize, offset: usize, out: *
 
     let eth_offset = data + offset;
 
-    let eth_type = read_be16(eth_offset, 12);
+    let mut eth_type = read_be16(eth_offset, 12);
+    let mut vlan_id: u16 = 0;
+    let mut ip_offset = eth_offset + ETH_HLEN;
+
+    if eth_type == 0x8100 {
+        // 802.1Q VLAN tagged frame
+        if ip_offset + 4 + 20 > data_end {
+            return false;
+        }
+        let tci = read_be16(eth_offset, 14);
+        vlan_id = tci & 0x0FFF;
+        eth_type = read_be16(eth_offset, 16);
+        ip_offset += 4;
+    }
+
     if eth_type != 0x0800 {
         return false;
     }
-
-    let ip_offset = eth_offset + ETH_HLEN;
     let ihl = ((read8(ip_offset, 0) & 0x0F) as usize) * 4;
     if ihl < 20 {
         return false;
@@ -106,7 +119,8 @@ pub unsafe fn parse_eth_ipv4(data: usize, data_end: usize, offset: usize, out: *
     (*out).tcp_flags = tcp_flags;
     (*out).tcp_seq = tcp_seq;
     (*out).payload_len = payload_len;
-    (*out)._pad = [0; 3];
+    (*out).vlan_id = vlan_id;
+    (*out)._pad = [0; 1];
 
     true
 }
@@ -132,12 +146,24 @@ pub unsafe fn parse_eth_ipv6(data: usize, data_end: usize, offset: usize, out: *
 
     let eth_offset = data + offset;
 
-    let eth_type = read_be16(eth_offset, 12);
+    let mut eth_type = read_be16(eth_offset, 12);
+    let mut vlan_id: u16 = 0;
+    let mut ip_offset = eth_offset + ETH_HLEN;
+
+    if eth_type == 0x8100 {
+        // 802.1Q VLAN tagged frame
+        if ip_offset + 4 + 40 > data_end {
+            return false;
+        }
+        let tci = read_be16(eth_offset, 14);
+        vlan_id = tci & 0x0FFF;
+        eth_type = read_be16(eth_offset, 16);
+        ip_offset += 4;
+    }
+
     if eth_type != 0x86DD {
         return false;
     }
-
-    let ip_offset = eth_offset + ETH_HLEN;
     let mut next_header = read8(ip_offset, 6);
 
     // Write IPv6 addresses directly to output
@@ -219,7 +245,8 @@ pub unsafe fn parse_eth_ipv6(data: usize, data_end: usize, offset: usize, out: *
     (*out).tcp_flags = tcp_flags;
     (*out).tcp_seq = tcp_seq;
     (*out).payload_len = payload_len;
-    (*out)._pad = [0; 3];
+    (*out).vlan_id = vlan_id;
+    (*out)._pad = [0; 1];
 
     true
 }

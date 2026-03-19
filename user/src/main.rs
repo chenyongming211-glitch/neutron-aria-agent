@@ -68,6 +68,11 @@ enum Commands {
         #[command(subcommand)]
         action: TcprtCommands,
     },
+    /// Service chain topology management
+    Chain {
+        #[command(subcommand)]
+        action: ChainCommands,
+    },
     /// Drop reason profiler
     Drops {
         #[command(subcommand)]
@@ -230,14 +235,12 @@ enum TcprtCommands {
     },
     /// Cross-instance single flow detail with latency/loss breakdown
     Flow {
-        #[arg(long, help = "Source IP")]
-        src: String,
-        #[arg(long, help = "Destination IP")]
+        #[arg(long, help = "Destination IP (service address)")]
         dst: String,
-        #[arg(long, help = "Source port")]
-        sport: u16,
-        #[arg(long, help = "Destination port")]
+        #[arg(long, help = "Destination port (service port)")]
         dport: u16,
+        #[arg(long, help = "Service chain name for per-hop breakdown")]
+        chain: Option<String>,
     },
     /// Flush all TCP-RT tracking entries (requires --tap)
     Flush,
@@ -249,6 +252,27 @@ enum DropsCommands {
     List,
     /// Flush all drop statistics
     Flush,
+}
+
+#[derive(Subcommand)]
+enum ChainCommands {
+    /// Create or update a service chain from JSON file
+    Apply {
+        #[arg(short, long, help = "JSON file with service chain definition")]
+        file: String,
+    },
+    /// List all service chains
+    List,
+    /// Show service chain details
+    Show {
+        #[arg(help = "Service chain name")]
+        name: String,
+    },
+    /// Delete a service chain
+    Delete {
+        #[arg(help = "Service chain name")]
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -447,149 +471,234 @@ async fn run_tcprt_top(
 
 async fn run_tcprt_flow(
     client: &api_client::ApiClient,
-    src: &str,
     dst: &str,
-    sport: u16,
     dport: u16,
+    chain: Option<&str>,
 ) -> Result<(), String> {
-    let req = aria_api::TcpRtBatchQueryRequest {
-        tuples: vec![aria_api::TcpRtQueryTuple {
-            src_ip: src.to_string(),
-            dst_ip: dst.to_string(),
-            src_port: sport,
-            dst_port: dport,
-        }],
-    };
-    let resp = client.batch_query_tcprt(&req).await?;
-    if resp.results.is_empty() {
-        println!("Flow {}:{} → {}:{} not found in any instance", src, sport, dst, dport);
+    // Fetch aggregated data via filter API
+    let resp = client.filter_tcprt(&aria_api::TcpRtFilterRequest {
+        dst_ip: dst.to_string(),
+        dst_port: dport,
+    }).await?;
+
+    if resp.instances.is_empty() {
+        println!("No flows found for {}:{}", dst, dport);
         return Ok(());
     }
 
-    // Collect observation points sorted by sRTT descending (outermost first)
-    let mut points: Vec<(&str, &aria_api::TcpRtEntry)> = resp.results.iter()
-        .map(|r| (r.instance.as_str(), &r.entry))
-        .collect();
-    points.sort_by(|a, b| b.1.rtt_server_us.partial_cmp(&a.1.rtt_server_us).unwrap_or(std::cmp::Ordering::Equal));
+    let total_flows: u32 = resp.instances.iter().map(|i| i.flow_count).sum();
 
-    println!("Flow: {}:{} → {}:{}\n", src, sport, dst, dport);
+    if let Some(chain_name) = chain {
+        run_tcprt_flow_with_chain(client, dst, dport, chain_name, &resp, total_flows).await
+    } else {
+        run_tcprt_flow_coarse(dst, dport, &resp, total_flows)
+    }
+}
 
-    // ── Cross-point metrics table ──
-    let col_w = 12;
-    print!("  {:<14}", "");
-    for (name, _) in &points { print!(" {:>w$}", name, w = col_w); }
-    println!();
-    print!("  {:<14}", "──────────────");
-    for _ in &points { print!(" {:>w$}", "────────────", w = col_w); }
-    println!();
+/// 3-segment coarse-grained breakdown (no chain config needed)
+fn run_tcprt_flow_coarse(
+    dst: &str,
+    dport: u16,
+    resp: &aria_api::TcpRtFilterResponse,
+    total_flows: u32,
+) -> Result<(), String> {
+    println!("Service: {}:{}  ({} flows)\n", dst, dport, total_flows);
 
-    let metrics: &[(&str, Box<dyn Fn(&aria_api::TcpRtEntry) -> String>)] = &[
-        ("cRTT (us)", Box::new(|f: &aria_api::TcpRtEntry| format!("{:.1}", f.rtt_client_us))),
-        ("sRTT (us)", Box::new(|f| format!("{:.1}", f.rtt_server_us))),
-        ("ART (us)", Box::new(|f| if f.art_us == 0.0 { "-".to_string() } else { format!("{:.1}", f.art_us) })),
-        ("HS (us)", Box::new(|f| format!("{:.1}", f.handshake_us))),
-        ("ReqRT", Box::new(|f| format!("{}", f.retrans_req))),
-        ("RspRT", Box::new(|f| format!("{}", f.retrans_resp))),
-    ];
-    for (label, extractor) in metrics {
-        print!("  {:<14}", label);
-        for (_, f) in &points { print!(" {:>w$}", extractor(f), w = col_w); }
-        println!();
+    if resp.instances.len() == 1 {
+        // Single instance: just show aggregated metrics, no breakdown
+        let inst = &resp.instances[0];
+        println!("  Instance: {}", inst.instance);
+        println!("  Avg cRTT:      {:.1} us", inst.avg_rtt_client_us);
+        println!("  Avg sRTT:      {:.1} us", inst.avg_rtt_server_us);
+        println!("  Avg ART:       {:.1} us", inst.avg_art_us);
+        println!("  Avg Handshake: {:.1} us", inst.avg_handshake_us);
+        println!("  Retrans Req:   {}", inst.total_retrans_req);
+        println!("  Retrans Resp:  {}", inst.total_retrans_resp);
+        return Ok(());
     }
 
-    // ── Latency Breakdown ──
-    if points.len() >= 2 {
-        println!();
-        print!("  {:<14}", "──────────────");
-        for _ in &points { print!(" {:>w$}", "────────────", w = col_w); }
-        println!();
-        println!("  Breakdown      Component            Latency (us)");
-        println!("  ─────────────  ───────────────────  ────────────");
+    // Find outer (max avg_sRTT) and inner (min avg_sRTT) instances
+    let outer = resp.instances.iter()
+        .max_by(|a, b| a.avg_rtt_server_us.partial_cmp(&b.avg_rtt_server_us).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap();
+    let inner = resp.instances.iter()
+        .min_by(|a, b| a.avg_rtt_server_us.partial_cmp(&b.avg_rtt_server_us).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap();
 
-        let n = points.len();
-        struct Segment {
-            label: String,
-            value: f64,
+    // Latency breakdown
+    let client_net = outer.avg_rtt_client_us;
+    let platform = (outer.avg_rtt_server_us - inner.avg_rtt_server_us).max(0.0);
+    let app = (inner.avg_art_us - inner.avg_rtt_server_us).max(0.0);
+
+    struct Segment { label: &'static str, value: f64 }
+    let segments = [
+        Segment { label: "Client Network", value: client_net },
+        Segment { label: "Platform Processing", value: platform },
+        Segment { label: "App Processing", value: app },
+    ];
+    let max_val = segments.iter().map(|s| s.value).fold(0.0f64, f64::max);
+
+    println!("  Latency Breakdown (avg)");
+    println!("  ─────────────────────  ────────────");
+    for seg in &segments {
+        let marker = if seg.value >= max_val && max_val > 0.0 { "  ← bottleneck" } else { "" };
+        println!("  {:<23} {:.1} us{}", seg.label, seg.value, marker);
+    }
+
+    // Packet loss breakdown
+    let platform_req_loss = (outer.total_retrans_req as i64 - inner.total_retrans_req as i64).max(0);
+    let platform_rsp_loss = (outer.total_retrans_resp as i64 - inner.total_retrans_resp as i64).max(0);
+
+    println!();
+    println!("  Packet Loss (total)");
+    println!("  ─────────────────────  ─────────  ─────────");
+    println!("  {:<23} {:<10} {}", "", "Req Loss", "Rsp Loss");
+    println!("  {:<23} {:<10} {}", "Platform", platform_req_loss, platform_rsp_loss);
+    println!("  {:<23} {:<10} {}", "App Side", inner.total_retrans_req, inner.total_retrans_resp);
+    println!();
+
+    Ok(())
+}
+
+/// Per-hop fine-grained breakdown using service chain topology
+async fn run_tcprt_flow_with_chain(
+    client: &api_client::ApiClient,
+    dst: &str,
+    dport: u16,
+    chain_name: &str,
+    resp: &aria_api::TcpRtFilterResponse,
+    total_flows: u32,
+) -> Result<(), String> {
+    // Fetch chain definition
+    let chain = client.get_chain(chain_name).await?;
+
+    println!("Service: {}:{}  (chain: {}, {} flows)\n", dst, dport, chain_name, total_flows);
+
+    // Build tap → hop_index mapping
+    let mut tap_to_hop: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (idx, hop) in chain.hops.iter().enumerate() {
+        for tap in &hop.taps {
+            tap_to_hop.insert(tap.tap.clone(), idx);
         }
-        let mut segments: Vec<Segment> = Vec::new();
+    }
 
-        // External network: cRTT of outermost point
-        let (_, outermost) = points[0];
-        segments.push(Segment {
-            label: "External Network".to_string(),
-            value: outermost.rtt_client_us,
-        });
+    // Group instances by hop index, take representative value (average across instances in same hop)
+    let mut hop_data: Vec<Option<aria_api::TcpRtAggregatedEntry>> = vec![None; chain.hops.len()];
+    let mut hop_counts: Vec<u32> = vec![0; chain.hops.len()];
 
-        // Inter-point segments: sRTT difference between adjacent points
-        if n == 2 {
-            let (_, outer) = points[0];
-            let (_, inner) = points[1];
-            segments.push(Segment {
-                label: "Host Overhead".to_string(),
-                value: (outer.rtt_server_us - inner.rtt_server_us).max(0.0),
-            });
-        } else {
-            // 3+ points: first gap = host overhead, middle gaps = security device, etc.
-            for i in 0..n - 1 {
-                let (_, outer) = points[i];
-                let (_, inner) = points[i + 1];
-                let diff = (outer.rtt_server_us - inner.rtt_server_us).max(0.0);
-                let label = if i == 0 {
-                    "Host Overhead".to_string()
-                } else {
-                    format!("Security DPI #{}", i)
-                };
-                segments.push(Segment { label, value: diff });
+    for inst in &resp.instances {
+        if let Some(&hop_idx) = tap_to_hop.get(&inst.instance) {
+            if let Some(ref mut existing) = hop_data[hop_idx] {
+                // Accumulate for averaging
+                existing.avg_rtt_client_us += inst.avg_rtt_client_us;
+                existing.avg_rtt_server_us += inst.avg_rtt_server_us;
+                existing.avg_art_us += inst.avg_art_us;
+                existing.avg_handshake_us += inst.avg_handshake_us;
+                existing.total_retrans_req += inst.total_retrans_req;
+                existing.total_retrans_resp += inst.total_retrans_resp;
+                existing.flow_count += inst.flow_count;
+                hop_counts[hop_idx] += 1;
+            } else {
+                hop_data[hop_idx] = Some(aria_api::TcpRtAggregatedEntry {
+                    instance: inst.instance.clone(),
+                    flow_count: inst.flow_count,
+                    avg_rtt_client_us: inst.avg_rtt_client_us,
+                    avg_rtt_server_us: inst.avg_rtt_server_us,
+                    avg_art_us: inst.avg_art_us,
+                    avg_handshake_us: inst.avg_handshake_us,
+                    total_retrans_req: inst.total_retrans_req,
+                    total_retrans_resp: inst.total_retrans_resp,
+                });
+                hop_counts[hop_idx] = 1;
             }
         }
-
-        // Innermost point → server: ART - sRTT of innermost
-        let (_, innermost) = points[n - 1];
-        let vm_processing = (innermost.art_us - innermost.rtt_server_us).max(0.0);
-        segments.push(Segment {
-            label: "App Processing".to_string(),
-            value: vm_processing,
-        });
-
-        // Find bottleneck (max latency segment)
-        let max_val = segments.iter().map(|s| s.value).fold(0.0f64, f64::max);
-
-        for seg in &segments {
-            let marker = if seg.value >= max_val && max_val > 0.0 { " ← bottleneck" } else { "" };
-            println!("                 {:<21} {:.1}{}",
-                seg.label, seg.value, marker);
-        }
-
-        // ── Packet Loss Breakdown ──
-        println!();
-        print!("  {:<14}", "──────────────");
-        for _ in &points { print!(" {:>w$}", "────────────", w = col_w); }
-        println!();
-        println!("  Packet Loss    Location             Req Loss   Rsp Loss");
-        println!("  ─────────────  ───────────────────  ─────────  ─────────");
-
-        for i in 0..n - 1 {
-            let (_, outer) = points[i];
-            let (_, inner) = points[i + 1];
-            let req_loss = (outer.retrans_req as i64 - inner.retrans_req as i64).max(0);
-            let resp_loss = (outer.retrans_resp as i64 - inner.retrans_resp as i64).max(0);
-            let label = if n == 2 {
-                "Host".to_string()
-            } else if i == 0 {
-                "Host".to_string()
-            } else {
-                format!("Security #{}", i)
-            };
-            println!("                 {:<21} {:<10} {}",
-                label, req_loss, resp_loss);
-        }
-        // Innermost → server
-        let (_, innermost) = points[n - 1];
-        println!("                 {:<21} {:<10} {}",
-            "App Side", innermost.retrans_req, innermost.retrans_resp);
     }
 
+    // Average the accumulated values for hops with multiple instances
+    for (idx, data) in hop_data.iter_mut().enumerate() {
+        if let Some(ref mut d) = data {
+            let c = hop_counts[idx] as f64;
+            if c > 1.0 {
+                d.avg_rtt_client_us /= c;
+                d.avg_rtt_server_us /= c;
+                d.avg_art_us /= c;
+                d.avg_handshake_us /= c;
+            }
+        }
+    }
+
+    // Collect hops that have data, in chain order
+    struct HopPoint { name: String, data: aria_api::TcpRtAggregatedEntry }
+    let points: Vec<HopPoint> = chain.hops.iter().enumerate()
+        .filter_map(|(idx, hop)| {
+            hop_data[idx].take().map(|d| HopPoint { name: hop.name.clone(), data: d })
+        })
+        .collect();
+
+    if points.is_empty() {
+        println!("  No matching data found for chain hops");
+        return Ok(());
+    }
+
+    if points.len() < 2 {
+        let p = &points[0];
+        println!("  Only one hop has data: {}", p.name);
+        println!("  Avg cRTT: {:.1} us, Avg sRTT: {:.1} us, Avg ART: {:.1} us",
+            p.data.avg_rtt_client_us, p.data.avg_rtt_server_us, p.data.avg_art_us);
+        return Ok(());
+    }
+
+    // Latency breakdown: client network + inter-hop segments + app processing
+    struct Segment { label: String, value: f64 }
+    let mut segments: Vec<Segment> = Vec::new();
+
+    // Client network = cRTT of first hop
+    segments.push(Segment {
+        label: "Client Network".to_string(),
+        value: points[0].data.avg_rtt_client_us,
+    });
+
+    // Inter-hop segments
+    for i in 0..points.len() - 1 {
+        let diff = (points[i].data.avg_rtt_server_us - points[i + 1].data.avg_rtt_server_us).max(0.0);
+        segments.push(Segment {
+            label: format!("{} → {}", points[i].name, points[i + 1].name),
+            value: diff,
+        });
+    }
+
+    // App processing = ART - sRTT of last hop
+    let last = &points[points.len() - 1];
+    segments.push(Segment {
+        label: format!("{} → server", last.name),
+        value: (last.data.avg_art_us - last.data.avg_rtt_server_us).max(0.0),
+    });
+
+    let max_val = segments.iter().map(|s| s.value).fold(0.0f64, f64::max);
+
+    println!("  Latency Breakdown (avg)");
+    println!("  ─────────────────────  ────────────");
+    for seg in &segments {
+        let marker = if seg.value >= max_val && max_val > 0.0 { "  ← bottleneck" } else { "" };
+        println!("  {:<23} {:.1} us{}", seg.label, seg.value, marker);
+    }
+
+    // Packet loss breakdown
     println!();
+    println!("  Packet Loss (total)");
+    println!("  ─────────────────────  ─────────  ─────────");
+    println!("  {:<23} {:<10} {}", "", "Req Loss", "Rsp Loss");
+    for i in 0..points.len() - 1 {
+        let req_loss = (points[i].data.total_retrans_req as i64 - points[i + 1].data.total_retrans_req as i64).max(0);
+        let rsp_loss = (points[i].data.total_retrans_resp as i64 - points[i + 1].data.total_retrans_resp as i64).max(0);
+        let label = format!("{} → {}", points[i].name, points[i + 1].name);
+        println!("  {:<23} {:<10} {}", label, req_loss, rsp_loss);
+    }
+    let last = &points[points.len() - 1];
+    let label = format!("{} → server", last.name);
+    println!("  {:<23} {:<10} {}", label, last.data.total_retrans_req, last.data.total_retrans_resp);
+    println!();
+
     Ok(())
 }
 
@@ -1036,12 +1145,70 @@ async fn main() {
                     run_tcprt_top(&client, &by, top).await
                 }
             }
-            TcprtCommands::Flow { src, dst, sport, dport } => {
-                run_tcprt_flow(&client, &src, &dst, sport, dport).await
+            TcprtCommands::Flow { dst, dport, chain } => {
+                run_tcprt_flow(&client, &dst, dport, chain.as_deref()).await
             }
             TcprtCommands::Flush => {
                 match client.flush_tcprt(&instance).await {
                     Ok(resp) => { println!("Flushed {} TCP-RT entries", resp.flushed); Ok(()) }
+                    Err(e) => Err(e),
+                }
+            }
+        },
+        Commands::Chain { action } => match action {
+            ChainCommands::Apply { file } => {
+                let json_str = match std::fs::read_to_string(&file) {
+                    Ok(s) => s,
+                    Err(e) => { eprintln!("Error: Failed to read file '{}': {}", file, e); std::process::exit(1); },
+                };
+                let req: aria_api::CreateServiceChainRequest = match serde_json::from_str(&json_str) {
+                    Ok(r) => r,
+                    Err(e) => { eprintln!("Error: Invalid JSON: {}", e); std::process::exit(1); },
+                };
+                match client.create_chain(&req).await {
+                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
+                    Err(e) => Err(e),
+                }
+            }
+            ChainCommands::List => {
+                match client.list_chains().await {
+                    Ok(resp) => {
+                        if resp.chains.is_empty() {
+                            println!("No service chains configured");
+                        } else {
+                            println!("{:<20} {:<30} {}", "Name", "Description", "Hops");
+                            for c in &resp.chains {
+                                let hop_names: Vec<&str> = c.hops.iter().map(|h| h.name.as_str()).collect();
+                                println!("{:<20} {:<30} {}", c.name, c.description, hop_names.join(" → "));
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            ChainCommands::Show { name } => {
+                match client.get_chain(&name).await {
+                    Ok(chain) => {
+                        println!("Chain: {}", chain.name);
+                        if !chain.description.is_empty() {
+                            println!("Description: {}", chain.description);
+                        }
+                        println!();
+                        for (i, hop) in chain.hops.iter().enumerate() {
+                            println!("  Hop #{}: {} ({})", i + 1, hop.name, hop.hop_type);
+                            for tap in &hop.taps {
+                                println!("    tap: {} ({})", tap.tap, tap.role);
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            ChainCommands::Delete { name } => {
+                match client.delete_chain(&name).await {
+                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
                     Err(e) => Err(e),
                 }
             }

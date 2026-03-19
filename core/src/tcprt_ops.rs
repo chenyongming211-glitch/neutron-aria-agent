@@ -140,6 +140,71 @@ pub fn lookup_tcprt_flows(pin_path: &str, tuples: &[(String, String, u16, u16)])
     Ok(entries)
 }
 
+/// Filter TCP-RT flows by dst_ip + dst_port (service address). Iterates all entries.
+pub fn filter_tcprt_flows(pin_path: &str, dst_ip: &str, dst_port: u16) -> Result<Vec<TcpRtEntry>, String> {
+    let mut entries = Vec::new();
+
+    // Filter V4
+    let v4_path = format!("{}/TCPRT_TABLE_V4", pin_path);
+    if let Ok(map_data) = MapData::from_pin(&v4_path) {
+        if let Ok(map) = HashMap::<_, CtKey4, TcpRtValue>::try_from(
+            aya::maps::Map::LruHashMap(map_data)
+        ) {
+            let target_ip: Option<Ipv4Addr> = dst_ip.parse().ok();
+            for item in map.iter() {
+                if let Ok((key, val)) = item {
+                    if key.dst_port != dst_port {
+                        continue;
+                    }
+                    if let Some(tip) = target_ip {
+                        if key.dst_ip != u32::from(tip) {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                    entries.push(value_to_entry(
+                        Ipv4Addr::from(key.src_ip).to_string(),
+                        Ipv4Addr::from(key.dst_ip).to_string(),
+                        key.src_port, key.dst_port, &val,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Filter V6
+    let v6_path = format!("{}/TCPRT_TABLE_V6", pin_path);
+    if let Ok(map_data) = MapData::from_pin(&v6_path) {
+        if let Ok(map) = HashMap::<_, CtKey6, TcpRtValue>::try_from(
+            aya::maps::Map::LruHashMap(map_data)
+        ) {
+            let target_ip: Option<Ipv6Addr> = dst_ip.parse().ok();
+            for item in map.iter() {
+                if let Ok((key, val)) = item {
+                    if key.dst_port != dst_port {
+                        continue;
+                    }
+                    if let Some(tip) = target_ip {
+                        if key.dst_ip != tip.octets() {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                    entries.push(value_to_entry(
+                        Ipv6Addr::from(key.src_ip).to_string(),
+                        Ipv6Addr::from(key.dst_ip).to_string(),
+                        key.src_port, key.dst_port, &val,
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(entries)
+}
+
 pub fn flush_tcprt(pin_path: &str) -> Result<u64, String> {
     let mut count = 0u64;
 

@@ -8,6 +8,7 @@ mod instance;
 mod tap_registry;
 mod netlink;
 mod control_plane;
+mod service_chain;
 mod system_manager;
 mod api_handlers;
 mod api_routes;

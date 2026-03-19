@@ -4,6 +4,7 @@ use tokio::sync::RwLock;
 
 use aria_core::state::{FirewallState, GroupInfo, RuleInfo, QosRuleInfo, MirrorRuleInfo};
 use aria_core::wal::{WalEntry, WalWriter};
+use crate::service_chain::{ServiceChain, self};
 
 const WAL_COMPACT_THRESHOLD: u64 = 1000;
 
@@ -36,6 +37,7 @@ pub struct ControlPlane {
     pub ebpf_path: String,
     pub base_pin_path: String,
     pub base_state_path: String,
+    chains: RwLock<Vec<ServiceChain>>,
 }
 
 #[derive(Debug)]
@@ -77,11 +79,13 @@ impl ControlPlaneError {
 
 impl ControlPlane {
     pub fn new(ebpf_path: &str, base_pin_path: &str, base_state_path: &str) -> Self {
+        let chains = service_chain::load_chains(base_state_path);
         Self {
             instances: RwLock::new(HashMap::new()),
             ebpf_path: ebpf_path.to_string(),
             base_pin_path: base_pin_path.to_string(),
             base_state_path: base_state_path.to_string(),
+            chains: RwLock::new(chains),
         }
     }
 
@@ -829,6 +833,57 @@ impl ControlPlane {
             }
         }
         Ok(results)
+    }
+
+    pub async fn filter_tcprt(&self, dst_ip: &str, dst_port: u16)
+        -> Result<Vec<(String, Vec<aria_core::tcprt_ops::TcpRtEntry>)>, ControlPlaneError>
+    {
+        let instances = self.instances.read().await;
+        let mut results = Vec::new();
+        for (name, inst) in instances.iter() {
+            let state = inst.read().await;
+            let entries = aria_core::tcprt_ops::filter_tcprt_flows(&state.pin_path, dst_ip, dst_port)
+                .unwrap_or_default();
+            if !entries.is_empty() {
+                results.push((name.clone(), entries));
+            }
+        }
+        Ok(results)
+    }
+
+    // ── Service Chains ──
+
+    pub async fn list_chains(&self) -> Vec<ServiceChain> {
+        let chains = self.chains.read().await;
+        chains.clone()
+    }
+
+    pub async fn get_chain(&self, name: &str) -> Result<ServiceChain, ControlPlaneError> {
+        let chains = self.chains.read().await;
+        chains.iter()
+            .find(|c| c.name == name)
+            .cloned()
+            .ok_or_else(|| ControlPlaneError::InstanceNotFound(format!("Service chain '{}' not found", name)))
+    }
+
+    pub async fn create_chain(&self, chain: ServiceChain) -> Result<(), ControlPlaneError> {
+        let mut chains = self.chains.write().await;
+        // Upsert: replace if exists
+        chains.retain(|c| c.name != chain.name);
+        chains.push(chain);
+        service_chain::save_chains(&self.base_state_path, &chains)
+            .map_err(|e| ControlPlaneError::KernelError(e))
+    }
+
+    pub async fn delete_chain(&self, name: &str) -> Result<(), ControlPlaneError> {
+        let mut chains = self.chains.write().await;
+        let before = chains.len();
+        chains.retain(|c| c.name != name);
+        if chains.len() == before {
+            return Err(ControlPlaneError::InstanceNotFound(format!("Service chain '{}' not found", name)));
+        }
+        service_chain::save_chains(&self.base_state_path, &chains)
+            .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
     // ── Drop Reason Profiler ──

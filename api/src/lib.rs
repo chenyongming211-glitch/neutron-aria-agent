@@ -429,6 +429,69 @@ pub struct TcpRtBatchQueryResponse {
     pub results: Vec<TcpRtInstanceEntry>,
 }
 
+// ── TCP-RT Filter (by service address) ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtFilterRequest {
+    pub dst_ip: String,
+    pub dst_port: u16,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtAggregatedEntry {
+    pub instance: String,
+    pub flow_count: u32,
+    pub avg_rtt_client_us: f64,
+    pub avg_rtt_server_us: f64,
+    pub avg_art_us: f64,
+    pub avg_handshake_us: f64,
+    pub total_retrans_req: u32,
+    pub total_retrans_resp: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtFilterResponse {
+    pub dst_ip: String,
+    pub dst_port: u16,
+    pub instances: Vec<TcpRtAggregatedEntry>,
+}
+
+// ── Service Chain ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TapBindingEntry {
+    pub tap: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceHopEntry {
+    pub name: String,
+    pub hop_type: String,
+    pub taps: Vec<TapBindingEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChainEntry {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub hops: Vec<ServiceHopEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ServiceChainListResponse {
+    pub chains: Vec<ServiceChainEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateServiceChainRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub hops: Vec<ServiceHopEntry>,
+}
+
 // ── Drop Reason Profiler ──
 
 #[derive(Debug, Serialize, Deserialize)]

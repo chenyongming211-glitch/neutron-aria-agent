@@ -263,6 +263,45 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    pub async fn filter_tcprt(&self, req: &TcpRtFilterRequest) -> Result<TcpRtFilterResponse, String> {
+        let resp = self.client.post(self.url("/api/v1/tcprt/filter"))
+            .json(req)
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    // ── Service Chains ──
+
+    pub async fn list_chains(&self) -> Result<ServiceChainListResponse, String> {
+        let resp = self.client.get(self.url("/api/v1/chains"))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn get_chain(&self, name: &str) -> Result<ServiceChainEntry, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/chains/{}", name)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn create_chain(&self, req: &CreateServiceChainRequest) -> Result<MessageResponse, String> {
+        let resp = self.client.post(self.url("/api/v1/chains"))
+            .json(req)
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn delete_chain(&self, name: &str) -> Result<MessageResponse, String> {
+        let resp = self.client.delete(self.url(&format!("/api/v1/chains/{}", name)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── Drop Reason Profiler ──
 
     pub async fn list_drops(&self, instance: &str) -> Result<DropStatsResponse, String> {
