@@ -444,7 +444,7 @@ unsafe fn phase_ct_fastpath_xdp_v4(info: &parser::PacketInfo, p: &mut PipelineCt
         if (p.flags & FLAG_IS_FORWARD) != 0 {
             tcprt::track_tcp_rt_v4(ct_key, info, p.now, true);
         } else {
-            tcprt::track_tcp_rt_v4(ct_key, info, p.now, false);
+            tcprt::track_tcp_rt_v4_rev(info, p.now);
         }
     }
 
@@ -480,7 +480,7 @@ unsafe fn phase_ct_fastpath_xdp_v6(info: &parser::PacketInfo, p: &mut PipelineCt
         if (p.flags & FLAG_IS_FORWARD) != 0 {
             tcprt::track_tcp_rt_v6(ct_key, info, p.now, true);
         } else {
-            tcprt::track_tcp_rt_v6(ct_key, info, p.now, false);
+            tcprt::track_tcp_rt_v6_rev(info, p.now);
         }
     }
 
@@ -516,7 +516,7 @@ unsafe fn phase_ct_fastpath_tc_v4(ctx: &TcContext, info: &parser::PacketInfo, p:
         if (p.flags & FLAG_IS_FORWARD) != 0 {
             tcprt::track_tcp_rt_v4(ct_key, info, p.now, true);
         } else {
-            tcprt::track_tcp_rt_v4(ct_key, info, p.now, false);
+            tcprt::track_tcp_rt_v4_rev(info, p.now);
         }
     }
 
@@ -560,7 +560,7 @@ unsafe fn phase_ct_fastpath_tc_v6(ctx: &TcContext, info: &parser::PacketInfo, p:
         if (p.flags & FLAG_IS_FORWARD) != 0 {
             tcprt::track_tcp_rt_v6(ct_key, info, p.now, true);
         } else {
-            tcprt::track_tcp_rt_v6(ct_key, info, p.now, false);
+            tcprt::track_tcp_rt_v6_rev(info, p.now);
         }
     }
 
