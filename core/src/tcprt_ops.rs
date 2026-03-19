@@ -37,20 +37,11 @@ pub fn get_tcprt_flows_v4(pin_path: &str) -> Result<Vec<TcpRtEntry>, String> {
     let mut entries = Vec::new();
     for item in map.iter() {
         if let Ok((key, val)) = item {
-            entries.push(TcpRtEntry {
-                src_ip: Ipv4Addr::from(key.src_ip).to_string(),
-                dst_ip: Ipv4Addr::from(key.dst_ip).to_string(),
-                src_port: key.src_port,
-                dst_port: key.dst_port,
-                handshake_us: val.handshake_ns as f64 / 1000.0,
-                rtt_client_us: val.rtt_client_ns as f64 / 1000.0,
-                rtt_server_us: val.rtt_server_ns as f64 / 1000.0,
-                art_us: val.art_ns as f64 / 1000.0,
-                retrans_req: val.retrans_req,
-                retrans_resp: val.retrans_resp,
-                request_count: val.request_count,
-                state: state_name(val.state),
-            });
+            entries.push(value_to_entry(
+                Ipv4Addr::from(key.src_ip).to_string(),
+                Ipv4Addr::from(key.dst_ip).to_string(),
+                key.src_port, key.dst_port, &val,
+            ));
         }
     }
     Ok(entries)
@@ -67,22 +58,85 @@ pub fn get_tcprt_flows_v6(pin_path: &str) -> Result<Vec<TcpRtEntry>, String> {
     let mut entries = Vec::new();
     for item in map.iter() {
         if let Ok((key, val)) = item {
-            entries.push(TcpRtEntry {
-                src_ip: Ipv6Addr::from(key.src_ip).to_string(),
-                dst_ip: Ipv6Addr::from(key.dst_ip).to_string(),
-                src_port: key.src_port,
-                dst_port: key.dst_port,
-                handshake_us: val.handshake_ns as f64 / 1000.0,
-                rtt_client_us: val.rtt_client_ns as f64 / 1000.0,
-                rtt_server_us: val.rtt_server_ns as f64 / 1000.0,
-                art_us: val.art_ns as f64 / 1000.0,
-                retrans_req: val.retrans_req,
-                retrans_resp: val.retrans_resp,
-                request_count: val.request_count,
-                state: state_name(val.state),
-            });
+            entries.push(value_to_entry(
+                Ipv6Addr::from(key.src_ip).to_string(),
+                Ipv6Addr::from(key.dst_ip).to_string(),
+                key.src_port, key.dst_port, &val,
+            ));
         }
     }
+    Ok(entries)
+}
+
+fn value_to_entry(src_ip: String, dst_ip: String, src_port: u16, dst_port: u16, val: &TcpRtValue) -> TcpRtEntry {
+    TcpRtEntry {
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        handshake_us: val.handshake_ns as f64 / 1000.0,
+        rtt_client_us: val.rtt_client_ns as f64 / 1000.0,
+        rtt_server_us: val.rtt_server_ns as f64 / 1000.0,
+        art_us: val.art_ns as f64 / 1000.0,
+        retrans_req: val.retrans_req,
+        retrans_resp: val.retrans_resp,
+        request_count: val.request_count,
+        state: state_name(val.state),
+    }
+}
+
+/// O(1) lookup of specific flows by 4-tuple. Returns matching entries.
+pub fn lookup_tcprt_flows(pin_path: &str, tuples: &[(String, String, u16, u16)]) -> Result<Vec<TcpRtEntry>, String> {
+    let mut entries = Vec::new();
+
+    // Try V4 lookups
+    let v4_path = format!("{}/TCPRT_TABLE_V4", pin_path);
+    if let Ok(map_data) = MapData::from_pin(&v4_path) {
+        if let Ok(map) = HashMap::<_, CtKey4, TcpRtValue>::try_from(
+            aya::maps::Map::LruHashMap(map_data)
+        ) {
+            for (src_ip, dst_ip, src_port, dst_port) in tuples {
+                if let (Ok(sip), Ok(dip)) = (src_ip.parse::<Ipv4Addr>(), dst_ip.parse::<Ipv4Addr>()) {
+                    let key = CtKey4 {
+                        src_ip: u32::from(sip),
+                        dst_ip: u32::from(dip),
+                        src_port: *src_port,
+                        dst_port: *dst_port,
+                        proto: 6,
+                        pad: [0; 3],
+                    };
+                    if let Ok(val) = map.get(&key, 0) {
+                        entries.push(value_to_entry(src_ip.clone(), dst_ip.clone(), *src_port, *dst_port, &val));
+                    }
+                }
+            }
+        }
+    }
+
+    // Try V6 lookups
+    let v6_path = format!("{}/TCPRT_TABLE_V6", pin_path);
+    if let Ok(map_data) = MapData::from_pin(&v6_path) {
+        if let Ok(map) = HashMap::<_, CtKey6, TcpRtValue>::try_from(
+            aya::maps::Map::LruHashMap(map_data)
+        ) {
+            for (src_ip, dst_ip, src_port, dst_port) in tuples {
+                if let (Ok(sip), Ok(dip)) = (src_ip.parse::<Ipv6Addr>(), dst_ip.parse::<Ipv6Addr>()) {
+                    let key = CtKey6 {
+                        src_ip: sip.octets(),
+                        dst_ip: dip.octets(),
+                        src_port: *src_port,
+                        dst_port: *dst_port,
+                        proto: 6,
+                        pad: [0; 3],
+                    };
+                    if let Ok(val) = map.get(&key, 0) {
+                        entries.push(value_to_entry(src_ip.clone(), dst_ip.clone(), *src_port, *dst_port, &val));
+                    }
+                }
+            }
+        }
+    }
+
     Ok(entries)
 }
 

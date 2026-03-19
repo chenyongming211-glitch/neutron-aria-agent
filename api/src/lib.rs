@@ -405,6 +405,30 @@ pub struct TcpRtFlushResponse {
     pub flushed: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtQueryTuple {
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub src_port: u16,
+    pub dst_port: u16,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtBatchQueryRequest {
+    pub tuples: Vec<TcpRtQueryTuple>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtInstanceEntry {
+    pub instance: String,
+    pub entry: TcpRtEntry,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtBatchQueryResponse {
+    pub results: Vec<TcpRtInstanceEntry>,
+}
+
 // ── Drop Reason Profiler ──
 
 #[derive(Debug, Serialize, Deserialize)]

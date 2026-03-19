@@ -255,6 +255,14 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    pub async fn batch_query_tcprt(&self, req: &TcpRtBatchQueryRequest) -> Result<TcpRtBatchQueryResponse, String> {
+        let resp = self.client.post(self.url("/api/v1/tcprt/query"))
+            .json(req)
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── Drop Reason Profiler ──
 
     pub async fn list_drops(&self, instance: &str) -> Result<DropStatsResponse, String> {

@@ -452,29 +452,25 @@ async fn run_tcprt_flow(
     sport: u16,
     dport: u16,
 ) -> Result<(), String> {
-    let all_instances = fetch_all_instance_flows(client).await?;
-    if all_instances.is_empty() {
-        println!("No active instances found");
-        return Ok(());
-    }
-
-    let key = FlowKey {
-        src_ip: src.to_string(),
-        dst_ip: dst.to_string(),
-        src_port: sport,
-        dst_port: dport,
+    let req = aria_api::TcpRtBatchQueryRequest {
+        tuples: vec![aria_api::TcpRtQueryTuple {
+            src_ip: src.to_string(),
+            dst_ip: dst.to_string(),
+            src_port: sport,
+            dst_port: dport,
+        }],
     };
-
-    // Collect observation points sorted by sRTT descending (outermost first)
-    let mut points: Vec<(&str, &aria_api::TcpRtEntry)> = all_instances.iter()
-        .filter_map(|i| i.flows.get(&key).map(|f| (i.name.as_str(), f)))
-        .collect();
-    points.sort_by(|a, b| b.1.rtt_server_us.partial_cmp(&a.1.rtt_server_us).unwrap_or(std::cmp::Ordering::Equal));
-
-    if points.is_empty() {
+    let resp = client.batch_query_tcprt(&req).await?;
+    if resp.results.is_empty() {
         println!("Flow {}:{} → {}:{} not found in any instance", src, sport, dst, dport);
         return Ok(());
     }
+
+    // Collect observation points sorted by sRTT descending (outermost first)
+    let mut points: Vec<(&str, &aria_api::TcpRtEntry)> = resp.results.iter()
+        .map(|r| (r.instance.as_str(), &r.entry))
+        .collect();
+    points.sort_by(|a, b| b.1.rtt_server_us.partial_cmp(&a.1.rtt_server_us).unwrap_or(std::cmp::Ordering::Equal));
 
     println!("Flow: {}:{} → {}:{}\n", src, sport, dst, dport);
 

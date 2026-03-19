@@ -815,6 +815,22 @@ impl ControlPlane {
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
+    pub async fn batch_query_tcprt(&self, tuples: &[(String, String, u16, u16)])
+        -> Result<Vec<(String, aria_core::tcprt_ops::TcpRtEntry)>, ControlPlaneError>
+    {
+        let instances = self.instances.read().await;
+        let mut results = Vec::new();
+        for (name, inst) in instances.iter() {
+            let state = inst.read().await;
+            let entries = aria_core::tcprt_ops::lookup_tcprt_flows(&state.pin_path, tuples)
+                .unwrap_or_default();
+            for entry in entries {
+                results.push((name.clone(), entry));
+            }
+        }
+        Ok(results)
+    }
+
     // ── Drop Reason Profiler ──
 
     pub async fn get_drop_stats(&self, instance: &str) -> Result<(Vec<aria_core::drop_ops::DropStatsEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {

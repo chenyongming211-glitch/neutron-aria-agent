@@ -705,6 +705,38 @@ pub async fn flush_tcprt(
     }
 }
 
+pub async fn batch_query_tcprt(
+    State(cp): State<AppState>,
+    Json(req): Json<aria_api::TcpRtBatchQueryRequest>,
+) -> impl IntoResponse {
+    let tuples: Vec<(String, String, u16, u16)> = req.tuples.into_iter()
+        .map(|t| (t.src_ip, t.dst_ip, t.src_port, t.dst_port))
+        .collect();
+    match cp.batch_query_tcprt(&tuples).await {
+        Ok(entries) => {
+            let results = entries.into_iter().map(|(instance, e)| aria_api::TcpRtInstanceEntry {
+                instance,
+                entry: aria_api::TcpRtEntry {
+                    src_ip: e.src_ip,
+                    dst_ip: e.dst_ip,
+                    src_port: e.src_port,
+                    dst_port: e.dst_port,
+                    handshake_us: e.handshake_us,
+                    rtt_client_us: e.rtt_client_us,
+                    rtt_server_us: e.rtt_server_us,
+                    art_us: e.art_us,
+                    retrans_req: e.retrans_req,
+                    retrans_resp: e.retrans_resp,
+                    request_count: e.request_count,
+                    state: e.state,
+                },
+            }).collect();
+            Ok(Json(aria_api::TcpRtBatchQueryResponse { results }))
+        }
+        Err(e) => Err(err_response(e)),
+    }
+}
+
 // ── Drop Reason Profiler ──
 
 pub async fn list_drops(

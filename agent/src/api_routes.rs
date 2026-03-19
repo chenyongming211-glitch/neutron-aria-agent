@@ -16,6 +16,8 @@ pub fn build_router(control_plane: Arc<ControlPlane>) -> Router {
         // System start/stop
         .route("/api/v1/system/start", post(api_handlers::system_start))
         .route("/api/v1/system/stop", post(api_handlers::system_stop))
+        // Batch query (no instance path param)
+        .route("/api/v1/tcprt/query", post(api_handlers::batch_query_tcprt))
         // Per-instance routes
         .route("/api/v1/{instance}/groups", get(api_handlers::list_groups).post(api_handlers::add_group))
         .route("/api/v1/{instance}/groups/{name}", delete(api_handlers::delete_group))
