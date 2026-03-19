@@ -437,7 +437,7 @@ pub struct TcpRtFilterRequest {
     pub dst_port: u16,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcpRtAggregatedEntry {
     pub instance: String,
     pub flow_count: u32,
