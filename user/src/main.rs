@@ -427,24 +427,25 @@ async fn run_analyze(
         flow_keys.truncate(top);
 
         for key in &flow_keys {
-            println!("Flow: {}:{} → {}:{}", key.src_ip, key.src_port, key.dst_ip, key.dst_port);
+            println!("Flow: {}:{} → {}:{}\n", key.src_ip, key.src_port, key.dst_ip, key.dst_port);
 
-            // Header
-            let inst_names: Vec<&str> = all_instances.iter()
-                .filter(|i| i.flows.contains_key(key))
-                .map(|i| i.name.as_str())
+            // Collect observation points, sorted by sRTT descending (outermost first)
+            let mut points: Vec<(&str, &aria_api::TcpRtEntry)> = all_instances.iter()
+                .filter_map(|i| i.flows.get(key).map(|f| (i.name.as_str(), f)))
                 .collect();
+            points.sort_by(|a, b| b.1.rtt_server_us.partial_cmp(&a.1.rtt_server_us).unwrap_or(std::cmp::Ordering::Equal));
 
-            if inst_names.is_empty() { continue; }
+            if points.is_empty() { continue; }
 
-            print!("{:<20}", "");
-            for name in &inst_names { print!(" {:>12}", name); }
+            // ── Cross-point metrics table ──
+            let col_w = 12;
+            print!("  {:<14}", "");
+            for (name, _) in &points { print!(" {:>w$}", name, w = col_w); }
             println!();
-            print!("{:<20}", "────────────────────");
-            for _ in &inst_names { print!(" {:>12}", "────────────"); }
+            print!("  {:<14}", "──────────────");
+            for _ in &points { print!(" {:>w$}", "────────────", w = col_w); }
             println!();
 
-            // Rows
             let metrics: &[(&str, Box<dyn Fn(&aria_api::TcpRtEntry) -> String>)] = &[
                 ("cRTT (us)", Box::new(|f: &aria_api::TcpRtEntry| format!("{:.1}", f.rtt_client_us))),
                 ("sRTT (us)", Box::new(|f| format!("{:.1}", f.rtt_server_us))),
@@ -452,59 +453,44 @@ async fn run_analyze(
                 ("ReqRT", Box::new(|f| format!("{}", f.retrans_req))),
                 ("RspRT", Box::new(|f| format!("{}", f.retrans_resp))),
             ];
-
             for (label, extractor) in metrics {
-                print!("{:<20}", label);
-                for inst in &all_instances {
-                    if let Some(f) = inst.flows.get(key) {
-                        print!(" {:>12}", extractor(f));
-                    }
-                }
+                print!("  {:<14}", label);
+                for (_, f) in &points { print!(" {:>w$}", extractor(f), w = col_w); }
                 println!();
             }
 
-            // Breakdown (need at least 2 observation points)
-            let points: Vec<(&str, &aria_api::TcpRtEntry)> = all_instances.iter()
-                .filter_map(|i| i.flows.get(key).map(|f| (i.name.as_str(), f)))
-                .collect();
-
+            // ── Latency Breakdown ──
             if points.len() >= 2 {
-                println!("{:<20}", "────────────────────");
-                println!("Latency Breakdown:");
-
-                // Find bond/physical (first), tap-in (middle), tap-out (last by sRTT ascending)
-                let mut sorted_points = points.clone();
-                sorted_points.sort_by(|a, b| b.1.rtt_server_us.partial_cmp(&a.1.rtt_server_us).unwrap_or(std::cmp::Ordering::Equal));
-
-                for i in 0..sorted_points.len() - 1 {
-                    let (outer_name, outer) = sorted_points[i];
-                    let (inner_name, inner) = sorted_points[i + 1];
-                    let latency = (outer.art_us - outer.rtt_server_us) - (inner.art_us - inner.rtt_server_us);
+                println!("\n  Latency Breakdown:");
+                for i in 0..points.len() - 1 {
+                    let (outer_name, outer) = points[i];
+                    let (inner_name, inner) = points[i + 1];
                     let host_overhead = outer.rtt_server_us - inner.rtt_server_us;
-                    println!("  {} → {}: network={:.1}us  processing={:.1}us",
-                        outer_name, inner_name, host_overhead, latency.max(0.0));
+                    let processing = (outer.art_us - outer.rtt_server_us) - (inner.art_us - inner.rtt_server_us);
+                    println!("    {} → {}:  network={:.1}us  processing={:.1}us",
+                        outer_name, inner_name, host_overhead.max(0.0), processing.max(0.0));
                 }
-
-                // Last point (closest to server)
-                let (last_name, last) = sorted_points.last().unwrap();
+                // Last point → server
+                let (last_name, last) = points.last().unwrap();
                 let server_processing = last.art_us - last.rtt_server_us;
-                println!("  {} → server: processing={:.1}us", last_name, server_processing.max(0.0));
+                println!("    {} → server:  processing={:.1}us", last_name, server_processing.max(0.0));
+                // Client → first point
+                let (first_name, first) = points.first().unwrap();
+                println!("    client → {}:  cRTT={:.1}us", first_name, first.rtt_client_us);
 
-                // Client-side (first point)
-                let (first_name, first) = sorted_points.first().unwrap();
-                println!("  client → {}: cRTT={:.1}us", first_name, first.rtt_client_us);
-
-                // Packet loss
-                println!("Packet Loss:");
-                for i in 0..sorted_points.len() - 1 {
-                    let (outer_name, outer) = sorted_points[i];
-                    let (inner_name, inner) = sorted_points[i + 1];
+                // ── Packet Loss Breakdown ──
+                println!("\n  Packet Loss:");
+                for i in 0..points.len() - 1 {
+                    let (outer_name, outer) = points[i];
+                    let (inner_name, inner) = points[i + 1];
                     let req_loss = outer.retrans_req as i64 - inner.retrans_req as i64;
                     let resp_loss = outer.retrans_resp as i64 - inner.retrans_resp as i64;
-                    println!("  {} → {}: req={} resp={}", outer_name, inner_name, req_loss.max(0), resp_loss.max(0));
+                    println!("    {} → {}:  req_retrans={} resp_retrans={}",
+                        outer_name, inner_name, req_loss.max(0), resp_loss.max(0));
                 }
-                let (last_name, last) = sorted_points.last().unwrap();
-                println!("  {} → server: req={} resp={}", last_name, last.retrans_req, last.retrans_resp);
+                let (last_name, last) = points.last().unwrap();
+                println!("    {} → server:  req_retrans={} resp_retrans={}",
+                    last_name, last.retrans_req, last.retrans_resp);
             }
             println!();
         }
@@ -581,22 +567,9 @@ async fn run_analyze(
                 name, g.flows, avg_crtt, avg_srtt, avg_art, p95_art, g.retrans_req, g.retrans_resp);
         }
 
-        // Top N slowest flows
-        let mut all_flows: Vec<&aria_api::TcpRtEntry> = best_inst.flows.values().collect();
-        all_flows.sort_by(|a, b| b.art_us.partial_cmp(&a.art_us).unwrap_or(std::cmp::Ordering::Equal));
-        all_flows.truncate(top);
-
-        println!("\nSlowest Flows (top {} by ART):", top);
-        println!("{:<20} {:<20} {:>6} {:>6} {:>12} {:>8} {:>8} {}",
-            "Source", "Destination", "SPort", "DPort", "ART (us)", "ReqRT", "RspRT", "Group");
-        println!("{:<20} {:<20} {:>6} {:>6} {:>12} {:>8} {:>8} {}",
-            "────────────────────", "────────────────────", "──────", "──────", "────────────", "────────", "────────", "───────");
-
-        for f in &all_flows {
-            let grp = find_group(&f.dst_ip, &groups);
-            println!("{:<20} {:<20} {:>6} {:>6} {:>12.1} {:>8} {:>8} {}",
-                f.src_ip, f.dst_ip, f.src_port, f.dst_port, f.art_us,
-                f.retrans_req, f.retrans_resp, grp);
+        // Hint: use --group <name> to drill into a specific group
+        if groups_sorted.len() > 0 {
+            println!("\nUse 'tcprt analyze --group <name>' to drill into per-flow cross-point analysis.");
         }
     }
 
