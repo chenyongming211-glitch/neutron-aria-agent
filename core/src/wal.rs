@@ -77,6 +77,8 @@ impl WalWriter {
             .map_err(|e| format!("Failed to write WAL newline: {}", e))?;
         self.file.flush()
             .map_err(|e| format!("Failed to flush WAL: {}", e))?;
+        self.file.get_ref().sync_all()
+            .map_err(|e| format!("Failed to fsync WAL: {}", e))?;
         self.entry_count += 1;
         Ok(())
     }

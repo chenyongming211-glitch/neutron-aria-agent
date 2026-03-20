@@ -940,13 +940,15 @@ pub async fn start_trace(
     let mut src_ip_v6: [u8; 16] = [0u8; 16];
     let mut dst_ip_v6: [u8; 16] = [0u8; 16];
     let mut is_ipv6: u8 = 0; // 0=IPv4, 1=IPv6, 2=both
+    let mut src_is_v6 = false;
+    let mut dst_is_v6 = false;
 
     if !req.src_ip.is_empty() {
         if let Ok(ip) = req.src_ip.parse::<std::net::Ipv4Addr>() {
             src_ip = u32::from(ip);
         } else if let Ok(ip) = req.src_ip.parse::<std::net::Ipv6Addr>() {
             src_ip_v6 = ip.octets();
-            is_ipv6 = 1;
+            src_is_v6 = true;
         } else {
             return Err(err_response(ControlPlaneError::ValidationError(
                 format!("Invalid src_ip: {}", req.src_ip)
@@ -958,7 +960,7 @@ pub async fn start_trace(
             dst_ip = u32::from(ip);
         } else if let Ok(ip) = req.dst_ip.parse::<std::net::Ipv6Addr>() {
             dst_ip_v6 = ip.octets();
-            is_ipv6 = 1;
+            dst_is_v6 = true;
         } else {
             return Err(err_response(ControlPlaneError::ValidationError(
                 format!("Invalid dst_ip: {}", req.dst_ip)
@@ -966,10 +968,22 @@ pub async fn start_trace(
         }
     }
 
-    // If no IP filters specified, trace both IPv4 and IPv6
-    if req.src_ip.is_empty() && req.dst_ip.is_empty() {
+    // Reject mixed address families
+    if (src_is_v6 && !req.dst_ip.is_empty() && !dst_is_v6)
+        || (dst_is_v6 && !req.src_ip.is_empty() && !src_is_v6)
+    {
+        return Err(err_response(ControlPlaneError::ValidationError(
+            "Cannot mix IPv4 and IPv6 addresses in trace filter".to_string()
+        )));
+    }
+
+    // Determine address family
+    if src_is_v6 || dst_is_v6 {
+        is_ipv6 = 1;
+    } else if req.src_ip.is_empty() && req.dst_ip.is_empty() {
         is_ipv6 = 2; // match both
     }
+    // else: is_ipv6 = 0 (IPv4 only, default)
 
     let proto: u8 = if req.proto.is_empty() {
         0
