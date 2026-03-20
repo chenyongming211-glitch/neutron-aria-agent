@@ -985,6 +985,7 @@ async fn main() {
                             for err in &resp.errors {
                                 eprintln!("  {}", err);
                             }
+                            std::process::exit(1);
                         }
                         Ok(())
                     }

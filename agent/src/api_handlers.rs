@@ -291,10 +291,16 @@ pub async fn add_qos(
     // direction=2 means "both": apply to ingress and egress
     let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
     let mut applied: Vec<u8> = Vec::new();
+    let mut shaping_downgraded = false;
 
     for dir in &directions {
-        // Ingress does not support shaping mode
-        let effective_mode = if *dir == 0 && mode == 1 { 0 } else { mode };
+        // Ingress does not support shaping mode, downgrade to policing
+        let effective_mode = if *dir == 0 && mode == 1 {
+            shaping_downgraded = true;
+            0
+        } else {
+            mode
+        };
         if let Err(e) = cp.add_qos(&instance, &req.group, *dir, rate_bps, burst_bytes, req.priority, effective_mode).await {
             // Rollback previously applied directions
             for prev_dir in &applied {
@@ -306,9 +312,11 @@ pub async fn add_qos(
     }
 
     let dir_label = if direction == 2 { "both" } else { &req.direction };
-    Ok((StatusCode::CREATED, Json(MessageResponse {
-        message: format!("Added QoS rule for group '{}' ({})", req.group, dir_label),
-    })))
+    let mut msg = format!("Added QoS rule for group '{}' ({})", req.group, dir_label);
+    if shaping_downgraded {
+        msg.push_str(". Warning: ingress shaping is not supported, downgraded to policing");
+    }
+    Ok((StatusCode::CREATED, Json(MessageResponse { message: msg })))
 }
 
 pub async fn delete_qos(

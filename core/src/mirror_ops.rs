@@ -22,7 +22,10 @@ fn sync_mirror_enabled(pin_path: &str, enabled: bool) -> Result<(), String> {
     let mut cfg = map.get(&0u32, 0).unwrap_or(FirewallConfig {
         conntrack_enabled: 1,
         monitoring_enabled: 1,
-        num_cpus: 1,
+        num_cpus: {
+            let raw = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+            if raw > 0 { raw as u16 } else { 1 }
+        },
         qos_enabled: 0,
         acl_enabled: 1,
         mirror_enabled: 0,

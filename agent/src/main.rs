@@ -153,8 +153,8 @@ async fn main() {
     let netlink_task = tokio::spawn(async move {
         loop {
             if let Err(e) = netlink::monitor(registry_clone.clone()).await {
-                eprintln!("Netlink monitor error: {}, restarting in 5s...", e);
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                eprintln!("Netlink monitor error: {}, restarting in 1s...", e);
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         }
     });

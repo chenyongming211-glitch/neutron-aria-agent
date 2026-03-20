@@ -42,11 +42,14 @@ impl WalWriter {
                 .map_err(|e| format!("Failed to create WAL directory: {}", e))?;
         }
 
-        // Count existing entries
+        // Count existing valid entries (skip corrupt lines)
         let entry_count = if wal_path.exists() {
             let f = File::open(&wal_path)
                 .map_err(|e| format!("Failed to open WAL for counting: {}", e))?;
-            BufReader::new(f).lines().count() as u64
+            BufReader::new(f).lines()
+                .filter_map(|l| l.ok())
+                .filter(|l| !l.trim().is_empty() && serde_json::from_str::<WalEntry>(l).is_ok())
+                .count() as u64
         } else {
             0
         };
