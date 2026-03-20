@@ -290,13 +290,19 @@ pub async fn add_qos(
 
     // direction=2 means "both": apply to ingress and egress
     let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
+    let mut applied: Vec<u8> = Vec::new();
 
     for dir in &directions {
         // Ingress does not support shaping mode
         let effective_mode = if *dir == 0 && mode == 1 { 0 } else { mode };
         if let Err(e) = cp.add_qos(&instance, &req.group, *dir, rate_bps, burst_bytes, req.priority, effective_mode).await {
+            // Rollback previously applied directions
+            for prev_dir in &applied {
+                let _ = cp.delete_qos(&instance, &req.group, *prev_dir).await;
+            }
             return Err(err_response(e));
         }
+        applied.push(*dir);
     }
 
     let dir_label = if direction == 2 { "both" } else { &req.direction };
@@ -593,11 +599,17 @@ pub async fn add_mirror(
 
     // direction=2 means "both": apply to ingress and egress
     let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
+    let mut applied: Vec<u8> = Vec::new();
 
     for dir in &directions {
         if let Err(e) = cp.add_mirror(&instance, &req.src_group, &req.dst_group, proto, *dir, &req.target).await {
+            // Rollback previously applied directions
+            for prev_dir in &applied {
+                let _ = cp.delete_mirror(&instance, &req.src_group, &req.dst_group, proto, *prev_dir).await;
+            }
             return Err(err_response(e));
         }
+        applied.push(*dir);
     }
 
     let dir_label = if direction == 2 { "both" } else { &req.direction };

@@ -30,6 +30,15 @@ impl InstanceState {
             }
         }
     }
+
+    /// Append a WAL entry. If append fails, attempt a full compact as fallback
+    /// to ensure the current state is persisted despite the individual write failure.
+    fn wal_append(&mut self, entry: &WalEntry) {
+        if let Err(e) = self.wal.append(entry) {
+            eprintln!("[ControlPlane] WAL append failed: {}. Attempting compact as fallback...", e);
+            self.do_compact();
+        }
+    }
 }
 
 pub struct ControlPlane {
@@ -239,12 +248,10 @@ impl ControlPlane {
             return Err(ControlPlaneError::KernelError(format!("dst: {}", e)));
         }
 
-        if let Err(e) = state.wal.append(&WalEntry::AddGroup {
+        state.wal_append(&WalEntry::AddGroup {
             name: name.to_string(),
             cidr: cidr.to_string(),
-        }) {
-            eprintln!("[ControlPlane] WAL append failed (add_group): {}", e);
-        }
+        });
         Ok(id)
     }
 
@@ -299,11 +306,9 @@ impl ControlPlane {
         }
 
         state.state.groups.remove(name);
-        if let Err(e) = state.wal.append(&WalEntry::DeleteGroup {
+        state.wal_append(&WalEntry::DeleteGroup {
             name: name.to_string(),
-        }) {
-            eprintln!("[ControlPlane] WAL append failed (delete_group): {}", e);
-        }
+        });
         Ok(())
     }
 
@@ -363,16 +368,14 @@ impl ControlPlane {
             }
         }
 
-        if let Err(e) = state.wal.append(&WalEntry::AddRule {
+        state.wal_append(&WalEntry::AddRule {
             src_id,
             dst_id,
             proto,
             action,
             ports: ports.map(|s| s.to_string()),
             direction,
-        }) {
-            eprintln!("[ControlPlane] WAL append failed (add_policy): {}", e);
-        }
+        });
         Ok(())
     }
 
@@ -419,14 +422,12 @@ impl ControlPlane {
             }
         }
 
-        if let Err(e) = state.wal.append(&WalEntry::RemoveRule {
+        state.wal_append(&WalEntry::RemoveRule {
             src_id,
             dst_id,
             proto,
             direction,
-        }) {
-            eprintln!("[ControlPlane] WAL append failed (delete_policy): {}", e);
-        }
+        });
         Ok(())
     }
 
@@ -477,7 +478,7 @@ impl ControlPlane {
             mode,
         });
 
-        if let Err(e) = state.wal.append(&WalEntry::AddQos {
+        state.wal_append(&WalEntry::AddQos {
             group_name: group_name.to_string(),
             group_id,
             direction,
@@ -485,9 +486,7 @@ impl ControlPlane {
             burst_bytes,
             priority,
             mode,
-        }) {
-            eprintln!("[ControlPlane] WAL append failed (add_qos): {}", e);
-        }
+        });
         Ok(())
     }
 
@@ -522,12 +521,10 @@ impl ControlPlane {
         }
 
         state.state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
-        if let Err(e) = state.wal.append(&WalEntry::DeleteQos {
+        state.wal_append(&WalEntry::DeleteQos {
             group_id,
             direction,
-        }) {
-            eprintln!("[ControlPlane] WAL append failed (delete_qos): {}", e);
-        }
+        });
         Ok(())
     }
 
@@ -588,7 +585,7 @@ impl ControlPlane {
             is_global,
         });
 
-        if let Err(e) = state.wal.append(&WalEntry::AddMirror {
+        state.wal_append(&WalEntry::AddMirror {
             src_group_name: src_group.to_string(),
             src_group_id: src_id,
             dst_group_name: dst_group.to_string(),
@@ -598,9 +595,7 @@ impl ControlPlane {
             target_iface: target_iface.to_string(),
             target_ifindex,
             is_global,
-        }) {
-            eprintln!("[ControlPlane] WAL append failed (add_mirror): {}", e);
-        }
+        });
         Ok(())
     }
 
@@ -647,15 +642,13 @@ impl ControlPlane {
             state.state.mirror_rules.retain(|r| !(r.src_group_id == src_id && r.dst_group_id == dst_id && r.proto == proto && r.direction == direction && !r.is_global));
         }
 
-        if let Err(e) = state.wal.append(&WalEntry::DeleteMirror {
+        state.wal_append(&WalEntry::DeleteMirror {
             src_group_id: src_id,
             dst_group_id: dst_id,
             proto,
             direction,
             is_global,
-        }) {
-            eprintln!("[ControlPlane] WAL append failed (delete_mirror): {}", e);
-        }
+        });
         Ok(())
     }
 
@@ -734,16 +727,14 @@ impl ControlPlane {
             state.state.tcprt_enabled = t;
         }
 
-        if let Err(e) = state.wal.append(&WalEntry::UpdateConfig {
+        state.wal_append(&WalEntry::UpdateConfig {
             conntrack,
             monitoring,
             acl,
             qos,
             mirror,
             tcprt,
-        }) {
-            eprintln!("[ControlPlane] WAL append failed (update_config): {}", e);
-        }
+        });
         Ok(())
     }
 
