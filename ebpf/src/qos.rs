@@ -34,6 +34,7 @@ fn compute_refill(rate: u64, elapsed_ns: u64) -> u64 {
 /// deficit is at most one packet (~64 KB), so deficit * 1e9 < 6.5e13, well within u64.
 #[inline(always)]
 fn compute_delay_ns(deficit: u64, rate: u64) -> u64 {
+    if rate == 0 { return 0; }
     deficit * 1_000_000_000 / rate
 }
 

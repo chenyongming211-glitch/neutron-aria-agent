@@ -115,11 +115,12 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
         if info.payload_len > 0 {
             if is_retrans_req(entry, info.tcp_seq) {
                 (*entry).retrans_req += 1;
-            }
-
-            if (*entry).first_response_ts > 0 {
-                (*entry).request_count += 1;
-                (*entry).first_response_ts = 0;
+            } else {
+                // Only count as new request cycle if NOT a retransmit
+                if (*entry).first_response_ts > 0 {
+                    (*entry).request_count += 1;
+                    (*entry).first_response_ts = 0;
+                }
             }
 
             (*entry).last_request_ts = now;
@@ -242,10 +243,11 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
         if info.payload_len > 0 {
             if is_retrans_req(entry, info.tcp_seq) {
                 (*entry).retrans_req += 1;
-            }
-            if (*entry).first_response_ts > 0 {
-                (*entry).request_count += 1;
-                (*entry).first_response_ts = 0;
+            } else {
+                if (*entry).first_response_ts > 0 {
+                    (*entry).request_count += 1;
+                    (*entry).first_response_ts = 0;
+                }
             }
             (*entry).last_request_ts = now;
             (*entry).prev_seq = (*entry).last_seq;
