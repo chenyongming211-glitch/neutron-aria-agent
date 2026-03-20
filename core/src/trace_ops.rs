@@ -1,6 +1,6 @@
 use aya::maps::{HashMap, MapData};
 use crate::common::{TraceFilter, TraceEvent};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
 
 pub struct TraceEventEntry {
     pub seq: u64,

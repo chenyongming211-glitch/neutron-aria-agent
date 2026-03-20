@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use aya::maps::{HashMap, LpmTrie, MapData};
 use aya::maps::lpm_trie::Key;
-use crate::common::{PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig, MirrorKey, GlobalMirrorKey, MirrorConfig};
+use crate::common::{PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig};
 use crate::state::FirewallState;
 
 /// 加载 eBPF 程序，并设置 pin 路径以复用已有的 map。

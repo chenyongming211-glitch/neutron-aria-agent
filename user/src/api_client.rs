@@ -255,6 +255,7 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    #[allow(dead_code)]
     pub async fn batch_query_tcprt(&self, req: &TcpRtBatchQueryRequest) -> Result<TcpRtBatchQueryResponse, String> {
         let resp = self.client.post(self.url("/api/v1/tcprt/query"))
             .json(req)

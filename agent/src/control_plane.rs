@@ -984,6 +984,7 @@ impl ControlPlane {
     }
 
     /// Find group name by id
+    #[allow(dead_code)]
     pub fn group_name_by_id(state: &FirewallState, id: u32) -> String {
         if id == 0 {
             return "any".to_string();
