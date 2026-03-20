@@ -935,26 +935,42 @@ pub async fn start_trace(
     Path(instance): Path<String>,
     Json(req): Json<aria_api::TraceStartRequest>,
 ) -> impl IntoResponse {
-    let src_ip: u32 = if req.src_ip.is_empty() {
-        0
-    } else {
-        match req.src_ip.parse::<std::net::Ipv4Addr>() {
-            Ok(ip) => u32::from(ip),
-            Err(_) => return Err(err_response(ControlPlaneError::ValidationError(
+    let mut src_ip: u32 = 0;
+    let mut dst_ip: u32 = 0;
+    let mut src_ip_v6: [u8; 16] = [0u8; 16];
+    let mut dst_ip_v6: [u8; 16] = [0u8; 16];
+    let mut is_ipv6: u8 = 0; // 0=IPv4, 1=IPv6, 2=both
+
+    if !req.src_ip.is_empty() {
+        if let Ok(ip) = req.src_ip.parse::<std::net::Ipv4Addr>() {
+            src_ip = u32::from(ip);
+        } else if let Ok(ip) = req.src_ip.parse::<std::net::Ipv6Addr>() {
+            src_ip_v6 = ip.octets();
+            is_ipv6 = 1;
+        } else {
+            return Err(err_response(ControlPlaneError::ValidationError(
                 format!("Invalid src_ip: {}", req.src_ip)
-            ))),
+            )));
         }
-    };
-    let dst_ip: u32 = if req.dst_ip.is_empty() {
-        0
-    } else {
-        match req.dst_ip.parse::<std::net::Ipv4Addr>() {
-            Ok(ip) => u32::from(ip),
-            Err(_) => return Err(err_response(ControlPlaneError::ValidationError(
+    }
+    if !req.dst_ip.is_empty() {
+        if let Ok(ip) = req.dst_ip.parse::<std::net::Ipv4Addr>() {
+            dst_ip = u32::from(ip);
+        } else if let Ok(ip) = req.dst_ip.parse::<std::net::Ipv6Addr>() {
+            dst_ip_v6 = ip.octets();
+            is_ipv6 = 1;
+        } else {
+            return Err(err_response(ControlPlaneError::ValidationError(
                 format!("Invalid dst_ip: {}", req.dst_ip)
-            ))),
+            )));
         }
-    };
+    }
+
+    // If no IP filters specified, trace both IPv4 and IPv6
+    if req.src_ip.is_empty() && req.dst_ip.is_empty() {
+        is_ipv6 = 2; // match both
+    }
+
     let proto: u8 = if req.proto.is_empty() {
         0
     } else {
@@ -964,7 +980,7 @@ pub async fn start_trace(
         }
     };
 
-    match cp.start_trace(&instance, src_ip, dst_ip, req.src_port, req.dst_port, proto).await {
+    match cp.start_trace(&instance, src_ip, dst_ip, src_ip_v6, dst_ip_v6, req.src_port, req.dst_port, proto, is_ipv6).await {
         Ok(()) => Ok((StatusCode::OK, Json(MessageResponse {
             message: "Trace started".to_string(),
         }))),

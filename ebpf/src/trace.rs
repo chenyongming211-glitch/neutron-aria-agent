@@ -6,10 +6,6 @@ use crate::parser::PacketInfo;
 /// Returns false quickly if filter is not set or not matching (zero overhead path).
 #[inline(always)]
 pub unsafe fn should_trace(info: &PacketInfo) -> bool {
-    // Only trace IPv4 packets (TraceFilter uses u32 IPs)
-    if info.is_ipv6 {
-        return false;
-    }
     let key: u32 = 0;
     let filter = match TRACE_FILTER.get(&key) {
         Some(f) => f,
@@ -18,11 +14,28 @@ pub unsafe fn should_trace(info: &PacketInfo) -> bool {
     if filter.enabled == 0 {
         return false;
     }
-    if filter.src_ip != 0 && filter.src_ip != info.src_ip {
-        return false;
-    }
-    if filter.dst_ip != 0 && filter.dst_ip != info.dst_ip {
-        return false;
+    // is_ipv6: 0=IPv4 only, 1=IPv6 only, 2=both
+    if info.is_ipv6 {
+        if filter.is_ipv6 == 0 {
+            return false;
+        }
+        // Match IPv6 addresses (all-zero = any)
+        if filter.src_ip_v6 != [0u8; 16] && filter.src_ip_v6 != info.src_ip_v6 {
+            return false;
+        }
+        if filter.dst_ip_v6 != [0u8; 16] && filter.dst_ip_v6 != info.dst_ip_v6 {
+            return false;
+        }
+    } else {
+        if filter.is_ipv6 == 1 {
+            return false;
+        }
+        if filter.src_ip != 0 && filter.src_ip != info.src_ip {
+            return false;
+        }
+        if filter.dst_ip != 0 && filter.dst_ip != info.dst_ip {
+            return false;
+        }
     }
     if filter.src_port != 0 && filter.src_port != info.src_port {
         return false;

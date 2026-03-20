@@ -17,6 +17,19 @@ pub fn tcprt_enabled() -> bool {
     }
 }
 
+/// Check if seq matches last_seq or prev_seq (catches retransmits arriving after new data).
+#[inline(always)]
+unsafe fn is_retrans_req(entry: *mut TcpRtValue, seq: u32) -> bool {
+    ((*entry).last_seq == seq && (*entry).last_payload_len > 0)
+        || ((*entry).prev_seq == seq && (*entry).prev_payload_len > 0)
+}
+
+#[inline(always)]
+unsafe fn is_retrans_resp(entry: *mut TcpRtValue, seq: u32) -> bool {
+    ((*entry).last_resp_seq == seq && (*entry).last_resp_payload_len > 0)
+        || ((*entry).prev_resp_seq == seq && (*entry).prev_resp_payload_len > 0)
+}
+
 /// Track TCP response time for an IPv4 flow.
 /// `ct_key` must be the forward (original direction) key.
 /// `is_forward` indicates whether this packet is in the original direction.
@@ -48,8 +61,12 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
             pad: [0; 2],
             last_seq: info.tcp_seq,
             last_payload_len: 0,
+            prev_seq: 0,
+            prev_payload_len: 0,
             last_resp_seq: 0,
             last_resp_payload_len: 0,
+            prev_resp_seq: 0,
+            prev_resp_payload_len: 0,
         };
         let _ = TCPRT_TABLE_V4.insert(ct_key, &val, 0);
         return;
@@ -96,7 +113,7 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
     if is_forward {
         // Request direction (client → server)
         if info.payload_len > 0 {
-            if (*entry).last_seq == info.tcp_seq && (*entry).last_payload_len > 0 {
+            if is_retrans_req(entry, info.tcp_seq) {
                 (*entry).retrans_req += 1;
             }
 
@@ -106,14 +123,16 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
             }
 
             (*entry).last_request_ts = now;
+            // Rotate: last → prev, new → last
+            (*entry).prev_seq = (*entry).last_seq;
+            (*entry).prev_payload_len = (*entry).last_payload_len;
             (*entry).last_seq = info.tcp_seq;
             (*entry).last_payload_len = info.payload_len;
         }
     } else {
         // Response direction (server → client)
         if info.payload_len > 0 {
-            // Retransmission detection for response direction
-            if (*entry).last_resp_seq == info.tcp_seq && (*entry).last_resp_payload_len > 0 {
+            if is_retrans_resp(entry, info.tcp_seq) {
                 (*entry).retrans_resp += 1;
             }
 
@@ -123,6 +142,9 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
                 (*entry).art_ns = now.wrapping_sub((*entry).last_request_ts);
             }
 
+            // Rotate: last → prev, new → last
+            (*entry).prev_resp_seq = (*entry).last_resp_seq;
+            (*entry).prev_resp_payload_len = (*entry).last_resp_payload_len;
             (*entry).last_resp_seq = info.tcp_seq;
             (*entry).last_resp_payload_len = info.payload_len;
         }
@@ -145,8 +167,6 @@ pub unsafe fn track_tcp_rt_v4_rev(info: &PacketInfo, now: u64) {
 
 /// Track TCP response time for an IPv6 flow.
 /// Same logic as V4, different map.
-/// `ct_key` must be the forward (original direction) key.
-/// `is_forward` indicates whether this packet is in the original direction.
 #[inline(always)]
 pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_forward: bool) {
     let flags = info.tcp_flags;
@@ -174,8 +194,12 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
             pad: [0; 2],
             last_seq: info.tcp_seq,
             last_payload_len: 0,
+            prev_seq: 0,
+            prev_payload_len: 0,
             last_resp_seq: 0,
             last_resp_payload_len: 0,
+            prev_resp_seq: 0,
+            prev_resp_payload_len: 0,
         };
         let _ = TCPRT_TABLE_V6.insert(ct_key, &val, 0);
         return;
@@ -216,7 +240,7 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
 
     if is_forward {
         if info.payload_len > 0 {
-            if (*entry).last_seq == info.tcp_seq && (*entry).last_payload_len > 0 {
+            if is_retrans_req(entry, info.tcp_seq) {
                 (*entry).retrans_req += 1;
             }
             if (*entry).first_response_ts > 0 {
@@ -224,18 +248,22 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
                 (*entry).first_response_ts = 0;
             }
             (*entry).last_request_ts = now;
+            (*entry).prev_seq = (*entry).last_seq;
+            (*entry).prev_payload_len = (*entry).last_payload_len;
             (*entry).last_seq = info.tcp_seq;
             (*entry).last_payload_len = info.payload_len;
         }
     } else {
         if info.payload_len > 0 {
-            if (*entry).last_resp_seq == info.tcp_seq && (*entry).last_resp_payload_len > 0 {
+            if is_retrans_resp(entry, info.tcp_seq) {
                 (*entry).retrans_resp += 1;
             }
             if (*entry).first_response_ts == 0 && (*entry).last_request_ts > 0 {
                 (*entry).first_response_ts = now;
                 (*entry).art_ns = now.wrapping_sub((*entry).last_request_ts);
             }
+            (*entry).prev_resp_seq = (*entry).last_resp_seq;
+            (*entry).prev_resp_payload_len = (*entry).last_resp_payload_len;
             (*entry).last_resp_seq = info.tcp_seq;
             (*entry).last_resp_payload_len = info.payload_len;
         }

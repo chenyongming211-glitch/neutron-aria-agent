@@ -901,13 +901,16 @@ impl ControlPlane {
         instance: &str,
         src_ip: u32,
         dst_ip: u32,
+        src_ip_v6: [u8; 16],
+        dst_ip_v6: [u8; 16],
         src_port: u16,
         dst_port: u16,
         proto: u8,
+        is_ipv6: u8,
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        aria_core::trace_ops::set_trace_filter(&state.pin_path, src_ip, dst_ip, src_port, dst_port, proto, true)
+        aria_core::trace_ops::set_trace_filter(&state.pin_path, src_ip, dst_ip, src_ip_v6, dst_ip_v6, src_port, dst_port, proto, is_ipv6, true)
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 

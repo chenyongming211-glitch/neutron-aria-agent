@@ -1,6 +1,6 @@
 use aya::maps::{HashMap, MapData};
 use crate::common::{TraceFilter, TraceEvent};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub struct TraceEventEntry {
     pub seq: u64,
@@ -75,9 +75,12 @@ pub fn set_trace_filter(
     pin_path: &str,
     src_ip: u32,
     dst_ip: u32,
+    src_ip_v6: [u8; 16],
+    dst_ip_v6: [u8; 16],
     src_port: u16,
     dst_port: u16,
     proto: u8,
+    is_ipv6: u8,
     enabled: bool,
 ) -> Result<(), String> {
     let map_path = format!("{}/TRACE_FILTER", pin_path);
@@ -90,11 +93,14 @@ pub fn set_trace_filter(
     let filter = TraceFilter {
         src_ip,
         dst_ip,
+        src_ip_v6,
+        dst_ip_v6,
         src_port,
         dst_port,
         proto,
         enabled: if enabled { 1 } else { 0 },
-        pad: [0; 2],
+        is_ipv6,
+        pad: [0; 1],
     };
     map.insert(&0u32, &filter, 0)
         .map_err(|e| format!("insert TRACE_FILTER: {:?}", e))?;
@@ -102,7 +108,7 @@ pub fn set_trace_filter(
 }
 
 pub fn clear_trace_filter(pin_path: &str) -> Result<(), String> {
-    set_trace_filter(pin_path, 0, 0, 0, 0, 0, false)
+    set_trace_filter(pin_path, 0, 0, [0u8; 16], [0u8; 16], 0, 0, 0, 0, false)
 }
 
 pub fn get_trace_events(pin_path: &str, limit: usize) -> Result<Vec<TraceEventEntry>, String> {

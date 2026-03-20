@@ -224,8 +224,12 @@ pub struct TcpRtValue {
     pub pad: [u8; 2],
     pub last_seq: u32,          // Last forward seq (for retransmission detection)
     pub last_payload_len: u16,  // Last forward payload length
+    pub prev_seq: u32,          // Previous forward seq (catch retransmits after new data)
+    pub prev_payload_len: u16,  // Previous forward payload length
     pub last_resp_seq: u32,     // Last reverse seq (for retransmission detection)
     pub last_resp_payload_len: u16, // Last reverse payload length
+    pub prev_resp_seq: u32,     // Previous reverse seq
+    pub prev_resp_payload_len: u16, // Previous reverse payload length
 }
 
 pub const TCPRT_STATE_HANDSHAKE: u8 = 0;
@@ -283,13 +287,16 @@ pub const TRACE_RESULT_DROP_QOS: u8 = 4;
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct TraceFilter {
-    pub src_ip: u32,        // 0 = any
-    pub dst_ip: u32,        // 0 = any
+    pub src_ip: u32,        // 0 = any (IPv4)
+    pub dst_ip: u32,        // 0 = any (IPv4)
+    pub src_ip_v6: [u8; 16], // all-zero = any (IPv6)
+    pub dst_ip_v6: [u8; 16], // all-zero = any (IPv6)
     pub src_port: u16,      // 0 = any
     pub dst_port: u16,      // 0 = any
     pub proto: u8,          // 0 = any
     pub enabled: u8,        // 1 = tracing active
-    pub pad: [u8; 2],
+    pub is_ipv6: u8,        // 0 = match IPv4, 1 = match IPv6, 2 = match both
+    pub pad: [u8; 1],
 }
 
 #[repr(C)]

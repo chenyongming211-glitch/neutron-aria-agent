@@ -224,8 +224,12 @@ pub struct TcpRtValue {
     pub pad: [u8; 2],
     pub last_seq: u32,
     pub last_payload_len: u16,
+    pub prev_seq: u32,
+    pub prev_payload_len: u16,
     pub last_resp_seq: u32,
     pub last_resp_payload_len: u16,
+    pub prev_resp_seq: u32,
+    pub prev_resp_payload_len: u16,
 }
 unsafe impl Pod for TcpRtValue {}
 
@@ -278,11 +282,14 @@ unsafe impl Pod for DropValue {}
 pub struct TraceFilter {
     pub src_ip: u32,
     pub dst_ip: u32,
+    pub src_ip_v6: [u8; 16],
+    pub dst_ip_v6: [u8; 16],
     pub src_port: u16,
     pub dst_port: u16,
     pub proto: u8,
     pub enabled: u8,
-    pub pad: [u8; 2],
+    pub is_ipv6: u8,        // 0=IPv4, 1=IPv6, 2=both
+    pub pad: [u8; 1],
 }
 unsafe impl Pod for TraceFilter {}
 
