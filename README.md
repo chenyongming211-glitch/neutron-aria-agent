@@ -1,20 +1,26 @@
 # Aria Firewall
 
-基于 eBPF/XDP + TC 的高性能防火墙，支持双向策略（ingress/egress）、连接跟踪、QoS 限速和实时流量监控。
+基于 eBPF/XDP + TC 的高性能网络防火墙与可观测平台，支持多实例管理、双向策略、连接跟踪、QoS 限速、端口镜像、TCP 响应时间分析和实时流量追踪。
 
 ## 功能特性
 
+### 数据面（eBPF 内核态）
+
 - **XDP 入向过滤** — 在网卡驱动层拦截，零拷贝、无内核协议栈开销
 - **TC 出向控制** — 基于 clsact/TC 的出向策略匹配与 EDT 调度
+- **TC 入向镜像** — 入向流量镜像（SPAN）到分析接口
+- **IPv4/IPv6 双栈** — 全部功能支持双栈，LPM 前缀树做 CIDR 最长前缀匹配
 - **8 级 fallback 策略匹配** — (src, dst, proto) 三维通配，自动回退到更宽泛的规则
-- **LPM 前缀树** — 高效 CIDR 最长前缀匹配，IPv4/IPv6 双栈
-- **端口集 (port set)** — 引用计数共享，支持端口范围和逗号分隔
-- **连接跟踪 (conntrack)** — 有状态防火墙，已建立连接走快速路径
-- **QoS 限速** — 出向 EDT shaping + 入向 policing，令牌桶算法，多核感知
-- **实时监控** — 按规则/流/连接维度统计，快速路径也计入 rule stats
-- **运行时配置** — conntrack/monitoring 开关可热切换，无需重启
-- **WAL 增量持久化** — 操作追加写入日志（O(1)），定期 compact 为快照，crash-safe
-- **Tap 模式** — aria-agent 守护进程管理多实例，支持 veth/tap 网卡
+- **连接跟踪快速路径** — 已建立连接跳过策略评估，直接放行并更新统计
+- **Per-CPU 统计** — 多核无锁聚合，零竞争
+
+### 控制面（aria-agent 守护进程）
+
+- **多实例管理** — 自动发现 tap/veth/eth 接口，每个接口独立状态
+- **REST API** — 完整的 HTTP API，CLI 是其薄客户端
+- **WAL 持久化** — 操作追加写入日志（O(1)），定期 compact 为快照，crash-safe
+- **Netlink 监听** — 实时感知接口增删，60 秒对账兜底
+- **Pinned Maps** — eBPF map 固定到 bpffs，agent 重启后自动恢复
 
 ## 系统要求
 
@@ -22,9 +28,36 @@
 - 内核支持 BTF：`ls /sys/kernel/btf/vmlinux`
 - Ubuntu 22.04+ / Fedora 35+ / RHEL 9+
 
-## 快速开始
+## 安装
 
-### 编译
+### 从 Release 安装
+
+```bash
+# 下载最新 release
+wget https://github.com/chenyongming211-glitch/aria-firewall/releases/latest/download/firewall-binaries-x86_64.zip
+unzip firewall-binaries-x86_64.zip -d /tmp/aria
+
+# 安装
+sudo cp /tmp/aria/aria-agent /usr/local/bin/
+sudo cp /tmp/aria/ariactl /usr/local/bin/
+sudo cp /tmp/aria/libebpf_firewall.so /usr/local/lib/
+sudo chmod +x /usr/local/bin/aria-agent /usr/local/bin/ariactl
+
+# 创建配置（首次）
+sudo mkdir -p /etc/aria-agent
+sudo cat > /etc/aria-agent/config.toml << 'EOF'
+ebpf_path = "/usr/local/lib/libebpf_firewall.so"
+pin_path = "/sys/fs/bpf/aria"
+state_path = "/var/lib/aria-agent"
+iface_pattern = "^(eth|tap)"
+max_port_policies = 16384
+EOF
+
+# 启动
+sudo aria-agent
+```
+
+### 从源码编译
 
 ```bash
 # 安装依赖
@@ -38,179 +71,409 @@ cargo install bpf-linker
 cargo build --release
 ```
 
-### 基本用法
+## 快速开始
+
+### 1. 启动 Agent
 
 ```bash
-# 启动防火墙
-sudo ariactl system start --iface eth0
+# 前台运行（调试）
+sudo aria-agent
 
+# 或 systemd 服务
+sudo systemctl start aria-agent
+```
+
+Agent 启动后自动扫描匹配 `iface_pattern` 的网卡并挂载 eBPF 程序。
+
+### 2. IP 组管理
+
+```bash
 # 添加 IP 组
-sudo ariactl group add --name web --cidr 10.0.0.0/8
-sudo ariactl group add --name db --cidr 192.168.1.0/24
+ariactl --tap eth0 group add --name web --cidr 10.0.0.0/8
+ariactl --tap eth0 group add --name db --cidr 192.168.1.0/24
 
-# 添加策略（入向：允许 web 到 db 的 TCP 3306）
-sudo ariactl policy add \
+# 查看
+ariactl --tap eth0 group list
+```
+
+### 3. ACL 策略
+
+```bash
+# 入向：允许 web 到 db 的 MySQL 流量
+ariactl --tap eth0 policy add \
   --src-group web --dst-group db \
   --proto tcp --ports 3306 \
   --action accept --direction ingress
 
-# 添加策略（出向：允许所有到 web 的 HTTP/HTTPS）
-sudo ariactl policy add \
+# 出向：允许 HTTP/HTTPS
+ariactl --tap eth0 policy add \
   --src-group any --dst-group web \
   --proto tcp --ports 80,443 \
   --action accept --direction egress
 
-# 查看
-sudo ariactl policy list
-sudo ariactl group list
+# 批量导入策略
+ariactl --tap eth0 policy batch --file policies.json
 
-# 停止
-sudo ariactl system stop
+# 查看 / 删除
+ariactl --tap eth0 policy list
+ariactl --tap eth0 policy delete --src-group web --dst-group db --proto tcp --direction ingress
 ```
 
-### QoS 限速
+### 4. QoS 限速
 
 ```bash
-# 出向限速（EDT shaping）
-sudo ariactl qos add --group web --direction egress --rate 100mbps --burst 1mb
+# 出向 EDT shaping（平滑限速）
+ariactl --tap eth0 qos add --group web --direction egress --rate 100mbps --burst 1mb --mode shaping
 
-# 入向限速（policing，超限直接丢包）
-sudo ariactl qos add --group web --direction ingress --rate 50mbps
+# 入向 policing（超限丢包）
+ariactl --tap eth0 qos add --group web --direction ingress --rate 50mbps
 
-# 查看 QoS 规则
-sudo ariactl qos list
+# 双向同时限速
+ariactl --tap eth0 qos add --group db --direction both --rate 200mbps
 
-# 删除
-sudo ariactl qos delete --group web --direction egress
+# 查看 / 删除
+ariactl --tap eth0 qos list
+ariactl --tap eth0 qos delete --group web --direction egress
 ```
 
-### 连接跟踪
+速率支持单位：`gbps`、`mbps`、`kbps`、`bps`，或纯数字（字节/秒）。
+
+### 5. 端口镜像（SPAN）
+
+```bash
+# 镜像 web→db 的 TCP 流量到 tapmirror 接口
+ariactl --tap eth0 mirror add \
+  --src-group web --dst-group db --proto tcp \
+  --direction both --target tapmirror
+
+# 全局镜像（所有流量）
+ariactl --tap eth0 mirror add \
+  --src-group any --dst-group any --proto any \
+  --direction ingress --target tapmirror
+
+# 查看 / 删除
+ariactl --tap eth0 mirror list
+ariactl --tap eth0 mirror delete --src-group web --dst-group db --proto tcp --direction both
+```
+
+### 6. TCP 响应时间分析（TCP-RT）
+
+每条 TCP 流自动采集：握手延迟、客户端 RTT、服务端 RTT、应用响应时间（ART）、重传次数。
+
+```bash
+# Top-N 流按 ART 排序
+ariactl tcprt top --by art --top 10
+
+# 实时刷新模式
+ariactl tcprt top --by crtt --top 20 --watch --interval 2
+
+# 单流详细延迟分解
+ariactl tcprt flow --dst 10.0.0.5 --dport 3306
+
+# 结合 service chain 做逐跳分析
+ariactl tcprt flow --dst 10.0.0.5 --dport 3306 --chain prod-chain
+```
+
+排序维度：`art`（应用响应）、`crtt`（客户端 RTT）、`srtt`（服务端 RTT）、`hs`（握手）、`retrans`（重传）。
+
+### 7. Service Chain 拓扑
+
+定义多跳服务路径，实现逐段延迟归因：
+
+```bash
+# 应用拓扑
+ariactl chain apply --file chain.json
+
+# 查看
+ariactl chain list
+ariactl chain show prod-chain
+ariactl chain delete prod-chain
+```
+
+chain.json 示例：
+
+```json
+{
+  "name": "prod-chain",
+  "description": "Production service chain",
+  "hops": [
+    {
+      "name": "load-balancer",
+      "hop_type": "proxy",
+      "taps": [{"tap": "tap1", "role": "in"}, {"tap": "tap2", "role": "out"}]
+    },
+    {
+      "name": "app-server",
+      "hop_type": "bridge",
+      "taps": [{"tap": "tap3", "role": "bidirectional"}]
+    }
+  ]
+}
+```
+
+### 8. 包追踪调试
+
+实时包级别调试，查看每个包在 XDP/TC 各阶段的处理结果。支持 IPv4 和 IPv6。
+
+```bash
+# 定时模式（5 秒后自动结束）
+ariactl trace start --dst 192.168.1.10 --proto tcp --dport 3306 --wait 5
+
+# IPv6 追踪
+ariactl trace start --dst ::1 --wait 3
+
+# 连续模式（Ctrl+C 结束）
+ariactl trace start --tap eth0 --dst 10.0.0.5
+
+# 无过滤条件（追踪所有 IPv4+IPv6 流量）
+ariactl trace start --wait 3
+```
+
+输出包含：实例汇总（入/出包数、verdict）+ 详细 drop 原因分析。
+
+### 9. Drop 原因分析
+
+```bash
+# 查看丢包统计
+ariactl stats --drops
+
+# 清空计数器
+ariactl drops flush --tap eth0
+```
+
+丢包原因：`acl-deny`、`acl-port-deny`、`acl-default-deny`、`qos-ingress`、`qos-egress`。
+
+### 10. 连接跟踪
 
 ```bash
 # 查看活跃连接
-sudo ariactl conntrack list
+ariactl --tap eth0 conntrack list
 
 # 清空连接表
-sudo ariactl conntrack flush
+ariactl --tap eth0 conntrack flush
 ```
 
-### 运行时配置
+### 11. 监控与统计
 
 ```bash
-# 查看当前配置（conntrack/monitoring 开关、CPU 数）
-sudo ariactl config show
+# 概览（groups/policies/qos/mirror/conntrack 数量）
+ariactl --tap eth0 stats
 
-# 关闭连接跟踪
-sudo ariactl config set conntrack off
-
-# 关闭流量监控
-sudo ariactl config set monitoring off
-```
-
-### 监控与统计
-
-```bash
-# 概览
-sudo ariactl stats
-
-# 按规则统计
-sudo ariactl stats --rules
+# 按规则统计（命中次数、字节数）
+ariactl --tap eth0 stats --rules
 
 # Top 流量
-sudo ariactl stats --flows --top 20
+ariactl --tap eth0 stats --flows --top 20
 
-# 连接跟踪摘要
-sudo ariactl stats --conntrack
+# QoS 统计（通过/丢弃/整形）
+ariactl --tap eth0 stats --qos
 
-# QoS 状态
-sudo ariactl stats --qos
+# 按组统计
+ariactl --tap eth0 stats --groups
 
-# 实时仪表盘（2 秒刷新）
-sudo ariactl monitor --interval 2
+# 镜像统计
+ariactl --tap eth0 stats --mirror
+
+# TCP-RT 统计
+ariactl --tap eth0 stats --tcprt
+
+# Drop 统计
+ariactl --tap eth0 stats --drops
+```
+
+### 12. 运行时配置
+
+所有开关可热切换，无需重启：
+
+```bash
+ariactl --tap eth0 config show
+
+ariactl --tap eth0 config set conntrack on
+ariactl --tap eth0 config set monitoring on
+ariactl --tap eth0 config set acl on
+ariactl --tap eth0 config set qos off
+ariactl --tap eth0 config set mirror off
+ariactl --tap eth0 config set tcprt on
+```
+
+### 13. 实例管理
+
+```bash
+# 列出所有实例
+ariactl instances
+
+# 健康检查
+ariactl health
+
+# 指定实例操作
+ariactl --tap tap1 stats
+ariactl --tap tap2 policy list
 ```
 
 ## 命令参考
 
 | 命令 | 说明 |
 |------|------|
-| `system start --iface <IF>` | 启动防火墙，加载 eBPF 到指定网卡 |
-| `system stop` | 停止防火墙，卸载 eBPF 程序 |
-| `group add/delete/list` | IP 组管理（CIDR 格式） |
-| `policy add/delete/list` | 策略规则管理（支持 ingress/egress） |
-| `qos add/delete/list` | QoS 限速管理（egress shaping / ingress policing） |
+| `health` | Agent 健康检查 |
+| `instances` | 列出所有实例 |
+| `system start/stop` | 独立模式启停 |
+| `group add/delete/list` | IP 组管理（CIDR） |
+| `policy add/delete/list/batch` | ACL 策略管理 |
+| `qos add/delete/list` | QoS 限速管理 |
+| `mirror add/delete/list` | 端口镜像管理 |
 | `conntrack list/flush` | 连接跟踪操作 |
-| `config show/set` | 运行时配置（conntrack / monitoring 开关） |
-| `stats` | 统计信息（--rules / --flows / --conntrack / --qos） |
-| `monitor` | 实时监控仪表盘 |
-| `tap list` | 列出 aria-agent 管理的 tap 实例 |
+| `tcprt top/flow/flush` | TCP 响应时间分析 |
+| `chain apply/list/show/delete` | Service Chain 拓扑 |
+| `trace start` | 包追踪调试 |
+| `drops list/flush` | Drop 原因分析 |
+| `stats` | 统计信息 |
+| `config show/set` | 运行时配置 |
 
 ## 技术架构
 
 ```
-                 ariactl (CLI)          aria-agent (daemon)
-                       │                          │
-                       ▼                          ▼
-              ┌─────────────────────────────────────────────┐
-              │              aria-core (共享库)               │
-              │  ebpf_ops · state · wal · monitoring · qos_ops │
-              └─────────────────────────────────────────────┘
-                       │  pinned maps + state.json + state.wal
-                       ▼
-              ┌─────────────────────────────────────────────┐
-              │           libebpf_firewall.so (eBPF)        │
-              │                                             │
-              │  ┌─────────┐ ┌──────────┐ ┌──────────────┐ │
-              │  │ policy   │ │conntrack │ │    qos       │ │
-              │  │ 8级匹配  │ │ CT 跟踪  │ │ 令牌桶限速   │ │
-              │  └─────────┘ └──────────┘ └──────────────┘ │
-              │  ┌─────────┐ ┌──────────┐ ┌──────────────┐ │
-              │  │ parser  │ │  stats   │ │    maps      │ │
-              │  │协议解析  │ │ 流量统计  │ │ LPM/Hash/..│ │
-              │  └─────────┘ └──────────┘ └──────────────┘ │
-              └─────────────────────────────────────────────┘
-                       │                    │
-                  XDP (ingress)        TC (egress)
-                       │                    │
-              ┌─────────────────────────────────────────────┐
-              │                  NIC                         │
-              └─────────────────────────────────────────────┘
+                ariactl (CLI)
+                     │  HTTP
+                     ▼
+              aria-agent (daemon)
+              ┌──────────────────────────────────────────────┐
+              │  REST API (axum)                              │
+              │  ControlPlane (per-instance state + WAL)      │
+              │  TapRegistry (netlink auto-discovery)         │
+              │  ServiceChain (topology-aware aggregation)    │
+              └──────────────────────────────────────────────┘
+                     │  pinned maps + state.json + state.wal
+                     ▼
+              aria-core (shared library)
+              ┌──────────────────────────────────────────────┐
+              │  ebpf_ops · state · wal · monitoring         │
+              │  qos_ops · mirror_ops · ct_ops · trace_ops   │
+              │  tcprt_ops · drop_ops                        │
+              └──────────────────────────────────────────────┘
+                     │
+                     ▼
+              libebpf_firewall.so (eBPF kernel programs)
+              ┌──────────────────────────────────────────────┐
+              │                                              │
+              │  ┌─────────┐ ┌──────────┐ ┌──────────────┐  │
+              │  │ policy   │ │conntrack │ │    qos       │  │
+              │  │ 8级匹配  │ │ CT 跟踪  │ │ 令牌桶/EDT   │  │
+              │  └─────────┘ └──────────┘ └──────────────┘  │
+              │  ┌─────────┐ ┌──────────┐ ┌──────────────┐  │
+              │  │ mirror  │ │ tcp-rt   │ │   trace      │  │
+              │  │ SPAN    │ │ 延迟分析  │ │  包追踪      │  │
+              │  └─────────┘ └──────────┘ └──────────────┘  │
+              │  ┌─────────┐ ┌──────────┐ ┌──────────────┐  │
+              │  │ parser  │ │  stats   │ │   drops      │  │
+              │  │ 协议解析 │ │ 流量统计  │ │  丢包分析    │  │
+              │  └─────────┘ └──────────┘ └──────────────┘  │
+              └──────────────────────────────────────────────┘
+                     │                    │
+                XDP (ingress)        TC (egress/ingress)
+                     │                    │
+              ┌──────────────────────────────────────────────┐
+              │                   NIC                         │
+              └──────────────────────────────────────────────┘
+```
+
+### 包处理流水线
+
+```
+入向包 → XDP → parse → CT lookup ─── hit ──→ fast-path (stats + tcprt + qos) → PASS
+                                  │
+                                  └─ miss ─→ LPM (src/dst) → policy (8级) → qos → CT create → PASS/DROP
+                                                                                      │
+                                                                                      ├─ mirror
+                                                                                      ├─ trace
+                                                                                      └─ drop stats
 ```
 
 ## 项目结构
 
 ```
 aria-firewall/
-├── ebpf/src/            — eBPF 数据面
-│   ├── lib.rs           入口调度（XDP ingress / TC egress）
-│   ├── policy.rs        8 级 fallback 策略匹配
-│   ├── conntrack.rs     连接跟踪（CT lookup/create + 超时）
-│   ├── qos.rs           QoS 令牌桶（egress shaping / ingress policing）
-│   ├── parser.rs        协议解析（IPv4/IPv6/TCP/UDP/ICMP）
-│   ├── stats.rs         统计更新（rule stats / flow stats）
-│   ├── maps.rs          eBPF map 定义
-│   └── common.rs        共享数据结构
-├── core/src/            — 共享业务库
-│   ├── ebpf_ops.rs      eBPF 加载、map 读写、replay_state
-│   ├── state.rs         状态管理（FirewallState + StateManager）
-│   ├── wal.rs           WAL 增量持久化（append + compact + replay）
-│   ├── monitoring.rs    监控数据读取与格式化
-│   ├── qos_ops.rs       QoS map 操作 + 速率解析
-│   ├── ct_ops.rs        连接跟踪 map 操作
-│   └── common.rs        共享数据结构（与 eBPF 侧 repr(C) 对齐）
-├── user/src/            — CLI 控制面
-│   ├── main.rs          ariactl 命令实现
-│   └── manager.rs       系统启停管理
-├── agent/src/           — 多实例守护进程
-│   ├── main.rs          aria-agent 入口
-│   ├── control_plane.rs ControlPlane（状态 mutation + WAL + compact）
-│   ├── api_handlers.rs  REST API handler
-│   ├── api_routes.rs    路由注册
-│   ├── netlink.rs       Netlink 网卡监听
-│   ├── tap_registry.rs  tap 实例注册表
-│   ├── system_manager.rs 独立模式管理
-│   └── instance.rs      实例生命周期管理
-└── Cargo.toml           Workspace 配置
+├── ebpf/src/              — eBPF 数据面（内核态）
+│   ├── lib.rs             XDP/TC 入口 + pipeline 调度
+│   ├── policy.rs          8 级 fallback 策略匹配
+│   ├── conntrack.rs       连接跟踪（双向查找 + 超时）
+│   ├── qos.rs             QoS 令牌桶（shaping + policing）
+│   ├── mirror.rs          端口镜像（bpf_clone_redirect）
+│   ├── tcprt.rs           TCP 响应时间追踪
+│   ├── trace.rs           包追踪过滤（IPv4/IPv6）
+│   ├── drops.rs           丢包原因记录
+│   ├── stats.rs           统计更新（rule/flow/group）
+│   ├── parser.rs          协议解析（Eth/IPv4/IPv6/TCP/UDP/VLAN）
+│   ├── maps.rs            eBPF map 定义
+│   └── common.rs          共享数据结构
+├── core/src/              — 共享业务库
+│   ├── ebpf_ops.rs        eBPF 加载、map 读写、replay
+│   ├── state.rs           FirewallState（组/规则/端口集/引用计数）
+│   ├── wal.rs             WAL 增量持久化（append + compact）
+│   ├── monitoring.rs      监控数据读取与聚合
+│   ├── qos_ops.rs         QoS map 操作 + 速率解析
+│   ├── mirror_ops.rs      镜像 map 操作 + ifindex 解析
+│   ├── tcprt_ops.rs       TCP-RT map 读取与过滤
+│   ├── trace_ops.rs       Trace 过滤器设置与事件读取
+│   ├── drop_ops.rs        Drop 统计读取
+│   ├── ct_ops.rs          连接跟踪 map 操作
+│   └── common.rs          共享数据结构（repr(C) 对齐）
+├── agent/src/             — 多实例守护进程
+│   ├── main.rs            aria-agent 入口
+│   ├── control_plane.rs   ControlPlane（状态 + WAL + kernel 同步）
+│   ├── api_handlers.rs    REST API handlers
+│   ├── api_routes.rs      路由注册
+│   ├── netlink.rs         Netlink 网卡监听 + 对账
+│   ├── tap_registry.rs    Tap 实例注册表
+│   ├── instance.rs        实例生命周期（load/attach/replay）
+│   ├── service_chain.rs   Service Chain 拓扑管理
+│   └── system_manager.rs  独立模式管理
+├── user/src/              — CLI 控制面
+│   ├── main.rs            ariactl 命令实现
+│   └── api_client.rs      HTTP API 客户端
+├── api/src/               — 共享 API 类型
+│   └── lib.rs             请求/响应结构体
+└── Cargo.toml             Workspace 配置
 ```
+
+## REST API
+
+所有路由前缀 `/api/v1/`。
+
+| 方法 | 路由 | 说明 |
+|------|------|------|
+| GET | `/health` | 健康检查 |
+| GET | `/instances` | 实例列表 |
+| POST | `/system/start` | 启动防火墙 |
+| POST | `/system/stop` | 停止防火墙 |
+| GET/POST/DELETE | `/{instance}/groups` | IP 组 CRUD |
+| GET/POST/DELETE | `/{instance}/policies` | 策略 CRUD |
+| POST | `/{instance}/policies/batch` | 批量添加策略 |
+| GET/POST/DELETE | `/{instance}/qos` | QoS CRUD |
+| GET/POST/DELETE | `/{instance}/mirror` | 镜像 CRUD |
+| GET/DELETE | `/{instance}/conntrack` | 连接跟踪查看/清空 |
+| GET/PUT | `/{instance}/config` | 配置查看/更新 |
+| GET | `/{instance}/stats` | 统计概览 |
+| GET | `/{instance}/stats/rules\|flows\|qos\|groups\|mirror\|drops` | 详细统计 |
+| GET/DELETE | `/{instance}/tcprt` | TCP-RT 查看/清空 |
+| POST | `/tcprt/query` | 跨实例批量查询 |
+| POST | `/tcprt/filter` | 按目标聚合查询 |
+| POST/GET/DELETE | `/{instance}/trace` | 追踪启动/查看/停止 |
+| GET/POST/DELETE | `/chains` | Service Chain CRUD |
+
+## 配置文件
+
+`/etc/aria-agent/config.toml`：
+
+```toml
+ebpf_path = "/usr/local/lib/libebpf_firewall.so"
+pin_path = "/sys/fs/bpf/aria"
+state_path = "/var/lib/aria-agent"
+iface_pattern = "^(eth|tap)"    # 正则匹配要管理的接口
+max_port_policies = 16384       # 端口集上限
+listen_addr = "127.0.0.1:8080"  # API 监听地址
+```
+
+环境变量：`ARIA_API_URL` 覆盖 CLI 连接地址（默认 `http://127.0.0.1:8080`）。
 
 ## 许可证
 
