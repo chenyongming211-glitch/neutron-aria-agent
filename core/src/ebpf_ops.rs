@@ -722,6 +722,7 @@ pub fn show_stats(pin_path: &str, state_path: &str) -> Result<(), String> {
 
 /// Setup TC ingress: add clsact qdisc and attach the tc_ingress classifier program (mirror only).
 /// The TC link is pinned to `{pin_path}/tc_ingress_link` to prevent detach on drop.
+#[allow(dead_code)]
 pub fn attach_tc_ingress(bpf: &mut aya::Ebpf, iface: &str, pin_path: &str) -> Result<(), String> {
     // Add clsact qdisc (idempotent — ignore "File exists")
     if let Err(e) = aya::programs::tc::qdisc_add_clsact(iface) {
@@ -758,6 +759,7 @@ pub fn attach_tc_ingress(bpf: &mut aya::Ebpf, iface: &str, pin_path: &str) -> Re
 
 /// Setup TC egress: add clsact qdisc and attach the classifier program.
 /// The TC link is pinned to `{pin_path}/tc_egress_link` to prevent detach on drop.
+#[allow(dead_code)]
 pub fn attach_tc_egress(bpf: &mut aya::Ebpf, iface: &str, pin_path: &str) -> Result<(), String> {
     // Add clsact qdisc using aya's API
     if let Err(e) = aya::programs::tc::qdisc_add_clsact(iface) {
@@ -819,6 +821,20 @@ pub fn setup_fq_qdisc(iface: &str) -> Result<(), String> {
     }
     println!("FQ qdisc configured on {}", iface);
     Ok(())
+}
+
+/// Check if FQ qdisc is currently active on the interface.
+pub fn check_fq_qdisc(iface: &str) -> bool {
+    let output = std::process::Command::new("tc")
+        .args(["qdisc", "show", "dev", iface])
+        .output();
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.contains("fq")
+        }
+        Err(_) => false,
+    }
 }
 
 /// Update FIREWALL_CONFIG map at runtime via pinned map.

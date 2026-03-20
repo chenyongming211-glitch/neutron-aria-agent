@@ -24,9 +24,22 @@
 
 ## 系统要求
 
-- Linux 内核 5.8+（推荐 5.16+）
+- Linux 内核 4.18+（RHEL/CentOS 8.2+）或 5.8+（推荐）
 - 内核支持 BTF：`ls /sys/kernel/btf/vmlinux`
-- Ubuntu 22.04+ / Fedora 35+ / RHEL 9+
+- Ubuntu 22.04+ / Fedora 35+ / RHEL 8.2+ / CentOS 8.2+
+
+### 内核版本功能对照
+
+| 功能 | 4.18 (RHEL 8) | 5.8+ | 5.16+ |
+|------|:---:|:---:|:---:|
+| ACL / 连接跟踪 / 统计 | 完整 | 完整 | 完整 |
+| 端口镜像 / TCP-RT / Trace | 完整 | 完整 | 完整 |
+| QoS Policing（入向/出向） | 完整 | 完整 | 完整 |
+| QoS EDT Shaping（平滑整形） | 不支持 | 支持 | 支持 |
+| XDP Link Pin（agent 崩溃保活） | 不支持 | 支持 | 支持 |
+| TC Link Pin | 不支持 | 支持 | 支持 |
+
+> 在 4.18 内核上，QoS shaping 会自动降级为 policing，XDP 会在 agent 退出时脱落（systemd 自动重启恢复）。
 
 ## 安装
 

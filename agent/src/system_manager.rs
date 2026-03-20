@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::control_plane::ControlPlane;
 
 use aria_core::ebpf_ops::{
-    attach_tc_egress, detach_tc_egress, setup_fq_qdisc,
+    detach_tc_egress, setup_fq_qdisc,
     replay_state, ALL_MAP_NAMES,
 };
 
@@ -52,22 +52,28 @@ pub async fn system_start(
 
     println!("XDP attached successfully (link_id: {:?})", link_id);
 
-    // Pin the XDP link so it survives for the lifetime of the process
-    let xdp_link = xdp.take_link(link_id)
-        .map_err(|e| format!("take_link error: {:?}", e))?;
+    // Try to pin the XDP link (requires bpf_link, kernel 5.7+)
     let xdp_link_pin = format!("{}/xdp_link", pin_path);
-    let fd_link: aya::programs::links::FdLink = xdp_link.try_into()
-        .map_err(|e: aya::programs::links::LinkError| format!("convert to FdLink error: {:?}", e))?;
-    let _pinned_link = fd_link.pin(&xdp_link_pin)
-        .map_err(|e| format!("pin link error: {:?}", e))?;
+    match (|| -> Result<(), String> {
+        let xdp_link = xdp.take_link(link_id)
+            .map_err(|e| format!("take_link: {:?}", e))?;
+        let fd_link: aya::programs::links::FdLink = xdp_link.try_into()
+            .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
+        fd_link.pin(&xdp_link_pin)
+            .map_err(|e| format!("pin: {:?}", e))?;
+        Ok(())
+    })() {
+        Ok(()) => println!("XDP link pinned (crash-resilient)"),
+        Err(e) => eprintln!("XDP link pin not supported ({}), XDP will detach on agent exit", e),
+    }
 
-    // Attach TC egress
-    if let Err(e) = attach_tc_egress(&mut bpf, iface, pin_path) {
+    // Attach TC egress (with graceful link pin fallback)
+    if let Err(e) = attach_tc_program(&mut bpf, "tc_egress", iface, aya::programs::tc::TcAttachType::Egress, pin_path) {
         eprintln!("Warning: TC egress attach failed: {}. Egress control disabled.", e);
     }
 
-    // Attach TC ingress (mirror)
-    if let Err(e) = aria_core::ebpf_ops::attach_tc_ingress(&mut bpf, iface, pin_path) {
+    // Attach TC ingress (mirror, with graceful link pin fallback)
+    if let Err(e) = attach_tc_program(&mut bpf, "tc_ingress", iface, aya::programs::tc::TcAttachType::Ingress, pin_path) {
         eprintln!("Warning: TC ingress attach failed: {}. Ingress mirror disabled.", e);
     }
 
@@ -177,5 +183,56 @@ pub async fn system_stop(
     control_plane.unregister_instance("system").await;
 
     println!("eBPF system stopped");
+    Ok(())
+}
+
+/// Attach a TC program with optional link pinning (graceful fallback for older kernels).
+fn attach_tc_program(
+    bpf: &mut aya::Ebpf,
+    prog_name: &str,
+    iface: &str,
+    attach_type: aya::programs::tc::TcAttachType,
+    pin_path: &str,
+) -> Result<(), String> {
+    if let Err(e) = aya::programs::tc::qdisc_add_clsact(iface) {
+        let err_str = format!("{:?}", e);
+        if !err_str.contains("File exists") {
+            return Err(format!("qdisc_add_clsact: {}", err_str));
+        }
+    }
+
+    let tc_program = bpf.program_mut(prog_name)
+        .ok_or_else(|| format!("{} program not found", prog_name))?;
+
+    let tc: &mut aya::programs::SchedClassifier = tc_program
+        .try_into()
+        .map_err(|e: aya::programs::ProgramError| format!("{} try_into: {:?}", prog_name, e))?;
+
+    tc.load().map_err(|e| format!("{} load: {:?}", prog_name, e))?;
+
+    let dir_str = match attach_type {
+        aya::programs::tc::TcAttachType::Ingress => "ingress",
+        aya::programs::tc::TcAttachType::Egress => "egress",
+        _ => "unknown",
+    };
+
+    let link_id = tc.attach(iface, attach_type)
+        .map_err(|e| format!("{} attach: {:?}", prog_name, e))?;
+
+    // Try to pin TC link (graceful fallback)
+    match (|| -> Result<(), String> {
+        let tc_link = tc.take_link(link_id)
+            .map_err(|e| format!("take_link: {:?}", e))?;
+        let fd_link: aya::programs::links::FdLink = tc_link.try_into()
+            .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
+        let link_pin = format!("{}/{}_link", pin_path, prog_name);
+        fd_link.pin(&link_pin)
+            .map_err(|e| format!("pin: {:?}", e))?;
+        Ok(())
+    })() {
+        Ok(()) => println!("TC {} attached to {} (link pinned)", dir_str, iface),
+        Err(e) => println!("TC {} attached to {} (link pin skipped: {})", dir_str, iface, e),
+    }
+
     Ok(())
 }

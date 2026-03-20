@@ -80,7 +80,7 @@ impl TapRegistry {
             }
         }
 
-        let instance = FirewallInstance::new(
+        let mut instance = FirewallInstance::new(
             iface,
             self.base_pin_path.to_str().unwrap(),
             self.base_state_path.to_str().unwrap(),
