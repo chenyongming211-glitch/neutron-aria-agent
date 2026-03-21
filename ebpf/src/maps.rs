@@ -172,3 +172,7 @@ pub static SSL_HTTP_TABLE: LruHashMap<u64, SslHttpValue> = LruHashMap::with_max_
 
 #[map(name = "SSL_HTTP_SEQ")]
 pub static SSL_HTTP_SEQ: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+/// Per-CPU scratch for building SslHttpValue without stack overflow
+#[map(name = "SSL_HTTP_VALUE_BUF")]
+pub static SSL_HTTP_VALUE_BUF: PerCpuArray<SslHttpValue> = PerCpuArray::with_max_entries(1, 0);

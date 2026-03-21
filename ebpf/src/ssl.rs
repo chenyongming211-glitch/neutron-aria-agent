@@ -4,7 +4,7 @@ use aya_ebpf::programs::{ProbeContext, RetProbeContext};
 use crate::maps::{
     FIREWALL_CONFIG, SSL_HANDSHAKE_SCRATCH, SSL_CONN_TABLE, SSL_SNI_TABLE, SSL_SEQ,
     SSL_HTTP_SCRATCH_BUF, SSL_HTTP_SCRATCH, SSL_READ_SCRATCH, SSL_HTTP_TABLE, SSL_HTTP_SEQ,
-    SSL_HTTP_PARSE_BUF,
+    SSL_HTTP_PARSE_BUF, SSL_HTTP_VALUE_BUF,
     SslScratch, SslConnValue, SslReadScratch, SslHttpValue,
 };
 
@@ -213,19 +213,18 @@ pub unsafe fn ssl_read_return_impl(ctx: &RetProbeContext) -> u32 {
 
     let pid_tgid = bpf_get_current_pid_tgid();
 
-    // Get and remove read scratch
+    // Get and remove read scratch (small struct, ok to copy)
     let read_scratch = match SSL_READ_SCRATCH.get(&pid_tgid) {
         Some(s) => *s,
         None => return 0,
     };
     let _ = SSL_READ_SCRATCH.remove(&pid_tgid);
 
-    // Get and remove HTTP scratch (pending request)
+    // Get HTTP scratch pointer (avoid stack copy of 264-byte struct)
     let http_scratch = match SSL_HTTP_SCRATCH.get(&pid_tgid) {
-        Some(s) => *s,
+        Some(s) => s,
         None => return 0,
     };
-    let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
 
     // Read first 32 bytes of response to detect "HTTP/1.x NNN" (handle fragmentation)
     let parse_buf = match SSL_HTTP_PARSE_BUF.get_ptr_mut(0) {
@@ -265,16 +264,23 @@ pub unsafe fn ssl_read_return_impl(ctx: &RetProbeContext) -> u32 {
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
 
-    let event = SslHttpValue {
-        pid,
-        tid,
-        request_ts: http_scratch.write_ts,
-        response_ts: now,
-        latency_ns,
-        status_code,
-        _pad: [0u8; 6],
-        req_data: http_scratch.req_data,
+    // Use Per-CPU buffer for SslHttpValue to avoid stack overflow
+    let event = match SSL_HTTP_VALUE_BUF.get_ptr_mut(0) {
+        Some(p) => &mut *p,
+        None => return 0,
     };
+
+    event.pid = pid;
+    event.tid = tid;
+    event.request_ts = http_scratch.write_ts;
+    event.response_ts = now;
+    event.latency_ns = latency_ns;
+    event.status_code = status_code;
+    event._pad = [0u8; 6];
+    event.req_data.copy_from_slice(&http_scratch.req_data);
+
+    // Remove HTTP scratch after copying data
+    let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
 
     // Get per-CPU seq
     let seq_ptr = match SSL_HTTP_SEQ.get_ptr_mut(0) {
@@ -284,6 +290,6 @@ pub unsafe fn ssl_read_return_impl(ctx: &RetProbeContext) -> u32 {
     let seq = *seq_ptr;
     *seq_ptr = seq.wrapping_add(1);
 
-    let _ = SSL_HTTP_TABLE.insert(&seq, &event, 0);
+    let _ = SSL_HTTP_TABLE.insert(&seq, event, 0);
     0
 }
