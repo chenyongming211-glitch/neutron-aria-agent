@@ -169,7 +169,7 @@ ariactl --tap eth0 mirror list
 ariactl --tap eth0 mirror delete --src-group web --dst-group db --proto tcp --direction both
 ```
 
-### 6. TCP 响应时间分析（TCP-RT）
+### 6. 业务延迟分析（TCP-RT）
 
 每条 TCP 流自动采集：握手延迟、客户端 RTT、服务端 RTT、应用响应时间（ART）、重传次数。
 
@@ -182,64 +182,36 @@ ariactl tcprt top --by crtt --top 20 --watch --interval 2
 
 # 单流详细延迟分解
 ariactl tcprt flow --dst 10.0.0.5 --dport 3306
-
-# 结合 service chain 做逐跳分析
-ariactl tcprt flow --dst 10.0.0.5 --dport 3306 --chain prod-chain
 ```
 
 排序维度：`art`（应用响应）、`crtt`（客户端 RTT）、`srtt`（服务端 RTT）、`hs`（握手）、`retrans`（重传）。
 
-### 7. Service Chain 拓扑
-
-定义多跳服务路径，实现逐段延迟归因：
+**逐跳延迟归因**：结合 `--chain` 指定服务链拓扑，自动按 hop 拆分延迟瓶颈：
 
 ```bash
-# 应用拓扑
-ariactl chain apply --file chain.json
-
-# 查看
-ariactl chain list
-ariactl chain show prod-chain
-ariactl chain delete prod-chain
+ariactl tcprt flow --dst 10.0.0.5 --dport 3306 --chain prod-chain
 ```
 
-chain.json 示例：
+### 7. 丢包溯源（Chain X-Ray）
 
-```json
-{
-  "name": "prod-chain",
-  "description": "Production service chain",
-  "hops": [
-    {
-      "name": "load-balancer",
-      "hop_type": "proxy",
-      "taps": [{"tap": "tap1", "role": "in"}, {"tap": "tap2", "role": "out"}]
-    },
-    {
-      "name": "app-server",
-      "hop_type": "bridge",
-      "taps": [{"tap": "tap3", "role": "bidirectional"}]
-    }
-  ]
-}
-```
-
-### 8. Chain X-Ray — 基于服务链感知的链路分析
-
-利用 Service Chain 拓扑，按 hop 顺序追踪包的流转路径，自动归因丢包位置。即使安全设备内部的 drop 无法被 eBPF 捕获，也能通过 in/out 口的包数差定位到具体设备。
+实时包级别追踪，查看每个包在 XDP/TC 各阶段的处理结果，支持 IPv4 和 IPv6。
 
 ```bash
-# 定时模式（5 秒采集，按 hop 展示）
-ariactl trace start --chain prod-chain --dst 10.0.0.5 --dport 3306 --wait 5
+# 单实例追踪
+ariactl trace start --tap eth0 --dst 10.0.0.5 --proto tcp --dport 3306 --wait 5
 
-# 连续模式（实时刷新，Ctrl+C 结束）
-ariactl trace start --chain prod-chain --dst 10.0.0.5
-
-# 不指定 --chain 则按传统平铺模式展示（向后兼容）
+# 跨实例追踪（自动发现所有活跃实例）
 ariactl trace start --dst 10.0.0.5 --wait 5
+
+# 连续模式（Ctrl+C 结束）
+ariactl trace start --dst 10.0.0.5
 ```
 
-输出示例：
+**服务链透视**：结合 `--chain` 按 hop 顺序展示包的流转路径，自动归因丢包位置。即使安全设备内部的 drop 无法被 eBPF 捕获，也能通过 in/out 口的包数差定位到具体设备：
+
+```bash
+ariactl trace start --chain prod-chain --dst 10.0.0.5 --dport 3306 --wait 5
+```
 
 ```
 Chain: prod-chain    Filter: * → 10.0.0.5:3306
@@ -257,7 +229,7 @@ Chain: prod-chain    Filter: * → 10.0.0.5:3306
   app-server     tap5    bidi   0 pkts    0 pkts    -
 ```
 
-丢包归因：
+丢包归因标记：
 
 | 标记 | 含义 |
 |------|------|
@@ -266,27 +238,44 @@ Chain: prod-chain    Filter: * → 10.0.0.5:3306
 | `└─ no drop reason captured` | 黑盒丢包：设备内部阻拦，eBPF 未捕获 drop 事件 |
 | `↓ N pkts lost between A and B` | hop 间网络丢包 |
 
-### 9. 包追踪调试
+### 服务链拓扑定义
 
-实时包级别调试，查看每个包在 XDP/TC 各阶段的处理结果。支持 IPv4 和 IPv6。
+TCP-RT 的 `--chain` 和 Trace 的 `--chain` 共享同一份拓扑定义：
 
 ```bash
-# 定时模式（5 秒后自动结束）
-ariactl trace start --dst 192.168.1.10 --proto tcp --dport 3306 --wait 5
-
-# IPv6 追踪
-ariactl trace start --dst ::1 --wait 3
-
-# 连续模式（Ctrl+C 结束）
-ariactl trace start --tap eth0 --dst 10.0.0.5
-
-# 无过滤条件（追踪所有 IPv4+IPv6 流量）
-ariactl trace start --wait 3
+ariactl chain apply --file chain.json    # 创建/更新
+ariactl chain list                       # 列出
+ariactl chain show prod-chain            # 详情
+ariactl chain delete prod-chain          # 删除
 ```
 
-输出包含：实例汇总（入/出包数、verdict）+ 详细 drop 原因分析。
+chain.json 示例：
 
-### 10. Drop 原因分析
+```json
+{
+  "name": "prod-chain",
+  "description": "Production service chain",
+  "hops": [
+    {
+      "name": "load-balancer",
+      "hop_type": "proxy",
+      "taps": [{"tap": "tap1", "role": "in"}, {"tap": "tap2", "role": "out"}]
+    },
+    {
+      "name": "firewall",
+      "hop_type": "bridge",
+      "taps": [{"tap": "tap3", "role": "in"}, {"tap": "tap4", "role": "out"}]
+    },
+    {
+      "name": "app-server",
+      "hop_type": "bridge",
+      "taps": [{"tap": "tap5", "role": "bidi"}]
+    }
+  ]
+}
+```
+
+### 8. Drop 原因分析
 
 ```bash
 # 查看丢包统计
@@ -298,7 +287,7 @@ ariactl drops flush --tap eth0
 
 丢包原因：`acl-deny`、`acl-port-deny`、`acl-default-deny`、`qos-ingress`、`qos-egress`。
 
-### 11. 连接跟踪
+### 9. 连接跟踪
 
 ```bash
 # 查看活跃连接
@@ -308,7 +297,7 @@ ariactl --tap eth0 conntrack list
 ariactl --tap eth0 conntrack flush
 ```
 
-### 12. 监控与统计
+### 10. 监控与统计
 
 ```bash
 # 概览（groups/policies/qos/mirror/conntrack 数量）
@@ -336,7 +325,7 @@ ariactl --tap eth0 stats --tcprt
 ariactl --tap eth0 stats --drops
 ```
 
-### 13. 运行时配置
+### 11. 运行时配置
 
 所有开关可热切换，无需重启：
 
@@ -351,7 +340,7 @@ ariactl --tap eth0 config set mirror off
 ariactl --tap eth0 config set tcprt on
 ```
 
-### 14. 实例管理
+### 12. 实例管理
 
 ```bash
 # 列出所有实例
@@ -377,9 +366,9 @@ ariactl --tap tap2 policy list
 | `qos add/delete/list` | QoS 限速管理 |
 | `mirror add/delete/list` | 端口镜像管理 |
 | `conntrack list/flush` | 连接跟踪操作 |
-| `tcprt top/flow/flush` | TCP 响应时间分析 |
-| `chain apply/list/show/delete` | Service Chain 拓扑 |
-| `trace start` | 包追踪调试（支持 `--chain` 服务链透视） |
+| `tcprt top/flow/flush` | 业务延迟分析（支持 `--chain` 逐跳归因） |
+| `trace start` | 丢包溯源（支持 `--chain` 服务链透视） |
+| `chain apply/list/show/delete` | 服务链拓扑定义（供 tcprt/trace 共用） |
 | `drops list/flush` | Drop 原因分析 |
 | `stats` | 统计信息 |
 | `config show/set` | 运行时配置 |
