@@ -188,8 +188,17 @@ pub unsafe fn ssl_read_entry_impl(ctx: &ProbeContext) -> u32 {
 
     let pid_tgid = bpf_get_current_pid_tgid();
 
-    // Only track if we have a pending write (HTTP request)
-    if SSL_HTTP_SCRATCH.get(&pid_tgid).is_none() {
+    // Check for pending HTTP request (avoid stack copy of 264-byte struct)
+    let http_scratch = match SSL_HTTP_SCRATCH.get(&pid_tgid) {
+        Some(s) => s,
+        None => return 0,
+    };
+
+    // Clean up stale entries: request without response for > 30s
+    const SCRATCH_TIMEOUT_NS: u64 = 30_000_000_000;
+    let now = bpf_ktime_get_ns();
+    if now.saturating_sub(http_scratch.write_ts) > SCRATCH_TIMEOUT_NS {
+        let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
         return 0;
     }
 

@@ -82,25 +82,43 @@ fn bytes_to_string(bytes: &[u8]) -> String {
 }
 
 /// Parse method, path, and host from raw HTTP request header bytes
+/// Robust parsing: case-insensitive Host header, tolerant whitespace
 fn parse_http_request(data: &[u8; 256]) -> (String, String, String) {
     let raw = bytes_to_string(data);
 
-    // Parse request line: "METHOD PATH HTTP/1.x\r\n"
-    let first_line = raw.split("\r\n").next().unwrap_or("");
-    let mut parts = first_line.splitn(3, ' ');
+    // Parse request line: "METHOD PATH HTTP/1.x"
+    // Handle multiple spaces between parts (non-standard but common)
+    let first_line = match raw.split("\r\n").next() {
+        Some(line) => line,
+        None => return (String::new(), String::new(), String::new()),
+    };
+
+    // Split by whitespace, filter empty parts (handles multiple spaces)
+    let mut parts = first_line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
 
-    // Parse Host header
+    // Parse Host header (case-insensitive, tolerant of whitespace)
     let mut host = String::new();
     for line in raw.split("\r\n").skip(1) {
-        if let Some(val) = line.strip_prefix("Host: ") {
-            host = val.to_string();
-            break;
+        let line_trimmed = line.trim();
+        if line_trimmed.is_empty() {
+            continue;
         }
-        if let Some(val) = line.strip_prefix("host: ") {
-            host = val.to_string();
-            break;
+
+        // Case-insensitive Host header matching
+        // Accepts: "Host: example.com", "host: example.com", "HOST: example.com"
+        // Also handles: "Host : example.com", "Host:  example.com"
+        let line_lower = line_trimmed.to_lowercase();
+        if line_lower.starts_with("host") {
+            // Find the colon and extract value
+            if let Some(colon_pos) = line_trimmed.find(':') {
+                let value = line_trimmed[colon_pos + 1..].trim();
+                if !value.is_empty() {
+                    host = value.to_string();
+                    break;
+                }
+            }
         }
     }
 
