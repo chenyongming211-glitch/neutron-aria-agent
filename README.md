@@ -224,7 +224,49 @@ chain.json 示例：
 }
 ```
 
-### 8. 包追踪调试
+### 8. Chain X-Ray — 基于服务链感知的链路分析
+
+利用 Service Chain 拓扑，按 hop 顺序追踪包的流转路径，自动归因丢包位置。即使安全设备内部的 drop 无法被 eBPF 捕获，也能通过 in/out 口的包数差定位到具体设备。
+
+```bash
+# 定时模式（5 秒采集，按 hop 展示）
+ariactl trace start --chain prod-chain --dst 10.0.0.5 --dport 3306 --wait 5
+
+# 连续模式（实时刷新，Ctrl+C 结束）
+ariactl trace start --chain prod-chain --dst 10.0.0.5
+
+# 不指定 --chain 则按传统平铺模式展示（向后兼容）
+ariactl trace start --dst 10.0.0.5 --wait 5
+```
+
+输出示例：
+
+```
+Chain: prod-chain    Filter: * → 10.0.0.5:3306
+
+  Hop            Tap     Role   In        Out       Drops
+  ──────────     ──────  ────   ────────  ────────  ──────────────────
+  load-balancer  tap1    in     50 pkts   -         -
+  load-balancer  tap2    out    -         48 pkts   -
+                                          ↓ 2 pkts lost between load-balancer and firewall
+  firewall       tap3    in     46 pkts   -         ✗ 40 acl_deny
+  firewall       tap4    out    -         0 pkts    ✗ 6 qos_drop
+                         ★ dropped 46/46 inside firewall
+                           ├─ ingress: 40 (acl_deny)
+                           └─ egress: 6 (qos_drop)
+  app-server     tap5    bidi   0 pkts    0 pkts    -
+```
+
+丢包归因：
+
+| 标记 | 含义 |
+|------|------|
+| `✗ N reason` | eBPF 捕获到的 drop 事件，按 reason 分组 |
+| `★ dropped M/N inside <hop>` | 设备内部丢包（in 口进入但 out 口未出），附带方向+原因树状展开 |
+| `└─ no drop reason captured` | 黑盒丢包：设备内部阻拦，eBPF 未捕获 drop 事件 |
+| `↓ N pkts lost between A and B` | hop 间网络丢包 |
+
+### 9. 包追踪调试
 
 实时包级别调试，查看每个包在 XDP/TC 各阶段的处理结果。支持 IPv4 和 IPv6。
 
@@ -244,7 +286,7 @@ ariactl trace start --wait 3
 
 输出包含：实例汇总（入/出包数、verdict）+ 详细 drop 原因分析。
 
-### 9. Drop 原因分析
+### 10. Drop 原因分析
 
 ```bash
 # 查看丢包统计
@@ -256,7 +298,7 @@ ariactl drops flush --tap eth0
 
 丢包原因：`acl-deny`、`acl-port-deny`、`acl-default-deny`、`qos-ingress`、`qos-egress`。
 
-### 10. 连接跟踪
+### 11. 连接跟踪
 
 ```bash
 # 查看活跃连接
@@ -266,7 +308,7 @@ ariactl --tap eth0 conntrack list
 ariactl --tap eth0 conntrack flush
 ```
 
-### 11. 监控与统计
+### 12. 监控与统计
 
 ```bash
 # 概览（groups/policies/qos/mirror/conntrack 数量）
@@ -294,7 +336,7 @@ ariactl --tap eth0 stats --tcprt
 ariactl --tap eth0 stats --drops
 ```
 
-### 12. 运行时配置
+### 13. 运行时配置
 
 所有开关可热切换，无需重启：
 
@@ -309,7 +351,7 @@ ariactl --tap eth0 config set mirror off
 ariactl --tap eth0 config set tcprt on
 ```
 
-### 13. 实例管理
+### 14. 实例管理
 
 ```bash
 # 列出所有实例
@@ -337,7 +379,7 @@ ariactl --tap tap2 policy list
 | `conntrack list/flush` | 连接跟踪操作 |
 | `tcprt top/flow/flush` | TCP 响应时间分析 |
 | `chain apply/list/show/delete` | Service Chain 拓扑 |
-| `trace start` | 包追踪调试 |
+| `trace start` | 包追踪调试（支持 `--chain` 服务链透视） |
 | `drops list/flush` | Drop 原因分析 |
 | `stats` | 统计信息 |
 | `config show/set` | 运行时配置 |
