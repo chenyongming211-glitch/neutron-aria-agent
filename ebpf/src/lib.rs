@@ -2,7 +2,7 @@
 #![no_main]
 
 use aya_ebpf::macros::{xdp, classifier, uprobe, uretprobe};
-use aya_ebpf::programs::{XdpContext, TcContext, ProbeContext};
+use aya_ebpf::programs::{XdpContext, TcContext, ProbeContext, RetProbeContext};
 use aya_ebpf::maps::LpmTrie;
 use aya_ebpf::maps::lpm_trie::Key;
 use aya_ebpf::helpers::bpf_ktime_get_ns;
@@ -772,7 +772,7 @@ pub fn ssl_handshake_entry(ctx: ProbeContext) -> u32 {
 }
 
 #[uretprobe]
-pub fn ssl_handshake_return(ctx: ProbeContext) -> u32 {
+pub fn ssl_handshake_return(ctx: RetProbeContext) -> u32 {
     unsafe { ssl::ssl_handshake_return_impl(&ctx) }
 }
 

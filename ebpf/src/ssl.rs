@@ -1,5 +1,5 @@
 use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_user_str_bytes};
-use aya_ebpf::programs::ProbeContext;
+use aya_ebpf::programs::{ProbeContext, RetProbeContext};
 
 use crate::maps::{
     FIREWALL_CONFIG, SSL_HANDSHAKE_SCRATCH, SSL_CONN_TABLE, SSL_SNI_TABLE, SSL_SEQ,
@@ -33,7 +33,7 @@ pub unsafe fn ssl_handshake_entry_impl(ctx: &ProbeContext) -> u32 {
     0
 }
 
-pub unsafe fn ssl_handshake_return_impl(_ctx: &ProbeContext) -> u32 {
+pub unsafe fn ssl_handshake_return_impl(_ctx: &RetProbeContext) -> u32 {
     if !ssl_enabled() {
         return 0;
     }
