@@ -43,6 +43,15 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
 
     // SYN (no ACK) — new connection, forward direction
     if is_syn && !is_ack && is_forward {
+        // Dual-observation: if entry exists with syn_ingress_ts == syn_ts, this is the egress pass
+        if let Some(entry) = TCPRT_TABLE_V4.get_ptr_mut(ct_key) {
+            if (*entry).state == TCPRT_STATE_HANDSHAKE
+                && (*entry).syn_ingress_ts == (*entry).syn_ts
+            {
+                (*entry).syn_ts = now; // update to egress timestamp, preserve syn_ingress_ts
+                return;
+            }
+        }
         let val = TcpRtValue {
             syn_ts: now,
             synack_ts: 0,
@@ -53,6 +62,8 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
             rtt_client_ns: 0,
             rtt_server_ns: 0,
             art_ns: 0,
+            syn_ingress_ts: now,
+            synack_ingress_ts: 0,
             retrans_req: 0,
             retrans_resp: 0,
             request_count: 0,
@@ -86,6 +97,9 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
 
     // SYN-ACK — reverse direction (server response)
     if is_syn && is_ack && !is_forward {
+        if (*entry).synack_ingress_ts == 0 {
+            (*entry).synack_ingress_ts = now; // first observation (ingress)
+        }
         (*entry).synack_ts = now;
         (*entry).rtt_server_ns = now.wrapping_sub((*entry).syn_ts);
         (*entry).flags |= TCPRT_FLAG_SYNACK_SEEN;
@@ -177,6 +191,15 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
     let is_rst = (flags & TCP_FLAG_RST) != 0;
 
     if is_syn && !is_ack && is_forward {
+        // Dual-observation: if entry exists with syn_ingress_ts == syn_ts, this is the egress pass
+        if let Some(entry) = TCPRT_TABLE_V6.get_ptr_mut(ct_key) {
+            if (*entry).state == TCPRT_STATE_HANDSHAKE
+                && (*entry).syn_ingress_ts == (*entry).syn_ts
+            {
+                (*entry).syn_ts = now;
+                return;
+            }
+        }
         let val = TcpRtValue {
             syn_ts: now,
             synack_ts: 0,
@@ -187,6 +210,8 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
             rtt_client_ns: 0,
             rtt_server_ns: 0,
             art_ns: 0,
+            syn_ingress_ts: now,
+            synack_ingress_ts: 0,
             retrans_req: 0,
             retrans_resp: 0,
             request_count: 0,
@@ -217,6 +242,9 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
     }
 
     if is_syn && is_ack && !is_forward {
+        if (*entry).synack_ingress_ts == 0 {
+            (*entry).synack_ingress_ts = now;
+        }
         (*entry).synack_ts = now;
         (*entry).rtt_server_ns = now.wrapping_sub((*entry).syn_ts);
         (*entry).flags |= TCPRT_FLAG_SYNACK_SEEN;

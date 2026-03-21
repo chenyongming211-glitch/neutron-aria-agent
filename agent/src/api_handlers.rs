@@ -709,6 +709,9 @@ pub async fn list_tcprt(
                 retrans_resp: e.retrans_resp,
                 request_count: e.request_count,
                 state: e.state,
+                forward_platform_us: e.forward_platform_us,
+                server_network_us: e.server_network_us,
+                reverse_platform_us: e.reverse_platform_us,
             }).collect();
             Ok(Json(aria_api::TcpRtResponse { flows }))
         }
@@ -750,6 +753,9 @@ pub async fn batch_query_tcprt(
                     retrans_resp: e.retrans_resp,
                     request_count: e.request_count,
                     state: e.state,
+                    forward_platform_us: e.forward_platform_us,
+                    server_network_us: e.server_network_us,
+                    reverse_platform_us: e.reverse_platform_us,
                 },
             }).collect();
             Ok(Json(aria_api::TcpRtBatchQueryResponse { results }))
@@ -777,6 +783,9 @@ pub async fn filter_tcprt(
                         avg_handshake_us: entries.iter().map(|e| e.handshake_us).sum::<f64>() / fc,
                         total_retrans_req: entries.iter().map(|e| e.retrans_req).sum(),
                         total_retrans_resp: entries.iter().map(|e| e.retrans_resp).sum(),
+                        avg_forward_platform_us: entries.iter().map(|e| e.forward_platform_us).sum::<f64>() / fc,
+                        avg_server_network_us: entries.iter().map(|e| e.server_network_us).sum::<f64>() / fc,
+                        avg_reverse_platform_us: entries.iter().map(|e| e.reverse_platform_us).sum::<f64>() / fc,
                     }
                 })
                 .collect();

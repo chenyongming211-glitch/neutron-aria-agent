@@ -216,6 +216,8 @@ pub struct TcpRtValue {
     pub rtt_client_ns: u64,
     pub rtt_server_ns: u64,
     pub art_ns: u64,
+    pub syn_ingress_ts: u64,
+    pub synack_ingress_ts: u64,
     pub retrans_req: u32,
     pub retrans_resp: u32,
     pub request_count: u32,

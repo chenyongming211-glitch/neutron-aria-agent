@@ -216,6 +216,8 @@ pub struct TcpRtValue {
     pub rtt_client_ns: u64,     // Client-side RTT (ack_ts - synack_ts)
     pub rtt_server_ns: u64,     // Server-side RTT (synack_ts - syn_ts)
     pub art_ns: u64,            // Application response time (first_response_ts - last_request_ts)
+    pub syn_ingress_ts: u64,    // SYN first observation (ingress) for dual-observation
+    pub synack_ingress_ts: u64, // SYN-ACK first observation (ingress) for dual-observation
     pub retrans_req: u32,       // Request direction retransmissions (client → server)
     pub retrans_resp: u32,      // Response direction retransmissions (server → client)
     pub request_count: u32,     // Completed request-response cycles

@@ -15,6 +15,9 @@ pub struct TcpRtEntry {
     pub retrans_resp: u32,
     pub request_count: u32,
     pub state: String,
+    pub forward_platform_us: f64,
+    pub server_network_us: f64,
+    pub reverse_platform_us: f64,
 }
 
 fn state_name(state: u8) -> String {
@@ -69,6 +72,7 @@ pub fn get_tcprt_flows_v6(pin_path: &str) -> Result<Vec<TcpRtEntry>, String> {
 }
 
 fn value_to_entry(src_ip: String, dst_ip: String, src_port: u16, dst_port: u16, val: &TcpRtValue) -> TcpRtEntry {
+    let dual = val.syn_ingress_ts > 0 && val.syn_ingress_ts != val.syn_ts;
     TcpRtEntry {
         src_ip,
         dst_ip,
@@ -82,6 +86,13 @@ fn value_to_entry(src_ip: String, dst_ip: String, src_port: u16, dst_port: u16, 
         retrans_resp: val.retrans_resp,
         request_count: val.request_count,
         state: state_name(val.state),
+        forward_platform_us: if dual { (val.syn_ts - val.syn_ingress_ts) as f64 / 1000.0 } else { 0.0 },
+        server_network_us: if dual && val.synack_ingress_ts > 0 {
+            (val.synack_ingress_ts - val.syn_ts) as f64 / 1000.0
+        } else { 0.0 },
+        reverse_platform_us: if dual && val.synack_ingress_ts > 0 {
+            (val.synack_ts - val.synack_ingress_ts) as f64 / 1000.0
+        } else { 0.0 },
     }
 }
 

@@ -393,6 +393,12 @@ pub struct TcpRtEntry {
     pub retrans_resp: u32,
     pub request_count: u32,
     pub state: String,
+    #[serde(default)]
+    pub forward_platform_us: f64,
+    #[serde(default)]
+    pub server_network_us: f64,
+    #[serde(default)]
+    pub reverse_platform_us: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -447,6 +453,12 @@ pub struct TcpRtAggregatedEntry {
     pub avg_handshake_us: f64,
     pub total_retrans_req: u32,
     pub total_retrans_resp: u32,
+    #[serde(default)]
+    pub avg_forward_platform_us: f64,
+    #[serde(default)]
+    pub avg_server_network_us: f64,
+    #[serde(default)]
+    pub avg_reverse_platform_us: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

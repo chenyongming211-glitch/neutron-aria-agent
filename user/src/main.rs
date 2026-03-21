@@ -493,6 +493,7 @@ async fn run_tcprt_flow(
 }
 
 /// 3-segment coarse-grained breakdown (no chain config needed)
+/// With dual-observation (bond1 XDP+TC), upgrades to 5-segment breakdown.
 fn run_tcprt_flow_coarse(
     dst: &str,
     dport: u16,
@@ -502,8 +503,43 @@ fn run_tcprt_flow_coarse(
     println!("Service: {}:{}  ({} flows)\n", dst, dport, total_flows);
 
     if resp.instances.len() == 1 {
-        // Single instance: just show aggregated metrics, no breakdown
         let inst = &resp.instances[0];
+
+        // Check for dual-observation mode (5-segment)
+        if inst.avg_forward_platform_us > 0.0 {
+            let client_net = inst.avg_rtt_client_us;
+            let fwd_platform = inst.avg_forward_platform_us;
+            let server_net = inst.avg_server_network_us;
+            let rev_platform = inst.avg_reverse_platform_us;
+            let server_proc = (inst.avg_art_us - server_net).max(0.0);
+
+            struct Segment { label: &'static str, value: f64 }
+            let segments = [
+                Segment { label: "Client Network", value: client_net },
+                Segment { label: "Platform (forward)", value: fwd_platform },
+                Segment { label: "Server Network", value: server_net },
+                Segment { label: "Platform (reverse)", value: rev_platform },
+                Segment { label: "Server Processing", value: server_proc },
+            ];
+            let max_val = segments.iter().map(|s| s.value).fold(0.0f64, f64::max);
+
+            println!("  Latency Breakdown (avg)");
+            println!("  ─────────────────────────  ────────────");
+            for seg in &segments {
+                let marker = if seg.value >= max_val && max_val > 0.0 { "  <- bottleneck" } else { "" };
+                println!("  {:<25} {:>8.1} us{}", seg.label, seg.value, marker);
+            }
+
+            println!();
+            println!("  Retransmissions (total)");
+            println!("  ─────────────────────────  ─────────  ─────────");
+            println!("  {:<25} {:<10} {}", "", "Req", "Resp");
+            println!("  {:<25} {:<10} {}", "Total", inst.total_retrans_req, inst.total_retrans_resp);
+            println!();
+            return Ok(());
+        }
+
+        // Fallback: single instance, no dual-observation
         println!("  Instance: {}", inst.instance);
         println!("  Avg cRTT:      {:.1} us", inst.avg_rtt_client_us);
         println!("  Avg sRTT:      {:.1} us", inst.avg_rtt_server_us);
@@ -514,6 +550,44 @@ fn run_tcprt_flow_coarse(
         return Ok(());
     }
 
+    // Multi-instance: check system instance for dual-observation
+    let system_inst = resp.instances.iter().find(|i| i.instance == "system");
+    if let Some(sys) = system_inst {
+        if sys.avg_forward_platform_us > 0.0 {
+            let client_net = sys.avg_rtt_client_us;
+            let fwd_platform = sys.avg_forward_platform_us;
+            let server_net = sys.avg_server_network_us;
+            let rev_platform = sys.avg_reverse_platform_us;
+            let server_proc = (sys.avg_art_us - server_net).max(0.0);
+
+            struct Segment { label: &'static str, value: f64 }
+            let segments = [
+                Segment { label: "Client Network", value: client_net },
+                Segment { label: "Platform (forward)", value: fwd_platform },
+                Segment { label: "Server Network", value: server_net },
+                Segment { label: "Platform (reverse)", value: rev_platform },
+                Segment { label: "Server Processing", value: server_proc },
+            ];
+            let max_val = segments.iter().map(|s| s.value).fold(0.0f64, f64::max);
+
+            println!("  Latency Breakdown (avg)");
+            println!("  ─────────────────────────  ────────────");
+            for seg in &segments {
+                let marker = if seg.value >= max_val && max_val > 0.0 { "  <- bottleneck" } else { "" };
+                println!("  {:<25} {:>8.1} us{}", seg.label, seg.value, marker);
+            }
+
+            println!();
+            println!("  Retransmissions (total)");
+            println!("  ─────────────────────────  ─────────  ─────────");
+            println!("  {:<25} {:<10} {}", "", "Req", "Resp");
+            println!("  {:<25} {:<10} {}", "Total", sys.total_retrans_req, sys.total_retrans_resp);
+            println!();
+            return Ok(());
+        }
+    }
+
+    // Fallback: outer/inner 3-segment logic
     // Find outer (max avg_sRTT) and inner (min avg_sRTT) instances
     let outer = resp.instances.iter()
         .max_by(|a, b| a.avg_rtt_server_us.partial_cmp(&b.avg_rtt_server_us).unwrap_or(std::cmp::Ordering::Equal))
@@ -538,7 +612,7 @@ fn run_tcprt_flow_coarse(
     println!("  Latency Breakdown (avg)");
     println!("  ─────────────────────  ────────────");
     for seg in &segments {
-        let marker = if seg.value >= max_val && max_val > 0.0 { "  ← bottleneck" } else { "" };
+        let marker = if seg.value >= max_val && max_val > 0.0 { "  <- bottleneck" } else { "" };
         println!("  {:<23} {:.1} us{}", seg.label, seg.value, marker);
     }
 
@@ -594,6 +668,9 @@ async fn run_tcprt_flow_with_chain(
                 existing.total_retrans_req += inst.total_retrans_req;
                 existing.total_retrans_resp += inst.total_retrans_resp;
                 existing.flow_count += inst.flow_count;
+                existing.avg_forward_platform_us += inst.avg_forward_platform_us;
+                existing.avg_server_network_us += inst.avg_server_network_us;
+                existing.avg_reverse_platform_us += inst.avg_reverse_platform_us;
                 hop_counts[hop_idx] += 1;
             } else {
                 hop_data[hop_idx] = Some(aria_api::TcpRtAggregatedEntry {
@@ -605,6 +682,9 @@ async fn run_tcprt_flow_with_chain(
                     avg_handshake_us: inst.avg_handshake_us,
                     total_retrans_req: inst.total_retrans_req,
                     total_retrans_resp: inst.total_retrans_resp,
+                    avg_forward_platform_us: inst.avg_forward_platform_us,
+                    avg_server_network_us: inst.avg_server_network_us,
+                    avg_reverse_platform_us: inst.avg_reverse_platform_us,
                 });
                 hop_counts[hop_idx] = 1;
             }
@@ -620,6 +700,9 @@ async fn run_tcprt_flow_with_chain(
                 d.avg_rtt_server_us /= c;
                 d.avg_art_us /= c;
                 d.avg_handshake_us /= c;
+                d.avg_forward_platform_us /= c;
+                d.avg_server_network_us /= c;
+                d.avg_reverse_platform_us /= c;
             }
         }
     }
