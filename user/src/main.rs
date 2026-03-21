@@ -820,42 +820,83 @@ fn count_in_out(evts: &[aria_api::TraceEventEntry]) -> (usize, usize) {
     (ingress, egress)
 }
 
-/// Display chain-aware trace summary (timed mode).
-fn display_trace_chain_summary(
-    src: &str,
-    dst: &str,
-    chain_name: &str,
-    events: &std::collections::HashMap<String, Vec<aria_api::TraceEventEntry>>,
+/// Build a compact drop summary string grouped by (direction, reason), e.g. "✗ 40 acl_deny, 6 qos_drop"
+fn format_drop_summary(evts: &[aria_api::TraceEventEntry]) -> String {
+    let drops: Vec<&aria_api::TraceEventEntry> = evts.iter()
+        .filter(|e| e.result.contains("drop"))
+        .collect();
+    if drops.is_empty() {
+        return "-".to_string();
+    }
+    // Group by drop_reason, count each
+    let mut reason_counts: Vec<(String, usize)> = Vec::new();
+    for d in &drops {
+        let reason = if d.drop_reason.is_empty() { "unknown" } else { &d.drop_reason };
+        if let Some(entry) = reason_counts.iter_mut().find(|(r, _)| r == reason) {
+            entry.1 += 1;
+        } else {
+            reason_counts.push((reason.to_string(), 1));
+        }
+    }
+    // Sort by count descending
+    reason_counts.sort_by(|a, b| b.1.cmp(&a.1));
+    let parts: Vec<String> = reason_counts.iter()
+        .map(|(r, c)| format!("{} {}", c, r))
+        .collect();
+    format!("\u{2717} {}", parts.join(", "))
+}
+
+/// Per-hop aggregated data for drop attribution.
+struct HopAgg {
+    total_in: usize,
+    total_out: usize,
+    /// Drop events grouped by (direction, reason) → count
+    drop_groups: Vec<(String, String, usize)>,
+}
+
+/// Collect per-hop aggregated data from events.
+fn collect_hop_aggs(
     hops: &[ChainHopTrace],
-) {
-    let src_label = if src.is_empty() { "*" } else { src };
-    let dst_label = if dst.is_empty() { "*" } else { dst };
-    println!("Chain: {}    Filter: {} → {}\n", chain_name, src_label, dst_label);
-
-    println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
-        "Hop", "Tap", "Role", "In", "Out", "Drops");
-    println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
-        "──────────", "────────", "────", "────────", "────────", "──────");
-
-    // Collect per-hop aggregated out/in counts for inter-hop loss detection
-    struct HopAgg { total_in: usize, total_out: usize, has_internal_drop: bool }
-    let mut hop_aggs: Vec<HopAgg> = Vec::new();
-
+    events: &std::collections::HashMap<String, Vec<aria_api::TraceEventEntry>>,
+) -> Vec<HopAgg> {
+    let mut hop_aggs = Vec::new();
     for hop in hops {
         let mut hop_in = 0usize;
         let mut hop_out = 0usize;
-        let mut hop_has_drop = false;
+        let mut drop_groups: Vec<(String, String, usize)> = Vec::new();
 
+        for (tap_name, _role) in &hop.taps {
+            let evts = events.get(tap_name).map(|v| v.as_slice()).unwrap_or(&[]);
+            let (in_cnt, out_cnt) = count_in_out(evts);
+            hop_in += in_cnt;
+            hop_out += out_cnt;
+
+            for e in evts.iter().filter(|e| e.result.contains("drop")) {
+                let dir = e.direction.clone();
+                let reason = if e.drop_reason.is_empty() { "unknown".to_string() } else { e.drop_reason.clone() };
+                if let Some(entry) = drop_groups.iter_mut().find(|(d, r, _)| d == &dir && r == &reason) {
+                    entry.2 += 1;
+                } else {
+                    drop_groups.push((dir, reason, 1));
+                }
+            }
+        }
+        drop_groups.sort_by(|a, b| b.2.cmp(&a.2));
+        hop_aggs.push(HopAgg { total_in: hop_in, total_out: hop_out, drop_groups });
+    }
+    hop_aggs
+}
+
+/// Print the table rows for each hop/tap.
+fn print_chain_table_rows(
+    hops: &[ChainHopTrace],
+    events: &std::collections::HashMap<String, Vec<aria_api::TraceEventEntry>>,
+) {
+    for hop in hops {
         for (tap_name, role) in &hop.taps {
             let evts = events.get(tap_name).map(|v| v.as_slice()).unwrap_or(&[]);
             let (in_cnt, out_cnt) = count_in_out(evts);
-            let has_drop = evts.iter().any(|e| e.result.contains("drop"));
-            let drop_str = if has_drop {
-                let drop_cnt = evts.iter().filter(|e| e.result.contains("drop")).count();
-                format!("{} drops", drop_cnt)
-            } else {
-                "-".to_string()
-            };
+            let drop_str = format_drop_summary(evts);
 
             let in_str = if in_cnt > 0 || role == "in" || role == "bidi" {
                 format!("{} pkts", in_cnt)
@@ -866,31 +907,74 @@ fn display_trace_chain_summary(
 
             println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
                 hop.name, tap_name, role, in_str, out_str, drop_str);
-
-            hop_in += in_cnt;
-            hop_out += out_cnt;
-            if has_drop { hop_has_drop = true; }
         }
-
-        hop_aggs.push(HopAgg { total_in: hop_in, total_out: hop_out, has_internal_drop: hop_has_drop });
     }
+}
 
-    // Inter-hop and internal drop annotations
-    println!();
+/// Print drop attribution annotations (★ internal drops, ↓ inter-hop loss).
+fn print_drop_annotations(
+    hops: &[ChainHopTrace],
+    hop_aggs: &[HopAgg],
+) {
+    let mut has_annotation = false;
     for i in 0..hop_aggs.len() {
-        // Internal drop: packets entered but none exited
-        if hop_aggs[i].total_in > 0 && hop_aggs[i].total_out == 0 {
-            println!("  \u{2605} {} pkts dropped inside {}", hop_aggs[i].total_in, hops[i].name);
+        // Internal drop: in > out (covers both partial and total drop)
+        if hop_aggs[i].total_in > hop_aggs[i].total_out {
+            let lost = hop_aggs[i].total_in - hop_aggs[i].total_out;
+            if !has_annotation { println!(); has_annotation = true; }
+            println!("  \u{2605} dropped {}/{} inside {}",
+                lost, hop_aggs[i].total_in, hops[i].name);
+
+            if hop_aggs[i].drop_groups.is_empty() {
+                // Black-box drop: no eBPF drop events captured
+                println!("    \u{2514}\u{2500} no drop reason captured (device internal block)");
+            } else {
+                // Has drop events: show tree-style breakdown by direction+reason
+                let total_groups = hop_aggs[i].drop_groups.len();
+                for (j, (dir, reason, cnt)) in hop_aggs[i].drop_groups.iter().enumerate() {
+                    let connector = if j + 1 < total_groups { "\u{251c}\u{2500}" } else { "\u{2514}\u{2500}" };
+                    println!("    {} {}: {} ({})", connector, dir, cnt, reason);
+                }
+            }
         }
         // Inter-hop loss
         if i + 1 < hop_aggs.len() && hop_aggs[i].total_out > 0 {
             let next_in = hop_aggs[i + 1].total_in;
             if hop_aggs[i].total_out > next_in {
                 let lost = hop_aggs[i].total_out - next_in;
-                println!("  \u{2193} {} pkts lost between {} and {}", lost, hops[i].name, hops[i + 1].name);
+                if !has_annotation { println!(); has_annotation = true; }
+                println!("  \u{2193} {} pkts lost between {} and {}",
+                    lost, hops[i].name, hops[i + 1].name);
             }
         }
     }
+}
+
+/// Display chain-aware trace summary (timed mode).
+fn display_trace_chain_summary(
+    src: &str,
+    dst: &str,
+    chain_name: &str,
+    events: &std::collections::HashMap<String, Vec<aria_api::TraceEventEntry>>,
+    hops: &[ChainHopTrace],
+) {
+    let src_label = if src.is_empty() { "*" } else { src };
+    let dst_label = if dst.is_empty() { "*" } else { dst };
+    println!("Chain: {}    Filter: {} \u{2192} {}\n", chain_name, src_label, dst_label);
+
+    println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
+        "Hop", "Tap", "Role", "In", "Out", "Drops");
+    println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "\u{2500}\u{2500}\u{2500}\u{2500}",
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
+
+    print_chain_table_rows(hops, events);
+    let hop_aggs = collect_hop_aggs(hops, events);
+    print_drop_annotations(hops, &hop_aggs);
 
     // Detail section for drops
     for hop in hops {
@@ -921,61 +1005,21 @@ fn display_trace_chain_live(
 ) {
     let src_label = if src.is_empty() { "*" } else { src };
     let dst_label = if dst.is_empty() { "*" } else { dst };
-    println!("Chain: {}    Filter: {} → {}  (live, Ctrl+C to stop)\n", chain_name, src_label, dst_label);
+    println!("Chain: {}    Filter: {} \u{2192} {}  (live, Ctrl+C to stop)\n", chain_name, src_label, dst_label);
 
     println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
         "Hop", "Tap", "Role", "In", "Out", "Drops");
     println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
-        "──────────", "────────", "────", "────────", "────────", "──────");
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "\u{2500}\u{2500}\u{2500}\u{2500}",
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
 
-    struct HopAgg { total_in: usize, total_out: usize }
-    let mut hop_aggs: Vec<HopAgg> = Vec::new();
-
-    for hop in hops {
-        let mut hop_in = 0usize;
-        let mut hop_out = 0usize;
-
-        for (tap_name, role) in &hop.taps {
-            let evts = events.get(tap_name).map(|v| v.as_slice()).unwrap_or(&[]);
-            let (in_cnt, out_cnt) = count_in_out(evts);
-            let has_drop = evts.iter().any(|e| e.result.contains("drop"));
-            let drop_str = if has_drop {
-                let drop_cnt = evts.iter().filter(|e| e.result.contains("drop")).count();
-                format!("{} drops", drop_cnt)
-            } else {
-                "-".to_string()
-            };
-
-            let in_str = if in_cnt > 0 || role == "in" || role == "bidi" {
-                format!("{} pkts", in_cnt)
-            } else { "-".to_string() };
-            let out_str = if out_cnt > 0 || role == "out" || role == "bidi" {
-                format!("{} pkts", out_cnt)
-            } else { "-".to_string() };
-
-            println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
-                hop.name, tap_name, role, in_str, out_str, drop_str);
-
-            hop_in += in_cnt;
-            hop_out += out_cnt;
-        }
-
-        hop_aggs.push(HopAgg { total_in: hop_in, total_out: hop_out });
-    }
-
-    // Inline annotations
-    for i in 0..hop_aggs.len() {
-        if hop_aggs[i].total_in > 0 && hop_aggs[i].total_out == 0 {
-            println!("  \u{2605} {} pkts dropped inside {}", hop_aggs[i].total_in, hops[i].name);
-        }
-        if i + 1 < hop_aggs.len() && hop_aggs[i].total_out > 0 {
-            let next_in = hop_aggs[i + 1].total_in;
-            if hop_aggs[i].total_out > next_in {
-                let lost = hop_aggs[i].total_out - next_in;
-                println!("  \u{2193} {} pkts lost between {} and {}", lost, hops[i].name, hops[i + 1].name);
-            }
-        }
-    }
+    print_chain_table_rows(hops, events);
+    let hop_aggs = collect_hop_aggs(hops, events);
+    print_drop_annotations(hops, &hop_aggs);
 }
 
 async fn run_trace_with_chain(
