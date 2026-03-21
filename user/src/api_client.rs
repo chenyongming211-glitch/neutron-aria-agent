@@ -336,6 +336,22 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    // ── SSL Error Events ──
+
+    pub async fn list_ssl_errors(&self) -> Result<SslErrorListResponse, String> {
+        let resp = self.client.get(self.url("/api/v1/ssl/errors"))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn flush_ssl_errors(&self) -> Result<SslErrorFlushResponse, String> {
+        let resp = self.client.delete(self.url("/api/v1/ssl/errors"))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── Service Chains ──
 
     pub async fn list_chains(&self) -> Result<ServiceChainListResponse, String> {

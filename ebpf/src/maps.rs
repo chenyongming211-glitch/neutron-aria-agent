@@ -15,6 +15,7 @@ pub use crate::common::{
     PipelineCtx,
     SslScratch, SslConnValue,
     SslParseBuf, SslHttpScratch, SslReadScratch, SslHttpValue,
+    SslErrorEvent, SslWriteScratch,
 };
 use crate::parser::PacketInfo;
 
@@ -181,3 +182,15 @@ pub static SSL_HTTP_VALUE_BUF: PerCpuArray<SslHttpValue> = PerCpuArray::with_max
 /// SSL uprobe is process-level, not tied to any network interface
 #[map(name = "SSL_GLOBAL_CONFIG")]
 pub static SSL_GLOBAL_CONFIG: HashMap<u32, u8> = HashMap::with_max_entries(1, 0);
+
+/// SSL error events table
+#[map(name = "SSL_ERROR_TABLE")]
+pub static SSL_ERROR_TABLE: LruHashMap<u64, SslErrorEvent> = LruHashMap::with_max_entries(4096, 0);
+
+/// SSL error sequence counter (per-CPU)
+#[map(name = "SSL_ERROR_SEQ")]
+pub static SSL_ERROR_SEQ: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+/// SSL_write scratch: store ssl_ptr in entry, read in return
+#[map(name = "SSL_WRITE_SCRATCH")]
+pub static SSL_WRITE_SCRATCH: HashMap<u64, SslWriteScratch> = HashMap::with_max_entries(4096, 0);

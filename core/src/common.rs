@@ -292,6 +292,30 @@ pub struct SslHttpValue {
 }
 unsafe impl Pod for SslHttpValue {}
 
+// --- SSL Error Observability ---
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct SslErrorEvent {
+    pub pid: u32,
+    pub tid: u32,
+    pub timestamp: u64,
+    pub ssl_ptr: u64,
+    pub syscall: u8,       // 0=read, 1=write
+    pub ret_code: i32,     // SSL_read/write return value
+    pub error_hint: u8,    // 0=none, 1=zero_return, 2=want_retry, 3=syscall_err
+    pub _pad: [u8; 2],
+}
+unsafe impl Pod for SslErrorEvent {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct SslWriteScratch {
+    pub ssl_ptr: u64,
+    pub write_ts: u64,
+}
+unsafe impl Pod for SslWriteScratch {}
+
 // --- Drop Reason Profiler ---
 
 pub const DROP_ACL_DENY: u8 = 1;

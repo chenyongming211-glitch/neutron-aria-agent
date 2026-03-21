@@ -756,6 +756,16 @@ impl ControlPlane {
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
+    pub async fn get_ssl_errors(&self) -> Result<Vec<aria_core::ssl_ops::SslErrorEntry>, ControlPlaneError> {
+        aria_core::ssl_ops::get_ssl_errors(&self.base_pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))
+    }
+
+    pub async fn flush_ssl_errors(&self) -> Result<u64, ControlPlaneError> {
+        aria_core::ssl_ops::flush_ssl_errors(&self.base_pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))
+    }
+
     // ── Stats ──
 
     pub async fn get_stats_overview(&self, instance: &str) -> Result<(usize, usize, usize, usize, u64, u64), ControlPlaneError> {

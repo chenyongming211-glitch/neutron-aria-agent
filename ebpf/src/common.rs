@@ -449,3 +449,27 @@ pub struct SslHttpValue {
     pub _pad: [u8; 6],
     pub req_data: [u8; 256],  // raw HTTP request header (was 128)
 }
+
+// --- SSL Error Observability ---
+
+/// SSL error event (read/write failures)
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SslErrorEvent {
+    pub pid: u32,
+    pub tid: u32,
+    pub timestamp: u64,
+    pub ssl_ptr: u64,
+    pub ret_code: i32,     // SSL_read/write return value
+    pub syscall: u8,       // 0=read, 1=write
+    pub error_hint: u8,    // 0=none, 1=zero_return, 2=want_retry, 3=syscall_err
+    pub _pad: [u8; 2],
+}
+
+/// SSL_write scratch for storing ssl_ptr in entry probe
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SslWriteScratch {
+    pub ssl_ptr: u64,
+    pub write_ts: u64,
+}

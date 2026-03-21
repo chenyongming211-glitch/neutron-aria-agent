@@ -221,3 +221,87 @@ pub fn set_ssl_global_config(base_pin_path: &str, enabled: bool) -> Result<(), S
 
     Ok(())
 }
+
+// --- SSL Error Events ---
+
+pub struct SslErrorEntry {
+    pub seq: u64,
+    pub pid: u32,
+    pub tid: u32,
+    pub timestamp: u64,
+    pub syscall: String,
+    pub ret_code: i32,
+    pub error_hint: String,
+}
+
+/// Get all SSL error events from map
+pub fn get_ssl_errors(pin_path: &str) -> Result<Vec<SslErrorEntry>, String> {
+    let map_path = format!("{}/SSL_ERROR_TABLE", pin_path);
+
+    if !std::path::Path::new(&map_path).exists() {
+        return Ok(Vec::new());
+    }
+
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open SSL_ERROR_TABLE: {:?}", e))?;
+    let map = HashMap::<_, u64, SslErrorEvent>::try_from(
+        aya::maps::Map::LruHashMap(map_data)
+    ).map_err(|e| format!("convert SSL_ERROR_TABLE: {:?}", e))?;
+
+    let mut entries = Vec::new();
+    for item in map.iter() {
+        if let Ok((seq, val)) = item {
+            let syscall = match val.syscall {
+                0 => "read",
+                1 => "write",
+                _ => "unknown",
+            }.to_string();
+
+            let error_hint = match val.error_hint {
+                0 => "none",
+                1 => "zero_return",
+                2 => "want_retry",
+                3 => "syscall_err",
+                _ => "unknown",
+            }.to_string();
+
+            entries.push(SslErrorEntry {
+                seq,
+                pid: val.pid,
+                tid: val.tid,
+                timestamp: val.timestamp,
+                syscall,
+                ret_code: val.ret_code,
+                error_hint,
+            });
+        }
+    }
+    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Ok(entries)
+}
+
+/// Flush all SSL error events
+pub fn flush_ssl_errors(pin_path: &str) -> Result<u64, String> {
+    let map_path = format!("{}/SSL_ERROR_TABLE", pin_path);
+
+    if !std::path::Path::new(&map_path).exists() {
+        return Ok(0);
+    }
+
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open SSL_ERROR_TABLE: {:?}", e))?;
+    let mut map = HashMap::<_, u64, SslErrorEvent>::try_from(
+        aya::maps::Map::LruHashMap(map_data)
+    ).map_err(|e| format!("convert SSL_ERROR_TABLE: {:?}", e))?;
+
+    let keys: Vec<u64> = map.iter()
+        .filter_map(|item| item.ok().map(|(k, _)| k))
+        .collect();
+    let mut count = 0u64;
+    for key in keys {
+        if map.remove(&key).is_ok() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}

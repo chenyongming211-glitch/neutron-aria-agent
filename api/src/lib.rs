@@ -688,6 +688,29 @@ pub struct UpdateSslGlobalConfigRequest {
     pub enabled: bool,
 }
 
+// ── SSL Error Events ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SslErrorEntry {
+    pub seq: u64,
+    pub pid: u32,
+    pub tid: u32,
+    pub timestamp: u64,
+    pub syscall: String,
+    pub ret_code: i32,
+    pub error_hint: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SslErrorListResponse {
+    pub errors: Vec<SslErrorEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SslErrorFlushResponse {
+    pub flushed: u64,
+}
+
 // ── Helpers (functions) ──
 
 pub fn proto_to_string(proto: u8) -> String {

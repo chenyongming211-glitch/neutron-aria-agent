@@ -338,6 +338,13 @@ enum SslCommands {
     Disable,
     /// Show global SSL observability status
     Status,
+    /// List SSL errors (read/write failures)
+    Errors {
+        #[arg(long, default_value = "20", help = "Number of errors to show")]
+        top: usize,
+    },
+    /// Flush all SSL errors
+    ErrorsFlush,
 }
 
 #[derive(Subcommand)]
@@ -2106,6 +2113,29 @@ async fn main() {
                         println!("Global SSL Observability: {}", if cfg.enabled { "ENABLED" } else { "DISABLED" });
                         Ok(())
                     }
+                    Err(e) => Err(e),
+                }
+            }
+            SslCommands::Errors { top } => {
+                match client.list_ssl_errors().await {
+                    Ok(resp) => {
+                        if resp.errors.is_empty() {
+                            println!("No SSL errors");
+                        } else {
+                            let display: Vec<_> = resp.errors.into_iter().take(top).collect();
+                            println!("{:<8} {:<8} {:<8} {:<18} {:<10} {:<12}", "PID", "TID", "SYSCALL", "TIMESTAMP", "RET", "HINT");
+                            for e in &display {
+                                println!("{:<8} {:<8} {:<8} {:<18} {:<10} {:<12}", e.pid, e.tid, e.syscall, e.timestamp, e.ret_code, e.error_hint);
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            SslCommands::ErrorsFlush => {
+                match client.flush_ssl_errors().await {
+                    Ok(resp) => { println!("Flushed {} SSL errors", resp.flushed); Ok(()) }
                     Err(e) => Err(e),
                 }
             }

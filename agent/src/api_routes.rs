@@ -26,6 +26,7 @@ pub fn build_router(control_plane: Arc<ControlPlane>) -> Router {
         .route("/api/v1/chains/{name}", get(api_handlers::get_chain).delete(api_handlers::delete_chain))
         // Global SSL observability config (no instance path param)
         .route("/api/v1/ssl/config", get(api_handlers::get_ssl_config).put(api_handlers::update_ssl_config))
+        .route("/api/v1/ssl/errors", get(api_handlers::list_ssl_errors).delete(api_handlers::flush_ssl_errors))
         // Per-instance routes
         .route("/api/v1/{instance}/groups", get(api_handlers::list_groups).post(api_handlers::add_group))
         .route("/api/v1/{instance}/groups/{name}", delete(api_handlers::delete_group))

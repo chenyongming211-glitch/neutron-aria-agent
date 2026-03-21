@@ -828,6 +828,31 @@ pub async fn update_ssl_config(
     }
 }
 
+pub async fn list_ssl_errors(State(cp): State<AppState>) -> impl IntoResponse {
+    match cp.get_ssl_errors().await {
+        Ok(entries) => {
+            let errors = entries.into_iter().map(|e| aria_api::SslErrorEntry {
+                seq: e.seq,
+                pid: e.pid,
+                tid: e.tid,
+                timestamp: e.timestamp,
+                syscall: e.syscall,
+                ret_code: e.ret_code,
+                error_hint: e.error_hint,
+            }).collect();
+            Ok(Json(aria_api::SslErrorListResponse { errors }))
+        }
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+pub async fn flush_ssl_errors(State(cp): State<AppState>) -> impl IntoResponse {
+    match cp.flush_ssl_errors().await {
+        Ok(count) => Ok(Json(aria_api::SslErrorFlushResponse { flushed: count })),
+        Err(e) => Err(err_response(e)),
+    }
+}
+
 pub async fn batch_query_tcprt(
     State(cp): State<AppState>,
     Json(req): Json<aria_api::TcpRtBatchQueryRequest>,

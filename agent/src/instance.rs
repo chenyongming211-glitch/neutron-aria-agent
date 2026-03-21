@@ -231,6 +231,7 @@ impl FirewallInstance {
             ("ssl_handshake_return", "SSL_do_handshake"),
             ("ssl_set_sni", "SSL_ctrl"),
             ("ssl_write_entry", "SSL_write"),
+            ("ssl_write_return", "SSL_write"),
             ("ssl_read_entry", "SSL_read"),
             ("ssl_read_return", "SSL_read"),
         ];
