@@ -4,16 +4,18 @@ use aya_ebpf::programs::{ProbeContext, RetProbeContext};
 use crate::maps::{
     FIREWALL_CONFIG, SSL_HANDSHAKE_SCRATCH, SSL_CONN_TABLE, SSL_SNI_TABLE, SSL_SEQ,
     SSL_HTTP_SCRATCH_BUF, SSL_HTTP_SCRATCH, SSL_READ_SCRATCH, SSL_HTTP_TABLE, SSL_HTTP_SEQ,
-    SSL_HTTP_PARSE_BUF, SSL_HTTP_VALUE_BUF,
+    SSL_HTTP_PARSE_BUF, SSL_HTTP_VALUE_BUF, SSL_GLOBAL_CONFIG,
     SslScratch, SslConnValue, SslReadScratch, SslHttpValue,
 };
 
 const SSL_CTRL_SET_TLSEXT_HOSTNAME: u64 = 55;
 
+/// Check global SSL observability config (not per-interface)
+/// SSL uprobe is process-level, shared across all network interfaces
 #[inline(always)]
 unsafe fn ssl_enabled() -> bool {
-    match FIREWALL_CONFIG.get(&0u32) {
-        Some(cfg) => cfg.ssl_enabled != 0,
+    match SSL_GLOBAL_CONFIG.get(&0u32) {
+        Some(&v) => v != 0,
         None => false,
     }
 }

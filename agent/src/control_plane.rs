@@ -743,6 +743,19 @@ impl ControlPlane {
         Ok(())
     }
 
+    // ── Global SSL Observability Config ──
+    // SSL uprobe is process-level, not tied to any network interface
+
+    pub async fn get_ssl_global_config(&self) -> Result<bool, ControlPlaneError> {
+        aria_core::ssl_ops::get_ssl_global_config(&self.base_pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))
+    }
+
+    pub async fn set_ssl_global_config(&self, enabled: bool) -> Result<(), ControlPlaneError> {
+        aria_core::ssl_ops::set_ssl_global_config(&self.base_pin_path, enabled)
+            .map_err(|e| ControlPlaneError::KernelError(e))
+    }
+
     // ── Stats ──
 
     pub async fn get_stats_overview(&self, instance: &str) -> Result<(usize, usize, usize, usize, u64, u64), ControlPlaneError> {

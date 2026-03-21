@@ -675,6 +675,19 @@ pub struct SslHttpFlushResponse {
     pub flushed: u64,
 }
 
+// ── Global SSL Observability Config ──
+// SSL uprobe is process-level, not tied to any network interface
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SslGlobalConfigResponse {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateSslGlobalConfigRequest {
+    pub enabled: bool,
+}
+
 // ── Helpers (functions) ──
 
 pub fn proto_to_string(proto: u8) -> String {

@@ -806,6 +806,28 @@ pub async fn flush_ssl_http(
     }
 }
 
+// ── Global SSL Observability Config ──
+// SSL uprobe is process-level, not tied to any network interface
+
+pub async fn get_ssl_config(State(cp): State<AppState>) -> impl IntoResponse {
+    match cp.get_ssl_global_config().await {
+        Ok(enabled) => Ok(Json(aria_api::SslGlobalConfigResponse { enabled })),
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+pub async fn update_ssl_config(
+    State(cp): State<AppState>,
+    Json(req): Json<aria_api::UpdateSslGlobalConfigRequest>,
+) -> impl IntoResponse {
+    match cp.set_ssl_global_config(req.enabled).await {
+        Ok(()) => Ok(Json(aria_api::MessageResponse {
+            message: format!("SSL observability {}", if req.enabled { "enabled" } else { "disabled" }),
+        })),
+        Err(e) => Err(err_response(e)),
+    }
+}
+
 pub async fn batch_query_tcprt(
     State(cp): State<AppState>,
     Json(req): Json<aria_api::TcpRtBatchQueryRequest>,

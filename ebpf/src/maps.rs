@@ -176,3 +176,8 @@ pub static SSL_HTTP_SEQ: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 /// Per-CPU scratch for building SslHttpValue without stack overflow
 #[map(name = "SSL_HTTP_VALUE_BUF")]
 pub static SSL_HTTP_VALUE_BUF: PerCpuArray<SslHttpValue> = PerCpuArray::with_max_entries(1, 0);
+
+/// Global SSL observability config (key=0)
+/// SSL uprobe is process-level, not tied to any network interface
+#[map(name = "SSL_GLOBAL_CONFIG")]
+pub static SSL_GLOBAL_CONFIG: HashMap<u32, u8> = HashMap::with_max_entries(1, 0);

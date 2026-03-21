@@ -332,6 +332,12 @@ enum SslCommands {
     },
     /// Flush all SSL HTTP events
     HttpFlush,
+    /// Enable global SSL observability (affects all processes)
+    Enable,
+    /// Disable global SSL observability
+    Disable,
+    /// Show global SSL observability status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -2079,6 +2085,27 @@ async fn main() {
             SslCommands::HttpFlush => {
                 match client.flush_ssl_http(&instance).await {
                     Ok(resp) => { println!("Flushed {} SSL HTTP entries", resp.flushed); Ok(()) }
+                    Err(e) => Err(e),
+                }
+            }
+            SslCommands::Enable => {
+                match client.update_ssl_config(true).await {
+                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
+                    Err(e) => Err(e),
+                }
+            }
+            SslCommands::Disable => {
+                match client.update_ssl_config(false).await {
+                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
+                    Err(e) => Err(e),
+                }
+            }
+            SslCommands::Status => {
+                match client.get_ssl_config().await {
+                    Ok(cfg) => {
+                        println!("Global SSL Observability: {}", if cfg.enabled { "ENABLED" } else { "DISABLED" });
+                        Ok(())
+                    }
                     Err(e) => Err(e),
                 }
             }

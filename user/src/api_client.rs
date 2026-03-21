@@ -318,6 +318,24 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    // ── Global SSL Observability Config ──
+    // SSL uprobe is process-level, not tied to any network interface
+
+    pub async fn get_ssl_config(&self) -> Result<SslGlobalConfigResponse, String> {
+        let resp = self.client.get(self.url("/api/v1/ssl/config"))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn update_ssl_config(&self, enabled: bool) -> Result<MessageResponse, String> {
+        let resp = self.client.put(self.url("/api/v1/ssl/config"))
+            .json(&UpdateSslGlobalConfigRequest { enabled })
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── Service Chains ──
 
     pub async fn list_chains(&self) -> Result<ServiceChainListResponse, String> {

@@ -174,3 +174,50 @@ pub fn flush_ssl_http_events(pin_path: &str) -> Result<u64, String> {
     }
     Ok(count)
 }
+
+// --- Global SSL Observability Config ---
+
+/// Get global SSL observability enabled status
+/// Uses base_pin_path (e.g., /sys/fs/bpf) since SSL uprobe is global, not per-instance
+pub fn get_ssl_global_config(base_pin_path: &str) -> Result<bool, String> {
+    let map_path = format!("{}/SSL_GLOBAL_CONFIG", base_pin_path);
+
+    // Map may not exist if no instance has started SSL yet
+    if !std::path::Path::new(&map_path).exists() {
+        return Ok(false);
+    }
+
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open SSL_GLOBAL_CONFIG: {:?}", e))?;
+    let map = HashMap::<_, u32, u8>::try_from(
+        aya::maps::Map::HashMap(map_data)
+    ).map_err(|e| format!("convert SSL_GLOBAL_CONFIG: {:?}", e))?;
+
+    match map.get(&0u32, 0) {
+        Ok(&v) => Ok(v != 0),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Set global SSL observability enabled status
+/// This affects all processes with SSL uprobes attached
+pub fn set_ssl_global_config(base_pin_path: &str, enabled: bool) -> Result<(), String> {
+    let map_path = format!("{}/SSL_GLOBAL_CONFIG", base_pin_path);
+
+    // Map may not exist if no instance has loaded eBPF yet
+    if !std::path::Path::new(&map_path).exists() {
+        return Err("SSL_GLOBAL_CONFIG map not found - start a firewall instance first".to_string());
+    }
+
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open SSL_GLOBAL_CONFIG: {:?}", e))?;
+    let mut map = HashMap::<_, u32, u8>::try_from(
+        aya::maps::Map::HashMap(map_data)
+    ).map_err(|e| format!("convert SSL_GLOBAL_CONFIG: {:?}", e))?;
+
+    let value: u8 = if enabled { 1 } else { 0 };
+    map.insert(&0u32, &value, 0)
+        .map_err(|e| format!("SSL_GLOBAL_CONFIG insert: {:?}", e))?;
+
+    Ok(())
+}
