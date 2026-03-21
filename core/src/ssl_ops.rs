@@ -194,7 +194,7 @@ pub fn get_ssl_global_config(base_pin_path: &str) -> Result<bool, String> {
     ).map_err(|e| format!("convert SSL_GLOBAL_CONFIG: {:?}", e))?;
 
     match map.get(&0u32, 0) {
-        Ok(&v) => Ok(v != 0),
+        Ok(v) => Ok(v != 0),
         Err(_) => Ok(false),
     }
 }
