@@ -1360,12 +1360,12 @@ async fn main() {
                             if resp.rules.is_empty() {
                                 println!("  No rule statistics collected yet");
                             } else {
-                                println!("{:<12} {:<12} {:<8} {:<10} {:<15} {}",
-                                    "SrcGroup", "DstGroup", "Proto", "Direction", "Packets", "Bytes");
+                                println!("{:<12} {:<12} {:<8} {:<10} {:<15} {:<15} {:<15} {}",
+                                    "SrcGroup", "DstGroup", "Proto", "Direction", "Packets", "Bytes", "DroppedPkts", "DroppedBytes");
                                 for e in &resp.rules {
-                                    println!("{:<12} {:<12} {:<8} {:<10} {:<15} {}",
+                                    println!("{:<12} {:<12} {:<8} {:<10} {:<15} {:<15} {:<15} {}",
                                         e.src_group, e.dst_group, e.proto, e.direction,
-                                        e.packets, e.bytes);
+                                        e.packets, e.bytes, e.dropped_packets, e.dropped_bytes);
                                 }
                             }
                             println!();

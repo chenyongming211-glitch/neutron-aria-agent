@@ -93,6 +93,8 @@ pub struct CtConfig {
 pub struct RuleStatsValue {
     pub packets: u64,
     pub bytes: u64,
+    pub dropped_packets: u64,
+    pub dropped_bytes: u64,
 }
 
 #[repr(C)]

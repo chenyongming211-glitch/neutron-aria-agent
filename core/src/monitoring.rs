@@ -10,6 +10,8 @@ pub struct RuleStatsEntry {
     pub key: PolicyKey,
     pub packets: u64,
     pub bytes: u64,
+    pub dropped_packets: u64,
+    pub dropped_bytes: u64,
 }
 
 pub struct FlowStatsEntry {
@@ -41,14 +43,18 @@ pub struct ConntrackSummary {
     pub established_count: u64,
 }
 
-fn sum_per_cpu_rule_stats(values: PerCpuValues<RuleStatsValue>) -> (u64, u64) {
+fn sum_per_cpu_rule_stats(values: PerCpuValues<RuleStatsValue>) -> (u64, u64, u64, u64) {
     let mut packets = 0u64;
     let mut bytes = 0u64;
+    let mut dropped_packets = 0u64;
+    let mut dropped_bytes = 0u64;
     for v in values.iter() {
         packets += v.packets;
         bytes += v.bytes;
+        dropped_packets += v.dropped_packets;
+        dropped_bytes += v.dropped_bytes;
     }
-    (packets, bytes)
+    (packets, bytes, dropped_packets, dropped_bytes)
 }
 
 fn sum_per_cpu_flow_stats(values: PerCpuValues<FlowStatsValue>) -> (u64, u64, u64) {
@@ -77,9 +83,9 @@ pub fn get_rule_stats(pin_path: &str) -> Result<Vec<RuleStatsEntry>, String> {
     for item in map.iter() {
         match item {
             Ok((key, values)) => {
-                let (packets, bytes) = sum_per_cpu_rule_stats(values);
+                let (packets, bytes, dropped_packets, dropped_bytes) = sum_per_cpu_rule_stats(values);
                 if packets > 0 {
-                    entries.push(RuleStatsEntry { key, packets, bytes });
+                    entries.push(RuleStatsEntry { key, packets, bytes, dropped_packets, dropped_bytes });
                 }
             }
             Err(_) => continue,

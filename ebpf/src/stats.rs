@@ -13,17 +13,23 @@ pub(crate) fn monitoring_enabled() -> bool {
 }
 
 #[inline(always)]
-pub unsafe fn update_rule_stats(key: &PolicyKey, pkt_len: u32) {
+pub unsafe fn update_rule_stats(key: &PolicyKey, pkt_len: u32, dropped: bool) {
     if !monitoring_enabled() {
         return;
     }
     if let Some(s) = RULE_STATS.get_ptr_mut(key) {
         (*s).packets += 1;
         (*s).bytes += pkt_len as u64;
+        if dropped {
+            (*s).dropped_packets += 1;
+            (*s).dropped_bytes += pkt_len as u64;
+        }
     } else {
         let val = RuleStatsValue {
             packets: 1,
             bytes: pkt_len as u64,
+            dropped_packets: if dropped { 1 } else { 0 },
+            dropped_bytes: if dropped { pkt_len as u64 } else { 0 },
         };
         let _ = RULE_STATS.insert(key, &val, 0);
     }

@@ -248,6 +248,10 @@ pub struct RuleStatsEntry {
     pub direction: String,
     pub packets: u64,
     pub bytes: u64,
+    #[serde(default)]
+    pub dropped_packets: u64,
+    #[serde(default)]
+    pub dropped_bytes: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

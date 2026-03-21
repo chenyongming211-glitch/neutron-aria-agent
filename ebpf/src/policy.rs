@@ -67,7 +67,7 @@ pub unsafe fn evaluate_policy(
         };
         if let Some(policy) = POLICY_TABLE.get(&key) {
             let (result, drop_reason) = apply_policy(policy, args.dst_port);
-            stats::update_rule_stats(&key, args.pkt_len);
+            stats::update_rule_stats(&key, args.pkt_len, result == XDP_DROP);
             if result == XDP_DROP {
                 drops::record_drop(&drops::DropArgs { reason: drop_reason, direction: args.direction, proto: args.proto, src_id: args.src_id, dst_id: args.dst_id, pkt_len: args.pkt_len, now: args.now, _pad: 0 });
             }

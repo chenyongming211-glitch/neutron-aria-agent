@@ -459,6 +459,8 @@ pub async fn stats_rules(
                     direction: direction_to_string(e.key.direction),
                     packets: e.packets,
                     bytes: e.bytes,
+                    dropped_packets: e.dropped_packets,
+                    dropped_bytes: e.dropped_bytes,
                 }).collect(),
             }))
         }
@@ -1138,6 +1140,10 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
     let _ = writeln!(out, "# TYPE aria_rule_packets_total counter");
     let _ = writeln!(out, "# HELP aria_rule_bytes_total ACL rule matched bytes");
     let _ = writeln!(out, "# TYPE aria_rule_bytes_total counter");
+    let _ = writeln!(out, "# HELP aria_rule_dropped_packets_total ACL rule dropped packets");
+    let _ = writeln!(out, "# TYPE aria_rule_dropped_packets_total counter");
+    let _ = writeln!(out, "# HELP aria_rule_dropped_bytes_total ACL rule dropped bytes");
+    let _ = writeln!(out, "# TYPE aria_rule_dropped_bytes_total counter");
 
     for inst in &instances {
         let i = prom_escape(inst);
@@ -1153,6 +1159,8 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
                 let dir = prom_escape(&direction_to_string(e.key.direction));
                 let _ = writeln!(out, "aria_rule_packets_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.packets);
                 let _ = writeln!(out, "aria_rule_bytes_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.bytes);
+                let _ = writeln!(out, "aria_rule_dropped_packets_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.dropped_packets);
+                let _ = writeln!(out, "aria_rule_dropped_bytes_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.dropped_bytes);
             }
         }
     }

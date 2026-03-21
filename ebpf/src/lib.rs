@@ -437,7 +437,7 @@ unsafe fn phase_ct_v6(_info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &
 unsafe fn phase_ct_fastpath_xdp_v4(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
     let tracing = (p.flags & FLAG_TRACING) != 0;
     let matched = get_matched(p);
-    stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len);
+    stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
     stats::update_flow_stats_v4(ct_key, p.pkt_len, p.now);
 
     if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
@@ -473,7 +473,7 @@ unsafe fn phase_ct_fastpath_xdp_v4(info: &parser::PacketInfo, p: &mut PipelineCt
 unsafe fn phase_ct_fastpath_xdp_v6(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
     let tracing = (p.flags & FLAG_TRACING) != 0;
     let matched = get_matched(p);
-    stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len);
+    stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
     stats::update_flow_stats_v6(ct_key, p.pkt_len, p.now);
 
     if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
@@ -509,7 +509,7 @@ unsafe fn phase_ct_fastpath_xdp_v6(info: &parser::PacketInfo, p: &mut PipelineCt
 unsafe fn phase_ct_fastpath_tc_v4(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
     let tracing = (p.flags & FLAG_TRACING) != 0;
     let matched = get_matched(p);
-    stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len);
+    stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
     stats::update_flow_stats_v4(ct_key, p.pkt_len, p.now);
 
     if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
@@ -553,7 +553,7 @@ unsafe fn phase_ct_fastpath_tc_v4(ctx: &TcContext, info: &parser::PacketInfo, p:
 unsafe fn phase_ct_fastpath_tc_v6(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
     let tracing = (p.flags & FLAG_TRACING) != 0;
     let matched = get_matched(p);
-    stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len);
+    stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
     stats::update_flow_stats_v6(ct_key, p.pkt_len, p.now);
 
     if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
