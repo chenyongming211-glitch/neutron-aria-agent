@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::sync::Arc;
 use axum::{
     extract::{Path, Query, State},
@@ -1062,4 +1063,227 @@ pub async fn flush_trace(
         Ok(count) => Ok(Json(aria_api::TraceFlushResponse { flushed: count })),
         Err(e) => Err(err_response(e)),
     }
+}
+
+// ── Prometheus Metrics ──
+
+fn prom_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+}
+
+pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
+    let instances = cp.list_instances().await;
+    let mut out = String::with_capacity(8192);
+
+    // ── Overview gauges ──
+    let _ = writeln!(out, "# HELP aria_groups_total Number of IP groups configured");
+    let _ = writeln!(out, "# TYPE aria_groups_total gauge");
+    let _ = writeln!(out, "# HELP aria_policies_total Number of ACL policies configured");
+    let _ = writeln!(out, "# TYPE aria_policies_total gauge");
+    let _ = writeln!(out, "# HELP aria_qos_rules_total Number of QoS rules configured");
+    let _ = writeln!(out, "# TYPE aria_qos_rules_total gauge");
+    let _ = writeln!(out, "# HELP aria_mirror_rules_total Number of mirror rules configured");
+    let _ = writeln!(out, "# TYPE aria_mirror_rules_total gauge");
+    let _ = writeln!(out, "# HELP aria_conntrack_total Number of conntrack entries");
+    let _ = writeln!(out, "# TYPE aria_conntrack_total gauge");
+
+    for inst in &instances {
+        let i = prom_escape(inst);
+        if let Ok((groups, policies, qos_rules, mirror_rules, ct_v4, ct_v6)) = cp.get_stats_overview(inst).await {
+            let _ = writeln!(out, "aria_groups_total{{instance=\"{i}\"}} {groups}");
+            let _ = writeln!(out, "aria_policies_total{{instance=\"{i}\"}} {policies}");
+            let _ = writeln!(out, "aria_qos_rules_total{{instance=\"{i}\"}} {qos_rules}");
+            let _ = writeln!(out, "aria_mirror_rules_total{{instance=\"{i}\"}} {mirror_rules}");
+            let _ = writeln!(out, "aria_conntrack_total{{instance=\"{i}\",family=\"ipv4\"}} {ct_v4}");
+            let _ = writeln!(out, "aria_conntrack_total{{instance=\"{i}\",family=\"ipv6\"}} {ct_v6}");
+        }
+    }
+
+    // ── Drop counters ──
+    let _ = writeln!(out, "# HELP aria_drop_packets_total Dropped packets by reason");
+    let _ = writeln!(out, "# TYPE aria_drop_packets_total counter");
+    let _ = writeln!(out, "# HELP aria_drop_bytes_total Dropped bytes by reason");
+    let _ = writeln!(out, "# TYPE aria_drop_bytes_total counter");
+
+    for inst in &instances {
+        let i = prom_escape(inst);
+        if let Ok((entries, groups)) = cp.get_drop_stats(inst).await {
+            let find_name = |id: u32| -> String {
+                if id == 0 { return "any".to_string(); }
+                groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
+            };
+            for e in &entries {
+                let reason = prom_escape(&aria_core::trace_ops::drop_reason_name(e.reason));
+                let dir = prom_escape(&direction_to_string(e.direction));
+                let proto = prom_escape(&proto_to_string(e.proto));
+                let sg = prom_escape(&find_name(e.src_id));
+                let dg = prom_escape(&find_name(e.dst_id));
+                let _ = writeln!(out, "aria_drop_packets_total{{instance=\"{i}\",reason=\"{reason}\",direction=\"{dir}\",proto=\"{proto}\",src_group=\"{sg}\",dst_group=\"{dg}\"}} {}", e.packets);
+                let _ = writeln!(out, "aria_drop_bytes_total{{instance=\"{i}\",reason=\"{reason}\",direction=\"{dir}\",proto=\"{proto}\",src_group=\"{sg}\",dst_group=\"{dg}\"}} {}", e.bytes);
+            }
+        }
+    }
+
+    // ── ACL rule counters ──
+    let _ = writeln!(out, "# HELP aria_rule_packets_total ACL rule matched packets");
+    let _ = writeln!(out, "# TYPE aria_rule_packets_total counter");
+    let _ = writeln!(out, "# HELP aria_rule_bytes_total ACL rule matched bytes");
+    let _ = writeln!(out, "# TYPE aria_rule_bytes_total counter");
+
+    for inst in &instances {
+        let i = prom_escape(inst);
+        if let Ok((entries, groups)) = cp.get_rule_stats(inst).await {
+            let find_name = |id: u32| -> String {
+                if id == 0 { return "any".to_string(); }
+                groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
+            };
+            for e in &entries {
+                let sg = prom_escape(&find_name(e.key.src_id));
+                let dg = prom_escape(&find_name(e.key.dst_id));
+                let proto = prom_escape(&proto_to_string(e.key.proto));
+                let dir = prom_escape(&direction_to_string(e.key.direction));
+                let _ = writeln!(out, "aria_rule_packets_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.packets);
+                let _ = writeln!(out, "aria_rule_bytes_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.bytes);
+            }
+        }
+    }
+
+    // ── QoS counters ──
+    let _ = writeln!(out, "# HELP aria_qos_passed_packets_total QoS passed packets");
+    let _ = writeln!(out, "# TYPE aria_qos_passed_packets_total counter");
+    let _ = writeln!(out, "# HELP aria_qos_passed_bytes_total QoS passed bytes");
+    let _ = writeln!(out, "# TYPE aria_qos_passed_bytes_total counter");
+    let _ = writeln!(out, "# HELP aria_qos_dropped_packets_total QoS dropped packets");
+    let _ = writeln!(out, "# TYPE aria_qos_dropped_packets_total counter");
+    let _ = writeln!(out, "# HELP aria_qos_dropped_bytes_total QoS dropped bytes");
+    let _ = writeln!(out, "# TYPE aria_qos_dropped_bytes_total counter");
+    let _ = writeln!(out, "# HELP aria_qos_shaped_packets_total QoS shaped packets");
+    let _ = writeln!(out, "# TYPE aria_qos_shaped_packets_total counter");
+    let _ = writeln!(out, "# HELP aria_qos_shaped_bytes_total QoS shaped bytes");
+    let _ = writeln!(out, "# TYPE aria_qos_shaped_bytes_total counter");
+
+    for inst in &instances {
+        let i = prom_escape(inst);
+        if let Ok((entries, groups)) = cp.get_qos_stats(inst).await {
+            let find_name = |id: u32| -> String {
+                if id == 0 { return "any".to_string(); }
+                groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
+            };
+            for e in &entries {
+                let g = prom_escape(&find_name(e.key.group_id));
+                let dir = prom_escape(&direction_to_string(e.key.direction));
+                let _ = writeln!(out, "aria_qos_passed_packets_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.passed_packets);
+                let _ = writeln!(out, "aria_qos_passed_bytes_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.passed_bytes);
+                let _ = writeln!(out, "aria_qos_dropped_packets_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.dropped_packets);
+                let _ = writeln!(out, "aria_qos_dropped_bytes_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.dropped_bytes);
+                let _ = writeln!(out, "aria_qos_shaped_packets_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.shaped_packets);
+                let _ = writeln!(out, "aria_qos_shaped_bytes_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.shaped_bytes);
+            }
+        }
+    }
+
+    // ── Group traffic counters ──
+    let _ = writeln!(out, "# HELP aria_group_packets_total Group traffic packets");
+    let _ = writeln!(out, "# TYPE aria_group_packets_total counter");
+    let _ = writeln!(out, "# HELP aria_group_bytes_total Group traffic bytes");
+    let _ = writeln!(out, "# TYPE aria_group_bytes_total counter");
+
+    for inst in &instances {
+        let i = prom_escape(inst);
+        if let Ok((entries, groups)) = cp.get_group_stats(inst).await {
+            let find_name = |id: u32| -> String {
+                if id == 0 { return "any".to_string(); }
+                groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
+            };
+            for e in &entries {
+                let g = prom_escape(&find_name(e.key.group_id));
+                let dir = prom_escape(&direction_to_string(e.key.direction));
+                let _ = writeln!(out, "aria_group_packets_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.packets);
+                let _ = writeln!(out, "aria_group_bytes_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.bytes);
+            }
+        }
+    }
+
+    // ── Mirror counters ──
+    let _ = writeln!(out, "# HELP aria_mirror_packets_total Mirrored packets");
+    let _ = writeln!(out, "# TYPE aria_mirror_packets_total counter");
+    let _ = writeln!(out, "# HELP aria_mirror_bytes_total Mirrored bytes");
+    let _ = writeln!(out, "# TYPE aria_mirror_bytes_total counter");
+    let _ = writeln!(out, "# HELP aria_mirror_errors_total Mirror errors");
+    let _ = writeln!(out, "# TYPE aria_mirror_errors_total counter");
+
+    for inst in &instances {
+        let i = prom_escape(inst);
+        if let Ok((entries, groups)) = cp.get_mirror_stats(inst).await {
+            let find_name = |id: u32| -> String {
+                if id == 0 { return "any".to_string(); }
+                groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
+            };
+            for e in &entries {
+                let sg = prom_escape(&find_name(e.src_id));
+                let dg = prom_escape(&find_name(e.dst_id));
+                let proto = prom_escape(&proto_to_string(e.proto));
+                let dir = prom_escape(&direction_to_string(e.direction));
+                let _ = writeln!(out, "aria_mirror_packets_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.mirrored_packets);
+                let _ = writeln!(out, "aria_mirror_bytes_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.mirrored_bytes);
+                let _ = writeln!(out, "aria_mirror_errors_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.errors);
+            }
+        }
+    }
+
+    // ── TCP-RT aggregated ──
+    let _ = writeln!(out, "# HELP aria_tcprt_flows_total Number of active TCP-RT flows");
+    let _ = writeln!(out, "# TYPE aria_tcprt_flows_total gauge");
+    let _ = writeln!(out, "# HELP aria_tcprt_retrans_req_total Total request retransmissions");
+    let _ = writeln!(out, "# TYPE aria_tcprt_retrans_req_total counter");
+    let _ = writeln!(out, "# HELP aria_tcprt_retrans_resp_total Total response retransmissions");
+    let _ = writeln!(out, "# TYPE aria_tcprt_retrans_resp_total counter");
+    let _ = writeln!(out, "# HELP aria_tcprt_requests_total Total request count");
+    let _ = writeln!(out, "# TYPE aria_tcprt_requests_total counter");
+    let _ = writeln!(out, "# HELP aria_tcprt_handshake_us_sum Sum of handshake latency in microseconds");
+    let _ = writeln!(out, "# TYPE aria_tcprt_handshake_us_sum gauge");
+    let _ = writeln!(out, "# HELP aria_tcprt_art_us_sum Sum of application response time in microseconds");
+    let _ = writeln!(out, "# TYPE aria_tcprt_art_us_sum gauge");
+    let _ = writeln!(out, "# HELP aria_tcprt_rtt_client_us_sum Sum of client RTT in microseconds");
+    let _ = writeln!(out, "# TYPE aria_tcprt_rtt_client_us_sum gauge");
+    let _ = writeln!(out, "# HELP aria_tcprt_rtt_server_us_sum Sum of server RTT in microseconds");
+    let _ = writeln!(out, "# TYPE aria_tcprt_rtt_server_us_sum gauge");
+
+    for inst in &instances {
+        let i = prom_escape(inst);
+        // Fetch all flows (use a large top value to get everything)
+        if let Ok(entries) = cp.list_tcprt(inst, 100000).await {
+            let flows = entries.len() as u64;
+            let mut retrans_req: u64 = 0;
+            let mut retrans_resp: u64 = 0;
+            let mut requests: u64 = 0;
+            let mut handshake_sum: f64 = 0.0;
+            let mut art_sum: f64 = 0.0;
+            let mut rtt_client_sum: f64 = 0.0;
+            let mut rtt_server_sum: f64 = 0.0;
+            for e in &entries {
+                retrans_req += e.retrans_req as u64;
+                retrans_resp += e.retrans_resp as u64;
+                requests += e.request_count as u64;
+                handshake_sum += e.handshake_us;
+                art_sum += e.art_us;
+                rtt_client_sum += e.rtt_client_us;
+                rtt_server_sum += e.rtt_server_us;
+            }
+            let _ = writeln!(out, "aria_tcprt_flows_total{{instance=\"{i}\"}} {flows}");
+            let _ = writeln!(out, "aria_tcprt_retrans_req_total{{instance=\"{i}\"}} {retrans_req}");
+            let _ = writeln!(out, "aria_tcprt_retrans_resp_total{{instance=\"{i}\"}} {retrans_resp}");
+            let _ = writeln!(out, "aria_tcprt_requests_total{{instance=\"{i}\"}} {requests}");
+            let _ = writeln!(out, "aria_tcprt_handshake_us_sum{{instance=\"{i}\"}} {handshake_sum}");
+            let _ = writeln!(out, "aria_tcprt_art_us_sum{{instance=\"{i}\"}} {art_sum}");
+            let _ = writeln!(out, "aria_tcprt_rtt_client_us_sum{{instance=\"{i}\"}} {rtt_client_sum}");
+            let _ = writeln!(out, "aria_tcprt_rtt_server_us_sum{{instance=\"{i}\"}} {rtt_server_sum}");
+        }
+    }
+
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        out,
+    )
 }

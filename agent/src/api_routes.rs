@@ -11,6 +11,7 @@ use crate::api_handlers;
 pub fn build_router(control_plane: Arc<ControlPlane>) -> Router {
     Router::new()
         // Health & instances
+        .route("/metrics", get(api_handlers::metrics))
         .route("/api/v1/health", get(api_handlers::health))
         .route("/api/v1/instances", get(api_handlers::list_instances))
         // System start/stop
