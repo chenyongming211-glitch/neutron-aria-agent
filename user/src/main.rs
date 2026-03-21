@@ -331,35 +331,22 @@ struct InstanceFlows {
     flows: std::collections::HashMap<FlowKey, aria_api::TcpRtEntry>,
 }
 
-/// Fetch TCP-RT data from all active instances, return (instance_name, flows_map) pairs.
-async fn fetch_all_instance_flows(
+/// Fetch TCP-RT data from the system instance (primary observation point on bond).
+async fn fetch_system_flows(
     client: &api_client::ApiClient,
 ) -> Result<Vec<InstanceFlows>, String> {
-    let instances_resp = client.list_instances().await?;
-    let active: Vec<String> = instances_resp.instances.iter()
-        .filter(|i| i.active)
-        .map(|i| i.name.clone())
-        .collect();
-
-    let mut all = Vec::new();
-    for inst_name in &active {
-        let resp = match client.list_tcprt(inst_name, 65536).await {
-            Ok(r) => r,
-            Err(_) => continue,
+    let resp = client.list_tcprt("system", 65536).await?;
+    let mut flows = std::collections::HashMap::new();
+    for f in resp.flows {
+        let key = FlowKey {
+            src_ip: f.src_ip.clone(),
+            dst_ip: f.dst_ip.clone(),
+            src_port: f.src_port,
+            dst_port: f.dst_port,
         };
-        let mut flows = std::collections::HashMap::new();
-        for f in resp.flows {
-            let key = FlowKey {
-                src_ip: f.src_ip.clone(),
-                dst_ip: f.dst_ip.clone(),
-                src_port: f.src_port,
-                dst_port: f.dst_port,
-            };
-            flows.insert(key, f);
-        }
-        all.push(InstanceFlows { name: inst_name.clone(), flows });
+        flows.insert(key, f);
     }
-    Ok(all)
+    Ok(vec![InstanceFlows { name: "system".to_string(), flows }])
 }
 
 /// Sort key extractor for a given dimension name.
@@ -378,7 +365,7 @@ async fn run_tcprt_top(
     by: &str,
     top: usize,
 ) -> Result<(), String> {
-    let all_instances = fetch_all_instance_flows(client).await?;
+    let all_instances = fetch_system_flows(client).await?;
     if all_instances.is_empty() {
         println!("No active instances found");
         return Ok(());
@@ -488,11 +475,26 @@ async fn run_tcprt_flow(
     if let Some(chain_name) = chain {
         run_tcprt_flow_with_chain(client, dst, dport, chain_name, &resp, total_flows).await
     } else {
-        run_tcprt_flow_coarse(dst, dport, &resp, total_flows)
+        // No chain: only use system instance (primary observation point on bond)
+        let system_instances: Vec<aria_api::TcpRtAggregatedEntry> = resp.instances.iter()
+            .filter(|i| i.instance == "system")
+            .cloned()
+            .collect();
+        if system_instances.is_empty() {
+            println!("No flows found on system instance for {}:{}", dst, dport);
+            return Ok(());
+        }
+        let system_resp = aria_api::TcpRtFilterResponse {
+            dst_ip: resp.dst_ip.clone(),
+            dst_port: resp.dst_port,
+            instances: system_instances,
+        };
+        let sys_flows = system_resp.instances[0].flow_count;
+        run_tcprt_flow_coarse(dst, dport, &system_resp, sys_flows)
     }
 }
 
-/// 3-segment coarse-grained breakdown (no chain config needed)
+/// 3-segment coarse-grained breakdown from system instance (primary observation point)
 fn run_tcprt_flow_coarse(
     dst: &str,
     dport: u16,
@@ -501,37 +503,21 @@ fn run_tcprt_flow_coarse(
 ) -> Result<(), String> {
     println!("Service: {}:{}  ({} flows)\n", dst, dport, total_flows);
 
-    if resp.instances.len() == 1 {
-        // Single instance: just show aggregated metrics, no breakdown
-        let inst = &resp.instances[0];
-        println!("  Instance: {}", inst.instance);
-        println!("  Avg cRTT:      {:.1} us", inst.avg_rtt_client_us);
-        println!("  Avg sRTT:      {:.1} us", inst.avg_rtt_server_us);
-        println!("  Avg ART:       {:.1} us", inst.avg_art_us);
-        println!("  Avg Handshake: {:.1} us", inst.avg_handshake_us);
-        println!("  Retrans Req:   {}", inst.total_retrans_req);
-        println!("  Retrans Resp:  {}", inst.total_retrans_resp);
-        return Ok(());
-    }
+    let inst = &resp.instances[0];
 
-    // Find outer (max avg_sRTT) and inner (min avg_sRTT) instances
-    let outer = resp.instances.iter()
-        .max_by(|a, b| a.avg_rtt_server_us.partial_cmp(&b.avg_rtt_server_us).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap();
-    let inner = resp.instances.iter()
-        .min_by(|a, b| a.avg_rtt_server_us.partial_cmp(&b.avg_rtt_server_us).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap();
-
-    // Latency breakdown
-    let client_net = outer.avg_rtt_client_us;
-    let platform = (outer.avg_rtt_server_us - inner.avg_rtt_server_us).max(0.0);
-    let app = (inner.avg_art_us - inner.avg_rtt_server_us).max(0.0);
+    // Three-segment breakdown from bond (system) observation point:
+    // cRTT       = client network latency (client ↔ bond)
+    // sRTT       = platform processing latency (bond → all NFs → server network)
+    // ART - sRTT = server processing latency
+    let client_net = inst.avg_rtt_client_us;
+    let platform = inst.avg_rtt_server_us;
+    let server = (inst.avg_art_us - inst.avg_rtt_server_us).max(0.0);
 
     struct Segment { label: &'static str, value: f64 }
     let segments = [
         Segment { label: "Client Network", value: client_net },
         Segment { label: "Platform Processing", value: platform },
-        Segment { label: "App Processing", value: app },
+        Segment { label: "Server Processing", value: server },
     ];
     let max_val = segments.iter().map(|s| s.value).fold(0.0f64, f64::max);
 
@@ -542,16 +528,11 @@ fn run_tcprt_flow_coarse(
         println!("  {:<23} {:.1} us{}", seg.label, seg.value, marker);
     }
 
-    // Packet loss breakdown
-    let platform_req_loss = (outer.total_retrans_req as i64 - inner.total_retrans_req as i64).max(0);
-    let platform_rsp_loss = (outer.total_retrans_resp as i64 - inner.total_retrans_resp as i64).max(0);
-
     println!();
-    println!("  Packet Loss (total)");
+    println!("  Retransmissions (total)");
     println!("  ─────────────────────  ─────────  ─────────");
-    println!("  {:<23} {:<10} {}", "", "Req Loss", "Rsp Loss");
-    println!("  {:<23} {:<10} {}", "Platform", platform_req_loss, platform_rsp_loss);
-    println!("  {:<23} {:<10} {}", "App Side", inner.total_retrans_req, inner.total_retrans_resp);
+    println!("  {:<23} {:<10} {}", "", "Req", "Resp");
+    println!("  {:<23} {:<10} {}", "Total", inst.total_retrans_req, inst.total_retrans_resp);
     println!();
 
     Ok(())
