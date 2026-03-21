@@ -492,8 +492,8 @@ async fn run_tcprt_flow(
     }
 }
 
-/// 3-segment coarse-grained breakdown (no chain config needed)
-/// With dual-observation (bond1 XDP+TC), upgrades to 5-segment breakdown.
+/// Latency breakdown using dual-observation (bond1 XDP+TC).
+/// For multi-instance without dual-observation, suggest --chain.
 fn run_tcprt_flow_coarse(
     dst: &str,
     dport: u16,
@@ -502,130 +502,59 @@ fn run_tcprt_flow_coarse(
 ) -> Result<(), String> {
     println!("Service: {}:{}  ({} flows)\n", dst, dport, total_flows);
 
-    if resp.instances.len() == 1 {
-        let inst = &resp.instances[0];
+    // Find the best instance with dual-observation data
+    let dual_inst = resp.instances.iter()
+        .find(|i| i.instance == "system" && i.avg_forward_platform_us > 0.0)
+        .or_else(|| resp.instances.iter().find(|i| i.avg_forward_platform_us > 0.0));
 
-        // Check for dual-observation mode (5-segment)
-        if inst.avg_forward_platform_us > 0.0 {
-            let client_net = inst.avg_rtt_client_us;
-            let fwd_platform = inst.avg_forward_platform_us;
-            let server_net = inst.avg_server_network_us;
-            let rev_platform = inst.avg_reverse_platform_us;
-            let server_proc = (inst.avg_art_us - server_net).max(0.0);
+    if let Some(inst) = dual_inst {
+        let client_net = inst.avg_rtt_client_us;
+        let fwd_platform = inst.avg_forward_platform_us;
+        let server_net = inst.avg_server_network_us;
+        let rev_platform = inst.avg_reverse_platform_us;
+        let server_proc = (inst.avg_art_us - server_net).max(0.0);
 
-            struct Segment { label: &'static str, value: f64 }
-            let segments = [
-                Segment { label: "Client Network", value: client_net },
-                Segment { label: "Platform (forward)", value: fwd_platform },
-                Segment { label: "Server Network", value: server_net },
-                Segment { label: "Platform (reverse)", value: rev_platform },
-                Segment { label: "Server Processing", value: server_proc },
-            ];
-            let max_val = segments.iter().map(|s| s.value).fold(0.0f64, f64::max);
+        struct Segment { label: &'static str, value: f64 }
+        let segments = [
+            Segment { label: "Client Network", value: client_net },
+            Segment { label: "Platform (forward)", value: fwd_platform },
+            Segment { label: "Server Network", value: server_net },
+            Segment { label: "Platform (reverse)", value: rev_platform },
+            Segment { label: "Server Processing", value: server_proc },
+        ];
+        let max_val = segments.iter().map(|s| s.value).fold(0.0f64, f64::max);
 
-            println!("  Latency Breakdown (avg)");
-            println!("  ─────────────────────────  ────────────");
-            for seg in &segments {
-                let marker = if seg.value >= max_val && max_val > 0.0 { "  <- bottleneck" } else { "" };
-                println!("  {:<25} {:>8.1} us{}", seg.label, seg.value, marker);
-            }
-
-            println!();
-            println!("  Retransmissions (total)");
-            println!("  ─────────────────────────  ─────────  ─────────");
-            println!("  {:<25} {:<10} {}", "", "Req", "Resp");
-            println!("  {:<25} {:<10} {}", "Total", inst.total_retrans_req, inst.total_retrans_resp);
-            println!();
-            return Ok(());
+        println!("  Latency Breakdown (avg)");
+        println!("  ─────────────────────────  ────────────");
+        for seg in &segments {
+            let marker = if seg.value >= max_val && max_val > 0.0 { "  <- bottleneck" } else { "" };
+            println!("  {:<25} {:>8.1} us{}", seg.label, seg.value, marker);
         }
 
-        // Fallback: single instance, no dual-observation
-        println!("  Instance: {}", inst.instance);
-        println!("  Avg cRTT:      {:.1} us", inst.avg_rtt_client_us);
-        println!("  Avg sRTT:      {:.1} us", inst.avg_rtt_server_us);
-        println!("  Avg ART:       {:.1} us", inst.avg_art_us);
-        println!("  Avg Handshake: {:.1} us", inst.avg_handshake_us);
-        println!("  Retrans Req:   {}", inst.total_retrans_req);
-        println!("  Retrans Resp:  {}", inst.total_retrans_resp);
+        println!();
+        println!("  Retransmissions (total)");
+        println!("  ─────────────────────────  ─────────  ─────────");
+        println!("  {:<25} {:<10} {}", "", "Req", "Resp");
+        println!("  {:<25} {:<10} {}", "Total", inst.total_retrans_req, inst.total_retrans_resp);
+        println!();
         return Ok(());
     }
 
-    // Multi-instance: check system instance for dual-observation
-    let system_inst = resp.instances.iter().find(|i| i.instance == "system");
-    if let Some(sys) = system_inst {
-        if sys.avg_forward_platform_us > 0.0 {
-            let client_net = sys.avg_rtt_client_us;
-            let fwd_platform = sys.avg_forward_platform_us;
-            let server_net = sys.avg_server_network_us;
-            let rev_platform = sys.avg_reverse_platform_us;
-            let server_proc = (sys.avg_art_us - server_net).max(0.0);
-
-            struct Segment { label: &'static str, value: f64 }
-            let segments = [
-                Segment { label: "Client Network", value: client_net },
-                Segment { label: "Platform (forward)", value: fwd_platform },
-                Segment { label: "Server Network", value: server_net },
-                Segment { label: "Platform (reverse)", value: rev_platform },
-                Segment { label: "Server Processing", value: server_proc },
-            ];
-            let max_val = segments.iter().map(|s| s.value).fold(0.0f64, f64::max);
-
-            println!("  Latency Breakdown (avg)");
-            println!("  ─────────────────────────  ────────────");
-            for seg in &segments {
-                let marker = if seg.value >= max_val && max_val > 0.0 { "  <- bottleneck" } else { "" };
-                println!("  {:<25} {:>8.1} us{}", seg.label, seg.value, marker);
-            }
-
-            println!();
-            println!("  Retransmissions (total)");
-            println!("  ─────────────────────────  ─────────  ─────────");
-            println!("  {:<25} {:<10} {}", "", "Req", "Resp");
-            println!("  {:<25} {:<10} {}", "Total", sys.total_retrans_req, sys.total_retrans_resp);
-            println!();
-            return Ok(());
-        }
+    // No dual-observation: show per-instance metrics
+    println!("  {:<15} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
+        "Instance", "cRTT", "sRTT", "ART", "HS", "ReqRT", "RspRT");
+    println!("  {:<15} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
+        "───────────", "────────", "────────", "────────", "────────", "──────", "──────");
+    for inst in &resp.instances {
+        println!("  {:<15} {:>8.1}us {:>8.1}us {:>8.1}us {:>8.1}us {:>8} {:>8}",
+            inst.instance,
+            inst.avg_rtt_client_us, inst.avg_rtt_server_us,
+            inst.avg_art_us, inst.avg_handshake_us,
+            inst.total_retrans_req, inst.total_retrans_resp);
     }
-
-    // Fallback: outer/inner 3-segment logic
-    // Find outer (max avg_sRTT) and inner (min avg_sRTT) instances
-    let outer = resp.instances.iter()
-        .max_by(|a, b| a.avg_rtt_server_us.partial_cmp(&b.avg_rtt_server_us).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap();
-    let inner = resp.instances.iter()
-        .min_by(|a, b| a.avg_rtt_server_us.partial_cmp(&b.avg_rtt_server_us).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap();
-
-    // Latency breakdown
-    let client_net = outer.avg_rtt_client_us;
-    let platform = (outer.avg_rtt_server_us - inner.avg_rtt_server_us).max(0.0);
-    let app = (inner.avg_art_us - inner.avg_rtt_server_us).max(0.0);
-
-    struct Segment { label: &'static str, value: f64 }
-    let segments = [
-        Segment { label: "Client Network", value: client_net },
-        Segment { label: "Platform Processing", value: platform },
-        Segment { label: "App Processing", value: app },
-    ];
-    let max_val = segments.iter().map(|s| s.value).fold(0.0f64, f64::max);
-
-    println!("  Latency Breakdown (avg)");
-    println!("  ─────────────────────  ────────────");
-    for seg in &segments {
-        let marker = if seg.value >= max_val && max_val > 0.0 { "  <- bottleneck" } else { "" };
-        println!("  {:<23} {:.1} us{}", seg.label, seg.value, marker);
+    if resp.instances.len() > 1 {
+        println!("\n  Tip: use --chain <name> for per-hop latency breakdown");
     }
-
-    // Packet loss breakdown
-    let platform_req_loss = (outer.total_retrans_req as i64 - inner.total_retrans_req as i64).max(0);
-    let platform_rsp_loss = (outer.total_retrans_resp as i64 - inner.total_retrans_resp as i64).max(0);
-
-    println!();
-    println!("  Packet Loss (total)");
-    println!("  ─────────────────────  ─────────  ─────────");
-    println!("  {:<23} {:<10} {}", "", "Req Loss", "Rsp Loss");
-    println!("  {:<23} {:<10} {}", "Platform", platform_req_loss, platform_rsp_loss);
-    println!("  {:<23} {:<10} {}", "App Side", inner.total_retrans_req, inner.total_retrans_resp);
     println!();
 
     Ok(())
