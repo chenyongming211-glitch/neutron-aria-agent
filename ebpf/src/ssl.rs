@@ -113,22 +113,6 @@ pub unsafe fn ssl_set_sni_impl(ctx: &ProbeContext) -> u32 {
 
 // --- SSL HTTP (Phase 2) ---
 
-/// Check if a byte slice starts with the given prefix (verifier-friendly)
-#[inline(always)]
-fn starts_with(data: &[u8], prefix: &[u8]) -> bool {
-    if data.len() < prefix.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < prefix.len() {
-        if data[i] != prefix[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
 /// uprobe on SSL_write: parse HTTP request line and Host header
 pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
     if !ssl_enabled() {
@@ -154,31 +138,30 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
 
     let read_len = if num < 256 { num as usize } else { 256 };
     let read_len = read_len & 0xFF; // verifier hint: max 255
-    if read_len == 0 {
+    if read_len < 4 {
         return 0;
     }
     if bpf_probe_read_user_buf(buf_ptr as *const u8, &mut parse_buf.data[..read_len]).is_err() {
         return 0;
     }
 
-    // Check for HTTP methods
-    let data = &parse_buf.data[..read_len];
-    let mut method_len: usize = 0;
+    let d = &parse_buf.data;
 
-    if starts_with(data, b"GET ") {
+    // Detect HTTP method and extract method_len
+    let method_len: usize;
+    if read_len >= 4 && d[0] == b'G' && d[1] == b'E' && d[2] == b'T' && d[3] == b' ' {
         method_len = 3;
-    } else if starts_with(data, b"POST ") {
+    } else if read_len >= 5 && d[0] == b'P' && d[1] == b'O' && d[2] == b'S' && d[3] == b'T' && d[4] == b' ' {
         method_len = 4;
-    } else if starts_with(data, b"PUT ") {
+    } else if read_len >= 4 && d[0] == b'P' && d[1] == b'U' && d[2] == b'T' && d[3] == b' ' {
         method_len = 3;
-    } else if starts_with(data, b"DELETE ") {
+    } else if read_len >= 5 && d[0] == b'H' && d[1] == b'E' && d[2] == b'A' && d[3] == b'D' && d[4] == b' ' {
+        method_len = 4;
+    } else if read_len >= 7 && d[0] == b'D' && d[1] == b'E' && d[2] == b'L' && d[3] == b'E' && d[4] == b'T' && d[5] == b'E' && d[6] == b' ' {
         method_len = 6;
-    } else if starts_with(data, b"HEAD ") {
-        method_len = 4;
-    } else if starts_with(data, b"PATCH ") {
+    } else if read_len >= 6 && d[0] == b'P' && d[1] == b'A' && d[2] == b'T' && d[3] == b'C' && d[4] == b'H' && d[5] == b' ' {
         method_len = 5;
     } else {
-        // Not an HTTP request, skip
         return 0;
     }
 
@@ -189,71 +172,58 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
         host: [0u8; 64],
     };
 
-    // Copy method
-    let m_copy = if method_len > 7 { 7 } else { method_len };
-    for i in 0..m_copy {
-        if i < 7 {
-            scratch.method[i] = data[i];
+    // Copy method (max 7 bytes, bounded loop)
+    for i in 0..7u32 {
+        let idx = i as usize;
+        if idx < method_len {
+            scratch.method[idx] = d[idx];
         }
     }
 
-    // Extract path: starts after "METHOD ", ends at next space or \r\n
-    let path_start = method_len + 1; // skip the space after method
-    let mut path_end = path_start;
-    for i in path_start..read_len {
-        if i >= read_len {
+    // Extract path: starts after "METHOD " (method_len+1), ends at space/CR/LF
+    let path_start = method_len + 1;
+    let mut path_len: usize = 0;
+    for i in 0..127u32 {
+        let idx = path_start + i as usize;
+        if idx >= read_len {
             break;
         }
-        if data[i] == b' ' || data[i] == b'\r' || data[i] == b'\n' {
-            path_end = i;
+        if d[idx] == b' ' || d[idx] == b'\r' || d[idx] == b'\n' {
             break;
         }
-        path_end = i + 1;
+        scratch.path[i as usize] = d[idx];
+        path_len = i as usize + 1;
     }
-    let path_len = path_end - path_start;
-    let p_copy = if path_len > 127 { 127 } else { path_len };
-    for i in 0..p_copy {
-        let src_idx = path_start + i;
-        if src_idx < read_len && i < 127 {
-            scratch.path[i] = data[src_idx];
-        }
-    }
+    let _ = path_len; // suppress unused warning
 
-    // Extract Host header: search for "\r\nHost: "
-    let host_prefix = b"\r\nHost: ";
-    let hp_len = host_prefix.len(); // 8
-    let mut host_start: usize = 0;
+    // Search for "\r\nHost: " and extract host value
+    let mut host_offset: usize = 0;
     let mut found_host = false;
-    // Bounded loop for verifier
-    for i in 0..248 {
-        if i + hp_len > read_len {
+    for i in 0..248u32 {
+        let idx = i as usize;
+        if idx + 8 > read_len {
             break;
         }
-        if starts_with(&data[i..], host_prefix) {
-            host_start = i + hp_len;
+        if d[idx] == b'\r' && d[idx+1] == b'\n'
+            && d[idx+2] == b'H' && d[idx+3] == b'o'
+            && d[idx+4] == b's' && d[idx+5] == b't'
+            && d[idx+6] == b':' && d[idx+7] == b' '
+        {
+            host_offset = idx + 8;
             found_host = true;
             break;
         }
     }
     if found_host {
-        let mut host_end = host_start;
-        for i in host_start..read_len {
-            if i >= read_len {
+        for i in 0..63u32 {
+            let idx = host_offset + i as usize;
+            if idx >= read_len {
                 break;
             }
-            if data[i] == b'\r' || data[i] == b'\n' {
-                host_end = i;
+            if d[idx] == b'\r' || d[idx] == b'\n' {
                 break;
             }
-            host_end = i + 1;
-        }
-        let host_len = host_end - host_start;
-        let h_copy = if host_len > 63 { 63 } else { host_len };
-        for i in 0..h_copy {
-            let src_idx = host_start + i;
-            if src_idx < read_len && i < 63 {
-                scratch.host[i] = data[src_idx];
-            }
+            scratch.host[i as usize] = d[idx];
         }
     }
 
@@ -332,20 +302,21 @@ pub unsafe fn ssl_read_return_impl(ctx: &RetProbeContext) -> u32 {
         return 0;
     }
 
-    let data = &parse_buf.data[..read_len];
+    let d = &parse_buf.data;
 
     // Parse "HTTP/1.x NNN": need at least 12 bytes
     if read_len < 12 {
         return 0;
     }
-    if !starts_with(data, b"HTTP/1.") {
+    if d[0] != b'H' || d[1] != b'T' || d[2] != b'T' || d[3] != b'P'
+        || d[4] != b'/' || d[5] != b'1' || d[6] != b'.' {
         return 0;
     }
 
     // Status code starts at offset 9 (after "HTTP/1.x ")
-    let d0 = data[9];
-    let d1 = data[10];
-    let d2 = data[11];
+    let d0 = d[9];
+    let d1 = d[10];
+    let d2 = d[11];
     if d0 < b'0' || d0 > b'9' || d1 < b'0' || d1 > b'9' || d2 < b'0' || d2 > b'9' {
         return 0;
     }
