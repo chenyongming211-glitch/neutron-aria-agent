@@ -9,6 +9,7 @@
 - **XDP 入向过滤** — 在网卡驱动层拦截，零拷贝、无内核协议栈开销
 - **TC 出向控制** — 基于 clsact/TC 的出向策略匹配与 EDT 调度
 - **TC 入向镜像** — 入向流量镜像（SPAN）到分析接口
+- **双观测延迟分解** — bond1 XDP+TC 双观测，精确拆解 5 段延迟（正/反向平台处理、网络 RTT、业务处理）
 - **IPv4/IPv6 双栈** — 全部功能支持双栈，LPM 前缀树做 CIDR 最长前缀匹配
 - **8 级 fallback 策略匹配** — (src, dst, proto) 三维通配，自动回退到更宽泛的规则
 - **连接跟踪快速路径** — 已建立连接跳过策略评估，直接放行并更新统计
@@ -173,6 +174,25 @@ ariactl --tap eth0 mirror delete --src-group web --dst-group db --proto tcp --di
 
 每条 TCP 流自动采集：握手延迟、客户端 RTT、服务端 RTT、应用响应时间（ART）、重传次数。
 
+在 bond1 等同时挂载 XDP（ingress）和 TC（egress）的物理口上，eBPF 自动启用**双观测模式**：SYN 和 SYN-ACK 各被观测两次（入/出），从而精确分解出 5 段延迟：
+
+```
+Client ──── bond1(in) ──── OVS/NFs ──── bond1(out) ──── Server
+         t0          t1                t2          t3
+         │     ①     │       ②        │     ③     │
+         │ Platform  │  Server Net    │ Platform  │
+         │ (forward) │               │ (reverse) │
+    ④ Client Net                              ⑤ Server Processing
+```
+
+| # | 段 | 说明 |
+|---|---|---|
+| ① | Platform (forward) | SYN 从 ingress 到 egress，宿主机正向处理耗时 |
+| ② | Server Network | SYN 出 bond1 到 SYN-ACK 回到 bond1，网络往返 |
+| ③ | Platform (reverse) | SYN-ACK 从 ingress 到 egress，宿主机反向处理耗时 |
+| ④ | Client Network | ACK 到达 bond1 减去 SYN-ACK 离开，客户端网络往返 |
+| ⑤ | Server Processing | 数据阶段 ART 减去 Server Network，服务端业务耗时 |
+
 ```bash
 # Top-N 流按 ART 排序
 ariactl tcprt top --by art --top 10
@@ -180,8 +200,27 @@ ariactl tcprt top --by art --top 10
 # 实时刷新模式
 ariactl tcprt top --by crtt --top 20 --watch --interval 2
 
-# 单流详细延迟分解
+# 单服务延迟分解（自动检测双观测，展示 5 段 breakdown）
 ariactl tcprt flow --dst 10.0.0.5 --dport 3306
+```
+
+5 段 breakdown 输出示例：
+
+```
+Service: 10.0.0.5:3306  (128 flows)
+
+  Latency Breakdown (avg)
+  ─────────────────────────  ────────────
+  Client Network                350.2 us
+  Platform (forward)            120.0 us
+  Server Network                180.0 us
+  Platform (reverse)            130.0 us
+  Server Processing             450.0 us  <- bottleneck
+
+  Retransmissions (total)
+  ─────────────────────────  ─────────  ─────────
+                               Req        Resp
+  Total                        5          2
 ```
 
 排序维度：`art`（应用响应）、`crtt`（客户端 RTT）、`srtt`（服务端 RTT）、`hs`（握手）、`retrans`（重传）。
