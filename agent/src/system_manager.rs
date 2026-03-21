@@ -163,7 +163,8 @@ pub async fn system_stop(
             }
 
             // Remove pinned SSL uprobe links
-            for link_name in &["ssl_handshake_entry_link", "ssl_handshake_return_link", "ssl_set_sni_link"] {
+            for link_name in &["ssl_handshake_entry_link", "ssl_handshake_return_link", "ssl_set_sni_link",
+                                "ssl_write_entry_link", "ssl_read_entry_link", "ssl_read_return_link"] {
                 let link_pin = format!("{}/{}", pin_path, link_name);
                 if std::path::Path::new(&link_pin).exists() {
                     if let Err(e) = fs::remove_file(&link_pin) {
@@ -310,6 +311,22 @@ fn attach_ssl_uprobes(bpf: &mut aya::Ebpf, pin_path: &str) {
 
     if let Err(e) = attach_uprobe(bpf, "ssl_set_sni", &libssl, "SSL_ctrl", pin_path) {
         eprintln!("Warning: failed to attach ssl_set_sni uprobe: {}", e);
+        return;
+    }
+
+    // Phase 2: HTTP/1.1 observation
+    if let Err(e) = attach_uprobe(bpf, "ssl_write_entry", &libssl, "SSL_write", pin_path) {
+        eprintln!("Warning: failed to attach ssl_write_entry uprobe: {}", e);
+        return;
+    }
+
+    if let Err(e) = attach_uprobe(bpf, "ssl_read_entry", &libssl, "SSL_read", pin_path) {
+        eprintln!("Warning: failed to attach ssl_read_entry uprobe: {}", e);
+        return;
+    }
+
+    if let Err(e) = attach_uprobe(bpf, "ssl_read_return", &libssl, "SSL_read", pin_path) {
+        eprintln!("Warning: failed to attach ssl_read_return uretprobe: {}", e);
         return;
     }
 

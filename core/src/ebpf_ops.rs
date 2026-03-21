@@ -330,6 +330,7 @@ pub const ALL_MAP_NAMES: &[&str] = &[
     "TRACE_FILTER", "TRACE_LOG", "TRACE_SEQ",
     "FIREWALL_CONFIG",
     "SSL_HANDSHAKE_SCRATCH", "SSL_CONN_TABLE", "SSL_SNI_TABLE", "SSL_SEQ",
+    "SSL_HTTP_PARSE_BUF", "SSL_HTTP_SCRATCH", "SSL_READ_SCRATCH", "SSL_HTTP_TABLE", "SSL_HTTP_SEQ",
 ];
 
 /// 从 state.json 重放所有组和规则到已加载的 eBPF maps。

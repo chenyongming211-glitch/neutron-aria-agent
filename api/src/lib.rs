@@ -649,6 +649,32 @@ pub struct SslFlushResponse {
     pub flushed: u64,
 }
 
+// ── SSL HTTP Observability ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SslHttpEntry {
+    pub seq: u64,
+    pub pid: u32,
+    pub tid: u32,
+    pub method: String,
+    pub path: String,
+    pub host: String,
+    pub status_code: u16,
+    pub latency_us: f64,
+    pub request_ts: u64,
+    pub response_ts: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SslHttpListResponse {
+    pub events: Vec<SslHttpEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SslHttpFlushResponse {
+    pub flushed: u64,
+}
+
 // ── Helpers (functions) ──
 
 pub fn proto_to_string(proto: u8) -> String {

@@ -833,6 +833,24 @@ impl ControlPlane {
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
+    // ── SSL HTTP ──
+
+    pub async fn list_ssl_http(&self, instance: &str, top: usize) -> Result<Vec<aria_core::ssl_ops::SslHttpEntry>, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        let mut entries = aria_core::ssl_ops::get_ssl_http_events(&state.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))?;
+        entries.truncate(top);
+        Ok(entries)
+    }
+
+    pub async fn flush_ssl_http(&self, instance: &str) -> Result<u64, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        aria_core::ssl_ops::flush_ssl_http_events(&state.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))
+    }
+
     pub async fn batch_query_tcprt(&self, tuples: &[(String, String, u16, u16)])
         -> Result<Vec<(String, aria_core::tcprt_ops::TcpRtEntry)>, ControlPlaneError>
     {

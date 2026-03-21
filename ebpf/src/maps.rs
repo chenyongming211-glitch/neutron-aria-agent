@@ -14,6 +14,7 @@ pub use crate::common::{
     TraceFilter, TraceEvent,
     PipelineCtx,
     SslScratch, SslConnValue,
+    SslParseBuf, SslHttpScratch, SslReadScratch, SslHttpValue,
 };
 use crate::parser::PacketInfo;
 
@@ -150,3 +151,20 @@ pub static SSL_SNI_TABLE: LruHashMap<u64, [u8; 64]> = LruHashMap::with_max_entri
 
 #[map(name = "SSL_SEQ")]
 pub static SSL_SEQ: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+// --- SSL HTTP Observability maps ---
+
+#[map(name = "SSL_HTTP_PARSE_BUF")]
+pub static SSL_HTTP_PARSE_BUF: PerCpuArray<SslParseBuf> = PerCpuArray::with_max_entries(1, 0);
+
+#[map(name = "SSL_HTTP_SCRATCH")]
+pub static SSL_HTTP_SCRATCH: HashMap<u64, SslHttpScratch> = HashMap::with_max_entries(4096, 0);
+
+#[map(name = "SSL_READ_SCRATCH")]
+pub static SSL_READ_SCRATCH: HashMap<u64, SslReadScratch> = HashMap::with_max_entries(4096, 0);
+
+#[map(name = "SSL_HTTP_TABLE")]
+pub static SSL_HTTP_TABLE: LruHashMap<u64, SslHttpValue> = LruHashMap::with_max_entries(16384, 0);
+
+#[map(name = "SSL_HTTP_SEQ")]
+pub static SSL_HTTP_SEQ: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);

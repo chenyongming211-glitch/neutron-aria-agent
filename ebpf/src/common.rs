@@ -409,3 +409,45 @@ pub struct SslConnValue {
     pub timestamp: u64,
     pub sni: [u8; 64],
 }
+
+// --- SSL HTTP Observability ---
+
+/// Per-CPU scratch buffer for reading SSL user buffers (avoids stack overflow)
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SslParseBuf {
+    pub data: [u8; 256],
+}
+
+/// SSL_write → SSL_read correlation scratch (key=pid_tgid)
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SslHttpScratch {
+    pub write_ts: u64,
+    pub method: [u8; 8],
+    pub path: [u8; 128],
+    pub host: [u8; 64],
+}
+
+/// SSL_read entry saves buf pointer for return probe
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SslReadScratch {
+    pub buf_ptr: u64,
+}
+
+/// Completed HTTP request/response event
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SslHttpValue {
+    pub pid: u32,
+    pub tid: u32,
+    pub request_ts: u64,
+    pub response_ts: u64,
+    pub latency_ns: u64,
+    pub status_code: u16,
+    pub method: [u8; 8],
+    pub path: [u8; 128],
+    pub host: [u8; 64],
+    pub _pad: [u8; 2],
+}

@@ -276,6 +276,24 @@ pub struct SslConnValue {
 }
 unsafe impl Pod for SslConnValue {}
 
+// --- SSL HTTP Observability ---
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct SslHttpValue {
+    pub pid: u32,
+    pub tid: u32,
+    pub request_ts: u64,
+    pub response_ts: u64,
+    pub latency_ns: u64,
+    pub status_code: u16,
+    pub method: [u8; 8],
+    pub path: [u8; 128],
+    pub host: [u8; 64],
+    pub _pad: [u8; 2],
+}
+unsafe impl Pod for SslHttpValue {}
+
 // --- Drop Reason Profiler ---
 
 pub const DROP_ACL_DENY: u8 = 1;
