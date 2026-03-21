@@ -252,7 +252,7 @@ fn attach_tc_program(
 }
 
 /// Find libssl.so path on the system
-fn find_libssl() -> Option<String> {
+pub fn find_libssl() -> Option<String> {
     let candidates = [
         "/usr/lib/x86_64-linux-gnu/libssl.so.3",
         "/usr/lib/x86_64-linux-gnu/libssl.so.1.1",
@@ -334,7 +334,7 @@ fn attach_ssl_uprobes(bpf: &mut aya::Ebpf, pin_path: &str) {
 }
 
 /// Attach a single uprobe/uretprobe and pin its link.
-fn attach_uprobe(
+pub fn attach_uprobe(
     bpf: &mut aya::Ebpf,
     prog_name: &str,
     target: &str,

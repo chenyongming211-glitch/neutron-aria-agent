@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use aria_core::ebpf_ops::ALL_MAP_NAMES;
+use crate::system_manager::{find_libssl, attach_uprobe};
 
 /// Represents a single tap interface with its attached XDP firewall instance.
 /// On kernel 5.7+, the XDP link is pinned to bpffs so it survives agent crashes.
@@ -127,6 +128,9 @@ impl FirewallInstance {
         let state_path_str = self.state_path.to_str().unwrap();
         aria_core::ebpf_ops::replay_state(&mut bpf, state_path_str);
 
+        // Attach SSL uprobes (non-fatal: warn and continue if libssl not found)
+        self.attach_ssl_uprobes(&mut bpf, pin_path_str);
+
         println!("[{}] Firewall instance active", self.iface);
         Ok(())
     }
@@ -212,6 +216,35 @@ impl FirewallInstance {
         Ok(())
     }
 
+    /// Attach SSL uprobes to libssl. Non-fatal: warns on failure.
+    fn attach_ssl_uprobes(&self, bpf: &mut aya::Ebpf, pin_path: &str) {
+        let libssl = match find_libssl() {
+            Some(p) => p,
+            None => {
+                println!("[{}] libssl not found, SSL uprobes not attached", self.iface);
+                return;
+            }
+        };
+
+        let probes = [
+            ("ssl_handshake_entry", "SSL_do_handshake"),
+            ("ssl_handshake_return", "SSL_do_handshake"),
+            ("ssl_set_sni", "SSL_ctrl"),
+            ("ssl_write_entry", "SSL_write"),
+            ("ssl_read_entry", "SSL_read"),
+            ("ssl_read_return", "SSL_read"),
+        ];
+
+        for (prog_name, fn_name) in &probes {
+            if let Err(e) = attach_uprobe(bpf, prog_name, &libssl, fn_name, pin_path) {
+                eprintln!("[{}] Warning: failed to attach {} uprobe: {}", self.iface, prog_name, e);
+                return;
+            }
+        }
+
+        println!("[{}] SSL uprobes attached to {}", self.iface, libssl);
+    }
+
     /// Replay state to already-pinned maps (used during crash recovery)
     fn replay_state_to_pinned_maps(&self, ebpf_path: &str) -> Result<(), String> {
         let pin_path_str = self.pin_path.to_str().unwrap();
@@ -242,6 +275,15 @@ impl FirewallInstance {
 
         // Detach TC egress
         aria_core::ebpf_ops::detach_tc_egress(&self.iface);
+
+        // Remove pinned SSL uprobe links
+        for link_name in &["ssl_handshake_entry_link", "ssl_handshake_return_link", "ssl_set_sni_link",
+                            "ssl_write_entry_link", "ssl_read_entry_link", "ssl_read_return_link"] {
+            let link_pin = format!("{}/{}", pin_path_str, link_name);
+            if std::path::Path::new(&link_pin).exists() {
+                let _ = std::fs::remove_file(&link_pin);
+            }
+        }
 
         // Clean up all pinned maps and programs
         if self.pin_path.exists() {
