@@ -287,10 +287,8 @@ pub struct SslHttpValue {
     pub response_ts: u64,
     pub latency_ns: u64,
     pub status_code: u16,
-    pub method: [u8; 8],
-    pub path: [u8; 128],
-    pub host: [u8; 64],
-    pub _pad: [u8; 2],
+    pub _pad: [u8; 6],
+    pub req_data: [u8; 128],
 }
 unsafe impl Pod for SslHttpValue {}
 

@@ -420,13 +420,12 @@ pub struct SslParseBuf {
 }
 
 /// SSL_write → SSL_read correlation scratch (key=pid_tgid)
+/// Stores raw request header for userspace parsing (zero loops in eBPF)
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct SslHttpScratch {
     pub write_ts: u64,
-    pub method: [u8; 8],
-    pub path: [u8; 128],
-    pub host: [u8; 64],
+    pub req_data: [u8; 128],  // raw HTTP request first 128 bytes
 }
 
 /// SSL_read entry saves buf pointer for return probe
@@ -437,6 +436,7 @@ pub struct SslReadScratch {
 }
 
 /// Completed HTTP request/response event
+/// req_data contains raw request header; method/path/host parsed in userspace
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct SslHttpValue {
@@ -446,8 +446,6 @@ pub struct SslHttpValue {
     pub response_ts: u64,
     pub latency_ns: u64,
     pub status_code: u16,
-    pub method: [u8; 8],
-    pub path: [u8; 128],
-    pub host: [u8; 64],
-    pub _pad: [u8; 2],
+    pub _pad: [u8; 6],
+    pub req_data: [u8; 128],  // raw HTTP request header
 }

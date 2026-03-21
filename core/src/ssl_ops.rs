@@ -81,6 +81,32 @@ fn bytes_to_string(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..end]).to_string()
 }
 
+/// Parse method, path, and host from raw HTTP request header bytes
+fn parse_http_request(data: &[u8; 128]) -> (String, String, String) {
+    let raw = bytes_to_string(data);
+
+    // Parse request line: "METHOD PATH HTTP/1.x\r\n"
+    let first_line = raw.split("\r\n").next().unwrap_or("");
+    let mut parts = first_line.splitn(3, ' ');
+    let method = parts.next().unwrap_or("").to_string();
+    let path = parts.next().unwrap_or("").to_string();
+
+    // Parse Host header
+    let mut host = String::new();
+    for line in raw.split("\r\n").skip(1) {
+        if let Some(val) = line.strip_prefix("Host: ") {
+            host = val.to_string();
+            break;
+        }
+        if let Some(val) = line.strip_prefix("host: ") {
+            host = val.to_string();
+            break;
+        }
+    }
+
+    (method, path, host)
+}
+
 pub fn get_ssl_http_events(pin_path: &str) -> Result<Vec<SslHttpEntry>, String> {
     let map_path = format!("{}/SSL_HTTP_TABLE", pin_path);
     let map_data = MapData::from_pin(&map_path)
@@ -92,13 +118,14 @@ pub fn get_ssl_http_events(pin_path: &str) -> Result<Vec<SslHttpEntry>, String> 
     let mut entries = Vec::new();
     for item in map.iter() {
         if let Ok((seq, val)) = item {
+            let (method, path, host) = parse_http_request(&val.req_data);
             entries.push(SslHttpEntry {
                 seq,
                 pid: val.pid,
                 tid: val.tid,
-                method: bytes_to_string(&val.method),
-                path: bytes_to_string(&val.path),
-                host: bytes_to_string(&val.host),
+                method,
+                path,
+                host,
                 status_code: val.status_code,
                 latency_us: val.latency_ns as f64 / 1000.0,
                 request_ts: val.request_ts,

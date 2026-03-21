@@ -3,8 +3,9 @@ use aya_ebpf::programs::{ProbeContext, RetProbeContext};
 
 use crate::maps::{
     FIREWALL_CONFIG, SSL_HANDSHAKE_SCRATCH, SSL_CONN_TABLE, SSL_SNI_TABLE, SSL_SEQ,
-    SSL_HTTP_PARSE_BUF, SSL_HTTP_SCRATCH, SSL_HTTP_SCRATCH_BUF, SSL_READ_SCRATCH, SSL_HTTP_TABLE, SSL_HTTP_SEQ,
-    SslScratch, SslConnValue, SslHttpScratch, SslReadScratch, SslHttpValue,
+    SSL_HTTP_SCRATCH_BUF, SSL_HTTP_SCRATCH, SSL_READ_SCRATCH, SSL_HTTP_TABLE, SSL_HTTP_SEQ,
+    SSL_HTTP_PARSE_BUF,
+    SslScratch, SslConnValue, SslReadScratch, SslHttpValue,
 };
 
 const SSL_CTRL_SET_TLSEXT_HOSTNAME: u64 = 55;
@@ -111,9 +112,9 @@ pub unsafe fn ssl_set_sni_impl(ctx: &ProbeContext) -> u32 {
     0
 }
 
-// --- SSL HTTP (Phase 2) ---
+// --- SSL HTTP (Phase 2): zero-loop design for kernel 4.18+ compatibility ---
 
-/// uprobe on SSL_write: parse HTTP request line and Host header
+/// uprobe on SSL_write: detect HTTP request, store raw header for userspace parsing
 pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
     if !ssl_enabled() {
         return 0;
@@ -131,116 +132,41 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
         return 0;
     }
 
-    let parse_buf = match SSL_HTTP_PARSE_BUF.get_ptr_mut(0) {
-        Some(p) => &mut *p,
-        None => return 0,
-    };
-
-    let read_len = if num < 256 { num as usize } else { 256 };
-    let read_len = read_len & 0xFF; // verifier hint: max 255
-    if read_len < 4 {
-        return 0;
-    }
-    if bpf_probe_read_user_buf(buf_ptr as *const u8, &mut parse_buf.data[..read_len]).is_err() {
-        return 0;
-    }
-
-    let d = &parse_buf.data;
-
-    // Detect HTTP method and extract method_len
-    let method_len: usize;
-    if read_len >= 4 && d[0] == b'G' && d[1] == b'E' && d[2] == b'T' && d[3] == b' ' {
-        method_len = 3;
-    } else if read_len >= 5 && d[0] == b'P' && d[1] == b'O' && d[2] == b'S' && d[3] == b'T' && d[4] == b' ' {
-        method_len = 4;
-    } else if read_len >= 4 && d[0] == b'P' && d[1] == b'U' && d[2] == b'T' && d[3] == b' ' {
-        method_len = 3;
-    } else if read_len >= 5 && d[0] == b'H' && d[1] == b'E' && d[2] == b'A' && d[3] == b'D' && d[4] == b' ' {
-        method_len = 4;
-    } else if read_len >= 7 && d[0] == b'D' && d[1] == b'E' && d[2] == b'L' && d[3] == b'E' && d[4] == b'T' && d[5] == b'E' && d[6] == b' ' {
-        method_len = 6;
-    } else if read_len >= 6 && d[0] == b'P' && d[1] == b'A' && d[2] == b'T' && d[3] == b'C' && d[4] == b'H' && d[5] == b' ' {
-        method_len = 5;
-    } else {
-        return 0;
-    }
-
-    // Use per-CPU scratch buffer to avoid stack memset for large struct
+    // Use per-CPU scratch to read request data directly (no loops)
     let scratch = match SSL_HTTP_SCRATCH_BUF.get_ptr_mut(0) {
         Some(p) => &mut *p,
         None => return 0,
     };
+
+    let read_len = if num < 128 { num as usize } else { 128 };
+    let read_len = read_len & 0x7F; // verifier hint: max 127
+    if read_len < 4 {
+        return 0;
+    }
+
+    // Read directly into scratch.req_data — zero copy, zero loops
+    if bpf_probe_read_user_buf(buf_ptr as *const u8, &mut scratch.req_data[..read_len]).is_err() {
+        return 0;
+    }
+
+    // Detect HTTP method — pure branch comparison, zero loops
+    let d = &scratch.req_data;
+    let is_http = (d[0] == b'G' && d[1] == b'E' && d[2] == b'T' && d[3] == b' ')
+        || (read_len >= 5 && d[0] == b'P' && d[1] == b'O' && d[2] == b'S' && d[3] == b'T' && d[4] == b' ')
+        || (d[0] == b'P' && d[1] == b'U' && d[2] == b'T' && d[3] == b' ')
+        || (read_len >= 5 && d[0] == b'H' && d[1] == b'E' && d[2] == b'A' && d[3] == b'D' && d[4] == b' ')
+        || (read_len >= 7 && d[0] == b'D' && d[1] == b'E' && d[2] == b'L' && d[3] == b'E' && d[4] == b'T' && d[5] == b'E' && d[6] == b' ')
+        || (read_len >= 6 && d[0] == b'P' && d[1] == b'A' && d[2] == b'T' && d[3] == b'C' && d[4] == b'H' && d[5] == b' ');
+
+    if !is_http {
+        return 0;
+    }
+
     scratch.write_ts = bpf_ktime_get_ns();
 
-    // Copy method (max 7 bytes, bounded loop) + null terminate
-    let mut m_end: usize = 0;
-    for i in 0..7u32 {
-        let idx = i as usize;
-        if idx < method_len {
-            scratch.method[idx] = d[idx];
-            m_end = idx + 1;
-        }
-    }
-    if m_end < 8 {
-        scratch.method[m_end] = 0;
-    }
-
-    // Extract path: starts after "METHOD " (method_len+1), ends at space/CR/LF
-    // Limit to 48 bytes to reduce verifier state explosion
-    let path_start = method_len + 1;
-    let mut p_end: usize = 0;
-    for i in 0..48u32 {
-        let idx = path_start + i as usize;
-        if idx >= read_len {
-            break;
-        }
-        if d[idx] == b' ' || d[idx] == b'\r' || d[idx] == b'\n' {
-            break;
-        }
-        scratch.path[i as usize] = d[idx];
-        p_end = i as usize + 1;
-    }
-    if p_end < 128 {
-        scratch.path[p_end] = 0;
-    }
-
-    // Search for "\r\nHost: " and extract host value
-    // Limit search to first 128 bytes to reduce verifier complexity
-    let mut host_offset: usize = 0;
-    let mut found_host = false;
-    for i in 0..120u32 {
-        let idx = i as usize;
-        if idx + 8 > read_len {
-            break;
-        }
-        if d[idx] == b'\r' && d[idx+1] == b'\n'
-            && d[idx+2] == b'H' && d[idx+3] == b'o'
-            && d[idx+4] == b's' && d[idx+5] == b't'
-            && d[idx+6] == b':' && d[idx+7] == b' '
-        {
-            host_offset = idx + 8;
-            found_host = true;
-            break;
-        }
-    }
-    if found_host {
-        let mut h_end: usize = 0;
-        for i in 0..32u32 {
-            let idx = host_offset + i as usize;
-            if idx >= read_len {
-                break;
-            }
-            if d[idx] == b'\r' || d[idx] == b'\n' {
-                break;
-            }
-            scratch.host[i as usize] = d[idx];
-            h_end = i as usize + 1;
-        }
-        if h_end < 64 {
-            scratch.host[h_end] = 0;
-        }
-    } else {
-        scratch.host[0] = 0;
+    // Null-terminate if short read
+    if read_len < 128 {
+        scratch.req_data[read_len] = 0;
     }
 
     let pid_tgid = bpf_get_current_pid_tgid();
@@ -303,33 +229,30 @@ pub unsafe fn ssl_read_return_impl(ctx: &RetProbeContext) -> u32 {
     };
     let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
 
-    // Read response data
+    // Read first 16 bytes of response to detect "HTTP/1.x NNN"
     let parse_buf = match SSL_HTTP_PARSE_BUF.get_ptr_mut(0) {
         Some(p) => &mut *p,
         None => return 0,
     };
 
-    let read_len = if (ret as usize) < 256 { ret as usize } else { 256 };
-    let read_len = read_len & 0xFF; // verifier hint: max 255
-    if read_len == 0 {
+    // Only need 13 bytes ("HTTP/1.x NNN"), read 16 for alignment
+    let read_len: usize = if (ret as usize) < 16 { ret as usize } else { 16 };
+    if read_len < 13 {
         return 0;
     }
-    if bpf_probe_read_user_buf(read_scratch.buf_ptr as *const u8, &mut parse_buf.data[..read_len]).is_err() {
+    if bpf_probe_read_user_buf(read_scratch.buf_ptr as *const u8, &mut parse_buf.data[..16]).is_err() {
         return 0;
     }
 
     let d = &parse_buf.data;
 
-    // Parse "HTTP/1.x NNN": need at least 12 bytes
-    if read_len < 12 {
-        return 0;
-    }
+    // Check "HTTP/1." prefix — pure branch, zero loops
     if d[0] != b'H' || d[1] != b'T' || d[2] != b'T' || d[3] != b'P'
         || d[4] != b'/' || d[5] != b'1' || d[6] != b'.' {
         return 0;
     }
 
-    // Status code starts at offset 9 (after "HTTP/1.x ")
+    // Status code at offset 9 (after "HTTP/1.x ")
     let d0 = d[9];
     let d1 = d[10];
     let d2 = d[11];
@@ -351,10 +274,8 @@ pub unsafe fn ssl_read_return_impl(ctx: &RetProbeContext) -> u32 {
         response_ts: now,
         latency_ns,
         status_code,
-        method: http_scratch.method,
-        path: http_scratch.path,
-        host: http_scratch.host,
-        _pad: [0u8; 2],
+        _pad: [0u8; 6],
+        req_data: http_scratch.req_data,
     };
 
     // Get per-CPU seq
