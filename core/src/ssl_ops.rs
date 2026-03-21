@@ -82,7 +82,7 @@ fn bytes_to_string(bytes: &[u8]) -> String {
 }
 
 /// Parse method, path, and host from raw HTTP request header bytes
-fn parse_http_request(data: &[u8; 128]) -> (String, String, String) {
+fn parse_http_request(data: &[u8; 256]) -> (String, String, String) {
     let raw = bytes_to_string(data);
 
     // Parse request line: "METHOD PATH HTTP/1.x\r\n"
