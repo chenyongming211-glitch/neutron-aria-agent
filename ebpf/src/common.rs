@@ -425,7 +425,7 @@ pub struct SslParseBuf {
 #[derive(Copy, Clone)]
 pub struct SslHttpScratch {
     pub write_ts: u64,
-    pub req_data: [u8; 128],  // raw HTTP request first 128 bytes
+    pub req_data: [u8; 256],  // raw HTTP request first 256 bytes
 }
 
 /// SSL_read entry saves buf pointer for return probe
@@ -447,5 +447,5 @@ pub struct SslHttpValue {
     pub latency_ns: u64,
     pub status_code: u16,
     pub _pad: [u8; 6],
-    pub req_data: [u8; 128],  // raw HTTP request header
+    pub req_data: [u8; 256],  // raw HTTP request header (was 128)
 }

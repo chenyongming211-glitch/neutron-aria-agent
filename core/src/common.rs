@@ -288,7 +288,7 @@ pub struct SslHttpValue {
     pub latency_ns: u64,
     pub status_code: u16,
     pub _pad: [u8; 6],
-    pub req_data: [u8; 128],
+    pub req_data: [u8; 256],  // raw HTTP request header (was 128)
 }
 unsafe impl Pod for SslHttpValue {}
 

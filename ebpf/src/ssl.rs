@@ -138,8 +138,8 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
         None => return 0,
     };
 
-    let read_len = if num < 128 { num as usize } else { 128 };
-    let read_len = read_len & 0x7F; // verifier hint: max 127
+    let read_len = if num < 255 { num as usize } else { 255 };
+    let read_len = read_len & 0xFF; // verifier hint: max 255
     if read_len < 4 {
         return 0;
     }
@@ -164,10 +164,8 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
 
     scratch.write_ts = bpf_ktime_get_ns();
 
-    // Null-terminate if short read
-    if read_len < 128 {
-        scratch.req_data[read_len] = 0;
-    }
+    // Null-terminate: always safe since read_len <= 255 < 256
+    scratch.req_data[read_len] = 0;
 
     let pid_tgid = bpf_get_current_pid_tgid();
     let _ = SSL_HTTP_SCRATCH.insert(&pid_tgid, scratch, 0);
@@ -229,18 +227,18 @@ pub unsafe fn ssl_read_return_impl(ctx: &RetProbeContext) -> u32 {
     };
     let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
 
-    // Read first 16 bytes of response to detect "HTTP/1.x NNN"
+    // Read first 32 bytes of response to detect "HTTP/1.x NNN" (handle fragmentation)
     let parse_buf = match SSL_HTTP_PARSE_BUF.get_ptr_mut(0) {
         Some(p) => &mut *p,
         None => return 0,
     };
 
-    // Only need 13 bytes ("HTTP/1.x NNN"), read 16 for alignment
-    let read_len: usize = if (ret as usize) < 16 { ret as usize } else { 16 };
+    // Only need 13 bytes ("HTTP/1.x NNN"), read 32 for fragmentation tolerance
+    let read_len: usize = if (ret as usize) < 32 { ret as usize } else { 32 };
     if read_len < 13 {
         return 0;
     }
-    if bpf_probe_read_user_buf(read_scratch.buf_ptr as *const u8, &mut parse_buf.data[..16]).is_err() {
+    if bpf_probe_read_user_buf(read_scratch.buf_ptr as *const u8, &mut parse_buf.data[..32]).is_err() {
         return 0;
     }
 
