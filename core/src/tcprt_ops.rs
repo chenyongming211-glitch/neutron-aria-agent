@@ -18,13 +18,21 @@ pub struct TcpRtEntry {
     pub forward_platform_us: f64,
     pub server_network_us: f64,
     pub reverse_platform_us: f64,
+    pub fin_us: f64,
+    pub rst_us: f64,
+    pub close_us: f64,
+    pub nqa_score: u8,
 }
 
 fn state_name(state: u8) -> String {
     match state {
-        0 => "handshake".to_string(),
+        0 => "syn_sent".to_string(),
         1 => "established".to_string(),
-        2 => "closing".to_string(),
+        2 => "fin_wait".to_string(),
+        3 => "close_wait".to_string(),
+        4 => "time_wait".to_string(),
+        5 => "rst".to_string(),
+        6 => "closed".to_string(),
         _ => "unknown".to_string(),
     }
 }
@@ -73,6 +81,15 @@ pub fn get_tcprt_flows_v6(pin_path: &str) -> Result<Vec<TcpRtEntry>, String> {
 
 fn value_to_entry(src_ip: String, dst_ip: String, src_port: u16, dst_port: u16, val: &TcpRtValue) -> TcpRtEntry {
     let dual = val.syn_ingress_ts > 0 && val.syn_ingress_ts != val.syn_ts;
+    let fin_us = if val.fin_ts > 0 && val.syn_ts > 0 {
+        val.fin_ts.saturating_sub(val.syn_ts) as f64 / 1000.0
+    } else { 0.0 };
+    let rst_us = if val.rst_ts > 0 && val.syn_ts > 0 {
+        val.rst_ts.saturating_sub(val.syn_ts) as f64 / 1000.0
+    } else { 0.0 };
+    let close_us = if val.close_ts > 0 && val.syn_ts > 0 {
+        val.close_ts.saturating_sub(val.syn_ts) as f64 / 1000.0
+    } else { 0.0 };
     TcpRtEntry {
         src_ip,
         dst_ip,
@@ -93,7 +110,35 @@ fn value_to_entry(src_ip: String, dst_ip: String, src_port: u16, dst_port: u16, 
         reverse_platform_us: if dual && val.synack_ingress_ts > 0 {
             val.synack_ts.saturating_sub(val.synack_ingress_ts) as f64 / 1000.0
         } else { 0.0 },
+        fin_us,
+        rst_us,
+        close_us,
+        nqa_score: compute_nqa_score(val),
     }
+}
+
+/// Compute NQA (Network Quality Assessment) score 0-100.
+/// Deducts for retransmissions, ART/RTT ratio, and absolute RTT.
+fn compute_nqa_score(val: &TcpRtValue) -> u8 {
+    let req_count = val.request_count.max(1) as f64;
+    let total_retrans = (val.retrans_req + val.retrans_resp) as f64;
+    let retrans_rate = total_retrans / (req_count * 2.0);
+    // Retrans penalty: up to 40 points
+    let retrans_penalty = (retrans_rate * 100.0).min(40.0);
+
+    // ART ratio penalty: up to 30 points
+    let art_us = val.art_ns as f64 / 1000.0;
+    let rtt_server_us = val.rtt_server_ns as f64 / 1000.0;
+    let art_penalty = if rtt_server_us > 0.0 {
+        let ratio = art_us / rtt_server_us;
+        ((ratio - 1.0).max(0.0) * 10.0).min(30.0)
+    } else { 0.0 };
+
+    // RTT penalty: up to 30 points (100ms = 30 point deduction)
+    let rtt_penalty = (rtt_server_us / 100_000.0 * 30.0).min(30.0);
+
+    let score = 100.0 - retrans_penalty - art_penalty - rtt_penalty;
+    score.max(0.0) as u8
 }
 
 /// O(1) lookup of specific flows by 4-tuple. Returns matching entries.

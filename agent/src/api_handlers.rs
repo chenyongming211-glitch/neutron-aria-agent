@@ -714,6 +714,10 @@ pub async fn list_tcprt(
                 forward_platform_us: e.forward_platform_us,
                 server_network_us: e.server_network_us,
                 reverse_platform_us: e.reverse_platform_us,
+                fin_us: e.fin_us,
+                rst_us: e.rst_us,
+                close_us: e.close_us,
+                nqa_score: e.nqa_score,
             }).collect();
             Ok(Json(aria_api::TcpRtResponse { flows }))
         }
@@ -758,6 +762,10 @@ pub async fn batch_query_tcprt(
                     forward_platform_us: e.forward_platform_us,
                     server_network_us: e.server_network_us,
                     reverse_platform_us: e.reverse_platform_us,
+                    fin_us: e.fin_us,
+                    rst_us: e.rst_us,
+                    close_us: e.close_us,
+                    nqa_score: e.nqa_score,
                 },
             }).collect();
             Ok(Json(aria_api::TcpRtBatchQueryResponse { results }))
@@ -788,6 +796,7 @@ pub async fn filter_tcprt(
                         avg_forward_platform_us: entries.iter().map(|e| e.forward_platform_us).sum::<f64>() / fc,
                         avg_server_network_us: entries.iter().map(|e| e.server_network_us).sum::<f64>() / fc,
                         avg_reverse_platform_us: entries.iter().map(|e| e.reverse_platform_us).sum::<f64>() / fc,
+                        avg_nqa_score: entries.iter().map(|e| e.nqa_score as f64).sum::<f64>() / fc,
                     }
                 })
                 .collect();
@@ -795,6 +804,102 @@ pub async fn filter_tcprt(
                 dst_ip: req.dst_ip,
                 dst_port: req.dst_port,
                 instances,
+            }))
+        }
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+pub async fn tcprt_histogram(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    match cp.list_tcprt(&instance, 100000).await {
+        Ok(entries) => {
+            let bucket_boundaries: Vec<f64> = vec![
+                1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0,
+                500_000.0, 1_000_000.0, 5_000_000.0, 10_000_000.0,
+            ];
+            let mut counts = vec![0u64; bucket_boundaries.len()];
+            let mut total = 0u64;
+            let mut sum_us = 0.0f64;
+            let mut art_values: Vec<f64> = Vec::new();
+
+            for e in &entries {
+                if e.art_us > 0.0 {
+                    total += 1;
+                    sum_us += e.art_us;
+                    art_values.push(e.art_us);
+                    for (i, &boundary) in bucket_boundaries.iter().enumerate() {
+                        if e.art_us <= boundary {
+                            counts[i] += 1;
+                        }
+                    }
+                }
+            }
+
+            art_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let percentile = |p: f64| -> f64 {
+                if art_values.is_empty() { return 0.0; }
+                let idx = ((p / 100.0) * art_values.len() as f64).ceil() as usize;
+                art_values[idx.min(art_values.len()).saturating_sub(1)]
+            };
+
+            let buckets = bucket_boundaries.iter().enumerate().map(|(i, &le_us)| {
+                aria_api::TcpRtHistogramBucket { le_us, count: counts[i] }
+            }).collect();
+
+            Ok(Json(aria_api::TcpRtHistogramResponse {
+                buckets,
+                total,
+                sum_us,
+                p50_us: percentile(50.0),
+                p95_us: percentile(95.0),
+                p99_us: percentile(99.0),
+            }))
+        }
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+pub async fn tcprt_states(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    match cp.list_tcprt(&instance, 100000).await {
+        Ok(entries) => {
+            let mut state_counts: Vec<(String, u64)> = Vec::new();
+            let total_flows = entries.len() as u64;
+
+            for e in &entries {
+                if let Some(sc) = state_counts.iter_mut().find(|(s, _)| s == &e.state) {
+                    sc.1 += 1;
+                } else {
+                    state_counts.push((e.state.clone(), 1));
+                }
+            }
+
+            let mut anomalies: Vec<String> = Vec::new();
+            if total_flows > 0 {
+                for (state, count) in &state_counts {
+                    let pct = *count as f64 / total_flows as f64 * 100.0;
+                    if state == "close_wait" && pct > 10.0 {
+                        anomalies.push(format!("CLOSE_WAIT is {:.1}% (>10%) - possible connection leak", pct));
+                    }
+                    if state == "rst" && pct > 20.0 {
+                        anomalies.push(format!("RST is {:.1}% (>20%) - possible network issue", pct));
+                    }
+                }
+            }
+
+            let states = state_counts.into_iter().map(|(state, count)| {
+                aria_api::TcpRtStateCount { state, count }
+            }).collect();
+
+            Ok(Json(aria_api::TcpRtStatesResponse {
+                states,
+                total_flows,
+                anomalies,
             }))
         }
         Err(e) => Err(err_response(e)),
@@ -1265,6 +1370,10 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
     let _ = writeln!(out, "# TYPE aria_tcprt_rtt_client_us_sum gauge");
     let _ = writeln!(out, "# HELP aria_tcprt_rtt_server_us_sum Sum of server RTT in microseconds");
     let _ = writeln!(out, "# TYPE aria_tcprt_rtt_server_us_sum gauge");
+    let _ = writeln!(out, "# HELP aria_tcprt_art_seconds ART latency distribution histogram");
+    let _ = writeln!(out, "# TYPE aria_tcprt_art_seconds histogram");
+    let _ = writeln!(out, "# HELP aria_tcprt_nqa_score_avg Average NQA network quality score (0-100)");
+    let _ = writeln!(out, "# TYPE aria_tcprt_nqa_score_avg gauge");
 
     for inst in &instances {
         let i = prom_escape(inst);
@@ -1278,6 +1387,15 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
             let mut art_sum: f64 = 0.0;
             let mut rtt_client_sum: f64 = 0.0;
             let mut rtt_server_sum: f64 = 0.0;
+            let mut nqa_sum: f64 = 0.0;
+            let mut art_count: u64 = 0;
+            // ART histogram buckets (in seconds for Prometheus convention)
+            let art_boundaries_us: [f64; 9] = [
+                1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0,
+                500_000.0, 1_000_000.0, 5_000_000.0, 10_000_000.0,
+            ];
+            let mut art_bucket_counts = [0u64; 9];
+            let mut art_sum_seconds: f64 = 0.0;
             for e in &entries {
                 retrans_req += e.retrans_req as u64;
                 retrans_resp += e.retrans_resp as u64;
@@ -1286,6 +1404,16 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
                 art_sum += e.art_us;
                 rtt_client_sum += e.rtt_client_us;
                 rtt_server_sum += e.rtt_server_us;
+                nqa_sum += e.nqa_score as f64;
+                if e.art_us > 0.0 {
+                    art_count += 1;
+                    art_sum_seconds += e.art_us / 1_000_000.0;
+                    for (j, &boundary) in art_boundaries_us.iter().enumerate() {
+                        if e.art_us <= boundary {
+                            art_bucket_counts[j] += 1;
+                        }
+                    }
+                }
             }
             let _ = writeln!(out, "aria_tcprt_flows_total{{instance=\"{i}\"}} {flows}");
             let _ = writeln!(out, "aria_tcprt_retrans_req_total{{instance=\"{i}\"}} {retrans_req}");
@@ -1295,6 +1423,17 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
             let _ = writeln!(out, "aria_tcprt_art_us_sum{{instance=\"{i}\"}} {art_sum}");
             let _ = writeln!(out, "aria_tcprt_rtt_client_us_sum{{instance=\"{i}\"}} {rtt_client_sum}");
             let _ = writeln!(out, "aria_tcprt_rtt_server_us_sum{{instance=\"{i}\"}} {rtt_server_sum}");
+            // ART histogram (Prometheus native histogram format)
+            let art_boundaries_s = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10"];
+            for (j, le) in art_boundaries_s.iter().enumerate() {
+                let _ = writeln!(out, "aria_tcprt_art_seconds_bucket{{instance=\"{i}\",le=\"{le}\"}} {}", art_bucket_counts[j]);
+            }
+            let _ = writeln!(out, "aria_tcprt_art_seconds_bucket{{instance=\"{i}\",le=\"+Inf\"}} {art_count}");
+            let _ = writeln!(out, "aria_tcprt_art_seconds_sum{{instance=\"{i}\"}} {art_sum_seconds}");
+            let _ = writeln!(out, "aria_tcprt_art_seconds_count{{instance=\"{i}\"}} {art_count}");
+            // NQA average gauge
+            let avg_nqa = if flows > 0 { nqa_sum / flows as f64 } else { 0.0 };
+            let _ = writeln!(out, "aria_tcprt_nqa_score_avg{{instance=\"{i}\"}} {avg_nqa:.1}");
         }
     }
 

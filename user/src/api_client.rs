@@ -272,6 +272,20 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    pub async fn tcprt_histogram(&self, instance: &str) -> Result<TcpRtHistogramResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/tcprt/histogram", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn tcprt_states(&self, instance: &str) -> Result<TcpRtStatesResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/tcprt/states", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── Service Chains ──
 
     pub async fn list_chains(&self) -> Result<ServiceChainListResponse, String> {

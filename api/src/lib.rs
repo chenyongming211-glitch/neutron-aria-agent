@@ -403,6 +403,14 @@ pub struct TcpRtEntry {
     pub server_network_us: f64,
     #[serde(default)]
     pub reverse_platform_us: f64,
+    #[serde(default)]
+    pub fin_us: f64,
+    #[serde(default)]
+    pub rst_us: f64,
+    #[serde(default)]
+    pub close_us: f64,
+    #[serde(default)]
+    pub nqa_score: u8,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -463,6 +471,8 @@ pub struct TcpRtAggregatedEntry {
     pub avg_server_network_us: f64,
     #[serde(default)]
     pub avg_reverse_platform_us: f64,
+    #[serde(default)]
+    pub avg_nqa_score: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -470,6 +480,39 @@ pub struct TcpRtFilterResponse {
     pub dst_ip: String,
     pub dst_port: u16,
     pub instances: Vec<TcpRtAggregatedEntry>,
+}
+
+// ── TCP-RT Histogram ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtHistogramBucket {
+    pub le_us: f64,
+    pub count: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtHistogramResponse {
+    pub buckets: Vec<TcpRtHistogramBucket>,
+    pub total: u64,
+    pub sum_us: f64,
+    pub p50_us: f64,
+    pub p95_us: f64,
+    pub p99_us: f64,
+}
+
+// ── TCP-RT States ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtStateCount {
+    pub state: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TcpRtStatesResponse {
+    pub states: Vec<TcpRtStateCount>,
+    pub total_flows: u64,
+    pub anomalies: Vec<String>,
 }
 
 // ── Service Chain ──

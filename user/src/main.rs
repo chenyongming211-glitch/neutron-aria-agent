@@ -224,7 +224,7 @@ enum MirrorCommands {
 enum TcprtCommands {
     /// Cross-instance TopN summary sorted by a chosen metric
     Top {
-        #[arg(long, default_value = "art", help = "Sort dimension: art, crtt, srtt, hs, retrans")]
+        #[arg(long, default_value = "art", help = "Sort dimension: art, crtt, srtt, hs, retrans, nqa")]
         by: String,
         #[arg(long, default_value = "10", help = "Number of top flows to show")]
         top: usize,
@@ -242,6 +242,10 @@ enum TcprtCommands {
         #[arg(long, help = "Service chain name for per-hop breakdown")]
         chain: Option<String>,
     },
+    /// ART latency distribution histogram
+    Histogram,
+    /// TCP state distribution and anomaly detection
+    States,
     /// Flush all TCP-RT tracking entries (requires --tap)
     Flush,
 }
@@ -369,6 +373,7 @@ fn sort_value(entry: &aria_api::TcpRtEntry, dim: &str) -> f64 {
         "srtt" => entry.rtt_server_us,
         "hs" => entry.handshake_us,
         "retrans" => (entry.retrans_req + entry.retrans_resp) as f64,
+        "nqa" => -(entry.nqa_score as f64), // Negate so lower NQA sorts first (desc sort)
         _ /* art */ => entry.art_us,
     }
 }
@@ -425,6 +430,7 @@ async fn run_tcprt_top(
         req_rt: u32,
         rsp_rt: u32,
         state: String,
+        nqa: u8,
     }
 
     let mut rows: Vec<Row> = Vec::new();
@@ -449,18 +455,19 @@ async fn run_tcprt_top(
                 req_rt: entry.retrans_req,
                 rsp_rt: entry.retrans_resp,
                 state: entry.state.clone(),
+                nqa: entry.nqa_score,
             });
         }
     }
 
-    println!("{:<20} {:<20} {:<7} {:<7} {:<12} {:<10} {:<10} {:<10} {:<10} {:<7} {:<7} {}",
+    println!("{:<20} {:<20} {:<7} {:<7} {:<12} {:<10} {:<10} {:<10} {:<10} {:<7} {:<7} {:<5} {}",
         "Source", "Destination", "SPort", "DPort", "Instance",
-        "ART (us)", "cRTT", "sRTT", "HS", "ReqRT", "RspRT", "State");
+        "ART (us)", "cRTT", "sRTT", "HS", "ReqRT", "RspRT", "NQA", "State");
     for r in &rows {
         let art_str = if r.art == 0.0 { "-".to_string() } else { format!("{:.1}", r.art) };
-        println!("{:<20} {:<20} {:<7} {:<7} {:<12} {:<10} {:<10.1} {:<10.1} {:<10.1} {:<7} {:<7} {}",
+        println!("{:<20} {:<20} {:<7} {:<7} {:<12} {:<10} {:<10.1} {:<10.1} {:<10.1} {:<7} {:<7} {:<5} {}",
             r.src_ip, r.dst_ip, r.src_port, r.dst_port, r.instance,
-            art_str, r.crtt, r.srtt, r.hs, r.req_rt, r.rsp_rt, r.state);
+            art_str, r.crtt, r.srtt, r.hs, r.req_rt, r.rsp_rt, r.nqa, r.state);
     }
 
     Ok(())
@@ -536,21 +543,25 @@ fn run_tcprt_flow_coarse(
         println!("  ─────────────────────────  ─────────  ─────────");
         println!("  {:<25} {:<10} {}", "", "Req", "Resp");
         println!("  {:<25} {:<10} {}", "Total", inst.total_retrans_req, inst.total_retrans_resp);
+
+        println!();
+        println!("  NQA Score (avg): {:.0}", inst.avg_nqa_score);
         println!();
         return Ok(());
     }
 
     // No dual-observation: show per-instance metrics
-    println!("  {:<15} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
-        "Instance", "cRTT", "sRTT", "ART", "HS", "ReqRT", "RspRT");
-    println!("  {:<15} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
-        "───────────", "────────", "────────", "────────", "────────", "──────", "──────");
+    println!("  {:<15} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>5}",
+        "Instance", "cRTT", "sRTT", "ART", "HS", "ReqRT", "RspRT", "NQA");
+    println!("  {:<15} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>5}",
+        "───────────", "────────", "────────", "────────", "────────", "──────", "──────", "─────");
     for inst in &resp.instances {
-        println!("  {:<15} {:>8.1}us {:>8.1}us {:>8.1}us {:>8.1}us {:>8} {:>8}",
+        println!("  {:<15} {:>8.1}us {:>8.1}us {:>8.1}us {:>8.1}us {:>8} {:>8} {:>5.0}",
             inst.instance,
             inst.avg_rtt_client_us, inst.avg_rtt_server_us,
             inst.avg_art_us, inst.avg_handshake_us,
-            inst.total_retrans_req, inst.total_retrans_resp);
+            inst.total_retrans_req, inst.total_retrans_resp,
+            inst.avg_nqa_score);
     }
     if resp.instances.len() > 1 {
         println!("\n  Tip: use --chain <name> for per-hop latency breakdown");
@@ -600,6 +611,7 @@ async fn run_tcprt_flow_with_chain(
                 existing.avg_forward_platform_us += inst.avg_forward_platform_us;
                 existing.avg_server_network_us += inst.avg_server_network_us;
                 existing.avg_reverse_platform_us += inst.avg_reverse_platform_us;
+                existing.avg_nqa_score += inst.avg_nqa_score;
                 hop_counts[hop_idx] += 1;
             } else {
                 hop_data[hop_idx] = Some(aria_api::TcpRtAggregatedEntry {
@@ -614,6 +626,7 @@ async fn run_tcprt_flow_with_chain(
                     avg_forward_platform_us: inst.avg_forward_platform_us,
                     avg_server_network_us: inst.avg_server_network_us,
                     avg_reverse_platform_us: inst.avg_reverse_platform_us,
+                    avg_nqa_score: inst.avg_nqa_score,
                 });
                 hop_counts[hop_idx] = 1;
             }
@@ -632,6 +645,7 @@ async fn run_tcprt_flow_with_chain(
                 d.avg_forward_platform_us /= c;
                 d.avg_server_network_us /= c;
                 d.avg_reverse_platform_us /= c;
+                d.avg_nqa_score /= c;
             }
         }
     }
@@ -1635,6 +1649,63 @@ async fn main() {
             }
             TcprtCommands::Flow { dst, dport, chain } => {
                 run_tcprt_flow(&client, &dst, dport, chain.as_deref()).await
+            }
+            TcprtCommands::Histogram => {
+                match client.tcprt_histogram(&instance).await {
+                    Ok(resp) => {
+                        if resp.total == 0 {
+                            println!("No ART data collected yet");
+                        } else {
+                            println!("=== ART Latency Distribution ===\n");
+                            let max_count = resp.buckets.iter().map(|b| b.count).max().unwrap_or(1);
+                            let bar_width = 40;
+                            for b in &resp.buckets {
+                                let label = if b.le_us >= 1_000_000.0 {
+                                    format!("{:.0}s", b.le_us / 1_000_000.0)
+                                } else if b.le_us >= 1_000.0 {
+                                    format!("{:.0}ms", b.le_us / 1_000.0)
+                                } else {
+                                    format!("{:.0}us", b.le_us)
+                                };
+                                let filled = if max_count > 0 { (b.count as usize * bar_width) / max_count as usize } else { 0 };
+                                let bar: String = "\u{2588}".repeat(filled);
+                                println!("  <= {:<8} {:>8} |{}", label, b.count, bar);
+                            }
+                            println!();
+                            println!("  Total: {}  Sum: {:.1} us", resp.total, resp.sum_us);
+                            println!("  p50: {:.1} us  p95: {:.1} us  p99: {:.1} us",
+                                resp.p50_us, resp.p95_us, resp.p99_us);
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            TcprtCommands::States => {
+                match client.tcprt_states(&instance).await {
+                    Ok(resp) => {
+                        if resp.total_flows == 0 {
+                            println!("No TCP-RT flows found");
+                        } else {
+                            println!("=== TCP State Distribution ({} flows) ===\n", resp.total_flows);
+                            println!("  {:<15} {:>8} {:>8}", "State", "Count", "Percent");
+                            println!("  {:<15} {:>8} {:>8}", "───────────", "──────", "───────");
+                            for s in &resp.states {
+                                let pct = s.count as f64 / resp.total_flows as f64 * 100.0;
+                                println!("  {:<15} {:>8} {:>7.1}%", s.state, s.count, pct);
+                            }
+                            if !resp.anomalies.is_empty() {
+                                println!();
+                                println!("  Anomalies:");
+                                for a in &resp.anomalies {
+                                    println!("    ! {}", a);
+                                }
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
             }
             TcprtCommands::Flush => {
                 match client.flush_tcprt(&instance).await {

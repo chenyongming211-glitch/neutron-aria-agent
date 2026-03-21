@@ -234,6 +234,10 @@ pub struct TcpRtValue {
     pub last_resp_payload_len: u16,
     pub prev_resp_seq: u32,
     pub prev_resp_payload_len: u16,
+    pub _pad2: [u8; 6],
+    pub fin_ts: u64,
+    pub rst_ts: u64,
+    pub close_ts: u64,
 }
 unsafe impl Pod for TcpRtValue {}
 

@@ -223,8 +223,8 @@ pub struct TcpRtValue {
     pub retrans_req: u32,       // Request direction retransmissions (client → server)
     pub retrans_resp: u32,      // Response direction retransmissions (server → client)
     pub request_count: u32,     // Completed request-response cycles
-    pub state: u8,              // 0=handshake, 1=established, 2=closing
-    pub flags: u8,              // bit 0: syn_seen, bit 1: synack_seen, bit 2: established
+    pub state: u8,              // 0=syn_sent, 1=established, 2=fin_wait, 3=close_wait, 4=time_wait, 5=rst, 6=closed
+    pub flags: u8,              // bit 0: syn_seen, bit 1: synack_seen, bit 2: established, bit 3: fin_fwd, bit 4: fin_rev
     pub pad: [u8; 2],
     pub last_seq: u32,          // Last forward seq (for retransmission detection)
     pub last_payload_len: u16,  // Last forward payload length
@@ -234,15 +234,25 @@ pub struct TcpRtValue {
     pub last_resp_payload_len: u16, // Last reverse payload length
     pub prev_resp_seq: u32,     // Previous reverse seq
     pub prev_resp_payload_len: u16, // Previous reverse payload length
+    pub _pad2: [u8; 6],        // Align to u64 boundary
+    pub fin_ts: u64,            // FIN timestamp
+    pub rst_ts: u64,            // RST timestamp
+    pub close_ts: u64,          // Connection fully closed timestamp
 }
 
-pub const TCPRT_STATE_HANDSHAKE: u8 = 0;
+pub const TCPRT_STATE_SYN_SENT: u8 = 0;
 pub const TCPRT_STATE_ESTABLISHED: u8 = 1;
-pub const TCPRT_STATE_CLOSING: u8 = 2;
+pub const TCPRT_STATE_FIN_WAIT: u8 = 2;
+pub const TCPRT_STATE_CLOSE_WAIT: u8 = 3;
+pub const TCPRT_STATE_TIME_WAIT: u8 = 4;
+pub const TCPRT_STATE_RST: u8 = 5;
+pub const TCPRT_STATE_CLOSED: u8 = 6;
 
 pub const TCPRT_FLAG_SYN_SEEN: u8 = 1;
 pub const TCPRT_FLAG_SYNACK_SEEN: u8 = 2;
 pub const TCPRT_FLAG_ESTABLISHED: u8 = 4;
+pub const TCPRT_FLAG_FIN_FWD: u8 = 1 << 3;
+pub const TCPRT_FLAG_FIN_REV: u8 = 1 << 4;
 
 // --- Drop Reason Profiler ---
 
