@@ -160,6 +160,10 @@ pub static SSL_HTTP_PARSE_BUF: PerCpuArray<SslParseBuf> = PerCpuArray::with_max_
 #[map(name = "SSL_HTTP_SCRATCH")]
 pub static SSL_HTTP_SCRATCH: HashMap<u64, SslHttpScratch> = HashMap::with_max_entries(4096, 0);
 
+/// Per-CPU scratch for building SslHttpScratch without stack memset
+#[map(name = "SSL_HTTP_SCRATCH_BUF")]
+pub static SSL_HTTP_SCRATCH_BUF: PerCpuArray<SslHttpScratch> = PerCpuArray::with_max_entries(1, 0);
+
 #[map(name = "SSL_READ_SCRATCH")]
 pub static SSL_READ_SCRATCH: HashMap<u64, SslReadScratch> = HashMap::with_max_entries(4096, 0);
 

@@ -3,7 +3,7 @@ use aya_ebpf::programs::{ProbeContext, RetProbeContext};
 
 use crate::maps::{
     FIREWALL_CONFIG, SSL_HANDSHAKE_SCRATCH, SSL_CONN_TABLE, SSL_SNI_TABLE, SSL_SEQ,
-    SSL_HTTP_PARSE_BUF, SSL_HTTP_SCRATCH, SSL_READ_SCRATCH, SSL_HTTP_TABLE, SSL_HTTP_SEQ,
+    SSL_HTTP_PARSE_BUF, SSL_HTTP_SCRATCH, SSL_HTTP_SCRATCH_BUF, SSL_READ_SCRATCH, SSL_HTTP_TABLE, SSL_HTTP_SEQ,
     SslScratch, SslConnValue, SslHttpScratch, SslReadScratch, SslHttpValue,
 };
 
@@ -165,12 +165,22 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
         return 0;
     }
 
-    let mut scratch = SslHttpScratch {
-        write_ts: bpf_ktime_get_ns(),
-        method: [0u8; 8],
-        path: [0u8; 128],
-        host: [0u8; 64],
+    // Use per-CPU scratch buffer to avoid stack memset for large struct
+    let scratch = match SSL_HTTP_SCRATCH_BUF.get_ptr_mut(0) {
+        Some(p) => &mut *p,
+        None => return 0,
     };
+    scratch.write_ts = bpf_ktime_get_ns();
+    // Zero method/path/host fields manually with bounded loops
+    for i in 0..8u32 {
+        scratch.method[i as usize] = 0;
+    }
+    for i in 0..128u32 {
+        scratch.path[i as usize] = 0;
+    }
+    for i in 0..64u32 {
+        scratch.host[i as usize] = 0;
+    }
 
     // Copy method (max 7 bytes, bounded loop)
     for i in 0..7u32 {
@@ -228,7 +238,7 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
     }
 
     let pid_tgid = bpf_get_current_pid_tgid();
-    let _ = SSL_HTTP_SCRATCH.insert(&pid_tgid, &scratch, 0);
+    let _ = SSL_HTTP_SCRATCH.insert(&pid_tgid, scratch, 0);
     0
 }
 
