@@ -171,29 +171,25 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
         None => return 0,
     };
     scratch.write_ts = bpf_ktime_get_ns();
-    // Zero method/path/host fields manually with bounded loops
-    for i in 0..8u32 {
-        scratch.method[i as usize] = 0;
-    }
-    for i in 0..128u32 {
-        scratch.path[i as usize] = 0;
-    }
-    for i in 0..64u32 {
-        scratch.host[i as usize] = 0;
-    }
 
-    // Copy method (max 7 bytes, bounded loop)
+    // Copy method (max 7 bytes, bounded loop) + null terminate
+    let mut m_end: usize = 0;
     for i in 0..7u32 {
         let idx = i as usize;
         if idx < method_len {
             scratch.method[idx] = d[idx];
+            m_end = idx + 1;
         }
+    }
+    if m_end < 8 {
+        scratch.method[m_end] = 0;
     }
 
     // Extract path: starts after "METHOD " (method_len+1), ends at space/CR/LF
+    // Limit to 48 bytes to reduce verifier state explosion
     let path_start = method_len + 1;
-    let mut path_len: usize = 0;
-    for i in 0..127u32 {
+    let mut p_end: usize = 0;
+    for i in 0..48u32 {
         let idx = path_start + i as usize;
         if idx >= read_len {
             break;
@@ -202,14 +198,17 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
             break;
         }
         scratch.path[i as usize] = d[idx];
-        path_len = i as usize + 1;
+        p_end = i as usize + 1;
     }
-    let _ = path_len; // suppress unused warning
+    if p_end < 128 {
+        scratch.path[p_end] = 0;
+    }
 
     // Search for "\r\nHost: " and extract host value
+    // Limit search to first 128 bytes to reduce verifier complexity
     let mut host_offset: usize = 0;
     let mut found_host = false;
-    for i in 0..248u32 {
+    for i in 0..120u32 {
         let idx = i as usize;
         if idx + 8 > read_len {
             break;
@@ -225,7 +224,8 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
         }
     }
     if found_host {
-        for i in 0..63u32 {
+        let mut h_end: usize = 0;
+        for i in 0..32u32 {
             let idx = host_offset + i as usize;
             if idx >= read_len {
                 break;
@@ -234,7 +234,13 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
                 break;
             }
             scratch.host[i as usize] = d[idx];
+            h_end = i as usize + 1;
         }
+        if h_end < 64 {
+            scratch.host[h_end] = 0;
+        }
+    } else {
+        scratch.host[0] = 0;
     }
 
     let pid_tgid = bpf_get_current_pid_tgid();
