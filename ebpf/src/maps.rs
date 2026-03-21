@@ -13,6 +13,7 @@ pub use crate::common::{
     DropKey, DropValue,
     TraceFilter, TraceEvent,
     PipelineCtx,
+    SslScratch, SslConnValue,
 };
 use crate::parser::PacketInfo;
 
@@ -135,3 +136,17 @@ pub static TRACE_LOG: LruHashMap<u64, TraceEvent> = LruHashMap::with_max_entries
 
 #[map(name = "TRACE_SEQ")]
 pub static TRACE_SEQ: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+// --- SSL Observability maps ---
+
+#[map(name = "SSL_HANDSHAKE_SCRATCH")]
+pub static SSL_HANDSHAKE_SCRATCH: HashMap<u64, SslScratch> = HashMap::with_max_entries(4096, 0);
+
+#[map(name = "SSL_CONN_TABLE")]
+pub static SSL_CONN_TABLE: LruHashMap<u64, SslConnValue> = LruHashMap::with_max_entries(16384, 0);
+
+#[map(name = "SSL_SNI_TABLE")]
+pub static SSL_SNI_TABLE: LruHashMap<u64, [u8; 64]> = LruHashMap::with_max_entries(4096, 0);
+
+#[map(name = "SSL_SEQ")]
+pub static SSL_SEQ: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);

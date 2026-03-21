@@ -106,6 +106,9 @@ pub async fn system_start(
     // Replay state
     replay_state(&mut bpf, state_path);
 
+    // Attach SSL uprobes (non-fatal: warn and continue if libssl not found)
+    attach_ssl_uprobes(&mut bpf, pin_path);
+
     // Register with control plane
     control_plane.register_system_instance(pin_path, state_path).await;
 
@@ -156,6 +159,16 @@ pub async fn system_stop(
             if std::path::Path::new(&tc_ingress_link_pin).exists() {
                 if let Err(e) = fs::remove_file(&tc_ingress_link_pin) {
                     eprintln!("Warning: failed to remove pinned TC ingress link: {}", e);
+                }
+            }
+
+            // Remove pinned SSL uprobe links
+            for link_name in &["ssl_handshake_entry_link", "ssl_handshake_return_link", "ssl_set_sni_link"] {
+                let link_pin = format!("{}/{}", pin_path, link_name);
+                if std::path::Path::new(&link_pin).exists() {
+                    if let Err(e) = fs::remove_file(&link_pin) {
+                        eprintln!("Warning: failed to remove pinned {} link: {}", link_name, e);
+                    }
                 }
             }
 
@@ -232,6 +245,110 @@ fn attach_tc_program(
     })() {
         Ok(()) => println!("TC {} attached to {} (link pinned)", dir_str, iface),
         Err(e) => println!("TC {} attached to {} (link pin skipped: {})", dir_str, iface, e),
+    }
+
+    Ok(())
+}
+
+/// Find libssl.so path on the system
+fn find_libssl() -> Option<String> {
+    let candidates = [
+        "/usr/lib/x86_64-linux-gnu/libssl.so.3",
+        "/usr/lib/x86_64-linux-gnu/libssl.so.1.1",
+        "/usr/lib64/libssl.so.3",
+        "/usr/lib64/libssl.so.1.1",
+        "/usr/lib/libssl.so.3",
+        "/usr/lib/libssl.so.1.1",
+        "/usr/lib/aarch64-linux-gnu/libssl.so.3",
+        "/usr/lib/aarch64-linux-gnu/libssl.so.1.1",
+    ];
+
+    for path in &candidates {
+        if std::path::Path::new(path).exists() {
+            return Some(path.to_string());
+        }
+    }
+
+    // Fallback: try ldconfig -p
+    if let Ok(output) = std::process::Command::new("ldconfig").arg("-p").output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.contains("libssl.so") && line.contains("=>") {
+                if let Some(path) = line.split("=>").nth(1) {
+                    let path = path.trim();
+                    if std::path::Path::new(path).exists() {
+                        return Some(path.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Attach SSL uprobes to libssl. Non-fatal: warns on failure.
+fn attach_ssl_uprobes(bpf: &mut aya::Ebpf, pin_path: &str) {
+    let libssl = match find_libssl() {
+        Some(p) => p,
+        None => {
+            println!("libssl not found, SSL uprobes not attached");
+            return;
+        }
+    };
+    println!("Found libssl at: {}", libssl);
+
+    if let Err(e) = attach_uprobe(bpf, "ssl_handshake_entry", &libssl, "SSL_do_handshake", pin_path) {
+        eprintln!("Warning: failed to attach ssl_handshake_entry uprobe: {}", e);
+        return;
+    }
+
+    if let Err(e) = attach_uprobe(bpf, "ssl_handshake_return", &libssl, "SSL_do_handshake", pin_path) {
+        eprintln!("Warning: failed to attach ssl_handshake_return uretprobe: {}", e);
+        return;
+    }
+
+    if let Err(e) = attach_uprobe(bpf, "ssl_set_sni", &libssl, "SSL_ctrl", pin_path) {
+        eprintln!("Warning: failed to attach ssl_set_sni uprobe: {}", e);
+        return;
+    }
+
+    println!("SSL uprobes attached to {}", libssl);
+}
+
+/// Attach a single uprobe/uretprobe and pin its link.
+fn attach_uprobe(
+    bpf: &mut aya::Ebpf,
+    prog_name: &str,
+    target: &str,
+    fn_name: &str,
+    pin_path: &str,
+) -> Result<(), String> {
+    let program = bpf.program_mut(prog_name)
+        .ok_or_else(|| format!("{} program not found in eBPF binary", prog_name))?;
+
+    let probe: &mut aya::programs::UProbe = program
+        .try_into()
+        .map_err(|e: aya::programs::ProgramError| format!("{} try_into: {:?}", prog_name, e))?;
+
+    probe.load().map_err(|e| format!("{} load: {:?}", prog_name, e))?;
+
+    let link_id = probe.attach(Some(fn_name), 0, target, None)
+        .map_err(|e| format!("{} attach: {:?}", prog_name, e))?;
+
+    // Try to pin the link (graceful fallback)
+    match (|| -> Result<(), String> {
+        let link = probe.take_link(link_id)
+            .map_err(|e| format!("take_link: {:?}", e))?;
+        let fd_link: aya::programs::links::FdLink = link.try_into()
+            .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
+        let link_pin = format!("{}/{}_link", pin_path, prog_name);
+        fd_link.pin(&link_pin)
+            .map_err(|e| format!("pin: {:?}", e))?;
+        Ok(())
+    })() {
+        Ok(()) => println!("  {} -> {}:{} (link pinned)", prog_name, target, fn_name),
+        Err(e) => println!("  {} -> {}:{} (link pin skipped: {})", prog_name, target, fn_name, e),
     }
 
     Ok(())

@@ -251,8 +251,30 @@ pub struct FirewallConfig {
     pub acl_enabled: u8,
     pub mirror_enabled: u8,
     pub tcprt_enabled: u8,
+    pub ssl_enabled: u8,
 }
 unsafe impl Pod for FirewallConfig {}
+
+// --- SSL Observability ---
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct SslScratch {
+    pub ssl_ptr: u64,
+    pub start_ts: u64,
+}
+unsafe impl Pod for SslScratch {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct SslConnValue {
+    pub pid: u32,
+    pub tid: u32,
+    pub handshake_ns: u64,
+    pub timestamp: u64,
+    pub sni: [u8; 64],
+}
+unsafe impl Pod for SslConnValue {}
 
 // --- Drop Reason Profiler ---
 

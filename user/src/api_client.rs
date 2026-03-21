@@ -286,6 +286,22 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    // ── SSL ──
+
+    pub async fn list_ssl(&self, instance: &str, top: usize) -> Result<SslListResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/ssl?top={}", instance, top)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn flush_ssl(&self, instance: &str) -> Result<SslFlushResponse, String> {
+        let resp = self.client.delete(self.url(&format!("/api/v1/{}/ssl", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── Service Chains ──
 
     pub async fn list_chains(&self) -> Result<ServiceChainListResponse, String> {

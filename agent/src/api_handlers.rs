@@ -398,6 +398,7 @@ pub async fn get_config(
             qos: cfg.qos_enabled != 0,
             mirror: cfg.mirror_enabled != 0,
             tcprt: cfg.tcprt_enabled != 0,
+            ssl: cfg.ssl_enabled != 0,
             num_cpus: cfg.num_cpus,
         })),
         Err(e) => Err(err_response(e)),
@@ -409,7 +410,7 @@ pub async fn update_config(
     Path(instance): Path<String>,
     Json(req): Json<UpdateConfigRequest>,
 ) -> impl IntoResponse {
-    match cp.update_config(&instance, req.conntrack, req.monitoring, req.acl, req.qos, req.mirror, req.tcprt).await {
+    match cp.update_config(&instance, req.conntrack, req.monitoring, req.acl, req.qos, req.mirror, req.tcprt, req.ssl).await {
         Ok(()) => Ok(Json(MessageResponse {
             message: "Configuration updated".to_string(),
         })),
@@ -731,6 +732,39 @@ pub async fn flush_tcprt(
 ) -> impl IntoResponse {
     match cp.flush_tcprt(&instance).await {
         Ok(count) => Ok(Json(aria_api::TcpRtFlushResponse { flushed: count })),
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+// ── SSL ──
+
+pub async fn list_ssl(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+    Query(query): Query<TopQuery>,
+) -> impl IntoResponse {
+    match cp.list_ssl(&instance, query.top).await {
+        Ok(entries) => {
+            let connections = entries.into_iter().map(|e| aria_api::SslConnEntry {
+                seq: e.seq,
+                pid: e.pid,
+                tid: e.tid,
+                handshake_us: e.handshake_us,
+                timestamp: e.timestamp,
+                sni: e.sni,
+            }).collect();
+            Ok(Json(aria_api::SslListResponse { connections }))
+        }
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+pub async fn flush_ssl(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    match cp.flush_ssl(&instance).await {
+        Ok(count) => Ok(Json(aria_api::SslFlushResponse { flushed: count })),
         Err(e) => Err(err_response(e)),
     }
 }
@@ -1434,6 +1468,47 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
             // NQA average gauge
             let avg_nqa = if flows > 0 { nqa_sum / flows as f64 } else { 0.0 };
             let _ = writeln!(out, "aria_tcprt_nqa_score_avg{{instance=\"{i}\"}} {avg_nqa:.1}");
+        }
+    }
+
+    // ── SSL handshake metrics ──
+    let _ = writeln!(out, "# HELP aria_ssl_handshakes_total Number of SSL handshakes observed");
+    let _ = writeln!(out, "# TYPE aria_ssl_handshakes_total gauge");
+    let _ = writeln!(out, "# HELP aria_ssl_handshake_seconds SSL handshake latency distribution");
+    let _ = writeln!(out, "# TYPE aria_ssl_handshake_seconds histogram");
+
+    for inst in &instances {
+        let i = prom_escape(inst);
+        if let Ok(entries) = cp.list_ssl(inst, 100000).await {
+            let total = entries.len() as u64;
+            let _ = writeln!(out, "aria_ssl_handshakes_total{{instance=\"{i}\"}} {total}");
+
+            let ssl_boundaries_us: [f64; 9] = [
+                1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0,
+                500_000.0, 1_000_000.0, 5_000_000.0, 10_000_000.0,
+            ];
+            let mut ssl_bucket_counts = [0u64; 9];
+            let mut ssl_sum_seconds: f64 = 0.0;
+            let mut ssl_count: u64 = 0;
+
+            for e in &entries {
+                if e.handshake_us > 0.0 {
+                    ssl_count += 1;
+                    ssl_sum_seconds += e.handshake_us / 1_000_000.0;
+                    for (j, &boundary) in ssl_boundaries_us.iter().enumerate() {
+                        if e.handshake_us <= boundary {
+                            ssl_bucket_counts[j] += 1;
+                        }
+                    }
+                }
+            }
+            let ssl_boundaries_s = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10"];
+            for (j, le) in ssl_boundaries_s.iter().enumerate() {
+                let _ = writeln!(out, "aria_ssl_handshake_seconds_bucket{{instance=\"{i}\",le=\"{le}\"}} {}", ssl_bucket_counts[j]);
+            }
+            let _ = writeln!(out, "aria_ssl_handshake_seconds_bucket{{instance=\"{i}\",le=\"+Inf\"}} {ssl_count}");
+            let _ = writeln!(out, "aria_ssl_handshake_seconds_sum{{instance=\"{i}\"}} {ssl_sum_seconds}");
+            let _ = writeln!(out, "aria_ssl_handshake_seconds_count{{instance=\"{i}\"}} {ssl_count}");
         }
     }
 

@@ -19,7 +19,7 @@ pub enum WalEntry {
     DeleteQos { group_id: u32, direction: u8 },
     AddMirror { src_group_name: String, src_group_id: u32, dst_group_name: String, dst_group_id: u32, proto: u8, direction: u8, target_iface: String, target_ifindex: u32, is_global: bool },
     DeleteMirror { src_group_id: u32, dst_group_id: u32, proto: u8, direction: u8, is_global: bool },
-    UpdateConfig { conntrack: Option<bool>, monitoring: Option<bool>, #[serde(default)] acl: Option<bool>, #[serde(default)] qos: Option<bool>, #[serde(default)] mirror: Option<bool>, #[serde(default)] tcprt: Option<bool> },
+    UpdateConfig { conntrack: Option<bool>, monitoring: Option<bool>, #[serde(default)] acl: Option<bool>, #[serde(default)] qos: Option<bool>, #[serde(default)] mirror: Option<bool>, #[serde(default)] tcprt: Option<bool>, #[serde(default)] ssl: Option<bool> },
     SetMaxPortPolicies { max: u32 },
     SetAttachedIface { iface: String },
     ClearAttachedIface,
@@ -198,7 +198,7 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) {
                 state.mirror_rules.retain(|r| !(r.src_group_id == src_group_id && r.dst_group_id == dst_group_id && r.proto == proto && r.direction == direction && !r.is_global));
             }
         }
-        WalEntry::UpdateConfig { conntrack, monitoring, acl, qos, mirror, tcprt } => {
+        WalEntry::UpdateConfig { conntrack, monitoring, acl, qos, mirror, tcprt, ssl } => {
             if let Some(ct) = conntrack {
                 state.conntrack_enabled = ct;
             }
@@ -216,6 +216,9 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) {
             }
             if let Some(t) = tcprt {
                 state.tcprt_enabled = t;
+            }
+            if let Some(s) = ssl {
+                state.ssl_enabled = s;
             }
         }
         WalEntry::SetMaxPortPolicies { max } => {
@@ -473,7 +476,7 @@ mod tests {
 
         // UpdateConfig
         apply_wal_entry(&mut state, WalEntry::UpdateConfig {
-            conntrack: Some(false), monitoring: None, acl: None, qos: None, mirror: None, tcprt: None,
+            conntrack: Some(false), monitoring: None, acl: None, qos: None, mirror: None, tcprt: None, ssl: None,
         });
         assert!(!state.conntrack_enabled);
         assert!(state.monitoring_enabled);

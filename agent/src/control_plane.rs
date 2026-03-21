@@ -694,6 +694,7 @@ impl ControlPlane {
         qos: Option<bool>,
         mirror: Option<bool>,
         tcprt: Option<bool>,
+        ssl: Option<bool>,
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
@@ -704,7 +705,7 @@ impl ControlPlane {
         // For mirror, the kernel flag = user_wants_mirror && has_rules
         let kernel_mirror = mirror.map(|m| m && !state.state.mirror_rules.is_empty());
 
-        if let Err(e) = aria_core::ebpf_ops::update_firewall_config(&state.pin_path, conntrack, monitoring, acl, kernel_qos, kernel_mirror, tcprt) {
+        if let Err(e) = aria_core::ebpf_ops::update_firewall_config(&state.pin_path, conntrack, monitoring, acl, kernel_qos, kernel_mirror, tcprt, ssl) {
             return Err(ControlPlaneError::KernelError(e));
         }
 
@@ -726,6 +727,9 @@ impl ControlPlane {
         if let Some(t) = tcprt {
             state.state.tcprt_enabled = t;
         }
+        if let Some(s) = ssl {
+            state.state.ssl_enabled = s;
+        }
 
         state.wal_append(&WalEntry::UpdateConfig {
             conntrack,
@@ -734,6 +738,7 @@ impl ControlPlane {
             qos,
             mirror,
             tcprt,
+            ssl,
         });
         Ok(())
     }
@@ -807,6 +812,24 @@ impl ControlPlane {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
         aria_core::tcprt_ops::flush_tcprt(&state.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))
+    }
+
+    // ── SSL ──
+
+    pub async fn list_ssl(&self, instance: &str, top: usize) -> Result<Vec<aria_core::ssl_ops::SslConnEntry>, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        let mut entries = aria_core::ssl_ops::get_ssl_conns(&state.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))?;
+        entries.truncate(top);
+        Ok(entries)
+    }
+
+    pub async fn flush_ssl(&self, instance: &str) -> Result<u64, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        aria_core::ssl_ops::flush_ssl_conns(&state.pin_path)
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 

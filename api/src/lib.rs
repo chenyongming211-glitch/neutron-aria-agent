@@ -213,6 +213,7 @@ pub struct ConfigResponse {
     pub qos: bool,
     pub mirror: bool,
     pub tcprt: bool,
+    pub ssl: bool,
     pub num_cpus: u16,
 }
 
@@ -224,6 +225,7 @@ pub struct UpdateConfigRequest {
     pub qos: Option<bool>,
     pub mirror: Option<bool>,
     pub tcprt: Option<bool>,
+    pub ssl: Option<bool>,
 }
 
 // ── Stats ──
@@ -624,6 +626,30 @@ pub struct TraceFlushResponse {
 }
 
 // ── Helpers ──
+
+// ── SSL Observability ──
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SslConnEntry {
+    pub seq: u64,
+    pub pid: u32,
+    pub tid: u32,
+    pub handshake_us: f64,
+    pub timestamp: u64,
+    pub sni: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SslListResponse {
+    pub connections: Vec<SslConnEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SslFlushResponse {
+    pub flushed: u64,
+}
+
+// ── Helpers (functions) ──
 
 pub fn proto_to_string(proto: u8) -> String {
     match proto {

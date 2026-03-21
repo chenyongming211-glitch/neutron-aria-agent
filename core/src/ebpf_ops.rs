@@ -329,6 +329,7 @@ pub const ALL_MAP_NAMES: &[&str] = &[
     "DROP_REASON_STATS",
     "TRACE_FILTER", "TRACE_LOG", "TRACE_SEQ",
     "FIREWALL_CONFIG",
+    "SSL_HANDSHAKE_SCRATCH", "SSL_CONN_TABLE", "SSL_SNI_TABLE", "SSL_SEQ",
 ];
 
 /// 从 state.json 重放所有组和规则到已加载的 eBPF maps。
@@ -632,6 +633,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
             acl_enabled: if state.acl_enabled { 1 } else { 0 },
             mirror_enabled: if state.mirror_enabled && !state.mirror_rules.is_empty() { 1 } else { 0 },
             tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
+            ssl_enabled: if state.ssl_enabled { 1 } else { 0 },
         };
         match bpf.map_mut("FIREWALL_CONFIG")
             .ok_or_else(|| "FIREWALL_CONFIG not found".to_string())
@@ -847,6 +849,7 @@ pub fn update_firewall_config(
     qos_enabled: Option<bool>,
     mirror_enabled: Option<bool>,
     tcprt_enabled: Option<bool>,
+    ssl_enabled: Option<bool>,
 ) -> Result<(), String> {
     let map_path = format!("{}/FIREWALL_CONFIG", pin_path);
     let map_data = MapData::from_pin(&map_path)
@@ -873,6 +876,8 @@ pub fn update_firewall_config(
         .unwrap_or_else(|| current.as_ref().map(|c| c.mirror_enabled).unwrap_or(0));
     let tcprt = tcprt_enabled.map(|b| if b { 1u8 } else { 0 })
         .unwrap_or_else(|| current.as_ref().map(|c| c.tcprt_enabled).unwrap_or(1));
+    let ssl = ssl_enabled.map(|b| if b { 1u8 } else { 0 })
+        .unwrap_or_else(|| current.as_ref().map(|c| c.ssl_enabled).unwrap_or(0));
 
     let cfg = FirewallConfig {
         conntrack_enabled: ct,
@@ -882,6 +887,7 @@ pub fn update_firewall_config(
         acl_enabled: acl,
         mirror_enabled: mir,
         tcprt_enabled: tcprt,
+        ssl_enabled: ssl,
     };
     map.insert(&0u32, &cfg, 0)
         .map_err(|e| format!("FIREWALL_CONFIG insert: {:?}", e))?;

@@ -106,6 +106,8 @@ pub struct FirewallState {
     pub mirror_enabled: bool,
     #[serde(default = "default_true")]
     pub tcprt_enabled: bool,
+    #[serde(default)]
+    pub ssl_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -131,6 +133,7 @@ impl Default for FirewallState {
             mirror_rules: Vec::new(),
             mirror_enabled: true,
             tcprt_enabled: true,
+            ssl_enabled: false,
         }
     }
 }

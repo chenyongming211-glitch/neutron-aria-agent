@@ -1,8 +1,8 @@
 #![no_std]
 #![no_main]
 
-use aya_ebpf::macros::{xdp, classifier};
-use aya_ebpf::programs::{XdpContext, TcContext};
+use aya_ebpf::macros::{xdp, classifier, uprobe, uretprobe};
+use aya_ebpf::programs::{XdpContext, TcContext, ProbeContext};
 use aya_ebpf::maps::LpmTrie;
 use aya_ebpf::maps::lpm_trie::Key;
 use aya_ebpf::helpers::bpf_ktime_get_ns;
@@ -20,6 +20,7 @@ mod mirror;
 mod tcprt;
 mod drops;
 mod trace;
+mod ssl;
 
 use common::{
     CtKey4, CtKey6,
@@ -761,4 +762,21 @@ unsafe fn apply_edt_prio(ctx: &TcContext, edt: u64, prio: u8) {
             (*skb).priority = prio as u32;
         }
     }
+}
+
+// --- SSL uprobe entry points ---
+
+#[uprobe]
+pub fn ssl_handshake_entry(ctx: ProbeContext) -> u32 {
+    unsafe { ssl::ssl_handshake_entry_impl(&ctx) }
+}
+
+#[uretprobe]
+pub fn ssl_handshake_return(ctx: ProbeContext) -> u32 {
+    unsafe { ssl::ssl_handshake_return_impl(&ctx) }
+}
+
+#[uprobe]
+pub fn ssl_set_sni(ctx: ProbeContext) -> u32 {
+    unsafe { ssl::ssl_set_sni_impl(&ctx) }
 }

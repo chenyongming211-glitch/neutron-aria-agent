@@ -83,6 +83,11 @@ enum Commands {
         #[command(subcommand)]
         action: TraceCommands,
     },
+    /// SSL handshake observability
+    Ssl {
+        #[command(subcommand)]
+        action: SslCommands,
+    },
     /// Firewall configuration
     Config {
         #[command(subcommand)]
@@ -303,12 +308,23 @@ enum TraceCommands {
 }
 
 #[derive(Subcommand)]
+enum SslCommands {
+    /// List SSL handshake records
+    List {
+        #[arg(long, default_value = "100", help = "Number of records to show")]
+        top: usize,
+    },
+    /// Flush all SSL handshake records
+    Flush,
+}
+
+#[derive(Subcommand)]
 enum ConfigCommands {
     /// Show current firewall configuration
     Show,
     /// Set a configuration value
     Set {
-        #[arg(help = "Configuration key: conntrack, monitoring, acl, or qos")]
+        #[arg(help = "Configuration key: conntrack, monitoring, acl, qos, mirror, tcprt, or ssl")]
         key: String,
         #[arg(help = "Value: on or off")]
         value: String,
@@ -1828,6 +1844,32 @@ async fn main() {
                 }
             }
         },
+        Commands::Ssl { action } => match action {
+            SslCommands::List { top } => {
+                match client.list_ssl(&instance, top).await {
+                    Ok(resp) => {
+                        if resp.connections.is_empty() {
+                            println!("No SSL handshake records");
+                        } else {
+                            println!("{:<8} {:<8} {:<15} {:<64} {}",
+                                "PID", "TID", "Handshake(us)", "SNI", "Seq");
+                            for e in &resp.connections {
+                                println!("{:<8} {:<8} {:<15.1} {:<64} {}",
+                                    e.pid, e.tid, e.handshake_us, e.sni, e.seq);
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            SslCommands::Flush => {
+                match client.flush_ssl(&instance).await {
+                    Ok(resp) => { println!("Flushed {} SSL handshake entries", resp.flushed); Ok(()) }
+                    Err(e) => Err(e),
+                }
+            }
+        },
         Commands::Config { action } => match action {
             ConfigCommands::Show => {
                 match client.get_config(&instance).await {
@@ -1839,6 +1881,7 @@ async fn main() {
                         println!("  qos:        {}", if cfg.qos { "on" } else { "off" });
                         println!("  mirror:     {}", if cfg.mirror { "on" } else { "off" });
                         println!("  tcprt:      {}", if cfg.tcprt { "on" } else { "off" });
+                        println!("  ssl:        {}", if cfg.ssl { "on" } else { "off" });
                         println!("  num_cpus:   {}", cfg.num_cpus);
                         Ok(())
                     }
@@ -1863,6 +1906,7 @@ async fn main() {
                         qos: None,
                         mirror: None,
                         tcprt: None,
+                        ssl: None,
                     },
                     "monitoring" | "mon" => aria_api::UpdateConfigRequest {
                         conntrack: None,
@@ -1871,6 +1915,7 @@ async fn main() {
                         qos: None,
                         mirror: None,
                         tcprt: None,
+                        ssl: None,
                     },
                     "acl" | "policy" => aria_api::UpdateConfigRequest {
                         conntrack: None,
@@ -1879,6 +1924,7 @@ async fn main() {
                         qos: None,
                         mirror: None,
                         tcprt: None,
+                        ssl: None,
                     },
                     "qos" => aria_api::UpdateConfigRequest {
                         conntrack: None,
@@ -1887,6 +1933,7 @@ async fn main() {
                         qos: Some(enabled),
                         mirror: None,
                         tcprt: None,
+                        ssl: None,
                     },
                     "mirror" => aria_api::UpdateConfigRequest {
                         conntrack: None,
@@ -1895,6 +1942,7 @@ async fn main() {
                         qos: None,
                         mirror: Some(enabled),
                         tcprt: None,
+                        ssl: None,
                     },
                     "tcprt" | "tcp-rt" => aria_api::UpdateConfigRequest {
                         conntrack: None,
@@ -1903,9 +1951,19 @@ async fn main() {
                         qos: None,
                         mirror: None,
                         tcprt: Some(enabled),
+                        ssl: None,
+                    },
+                    "ssl" => aria_api::UpdateConfigRequest {
+                        conntrack: None,
+                        monitoring: None,
+                        acl: None,
+                        qos: None,
+                        mirror: None,
+                        tcprt: None,
+                        ssl: Some(enabled),
                     },
                     _ => {
-                        eprintln!("Error: unknown config key '{}': must be 'conntrack', 'monitoring', 'acl', 'qos', 'mirror', or 'tcprt'", key);
+                        eprintln!("Error: unknown config key '{}': must be 'conntrack', 'monitoring', 'acl', 'qos', 'mirror', 'tcprt', or 'ssl'", key);
                         std::process::exit(1);
                     }
                 };
