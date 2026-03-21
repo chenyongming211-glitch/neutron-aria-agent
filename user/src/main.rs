@@ -293,6 +293,8 @@ enum TraceCommands {
         proto: String,
         #[arg(long, help = "Seconds to trace (omit for continuous)")]
         wait: Option<u64>,
+        #[arg(long, help = "Service chain name for hop-ordered display")]
+        chain: Option<String>,
     },
 }
 
@@ -793,6 +795,267 @@ fn print_instance_summary(tap: &str, evts: &[aria_api::TraceEventEntry]) {
         format!("{} pkts", ingress),
         format!("{} pkts", egress),
         verdict);
+}
+
+/// Represents a hop in the chain trace display, with its taps and aggregated event data.
+struct ChainHopTrace {
+    name: String,
+    taps: Vec<(String, String)>, // (tap_name, role)
+}
+
+/// Build chain hop trace structure from a chain definition.
+fn build_chain_hops(chain: &aria_api::ServiceChainEntry) -> Vec<ChainHopTrace> {
+    chain.hops.iter().map(|hop| {
+        ChainHopTrace {
+            name: hop.name.clone(),
+            taps: hop.taps.iter().map(|t| (t.tap.clone(), t.role.clone())).collect(),
+        }
+    }).collect()
+}
+
+/// Count ingress/egress packets for a set of events.
+fn count_in_out(evts: &[aria_api::TraceEventEntry]) -> (usize, usize) {
+    let ingress = evts.iter().filter(|e| e.direction == "ingress").count();
+    let egress = evts.iter().filter(|e| e.direction == "egress").count();
+    (ingress, egress)
+}
+
+/// Display chain-aware trace summary (timed mode).
+fn display_trace_chain_summary(
+    src: &str,
+    dst: &str,
+    chain_name: &str,
+    events: &std::collections::HashMap<String, Vec<aria_api::TraceEventEntry>>,
+    hops: &[ChainHopTrace],
+) {
+    let src_label = if src.is_empty() { "*" } else { src };
+    let dst_label = if dst.is_empty() { "*" } else { dst };
+    println!("Chain: {}    Filter: {} → {}\n", chain_name, src_label, dst_label);
+
+    println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
+        "Hop", "Tap", "Role", "In", "Out", "Drops");
+    println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
+        "──────────", "────────", "────", "────────", "────────", "──────");
+
+    // Collect per-hop aggregated out/in counts for inter-hop loss detection
+    struct HopAgg { total_in: usize, total_out: usize, has_internal_drop: bool }
+    let mut hop_aggs: Vec<HopAgg> = Vec::new();
+
+    for hop in hops {
+        let mut hop_in = 0usize;
+        let mut hop_out = 0usize;
+        let mut hop_has_drop = false;
+
+        for (tap_name, role) in &hop.taps {
+            let evts = events.get(tap_name).map(|v| v.as_slice()).unwrap_or(&[]);
+            let (in_cnt, out_cnt) = count_in_out(evts);
+            let has_drop = evts.iter().any(|e| e.result.contains("drop"));
+            let drop_str = if has_drop {
+                let drop_cnt = evts.iter().filter(|e| e.result.contains("drop")).count();
+                format!("{} drops", drop_cnt)
+            } else {
+                "-".to_string()
+            };
+
+            let in_str = if in_cnt > 0 || role == "in" || role == "bidi" {
+                format!("{} pkts", in_cnt)
+            } else { "-".to_string() };
+            let out_str = if out_cnt > 0 || role == "out" || role == "bidi" {
+                format!("{} pkts", out_cnt)
+            } else { "-".to_string() };
+
+            println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
+                hop.name, tap_name, role, in_str, out_str, drop_str);
+
+            hop_in += in_cnt;
+            hop_out += out_cnt;
+            if has_drop { hop_has_drop = true; }
+        }
+
+        hop_aggs.push(HopAgg { total_in: hop_in, total_out: hop_out, has_internal_drop: hop_has_drop });
+    }
+
+    // Inter-hop and internal drop annotations
+    println!();
+    for i in 0..hop_aggs.len() {
+        // Internal drop: packets entered but none exited
+        if hop_aggs[i].total_in > 0 && hop_aggs[i].total_out == 0 {
+            println!("  \u{2605} {} pkts dropped inside {}", hop_aggs[i].total_in, hops[i].name);
+        }
+        // Inter-hop loss
+        if i + 1 < hop_aggs.len() && hop_aggs[i].total_out > 0 {
+            let next_in = hop_aggs[i + 1].total_in;
+            if hop_aggs[i].total_out > next_in {
+                let lost = hop_aggs[i].total_out - next_in;
+                println!("  \u{2193} {} pkts lost between {} and {}", lost, hops[i].name, hops[i + 1].name);
+            }
+        }
+    }
+
+    // Detail section for drops
+    for hop in hops {
+        for (tap_name, _role) in &hop.taps {
+            let evts = events.get(tap_name).map(|v| v.as_slice()).unwrap_or(&[]);
+            let drops: Vec<&aria_api::TraceEventEntry> = evts.iter()
+                .filter(|e| e.result.contains("drop"))
+                .collect();
+            if drops.is_empty() { continue; }
+            println!("\n  Detail ({} / {}):", hop.name, tap_name);
+            println!("  {:<6} {:<16} {:<16} {:<6} {:<10} {:<14} {}",
+                "Seq", "Source", "Destination", "Proto", "Result", "Drop Reason", "Hook");
+            for e in &drops {
+                println!("  {:<6} {:<16} {:<16} {:<6} {:<10} {:<14} {}",
+                    e.seq, e.src_ip, e.dst_ip, e.proto, e.result, e.drop_reason, e.hook);
+            }
+        }
+    }
+}
+
+/// Display chain-aware trace live view (continuous mode).
+fn display_trace_chain_live(
+    src: &str,
+    dst: &str,
+    chain_name: &str,
+    events: &std::collections::HashMap<String, Vec<aria_api::TraceEventEntry>>,
+    hops: &[ChainHopTrace],
+) {
+    let src_label = if src.is_empty() { "*" } else { src };
+    let dst_label = if dst.is_empty() { "*" } else { dst };
+    println!("Chain: {}    Filter: {} → {}  (live, Ctrl+C to stop)\n", chain_name, src_label, dst_label);
+
+    println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
+        "Hop", "Tap", "Role", "In", "Out", "Drops");
+    println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
+        "──────────", "────────", "────", "────────", "────────", "──────");
+
+    struct HopAgg { total_in: usize, total_out: usize }
+    let mut hop_aggs: Vec<HopAgg> = Vec::new();
+
+    for hop in hops {
+        let mut hop_in = 0usize;
+        let mut hop_out = 0usize;
+
+        for (tap_name, role) in &hop.taps {
+            let evts = events.get(tap_name).map(|v| v.as_slice()).unwrap_or(&[]);
+            let (in_cnt, out_cnt) = count_in_out(evts);
+            let has_drop = evts.iter().any(|e| e.result.contains("drop"));
+            let drop_str = if has_drop {
+                let drop_cnt = evts.iter().filter(|e| e.result.contains("drop")).count();
+                format!("{} drops", drop_cnt)
+            } else {
+                "-".to_string()
+            };
+
+            let in_str = if in_cnt > 0 || role == "in" || role == "bidi" {
+                format!("{} pkts", in_cnt)
+            } else { "-".to_string() };
+            let out_str = if out_cnt > 0 || role == "out" || role == "bidi" {
+                format!("{} pkts", out_cnt)
+            } else { "-".to_string() };
+
+            println!("  {:<15} {:<12} {:<8} {:<12} {:<12} {}",
+                hop.name, tap_name, role, in_str, out_str, drop_str);
+
+            hop_in += in_cnt;
+            hop_out += out_cnt;
+        }
+
+        hop_aggs.push(HopAgg { total_in: hop_in, total_out: hop_out });
+    }
+
+    // Inline annotations
+    for i in 0..hop_aggs.len() {
+        if hop_aggs[i].total_in > 0 && hop_aggs[i].total_out == 0 {
+            println!("  \u{2605} {} pkts dropped inside {}", hop_aggs[i].total_in, hops[i].name);
+        }
+        if i + 1 < hop_aggs.len() && hop_aggs[i].total_out > 0 {
+            let next_in = hop_aggs[i + 1].total_in;
+            if hop_aggs[i].total_out > next_in {
+                let lost = hop_aggs[i].total_out - next_in;
+                println!("  \u{2193} {} pkts lost between {} and {}", lost, hops[i].name, hops[i + 1].name);
+            }
+        }
+    }
+}
+
+async fn run_trace_with_chain(
+    client: &api_client::ApiClient,
+    chain_name: &str,
+    src: &str,
+    dst: &str,
+    sport: u16,
+    dport: u16,
+    proto: &str,
+    wait: Option<u64>,
+) -> Result<(), String> {
+    // Fetch chain definition
+    let chain = client.get_chain(chain_name).await?;
+    let hops = build_chain_hops(&chain);
+
+    // Collect only the taps referenced by the chain
+    let taps: Vec<String> = hops.iter()
+        .flat_map(|h| h.taps.iter().map(|(t, _)| t.clone()))
+        .collect();
+
+    if taps.is_empty() {
+        return Err("Chain has no taps configured".to_string());
+    }
+
+    let req = aria_api::TraceStartRequest {
+        src_ip: src.to_string(),
+        dst_ip: dst.to_string(),
+        src_port: sport,
+        dst_port: dport,
+        proto: proto.to_string(),
+    };
+
+    // Flush + start on all taps
+    for tap in &taps {
+        let _ = client.flush_trace(tap).await;
+        client.start_trace(tap, &req).await
+            .map_err(|e| format!("Failed to start trace on {}: {}", tap, e))?;
+    }
+
+    let tap_list = taps.join(", ");
+    println!("Tracing chain '{}' on [{}] ...", chain_name, tap_list);
+
+    let result = match wait {
+        Some(secs) => {
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+            let events = collect_trace_events(client, &taps).await?;
+            display_trace_chain_summary(src, dst, chain_name, &events, &hops);
+            Ok(())
+        }
+        None => {
+            let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let r = running.clone();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                r.store(false, std::sync::atomic::Ordering::SeqCst);
+            });
+
+            while running.load(std::sync::atomic::Ordering::SeqCst) {
+                let events = collect_trace_events(client, &taps).await?;
+                print!("\x1B[2J\x1B[H");
+                display_trace_chain_live(src, dst, chain_name, &events, &hops);
+                for _ in 0..20 {
+                    if !running.load(std::sync::atomic::Ordering::SeqCst) { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+
+            println!();
+            let events = collect_trace_events(client, &taps).await?;
+            display_trace_chain_summary(src, dst, chain_name, &events, &hops);
+            Ok(())
+        }
+    };
+
+    for tap in &taps {
+        let _ = client.stop_trace(tap).await;
+    }
+
+    result
 }
 
 async fn run_trace(
@@ -1411,25 +1674,30 @@ async fn main() {
             }
         },
         Commands::Trace { action } => match action {
-            TraceCommands::Start { tap, src, dst, sport, dport, proto, wait } => {
-                let taps = if let Some(t) = tap {
-                    vec![t]
+            TraceCommands::Start { tap, src, dst, sport, dport, proto, wait, chain } => {
+                if let Some(chain_name) = chain {
+                    // Chain-aware mode: trace only the chain's taps, display by hop
+                    run_trace_with_chain(&client, &chain_name, &src, &dst, sport, dport, &proto, wait).await
                 } else {
-                    match client.list_instances().await {
-                        Ok(resp) => resp.instances.iter()
-                            .filter(|i| i.active)
-                            .map(|i| i.name.clone())
-                            .collect(),
-                        Err(e) => {
-                            eprintln!("Error: Failed to list instances: {}", e);
-                            std::process::exit(1);
+                    let taps = if let Some(t) = tap {
+                        vec![t]
+                    } else {
+                        match client.list_instances().await {
+                            Ok(resp) => resp.instances.iter()
+                                .filter(|i| i.active)
+                                .map(|i| i.name.clone())
+                                .collect(),
+                            Err(e) => {
+                                eprintln!("Error: Failed to list instances: {}", e);
+                                std::process::exit(1);
+                            }
                         }
+                    };
+                    if taps.is_empty() {
+                        Err("No active instances found".to_string())
+                    } else {
+                        run_trace(&client, &taps, &src, &dst, sport, dport, &proto, wait).await
                     }
-                };
-                if taps.is_empty() {
-                    Err("No active instances found".to_string())
-                } else {
-                    run_trace(&client, &taps, &src, &dst, sport, dport, &proto, wait).await
                 }
             }
         },
