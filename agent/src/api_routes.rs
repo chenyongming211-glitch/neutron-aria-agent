@@ -34,6 +34,7 @@ pub fn build_router(control_plane: Arc<ControlPlane>) -> Router {
         .route("/api/v1/{instance}/groups/{name}", delete(api_handlers::delete_group))
         .route("/api/v1/{instance}/policies", get(api_handlers::list_policies).post(api_handlers::add_policy).delete(api_handlers::delete_policy))
         .route("/api/v1/{instance}/policies/batch", post(api_handlers::batch_add_policies))
+        .route("/api/v1/{instance}/policies/with_stats", get(api_handlers::list_policies_with_stats))
         .route("/api/v1/{instance}/qos", get(api_handlers::list_qos).post(api_handlers::add_qos).delete(api_handlers::delete_qos))
         .route("/api/v1/{instance}/mirror", get(api_handlers::list_mirror).post(api_handlers::add_mirror).delete(api_handlers::delete_mirror))
         .route("/api/v1/{instance}/conntrack", get(api_handlers::list_conntrack).delete(api_handlers::flush_conntrack))

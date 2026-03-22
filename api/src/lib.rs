@@ -140,6 +140,36 @@ pub struct BatchPoliciesResponse {
     pub errors: Vec<String>,
 }
 
+// ── Policies with Stats (Aggregation) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyWithStatsEntry {
+    // Policy configuration
+    pub src_group: String,
+    pub src_group_id: u32,
+    pub dst_group: String,
+    pub dst_group_id: u32,
+    pub proto: String,
+    pub action: String,
+    pub direction: String,
+    pub ports: Option<String>,
+    pub bitmap_idx: Option<u32>,
+    // Statistics
+    #[serde(default)]
+    pub packets: u64,
+    #[serde(default)]
+    pub bytes: u64,
+    #[serde(default)]
+    pub dropped_packets: u64,
+    #[serde(default)]
+    pub dropped_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PoliciesWithStatsResponse {
+    pub policies: Vec<PolicyWithStatsEntry>,
+}
+
 // ── QoS ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

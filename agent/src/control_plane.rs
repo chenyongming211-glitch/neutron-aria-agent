@@ -491,6 +491,23 @@ impl ControlPlane {
         Ok(())
     }
 
+    // ── Policies with Stats (Aggregation) ──
+
+    pub async fn list_policies_with_stats(&self, instance: &str) -> Result<(Vec<aria_core::state::RuleInfo>, Vec<aria_core::monitoring::RuleStatsEntry>), ControlPlaneError> {
+        // Get policies configuration
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        let rules = state.state.rules.clone();
+        let groups = state.state.groups.clone();
+        drop(state);
+
+        // Get statistics
+        let stats = aria_core::monitoring::get_rule_stats(&inst.read().await.pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))?;
+
+        Ok((rules, stats))
+    }
+
     // ── QoS ──
 
     pub async fn list_qos(&self, instance: &str) -> Result<Vec<QosRuleInfo>, ControlPlaneError> {

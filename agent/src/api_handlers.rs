@@ -206,6 +206,56 @@ pub async fn delete_policy(
     }
 }
 
+pub async fn list_policies_with_stats(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    match cp.list_policies(&instance).await {
+        Ok((rules, groups)) => {
+            match cp.get_rule_stats(&instance).await {
+                Ok((stats, _stats_groups)) => {
+                    let find_name = |id: u32| -> String {
+                        if id == 0 { return "any".to_string(); }
+                        groups.values()
+                            .find(|g| g.id == id)
+                            .map(|g| g.name.clone())
+                            .unwrap_or_else(|| format!("id:{}", id))
+                    };
+
+                    // Build stats map for O(1) lookup
+                    let mut stats_map: std::collections::HashMap<(u32, u32, u8, u8), aria_core::monitoring::RuleStatsEntry> =
+                        stats.into_iter().map(|s| {
+                            ((s.key.src_id, s.key.dst_id, s.key.proto, s.key.direction), s)
+                        }).collect();
+
+                    let policies = rules.into_iter().map(|r| {
+                        let key = (r.src_group_id, r.dst_group_id, r.proto, r.direction);
+                        let stat = stats_map.remove(&key);
+                        PolicyWithStatsEntry {
+                            src_group: find_name(r.src_group_id),
+                            src_group_id: r.src_group_id,
+                            dst_group: find_name(r.dst_group_id),
+                            dst_group_id: r.dst_group_id,
+                            proto: proto_to_string(r.proto),
+                            action: action_to_string(r.action),
+                            direction: direction_to_string(r.direction),
+                            ports: r.ports,
+                            bitmap_idx: r.bitmap_idx,
+                            packets: stat.as_ref().map(|s| s.packets).unwrap_or(0),
+                            bytes: stat.as_ref().map(|s| s.bytes).unwrap_or(0),
+                            dropped_packets: stat.as_ref().map(|s| s.dropped_packets).unwrap_or(0),
+                            dropped_bytes: stat.as_ref().map(|s| s.dropped_bytes).unwrap_or(0),
+                        }
+                    }).collect();
+                    Ok(Json(PoliciesWithStatsResponse { policies }))
+                }
+                Err(e) => Err(err_response(e)),
+            }
+        }
+        Err(e) => Err(err_response(e)),
+    }
+}
+
 pub async fn batch_add_policies(
     State(cp): State<AppState>,
     Path(instance): Path<String>,

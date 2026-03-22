@@ -165,7 +165,10 @@ enum PolicyCommands {
         #[arg(short, long, help = "JSON file with policies array (use - for stdin)")]
         file: String,
     },
+    /// List all policies
     List,
+    /// List policies with statistics
+    WithStats,
 }
 
 #[derive(Subcommand)]
@@ -1566,6 +1569,32 @@ async fn main() {
                                 println!("{:<12} {:<12} {:<8} {:<8} {:<10} {:<8} {}",
                                     p.src_group, p.dst_group, p.proto, p.action,
                                     p.direction, bitmap_str,
+                                    p.ports.as_deref().unwrap_or(""));
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            PolicyCommands::WithStats => {
+                match client.list_policies_with_stats(&instance).await {
+                    Ok(resp) => {
+                        if resp.policies.is_empty() {
+                            println!("No policies configured");
+                        } else {
+                            println!("{:<12} {:<12} {:<8} {:<8} {:<10} {:<8} {:>12} {:>12} {:>12} {:>12} {}",
+                                "SrcGroup", "DstGroup", "Proto", "Action", "Direction", "Bitmap",
+                                "Packets", "Bytes", "DropPkts", "DropBytes", "Ports");
+                            for p in &resp.policies {
+                                let bitmap_str = match p.bitmap_idx {
+                                    Some(idx) => idx.to_string(),
+                                    None => "-".to_string(),
+                                };
+                                println!("{:<12} {:<12} {:<8} {:<8} {:<10} {:<8} {:>12} {:>12} {:>12} {:>12} {}",
+                                    p.src_group, p.dst_group, p.proto, p.action,
+                                    p.direction, bitmap_str,
+                                    p.packets, p.bytes, p.dropped_packets, p.dropped_bytes,
                                     p.ports.as_deref().unwrap_or(""));
                             }
                         }

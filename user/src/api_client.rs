@@ -112,6 +112,13 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    pub async fn list_policies_with_stats(&self, instance: &str) -> Result<PoliciesWithStatsResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/policies/with_stats", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── QoS ──
 
     pub async fn list_qos(&self, instance: &str) -> Result<QosListResponse, String> {
