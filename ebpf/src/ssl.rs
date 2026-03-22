@@ -636,19 +636,19 @@ unsafe fn append_http_fragment(
     buf_ptr: *const u8,
     num: usize,
 ) -> bool {
-    let start = scratch.data_len as usize;
-    if start >= SSL_HTTP_REQ_CAP {
-        return false;
-    }
-
-    let remaining = SSL_HTTP_REQ_CAP - start;
-    let copy_len = if num < remaining { num } else { remaining };
+    let start = (scratch.data_len as u32) & 0xff;
+    let remaining = (SSL_HTTP_REQ_CAP as u32) - start;
+    let copy_len = if num < remaining as usize {
+        num as u32
+    } else {
+        remaining
+    };
     if copy_len == 0 {
         return false;
     }
 
     let end = start + copy_len;
-    if end > SSL_HTTP_REQ_CAP {
+    if end > SSL_HTTP_REQ_CAP as u32 {
         return false;
     }
 
@@ -659,17 +659,17 @@ unsafe fn append_http_fragment(
 
     let dst = parse_buf.data.as_mut_ptr() as *mut c_void;
     let src = buf_ptr as *const c_void;
-    if gen::bpf_probe_read_user(dst, copy_len as u32, src) != 0 {
+    if gen::bpf_probe_read_user(dst, copy_len, src) != 0 {
         return false;
     }
 
-    if !copy_parse_buf_into_http_scratch(scratch, parse_buf, copy_len) {
+    if !copy_parse_buf_into_http_scratch(scratch, parse_buf, copy_len as usize) {
         return false;
     }
 
     scratch.data_len = end as u16;
-    if end < SSL_HTTP_REQ_CAP {
-        *scratch.req_data.as_mut_ptr().add(end) = 0;
+    if end < SSL_HTTP_REQ_CAP as u32 {
+        *scratch.req_data.as_mut_ptr().add(end as usize) = 0;
     }
 
     true
