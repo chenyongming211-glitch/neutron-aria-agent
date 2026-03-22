@@ -7,7 +7,7 @@ use crate::maps::{
     SSL_HTTP_SCRATCH_BUF, SSL_HTTP_SCRATCH, SSL_READ_SCRATCH, SSL_HTTP_TABLE, SSL_HTTP_SEQ,
     SSL_HTTP_PARSE_BUF, SSL_HTTP_VALUE_BUF, SSL_GLOBAL_CONFIG,
     SSL_ERROR_TABLE, SSL_ERROR_SEQ, SSL_WRITE_SCRATCH,
-    SslScratch, SslConnValue, SslHttpScratch, SslReadScratch, SslHttpValue, SslErrorEvent, SslWriteScratch,
+    SslScratch, SslConnValue, SslParseBuf, SslHttpScratch, SslReadScratch, SslHttpValue, SslErrorEvent, SslWriteScratch,
 };
 
 const SSL_CTRL_SET_TLSEXT_HOSTNAME: u64 = 55;
@@ -161,6 +161,18 @@ const SSL_HTTP_FLAG_MATCHED: u8 = 1;
 const HTTP_PREFIX_REJECT: u8 = 0;
 const HTTP_PREFIX_PENDING: u8 = 1;
 const HTTP_PREFIX_MATCHED: u8 = 2;
+
+macro_rules! append_fragment_byte {
+    ($scratch:expr, $parse_buf:expr, $start:expr, $copy_len:expr, $idx:expr $(,)?) => {
+        if $copy_len > $idx {
+            let dst_off = $start + $idx;
+            if dst_off >= SSL_HTTP_REQ_CAP {
+                return false;
+            }
+            *((($scratch).req_data.as_mut_ptr()).add(dst_off)) = ($parse_buf).data[$idx];
+        }
+    };
+}
 
 #[inline(always)]
 fn http_method_state_4(data: &[u8; 256], len: usize, b0: u8, b1: u8, b2: u8, b3: u8) -> u8 {
@@ -338,6 +350,273 @@ unsafe fn is_http_scratch_stale(first_write_ts: u64) -> bool {
 }
 
 #[inline(always)]
+unsafe fn copy_parse_buf_into_http_scratch(
+    scratch: &mut SslHttpScratch,
+    parse_buf: &SslParseBuf,
+    start: usize,
+    copy_len: usize,
+) -> bool {
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 0,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 1,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 2,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 3,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 4,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 5,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 6,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 7,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 8,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 9,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 10,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 11,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 12,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 13,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 14,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 15,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 16,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 17,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 18,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 19,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 20,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 21,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 22,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 23,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 24,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 25,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 26,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 27,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 28,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 29,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 30,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 31,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 32,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 33,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 34,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 35,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 36,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 37,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 38,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 39,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 40,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 41,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 42,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 43,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 44,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 45,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 46,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 47,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 48,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 49,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 50,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 51,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 52,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 53,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 54,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 55,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 56,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 57,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 58,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 59,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 60,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 61,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 62,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 63,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 64,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 65,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 66,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 67,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 68,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 69,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 70,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 71,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 72,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 73,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 74,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 75,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 76,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 77,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 78,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 79,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 80,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 81,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 82,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 83,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 84,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 85,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 86,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 87,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 88,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 89,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 90,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 91,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 92,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 93,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 94,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 95,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 96,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 97,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 98,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 99,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 100,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 101,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 102,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 103,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 104,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 105,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 106,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 107,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 108,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 109,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 110,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 111,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 112,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 113,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 114,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 115,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 116,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 117,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 118,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 119,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 120,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 121,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 122,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 123,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 124,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 125,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 126,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 127,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 128,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 129,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 130,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 131,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 132,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 133,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 134,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 135,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 136,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 137,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 138,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 139,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 140,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 141,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 142,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 143,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 144,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 145,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 146,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 147,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 148,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 149,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 150,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 151,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 152,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 153,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 154,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 155,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 156,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 157,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 158,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 159,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 160,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 161,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 162,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 163,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 164,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 165,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 166,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 167,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 168,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 169,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 170,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 171,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 172,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 173,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 174,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 175,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 176,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 177,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 178,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 179,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 180,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 181,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 182,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 183,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 184,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 185,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 186,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 187,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 188,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 189,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 190,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 191,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 192,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 193,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 194,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 195,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 196,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 197,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 198,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 199,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 200,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 201,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 202,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 203,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 204,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 205,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 206,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 207,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 208,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 209,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 210,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 211,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 212,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 213,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 214,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 215,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 216,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 217,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 218,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 219,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 220,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 221,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 222,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 223,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 224,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 225,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 226,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 227,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 228,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 229,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 230,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 231,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 232,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 233,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 234,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 235,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 236,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 237,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 238,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 239,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 240,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 241,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 242,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 243,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 244,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 245,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 246,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 247,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 248,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 249,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 250,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 251,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 252,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 253,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 254,);
+    append_fragment_byte!(scratch, parse_buf, start, copy_len, 255,);
+
+    true
+}
+
+#[inline(always)]
 unsafe fn http_request_is_ready(pid_tgid: u64) -> bool {
     let http_scratch = match SSL_HTTP_SCRATCH.get(&pid_tgid) {
         Some(s) => s,
@@ -374,9 +653,18 @@ unsafe fn append_http_fragment(
         return false;
     }
 
-    let dst = scratch.req_data.as_mut_ptr().add(start) as *mut c_void;
+    let parse_buf = match SSL_HTTP_PARSE_BUF.get_ptr_mut(0) {
+        Some(p) => &mut *p,
+        None => return false,
+    };
+
+    let dst = parse_buf.data.as_mut_ptr() as *mut c_void;
     let src = buf_ptr as *const c_void;
     if gen::bpf_probe_read_user(dst, copy_len as u32, src) != 0 {
+        return false;
+    }
+
+    if !copy_parse_buf_into_http_scratch(scratch, parse_buf, start, copy_len) {
         return false;
     }
 
