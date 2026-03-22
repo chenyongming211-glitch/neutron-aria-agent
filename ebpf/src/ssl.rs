@@ -1,4 +1,5 @@
-use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_user_str_bytes, bpf_probe_read_user_buf};
+use aya_ebpf::cty::c_void;
+use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_user_str_bytes, bpf_probe_read_user_buf, gen};
 use aya_ebpf::programs::{ProbeContext, RetProbeContext};
 
 use crate::maps::{
@@ -153,6 +154,7 @@ pub unsafe fn ssl_set_sni_impl(ctx: &ProbeContext) -> u32 {
 // --- SSL HTTP (Phase 2): zero-loop design for kernel 4.18+ compatibility ---
 
 const SCRATCH_TIMEOUT_NS: u64 = 30_000_000_000;
+const SSL_HTTP_REQ_CAP: usize = 256;
 const SSL_READ_MODE_STANDARD: u8 = 0;
 const SSL_READ_MODE_EX: u8 = 1;
 const SSL_HTTP_FLAG_MATCHED: u8 = 1;
@@ -357,25 +359,30 @@ unsafe fn append_http_fragment(
     num: usize,
 ) -> bool {
     let start = scratch.data_len as usize;
-    let remaining = 256usize.saturating_sub(start);
+    if start >= SSL_HTTP_REQ_CAP {
+        return false;
+    }
+
+    let remaining = SSL_HTTP_REQ_CAP - start;
     let copy_len = if num < remaining { num } else { remaining };
     if copy_len == 0 {
         return false;
     }
 
-    if bpf_probe_read_user_buf(
-        buf_ptr,
-        &mut scratch.req_data[start..start + copy_len],
-    )
-    .is_err()
-    {
+    let end = start + copy_len;
+    if end > SSL_HTTP_REQ_CAP {
         return false;
     }
 
-    let new_len = start + copy_len;
-    scratch.data_len = new_len as u16;
-    if new_len < scratch.req_data.len() {
-        scratch.req_data[new_len] = 0;
+    let dst = scratch.req_data.as_mut_ptr().add(start) as *mut c_void;
+    let src = buf_ptr as *const c_void;
+    if gen::bpf_probe_read_user(dst, copy_len as u32, src) != 0 {
+        return false;
+    }
+
+    scratch.data_len = end as u16;
+    if end < SSL_HTTP_REQ_CAP {
+        *scratch.req_data.as_mut_ptr().add(end) = 0;
     }
 
     true
@@ -569,7 +576,7 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
                     HTTP_PREFIX_MATCHED => scratch.flags |= SSL_HTTP_FLAG_MATCHED,
                     HTTP_PREFIX_REJECT => remove_scratch = true,
                     _ => {
-                        if scratch.data_len as usize >= scratch.req_data.len() {
+                        if scratch.data_len as usize >= SSL_HTTP_REQ_CAP {
                             remove_scratch = true;
                         }
                     }
