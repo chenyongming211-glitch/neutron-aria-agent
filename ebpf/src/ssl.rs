@@ -227,12 +227,10 @@ unsafe fn handle_ssl_read_return(pid_tgid: u64, ret: i32) -> u32 {
 
         let _ = SSL_READ_SCRATCH.remove(&pid_tgid);
 
-        // Negative SSL_read* returns are often retryable in userspace loops.
-        // Keep the pending HTTP request so a later successful read can still
-        // correlate the response. EOF (ret == 0) is terminal, so clear it.
-        if ret == 0 {
-            let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
-        }
+        // SSL_read* may report retryable states as non-positive returns and
+        // require userspace to inspect SSL_get_error(). Keep the pending HTTP
+        // request so a later successful read can still correlate the response.
+        // Stale requests are cleaned up by the scratch timeout path.
         return 0;
     }
 
