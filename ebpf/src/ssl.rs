@@ -226,7 +226,13 @@ unsafe fn handle_ssl_read_return(pid_tgid: u64, ret: i32) -> u32 {
         emit_ssl_error_event(pid_tgid, ssl_ptr, 0, ret, error_hint);
 
         let _ = SSL_READ_SCRATCH.remove(&pid_tgid);
-        let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
+
+        // Negative SSL_read* returns are often retryable in userspace loops.
+        // Keep the pending HTTP request so a later successful read can still
+        // correlate the response. EOF (ret == 0) is terminal, so clear it.
+        if ret == 0 {
+            let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
+        }
         return 0;
     }
 
