@@ -165,11 +165,10 @@ const HTTP_PREFIX_MATCHED: u8 = 2;
 macro_rules! append_fragment_byte {
     ($scratch:expr, $parse_buf:expr, $start:expr, $copy_len:expr, $idx:expr $(,)?) => {
         if $copy_len > $idx {
-            let dst_off = $start + $idx;
-            if dst_off >= SSL_HTTP_REQ_CAP {
+            if $start > (SSL_HTTP_REQ_CAP - 1 - $idx) {
                 return false;
             }
-            *((($scratch).req_data.as_mut_ptr()).add(dst_off)) = ($parse_buf).data[$idx];
+            *((($scratch).req_data.as_mut_ptr()).add($start + $idx)) = ($parse_buf).data[$idx];
         }
     };
 }

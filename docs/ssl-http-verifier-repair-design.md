@@ -118,7 +118,8 @@ The copy from `SSL_HTTP_PARSE_BUF.data` into `scratch.req_data` should be:
 
 - unrolled
 - expressed as direct pointer stores
-- guarded by explicit `dst_off < 256` checks
+- guarded by explicit per-index constant bounds:
+  - for byte `i`, require `start <= 255 - i`
 
 This avoids both:
 
