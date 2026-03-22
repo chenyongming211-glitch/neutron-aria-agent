@@ -28,9 +28,13 @@ pub const SSL_PROGRAM_NAMES: &[&str] = &[
     "ssl_handshake_return",
     "ssl_set_sni",
     "ssl_write_entry",
+    "ssl_write_ex_entry",
     "ssl_write_return",
+    "ssl_write_ex_return",
     "ssl_read_entry",
+    "ssl_read_ex_entry",
     "ssl_read_return",
+    "ssl_read_ex_return",
 ];
 
 pub const SSL_LINK_NAMES: &[&str] = &[
@@ -38,9 +42,13 @@ pub const SSL_LINK_NAMES: &[&str] = &[
     "ssl_handshake_return_link",
     "ssl_set_sni_link",
     "ssl_write_entry_link",
+    "ssl_write_ex_entry_link",
     "ssl_write_return_link",
+    "ssl_write_ex_return_link",
     "ssl_read_entry_link",
+    "ssl_read_ex_entry_link",
     "ssl_read_return_link",
+    "ssl_read_ex_return_link",
 ];
 
 pub const SSL_UPROBE_SPECS: &[SslUprobeSpec] = &[
@@ -61,16 +69,32 @@ pub const SSL_UPROBE_SPECS: &[SslUprobeSpec] = &[
         symbol_name: "SSL_write",
     },
     SslUprobeSpec {
+        program_name: "ssl_write_ex_entry",
+        symbol_name: "SSL_write_ex",
+    },
+    SslUprobeSpec {
         program_name: "ssl_write_return",
         symbol_name: "SSL_write",
+    },
+    SslUprobeSpec {
+        program_name: "ssl_write_ex_return",
+        symbol_name: "SSL_write_ex",
     },
     SslUprobeSpec {
         program_name: "ssl_read_entry",
         symbol_name: "SSL_read",
     },
     SslUprobeSpec {
+        program_name: "ssl_read_ex_entry",
+        symbol_name: "SSL_read_ex",
+    },
+    SslUprobeSpec {
         program_name: "ssl_read_return",
         symbol_name: "SSL_read",
+    },
+    SslUprobeSpec {
+        program_name: "ssl_read_ex_return",
+        symbol_name: "SSL_read_ex",
     },
 ];
 

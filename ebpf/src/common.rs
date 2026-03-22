@@ -432,7 +432,11 @@ pub struct SslHttpScratch {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct SslReadScratch {
+    pub ssl_ptr: u64,
     pub buf_ptr: u64,
+    pub out_len_ptr: u64,
+    pub mode: u8,         // 0=SSL_read, 1=SSL_read_ex
+    pub _pad: [u8; 7],
 }
 
 /// Completed HTTP request/response event

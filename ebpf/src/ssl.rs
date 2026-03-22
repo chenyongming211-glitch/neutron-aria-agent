@@ -152,6 +152,161 @@ pub unsafe fn ssl_set_sni_impl(ctx: &ProbeContext) -> u32 {
 
 // --- SSL HTTP (Phase 2): zero-loop design for kernel 4.18+ compatibility ---
 
+const SCRATCH_TIMEOUT_NS: u64 = 30_000_000_000;
+const SSL_READ_MODE_STANDARD: u8 = 0;
+const SSL_READ_MODE_EX: u8 = 1;
+
+#[inline(always)]
+unsafe fn http_request_is_fresh(pid_tgid: u64) -> bool {
+    let http_scratch = match SSL_HTTP_SCRATCH.get(&pid_tgid) {
+        Some(s) => s,
+        None => return false,
+    };
+
+    if bpf_ktime_get_ns().saturating_sub(http_scratch.write_ts) > SCRATCH_TIMEOUT_NS {
+        let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
+        return false;
+    }
+
+    true
+}
+
+#[inline(always)]
+unsafe fn store_ssl_read_scratch(
+    pid_tgid: u64,
+    ssl_ptr: u64,
+    buf_ptr: u64,
+    out_len_ptr: u64,
+    mode: u8,
+) {
+    let read_scratch = SslReadScratch {
+        ssl_ptr,
+        buf_ptr,
+        out_len_ptr,
+        mode,
+        _pad: [0u8; 7],
+    };
+    let _ = SSL_READ_SCRATCH.insert(&pid_tgid, &read_scratch, 0);
+}
+
+#[inline(always)]
+unsafe fn resolve_ssl_read_len(read_scratch: &SslReadScratch, ret: i32) -> Option<usize> {
+    let actual_len = if read_scratch.mode == SSL_READ_MODE_EX {
+        if read_scratch.out_len_ptr == 0 {
+            return None;
+        }
+
+        let mut len_bytes = [0u8; 8];
+        if bpf_probe_read_user_buf(read_scratch.out_len_ptr as *const u8, &mut len_bytes).is_err() {
+            return None;
+        }
+
+        u64::from_ne_bytes(len_bytes) as usize
+    } else {
+        ret as usize
+    };
+
+    let read_len = if actual_len < 32 { actual_len } else { 32 };
+    if read_len < 13 {
+        return None;
+    }
+
+    Some(read_len)
+}
+
+#[inline(always)]
+unsafe fn handle_ssl_read_return(pid_tgid: u64, ret: i32) -> u32 {
+    if ret <= 0 {
+        let ssl_ptr = SSL_READ_SCRATCH
+            .get(&pid_tgid)
+            .map(|s| s.ssl_ptr)
+            .unwrap_or(0);
+
+        let error_hint = if ret == 0 { 1 } else { 3 };
+        emit_ssl_error_event(pid_tgid, ssl_ptr, 0, ret, error_hint);
+
+        let _ = SSL_READ_SCRATCH.remove(&pid_tgid);
+        let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
+        return 0;
+    }
+
+    let read_scratch = match SSL_READ_SCRATCH.get(&pid_tgid) {
+        Some(s) => *s,
+        None => return 0,
+    };
+    let _ = SSL_READ_SCRATCH.remove(&pid_tgid);
+
+    let http_scratch = match SSL_HTTP_SCRATCH.get(&pid_tgid) {
+        Some(s) => s,
+        None => return 0,
+    };
+
+    let read_len = match resolve_ssl_read_len(&read_scratch, ret) {
+        Some(v) => v,
+        None => return 0,
+    };
+
+    let parse_buf = match SSL_HTTP_PARSE_BUF.get_ptr_mut(0) {
+        Some(p) => &mut *p,
+        None => return 0,
+    };
+
+    if bpf_probe_read_user_buf(
+        read_scratch.buf_ptr as *const u8,
+        &mut parse_buf.data[..read_len],
+    )
+    .is_err()
+    {
+        return 0;
+    }
+
+    let d = &parse_buf.data;
+    if d[0] != b'H' || d[1] != b'T' || d[2] != b'T' || d[3] != b'P'
+        || d[4] != b'/' || d[5] != b'1' || d[6] != b'.'
+    {
+        return 0;
+    }
+
+    let d0 = d[9];
+    let d1 = d[10];
+    let d2 = d[11];
+    if d0 < b'0' || d0 > b'9' || d1 < b'0' || d1 > b'9' || d2 < b'0' || d2 > b'9' {
+        return 0;
+    }
+    let status_code = ((d0 - b'0') as u16) * 100 + ((d1 - b'0') as u16) * 10 + ((d2 - b'0') as u16);
+
+    let now = bpf_ktime_get_ns();
+    let latency_ns = now.saturating_sub(http_scratch.write_ts);
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
+
+    let event = match SSL_HTTP_VALUE_BUF.get_ptr_mut(0) {
+        Some(p) => &mut *p,
+        None => return 0,
+    };
+
+    event.pid = pid;
+    event.tid = tid;
+    event.request_ts = http_scratch.write_ts;
+    event.response_ts = now;
+    event.latency_ns = latency_ns;
+    event.status_code = status_code;
+    event._pad = [0u8; 6];
+    event.req_data.copy_from_slice(&http_scratch.req_data);
+
+    let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
+
+    let seq_ptr = match SSL_HTTP_SEQ.get_ptr_mut(0) {
+        Some(p) => p,
+        None => return 0,
+    };
+    let seq = *seq_ptr;
+    *seq_ptr = seq.wrapping_add(1);
+
+    let _ = SSL_HTTP_TABLE.insert(&seq, event, 0);
+    0
+}
+
 /// uprobe on SSL_write: detect HTTP request, store raw header for userspace parsing
 pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
     if !ssl_enabled() {
@@ -227,33 +382,56 @@ pub unsafe fn ssl_read_entry_impl(ctx: &ProbeContext) -> u32 {
     if !ssl_enabled() {
         return 0;
     }
-    // SSL_read(ssl, buf, num) — buf is arg1
+    // SSL_read(ssl, buf, num)
+    let ssl_ptr: u64 = match ctx.arg(0) {
+        Some(v) => v,
+        None => return 0,
+    };
     let buf_ptr: u64 = match ctx.arg(1) {
         Some(v) => v,
         None => return 0,
     };
-    if buf_ptr == 0 {
+    if ssl_ptr == 0 || buf_ptr == 0 {
         return 0;
     }
 
     let pid_tgid = bpf_get_current_pid_tgid();
-
-    // Check for pending HTTP request (avoid stack copy of 264-byte struct)
-    let http_scratch = match SSL_HTTP_SCRATCH.get(&pid_tgid) {
-        Some(s) => s,
-        None => return 0,
-    };
-
-    // Clean up stale entries: request without response for > 30s
-    const SCRATCH_TIMEOUT_NS: u64 = 30_000_000_000;
-    let now = bpf_ktime_get_ns();
-    if now.saturating_sub(http_scratch.write_ts) > SCRATCH_TIMEOUT_NS {
-        let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
+    if !http_request_is_fresh(pid_tgid) {
         return 0;
     }
 
-    let read_scratch = SslReadScratch { buf_ptr };
-    let _ = SSL_READ_SCRATCH.insert(&pid_tgid, &read_scratch, 0);
+    store_ssl_read_scratch(pid_tgid, ssl_ptr, buf_ptr, 0, SSL_READ_MODE_STANDARD);
+    0
+}
+
+/// uprobe on SSL_read_ex: save buf pointer and out-len pointer for return probe
+pub unsafe fn ssl_read_ex_entry_impl(ctx: &ProbeContext) -> u32 {
+    if !ssl_enabled() {
+        return 0;
+    }
+    // SSL_read_ex(ssl, buf, num, readbytes)
+    let ssl_ptr: u64 = match ctx.arg(0) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let buf_ptr: u64 = match ctx.arg(1) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let out_len_ptr: u64 = match ctx.arg(3) {
+        Some(v) => v,
+        None => return 0,
+    };
+    if ssl_ptr == 0 || buf_ptr == 0 || out_len_ptr == 0 {
+        return 0;
+    }
+
+    let pid_tgid = bpf_get_current_pid_tgid();
+    if !http_request_is_fresh(pid_tgid) {
+        return 0;
+    }
+
+    store_ssl_read_scratch(pid_tgid, ssl_ptr, buf_ptr, out_len_ptr, SSL_READ_MODE_EX);
     0
 }
 
@@ -269,107 +447,21 @@ pub unsafe fn ssl_read_return_impl(ctx: &RetProbeContext) -> u32 {
     };
 
     let pid_tgid = bpf_get_current_pid_tgid();
+    handle_ssl_read_return(pid_tgid, ret)
+}
 
-    // Track SSL_read errors
-    if ret <= 0 {
-        // Try to get ssl_ptr from read scratch (may not exist if no pending HTTP)
-        let ssl_ptr = SSL_READ_SCRATCH.get(&pid_tgid)
-            .map(|s| s.buf_ptr)  // buf_ptr stored, approximate ssl context
-            .unwrap_or(0);
-
-        let error_hint = if ret == 0 {
-            1  // zero_return
-        } else {
-            3  // syscall_err (generic negative return)
-        };
-
-        emit_ssl_error_event(pid_tgid, ssl_ptr, 0, ret, error_hint);
-
-        // Clean up scratch entries
-        let _ = SSL_READ_SCRATCH.remove(&pid_tgid);
-        let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
+/// uretprobe on SSL_read_ex: parse HTTP response status code and emit event
+pub unsafe fn ssl_read_ex_return_impl(ctx: &RetProbeContext) -> u32 {
+    if !ssl_enabled() {
         return 0;
     }
-
-    // Get and remove read scratch (small struct, ok to copy)
-    let read_scratch = match SSL_READ_SCRATCH.get(&pid_tgid) {
-        Some(s) => *s,
-        None => return 0,
-    };
-    let _ = SSL_READ_SCRATCH.remove(&pid_tgid);
-
-    // Get HTTP scratch pointer (avoid stack copy of 264-byte struct)
-    let http_scratch = match SSL_HTTP_SCRATCH.get(&pid_tgid) {
-        Some(s) => s,
+    let ret: i32 = match ctx.ret() {
+        Some(v) => v,
         None => return 0,
     };
 
-    // Read first 32 bytes of response to detect "HTTP/1.x NNN" (handle fragmentation)
-    let parse_buf = match SSL_HTTP_PARSE_BUF.get_ptr_mut(0) {
-        Some(p) => &mut *p,
-        None => return 0,
-    };
-
-    // Only need 13 bytes ("HTTP/1.x NNN"), read 32 for fragmentation tolerance
-    let read_len: usize = if (ret as usize) < 32 { ret as usize } else { 32 };
-    if read_len < 13 {
-        return 0;
-    }
-    if bpf_probe_read_user_buf(read_scratch.buf_ptr as *const u8, &mut parse_buf.data[..32]).is_err() {
-        return 0;
-    }
-
-    let d = &parse_buf.data;
-
-    // Check "HTTP/1." prefix — pure branch, zero loops
-    if d[0] != b'H' || d[1] != b'T' || d[2] != b'T' || d[3] != b'P'
-        || d[4] != b'/' || d[5] != b'1' || d[6] != b'.' {
-        return 0;
-    }
-
-    // Status code at offset 9 (after "HTTP/1.x ")
-    let d0 = d[9];
-    let d1 = d[10];
-    let d2 = d[11];
-    if d0 < b'0' || d0 > b'9' || d1 < b'0' || d1 > b'9' || d2 < b'0' || d2 > b'9' {
-        return 0;
-    }
-    let status_code = ((d0 - b'0') as u16) * 100 + ((d1 - b'0') as u16) * 10 + ((d2 - b'0') as u16);
-
-    let now = bpf_ktime_get_ns();
-    let latency_ns = now.saturating_sub(http_scratch.write_ts);
-
-    let pid = (pid_tgid >> 32) as u32;
-    let tid = pid_tgid as u32;
-
-    // Use Per-CPU buffer for SslHttpValue to avoid stack overflow
-    let event = match SSL_HTTP_VALUE_BUF.get_ptr_mut(0) {
-        Some(p) => &mut *p,
-        None => return 0,
-    };
-
-    event.pid = pid;
-    event.tid = tid;
-    event.request_ts = http_scratch.write_ts;
-    event.response_ts = now;
-    event.latency_ns = latency_ns;
-    event.status_code = status_code;
-    event._pad = [0u8; 6];
-    event.req_data.copy_from_slice(&http_scratch.req_data);
-
-    // Remove HTTP scratch after copying data
-    let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
-
-    // Get per-CPU seq
-    let seq_ptr = match SSL_HTTP_SEQ.get_ptr_mut(0) {
-        Some(p) => p,
-        None => return 0,
-    };
-    let seq = *seq_ptr;
-    *seq_ptr = seq.wrapping_add(1);
-
-    let _ = SSL_HTTP_TABLE.insert(&seq, event, 0);
-    0
+    let pid_tgid = bpf_get_current_pid_tgid();
+    handle_ssl_read_return(pid_tgid, ret)
 }
 
 /// uretprobe on SSL_write: track write errors
