@@ -111,16 +111,24 @@ impl TapRegistry {
         let iface_lock = self.get_iface_lock(iface).await;
         let _guard = iface_lock.lock().await;
 
-        // Unregister from ControlPlane
-        self.control_plane.unregister_instance(iface).await;
-
-        let instance = {
-            let mut instances = self.instances.write().await;
-            instances.remove(iface)
+        let instance_exists = {
+            let instances = self.instances.read().await;
+            instances.contains_key(iface)
         };
 
-        if let Some(instance) = instance {
+        if instance_exists {
+            let instances = self.instances.read().await;
+            let instance = instances.get(iface).expect("instance existence checked above");
             instance.detach()?;
+        }
+
+        {
+            let mut instances = self.instances.write().await;
+            instances.remove(iface);
+        }
+
+        if instance_exists {
+            self.control_plane.unregister_instance(iface).await;
         }
 
         // Clean up the per-iface lock

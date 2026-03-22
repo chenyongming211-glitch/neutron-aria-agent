@@ -5,6 +5,7 @@ use tokio::sync::RwLock;
 use aria_core::state::{FirewallState, GroupInfo, RuleInfo, QosRuleInfo, MirrorRuleInfo};
 use aria_core::wal::{WalEntry, WalWriter};
 use crate::service_chain::{ServiceChain, self};
+use crate::ssl_manager::SslManager;
 
 const WAL_COMPACT_THRESHOLD: u64 = 1000;
 
@@ -46,6 +47,7 @@ pub struct ControlPlane {
     pub ebpf_path: String,
     pub base_pin_path: String,
     pub base_state_path: String,
+    ssl_manager: Arc<SslManager>,
     chains: RwLock<Vec<ServiceChain>>,
 }
 
@@ -87,13 +89,19 @@ impl ControlPlaneError {
 }
 
 impl ControlPlane {
-    pub fn new(ebpf_path: &str, base_pin_path: &str, base_state_path: &str) -> Self {
+    pub fn new(
+        ebpf_path: &str,
+        base_pin_path: &str,
+        base_state_path: &str,
+        ssl_manager: Arc<SslManager>,
+    ) -> Self {
         let chains = service_chain::load_chains(base_state_path);
         Self {
             instances: RwLock::new(HashMap::new()),
             ebpf_path: ebpf_path.to_string(),
             base_pin_path: base_pin_path.to_string(),
             base_state_path: base_state_path.to_string(),
+            ssl_manager,
             chains: RwLock::new(chains),
         }
     }
@@ -103,6 +111,16 @@ impl ControlPlane {
     pub async fn register_instance(&self, name: &str) {
         let pin_path = format!("{}/{}", self.base_pin_path, name);
         let state_path = format!("{}/{}", self.base_state_path, name);
+        let global_ssl_enabled = match self.read_ssl_global_config().await {
+            Ok(enabled) => Some(enabled),
+            Err(e) => {
+                eprintln!(
+                    "[ControlPlane] Warning: failed to read global SSL config during register for {}: {}",
+                    name, e
+                );
+                None
+            }
+        };
 
         // If already registered, compact before replacing
         {
@@ -113,7 +131,15 @@ impl ControlPlane {
             }
         }
 
-        let state = aria_core::wal::load_with_wal(&state_path);
+        let mut state = aria_core::wal::load_with_wal(&state_path);
+        let ssl_changed = global_ssl_enabled
+            .map(|enabled| state.ssl_enabled != enabled)
+            .unwrap_or(false);
+        if let Some(enabled) = global_ssl_enabled {
+            if ssl_changed {
+                state.ssl_enabled = enabled;
+            }
+        }
 
         let mut wal = match WalWriter::open(&state_path) {
             Ok(w) => w,
@@ -124,7 +150,7 @@ impl ControlPlane {
         };
 
         // Compact on startup if WAL had replayed entries
-        if wal.entry_count() > 0 {
+        if wal.entry_count() > 0 || ssl_changed {
             match serde_json::to_string_pretty(&state) {
                 Ok(json) => {
                     if let Err(e) = wal.compact(&json) {
@@ -144,6 +170,16 @@ impl ControlPlane {
             wal,
         }));
 
+        let instance_pin_path = {
+            let guard = instance.read().await;
+            guard.pin_path.clone()
+        };
+        if let Some(enabled) = global_ssl_enabled {
+            if let Err(e) = self.sync_pinned_ssl_config(&instance_pin_path, enabled) {
+                eprintln!("[ControlPlane] Warning: failed to sync SSL config for {}: {}", name, e);
+            }
+        }
+
         let mut instances = self.instances.write().await;
         instances.insert(name.to_string(), instance);
         println!("[ControlPlane] Registered instance: {}", name);
@@ -151,7 +187,25 @@ impl ControlPlane {
 
     /// Register the "system" instance (standalone mode)
     pub async fn register_system_instance(&self, pin_path: &str, state_path: &str) {
-        let state = aria_core::wal::load_with_wal(state_path);
+        let global_ssl_enabled = match self.read_ssl_global_config().await {
+            Ok(enabled) => Some(enabled),
+            Err(e) => {
+                eprintln!(
+                    "[ControlPlane] Warning: failed to read global SSL config during system register: {}",
+                    e
+                );
+                None
+            }
+        };
+        let mut state = aria_core::wal::load_with_wal(state_path);
+        let ssl_changed = global_ssl_enabled
+            .map(|enabled| state.ssl_enabled != enabled)
+            .unwrap_or(false);
+        if let Some(enabled) = global_ssl_enabled {
+            if ssl_changed {
+                state.ssl_enabled = enabled;
+            }
+        }
 
         let mut wal = match WalWriter::open(state_path) {
             Ok(w) => w,
@@ -162,7 +216,7 @@ impl ControlPlane {
         };
 
         // Compact on startup if WAL had replayed entries
-        if wal.entry_count() > 0 {
+        if wal.entry_count() > 0 || ssl_changed {
             match serde_json::to_string_pretty(&state) {
                 Ok(json) => {
                     if let Err(e) = wal.compact(&json) {
@@ -181,6 +235,12 @@ impl ControlPlane {
             state_path: state_path.to_string(),
             wal,
         }));
+
+        if let Some(enabled) = global_ssl_enabled {
+            if let Err(e) = self.sync_pinned_ssl_config(pin_path, enabled) {
+                eprintln!("[ControlPlane] Warning: failed to sync SSL config for system: {}", e);
+            }
+        }
 
         let mut instances = self.instances.write().await;
         instances.insert("system".to_string(), instance);
@@ -680,9 +740,16 @@ impl ControlPlane {
 
     pub async fn get_config(&self, instance: &str) -> Result<aria_core::common::FirewallConfig, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
-        let state = inst.read().await;
-        aria_core::ebpf_ops::read_firewall_config(&state.pin_path)
-            .map_err(|e| ControlPlaneError::KernelError(e))
+        let pin_path = {
+            let state = inst.read().await;
+            state.pin_path.clone()
+        };
+        let mut cfg = aria_core::ebpf_ops::read_firewall_config(&pin_path)
+            .map_err(|e| ControlPlaneError::KernelError(e))?;
+        if let Ok(enabled) = self.get_ssl_global_config().await {
+            cfg.ssl_enabled = if enabled { 1 } else { 0 };
+        }
+        Ok(cfg)
     }
 
     pub async fn update_config(
@@ -697,6 +764,21 @@ impl ControlPlane {
         ssl: Option<bool>,
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
+        let only_ssl = ssl.is_some()
+            && conntrack.is_none()
+            && monitoring.is_none()
+            && acl.is_none()
+            && qos.is_none()
+            && mirror.is_none()
+            && tcprt.is_none();
+
+        if let Some(enabled) = ssl {
+            self.set_ssl_global_config(enabled).await?;
+            if only_ssl {
+                return Ok(());
+            }
+        }
+
         let mut state = inst.write().await;
         Self::check_xdp_ready(&state.pin_path)?;
 
@@ -705,7 +787,16 @@ impl ControlPlane {
         // For mirror, the kernel flag = user_wants_mirror && has_rules
         let kernel_mirror = mirror.map(|m| m && !state.state.mirror_rules.is_empty());
 
-        if let Err(e) = aria_core::ebpf_ops::update_firewall_config(&state.pin_path, conntrack, monitoring, acl, kernel_qos, kernel_mirror, tcprt, ssl) {
+        if let Err(e) = aria_core::ebpf_ops::update_firewall_config(
+            &state.pin_path,
+            conntrack,
+            monitoring,
+            acl,
+            kernel_qos,
+            kernel_mirror,
+            tcprt,
+            None,
+        ) {
             return Err(ControlPlaneError::KernelError(e));
         }
 
@@ -727,10 +818,6 @@ impl ControlPlane {
         if let Some(t) = tcprt {
             state.state.tcprt_enabled = t;
         }
-        if let Some(s) = ssl {
-            state.state.ssl_enabled = s;
-        }
-
         state.wal_append(&WalEntry::UpdateConfig {
             conntrack,
             monitoring,
@@ -738,7 +825,7 @@ impl ControlPlane {
             qos,
             mirror,
             tcprt,
-            ssl,
+            ssl: None,
         });
         Ok(())
     }
@@ -747,22 +834,32 @@ impl ControlPlane {
     // SSL uprobe is process-level, not tied to any network interface
 
     pub async fn get_ssl_global_config(&self) -> Result<bool, ControlPlaneError> {
-        aria_core::ssl_ops::get_ssl_global_config(&self.base_pin_path)
+        self.ssl_manager.ensure_loaded().await
+            .map_err(ControlPlaneError::KernelError)?;
+        aria_core::ssl_ops::get_ssl_global_config(self.ssl_manager.pin_path())
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
     pub async fn set_ssl_global_config(&self, enabled: bool) -> Result<(), ControlPlaneError> {
-        aria_core::ssl_ops::set_ssl_global_config(&self.base_pin_path, enabled)
-            .map_err(|e| ControlPlaneError::KernelError(e))
+        self.ssl_manager.ensure_loaded().await
+            .map_err(ControlPlaneError::KernelError)?;
+        aria_core::ssl_ops::set_ssl_global_config(self.ssl_manager.pin_path(), enabled)
+            .map_err(ControlPlaneError::KernelError)?;
+        self.sync_active_instance_ssl_state(enabled).await;
+        Ok(())
     }
 
     pub async fn get_ssl_errors(&self) -> Result<Vec<aria_core::ssl_ops::SslErrorEntry>, ControlPlaneError> {
-        aria_core::ssl_ops::get_ssl_errors(&self.base_pin_path)
+        self.ssl_manager.ensure_loaded().await
+            .map_err(ControlPlaneError::KernelError)?;
+        aria_core::ssl_ops::get_ssl_errors(self.ssl_manager.pin_path())
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
     pub async fn flush_ssl_errors(&self) -> Result<u64, ControlPlaneError> {
-        aria_core::ssl_ops::flush_ssl_errors(&self.base_pin_path)
+        self.ssl_manager.ensure_loaded().await
+            .map_err(ControlPlaneError::KernelError)?;
+        aria_core::ssl_ops::flush_ssl_errors(self.ssl_manager.pin_path())
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
@@ -841,37 +938,57 @@ impl ControlPlane {
     // ── SSL ──
 
     pub async fn list_ssl(&self, instance: &str, top: usize) -> Result<Vec<aria_core::ssl_ops::SslConnEntry>, ControlPlaneError> {
-        let inst = self.get_instance(instance).await?;
-        let state = inst.read().await;
-        let mut entries = aria_core::ssl_ops::get_ssl_conns(&state.pin_path)
-            .map_err(|e| ControlPlaneError::KernelError(e))?;
+        self.get_instance(instance).await?;
+        self.list_ssl_global(top).await
+    }
+
+    pub async fn list_ssl_global(&self, top: usize) -> Result<Vec<aria_core::ssl_ops::SslConnEntry>, ControlPlaneError> {
+        self.ssl_manager.ensure_loaded().await
+            .map_err(ControlPlaneError::KernelError)?;
+        let mut entries = aria_core::ssl_ops::get_ssl_conns(self.ssl_manager.pin_path())
+            .map_err(ControlPlaneError::KernelError)?;
         entries.truncate(top);
         Ok(entries)
     }
 
     pub async fn flush_ssl(&self, instance: &str) -> Result<u64, ControlPlaneError> {
-        let inst = self.get_instance(instance).await?;
-        let state = inst.read().await;
-        aria_core::ssl_ops::flush_ssl_conns(&state.pin_path)
-            .map_err(|e| ControlPlaneError::KernelError(e))
+        self.get_instance(instance).await?;
+        self.flush_ssl_global().await
+    }
+
+    pub async fn flush_ssl_global(&self) -> Result<u64, ControlPlaneError> {
+        self.ssl_manager.ensure_loaded().await
+            .map_err(ControlPlaneError::KernelError)?;
+        aria_core::ssl_ops::flush_ssl_conns(self.ssl_manager.pin_path())
+            .map_err(ControlPlaneError::KernelError)
     }
 
     // ── SSL HTTP ──
 
     pub async fn list_ssl_http(&self, instance: &str, top: usize) -> Result<Vec<aria_core::ssl_ops::SslHttpEntry>, ControlPlaneError> {
-        let inst = self.get_instance(instance).await?;
-        let state = inst.read().await;
-        let mut entries = aria_core::ssl_ops::get_ssl_http_events(&state.pin_path)
-            .map_err(|e| ControlPlaneError::KernelError(e))?;
+        self.get_instance(instance).await?;
+        self.list_ssl_http_global(top).await
+    }
+
+    pub async fn list_ssl_http_global(&self, top: usize) -> Result<Vec<aria_core::ssl_ops::SslHttpEntry>, ControlPlaneError> {
+        self.ssl_manager.ensure_loaded().await
+            .map_err(ControlPlaneError::KernelError)?;
+        let mut entries = aria_core::ssl_ops::get_ssl_http_events(self.ssl_manager.pin_path())
+            .map_err(ControlPlaneError::KernelError)?;
         entries.truncate(top);
         Ok(entries)
     }
 
     pub async fn flush_ssl_http(&self, instance: &str) -> Result<u64, ControlPlaneError> {
-        let inst = self.get_instance(instance).await?;
-        let state = inst.read().await;
-        aria_core::ssl_ops::flush_ssl_http_events(&state.pin_path)
-            .map_err(|e| ControlPlaneError::KernelError(e))
+        self.get_instance(instance).await?;
+        self.flush_ssl_http_global().await
+    }
+
+    pub async fn flush_ssl_http_global(&self) -> Result<u64, ControlPlaneError> {
+        self.ssl_manager.ensure_loaded().await
+            .map_err(ControlPlaneError::KernelError)?;
+        aria_core::ssl_ops::flush_ssl_http_events(self.ssl_manager.pin_path())
+            .map_err(ControlPlaneError::KernelError)
     }
 
     pub async fn batch_query_tcprt(&self, tuples: &[(String, String, u16, u16)])
@@ -1036,6 +1153,52 @@ impl ControlPlane {
     }
 
     // ── Helpers ──
+
+    async fn read_ssl_global_config(&self) -> Result<bool, String> {
+        self.ssl_manager.ensure_loaded().await?;
+        aria_core::ssl_ops::get_ssl_global_config(self.ssl_manager.pin_path())
+    }
+
+    fn sync_pinned_ssl_config(&self, pin_path: &str, enabled: bool) -> Result<(), String> {
+        if !std::path::Path::new(&format!("{}/xdp_firewall", pin_path)).exists() {
+            return Ok(());
+        }
+        aria_core::ebpf_ops::update_firewall_config(
+            pin_path,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(enabled),
+        )
+    }
+
+    async fn sync_active_instance_ssl_state(&self, enabled: bool) {
+        let instances = self.instances.read().await;
+        for (name, inst) in instances.iter() {
+            let mut state = inst.write().await;
+
+            if let Err(e) = self.sync_pinned_ssl_config(&state.pin_path, enabled) {
+                eprintln!(
+                    "[ControlPlane] Warning: failed to sync runtime SSL flag for {}: {}",
+                    name, e
+                );
+            }
+
+            state.state.ssl_enabled = enabled;
+            state.wal_append(&WalEntry::UpdateConfig {
+                conntrack: None,
+                monitoring: None,
+                acl: None,
+                qos: None,
+                mirror: None,
+                tcprt: None,
+                ssl: Some(enabled),
+            });
+        }
+    }
 
     fn resolve_group_id(&self, state: &FirewallState, name: &str) -> Result<u32, ControlPlaneError> {
         if name == "any" {

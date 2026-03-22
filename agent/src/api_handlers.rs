@@ -738,23 +738,60 @@ pub async fn flush_tcprt(
 
 // ── SSL ──
 
+fn map_ssl_connections(entries: Vec<aria_core::ssl_ops::SslConnEntry>) -> aria_api::SslListResponse {
+    let connections = entries.into_iter().map(|e| aria_api::SslConnEntry {
+        seq: e.seq,
+        pid: e.pid,
+        tid: e.tid,
+        handshake_us: e.handshake_us,
+        timestamp: e.timestamp,
+        sni: e.sni,
+    }).collect();
+    aria_api::SslListResponse { connections }
+}
+
+fn map_ssl_http_events(entries: Vec<aria_core::ssl_ops::SslHttpEntry>) -> aria_api::SslHttpListResponse {
+    let events = entries.into_iter().map(|e| aria_api::SslHttpEntry {
+        seq: e.seq,
+        pid: e.pid,
+        tid: e.tid,
+        method: e.method,
+        path: e.path,
+        host: e.host,
+        status_code: e.status_code,
+        latency_us: e.latency_us,
+        request_ts: e.request_ts,
+        response_ts: e.response_ts,
+    }).collect();
+    aria_api::SslHttpListResponse { events }
+}
+
+pub async fn list_ssl_global(
+    State(cp): State<AppState>,
+    Query(query): Query<TopQuery>,
+) -> impl IntoResponse {
+    match cp.list_ssl_global(query.top).await {
+        Ok(entries) => Ok(Json(map_ssl_connections(entries))),
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+pub async fn flush_ssl_global(
+    State(cp): State<AppState>,
+) -> impl IntoResponse {
+    match cp.flush_ssl_global().await {
+        Ok(count) => Ok(Json(aria_api::SslFlushResponse { flushed: count })),
+        Err(e) => Err(err_response(e)),
+    }
+}
+
 pub async fn list_ssl(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
     Query(query): Query<TopQuery>,
 ) -> impl IntoResponse {
     match cp.list_ssl(&instance, query.top).await {
-        Ok(entries) => {
-            let connections = entries.into_iter().map(|e| aria_api::SslConnEntry {
-                seq: e.seq,
-                pid: e.pid,
-                tid: e.tid,
-                handshake_us: e.handshake_us,
-                timestamp: e.timestamp,
-                sni: e.sni,
-            }).collect();
-            Ok(Json(aria_api::SslListResponse { connections }))
-        }
+        Ok(entries) => Ok(Json(map_ssl_connections(entries))),
         Err(e) => Err(err_response(e)),
     }
 }
@@ -771,27 +808,32 @@ pub async fn flush_ssl(
 
 // ── SSL HTTP ──
 
+pub async fn list_ssl_http_global(
+    State(cp): State<AppState>,
+    Query(query): Query<TopQuery>,
+) -> impl IntoResponse {
+    match cp.list_ssl_http_global(query.top).await {
+        Ok(entries) => Ok(Json(map_ssl_http_events(entries))),
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+pub async fn flush_ssl_http_global(
+    State(cp): State<AppState>,
+) -> impl IntoResponse {
+    match cp.flush_ssl_http_global().await {
+        Ok(count) => Ok(Json(aria_api::SslHttpFlushResponse { flushed: count })),
+        Err(e) => Err(err_response(e)),
+    }
+}
+
 pub async fn list_ssl_http(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
     Query(query): Query<TopQuery>,
 ) -> impl IntoResponse {
     match cp.list_ssl_http(&instance, query.top).await {
-        Ok(entries) => {
-            let events = entries.into_iter().map(|e| aria_api::SslHttpEntry {
-                seq: e.seq,
-                pid: e.pid,
-                tid: e.tid,
-                method: e.method,
-                path: e.path,
-                host: e.host,
-                status_code: e.status_code,
-                latency_us: e.latency_us,
-                request_ts: e.request_ts,
-                response_ts: e.response_ts,
-            }).collect();
-            Ok(Json(aria_api::SslHttpListResponse { events }))
-        }
+        Ok(entries) => Ok(Json(map_ssl_http_events(entries))),
         Err(e) => Err(err_response(e)),
     }
 }
@@ -1561,39 +1603,37 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
     let _ = writeln!(out, "# HELP aria_ssl_handshake_seconds SSL handshake latency distribution");
     let _ = writeln!(out, "# TYPE aria_ssl_handshake_seconds histogram");
 
-    for inst in &instances {
-        let i = prom_escape(inst);
-        if let Ok(entries) = cp.list_ssl(inst, 100000).await {
-            let total = entries.len() as u64;
-            let _ = writeln!(out, "aria_ssl_handshakes_total{{instance=\"{i}\"}} {total}");
+    let ssl_instance = prom_escape("ssl-global");
+    if let Ok(entries) = cp.list_ssl_global(100000).await {
+        let total = entries.len() as u64;
+        let _ = writeln!(out, "aria_ssl_handshakes_total{{instance=\"{ssl_instance}\"}} {total}");
 
-            let ssl_boundaries_us: [f64; 9] = [
-                1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0,
-                500_000.0, 1_000_000.0, 5_000_000.0, 10_000_000.0,
-            ];
-            let mut ssl_bucket_counts = [0u64; 9];
-            let mut ssl_sum_seconds: f64 = 0.0;
-            let mut ssl_count: u64 = 0;
+        let ssl_boundaries_us: [f64; 9] = [
+            1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0,
+            500_000.0, 1_000_000.0, 5_000_000.0, 10_000_000.0,
+        ];
+        let mut ssl_bucket_counts = [0u64; 9];
+        let mut ssl_sum_seconds: f64 = 0.0;
+        let mut ssl_count: u64 = 0;
 
-            for e in &entries {
-                if e.handshake_us > 0.0 {
-                    ssl_count += 1;
-                    ssl_sum_seconds += e.handshake_us / 1_000_000.0;
-                    for (j, &boundary) in ssl_boundaries_us.iter().enumerate() {
-                        if e.handshake_us <= boundary {
-                            ssl_bucket_counts[j] += 1;
-                        }
+        for e in &entries {
+            if e.handshake_us > 0.0 {
+                ssl_count += 1;
+                ssl_sum_seconds += e.handshake_us / 1_000_000.0;
+                for (j, &boundary) in ssl_boundaries_us.iter().enumerate() {
+                    if e.handshake_us <= boundary {
+                        ssl_bucket_counts[j] += 1;
                     }
                 }
             }
-            let ssl_boundaries_s = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10"];
-            for (j, le) in ssl_boundaries_s.iter().enumerate() {
-                let _ = writeln!(out, "aria_ssl_handshake_seconds_bucket{{instance=\"{i}\",le=\"{le}\"}} {}", ssl_bucket_counts[j]);
-            }
-            let _ = writeln!(out, "aria_ssl_handshake_seconds_bucket{{instance=\"{i}\",le=\"+Inf\"}} {ssl_count}");
-            let _ = writeln!(out, "aria_ssl_handshake_seconds_sum{{instance=\"{i}\"}} {ssl_sum_seconds}");
-            let _ = writeln!(out, "aria_ssl_handshake_seconds_count{{instance=\"{i}\"}} {ssl_count}");
         }
+        let ssl_boundaries_s = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10"];
+        for (j, le) in ssl_boundaries_s.iter().enumerate() {
+            let _ = writeln!(out, "aria_ssl_handshake_seconds_bucket{{instance=\"{ssl_instance}\",le=\"{le}\"}} {}", ssl_bucket_counts[j]);
+        }
+        let _ = writeln!(out, "aria_ssl_handshake_seconds_bucket{{instance=\"{ssl_instance}\",le=\"+Inf\"}} {ssl_count}");
+        let _ = writeln!(out, "aria_ssl_handshake_seconds_sum{{instance=\"{ssl_instance}\"}} {ssl_sum_seconds}");
+        let _ = writeln!(out, "aria_ssl_handshake_seconds_count{{instance=\"{ssl_instance}\"}} {ssl_count}");
     }
 
     // ── SSL HTTP metrics ──
@@ -1602,51 +1642,48 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
     let _ = writeln!(out, "# HELP aria_ssl_http_latency_seconds HTTP request latency distribution via SSL");
     let _ = writeln!(out, "# TYPE aria_ssl_http_latency_seconds histogram");
 
-    for inst in &instances {
-        let i = prom_escape(inst);
-        if let Ok(entries) = cp.list_ssl_http(inst, 100000).await {
-            let total = entries.len() as u64;
-            let _ = writeln!(out, "aria_ssl_http_requests_total{{instance=\"{i}\"}} {total}");
+    if let Ok(entries) = cp.list_ssl_http_global(100000).await {
+        let total = entries.len() as u64;
+        let _ = writeln!(out, "aria_ssl_http_requests_total{{instance=\"{ssl_instance}\"}} {total}");
 
-            let http_boundaries_us: [f64; 9] = [
-                1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0,
-                500_000.0, 1_000_000.0, 5_000_000.0, 10_000_000.0,
-            ];
-            let mut http_bucket_counts = [0u64; 9];
-            let mut http_sum_seconds: f64 = 0.0;
-            let mut http_count: u64 = 0;
-            let mut status_2xx: u64 = 0;
-            let mut status_4xx: u64 = 0;
-            let mut status_5xx: u64 = 0;
+        let http_boundaries_us: [f64; 9] = [
+            1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0,
+            500_000.0, 1_000_000.0, 5_000_000.0, 10_000_000.0,
+        ];
+        let mut http_bucket_counts = [0u64; 9];
+        let mut http_sum_seconds: f64 = 0.0;
+        let mut http_count: u64 = 0;
+        let mut status_2xx: u64 = 0;
+        let mut status_4xx: u64 = 0;
+        let mut status_5xx: u64 = 0;
 
-            for e in &entries {
-                if e.latency_us > 0.0 {
-                    http_count += 1;
-                    http_sum_seconds += e.latency_us / 1_000_000.0;
-                    for (j, &boundary) in http_boundaries_us.iter().enumerate() {
-                        if e.latency_us <= boundary {
-                            http_bucket_counts[j] += 1;
-                        }
+        for e in &entries {
+            if e.latency_us > 0.0 {
+                http_count += 1;
+                http_sum_seconds += e.latency_us / 1_000_000.0;
+                for (j, &boundary) in http_boundaries_us.iter().enumerate() {
+                    if e.latency_us <= boundary {
+                        http_bucket_counts[j] += 1;
                     }
                 }
-                match e.status_code {
-                    200..=299 => status_2xx += 1,
-                    400..=499 => status_4xx += 1,
-                    500..=599 => status_5xx += 1,
-                    _ => {}
-                }
             }
-            let http_boundaries_s = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10"];
-            for (j, le) in http_boundaries_s.iter().enumerate() {
-                let _ = writeln!(out, "aria_ssl_http_latency_seconds_bucket{{instance=\"{i}\",le=\"{le}\"}} {}", http_bucket_counts[j]);
+            match e.status_code {
+                200..=299 => status_2xx += 1,
+                400..=499 => status_4xx += 1,
+                500..=599 => status_5xx += 1,
+                _ => {}
             }
-            let _ = writeln!(out, "aria_ssl_http_latency_seconds_bucket{{instance=\"{i}\",le=\"+Inf\"}} {http_count}");
-            let _ = writeln!(out, "aria_ssl_http_latency_seconds_sum{{instance=\"{i}\"}} {http_sum_seconds}");
-            let _ = writeln!(out, "aria_ssl_http_latency_seconds_count{{instance=\"{i}\"}} {http_count}");
-            let _ = writeln!(out, "aria_ssl_http_status_2xx_total{{instance=\"{i}\"}} {status_2xx}");
-            let _ = writeln!(out, "aria_ssl_http_status_4xx_total{{instance=\"{i}\"}} {status_4xx}");
-            let _ = writeln!(out, "aria_ssl_http_status_5xx_total{{instance=\"{i}\"}} {status_5xx}");
         }
+        let http_boundaries_s = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10"];
+        for (j, le) in http_boundaries_s.iter().enumerate() {
+            let _ = writeln!(out, "aria_ssl_http_latency_seconds_bucket{{instance=\"{ssl_instance}\",le=\"{le}\"}} {}", http_bucket_counts[j]);
+        }
+        let _ = writeln!(out, "aria_ssl_http_latency_seconds_bucket{{instance=\"{ssl_instance}\",le=\"+Inf\"}} {http_count}");
+        let _ = writeln!(out, "aria_ssl_http_latency_seconds_sum{{instance=\"{ssl_instance}\"}} {http_sum_seconds}");
+        let _ = writeln!(out, "aria_ssl_http_latency_seconds_count{{instance=\"{ssl_instance}\"}} {http_count}");
+        let _ = writeln!(out, "aria_ssl_http_status_2xx_total{{instance=\"{ssl_instance}\"}} {status_2xx}");
+        let _ = writeln!(out, "aria_ssl_http_status_4xx_total{{instance=\"{ssl_instance}\"}} {status_4xx}");
+        let _ = writeln!(out, "aria_ssl_http_status_5xx_total{{instance=\"{ssl_instance}\"}} {status_5xx}");
     }
 
     (

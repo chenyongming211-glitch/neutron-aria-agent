@@ -10,6 +10,8 @@ mod netlink;
 mod control_plane;
 mod service_chain;
 mod system_manager;
+mod ssl_manager;
+mod ssl_support;
 mod api_handlers;
 mod api_routes;
 
@@ -129,11 +131,23 @@ async fn main() {
     std::fs::create_dir_all(&config.pin_path).ok();
     std::fs::create_dir_all(&config.state_path).ok();
 
+    let ssl_manager = Arc::new(ssl_manager::SslManager::new(
+        &config.ebpf_path,
+        &config.pin_path,
+    ));
+    if let Err(e) = ssl_manager.ensure_loaded().await {
+        eprintln!("Warning: failed to initialize global SSL manager: {}", e);
+    }
+    if let Err(e) = ssl_manager.cleanup_legacy_instance_pins().await {
+        eprintln!("Warning: failed to clean legacy SSL pins: {}", e);
+    }
+
     // Create ControlPlane
     let control_plane = Arc::new(control_plane::ControlPlane::new(
         &config.ebpf_path,
         &config.pin_path,
         &config.state_path,
+        ssl_manager.clone(),
     ));
 
     // Note: instances are registered by TapRegistry::attach when XDP is actually attached.

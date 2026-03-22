@@ -1,6 +1,5 @@
 use std::path::PathBuf;
-use aria_core::ebpf_ops::ALL_MAP_NAMES;
-use crate::system_manager::{find_libssl, attach_uprobe};
+use aria_core::ebpf_ops::NETWORK_MAP_NAMES;
 
 /// Represents a single tap interface with its attached XDP firewall instance.
 /// On kernel 5.7+, the XDP link is pinned to bpffs so it survives agent crashes.
@@ -38,8 +37,9 @@ impl FirewallInstance {
         if std::path::Path::new(&xdp_link_pin).exists() {
             println!("[{}] Found pinned XDP link, recovering...", self.iface);
             self.replay_state_to_pinned_maps(ebpf_path)?;
-            // Check if FQ qdisc is still active
-            self.edt_available = aria_core::ebpf_ops::check_fq_qdisc(&self.iface);
+            let mut bpf = aria_core::ebpf_ops::load_bpf_with_pin(pin_path_str, ebpf_path)?;
+            self.ensure_tc_runtime(&mut bpf, pin_path_str);
+            self.ensure_fq_runtime();
             println!("[{}] Recovery complete (EDT: {})", self.iface, if self.edt_available { "available" } else { "unavailable" });
             return Ok(());
         }
@@ -48,10 +48,12 @@ impl FirewallInstance {
         let xdp_prog_pin = format!("{}/xdp_firewall", pin_path_str);
         if std::path::Path::new(&xdp_prog_pin).exists() {
             println!("[{}] Found pinned XDP program (no link pin), recovering...", self.iface);
-            self.replay_state_to_pinned_maps(ebpf_path)?;
-            // Re-attach XDP since link wasn't pinned (detached when old agent exited)
-            self.reattach_xdp_from_pinned(pin_path_str)?;
-            self.edt_available = aria_core::ebpf_ops::check_fq_qdisc(&self.iface);
+            let mut bpf = aria_core::ebpf_ops::load_bpf_with_pin(pin_path_str, ebpf_path)?;
+            let state_path_str = self.state_path.to_str().unwrap();
+            aria_core::ebpf_ops::replay_state(&mut bpf, state_path_str);
+            self.reattach_xdp_from_loaded(&mut bpf, &xdp_link_pin)?;
+            self.ensure_tc_runtime(&mut bpf, pin_path_str);
+            self.ensure_fq_runtime();
             println!("[{}] Recovery complete (EDT: {})", self.iface, if self.edt_available { "available" } else { "unavailable" });
             return Ok(());
         }
@@ -109,7 +111,7 @@ impl FirewallInstance {
         }
 
         // Pin all maps
-        for name in ALL_MAP_NAMES {
+        for name in NETWORK_MAP_NAMES {
             if let Some(map) = bpf.map_mut(name) {
                 if let Err(e) = map.pin(format!("{}/{}", pin_path_str, name)) {
                     eprintln!("[{}] Warning: failed to pin map {}: {}", self.iface, name, e);
@@ -117,19 +119,18 @@ impl FirewallInstance {
             }
         }
 
-        // Pin programs
-        for (name, prog) in bpf.programs_mut() {
-            if let Err(e) = prog.pin(format!("{}/{}", pin_path_str, name)) {
-                eprintln!("[{}] Warning: failed to pin program {}: {:?}", self.iface, name, e);
+        // Pin runtime programs.
+        for name in &["xdp_firewall", "tc_egress", "tc_ingress"] {
+            if let Some(program) = bpf.program_mut(name) {
+                if let Err(e) = program.pin(format!("{}/{}", pin_path_str, name)) {
+                    eprintln!("[{}] Warning: failed to pin program {}: {:?}", self.iface, name, e);
+                }
             }
         }
 
-        // Replay state from state.json if exists
+        // Replay state from snapshot + WAL if present.
         let state_path_str = self.state_path.to_str().unwrap();
         aria_core::ebpf_ops::replay_state(&mut bpf, state_path_str);
-
-        // Attach SSL uprobes (non-fatal: warn and continue if libssl not found)
-        self.attach_ssl_uprobes(&mut bpf, pin_path_str);
 
         println!("[{}] Firewall instance active", self.iface);
         Ok(())
@@ -203,47 +204,66 @@ impl FirewallInstance {
         Ok(())
     }
 
-    /// Re-attach XDP from a pinned program (used when recovering on older kernels without bpf_link).
-    fn reattach_xdp_from_pinned(&self, pin_path: &str) -> Result<(), String> {
-        let prog_pin = format!("{}/xdp_firewall", pin_path);
-        let prog = aya::programs::loaded_programs()
-            .filter_map(|p| p.ok())
-            .find(|_| std::path::Path::new(&prog_pin).exists());
-        if prog.is_none() {
-            // Fall back to ip command
-            eprintln!("[{}] Cannot re-attach XDP from pin, will need full reload on next attach", self.iface);
-        }
-        Ok(())
-    }
-
-    /// Attach SSL uprobes to libssl. Non-fatal: warns on failure.
-    fn attach_ssl_uprobes(&self, bpf: &mut aya::Ebpf, pin_path: &str) {
-        let libssl = match find_libssl() {
-            Some(p) => p,
-            None => {
-                println!("[{}] libssl not found, SSL uprobes not attached", self.iface);
-                return;
-            }
-        };
-
-        let probes = [
-            ("ssl_handshake_entry", "SSL_do_handshake"),
-            ("ssl_handshake_return", "SSL_do_handshake"),
-            ("ssl_set_sni", "SSL_ctrl"),
-            ("ssl_write_entry", "SSL_write"),
-            ("ssl_write_return", "SSL_write"),
-            ("ssl_read_entry", "SSL_read"),
-            ("ssl_read_return", "SSL_read"),
+    fn ensure_tc_runtime(&self, bpf: &mut aya::Ebpf, pin_path: &str) {
+        let tc_programs = [
+            ("tc_egress", aya::programs::tc::TcAttachType::Egress, "Egress control"),
+            ("tc_ingress", aya::programs::tc::TcAttachType::Ingress, "Ingress mirror"),
         ];
 
-        for (prog_name, fn_name) in &probes {
-            if let Err(e) = attach_uprobe(bpf, prog_name, &libssl, fn_name, pin_path) {
-                eprintln!("[{}] Warning: failed to attach {} uprobe: {}", self.iface, prog_name, e);
-                return;
+        for (prog_name, attach_type, purpose) in tc_programs {
+            let link_pin = format!("{}/{}_link", pin_path, prog_name);
+            if std::path::Path::new(&link_pin).exists() {
+                continue;
+            }
+
+            if let Err(e) = self.try_attach_tc(bpf, prog_name, attach_type, pin_path) {
+                eprintln!("[{}] Warning: failed to recover {}: {}", self.iface, purpose, e);
             }
         }
+    }
 
-        println!("[{}] SSL uprobes attached to {}", self.iface, libssl);
+    fn ensure_fq_runtime(&mut self) {
+        let state_path_str = self.state_path.to_str().unwrap();
+        let state = aria_core::wal::load_with_wal(state_path_str);
+        let requires_shaping = state.qos_rules.iter().any(|rule| rule.mode == 1);
+
+        if requires_shaping {
+            match aria_core::ebpf_ops::setup_fq_qdisc(&self.iface) {
+                Ok(()) => self.edt_available = true,
+                Err(e) => {
+                    self.edt_available = aria_core::ebpf_ops::check_fq_qdisc(&self.iface);
+                    if !self.edt_available {
+                        eprintln!("[{}] Warning: failed to recover FQ qdisc: {}", self.iface, e);
+                    }
+                }
+            }
+        } else {
+            self.edt_available = aria_core::ebpf_ops::check_fq_qdisc(&self.iface);
+        }
+    }
+
+    /// Re-attach XDP after loading the pinned map set on kernels where the link itself was not pinned.
+    fn reattach_xdp_from_loaded(&self, bpf: &mut aya::Ebpf, xdp_link_pin: &str) -> Result<(), String> {
+        let xdp_program = bpf
+            .program_mut("xdp_firewall")
+            .ok_or_else(|| format!("[{}] XDP program not found during recovery", self.iface))?;
+
+        let xdp: &mut aya::programs::Xdp = xdp_program
+            .try_into()
+            .map_err(|e: aya::programs::ProgramError| format!("[{}] xdp try_into during recovery: {:?}", self.iface, e))?;
+
+        xdp.load()
+            .map_err(|e| format!("[{}] xdp.load during recovery: {:?}", self.iface, e))?;
+
+        let link_id = xdp
+            .attach(&self.iface, aya::programs::XdpFlags::default())
+            .map_err(|e| format!("[{}] xdp.attach during recovery: {:?}", self.iface, e))?;
+
+        match self.try_pin_xdp_link(xdp, link_id, xdp_link_pin) {
+            Ok(()) => println!("[{}] Recovered XDP link pin", self.iface),
+            Err(e) => eprintln!("[{}] Warning: XDP link re-pin skipped during recovery: {}", self.iface, e),
+        }
+        Ok(())
     }
 
     /// Replay state to already-pinned maps (used during crash recovery)
@@ -276,15 +296,6 @@ impl FirewallInstance {
 
         // Detach TC egress
         aria_core::ebpf_ops::detach_tc_egress(&self.iface);
-
-        // Remove pinned SSL uprobe links
-        for link_name in &["ssl_handshake_entry_link", "ssl_handshake_return_link", "ssl_set_sni_link",
-                            "ssl_write_entry_link", "ssl_read_entry_link", "ssl_read_return_link"] {
-            let link_pin = format!("{}/{}", pin_path_str, link_name);
-            if std::path::Path::new(&link_pin).exists() {
-                let _ = std::fs::remove_file(&link_pin);
-            }
-        }
 
         // Clean up all pinned maps and programs
         if self.pin_path.exists() {

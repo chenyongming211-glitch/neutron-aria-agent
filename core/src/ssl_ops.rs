@@ -177,10 +177,9 @@ pub fn flush_ssl_http_events(pin_path: &str) -> Result<u64, String> {
 
 // --- Global SSL Observability Config ---
 
-/// Get global SSL observability enabled status
-/// Uses base_pin_path (e.g., /sys/fs/bpf) since SSL uprobe is global, not per-instance
-pub fn get_ssl_global_config(base_pin_path: &str) -> Result<bool, String> {
-    let map_path = format!("{}/SSL_GLOBAL_CONFIG", base_pin_path);
+/// Get global SSL observability enabled status from the host-global SSL pin path.
+pub fn get_ssl_global_config(pin_path: &str) -> Result<bool, String> {
+    let map_path = format!("{}/SSL_GLOBAL_CONFIG", pin_path);
 
     // Map may not exist if no instance has started SSL yet
     if !std::path::Path::new(&map_path).exists() {
@@ -199,14 +198,14 @@ pub fn get_ssl_global_config(base_pin_path: &str) -> Result<bool, String> {
     }
 }
 
-/// Set global SSL observability enabled status
-/// This affects all processes with SSL uprobes attached
-pub fn set_ssl_global_config(base_pin_path: &str, enabled: bool) -> Result<(), String> {
-    let map_path = format!("{}/SSL_GLOBAL_CONFIG", base_pin_path);
+/// Set global SSL observability enabled status.
+/// This affects all processes with SSL uprobes attached.
+pub fn set_ssl_global_config(pin_path: &str, enabled: bool) -> Result<(), String> {
+    let map_path = format!("{}/SSL_GLOBAL_CONFIG", pin_path);
 
-    // Map may not exist if no instance has loaded eBPF yet
+    // Map may not exist if the global SSL manager has not initialized yet.
     if !std::path::Path::new(&map_path).exists() {
-        return Err("SSL_GLOBAL_CONFIG map not found - start a firewall instance first".to_string());
+        return Err("SSL_GLOBAL_CONFIG map not found - initialize the global SSL manager first".to_string());
     }
 
     let map_data = MapData::from_pin(&map_path)

@@ -786,6 +786,11 @@ pub fn ssl_write_entry(ctx: ProbeContext) -> u32 {
     unsafe { ssl::ssl_write_entry_impl(&ctx) }
 }
 
+#[uretprobe]
+pub fn ssl_write_return(ctx: RetProbeContext) -> u32 {
+    unsafe { ssl::ssl_write_return_impl(&ctx) }
+}
+
 #[uprobe]
 pub fn ssl_read_entry(ctx: ProbeContext) -> u32 {
     unsafe { ssl::ssl_read_entry_impl(&ctx) }

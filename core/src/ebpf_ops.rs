@@ -316,7 +316,30 @@ pub fn delete_port_set(
     Ok(())
 }
 
-/// All map names that need to be pinned
+/// Network-instance map names pinned under each tap/system instance directory.
+pub const NETWORK_MAP_NAMES: &[&str] = &[
+    "SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE",
+    "POLICY_TABLE", "PORT_BITMAP_POOL",
+    "CT_TABLE_V4", "CT_TABLE_V6", "CT_CONFIG",
+    "RULE_STATS", "FLOW_STATS_V4", "FLOW_STATS_V6",
+    "QOS_CONFIG", "QOS_TOKEN_BUCKET", "QOS_STATS",
+    "GROUP_STATS",
+    "MIRROR_POLICY", "MIRROR_GLOBAL", "MIRROR_STATS", "MIRROR_GLOBAL_STATS",
+    "TCPRT_TABLE_V4", "TCPRT_TABLE_V6",
+    "DROP_REASON_STATS",
+    "TRACE_FILTER", "TRACE_LOG", "TRACE_SEQ",
+    "FIREWALL_CONFIG",
+];
+
+/// Host-global SSL maps pinned under `ssl-global`.
+pub const SSL_MAP_NAMES: &[&str] = &[
+    "SSL_HANDSHAKE_SCRATCH", "SSL_CONN_TABLE", "SSL_SNI_TABLE", "SSL_SEQ",
+    "SSL_HTTP_PARSE_BUF", "SSL_HTTP_SCRATCH", "SSL_HTTP_SCRATCH_BUF", "SSL_READ_SCRATCH",
+    "SSL_HTTP_TABLE", "SSL_HTTP_SEQ", "SSL_HTTP_VALUE_BUF",
+    "SSL_GLOBAL_CONFIG", "SSL_ERROR_TABLE", "SSL_ERROR_SEQ", "SSL_WRITE_SCRATCH",
+];
+
+/// Complete map inventory, used by diagnostics and legacy paths.
 pub const ALL_MAP_NAMES: &[&str] = &[
     "SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE",
     "POLICY_TABLE", "PORT_BITMAP_POOL",
@@ -330,36 +353,14 @@ pub const ALL_MAP_NAMES: &[&str] = &[
     "TRACE_FILTER", "TRACE_LOG", "TRACE_SEQ",
     "FIREWALL_CONFIG",
     "SSL_HANDSHAKE_SCRATCH", "SSL_CONN_TABLE", "SSL_SNI_TABLE", "SSL_SEQ",
-    "SSL_HTTP_PARSE_BUF", "SSL_HTTP_SCRATCH", "SSL_HTTP_SCRATCH_BUF", "SSL_READ_SCRATCH", "SSL_HTTP_TABLE", "SSL_HTTP_SEQ",
+    "SSL_HTTP_PARSE_BUF", "SSL_HTTP_SCRATCH", "SSL_HTTP_SCRATCH_BUF", "SSL_READ_SCRATCH",
+    "SSL_HTTP_TABLE", "SSL_HTTP_SEQ", "SSL_HTTP_VALUE_BUF",
+    "SSL_GLOBAL_CONFIG", "SSL_ERROR_TABLE", "SSL_ERROR_SEQ", "SSL_WRITE_SCRATCH",
 ];
 
-/// 从 state.json 重放所有组和规则到已加载的 eBPF maps。
+/// 从 snapshot + WAL 重放所有组和规则到已加载的 eBPF maps。
 pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
-    let state_file = format!("{}/state.json", state_path);
-    if !std::path::Path::new(&state_file).exists() {
-        println!("No state file found, skipping replay");
-        return;
-    }
-
-    let contents = match std::fs::read_to_string(&state_file) {
-        Ok(c) if !c.is_empty() => c,
-        Ok(_) => {
-            println!("State file is empty, skipping replay");
-            return;
-        }
-        Err(e) => {
-            eprintln!("Warning: failed to read state file for replay: {}", e);
-            return;
-        }
-    };
-
-    let state: FirewallState = match serde_json::from_str(&contents) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Warning: failed to parse state file for replay: {}", e);
-            return;
-        }
-    };
+    let state = crate::wal::load_with_wal(state_path);
 
     if state.groups.is_empty() && state.rules.is_empty() && state.qos_rules.is_empty() && state.mirror_rules.is_empty() {
         println!("State is empty, nothing to replay");
@@ -714,7 +715,7 @@ pub fn show_stats(pin_path: &str, state_path: &str) -> Result<(), String> {
     println!();
 
     println!("Kernel maps:");
-    for name in ALL_MAP_NAMES {
+    for name in NETWORK_MAP_NAMES {
         let path = format!("{}/{}", pin_path, name);
         let status = if std::path::Path::new(&path).exists() { "pinned" } else { "missing" };
         println!("  {}: {}", name, status);

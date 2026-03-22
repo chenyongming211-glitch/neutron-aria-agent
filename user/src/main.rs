@@ -364,6 +364,12 @@ fn get_instance(cli: &Cli) -> String {
     cli.tap.clone().unwrap_or_else(|| "system".to_string())
 }
 
+fn note_ssl_is_global(cli: &Cli) {
+    if cli.tap.is_some() {
+        eprintln!("Note: --tap is ignored for SSL observability commands; SSL data is host-global.");
+    }
+}
+
 // ── TCP-RT Analyze helpers ──
 
 /// 5-tuple flow key for cross-instance matching
@@ -2048,6 +2054,7 @@ async fn main() {
         },
         Commands::Ssl { action } => match action {
             SslCommands::List { top } => {
+                note_ssl_is_global(&cli);
                 match client.list_ssl(&instance, top).await {
                     Ok(resp) => {
                         if resp.connections.is_empty() {
@@ -2066,12 +2073,14 @@ async fn main() {
                 }
             }
             SslCommands::Flush => {
+                note_ssl_is_global(&cli);
                 match client.flush_ssl(&instance).await {
                     Ok(resp) => { println!("Flushed {} SSL handshake entries", resp.flushed); Ok(()) }
                     Err(e) => Err(e),
                 }
             }
             SslCommands::Http { top } => {
+                note_ssl_is_global(&cli);
                 match client.list_ssl_http(&instance, top).await {
                     Ok(resp) => {
                         if resp.events.is_empty() {
@@ -2090,24 +2099,28 @@ async fn main() {
                 }
             }
             SslCommands::HttpFlush => {
+                note_ssl_is_global(&cli);
                 match client.flush_ssl_http(&instance).await {
                     Ok(resp) => { println!("Flushed {} SSL HTTP entries", resp.flushed); Ok(()) }
                     Err(e) => Err(e),
                 }
             }
             SslCommands::Enable => {
+                note_ssl_is_global(&cli);
                 match client.update_ssl_config(true).await {
                     Ok(resp) => { println!("{}", resp.message); Ok(()) }
                     Err(e) => Err(e),
                 }
             }
             SslCommands::Disable => {
+                note_ssl_is_global(&cli);
                 match client.update_ssl_config(false).await {
                     Ok(resp) => { println!("{}", resp.message); Ok(()) }
                     Err(e) => Err(e),
                 }
             }
             SslCommands::Status => {
+                note_ssl_is_global(&cli);
                 match client.get_ssl_config().await {
                     Ok(cfg) => {
                         println!("Global SSL Observability: {}", if cfg.enabled { "ENABLED" } else { "DISABLED" });
@@ -2117,6 +2130,7 @@ async fn main() {
                 }
             }
             SslCommands::Errors { top } => {
+                note_ssl_is_global(&cli);
                 match client.list_ssl_errors().await {
                     Ok(resp) => {
                         if resp.errors.is_empty() {
@@ -2134,6 +2148,7 @@ async fn main() {
                 }
             }
             SslCommands::ErrorsFlush => {
+                note_ssl_is_global(&cli);
                 match client.flush_ssl_errors().await {
                     Ok(resp) => { println!("Flushed {} SSL errors", resp.flushed); Ok(()) }
                     Err(e) => Err(e),
@@ -2167,6 +2182,17 @@ async fn main() {
                         std::process::exit(1);
                     }
                 };
+
+                if matches!(key.to_lowercase().as_str(), "ssl") {
+                    note_ssl_is_global(&cli);
+                    match client.update_ssl_config(enabled).await {
+                        Ok(_) => {
+                            println!("Set ssl = {}", if enabled { "on" } else { "off" });
+                            return Ok(());
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
 
                 let req = match key.to_lowercase().as_str() {
                     "conntrack" | "ct" => aria_api::UpdateConfigRequest {
@@ -2222,15 +2248,6 @@ async fn main() {
                         mirror: None,
                         tcprt: Some(enabled),
                         ssl: None,
-                    },
-                    "ssl" => aria_api::UpdateConfigRequest {
-                        conntrack: None,
-                        monitoring: None,
-                        acl: None,
-                        qos: None,
-                        mirror: None,
-                        tcprt: None,
-                        ssl: Some(enabled),
                     },
                     _ => {
                         eprintln!("Error: unknown config key '{}': must be 'conntrack', 'monitoring', 'acl', 'qos', 'mirror', 'tcprt', or 'ssl'", key);

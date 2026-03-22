@@ -288,15 +288,15 @@ impl ApiClient {
 
     // ── SSL ──
 
-    pub async fn list_ssl(&self, instance: &str, top: usize) -> Result<SslListResponse, String> {
-        let resp = self.client.get(self.url(&format!("/api/v1/{}/ssl?top={}", instance, top)))
+    pub async fn list_ssl(&self, _instance: &str, top: usize) -> Result<SslListResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/ssl?top={}", top)))
             .send().await
             .map_err(|e| self.connection_error(e))?;
         self.parse_response(resp).await
     }
 
-    pub async fn flush_ssl(&self, instance: &str) -> Result<SslFlushResponse, String> {
-        let resp = self.client.delete(self.url(&format!("/api/v1/{}/ssl", instance)))
+    pub async fn flush_ssl(&self, _instance: &str) -> Result<SslFlushResponse, String> {
+        let resp = self.client.delete(self.url("/api/v1/ssl"))
             .send().await
             .map_err(|e| self.connection_error(e))?;
         self.parse_response(resp).await
@@ -304,15 +304,15 @@ impl ApiClient {
 
     // ── SSL HTTP ──
 
-    pub async fn list_ssl_http(&self, instance: &str, top: usize) -> Result<SslHttpListResponse, String> {
-        let resp = self.client.get(self.url(&format!("/api/v1/{}/ssl/http?top={}", instance, top)))
+    pub async fn list_ssl_http(&self, _instance: &str, top: usize) -> Result<SslHttpListResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/ssl/http?top={}", top)))
             .send().await
             .map_err(|e| self.connection_error(e))?;
         self.parse_response(resp).await
     }
 
-    pub async fn flush_ssl_http(&self, instance: &str) -> Result<SslHttpFlushResponse, String> {
-        let resp = self.client.delete(self.url(&format!("/api/v1/{}/ssl/http", instance)))
+    pub async fn flush_ssl_http(&self, _instance: &str) -> Result<SslHttpFlushResponse, String> {
+        let resp = self.client.delete(self.url("/api/v1/ssl/http"))
             .send().await
             .map_err(|e| self.connection_error(e))?;
         self.parse_response(resp).await

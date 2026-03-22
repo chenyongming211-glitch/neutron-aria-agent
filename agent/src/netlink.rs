@@ -53,8 +53,8 @@ fn cleanup_orphaned_pins(base_pin_path: &str, existing_ifaces: &[String]) {
         if let Ok(entry) = entry {
             if entry.path().is_dir() {
                 if let Some(name) = entry.file_name().to_str() {
-                    // Skip "system" directory (managed by system_start/stop, not tap)
-                    if name == "system" {
+                    // Skip special directories managed outside tap lifecycle.
+                    if name == "system" || name == "ssl-global" {
                         continue;
                     }
                     if !existing_ifaces.contains(&name.to_string()) {
