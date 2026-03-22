@@ -1,5 +1,5 @@
 use aya::maps::{HashMap, MapData};
-use crate::common::{SslConnValue, SslHttpValue};
+use crate::common::{SslConnValue, SslHttpValue, SslErrorEvent};
 
 pub struct SslConnEntry {
     pub seq: u64,
