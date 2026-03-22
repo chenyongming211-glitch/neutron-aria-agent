@@ -301,8 +301,8 @@ pub struct SslErrorEvent {
     pub tid: u32,
     pub timestamp: u64,
     pub ssl_ptr: u64,
-    pub syscall: u8,       // 0=read, 1=write
     pub ret_code: i32,     // SSL_read/write return value
+    pub syscall: u8,       // 0=read, 1=write
     pub error_hint: u8,    // 0=none, 1=zero_return, 2=want_retry, 3=syscall_err
     pub _pad: [u8; 2],
 }
@@ -315,6 +315,16 @@ pub struct SslWriteScratch {
     pub write_ts: u64,
 }
 unsafe impl Pod for SslWriteScratch {}
+
+#[cfg(test)]
+mod tests {
+    use super::SslErrorEvent;
+
+    #[test]
+    fn ssl_error_event_layout_matches_ebpf() {
+        assert_eq!(core::mem::size_of::<SslErrorEvent>(), 32);
+    }
+}
 
 // --- Drop Reason Profiler ---
 
