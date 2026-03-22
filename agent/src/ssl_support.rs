@@ -109,13 +109,18 @@ pub fn pin_map_if_needed(bpf: &mut aya::Ebpf, map_name: &str, pin_path: &str) ->
         .map_err(|e| format!("{} pin: {}", map_name, e))
 }
 
+fn is_already_loaded_error(err: &str) -> bool {
+    let normalized = err.to_ascii_lowercase();
+    normalized.contains("already loaded") || normalized.contains("alreadyloaded")
+}
+
 pub fn load_uprobe_program(bpf: &mut aya::Ebpf, prog_name: &str) -> Result<(), String> {
     let probe = uprobe_program(bpf, prog_name)?;
     match probe.load() {
         Ok(()) => Ok(()),
         Err(e) => {
             let err = format!("{:?}", e);
-            if err.contains("already loaded") {
+            if is_already_loaded_error(&err) {
                 Ok(())
             } else {
                 Err(format!("{} load: {}", prog_name, err))
@@ -156,7 +161,7 @@ pub fn attach_uprobe_if_needed(
         Ok(()) => {}
         Err(e) => {
             let err = format!("{:?}", e);
-            if !err.contains("already loaded") {
+            if !is_already_loaded_error(&err) {
                 return Err(format!("{} load: {}", prog_name, err));
             }
         }
