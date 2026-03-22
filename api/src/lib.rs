@@ -81,6 +81,30 @@ pub struct AddGroupResponse {
     pub name: String,
 }
 
+// ── Groups with Stats (Aggregation) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupWithStatsEntry {
+    // Group configuration
+    pub id: u32,
+    pub name: String,
+    pub cidrs: Vec<String>,
+    // Statistics (per-direction)
+    #[serde(default)]
+    pub ingress_packets: u64,
+    #[serde(default)]
+    pub ingress_bytes: u64,
+    #[serde(default)]
+    pub egress_packets: u64,
+    #[serde(default)]
+    pub egress_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GroupsWithStatsResponse {
+    pub groups: Vec<GroupWithStatsEntry>,
+}
+
 // ── Policies ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,6 +351,38 @@ pub struct QosStatsResponse {
     pub rules: Vec<QosStatsEntry>,
 }
 
+// ── QoS with Stats (Aggregation) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QosWithStatsEntry {
+    // QoS configuration
+    pub group: String,
+    pub group_id: u32,
+    pub direction: String,
+    pub rate_bps: u64,
+    pub burst_bytes: u64,
+    pub priority: u8,
+    pub mode: String,
+    // Statistics
+    #[serde(default)]
+    pub passed_packets: u64,
+    #[serde(default)]
+    pub passed_bytes: u64,
+    #[serde(default)]
+    pub dropped_packets: u64,
+    #[serde(default)]
+    pub dropped_bytes: u64,
+    #[serde(default)]
+    pub shaped_packets: u64,
+    #[serde(default)]
+    pub shaped_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QosWithStatsResponse {
+    pub rules: Vec<QosWithStatsEntry>,
+}
+
 // --- Per-Group Statistics ---
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -411,6 +467,34 @@ pub struct MirrorStatsEntry {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MirrorStatsResponse {
     pub rules: Vec<MirrorStatsEntry>,
+}
+
+// ── Mirror with Stats (Aggregation) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirrorWithStatsEntry {
+    // Mirror configuration
+    pub src_group: String,
+    pub src_group_id: u32,
+    pub dst_group: String,
+    pub dst_group_id: u32,
+    pub proto: String,
+    pub direction: String,
+    pub target_iface: String,
+    pub target_ifindex: u32,
+    pub is_global: bool,
+    // Statistics
+    #[serde(default)]
+    pub mirrored_packets: u64,
+    #[serde(default)]
+    pub mirrored_bytes: u64,
+    #[serde(default)]
+    pub errors: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MirrorWithStatsResponse {
+    pub rules: Vec<MirrorWithStatsEntry>,
 }
 
 // ── TCP-RT ──

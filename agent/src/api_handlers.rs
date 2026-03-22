@@ -124,6 +124,39 @@ pub async fn delete_group(
     }
 }
 
+pub async fn list_groups_with_stats(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    match cp.list_groups_with_stats(&instance).await {
+        Ok((groups, stats)) => {
+            // Build stats map for O(1) lookup: (group_id, direction) -> stats
+            let mut stats_map: std::collections::HashMap<(u32, u8), aria_core::monitoring::GroupStatsEntry> =
+                stats.into_iter().map(|s| {
+                    ((s.group_id, s.direction as u8), s)
+                }).collect();
+
+            let groups_with_stats = groups.into_iter().map(|g| {
+                let ingress_key = (g.id, 0u8); // direction=0 for ingress
+                let egress_key = (g.id, 1u8); // direction=1 for egress
+                let ingress_stats = stats_map.remove(&ingress_key);
+                let egress_stats = stats_map.remove(&egress_key);
+                GroupWithStatsEntry {
+                    id: g.id,
+                    name: g.name,
+                    cidrs: g.cidrs,
+                    ingress_packets: ingress_stats.as_ref().map(|s| s.packets).unwrap_or(0),
+                    ingress_bytes: ingress_stats.as_ref().map(|s| s.bytes).unwrap_or(0),
+                    egress_packets: egress_stats.as_ref().map(|s| s.packets).unwrap_or(0),
+                    egress_bytes: egress_stats.as_ref().map(|s| s.bytes).unwrap_or(0),
+                }
+            }).collect();
+            Ok(Json(GroupsWithStatsResponse { groups: groups_with_stats }))
+        }
+        Err(e) => Err(err_response(e)),
+    }
+}
+
 // ── Policies ──
 
 pub async fn list_policies(
@@ -393,6 +426,48 @@ pub async fn delete_qos(
     Ok(Json(MessageResponse {
         message: format!("Deleted QoS rule for group '{}' ({})", req.group, dir_label),
     }))
+}
+
+pub async fn list_qos_with_stats(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    match cp.list_qos(&instance).await {
+        Ok(rules) => {
+            match cp.get_qos_stats(&instance).await {
+                Ok((stats, _)) => {
+                    // Build stats map for O(1) lookup
+                    let mut stats_map: std::collections::HashMap<(u32, u8), aria_core::monitoring::QosStatsEntry> =
+                        stats.into_iter().map(|s| {
+                            ((s.group_id, s.direction as u8), s)
+                        }).collect();
+
+                    let rules_with_stats = rules.into_iter().map(|r| {
+                        let key = (r.group_id, r.direction);
+                        let stat = stats_map.remove(&key);
+                        QosWithStatsEntry {
+                            group: r.group_name,
+                            group_id: r.group_id,
+                            direction: direction_to_string(r.direction),
+                            rate_bps: r.rate_bps,
+                            burst_bytes: r.burst_bytes,
+                            priority: r.priority,
+                            mode: if r.mode == 1 { "shaping".to_string() } else { "policing".to_string() },
+                            passed_packets: stat.as_ref().map(|s| s.passed_packets).unwrap_or(0),
+                            passed_bytes: stat.as_ref().map(|s| s.passed_bytes).unwrap_or(0),
+                            dropped_packets: stat.as_ref().map(|s| s.dropped_packets).unwrap_or(0),
+                            dropped_bytes: stat.as_ref().map(|s| s.dropped_bytes).unwrap_or(0),
+                            shaped_packets: stat.as_ref().map(|s| s.shaped_packets).unwrap_or(0),
+                            shaped_bytes: stat.as_ref().map(|s| s.shaped_bytes).unwrap_or(0),
+                        }
+                    }).collect();
+                    Ok(Json(QosWithStatsResponse { rules: rules_with_stats }))
+                }
+                Err(e) => Err(err_response(e)),
+            }
+        }
+        Err(e) => Err(err_response(e)),
+    }
 }
 
 // ── Conntrack ──
@@ -735,6 +810,54 @@ pub async fn stats_mirror(
                     is_global: e.is_global,
                 }).collect(),
             }))
+        }
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+pub async fn list_mirror_with_stats(
+    State(cp): State<AppState>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    match cp.list_mirror(&instance).await {
+        Ok(rules) => {
+            match cp.get_mirror_stats(&instance).await {
+                Ok((stats, _)) => {
+                    let find_name = |id: u32| -> String {
+                        if id == 0 { return "any".to_string(); }
+                        rules.iter()
+                            .find(|r| r.src_group_id == id || r.dst_group_id == id)
+                            .and_then(|r| if r.src_group_id == id { Some(&r.src_group_name) } else { Some(&r.dst_group_name) })
+                            .unwrap_or_else(|| format!("id:{}", id))
+                    };
+                    // Build stats map for O(1) lookup
+                    let mut stats_map: std::collections::HashMap<(u32, u32, u8, u8, bool), aria_core::monitoring::MirrorStatsEntry> =
+                        stats.into_iter().map(|s| {
+                            ((s.src_id, s.dst_id, s.proto, s.direction as u8, s.is_global), s)
+                        }).collect();
+
+                    let rules_with_stats = rules.into_iter().map(|r| {
+                        let key = (r.src_group_id, r.dst_group_id, r.proto, r.direction, r.is_global);
+                        let stat = stats_map.remove(&key);
+                        MirrorWithStatsEntry {
+                            src_group: r.src_group_name,
+                            src_group_id: r.src_group_id,
+                            dst_group: r.dst_group_name,
+                            dst_group_id: r.dst_group_id,
+                            proto: proto_to_string(r.proto),
+                            direction: direction_to_string(r.direction),
+                            target_iface: r.target_iface,
+                            target_ifindex: r.target_ifindex,
+                            is_global: r.is_global,
+                            mirrored_packets: stat.as_ref().map(|s| s.mirrored_packets).unwrap_or(0),
+                            mirrored_bytes: stat.as_ref().map(|s| s.mirrored_bytes).unwrap_or(0),
+                            errors: stat.as_ref().map(|s| s.errors).unwrap_or(0),
+                        }
+                    }).collect();
+                    Ok(Json(MirrorWithStatsResponse { rules: rules_with_stats }))
+                }
+                Err(e) => Err(err_response(e)),
+            }
         }
         Err(e) => Err(err_response(e)),
     }

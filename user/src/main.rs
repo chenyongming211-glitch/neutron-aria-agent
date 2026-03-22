@@ -132,6 +132,8 @@ enum GroupCommands {
         name: String,
     },
     List,
+    /// List groups with statistics
+    WithStats,
 }
 
 #[derive(Subcommand)]
@@ -205,6 +207,8 @@ enum QosCommands {
     },
     /// List all QoS rules
     List,
+    /// List QoS rules with statistics
+    WithStats,
 }
 
 #[derive(Subcommand)]
@@ -235,6 +239,8 @@ enum MirrorCommands {
     },
     /// List all mirror rules
     List,
+    /// List mirror rules with statistics
+    WithStats,
 }
 
 #[derive(Subcommand)]
@@ -1492,6 +1498,27 @@ async fn main() {
                     Err(e) => Err(e),
                 }
             }
+            GroupCommands::WithStats => {
+                match client.list_groups_with_stats(&instance).await {
+                    Ok(resp) => {
+                        if resp.groups.is_empty() {
+                            println!("No groups configured");
+                        } else {
+                            println!("{:<10} {:<15} {:>15} {:>15} {:>15} {:>15} {}",
+                                "ID", "Name", "InPkts", "InBytes", "OutPkts", "OutBytes", "CIDRs");
+                            for g in &resp.groups {
+                                println!("{:<10} {:<15} {:>15} {:>15} {:>15} {:>15} {}",
+                                    g.id, g.name,
+                                    g.ingress_packets, g.ingress_bytes,
+                                    g.egress_packets, g.egress_bytes,
+                                    g.cidrs.join(", "));
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
         },
         Commands::Policy { action } => match action {
             PolicyCommands::Add { src_group, dst_group, proto, action, ports, direction } => {
@@ -1841,6 +1868,29 @@ async fn main() {
                     Err(e) => Err(e),
                 }
             }
+            QosCommands::WithStats => {
+                match client.list_qos_with_stats(&instance).await {
+                    Ok(resp) => {
+                        if resp.rules.is_empty() {
+                            println!("No QoS rules configured");
+                        } else {
+                            println!("{:<15} {:<10} {:<10} {:<15} {:<15} {:<10} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {}",
+                                "Group", "GroupID", "Direction", "Rate (B/s)", "Burst (B)", "Mode",
+                                "PassPkts", "PassBytes", "DropPkts", "DropBytes", "ShapePkts", "ShapeBytes", "Priority");
+                            for r in &resp.rules {
+                                println!("{:<15} {:<10} {:<10} {:<15} {:<15} {:<10} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {}",
+                                    r.group, r.group_id, r.direction, r.rate_bps, r.burst_bytes, r.mode,
+                                    r.passed_packets, r.passed_bytes,
+                                    r.dropped_packets, r.dropped_bytes,
+                                    r.shaped_packets, r.shaped_bytes,
+                                    r.priority);
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
         },
         Commands::Mirror { action } => match action {
             MirrorCommands::Add { direction, target, src_group, dst_group, proto } => {
@@ -1879,6 +1929,28 @@ async fn main() {
                                     r.src_group, r.dst_group, r.proto, r.direction,
                                     r.target_iface, r.target_ifindex,
                                     if r.is_global { "yes" } else { "no" });
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            MirrorCommands::WithStats => {
+                match client.list_mirror_with_stats(&instance).await {
+                    Ok(resp) => {
+                        if resp.rules.is_empty() {
+                            println!("No mirror rules configured");
+                        } else {
+                            println!("{:<12} {:<12} {:<8} {:<10} {:<15} {:<8} {:>12} {:>12} {}",
+                                "SrcGroup", "DstGroup", "Proto", "Direction", "Target", "Global",
+                                "MirrorPkts", "MirrorBytes", "Errors");
+                            for r in &resp.rules {
+                                println!("{:<12} {:<12} {:<8} {:<10} {:<15} {:<8} {:>12} {:>12} {}",
+                                    r.src_group, r.dst_group, r.proto, r.direction,
+                                    r.target_iface, if r.is_global { "yes" } else { "no" },
+                                    r.mirrored_packets, r.mirrored_bytes,
+                                    r.errors);
                             }
                         }
                         Ok(())

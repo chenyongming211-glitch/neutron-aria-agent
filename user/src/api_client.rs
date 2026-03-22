@@ -79,6 +79,13 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    pub async fn list_groups_with_stats(&self, instance: &str) -> Result<GroupsWithStatsResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/groups/with_stats", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── Policies ──
 
     pub async fn list_policies(&self, instance: &str) -> Result<PoliciesResponse, String> {
@@ -144,6 +151,13 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    pub async fn list_qos_with_stats(&self, instance: &str) -> Result<QosWithStatsResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/qos/with_stats", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── Mirror ──
 
     pub async fn list_mirror(&self, instance: &str) -> Result<MirrorListResponse, String> {
@@ -171,6 +185,13 @@ impl ApiClient {
 
     pub async fn stats_mirror(&self, instance: &str) -> Result<MirrorStatsResponse, String> {
         let resp = self.client.get(self.url(&format!("/api/v1/{}/stats/mirror", instance)))
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn list_mirror_with_stats(&self, instance: &str) -> Result<MirrorWithStatsResponse, String> {
+        let resp = self.client.get(self.url(&format!("/api/v1/{}/mirror/with_stats", instance)))
             .send().await
             .map_err(|e| self.connection_error(e))?;
         self.parse_response(resp).await
