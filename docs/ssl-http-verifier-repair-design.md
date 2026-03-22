@@ -1,6 +1,6 @@
 # Aria Firewall SSL HTTP Verifier Repair Design
 
-Status: Draft
+Status: In Progress
 Date: 2026-03-22
 Scope: SSL HTTP observability repair for fragmented `SSL_write*` traffic
 
@@ -31,6 +31,14 @@ Facts:
 - The first failure began after introducing `append_http_fragment()` with a dynamic Rust sub-slice:
   - `&mut scratch.req_data[start..start + copy_len]`
 - Replacing that sub-slice with a raw helper write to `scratch.req_data.as_mut_ptr().add(start)` still failed on the target kernel.
+- After moving helper writes to `SSL_HTTP_PARSE_BUF`, the failure point moved to the helper length argument itself:
+  - `R2 min value is negative, either use unsigned or 'var &= const'`
+- The verifier log shows the critical sequence:
+  - load `scratch.data_len`
+  - compare it with `0xff`
+  - spill/reload it from stack
+  - compute `256 - start`
+  - pass that scalar into `bpf_probe_read_user()`
 
 Why verifier rejects it:
 
@@ -47,6 +55,12 @@ Why verifier rejects it:
     - `R1 max value is outside of the allowed memory range`
   - This shows that moving from a dynamic Rust slice to a helper call is not sufficient if the helper still writes into `req_data + start`.
 
+- Failure mode 3:
+  - Even after moving helper writes to the fixed-base `SSL_HTTP_PARSE_BUF`, the verifier still rejects the program because the final helper length scalar is not explicitly re-narrowed.
+  - In the compiled BPF, `scratch.data_len` is spilled before the `<= 255` fact is reused.
+  - The verifier therefore treats `256 - start` as a scalar whose signed lower bound may be negative.
+  - `bpf_probe_read_user()` requires a provably non-negative bounded size argument, so the load fails before later byte-copy logic is even checked.
+
 This is a verifier-compatibility issue in the eBPF program shape, not in the Aya loader itself.
 
 ## 3. Repair Goals
@@ -61,6 +75,7 @@ This is a verifier-compatibility issue in the eBPF program shape, not in the Aya
 - The request buffer must remain fixed-size and bounded.
 - The implementation must avoid dynamic Rust slice construction on map-backed buffers.
 - The verifier must be able to prove every pointer offset and write boundary.
+- The verifier must also be shown explicit signed bounds for every scalar passed to helpers as a size argument.
 - The fix should be minimal and local to the SSL write accumulation path.
 
 ## 5. Detailed Repair
@@ -103,7 +118,27 @@ Why this works better:
 - The helper destination is now a fixed-base per-CPU map value, not a dynamic-offset map pointer.
 - The append copy into `scratch.req_data` can be expressed as direct byte stores with explicit per-byte bounds guards, which the verifier can reason about more easily than a helper write.
 
-### 5.3 Keep explicit post-copy bounds checks
+### 5.3 Re-narrow helper size arguments with verifier-friendly signed checks
+
+The current code shape still needs one more step.
+
+`start`, `remaining`, `copy_len`, and `end` must be re-validated with `aya_ebpf::check_bounds_signed()` before they are reused in:
+
+- helper size arguments
+- pointer offset calculations
+- post-copy length updates
+
+Why:
+
+- `check_bounds_signed()` emits signed compare forms specifically intended for verifier consumption.
+- This avoids relying on LLVM preserving a previous high-level Rust bounds proof across stack spills and reloads.
+- The final `copy_len` must be explicitly narrowed immediately before `bpf_probe_read_user()` so the helper sees a scalar in the range `[1, 256]`.
+
+This is the key repair for the current failure signature:
+
+- `R2 min value is negative, either use unsigned or 'var &= const'`
+
+### 5.4 Keep explicit post-copy bounds checks
 
 After a successful copy:
 
@@ -112,7 +147,7 @@ After a successful copy:
 
 This keeps the userspace parser behavior unchanged while still allowing a full 256-byte capture when the request header fills the buffer.
 
-### 5.4 Use direct byte stores for the append step
+### 5.5 Use direct byte stores for the append step
 
 The copy from `SSL_HTTP_PARSE_BUF.data` into `scratch.req_data` should be:
 
@@ -126,7 +161,7 @@ This avoids both:
 - Rust bounds-check/panic generation
 - helper calls that target a dynamic map-value destination address
 
-### 5.5 Do not broaden the fix beyond write accumulation
+### 5.6 Do not broaden the fix beyond write accumulation
 
 This repair should not change:
 
@@ -179,3 +214,7 @@ Rejected because deployment confirmed that the verifier still rejects helper wri
 ### 7.4 Blame Aya version and downgrade first
 
 Rejected because the failure is explained by verifier-visible code generation in the Rust program itself. The current evidence does not justify a version rollback as the primary repair.
+
+### 7.5 Keep patching bounds checks without re-narrowing the final helper length
+
+Rejected because the latest verifier failure already shows that proving `start <= 255` at source level is not enough once the compiled BPF spills and reloads the scalar before `bpf_probe_read_user()`.

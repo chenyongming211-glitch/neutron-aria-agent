@@ -1,4 +1,4 @@
-use aya_ebpf::cty::c_void;
+use aya_ebpf::{check_bounds_signed, cty::c_void};
 use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_user_str_bytes, bpf_probe_read_user_buf, gen};
 use aya_ebpf::programs::{ProbeContext, RetProbeContext};
 
@@ -636,19 +636,38 @@ unsafe fn append_http_fragment(
     buf_ptr: *const u8,
     num: usize,
 ) -> bool {
-    let start = (scratch.data_len as u32) & 0xff;
-    let remaining = (SSL_HTTP_REQ_CAP as u32) - start;
-    let copy_len = if num < remaining as usize {
-        num as u32
+    let start = scratch.data_len as i64;
+    if !check_bounds_signed(start, 0, (SSL_HTTP_REQ_CAP - 1) as i64) {
+        return false;
+    }
+
+    let capped_num = if num < SSL_HTTP_REQ_CAP {
+        num as i64
+    } else {
+        SSL_HTTP_REQ_CAP as i64
+    };
+    if !check_bounds_signed(capped_num, 1, SSL_HTTP_REQ_CAP as i64) {
+        return false;
+    }
+
+    let remaining = (SSL_HTTP_REQ_CAP as i64) - start;
+    if !check_bounds_signed(remaining, 1, SSL_HTTP_REQ_CAP as i64) {
+        return false;
+    }
+
+    // LLVM can spill and reload `start` before the helper call, so narrow the
+    // final size scalar explicitly in a verifier-friendly signed form.
+    let copy_len = if capped_num < remaining {
+        capped_num
     } else {
         remaining
     };
-    if copy_len == 0 {
+    if !check_bounds_signed(copy_len, 1, SSL_HTTP_REQ_CAP as i64) {
         return false;
     }
 
     let end = start + copy_len;
-    if end > SSL_HTTP_REQ_CAP as u32 {
+    if !check_bounds_signed(end, 1, SSL_HTTP_REQ_CAP as i64) {
         return false;
     }
 
@@ -659,7 +678,7 @@ unsafe fn append_http_fragment(
 
     let dst = parse_buf.data.as_mut_ptr() as *mut c_void;
     let src = buf_ptr as *const c_void;
-    if gen::bpf_probe_read_user(dst, copy_len, src) != 0 {
+    if gen::bpf_probe_read_user(dst, copy_len as u32, src) != 0 {
         return false;
     }
 
@@ -668,7 +687,7 @@ unsafe fn append_http_fragment(
     }
 
     scratch.data_len = end as u16;
-    if end < SSL_HTTP_REQ_CAP as u32 {
+    if end < SSL_HTTP_REQ_CAP as i64 {
         *scratch.req_data.as_mut_ptr().add(end as usize) = 0;
     }
 
