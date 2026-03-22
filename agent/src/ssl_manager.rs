@@ -136,13 +136,33 @@ impl SslManager {
 
         let bpf_bytes = std::fs::read(&self.ebpf_path)
             .map_err(|e| format!("read ebpf: {}", e))?;
-        let mut bpf = aya::EbpfLoader::new()
-            .map_pin_path(&self.pin_path)
-            .load(&bpf_bytes)
-            .map_err(|e| format!("load ssl manager ebpf: {:?}", e))?;
+        let mut preserved_ssl_enabled = None;
+        let mut bpf = match self.load_bpf_with_pins(&bpf_bytes) {
+            Ok(bpf) => bpf,
+            Err(first_err) => {
+                preserved_ssl_enabled = aria_core::ssl_ops::get_ssl_global_config(&self.pin_path).ok();
+                eprintln!(
+                    "[ssl-manager] Warning: failed to reuse pinned SSL state, recreating ssl-global pins: {}",
+                    first_err
+                );
+                self.reset_ssl_global_pins()?;
+                self.load_bpf_with_pins(&bpf_bytes).map_err(|retry_err| {
+                    format!(
+                        "load ssl manager ebpf: {}; retry after ssl-global reset failed: {}",
+                        first_err, retry_err
+                    )
+                })?
+            }
+        };
 
         for map_name in SSL_MAP_NAMES {
             pin_map_if_needed(&mut bpf, map_name, &self.pin_path)?;
+        }
+
+        if let Some(enabled) = preserved_ssl_enabled {
+            if let Err(e) = aria_core::ssl_ops::set_ssl_global_config(&self.pin_path, enabled) {
+                eprintln!("[ssl-manager] Warning: failed to restore SSL global config after pin reset: {}", e);
+            }
         }
 
         for prog_name in SSL_PROGRAM_NAMES {
@@ -163,6 +183,47 @@ impl SslManager {
             println!("[ssl-manager] SSL uprobes ready on {}", libssl);
         } else {
             println!("[ssl-manager] libssl not found, SSL probes will attach when libssl becomes available");
+        }
+
+        Ok(())
+    }
+
+    fn load_bpf_with_pins(&self, bpf_bytes: &[u8]) -> Result<aya::Ebpf, String> {
+        aya::EbpfLoader::new()
+            .map_pin_path(&self.pin_path)
+            .load(bpf_bytes)
+            .map_err(|e| format!("{:?}", e))
+    }
+
+    fn reset_ssl_global_pins(&self) -> Result<(), String> {
+        let dir = Path::new(&self.pin_path);
+        if !dir.exists() {
+            return Ok(());
+        }
+
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("read ssl-global pin dir {}: {}", self.pin_path, e))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("iterate ssl-global pin dir: {}", e))?;
+            let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+                continue;
+            };
+
+            if !is_ssl_pin_name(&name) {
+                continue;
+            }
+
+            let path = entry.path();
+            let result = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+
+            if let Err(e) = result {
+                return Err(format!("remove stale ssl-global pin {:?}: {}", path, e));
+            }
         }
 
         Ok(())

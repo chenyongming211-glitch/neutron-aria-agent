@@ -6,7 +6,7 @@ use crate::maps::{
     SSL_HTTP_SCRATCH_BUF, SSL_HTTP_SCRATCH, SSL_READ_SCRATCH, SSL_HTTP_TABLE, SSL_HTTP_SEQ,
     SSL_HTTP_PARSE_BUF, SSL_HTTP_VALUE_BUF, SSL_GLOBAL_CONFIG,
     SSL_ERROR_TABLE, SSL_ERROR_SEQ, SSL_WRITE_SCRATCH,
-    SslScratch, SslConnValue, SslReadScratch, SslHttpValue, SslErrorEvent, SslWriteScratch,
+    SslScratch, SslConnValue, SslHttpScratch, SslReadScratch, SslHttpValue, SslErrorEvent, SslWriteScratch,
 };
 
 const SSL_CTRL_SET_TLSEXT_HOSTNAME: u64 = 55;
@@ -155,17 +155,227 @@ pub unsafe fn ssl_set_sni_impl(ctx: &ProbeContext) -> u32 {
 const SCRATCH_TIMEOUT_NS: u64 = 30_000_000_000;
 const SSL_READ_MODE_STANDARD: u8 = 0;
 const SSL_READ_MODE_EX: u8 = 1;
+const SSL_HTTP_FLAG_MATCHED: u8 = 1;
+const HTTP_PREFIX_REJECT: u8 = 0;
+const HTTP_PREFIX_PENDING: u8 = 1;
+const HTTP_PREFIX_MATCHED: u8 = 2;
 
 #[inline(always)]
-unsafe fn http_request_is_fresh(pid_tgid: u64) -> bool {
+fn http_method_state_4(data: &[u8; 256], len: usize, b0: u8, b1: u8, b2: u8, b3: u8) -> u8 {
+    if len == 0 {
+        return HTTP_PREFIX_PENDING;
+    }
+    if data[0] != b0 {
+        return HTTP_PREFIX_REJECT;
+    }
+    if len == 1 {
+        return HTTP_PREFIX_PENDING;
+    }
+    if data[1] != b1 {
+        return HTTP_PREFIX_REJECT;
+    }
+    if len == 2 {
+        return HTTP_PREFIX_PENDING;
+    }
+    if data[2] != b2 {
+        return HTTP_PREFIX_REJECT;
+    }
+    if len == 3 {
+        return HTTP_PREFIX_PENDING;
+    }
+    if data[3] != b3 {
+        return HTTP_PREFIX_REJECT;
+    }
+    HTTP_PREFIX_MATCHED
+}
+
+#[inline(always)]
+fn http_method_state_5(data: &[u8; 256], len: usize, b0: u8, b1: u8, b2: u8, b3: u8, b4: u8) -> u8 {
+    let state = http_method_state_4(data, len, b0, b1, b2, b3);
+    if state != HTTP_PREFIX_MATCHED {
+        return state;
+    }
+    if len == 4 {
+        return HTTP_PREFIX_PENDING;
+    }
+    if data[4] != b4 {
+        return HTTP_PREFIX_REJECT;
+    }
+    HTTP_PREFIX_MATCHED
+}
+
+#[inline(always)]
+fn http_method_state_6(
+    data: &[u8; 256],
+    len: usize,
+    b0: u8,
+    b1: u8,
+    b2: u8,
+    b3: u8,
+    b4: u8,
+    b5: u8,
+) -> u8 {
+    let state = http_method_state_5(data, len, b0, b1, b2, b3, b4);
+    if state != HTTP_PREFIX_MATCHED {
+        return state;
+    }
+    if len == 5 {
+        return HTTP_PREFIX_PENDING;
+    }
+    if data[5] != b5 {
+        return HTTP_PREFIX_REJECT;
+    }
+    HTTP_PREFIX_MATCHED
+}
+
+#[inline(always)]
+fn http_method_state_7(
+    data: &[u8; 256],
+    len: usize,
+    b0: u8,
+    b1: u8,
+    b2: u8,
+    b3: u8,
+    b4: u8,
+    b5: u8,
+    b6: u8,
+) -> u8 {
+    let state = http_method_state_6(data, len, b0, b1, b2, b3, b4, b5);
+    if state != HTTP_PREFIX_MATCHED {
+        return state;
+    }
+    if len == 6 {
+        return HTTP_PREFIX_PENDING;
+    }
+    if data[6] != b6 {
+        return HTTP_PREFIX_REJECT;
+    }
+    HTTP_PREFIX_MATCHED
+}
+
+#[inline(always)]
+fn http_method_state_8(
+    data: &[u8; 256],
+    len: usize,
+    b0: u8,
+    b1: u8,
+    b2: u8,
+    b3: u8,
+    b4: u8,
+    b5: u8,
+    b6: u8,
+    b7: u8,
+) -> u8 {
+    let state = http_method_state_7(data, len, b0, b1, b2, b3, b4, b5, b6);
+    if state != HTTP_PREFIX_MATCHED {
+        return state;
+    }
+    if len == 7 {
+        return HTTP_PREFIX_PENDING;
+    }
+    if data[7] != b7 {
+        return HTTP_PREFIX_REJECT;
+    }
+    HTTP_PREFIX_MATCHED
+}
+
+#[inline(always)]
+fn classify_http_method_prefix(data: &[u8; 256], len: usize) -> u8 {
+    let get = http_method_state_4(data, len, b'G', b'E', b'T', b' ');
+    if get == HTTP_PREFIX_MATCHED {
+        return HTTP_PREFIX_MATCHED;
+    }
+
+    let post = http_method_state_5(data, len, b'P', b'O', b'S', b'T', b' ');
+    if post == HTTP_PREFIX_MATCHED {
+        return HTTP_PREFIX_MATCHED;
+    }
+
+    let put = http_method_state_4(data, len, b'P', b'U', b'T', b' ');
+    if put == HTTP_PREFIX_MATCHED {
+        return HTTP_PREFIX_MATCHED;
+    }
+
+    let head = http_method_state_5(data, len, b'H', b'E', b'A', b'D', b' ');
+    if head == HTTP_PREFIX_MATCHED {
+        return HTTP_PREFIX_MATCHED;
+    }
+
+    let delete = http_method_state_7(data, len, b'D', b'E', b'L', b'E', b'T', b'E', b' ');
+    if delete == HTTP_PREFIX_MATCHED {
+        return HTTP_PREFIX_MATCHED;
+    }
+
+    let patch = http_method_state_6(data, len, b'P', b'A', b'T', b'C', b'H', b' ');
+    if patch == HTTP_PREFIX_MATCHED {
+        return HTTP_PREFIX_MATCHED;
+    }
+
+    let options = http_method_state_8(data, len, b'O', b'P', b'T', b'I', b'O', b'N', b'S', b' ');
+    if options == HTTP_PREFIX_MATCHED {
+        return HTTP_PREFIX_MATCHED;
+    }
+
+    if get == HTTP_PREFIX_PENDING
+        || post == HTTP_PREFIX_PENDING
+        || put == HTTP_PREFIX_PENDING
+        || head == HTTP_PREFIX_PENDING
+        || delete == HTTP_PREFIX_PENDING
+        || patch == HTTP_PREFIX_PENDING
+        || options == HTTP_PREFIX_PENDING
+    {
+        HTTP_PREFIX_PENDING
+    } else {
+        HTTP_PREFIX_REJECT
+    }
+}
+
+#[inline(always)]
+unsafe fn is_http_scratch_stale(first_write_ts: u64) -> bool {
+    first_write_ts == 0 || bpf_ktime_get_ns().saturating_sub(first_write_ts) > SCRATCH_TIMEOUT_NS
+}
+
+#[inline(always)]
+unsafe fn http_request_is_ready(pid_tgid: u64) -> bool {
     let http_scratch = match SSL_HTTP_SCRATCH.get(&pid_tgid) {
         Some(s) => s,
         None => return false,
     };
 
-    if bpf_ktime_get_ns().saturating_sub(http_scratch.write_ts) > SCRATCH_TIMEOUT_NS {
+    if is_http_scratch_stale(http_scratch.first_write_ts) {
         let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
         return false;
+    }
+
+    (http_scratch.flags & SSL_HTTP_FLAG_MATCHED) != 0
+}
+
+#[inline(always)]
+unsafe fn append_http_fragment(
+    scratch: &mut SslHttpScratch,
+    buf_ptr: *const u8,
+    num: usize,
+) -> bool {
+    let start = scratch.data_len as usize;
+    let remaining = 256usize.saturating_sub(start);
+    let copy_len = if num < remaining { num } else { remaining };
+    if copy_len == 0 {
+        return false;
+    }
+
+    if bpf_probe_read_user_buf(
+        buf_ptr,
+        &mut scratch.req_data[start..start + copy_len],
+    )
+    .is_err()
+    {
+        return false;
+    }
+
+    let new_len = start + copy_len;
+    scratch.data_len = new_len as u16;
+    if new_len < scratch.req_data.len() {
+        scratch.req_data[new_len] = 0;
     }
 
     true
@@ -280,7 +490,7 @@ unsafe fn handle_ssl_read_return(pid_tgid: u64, ret: i32) -> u32 {
     let status_code = ((d0 - b'0') as u16) * 100 + ((d1 - b'0') as u16) * 10 + ((d2 - b'0') as u16);
 
     let now = bpf_ktime_get_ns();
-    let latency_ns = now.saturating_sub(http_scratch.write_ts);
+    let latency_ns = now.saturating_sub(http_scratch.first_write_ts);
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
 
@@ -291,7 +501,7 @@ unsafe fn handle_ssl_read_return(pid_tgid: u64, ret: i32) -> u32 {
 
     event.pid = pid;
     event.tid = tid;
-    event.request_ts = http_scratch.write_ts;
+    event.request_ts = http_scratch.first_write_ts;
     event.response_ts = now;
     event.latency_ns = latency_ns;
     event.status_code = status_code;
@@ -341,42 +551,59 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
     };
     let _ = SSL_WRITE_SCRATCH.insert(&pid_tgid, &write_scratch, 0);
 
-    // Use per-CPU scratch to read request data directly (no loops)
+    let now = bpf_ktime_get_ns();
+    if let Some(existing) = SSL_HTTP_SCRATCH.get(&pid_tgid) {
+        if is_http_scratch_stale(existing.first_write_ts) {
+            let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
+        }
+    }
+
+    if let Some(scratch_ptr) = SSL_HTTP_SCRATCH.get_ptr_mut(&pid_tgid) {
+        let mut remove_scratch = false;
+        {
+            let scratch = &mut *scratch_ptr;
+            let _ = append_http_fragment(scratch, buf_ptr as *const u8, num as usize);
+
+            if (scratch.flags & SSL_HTTP_FLAG_MATCHED) == 0 {
+                match classify_http_method_prefix(&scratch.req_data, scratch.data_len as usize) {
+                    HTTP_PREFIX_MATCHED => scratch.flags |= SSL_HTTP_FLAG_MATCHED,
+                    HTTP_PREFIX_REJECT => remove_scratch = true,
+                    _ => {
+                        if scratch.data_len as usize >= scratch.req_data.len() {
+                            remove_scratch = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if remove_scratch {
+            let _ = SSL_HTTP_SCRATCH.remove(&pid_tgid);
+        }
+
+        return 0;
+    }
+
     let scratch = match SSL_HTTP_SCRATCH_BUF.get_ptr_mut(0) {
         Some(p) => &mut *p,
         None => return 0,
     };
+    scratch.first_write_ts = now;
+    scratch.data_len = 0;
+    scratch.flags = 0;
+    scratch._pad = [0u8; 5];
+    scratch.req_data[0] = 0;
 
-    let read_len = if num < 255 { num as usize } else { 255 };
-    let read_len = read_len & 0xFF; // verifier hint: max 255
-    if read_len < 4 {
+    if !append_http_fragment(scratch, buf_ptr as *const u8, num as usize) {
         return 0;
     }
 
-    // Read directly into scratch.req_data — zero copy, zero loops
-    if bpf_probe_read_user_buf(buf_ptr as *const u8, &mut scratch.req_data[..read_len]).is_err() {
-        return 0;
+    match classify_http_method_prefix(&scratch.req_data, scratch.data_len as usize) {
+        HTTP_PREFIX_MATCHED => scratch.flags |= SSL_HTTP_FLAG_MATCHED,
+        HTTP_PREFIX_REJECT => return 0,
+        _ => {}
     }
 
-    // Detect HTTP method — pure branch comparison, zero loops
-    let d = &scratch.req_data;
-    let is_http = (d[0] == b'G' && d[1] == b'E' && d[2] == b'T' && d[3] == b' ')
-        || (read_len >= 5 && d[0] == b'P' && d[1] == b'O' && d[2] == b'S' && d[3] == b'T' && d[4] == b' ')
-        || (d[0] == b'P' && d[1] == b'U' && d[2] == b'T' && d[3] == b' ')
-        || (read_len >= 5 && d[0] == b'H' && d[1] == b'E' && d[2] == b'A' && d[3] == b'D' && d[4] == b' ')
-        || (read_len >= 7 && d[0] == b'D' && d[1] == b'E' && d[2] == b'L' && d[3] == b'E' && d[4] == b'T' && d[5] == b'E' && d[6] == b' ')
-        || (read_len >= 6 && d[0] == b'P' && d[1] == b'A' && d[2] == b'T' && d[3] == b'C' && d[4] == b'H' && d[5] == b' ');
-
-    if !is_http {
-        return 0;
-    }
-
-    scratch.write_ts = bpf_ktime_get_ns();
-
-    // Null-terminate: always safe since read_len <= 255 < 256
-    scratch.req_data[read_len] = 0;
-
-    let pid_tgid = bpf_get_current_pid_tgid();
     let _ = SSL_HTTP_SCRATCH.insert(&pid_tgid, scratch, 0);
     0
 }
@@ -400,7 +627,7 @@ pub unsafe fn ssl_read_entry_impl(ctx: &ProbeContext) -> u32 {
     }
 
     let pid_tgid = bpf_get_current_pid_tgid();
-    if !http_request_is_fresh(pid_tgid) {
+    if !http_request_is_ready(pid_tgid) {
         return 0;
     }
 
@@ -431,7 +658,7 @@ pub unsafe fn ssl_read_ex_entry_impl(ctx: &ProbeContext) -> u32 {
     }
 
     let pid_tgid = bpf_get_current_pid_tgid();
-    if !http_request_is_fresh(pid_tgid) {
+    if !http_request_is_ready(pid_tgid) {
         return 0;
     }
 

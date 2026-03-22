@@ -420,11 +420,14 @@ pub struct SslParseBuf {
 }
 
 /// SSL_write → SSL_read correlation scratch (key=pid_tgid)
-/// Stores raw request header for userspace parsing (zero loops in eBPF)
+/// Accumulates raw request header bytes across multiple SSL_write* calls.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct SslHttpScratch {
-    pub write_ts: u64,
+    pub first_write_ts: u64,
+    pub data_len: u16,
+    pub flags: u8,
+    pub _pad: [u8; 5],
     pub req_data: [u8; 256],  // raw HTTP request first 256 bytes
 }
 
