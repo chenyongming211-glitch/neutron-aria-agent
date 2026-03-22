@@ -2188,79 +2188,79 @@ async fn main() {
                     match client.update_ssl_config(enabled).await {
                         Ok(_) => {
                             println!("Set ssl = {}", if enabled { "on" } else { "off" });
-                            return Ok(());
+                            Ok(())
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => Err(e),
                     }
-                }
+                } else {
+                    let req = match key.to_lowercase().as_str() {
+                        "conntrack" | "ct" => aria_api::UpdateConfigRequest {
+                            conntrack: Some(enabled),
+                            monitoring: None,
+                            acl: None,
+                            qos: None,
+                            mirror: None,
+                            tcprt: None,
+                            ssl: None,
+                        },
+                        "monitoring" | "mon" => aria_api::UpdateConfigRequest {
+                            conntrack: None,
+                            monitoring: Some(enabled),
+                            acl: None,
+                            qos: None,
+                            mirror: None,
+                            tcprt: None,
+                            ssl: None,
+                        },
+                        "acl" | "policy" => aria_api::UpdateConfigRequest {
+                            conntrack: None,
+                            monitoring: None,
+                            acl: Some(enabled),
+                            qos: None,
+                            mirror: None,
+                            tcprt: None,
+                            ssl: None,
+                        },
+                        "qos" => aria_api::UpdateConfigRequest {
+                            conntrack: None,
+                            monitoring: None,
+                            acl: None,
+                            qos: Some(enabled),
+                            mirror: None,
+                            tcprt: None,
+                            ssl: None,
+                        },
+                        "mirror" => aria_api::UpdateConfigRequest {
+                            conntrack: None,
+                            monitoring: None,
+                            acl: None,
+                            qos: None,
+                            mirror: Some(enabled),
+                            tcprt: None,
+                            ssl: None,
+                        },
+                        "tcprt" | "tcp-rt" => aria_api::UpdateConfigRequest {
+                            conntrack: None,
+                            monitoring: None,
+                            acl: None,
+                            qos: None,
+                            mirror: None,
+                            tcprt: Some(enabled),
+                            ssl: None,
+                        },
+                        _ => {
+                            eprintln!("Error: unknown config key '{}': must be 'conntrack', 'monitoring', 'acl', 'qos', 'mirror', 'tcprt', or 'ssl'", key);
+                            std::process::exit(1);
+                        }
+                    };
 
-                let req = match key.to_lowercase().as_str() {
-                    "conntrack" | "ct" => aria_api::UpdateConfigRequest {
-                        conntrack: Some(enabled),
-                        monitoring: None,
-                        acl: None,
-                        qos: None,
-                        mirror: None,
-                        tcprt: None,
-                        ssl: None,
-                    },
-                    "monitoring" | "mon" => aria_api::UpdateConfigRequest {
-                        conntrack: None,
-                        monitoring: Some(enabled),
-                        acl: None,
-                        qos: None,
-                        mirror: None,
-                        tcprt: None,
-                        ssl: None,
-                    },
-                    "acl" | "policy" => aria_api::UpdateConfigRequest {
-                        conntrack: None,
-                        monitoring: None,
-                        acl: Some(enabled),
-                        qos: None,
-                        mirror: None,
-                        tcprt: None,
-                        ssl: None,
-                    },
-                    "qos" => aria_api::UpdateConfigRequest {
-                        conntrack: None,
-                        monitoring: None,
-                        acl: None,
-                        qos: Some(enabled),
-                        mirror: None,
-                        tcprt: None,
-                        ssl: None,
-                    },
-                    "mirror" => aria_api::UpdateConfigRequest {
-                        conntrack: None,
-                        monitoring: None,
-                        acl: None,
-                        qos: None,
-                        mirror: Some(enabled),
-                        tcprt: None,
-                        ssl: None,
-                    },
-                    "tcprt" | "tcp-rt" => aria_api::UpdateConfigRequest {
-                        conntrack: None,
-                        monitoring: None,
-                        acl: None,
-                        qos: None,
-                        mirror: None,
-                        tcprt: Some(enabled),
-                        ssl: None,
-                    },
-                    _ => {
-                        eprintln!("Error: unknown config key '{}': must be 'conntrack', 'monitoring', 'acl', 'qos', 'mirror', 'tcprt', or 'ssl'", key);
-                        std::process::exit(1);
+                    match client.update_config(&instance, &req).await {
+                        Ok(_) => {
+                            println!("Set {} = {}", key, if enabled { "on" } else { "off" });
+                            Ok(())
+                        }
+                        Err(e) => Err(e),
                     }
-                };
-
-                match client.update_config(&instance, &req).await {
-                    Ok(_) => {
-                        println!("Set {} = {}", key, if enabled { "on" } else { "off" });
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
                 }
             }
         },
