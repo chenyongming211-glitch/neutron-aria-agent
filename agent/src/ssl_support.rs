@@ -26,6 +26,12 @@ pub const SSL_MAP_NAMES: &[&str] = &[
 pub const SSL_PROGRAM_NAMES: &[&str] = &[
     "ssl_handshake_entry",
     "ssl_handshake_return",
+    "ssl_connect_entry",
+    "ssl_connect_return",
+    "ssl_accept_entry",
+    "ssl_accept_return",
+    "ssl_set_connect_state",
+    "ssl_set_accept_state",
     "ssl_set_sni",
     "ssl_write_entry",
     "ssl_write_ex_entry",
@@ -40,6 +46,12 @@ pub const SSL_PROGRAM_NAMES: &[&str] = &[
 pub const SSL_LINK_NAMES: &[&str] = &[
     "ssl_handshake_entry_link",
     "ssl_handshake_return_link",
+    "ssl_connect_entry_link",
+    "ssl_connect_return_link",
+    "ssl_accept_entry_link",
+    "ssl_accept_return_link",
+    "ssl_set_connect_state_link",
+    "ssl_set_accept_state_link",
     "ssl_set_sni_link",
     "ssl_write_entry_link",
     "ssl_write_ex_entry_link",
@@ -59,6 +71,30 @@ pub const SSL_UPROBE_SPECS: &[SslUprobeSpec] = &[
     SslUprobeSpec {
         program_name: "ssl_handshake_return",
         symbol_name: "SSL_do_handshake",
+    },
+    SslUprobeSpec {
+        program_name: "ssl_connect_entry",
+        symbol_name: "SSL_connect",
+    },
+    SslUprobeSpec {
+        program_name: "ssl_connect_return",
+        symbol_name: "SSL_connect",
+    },
+    SslUprobeSpec {
+        program_name: "ssl_accept_entry",
+        symbol_name: "SSL_accept",
+    },
+    SslUprobeSpec {
+        program_name: "ssl_accept_return",
+        symbol_name: "SSL_accept",
+    },
+    SslUprobeSpec {
+        program_name: "ssl_set_connect_state",
+        symbol_name: "SSL_set_connect_state",
+    },
+    SslUprobeSpec {
+        program_name: "ssl_set_accept_state",
+        symbol_name: "SSL_set_accept_state",
     },
     SslUprobeSpec {
         program_name: "ssl_set_sni",

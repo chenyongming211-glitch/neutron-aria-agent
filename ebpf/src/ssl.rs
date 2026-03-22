@@ -11,6 +11,7 @@ use crate::maps::{
 };
 
 const SSL_CTRL_SET_TLSEXT_HOSTNAME: u64 = 55;
+const SCRATCH_TIMEOUT_NS: u64 = 30_000_000_000;
 
 /// Check global SSL observability config (not per-interface)
 /// SSL uprobe is process-level, shared across all network interfaces
@@ -57,38 +58,36 @@ unsafe fn emit_ssl_error_event(
     let _ = SSL_ERROR_TABLE.insert(&seq, &event, 0);
 }
 
-pub unsafe fn ssl_handshake_entry_impl(ctx: &ProbeContext) -> u32 {
-    if !ssl_enabled() {
-        return 0;
+#[inline(always)]
+unsafe fn handshake_scratch_is_stale(start_ts: u64) -> bool {
+    start_ts == 0 || bpf_ktime_get_ns().saturating_sub(start_ts) > SCRATCH_TIMEOUT_NS
+}
+
+#[inline(always)]
+unsafe fn store_handshake_start(pid_tgid: u64, ssl_ptr: u64) {
+    if ssl_ptr == 0 {
+        return;
     }
-    let pid_tgid = bpf_get_current_pid_tgid();
-    let ssl_ptr: u64 = match ctx.arg(0) {
-        Some(v) => v,
-        None => return 0,
-    };
+
+    if let Some(existing) = SSL_HANDSHAKE_SCRATCH.get(&pid_tgid) {
+        if existing.ssl_ptr == ssl_ptr && !handshake_scratch_is_stale(existing.start_ts) {
+            return;
+        }
+        let _ = SSL_HANDSHAKE_SCRATCH.remove(&pid_tgid);
+    }
+
     let scratch = SslScratch {
         ssl_ptr,
         start_ts: bpf_ktime_get_ns(),
     };
     let _ = SSL_HANDSHAKE_SCRATCH.insert(&pid_tgid, &scratch, 0);
-    0
 }
 
-pub unsafe fn ssl_handshake_return_impl(_ctx: &RetProbeContext) -> u32 {
-    if !ssl_enabled() {
-        return 0;
-    }
-    let pid_tgid = bpf_get_current_pid_tgid();
-    let scratch = match SSL_HANDSHAKE_SCRATCH.get(&pid_tgid) {
-        Some(s) => *s,
-        None => return 0,
-    };
-    let _ = SSL_HANDSHAKE_SCRATCH.remove(&pid_tgid);
-
+#[inline(always)]
+unsafe fn emit_ssl_handshake_event(pid_tgid: u64, scratch: SslScratch) {
     let now = bpf_ktime_get_ns();
     let handshake_ns = now.saturating_sub(scratch.start_ts);
 
-    // Read SNI if available
     let mut sni = [0u8; 64];
     if let Some(sni_val) = SSL_SNI_TABLE.get(&pid_tgid) {
         sni = *sni_val;
@@ -106,16 +105,117 @@ pub unsafe fn ssl_handshake_return_impl(_ctx: &RetProbeContext) -> u32 {
         sni,
     };
 
-    // Get per-CPU seq
     let seq_ptr = match SSL_SEQ.get_ptr_mut(0) {
         Some(p) => p,
-        None => return 0,
+        None => return,
     };
     let seq = *seq_ptr;
     *seq_ptr = seq.wrapping_add(1);
 
     let _ = SSL_CONN_TABLE.insert(&seq, &conn, 0);
+}
+
+#[inline(always)]
+unsafe fn complete_handshake_if_pending(pid_tgid: u64, ssl_ptr: u64) {
+    let scratch = match SSL_HANDSHAKE_SCRATCH.get(&pid_tgid) {
+        Some(s) => *s,
+        None => return,
+    };
+
+    if handshake_scratch_is_stale(scratch.start_ts) {
+        let _ = SSL_HANDSHAKE_SCRATCH.remove(&pid_tgid);
+        return;
+    }
+
+    if scratch.ssl_ptr != ssl_ptr {
+        return;
+    }
+
+    let _ = SSL_HANDSHAKE_SCRATCH.remove(&pid_tgid);
+    emit_ssl_handshake_event(pid_tgid, scratch);
+}
+
+#[inline(always)]
+unsafe fn handshake_pending_for(pid_tgid: u64, ssl_ptr: u64) -> bool {
+    let scratch = match SSL_HANDSHAKE_SCRATCH.get(&pid_tgid) {
+        Some(s) => *s,
+        None => return false,
+    };
+
+    if handshake_scratch_is_stale(scratch.start_ts) {
+        let _ = SSL_HANDSHAKE_SCRATCH.remove(&pid_tgid);
+        return false;
+    }
+
+    scratch.ssl_ptr == ssl_ptr
+}
+
+#[inline(always)]
+unsafe fn start_handshake_from_arg0(ctx: &ProbeContext) -> u32 {
+    if !ssl_enabled() {
+        return 0;
+    }
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let ssl_ptr: u64 = match ctx.arg(0) {
+        Some(v) => v,
+        None => return 0,
+    };
+    store_handshake_start(pid_tgid, ssl_ptr);
     0
+}
+
+#[inline(always)]
+unsafe fn complete_explicit_handshake_from_return(ctx: &RetProbeContext) -> u32 {
+    if !ssl_enabled() {
+        return 0;
+    }
+    let ret: i32 = match ctx.ret() {
+        Some(v) => v,
+        None => return 0,
+    };
+    if ret <= 0 {
+        return 0;
+    }
+
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let ssl_ptr = match SSL_HANDSHAKE_SCRATCH.get(&pid_tgid) {
+        Some(s) => s.ssl_ptr,
+        None => return 0,
+    };
+    complete_handshake_if_pending(pid_tgid, ssl_ptr);
+    0
+}
+
+pub unsafe fn ssl_handshake_entry_impl(ctx: &ProbeContext) -> u32 {
+    start_handshake_from_arg0(ctx)
+}
+
+pub unsafe fn ssl_handshake_return_impl(ctx: &RetProbeContext) -> u32 {
+    complete_explicit_handshake_from_return(ctx)
+}
+
+pub unsafe fn ssl_connect_entry_impl(ctx: &ProbeContext) -> u32 {
+    start_handshake_from_arg0(ctx)
+}
+
+pub unsafe fn ssl_connect_return_impl(ctx: &RetProbeContext) -> u32 {
+    complete_explicit_handshake_from_return(ctx)
+}
+
+pub unsafe fn ssl_accept_entry_impl(ctx: &ProbeContext) -> u32 {
+    start_handshake_from_arg0(ctx)
+}
+
+pub unsafe fn ssl_accept_return_impl(ctx: &RetProbeContext) -> u32 {
+    complete_explicit_handshake_from_return(ctx)
+}
+
+pub unsafe fn ssl_set_connect_state_impl(ctx: &ProbeContext) -> u32 {
+    start_handshake_from_arg0(ctx)
+}
+
+pub unsafe fn ssl_set_accept_state_impl(ctx: &ProbeContext) -> u32 {
+    start_handshake_from_arg0(ctx)
 }
 
 pub unsafe fn ssl_set_sni_impl(ctx: &ProbeContext) -> u32 {
@@ -153,7 +253,6 @@ pub unsafe fn ssl_set_sni_impl(ctx: &ProbeContext) -> u32 {
 
 // --- SSL HTTP (Phase 2): zero-loop design for kernel 4.18+ compatibility ---
 
-const SCRATCH_TIMEOUT_NS: u64 = 30_000_000_000;
 const SSL_HTTP_REQ_CAP: usize = 256;
 const SSL_READ_MODE_STANDARD: u8 = 0;
 const SSL_READ_MODE_EX: u8 = 1;
@@ -763,6 +862,10 @@ unsafe fn handle_ssl_read_return(pid_tgid: u64, ret: i32) -> u32 {
     };
     let _ = SSL_READ_SCRATCH.remove(&pid_tgid);
 
+    // Some clients complete the TLS handshake lazily on the first successful
+    // read instead of calling an explicit handshake API.
+    complete_handshake_if_pending(pid_tgid, read_scratch.ssl_ptr);
+
     let http_scratch = match SSL_HTTP_SCRATCH.get(&pid_tgid) {
         Some(s) => s,
         None => return 0,
@@ -940,7 +1043,8 @@ pub unsafe fn ssl_read_entry_impl(ctx: &ProbeContext) -> u32 {
     }
 
     let pid_tgid = bpf_get_current_pid_tgid();
-    if !http_request_is_ready(pid_tgid) {
+    let handshake_pending = handshake_pending_for(pid_tgid, ssl_ptr);
+    if !handshake_pending && !http_request_is_ready(pid_tgid) {
         return 0;
     }
 
@@ -971,7 +1075,8 @@ pub unsafe fn ssl_read_ex_entry_impl(ctx: &ProbeContext) -> u32 {
     }
 
     let pid_tgid = bpf_get_current_pid_tgid();
-    if !http_request_is_ready(pid_tgid) {
+    let handshake_pending = handshake_pending_for(pid_tgid, ssl_ptr);
+    if !handshake_pending && !http_request_is_ready(pid_tgid) {
         return 0;
     }
 
@@ -1018,27 +1123,26 @@ pub unsafe fn ssl_write_return_impl(ctx: &RetProbeContext) -> u32 {
         None => return 0,
     };
 
-    // Only track errors
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let write_scratch = match SSL_WRITE_SCRATCH.get(&pid_tgid) {
+        Some(s) => *s,
+        None => return 0,
+    };
+
     if ret <= 0 {
-        let pid_tgid = bpf_get_current_pid_tgid();
-
-        // Get ssl_ptr from write scratch
-        let ssl_ptr = match SSL_WRITE_SCRATCH.get(&pid_tgid) {
-            Some(s) => s.ssl_ptr,
-            None => return 0,
-        };
-
         let error_hint = if ret == 0 {
             1  // zero_return
         } else {
             3  // syscall_err
         };
 
-        emit_ssl_error_event(pid_tgid, ssl_ptr, 1, ret, error_hint);
+        emit_ssl_error_event(pid_tgid, write_scratch.ssl_ptr, 1, ret, error_hint);
+    } else {
+        // Some clients complete the TLS handshake lazily on the first
+        // application write instead of calling an explicit handshake API.
+        complete_handshake_if_pending(pid_tgid, write_scratch.ssl_ptr);
     }
 
-    // Always clean up write scratch
-    let pid_tgid = bpf_get_current_pid_tgid();
     let _ = SSL_WRITE_SCRATCH.remove(&pid_tgid);
 
     0

@@ -777,6 +777,36 @@ pub fn ssl_handshake_return(ctx: RetProbeContext) -> u32 {
 }
 
 #[uprobe]
+pub fn ssl_connect_entry(ctx: ProbeContext) -> u32 {
+    unsafe { ssl::ssl_connect_entry_impl(&ctx) }
+}
+
+#[uretprobe]
+pub fn ssl_connect_return(ctx: RetProbeContext) -> u32 {
+    unsafe { ssl::ssl_connect_return_impl(&ctx) }
+}
+
+#[uprobe]
+pub fn ssl_accept_entry(ctx: ProbeContext) -> u32 {
+    unsafe { ssl::ssl_accept_entry_impl(&ctx) }
+}
+
+#[uretprobe]
+pub fn ssl_accept_return(ctx: RetProbeContext) -> u32 {
+    unsafe { ssl::ssl_accept_return_impl(&ctx) }
+}
+
+#[uprobe]
+pub fn ssl_set_connect_state(ctx: ProbeContext) -> u32 {
+    unsafe { ssl::ssl_set_connect_state_impl(&ctx) }
+}
+
+#[uprobe]
+pub fn ssl_set_accept_state(ctx: ProbeContext) -> u32 {
+    unsafe { ssl::ssl_set_accept_state_impl(&ctx) }
+}
+
+#[uprobe]
 pub fn ssl_set_sni(ctx: ProbeContext) -> u32 {
     unsafe { ssl::ssl_set_sni_impl(&ctx) }
 }
