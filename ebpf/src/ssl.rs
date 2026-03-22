@@ -1,5 +1,8 @@
 use aya_ebpf::{check_bounds_signed, cty::c_void};
-use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_user_str_bytes, bpf_probe_read_user_buf, gen};
+use aya_ebpf::helpers::{
+    bpf_get_current_pid_tgid, bpf_get_smp_processor_id, bpf_ktime_get_ns,
+    bpf_probe_read_user_str_bytes, bpf_probe_read_user_buf, gen,
+};
 use aya_ebpf::programs::{ProbeContext, RetProbeContext};
 
 use crate::maps::{
@@ -21,6 +24,18 @@ unsafe fn ssl_enabled() -> bool {
         Some(&v) => v != 0,
         None => false,
     }
+}
+
+#[inline(always)]
+unsafe fn next_event_key(seq_ptr: *mut u64) -> u64 {
+    let local_seq = *seq_ptr;
+    *seq_ptr = local_seq.wrapping_add(1);
+
+    // SSL_SEQ/SSL_HTTP_SEQ/SSL_ERROR_SEQ are per-CPU counters. Mix the CPU ID
+    // into the key so events emitted on different CPUs cannot overwrite each
+    // other in the global LRU tables.
+    let cpu_id = (bpf_get_smp_processor_id() as u64) & 0xff;
+    ((local_seq & 0x00ff_ffff_ffff_ffff) << 8) | cpu_id
 }
 
 /// Emit SSL error event to userspace
@@ -52,8 +67,7 @@ unsafe fn emit_ssl_error_event(
         Some(p) => p,
         None => return,
     };
-    let seq = *seq_ptr;
-    *seq_ptr = seq.wrapping_add(1);
+    let seq = next_event_key(seq_ptr);
 
     let _ = SSL_ERROR_TABLE.insert(&seq, &event, 0);
 }
@@ -109,8 +123,7 @@ unsafe fn emit_ssl_handshake_event(pid_tgid: u64, scratch: SslScratch) {
         Some(p) => p,
         None => return,
     };
-    let seq = *seq_ptr;
-    *seq_ptr = seq.wrapping_add(1);
+    let seq = next_event_key(seq_ptr);
 
     let _ = SSL_CONN_TABLE.insert(&seq, &conn, 0);
 }
@@ -930,8 +943,7 @@ unsafe fn handle_ssl_read_return(pid_tgid: u64, ret: i32) -> u32 {
         Some(p) => p,
         None => return 0,
     };
-    let seq = *seq_ptr;
-    *seq_ptr = seq.wrapping_add(1);
+    let seq = next_event_key(seq_ptr);
 
     let _ = SSL_HTTP_TABLE.insert(&seq, event, 0);
     0
