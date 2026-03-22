@@ -133,7 +133,7 @@ pub async fn list_groups_with_stats(
             // Build stats map for O(1) lookup: (group_id, direction) -> stats
             let mut stats_map: std::collections::HashMap<(u32, u8), aria_core::monitoring::GroupStatsEntry> =
                 stats.into_iter().map(|s| {
-                    ((s.group_id, s.direction as u8), s)
+                    ((s.key.group_id, s.key.direction), s)
                 }).collect();
 
             let groups_with_stats = groups.into_iter().map(|g| {
@@ -439,7 +439,7 @@ pub async fn list_qos_with_stats(
                     // Build stats map for O(1) lookup
                     let mut stats_map: std::collections::HashMap<(u32, u8), aria_core::monitoring::QosStatsEntry> =
                         stats.into_iter().map(|s| {
-                            ((s.group_id, s.direction as u8), s)
+                            ((s.key.group_id, s.key.direction), s)
                         }).collect();
 
                     let rules_with_stats = rules.into_iter().map(|r| {
@@ -823,17 +823,10 @@ pub async fn list_mirror_with_stats(
         Ok(rules) => {
             match cp.get_mirror_stats(&instance).await {
                 Ok((stats, _)) => {
-                    let find_name = |id: u32| -> String {
-                        if id == 0 { return "any".to_string(); }
-                        rules.iter()
-                            .find(|r| r.src_group_id == id || r.dst_group_id == id)
-                            .and_then(|r| if r.src_group_id == id { Some(&r.src_group_name) } else { Some(&r.dst_group_name) })
-                            .unwrap_or_else(|| format!("id:{}", id))
-                    };
                     // Build stats map for O(1) lookup
                     let mut stats_map: std::collections::HashMap<(u32, u32, u8, u8, bool), aria_core::monitoring::MirrorStatsEntry> =
                         stats.into_iter().map(|s| {
-                            ((s.src_id, s.dst_id, s.proto, s.direction as u8, s.is_global), s)
+                            ((s.src_id, s.dst_id, s.proto, s.direction, s.is_global), s)
                         }).collect();
 
                     let rules_with_stats = rules.into_iter().map(|r| {

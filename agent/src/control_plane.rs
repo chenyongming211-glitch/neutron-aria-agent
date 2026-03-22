@@ -514,7 +514,6 @@ impl ControlPlane {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
         let rules = state.state.rules.clone();
-        let groups = state.state.groups.clone();
         drop(state);
 
         // Get statistics
