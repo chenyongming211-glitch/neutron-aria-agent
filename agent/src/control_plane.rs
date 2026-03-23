@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc, oneshot};
 
 use aria_core::state::{FirewallState, GroupInfo, RuleInfo, QosRuleInfo, MirrorRuleInfo};
 use aria_core::wal::{WalEntry, WalWriter};
@@ -14,16 +14,84 @@ struct InstanceState {
     state: FirewallState,
     pin_path: String,
     state_path: String,
-    wal: WalWriter,
+    wal_tx: mpsc::Sender<WalCommand>,
+}
+
+enum WalCommand {
+    Append {
+        entry: WalEntry,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    Compact {
+        state_json: String,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    NeedsCompact {
+        threshold: u64,
+        ack: oneshot::Sender<bool>,
+    },
+    Shutdown {
+        ack: oneshot::Sender<()>,
+    },
+}
+
+fn spawn_wal_actor(mut wal: WalWriter) -> mpsc::Sender<WalCommand> {
+    let (tx, mut rx) = mpsc::channel(128);
+    tokio::task::spawn_blocking(move || {
+        while let Some(cmd) = rx.blocking_recv() {
+            match cmd {
+                WalCommand::Append { entry, ack } => {
+                    let _ = ack.send(wal.append(&entry));
+                }
+                WalCommand::Compact { state_json, ack } => {
+                    let _ = ack.send(wal.compact(&state_json));
+                }
+                WalCommand::NeedsCompact { threshold, ack } => {
+                    let _ = ack.send(wal.needs_compact(threshold));
+                }
+                WalCommand::Shutdown { ack } => {
+                    let _ = ack.send(());
+                    break;
+                }
+            }
+        }
+    });
+    tx
 }
 
 impl InstanceState {
+    async fn wal_needs_compact(&self, threshold: u64) -> bool {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self.wal_tx.send(WalCommand::NeedsCompact {
+            threshold,
+            ack: ack_tx,
+        }).await.is_err() {
+            eprintln!("[ControlPlane] WAL actor unavailable during needs_compact for {}", self.state_path);
+            return false;
+        }
+        ack_rx.await.unwrap_or(false)
+    }
+
     /// Serialize state then compact WAL. Avoids borrow conflict between wal and state.
-    fn do_compact(&mut self) {
+    async fn do_compact(&mut self) {
         match serde_json::to_string_pretty(&self.state) {
             Ok(json) => {
-                if let Err(e) = self.wal.compact(&json) {
-                    eprintln!("[ControlPlane] Failed to compact {}: {}", self.state_path, e);
+                let (ack_tx, ack_rx) = oneshot::channel();
+                if self.wal_tx.send(WalCommand::Compact {
+                    state_json: json,
+                    ack: ack_tx,
+                }).await.is_err() {
+                    eprintln!("[ControlPlane] WAL actor unavailable during compact for {}", self.state_path);
+                    return;
+                }
+                match ack_rx.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        eprintln!("[ControlPlane] Failed to compact {}: {}", self.state_path, e);
+                    }
+                    Err(_) => {
+                        eprintln!("[ControlPlane] WAL actor dropped compact ack for {}", self.state_path);
+                    }
                 }
             }
             Err(e) => {
@@ -34,10 +102,34 @@ impl InstanceState {
 
     /// Append a WAL entry. If append fails, attempt a full compact as fallback
     /// to ensure the current state is persisted despite the individual write failure.
-    fn wal_append(&mut self, entry: &WalEntry) {
-        if let Err(e) = self.wal.append(entry) {
-            eprintln!("[ControlPlane] WAL append failed: {}. Attempting compact as fallback...", e);
-            self.do_compact();
+    async fn wal_append(&mut self, entry: &WalEntry) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self.wal_tx.send(WalCommand::Append {
+            entry: entry.clone(),
+            ack: ack_tx,
+        }).await.is_err() {
+            eprintln!("[ControlPlane] WAL actor unavailable. Attempting compact as fallback...");
+            self.do_compact().await;
+            return;
+        }
+
+        match ack_rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                eprintln!("[ControlPlane] WAL append failed: {}. Attempting compact as fallback...", e);
+                self.do_compact().await;
+            }
+            Err(_) => {
+                eprintln!("[ControlPlane] WAL actor dropped append ack. Attempting compact as fallback...");
+                self.do_compact().await;
+            }
+        }
+    }
+
+    async fn shutdown_wal(&mut self) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self.wal_tx.send(WalCommand::Shutdown { ack: ack_tx }).await.is_ok() {
+            let _ = ack_rx.await;
         }
     }
 }
@@ -127,7 +219,7 @@ impl ControlPlane {
             let instances = self.instances.read().await;
             if let Some(existing) = instances.get(name) {
                 let mut st = existing.write().await;
-                st.do_compact();
+                st.do_compact().await;
             }
         }
 
@@ -162,11 +254,13 @@ impl ControlPlane {
             }
         }
 
+        let wal_tx = spawn_wal_actor(wal);
+
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             pin_path,
             state_path,
-            wal,
+            wal_tx,
         }));
 
         let instance_pin_path = {
@@ -228,11 +322,13 @@ impl ControlPlane {
             }
         }
 
+        let wal_tx = spawn_wal_actor(wal);
+
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             pin_path: pin_path.to_string(),
             state_path: state_path.to_string(),
-            wal,
+            wal_tx,
         }));
 
         if let Some(enabled) = global_ssl_enabled {
@@ -252,7 +348,10 @@ impl ControlPlane {
         // Compact before removing
         self.compact_instance(name).await;
         let mut instances = self.instances.write().await;
-        instances.remove(name);
+        if let Some(inst) = instances.remove(name) {
+            let mut state = inst.write().await;
+            state.shutdown_wal().await;
+        }
         println!("[ControlPlane] Unregistered instance: {}", name);
     }
 
@@ -313,7 +412,7 @@ impl ControlPlane {
         state.wal_append(&WalEntry::AddGroup {
             name: name.to_string(),
             cidr: cidr.to_string(),
-        });
+        }).await;
         Ok(id)
     }
 
@@ -370,7 +469,7 @@ impl ControlPlane {
         state.state.groups.remove(name);
         state.wal_append(&WalEntry::DeleteGroup {
             name: name.to_string(),
-        });
+        }).await;
         Ok(())
     }
 
@@ -465,7 +564,7 @@ impl ControlPlane {
             action,
             ports: ports.map(|s| s.to_string()),
             direction,
-        });
+        }).await;
         Ok(())
     }
 
@@ -517,7 +616,7 @@ impl ControlPlane {
             dst_id,
             proto,
             direction,
-        });
+        }).await;
         Ok(())
     }
 
@@ -592,7 +691,7 @@ impl ControlPlane {
             burst_bytes,
             priority,
             mode,
-        });
+        }).await;
         Ok(())
     }
 
@@ -630,7 +729,7 @@ impl ControlPlane {
         state.wal_append(&WalEntry::DeleteQos {
             group_id,
             direction,
-        });
+        }).await;
         Ok(())
     }
 
@@ -717,7 +816,7 @@ impl ControlPlane {
             target_iface: target_iface.to_string(),
             target_ifindex,
             is_global,
-        });
+        }).await;
         Ok(())
     }
 
@@ -770,7 +869,7 @@ impl ControlPlane {
             proto,
             direction,
             is_global,
-        });
+        }).await;
         Ok(())
     }
 
@@ -904,7 +1003,7 @@ impl ControlPlane {
             mirror,
             tcprt,
             ssl: None,
-        });
+        }).await;
         Ok(())
     }
 
@@ -1202,9 +1301,7 @@ impl ControlPlane {
         let instances = self.instances.read().await;
         for (_name, inst) in instances.iter() {
             let mut state = inst.write().await;
-            if state.wal.entry_count() > 0 {
-                state.do_compact();
-            }
+            state.do_compact().await;
         }
     }
 
@@ -1213,8 +1310,8 @@ impl ControlPlane {
         let instances = self.instances.read().await;
         for (_name, inst) in instances.iter() {
             let mut state = inst.write().await;
-            if state.wal.needs_compact(WAL_COMPACT_THRESHOLD) {
-                state.do_compact();
+            if state.wal_needs_compact(WAL_COMPACT_THRESHOLD).await {
+                state.do_compact().await;
             }
         }
     }
@@ -1224,9 +1321,7 @@ impl ControlPlane {
         let instances = self.instances.read().await;
         if let Some(inst) = instances.get(name) {
             let mut state = inst.write().await;
-            if state.wal.entry_count() > 0 {
-                state.do_compact();
-            }
+            state.do_compact().await;
         }
     }
 
@@ -1274,7 +1369,7 @@ impl ControlPlane {
                 mirror: None,
                 tcprt: None,
                 ssl: Some(enabled),
-            });
+            }).await;
         }
     }
 

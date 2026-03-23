@@ -9,7 +9,7 @@ use crate::state::FirewallState;
 /// Time-based compact interval (5 minutes)
 const WAL_COMPACT_INTERVAL_SECS: u64 = 300;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WalEntry {
     AddGroup { name: String, cidr: String },
     DeleteGroup { name: String },
