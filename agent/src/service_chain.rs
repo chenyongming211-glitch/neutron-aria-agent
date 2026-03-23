@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -42,7 +43,7 @@ pub fn load_chains(base_state_path: &str) -> Vec<ServiceChain> {
     let path = format!("{}/{}", base_state_path, CHAINS_FILE);
     match std::fs::read_to_string(&path) {
         Ok(data) => serde_json::from_str(&data).unwrap_or_else(|e| {
-            eprintln!("[ServiceChain] Failed to parse {}: {}", path, e);
+            warn!(path = %path, error = %e, "failed to parse service chain file");
             Vec::new()
         }),
         Err(_) => Vec::new(),

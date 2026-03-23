@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use serde::Deserialize;
 use tokio::signal::unix::{signal, SignalKind};
+use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
 
 mod instance;
 mod tap_registry;
@@ -37,6 +39,10 @@ struct Config {
     max_port_policies: u32,
     #[serde(default = "default_listen_addr")]
     listen_addr: String,
+    #[serde(default = "default_log_format")]
+    log_format: String,
+    #[serde(default = "default_log_filter")]
+    log_filter: String,
 }
 
 fn default_ebpf_path() -> String {
@@ -63,6 +69,14 @@ fn default_listen_addr() -> String {
     "127.0.0.1:8080".to_string()
 }
 
+fn default_log_format() -> String {
+    "text".to_string()
+}
+
+fn default_log_filter() -> String {
+    "info".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -72,7 +86,38 @@ impl Default for Config {
             iface_pattern: default_iface_pattern(),
             max_port_policies: default_max_port_policies(),
             listen_addr: default_listen_addr(),
+            log_format: default_log_format(),
+            log_filter: default_log_filter(),
         }
+    }
+}
+
+fn build_env_filter(config: &Config) -> Result<EnvFilter, String> {
+    EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(&config.log_filter))
+        .map_err(|e| format!("failed to build log filter: {}", e))
+}
+
+fn init_tracing(config: &Config) -> Result<(), String> {
+    match config.log_format.to_ascii_lowercase().as_str() {
+        "text" => tracing_subscriber::fmt()
+            .compact()
+            .with_env_filter(build_env_filter(config)?)
+            .with_target(true)
+            .with_thread_names(true)
+            .try_init()
+            .map_err(|e| format!("failed to initialize text logger: {}", e)),
+        "json" => tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(false)
+            .with_span_list(false)
+            .with_env_filter(build_env_filter(config)?)
+            .with_target(true)
+            .with_thread_names(true)
+            .try_init()
+            .map_err(|e| format!("failed to initialize json logger: {}", e)),
+        other => Err(format!("unsupported log_format '{}': expected 'text' or 'json'", other)),
     }
 }
 
@@ -104,6 +149,8 @@ fn load_config(path: &PathBuf) -> Config {
 
 #[tokio::main]
 async fn main() {
+    const SSL_RECONCILE_INTERVAL_SECS: u64 = 15;
+
     // Root privilege check
     if unsafe { libc::geteuid() } != 0 {
         eprintln!("Error: aria-agent must run as root");
@@ -112,34 +159,47 @@ async fn main() {
 
     let args = Args::parse();
     let config = load_config(&args.config);
+    if let Err(e) = init_tracing(&config) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
 
-    println!("aria-agent starting...");
-    println!("  eBPF path: {}", config.ebpf_path);
-    println!("  Pin path:  {}", config.pin_path);
-    println!("  State path: {}", config.state_path);
-    println!("  Interface pattern: {}", config.iface_pattern);
-    println!("  Max port policies: {}", config.max_port_policies);
-    println!("  Listen addr: {}", config.listen_addr);
+    info!(
+        config_path = %args.config.display(),
+        ebpf_path = %config.ebpf_path,
+        pin_path = %config.pin_path,
+        state_path = %config.state_path,
+        iface_pattern = %config.iface_pattern,
+        max_port_policies = config.max_port_policies,
+        listen_addr = %config.listen_addr,
+        log_format = %config.log_format,
+        log_filter = %config.log_filter,
+        "starting aria-agent"
+    );
 
     // Verify eBPF binary exists
     if !std::path::Path::new(&config.ebpf_path).exists() {
-        eprintln!("Error: eBPF binary not found at {}", config.ebpf_path);
+        error!(ebpf_path = %config.ebpf_path, "eBPF binary not found");
         std::process::exit(1);
     }
 
     // Create base directories
-    std::fs::create_dir_all(&config.pin_path).ok();
-    std::fs::create_dir_all(&config.state_path).ok();
+    if let Err(e) = std::fs::create_dir_all(&config.pin_path) {
+        warn!(path = %config.pin_path, error = %e, "failed to create pin directory");
+    }
+    if let Err(e) = std::fs::create_dir_all(&config.state_path) {
+        warn!(path = %config.state_path, error = %e, "failed to create state directory");
+    }
 
     let ssl_manager = Arc::new(ssl_manager::SslManager::new(
         &config.ebpf_path,
         &config.pin_path,
     ));
     if let Err(e) = ssl_manager.ensure_loaded().await {
-        eprintln!("Warning: failed to initialize global SSL manager: {}", e);
+        warn!(error = %e, "failed to initialize global SSL manager");
     }
     if let Err(e) = ssl_manager.cleanup_legacy_instance_pins().await {
-        eprintln!("Warning: failed to clean legacy SSL pins: {}", e);
+        warn!(error = %e, "failed to clean legacy SSL pins");
     }
 
     // Create ControlPlane
@@ -167,7 +227,7 @@ async fn main() {
     let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("Error: failed to bind HTTP server to {}: {}", listen_addr, e);
+            error!(listen_addr = %listen_addr, error = %e, "failed to bind HTTP server");
             std::process::exit(1);
         }
     };
@@ -178,7 +238,7 @@ async fn main() {
     let netlink_task = tokio::spawn(async move {
         loop {
             if let Err(e) = netlink::monitor(registry_clone.clone()).await {
-                eprintln!("Netlink monitor error: {}, restarting in 1s...", e);
+                warn!(error = %e, "netlink monitor failed; restarting");
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         }
@@ -193,15 +253,27 @@ async fn main() {
         }
     });
 
-    // Start HTTP server
-    let http_task = tokio::spawn(async move {
-        println!("HTTP API server listening on {}", listen_addr);
-        if let Err(e) = axum::serve(listener, router).await {
-            eprintln!("HTTP server error: {}", e);
+    let ssl_reconcile_cp = control_plane.clone();
+    let ssl_reconcile_task = tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(SSL_RECONCILE_INTERVAL_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            ssl_reconcile_cp.reconcile_ssl_runtime_state().await;
         }
     });
 
-    println!("aria-agent running. Press Ctrl+C or send SIGTERM to stop.");
+    // Start HTTP server
+    let http_task = tokio::spawn(async move {
+        info!(listen_addr = %listen_addr, "HTTP API server listening");
+        if let Err(e) = axum::serve(listener, router).await {
+            error!(error = %e, "HTTP server stopped with error");
+        }
+    });
+
+    info!("aria-agent running");
 
     // Wait for shutdown signal
     let mut sigterm = signal(SignalKind::terminate())
@@ -210,16 +282,17 @@ async fn main() {
         .expect("failed to create SIGINT handler");
 
     tokio::select! {
-        _ = sigterm.recv() => println!("\nReceived SIGTERM"),
-        _ = sigint.recv() => println!("\nReceived SIGINT"),
+        _ = sigterm.recv() => info!("received SIGTERM"),
+        _ = sigint.recv() => info!("received SIGINT"),
     }
 
-    println!("Shutting down aria-agent...");
+    info!("shutting down aria-agent");
 
     // Abort tasks
     netlink_task.abort();
     http_task.abort();
     compact_task.abort();
+    ssl_reconcile_task.abort();
 
     // Final compact: ensure WAL is flushed to snapshot
     control_plane.compact_all().await;
@@ -227,5 +300,5 @@ async fn main() {
     // Graceful shutdown: detach all instances
     registry.shutdown().await;
 
-    println!("aria-agent stopped");
+    info!("aria-agent stopped");
 }

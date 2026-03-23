@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use tokio::sync::Mutex;
+use tracing::{info, warn};
 
 use crate::ssl_support::{
     attach_uprobe_if_needed, find_libssl, is_ssl_pin_name, pin_map_if_needed,
@@ -92,7 +93,7 @@ impl SslManager {
             let child_entries = match std::fs::read_dir(entry.path()) {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("[ssl-manager] Warning: failed to scan {:?}: {}", entry.path(), e);
+                    warn!(path = ?entry.path(), error = %e, "failed to scan legacy SSL pin directory");
                     continue;
                 }
             };
@@ -101,7 +102,7 @@ impl SslManager {
                 let child = match child {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("[ssl-manager] Warning: failed to inspect {:?}: {}", entry.path(), e);
+                        warn!(path = ?entry.path(), error = %e, "failed to inspect legacy SSL pin directory");
                         continue;
                     }
                 };
@@ -122,7 +123,7 @@ impl SslManager {
                 };
 
                 if let Err(e) = result {
-                    eprintln!("[ssl-manager] Warning: failed to remove legacy SSL pin {:?}: {}", path, e);
+                    warn!(path = ?path, error = %e, "failed to remove legacy SSL pin");
                 }
             }
         }
@@ -141,10 +142,7 @@ impl SslManager {
             Ok(bpf) => bpf,
             Err(first_err) => {
                 preserved_ssl_enabled = aria_core::ssl_ops::get_ssl_global_config(&self.pin_path).ok();
-                eprintln!(
-                    "[ssl-manager] Warning: failed to reuse pinned SSL state, recreating ssl-global pins: {}",
-                    first_err
-                );
+                warn!(error = %first_err, "failed to reuse pinned SSL state; recreating ssl-global pins");
                 self.reset_ssl_global_pins()?;
                 self.load_bpf_with_pins(&bpf_bytes).map_err(|retry_err| {
                     format!(
@@ -161,7 +159,7 @@ impl SslManager {
 
         if let Some(enabled) = preserved_ssl_enabled {
             if let Err(e) = aria_core::ssl_ops::set_ssl_global_config(&self.pin_path, enabled) {
-                eprintln!("[ssl-manager] Warning: failed to restore SSL global config after pin reset: {}", e);
+                warn!(error = %e, "failed to restore SSL global config after pin reset");
             }
         }
 
@@ -180,9 +178,9 @@ impl SslManager {
                     &self.pin_path,
                 )?;
             }
-            println!("[ssl-manager] SSL uprobes ready on {}", libssl);
+            info!(libssl = %libssl, "SSL uprobes ready");
         } else {
-            println!("[ssl-manager] libssl not found, SSL probes will attach when libssl becomes available");
+            info!("libssl not found; SSL probes will attach when libssl becomes available");
         }
 
         Ok(())

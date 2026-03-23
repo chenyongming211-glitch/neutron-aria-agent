@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use aya::maps::{HashMap, LpmTrie, MapData};
 use aya::maps::lpm_trie::Key;
+use tracing::{info, warn};
 use crate::common::{PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig};
 use crate::state::FirewallState;
 
@@ -141,7 +142,7 @@ pub fn add_network(direction: &str, cidr: &str, id: u32, pin_path: &str, _ebpf_p
             let mut lpm_map = open_pinned_lpm_v4(pin_path, map_name)?;
             lpm_map.insert(&key, &id, 0)
                 .map_err(|e| format!("LPM insert error: {:?}", e))?;
-            println!("Added IPv4 network {} -> id {} (direction: {})", cidr, id, direction);
+            info!(cidr = %cidr, id, direction = %direction, map = %map_name, "added IPv4 network");
         }
         IpAddr::V6(v6) => {
             let map_name = match direction {
@@ -153,7 +154,7 @@ pub fn add_network(direction: &str, cidr: &str, id: u32, pin_path: &str, _ebpf_p
             let mut lpm_map = open_pinned_lpm_v6(pin_path, map_name)?;
             lpm_map.insert(&key, &id, 0)
                 .map_err(|e| format!("LPM insert error: {:?}", e))?;
-            println!("Added IPv6 network {} -> id {} (direction: {})", cidr, id, direction);
+            info!(cidr = %cidr, id, direction = %direction, map = %map_name, "added IPv6 network");
         }
     }
     Ok(())
@@ -177,8 +178,8 @@ pub fn delete_network(direction: &str, cidr: &str, _id: u32, pin_path: &str, _eb
             let key = Key::new(prefix_len as u32, v4.octets());
             let mut lpm_map = open_pinned_lpm_v4(pin_path, map_name)?;
             match lpm_map.remove(&key) {
-                Ok(()) => println!("Deleted IPv4 network {} from {}", cidr, map_name),
-                Err(_) => println!("IPv4 network {} not found in {}, skipping", cidr, map_name),
+                Ok(()) => info!(cidr = %cidr, map = %map_name, "deleted IPv4 network"),
+                Err(_) => info!(cidr = %cidr, map = %map_name, "IPv4 network not present during delete"),
             }
         }
         IpAddr::V6(v6) => {
@@ -190,8 +191,8 @@ pub fn delete_network(direction: &str, cidr: &str, _id: u32, pin_path: &str, _eb
             let key = Key::new(prefix_len as u32, v6.octets());
             let mut lpm_map = open_pinned_lpm_v6(pin_path, map_name)?;
             match lpm_map.remove(&key) {
-                Ok(()) => println!("Deleted IPv6 network {} from {}", cidr, map_name),
-                Err(_) => println!("IPv6 network {} not found in {}, skipping", cidr, map_name),
+                Ok(()) => info!(cidr = %cidr, map = %map_name, "deleted IPv6 network"),
+                Err(_) => info!(cidr = %cidr, map = %map_name, "IPv6 network not present during delete"),
             }
         }
     }
@@ -233,7 +234,7 @@ pub fn add_policy(
                             return Err(format!("set port bitmap error: {:?}", e));
                         }
                     }
-                    println!("  Set ports {}-{} to action {}", start, end, rule_action);
+                    info!(bitmap_idx = idx, start_port = start, end_port = end, rule_action, "programmed port bitmap range");
                 }
             }
         }
@@ -264,8 +265,15 @@ pub fn add_policy(
     }
 
     let dir_str = if direction == 1 { "egress" } else { "ingress" };
-    println!("Added policy: src_id={}, dst_id={}, proto={}, action={}, direction={}, ports={:?}",
-        src_id, dst_id, proto, action, dir_str, ports);
+    info!(
+        src_id,
+        dst_id,
+        proto,
+        action,
+        direction = %dir_str,
+        ports = ?ports,
+        "added policy"
+    );
     Ok(())
 }
 
@@ -295,7 +303,7 @@ pub fn delete_policy(
     policy_table.remove(&key)
         .map_err(|e| format!("remove policy error: {:?}", e))?;
 
-    println!("Deleted policy: src_id={}, dst_id={}, proto={}, direction={}", src_id, dst_id, proto, direction);
+    info!(src_id, dst_id, proto, direction, "deleted policy");
     Ok(())
 }
 
@@ -384,12 +392,18 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
     let state = crate::wal::load_with_wal(state_path);
 
     if state.groups.is_empty() && state.rules.is_empty() && state.qos_rules.is_empty() && state.mirror_rules.is_empty() {
-        println!("State is empty, nothing to replay");
+        info!(state_path = %state_path, "state is empty; nothing to replay");
         return;
     }
 
-    println!("Replaying state: {} groups, {} rules, {} QoS rules...",
-        state.groups.len(), state.rules.len(), state.qos_rules.len());
+    info!(
+        state_path = %state_path,
+        groups = state.groups.len(),
+        rules = state.rules.len(),
+        qos_rules = state.qos_rules.len(),
+        mirror_rules = state.mirror_rules.len(),
+        "replaying state into eBPF maps"
+    );
 
     let mut errors: Vec<String> = Vec::new();
     let mut group_count: u32 = 0;
@@ -629,7 +643,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
             let ifindex = match crate::mirror_ops::resolve_ifindex(&mr.target_iface) {
                 Ok(idx) => idx,
                 Err(e) => {
-                    eprintln!("Warning: mirror target '{}' not found during replay: {}", mr.target_iface, e);
+                    warn!(target_iface = %mr.target_iface, error = %e, "mirror target not found during replay");
                     continue;
                 }
             };
@@ -671,14 +685,18 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
         }
     }
 
-    println!(
-        "Replay complete: {} group CIDRs, {} rules, {} port bitmaps, {} QoS rules, {} mirror rules written",
-        group_count, rule_count, bitmap_count, state.qos_rules.len(), state.mirror_rules.len()
+    info!(
+        group_cidrs = group_count,
+        rules = rule_count,
+        port_bitmaps = bitmap_count,
+        qos_rules = state.qos_rules.len(),
+        mirror_rules = state.mirror_rules.len(),
+        "replay complete"
     );
     if !errors.is_empty() {
-        eprintln!("Replay encountered {} errors:", errors.len());
+        warn!(error_count = errors.len(), "replay encountered errors");
         for err in &errors {
-            eprintln!("  {}", err);
+            warn!(error = %err, "replay error");
         }
     }
 }
@@ -778,7 +796,7 @@ pub fn attach_tc_ingress(bpf: &mut aya::Ebpf, iface: &str, pin_path: &str) -> Re
     let _pinned = fd_link.pin(&tc_link_pin)
         .map_err(|e| format!("tc_ingress pin link error: {:?}", e))?;
 
-    println!("TC ingress attached to {} (link pinned)", iface);
+    info!(iface = %iface, "TC ingress attached with pinned link");
     Ok(())
 }
 
@@ -817,7 +835,7 @@ pub fn attach_tc_egress(bpf: &mut aya::Ebpf, iface: &str, pin_path: &str) -> Res
     let _pinned = fd_link.pin(&tc_link_pin)
         .map_err(|e| format!("tc pin link error: {:?}", e))?;
 
-    println!("TC egress attached to {} (link pinned)", iface);
+    info!(iface = %iface, "TC egress attached with pinned link");
     Ok(())
 }
 
@@ -844,7 +862,7 @@ pub fn setup_fq_qdisc(iface: &str) -> Result<(), String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("tc qdisc replace fq failed: {}", stderr));
     }
-    println!("FQ qdisc configured on {}", iface);
+    info!(iface = %iface, "FQ qdisc configured");
     Ok(())
 }
 

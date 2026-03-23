@@ -5,6 +5,7 @@ use netlink_packet_core::NetlinkPayload;
 use netlink_packet_route::RouteNetlinkMessage;
 use netlink_packet_route::link::LinkAttribute;
 use netlink_sys::AsyncSocket;
+use tracing::{info, warn};
 use crate::tap_registry::TapRegistry;
 
 /// Enumerate all current network interfaces and return names matching the pattern
@@ -12,7 +13,7 @@ async fn scan_existing_interfaces(registry: &TapRegistry) -> Vec<String> {
     let (connection, handle, _) = match rtnetlink::new_connection() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Failed to create rtnetlink connection for scan: {}", e);
+            warn!(error = %e, "failed to create rtnetlink connection for scan");
             return Vec::new();
         }
     };
@@ -44,7 +45,7 @@ fn cleanup_orphaned_pins(base_pin_path: &str, existing_ifaces: &[String]) {
     let entries = match std::fs::read_dir(base) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("Warning: failed to read pin directory for cleanup: {}", e);
+            warn!(error = %e, path = %base_pin_path, "failed to read pin directory for cleanup");
             return;
         }
     };
@@ -58,9 +59,9 @@ fn cleanup_orphaned_pins(base_pin_path: &str, existing_ifaces: &[String]) {
                         continue;
                     }
                     if !existing_ifaces.contains(&name.to_string()) {
-                        println!("Cleaning orphaned pin directory: {}", name);
+                        info!(pin = %name, "cleaning orphaned pin directory");
                         if let Err(e) = std::fs::remove_dir_all(entry.path()) {
-                            eprintln!("Warning: failed to remove orphaned pin {}: {}", name, e);
+                            warn!(pin = %name, error = %e, "failed to remove orphaned pin directory");
                         }
                     }
                 }
@@ -77,9 +78,9 @@ async fn reconcile(registry: &Arc<TapRegistry>) {
     // Attach any new interfaces not yet managed
     for iface in &existing {
         if !managed.contains(iface) {
-            println!("[reconcile] Detected unmanaged tap: {}", iface);
+            info!(instance = %iface, "reconcile detected unmanaged tap");
             if let Err(e) = registry.attach(iface).await {
-                eprintln!("[reconcile] Failed to attach {}: {}", iface, e);
+                warn!(instance = %iface, error = %e, "reconcile failed to attach interface");
             }
         }
     }
@@ -87,9 +88,9 @@ async fn reconcile(registry: &Arc<TapRegistry>) {
     // Detach any managed interfaces that no longer exist
     for iface in &managed {
         if !existing.contains(iface) {
-            println!("[reconcile] Interface {} disappeared, detaching", iface);
+            info!(instance = %iface, "reconcile detected disappeared interface");
             if let Err(e) = registry.detach(iface).await {
-                eprintln!("[reconcile] Failed to detach {}: {}", iface, e);
+                warn!(instance = %iface, error = %e, "reconcile failed to detach interface");
             }
         }
     }
@@ -103,7 +104,7 @@ async fn reconcile(registry: &Arc<TapRegistry>) {
 pub async fn monitor(registry: Arc<TapRegistry>) -> Result<(), String> {
     // 1. Initial scan
     let existing = scan_existing_interfaces(&registry).await;
-    println!("Initial scan found {} matching interfaces: {:?}", existing.len(), existing);
+    info!(count = existing.len(), interfaces = ?existing, "initial netlink scan complete");
 
     // 2. Clean orphaned pins
     cleanup_orphaned_pins(
@@ -114,7 +115,7 @@ pub async fn monitor(registry: Arc<TapRegistry>) -> Result<(), String> {
     // 3. Attach all existing tap interfaces
     for iface in &existing {
         if let Err(e) = registry.attach(iface).await {
-            eprintln!("[startup] Failed to attach {}: {}", iface, e);
+            warn!(instance = %iface, error = %e, "startup attach failed");
         }
     }
 
@@ -144,7 +145,7 @@ pub async fn monitor(registry: Arc<TapRegistry>) -> Result<(), String> {
                         handle_netlink_message(&registry, message).await;
                     }
                     None => {
-                        eprintln!("Netlink stream ended, restarting...");
+                        warn!("netlink stream ended; restarting monitor");
                         break;
                     }
                 }
@@ -175,11 +176,11 @@ async fn handle_netlink_message(
 
             if let Some(name) = iface_name {
                 if registry.matches_pattern(&name) {
-                    println!("[netlink] NewLink: {}", name);
+                    info!(instance = %name, "received netlink NewLink");
                     // Small delay to let the interface fully initialize
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     if let Err(e) = registry.attach(&name).await {
-                        eprintln!("[netlink] Failed to attach {}: {}", name, e);
+                        warn!(instance = %name, error = %e, "failed to attach interface after NewLink");
                     }
                 }
             }
@@ -195,9 +196,9 @@ async fn handle_netlink_message(
 
             if let Some(name) = iface_name {
                 if registry.matches_pattern(&name) {
-                    println!("[netlink] DelLink: {}", name);
+                    info!(instance = %name, "received netlink DelLink");
                     if let Err(e) = registry.detach(&name).await {
-                        eprintln!("[netlink] Failed to detach {}: {}", name, e);
+                        warn!(instance = %name, error = %e, "failed to detach interface after DelLink");
                     }
                 }
             }

@@ -4,6 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use fslock::LockFile;
+use tracing::{info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupInfo {
@@ -436,14 +437,14 @@ impl StateManager {
             file.read_to_string(&mut contents)
                 .map_err(|e| format!("Failed to read state file: {}", e))?;
             if contents.is_empty() {
-                eprintln!("Warning: state file is empty, starting with default state");
+                warn!(path = %self.state_file.display(), "state file is empty; starting with default state");
                 FirewallState::default()
             } else {
                 serde_json::from_str(&contents)
                     .map_err(|e| format!("Failed to parse state file: {}", e))?
             }
         } else {
-            eprintln!("State file does not exist, creating new state");
+            info!(path = %self.state_file.display(), "state file does not exist; creating new state");
             FirewallState::default()
         };
 

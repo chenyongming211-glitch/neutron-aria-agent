@@ -1,5 +1,6 @@
 use std::fs;
 use std::sync::Arc;
+use tracing::{info, warn};
 use crate::control_plane::ControlPlane;
 
 use aria_core::ebpf_ops::{
@@ -25,7 +26,7 @@ fn pin_runtime_maps(bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {
                 if CRITICAL_NETWORK_MAP_NAMES.contains(name) {
                     return Err(format!("failed to pin critical map {}: {}", name, e));
                 }
-                eprintln!("Warning: failed to pin map {}: {}", name, e);
+                warn!(map = %name, error = %e, "failed to pin runtime map");
             }
         } else if CRITICAL_NETWORK_MAP_NAMES.contains(name) {
             return Err(format!("critical map {} not found", name));
@@ -51,10 +52,10 @@ pub async fn system_start(
     // Set max_port_policies
     let sm = aria_core::state::StateManager::new(state_path);
     if let Err(e) = sm.set_max_port_policies(max_port_policies) {
-        eprintln!("Warning: Failed to persist max_port_policies: {}", e);
+        warn!(iface = %iface, error = %e, "failed to persist max_port_policies");
     }
 
-    println!("Loading eBPF from: {}", ebpf_path);
+    info!(iface = %iface, ebpf_path = %ebpf_path, "loading eBPF for system instance");
     let bpf_bytes = std::fs::read(ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
     let mut bpf = aya::EbpfLoader::new()
         .map_pin_path(pin_path)
@@ -62,7 +63,7 @@ pub async fn system_start(
         .map_err(|e| format!("load error: {:?}", e))?;
 
     // Attach XDP
-    println!("Attaching XDP to {}...", iface);
+    info!(iface = %iface, "attaching XDP");
     let xdp_program = bpf
         .program_mut("xdp_firewall")
         .ok_or("XDP program not found")?;
@@ -77,7 +78,7 @@ pub async fn system_start(
         .attach(iface, aya::programs::XdpFlags::default())
         .map_err(|e| format!("attach error: {:?}", e))?;
 
-    println!("XDP attached successfully (link_id: {:?})", link_id);
+    info!(iface = %iface, link_id = ?link_id, "XDP attached successfully");
 
     // Try to pin the XDP link (requires bpf_link, kernel 5.7+)
     let xdp_link_pin = format!("{}/xdp_link", pin_path);
@@ -90,23 +91,23 @@ pub async fn system_start(
             .map_err(|e| format!("pin: {:?}", e))?;
         Ok(())
     })() {
-        Ok(()) => println!("XDP link pinned (crash-resilient)"),
-        Err(e) => eprintln!("XDP link pin not supported ({}), XDP will detach on agent exit", e),
+        Ok(()) => info!(iface = %iface, "XDP link pinned"),
+        Err(e) => warn!(iface = %iface, error = %e, "XDP link pin not supported; XDP will detach on agent exit"),
     }
 
     // Attach TC egress (with graceful link pin fallback)
     if let Err(e) = attach_tc_program(&mut bpf, "tc_egress", iface, aya::programs::tc::TcAttachType::Egress, pin_path) {
-        eprintln!("Warning: TC egress attach failed: {}. Egress control disabled.", e);
+        warn!(iface = %iface, error = %e, "TC egress attach failed; egress control disabled");
     }
 
     // Attach TC ingress (mirror, with graceful link pin fallback)
     if let Err(e) = attach_tc_program(&mut bpf, "tc_ingress", iface, aya::programs::tc::TcAttachType::Ingress, pin_path) {
-        eprintln!("Warning: TC ingress attach failed: {}. Ingress mirror disabled.", e);
+        warn!(iface = %iface, error = %e, "TC ingress attach failed; ingress mirror disabled");
     }
 
     // Setup FQ qdisc for QoS EDT
     if let Err(e) = setup_fq_qdisc(iface) {
-        eprintln!("Warning: FQ qdisc setup failed: {}. QoS EDT disabled.", e);
+        warn!(iface = %iface, error = %e, "FQ qdisc setup failed; QoS EDT disabled");
     }
 
     // Pin all maps. Missing critical maps means the dataplane is not safely manageable.
@@ -133,7 +134,7 @@ pub async fn system_start(
     // Record attached iface
     let sm = aria_core::state::StateManager::new(state_path);
     if let Err(e) = sm.set_attached_iface(iface) {
-        eprintln!("Warning: failed to record attached interface: {}", e);
+        warn!(iface = %iface, error = %e, "failed to record attached interface");
     }
 
     // Replay state
@@ -145,7 +146,7 @@ pub async fn system_start(
         return Err(format!("control-plane register failed: {}", e));
     }
 
-    println!("eBPF system started successfully on {}", iface);
+    info!(iface = %iface, "system firewall started successfully");
     Ok(())
 }
 
@@ -162,9 +163,9 @@ pub async fn system_stop(
             let xdp_link_pin = format!("{}/xdp_link", pin_path);
             if std::path::Path::new(&xdp_link_pin).exists() {
                 if let Err(e) = fs::remove_file(&xdp_link_pin) {
-                    eprintln!("Warning: failed to remove pinned XDP link: {}", e);
+                    warn!(iface = %iface, error = %e, "failed to remove pinned XDP link");
                 } else {
-                    println!("XDP link unpinned (detached from {})", iface);
+                    info!(iface = %iface, "XDP link unpinned");
                 }
             } else {
                 // Fallback: use ip command if pin file doesn't exist
@@ -172,10 +173,13 @@ pub async fn system_stop(
                     .args(["link", "set", "dev", &iface, "xdp", "off"])
                     .output();
                 match output {
-                    Ok(o) if o.status.success() => println!("Detached XDP from {}", iface),
-                    Ok(o) => eprintln!("Warning: failed to detach XDP from {}: {}",
-                        iface, String::from_utf8_lossy(&o.stderr)),
-                    Err(e) => eprintln!("Warning: failed to run ip command: {}", e),
+                    Ok(o) if o.status.success() => info!(iface = %iface, "detached XDP via ip link"),
+                    Ok(o) => warn!(
+                        iface = %iface,
+                        stderr = %String::from_utf8_lossy(&o.stderr),
+                        "failed to detach XDP"
+                    ),
+                    Err(e) => warn!(iface = %iface, error = %e, "failed to run ip command"),
                 }
             }
 
@@ -183,7 +187,7 @@ pub async fn system_stop(
             let tc_link_pin = format!("{}/tc_egress_link", pin_path);
             if std::path::Path::new(&tc_link_pin).exists() {
                 if let Err(e) = fs::remove_file(&tc_link_pin) {
-                    eprintln!("Warning: failed to remove pinned TC egress link: {}", e);
+                    warn!(iface = %iface, error = %e, "failed to remove pinned TC egress link");
                 }
             }
 
@@ -191,34 +195,34 @@ pub async fn system_stop(
             let tc_ingress_link_pin = format!("{}/tc_ingress_link", pin_path);
             if std::path::Path::new(&tc_ingress_link_pin).exists() {
                 if let Err(e) = fs::remove_file(&tc_ingress_link_pin) {
-                    eprintln!("Warning: failed to remove pinned TC ingress link: {}", e);
+                    warn!(iface = %iface, error = %e, "failed to remove pinned TC ingress link");
                 }
             }
 
             detach_tc_egress(&iface);
 
             if let Err(e) = sm.clear_attached_iface() {
-                eprintln!("Warning: failed to clear attached interface record: {}", e);
+                warn!(iface = %iface, error = %e, "failed to clear attached interface record");
             }
         }
         Ok(None) => {
-            println!("No attached interface recorded, skipping XDP/TC detach");
+            info!("no attached interface recorded; skipping XDP/TC detach");
         }
         Err(e) => {
-            eprintln!("Warning: failed to read state: {}", e);
+            warn!(error = %e, "failed to read system state");
         }
     }
 
     if std::path::Path::new(pin_path).exists() {
         fs::remove_dir_all(pin_path)
             .map_err(|e| format!("Failed to remove pin directory: {}", e))?;
-        println!("Removed pinned maps and programs from {}", pin_path);
+        info!(pin_path = %pin_path, "removed pinned maps and programs");
     }
 
     // Unregister AFTER cleanup succeeds, so retry is possible on failure
     control_plane.unregister_instance("system").await;
 
-    println!("eBPF system stopped");
+    info!("system firewall stopped");
     Ok(())
 }
 
@@ -266,8 +270,8 @@ fn attach_tc_program(
             .map_err(|e| format!("pin: {:?}", e))?;
         Ok(())
     })() {
-        Ok(()) => println!("TC {} attached to {} (link pinned)", dir_str, iface),
-        Err(e) => println!("TC {} attached to {} (link pin skipped: {})", dir_str, iface, e),
+        Ok(()) => info!(iface = %iface, direction = %dir_str, "TC program attached with pinned link"),
+        Err(e) => info!(iface = %iface, direction = %dir_str, error = %e, "TC program attached without link pin"),
     }
 
     Ok(())

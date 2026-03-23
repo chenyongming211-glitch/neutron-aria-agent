@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use regex::Regex;
+use tracing::{info, warn};
 use crate::instance::FirewallInstance;
 use crate::control_plane::ControlPlane;
 
@@ -91,7 +92,7 @@ impl TapRegistry {
         if let Some(state_str) = state_dir.to_str() {
             let sm = aria_core::state::StateManager::new(state_str);
             if let Err(e) = sm.set_max_port_policies(self.max_port_policies) {
-                eprintln!("[{}] Warning: failed to set max_port_policies: {}", iface, e);
+                warn!(instance = %iface, error = %e, "failed to persist max_port_policies");
             }
         }
 
@@ -100,9 +101,10 @@ impl TapRegistry {
         // Only expose the instance after state/WAL registration succeeds.
         if let Err(e) = self.control_plane.register_instance(iface).await {
             if let Err(detach_err) = instance.detach() {
-                eprintln!(
-                    "[{}] Warning: failed to roll back attach after register failure: {}",
-                    iface, detach_err
+                warn!(
+                    instance = %iface,
+                    error = %detach_err,
+                    "failed to roll back attach after register failure"
                 );
             }
             return Err(format!("control-plane register failed: {}", e));
@@ -163,9 +165,9 @@ impl TapRegistry {
 
         for iface in &ifaces {
             if let Err(e) = self.detach(iface).await {
-                eprintln!("[{}] Warning: shutdown detach failed: {}", iface, e);
+                warn!(instance = %iface, error = %e, "shutdown detach failed");
             }
         }
-        println!("All firewall instances detached");
+        info!("all firewall instances detached");
     }
 }

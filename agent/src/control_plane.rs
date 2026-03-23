@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{error, info, warn};
 
 use aria_core::state::{FirewallState, GroupInfo, RuleInfo, QosRuleInfo, MirrorRuleInfo};
 use aria_core::wal::{WalClient, WalEntry};
@@ -15,6 +16,8 @@ struct InstanceState {
     pin_path: String,
     state_path: String,
     wal: WalClient,
+    ssl_sync_pending: bool,
+    last_ssl_sync_error: Option<String>,
 }
 
 impl InstanceState {
@@ -27,11 +30,11 @@ impl InstanceState {
         match serde_json::to_string_pretty(&self.state) {
             Ok(json) => {
                 if let Err(e) = self.wal.compact(json).await {
-                    eprintln!("[ControlPlane] Failed to compact {}: {}", self.state_path, e);
+                    error!(state_path = %self.state_path, error = %e, "failed to compact state");
                 }
             }
             Err(e) => {
-                eprintln!("[ControlPlane] Failed to serialize state for compact: {}", e);
+                error!(state_path = %self.state_path, error = %e, "failed to serialize state for compact");
             }
         }
     }
@@ -40,7 +43,11 @@ impl InstanceState {
     /// to ensure the current state is persisted despite the individual write failure.
     async fn wal_append(&mut self, entry: &WalEntry) {
         if let Err(e) = self.wal.append(entry.clone()).await {
-            eprintln!("[ControlPlane] WAL append failed: {}. Attempting compact as fallback...", e);
+            error!(
+                state_path = %self.state_path,
+                error = %e,
+                "WAL append failed; attempting compact fallback"
+            );
             self.do_compact().await;
         }
     }
@@ -57,6 +64,13 @@ pub struct ControlPlane {
     pub base_state_path: String,
     ssl_manager: Arc<SslManager>,
     chains: RwLock<Vec<ServiceChain>>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SslSyncStatus {
+    InSync,
+    Repaired,
+    Pending,
 }
 
 #[derive(Debug)]
@@ -122,10 +136,7 @@ impl ControlPlane {
         let global_ssl_enabled = match self.read_ssl_global_config().await {
             Ok(enabled) => Some(enabled),
             Err(e) => {
-                eprintln!(
-                    "[ControlPlane] Warning: failed to read global SSL config during register for {}: {}",
-                    name, e
-                );
+                warn!(instance = %name, error = %e, "failed to read global SSL config during register");
                 None
             }
         };
@@ -161,11 +172,11 @@ impl ControlPlane {
             match serde_json::to_string_pretty(&state) {
                 Ok(json) => {
                     if let Err(e) = wal.compact(json).await {
-                        eprintln!("[ControlPlane] Failed to compact {} on register: {}", name, e);
+                        error!(instance = %name, error = %e, "failed to compact WAL on register");
                     }
                 }
                 Err(e) => {
-                    eprintln!("[ControlPlane] Failed to serialize {} on register: {}", name, e);
+                    error!(instance = %name, error = %e, "failed to serialize state on register");
                 }
             }
         }
@@ -175,21 +186,21 @@ impl ControlPlane {
             pin_path,
             state_path,
             wal,
+            ssl_sync_pending: false,
+            last_ssl_sync_error: None,
         }));
 
-        let instance_pin_path = {
-            let guard = instance.read().await;
-            guard.pin_path.clone()
-        };
+        let mut instances = self.instances.write().await;
+        instances.insert(name.to_string(), instance.clone());
+        drop(instances);
+
         if let Some(enabled) = global_ssl_enabled {
-            if let Err(e) = self.sync_pinned_ssl_config(&instance_pin_path, enabled) {
-                eprintln!("[ControlPlane] Warning: failed to sync SSL config for {}: {}", name, e);
-            }
+            let _ = self
+                .reconcile_instance_ssl_state(name, &instance, enabled)
+                .await;
         }
 
-        let mut instances = self.instances.write().await;
-        instances.insert(name.to_string(), instance);
-        println!("[ControlPlane] Registered instance: {}", name);
+        info!(instance = %name, "registered instance");
         Ok(())
     }
 
@@ -198,10 +209,7 @@ impl ControlPlane {
         let global_ssl_enabled = match self.read_ssl_global_config().await {
             Ok(enabled) => Some(enabled),
             Err(e) => {
-                eprintln!(
-                    "[ControlPlane] Warning: failed to read global SSL config during system register: {}",
-                    e
-                );
+                warn!(error = %e, "failed to read global SSL config during system register");
                 None
             }
         };
@@ -227,11 +235,11 @@ impl ControlPlane {
             match serde_json::to_string_pretty(&state) {
                 Ok(json) => {
                     if let Err(e) = wal.compact(json).await {
-                        eprintln!("[ControlPlane] Failed to compact system on register: {}", e);
+                        error!(instance = "system", error = %e, "failed to compact WAL on system register");
                     }
                 }
                 Err(e) => {
-                    eprintln!("[ControlPlane] Failed to serialize system on register: {}", e);
+                    error!(instance = "system", error = %e, "failed to serialize state on system register");
                 }
             }
         }
@@ -241,17 +249,21 @@ impl ControlPlane {
             pin_path: pin_path.to_string(),
             state_path: state_path.to_string(),
             wal,
+            ssl_sync_pending: false,
+            last_ssl_sync_error: None,
         }));
 
+        let mut instances = self.instances.write().await;
+        instances.insert("system".to_string(), instance.clone());
+        drop(instances);
+
         if let Some(enabled) = global_ssl_enabled {
-            if let Err(e) = self.sync_pinned_ssl_config(pin_path, enabled) {
-                eprintln!("[ControlPlane] Warning: failed to sync SSL config for system: {}", e);
-            }
+            let _ = self
+                .reconcile_instance_ssl_state("system", &instance, enabled)
+                .await;
         }
 
-        let mut instances = self.instances.write().await;
-        instances.insert("system".to_string(), instance);
-        println!("[ControlPlane] Registered system instance");
+        info!(instance = "system", "registered system instance");
         Ok(())
     }
 
@@ -264,7 +276,7 @@ impl ControlPlane {
             let mut state = inst.write().await;
             state.shutdown_wal().await;
         }
-        println!("[ControlPlane] Unregistered instance: {}", name);
+        info!(instance = %name, "unregistered instance");
     }
 
     /// List all registered instance names
@@ -450,7 +462,7 @@ impl ControlPlane {
                         &state.pin_path,
                         &self.ebpf_path,
                     ) {
-                        eprintln!("Warning: failed to clean new port bitmap after add_policy error: {}", cleanup_err);
+                        warn!(error = %cleanup_err, "failed to clean new port bitmap after add_policy error");
                     }
                 }
             }
@@ -465,7 +477,7 @@ impl ControlPlane {
         // Clean up old port set if replaced
         if let Some((old_idx, ref ports_normalized)) = add_result.old_port_set_released {
             if let Err(e) = aria_core::ebpf_ops::delete_port_set(old_idx, ports_normalized, &state.pin_path, &self.ebpf_path) {
-                eprintln!("Warning: failed to clean old port bitmap: {}", e);
+                warn!(error = %e, "failed to clean old port bitmap");
             }
         }
 
@@ -519,7 +531,7 @@ impl ControlPlane {
 
         if let (Some(idx), Some(ref ports_normalized)) = (remove_result.bitmap_idx, &remove_result.port_set_released) {
             if let Err(e) = aria_core::ebpf_ops::delete_port_set(idx, ports_normalized, &state.pin_path, &self.ebpf_path) {
-                eprintln!("Warning: failed to clean port bitmap: {}", e);
+                warn!(error = %e, "failed to clean port bitmap");
             }
         }
 
@@ -934,7 +946,8 @@ impl ControlPlane {
             .map_err(ControlPlaneError::KernelError)?;
         aria_core::ssl_ops::set_ssl_global_config(self.ssl_manager.pin_path(), enabled)
             .map_err(ControlPlaneError::KernelError)?;
-        self.sync_active_instance_ssl_state(enabled).await;
+        info!(enabled, "updated global SSL config");
+        self.reconcile_ssl_runtime_state_with_desired(enabled).await;
         Ok(())
     }
 
@@ -1273,8 +1286,9 @@ impl ControlPlane {
     }
 
     fn sync_pinned_ssl_config(&self, pin_path: &str, enabled: bool) -> Result<(), String> {
-        if !std::path::Path::new(&format!("{}/xdp_firewall", pin_path)).exists() {
-            return Ok(());
+        let cfg_path = format!("{}/FIREWALL_CONFIG", pin_path);
+        if !std::path::Path::new(&cfg_path).exists() {
+            return Err("FIREWALL_CONFIG map not ready".to_string());
         }
         aria_core::ebpf_ops::update_firewall_config(
             pin_path,
@@ -1288,28 +1302,103 @@ impl ControlPlane {
         )
     }
 
-    async fn sync_active_instance_ssl_state(&self, enabled: bool) {
-        let instances = self.instances.read().await;
-        for (name, inst) in instances.iter() {
-            let mut state = inst.write().await;
-
-            if let Err(e) = self.sync_pinned_ssl_config(&state.pin_path, enabled) {
-                eprintln!(
-                    "[ControlPlane] Warning: failed to sync runtime SSL flag for {}: {}",
-                    name, e
-                );
+    pub async fn reconcile_ssl_runtime_state(&self) {
+        let desired = match self.read_ssl_global_config().await {
+            Ok(enabled) => enabled,
+            Err(e) => {
+                warn!(error = %e, "failed to read global SSL config during periodic reconcile");
+                return;
             }
+        };
 
+        self.reconcile_ssl_runtime_state_with_desired(desired).await;
+    }
+
+    async fn reconcile_ssl_runtime_state_with_desired(&self, enabled: bool) {
+        let instances = self.instance_entries().await;
+        let mut repaired_instances = 0usize;
+
+        for (name, inst) in instances {
+            if self
+                .reconcile_instance_ssl_state(&name, &inst, enabled)
+                .await
+                == SslSyncStatus::Repaired
+            {
+                repaired_instances += 1;
+            }
+        }
+
+        if repaired_instances > 0 {
+            info!(enabled, repaired_instances, "reconciled runtime SSL config on pending instances");
+        }
+    }
+
+    async fn instance_entries(&self) -> Vec<(String, Arc<tokio::sync::RwLock<InstanceState>>)> {
+        let instances = self.instances.read().await;
+        instances
+            .iter()
+            .map(|(name, inst)| (name.clone(), inst.clone()))
+            .collect()
+    }
+
+    async fn reconcile_instance_ssl_state(
+        &self,
+        name: &str,
+        inst: &Arc<tokio::sync::RwLock<InstanceState>>,
+        enabled: bool,
+    ) -> SslSyncStatus {
+        let mut state = inst.write().await;
+
+        if state.state.ssl_enabled != enabled {
             state.state.ssl_enabled = enabled;
-            state.wal_append(&WalEntry::UpdateConfig {
-                conntrack: None,
-                monitoring: None,
-                acl: None,
-                qos: None,
-                mirror: None,
-                tcprt: None,
-                ssl: Some(enabled),
-            }).await;
+            state
+                .wal_append(&WalEntry::UpdateConfig {
+                    conntrack: None,
+                    monitoring: None,
+                    acl: None,
+                    qos: None,
+                    mirror: None,
+                    tcprt: None,
+                    ssl: Some(enabled),
+                })
+                .await;
+        }
+
+        match aria_core::ebpf_ops::read_firewall_config(&state.pin_path) {
+            Ok(cfg) if (cfg.ssl_enabled != 0) == enabled => {
+                if state.ssl_sync_pending {
+                    state.ssl_sync_pending = false;
+                    state.last_ssl_sync_error = None;
+                    info!(instance = %name, enabled, "runtime SSL config reconciled");
+                    return SslSyncStatus::Repaired;
+                }
+                return SslSyncStatus::InSync;
+            }
+            Ok(_) | Err(_) => {}
+        }
+
+        match self.sync_pinned_ssl_config(&state.pin_path, enabled) {
+            Ok(()) => {
+                let repaired = state.ssl_sync_pending;
+                state.ssl_sync_pending = false;
+                state.last_ssl_sync_error = None;
+                if repaired {
+                    info!(instance = %name, enabled, "runtime SSL config reconciled");
+                    SslSyncStatus::Repaired
+                } else {
+                    SslSyncStatus::InSync
+                }
+            }
+            Err(e) => {
+                let should_log = !state.ssl_sync_pending
+                    || state.last_ssl_sync_error.as_deref() != Some(e.as_str());
+                state.ssl_sync_pending = true;
+                state.last_ssl_sync_error = Some(e.clone());
+                if should_log {
+                    warn!(instance = %name, enabled, error = %e, "failed to sync runtime SSL config");
+                }
+                SslSyncStatus::Pending
+            }
         }
     }
 

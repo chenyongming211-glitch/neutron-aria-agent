@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
+use tracing::{info, warn};
 
 use crate::state::FirewallState;
 
@@ -325,7 +326,7 @@ impl WalActor {
                 }
                 WalMessage::Shutdown { ack } => {
                     if let Err(e) = self.wal.sync() {
-                        eprintln!("[WAL Actor] Warning: final sync on shutdown failed: {}", e);
+                        warn!(error = %e, "final WAL sync on shutdown failed");
                     }
                     let _ = ack.send(());
                     break;
@@ -341,7 +342,7 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) {
     match entry {
         WalEntry::AddGroup { name, cidr } => {
             if let Err(e) = state.add_group(&name, &cidr) {
-                eprintln!("[WAL replay] AddGroup error: {}", e);
+                warn!(error = %e, group = %name, cidr = %cidr, "WAL replay AddGroup failed");
             }
         }
         WalEntry::DeleteGroup { name } => {
@@ -350,12 +351,12 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) {
         WalEntry::AddRule { src_id, dst_id, proto, action, ports, direction } => {
             let ports_ref = ports.as_deref();
             if let Err(e) = state.apply_add_rule(src_id, dst_id, proto, action, ports_ref, direction) {
-                eprintln!("[WAL replay] AddRule error: {}", e);
+                warn!(error = %e, src_id, dst_id, proto, direction, "WAL replay AddRule failed");
             }
         }
         WalEntry::RemoveRule { src_id, dst_id, proto, direction } => {
             if let Err(e) = state.apply_remove_rule(src_id, dst_id, proto, direction) {
-                eprintln!("[WAL replay] RemoveRule error: {}", e);
+                warn!(error = %e, src_id, dst_id, proto, direction, "WAL replay RemoveRule failed");
             }
         }
         WalEntry::AddQos { group_name, group_id, direction, rate_bps, burst_bytes, priority, mode } => {
@@ -442,7 +443,7 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
     let mut state = if let Ok(contents) = fs::read_to_string(&state_file) {
         if !contents.is_empty() {
             serde_json::from_str(&contents).unwrap_or_else(|e| {
-                eprintln!("[WAL] Failed to parse snapshot: {}, using default", e);
+                warn!(path = %state_file, error = %e, "failed to parse snapshot; using default state");
                 FirewallState::default()
             })
         } else {
@@ -469,18 +470,18 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
                             replayed += 1;
                         }
                         Err(e) => {
-                            eprintln!("[WAL] Skipping corrupt entry at line {}: {}", line_num + 1, e);
+                            warn!(path = %wal_path, line = line_num + 1, error = %e, "skipping corrupt WAL entry");
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("[WAL] Read error at line {}: {}", line_num + 1, e);
+                    warn!(path = %wal_path, line = line_num + 1, error = %e, "read error while replaying WAL");
                     break;
                 }
             }
         }
         if replayed > 0 {
-            println!("[WAL] Replayed {} entries from {}", replayed, wal_path);
+            info!(path = %wal_path, replayed, "replayed WAL entries");
         }
     }
 
