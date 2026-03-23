@@ -162,6 +162,17 @@ async fn main() {
         control_plane.clone(),
     ));
 
+    let router = api_routes::build_router(control_plane.clone());
+    let listen_addr = config.listen_addr.clone();
+    let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Error: failed to bind HTTP server to {}: {}", listen_addr, e);
+            std::process::exit(1);
+        }
+    };
+
+    // Bind before starting background tasks so we fail before any interfaces are attached.
     // Start netlink monitoring
     let registry_clone = registry.clone();
     let netlink_task = tokio::spawn(async move {
@@ -183,16 +194,7 @@ async fn main() {
     });
 
     // Start HTTP server
-    let router = api_routes::build_router(control_plane.clone());
-    let listen_addr = config.listen_addr.clone();
     let http_task = tokio::spawn(async move {
-        let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("Error: failed to bind HTTP server to {}: {}", listen_addr, e);
-                std::process::exit(1);
-            }
-        };
         println!("HTTP API server listening on {}", listen_addr);
         if let Err(e) = axum::serve(listener, router).await {
             eprintln!("HTTP server error: {}", e);

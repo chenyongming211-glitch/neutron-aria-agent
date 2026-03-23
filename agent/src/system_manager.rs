@@ -7,6 +7,17 @@ use aria_core::ebpf_ops::{
     replay_state, NETWORK_MAP_NAMES,
 };
 
+fn cleanup_failed_start(iface: &str, pin_path: &str) {
+    let _ = std::process::Command::new("ip")
+        .args(["link", "set", "dev", iface, "xdp", "off"])
+        .output();
+    detach_tc_egress(iface);
+    let _ = std::process::Command::new("tc")
+        .args(["qdisc", "del", "dev", iface, "root"])
+        .output();
+    let _ = fs::remove_dir_all(pin_path);
+}
+
 /// Start the system firewall (standalone mode, not tap-managed)
 pub async fn system_start(
     iface: &str,
@@ -93,11 +104,17 @@ pub async fn system_start(
 
     // Pin runtime programs.
     for name in &["xdp_firewall", "tc_egress", "tc_ingress"] {
-        let program = bpf
-            .program_mut(name)
-            .ok_or_else(|| format!("Program {} not found", name))?;
-        program.pin(format!("{}/{}", pin_path, name))
-            .map_err(|e| format!("Failed to pin program {}: {:?}", name, e))?;
+        let program = match bpf.program_mut(name) {
+            Some(program) => program,
+            None => {
+                cleanup_failed_start(iface, pin_path);
+                return Err(format!("Program {} not found", name));
+            }
+        };
+        if let Err(e) = program.pin(format!("{}/{}", pin_path, name)) {
+            cleanup_failed_start(iface, pin_path);
+            return Err(format!("Failed to pin program {}: {:?}", name, e));
+        }
     }
 
     // Record attached iface
@@ -110,7 +127,10 @@ pub async fn system_start(
     replay_state(&mut bpf, state_path);
 
     // Register with control plane
-    control_plane.register_system_instance(pin_path, state_path).await;
+    if let Err(e) = control_plane.register_system_instance(pin_path, state_path).await {
+        cleanup_failed_start(iface, pin_path);
+        return Err(format!("control-plane register failed: {}", e));
+    }
 
     println!("eBPF system started successfully on {}", iface);
     Ok(())

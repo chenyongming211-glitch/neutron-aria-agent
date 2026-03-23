@@ -97,8 +97,16 @@ impl TapRegistry {
 
         instance.attach(self.ebpf_path.to_str().unwrap())?;
 
-        // Register with ControlPlane
-        self.control_plane.register_instance(iface).await;
+        // Only expose the instance after state/WAL registration succeeds.
+        if let Err(e) = self.control_plane.register_instance(iface).await {
+            if let Err(detach_err) = instance.detach() {
+                eprintln!(
+                    "[{}] Warning: failed to roll back attach after register failure: {}",
+                    iface, detach_err
+                );
+            }
+            return Err(format!("control-plane register failed: {}", e));
+        }
 
         let mut instances = self.instances.write().await;
         instances.insert(iface.to_string(), instance);

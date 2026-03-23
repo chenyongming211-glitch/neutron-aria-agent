@@ -82,15 +82,22 @@ jobs:
           echo "=== release contents ==="
           ls -la release/
 
+      - name: Create release archive
+        run: |
+          cd release
+          zip -r ../firewall-binaries-x86_64.zip .
+          cd ..
+          ls -lh firewall-binaries-x86_64.zip
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: firewall-binaries-x86_64
-          path: release/
+          path: firewall-binaries-x86_64.zip
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: release/*
+          files: firewall-binaries-x86_64.zip
           generate_release_notes: true

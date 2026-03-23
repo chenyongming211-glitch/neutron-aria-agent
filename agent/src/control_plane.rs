@@ -108,7 +108,7 @@ impl ControlPlane {
 
     /// Register an instance (called when TapRegistry attaches a tap).
     /// If already registered, compacts state first to avoid data loss.
-    pub async fn register_instance(&self, name: &str) {
+    pub async fn register_instance(&self, name: &str) -> Result<(), String> {
         let pin_path = format!("{}/{}", self.base_pin_path, name);
         let state_path = format!("{}/{}", self.base_state_path, name);
         let global_ssl_enabled = match self.read_ssl_global_config().await {
@@ -144,8 +144,7 @@ impl ControlPlane {
         let mut wal = match WalWriter::open(&state_path) {
             Ok(w) => w,
             Err(e) => {
-                eprintln!("[ControlPlane] Failed to open WAL for {}: {}", name, e);
-                return;
+                return Err(format!("failed to open WAL for {}: {}", name, e));
             }
         };
 
@@ -183,10 +182,11 @@ impl ControlPlane {
         let mut instances = self.instances.write().await;
         instances.insert(name.to_string(), instance);
         println!("[ControlPlane] Registered instance: {}", name);
+        Ok(())
     }
 
     /// Register the "system" instance (standalone mode)
-    pub async fn register_system_instance(&self, pin_path: &str, state_path: &str) {
+    pub async fn register_system_instance(&self, pin_path: &str, state_path: &str) -> Result<(), String> {
         let global_ssl_enabled = match self.read_ssl_global_config().await {
             Ok(enabled) => Some(enabled),
             Err(e) => {
@@ -210,8 +210,7 @@ impl ControlPlane {
         let mut wal = match WalWriter::open(state_path) {
             Ok(w) => w,
             Err(e) => {
-                eprintln!("[ControlPlane] Failed to open WAL for system: {}", e);
-                return;
+                return Err(format!("failed to open WAL for system: {}", e));
             }
         };
 
@@ -245,6 +244,7 @@ impl ControlPlane {
         let mut instances = self.instances.write().await;
         instances.insert("system".to_string(), instance);
         println!("[ControlPlane] Registered system instance");
+        Ok(())
     }
 
     /// Unregister an instance (called when TapRegistry detaches)
@@ -270,9 +270,11 @@ impl ControlPlane {
     }
 
     fn check_xdp_ready(pin_path: &str) -> Result<(), ControlPlaneError> {
-        let prog_path = format!("{}/xdp_firewall", pin_path);
-        if !std::path::Path::new(&prog_path).exists() {
-            return Err(ControlPlaneError::InstanceNotReady("XDP not attached".to_string()));
+        let cfg_path = format!("{}/FIREWALL_CONFIG", pin_path);
+        if !std::path::Path::new(&cfg_path).exists() {
+            return Err(ControlPlaneError::InstanceNotReady(
+                "Pinned firewall maps not ready".to_string(),
+            ));
         }
         Ok(())
     }
