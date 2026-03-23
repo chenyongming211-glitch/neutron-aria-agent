@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::RwLock;
 
 use aria_core::state::{FirewallState, GroupInfo, RuleInfo, QosRuleInfo, MirrorRuleInfo};
-use aria_core::wal::{WalEntry, WalWriter};
+use aria_core::wal::{WalClient, WalEntry};
 use crate::service_chain::{ServiceChain, self};
 use crate::ssl_manager::SslManager;
 
@@ -14,84 +14,20 @@ struct InstanceState {
     state: FirewallState,
     pin_path: String,
     state_path: String,
-    wal_tx: mpsc::Sender<WalCommand>,
-}
-
-enum WalCommand {
-    Append {
-        entry: WalEntry,
-        ack: oneshot::Sender<Result<(), String>>,
-    },
-    Compact {
-        state_json: String,
-        ack: oneshot::Sender<Result<(), String>>,
-    },
-    NeedsCompact {
-        threshold: u64,
-        ack: oneshot::Sender<bool>,
-    },
-    Shutdown {
-        ack: oneshot::Sender<()>,
-    },
-}
-
-fn spawn_wal_actor(mut wal: WalWriter) -> mpsc::Sender<WalCommand> {
-    let (tx, mut rx) = mpsc::channel(128);
-    tokio::task::spawn_blocking(move || {
-        while let Some(cmd) = rx.blocking_recv() {
-            match cmd {
-                WalCommand::Append { entry, ack } => {
-                    let _ = ack.send(wal.append(&entry));
-                }
-                WalCommand::Compact { state_json, ack } => {
-                    let _ = ack.send(wal.compact(&state_json));
-                }
-                WalCommand::NeedsCompact { threshold, ack } => {
-                    let _ = ack.send(wal.needs_compact(threshold));
-                }
-                WalCommand::Shutdown { ack } => {
-                    let _ = ack.send(());
-                    break;
-                }
-            }
-        }
-    });
-    tx
+    wal: WalClient,
 }
 
 impl InstanceState {
-    async fn wal_needs_compact(&self, threshold: u64) -> bool {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        if self.wal_tx.send(WalCommand::NeedsCompact {
-            threshold,
-            ack: ack_tx,
-        }).await.is_err() {
-            eprintln!("[ControlPlane] WAL actor unavailable during needs_compact for {}", self.state_path);
-            return false;
-        }
-        ack_rx.await.unwrap_or(false)
+    fn wal_needs_compact(&self, threshold: u64) -> bool {
+        self.wal.needs_compact(threshold)
     }
 
     /// Serialize state then compact WAL. Avoids borrow conflict between wal and state.
     async fn do_compact(&mut self) {
         match serde_json::to_string_pretty(&self.state) {
             Ok(json) => {
-                let (ack_tx, ack_rx) = oneshot::channel();
-                if self.wal_tx.send(WalCommand::Compact {
-                    state_json: json,
-                    ack: ack_tx,
-                }).await.is_err() {
-                    eprintln!("[ControlPlane] WAL actor unavailable during compact for {}", self.state_path);
-                    return;
-                }
-                match ack_rx.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        eprintln!("[ControlPlane] Failed to compact {}: {}", self.state_path, e);
-                    }
-                    Err(_) => {
-                        eprintln!("[ControlPlane] WAL actor dropped compact ack for {}", self.state_path);
-                    }
+                if let Err(e) = self.wal.compact(json).await {
+                    eprintln!("[ControlPlane] Failed to compact {}: {}", self.state_path, e);
                 }
             }
             Err(e) => {
@@ -103,34 +39,14 @@ impl InstanceState {
     /// Append a WAL entry. If append fails, attempt a full compact as fallback
     /// to ensure the current state is persisted despite the individual write failure.
     async fn wal_append(&mut self, entry: &WalEntry) {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        if self.wal_tx.send(WalCommand::Append {
-            entry: entry.clone(),
-            ack: ack_tx,
-        }).await.is_err() {
-            eprintln!("[ControlPlane] WAL actor unavailable. Attempting compact as fallback...");
+        if let Err(e) = self.wal.append(entry.clone()).await {
+            eprintln!("[ControlPlane] WAL append failed: {}. Attempting compact as fallback...", e);
             self.do_compact().await;
-            return;
-        }
-
-        match ack_rx.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                eprintln!("[ControlPlane] WAL append failed: {}. Attempting compact as fallback...", e);
-                self.do_compact().await;
-            }
-            Err(_) => {
-                eprintln!("[ControlPlane] WAL actor dropped append ack. Attempting compact as fallback...");
-                self.do_compact().await;
-            }
         }
     }
 
     async fn shutdown_wal(&mut self) {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        if self.wal_tx.send(WalCommand::Shutdown { ack: ack_tx }).await.is_ok() {
-            let _ = ack_rx.await;
-        }
+        self.wal.shutdown().await;
     }
 }
 
@@ -233,7 +149,7 @@ impl ControlPlane {
             }
         }
 
-        let mut wal = match WalWriter::open(&state_path) {
+        let wal = match WalClient::open(&state_path) {
             Ok(w) => w,
             Err(e) => {
                 return Err(format!("failed to open WAL for {}: {}", name, e));
@@ -244,7 +160,7 @@ impl ControlPlane {
         if wal.entry_count() > 0 || ssl_changed {
             match serde_json::to_string_pretty(&state) {
                 Ok(json) => {
-                    if let Err(e) = wal.compact(&json) {
+                    if let Err(e) = wal.compact(json).await {
                         eprintln!("[ControlPlane] Failed to compact {} on register: {}", name, e);
                     }
                 }
@@ -254,13 +170,11 @@ impl ControlPlane {
             }
         }
 
-        let wal_tx = spawn_wal_actor(wal);
-
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             pin_path,
             state_path,
-            wal_tx,
+            wal,
         }));
 
         let instance_pin_path = {
@@ -301,7 +215,7 @@ impl ControlPlane {
             }
         }
 
-        let mut wal = match WalWriter::open(state_path) {
+        let wal = match WalClient::open(state_path) {
             Ok(w) => w,
             Err(e) => {
                 return Err(format!("failed to open WAL for system: {}", e));
@@ -312,7 +226,7 @@ impl ControlPlane {
         if wal.entry_count() > 0 || ssl_changed {
             match serde_json::to_string_pretty(&state) {
                 Ok(json) => {
-                    if let Err(e) = wal.compact(&json) {
+                    if let Err(e) = wal.compact(json).await {
                         eprintln!("[ControlPlane] Failed to compact system on register: {}", e);
                     }
                 }
@@ -322,13 +236,11 @@ impl ControlPlane {
             }
         }
 
-        let wal_tx = spawn_wal_actor(wal);
-
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             pin_path: pin_path.to_string(),
             state_path: state_path.to_string(),
-            wal_tx,
+            wal,
         }));
 
         if let Some(enabled) = global_ssl_enabled {
@@ -1310,7 +1222,7 @@ impl ControlPlane {
         let instances = self.instances.read().await;
         for (_name, inst) in instances.iter() {
             let mut state = inst.write().await;
-            if state.wal_needs_compact(WAL_COMPACT_THRESHOLD).await {
+            if state.wal_needs_compact(WAL_COMPACT_THRESHOLD) {
                 state.do_compact().await;
             }
         }

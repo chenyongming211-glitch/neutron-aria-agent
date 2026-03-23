@@ -2,12 +2,17 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Instant;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::state::FirewallState;
 
 /// Time-based compact interval (5 minutes)
 const WAL_COMPACT_INTERVAL_SECS: u64 = 300;
+const MAX_BATCH_SIZE: usize = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WalEntry {
@@ -68,19 +73,27 @@ impl WalWriter {
         })
     }
 
-    pub fn append(&mut self, entry: &WalEntry) -> Result<(), String> {
+    fn append_buffered(&mut self, entry: &WalEntry) -> Result<(), String> {
         let line = serde_json::to_string(entry)
             .map_err(|e| format!("Failed to serialize WAL entry: {}", e))?;
         self.file.write_all(line.as_bytes())
             .map_err(|e| format!("Failed to write WAL entry: {}", e))?;
         self.file.write_all(b"\n")
             .map_err(|e| format!("Failed to write WAL newline: {}", e))?;
+        self.entry_count += 1;
+        Ok(())
+    }
+
+    fn sync(&mut self) -> Result<(), String> {
         self.file.flush()
             .map_err(|e| format!("Failed to flush WAL: {}", e))?;
         self.file.get_ref().sync_all()
-            .map_err(|e| format!("Failed to fsync WAL: {}", e))?;
-        self.entry_count += 1;
-        Ok(())
+            .map_err(|e| format!("Failed to fsync WAL: {}", e))
+    }
+
+    pub fn append(&mut self, entry: &WalEntry) -> Result<(), String> {
+        self.append_buffered(entry)?;
+        self.sync()
     }
 
     pub fn entry_count(&self) -> u64 {
@@ -130,6 +143,186 @@ impl WalWriter {
         self.last_compact_time = Instant::now();
 
         Ok(())
+    }
+}
+
+pub enum WalMessage {
+    Append {
+        entry: WalEntry,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    Compact {
+        state_json: String,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    Shutdown {
+        ack: oneshot::Sender<()>,
+    },
+}
+
+#[derive(Clone)]
+pub struct WalClient {
+    sender: mpsc::Sender<WalMessage>,
+    entry_count: Arc<AtomicU64>,
+    last_compact_time: Arc<Mutex<Instant>>,
+}
+
+impl WalClient {
+    pub fn open(state_path: &str) -> Result<Self, String> {
+        let wal = WalWriter::open(state_path)?;
+        let entry_count = Arc::new(AtomicU64::new(wal.entry_count()));
+        let last_compact_time = Arc::new(Mutex::new(Instant::now()));
+        let (sender, receiver) = mpsc::channel(1024);
+
+        let actor = WalActor {
+            wal,
+            receiver,
+            entry_count: entry_count.clone(),
+            last_compact_time: last_compact_time.clone(),
+        };
+
+        thread::Builder::new()
+            .name("aria-wal-worker".to_string())
+            .spawn(move || actor.run())
+            .map_err(|e| format!("Failed to spawn WAL thread: {}", e))?;
+
+        Ok(Self {
+            sender,
+            entry_count,
+            last_compact_time,
+        })
+    }
+
+    pub async fn append(&self, entry: WalEntry) -> Result<(), String> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.sender
+            .send(WalMessage::Append { entry, ack: ack_tx })
+            .await
+            .map_err(|_| "WAL worker thread died".to_string())?;
+        ack_rx
+            .await
+            .unwrap_or_else(|_| Err("WAL ack channel dropped".to_string()))
+    }
+
+    pub async fn compact(&self, state_json: String) -> Result<(), String> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.sender
+            .send(WalMessage::Compact { state_json, ack: ack_tx })
+            .await
+            .map_err(|_| "WAL worker thread died".to_string())?;
+        ack_rx
+            .await
+            .unwrap_or_else(|_| Err("WAL ack channel dropped".to_string()))
+    }
+
+    pub async fn shutdown(&self) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self.sender.send(WalMessage::Shutdown { ack: ack_tx }).await.is_ok() {
+            let _ = ack_rx.await;
+        }
+    }
+
+    pub fn entry_count(&self) -> u64 {
+        self.entry_count.load(Ordering::Relaxed)
+    }
+
+    pub fn needs_compact(&self, threshold: u64) -> bool {
+        let count = self.entry_count();
+        if count == 0 {
+            return false;
+        }
+        let elapsed = self
+            .last_compact_time
+            .lock()
+            .map(|guard| guard.elapsed().as_secs())
+            .unwrap_or(0);
+        count >= threshold || elapsed >= WAL_COMPACT_INTERVAL_SECS
+    }
+}
+
+struct WalActor {
+    wal: WalWriter,
+    receiver: mpsc::Receiver<WalMessage>,
+    entry_count: Arc<AtomicU64>,
+    last_compact_time: Arc<Mutex<Instant>>,
+}
+
+impl WalActor {
+    fn run(mut self) {
+        let mut deferred: Option<WalMessage> = None;
+
+        loop {
+            let msg = match deferred.take() {
+                Some(msg) => msg,
+                None => match self.receiver.blocking_recv() {
+                    Some(msg) => msg,
+                    None => break,
+                },
+            };
+
+            match msg {
+                WalMessage::Append { entry, ack } => {
+                    let mut acks = Vec::with_capacity(MAX_BATCH_SIZE);
+                    let mut appended = 0u64;
+
+                    match self.wal.append_buffered(&entry) {
+                        Ok(()) => {
+                            acks.push(ack);
+                            appended += 1;
+                        }
+                        Err(e) => {
+                            let _ = ack.send(Err(e));
+                            continue;
+                        }
+                    }
+
+                    while acks.len() < MAX_BATCH_SIZE {
+                        match self.receiver.try_recv() {
+                            Ok(WalMessage::Append { entry, ack }) => {
+                                match self.wal.append_buffered(&entry) {
+                                    Ok(()) => {
+                                        acks.push(ack);
+                                        appended += 1;
+                                    }
+                                    Err(e) => {
+                                        let _ = ack.send(Err(e));
+                                        break;
+                                    }
+                                }
+                            }
+                            Ok(other) => {
+                                deferred = Some(other);
+                                break;
+                            }
+                            Err(mpsc::error::TryRecvError::Empty) => break,
+                            Err(mpsc::error::TryRecvError::Disconnected) => break,
+                        }
+                    }
+
+                    let result = self.wal.sync();
+                    if result.is_ok() {
+                        self.entry_count.fetch_add(appended, Ordering::Relaxed);
+                    }
+                    for ack in acks {
+                        let _ = ack.send(result.clone());
+                    }
+                }
+                WalMessage::Compact { state_json, ack } => {
+                    let result = self.wal.compact(&state_json);
+                    if result.is_ok() {
+                        self.entry_count.store(0, Ordering::Relaxed);
+                        if let Ok(mut guard) = self.last_compact_time.lock() {
+                            *guard = Instant::now();
+                        }
+                    }
+                    let _ = ack.send(result);
+                }
+                WalMessage::Shutdown { ack } => {
+                    let _ = ack.send(());
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -511,6 +704,52 @@ mod tests {
         // Re-open and verify count resumes
         let wal = WalWriter::open(&state_path).unwrap();
         assert_eq!(wal.entry_count(), 3);
+
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wal_client_append_and_load_roundtrip() {
+        let state_path = temp_state_path();
+
+        let wal = WalClient::open(&state_path).unwrap();
+        wal.append(WalEntry::AddGroup {
+            name: "web".to_string(),
+            cidr: "10.0.0.0/24".to_string(),
+        }).await.unwrap();
+        wal.append(WalEntry::AddGroup {
+            name: "db".to_string(),
+            cidr: "10.0.1.0/24".to_string(),
+        }).await.unwrap();
+        wal.shutdown().await;
+
+        let loaded = load_with_wal(&state_path);
+        assert!(loaded.groups.contains_key("web"));
+        assert!(loaded.groups.contains_key("db"));
+
+        let _ = fs::remove_dir_all(&state_path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wal_client_compact_clears_wal_and_persists_snapshot() {
+        let state_path = temp_state_path();
+
+        let wal = WalClient::open(&state_path).unwrap();
+        wal.append(WalEntry::AddGroup {
+            name: "web".to_string(),
+            cidr: "10.0.0.0/24".to_string(),
+        }).await.unwrap();
+
+        let mut state = FirewallState::default();
+        state.add_group("web", "10.0.0.0/24").unwrap();
+        wal.compact(serde_json::to_string_pretty(&state).unwrap()).await.unwrap();
+        wal.shutdown().await;
+
+        let wal_contents = fs::read_to_string(format!("{}/state.wal", state_path)).unwrap();
+        assert!(wal_contents.is_empty(), "WAL should be empty after compact");
+
+        let loaded = load_with_wal(&state_path);
+        assert!(loaded.groups.contains_key("web"));
 
         let _ = fs::remove_dir_all(&state_path);
     }
