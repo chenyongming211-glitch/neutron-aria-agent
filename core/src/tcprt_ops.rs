@@ -119,7 +119,7 @@ fn value_to_entry(src_ip: String, dst_ip: String, src_port: u16, dst_port: u16, 
 
 /// Compute NQA (Network Quality Assessment) score 0-100.
 /// Deducts for retransmissions, ART/RTT ratio, and absolute RTT.
-fn compute_nqa_score(val: &TcpRtValue) -> u8 {
+pub(crate) fn compute_nqa_score(val: &TcpRtValue) -> u8 {
     let req_count = val.request_count.max(1) as f64;
     let total_retrans = (val.retrans_req + val.retrans_resp) as f64;
     let retrans_rate = total_retrans / (req_count * 2.0);

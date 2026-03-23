@@ -2,9 +2,10 @@ use aya::maps::{HashMap, MapData, PerCpuHashMap, PerCpuValues};
 use crate::common::{
     PolicyKey, RuleStatsValue, FlowStatsValue, CtKey4, CtKey6, CtValue, CT_NEW, CT_ESTABLISHED,
     QosKey, QosStatsValue, GroupStatsKey, GroupStatsValue,
-    MirrorKey, GlobalMirrorKey, MirrorStatsValue,
+    MirrorKey, GlobalMirrorKey, MirrorStatsValue, TcpRtValue,
 };
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::path::Path;
 
 pub struct RuleStatsEntry {
     pub key: PolicyKey,
@@ -440,6 +441,119 @@ pub fn get_mirror_stats(pin_path: &str) -> Result<Vec<MirrorStatsEntry>, String>
 }
 
 // --- TCP-RT Statistics ---
+
+const LATENCY_BUCKET_BOUNDARIES_US: [f64; 9] = [
+    1_000.0,
+    5_000.0,
+    10_000.0,
+    50_000.0,
+    100_000.0,
+    500_000.0,
+    1_000_000.0,
+    5_000_000.0,
+    10_000_000.0,
+];
+
+#[derive(Debug, Clone, Default)]
+pub struct TcprtMetricsSummary {
+    pub flows: u64,
+    pub retrans_req: u64,
+    pub retrans_resp: u64,
+    pub requests: u64,
+    pub handshake_sum_us: f64,
+    pub art_sum_us: f64,
+    pub rtt_client_sum_us: f64,
+    pub rtt_server_sum_us: f64,
+    pub nqa_sum: f64,
+    pub art_count: u64,
+    pub art_bucket_counts: [u64; 9],
+    pub art_sum_seconds: f64,
+}
+
+fn accumulate_tcprt_value(summary: &mut TcprtMetricsSummary, val: &TcpRtValue) {
+    let handshake_us = val.handshake_ns as f64 / 1000.0;
+    let art_us = val.art_ns as f64 / 1000.0;
+    let rtt_client_us = val.rtt_client_ns as f64 / 1000.0;
+    let rtt_server_us = val.rtt_server_ns as f64 / 1000.0;
+
+    summary.flows += 1;
+    summary.retrans_req += val.retrans_req as u64;
+    summary.retrans_resp += val.retrans_resp as u64;
+    summary.requests += val.request_count as u64;
+    summary.handshake_sum_us += handshake_us;
+    summary.art_sum_us += art_us;
+    summary.rtt_client_sum_us += rtt_client_us;
+    summary.rtt_server_sum_us += rtt_server_us;
+    summary.nqa_sum += crate::tcprt_ops::compute_nqa_score(val) as f64;
+
+    if art_us > 0.0 {
+        summary.art_count += 1;
+        summary.art_sum_seconds += art_us / 1_000_000.0;
+        for (idx, boundary) in LATENCY_BUCKET_BOUNDARIES_US.iter().enumerate() {
+            if art_us <= *boundary {
+                summary.art_bucket_counts[idx] += 1;
+            }
+        }
+    }
+}
+
+fn collect_tcprt_metrics_v4(pin_path: &str, summary: &mut TcprtMetricsSummary) -> Result<bool, String> {
+    let map_path = format!("{}/TCPRT_TABLE_V4", pin_path);
+    if !Path::new(&map_path).exists() {
+        return Ok(false);
+    }
+
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open TCPRT_TABLE_V4: {:?}", e))?;
+    let map = HashMap::<_, CtKey4, TcpRtValue>::try_from(
+        aya::maps::Map::LruHashMap(map_data)
+    ).map_err(|e| format!("convert TCPRT_TABLE_V4: {:?}", e))?;
+
+    for item in map.iter() {
+        if let Ok((_key, val)) = item {
+            accumulate_tcprt_value(summary, &val);
+        }
+    }
+
+    Ok(true)
+}
+
+fn collect_tcprt_metrics_v6(pin_path: &str, summary: &mut TcprtMetricsSummary) -> Result<bool, String> {
+    let map_path = format!("{}/TCPRT_TABLE_V6", pin_path);
+    if !Path::new(&map_path).exists() {
+        return Ok(false);
+    }
+
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open TCPRT_TABLE_V6: {:?}", e))?;
+    let map = HashMap::<_, CtKey6, TcpRtValue>::try_from(
+        aya::maps::Map::LruHashMap(map_data)
+    ).map_err(|e| format!("convert TCPRT_TABLE_V6: {:?}", e))?;
+
+    for item in map.iter() {
+        if let Ok((_key, val)) = item {
+            accumulate_tcprt_value(summary, &val);
+        }
+    }
+
+    Ok(true)
+}
+
+/// Best-effort aggregate over a live TCP-RT map. This is not a snapshot read:
+/// entries may be added or removed while iteration is in progress.
+pub fn get_tcprt_metrics_summary(pin_path: &str) -> Result<Option<TcprtMetricsSummary>, String> {
+    let mut summary = TcprtMetricsSummary::default();
+    let mut available = false;
+
+    available |= collect_tcprt_metrics_v4(pin_path, &mut summary)?;
+    available |= collect_tcprt_metrics_v6(pin_path, &mut summary)?;
+
+    if !available {
+        return Ok(None);
+    }
+
+    Ok(Some(summary))
+}
 
 pub fn get_tcprt_stats(pin_path: &str, top_n: usize) -> Result<Vec<crate::tcprt_ops::TcpRtEntry>, String> {
     let mut entries = crate::tcprt_ops::get_tcprt_flows_v4(pin_path).unwrap_or_default();

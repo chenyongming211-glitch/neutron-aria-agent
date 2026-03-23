@@ -1017,6 +1017,16 @@ impl ControlPlane {
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
+    pub async fn get_tcprt_metrics_summary(
+        &self,
+        instance: &str,
+    ) -> Result<Option<aria_core::monitoring::TcprtMetricsSummary>, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        aria_core::monitoring::get_tcprt_metrics_summary(&state.pin_path)
+            .map_err(ControlPlaneError::KernelError)
+    }
+
     pub async fn flush_tcprt(&self, instance: &str) -> Result<u64, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
@@ -1038,6 +1048,15 @@ impl ControlPlane {
             .map_err(ControlPlaneError::KernelError)?;
         entries.truncate(top);
         Ok(entries)
+    }
+
+    pub async fn get_ssl_metrics_summary(
+        &self,
+    ) -> Result<Option<aria_core::ssl_ops::SslMetricsSummary>, ControlPlaneError> {
+        self.ssl_manager.ensure_loaded().await
+            .map_err(ControlPlaneError::KernelError)?;
+        aria_core::ssl_ops::get_ssl_metrics_summary(self.ssl_manager.pin_path())
+            .map_err(ControlPlaneError::KernelError)
     }
 
     pub async fn flush_ssl(&self, instance: &str) -> Result<u64, ControlPlaneError> {
@@ -1066,6 +1085,15 @@ impl ControlPlane {
             .map_err(ControlPlaneError::KernelError)?;
         entries.truncate(top);
         Ok(entries)
+    }
+
+    pub async fn get_ssl_http_metrics_summary(
+        &self,
+    ) -> Result<Option<aria_core::ssl_ops::SslHttpMetricsSummary>, ControlPlaneError> {
+        self.ssl_manager.ensure_loaded().await
+            .map_err(ControlPlaneError::KernelError)?;
+        aria_core::ssl_ops::get_ssl_http_metrics_summary(self.ssl_manager.pin_path())
+            .map_err(ControlPlaneError::KernelError)
     }
 
     pub async fn flush_ssl_http(&self, instance: &str) -> Result<u64, ControlPlaneError> {

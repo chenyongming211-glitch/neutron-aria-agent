@@ -1,12 +1,16 @@
 use std::fmt::Write;
 use std::sync::Arc;
+use async_stream::stream;
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::IntoResponse,
     Json,
 };
+use bytes::Bytes;
 use serde::Deserialize;
+use tracing::warn;
 
 use aria_api::*;
 use crate::control_plane::{ControlPlane, ControlPlaneError};
@@ -1509,352 +1513,389 @@ pub async fn flush_trace(
 
 // ── Prometheus Metrics ──
 
+const METRICS_CHUNK_SIZE: usize = 16 * 1024;
+const LATENCY_BUCKET_LABELS: [&str; 9] = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10"];
+
 fn prom_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
 }
 
+fn flush_metrics_chunk(buf: &mut String, force: bool) -> Option<Bytes> {
+    if buf.is_empty() || (!force && buf.len() < METRICS_CHUNK_SIZE) {
+        return None;
+    }
+
+    let chunk = Bytes::copy_from_slice(buf.as_bytes());
+    buf.clear();
+    Some(chunk)
+}
+
+fn write_latency_histogram(
+    out: &mut String,
+    metric_name: &str,
+    instance: &str,
+    bucket_counts: &[u64; 9],
+    sum_seconds: f64,
+    count: u64,
+) {
+    for (idx, le) in LATENCY_BUCKET_LABELS.iter().enumerate() {
+        let _ = writeln!(out, "{metric_name}_bucket{{instance=\"{instance}\",le=\"{le}\"}} {}", bucket_counts[idx]);
+    }
+    let _ = writeln!(out, "{metric_name}_bucket{{instance=\"{instance}\",le=\"+Inf\"}} {count}");
+    let _ = writeln!(out, "{metric_name}_sum{{instance=\"{instance}\"}} {sum_seconds}");
+    let _ = writeln!(out, "{metric_name}_count{{instance=\"{instance}\"}} {count}");
+}
+
+fn write_tcprt_summary_metrics(
+    out: &mut String,
+    instance: &str,
+    summary: &aria_core::monitoring::TcprtMetricsSummary,
+) {
+    let _ = writeln!(out, "aria_tcprt_flows_total{{instance=\"{instance}\"}} {}", summary.flows);
+    let _ = writeln!(out, "aria_tcprt_retrans_req_total{{instance=\"{instance}\"}} {}", summary.retrans_req);
+    let _ = writeln!(out, "aria_tcprt_retrans_resp_total{{instance=\"{instance}\"}} {}", summary.retrans_resp);
+    let _ = writeln!(out, "aria_tcprt_requests_total{{instance=\"{instance}\"}} {}", summary.requests);
+    let _ = writeln!(out, "aria_tcprt_handshake_us_sum{{instance=\"{instance}\"}} {}", summary.handshake_sum_us);
+    let _ = writeln!(out, "aria_tcprt_art_us_sum{{instance=\"{instance}\"}} {}", summary.art_sum_us);
+    let _ = writeln!(out, "aria_tcprt_rtt_client_us_sum{{instance=\"{instance}\"}} {}", summary.rtt_client_sum_us);
+    let _ = writeln!(out, "aria_tcprt_rtt_server_us_sum{{instance=\"{instance}\"}} {}", summary.rtt_server_sum_us);
+    write_latency_histogram(
+        out,
+        "aria_tcprt_art_seconds",
+        instance,
+        &summary.art_bucket_counts,
+        summary.art_sum_seconds,
+        summary.art_count,
+    );
+    let avg_nqa = if summary.flows > 0 {
+        summary.nqa_sum / summary.flows as f64
+    } else {
+        0.0
+    };
+    let _ = writeln!(out, "aria_tcprt_nqa_score_avg{{instance=\"{instance}\"}} {avg_nqa:.1}");
+}
+
+fn write_ssl_summary_metrics(
+    out: &mut String,
+    instance: &str,
+    summary: &aria_core::ssl_ops::SslMetricsSummary,
+) {
+    let _ = writeln!(out, "aria_ssl_handshakes_total{{instance=\"{instance}\"}} {}", summary.total);
+    write_latency_histogram(
+        out,
+        "aria_ssl_handshake_seconds",
+        instance,
+        &summary.bucket_counts,
+        summary.sum_seconds,
+        summary.count,
+    );
+}
+
+fn write_ssl_http_summary_metrics(
+    out: &mut String,
+    instance: &str,
+    summary: &aria_core::ssl_ops::SslHttpMetricsSummary,
+) {
+    let _ = writeln!(out, "aria_ssl_http_requests_total{{instance=\"{instance}\"}} {}", summary.total);
+    write_latency_histogram(
+        out,
+        "aria_ssl_http_latency_seconds",
+        instance,
+        &summary.bucket_counts,
+        summary.sum_seconds,
+        summary.count,
+    );
+    let _ = writeln!(out, "aria_ssl_http_status_2xx_total{{instance=\"{instance}\"}} {}", summary.status_2xx);
+    let _ = writeln!(out, "aria_ssl_http_status_4xx_total{{instance=\"{instance}\"}} {}", summary.status_4xx);
+    let _ = writeln!(out, "aria_ssl_http_status_5xx_total{{instance=\"{instance}\"}} {}", summary.status_5xx);
+}
+
 pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
     let instances = cp.list_instances().await;
-    let mut out = String::with_capacity(8192);
 
-    // ── Overview gauges ──
-    let _ = writeln!(out, "# HELP aria_groups_total Number of IP groups configured");
-    let _ = writeln!(out, "# TYPE aria_groups_total gauge");
-    let _ = writeln!(out, "# HELP aria_policies_total Number of ACL policies configured");
-    let _ = writeln!(out, "# TYPE aria_policies_total gauge");
-    let _ = writeln!(out, "# HELP aria_qos_rules_total Number of QoS rules configured");
-    let _ = writeln!(out, "# TYPE aria_qos_rules_total gauge");
-    let _ = writeln!(out, "# HELP aria_mirror_rules_total Number of mirror rules configured");
-    let _ = writeln!(out, "# TYPE aria_mirror_rules_total gauge");
-    let _ = writeln!(out, "# HELP aria_conntrack_total Number of conntrack entries");
-    let _ = writeln!(out, "# TYPE aria_conntrack_total gauge");
+    let stream = stream! {
+        let mut out = String::with_capacity(METRICS_CHUNK_SIZE * 2);
 
-    for inst in &instances {
-        let i = prom_escape(inst);
-        if let Ok((groups, policies, qos_rules, mirror_rules, ct_v4, ct_v6)) = cp.get_stats_overview(inst).await {
-            let _ = writeln!(out, "aria_groups_total{{instance=\"{i}\"}} {groups}");
-            let _ = writeln!(out, "aria_policies_total{{instance=\"{i}\"}} {policies}");
-            let _ = writeln!(out, "aria_qos_rules_total{{instance=\"{i}\"}} {qos_rules}");
-            let _ = writeln!(out, "aria_mirror_rules_total{{instance=\"{i}\"}} {mirror_rules}");
-            let _ = writeln!(out, "aria_conntrack_total{{instance=\"{i}\",family=\"ipv4\"}} {ct_v4}");
-            let _ = writeln!(out, "aria_conntrack_total{{instance=\"{i}\",family=\"ipv6\"}} {ct_v6}");
-        }
-    }
+        // ── Overview gauges ──
+        let _ = writeln!(out, "# HELP aria_groups_total Number of IP groups configured");
+        let _ = writeln!(out, "# TYPE aria_groups_total gauge");
+        let _ = writeln!(out, "# HELP aria_policies_total Number of ACL policies configured");
+        let _ = writeln!(out, "# TYPE aria_policies_total gauge");
+        let _ = writeln!(out, "# HELP aria_qos_rules_total Number of QoS rules configured");
+        let _ = writeln!(out, "# TYPE aria_qos_rules_total gauge");
+        let _ = writeln!(out, "# HELP aria_mirror_rules_total Number of mirror rules configured");
+        let _ = writeln!(out, "# TYPE aria_mirror_rules_total gauge");
+        let _ = writeln!(out, "# HELP aria_conntrack_total Number of conntrack entries");
+        let _ = writeln!(out, "# TYPE aria_conntrack_total gauge");
 
-    // ── Drop counters ──
-    let _ = writeln!(out, "# HELP aria_drop_packets_total Dropped packets by reason");
-    let _ = writeln!(out, "# TYPE aria_drop_packets_total counter");
-    let _ = writeln!(out, "# HELP aria_drop_bytes_total Dropped bytes by reason");
-    let _ = writeln!(out, "# TYPE aria_drop_bytes_total counter");
-
-    for inst in &instances {
-        let i = prom_escape(inst);
-        if let Ok((entries, groups)) = cp.get_drop_stats(inst).await {
-            let find_name = |id: u32| -> String {
-                if id == 0 { return "any".to_string(); }
-                groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
-            };
-            for e in &entries {
-                let reason = prom_escape(&aria_core::trace_ops::drop_reason_name(e.reason));
-                let dir = prom_escape(&direction_to_string(e.direction));
-                let proto = prom_escape(&proto_to_string(e.proto));
-                let sg = prom_escape(&find_name(e.src_id));
-                let dg = prom_escape(&find_name(e.dst_id));
-                let _ = writeln!(out, "aria_drop_packets_total{{instance=\"{i}\",reason=\"{reason}\",direction=\"{dir}\",proto=\"{proto}\",src_group=\"{sg}\",dst_group=\"{dg}\"}} {}", e.packets);
-                let _ = writeln!(out, "aria_drop_bytes_total{{instance=\"{i}\",reason=\"{reason}\",direction=\"{dir}\",proto=\"{proto}\",src_group=\"{sg}\",dst_group=\"{dg}\"}} {}", e.bytes);
+        for inst in &instances {
+            let i = prom_escape(inst);
+            if let Ok((groups, policies, qos_rules, mirror_rules, ct_v4, ct_v6)) = cp.get_stats_overview(inst).await {
+                let _ = writeln!(out, "aria_groups_total{{instance=\"{i}\"}} {groups}");
+                let _ = writeln!(out, "aria_policies_total{{instance=\"{i}\"}} {policies}");
+                let _ = writeln!(out, "aria_qos_rules_total{{instance=\"{i}\"}} {qos_rules}");
+                let _ = writeln!(out, "aria_mirror_rules_total{{instance=\"{i}\"}} {mirror_rules}");
+                let _ = writeln!(out, "aria_conntrack_total{{instance=\"{i}\",family=\"ipv4\"}} {ct_v4}");
+                let _ = writeln!(out, "aria_conntrack_total{{instance=\"{i}\",family=\"ipv6\"}} {ct_v6}");
+            }
+            if let Some(chunk) = flush_metrics_chunk(&mut out, false) {
+                yield Ok::<_, std::convert::Infallible>(chunk);
             }
         }
-    }
-
-    // ── ACL rule counters ──
-    let _ = writeln!(out, "# HELP aria_rule_packets_total ACL rule matched packets");
-    let _ = writeln!(out, "# TYPE aria_rule_packets_total counter");
-    let _ = writeln!(out, "# HELP aria_rule_bytes_total ACL rule matched bytes");
-    let _ = writeln!(out, "# TYPE aria_rule_bytes_total counter");
-    let _ = writeln!(out, "# HELP aria_rule_dropped_packets_total ACL rule dropped packets");
-    let _ = writeln!(out, "# TYPE aria_rule_dropped_packets_total counter");
-    let _ = writeln!(out, "# HELP aria_rule_dropped_bytes_total ACL rule dropped bytes");
-    let _ = writeln!(out, "# TYPE aria_rule_dropped_bytes_total counter");
-
-    for inst in &instances {
-        let i = prom_escape(inst);
-        if let Ok((entries, groups)) = cp.get_rule_stats(inst).await {
-            let find_name = |id: u32| -> String {
-                if id == 0 { return "any".to_string(); }
-                groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
-            };
-            for e in &entries {
-                let sg = prom_escape(&find_name(e.key.src_id));
-                let dg = prom_escape(&find_name(e.key.dst_id));
-                let proto = prom_escape(&proto_to_string(e.key.proto));
-                let dir = prom_escape(&direction_to_string(e.key.direction));
-                let _ = writeln!(out, "aria_rule_packets_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.packets);
-                let _ = writeln!(out, "aria_rule_bytes_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.bytes);
-                let _ = writeln!(out, "aria_rule_dropped_packets_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.dropped_packets);
-                let _ = writeln!(out, "aria_rule_dropped_bytes_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.dropped_bytes);
-            }
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
         }
-    }
 
-    // ── QoS counters ──
-    let _ = writeln!(out, "# HELP aria_qos_passed_packets_total QoS passed packets");
-    let _ = writeln!(out, "# TYPE aria_qos_passed_packets_total counter");
-    let _ = writeln!(out, "# HELP aria_qos_passed_bytes_total QoS passed bytes");
-    let _ = writeln!(out, "# TYPE aria_qos_passed_bytes_total counter");
-    let _ = writeln!(out, "# HELP aria_qos_dropped_packets_total QoS dropped packets");
-    let _ = writeln!(out, "# TYPE aria_qos_dropped_packets_total counter");
-    let _ = writeln!(out, "# HELP aria_qos_dropped_bytes_total QoS dropped bytes");
-    let _ = writeln!(out, "# TYPE aria_qos_dropped_bytes_total counter");
-    let _ = writeln!(out, "# HELP aria_qos_shaped_packets_total QoS shaped packets");
-    let _ = writeln!(out, "# TYPE aria_qos_shaped_packets_total counter");
-    let _ = writeln!(out, "# HELP aria_qos_shaped_bytes_total QoS shaped bytes");
-    let _ = writeln!(out, "# TYPE aria_qos_shaped_bytes_total counter");
+        // ── Drop counters ──
+        let _ = writeln!(out, "# HELP aria_drop_packets_total Dropped packets by reason");
+        let _ = writeln!(out, "# TYPE aria_drop_packets_total counter");
+        let _ = writeln!(out, "# HELP aria_drop_bytes_total Dropped bytes by reason");
+        let _ = writeln!(out, "# TYPE aria_drop_bytes_total counter");
 
-    for inst in &instances {
-        let i = prom_escape(inst);
-        if let Ok((entries, groups)) = cp.get_qos_stats(inst).await {
-            let find_name = |id: u32| -> String {
-                if id == 0 { return "any".to_string(); }
-                groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
-            };
-            for e in &entries {
-                let g = prom_escape(&find_name(e.key.group_id));
-                let dir = prom_escape(&direction_to_string(e.key.direction));
-                let _ = writeln!(out, "aria_qos_passed_packets_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.passed_packets);
-                let _ = writeln!(out, "aria_qos_passed_bytes_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.passed_bytes);
-                let _ = writeln!(out, "aria_qos_dropped_packets_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.dropped_packets);
-                let _ = writeln!(out, "aria_qos_dropped_bytes_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.dropped_bytes);
-                let _ = writeln!(out, "aria_qos_shaped_packets_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.shaped_packets);
-                let _ = writeln!(out, "aria_qos_shaped_bytes_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.shaped_bytes);
-            }
-        }
-    }
-
-    // ── Group traffic counters ──
-    let _ = writeln!(out, "# HELP aria_group_packets_total Group traffic packets");
-    let _ = writeln!(out, "# TYPE aria_group_packets_total counter");
-    let _ = writeln!(out, "# HELP aria_group_bytes_total Group traffic bytes");
-    let _ = writeln!(out, "# TYPE aria_group_bytes_total counter");
-
-    for inst in &instances {
-        let i = prom_escape(inst);
-        if let Ok((entries, groups)) = cp.get_group_stats(inst).await {
-            let find_name = |id: u32| -> String {
-                if id == 0 { return "any".to_string(); }
-                groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
-            };
-            for e in &entries {
-                let g = prom_escape(&find_name(e.key.group_id));
-                let dir = prom_escape(&direction_to_string(e.key.direction));
-                let _ = writeln!(out, "aria_group_packets_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.packets);
-                let _ = writeln!(out, "aria_group_bytes_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.bytes);
-            }
-        }
-    }
-
-    // ── Mirror counters ──
-    let _ = writeln!(out, "# HELP aria_mirror_packets_total Mirrored packets");
-    let _ = writeln!(out, "# TYPE aria_mirror_packets_total counter");
-    let _ = writeln!(out, "# HELP aria_mirror_bytes_total Mirrored bytes");
-    let _ = writeln!(out, "# TYPE aria_mirror_bytes_total counter");
-    let _ = writeln!(out, "# HELP aria_mirror_errors_total Mirror errors");
-    let _ = writeln!(out, "# TYPE aria_mirror_errors_total counter");
-
-    for inst in &instances {
-        let i = prom_escape(inst);
-        if let Ok((entries, groups)) = cp.get_mirror_stats(inst).await {
-            let find_name = |id: u32| -> String {
-                if id == 0 { return "any".to_string(); }
-                groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
-            };
-            for e in &entries {
-                let sg = prom_escape(&find_name(e.src_id));
-                let dg = prom_escape(&find_name(e.dst_id));
-                let proto = prom_escape(&proto_to_string(e.proto));
-                let dir = prom_escape(&direction_to_string(e.direction));
-                let _ = writeln!(out, "aria_mirror_packets_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.mirrored_packets);
-                let _ = writeln!(out, "aria_mirror_bytes_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.mirrored_bytes);
-                let _ = writeln!(out, "aria_mirror_errors_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.errors);
-            }
-        }
-    }
-
-    // ── TCP-RT aggregated ──
-    let _ = writeln!(out, "# HELP aria_tcprt_flows_total Number of active TCP-RT flows");
-    let _ = writeln!(out, "# TYPE aria_tcprt_flows_total gauge");
-    let _ = writeln!(out, "# HELP aria_tcprt_retrans_req_total Total request retransmissions");
-    let _ = writeln!(out, "# TYPE aria_tcprt_retrans_req_total counter");
-    let _ = writeln!(out, "# HELP aria_tcprt_retrans_resp_total Total response retransmissions");
-    let _ = writeln!(out, "# TYPE aria_tcprt_retrans_resp_total counter");
-    let _ = writeln!(out, "# HELP aria_tcprt_requests_total Total request count");
-    let _ = writeln!(out, "# TYPE aria_tcprt_requests_total counter");
-    let _ = writeln!(out, "# HELP aria_tcprt_handshake_us_sum Sum of handshake latency in microseconds");
-    let _ = writeln!(out, "# TYPE aria_tcprt_handshake_us_sum gauge");
-    let _ = writeln!(out, "# HELP aria_tcprt_art_us_sum Sum of application response time in microseconds");
-    let _ = writeln!(out, "# TYPE aria_tcprt_art_us_sum gauge");
-    let _ = writeln!(out, "# HELP aria_tcprt_rtt_client_us_sum Sum of client RTT in microseconds");
-    let _ = writeln!(out, "# TYPE aria_tcprt_rtt_client_us_sum gauge");
-    let _ = writeln!(out, "# HELP aria_tcprt_rtt_server_us_sum Sum of server RTT in microseconds");
-    let _ = writeln!(out, "# TYPE aria_tcprt_rtt_server_us_sum gauge");
-    let _ = writeln!(out, "# HELP aria_tcprt_art_seconds ART latency distribution histogram");
-    let _ = writeln!(out, "# TYPE aria_tcprt_art_seconds histogram");
-    let _ = writeln!(out, "# HELP aria_tcprt_nqa_score_avg Average NQA network quality score (0-100)");
-    let _ = writeln!(out, "# TYPE aria_tcprt_nqa_score_avg gauge");
-
-    for inst in &instances {
-        let i = prom_escape(inst);
-        // Fetch all flows (use a large top value to get everything)
-        if let Ok(entries) = cp.list_tcprt(inst, 100000).await {
-            let flows = entries.len() as u64;
-            let mut retrans_req: u64 = 0;
-            let mut retrans_resp: u64 = 0;
-            let mut requests: u64 = 0;
-            let mut handshake_sum: f64 = 0.0;
-            let mut art_sum: f64 = 0.0;
-            let mut rtt_client_sum: f64 = 0.0;
-            let mut rtt_server_sum: f64 = 0.0;
-            let mut nqa_sum: f64 = 0.0;
-            let mut art_count: u64 = 0;
-            // ART histogram buckets (in seconds for Prometheus convention)
-            let art_boundaries_us: [f64; 9] = [
-                1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0,
-                500_000.0, 1_000_000.0, 5_000_000.0, 10_000_000.0,
-            ];
-            let mut art_bucket_counts = [0u64; 9];
-            let mut art_sum_seconds: f64 = 0.0;
-            for e in &entries {
-                retrans_req += e.retrans_req as u64;
-                retrans_resp += e.retrans_resp as u64;
-                requests += e.request_count as u64;
-                handshake_sum += e.handshake_us;
-                art_sum += e.art_us;
-                rtt_client_sum += e.rtt_client_us;
-                rtt_server_sum += e.rtt_server_us;
-                nqa_sum += e.nqa_score as f64;
-                if e.art_us > 0.0 {
-                    art_count += 1;
-                    art_sum_seconds += e.art_us / 1_000_000.0;
-                    for (j, &boundary) in art_boundaries_us.iter().enumerate() {
-                        if e.art_us <= boundary {
-                            art_bucket_counts[j] += 1;
-                        }
+        for inst in &instances {
+            let i = prom_escape(inst);
+            if let Ok((entries, groups)) = cp.get_drop_stats(inst).await {
+                let find_name = |id: u32| -> String {
+                    if id == 0 {
+                        return "any".to_string();
                     }
-                }
-            }
-            let _ = writeln!(out, "aria_tcprt_flows_total{{instance=\"{i}\"}} {flows}");
-            let _ = writeln!(out, "aria_tcprt_retrans_req_total{{instance=\"{i}\"}} {retrans_req}");
-            let _ = writeln!(out, "aria_tcprt_retrans_resp_total{{instance=\"{i}\"}} {retrans_resp}");
-            let _ = writeln!(out, "aria_tcprt_requests_total{{instance=\"{i}\"}} {requests}");
-            let _ = writeln!(out, "aria_tcprt_handshake_us_sum{{instance=\"{i}\"}} {handshake_sum}");
-            let _ = writeln!(out, "aria_tcprt_art_us_sum{{instance=\"{i}\"}} {art_sum}");
-            let _ = writeln!(out, "aria_tcprt_rtt_client_us_sum{{instance=\"{i}\"}} {rtt_client_sum}");
-            let _ = writeln!(out, "aria_tcprt_rtt_server_us_sum{{instance=\"{i}\"}} {rtt_server_sum}");
-            // ART histogram (Prometheus native histogram format)
-            let art_boundaries_s = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10"];
-            for (j, le) in art_boundaries_s.iter().enumerate() {
-                let _ = writeln!(out, "aria_tcprt_art_seconds_bucket{{instance=\"{i}\",le=\"{le}\"}} {}", art_bucket_counts[j]);
-            }
-            let _ = writeln!(out, "aria_tcprt_art_seconds_bucket{{instance=\"{i}\",le=\"+Inf\"}} {art_count}");
-            let _ = writeln!(out, "aria_tcprt_art_seconds_sum{{instance=\"{i}\"}} {art_sum_seconds}");
-            let _ = writeln!(out, "aria_tcprt_art_seconds_count{{instance=\"{i}\"}} {art_count}");
-            // NQA average gauge
-            let avg_nqa = if flows > 0 { nqa_sum / flows as f64 } else { 0.0 };
-            let _ = writeln!(out, "aria_tcprt_nqa_score_avg{{instance=\"{i}\"}} {avg_nqa:.1}");
-        }
-    }
-
-    // ── SSL handshake metrics ──
-    let _ = writeln!(out, "# HELP aria_ssl_handshakes_total Number of SSL handshakes observed");
-    let _ = writeln!(out, "# TYPE aria_ssl_handshakes_total gauge");
-    let _ = writeln!(out, "# HELP aria_ssl_handshake_seconds SSL handshake latency distribution");
-    let _ = writeln!(out, "# TYPE aria_ssl_handshake_seconds histogram");
-
-    let ssl_instance = prom_escape("ssl-global");
-    if let Ok(entries) = cp.list_ssl_global(100000).await {
-        let total = entries.len() as u64;
-        let _ = writeln!(out, "aria_ssl_handshakes_total{{instance=\"{ssl_instance}\"}} {total}");
-
-        let ssl_boundaries_us: [f64; 9] = [
-            1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0,
-            500_000.0, 1_000_000.0, 5_000_000.0, 10_000_000.0,
-        ];
-        let mut ssl_bucket_counts = [0u64; 9];
-        let mut ssl_sum_seconds: f64 = 0.0;
-        let mut ssl_count: u64 = 0;
-
-        for e in &entries {
-            if e.handshake_us > 0.0 {
-                ssl_count += 1;
-                ssl_sum_seconds += e.handshake_us / 1_000_000.0;
-                for (j, &boundary) in ssl_boundaries_us.iter().enumerate() {
-                    if e.handshake_us <= boundary {
-                        ssl_bucket_counts[j] += 1;
+                    groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
+                };
+                for e in &entries {
+                    let reason = prom_escape(&aria_core::trace_ops::drop_reason_name(e.reason));
+                    let dir = prom_escape(&direction_to_string(e.direction));
+                    let proto = prom_escape(&proto_to_string(e.proto));
+                    let sg = prom_escape(&find_name(e.src_id));
+                    let dg = prom_escape(&find_name(e.dst_id));
+                    let _ = writeln!(out, "aria_drop_packets_total{{instance=\"{i}\",reason=\"{reason}\",direction=\"{dir}\",proto=\"{proto}\",src_group=\"{sg}\",dst_group=\"{dg}\"}} {}", e.packets);
+                    let _ = writeln!(out, "aria_drop_bytes_total{{instance=\"{i}\",reason=\"{reason}\",direction=\"{dir}\",proto=\"{proto}\",src_group=\"{sg}\",dst_group=\"{dg}\"}} {}", e.bytes);
+                    if let Some(chunk) = flush_metrics_chunk(&mut out, false) {
+                        yield Ok::<_, std::convert::Infallible>(chunk);
                     }
                 }
             }
         }
-        let ssl_boundaries_s = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10"];
-        for (j, le) in ssl_boundaries_s.iter().enumerate() {
-            let _ = writeln!(out, "aria_ssl_handshake_seconds_bucket{{instance=\"{ssl_instance}\",le=\"{le}\"}} {}", ssl_bucket_counts[j]);
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
         }
-        let _ = writeln!(out, "aria_ssl_handshake_seconds_bucket{{instance=\"{ssl_instance}\",le=\"+Inf\"}} {ssl_count}");
-        let _ = writeln!(out, "aria_ssl_handshake_seconds_sum{{instance=\"{ssl_instance}\"}} {ssl_sum_seconds}");
-        let _ = writeln!(out, "aria_ssl_handshake_seconds_count{{instance=\"{ssl_instance}\"}} {ssl_count}");
-    }
 
-    // ── SSL HTTP metrics ──
-    let _ = writeln!(out, "# HELP aria_ssl_http_requests_total Number of HTTP requests observed via SSL");
-    let _ = writeln!(out, "# TYPE aria_ssl_http_requests_total gauge");
-    let _ = writeln!(out, "# HELP aria_ssl_http_latency_seconds HTTP request latency distribution via SSL");
-    let _ = writeln!(out, "# TYPE aria_ssl_http_latency_seconds histogram");
+        // ── ACL rule counters ──
+        let _ = writeln!(out, "# HELP aria_rule_packets_total ACL rule matched packets");
+        let _ = writeln!(out, "# TYPE aria_rule_packets_total counter");
+        let _ = writeln!(out, "# HELP aria_rule_bytes_total ACL rule matched bytes");
+        let _ = writeln!(out, "# TYPE aria_rule_bytes_total counter");
+        let _ = writeln!(out, "# HELP aria_rule_dropped_packets_total ACL rule dropped packets");
+        let _ = writeln!(out, "# TYPE aria_rule_dropped_packets_total counter");
+        let _ = writeln!(out, "# HELP aria_rule_dropped_bytes_total ACL rule dropped bytes");
+        let _ = writeln!(out, "# TYPE aria_rule_dropped_bytes_total counter");
 
-    if let Ok(entries) = cp.list_ssl_http_global(100000).await {
-        let total = entries.len() as u64;
-        let _ = writeln!(out, "aria_ssl_http_requests_total{{instance=\"{ssl_instance}\"}} {total}");
-
-        let http_boundaries_us: [f64; 9] = [
-            1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0,
-            500_000.0, 1_000_000.0, 5_000_000.0, 10_000_000.0,
-        ];
-        let mut http_bucket_counts = [0u64; 9];
-        let mut http_sum_seconds: f64 = 0.0;
-        let mut http_count: u64 = 0;
-        let mut status_2xx: u64 = 0;
-        let mut status_4xx: u64 = 0;
-        let mut status_5xx: u64 = 0;
-
-        for e in &entries {
-            if e.latency_us > 0.0 {
-                http_count += 1;
-                http_sum_seconds += e.latency_us / 1_000_000.0;
-                for (j, &boundary) in http_boundaries_us.iter().enumerate() {
-                    if e.latency_us <= boundary {
-                        http_bucket_counts[j] += 1;
+        for inst in &instances {
+            let i = prom_escape(inst);
+            if let Ok((entries, groups)) = cp.get_rule_stats(inst).await {
+                let find_name = |id: u32| -> String {
+                    if id == 0 {
+                        return "any".to_string();
+                    }
+                    groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
+                };
+                for e in &entries {
+                    let sg = prom_escape(&find_name(e.key.src_id));
+                    let dg = prom_escape(&find_name(e.key.dst_id));
+                    let proto = prom_escape(&proto_to_string(e.key.proto));
+                    let dir = prom_escape(&direction_to_string(e.key.direction));
+                    let _ = writeln!(out, "aria_rule_packets_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.packets);
+                    let _ = writeln!(out, "aria_rule_bytes_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.bytes);
+                    let _ = writeln!(out, "aria_rule_dropped_packets_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.dropped_packets);
+                    let _ = writeln!(out, "aria_rule_dropped_bytes_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.dropped_bytes);
+                    if let Some(chunk) = flush_metrics_chunk(&mut out, false) {
+                        yield Ok::<_, std::convert::Infallible>(chunk);
                     }
                 }
             }
-            match e.status_code {
-                200..=299 => status_2xx += 1,
-                400..=499 => status_4xx += 1,
-                500..=599 => status_5xx += 1,
-                _ => {}
+        }
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
+        }
+
+        // ── QoS counters ──
+        let _ = writeln!(out, "# HELP aria_qos_passed_packets_total QoS passed packets");
+        let _ = writeln!(out, "# TYPE aria_qos_passed_packets_total counter");
+        let _ = writeln!(out, "# HELP aria_qos_passed_bytes_total QoS passed bytes");
+        let _ = writeln!(out, "# TYPE aria_qos_passed_bytes_total counter");
+        let _ = writeln!(out, "# HELP aria_qos_dropped_packets_total QoS dropped packets");
+        let _ = writeln!(out, "# TYPE aria_qos_dropped_packets_total counter");
+        let _ = writeln!(out, "# HELP aria_qos_dropped_bytes_total QoS dropped bytes");
+        let _ = writeln!(out, "# TYPE aria_qos_dropped_bytes_total counter");
+        let _ = writeln!(out, "# HELP aria_qos_shaped_packets_total QoS shaped packets");
+        let _ = writeln!(out, "# TYPE aria_qos_shaped_packets_total counter");
+        let _ = writeln!(out, "# HELP aria_qos_shaped_bytes_total QoS shaped bytes");
+        let _ = writeln!(out, "# TYPE aria_qos_shaped_bytes_total counter");
+
+        for inst in &instances {
+            let i = prom_escape(inst);
+            if let Ok((entries, groups)) = cp.get_qos_stats(inst).await {
+                let find_name = |id: u32| -> String {
+                    if id == 0 {
+                        return "any".to_string();
+                    }
+                    groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
+                };
+                for e in &entries {
+                    let g = prom_escape(&find_name(e.key.group_id));
+                    let dir = prom_escape(&direction_to_string(e.key.direction));
+                    let _ = writeln!(out, "aria_qos_passed_packets_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.passed_packets);
+                    let _ = writeln!(out, "aria_qos_passed_bytes_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.passed_bytes);
+                    let _ = writeln!(out, "aria_qos_dropped_packets_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.dropped_packets);
+                    let _ = writeln!(out, "aria_qos_dropped_bytes_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.dropped_bytes);
+                    let _ = writeln!(out, "aria_qos_shaped_packets_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.shaped_packets);
+                    let _ = writeln!(out, "aria_qos_shaped_bytes_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.shaped_bytes);
+                    if let Some(chunk) = flush_metrics_chunk(&mut out, false) {
+                        yield Ok::<_, std::convert::Infallible>(chunk);
+                    }
+                }
             }
         }
-        let http_boundaries_s = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10"];
-        for (j, le) in http_boundaries_s.iter().enumerate() {
-            let _ = writeln!(out, "aria_ssl_http_latency_seconds_bucket{{instance=\"{ssl_instance}\",le=\"{le}\"}} {}", http_bucket_counts[j]);
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
         }
-        let _ = writeln!(out, "aria_ssl_http_latency_seconds_bucket{{instance=\"{ssl_instance}\",le=\"+Inf\"}} {http_count}");
-        let _ = writeln!(out, "aria_ssl_http_latency_seconds_sum{{instance=\"{ssl_instance}\"}} {http_sum_seconds}");
-        let _ = writeln!(out, "aria_ssl_http_latency_seconds_count{{instance=\"{ssl_instance}\"}} {http_count}");
-        let _ = writeln!(out, "aria_ssl_http_status_2xx_total{{instance=\"{ssl_instance}\"}} {status_2xx}");
-        let _ = writeln!(out, "aria_ssl_http_status_4xx_total{{instance=\"{ssl_instance}\"}} {status_4xx}");
-        let _ = writeln!(out, "aria_ssl_http_status_5xx_total{{instance=\"{ssl_instance}\"}} {status_5xx}");
-    }
+
+        // ── Group traffic counters ──
+        let _ = writeln!(out, "# HELP aria_group_packets_total Group traffic packets");
+        let _ = writeln!(out, "# TYPE aria_group_packets_total counter");
+        let _ = writeln!(out, "# HELP aria_group_bytes_total Group traffic bytes");
+        let _ = writeln!(out, "# TYPE aria_group_bytes_total counter");
+
+        for inst in &instances {
+            let i = prom_escape(inst);
+            if let Ok((entries, groups)) = cp.get_group_stats(inst).await {
+                let find_name = |id: u32| -> String {
+                    if id == 0 {
+                        return "any".to_string();
+                    }
+                    groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
+                };
+                for e in &entries {
+                    let g = prom_escape(&find_name(e.key.group_id));
+                    let dir = prom_escape(&direction_to_string(e.key.direction));
+                    let _ = writeln!(out, "aria_group_packets_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.packets);
+                    let _ = writeln!(out, "aria_group_bytes_total{{instance=\"{i}\",group=\"{g}\",direction=\"{dir}\"}} {}", e.bytes);
+                    if let Some(chunk) = flush_metrics_chunk(&mut out, false) {
+                        yield Ok::<_, std::convert::Infallible>(chunk);
+                    }
+                }
+            }
+        }
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
+        }
+
+        // ── Mirror counters ──
+        let _ = writeln!(out, "# HELP aria_mirror_packets_total Mirrored packets");
+        let _ = writeln!(out, "# TYPE aria_mirror_packets_total counter");
+        let _ = writeln!(out, "# HELP aria_mirror_bytes_total Mirrored bytes");
+        let _ = writeln!(out, "# TYPE aria_mirror_bytes_total counter");
+        let _ = writeln!(out, "# HELP aria_mirror_errors_total Mirror errors");
+        let _ = writeln!(out, "# TYPE aria_mirror_errors_total counter");
+
+        for inst in &instances {
+            let i = prom_escape(inst);
+            if let Ok((entries, groups)) = cp.get_mirror_stats(inst).await {
+                let find_name = |id: u32| -> String {
+                    if id == 0 {
+                        return "any".to_string();
+                    }
+                    groups.values().find(|g| g.id == id).map(|g| g.name.clone()).unwrap_or_else(|| format!("id:{}", id))
+                };
+                for e in &entries {
+                    let sg = prom_escape(&find_name(e.src_id));
+                    let dg = prom_escape(&find_name(e.dst_id));
+                    let proto = prom_escape(&proto_to_string(e.proto));
+                    let dir = prom_escape(&direction_to_string(e.direction));
+                    let _ = writeln!(out, "aria_mirror_packets_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.mirrored_packets);
+                    let _ = writeln!(out, "aria_mirror_bytes_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.mirrored_bytes);
+                    let _ = writeln!(out, "aria_mirror_errors_total{{instance=\"{i}\",src_group=\"{sg}\",dst_group=\"{dg}\",proto=\"{proto}\",direction=\"{dir}\"}} {}", e.errors);
+                    if let Some(chunk) = flush_metrics_chunk(&mut out, false) {
+                        yield Ok::<_, std::convert::Infallible>(chunk);
+                    }
+                }
+            }
+        }
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
+        }
+
+        // ── TCP-RT aggregated ──
+        let _ = writeln!(out, "# HELP aria_tcprt_flows_total Number of active TCP-RT flows");
+        let _ = writeln!(out, "# TYPE aria_tcprt_flows_total gauge");
+        let _ = writeln!(out, "# HELP aria_tcprt_retrans_req_total Total request retransmissions");
+        let _ = writeln!(out, "# TYPE aria_tcprt_retrans_req_total counter");
+        let _ = writeln!(out, "# HELP aria_tcprt_retrans_resp_total Total response retransmissions");
+        let _ = writeln!(out, "# TYPE aria_tcprt_retrans_resp_total counter");
+        let _ = writeln!(out, "# HELP aria_tcprt_requests_total Total request count");
+        let _ = writeln!(out, "# TYPE aria_tcprt_requests_total counter");
+        let _ = writeln!(out, "# HELP aria_tcprt_handshake_us_sum Sum of handshake latency in microseconds");
+        let _ = writeln!(out, "# TYPE aria_tcprt_handshake_us_sum gauge");
+        let _ = writeln!(out, "# HELP aria_tcprt_art_us_sum Sum of application response time in microseconds");
+        let _ = writeln!(out, "# TYPE aria_tcprt_art_us_sum gauge");
+        let _ = writeln!(out, "# HELP aria_tcprt_rtt_client_us_sum Sum of client RTT in microseconds");
+        let _ = writeln!(out, "# TYPE aria_tcprt_rtt_client_us_sum gauge");
+        let _ = writeln!(out, "# HELP aria_tcprt_rtt_server_us_sum Sum of server RTT in microseconds");
+        let _ = writeln!(out, "# TYPE aria_tcprt_rtt_server_us_sum gauge");
+        let _ = writeln!(out, "# HELP aria_tcprt_art_seconds ART latency distribution histogram");
+        let _ = writeln!(out, "# TYPE aria_tcprt_art_seconds histogram");
+        let _ = writeln!(out, "# HELP aria_tcprt_nqa_score_avg Average NQA network quality score (0-100)");
+        let _ = writeln!(out, "# TYPE aria_tcprt_nqa_score_avg gauge");
+
+        for inst in &instances {
+            let i = prom_escape(inst);
+            match cp.get_tcprt_metrics_summary(inst).await {
+                Ok(Some(summary)) => write_tcprt_summary_metrics(&mut out, &i, &summary),
+                Ok(None) => {}
+                Err(e) => warn!("Failed to collect TCP-RT metrics for {}: {}", inst, e),
+            }
+            if let Some(chunk) = flush_metrics_chunk(&mut out, false) {
+                yield Ok::<_, std::convert::Infallible>(chunk);
+            }
+        }
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
+        }
+
+        // ── SSL handshake metrics ──
+        let _ = writeln!(out, "# HELP aria_ssl_handshakes_total Number of SSL handshakes observed");
+        let _ = writeln!(out, "# TYPE aria_ssl_handshakes_total gauge");
+        let _ = writeln!(out, "# HELP aria_ssl_handshake_seconds SSL handshake latency distribution");
+        let _ = writeln!(out, "# TYPE aria_ssl_handshake_seconds histogram");
+
+        let ssl_instance = prom_escape("ssl-global");
+        match cp.get_ssl_metrics_summary().await {
+            Ok(Some(summary)) => write_ssl_summary_metrics(&mut out, &ssl_instance, &summary),
+            Ok(None) => {}
+            Err(e) => warn!("Failed to collect SSL handshake metrics: {}", e),
+        }
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
+        }
+
+        // ── SSL HTTP metrics ──
+        let _ = writeln!(out, "# HELP aria_ssl_http_requests_total Number of HTTP requests observed via SSL");
+        let _ = writeln!(out, "# TYPE aria_ssl_http_requests_total gauge");
+        let _ = writeln!(out, "# HELP aria_ssl_http_latency_seconds HTTP request latency distribution via SSL");
+        let _ = writeln!(out, "# TYPE aria_ssl_http_latency_seconds histogram");
+
+        match cp.get_ssl_http_metrics_summary().await {
+            Ok(Some(summary)) => write_ssl_http_summary_metrics(&mut out, &ssl_instance, &summary),
+            Ok(None) => {}
+            Err(e) => warn!("Failed to collect SSL HTTP metrics: {}", e),
+        }
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
+        }
+    };
 
     (
         StatusCode::OK,
-        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
-        out,
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        Body::from_stream(stream),
     )
 }

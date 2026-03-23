@@ -1,5 +1,37 @@
 use aya::maps::{HashMap, MapData};
 use crate::common::{SslConnValue, SslHttpValue, SslErrorEvent};
+use std::path::Path;
+
+const LATENCY_BUCKET_BOUNDARIES_US: [f64; 9] = [
+    1_000.0,
+    5_000.0,
+    10_000.0,
+    50_000.0,
+    100_000.0,
+    500_000.0,
+    1_000_000.0,
+    5_000_000.0,
+    10_000_000.0,
+];
+
+#[derive(Debug, Clone, Default)]
+pub struct SslMetricsSummary {
+    pub total: u64,
+    pub count: u64,
+    pub sum_seconds: f64,
+    pub bucket_counts: [u64; 9],
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SslHttpMetricsSummary {
+    pub total: u64,
+    pub count: u64,
+    pub sum_seconds: f64,
+    pub bucket_counts: [u64; 9],
+    pub status_2xx: u64,
+    pub status_4xx: u64,
+    pub status_5xx: u64,
+}
 
 pub struct SslConnEntry {
     pub seq: u64,
@@ -13,6 +45,45 @@ pub struct SslConnEntry {
 fn sni_from_bytes(bytes: &[u8; 64]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(64);
     String::from_utf8_lossy(&bytes[..end]).to_string()
+}
+
+fn accumulate_latency_bucket(bucket_counts: &mut [u64; 9], latency_us: f64) {
+    for (idx, boundary) in LATENCY_BUCKET_BOUNDARIES_US.iter().enumerate() {
+        if latency_us <= *boundary {
+            bucket_counts[idx] += 1;
+        }
+    }
+}
+
+/// Best-effort aggregate over the live SSL handshake event map. This is not a
+/// snapshot read: entries may be added or removed while iteration is in progress.
+pub fn get_ssl_metrics_summary(pin_path: &str) -> Result<Option<SslMetricsSummary>, String> {
+    let map_path = format!("{}/SSL_CONN_TABLE", pin_path);
+    if !Path::new(&map_path).exists() {
+        return Ok(None);
+    }
+
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open SSL_CONN_TABLE: {:?}", e))?;
+    let map = HashMap::<_, u64, SslConnValue>::try_from(
+        aya::maps::Map::LruHashMap(map_data)
+    ).map_err(|e| format!("convert SSL_CONN_TABLE: {:?}", e))?;
+
+    let mut summary = SslMetricsSummary::default();
+    for item in map.iter() {
+        if let Ok((_seq, val)) = item {
+            summary.total += 1;
+
+            let handshake_us = val.handshake_ns as f64 / 1000.0;
+            if handshake_us > 0.0 {
+                summary.count += 1;
+                summary.sum_seconds += handshake_us / 1_000_000.0;
+                accumulate_latency_bucket(&mut summary.bucket_counts, handshake_us);
+            }
+        }
+    }
+
+    Ok(Some(summary))
 }
 
 pub fn get_ssl_conns(pin_path: &str) -> Result<Vec<SslConnEntry>, String> {
@@ -123,6 +194,44 @@ fn parse_http_request(data: &[u8; 256]) -> (String, String, String) {
     }
 
     (method, path, host)
+}
+
+/// Best-effort aggregate over the live SSL HTTP event map. This is not a
+/// snapshot read: entries may be added or removed while iteration is in progress.
+pub fn get_ssl_http_metrics_summary(pin_path: &str) -> Result<Option<SslHttpMetricsSummary>, String> {
+    let map_path = format!("{}/SSL_HTTP_TABLE", pin_path);
+    if !Path::new(&map_path).exists() {
+        return Ok(None);
+    }
+
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open SSL_HTTP_TABLE: {:?}", e))?;
+    let map = HashMap::<_, u64, SslHttpValue>::try_from(
+        aya::maps::Map::LruHashMap(map_data)
+    ).map_err(|e| format!("convert SSL_HTTP_TABLE: {:?}", e))?;
+
+    let mut summary = SslHttpMetricsSummary::default();
+    for item in map.iter() {
+        if let Ok((_seq, val)) = item {
+            summary.total += 1;
+
+            let latency_us = val.latency_ns as f64 / 1000.0;
+            if latency_us > 0.0 {
+                summary.count += 1;
+                summary.sum_seconds += latency_us / 1_000_000.0;
+                accumulate_latency_bucket(&mut summary.bucket_counts, latency_us);
+            }
+
+            match val.status_code {
+                200..=299 => summary.status_2xx += 1,
+                400..=499 => summary.status_4xx += 1,
+                500..=599 => summary.status_5xx += 1,
+                _ => {}
+            }
+        }
+    }
+
+    Ok(Some(summary))
 }
 
 pub fn get_ssl_http_events(pin_path: &str) -> Result<Vec<SslHttpEntry>, String> {
