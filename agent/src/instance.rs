@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use aria_core::ebpf_ops::NETWORK_MAP_NAMES;
+use aria_core::ebpf_ops::{CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES};
 
 /// Represents a single tap interface with its attached XDP firewall instance.
 /// On kernel 5.7+, the XDP link is pinned to bpffs so it survives agent crashes.
@@ -14,6 +14,22 @@ pub struct FirewallInstance {
 }
 
 impl FirewallInstance {
+    fn pin_runtime_maps(&self, bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {
+        for name in NETWORK_MAP_NAMES {
+            if let Some(map) = bpf.map_mut(name) {
+                if let Err(e) = map.pin(format!("{}/{}", pin_path, name)) {
+                    if CRITICAL_NETWORK_MAP_NAMES.contains(name) {
+                        return Err(format!("failed to pin critical map {}: {}", name, e));
+                    }
+                    eprintln!("[{}] Warning: failed to pin map {}: {}", self.iface, name, e);
+                }
+            } else if CRITICAL_NETWORK_MAP_NAMES.contains(name) {
+                return Err(format!("critical map {} not found", name));
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(iface: &str, base_pin_path: &str, base_state_path: &str) -> Self {
         Self {
             iface: iface.to_string(),
@@ -110,14 +126,7 @@ impl FirewallInstance {
             }
         }
 
-        // Pin all maps
-        for name in NETWORK_MAP_NAMES {
-            if let Some(map) = bpf.map_mut(name) {
-                if let Err(e) = map.pin(format!("{}/{}", pin_path_str, name)) {
-                    eprintln!("[{}] Warning: failed to pin map {}: {}", self.iface, name, e);
-                }
-            }
-        }
+        self.pin_runtime_maps(&mut bpf, pin_path_str)?;
 
         // Pin runtime programs.
         for name in &["xdp_firewall", "tc_egress", "tc_ingress"] {

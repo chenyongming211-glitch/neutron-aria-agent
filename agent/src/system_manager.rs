@@ -4,7 +4,7 @@ use crate::control_plane::ControlPlane;
 
 use aria_core::ebpf_ops::{
     detach_tc_egress, setup_fq_qdisc,
-    replay_state, NETWORK_MAP_NAMES,
+    replay_state, CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES,
 };
 
 fn cleanup_failed_start(iface: &str, pin_path: &str) {
@@ -16,6 +16,22 @@ fn cleanup_failed_start(iface: &str, pin_path: &str) {
         .args(["qdisc", "del", "dev", iface, "root"])
         .output();
     let _ = fs::remove_dir_all(pin_path);
+}
+
+fn pin_runtime_maps(bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {
+    for name in NETWORK_MAP_NAMES {
+        if let Some(map) = bpf.map_mut(name) {
+            if let Err(e) = map.pin(format!("{}/{}", pin_path, name)) {
+                if CRITICAL_NETWORK_MAP_NAMES.contains(name) {
+                    return Err(format!("failed to pin critical map {}: {}", name, e));
+                }
+                eprintln!("Warning: failed to pin map {}: {}", name, e);
+            }
+        } else if CRITICAL_NETWORK_MAP_NAMES.contains(name) {
+            return Err(format!("critical map {} not found", name));
+        }
+    }
+    Ok(())
 }
 
 /// Start the system firewall (standalone mode, not tap-managed)
@@ -93,13 +109,10 @@ pub async fn system_start(
         eprintln!("Warning: FQ qdisc setup failed: {}. QoS EDT disabled.", e);
     }
 
-    // Pin all maps
-    for name in NETWORK_MAP_NAMES {
-        if let Some(map) = bpf.map_mut(name) {
-            if let Err(e) = map.pin(format!("{}/{}", pin_path, name)) {
-                eprintln!("Warning: failed to pin map {}: {}", name, e);
-            }
-        }
+    // Pin all maps. Missing critical maps means the dataplane is not safely manageable.
+    if let Err(e) = pin_runtime_maps(&mut bpf, pin_path) {
+        cleanup_failed_start(iface, pin_path);
+        return Err(e);
     }
 
     // Pin runtime programs.

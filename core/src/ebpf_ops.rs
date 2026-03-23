@@ -331,6 +331,19 @@ pub const NETWORK_MAP_NAMES: &[&str] = &[
     "FIREWALL_CONFIG",
 ];
 
+/// Maps required for both dataplane correctness and control-plane management.
+/// If any of these fail to pin, startup must fail and roll back.
+pub const CRITICAL_NETWORK_MAP_NAMES: &[&str] = &[
+    "SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE",
+    "POLICY_TABLE", "PORT_BITMAP_POOL",
+    "CT_TABLE_V4", "CT_TABLE_V6", "CT_CONFIG",
+    "QOS_CONFIG", "QOS_TOKEN_BUCKET",
+    "MIRROR_POLICY", "MIRROR_GLOBAL",
+    "TCPRT_TABLE_V4", "TCPRT_TABLE_V6",
+    "TRACE_FILTER", "TRACE_SEQ",
+    "FIREWALL_CONFIG",
+];
+
 /// Host-global SSL maps pinned under `ssl-global`.
 pub const SSL_MAP_NAMES: &[&str] = &[
     "SSL_HANDSHAKE_SCRATCH", "SSL_CONN_TABLE", "SSL_SNI_TABLE", "SSL_SEQ",
