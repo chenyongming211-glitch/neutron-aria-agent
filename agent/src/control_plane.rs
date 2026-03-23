@@ -431,6 +431,18 @@ impl ControlPlane {
             add_result.bitmap_idx, add_result.is_new_port_set,
             direction, &state.pin_path, &self.ebpf_path,
         ) {
+            if add_result.is_new_port_set {
+                if let (Some(idx), Some(ports_str)) = (add_result.bitmap_idx, ports) {
+                    if let Err(cleanup_err) = aria_core::ebpf_ops::delete_port_set(
+                        idx,
+                        ports_str,
+                        &state.pin_path,
+                        &self.ebpf_path,
+                    ) {
+                        eprintln!("Warning: failed to clean new port bitmap after add_policy error: {}", cleanup_err);
+                    }
+                }
+            }
             // Rollback: restore snapshotted state
             state.state.rules = snapshot_rules;
             state.state.port_sets = snapshot_port_sets;

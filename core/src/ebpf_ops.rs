@@ -228,8 +228,10 @@ pub fn add_policy(
                 for (start, end, rule_action) in rules {
                     for port in start..=end {
                         let key = PortKey { idx, port, pad: 0 };
-                        port_pool.insert(&key, &rule_action, 0)
-                            .map_err(|e| format!("set port bitmap error: {:?}", e))?;
+                        if let Err(e) = port_pool.insert(&key, &rule_action, 0) {
+                            let _ = delete_port_set(idx, ports_str, pin_path, _ebpf_path);
+                            return Err(format!("set port bitmap error: {:?}", e));
+                        }
                     }
                     println!("  Set ports {}-{} to action {}", start, end, rule_action);
                 }
@@ -252,8 +254,14 @@ pub fn add_policy(
         pad1: [0; 2],
         bitmap_idx: bitmap_idx.unwrap_or(0),
     };
-    policy_table.insert(&key, &value, 0)
-        .map_err(|e| format!("insert error: {:?}", e))?;
+    if let Err(e) = policy_table.insert(&key, &value, 0) {
+        if is_new_port_set {
+            if let (Some(idx), Some(ports_str)) = (bitmap_idx, ports) {
+                let _ = delete_port_set(idx, ports_str, pin_path, _ebpf_path);
+            }
+        }
+        return Err(format!("insert error: {:?}", e));
+    }
 
     let dir_str = if direction == 1 { "egress" } else { "ingress" };
     println!("Added policy: src_id={}, dst_id={}, proto={}, action={}, direction={}, ports={:?}",

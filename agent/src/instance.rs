@@ -14,6 +14,16 @@ pub struct FirewallInstance {
 }
 
 impl FirewallInstance {
+    fn rollback_partial_attach(&self, stage: &str, err: String) -> Result<(), String> {
+        if let Err(cleanup_err) = self.detach() {
+            return Err(format!(
+                "{} failed: {}; rollback also failed: {}",
+                stage, err, cleanup_err
+            ));
+        }
+        Err(format!("{} failed: {}", stage, err))
+    }
+
     fn pin_runtime_maps(&self, bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {
         for name in NETWORK_MAP_NAMES {
             if let Some(map) = bpf.map_mut(name) {
@@ -126,7 +136,9 @@ impl FirewallInstance {
             }
         }
 
-        self.pin_runtime_maps(&mut bpf, pin_path_str)?;
+        if let Err(e) = self.pin_runtime_maps(&mut bpf, pin_path_str) {
+            return self.rollback_partial_attach("pin runtime maps", e);
+        }
 
         // Pin runtime programs.
         for name in &["xdp_firewall", "tc_egress", "tc_ingress"] {
