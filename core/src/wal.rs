@@ -13,6 +13,7 @@ use crate::state::FirewallState;
 /// Time-based compact interval (5 minutes)
 const WAL_COMPACT_INTERVAL_SECS: u64 = 300;
 const MAX_BATCH_SIZE: usize = 100;
+const WAL_CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WalEntry {
@@ -172,7 +173,7 @@ impl WalClient {
         let wal = WalWriter::open(state_path)?;
         let entry_count = Arc::new(AtomicU64::new(wal.entry_count()));
         let last_compact_time = Arc::new(Mutex::new(Instant::now()));
-        let (sender, receiver) = mpsc::channel(1024);
+        let (sender, receiver) = mpsc::channel(WAL_CHANNEL_CAPACITY);
 
         let actor = WalActor {
             wal,
@@ -237,6 +238,11 @@ impl WalClient {
             .map(|guard| guard.elapsed().as_secs())
             .unwrap_or(0);
         count >= threshold || elapsed >= WAL_COMPACT_INTERVAL_SECS
+    }
+
+    /// Approximate number of queued WAL messages waiting behind the actor.
+    pub fn queue_depth(&self) -> usize {
+        WAL_CHANNEL_CAPACITY.saturating_sub(self.sender.capacity())
     }
 }
 
@@ -318,6 +324,9 @@ impl WalActor {
                     let _ = ack.send(result);
                 }
                 WalMessage::Shutdown { ack } => {
+                    if let Err(e) = self.wal.sync() {
+                        eprintln!("[WAL Actor] Warning: final sync on shutdown failed: {}", e);
+                    }
                     let _ = ack.send(());
                     break;
                 }
