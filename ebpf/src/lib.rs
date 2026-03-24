@@ -678,7 +678,7 @@ unsafe fn phase_policy_tc(info: &parser::PacketInfo, p: &mut PipelineCtx) {
 }
 
 /// Phase: Flow stats + TCP-RT for IPv4.
-#[inline(always)]
+#[inline(never)]
 unsafe fn phase_flow_tcprt_v4(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
     stats::update_flow_stats_v4(ct_key, p.pkt_len, p.now);
     if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
@@ -687,7 +687,7 @@ unsafe fn phase_flow_tcprt_v4(info: &parser::PacketInfo, p: &mut PipelineCtx, ct
 }
 
 /// Phase: Flow stats + TCP-RT for IPv6.
-#[inline(always)]
+#[inline(never)]
 unsafe fn phase_flow_tcprt_v6(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
     stats::update_flow_stats_v6(ct_key, p.pkt_len, p.now);
     if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
