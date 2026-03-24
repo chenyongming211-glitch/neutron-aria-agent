@@ -3,7 +3,7 @@ use aya_ebpf::macros::map;
 
 pub use crate::common::{
     PolicyKey, PolicyValue, PortKey,
-    CtKey4, CtKey6, CtValue, CtConfig,
+    CtKey4, CtKey6, CtValue, CtConfig, CtContractKey, CtContractValue,
     RuleStatsValue, FlowStatsValue,
     QosKey, QosConfig, TokenBucket, QosStatsValue,
     GroupStatsKey, GroupStatsValue,
@@ -68,6 +68,13 @@ pub static CT_TABLE_V6: LruHashMap<CtKey6, CtValue> = LruHashMap::with_max_entri
 // Using HashMap with u32 key as a workaround (key=0 → config)
 #[map(name = "CT_CONFIG")]
 pub static CT_CONFIG: HashMap<u32, CtConfig> = HashMap::with_max_entries(1, 0);
+
+#[map(name = "CT_CONTRACT_STATS")]
+pub static CT_CONTRACT_STATS: PerCpuHashMap<CtContractKey, CtContractValue> =
+    PerCpuHashMap::with_max_entries(4096, 0);
+
+#[map(name = "CT_CONTRACT_VALUE_BUF")]
+pub static CT_CONTRACT_VALUE_BUF: PerCpuArray<CtContractValue> = PerCpuArray::with_max_entries(1, 0);
 
 // 全局配置：特性开关等（key=0）
 #[map(name = "FIREWALL_CONFIG")]

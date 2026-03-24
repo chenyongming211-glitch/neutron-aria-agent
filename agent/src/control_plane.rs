@@ -1055,6 +1055,13 @@ impl ControlPlane {
         ))
     }
 
+    pub async fn get_ct_contract_stats(&self, instance: &str) -> Result<Vec<aria_core::ct_contract_ops::CtContractStatsEntry>, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        aria_core::ct_contract_ops::get_ct_contract_stats(state.map_runtime())
+            .map_err(ControlPlaneError::KernelError)
+    }
+
     pub async fn get_rule_stats(&self, instance: &str) -> Result<(Vec<aria_core::monitoring::RuleStatsEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;

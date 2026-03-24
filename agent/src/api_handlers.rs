@@ -1520,6 +1520,29 @@ fn prom_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
 }
 
+fn ct_contract_hook_to_string(hook: u8) -> &'static str {
+    match hook {
+        aria_core::common::CT_CONTRACT_HOOK_TC_INGRESS => "tc_ingress",
+        _ => "unknown",
+    }
+}
+
+fn ct_contract_family_to_string(family: u8) -> &'static str {
+    match family {
+        aria_core::common::CT_CONTRACT_FAMILY_IPV4 => "ipv4",
+        aria_core::common::CT_CONTRACT_FAMILY_IPV6 => "ipv6",
+        _ => "unknown",
+    }
+}
+
+fn ct_contract_reason_to_string(reason: u8) -> &'static str {
+    match reason {
+        aria_core::common::CT_CONTRACT_REASON_CT_MISS => "ct_miss",
+        aria_core::common::CT_CONTRACT_REASON_CT_DISABLED => "ct_disabled",
+        _ => "unknown",
+    }
+}
+
 fn flush_metrics_chunk(buf: &mut String, force: bool) -> Option<Bytes> {
     if buf.is_empty() || (!force && buf.len() < METRICS_CHUNK_SIZE) {
         return None;
@@ -1640,6 +1663,31 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
             }
             if let Some(chunk) = flush_metrics_chunk(&mut out, false) {
                 yield Ok::<_, std::convert::Infallible>(chunk);
+            }
+        }
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
+        }
+
+        // ── CT contract fallback counters ──
+        let _ = writeln!(out, "# HELP aria_ct_contract_packets_total Packets handled through conntrack-contract fallback");
+        let _ = writeln!(out, "# TYPE aria_ct_contract_packets_total counter");
+        let _ = writeln!(out, "# HELP aria_ct_contract_bytes_total Bytes handled through conntrack-contract fallback");
+        let _ = writeln!(out, "# TYPE aria_ct_contract_bytes_total counter");
+
+        for inst in &instances {
+            let i = prom_escape(inst);
+            if let Ok(entries) = cp.get_ct_contract_stats(inst).await {
+                for e in &entries {
+                    let hook = prom_escape(ct_contract_hook_to_string(e.hook));
+                    let family = prom_escape(ct_contract_family_to_string(e.family));
+                    let reason = prom_escape(ct_contract_reason_to_string(e.reason));
+                    let _ = writeln!(out, "aria_ct_contract_packets_total{{instance=\"{i}\",hook=\"{hook}\",family=\"{family}\",reason=\"{reason}\"}} {}", e.packets);
+                    let _ = writeln!(out, "aria_ct_contract_bytes_total{{instance=\"{i}\",hook=\"{hook}\",family=\"{family}\",reason=\"{reason}\"}} {}", e.bytes);
+                    if let Some(chunk) = flush_metrics_chunk(&mut out, false) {
+                        yield Ok::<_, std::convert::Infallible>(chunk);
+                    }
+                }
             }
         }
         if let Some(chunk) = flush_metrics_chunk(&mut out, true) {

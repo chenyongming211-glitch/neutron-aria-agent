@@ -90,6 +90,34 @@ pub struct CtConfig {
     pub icmp_ns: u64,
 }
 
+// --- Conntrack contract telemetry ---
+
+pub const CT_CONTRACT_HOOK_TC_INGRESS: u8 = 1;
+
+pub const CT_CONTRACT_FAMILY_IPV4: u8 = 4;
+pub const CT_CONTRACT_FAMILY_IPV6: u8 = 6;
+
+pub const CT_CONTRACT_REASON_CT_MISS: u8 = 1;
+pub const CT_CONTRACT_REASON_CT_DISABLED: u8 = 2;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct CtContractKey {
+    pub tap_id: u32,
+    pub hook: u8,
+    pub family: u8,
+    pub reason: u8,
+    pub pad: u8,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct CtContractValue {
+    pub packets: u64,
+    pub bytes: u64,
+    pub last_seen: u64,
+}
+
 // --- Traffic statistics ---
 
 #[repr(C)]

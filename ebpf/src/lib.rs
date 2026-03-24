@@ -14,6 +14,7 @@ mod maps;
 mod parser;
 mod runtime;
 mod conntrack;
+mod ct_contract;
 mod stats;
 mod qos;
 mod policy;
@@ -27,6 +28,9 @@ use common::{
     CtKey4, CtKey6,
     XDP_PASS, XDP_DROP, DIR_INGRESS, DIR_EGRESS,
     IPPROTO_TCP,
+    CT_CONTRACT_HOOK_TC_INGRESS,
+    CT_CONTRACT_FAMILY_IPV4, CT_CONTRACT_FAMILY_IPV6,
+    CT_CONTRACT_REASON_CT_MISS, CT_CONTRACT_REASON_CT_DISABLED,
     DROP_QOS_INGRESS, DROP_QOS_EGRESS,
     TRACE_TC_EGRESS, TRACE_TC_DROP, TRACE_TC_INGRESS,
     TRACE_RESULT_PASS, TRACE_RESULT_DROP_QOS,
@@ -523,6 +527,24 @@ unsafe fn should_apply_ingress_qos(p: &PipelineCtx) -> bool {
 }
 
 #[inline(always)]
+unsafe fn record_tc_ingress_contract_fallback(p: &PipelineCtx, family: u8) {
+    let reason = if runtime::conntrack_enabled(p.tap_id) {
+        CT_CONTRACT_REASON_CT_MISS
+    } else {
+        CT_CONTRACT_REASON_CT_DISABLED
+    };
+    ct_contract::record_event(&ct_contract::CtContractArgs {
+        tap_id: p.tap_id,
+        pkt_len: p.pkt_len,
+        now: p.now,
+        hook: CT_CONTRACT_HOOK_TC_INGRESS,
+        family,
+        reason,
+        _pad: 0,
+    });
+}
+
+#[inline(always)]
 unsafe fn phase_qos_ingress_tc(info: &parser::PacketInfo, p: &mut PipelineCtx) {
     if !qos::apply_qos_ingress(p.tap_id, p.src_id, p.dst_id, p.pkt_len, p.now) {
         p.drop_reason = DROP_QOS_INGRESS;
@@ -605,7 +627,9 @@ unsafe fn phase_ct_fastpath_tc_ingress_v6(ctx: &TcContext, info: &parser::Packet
 /// CT miss fallback for TC ingress IPv4.
 #[inline(always)]
 unsafe fn phase_ct_miss_tc_ingress_v4(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx) {
-    if need_ingress_ids(p) {
+    let need_ids = need_ingress_ids(p);
+    if need_ids {
+        record_tc_ingress_contract_fallback(p, CT_CONTRACT_FAMILY_IPV4);
         load_packet_ids_v4(info, p);
         if should_apply_ingress_qos(p) {
             phase_qos_ingress_tc(info, p);
@@ -623,7 +647,9 @@ unsafe fn phase_ct_miss_tc_ingress_v4(ctx: &TcContext, info: &parser::PacketInfo
 /// CT miss fallback for TC ingress IPv6.
 #[inline(always)]
 unsafe fn phase_ct_miss_tc_ingress_v6(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx) {
-    if need_ingress_ids(p) {
+    let need_ids = need_ingress_ids(p);
+    if need_ids {
+        record_tc_ingress_contract_fallback(p, CT_CONTRACT_FAMILY_IPV6);
         load_packet_ids_v6(info, p);
         if should_apply_ingress_qos(p) {
             phase_qos_ingress_tc(info, p);

@@ -3,6 +3,7 @@ pub mod state;
 pub mod ebpf_ops;
 pub mod monitoring;
 pub mod ct_ops;
+pub mod ct_contract_ops;
 pub mod qos_ops;
 pub mod mirror_ops;
 pub mod tcprt_ops;
