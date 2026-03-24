@@ -1,5 +1,7 @@
-use crate::common::{MirrorKey, GlobalMirrorKey, MirrorStatsValue};
-use crate::maps::{MIRROR_POLICY, MIRROR_GLOBAL, MIRROR_STATS, MIRROR_GLOBAL_STATS};
+use crate::common::{GlobalMirrorKey, MirrorKey};
+use crate::maps::{
+    MIRROR_GLOBAL, MIRROR_GLOBAL_STATS, MIRROR_POLICY, MIRROR_STATS, MIRROR_STATS_BUF,
+};
 use aya_ebpf::helpers::gen::bpf_clone_redirect;
 
 /// Check if mirror is globally enabled via FIREWALL_CONFIG.
@@ -19,12 +21,20 @@ unsafe fn update_mirror_stats(key: &MirrorKey, pkt_len: u32, success: bool) {
             (*s).errors += 1;
         }
     } else {
-        let val = if success {
-            MirrorStatsValue { mirrored_packets: 1, mirrored_bytes: pkt_len as u64, errors: 0 }
-        } else {
-            MirrorStatsValue { mirrored_packets: 0, mirrored_bytes: 0, errors: 1 }
+        let val = match MIRROR_STATS_BUF.get_ptr_mut(0) {
+            Some(v) => v,
+            None => return,
         };
-        let _ = MIRROR_STATS.insert(key, &val, 0);
+        if success {
+            (*val).mirrored_packets = 1;
+            (*val).mirrored_bytes = pkt_len as u64;
+            (*val).errors = 0;
+        } else {
+            (*val).mirrored_packets = 0;
+            (*val).mirrored_bytes = 0;
+            (*val).errors = 1;
+        }
+        let _ = MIRROR_STATS.insert(key, &*val, 0);
     }
 }
 
@@ -39,12 +49,20 @@ unsafe fn update_global_mirror_stats(key: &GlobalMirrorKey, pkt_len: u32, succes
             (*s).errors += 1;
         }
     } else {
-        let val = if success {
-            MirrorStatsValue { mirrored_packets: 1, mirrored_bytes: pkt_len as u64, errors: 0 }
-        } else {
-            MirrorStatsValue { mirrored_packets: 0, mirrored_bytes: 0, errors: 1 }
+        let val = match MIRROR_STATS_BUF.get_ptr_mut(0) {
+            Some(v) => v,
+            None => return,
         };
-        let _ = MIRROR_GLOBAL_STATS.insert(key, &val, 0);
+        if success {
+            (*val).mirrored_packets = 1;
+            (*val).mirrored_bytes = pkt_len as u64;
+            (*val).errors = 0;
+        } else {
+            (*val).mirrored_packets = 0;
+            (*val).mirrored_bytes = 0;
+            (*val).errors = 1;
+        }
+        let _ = MIRROR_GLOBAL_STATS.insert(key, &*val, 0);
     }
 }
 

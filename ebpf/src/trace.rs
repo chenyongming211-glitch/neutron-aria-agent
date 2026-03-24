@@ -1,5 +1,4 @@
-use crate::common::TraceEvent;
-use crate::maps::{TRACE_FILTER, TRACE_LOG, TRACE_SEQ};
+use crate::maps::{TRACE_EVENT_BUF, TRACE_FILTER, TRACE_LOG, TRACE_SEQ};
 use crate::parser::PacketInfo;
 
 /// Check if tracing is enabled and packet matches filter.
@@ -73,24 +72,24 @@ pub unsafe fn trace_event(
 ) {
     let seq_key: u32 = 0;
     if let Some(seq) = TRACE_SEQ.get_ptr_mut(seq_key) {
-        *seq += 1;
-        let event = TraceEvent {
-            timestamp: args.now,
-            src_ip: info.src_ip,
-            dst_ip: info.dst_ip,
-            src_port: info.src_port,
-            dst_port: info.dst_port,
-            proto: info.proto,
-            hook: args.hook,
-            result: args.result,
-            direction: args.direction,
-            src_id: args.src_id,
-            dst_id: args.dst_id,
-            pkt_len: args.pkt_len,
-            ct_state: args.ct_state,
-            drop_reason: args.drop_reason,
-            pad: [0; 2],
-        };
-        let _ = TRACE_LOG.insert(&*seq, &event, 0);
+        if let Some(event) = TRACE_EVENT_BUF.get_ptr_mut(0) {
+            *seq += 1;
+            (*event).timestamp = args.now;
+            (*event).src_ip = info.src_ip;
+            (*event).dst_ip = info.dst_ip;
+            (*event).src_port = info.src_port;
+            (*event).dst_port = info.dst_port;
+            (*event).proto = info.proto;
+            (*event).hook = args.hook;
+            (*event).result = args.result;
+            (*event).direction = args.direction;
+            (*event).src_id = args.src_id;
+            (*event).dst_id = args.dst_id;
+            (*event).pkt_len = args.pkt_len;
+            (*event).ct_state = args.ct_state;
+            (*event).drop_reason = args.drop_reason;
+            (*event).pad = [0; 2];
+            let _ = TRACE_LOG.insert(&*seq, &*event, 0);
+        }
     }
 }

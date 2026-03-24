@@ -1,5 +1,5 @@
-use crate::common::{DropKey, DropValue};
-use crate::maps::DROP_REASON_STATS;
+use crate::common::DropKey;
+use crate::maps::{DROP_REASON_STATS, DROP_VALUE_BUF};
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -33,11 +33,13 @@ pub unsafe fn record_drop(args: &DropArgs) {
         (*v).bytes += args.pkt_len as u64;
         (*v).last_seen = args.now;
     } else {
-        let val = DropValue {
-            packets: 1,
-            bytes: args.pkt_len as u64,
-            last_seen: args.now,
+        let val = match DROP_VALUE_BUF.get_ptr_mut(0) {
+            Some(v) => v,
+            None => return,
         };
-        let _ = DROP_REASON_STATS.insert(&key, &val, 0);
+        (*val).packets = 1;
+        (*val).bytes = args.pkt_len as u64;
+        (*val).last_seen = args.now;
+        let _ = DROP_REASON_STATS.insert(&key, &*val, 0);
     }
 }

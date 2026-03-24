@@ -81,12 +81,18 @@ pub static TAP_CONFIG_MAP: HashMap<u32, TapConfig> = HashMap::with_max_entries(1
 #[map(name = "RULE_STATS")]
 pub static RULE_STATS: PerCpuHashMap<PolicyKey, RuleStatsValue> = PerCpuHashMap::with_max_entries(65536, 0);
 
+#[map(name = "RULE_STATS_BUF")]
+pub static RULE_STATS_BUF: PerCpuArray<RuleStatsValue> = PerCpuArray::with_max_entries(1, 0);
+
 // BPF_F_NO_PREALLOC (1) for LRU per-CPU maps
 #[map(name = "FLOW_STATS_V4")]
 pub static FLOW_STATS_V4: LruPerCpuHashMap<CtKey4, FlowStatsValue> = LruPerCpuHashMap::with_max_entries(16384, 0);
 
 #[map(name = "FLOW_STATS_V6")]
 pub static FLOW_STATS_V6: LruPerCpuHashMap<CtKey6, FlowStatsValue> = LruPerCpuHashMap::with_max_entries(4096, 0);
+
+#[map(name = "FLOW_STATS_BUF")]
+pub static FLOW_STATS_BUF: PerCpuArray<FlowStatsValue> = PerCpuArray::with_max_entries(1, 0);
 
 // --- QoS maps ---
 
@@ -104,10 +110,16 @@ pub static QOS_TOKEN_BUCKET: HashMap<QosKey, TokenBucket> = HashMap::with_max_en
 #[map(name = "QOS_STATS")]
 pub static QOS_STATS: PerCpuHashMap<QosKey, QosStatsValue> = PerCpuHashMap::with_max_entries(16384, 0);
 
+#[map(name = "QOS_STATS_BUF")]
+pub static QOS_STATS_BUF: PerCpuArray<QosStatsValue> = PerCpuArray::with_max_entries(1, 0);
+
 // --- Per-group statistics ---
 
 #[map(name = "GROUP_STATS")]
 pub static GROUP_STATS: PerCpuHashMap<GroupStatsKey, GroupStatsValue> = PerCpuHashMap::with_max_entries(8192, 0);
+
+#[map(name = "GROUP_STATS_BUF")]
+pub static GROUP_STATS_BUF: PerCpuArray<GroupStatsValue> = PerCpuArray::with_max_entries(1, 0);
 
 // --- Mirror (Port SPAN) maps ---
 
@@ -123,6 +135,9 @@ pub static MIRROR_STATS: PerCpuHashMap<MirrorKey, MirrorStatsValue> = PerCpuHash
 #[map(name = "MIRROR_GLOBAL_STATS")]
 pub static MIRROR_GLOBAL_STATS: PerCpuHashMap<GlobalMirrorKey, MirrorStatsValue> = PerCpuHashMap::with_max_entries(2, 0);
 
+#[map(name = "MIRROR_STATS_BUF")]
+pub static MIRROR_STATS_BUF: PerCpuArray<MirrorStatsValue> = PerCpuArray::with_max_entries(1, 0);
+
 // --- TCP-RT (TCP Response Time) maps ---
 
 #[map(name = "TCPRT_TABLE_V4")]
@@ -131,10 +146,16 @@ pub static TCPRT_TABLE_V4: LruHashMap<CtKey4, TcpRtValue> = LruHashMap::with_max
 #[map(name = "TCPRT_TABLE_V6")]
 pub static TCPRT_TABLE_V6: LruHashMap<CtKey6, TcpRtValue> = LruHashMap::with_max_entries(16384, 0);
 
+#[map(name = "TCPRT_VALUE_BUF")]
+pub static TCPRT_VALUE_BUF: PerCpuArray<TcpRtValue> = PerCpuArray::with_max_entries(1, 0);
+
 // --- Drop Reason Profiler ---
 
 #[map(name = "DROP_REASON_STATS")]
 pub static DROP_REASON_STATS: PerCpuHashMap<DropKey, DropValue> = PerCpuHashMap::with_max_entries(1024, 0);
+
+#[map(name = "DROP_VALUE_BUF")]
+pub static DROP_VALUE_BUF: PerCpuArray<DropValue> = PerCpuArray::with_max_entries(1, 0);
 
 // --- Packet Trace ---
 
@@ -146,6 +167,9 @@ pub static TRACE_LOG: LruHashMap<u64, TraceEvent> = LruHashMap::with_max_entries
 
 #[map(name = "TRACE_SEQ")]
 pub static TRACE_SEQ: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+#[map(name = "TRACE_EVENT_BUF")]
+pub static TRACE_EVENT_BUF: PerCpuArray<TraceEvent> = PerCpuArray::with_max_entries(1, 0);
 
 // --- SSL Observability maps ---
 

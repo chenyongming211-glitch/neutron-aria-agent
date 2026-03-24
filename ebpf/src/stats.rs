@@ -1,5 +1,8 @@
-use crate::common::{PolicyKey, RuleStatsValue, FlowStatsValue, CtKey4, CtKey6, GroupStatsKey, GroupStatsValue};
-use crate::maps::{RULE_STATS, FLOW_STATS_V4, FLOW_STATS_V6, GROUP_STATS};
+use crate::common::{CtKey4, CtKey6, GroupStatsKey, PolicyKey};
+use crate::maps::{
+    FLOW_STATS_BUF, FLOW_STATS_V4, FLOW_STATS_V6, GROUP_STATS, GROUP_STATS_BUF, RULE_STATS,
+    RULE_STATS_BUF,
+};
 
 #[inline(always)]
 pub(crate) fn monitoring_enabled(tap_id: u32) -> bool {
@@ -19,13 +22,15 @@ pub unsafe fn update_rule_stats(key: &PolicyKey, pkt_len: u32, dropped: bool) {
             (*s).dropped_bytes += pkt_len as u64;
         }
     } else {
-        let val = RuleStatsValue {
-            packets: 1,
-            bytes: pkt_len as u64,
-            dropped_packets: if dropped { 1 } else { 0 },
-            dropped_bytes: if dropped { pkt_len as u64 } else { 0 },
+        let val = match RULE_STATS_BUF.get_ptr_mut(0) {
+            Some(v) => v,
+            None => return,
         };
-        let _ = RULE_STATS.insert(key, &val, 0);
+        (*val).packets = 1;
+        (*val).bytes = pkt_len as u64;
+        (*val).dropped_packets = if dropped { 1 } else { 0 };
+        (*val).dropped_bytes = if dropped { pkt_len as u64 } else { 0 };
+        let _ = RULE_STATS.insert(key, &*val, 0);
     }
 }
 
@@ -39,12 +44,14 @@ pub unsafe fn update_flow_stats_v4(key: &CtKey4, pkt_len: u32, now: u64) {
         (*s).bytes += pkt_len as u64;
         (*s).last_seen = now;
     } else {
-        let val = FlowStatsValue {
-            packets: 1,
-            bytes: pkt_len as u64,
-            last_seen: now,
+        let val = match FLOW_STATS_BUF.get_ptr_mut(0) {
+            Some(v) => v,
+            None => return,
         };
-        let _ = FLOW_STATS_V4.insert(key, &val, 0);
+        (*val).packets = 1;
+        (*val).bytes = pkt_len as u64;
+        (*val).last_seen = now;
+        let _ = FLOW_STATS_V4.insert(key, &*val, 0);
     }
 }
 
@@ -58,12 +65,14 @@ pub unsafe fn update_flow_stats_v6(key: &CtKey6, pkt_len: u32, now: u64) {
         (*s).bytes += pkt_len as u64;
         (*s).last_seen = now;
     } else {
-        let val = FlowStatsValue {
-            packets: 1,
-            bytes: pkt_len as u64,
-            last_seen: now,
+        let val = match FLOW_STATS_BUF.get_ptr_mut(0) {
+            Some(v) => v,
+            None => return,
         };
-        let _ = FLOW_STATS_V6.insert(key, &val, 0);
+        (*val).packets = 1;
+        (*val).bytes = pkt_len as u64;
+        (*val).last_seen = now;
+        let _ = FLOW_STATS_V6.insert(key, &*val, 0);
     }
 }
 
@@ -82,10 +91,12 @@ pub unsafe fn update_group_stats(tap_id: u32, group_id: u32, direction: u8, pkt_
         (*s).packets += 1;
         (*s).bytes += pkt_len as u64;
     } else {
-        let val = GroupStatsValue {
-            packets: 1,
-            bytes: pkt_len as u64,
+        let val = match GROUP_STATS_BUF.get_ptr_mut(0) {
+            Some(v) => v,
+            None => return,
         };
-        let _ = GROUP_STATS.insert(&key, &val, 0);
+        (*val).packets = 1;
+        (*val).bytes = pkt_len as u64;
+        let _ = GROUP_STATS.insert(&key, &*val, 0);
     }
 }

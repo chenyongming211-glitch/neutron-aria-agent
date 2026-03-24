@@ -6,12 +6,45 @@ use crate::common::{
     TCPRT_FLAG_SYN_SEEN, TCPRT_FLAG_SYNACK_SEEN, TCPRT_FLAG_ESTABLISHED,
     TCPRT_FLAG_FIN_FWD, TCPRT_FLAG_FIN_REV,
 };
-use crate::maps::{TCPRT_TABLE_V4, TCPRT_TABLE_V6};
+use crate::maps::{TCPRT_TABLE_V4, TCPRT_TABLE_V6, TCPRT_VALUE_BUF};
 use crate::parser::PacketInfo;
 
 #[inline(always)]
 pub fn tcprt_enabled(tap_id: u32) -> bool {
     crate::runtime::tcprt_enabled(tap_id)
+}
+
+#[inline(always)]
+unsafe fn init_tcprt_value(val: *mut TcpRtValue, now: u64, tcp_seq: u32) {
+    (*val).syn_ts = now;
+    (*val).synack_ts = 0;
+    (*val).ack_ts = 0;
+    (*val).last_request_ts = 0;
+    (*val).first_response_ts = 0;
+    (*val).handshake_ns = 0;
+    (*val).rtt_client_ns = 0;
+    (*val).rtt_server_ns = 0;
+    (*val).art_ns = 0;
+    (*val).syn_ingress_ts = now;
+    (*val).synack_ingress_ts = 0;
+    (*val).retrans_req = 0;
+    (*val).retrans_resp = 0;
+    (*val).request_count = 0;
+    (*val).state = TCPRT_STATE_SYN_SENT;
+    (*val).flags = TCPRT_FLAG_SYN_SEEN;
+    (*val).pad = [0; 2];
+    (*val).last_seq = tcp_seq;
+    (*val).last_payload_len = 0;
+    (*val).prev_seq = 0;
+    (*val).prev_payload_len = 0;
+    (*val).last_resp_seq = 0;
+    (*val).last_resp_payload_len = 0;
+    (*val).prev_resp_seq = 0;
+    (*val).prev_resp_payload_len = 0;
+    (*val)._pad2 = [0; 6];
+    (*val).fin_ts = 0;
+    (*val).rst_ts = 0;
+    (*val).close_ts = 0;
 }
 
 /// Check if seq matches last_seq or prev_seq (catches retransmits arriving after new data).
@@ -49,38 +82,12 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
                 return;
             }
         }
-        let val = TcpRtValue {
-            syn_ts: now,
-            synack_ts: 0,
-            ack_ts: 0,
-            last_request_ts: 0,
-            first_response_ts: 0,
-            handshake_ns: 0,
-            rtt_client_ns: 0,
-            rtt_server_ns: 0,
-            art_ns: 0,
-            syn_ingress_ts: now,
-            synack_ingress_ts: 0,
-            retrans_req: 0,
-            retrans_resp: 0,
-            request_count: 0,
-            state: TCPRT_STATE_SYN_SENT,
-            flags: TCPRT_FLAG_SYN_SEEN,
-            pad: [0; 2],
-            last_seq: info.tcp_seq,
-            last_payload_len: 0,
-            prev_seq: 0,
-            prev_payload_len: 0,
-            last_resp_seq: 0,
-            last_resp_payload_len: 0,
-            prev_resp_seq: 0,
-            prev_resp_payload_len: 0,
-            _pad2: [0; 6],
-            fin_ts: 0,
-            rst_ts: 0,
-            close_ts: 0,
+        let val = match TCPRT_VALUE_BUF.get_ptr_mut(0) {
+            Some(v) => v,
+            None => return,
         };
-        let _ = TCPRT_TABLE_V4.insert(ct_key, &val, 0);
+        init_tcprt_value(val, now, info.tcp_seq);
+        let _ = TCPRT_TABLE_V4.insert(ct_key, &*val, 0);
         return;
     }
 
@@ -222,38 +229,12 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
                 return;
             }
         }
-        let val = TcpRtValue {
-            syn_ts: now,
-            synack_ts: 0,
-            ack_ts: 0,
-            last_request_ts: 0,
-            first_response_ts: 0,
-            handshake_ns: 0,
-            rtt_client_ns: 0,
-            rtt_server_ns: 0,
-            art_ns: 0,
-            syn_ingress_ts: now,
-            synack_ingress_ts: 0,
-            retrans_req: 0,
-            retrans_resp: 0,
-            request_count: 0,
-            state: TCPRT_STATE_SYN_SENT,
-            flags: TCPRT_FLAG_SYN_SEEN,
-            pad: [0; 2],
-            last_seq: info.tcp_seq,
-            last_payload_len: 0,
-            prev_seq: 0,
-            prev_payload_len: 0,
-            last_resp_seq: 0,
-            last_resp_payload_len: 0,
-            prev_resp_seq: 0,
-            prev_resp_payload_len: 0,
-            _pad2: [0; 6],
-            fin_ts: 0,
-            rst_ts: 0,
-            close_ts: 0,
+        let val = match TCPRT_VALUE_BUF.get_ptr_mut(0) {
+            Some(v) => v,
+            None => return,
         };
-        let _ = TCPRT_TABLE_V6.insert(ct_key, &val, 0);
+        init_tcprt_value(val, now, info.tcp_seq);
+        let _ = TCPRT_TABLE_V6.insert(ct_key, &*val, 0);
         return;
     }
 

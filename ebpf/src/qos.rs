@@ -1,5 +1,5 @@
-use crate::common::{QosKey, QosStatsValue, TokenBucket, DIR_EGRESS, DIR_INGRESS};
-use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, QOS_STATS};
+use crate::common::{QosKey, TokenBucket, DIR_EGRESS, DIR_INGRESS};
+use crate::maps::{QOS_CONFIG, QOS_STATS, QOS_STATS_BUF, QOS_TOKEN_BUCKET};
 
 /// QoS mode constants
 const QOS_MODE_SHAPING: u8 = 1;
@@ -53,29 +53,31 @@ unsafe fn update_qos_stats(key: &QosKey, pkt_len: u32, outcome: u8) {
             }
         }
     } else {
-        let mut val = QosStatsValue {
-            passed_packets: 0,
-            passed_bytes: 0,
-            dropped_packets: 0,
-            dropped_bytes: 0,
-            shaped_packets: 0,
-            shaped_bytes: 0,
+        let val = match QOS_STATS_BUF.get_ptr_mut(0) {
+            Some(v) => v,
+            None => return,
         };
+        (*val).passed_packets = 0;
+        (*val).passed_bytes = 0;
+        (*val).dropped_packets = 0;
+        (*val).dropped_bytes = 0;
+        (*val).shaped_packets = 0;
+        (*val).shaped_bytes = 0;
         match outcome {
             0 => {
-                val.passed_packets = 1;
-                val.passed_bytes = pkt_len as u64;
+                (*val).passed_packets = 1;
+                (*val).passed_bytes = pkt_len as u64;
             }
             1 => {
-                val.dropped_packets = 1;
-                val.dropped_bytes = pkt_len as u64;
+                (*val).dropped_packets = 1;
+                (*val).dropped_bytes = pkt_len as u64;
             }
             _ => {
-                val.shaped_packets = 1;
-                val.shaped_bytes = pkt_len as u64;
+                (*val).shaped_packets = 1;
+                (*val).shaped_bytes = pkt_len as u64;
             }
         }
-        let _ = QOS_STATS.insert(key, &val, 0);
+        let _ = QOS_STATS.insert(key, &*val, 0);
     }
 }
 
