@@ -321,3 +321,55 @@ pub fn flush_tcprt(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
 
     Ok(count)
 }
+
+fn scrub_tcprt_table_v4_strict(pin_path: &str, tap_id: u32) -> Result<u64, String> {
+    let map_path = format!("{}/TCPRT_TABLE_V4", pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open TCPRT_TABLE_V4: {:?}", e))?;
+    let mut map = HashMap::<_, CtKey4, TcpRtValue>::try_from(
+        aya::maps::Map::LruHashMap(map_data)
+    ).map_err(|e| format!("convert TCPRT_TABLE_V4: {:?}", e))?;
+
+    let keys: Vec<CtKey4> = map.iter()
+        .filter_map(|item| item.ok().map(|(k, _)| k))
+        .filter(|key| key.tap_id == tap_id)
+        .collect();
+    let count = keys.len() as u64;
+    for key in keys {
+        map.remove(&key)
+            .map_err(|e| format!("remove TCPRT_TABLE_V4 entry: {:?}", e))?;
+    }
+    Ok(count)
+}
+
+fn scrub_tcprt_table_v6_strict(pin_path: &str, tap_id: u32) -> Result<u64, String> {
+    let map_path = format!("{}/TCPRT_TABLE_V6", pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open TCPRT_TABLE_V6: {:?}", e))?;
+    let mut map = HashMap::<_, CtKey6, TcpRtValue>::try_from(
+        aya::maps::Map::LruHashMap(map_data)
+    ).map_err(|e| format!("convert TCPRT_TABLE_V6: {:?}", e))?;
+
+    let keys: Vec<CtKey6> = map.iter()
+        .filter_map(|item| item.ok().map(|(k, _)| k))
+        .filter(|key| key.tap_id == tap_id)
+        .collect();
+    let count = keys.len() as u64;
+    for key in keys {
+        map.remove(&key)
+            .map_err(|e| format!("remove TCPRT_TABLE_V6 entry: {:?}", e))?;
+    }
+    Ok(count)
+}
+
+/// Strict TCPRT scrub for managed pre-replay.
+/// Missing or invalid pinned maps are treated as errors.
+pub fn scrub_tcprt_tables_strict(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
+    let pin_path = runtime.pin_path;
+    let tap_id = runtime.tap_id;
+
+    let mut count = 0u64;
+    count += scrub_tcprt_table_v4_strict(pin_path, tap_id)?;
+    count += scrub_tcprt_table_v6_strict(pin_path, tap_id)?;
+    Ok(count)
+}
