@@ -12,6 +12,7 @@ use crate::drops;
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct PolicyArgs {
+    pub tap_id: u32,
     pub src_id: u32,
     pub dst_id: u32,
     pub pkt_len: u32,
@@ -59,6 +60,7 @@ pub unsafe fn evaluate_policy(
         let p = if (mask & 4) != 0 { 0 } else { args.proto };
 
         let key = PolicyKey {
+            tap_id: args.tap_id,
             src_id: s,
             dst_id: d,
             proto: p,
@@ -66,12 +68,13 @@ pub unsafe fn evaluate_policy(
             pad: [0; 2],
         };
         if let Some(policy) = POLICY_TABLE.get(&key) {
-            let (result, drop_reason) = apply_policy(policy, args.dst_port);
+            let (result, drop_reason) = apply_policy(args.tap_id, policy, args.dst_port);
             stats::update_rule_stats(&key, args.pkt_len, result == XDP_DROP);
             if result == XDP_DROP {
-                drops::record_drop(&drops::DropArgs { reason: drop_reason, direction: args.direction, proto: args.proto, src_id: args.src_id, dst_id: args.dst_id, pkt_len: args.pkt_len, now: args.now, _pad: 0 });
+                drops::record_drop(&drops::DropArgs { tap_id: args.tap_id, reason: drop_reason, direction: args.direction, proto: args.proto, src_id: args.src_id, dst_id: args.dst_id, pkt_len: args.pkt_len, now: args.now, _pad: 0 });
             }
             let matched = MatchedPolicy {
+                tap_id: args.tap_id,
                 src_id: s,
                 dst_id: d,
                 proto: p,
@@ -83,6 +86,7 @@ pub unsafe fn evaluate_policy(
     }
 
     let matched = MatchedPolicy {
+        tap_id: args.tap_id,
         src_id: 0,
         dst_id: 0,
         proto: 0,
@@ -92,7 +96,7 @@ pub unsafe fn evaluate_policy(
 }
 
 /// Returns (XDP action, drop_reason). drop_reason is 0 for PASS.
-fn apply_policy(policy: &PolicyValue, dst_port: u16) -> (u32, u8) {
+fn apply_policy(tap_id: u32, policy: &PolicyValue, dst_port: u16) -> (u32, u8) {
     if policy.has_port_filter == 0 {
         return if policy.action == 0 {
             (XDP_PASS, 0)
@@ -101,7 +105,7 @@ fn apply_policy(policy: &PolicyValue, dst_port: u16) -> (u32, u8) {
         };
     }
 
-    let key = PortKey { idx: policy.bitmap_idx, port: dst_port, pad: 0 };
+    let key = PortKey { tap_id, idx: policy.bitmap_idx, port: dst_port, pad: 0 };
     let rule_action = unsafe { PORT_BITMAP_POOL.get(&key).copied().unwrap_or(0) };
 
     match rule_action {

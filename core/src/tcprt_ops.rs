@@ -49,6 +49,9 @@ pub fn get_tcprt_flows_v4(runtime: TapMapRuntime<'_>) -> Result<Vec<TcpRtEntry>,
     let mut entries = Vec::new();
     for item in map.iter() {
         if let Ok((key, val)) = item {
+            if key.tap_id != runtime.tap_id {
+                continue;
+            }
             entries.push(value_to_entry(
                 Ipv4Addr::from(key.src_ip).to_string(),
                 Ipv4Addr::from(key.dst_ip).to_string(),
@@ -71,6 +74,9 @@ pub fn get_tcprt_flows_v6(runtime: TapMapRuntime<'_>) -> Result<Vec<TcpRtEntry>,
     let mut entries = Vec::new();
     for item in map.iter() {
         if let Ok((key, val)) = item {
+            if key.tap_id != runtime.tap_id {
+                continue;
+            }
             entries.push(value_to_entry(
                 Ipv6Addr::from(key.src_ip).to_string(),
                 Ipv6Addr::from(key.dst_ip).to_string(),
@@ -157,6 +163,7 @@ pub fn lookup_tcprt_flows(runtime: TapMapRuntime<'_>, tuples: &[(String, String,
             for (src_ip, dst_ip, src_port, dst_port) in tuples {
                 if let (Ok(sip), Ok(dip)) = (src_ip.parse::<Ipv4Addr>(), dst_ip.parse::<Ipv4Addr>()) {
                     let key = CtKey4 {
+                        tap_id: runtime.tap_id,
                         src_ip: u32::from(sip),
                         dst_ip: u32::from(dip),
                         src_port: *src_port,
@@ -181,6 +188,7 @@ pub fn lookup_tcprt_flows(runtime: TapMapRuntime<'_>, tuples: &[(String, String,
             for (src_ip, dst_ip, src_port, dst_port) in tuples {
                 if let (Ok(sip), Ok(dip)) = (src_ip.parse::<Ipv6Addr>(), dst_ip.parse::<Ipv6Addr>()) {
                     let key = CtKey6 {
+                        tap_id: runtime.tap_id,
                         src_ip: sip.octets(),
                         dst_ip: dip.octets(),
                         src_port: *src_port,
@@ -213,6 +221,9 @@ pub fn filter_tcprt_flows(runtime: TapMapRuntime<'_>, dst_ip: &str, dst_port: u1
             let target_ip: Option<Ipv4Addr> = dst_ip.parse().ok();
             for item in map.iter() {
                 if let Ok((key, val)) = item {
+                    if key.tap_id != runtime.tap_id {
+                        continue;
+                    }
                     if key.dst_port != dst_port {
                         continue;
                     }
@@ -242,6 +253,9 @@ pub fn filter_tcprt_flows(runtime: TapMapRuntime<'_>, dst_ip: &str, dst_port: u1
             let target_ip: Option<Ipv6Addr> = dst_ip.parse().ok();
             for item in map.iter() {
                 if let Ok((key, val)) = item {
+                    if key.tap_id != runtime.tap_id {
+                        continue;
+                    }
                     if key.dst_port != dst_port {
                         continue;
                     }
@@ -277,6 +291,7 @@ pub fn flush_tcprt(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
         ) {
             let keys: Vec<CtKey4> = map.iter()
                 .filter_map(|item| item.ok().map(|(k, _)| k))
+                .filter(|key| key.tap_id == runtime.tap_id)
                 .collect();
             for key in keys {
                 if map.remove(&key).is_ok() {
@@ -294,6 +309,7 @@ pub fn flush_tcprt(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
         ) {
             let keys: Vec<CtKey6> = map.iter()
                 .filter_map(|item| item.ok().map(|(k, _)| k))
+                .filter(|key| key.tap_id == runtime.tap_id)
                 .collect();
             for key in keys {
                 if map.remove(&key).is_ok() {

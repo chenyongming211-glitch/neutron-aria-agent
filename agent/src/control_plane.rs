@@ -193,6 +193,8 @@ impl ControlPlane {
         }
 
         let tap_id = state.tap_id;
+        let runtime = TapMapRuntime::new(&pin_path, tap_id);
+        aria_core::ebpf_ops::sync_iface_ctx(runtime, ifindex)?;
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             tap_id,
@@ -299,6 +301,11 @@ impl ControlPlane {
             let mut state = inst.write().await;
             let tap_id = state.tap_id;
             let ifindex = state.ifindex;
+            if let Some(ifindex) = ifindex {
+                if let Err(e) = aria_core::ebpf_ops::clear_iface_ctx(&state.pin_path, ifindex) {
+                    warn!(instance = %name, tap_id, ifindex, error = %e, "failed to clear iface context");
+                }
+            }
             state.shutdown_wal().await;
             info!(instance = %name, tap_id, ifindex = ?ifindex, "unregistered instance");
             return;

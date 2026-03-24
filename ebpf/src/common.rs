@@ -1,6 +1,7 @@
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct PolicyKey {
+    pub tap_id: u32,
     pub src_id: u32,
     pub dst_id: u32,
     pub proto: u8,
@@ -31,6 +32,7 @@ pub const DIR_EGRESS: u8 = 1;
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct PortKey {
+    pub tap_id: u32,
     pub idx: u32,
     pub port: u16,
     pub pad: u16,
@@ -41,6 +43,7 @@ pub struct PortKey {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct CtKey4 {
+    pub tap_id: u32,
     pub src_ip: u32,
     pub dst_ip: u32,
     pub src_port: u16,
@@ -52,6 +55,7 @@ pub struct CtKey4 {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct CtKey6 {
+    pub tap_id: u32,
     pub src_ip: [u8; 16],
     pub dst_ip: [u8; 16],
     pub src_port: u16,
@@ -110,6 +114,7 @@ pub struct FlowStatsValue {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct QosKey {
+    pub tap_id: u32,
     pub group_id: u32,
     pub direction: u8,
     pub pad: [u8; 3],
@@ -153,6 +158,7 @@ pub struct QosStatsValue {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct GroupStatsKey {
+    pub tap_id: u32,
     pub group_id: u32,
     pub direction: u8,
     pub pad: [u8; 3],
@@ -170,6 +176,7 @@ pub struct GroupStatsValue {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct MirrorKey {
+    pub tap_id: u32,
     pub src_id: u32,
     pub dst_id: u32,
     pub proto: u8,
@@ -180,6 +187,7 @@ pub struct MirrorKey {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct GlobalMirrorKey {
+    pub tap_id: u32,
     pub direction: u8,
     pub pad: [u8; 3],
 }
@@ -265,6 +273,7 @@ pub const DROP_QOS_EGRESS: u8 = 5;        // QoS egress rate limit drop
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct DropKey {
+    pub tap_id: u32,
     pub reason: u8,
     pub direction: u8,
     pub proto: u8,
@@ -351,6 +360,8 @@ pub const FLAG_NEED_IDS: u16 = 1 << 7;
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct PipelineCtx {
+    pub tap_id: u32,
+
     // ID lookup results
     pub src_id: u32,
     pub dst_id: u32,

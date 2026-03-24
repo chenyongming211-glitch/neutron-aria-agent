@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use aya::maps::{HashMap, LpmTrie, MapData};
 use aya::maps::lpm_trie::Key;
 use tracing::{info, warn};
-use crate::common::{PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig, TapMapRuntime};
+use crate::common::{IfaceCtx, PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig, TapMapRuntime};
 use crate::state::FirewallState;
 
 /// 加载 eBPF 程序，并设置 pin 路径以复用已有的 map。
@@ -48,6 +48,32 @@ fn open_pinned_port_pool(pin_path: &str) -> Result<HashMap<MapData, PortKey, u8>
         .map_err(|e| format!("open pinned PORT_BITMAP_POOL: {:?}", e))?;
     HashMap::try_from(aya::maps::Map::HashMap(map_data))
         .map_err(|e| format!("convert PORT_BITMAP_POOL to HashMap: {:?}", e))
+}
+
+fn open_pinned_iface_ctx(pin_path: &str) -> Result<HashMap<MapData, u32, IfaceCtx>, String> {
+    let map_path = format!("{}/IFACE_CTX_MAP", pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open pinned IFACE_CTX_MAP: {:?}", e))?;
+    HashMap::try_from(aya::maps::Map::HashMap(map_data))
+        .map_err(|e| format!("convert IFACE_CTX_MAP to HashMap: {:?}", e))
+}
+
+pub fn sync_iface_ctx(runtime: TapMapRuntime<'_>, ifindex: u32) -> Result<(), String> {
+    let mut map = open_pinned_iface_ctx(runtime.pin_path)?;
+    let ctx = IfaceCtx {
+        tap_id: runtime.tap_id,
+        flags: 0,
+    };
+    map.insert(&ifindex, &ctx, 0)
+        .map_err(|e| format!("IFACE_CTX_MAP insert for ifindex {}: {:?}", ifindex, e))
+}
+
+pub fn clear_iface_ctx(pin_path: &str, ifindex: u32) -> Result<(), String> {
+    let mut map = open_pinned_iface_ctx(pin_path)?;
+    match map.remove(&ifindex) {
+        Ok(()) => Ok(()),
+        Err(e) => Err(format!("IFACE_CTX_MAP remove for ifindex {}: {:?}", ifindex, e)),
+    }
 }
 
 pub fn parse_cidr(cidr: &str) -> Result<(IpAddr, u8), String> {
@@ -229,9 +255,9 @@ pub fn add_policy(
                 let rules = parse_ports(ports_str)?;
                 let mut port_pool = open_pinned_port_pool(pin_path)?;
 
-                for (start, end, rule_action) in rules {
+                    for (start, end, rule_action) in rules {
                     for port in start..=end {
-                        let key = PortKey { idx, port, pad: 0 };
+                        let key = PortKey { tap_id: runtime.tap_id, idx, port, pad: 0 };
                         if let Err(e) = port_pool.insert(&key, &rule_action, 0) {
                             let _ = delete_port_set(idx, ports_str, runtime, _ebpf_path);
                             return Err(format!("set port bitmap error: {:?}", e));
@@ -246,6 +272,7 @@ pub fn add_policy(
     let mut policy_table = open_pinned_policy_table(pin_path)?;
 
     let key = PolicyKey {
+        tap_id: runtime.tap_id,
         src_id,
         dst_id,
         proto,
@@ -298,6 +325,7 @@ pub fn delete_policy(
     let mut policy_table = open_pinned_policy_table(pin_path)?;
 
     let key = PolicyKey {
+        tap_id: runtime.tap_id,
         src_id,
         dst_id,
         proto,
@@ -329,7 +357,7 @@ pub fn delete_port_set(
     let rules = parse_ports(ports_normalized)?;
     for (start, end, _) in rules {
         for port in start..=end {
-            let key = PortKey { idx: bitmap_idx, port, pad: 0 };
+            let key = PortKey { tap_id: runtime.tap_id, idx: bitmap_idx, port, pad: 0 };
             let _ = port_pool.remove(&key);
         }
     }
@@ -339,6 +367,7 @@ pub fn delete_port_set(
 
 /// Network-instance map names pinned under each tap/system instance directory.
 pub const NETWORK_MAP_NAMES: &[&str] = &[
+    "IFACE_CTX_MAP",
     "SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE",
     "POLICY_TABLE", "PORT_BITMAP_POOL",
     "CT_TABLE_V4", "CT_TABLE_V6", "CT_CONFIG",
@@ -355,6 +384,7 @@ pub const NETWORK_MAP_NAMES: &[&str] = &[
 /// Maps required for both dataplane correctness and control-plane management.
 /// If any of these fail to pin, startup must fail and roll back.
 pub const CRITICAL_NETWORK_MAP_NAMES: &[&str] = &[
+    "IFACE_CTX_MAP",
     "SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE",
     "POLICY_TABLE", "PORT_BITMAP_POOL",
     "CT_TABLE_V4", "CT_TABLE_V6", "CT_CONFIG",
@@ -375,6 +405,7 @@ pub const SSL_MAP_NAMES: &[&str] = &[
 
 /// Complete map inventory, used by diagnostics and legacy paths.
 pub const ALL_MAP_NAMES: &[&str] = &[
+    "IFACE_CTX_MAP",
     "SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE",
     "POLICY_TABLE", "PORT_BITMAP_POOL",
     "CT_TABLE_V4", "CT_TABLE_V6", "CT_CONFIG",
@@ -395,6 +426,7 @@ pub const ALL_MAP_NAMES: &[&str] = &[
 /// 从 snapshot + WAL 重放所有组和规则到已加载的 eBPF maps。
 pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
     let state = crate::wal::load_with_wal(state_path);
+    let tap_id = state.tap_id;
 
     if state.groups.is_empty() && state.rules.is_empty() && state.qos_rules.is_empty() && state.mirror_rules.is_empty() {
         info!(state_path = %state_path, "state is empty; nothing to replay");
@@ -528,7 +560,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
                                 Ok(port_rules) => {
                                     for (start, end, action) in port_rules {
                                         for port in start..=end {
-                                            let key = PortKey { idx, port, pad: 0 };
+                                            let key = PortKey { tap_id, idx, port, pad: 0 };
                                             if let Err(e) = port_pool.insert(&key, &action, 0) {
                                                 errors.push(format!("PORT_BITMAP_POOL idx={} port={}: {:?}", idx, port, e));
                                             }
@@ -562,6 +594,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
                     let has_port_filter = (rule.ports.is_some() && !is_all_ports) as u8;
 
                     let key = PolicyKey {
+                        tap_id,
                         src_id: rule.src_group_id,
                         dst_id: rule.dst_group_id,
                         proto: rule.proto,
@@ -618,6 +651,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
             Ok(mut map) => {
                 for qr in &state.qos_rules {
                     let key = QosKey {
+                        tap_id,
                         group_id: qr.group_id,
                         direction: qr.direction,
                         pad: [0; 3],
@@ -659,7 +693,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
             }
         }
 
-        let mirror_errors = crate::mirror_ops::replay_mirror_rules(bpf, &policy_rules, &global_rules);
+        let mirror_errors = crate::mirror_ops::replay_mirror_rules(bpf, tap_id, &policy_rules, &global_rules);
         errors.extend(mirror_errors);
     }
 

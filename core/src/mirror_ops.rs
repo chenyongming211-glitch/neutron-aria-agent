@@ -47,8 +47,12 @@ fn has_mirror_rules(runtime: TapMapRuntime<'_>) -> bool {
         if let Ok(map) = HashMap::<_, MirrorKey, MirrorConfig>::try_from(
             aya::maps::Map::HashMap(map_data)
         ) {
-            if map.iter().next().is_some() {
-                return true;
+            for item in map.iter() {
+                if let Ok((key, _)) = item {
+                    if key.tap_id == runtime.tap_id {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -58,8 +62,12 @@ fn has_mirror_rules(runtime: TapMapRuntime<'_>) -> bool {
         if let Ok(map) = HashMap::<_, GlobalMirrorKey, MirrorConfig>::try_from(
             aya::maps::Map::HashMap(map_data)
         ) {
-            if map.iter().next().is_some() {
-                return true;
+            for item in map.iter() {
+                if let Ok((key, _)) = item {
+                    if key.tap_id == runtime.tap_id {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -85,6 +93,7 @@ pub fn add_mirror_rule(
     ).map_err(|e| format!("convert MIRROR_POLICY: {:?}", e))?;
 
     let key = MirrorKey {
+        tap_id: runtime.tap_id,
         src_id,
         dst_id,
         proto,
@@ -117,6 +126,7 @@ pub fn delete_mirror_rule(
     ).map_err(|e| format!("convert MIRROR_POLICY: {:?}", e))?;
 
     let key = MirrorKey {
+        tap_id: runtime.tap_id,
         src_id,
         dst_id,
         proto,
@@ -146,6 +156,7 @@ pub fn add_global_mirror(
     ).map_err(|e| format!("convert MIRROR_GLOBAL: {:?}", e))?;
 
     let key = GlobalMirrorKey {
+        tap_id: runtime.tap_id,
         direction,
         pad: [0; 3],
     };
@@ -172,6 +183,7 @@ pub fn delete_global_mirror(
     ).map_err(|e| format!("convert MIRROR_GLOBAL: {:?}", e))?;
 
     let key = GlobalMirrorKey {
+        tap_id: runtime.tap_id,
         direction,
         pad: [0; 3],
     };
@@ -195,7 +207,9 @@ pub fn list_mirror_rules(runtime: TapMapRuntime<'_>) -> Result<Vec<(MirrorKey, M
     let mut entries = Vec::new();
     for item in map.iter() {
         if let Ok((key, val)) = item {
-            entries.push((key, val));
+            if key.tap_id == runtime.tap_id {
+                entries.push((key, val));
+            }
         }
     }
     Ok(entries)
@@ -213,7 +227,9 @@ pub fn list_global_mirrors(runtime: TapMapRuntime<'_>) -> Result<Vec<(GlobalMirr
     let mut entries = Vec::new();
     for item in map.iter() {
         if let Ok((key, val)) = item {
-            entries.push((key, val));
+            if key.tap_id == runtime.tap_id {
+                entries.push((key, val));
+            }
         }
     }
     Ok(entries)
@@ -222,6 +238,7 @@ pub fn list_global_mirrors(runtime: TapMapRuntime<'_>) -> Result<Vec<(GlobalMirr
 /// Replay mirror rules from state into a freshly loaded eBPF object.
 pub fn replay_mirror_rules(
     bpf: &mut aya::Ebpf,
+    tap_id: u32,
     rules: &[(u32, u32, u8, u8, u32)],  // (src_id, dst_id, proto, direction, target_ifindex)
     global_rules: &[(u8, u32)],          // (direction, target_ifindex)
 ) -> Vec<String> {
@@ -234,7 +251,7 @@ pub fn replay_mirror_rules(
     {
         Ok(mut map) => {
             for &(src_id, dst_id, proto, direction, target_ifindex) in rules {
-                let key = MirrorKey { src_id, dst_id, proto, direction, pad: [0; 2] };
+                let key = MirrorKey { tap_id, src_id, dst_id, proto, direction, pad: [0; 2] };
                 let config = MirrorConfig { target_ifindex };
                 if let Err(e) = map.insert(&key, &config, 0) {
                     errors.push(format!("MIRROR_POLICY src={} dst={} dir={}: {:?}", src_id, dst_id, direction, e));
@@ -251,7 +268,7 @@ pub fn replay_mirror_rules(
     {
         Ok(mut map) => {
             for &(direction, target_ifindex) in global_rules {
-                let key = GlobalMirrorKey { direction, pad: [0; 3] };
+                let key = GlobalMirrorKey { tap_id, direction, pad: [0; 3] };
                 let config = MirrorConfig { target_ifindex };
                 if let Err(e) = map.insert(&key, &config, 0) {
                     errors.push(format!("MIRROR_GLOBAL dir={}: {:?}", direction, e));

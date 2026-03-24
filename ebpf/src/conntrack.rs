@@ -50,6 +50,7 @@ fn get_timeout(proto: u8, state: u8) -> u64 {
 #[inline(always)]
 fn reverse_key4(key: &CtKey4) -> CtKey4 {
     CtKey4 {
+        tap_id: key.tap_id,
         src_ip: key.dst_ip,
         dst_ip: key.src_ip,
         src_port: key.dst_port,
@@ -62,6 +63,7 @@ fn reverse_key4(key: &CtKey4) -> CtKey4 {
 #[inline(always)]
 fn reverse_key6(key: &CtKey6) -> CtKey6 {
     CtKey6 {
+        tap_id: key.tap_id,
         src_ip: key.dst_ip,
         dst_ip: key.src_ip,
         src_port: key.dst_port,
@@ -74,6 +76,7 @@ fn reverse_key6(key: &CtKey6) -> CtKey6 {
 /// Matched policy info cached in CT entry, returned on fast-path hit.
 #[derive(Copy, Clone)]
 pub struct MatchedPolicy {
+    pub tap_id: u32,
     pub src_id: u32,
     pub dst_id: u32,
     pub proto: u8,
@@ -84,6 +87,7 @@ impl MatchedPolicy {
     #[inline(always)]
     pub fn to_policy_key(&self) -> PolicyKey {
         PolicyKey {
+            tap_id: self.tap_id,
             src_id: self.src_id,
             dst_id: self.dst_id,
             proto: self.proto,
@@ -104,8 +108,9 @@ pub enum CtLookupResult {
 }
 
 #[inline(always)]
-fn extract_matched(entry: &CtValue) -> MatchedPolicy {
+fn extract_matched(entry: &CtValue, tap_id: u32) -> MatchedPolicy {
     MatchedPolicy {
+        tap_id,
         src_id: entry.matched_src_id,
         dst_id: entry.matched_dst_id,
         proto: entry.matched_proto,
@@ -133,7 +138,7 @@ pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResu
         if (*entry).state == CT_NEW && ((*entry).flags & CT_FLAG_SEEN_REPLY) != 0 {
             (*entry).state = CT_ESTABLISHED;
         }
-        let matched = extract_matched(&*entry);
+        let matched = extract_matched(&*entry, key.tap_id);
         if (*entry).state == CT_ESTABLISHED {
             return CtLookupResult::Established(matched, true);
         }
@@ -152,7 +157,7 @@ pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResu
         (*entry).pkt_count += 1;
         (*entry).byte_count += pkt_len as u64;
         (*entry).flags |= CT_FLAG_SEEN_REPLY;
-        let matched = extract_matched(&*entry);
+        let matched = extract_matched(&*entry, key.tap_id);
         return CtLookupResult::SeenReply(matched, false);
     }
 
@@ -178,7 +183,7 @@ pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResu
         if (*entry).state == CT_NEW && ((*entry).flags & CT_FLAG_SEEN_REPLY) != 0 {
             (*entry).state = CT_ESTABLISHED;
         }
-        let matched = extract_matched(&*entry);
+        let matched = extract_matched(&*entry, key.tap_id);
         if (*entry).state == CT_ESTABLISHED {
             return CtLookupResult::Established(matched, true);
         }
@@ -197,7 +202,7 @@ pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResu
         (*entry).pkt_count += 1;
         (*entry).byte_count += pkt_len as u64;
         (*entry).flags |= CT_FLAG_SEEN_REPLY;
-        let matched = extract_matched(&*entry);
+        let matched = extract_matched(&*entry, key.tap_id);
         return CtLookupResult::SeenReply(matched, false);
     }
 

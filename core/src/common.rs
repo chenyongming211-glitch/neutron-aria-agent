@@ -3,6 +3,7 @@ use aya::Pod;
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct PolicyKey {
+    pub tap_id: u32,
     pub src_id: u32,
     pub dst_id: u32,
     pub proto: u8,
@@ -24,6 +25,7 @@ unsafe impl Pod for PolicyValue {}
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct PortKey {
+    pub tap_id: u32,
     pub idx: u32,
     pub port: u16,
     pub pad: u16,
@@ -35,6 +37,7 @@ unsafe impl Pod for PortKey {}
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CtKey4 {
+    pub tap_id: u32,
     pub src_ip: u32,
     pub dst_ip: u32,
     pub src_port: u16,
@@ -47,6 +50,7 @@ unsafe impl Pod for CtKey4 {}
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CtKey6 {
+    pub tap_id: u32,
     pub src_ip: [u8; 16],
     pub dst_ip: [u8; 16],
     pub src_port: u16,
@@ -107,6 +111,7 @@ unsafe impl Pod for FlowStatsValue {}
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct QosKey {
+    pub tap_id: u32,
     pub group_id: u32,
     pub direction: u8,
     pub pad: [u8; 3],
@@ -152,6 +157,7 @@ unsafe impl Pod for QosStatsValue {}
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct GroupStatsKey {
+    pub tap_id: u32,
     pub group_id: u32,
     pub direction: u8,
     pub pad: [u8; 3],
@@ -171,6 +177,7 @@ unsafe impl Pod for GroupStatsValue {}
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct MirrorKey {
+    pub tap_id: u32,
     pub src_id: u32,
     pub dst_id: u32,
     pub proto: u8,
@@ -182,6 +189,7 @@ unsafe impl Pod for MirrorKey {}
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct GlobalMirrorKey {
+    pub tap_id: u32,
     pub direction: u8,
     pub pad: [u8; 3],
 }
@@ -391,6 +399,7 @@ pub const DROP_QOS_EGRESS: u8 = 5;
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct DropKey {
+    pub tap_id: u32,
     pub reason: u8,
     pub direction: u8,
     pub proto: u8,

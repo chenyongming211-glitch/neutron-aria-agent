@@ -63,6 +63,7 @@ unsafe fn update_global_mirror_stats(key: &GlobalMirrorKey, pkt_len: u32, succes
 #[inline(always)]
 pub unsafe fn try_mirror_tc(
     skb_ptr: *mut aya_ebpf::bindings::__sk_buff,
+    tap_id: u32,
     src_id: u32,
     dst_id: u32,
     proto: u8,
@@ -71,6 +72,7 @@ pub unsafe fn try_mirror_tc(
 ) {
     // Level 1: per-rule mirror policy
     let policy_key = MirrorKey {
+        tap_id,
         src_id,
         dst_id,
         proto,
@@ -86,6 +88,7 @@ pub unsafe fn try_mirror_tc(
 
     // Level 2: global mirror
     let global_key = GlobalMirrorKey {
+        tap_id,
         direction,
         pad: [0; 3],
     };

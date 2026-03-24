@@ -96,6 +96,7 @@ unsafe fn update_qos_stats(key: &QosKey, pkt_len: u32, outcome: u8) {
 /// by rate × num_cpus indefinitely.
 #[inline(always)]
 pub unsafe fn apply_qos_egress(
+    tap_id: u32,
     _src_id: u32,
     dst_id: u32,
     pkt_len: u32,
@@ -105,6 +106,7 @@ pub unsafe fn apply_qos_egress(
     let group_ids = [dst_id, 0u32];
     for &gid in &group_ids {
         let qos_key = QosKey {
+            tap_id,
             group_id: gid,
             direction: DIR_EGRESS,
             pad: [0; 3],
@@ -191,6 +193,7 @@ pub unsafe fn apply_qos_egress(
 /// See apply_qos_egress for the shared-bucket rationale.
 #[inline(always)]
 pub unsafe fn apply_qos_ingress(
+    tap_id: u32,
     src_id: u32,
     _dst_id: u32,
     pkt_len: u32,
@@ -199,6 +202,7 @@ pub unsafe fn apply_qos_ingress(
     let group_ids = [src_id, 0u32];
     for &gid in &group_ids {
         let qos_key = QosKey {
+            tap_id,
             group_id: gid,
             direction: DIR_INGRESS,
             pad: [0; 3],

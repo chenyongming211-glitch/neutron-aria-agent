@@ -39,7 +39,14 @@ fn has_qos_rules(runtime: TapMapRuntime<'_>) -> bool {
     let Ok(map) = HashMap::<_, QosKey, QosConfig>::try_from(
         aya::maps::Map::HashMap(map_data)
     ) else { return false };
-    map.iter().next().is_some()
+    for item in map.iter() {
+        if let Ok((key, _)) = item {
+            if key.tap_id == runtime.tap_id {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub fn add_qos_rule(
@@ -61,6 +68,7 @@ pub fn add_qos_rule(
     ).map_err(|e| format!("convert QOS_CONFIG: {:?}", e))?;
 
     let key = QosKey {
+        tap_id: runtime.tap_id,
         group_id,
         direction,
         pad: [0; 3],
@@ -97,6 +105,7 @@ pub fn delete_qos_rule(
     ).map_err(|e| format!("convert QOS_CONFIG: {:?}", e))?;
 
     let key = QosKey {
+        tap_id: runtime.tap_id,
         group_id,
         direction,
         pad: [0; 3],
@@ -123,14 +132,16 @@ pub fn list_qos_rules(runtime: TapMapRuntime<'_>) -> Result<Vec<(QosKey, QosConf
     let mut entries = Vec::new();
     for item in map.iter() {
         if let Ok((key, val)) = item {
-            entries.push((key, val));
+            if key.tap_id == runtime.tap_id {
+                entries.push((key, val));
+            }
         }
     }
 
     Ok(entries)
 }
 
-pub fn replay_qos_rules(bpf: &mut aya::Ebpf, rules: &[(u32, u8, u64, u64, u8, u8)]) -> Vec<String> {
+pub fn replay_qos_rules(bpf: &mut aya::Ebpf, tap_id: u32, rules: &[(u32, u8, u64, u64, u8, u8)]) -> Vec<String> {
     let mut errors = Vec::new();
 
     match bpf.map_mut("QOS_CONFIG")
@@ -140,6 +151,7 @@ pub fn replay_qos_rules(bpf: &mut aya::Ebpf, rules: &[(u32, u8, u64, u64, u8, u8
         Ok(mut map) => {
             for &(group_id, direction, rate_bps, burst_bytes, priority, mode) in rules {
                 let key = QosKey {
+                    tap_id,
                     group_id,
                     direction,
                     pad: [0; 3],

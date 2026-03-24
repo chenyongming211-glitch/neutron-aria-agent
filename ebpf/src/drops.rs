@@ -4,6 +4,7 @@ use crate::maps::DROP_REASON_STATS;
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct DropArgs {
+    pub tap_id: u32,
     pub src_id: u32,
     pub dst_id: u32,
     pub pkt_len: u32,
@@ -18,6 +19,7 @@ pub struct DropArgs {
 #[inline(always)]
 pub unsafe fn record_drop(args: &DropArgs) {
     let key = DropKey {
+        tap_id: args.tap_id,
         reason: args.reason,
         direction: args.direction,
         proto: args.proto,

@@ -13,6 +13,7 @@ pub use crate::common::{
     DropKey, DropValue,
     TraceFilter, TraceEvent,
     PipelineCtx,
+    IfaceCtx,
     SslScratch, SslConnValue,
     SslParseBuf, SslHttpScratch, SslReadScratch, SslHttpValue,
     SslErrorEvent, SslWriteScratch,
@@ -28,6 +29,9 @@ pub static PKT_SCRATCH: PerCpuArray<PacketInfo> = PerCpuArray::with_max_entries(
 
 #[map(name = "PIPE_SCRATCH")]
 pub static PIPE_SCRATCH: PerCpuArray<PipelineCtx> = PerCpuArray::with_max_entries(1, 0);
+
+#[map(name = "IFACE_CTX_MAP")]
+pub static IFACE_CTX_MAP: HashMap<u32, IfaceCtx> = HashMap::with_max_entries(1024, 0);
 
 // --- Existing maps ---
 

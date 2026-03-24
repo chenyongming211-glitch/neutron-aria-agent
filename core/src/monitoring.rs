@@ -85,6 +85,9 @@ pub fn get_rule_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<RuleStatsEntry>,
     for item in map.iter() {
         match item {
             Ok((key, values)) => {
+                if key.tap_id != runtime.tap_id {
+                    continue;
+                }
                 let (packets, bytes, dropped_packets, dropped_bytes) = sum_per_cpu_rule_stats(values);
                 if packets > 0 {
                     entries.push(RuleStatsEntry { key, packets, bytes, dropped_packets, dropped_bytes });
@@ -112,6 +115,9 @@ pub fn get_top_flows_v4(runtime: TapMapRuntime<'_>, n: usize) -> Result<Vec<Flow
     for item in map.iter() {
         match item {
             Ok((key, values)) => {
+                if key.tap_id != runtime.tap_id {
+                    continue;
+                }
                 let (packets, bytes, last_seen) = sum_per_cpu_flow_stats(values);
                 if packets > 0 {
                     entries.push(FlowStatsEntry {
@@ -150,6 +156,9 @@ pub fn get_top_flows_v6(runtime: TapMapRuntime<'_>, n: usize) -> Result<Vec<Flow
     for item in map.iter() {
         match item {
             Ok((key, values)) => {
+                if key.tap_id != runtime.tap_id {
+                    continue;
+                }
                 let (packets, bytes, last_seen) = sum_per_cpu_flow_stats(values);
                 if packets > 0 {
                     entries.push(FlowStatsEntryV6 {
@@ -189,7 +198,10 @@ pub fn get_conntrack_stats(runtime: TapMapRuntime<'_>) -> Result<ConntrackSummar
             aya::maps::Map::LruHashMap(map_data)
         ) {
             for item in map.iter() {
-                if let Ok((_key, val)) = item {
+                if let Ok((key, val)) = item {
+                    if key.tap_id != runtime.tap_id {
+                        continue;
+                    }
                     summary.total_v4 += 1;
                     match val.state {
                         CT_NEW => summary.new_count += 1,
@@ -208,7 +220,10 @@ pub fn get_conntrack_stats(runtime: TapMapRuntime<'_>) -> Result<ConntrackSummar
             aya::maps::Map::LruHashMap(map_data)
         ) {
             for item in map.iter() {
-                if let Ok((_key, val)) = item {
+                if let Ok((key, val)) = item {
+                    if key.tap_id != runtime.tap_id {
+                        continue;
+                    }
                     summary.total_v6 += 1;
                     match val.state {
                         CT_NEW => summary.new_count += 1,
@@ -266,6 +281,9 @@ pub fn get_qos_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<QosStatsEntry>, S
     for item in map.iter() {
         match item {
             Ok((key, values)) => {
+                if key.tap_id != runtime.tap_id {
+                    continue;
+                }
                 let (pp, pb, dp, db, sp, sb) = sum_per_cpu_qos_stats(values);
                 if pp > 0 || dp > 0 || sp > 0 {
                     entries.push(QosStatsEntry {
@@ -318,6 +336,9 @@ pub fn get_group_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<GroupStatsEntry
     for item in map.iter() {
         match item {
             Ok((key, values)) => {
+                if key.tap_id != runtime.tap_id {
+                    continue;
+                }
                 let (packets, bytes) = sum_per_cpu_group_stats(values);
                 if packets > 0 {
                     entries.push(GroupStatsEntry { key, packets, bytes });
@@ -399,6 +420,9 @@ pub fn get_mirror_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<MirrorStatsEnt
         ) {
             for item in map.iter() {
                 if let Ok((key, values)) = item {
+                    if key.tap_id != runtime.tap_id {
+                        continue;
+                    }
                     let (mp, mb, err) = sum_per_cpu_mirror_stats(values);
                     if mp > 0 || err > 0 {
                         entries.push(MirrorStatsEntry {
@@ -425,6 +449,9 @@ pub fn get_mirror_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<MirrorStatsEnt
         ) {
             for item in map.iter() {
                 if let Ok((key, values)) = item {
+                    if key.tap_id != runtime.tap_id {
+                        continue;
+                    }
                     let (mp, mb, err) = sum_per_cpu_mirror_stats(values);
                     if mp > 0 || err > 0 {
                         entries.push(MirrorStatsEntry {
@@ -518,7 +545,10 @@ fn collect_tcprt_metrics_v4(runtime: TapMapRuntime<'_>, summary: &mut TcprtMetri
     ).map_err(|e| format!("convert TCPRT_TABLE_V4: {:?}", e))?;
 
     for item in map.iter() {
-        if let Ok((_key, val)) = item {
+        if let Ok((key, val)) = item {
+            if key.tap_id != runtime.tap_id {
+                continue;
+            }
             accumulate_tcprt_value(summary, &val);
         }
     }
@@ -540,7 +570,10 @@ fn collect_tcprt_metrics_v6(runtime: TapMapRuntime<'_>, summary: &mut TcprtMetri
     ).map_err(|e| format!("convert TCPRT_TABLE_V6: {:?}", e))?;
 
     for item in map.iter() {
-        if let Ok((_key, val)) = item {
+        if let Ok((key, val)) = item {
+            if key.tap_id != runtime.tap_id {
+                continue;
+            }
             accumulate_tcprt_value(summary, &val);
         }
     }

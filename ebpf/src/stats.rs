@@ -74,11 +74,12 @@ pub unsafe fn update_flow_stats_v6(key: &CtKey6, pkt_len: u32, now: u64) {
 }
 
 #[inline(always)]
-pub unsafe fn update_group_stats(group_id: u32, direction: u8, pkt_len: u32) {
+pub unsafe fn update_group_stats(tap_id: u32, group_id: u32, direction: u8, pkt_len: u32) {
     if !monitoring_enabled() {
         return;
     }
     let key = GroupStatsKey {
+        tap_id,
         group_id,
         direction,
         pad: [0; 3],

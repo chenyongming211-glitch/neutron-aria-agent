@@ -25,6 +25,9 @@ pub fn ct_list(runtime: TapMapRuntime<'_>) -> Result<Vec<CtEntry>, String> {
         ) {
             for item in map.iter() {
                 if let Ok((key, val)) = item {
+                    if key.tap_id != runtime.tap_id {
+                        continue;
+                    }
                     entries.push(CtEntry {
                         src_ip: format!("{}", Ipv4Addr::from(key.src_ip)),
                         dst_ip: format!("{}", Ipv4Addr::from(key.dst_ip)),
@@ -48,6 +51,9 @@ pub fn ct_list(runtime: TapMapRuntime<'_>) -> Result<Vec<CtEntry>, String> {
         ) {
             for item in map.iter() {
                 if let Ok((key, val)) = item {
+                    if key.tap_id != runtime.tap_id {
+                        continue;
+                    }
                     let src = std::net::Ipv6Addr::from(key.src_ip);
                     let dst = std::net::Ipv6Addr::from(key.dst_ip);
                     entries.push(CtEntry {
@@ -80,6 +86,7 @@ pub fn ct_flush(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
         ) {
             let keys: Vec<CtKey4> = map.iter()
                 .filter_map(|item| item.ok().map(|(k, _)| k))
+                .filter(|key| key.tap_id == runtime.tap_id)
                 .collect();
             for key in keys {
                 if map.remove(&key).is_ok() {
@@ -97,6 +104,7 @@ pub fn ct_flush(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
         ) {
             let keys: Vec<CtKey6> = map.iter()
                 .filter_map(|item| item.ok().map(|(k, _)| k))
+                .filter(|key| key.tap_id == runtime.tap_id)
                 .collect();
             for key in keys {
                 if map.remove(&key).is_ok() {

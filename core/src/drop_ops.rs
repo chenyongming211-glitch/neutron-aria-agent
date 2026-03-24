@@ -38,6 +38,9 @@ pub fn get_drop_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<DropStatsEntry>,
     let mut entries = Vec::new();
     for item in map.iter() {
         if let Ok((key, values)) = item {
+            if key.tap_id != runtime.tap_id {
+                continue;
+            }
             let (packets, bytes, last_seen) = sum_per_cpu_drop(values);
             if packets > 0 {
                 entries.push(DropStatsEntry {
@@ -68,7 +71,10 @@ pub fn flush_drop_stats(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
         aya::maps::Map::PerCpuHashMap(map_data)
     ).map_err(|e| format!("convert DROP_REASON_STATS: {:?}", e))?;
 
-    let keys: Vec<DropKey> = map.keys().filter_map(|k| k.ok()).collect();
+    let keys: Vec<DropKey> = map.keys()
+        .filter_map(|k| k.ok())
+        .filter(|key| key.tap_id == runtime.tap_id)
+        .collect();
     let count = keys.len() as u64;
     for key in keys {
         let _ = map.remove(&key);

@@ -194,8 +194,9 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
 
 /// Track TCP-RT for reverse direction IPv4 (constructs forward key internally).
 #[inline(always)]
-pub unsafe fn track_tcp_rt_v4_rev(info: &PacketInfo, now: u64) {
+pub unsafe fn track_tcp_rt_v4_rev(tap_id: u32, info: &PacketInfo, now: u64) {
     let fwd_key = CtKey4 {
+        tap_id,
         src_ip: info.dst_ip,
         dst_ip: info.src_ip,
         src_port: info.dst_port,
@@ -353,8 +354,9 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
 
 /// Track TCP-RT for reverse direction IPv6 (constructs forward key internally).
 #[inline(always)]
-pub unsafe fn track_tcp_rt_v6_rev(info: &PacketInfo, now: u64) {
+pub unsafe fn track_tcp_rt_v6_rev(tap_id: u32, info: &PacketInfo, now: u64) {
     let fwd_key = CtKey6 {
+        tap_id,
         src_ip: info.dst_ip_v6,
         dst_ip: info.src_ip_v6,
         src_port: info.dst_port,
