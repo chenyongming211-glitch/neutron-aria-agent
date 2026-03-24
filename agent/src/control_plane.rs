@@ -141,6 +141,12 @@ impl ControlPlane {
                 warn!(instance = %name, tap_id, error = %e, "failed to clear tap runtime config after register failure");
             }
         }
+        if !preserve_existing_runtime && tap_id != aria_core::common::TAP_ID_UNASSIGNED {
+            let runtime = TapMapRuntime::new(pin_path, tap_id);
+            if let Err(e) = aria_core::ebpf_ops::scrub_managed_runtime_state(runtime) {
+                warn!(instance = %name, tap_id, error = %e, "failed to scrub tap runtime state after register failure");
+            }
+        }
         wal.shutdown().await;
     }
 
@@ -242,6 +248,14 @@ impl ControlPlane {
 
         let tap_id = state.tap_id;
         let runtime = TapMapRuntime::new(&pin_path, tap_id);
+        if !replacing_existing {
+            if let Err(e) = aria_core::ebpf_ops::scrub_managed_runtime_state(runtime) {
+                wal.shutdown().await;
+                return Err(format!("failed to scrub stale tap runtime state: {}", e));
+            }
+        } else {
+            info!(instance = %name, tap_id, "skipping pre-replay scrub while replacing existing registered instance");
+        }
         if let Err(e) = aria_core::ebpf_ops::sync_iface_ctx(runtime, ifindex) {
             wal.shutdown().await;
             return Err(e);

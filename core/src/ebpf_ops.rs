@@ -1,9 +1,15 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
-use aya::maps::{HashMap, LpmTrie, MapData};
+use aya::maps::{HashMap, LpmTrie, MapData, PerCpuHashMap};
 use aya::maps::lpm_trie::Key;
 use tracing::{info, warn};
-use crate::common::{IfaceCtx, PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig, TapConfig, TapMapRuntime, TAP_ID_UNASSIGNED};
+use crate::common::{
+    CtConfig, CtContractKey, CtContractValue, CtKey4, CtKey6,
+    FirewallConfig, FlowStatsValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue, IfaceCtx,
+    MirrorConfig, MirrorKey, MirrorStatsValue, PolicyKey, PolicyValue, PortKey, QosConfig,
+    QosKey, QosStatsValue, RuleStatsValue, TapConfig, TapMapRuntime,
+    TokenBucket, TAP_ID_UNASSIGNED,
+};
 use crate::state::FirewallState;
 
 /// 加载一个新的 eBPF 对象，并设置 pin 路径以尝试复用已有 map。
@@ -80,6 +86,164 @@ fn open_pinned_tap_config(pin_path: &str) -> Result<HashMap<MapData, u32, TapCon
         .map_err(|e| format!("open pinned TAP_CONFIG_MAP: {:?}", e))?;
     HashMap::try_from(aya::maps::Map::HashMap(map_data))
         .map_err(|e| format!("convert TAP_CONFIG_MAP to HashMap: {:?}", e))
+}
+
+trait HasTapId {
+    fn tap_id(&self) -> u32;
+}
+
+impl HasTapId for PolicyKey {
+    fn tap_id(&self) -> u32 { self.tap_id }
+}
+
+impl HasTapId for PortKey {
+    fn tap_id(&self) -> u32 { self.tap_id }
+}
+
+impl HasTapId for CtKey4 {
+    fn tap_id(&self) -> u32 { self.tap_id }
+}
+
+impl HasTapId for CtKey6 {
+    fn tap_id(&self) -> u32 { self.tap_id }
+}
+
+impl HasTapId for CtContractKey {
+    fn tap_id(&self) -> u32 { self.tap_id }
+}
+
+impl HasTapId for QosKey {
+    fn tap_id(&self) -> u32 { self.tap_id }
+}
+
+impl HasTapId for GroupStatsKey {
+    fn tap_id(&self) -> u32 { self.tap_id }
+}
+
+impl HasTapId for MirrorKey {
+    fn tap_id(&self) -> u32 { self.tap_id }
+}
+
+impl HasTapId for GlobalMirrorKey {
+    fn tap_id(&self) -> u32 { self.tap_id }
+}
+
+fn scrub_hash_map<K, V, F>(
+    pin_path: &str,
+    map_name: &str,
+    tap_id: u32,
+    open_map: F,
+) -> Result<u64, String>
+where
+    K: aya::Pod + HasTapId,
+    V: aya::Pod,
+    F: FnOnce(MapData) -> Result<HashMap<MapData, K, V>, String>,
+{
+    let map_path = format!("{}/{}", pin_path, map_name);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open pinned {}: {:?}", map_name, e))?;
+    let mut map = open_map(map_data)?;
+    let keys: Vec<K> = map.iter()
+        .filter_map(|item| item.ok().map(|(key, _)| key))
+        .filter(|key| key.tap_id() == tap_id)
+        .collect();
+    let count = keys.len() as u64;
+    for key in keys {
+        map.remove(&key)
+            .map_err(|e| format!("remove {} entry: {:?}", map_name, e))?;
+    }
+    Ok(count)
+}
+
+fn scrub_per_cpu_hash_map<K, V, F>(
+    pin_path: &str,
+    map_name: &str,
+    tap_id: u32,
+    open_map: F,
+) -> Result<u64, String>
+where
+    K: aya::Pod + HasTapId,
+    V: aya::Pod,
+    F: FnOnce(MapData) -> Result<PerCpuHashMap<MapData, K, V>, String>,
+{
+    let map_path = format!("{}/{}", pin_path, map_name);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open pinned {}: {:?}", map_name, e))?;
+    let mut map = open_map(map_data)?;
+    let keys: Vec<K> = map.keys()
+        .filter_map(|item| item.ok())
+        .filter(|key| key.tap_id() == tap_id)
+        .collect();
+    let count = keys.len() as u64;
+    for key in keys {
+        map.remove(&key)
+            .map_err(|e| format!("remove {} entry: {:?}", map_name, e))?;
+    }
+    Ok(count)
+}
+
+fn scrub_lpm_v4_map(pin_path: &str, map_name: &str, tap_id: u32) -> Result<u64, String> {
+    let mut map = open_pinned_lpm_v4(pin_path, map_name)?;
+    let tap_prefix = tap_id.to_be_bytes();
+    let keys: Vec<Key<[u8; 8]>> = map.iter()
+        .filter_map(|item| item.ok().map(|(key, _)| key))
+        .filter(|key| {
+            let data = key.data();
+            data[..4] == tap_prefix[..]
+        })
+        .collect();
+    let count = keys.len() as u64;
+    for key in keys {
+        map.remove(&key)
+            .map_err(|e| format!("remove {} entry: {:?}", map_name, e))?;
+    }
+    Ok(count)
+}
+
+fn scrub_lpm_v6_map(pin_path: &str, map_name: &str, tap_id: u32) -> Result<u64, String> {
+    let mut map = open_pinned_lpm_v6(pin_path, map_name)?;
+    let tap_prefix = tap_id.to_be_bytes();
+    let keys: Vec<Key<[u8; 20]>> = map.iter()
+        .filter_map(|item| item.ok().map(|(key, _)| key))
+        .filter(|key| {
+            let data = key.data();
+            data[..4] == tap_prefix[..]
+        })
+        .collect();
+    let count = keys.len() as u64;
+    for key in keys {
+        map.remove(&key)
+            .map_err(|e| format!("remove {} entry: {:?}", map_name, e))?;
+    }
+    Ok(count)
+}
+
+fn scrub_iface_ctx_entries(pin_path: &str, tap_id: u32) -> Result<u64, String> {
+    let mut map = open_pinned_iface_ctx(pin_path)?;
+    let keys: Vec<u32> = map.iter()
+        .filter_map(|item| item.ok())
+        .filter_map(|(ifindex, ctx)| (ctx.tap_id == tap_id).then_some(ifindex))
+        .collect();
+    let count = keys.len() as u64;
+    for ifindex in keys {
+        map.remove(&ifindex)
+            .map_err(|e| format!("remove IFACE_CTX_MAP entry for ifindex {}: {:?}", ifindex, e))?;
+    }
+    Ok(count)
+}
+
+fn scrub_tap_config_entries(pin_path: &str, tap_id: u32) -> Result<u64, String> {
+    let mut map = open_pinned_tap_config(pin_path)?;
+    let keys: Vec<u32> = map.iter()
+        .filter_map(|item| item.ok().map(|(key, _)| key))
+        .filter(|key| *key == tap_id)
+        .collect();
+    let count = keys.len() as u64;
+    for key in keys {
+        map.remove(&key)
+            .map_err(|e| format!("remove TAP_CONFIG_MAP entry for tap_id {}: {:?}", key, e))?;
+    }
+    Ok(count)
 }
 
 fn init_ct_config_pinned(pin_path: &str) -> Result<(), String> {
@@ -519,6 +683,102 @@ pub fn delete_port_set(
     }
 
     Ok(())
+}
+
+/// Scrub all tap-scoped entries from the shared managed runtime before replay.
+/// This makes replay idempotent and cleans up partial state left by failed attach attempts.
+pub fn scrub_managed_runtime_state(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
+    if runtime.tap_id == TAP_ID_UNASSIGNED {
+        return Ok(0);
+    }
+
+    let pin_path = runtime.pin_path;
+    let tap_id = runtime.tap_id;
+    let mut removed = 0u64;
+
+    removed += scrub_iface_ctx_entries(pin_path, tap_id)?;
+    removed += scrub_tap_config_entries(pin_path, tap_id)?;
+
+    removed += scrub_lpm_v4_map(pin_path, "SRC_IPV4_TRIE", tap_id)?;
+    removed += scrub_lpm_v4_map(pin_path, "DST_IPV4_TRIE", tap_id)?;
+    removed += scrub_lpm_v6_map(pin_path, "SRC_IPV6_TRIE", tap_id)?;
+    removed += scrub_lpm_v6_map(pin_path, "DST_IPV6_TRIE", tap_id)?;
+
+    removed += scrub_hash_map(pin_path, "POLICY_TABLE", tap_id, |map_data| {
+        HashMap::<_, PolicyKey, PolicyValue>::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| format!("convert POLICY_TABLE to HashMap: {:?}", e))
+    })?;
+    removed += scrub_hash_map(pin_path, "PORT_BITMAP_POOL", tap_id, |map_data| {
+        HashMap::<_, PortKey, u8>::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| format!("convert PORT_BITMAP_POOL to HashMap: {:?}", e))
+    })?;
+
+    removed += crate::ct_ops::ct_flush(runtime)?;
+    removed += scrub_per_cpu_hash_map(pin_path, "CT_CONTRACT_STATS", tap_id, |map_data| {
+        PerCpuHashMap::<_, CtContractKey, CtContractValue>::try_from(
+            aya::maps::Map::PerCpuHashMap(map_data)
+        ).map_err(|e| format!("convert CT_CONTRACT_STATS to PerCpuHashMap: {:?}", e))
+    })?;
+
+    removed += scrub_per_cpu_hash_map(pin_path, "RULE_STATS", tap_id, |map_data| {
+        PerCpuHashMap::<_, PolicyKey, RuleStatsValue>::try_from(
+            aya::maps::Map::PerCpuHashMap(map_data)
+        ).map_err(|e| format!("convert RULE_STATS to PerCpuHashMap: {:?}", e))
+    })?;
+    removed += scrub_per_cpu_hash_map(pin_path, "FLOW_STATS_V4", tap_id, |map_data| {
+        PerCpuHashMap::<_, CtKey4, FlowStatsValue>::try_from(
+            aya::maps::Map::PerCpuLruHashMap(map_data)
+        ).map_err(|e| format!("convert FLOW_STATS_V4 to PerCpuHashMap: {:?}", e))
+    })?;
+    removed += scrub_per_cpu_hash_map(pin_path, "FLOW_STATS_V6", tap_id, |map_data| {
+        PerCpuHashMap::<_, CtKey6, FlowStatsValue>::try_from(
+            aya::maps::Map::PerCpuLruHashMap(map_data)
+        ).map_err(|e| format!("convert FLOW_STATS_V6 to PerCpuHashMap: {:?}", e))
+    })?;
+
+    removed += scrub_hash_map(pin_path, "QOS_CONFIG", tap_id, |map_data| {
+        HashMap::<_, QosKey, QosConfig>::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| format!("convert QOS_CONFIG to HashMap: {:?}", e))
+    })?;
+    removed += scrub_hash_map(pin_path, "QOS_TOKEN_BUCKET", tap_id, |map_data| {
+        HashMap::<_, QosKey, TokenBucket>::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| format!("convert QOS_TOKEN_BUCKET to HashMap: {:?}", e))
+    })?;
+    removed += scrub_per_cpu_hash_map(pin_path, "QOS_STATS", tap_id, |map_data| {
+        PerCpuHashMap::<_, QosKey, QosStatsValue>::try_from(
+            aya::maps::Map::PerCpuHashMap(map_data)
+        ).map_err(|e| format!("convert QOS_STATS to PerCpuHashMap: {:?}", e))
+    })?;
+    removed += scrub_per_cpu_hash_map(pin_path, "GROUP_STATS", tap_id, |map_data| {
+        PerCpuHashMap::<_, GroupStatsKey, GroupStatsValue>::try_from(
+            aya::maps::Map::PerCpuHashMap(map_data)
+        ).map_err(|e| format!("convert GROUP_STATS to PerCpuHashMap: {:?}", e))
+    })?;
+
+    removed += scrub_hash_map(pin_path, "MIRROR_POLICY", tap_id, |map_data| {
+        HashMap::<_, MirrorKey, MirrorConfig>::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| format!("convert MIRROR_POLICY to HashMap: {:?}", e))
+    })?;
+    removed += scrub_hash_map(pin_path, "MIRROR_GLOBAL", tap_id, |map_data| {
+        HashMap::<_, GlobalMirrorKey, MirrorConfig>::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| format!("convert MIRROR_GLOBAL to HashMap: {:?}", e))
+    })?;
+    removed += scrub_per_cpu_hash_map(pin_path, "MIRROR_STATS", tap_id, |map_data| {
+        PerCpuHashMap::<_, MirrorKey, MirrorStatsValue>::try_from(
+            aya::maps::Map::PerCpuHashMap(map_data)
+        ).map_err(|e| format!("convert MIRROR_STATS to PerCpuHashMap: {:?}", e))
+    })?;
+    removed += scrub_per_cpu_hash_map(pin_path, "MIRROR_GLOBAL_STATS", tap_id, |map_data| {
+        PerCpuHashMap::<_, GlobalMirrorKey, MirrorStatsValue>::try_from(
+            aya::maps::Map::PerCpuHashMap(map_data)
+        ).map_err(|e| format!("convert MIRROR_GLOBAL_STATS to PerCpuHashMap: {:?}", e))
+    })?;
+
+    removed += crate::tcprt_ops::flush_tcprt(runtime)?;
+    removed += crate::drop_ops::flush_drop_stats(runtime)?;
+
+    info!(tap_id, removed_entries = removed, "scrubbed managed tap runtime state");
+    Ok(removed)
 }
 
 /// Network-instance map names pinned under each tap/system instance directory.
