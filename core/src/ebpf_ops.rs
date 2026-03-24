@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use aya::maps::{HashMap, LpmTrie, MapData};
 use aya::maps::lpm_trie::Key;
 use tracing::{info, warn};
-use crate::common::{PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig};
+use crate::common::{PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig, TapMapRuntime};
 use crate::state::FirewallState;
 
 /// 加载 eBPF 程序，并设置 pin 路径以复用已有的 map。
@@ -123,7 +123,8 @@ mod tests {
     }
 }
 
-pub fn add_network(direction: &str, cidr: &str, id: u32, pin_path: &str, _ebpf_path: &str) -> Result<(), String> {
+pub fn add_network(direction: &str, cidr: &str, id: u32, runtime: TapMapRuntime<'_>, _ebpf_path: &str) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let prog_path = format!("{}/xdp_firewall", pin_path);
     if !std::path::Path::new(&prog_path).exists() {
         return Err("Firewall not started. Run 'system start' first.".to_string());
@@ -160,7 +161,8 @@ pub fn add_network(direction: &str, cidr: &str, id: u32, pin_path: &str, _ebpf_p
     Ok(())
 }
 
-pub fn delete_network(direction: &str, cidr: &str, _id: u32, pin_path: &str, _ebpf_path: &str) -> Result<(), String> {
+pub fn delete_network(direction: &str, cidr: &str, _id: u32, runtime: TapMapRuntime<'_>, _ebpf_path: &str) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let prog_path = format!("{}/xdp_firewall", pin_path);
     if !std::path::Path::new(&prog_path).exists() {
         return Err("Firewall not started. Run 'system start' first.".to_string());
@@ -208,9 +210,10 @@ pub fn add_policy(
     bitmap_idx: Option<u32>,
     is_new_port_set: bool,
     direction: u8,
-    pin_path: &str,
+    runtime: TapMapRuntime<'_>,
     _ebpf_path: &str,
 ) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let prog_path = format!("{}/xdp_firewall", pin_path);
     if !std::path::Path::new(&prog_path).exists() {
         return Err("Firewall not started. Run 'system start' first.".to_string());
@@ -230,7 +233,7 @@ pub fn add_policy(
                     for port in start..=end {
                         let key = PortKey { idx, port, pad: 0 };
                         if let Err(e) = port_pool.insert(&key, &rule_action, 0) {
-                            let _ = delete_port_set(idx, ports_str, pin_path, _ebpf_path);
+                            let _ = delete_port_set(idx, ports_str, runtime, _ebpf_path);
                             return Err(format!("set port bitmap error: {:?}", e));
                         }
                     }
@@ -258,7 +261,7 @@ pub fn add_policy(
     if let Err(e) = policy_table.insert(&key, &value, 0) {
         if is_new_port_set {
             if let (Some(idx), Some(ports_str)) = (bitmap_idx, ports) {
-                let _ = delete_port_set(idx, ports_str, pin_path, _ebpf_path);
+                let _ = delete_port_set(idx, ports_str, runtime, _ebpf_path);
             }
         }
         return Err(format!("insert error: {:?}", e));
@@ -283,9 +286,10 @@ pub fn delete_policy(
     dst_id: u32,
     proto: u8,
     direction: u8,
-    pin_path: &str,
+    runtime: TapMapRuntime<'_>,
     _ebpf_path: &str,
 ) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let prog_path = format!("{}/xdp_firewall", pin_path);
     if !std::path::Path::new(&prog_path).exists() {
         return Err("Firewall not started. Run 'system start' first.".to_string());
@@ -311,9 +315,10 @@ pub fn delete_policy(
 pub fn delete_port_set(
     bitmap_idx: u32,
     ports_normalized: &str,
-    pin_path: &str,
+    runtime: TapMapRuntime<'_>,
     _ebpf_path: &str,
 ) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let prog_path = format!("{}/xdp_firewall", pin_path);
     if !std::path::Path::new(&prog_path).exists() {
         return Ok(()); // firewall not running, nothing to clean
@@ -883,7 +888,7 @@ pub fn check_fq_qdisc(iface: &str) -> bool {
 /// Update FIREWALL_CONFIG map at runtime via pinned map.
 /// Reads the current config, applies the changes, and writes back.
 pub fn update_firewall_config(
-    pin_path: &str,
+    runtime: TapMapRuntime<'_>,
     conntrack_enabled: Option<bool>,
     monitoring_enabled: Option<bool>,
     acl_enabled: Option<bool>,
@@ -892,6 +897,7 @@ pub fn update_firewall_config(
     tcprt_enabled: Option<bool>,
     ssl_enabled: Option<bool>,
 ) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/FIREWALL_CONFIG", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open FIREWALL_CONFIG: {:?}", e))?;
@@ -937,7 +943,8 @@ pub fn update_firewall_config(
 }
 
 /// Read the current FIREWALL_CONFIG from pinned map.
-pub fn read_firewall_config(pin_path: &str) -> Result<FirewallConfig, String> {
+pub fn read_firewall_config(runtime: TapMapRuntime<'_>) -> Result<FirewallConfig, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/FIREWALL_CONFIG", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open FIREWALL_CONFIG: {:?}", e))?;

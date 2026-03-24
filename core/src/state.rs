@@ -88,6 +88,9 @@ pub struct FirewallState {
     pub free_bitmap_indices: Vec<u32>,
     #[serde(default = "default_max_port_policies")]
     pub max_port_policies: u32,
+    /// Stable per-instance namespace id reserved for the future shared data plane.
+    #[serde(default)]
+    pub tap_id: u32,
     /// XDP 程序挂载的网卡名
     #[serde(default)]
     pub attached_iface: Option<String>,
@@ -125,6 +128,7 @@ impl Default for FirewallState {
             port_sets: HashMap::new(),
             free_bitmap_indices: Vec::new(),
             max_port_policies: default_max_port_policies(),
+            tap_id: 0,
             attached_iface: None,
             qos_rules: Vec::new(),
             conntrack_enabled: true,
@@ -539,6 +543,18 @@ impl StateManager {
         Ok(state.attached_iface)
     }
 
+    pub fn set_tap_id(&self, tap_id: u32) -> Result<(), String> {
+        self.with_state(|state| {
+            state.tap_id = tap_id;
+            Ok(())
+        })
+    }
+
+    pub fn get_tap_id(&self) -> Result<u32, String> {
+        let state = self._load_readonly()?;
+        Ok(state.tap_id)
+    }
+
     pub fn add_rule(
         &self,
         src_group_id: u32,
@@ -779,5 +795,19 @@ mod tests {
             idx3, idx1,
             "新端口集应优先复用 free_bitmap_indices 中的 idx"
         );
+    }
+
+    #[test]
+    fn tap_id_round_trips_in_state_file() {
+        let state_path = unique_state_path();
+        let mgr = StateManager::new(&state_path);
+
+        assert_eq!(mgr.get_tap_id().unwrap(), 0, "default tap_id should be unassigned");
+
+        mgr.set_tap_id(42).expect("set tap_id");
+        assert_eq!(mgr.get_tap_id().unwrap(), 42, "tap_id should be persisted");
+
+        let reloaded = StateManager::new(&state_path);
+        assert_eq!(reloaded.get_tap_id().unwrap(), 42, "tap_id should survive reload");
     }
 }

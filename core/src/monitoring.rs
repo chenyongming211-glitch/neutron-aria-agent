@@ -1,7 +1,7 @@
 use aya::maps::{HashMap, MapData, PerCpuHashMap, PerCpuValues};
 use crate::common::{
     PolicyKey, RuleStatsValue, FlowStatsValue, CtKey4, CtKey6, CtValue, CT_NEW, CT_ESTABLISHED,
-    QosKey, QosStatsValue, GroupStatsKey, GroupStatsValue,
+    QosKey, QosStatsValue, GroupStatsKey, GroupStatsValue, TapMapRuntime,
     MirrorKey, GlobalMirrorKey, MirrorStatsValue, TcpRtValue,
 };
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -72,7 +72,8 @@ fn sum_per_cpu_flow_stats(values: PerCpuValues<FlowStatsValue>) -> (u64, u64, u6
     (packets, bytes, last_seen)
 }
 
-pub fn get_rule_stats(pin_path: &str) -> Result<Vec<RuleStatsEntry>, String> {
+pub fn get_rule_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<RuleStatsEntry>, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/RULE_STATS", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open RULE_STATS: {:?}", e))?;
@@ -97,7 +98,8 @@ pub fn get_rule_stats(pin_path: &str) -> Result<Vec<RuleStatsEntry>, String> {
     Ok(entries)
 }
 
-pub fn get_top_flows_v4(pin_path: &str, n: usize) -> Result<Vec<FlowStatsEntry>, String> {
+pub fn get_top_flows_v4(runtime: TapMapRuntime<'_>, n: usize) -> Result<Vec<FlowStatsEntry>, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/FLOW_STATS_V4", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open FLOW_STATS_V4: {:?}", e))?;
@@ -133,7 +135,8 @@ pub fn get_top_flows_v4(pin_path: &str, n: usize) -> Result<Vec<FlowStatsEntry>,
     Ok(entries)
 }
 
-pub fn get_top_flows_v6(pin_path: &str, n: usize) -> Result<Vec<FlowStatsEntryV6>, String> {
+pub fn get_top_flows_v6(runtime: TapMapRuntime<'_>, n: usize) -> Result<Vec<FlowStatsEntryV6>, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/FLOW_STATS_V6", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open FLOW_STATS_V6: {:?}", e))?;
@@ -170,7 +173,8 @@ pub fn get_top_flows_v6(pin_path: &str, n: usize) -> Result<Vec<FlowStatsEntryV6
     Ok(entries)
 }
 
-pub fn get_conntrack_stats(pin_path: &str) -> Result<ConntrackSummary, String> {
+pub fn get_conntrack_stats(runtime: TapMapRuntime<'_>) -> Result<ConntrackSummary, String> {
+    let pin_path = runtime.pin_path;
     let mut summary = ConntrackSummary {
         total_v4: 0,
         total_v6: 0,
@@ -249,7 +253,8 @@ fn sum_per_cpu_qos_stats(values: PerCpuValues<QosStatsValue>) -> (u64, u64, u64,
     (pp, pb, dp, db, sp, sb)
 }
 
-pub fn get_qos_stats(pin_path: &str) -> Result<Vec<QosStatsEntry>, String> {
+pub fn get_qos_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<QosStatsEntry>, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/QOS_STATS", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open QOS_STATS: {:?}", e))?;
@@ -300,7 +305,8 @@ fn sum_per_cpu_group_stats(values: PerCpuValues<GroupStatsValue>) -> (u64, u64) 
     (packets, bytes)
 }
 
-pub fn get_group_stats(pin_path: &str) -> Result<Vec<GroupStatsEntry>, String> {
+pub fn get_group_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<GroupStatsEntry>, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/GROUP_STATS", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open GROUP_STATS: {:?}", e))?;
@@ -381,7 +387,8 @@ fn sum_per_cpu_mirror_stats(values: PerCpuValues<MirrorStatsValue>) -> (u64, u64
     (mp, mb, err)
 }
 
-pub fn get_mirror_stats(pin_path: &str) -> Result<Vec<MirrorStatsEntry>, String> {
+pub fn get_mirror_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<MirrorStatsEntry>, String> {
+    let pin_path = runtime.pin_path;
     let mut entries = Vec::new();
 
     // Per-rule mirror stats
@@ -497,7 +504,8 @@ fn accumulate_tcprt_value(summary: &mut TcprtMetricsSummary, val: &TcpRtValue) {
     }
 }
 
-fn collect_tcprt_metrics_v4(pin_path: &str, summary: &mut TcprtMetricsSummary) -> Result<bool, String> {
+fn collect_tcprt_metrics_v4(runtime: TapMapRuntime<'_>, summary: &mut TcprtMetricsSummary) -> Result<bool, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/TCPRT_TABLE_V4", pin_path);
     if !Path::new(&map_path).exists() {
         return Ok(false);
@@ -518,7 +526,8 @@ fn collect_tcprt_metrics_v4(pin_path: &str, summary: &mut TcprtMetricsSummary) -
     Ok(true)
 }
 
-fn collect_tcprt_metrics_v6(pin_path: &str, summary: &mut TcprtMetricsSummary) -> Result<bool, String> {
+fn collect_tcprt_metrics_v6(runtime: TapMapRuntime<'_>, summary: &mut TcprtMetricsSummary) -> Result<bool, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/TCPRT_TABLE_V6", pin_path);
     if !Path::new(&map_path).exists() {
         return Ok(false);
@@ -541,12 +550,12 @@ fn collect_tcprt_metrics_v6(pin_path: &str, summary: &mut TcprtMetricsSummary) -
 
 /// Best-effort aggregate over a live TCP-RT map. This is not a snapshot read:
 /// entries may be added or removed while iteration is in progress.
-pub fn get_tcprt_metrics_summary(pin_path: &str) -> Result<Option<TcprtMetricsSummary>, String> {
+pub fn get_tcprt_metrics_summary(runtime: TapMapRuntime<'_>) -> Result<Option<TcprtMetricsSummary>, String> {
     let mut summary = TcprtMetricsSummary::default();
     let mut available = false;
 
-    available |= collect_tcprt_metrics_v4(pin_path, &mut summary)?;
-    available |= collect_tcprt_metrics_v6(pin_path, &mut summary)?;
+    available |= collect_tcprt_metrics_v4(runtime, &mut summary)?;
+    available |= collect_tcprt_metrics_v6(runtime, &mut summary)?;
 
     if !available {
         return Ok(None);
@@ -555,9 +564,9 @@ pub fn get_tcprt_metrics_summary(pin_path: &str) -> Result<Option<TcprtMetricsSu
     Ok(Some(summary))
 }
 
-pub fn get_tcprt_stats(pin_path: &str, top_n: usize) -> Result<Vec<crate::tcprt_ops::TcpRtEntry>, String> {
-    let mut entries = crate::tcprt_ops::get_tcprt_flows_v4(pin_path).unwrap_or_default();
-    entries.extend(crate::tcprt_ops::get_tcprt_flows_v6(pin_path).unwrap_or_default());
+pub fn get_tcprt_stats(runtime: TapMapRuntime<'_>, top_n: usize) -> Result<Vec<crate::tcprt_ops::TcpRtEntry>, String> {
+    let mut entries = crate::tcprt_ops::get_tcprt_flows_v4(runtime).unwrap_or_default();
+    entries.extend(crate::tcprt_ops::get_tcprt_flows_v6(runtime).unwrap_or_default());
     // Sort by ART descending (slowest responses first)
     entries.sort_by(|a, b| b.art_us.partial_cmp(&a.art_us).unwrap_or(std::cmp::Ordering::Equal));
     entries.truncate(top_n);

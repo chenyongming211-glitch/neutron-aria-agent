@@ -255,6 +255,60 @@ pub struct FirewallConfig {
 }
 unsafe impl Pod for FirewallConfig {}
 
+pub const TAP_ID_UNASSIGNED: u32 = 0;
+pub const FIRST_MANAGED_TAP_ID: u32 = 1;
+
+#[derive(Copy, Clone, Debug)]
+pub struct TapMapRuntime<'a> {
+    pub pin_path: &'a str,
+    pub tap_id: u32,
+}
+
+impl<'a> TapMapRuntime<'a> {
+    pub fn new(pin_path: &'a str, tap_id: u32) -> Self {
+        Self { pin_path, tap_id }
+    }
+}
+
+/// Runtime lookup result for a managed interface in the future shared data plane.
+/// Keyed by kernel ifindex and resolved before touching heavy shared maps.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct IfaceCtx {
+    pub tap_id: u32,
+    pub flags: u32,
+}
+unsafe impl Pod for IfaceCtx {}
+
+/// Per-tap feature toggles for the future shared data plane.
+/// This intentionally excludes process-global SSL configuration.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct TapConfig {
+    pub conntrack_enabled: u8,
+    pub monitoring_enabled: u8,
+    pub acl_enabled: u8,
+    pub qos_enabled: u8,
+    pub mirror_enabled: u8,
+    pub tcprt_enabled: u8,
+    pub pad: [u8; 2],
+}
+unsafe impl Pod for TapConfig {}
+
+impl From<FirewallConfig> for TapConfig {
+    fn from(value: FirewallConfig) -> Self {
+        Self {
+            conntrack_enabled: value.conntrack_enabled,
+            monitoring_enabled: value.monitoring_enabled,
+            acl_enabled: value.acl_enabled,
+            qos_enabled: value.qos_enabled,
+            mirror_enabled: value.mirror_enabled,
+            tcprt_enabled: value.tcprt_enabled,
+            pad: [0; 2],
+        }
+    }
+}
+
 // --- SSL Observability ---
 
 #[repr(C)]

@@ -1,5 +1,5 @@
 use aya::maps::{HashMap, MapData};
-use crate::common::{TraceFilter, TraceEvent};
+use crate::common::{TraceFilter, TraceEvent, TapMapRuntime};
 use std::net::Ipv4Addr;
 
 pub struct TraceEventEntry {
@@ -72,7 +72,7 @@ fn direction_name(dir: u8) -> String {
 }
 
 pub fn set_trace_filter(
-    pin_path: &str,
+    runtime: TapMapRuntime<'_>,
     src_ip: u32,
     dst_ip: u32,
     src_ip_v6: [u8; 16],
@@ -83,6 +83,7 @@ pub fn set_trace_filter(
     is_ipv6: u8,
     enabled: bool,
 ) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/TRACE_FILTER", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open TRACE_FILTER: {:?}", e))?;
@@ -107,11 +108,12 @@ pub fn set_trace_filter(
     Ok(())
 }
 
-pub fn clear_trace_filter(pin_path: &str) -> Result<(), String> {
-    set_trace_filter(pin_path, 0, 0, [0u8; 16], [0u8; 16], 0, 0, 0, 0, false)
+pub fn clear_trace_filter(runtime: TapMapRuntime<'_>) -> Result<(), String> {
+    set_trace_filter(runtime, 0, 0, [0u8; 16], [0u8; 16], 0, 0, 0, 0, false)
 }
 
-pub fn get_trace_events(pin_path: &str, limit: usize) -> Result<Vec<TraceEventEntry>, String> {
+pub fn get_trace_events(runtime: TapMapRuntime<'_>, limit: usize) -> Result<Vec<TraceEventEntry>, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/TRACE_LOG", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open TRACE_LOG: {:?}", e))?;
@@ -148,7 +150,8 @@ pub fn get_trace_events(pin_path: &str, limit: usize) -> Result<Vec<TraceEventEn
     Ok(entries)
 }
 
-pub fn flush_trace_log(pin_path: &str) -> Result<u64, String> {
+pub fn flush_trace_log(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/TRACE_LOG", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open TRACE_LOG: {:?}", e))?;

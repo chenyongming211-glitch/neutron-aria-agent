@@ -1,5 +1,5 @@
 use aya::maps::{MapData, PerCpuHashMap, PerCpuValues};
-use crate::common::{DropKey, DropValue};
+use crate::common::{DropKey, DropValue, TapMapRuntime};
 
 pub struct DropStatsEntry {
     pub reason: u8,
@@ -26,7 +26,8 @@ fn sum_per_cpu_drop(values: PerCpuValues<DropValue>) -> (u64, u64, u64) {
     (packets, bytes, last_seen)
 }
 
-pub fn get_drop_stats(pin_path: &str) -> Result<Vec<DropStatsEntry>, String> {
+pub fn get_drop_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<DropStatsEntry>, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/DROP_REASON_STATS", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open DROP_REASON_STATS: {:?}", e))?;
@@ -58,7 +59,8 @@ pub fn get_drop_stats(pin_path: &str) -> Result<Vec<DropStatsEntry>, String> {
     Ok(entries)
 }
 
-pub fn flush_drop_stats(pin_path: &str) -> Result<u64, String> {
+pub fn flush_drop_stats(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/DROP_REASON_STATS", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open DROP_REASON_STATS: {:?}", e))?;

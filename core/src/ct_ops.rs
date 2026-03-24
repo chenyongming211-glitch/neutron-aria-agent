@@ -1,5 +1,5 @@
 use aya::maps::{HashMap, MapData};
-use crate::common::{CtKey4, CtKey6, CtValue, CtConfig};
+use crate::common::{CtKey4, CtKey6, CtValue, CtConfig, TapMapRuntime};
 use std::net::Ipv4Addr;
 
 pub struct CtEntry {
@@ -13,7 +13,8 @@ pub struct CtEntry {
     pub byte_count: u64,
 }
 
-pub fn ct_list(pin_path: &str) -> Result<Vec<CtEntry>, String> {
+pub fn ct_list(runtime: TapMapRuntime<'_>) -> Result<Vec<CtEntry>, String> {
+    let pin_path = runtime.pin_path;
     let mut entries = Vec::new();
 
     // CT_TABLE_V4 — LruHashMap on kernel side
@@ -67,7 +68,8 @@ pub fn ct_list(pin_path: &str) -> Result<Vec<CtEntry>, String> {
     Ok(entries)
 }
 
-pub fn ct_flush(pin_path: &str) -> Result<u64, String> {
+pub fn ct_flush(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
+    let pin_path = runtime.pin_path;
     let mut count = 0u64;
 
     // Flush CT_TABLE_V4

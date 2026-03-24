@@ -391,6 +391,31 @@ pub struct FirewallConfig {
     pub ssl_enabled: u8,
 }
 
+pub const TAP_ID_UNASSIGNED: u32 = 0;
+pub const FIRST_MANAGED_TAP_ID: u32 = 1;
+
+/// Runtime lookup result for a managed interface in the future shared data plane.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct IfaceCtx {
+    pub tap_id: u32,
+    pub flags: u32,
+}
+
+/// Per-tap feature toggles for the future shared data plane.
+/// This intentionally excludes process-global SSL configuration.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TapConfig {
+    pub conntrack_enabled: u8,
+    pub monitoring_enabled: u8,
+    pub acl_enabled: u8,
+    pub qos_enabled: u8,
+    pub mirror_enabled: u8,
+    pub tcprt_enabled: u8,
+    pub pad: [u8; 2],
+}
+
 // --- SSL Observability ---
 
 #[repr(C)]

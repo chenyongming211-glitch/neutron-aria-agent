@@ -1,9 +1,10 @@
 use aya::maps::{HashMap, MapData};
-use crate::common::{QosKey, QosConfig, FirewallConfig};
+use crate::common::{QosKey, QosConfig, FirewallConfig, TapMapRuntime};
 
 /// Update the qos_enabled flag in FIREWALL_CONFIG map.
 /// Called after every add/delete of a QoS rule to keep the flag in sync.
-fn sync_qos_enabled(pin_path: &str, enabled: bool) -> Result<(), String> {
+fn sync_qos_enabled(runtime: TapMapRuntime<'_>, enabled: bool) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/FIREWALL_CONFIG", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open FIREWALL_CONFIG: {:?}", e))?;
@@ -31,7 +32,8 @@ fn sync_qos_enabled(pin_path: &str, enabled: bool) -> Result<(), String> {
 }
 
 /// Check if any QoS rules remain in the QOS_CONFIG map.
-fn has_qos_rules(pin_path: &str) -> bool {
+fn has_qos_rules(runtime: TapMapRuntime<'_>) -> bool {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/QOS_CONFIG", pin_path);
     let Ok(map_data) = MapData::from_pin(&map_path) else { return false };
     let Ok(map) = HashMap::<_, QosKey, QosConfig>::try_from(
@@ -47,9 +49,10 @@ pub fn add_qos_rule(
     burst_bytes: u64,
     priority: u8,
     mode: u8,
-    pin_path: &str,
+    runtime: TapMapRuntime<'_>,
     user_qos_enabled: bool,
 ) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/QOS_CONFIG", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open QOS_CONFIG: {:?}", e))?;
@@ -74,7 +77,7 @@ pub fn add_qos_rule(
         .map_err(|e| format!("QOS_CONFIG insert: {:?}", e))?;
 
     // After adding a rule, QoS is active only if user wants it
-    sync_qos_enabled(pin_path, user_qos_enabled)?;
+    sync_qos_enabled(runtime, user_qos_enabled)?;
 
     Ok(())
 }
@@ -82,9 +85,10 @@ pub fn add_qos_rule(
 pub fn delete_qos_rule(
     group_id: u32,
     direction: u8,
-    pin_path: &str,
+    runtime: TapMapRuntime<'_>,
     user_qos_enabled: bool,
 ) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/QOS_CONFIG", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open QOS_CONFIG: {:?}", e))?;
@@ -102,12 +106,13 @@ pub fn delete_qos_rule(
         .map_err(|e| format!("QOS_CONFIG remove: {:?}", e))?;
 
     // After deleting, check if any rules remain and user wants QoS
-    sync_qos_enabled(pin_path, user_qos_enabled && has_qos_rules(pin_path))?;
+    sync_qos_enabled(runtime, user_qos_enabled && has_qos_rules(runtime))?;
 
     Ok(())
 }
 
-pub fn list_qos_rules(pin_path: &str) -> Result<Vec<(QosKey, QosConfig)>, String> {
+pub fn list_qos_rules(runtime: TapMapRuntime<'_>) -> Result<Vec<(QosKey, QosConfig)>, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/QOS_CONFIG", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open QOS_CONFIG: {:?}", e))?;

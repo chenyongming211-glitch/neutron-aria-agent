@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
+use aria_core::common::TapMapRuntime;
 use aria_core::state::{FirewallState, GroupInfo, RuleInfo, QosRuleInfo, MirrorRuleInfo};
 use aria_core::wal::{WalClient, WalEntry};
 use crate::service_chain::{ServiceChain, self};
@@ -13,6 +14,8 @@ const WAL_COMPACT_THRESHOLD: u64 = 1000;
 /// Per-instance in-memory state
 struct InstanceState {
     state: FirewallState,
+    tap_id: u32,
+    ifindex: Option<u32>,
     pin_path: String,
     state_path: String,
     wal: WalClient,
@@ -21,6 +24,10 @@ struct InstanceState {
 }
 
 impl InstanceState {
+    fn map_runtime(&self) -> TapMapRuntime<'_> {
+        TapMapRuntime::new(&self.pin_path, self.tap_id)
+    }
+
     fn wal_needs_compact(&self, threshold: u64) -> bool {
         self.wal.needs_compact(threshold)
     }
@@ -59,6 +66,7 @@ impl InstanceState {
 
 pub struct ControlPlane {
     instances: RwLock<HashMap<String, Arc<tokio::sync::RwLock<InstanceState>>>>,
+    tap_id_lock: Mutex<()>,
     pub ebpf_path: String,
     pub base_pin_path: String,
     pub base_state_path: String,
@@ -120,6 +128,7 @@ impl ControlPlane {
         let chains = service_chain::load_chains(base_state_path);
         Self {
             instances: RwLock::new(HashMap::new()),
+            tap_id_lock: Mutex::new(()),
             ebpf_path: ebpf_path.to_string(),
             base_pin_path: base_pin_path.to_string(),
             base_state_path: base_state_path.to_string(),
@@ -133,6 +142,7 @@ impl ControlPlane {
     pub async fn register_instance(&self, name: &str) -> Result<(), String> {
         let pin_path = format!("{}/{}", self.base_pin_path, name);
         let state_path = format!("{}/{}", self.base_state_path, name);
+        let ifindex = Self::resolve_ifindex(name)?;
         let global_ssl_enabled = match self.read_ssl_global_config().await {
             Ok(enabled) => Some(enabled),
             Err(e) => {
@@ -151,6 +161,7 @@ impl ControlPlane {
         }
 
         let mut state = aria_core::wal::load_with_wal(&state_path);
+        let tap_id_assigned = self.ensure_managed_tap_id(name, &mut state).await?;
         let ssl_changed = global_ssl_enabled
             .map(|enabled| state.ssl_enabled != enabled)
             .unwrap_or(false);
@@ -168,7 +179,7 @@ impl ControlPlane {
         };
 
         // Compact on startup if WAL had replayed entries
-        if wal.entry_count() > 0 || ssl_changed {
+        if wal.entry_count() > 0 || ssl_changed || tap_id_assigned {
             match serde_json::to_string_pretty(&state) {
                 Ok(json) => {
                     if let Err(e) = wal.compact(json).await {
@@ -181,8 +192,11 @@ impl ControlPlane {
             }
         }
 
+        let tap_id = state.tap_id;
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
+            tap_id,
+            ifindex: Some(ifindex),
             pin_path,
             state_path,
             wal,
@@ -200,7 +214,7 @@ impl ControlPlane {
                 .await;
         }
 
-        info!(instance = %name, "registered instance");
+        info!(instance = %name, tap_id, ifindex, "registered instance");
         Ok(())
     }
 
@@ -214,6 +228,12 @@ impl ControlPlane {
             }
         };
         let mut state = aria_core::wal::load_with_wal(state_path);
+        let tap_id_reset = if state.tap_id != aria_core::common::TAP_ID_UNASSIGNED {
+            state.tap_id = aria_core::common::TAP_ID_UNASSIGNED;
+            true
+        } else {
+            false
+        };
         let ssl_changed = global_ssl_enabled
             .map(|enabled| state.ssl_enabled != enabled)
             .unwrap_or(false);
@@ -231,7 +251,7 @@ impl ControlPlane {
         };
 
         // Compact on startup if WAL had replayed entries
-        if wal.entry_count() > 0 || ssl_changed {
+        if wal.entry_count() > 0 || ssl_changed || tap_id_reset {
             match serde_json::to_string_pretty(&state) {
                 Ok(json) => {
                     if let Err(e) = wal.compact(json).await {
@@ -244,8 +264,11 @@ impl ControlPlane {
             }
         }
 
+        let tap_id = state.tap_id;
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
+            tap_id,
+            ifindex: None,
             pin_path: pin_path.to_string(),
             state_path: state_path.to_string(),
             wal,
@@ -263,7 +286,7 @@ impl ControlPlane {
                 .await;
         }
 
-        info!(instance = "system", "registered system instance");
+        info!(instance = "system", tap_id, "registered system instance");
         Ok(())
     }
 
@@ -274,7 +297,11 @@ impl ControlPlane {
         let mut instances = self.instances.write().await;
         if let Some(inst) = instances.remove(name) {
             let mut state = inst.write().await;
+            let tap_id = state.tap_id;
+            let ifindex = state.ifindex;
             state.shutdown_wal().await;
+            info!(instance = %name, tap_id, ifindex = ?ifindex, "unregistered instance");
+            return;
         }
         info!(instance = %name, "unregistered instance");
     }
@@ -323,12 +350,12 @@ impl ControlPlane {
             .map_err(|e| ControlPlaneError::ValidationError(e))?;
 
         // Write to kernel maps
-        if let Err(e) = aria_core::ebpf_ops::add_network("src", cidr, id, &state.pin_path, &self.ebpf_path) {
+        if let Err(e) = aria_core::ebpf_ops::add_network("src", cidr, id, state.map_runtime(), &self.ebpf_path) {
             state.state.rollback_add_group(name, cidr, was_new_group);
             return Err(ControlPlaneError::KernelError(format!("src: {}", e)));
         }
-        if let Err(e) = aria_core::ebpf_ops::add_network("dst", cidr, id, &state.pin_path, &self.ebpf_path) {
-            let _ = aria_core::ebpf_ops::delete_network("src", cidr, id, &state.pin_path, &self.ebpf_path);
+        if let Err(e) = aria_core::ebpf_ops::add_network("dst", cidr, id, state.map_runtime(), &self.ebpf_path) {
+            let _ = aria_core::ebpf_ops::delete_network("src", cidr, id, state.map_runtime(), &self.ebpf_path);
             state.state.rollback_add_group(name, cidr, was_new_group);
             return Err(ControlPlaneError::KernelError(format!("dst: {}", e)));
         }
@@ -379,10 +406,10 @@ impl ControlPlane {
         // Delete from kernel
         let mut errors = Vec::new();
         for cidr in &group.cidrs {
-            if let Err(e) = aria_core::ebpf_ops::delete_network("src", cidr, group.id, &state.pin_path, &self.ebpf_path) {
+            if let Err(e) = aria_core::ebpf_ops::delete_network("src", cidr, group.id, state.map_runtime(), &self.ebpf_path) {
                 errors.push(format!("src {}: {}", cidr, e));
             }
-            if let Err(e) = aria_core::ebpf_ops::delete_network("dst", cidr, group.id, &state.pin_path, &self.ebpf_path) {
+            if let Err(e) = aria_core::ebpf_ops::delete_network("dst", cidr, group.id, state.map_runtime(), &self.ebpf_path) {
                 errors.push(format!("dst {}: {}", cidr, e));
             }
         }
@@ -404,10 +431,7 @@ impl ControlPlane {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
         let groups: Vec<_> = state.state.groups.values().cloned().collect();
-        drop(state);
-
-        // Get statistics
-        let stats = aria_core::monitoring::get_group_stats(&inst.read().await.pin_path)
+        let stats = aria_core::monitoring::get_group_stats(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))?;
 
         Ok((groups, stats))
@@ -452,14 +476,14 @@ impl ControlPlane {
         if let Err(e) = aria_core::ebpf_ops::add_policy(
             src_id, dst_id, proto, action, ports,
             add_result.bitmap_idx, add_result.is_new_port_set,
-            direction, &state.pin_path, &self.ebpf_path,
+            direction, state.map_runtime(), &self.ebpf_path,
         ) {
             if add_result.is_new_port_set {
                 if let (Some(idx), Some(ports_str)) = (add_result.bitmap_idx, ports) {
                     if let Err(cleanup_err) = aria_core::ebpf_ops::delete_port_set(
                         idx,
                         ports_str,
-                        &state.pin_path,
+                        state.map_runtime(),
                         &self.ebpf_path,
                     ) {
                         warn!(error = %cleanup_err, "failed to clean new port bitmap after add_policy error");
@@ -476,7 +500,7 @@ impl ControlPlane {
 
         // Clean up old port set if replaced
         if let Some((old_idx, ref ports_normalized)) = add_result.old_port_set_released {
-            if let Err(e) = aria_core::ebpf_ops::delete_port_set(old_idx, ports_normalized, &state.pin_path, &self.ebpf_path) {
+            if let Err(e) = aria_core::ebpf_ops::delete_port_set(old_idx, ports_normalized, state.map_runtime(), &self.ebpf_path) {
                 warn!(error = %e, "failed to clean old port bitmap");
             }
         }
@@ -521,7 +545,7 @@ impl ControlPlane {
         }
 
         // Delete from kernel
-        if let Err(e) = aria_core::ebpf_ops::delete_policy(src_id, dst_id, proto, direction, &state.pin_path, &self.ebpf_path) {
+        if let Err(e) = aria_core::ebpf_ops::delete_policy(src_id, dst_id, proto, direction, state.map_runtime(), &self.ebpf_path) {
             return Err(ControlPlaneError::KernelError(e));
         }
 
@@ -530,7 +554,7 @@ impl ControlPlane {
             .map_err(|e| ControlPlaneError::PolicyNotFound(e))?;
 
         if let (Some(idx), Some(ref ports_normalized)) = (remove_result.bitmap_idx, &remove_result.port_set_released) {
-            if let Err(e) = aria_core::ebpf_ops::delete_port_set(idx, ports_normalized, &state.pin_path, &self.ebpf_path) {
+            if let Err(e) = aria_core::ebpf_ops::delete_port_set(idx, ports_normalized, state.map_runtime(), &self.ebpf_path) {
                 warn!(error = %e, "failed to clean port bitmap");
             }
         }
@@ -551,10 +575,7 @@ impl ControlPlane {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
         let rules = state.state.rules.clone();
-        drop(state);
-
-        // Get statistics
-        let stats = aria_core::monitoring::get_rule_stats(&inst.read().await.pin_path)
+        let stats = aria_core::monitoring::get_rule_stats(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))?;
 
         Ok((rules, stats))
@@ -591,7 +612,7 @@ impl ControlPlane {
         };
 
         // Write to kernel
-        if let Err(e) = aria_core::qos_ops::add_qos_rule(group_id, direction, rate_bps, burst_bytes, priority, mode, &state.pin_path, state.state.qos_enabled) {
+        if let Err(e) = aria_core::qos_ops::add_qos_rule(group_id, direction, rate_bps, burst_bytes, priority, mode, state.map_runtime(), state.state.qos_enabled) {
             return Err(ControlPlaneError::KernelError(e));
         }
 
@@ -645,7 +666,7 @@ impl ControlPlane {
             ));
         }
 
-        if let Err(e) = aria_core::qos_ops::delete_qos_rule(group_id, direction, &state.pin_path, state.state.qos_enabled) {
+        if let Err(e) = aria_core::qos_ops::delete_qos_rule(group_id, direction, state.map_runtime(), state.state.qos_enabled) {
             return Err(ControlPlaneError::KernelError(e));
         }
 
@@ -664,10 +685,7 @@ impl ControlPlane {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
         let rules = state.state.qos_rules.clone();
-        drop(state);
-
-        // Get statistics
-        let stats = aria_core::monitoring::get_qos_stats(&inst.read().await.pin_path)
+        let stats = aria_core::monitoring::get_qos_stats(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))?;
 
         Ok((rules, stats))
@@ -703,11 +721,11 @@ impl ControlPlane {
         let is_global = src_id == 0 && dst_id == 0 && proto == 0;
 
         if is_global {
-            if let Err(e) = aria_core::mirror_ops::add_global_mirror(direction, target_ifindex, &state.pin_path, state.state.mirror_enabled) {
+            if let Err(e) = aria_core::mirror_ops::add_global_mirror(direction, target_ifindex, state.map_runtime(), state.state.mirror_enabled) {
                 return Err(ControlPlaneError::KernelError(e));
             }
         } else {
-            if let Err(e) = aria_core::mirror_ops::add_mirror_rule(src_id, dst_id, proto, direction, target_ifindex, &state.pin_path, state.state.mirror_enabled) {
+            if let Err(e) = aria_core::mirror_ops::add_mirror_rule(src_id, dst_id, proto, direction, target_ifindex, state.map_runtime(), state.state.mirror_enabled) {
                 return Err(ControlPlaneError::KernelError(e));
             }
         }
@@ -772,11 +790,11 @@ impl ControlPlane {
         }
 
         if is_global {
-            if let Err(e) = aria_core::mirror_ops::delete_global_mirror(direction, &state.pin_path, state.state.mirror_enabled) {
+            if let Err(e) = aria_core::mirror_ops::delete_global_mirror(direction, state.map_runtime(), state.state.mirror_enabled) {
                 return Err(ControlPlaneError::KernelError(e));
             }
         } else {
-            if let Err(e) = aria_core::mirror_ops::delete_mirror_rule(src_id, dst_id, proto, direction, &state.pin_path, state.state.mirror_enabled) {
+            if let Err(e) = aria_core::mirror_ops::delete_mirror_rule(src_id, dst_id, proto, direction, state.map_runtime(), state.state.mirror_enabled) {
                 return Err(ControlPlaneError::KernelError(e));
             }
         }
@@ -800,7 +818,7 @@ impl ControlPlane {
     pub async fn get_mirror_stats(&self, instance: &str) -> Result<(Vec<aria_core::monitoring::MirrorStatsEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        let stats = aria_core::monitoring::get_mirror_stats(&state.pin_path)
+        let stats = aria_core::monitoring::get_mirror_stats(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))?;
         Ok((stats, state.state.groups.clone()))
     }
@@ -812,10 +830,7 @@ impl ControlPlane {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
         let rules = state.state.mirror_rules.clone();
-        drop(state);
-
-        // Get statistics
-        let stats = aria_core::monitoring::get_mirror_stats(&inst.read().await.pin_path)
+        let stats = aria_core::monitoring::get_mirror_stats(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))?;
 
         Ok((rules, stats))
@@ -826,14 +841,14 @@ impl ControlPlane {
     pub async fn list_conntrack(&self, instance: &str) -> Result<Vec<aria_core::ct_ops::CtEntry>, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        aria_core::ct_ops::ct_list(&state.pin_path)
+        aria_core::ct_ops::ct_list(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
     pub async fn flush_conntrack(&self, instance: &str) -> Result<u64, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        aria_core::ct_ops::ct_flush(&state.pin_path)
+        aria_core::ct_ops::ct_flush(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
@@ -841,12 +856,11 @@ impl ControlPlane {
 
     pub async fn get_config(&self, instance: &str) -> Result<aria_core::common::FirewallConfig, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
-        let pin_path = {
+        let mut cfg = {
             let state = inst.read().await;
-            state.pin_path.clone()
+            aria_core::ebpf_ops::read_firewall_config(state.map_runtime())
+                .map_err(|e| ControlPlaneError::KernelError(e))?
         };
-        let mut cfg = aria_core::ebpf_ops::read_firewall_config(&pin_path)
-            .map_err(|e| ControlPlaneError::KernelError(e))?;
         if let Ok(enabled) = self.get_ssl_global_config().await {
             cfg.ssl_enabled = if enabled { 1 } else { 0 };
         }
@@ -889,7 +903,7 @@ impl ControlPlane {
         let kernel_mirror = mirror.map(|m| m && !state.state.mirror_rules.is_empty());
 
         if let Err(e) = aria_core::ebpf_ops::update_firewall_config(
-            &state.pin_path,
+            state.map_runtime(),
             conntrack,
             monitoring,
             acl,
@@ -971,7 +985,7 @@ impl ControlPlane {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
 
-        let ct_summary = aria_core::monitoring::get_conntrack_stats(&state.pin_path).unwrap_or(
+        let ct_summary = aria_core::monitoring::get_conntrack_stats(state.map_runtime()).unwrap_or(
             aria_core::monitoring::ConntrackSummary {
                 total_v4: 0, total_v6: 0, new_count: 0, established_count: 0,
             }
@@ -990,7 +1004,7 @@ impl ControlPlane {
     pub async fn get_rule_stats(&self, instance: &str) -> Result<(Vec<aria_core::monitoring::RuleStatsEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        let stats = aria_core::monitoring::get_rule_stats(&state.pin_path)
+        let stats = aria_core::monitoring::get_rule_stats(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))?;
         Ok((stats, state.state.groups.clone()))
     }
@@ -998,9 +1012,9 @@ impl ControlPlane {
     pub async fn get_top_flows(&self, instance: &str, top: usize) -> Result<(Vec<aria_core::monitoring::FlowStatsEntry>, Vec<aria_core::monitoring::FlowStatsEntryV6>), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        let v4 = aria_core::monitoring::get_top_flows_v4(&state.pin_path, top)
+        let v4 = aria_core::monitoring::get_top_flows_v4(state.map_runtime(), top)
             .map_err(|e| ControlPlaneError::KernelError(e))?;
-        let v6 = aria_core::monitoring::get_top_flows_v6(&state.pin_path, top)
+        let v6 = aria_core::monitoring::get_top_flows_v6(state.map_runtime(), top)
             .map_err(|e| ControlPlaneError::KernelError(e))?;
         Ok((v4, v6))
     }
@@ -1008,7 +1022,7 @@ impl ControlPlane {
     pub async fn get_qos_stats(&self, instance: &str) -> Result<(Vec<aria_core::monitoring::QosStatsEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        let stats = aria_core::monitoring::get_qos_stats(&state.pin_path)
+        let stats = aria_core::monitoring::get_qos_stats(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))?;
         Ok((stats, state.state.groups.clone()))
     }
@@ -1016,7 +1030,7 @@ impl ControlPlane {
     pub async fn get_group_stats(&self, instance: &str) -> Result<(Vec<aria_core::monitoring::GroupStatsEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        let stats = aria_core::monitoring::get_group_stats(&state.pin_path)
+        let stats = aria_core::monitoring::get_group_stats(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))?;
         Ok((stats, state.state.groups.clone()))
     }
@@ -1026,7 +1040,7 @@ impl ControlPlane {
     pub async fn list_tcprt(&self, instance: &str, top: usize) -> Result<Vec<aria_core::tcprt_ops::TcpRtEntry>, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        aria_core::monitoring::get_tcprt_stats(&state.pin_path, top)
+        aria_core::monitoring::get_tcprt_stats(state.map_runtime(), top)
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
@@ -1036,14 +1050,14 @@ impl ControlPlane {
     ) -> Result<Option<aria_core::monitoring::TcprtMetricsSummary>, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        aria_core::monitoring::get_tcprt_metrics_summary(&state.pin_path)
+        aria_core::monitoring::get_tcprt_metrics_summary(state.map_runtime())
             .map_err(ControlPlaneError::KernelError)
     }
 
     pub async fn flush_tcprt(&self, instance: &str) -> Result<u64, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        aria_core::tcprt_ops::flush_tcprt(&state.pin_path)
+        aria_core::tcprt_ops::flush_tcprt(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
@@ -1128,7 +1142,7 @@ impl ControlPlane {
         let mut results = Vec::new();
         for (name, inst) in instances.iter() {
             let state = inst.read().await;
-            let entries = aria_core::tcprt_ops::lookup_tcprt_flows(&state.pin_path, tuples)
+            let entries = aria_core::tcprt_ops::lookup_tcprt_flows(state.map_runtime(), tuples)
                 .unwrap_or_default();
             for entry in entries {
                 results.push((name.clone(), entry));
@@ -1144,7 +1158,7 @@ impl ControlPlane {
         let mut results = Vec::new();
         for (name, inst) in instances.iter() {
             let state = inst.read().await;
-            let entries = aria_core::tcprt_ops::filter_tcprt_flows(&state.pin_path, dst_ip, dst_port)
+            let entries = aria_core::tcprt_ops::filter_tcprt_flows(state.map_runtime(), dst_ip, dst_port)
                 .unwrap_or_default();
             if !entries.is_empty() {
                 results.push((name.clone(), entries));
@@ -1193,7 +1207,7 @@ impl ControlPlane {
     pub async fn get_drop_stats(&self, instance: &str) -> Result<(Vec<aria_core::drop_ops::DropStatsEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        let stats = aria_core::drop_ops::get_drop_stats(&state.pin_path)
+        let stats = aria_core::drop_ops::get_drop_stats(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))?;
         Ok((stats, state.state.groups.clone()))
     }
@@ -1201,7 +1215,7 @@ impl ControlPlane {
     pub async fn flush_drop_stats(&self, instance: &str) -> Result<u64, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        aria_core::drop_ops::flush_drop_stats(&state.pin_path)
+        aria_core::drop_ops::flush_drop_stats(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
@@ -1221,21 +1235,21 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        aria_core::trace_ops::set_trace_filter(&state.pin_path, src_ip, dst_ip, src_ip_v6, dst_ip_v6, src_port, dst_port, proto, is_ipv6, true)
+        aria_core::trace_ops::set_trace_filter(state.map_runtime(), src_ip, dst_ip, src_ip_v6, dst_ip_v6, src_port, dst_port, proto, is_ipv6, true)
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
     pub async fn stop_trace(&self, instance: &str) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        aria_core::trace_ops::clear_trace_filter(&state.pin_path)
+        aria_core::trace_ops::clear_trace_filter(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
     pub async fn get_trace_events(&self, instance: &str, limit: usize) -> Result<(Vec<aria_core::trace_ops::TraceEventEntry>, HashMap<String, GroupInfo>), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        let events = aria_core::trace_ops::get_trace_events(&state.pin_path, limit)
+        let events = aria_core::trace_ops::get_trace_events(state.map_runtime(), limit)
             .map_err(|e| ControlPlaneError::KernelError(e))?;
         Ok((events, state.state.groups.clone()))
     }
@@ -1243,7 +1257,7 @@ impl ControlPlane {
     pub async fn flush_trace(&self, instance: &str) -> Result<u64, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        aria_core::trace_ops::flush_trace_log(&state.pin_path)
+        aria_core::trace_ops::flush_trace_log(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
@@ -1285,13 +1299,87 @@ impl ControlPlane {
         aria_core::ssl_ops::get_ssl_global_config(self.ssl_manager.pin_path())
     }
 
-    fn sync_pinned_ssl_config(&self, pin_path: &str, enabled: bool) -> Result<(), String> {
-        let cfg_path = format!("{}/FIREWALL_CONFIG", pin_path);
+    fn resolve_ifindex(iface: &str) -> Result<u32, String> {
+        let path = format!("/sys/class/net/{}/ifindex", iface);
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read ifindex for {}: {}", iface, e))?;
+        raw.trim()
+            .parse::<u32>()
+            .map_err(|e| format!("invalid ifindex for {}: {}", iface, e))
+    }
+
+    async fn ensure_managed_tap_id(
+        &self,
+        name: &str,
+        state: &mut FirewallState,
+    ) -> Result<bool, String> {
+        if state.tap_id != aria_core::common::TAP_ID_UNASSIGNED {
+            return Ok(false);
+        }
+
+        let _guard = self.tap_id_lock.lock().await;
+        if state.tap_id != aria_core::common::TAP_ID_UNASSIGNED {
+            return Ok(false);
+        }
+
+        state.tap_id = self.next_available_tap_id(Some(name)).await?;
+        Ok(true)
+    }
+
+    async fn next_available_tap_id(&self, exclude_name: Option<&str>) -> Result<u32, String> {
+        let mut used = HashSet::new();
+
+        for (name, inst) in self.instance_entries().await {
+            if exclude_name == Some(name.as_str()) {
+                continue;
+            }
+            let state = inst.read().await;
+            if state.tap_id != aria_core::common::TAP_ID_UNASSIGNED {
+                used.insert(state.tap_id);
+            }
+        }
+
+        let state_root = std::path::Path::new(&self.base_state_path);
+        if state_root.exists() {
+            let entries = std::fs::read_dir(state_root)
+                .map_err(|e| format!("failed to scan state root {}: {}", self.base_state_path, e))?;
+            for entry in entries {
+                let entry = entry.map_err(|e| format!("failed to read state dir entry: {}", e))?;
+                let file_type = entry
+                    .file_type()
+                    .map_err(|e| format!("failed to inspect state dir entry: {}", e))?;
+                if !file_type.is_dir() {
+                    continue;
+                }
+
+                let entry_name = entry.file_name().to_string_lossy().to_string();
+                if exclude_name == Some(entry_name.as_str()) {
+                    continue;
+                }
+
+                let state_path = entry.path().to_string_lossy().to_string();
+                let state = aria_core::wal::load_with_wal(&state_path);
+                if state.tap_id != aria_core::common::TAP_ID_UNASSIGNED {
+                    used.insert(state.tap_id);
+                }
+            }
+        }
+
+        let mut next = aria_core::common::FIRST_MANAGED_TAP_ID;
+        while used.contains(&next) {
+            next += 1;
+        }
+
+        Ok(next)
+    }
+
+    fn sync_pinned_ssl_config(&self, runtime: TapMapRuntime<'_>, enabled: bool) -> Result<(), String> {
+        let cfg_path = format!("{}/FIREWALL_CONFIG", runtime.pin_path);
         if !std::path::Path::new(&cfg_path).exists() {
             return Err("FIREWALL_CONFIG map not ready".to_string());
         }
         aria_core::ebpf_ops::update_firewall_config(
-            pin_path,
+            runtime,
             None,
             None,
             None,
@@ -1364,7 +1452,7 @@ impl ControlPlane {
                 .await;
         }
 
-        match aria_core::ebpf_ops::read_firewall_config(&state.pin_path) {
+        match aria_core::ebpf_ops::read_firewall_config(state.map_runtime()) {
             Ok(cfg) if (cfg.ssl_enabled != 0) == enabled => {
                 if state.ssl_sync_pending {
                     state.ssl_sync_pending = false;
@@ -1377,7 +1465,7 @@ impl ControlPlane {
             Ok(_) | Err(_) => {}
         }
 
-        match self.sync_pinned_ssl_config(&state.pin_path, enabled) {
+        match self.sync_pinned_ssl_config(state.map_runtime(), enabled) {
             Ok(()) => {
                 let repaired = state.ssl_sync_pending;
                 state.ssl_sync_pending = false;

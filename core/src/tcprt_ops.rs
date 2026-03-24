@@ -1,5 +1,5 @@
 use aya::maps::{HashMap, MapData};
-use crate::common::{CtKey4, CtKey6, TcpRtValue};
+use crate::common::{CtKey4, CtKey6, TcpRtValue, TapMapRuntime};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub struct TcpRtEntry {
@@ -37,7 +37,8 @@ fn state_name(state: u8) -> String {
     }
 }
 
-pub fn get_tcprt_flows_v4(pin_path: &str) -> Result<Vec<TcpRtEntry>, String> {
+pub fn get_tcprt_flows_v4(runtime: TapMapRuntime<'_>) -> Result<Vec<TcpRtEntry>, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/TCPRT_TABLE_V4", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open TCPRT_TABLE_V4: {:?}", e))?;
@@ -58,7 +59,8 @@ pub fn get_tcprt_flows_v4(pin_path: &str) -> Result<Vec<TcpRtEntry>, String> {
     Ok(entries)
 }
 
-pub fn get_tcprt_flows_v6(pin_path: &str) -> Result<Vec<TcpRtEntry>, String> {
+pub fn get_tcprt_flows_v6(runtime: TapMapRuntime<'_>) -> Result<Vec<TcpRtEntry>, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/TCPRT_TABLE_V6", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open TCPRT_TABLE_V6: {:?}", e))?;
@@ -142,7 +144,8 @@ pub(crate) fn compute_nqa_score(val: &TcpRtValue) -> u8 {
 }
 
 /// O(1) lookup of specific flows by 4-tuple. Returns matching entries.
-pub fn lookup_tcprt_flows(pin_path: &str, tuples: &[(String, String, u16, u16)]) -> Result<Vec<TcpRtEntry>, String> {
+pub fn lookup_tcprt_flows(runtime: TapMapRuntime<'_>, tuples: &[(String, String, u16, u16)]) -> Result<Vec<TcpRtEntry>, String> {
+    let pin_path = runtime.pin_path;
     let mut entries = Vec::new();
 
     // Try V4 lookups
@@ -197,7 +200,8 @@ pub fn lookup_tcprt_flows(pin_path: &str, tuples: &[(String, String, u16, u16)])
 }
 
 /// Filter TCP-RT flows by dst_ip + dst_port (service address). Iterates all entries.
-pub fn filter_tcprt_flows(pin_path: &str, dst_ip: &str, dst_port: u16) -> Result<Vec<TcpRtEntry>, String> {
+pub fn filter_tcprt_flows(runtime: TapMapRuntime<'_>, dst_ip: &str, dst_port: u16) -> Result<Vec<TcpRtEntry>, String> {
+    let pin_path = runtime.pin_path;
     let mut entries = Vec::new();
 
     // Filter V4
@@ -261,7 +265,8 @@ pub fn filter_tcprt_flows(pin_path: &str, dst_ip: &str, dst_port: u16) -> Result
     Ok(entries)
 }
 
-pub fn flush_tcprt(pin_path: &str) -> Result<u64, String> {
+pub fn flush_tcprt(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
+    let pin_path = runtime.pin_path;
     let mut count = 0u64;
 
     // Flush TCPRT_TABLE_V4

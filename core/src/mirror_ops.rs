@@ -1,5 +1,5 @@
 use aya::maps::{HashMap, MapData};
-use crate::common::{MirrorKey, GlobalMirrorKey, MirrorConfig, FirewallConfig};
+use crate::common::{MirrorKey, GlobalMirrorKey, MirrorConfig, FirewallConfig, TapMapRuntime};
 
 /// Resolve interface name to ifindex.
 pub fn resolve_ifindex(iface: &str) -> Result<u32, String> {
@@ -11,7 +11,8 @@ pub fn resolve_ifindex(iface: &str) -> Result<u32, String> {
 }
 
 /// Update the mirror_enabled flag in FIREWALL_CONFIG map.
-fn sync_mirror_enabled(pin_path: &str, enabled: bool) -> Result<(), String> {
+fn sync_mirror_enabled(runtime: TapMapRuntime<'_>, enabled: bool) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/FIREWALL_CONFIG", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open FIREWALL_CONFIG: {:?}", e))?;
@@ -39,7 +40,8 @@ fn sync_mirror_enabled(pin_path: &str, enabled: bool) -> Result<(), String> {
 }
 
 /// Check if any mirror rules remain in MIRROR_POLICY or MIRROR_GLOBAL maps.
-fn has_mirror_rules(pin_path: &str) -> bool {
+fn has_mirror_rules(runtime: TapMapRuntime<'_>) -> bool {
+    let pin_path = runtime.pin_path;
     let policy_path = format!("{}/MIRROR_POLICY", pin_path);
     if let Ok(map_data) = MapData::from_pin(&policy_path) {
         if let Ok(map) = HashMap::<_, MirrorKey, MirrorConfig>::try_from(
@@ -71,9 +73,10 @@ pub fn add_mirror_rule(
     proto: u8,
     direction: u8,
     target_ifindex: u32,
-    pin_path: &str,
+    runtime: TapMapRuntime<'_>,
     user_mirror_enabled: bool,
 ) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/MIRROR_POLICY", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open MIRROR_POLICY: {:?}", e))?;
@@ -93,7 +96,7 @@ pub fn add_mirror_rule(
     map.insert(&key, &config, 0)
         .map_err(|e| format!("MIRROR_POLICY insert: {:?}", e))?;
 
-    sync_mirror_enabled(pin_path, user_mirror_enabled)?;
+    sync_mirror_enabled(runtime, user_mirror_enabled)?;
     Ok(())
 }
 
@@ -102,9 +105,10 @@ pub fn delete_mirror_rule(
     dst_id: u32,
     proto: u8,
     direction: u8,
-    pin_path: &str,
+    runtime: TapMapRuntime<'_>,
     user_mirror_enabled: bool,
 ) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/MIRROR_POLICY", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open MIRROR_POLICY: {:?}", e))?;
@@ -123,16 +127,17 @@ pub fn delete_mirror_rule(
     map.remove(&key)
         .map_err(|e| format!("MIRROR_POLICY remove: {:?}", e))?;
 
-    sync_mirror_enabled(pin_path, user_mirror_enabled && has_mirror_rules(pin_path))?;
+    sync_mirror_enabled(runtime, user_mirror_enabled && has_mirror_rules(runtime))?;
     Ok(())
 }
 
 pub fn add_global_mirror(
     direction: u8,
     target_ifindex: u32,
-    pin_path: &str,
+    runtime: TapMapRuntime<'_>,
     user_mirror_enabled: bool,
 ) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/MIRROR_GLOBAL", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open MIRROR_GLOBAL: {:?}", e))?;
@@ -149,15 +154,16 @@ pub fn add_global_mirror(
     map.insert(&key, &config, 0)
         .map_err(|e| format!("MIRROR_GLOBAL insert: {:?}", e))?;
 
-    sync_mirror_enabled(pin_path, user_mirror_enabled)?;
+    sync_mirror_enabled(runtime, user_mirror_enabled)?;
     Ok(())
 }
 
 pub fn delete_global_mirror(
     direction: u8,
-    pin_path: &str,
+    runtime: TapMapRuntime<'_>,
     user_mirror_enabled: bool,
 ) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/MIRROR_GLOBAL", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open MIRROR_GLOBAL: {:?}", e))?;
@@ -173,11 +179,12 @@ pub fn delete_global_mirror(
     map.remove(&key)
         .map_err(|e| format!("MIRROR_GLOBAL remove: {:?}", e))?;
 
-    sync_mirror_enabled(pin_path, user_mirror_enabled && has_mirror_rules(pin_path))?;
+    sync_mirror_enabled(runtime, user_mirror_enabled && has_mirror_rules(runtime))?;
     Ok(())
 }
 
-pub fn list_mirror_rules(pin_path: &str) -> Result<Vec<(MirrorKey, MirrorConfig)>, String> {
+pub fn list_mirror_rules(runtime: TapMapRuntime<'_>) -> Result<Vec<(MirrorKey, MirrorConfig)>, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/MIRROR_POLICY", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open MIRROR_POLICY: {:?}", e))?;
@@ -194,7 +201,8 @@ pub fn list_mirror_rules(pin_path: &str) -> Result<Vec<(MirrorKey, MirrorConfig)
     Ok(entries)
 }
 
-pub fn list_global_mirrors(pin_path: &str) -> Result<Vec<(GlobalMirrorKey, MirrorConfig)>, String> {
+pub fn list_global_mirrors(runtime: TapMapRuntime<'_>) -> Result<Vec<(GlobalMirrorKey, MirrorConfig)>, String> {
+    let pin_path = runtime.pin_path;
     let map_path = format!("{}/MIRROR_GLOBAL", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open MIRROR_GLOBAL: {:?}", e))?;
