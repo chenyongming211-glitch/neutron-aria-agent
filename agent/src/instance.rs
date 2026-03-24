@@ -90,8 +90,7 @@ impl FirewallInstance {
         // Check if XDP link is already pinned (recovery from crash, kernel 5.7+ only)
         if std::path::Path::new(&xdp_link_pin).exists() {
             info!(instance = %self.iface, "found pinned XDP link; recovering");
-            let mut bpf = aria_core::ebpf_ops::load_bpf_with_pin(pin_path_str, ebpf_path)?;
-            self.ensure_tc_runtime(&mut bpf);
+            self.ensure_tc_runtime();
             self.ensure_fq_runtime();
             info!(instance = %self.iface, edt_available = self.edt_available, "recovery complete from pinned XDP link");
             return Ok(());
@@ -101,9 +100,8 @@ impl FirewallInstance {
         let xdp_prog_pin = format!("{}/xdp_firewall", pin_path_str);
         if std::path::Path::new(&xdp_prog_pin).exists() {
             info!(instance = %self.iface, "found pinned XDP runtime; attaching interface link");
-            let mut bpf = aria_core::ebpf_ops::load_bpf_with_pin(pin_path_str, ebpf_path)?;
-            self.reattach_xdp_from_loaded(&mut bpf, &xdp_link_pin)?;
-            self.ensure_tc_runtime(&mut bpf);
+            self.reattach_xdp_from_pin(&xdp_prog_pin, &xdp_link_pin)?;
+            self.ensure_tc_runtime();
             self.ensure_fq_runtime();
             info!(instance = %self.iface, edt_available = self.edt_available, "interface link attached from pinned runtime");
             return Ok(());
@@ -249,7 +247,11 @@ impl FirewallInstance {
         Ok(())
     }
 
-    fn ensure_tc_runtime(&self, bpf: &mut aya::Ebpf) {
+    fn tc_prog_pin_path(&self, prog_name: &str) -> String {
+        format!("{}/{}", self.pin_path.display(), prog_name)
+    }
+
+    fn ensure_tc_runtime(&self) {
         let tc_programs = [
             ("tc_egress", aya::programs::tc::TcAttachType::Egress, "Egress control"),
             ("tc_ingress", aya::programs::tc::TcAttachType::Ingress, "Ingress mirror"),
@@ -261,7 +263,18 @@ impl FirewallInstance {
                 continue;
             }
 
-            if let Err(e) = self.try_attach_tc(bpf, prog_name, attach_type) {
+            let prog_pin = self.tc_prog_pin_path(prog_name);
+            if !std::path::Path::new(&prog_pin).exists() {
+                warn!(
+                    instance = %self.iface,
+                    purpose = %purpose,
+                    prog_pin = %prog_pin,
+                    "pinned TC program missing during recovery"
+                );
+                continue;
+            }
+
+            if let Err(e) = self.try_attach_tc_from_pin(prog_name, &prog_pin, attach_type) {
                 warn!(instance = %self.iface, purpose = %purpose, error = %e, "failed to recover TC runtime");
             }
         }
@@ -287,37 +300,73 @@ impl FirewallInstance {
         }
     }
 
-    /// Re-attach XDP after loading the pinned map set on kernels where the link itself was not pinned.
-    fn reattach_xdp_from_loaded(&self, bpf: &mut aya::Ebpf, xdp_link_pin: &str) -> Result<(), String> {
-        let xdp_program = bpf
-            .program_mut("xdp_firewall")
-            .ok_or_else(|| format!("[{}] XDP program not found during recovery", self.iface))?;
-
-        let xdp: &mut aya::programs::Xdp = xdp_program
-            .try_into()
-            .map_err(|e: aya::programs::ProgramError| format!("[{}] xdp try_into during recovery: {:?}", self.iface, e))?;
-
-        xdp.load()
-            .map_err(|e| format!("[{}] xdp.load during recovery: {:?}", self.iface, e))?;
+    /// Re-attach XDP from the already pinned shared runtime without loading a new eBPF object.
+    fn reattach_xdp_from_pin(&self, prog_pin: &str, xdp_link_pin: &str) -> Result<(), String> {
+        let mut xdp = aya::programs::Xdp::from_pin(
+            prog_pin,
+            aya_obj::programs::XdpAttachType::Interface,
+        )
+            .map_err(|e| format!("[{}] XDP from_pin during recovery: {:?}", self.iface, e))?;
 
         let link_id = xdp
             .attach(&self.iface, aya::programs::XdpFlags::default())
             .map_err(|e| format!("[{}] xdp.attach during recovery: {:?}", self.iface, e))?;
 
-        match self.try_pin_xdp_link(xdp, link_id, xdp_link_pin) {
+        match self.try_pin_xdp_link(&mut xdp, link_id, xdp_link_pin) {
             Ok(()) => info!(instance = %self.iface, "recovered XDP link pin"),
             Err(e) => warn!(instance = %self.iface, error = %e, "XDP link re-pin skipped during recovery"),
         }
         Ok(())
     }
 
+    fn try_attach_tc_from_pin(
+        &self,
+        prog_name: &str,
+        prog_pin: &str,
+        attach_type: aya::programs::tc::TcAttachType,
+    ) -> Result<(), String> {
+        if let Err(e) = aya::programs::tc::qdisc_add_clsact(&self.iface) {
+            let err_str = format!("{:?}", e);
+            if !err_str.contains("File exists") {
+                return Err(format!("qdisc_add_clsact: {}", err_str));
+            }
+        }
+
+        let mut tc = aya::programs::SchedClassifier::from_pin(prog_pin)
+            .map_err(|e| format!("{} from_pin: {:?}", prog_name, e))?;
+
+        let dir_str = match attach_type {
+            aya::programs::tc::TcAttachType::Ingress => "ingress",
+            aya::programs::tc::TcAttachType::Egress => "egress",
+            _ => "unknown",
+        };
+
+        let link_id = tc.attach(&self.iface, attach_type)
+            .map_err(|e| format!("{} attach from pin: {:?}", prog_name, e))?;
+
+        match (|| -> Result<(), String> {
+            let tc_link = tc.take_link(link_id)
+                .map_err(|e| format!("take_link: {:?}", e))?;
+            let fd_link: aya::programs::links::FdLink = tc_link.try_into()
+                .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
+            let link_pin = self.tc_link_pin_path(prog_name);
+            fd_link.pin(&link_pin)
+                .map_err(|e| format!("pin: {:?}", e))?;
+            Ok(())
+        })() {
+            Ok(()) => info!(instance = %self.iface, direction = %dir_str, "TC program reattached from pinned runtime"),
+            Err(e) => info!(instance = %self.iface, direction = %dir_str, error = %e, "TC program reattached without link pin"),
+        }
+
+        Ok(())
+    }
+
     /// Replay state to already-pinned maps after control-plane registration succeeds.
-    pub fn replay_state(&self, ebpf_path: &str) -> Result<(), String> {
+    pub fn replay_state(&self, _ebpf_path: &str) -> Result<(), String> {
         let pin_path_str = self.pin_path.to_str().unwrap();
         let state_path_str = self.state_path.to_str().unwrap();
 
-        let mut bpf = aria_core::ebpf_ops::load_bpf_with_pin(pin_path_str, ebpf_path)?;
-        aria_core::ebpf_ops::replay_state(&mut bpf, state_path_str);
+        aria_core::ebpf_ops::replay_state_to_pinned_maps(pin_path_str, state_path_str);
         Ok(())
     }
 
@@ -335,6 +384,15 @@ impl FirewallInstance {
                 .args(["link", "set", "dev", &self.iface, "xdp", "off"])
                 .output();
             info!(instance = %self.iface, "XDP detached via netlink");
+        }
+
+        for prog_name in ["tc_egress", "tc_ingress"] {
+            let link_pin = self.tc_link_pin_path(prog_name);
+            if std::path::Path::new(&link_pin).exists() {
+                std::fs::remove_file(&link_pin)
+                    .map_err(|e| format!("[{}] Failed to remove pinned {} link: {}", self.iface, prog_name, e))?;
+                info!(instance = %self.iface, program = %prog_name, "TC link unpinned");
+            }
         }
 
         // Detach TC egress

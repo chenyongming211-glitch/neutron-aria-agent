@@ -549,8 +549,8 @@ unsafe fn phase_ct_fastpath_xdp_v6(info: &parser::PacketInfo, p: &mut PipelineCt
     p.action = XDP_PASS;
 }
 
-/// CT fast-path for TC egress IPv4 (LEAF — no sub-calls to #[inline(never)]).
-#[inline(never)]
+/// CT fast-path for TC egress IPv4.
+#[inline(always)]
 unsafe fn phase_ct_fastpath_tc_v4(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
     let tracing = (p.flags & FLAG_TRACING) != 0;
     let matched = get_matched(p);
@@ -593,8 +593,8 @@ unsafe fn phase_ct_fastpath_tc_v4(ctx: &TcContext, info: &parser::PacketInfo, p:
     p.action = TC_ACT_OK as u32;
 }
 
-/// CT fast-path for TC egress IPv6 (LEAF — no sub-calls to #[inline(never)]).
-#[inline(never)]
+/// CT fast-path for TC egress IPv6.
+#[inline(always)]
 unsafe fn phase_ct_fastpath_tc_v6(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
     let tracing = (p.flags & FLAG_TRACING) != 0;
     let matched = get_matched(p);
@@ -656,7 +656,7 @@ unsafe fn phase_policy_xdp(info: &parser::PacketInfo, p: &mut PipelineCtx) {
 }
 
 /// Phase: Policy evaluation for TC.
-#[inline(never)]
+#[inline(always)]
 unsafe fn phase_policy_tc(info: &parser::PacketInfo, p: &mut PipelineCtx) {
     let (result, drop_reason, matched) = policy::evaluate_policy(&policy::PolicyArgs {
         tap_id: p.tap_id,
@@ -678,7 +678,7 @@ unsafe fn phase_policy_tc(info: &parser::PacketInfo, p: &mut PipelineCtx) {
 }
 
 /// Phase: Flow stats + TCP-RT for IPv4.
-#[inline(never)]
+#[inline(always)]
 unsafe fn phase_flow_tcprt_v4(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
     stats::update_flow_stats_v4(ct_key, p.pkt_len, p.now);
     if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
@@ -687,7 +687,7 @@ unsafe fn phase_flow_tcprt_v4(info: &parser::PacketInfo, p: &mut PipelineCtx, ct
 }
 
 /// Phase: Flow stats + TCP-RT for IPv6.
-#[inline(never)]
+#[inline(always)]
 unsafe fn phase_flow_tcprt_v6(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
     stats::update_flow_stats_v6(ct_key, p.pkt_len, p.now);
     if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
@@ -709,7 +709,7 @@ unsafe fn phase_qos_ingress_xdp(info: &parser::PacketInfo, p: &mut PipelineCtx) 
 }
 
 /// Phase: QoS egress for TC. Sets p.action = TC_ACT_SHOT if dropped.
-#[inline(never)]
+#[inline(always)]
 unsafe fn phase_qos_egress_tc(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx) {
     let (edt, prio) = qos::apply_qos_egress(p.tap_id, p.src_id, p.dst_id, p.pkt_len, p.now);
     if edt == u64::MAX {
@@ -757,7 +757,7 @@ unsafe fn phase_post_accept_xdp_v6(info: &parser::PacketInfo, p: &mut PipelineCt
 }
 
 /// Phase: Post-accept for TC egress IPv4.
-#[inline(never)]
+#[inline(always)]
 unsafe fn phase_post_accept_tc_v4(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
     stats::update_group_stats(p.tap_id, p.src_id, DIR_EGRESS, p.pkt_len);
     stats::update_group_stats(p.tap_id, p.dst_id, DIR_INGRESS, p.pkt_len);
@@ -777,7 +777,7 @@ unsafe fn phase_post_accept_tc_v4(ctx: &TcContext, info: &parser::PacketInfo, p:
 }
 
 /// Phase: Post-accept for TC egress IPv6.
-#[inline(never)]
+#[inline(always)]
 unsafe fn phase_post_accept_tc_v6(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
     stats::update_group_stats(p.tap_id, p.src_id, DIR_EGRESS, p.pkt_len);
     stats::update_group_stats(p.tap_id, p.dst_id, DIR_INGRESS, p.pkt_len);

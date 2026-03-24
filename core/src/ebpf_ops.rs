@@ -6,8 +6,8 @@ use tracing::{info, warn};
 use crate::common::{IfaceCtx, PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig, TapConfig, TapMapRuntime, TAP_ID_UNASSIGNED};
 use crate::state::FirewallState;
 
-/// 加载 eBPF 程序，并设置 pin 路径以复用已有的 map。
-/// 仅用于 system_start / agent attach 中的初始加载和 replay。
+/// 加载一个新的 eBPF 对象，并设置 pin 路径以尝试复用已有 map。
+/// 仅用于 standalone/legacy 路径；共享 managed runtime 不能再走这个函数。
 pub fn load_bpf_with_pin(pin_path: &str, ebpf_path: &str) -> Result<aya::Ebpf, String> {
     let bpf_bytes = std::fs::read(ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
     let bpf = aya::EbpfLoader::new()
@@ -80,6 +80,24 @@ fn open_pinned_tap_config(pin_path: &str) -> Result<HashMap<MapData, u32, TapCon
         .map_err(|e| format!("open pinned TAP_CONFIG_MAP: {:?}", e))?;
     HashMap::try_from(aya::maps::Map::HashMap(map_data))
         .map_err(|e| format!("convert TAP_CONFIG_MAP to HashMap: {:?}", e))
+}
+
+fn init_ct_config_pinned(pin_path: &str) -> Result<(), String> {
+    let map_path = format!("{}/CT_CONFIG", pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open pinned CT_CONFIG: {:?}", e))?;
+    let mut map = aya::maps::HashMap::<_, u32, CtConfig>::try_from(
+        aya::maps::Map::HashMap(map_data)
+    ).map_err(|e| format!("convert CT_CONFIG to HashMap: {:?}", e))?;
+
+    let config = CtConfig {
+        tcp_established_ns: 300_000_000_000,
+        tcp_new_ns: 30_000_000_000,
+        udp_ns: 60_000_000_000,
+        icmp_ns: 30_000_000_000,
+    };
+    map.insert(&0u32, &config, 0)
+        .map_err(|e| format!("CT_CONFIG insert: {:?}", e))
 }
 
 pub fn sync_iface_ctx(runtime: TapMapRuntime<'_>, ifindex: u32) -> Result<(), String> {
@@ -850,6 +868,173 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
         warn!(error_count = errors.len(), "replay encountered errors");
         for err in &errors {
             warn!(error = %err, "replay error");
+        }
+    }
+}
+
+/// Replay snapshot + WAL directly into already pinned maps without loading a new eBPF object.
+pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) {
+    let state = crate::wal::load_with_wal(state_path);
+    let tap_id = state.tap_id;
+    let runtime = TapMapRuntime::new(pin_path, tap_id);
+
+    if state.groups.is_empty() && state.rules.is_empty() && state.qos_rules.is_empty() && state.mirror_rules.is_empty() {
+        info!(state_path = %state_path, "state is empty; nothing to replay");
+        return;
+    }
+
+    info!(
+        state_path = %state_path,
+        pin_path = %pin_path,
+        groups = state.groups.len(),
+        rules = state.rules.len(),
+        qos_rules = state.qos_rules.len(),
+        mirror_rules = state.mirror_rules.len(),
+        "replaying state into pinned maps"
+    );
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut group_count: u32 = 0;
+    let mut rule_count: u32 = 0;
+    let mut bitmap_count: u32 = 0;
+
+    if let Err(e) = init_ct_config_pinned(pin_path) {
+        errors.push(e);
+    }
+
+    if let Err(e) = update_firewall_config(
+        runtime,
+        Some(state.conntrack_enabled),
+        Some(state.monitoring_enabled),
+        Some(state.acl_enabled),
+        Some(state.qos_enabled && !state.qos_rules.is_empty()),
+        Some(state.mirror_enabled && !state.mirror_rules.is_empty()),
+        Some(state.tcprt_enabled),
+        Some(state.ssl_enabled),
+    ) {
+        errors.push(format!("FIREWALL_CONFIG: {}", e));
+    }
+
+    if tap_id != TAP_ID_UNASSIGNED {
+        let tap_cfg = TapConfig {
+            conntrack_enabled: if state.conntrack_enabled { 1 } else { 0 },
+            monitoring_enabled: if state.monitoring_enabled { 1 } else { 0 },
+            acl_enabled: if state.acl_enabled { 1 } else { 0 },
+            qos_enabled: if state.qos_enabled && !state.qos_rules.is_empty() { 1 } else { 0 },
+            mirror_enabled: if state.mirror_enabled && !state.mirror_rules.is_empty() { 1 } else { 0 },
+            tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
+            pad: [0; 2],
+        };
+        if let Err(e) = write_tap_config(runtime, tap_cfg) {
+            errors.push(format!("TAP_CONFIG_MAP tap_id={}: {}", tap_id, e));
+        }
+    }
+
+    for (name, group) in &state.groups {
+        for cidr in &group.cidrs {
+            if let Err(e) = add_network("src", cidr, group.id, runtime, "") {
+                errors.push(format!("group '{}' cidr '{}' src: {}", name, cidr, e));
+            }
+            if let Err(e) = add_network("dst", cidr, group.id, runtime, "") {
+                errors.push(format!("group '{}' cidr '{}' dst: {}", name, cidr, e));
+            }
+            group_count += 1;
+        }
+    }
+
+    let mut written_bitmaps: HashSet<u32> = HashSet::new();
+    for rule in &state.rules {
+        let ports = rule.ports.as_deref();
+        let write_port_set = match (rule.bitmap_idx, ports) {
+            (Some(idx), Some(ports)) if !ports.is_empty() && ports != "all" => written_bitmaps.insert(idx),
+            _ => false,
+        };
+
+        if write_port_set {
+            bitmap_count += 1;
+        }
+
+        match add_policy(
+            rule.src_group_id,
+            rule.dst_group_id,
+            rule.proto,
+            rule.action,
+            ports,
+            rule.bitmap_idx,
+            write_port_set,
+            rule.direction,
+            runtime,
+            "",
+        ) {
+            Ok(()) => rule_count += 1,
+            Err(e) => errors.push(format!(
+                "POLICY_TABLE src={} dst={} proto={} dir={}: {}",
+                rule.src_group_id, rule.dst_group_id, rule.proto, rule.direction, e
+            )),
+        }
+    }
+
+    for qr in &state.qos_rules {
+        if let Err(e) = crate::qos_ops::add_qos_rule(
+            qr.group_id,
+            qr.direction,
+            qr.rate_bps,
+            qr.burst_bytes,
+            qr.priority,
+            qr.mode,
+            runtime,
+            state.qos_enabled,
+        ) {
+            errors.push(format!("QOS_CONFIG group={}: {}", qr.group_name, e));
+        }
+    }
+
+    for mr in &state.mirror_rules {
+        let target_ifindex = match crate::mirror_ops::resolve_ifindex(&mr.target_iface) {
+            Ok(idx) => idx,
+            Err(e) => {
+                warn!(target_iface = %mr.target_iface, error = %e, "mirror target not found during pinned replay");
+                continue;
+            }
+        };
+
+        let result = if mr.is_global {
+            crate::mirror_ops::add_global_mirror(
+                mr.direction,
+                target_ifindex,
+                runtime,
+                state.mirror_enabled,
+            )
+        } else {
+            crate::mirror_ops::add_mirror_rule(
+                mr.src_group_id,
+                mr.dst_group_id,
+                mr.proto,
+                mr.direction,
+                target_ifindex,
+                runtime,
+                state.mirror_enabled,
+            )
+        };
+
+        if let Err(e) = result {
+            let scope = if mr.is_global { "MIRROR_GLOBAL" } else { "MIRROR_POLICY" };
+            errors.push(format!("{} target={} dir={}: {}", scope, mr.target_iface, mr.direction, e));
+        }
+    }
+
+    info!(
+        group_cidrs = group_count,
+        rules = rule_count,
+        port_bitmaps = bitmap_count,
+        qos_rules = state.qos_rules.len(),
+        mirror_rules = state.mirror_rules.len(),
+        "pinned replay complete"
+    );
+    if !errors.is_empty() {
+        warn!(error_count = errors.len(), "pinned replay encountered errors");
+        for err in &errors {
+            warn!(error = %err, "pinned replay error");
         }
     }
 }

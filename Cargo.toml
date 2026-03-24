@@ -10,6 +10,7 @@ authors = ["Your Name <email@example.com>"]
 
 [workspace.dependencies]
 aya = "0.13.1"
+aya-obj = "0.2.1"
 aya-log = "0.2"
 aya-ebpf = "0.1"
 network-types = "0.1"
