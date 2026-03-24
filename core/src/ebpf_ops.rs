@@ -4,10 +4,10 @@ use aya::maps::{HashMap, LpmTrie, MapData, PerCpuHashMap};
 use aya::maps::lpm_trie::Key;
 use tracing::{info, warn};
 use crate::common::{
-    CtConfig, CtContractKey, CtContractValue, CtKey4, CtKey6,
+    CtConfig, CtContractKey, CtContractValue, CtKey4, CtKey6, CtValue,
     FirewallConfig, FlowStatsValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue, IfaceCtx,
     MirrorConfig, MirrorKey, MirrorStatsValue, PolicyKey, PolicyValue, PortKey, QosConfig,
-    QosKey, QosStatsValue, RuleStatsValue, TapConfig, TapMapRuntime,
+    QosKey, QosStatsValue, RuleStatsValue, TapConfig, TapMapRuntime, TcpRtValue,
     TokenBucket, TAP_ID_UNASSIGNED,
 };
 use crate::state::FirewallState;
@@ -730,7 +730,14 @@ pub fn scrub_managed_runtime_state(runtime: TapMapRuntime<'_>) -> Result<u64, St
             .map_err(|e| format!("convert PORT_BITMAP_POOL to HashMap: {:?}", e))
     })?;
 
-    removed += crate::ct_ops::ct_flush(runtime)?;
+    removed += scrub_hash_map(pin_path, "CT_TABLE_V4", tap_id, |map_data| {
+        HashMap::<_, CtKey4, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+            .map_err(|e| format!("convert CT_TABLE_V4 to HashMap: {:?}", e))
+    })?;
+    removed += scrub_hash_map(pin_path, "CT_TABLE_V6", tap_id, |map_data| {
+        HashMap::<_, CtKey6, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+            .map_err(|e| format!("convert CT_TABLE_V6 to HashMap: {:?}", e))
+    })?;
     record_optional_scrub(tap_id, "CT_CONTRACT_STATS", &mut removed, scrub_per_cpu_hash_map(pin_path, "CT_CONTRACT_STATS", tap_id, |map_data| {
         PerCpuHashMap::<_, CtContractKey, CtContractValue>::try_from(
             aya::maps::Map::PerCpuHashMap(map_data)
@@ -791,7 +798,14 @@ pub fn scrub_managed_runtime_state(runtime: TapMapRuntime<'_>) -> Result<u64, St
         ).map_err(|e| format!("convert MIRROR_GLOBAL_STATS to PerCpuHashMap: {:?}", e))
     }));
 
-    removed += crate::tcprt_ops::flush_tcprt(runtime)?;
+    removed += scrub_hash_map(pin_path, "TCPRT_TABLE_V4", tap_id, |map_data| {
+        HashMap::<_, CtKey4, TcpRtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+            .map_err(|e| format!("convert TCPRT_TABLE_V4 to HashMap: {:?}", e))
+    })?;
+    removed += scrub_hash_map(pin_path, "TCPRT_TABLE_V6", tap_id, |map_data| {
+        HashMap::<_, CtKey6, TcpRtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+            .map_err(|e| format!("convert TCPRT_TABLE_V6 to HashMap: {:?}", e))
+    })?;
     record_optional_scrub(tap_id, "DROP_REASON_STATS", &mut removed, crate::drop_ops::flush_drop_stats(runtime));
 
     info!(tap_id, removed_entries = removed, "scrubbed managed tap runtime state");
