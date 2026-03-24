@@ -246,6 +246,23 @@ fn scrub_tap_config_entries(pin_path: &str, tap_id: u32) -> Result<u64, String> 
     Ok(count)
 }
 
+fn record_optional_scrub(
+    tap_id: u32,
+    map_name: &str,
+    removed: &mut u64,
+    result: Result<u64, String>,
+) {
+    match result {
+        Ok(count) => *removed += count,
+        Err(e) => warn!(
+            tap_id,
+            map = %map_name,
+            error = %e,
+            "failed to scrub optional managed runtime map"
+        ),
+    }
+}
+
 fn init_ct_config_pinned(pin_path: &str) -> Result<(), String> {
     let map_path = format!("{}/CT_CONFIG", pin_path);
     let map_data = MapData::from_pin(&map_path)
@@ -714,27 +731,27 @@ pub fn scrub_managed_runtime_state(runtime: TapMapRuntime<'_>) -> Result<u64, St
     })?;
 
     removed += crate::ct_ops::ct_flush(runtime)?;
-    removed += scrub_per_cpu_hash_map(pin_path, "CT_CONTRACT_STATS", tap_id, |map_data| {
+    record_optional_scrub(tap_id, "CT_CONTRACT_STATS", &mut removed, scrub_per_cpu_hash_map(pin_path, "CT_CONTRACT_STATS", tap_id, |map_data| {
         PerCpuHashMap::<_, CtContractKey, CtContractValue>::try_from(
             aya::maps::Map::PerCpuHashMap(map_data)
         ).map_err(|e| format!("convert CT_CONTRACT_STATS to PerCpuHashMap: {:?}", e))
-    })?;
+    }));
 
-    removed += scrub_per_cpu_hash_map(pin_path, "RULE_STATS", tap_id, |map_data| {
+    record_optional_scrub(tap_id, "RULE_STATS", &mut removed, scrub_per_cpu_hash_map(pin_path, "RULE_STATS", tap_id, |map_data| {
         PerCpuHashMap::<_, PolicyKey, RuleStatsValue>::try_from(
             aya::maps::Map::PerCpuHashMap(map_data)
         ).map_err(|e| format!("convert RULE_STATS to PerCpuHashMap: {:?}", e))
-    })?;
-    removed += scrub_per_cpu_hash_map(pin_path, "FLOW_STATS_V4", tap_id, |map_data| {
+    }));
+    record_optional_scrub(tap_id, "FLOW_STATS_V4", &mut removed, scrub_per_cpu_hash_map(pin_path, "FLOW_STATS_V4", tap_id, |map_data| {
         PerCpuHashMap::<_, CtKey4, FlowStatsValue>::try_from(
             aya::maps::Map::PerCpuLruHashMap(map_data)
         ).map_err(|e| format!("convert FLOW_STATS_V4 to PerCpuHashMap: {:?}", e))
-    })?;
-    removed += scrub_per_cpu_hash_map(pin_path, "FLOW_STATS_V6", tap_id, |map_data| {
+    }));
+    record_optional_scrub(tap_id, "FLOW_STATS_V6", &mut removed, scrub_per_cpu_hash_map(pin_path, "FLOW_STATS_V6", tap_id, |map_data| {
         PerCpuHashMap::<_, CtKey6, FlowStatsValue>::try_from(
             aya::maps::Map::PerCpuLruHashMap(map_data)
         ).map_err(|e| format!("convert FLOW_STATS_V6 to PerCpuHashMap: {:?}", e))
-    })?;
+    }));
 
     removed += scrub_hash_map(pin_path, "QOS_CONFIG", tap_id, |map_data| {
         HashMap::<_, QosKey, QosConfig>::try_from(aya::maps::Map::HashMap(map_data))
@@ -744,16 +761,16 @@ pub fn scrub_managed_runtime_state(runtime: TapMapRuntime<'_>) -> Result<u64, St
         HashMap::<_, QosKey, TokenBucket>::try_from(aya::maps::Map::HashMap(map_data))
             .map_err(|e| format!("convert QOS_TOKEN_BUCKET to HashMap: {:?}", e))
     })?;
-    removed += scrub_per_cpu_hash_map(pin_path, "QOS_STATS", tap_id, |map_data| {
+    record_optional_scrub(tap_id, "QOS_STATS", &mut removed, scrub_per_cpu_hash_map(pin_path, "QOS_STATS", tap_id, |map_data| {
         PerCpuHashMap::<_, QosKey, QosStatsValue>::try_from(
             aya::maps::Map::PerCpuHashMap(map_data)
         ).map_err(|e| format!("convert QOS_STATS to PerCpuHashMap: {:?}", e))
-    })?;
-    removed += scrub_per_cpu_hash_map(pin_path, "GROUP_STATS", tap_id, |map_data| {
+    }));
+    record_optional_scrub(tap_id, "GROUP_STATS", &mut removed, scrub_per_cpu_hash_map(pin_path, "GROUP_STATS", tap_id, |map_data| {
         PerCpuHashMap::<_, GroupStatsKey, GroupStatsValue>::try_from(
             aya::maps::Map::PerCpuHashMap(map_data)
         ).map_err(|e| format!("convert GROUP_STATS to PerCpuHashMap: {:?}", e))
-    })?;
+    }));
 
     removed += scrub_hash_map(pin_path, "MIRROR_POLICY", tap_id, |map_data| {
         HashMap::<_, MirrorKey, MirrorConfig>::try_from(aya::maps::Map::HashMap(map_data))
@@ -763,19 +780,19 @@ pub fn scrub_managed_runtime_state(runtime: TapMapRuntime<'_>) -> Result<u64, St
         HashMap::<_, GlobalMirrorKey, MirrorConfig>::try_from(aya::maps::Map::HashMap(map_data))
             .map_err(|e| format!("convert MIRROR_GLOBAL to HashMap: {:?}", e))
     })?;
-    removed += scrub_per_cpu_hash_map(pin_path, "MIRROR_STATS", tap_id, |map_data| {
+    record_optional_scrub(tap_id, "MIRROR_STATS", &mut removed, scrub_per_cpu_hash_map(pin_path, "MIRROR_STATS", tap_id, |map_data| {
         PerCpuHashMap::<_, MirrorKey, MirrorStatsValue>::try_from(
             aya::maps::Map::PerCpuHashMap(map_data)
         ).map_err(|e| format!("convert MIRROR_STATS to PerCpuHashMap: {:?}", e))
-    })?;
-    removed += scrub_per_cpu_hash_map(pin_path, "MIRROR_GLOBAL_STATS", tap_id, |map_data| {
+    }));
+    record_optional_scrub(tap_id, "MIRROR_GLOBAL_STATS", &mut removed, scrub_per_cpu_hash_map(pin_path, "MIRROR_GLOBAL_STATS", tap_id, |map_data| {
         PerCpuHashMap::<_, GlobalMirrorKey, MirrorStatsValue>::try_from(
             aya::maps::Map::PerCpuHashMap(map_data)
         ).map_err(|e| format!("convert MIRROR_GLOBAL_STATS to PerCpuHashMap: {:?}", e))
-    })?;
+    }));
 
     removed += crate::tcprt_ops::flush_tcprt(runtime)?;
-    removed += crate::drop_ops::flush_drop_stats(runtime)?;
+    record_optional_scrub(tap_id, "DROP_REASON_STATS", &mut removed, crate::drop_ops::flush_drop_stats(runtime));
 
     info!(tap_id, removed_entries = removed, "scrubbed managed tap runtime state");
     Ok(removed)
