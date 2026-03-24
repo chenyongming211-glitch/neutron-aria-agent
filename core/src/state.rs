@@ -197,7 +197,7 @@ impl FirewallState {
 
         let (bitmap_idx, is_new) = if let Some(p) = ports {
             if p != "all" && !p.is_empty() {
-                let normalized = normalize_ports(p)?;
+                let normalized = normalize_ports(p, action)?;
 
                 if let Some(existing_ps) = self.port_sets.get_mut(&normalized) {
                     existing_ps.ref_count += 1;
@@ -336,11 +336,24 @@ impl FirewallState {
 }
 
 /// 将用户输入的端口规则归一化为唯一规范形式。
-/// 解析 → 按 (start, end, bpf_action) 排序 → 序列化为 "start[-end]:bpf_action,..." 形式。
-fn normalize_ports(ports_str: &str) -> Result<String, String> {
+/// 解析 → 按 (start, end, user_action) 排序 → 序列化为 "start[-end]:user_action,..." 形式。
+/// 这里持久化的是用户语义：0=pass, 1=drop。
+fn normalize_ports(ports_str: &str, default_action: u8) -> Result<String, String> {
     let mut entries: Vec<(u16, u16, u8)> = Vec::new();
     for part in ports_str.split(',') {
         let parts: Vec<&str> = part.trim().split(':').collect();
+        let rule_action = match parts.get(1) {
+            Some(raw_action) => {
+                let action = raw_action
+                    .parse::<u8>()
+                    .map_err(|_| format!("Invalid action '{}': must be 0 or 1", raw_action))?;
+                if action > 1 {
+                    return Err(format!("Invalid action {}: must be 0 or 1", action));
+                }
+                action
+            }
+            None => default_action,
+        };
         if parts[0].contains('-') {
             let range: Vec<&str> = parts[0].split('-').collect();
             if range.len() != 2 {
@@ -351,20 +364,10 @@ fn normalize_ports(ports_str: &str) -> Result<String, String> {
             if start > end {
                 return Err(format!("Invalid port range: {}-{}", start, end));
             }
-            let action: u8 = parts.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
-            if action > 1 {
-                return Err(format!("Invalid action {}: must be 0 or 1", action));
-            }
-            let bpf_action: u8 = if action == 0 { 2 } else { 1 };
-            entries.push((start, end, bpf_action));
+            entries.push((start, end, rule_action));
         } else {
             let port = parts[0].trim().parse::<u16>().map_err(|_| "Invalid port")?;
-            let action: u8 = parts.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
-            if action > 1 {
-                return Err(format!("Invalid action {}: must be 0 or 1", action));
-            }
-            let bpf_action: u8 = if action == 0 { 2 } else { 1 };
-            entries.push((port, port, bpf_action));
+            entries.push((port, port, rule_action));
         }
     }
     entries.sort();
@@ -736,17 +739,16 @@ mod tests {
 
     #[test]
     fn normalize_ports_sorts_and_encodes_actions() {
-        // 默认 action=1 → bpf_action=1, 显式 0 → bpf_action=2
-        let s = "100-200:0,80,443:1";
-        let normalized = normalize_ports(s).unwrap();
-        // 按 (start,end,act) 排序后应该是 80,100-200,443
-        assert_eq!(normalized, "80:1,100-200:2,443:1");
+        let s = "100-200:1,80,443:0";
+        let normalized = normalize_ports(s, 0).unwrap();
+        // 按 (start,end,act) 排序后应该是 80,100-200,443；act 持久化为用户语义 0=pass 1=drop
+        assert_eq!(normalized, "80:0,100-200:1,443:0");
     }
 
     #[test]
     fn normalize_ports_rejects_invalid_range_and_action() {
-        assert!(normalize_ports("200-100").is_err(), "start>end 应报错");
-        assert!(normalize_ports("80:2").is_err(), "action>1 应报错");
+        assert!(normalize_ports("200-100", 0).is_err(), "start>end 应报错");
+        assert!(normalize_ports("80:2", 0).is_err(), "action>1 应报错");
     }
 
     #[test]

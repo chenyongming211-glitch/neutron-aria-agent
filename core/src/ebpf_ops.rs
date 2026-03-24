@@ -199,10 +199,48 @@ pub fn parse_cidr(cidr: &str) -> Result<(IpAddr, u8), String> {
     Ok((ip, prefix))
 }
 
-pub fn parse_ports(ports_str: &str) -> Result<Vec<(u16, u16, u8)>, String> {
+fn encode_port_action(action: u8) -> Result<u8, String> {
+    match action {
+        0 => Ok(2), // PASS
+        1 => Ok(1), // DROP
+        _ => Err(format!("Invalid action {}: must be 0 or 1", action)),
+    }
+}
+
+fn stored_policy_action(action: u8, has_port_filter: bool) -> u8 {
+    if has_port_filter {
+        match action {
+            0 => 1,
+            1 => 0,
+            _ => action,
+        }
+    } else {
+        action
+    }
+}
+
+fn parse_ports_impl(
+    ports_str: &str,
+    default_action: u8,
+    allow_legacy_bpf_actions: bool,
+) -> Result<Vec<(u16, u16, u8)>, String> {
+    let default_bpf_action = encode_port_action(default_action)?;
     let mut rules = Vec::new();
     for part in ports_str.split(',') {
         let parts: Vec<&str> = part.trim().split(':').collect();
+        let rule_action = match parts.get(1) {
+            Some(raw_action) => {
+                let action = raw_action
+                    .parse::<u8>()
+                    .map_err(|_| format!("Invalid action '{}': must be 0 or 1", raw_action))?;
+                match action {
+                    0 | 1 => encode_port_action(action)?,
+                    2 if allow_legacy_bpf_actions => 2,
+                    _ => return Err(format!("Invalid action {}: must be 0 or 1", action)),
+                }
+            }
+            None => default_bpf_action,
+        };
 
         if parts[0].contains('-') {
             let range: Vec<&str> = parts[0].split('-').collect();
@@ -214,44 +252,56 @@ pub fn parse_ports(ports_str: &str) -> Result<Vec<(u16, u16, u8)>, String> {
             if start > end {
                 return Err(format!("Invalid port range: {}-{} (start must be <= end)", start, end));
             }
-            let action = parts.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
-            if action > 1 {
-                return Err(format!("Invalid action {}: must be 0 or 1", action));
-            }
-            let bpf_action = if action == 0 { 2 } else { 1 };
-            rules.push((start, end, bpf_action));
+            rules.push((start, end, rule_action));
         } else {
             let port = parts[0].trim().parse::<u16>().map_err(|_| "Invalid port")?;
-            let action = parts.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
-            if action > 1 {
-                return Err(format!("Invalid action {}: must be 0 or 1", action));
-            }
-            let bpf_action = if action == 0 { 2 } else { 1 };
-            rules.push((port, port, bpf_action));
+            rules.push((port, port, rule_action));
         }
     }
     Ok(rules)
 }
 
+pub fn parse_ports(ports_str: &str, default_action: u8) -> Result<Vec<(u16, u16, u8)>, String> {
+    parse_ports_impl(ports_str, default_action, false)
+}
+
+fn parse_normalized_ports(ports_str: &str) -> Result<Vec<(u16, u16, u8)>, String> {
+    parse_ports_impl(ports_str, 0, true)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_ports;
+    use super::{parse_normalized_ports, parse_ports, stored_policy_action};
 
     #[test]
-    fn parse_ports_single_and_range() {
-        let r = parse_ports("80,100-200:0").unwrap();
+    fn parse_ports_inherits_rule_action_for_implicit_entries() {
+        let r = parse_ports("80,100-200:0", 1).unwrap();
         assert_eq!(r.len(), 2);
-        // 默认 action=1 → bpf_action=1
+        // 规则默认 action=1 (drop) → 隐式端口也应编码成 DROP
         assert_eq!(r[0], (80, 80, 1));
-        // 显式 0 → bpf_action=2
+        // 显式 0 → PASS
         assert_eq!(r[1], (100, 200, 2));
     }
 
     #[test]
     fn parse_ports_rejects_invalid_formats() {
-        assert!(parse_ports("200-100").is_err(), "start>end 应报错");
-        assert!(parse_ports("80:2").is_err(), "action>1 应报错");
-        assert!(parse_ports("bad").is_err(), "非数字端口应报错");
+        assert!(parse_ports("200-100", 0).is_err(), "start>end 应报错");
+        assert!(parse_ports("80:2", 0).is_err(), "action>1 应报错");
+        assert!(parse_ports("bad", 0).is_err(), "非数字端口应报错");
+    }
+
+    #[test]
+    fn parse_normalized_ports_accepts_legacy_pass_encoding() {
+        let r = parse_normalized_ports("80:2,443:1").unwrap();
+        assert_eq!(r, vec![(80, 80, 2), (443, 443, 1)]);
+    }
+
+    #[test]
+    fn stored_policy_action_inverts_when_port_filter_is_present() {
+        assert_eq!(stored_policy_action(0, false), 0);
+        assert_eq!(stored_policy_action(1, false), 1);
+        assert_eq!(stored_policy_action(0, true), 1);
+        assert_eq!(stored_policy_action(1, true), 0);
     }
 }
 
@@ -358,10 +408,10 @@ pub fn add_policy(
         if let Some(idx) = bitmap_idx {
             let ports_str = ports.unwrap_or("");
             if !ports_str.is_empty() {
-                let rules = parse_ports(ports_str)?;
+                let rules = parse_ports(ports_str, action)?;
                 let mut port_pool = open_pinned_port_pool(pin_path)?;
 
-                    for (start, end, rule_action) in rules {
+                for (start, end, rule_action) in rules {
                     for port in start..=end {
                         let key = PortKey { tap_id: runtime.tap_id, idx, port, pad: 0 };
                         if let Err(e) = port_pool.insert(&key, &rule_action, 0) {
@@ -386,7 +436,7 @@ pub fn add_policy(
         pad: [0; 2],
     };
     let value = PolicyValue {
-        action,
+        action: stored_policy_action(action, has_port_filter != 0),
         has_port_filter,
         pad1: [0; 2],
         bitmap_idx: bitmap_idx.unwrap_or(0),
@@ -460,7 +510,7 @@ pub fn delete_port_set(
 
     let mut port_pool = open_pinned_port_pool(pin_path)?;
 
-    let rules = parse_ports(ports_normalized)?;
+    let rules = parse_normalized_ports(ports_normalized)?;
     for (start, end, _) in rules {
         for port in start..=end {
             let key = PortKey { tap_id: runtime.tap_id, idx: bitmap_idx, port, pad: 0 };
@@ -667,7 +717,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
                 for rule in &state.rules {
                     if let (Some(idx), Some(ref ports)) = (rule.bitmap_idx, &rule.ports) {
                         if !ports.is_empty() && ports != "all" && !written_bitmaps.contains(&idx) {
-                            match parse_ports(ports) {
+                            match parse_ports(ports, rule.action) {
                                 Ok(port_rules) => {
                                     for (start, end, action) in port_rules {
                                         for port in start..=end {
@@ -713,7 +763,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
                         pad: [0; 2],
                     };
                     let value = PolicyValue {
-                        action: rule.action,
+                        action: stored_policy_action(rule.action, has_port_filter != 0),
                         has_port_filter,
                         pad1: [0; 2],
                         bitmap_idx: rule.bitmap_idx.unwrap_or(0),
