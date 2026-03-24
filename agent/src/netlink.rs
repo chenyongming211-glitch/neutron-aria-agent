@@ -6,6 +6,7 @@ use netlink_packet_route::RouteNetlinkMessage;
 use netlink_packet_route::link::LinkAttribute;
 use netlink_sys::AsyncSocket;
 use tracing::{info, warn};
+use crate::control_plane::MANAGED_SHARED_PIN_NAMESPACE;
 use crate::tap_registry::TapRegistry;
 
 /// Enumerate all current network interfaces and return names matching the pattern
@@ -55,7 +56,10 @@ fn cleanup_orphaned_pins(base_pin_path: &str, existing_ifaces: &[String]) {
             if entry.path().is_dir() {
                 if let Some(name) = entry.file_name().to_str() {
                     // Skip special directories managed outside tap lifecycle.
-                    if name == "system" || name == "ssl-global" {
+                    if name == "system"
+                        || name == "ssl-global"
+                        || name == MANAGED_SHARED_PIN_NAMESPACE
+                    {
                         continue;
                     }
                     if !existing_ifaces.contains(&name.to_string()) {

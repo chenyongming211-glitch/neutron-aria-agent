@@ -37,16 +37,16 @@ pub static IFACE_CTX_MAP: HashMap<u32, IfaceCtx> = HashMap::with_max_entries(102
 // --- Existing maps ---
 
 #[map(name = "SRC_IPV4_TRIE")]
-pub static SRC_IPV4_TRIE: LpmTrie<[u8; 4], u32> = LpmTrie::with_max_entries(10000, 0);
+pub static SRC_IPV4_TRIE: LpmTrie<[u8; 8], u32> = LpmTrie::with_max_entries(10000, 0);
 
 #[map(name = "DST_IPV4_TRIE")]
-pub static DST_IPV4_TRIE: LpmTrie<[u8; 4], u32> = LpmTrie::with_max_entries(10000, 0);
+pub static DST_IPV4_TRIE: LpmTrie<[u8; 8], u32> = LpmTrie::with_max_entries(10000, 0);
 
 #[map(name = "SRC_IPV6_TRIE")]
-pub static SRC_IPV6_TRIE: LpmTrie<[u8; 16], u32> = LpmTrie::with_max_entries(5000, 0);
+pub static SRC_IPV6_TRIE: LpmTrie<[u8; 20], u32> = LpmTrie::with_max_entries(5000, 0);
 
 #[map(name = "DST_IPV6_TRIE")]
-pub static DST_IPV6_TRIE: LpmTrie<[u8; 16], u32> = LpmTrie::with_max_entries(5000, 0);
+pub static DST_IPV6_TRIE: LpmTrie<[u8; 20], u32> = LpmTrie::with_max_entries(5000, 0);
 
 #[map(name = "POLICY_TABLE")]
 pub static POLICY_TABLE: HashMap<PolicyKey, PolicyValue> = HashMap::with_max_entries(65536, 0);

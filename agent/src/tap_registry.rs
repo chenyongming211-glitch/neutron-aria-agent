@@ -5,12 +5,13 @@ use tokio::sync::{Mutex, RwLock};
 use regex::Regex;
 use tracing::{info, warn};
 use crate::instance::FirewallInstance;
-use crate::control_plane::ControlPlane;
+use crate::control_plane::{ControlPlane, MANAGED_SHARED_PIN_NAMESPACE};
 
 pub struct TapRegistry {
     instances: RwLock<HashMap<String, FirewallInstance>>,
     /// Per-iface mutex to serialize attach/detach on the same interface
     iface_locks: RwLock<HashMap<String, Arc<Mutex<()>>>>,
+    runtime_lock: Mutex<()>,
     pub ebpf_path: PathBuf,
     pub base_pin_path: PathBuf,
     pub base_state_path: PathBuf,
@@ -31,6 +32,7 @@ impl TapRegistry {
         Self {
             instances: RwLock::new(HashMap::new()),
             iface_locks: RwLock::new(HashMap::new()),
+            runtime_lock: Mutex::new(()),
             ebpf_path: PathBuf::from(ebpf_path),
             base_pin_path: PathBuf::from(base_pin_path),
             base_state_path: PathBuf::from(base_state_path),
@@ -60,6 +62,21 @@ impl TapRegistry {
         self.iface_pattern.is_match(iface)
     }
 
+    fn cleanup_shared_runtime_dir(&self) {
+        let shared_pin_path = self.base_pin_path.join(MANAGED_SHARED_PIN_NAMESPACE);
+        if shared_pin_path.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&shared_pin_path) {
+                warn!(
+                    path = %shared_pin_path.display(),
+                    error = %e,
+                    "failed to remove shared managed pin directory"
+                );
+            } else {
+                info!(path = %shared_pin_path.display(), "removed shared managed pin directory");
+            }
+        }
+    }
+
     /// Attach XDP firewall to a tap interface. Idempotent: skips if already attached.
     pub async fn attach(&self, iface: &str) -> Result<(), String> {
         // Idempotent check
@@ -72,6 +89,7 @@ impl TapRegistry {
 
         let iface_lock = self.get_iface_lock(iface).await;
         let _guard = iface_lock.lock().await;
+        let _runtime_guard = self.runtime_lock.lock().await;
 
         // Re-check after acquiring lock
         {
@@ -81,10 +99,16 @@ impl TapRegistry {
             }
         }
 
+        let had_managed_instances = {
+            let instances = self.instances.read().await;
+            !instances.is_empty()
+        };
+
         let mut instance = FirewallInstance::new(
             iface,
-            self.base_pin_path.to_str().unwrap(),
-            self.base_state_path.to_str().unwrap(),
+            PathBuf::from(self.control_plane.managed_pin_path()),
+            self.base_state_path.join(iface),
+            true,
         );
 
         // 为该 tap 实例设置端口策略上限（写入对应 state.json）
@@ -95,6 +119,8 @@ impl TapRegistry {
                 warn!(instance = %iface, error = %e, "failed to persist max_port_policies");
             }
         }
+
+        self.control_plane.prepare_managed_instance(iface).await?;
 
         instance.attach(self.ebpf_path.to_str().unwrap())?;
 
@@ -107,7 +133,25 @@ impl TapRegistry {
                     "failed to roll back attach after register failure"
                 );
             }
+            if !had_managed_instances {
+                self.cleanup_shared_runtime_dir();
+            }
             return Err(format!("control-plane register failed: {}", e));
+        }
+
+        if let Err(e) = instance.replay_state(self.ebpf_path.to_str().unwrap()) {
+            self.control_plane.unregister_instance(iface).await;
+            if let Err(detach_err) = instance.detach() {
+                warn!(
+                    instance = %iface,
+                    error = %detach_err,
+                    "failed to roll back attach after replay failure"
+                );
+            }
+            if !had_managed_instances {
+                self.cleanup_shared_runtime_dir();
+            }
+            return Err(format!("state replay failed: {}", e));
         }
 
         let mut instances = self.instances.write().await;
@@ -120,6 +164,7 @@ impl TapRegistry {
     pub async fn detach(&self, iface: &str) -> Result<(), String> {
         let iface_lock = self.get_iface_lock(iface).await;
         let _guard = iface_lock.lock().await;
+        let _runtime_guard = self.runtime_lock.lock().await;
 
         let instance_exists = {
             let instances = self.instances.read().await;
@@ -139,6 +184,15 @@ impl TapRegistry {
 
         if instance_exists {
             self.control_plane.unregister_instance(iface).await;
+        }
+
+        let should_cleanup_shared_runtime = {
+            let instances = self.instances.read().await;
+            instances.is_empty()
+        };
+
+        if should_cleanup_shared_runtime {
+            self.cleanup_shared_runtime_dir();
         }
 
         // Clean up the per-iface lock

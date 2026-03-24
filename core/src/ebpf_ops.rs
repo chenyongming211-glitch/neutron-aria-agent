@@ -17,8 +17,24 @@ pub fn load_bpf_with_pin(pin_path: &str, ebpf_path: &str) -> Result<aya::Ebpf, S
     Ok(bpf)
 }
 
+const TAP_LPM_PREFIX_BITS: u32 = 32;
+
+fn tap_lpm_key_v4(tap_id: u32, ip: [u8; 4], prefix_len: u8) -> Key<[u8; 8]> {
+    let mut bytes = [0u8; 8];
+    bytes[..4].copy_from_slice(&tap_id.to_be_bytes());
+    bytes[4..].copy_from_slice(&ip);
+    Key::new(TAP_LPM_PREFIX_BITS + prefix_len as u32, bytes)
+}
+
+fn tap_lpm_key_v6(tap_id: u32, ip: [u8; 16], prefix_len: u8) -> Key<[u8; 20]> {
+    let mut bytes = [0u8; 20];
+    bytes[..4].copy_from_slice(&tap_id.to_be_bytes());
+    bytes[4..].copy_from_slice(&ip);
+    Key::new(TAP_LPM_PREFIX_BITS + prefix_len as u32, bytes)
+}
+
 /// 从 pin 路径直接打开已有的 map（不加载 eBPF 程序）
-fn open_pinned_lpm_v4(pin_path: &str, map_name: &str) -> Result<LpmTrie<MapData, [u8; 4], u32>, String> {
+fn open_pinned_lpm_v4(pin_path: &str, map_name: &str) -> Result<LpmTrie<MapData, [u8; 8], u32>, String> {
     let map_path = format!("{}/{}", pin_path, map_name);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open pinned map {}: {:?}", map_name, e))?;
@@ -26,7 +42,7 @@ fn open_pinned_lpm_v4(pin_path: &str, map_name: &str) -> Result<LpmTrie<MapData,
         .map_err(|e| format!("convert {} to LpmTrie: {:?}", map_name, e))
 }
 
-fn open_pinned_lpm_v6(pin_path: &str, map_name: &str) -> Result<LpmTrie<MapData, [u8; 16], u32>, String> {
+fn open_pinned_lpm_v6(pin_path: &str, map_name: &str) -> Result<LpmTrie<MapData, [u8; 20], u32>, String> {
     let map_path = format!("{}/{}", pin_path, map_name);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open pinned map {}: {:?}", map_name, e))?;
@@ -237,7 +253,7 @@ pub fn add_network(direction: &str, cidr: &str, id: u32, runtime: TapMapRuntime<
                 "dst" => "DST_IPV4_TRIE",
                 _ => return Err("direction must be 'src' or 'dst'".to_string()),
             };
-            let key = Key::new(prefix_len as u32, v4.octets());
+            let key = tap_lpm_key_v4(runtime.tap_id, v4.octets(), prefix_len);
             let mut lpm_map = open_pinned_lpm_v4(pin_path, map_name)?;
             lpm_map.insert(&key, &id, 0)
                 .map_err(|e| format!("LPM insert error: {:?}", e))?;
@@ -249,7 +265,7 @@ pub fn add_network(direction: &str, cidr: &str, id: u32, runtime: TapMapRuntime<
                 "dst" => "DST_IPV6_TRIE",
                 _ => return Err("direction must be 'src' or 'dst'".to_string()),
             };
-            let key = Key::new(prefix_len as u32, v6.octets());
+            let key = tap_lpm_key_v6(runtime.tap_id, v6.octets(), prefix_len);
             let mut lpm_map = open_pinned_lpm_v6(pin_path, map_name)?;
             lpm_map.insert(&key, &id, 0)
                 .map_err(|e| format!("LPM insert error: {:?}", e))?;
@@ -275,7 +291,7 @@ pub fn delete_network(direction: &str, cidr: &str, _id: u32, runtime: TapMapRunt
                 "dst" => "DST_IPV4_TRIE",
                 _ => return Err("direction must be 'src' or 'dst'".to_string()),
             };
-            let key = Key::new(prefix_len as u32, v4.octets());
+            let key = tap_lpm_key_v4(runtime.tap_id, v4.octets(), prefix_len);
             let mut lpm_map = open_pinned_lpm_v4(pin_path, map_name)?;
             match lpm_map.remove(&key) {
                 Ok(()) => info!(cidr = %cidr, map = %map_name, "deleted IPv4 network"),
@@ -288,7 +304,7 @@ pub fn delete_network(direction: &str, cidr: &str, _id: u32, runtime: TapMapRunt
                 "dst" => "DST_IPV6_TRIE",
                 _ => return Err("direction must be 'src' or 'dst'".to_string()),
             };
-            let key = Key::new(prefix_len as u32, v6.octets());
+            let key = tap_lpm_key_v6(runtime.tap_id, v6.octets(), prefix_len);
             let mut lpm_map = open_pinned_lpm_v6(pin_path, map_name)?;
             match lpm_map.remove(&key) {
                 Ok(()) => info!(cidr = %cidr, map = %map_name, "deleted IPv6 network"),
@@ -523,22 +539,22 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
     let mut bitmap_count: u32 = 0;
 
     // 收集 IPv4 和 IPv6 条目，按 map 分批写入
-    let mut src_ipv4: Vec<([u8; 4], u32, u32)> = Vec::new();
-    let mut dst_ipv4: Vec<([u8; 4], u32, u32)> = Vec::new();
-    let mut src_ipv6: Vec<([u8; 16], u32, u32)> = Vec::new();
-    let mut dst_ipv6: Vec<([u8; 16], u32, u32)> = Vec::new();
+    let mut src_ipv4: Vec<([u8; 4], u8, u32)> = Vec::new();
+    let mut dst_ipv4: Vec<([u8; 4], u8, u32)> = Vec::new();
+    let mut src_ipv6: Vec<([u8; 16], u8, u32)> = Vec::new();
+    let mut dst_ipv6: Vec<([u8; 16], u8, u32)> = Vec::new();
 
     for (name, group) in &state.groups {
         for cidr in &group.cidrs {
             match parse_cidr(cidr) {
                 Ok((IpAddr::V4(v4), prefix)) => {
-                    src_ipv4.push((v4.octets(), prefix as u32, group.id));
-                    dst_ipv4.push((v4.octets(), prefix as u32, group.id));
+                    src_ipv4.push((v4.octets(), prefix, group.id));
+                    dst_ipv4.push((v4.octets(), prefix, group.id));
                     group_count += 1;
                 }
                 Ok((IpAddr::V6(v6), prefix)) => {
-                    src_ipv6.push((v6.octets(), prefix as u32, group.id));
-                    dst_ipv6.push((v6.octets(), prefix as u32, group.id));
+                    src_ipv6.push((v6.octets(), prefix, group.id));
+                    dst_ipv6.push((v6.octets(), prefix, group.id));
                     group_count += 1;
                 }
                 Err(e) => {
@@ -552,11 +568,11 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
     {
         match bpf.map_mut("SRC_IPV4_TRIE")
             .ok_or_else(|| "SRC_IPV4_TRIE not found".to_string())
-            .and_then(|m| LpmTrie::<_, [u8; 4], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
+            .and_then(|m| LpmTrie::<_, [u8; 8], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
         {
             Ok(mut map) => {
                 for (octets, prefix, id) in &src_ipv4 {
-                    let key = Key::new(*prefix, *octets);
+                    let key = tap_lpm_key_v4(tap_id, *octets, *prefix);
                     if let Err(e) = map.insert(&key, id, 0) {
                         errors.push(format!("SRC_IPV4_TRIE id={}: {:?}", id, e));
                     }
@@ -570,11 +586,11 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
     {
         match bpf.map_mut("DST_IPV4_TRIE")
             .ok_or_else(|| "DST_IPV4_TRIE not found".to_string())
-            .and_then(|m| LpmTrie::<_, [u8; 4], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
+            .and_then(|m| LpmTrie::<_, [u8; 8], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
         {
             Ok(mut map) => {
                 for (octets, prefix, id) in &dst_ipv4 {
-                    let key = Key::new(*prefix, *octets);
+                    let key = tap_lpm_key_v4(tap_id, *octets, *prefix);
                     if let Err(e) = map.insert(&key, id, 0) {
                         errors.push(format!("DST_IPV4_TRIE id={}: {:?}", id, e));
                     }
@@ -588,11 +604,11 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
     {
         match bpf.map_mut("SRC_IPV6_TRIE")
             .ok_or_else(|| "SRC_IPV6_TRIE not found".to_string())
-            .and_then(|m| LpmTrie::<_, [u8; 16], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
+            .and_then(|m| LpmTrie::<_, [u8; 20], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
         {
             Ok(mut map) => {
                 for (octets, prefix, id) in &src_ipv6 {
-                    let key = Key::new(*prefix, *octets);
+                    let key = tap_lpm_key_v6(tap_id, *octets, *prefix);
                     if let Err(e) = map.insert(&key, id, 0) {
                         errors.push(format!("SRC_IPV6_TRIE id={}: {:?}", id, e));
                     }
@@ -606,11 +622,11 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
     {
         match bpf.map_mut("DST_IPV6_TRIE")
             .ok_or_else(|| "DST_IPV6_TRIE not found".to_string())
-            .and_then(|m| LpmTrie::<_, [u8; 16], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
+            .and_then(|m| LpmTrie::<_, [u8; 20], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
         {
             Ok(mut map) => {
                 for (octets, prefix, id) in &dst_ipv6 {
-                    let key = Key::new(*prefix, *octets);
+                    let key = tap_lpm_key_v6(tap_id, *octets, *prefix);
                     if let Err(e) = map.insert(&key, id, 0) {
                         errors.push(format!("DST_IPV6_TRIE id={}: {:?}", id, e));
                     }

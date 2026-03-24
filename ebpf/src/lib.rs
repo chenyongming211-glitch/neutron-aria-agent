@@ -107,8 +107,8 @@ unsafe fn try_xdp_firewall(ctx: &XdpContext, info: *const parser::PacketInfo, pi
             return Ok(p.action);
         }
 
-        p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
-        p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
+        p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, p.tap_id, info.src_ip_v6).unwrap_or(0);
+        p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, p.tap_id, info.dst_ip_v6).unwrap_or(0);
 
         if (p.flags & FLAG_ACL_ON) != 0 {
             phase_policy_xdp(info, p);
@@ -145,8 +145,8 @@ unsafe fn try_xdp_firewall(ctx: &XdpContext, info: *const parser::PacketInfo, pi
         return Ok(p.action);
     }
 
-    p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
-    p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
+    p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, p.tap_id, info.src_ip).unwrap_or(0);
+    p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, p.tap_id, info.dst_ip).unwrap_or(0);
 
     if (p.flags & FLAG_ACL_ON) != 0 {
         phase_policy_xdp(info, p);
@@ -228,8 +228,8 @@ unsafe fn try_tc_egress(ctx: &TcContext, info: *const parser::PacketInfo, pipe: 
             return Ok(p.action as i32);
         }
 
-        p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
-        p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
+        p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, p.tap_id, info.src_ip_v6).unwrap_or(0);
+        p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, p.tap_id, info.dst_ip_v6).unwrap_or(0);
 
         if (p.flags & FLAG_ACL_ON) != 0 {
             phase_policy_tc(info, p);
@@ -266,8 +266,8 @@ unsafe fn try_tc_egress(ctx: &TcContext, info: *const parser::PacketInfo, pipe: 
         return Ok(p.action as i32);
     }
 
-    p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
-    p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
+    p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, p.tap_id, info.src_ip).unwrap_or(0);
+    p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, p.tap_id, info.dst_ip).unwrap_or(0);
 
     if (p.flags & FLAG_ACL_ON) != 0 {
         phase_policy_tc(info, p);
@@ -333,11 +333,11 @@ unsafe fn try_tc_ingress(ctx: &TcContext, info: *const parser::PacketInfo, pipe:
     let tracing = trace::should_trace(info);
 
     if info.is_ipv6 {
-        p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
-        p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
+        p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, p.tap_id, info.src_ip_v6).unwrap_or(0);
+        p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, p.tap_id, info.dst_ip_v6).unwrap_or(0);
     } else {
-        p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
-        p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
+        p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, p.tap_id, info.src_ip).unwrap_or(0);
+        p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, p.tap_id, info.dst_ip).unwrap_or(0);
     }
 
     if mirror::mirror_enabled(p.tap_id) {
@@ -427,13 +427,19 @@ unsafe fn do_drop(p: &PipelineCtx) {
     });
 }
 
-unsafe fn lookup_ipv4(map: &LpmTrie<[u8; 4], u32>, ip: u32) -> Option<u32> {
-    let key = Key::new(32, ip.to_be_bytes());
+unsafe fn lookup_ipv4(map: &LpmTrie<[u8; 8], u32>, tap_id: u32, ip: u32) -> Option<u32> {
+    let mut bytes = [0u8; 8];
+    bytes[..4].copy_from_slice(&tap_id.to_be_bytes());
+    bytes[4..].copy_from_slice(&ip.to_be_bytes());
+    let key = Key::new(64, bytes);
     map.get(&key).copied()
 }
 
-unsafe fn lookup_ipv6(map: &LpmTrie<[u8; 16], u32>, ip: [u8; 16]) -> Option<u32> {
-    let key = Key::new(128, ip);
+unsafe fn lookup_ipv6(map: &LpmTrie<[u8; 20], u32>, tap_id: u32, ip: [u8; 16]) -> Option<u32> {
+    let mut bytes = [0u8; 20];
+    bytes[..4].copy_from_slice(&tap_id.to_be_bytes());
+    bytes[4..].copy_from_slice(&ip);
+    let key = Key::new(160, bytes);
     map.get(&key).copied()
 }
 
@@ -489,8 +495,8 @@ unsafe fn phase_ct_fastpath_xdp_v4(info: &parser::PacketInfo, p: &mut PipelineCt
 
     let need_ids = (p.flags & FLAG_QOS_ON) != 0 || stats::monitoring_enabled(p.tap_id);
     if need_ids {
-        p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
-        p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
+        p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, p.tap_id, info.src_ip).unwrap_or(0);
+        p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, p.tap_id, info.dst_ip).unwrap_or(0);
         if (p.flags & FLAG_QOS_ON) != 0 && !qos::apply_qos_ingress(p.tap_id, p.src_id, p.dst_id, p.pkt_len, p.now) {
             p.drop_reason = DROP_QOS_INGRESS;
             p.action = XDP_DROP;
@@ -525,8 +531,8 @@ unsafe fn phase_ct_fastpath_xdp_v6(info: &parser::PacketInfo, p: &mut PipelineCt
 
     let need_ids = (p.flags & FLAG_QOS_ON) != 0 || stats::monitoring_enabled(p.tap_id);
     if need_ids {
-        p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
-        p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
+        p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, p.tap_id, info.src_ip_v6).unwrap_or(0);
+        p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, p.tap_id, info.dst_ip_v6).unwrap_or(0);
         if (p.flags & FLAG_QOS_ON) != 0 && !qos::apply_qos_ingress(p.tap_id, p.src_id, p.dst_id, p.pkt_len, p.now) {
             p.drop_reason = DROP_QOS_INGRESS;
             p.action = XDP_DROP;
@@ -561,8 +567,8 @@ unsafe fn phase_ct_fastpath_tc_v4(ctx: &TcContext, info: &parser::PacketInfo, p:
 
     let need_ids = (p.flags & FLAG_QOS_ON) != 0 || (p.flags & FLAG_MIRROR_ON) != 0 || stats::monitoring_enabled(p.tap_id);
     if need_ids {
-        p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
-        p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
+        p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, p.tap_id, info.dst_ip).unwrap_or(0);
+        p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, p.tap_id, info.src_ip).unwrap_or(0);
         if (p.flags & FLAG_QOS_ON) != 0 {
             let (edt, prio) = qos::apply_qos_egress(p.tap_id, p.src_id, p.dst_id, p.pkt_len, p.now);
             if edt == u64::MAX {
@@ -605,8 +611,8 @@ unsafe fn phase_ct_fastpath_tc_v6(ctx: &TcContext, info: &parser::PacketInfo, p:
 
     let need_ids = (p.flags & FLAG_QOS_ON) != 0 || (p.flags & FLAG_MIRROR_ON) != 0 || stats::monitoring_enabled(p.tap_id);
     if need_ids {
-        p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
-        p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
+        p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, p.tap_id, info.dst_ip_v6).unwrap_or(0);
+        p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, p.tap_id, info.src_ip_v6).unwrap_or(0);
         if (p.flags & FLAG_QOS_ON) != 0 {
             let (edt, prio) = qos::apply_qos_egress(p.tap_id, p.src_id, p.dst_id, p.pkt_len, p.now);
             if edt == u64::MAX {

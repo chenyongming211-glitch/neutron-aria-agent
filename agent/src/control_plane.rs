@@ -10,6 +10,7 @@ use crate::service_chain::{ServiceChain, self};
 use crate::ssl_manager::SslManager;
 
 const WAL_COMPACT_THRESHOLD: u64 = 1000;
+pub const MANAGED_SHARED_PIN_NAMESPACE: &str = "global-v2";
 
 /// Per-instance in-memory state
 struct InstanceState {
@@ -137,10 +138,30 @@ impl ControlPlane {
         }
     }
 
+    pub fn managed_pin_path(&self) -> String {
+        format!("{}/{}", self.base_pin_path, MANAGED_SHARED_PIN_NAMESPACE)
+    }
+
+    pub async fn prepare_managed_instance(&self, name: &str) -> Result<u32, String> {
+        let state_path = format!("{}/{}", self.base_state_path, name);
+        let mut state = aria_core::wal::load_with_wal(&state_path);
+        let tap_id_assigned = self.ensure_managed_tap_id(name, &mut state).await?;
+
+        if tap_id_assigned {
+            let state_manager = aria_core::state::StateManager::new(&state_path);
+            state_manager
+                .set_tap_id(state.tap_id)
+                .map_err(|e| format!("failed to persist tap_id for {}: {}", name, e))?;
+            info!(instance = %name, tap_id = state.tap_id, "prepared managed tap state");
+        }
+
+        Ok(state.tap_id)
+    }
+
     /// Register an instance (called when TapRegistry attaches a tap).
     /// If already registered, compacts state first to avoid data loss.
     pub async fn register_instance(&self, name: &str) -> Result<(), String> {
-        let pin_path = format!("{}/{}", self.base_pin_path, name);
+        let pin_path = self.managed_pin_path();
         let state_path = format!("{}/{}", self.base_state_path, name);
         let ifindex = Self::resolve_ifindex(name)?;
         let global_ssl_enabled = match self.read_ssl_global_config().await {

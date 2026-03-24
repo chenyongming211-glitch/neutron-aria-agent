@@ -9,14 +9,20 @@ pub struct FirewallInstance {
     pub iface: String,
     pub pin_path: PathBuf,
     pub state_path: PathBuf,
+    pub shared_runtime: bool,
     /// Whether FQ qdisc (EDT) was successfully configured.
     /// If false, QoS shaping is unavailable — only policing works.
     pub edt_available: bool,
 }
 
 impl FirewallInstance {
-    fn rollback_partial_attach(&self, stage: &str, err: String) -> Result<(), String> {
-        if let Err(cleanup_err) = self.detach() {
+    fn rollback_partial_attach(
+        &self,
+        stage: &str,
+        err: String,
+        remove_pin_path: bool,
+    ) -> Result<(), String> {
+        if let Err(cleanup_err) = self.detach_with_cleanup(remove_pin_path) {
             return Err(format!(
                 "{} failed: {}; rollback also failed: {}",
                 stage, err, cleanup_err
@@ -25,10 +31,30 @@ impl FirewallInstance {
         Err(format!("{} failed: {}", stage, err))
     }
 
+    fn xdp_link_pin_path(&self) -> String {
+        if self.shared_runtime {
+            format!("{}/{}_xdp_link", self.pin_path.display(), self.iface)
+        } else {
+            format!("{}/xdp_link", self.pin_path.display())
+        }
+    }
+
+    fn tc_link_pin_path(&self, prog_name: &str) -> String {
+        if self.shared_runtime {
+            format!("{}/{}_{}_link", self.pin_path.display(), self.iface, prog_name)
+        } else {
+            format!("{}/{}_link", self.pin_path.display(), prog_name)
+        }
+    }
+
     fn pin_runtime_maps(&self, bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {
         for name in NETWORK_MAP_NAMES {
             if let Some(map) = bpf.map_mut(name) {
-                if let Err(e) = map.pin(format!("{}/{}", pin_path, name)) {
+                let target = format!("{}/{}", pin_path, name);
+                if std::path::Path::new(&target).exists() {
+                    continue;
+                }
+                if let Err(e) = map.pin(target) {
                     if CRITICAL_NETWORK_MAP_NAMES.contains(name) {
                         return Err(format!("failed to pin critical map {}: {}", name, e));
                     }
@@ -41,11 +67,12 @@ impl FirewallInstance {
         Ok(())
     }
 
-    pub fn new(iface: &str, base_pin_path: &str, base_state_path: &str) -> Self {
+    pub fn new(iface: &str, pin_path: PathBuf, state_path: PathBuf, shared_runtime: bool) -> Self {
         Self {
             iface: iface.to_string(),
-            pin_path: PathBuf::from(format!("{}/{}", base_pin_path, iface)),
-            state_path: PathBuf::from(format!("{}/{}", base_state_path, iface)),
+            pin_path,
+            state_path,
+            shared_runtime,
             edt_available: false,
         }
     }
@@ -58,30 +85,27 @@ impl FirewallInstance {
             .map_err(|e| format!("Failed to create state directory {:?}: {}", self.state_path, e))?;
 
         let pin_path_str = self.pin_path.to_str().unwrap();
-        let xdp_link_pin = format!("{}/xdp_link", pin_path_str);
+        let xdp_link_pin = self.xdp_link_pin_path();
 
         // Check if XDP link is already pinned (recovery from crash, kernel 5.7+ only)
         if std::path::Path::new(&xdp_link_pin).exists() {
             info!(instance = %self.iface, "found pinned XDP link; recovering");
-            self.replay_state_to_pinned_maps(ebpf_path)?;
             let mut bpf = aria_core::ebpf_ops::load_bpf_with_pin(pin_path_str, ebpf_path)?;
-            self.ensure_tc_runtime(&mut bpf, pin_path_str);
+            self.ensure_tc_runtime(&mut bpf);
             self.ensure_fq_runtime();
             info!(instance = %self.iface, edt_available = self.edt_available, "recovery complete from pinned XDP link");
             return Ok(());
         }
 
-        // Check if XDP program is pinned but link isn't (older kernel recovery)
+        // If the shared runtime is already pinned, only this interface link needs to be attached.
         let xdp_prog_pin = format!("{}/xdp_firewall", pin_path_str);
         if std::path::Path::new(&xdp_prog_pin).exists() {
-            info!(instance = %self.iface, "found pinned XDP program without link pin; recovering");
+            info!(instance = %self.iface, "found pinned XDP runtime; attaching interface link");
             let mut bpf = aria_core::ebpf_ops::load_bpf_with_pin(pin_path_str, ebpf_path)?;
-            let state_path_str = self.state_path.to_str().unwrap();
-            aria_core::ebpf_ops::replay_state(&mut bpf, state_path_str);
             self.reattach_xdp_from_loaded(&mut bpf, &xdp_link_pin)?;
-            self.ensure_tc_runtime(&mut bpf, pin_path_str);
+            self.ensure_tc_runtime(&mut bpf);
             self.ensure_fq_runtime();
-            info!(instance = %self.iface, edt_available = self.edt_available, "recovery complete from pinned XDP program");
+            info!(instance = %self.iface, edt_available = self.edt_available, "interface link attached from pinned runtime");
             return Ok(());
         }
 
@@ -119,12 +143,12 @@ impl FirewallInstance {
         }
 
         // Attach TC egress
-        if let Err(e) = self.try_attach_tc(&mut bpf, "tc_egress", aya::programs::tc::TcAttachType::Egress, pin_path_str) {
+        if let Err(e) = self.try_attach_tc(&mut bpf, "tc_egress", aya::programs::tc::TcAttachType::Egress) {
             warn!(instance = %self.iface, error = %e, "TC egress attach failed; egress control disabled");
         }
 
         // Attach TC ingress (mirror)
-        if let Err(e) = self.try_attach_tc(&mut bpf, "tc_ingress", aya::programs::tc::TcAttachType::Ingress, pin_path_str) {
+        if let Err(e) = self.try_attach_tc(&mut bpf, "tc_ingress", aya::programs::tc::TcAttachType::Ingress) {
             warn!(instance = %self.iface, error = %e, "TC ingress attach failed; ingress mirror disabled");
         }
 
@@ -138,21 +162,21 @@ impl FirewallInstance {
         }
 
         if let Err(e) = self.pin_runtime_maps(&mut bpf, pin_path_str) {
-            return self.rollback_partial_attach("pin runtime maps", e);
+            return self.rollback_partial_attach("pin runtime maps", e, true);
         }
 
         // Pin runtime programs.
         for name in &["xdp_firewall", "tc_egress", "tc_ingress"] {
             if let Some(program) = bpf.program_mut(name) {
-                if let Err(e) = program.pin(format!("{}/{}", pin_path_str, name)) {
+                let target = format!("{}/{}", pin_path_str, name);
+                if std::path::Path::new(&target).exists() {
+                    continue;
+                }
+                if let Err(e) = program.pin(target) {
                     warn!(instance = %self.iface, program = %name, error = ?e, "failed to pin runtime program");
                 }
             }
         }
-
-        // Replay state from snapshot + WAL if present.
-        let state_path_str = self.state_path.to_str().unwrap();
-        aria_core::ebpf_ops::replay_state(&mut bpf, state_path_str);
 
         info!(instance = %self.iface, "firewall instance active");
         Ok(())
@@ -180,7 +204,6 @@ impl FirewallInstance {
         bpf: &mut aya::Ebpf,
         prog_name: &str,
         attach_type: aya::programs::tc::TcAttachType,
-        pin_path: &str,
     ) -> Result<(), String> {
         // Add clsact qdisc (idempotent)
         if let Err(e) = aya::programs::tc::qdisc_add_clsact(&self.iface) {
@@ -214,7 +237,7 @@ impl FirewallInstance {
                 .map_err(|e| format!("take_link: {:?}", e))?;
             let fd_link: aya::programs::links::FdLink = tc_link.try_into()
                 .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
-            let link_pin = format!("{}/{}_link", pin_path, prog_name);
+            let link_pin = self.tc_link_pin_path(prog_name);
             fd_link.pin(&link_pin)
                 .map_err(|e| format!("pin: {:?}", e))?;
             Ok(())
@@ -226,19 +249,19 @@ impl FirewallInstance {
         Ok(())
     }
 
-    fn ensure_tc_runtime(&self, bpf: &mut aya::Ebpf, pin_path: &str) {
+    fn ensure_tc_runtime(&self, bpf: &mut aya::Ebpf) {
         let tc_programs = [
             ("tc_egress", aya::programs::tc::TcAttachType::Egress, "Egress control"),
             ("tc_ingress", aya::programs::tc::TcAttachType::Ingress, "Ingress mirror"),
         ];
 
         for (prog_name, attach_type, purpose) in tc_programs {
-            let link_pin = format!("{}/{}_link", pin_path, prog_name);
+            let link_pin = self.tc_link_pin_path(prog_name);
             if std::path::Path::new(&link_pin).exists() {
                 continue;
             }
 
-            if let Err(e) = self.try_attach_tc(bpf, prog_name, attach_type, pin_path) {
+            if let Err(e) = self.try_attach_tc(bpf, prog_name, attach_type) {
                 warn!(instance = %self.iface, purpose = %purpose, error = %e, "failed to recover TC runtime");
             }
         }
@@ -288,8 +311,8 @@ impl FirewallInstance {
         Ok(())
     }
 
-    /// Replay state to already-pinned maps (used during crash recovery)
-    fn replay_state_to_pinned_maps(&self, ebpf_path: &str) -> Result<(), String> {
+    /// Replay state to already-pinned maps after control-plane registration succeeds.
+    pub fn replay_state(&self, ebpf_path: &str) -> Result<(), String> {
         let pin_path_str = self.pin_path.to_str().unwrap();
         let state_path_str = self.state_path.to_str().unwrap();
 
@@ -298,10 +321,8 @@ impl FirewallInstance {
         Ok(())
     }
 
-    /// Detach XDP and TC: unpin link (causes XDP detach), clean up pin directory.
-    pub fn detach(&self) -> Result<(), String> {
-        let pin_path_str = self.pin_path.to_str().unwrap();
-        let xdp_link_pin = format!("{}/xdp_link", pin_path_str);
+    fn detach_with_cleanup(&self, remove_pin_path: bool) -> Result<(), String> {
+        let xdp_link_pin = self.xdp_link_pin_path();
 
         // Method 1: Remove pinned link (kernel 5.7+ with bpf_link)
         if std::path::Path::new(&xdp_link_pin).exists() {
@@ -319,8 +340,8 @@ impl FirewallInstance {
         // Detach TC egress
         aria_core::ebpf_ops::detach_tc_egress(&self.iface);
 
-        // Clean up all pinned maps and programs
-        if self.pin_path.exists() {
+        // Clean up pinned runtime dir only for non-shared runtimes or explicit rollback.
+        if remove_pin_path && self.pin_path.exists() {
             std::fs::remove_dir_all(&self.pin_path)
                 .map_err(|e| format!("[{}] Failed to remove pin directory: {}", self.iface, e))?;
             info!(instance = %self.iface, "pin directory cleaned");
@@ -328,5 +349,11 @@ impl FirewallInstance {
 
         info!(instance = %self.iface, "firewall instance detached");
         Ok(())
+    }
+
+    /// Detach XDP and TC. Shared managed runtimes keep the shared pin directory
+    /// until the last tap is removed by TapRegistry.
+    pub fn detach(&self) -> Result<(), String> {
+        self.detach_with_cleanup(!self.shared_runtime)
     }
 }
