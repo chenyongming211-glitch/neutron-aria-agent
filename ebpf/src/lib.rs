@@ -764,12 +764,15 @@ unsafe fn phase_policy_xdp(info: &parser::PacketInfo, p: &mut PipelineCtx) {
         src_id: p.src_id, dst_id: p.dst_id, proto: p.proto,
         direction: p.direction, dst_port: info.dst_port, pkt_len: p.pkt_len, now: p.now,
     };
-    let (result, drop_reason, matched, _) = policy::evaluate_policy(&args);
+    let (result, drop_reason, matched, policy_hit) = policy::evaluate_policy(&args);
     p.action = result;
     p.drop_reason = drop_reason;
     set_matched(p, &matched);
 
     if result == XDP_DROP {
+        if policy_hit {
+            stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, true);
+        }
         policy::record_policy_drop(&args, drop_reason);
     }
 }
