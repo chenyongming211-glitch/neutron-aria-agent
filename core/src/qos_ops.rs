@@ -1,34 +1,19 @@
 use aya::maps::{HashMap, MapData};
-use crate::common::{QosKey, QosConfig, FirewallConfig, TapMapRuntime};
+use crate::common::{QosKey, QosConfig, TapMapRuntime};
 
 /// Update the qos_enabled flag in FIREWALL_CONFIG map.
 /// Called after every add/delete of a QoS rule to keep the flag in sync.
 fn sync_qos_enabled(runtime: TapMapRuntime<'_>, enabled: bool) -> Result<(), String> {
-    let pin_path = runtime.pin_path;
-    let map_path = format!("{}/FIREWALL_CONFIG", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open FIREWALL_CONFIG: {:?}", e))?;
-    let mut map = HashMap::<_, u32, FirewallConfig>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert FIREWALL_CONFIG: {:?}", e))?;
-
-    let mut cfg = map.get(&0u32, 0).unwrap_or(FirewallConfig {
-        conntrack_enabled: 1,
-        monitoring_enabled: 1,
-        num_cpus: {
-            let raw = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-            if raw > 0 { raw as u16 } else { 1 }
-        },
-        qos_enabled: 0,
-        acl_enabled: 1,
-        mirror_enabled: 0,
-        tcprt_enabled: 1,
-        ssl_enabled: 0,
-    });
-    cfg.qos_enabled = if enabled { 1 } else { 0 };
-    map.insert(&0u32, &cfg, 0)
-        .map_err(|e| format!("FIREWALL_CONFIG update qos_enabled: {:?}", e))?;
-    Ok(())
+    crate::ebpf_ops::update_runtime_config(
+        runtime,
+        None,
+        None,
+        None,
+        Some(enabled),
+        None,
+        None,
+        None,
+    )
 }
 
 /// Check if any QoS rules remain in the QOS_CONFIG map.

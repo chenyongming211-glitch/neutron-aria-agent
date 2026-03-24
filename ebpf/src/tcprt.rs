@@ -6,17 +6,12 @@ use crate::common::{
     TCPRT_FLAG_SYN_SEEN, TCPRT_FLAG_SYNACK_SEEN, TCPRT_FLAG_ESTABLISHED,
     TCPRT_FLAG_FIN_FWD, TCPRT_FLAG_FIN_REV,
 };
-use crate::maps::{TCPRT_TABLE_V4, TCPRT_TABLE_V6, FIREWALL_CONFIG};
+use crate::maps::{TCPRT_TABLE_V4, TCPRT_TABLE_V6};
 use crate::parser::PacketInfo;
 
 #[inline(always)]
-pub fn tcprt_enabled() -> bool {
-    let key: u32 = 0;
-    if let Some(cfg) = unsafe { FIREWALL_CONFIG.get(&key) } {
-        cfg.tcprt_enabled != 0
-    } else {
-        false
-    }
+pub fn tcprt_enabled(tap_id: u32) -> bool {
+    crate::runtime::tcprt_enabled(tap_id)
 }
 
 /// Check if seq matches last_seq or prev_seq (catches retransmits arriving after new data).

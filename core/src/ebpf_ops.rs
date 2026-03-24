@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use aya::maps::{HashMap, LpmTrie, MapData};
 use aya::maps::lpm_trie::Key;
 use tracing::{info, warn};
-use crate::common::{IfaceCtx, PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig, TapMapRuntime};
+use crate::common::{IfaceCtx, PolicyKey, PolicyValue, PortKey, QosKey, QosConfig, CtConfig, FirewallConfig, TapConfig, TapMapRuntime, TAP_ID_UNASSIGNED};
 use crate::state::FirewallState;
 
 /// 加载 eBPF 程序，并设置 pin 路径以复用已有的 map。
@@ -58,6 +58,14 @@ fn open_pinned_iface_ctx(pin_path: &str) -> Result<HashMap<MapData, u32, IfaceCt
         .map_err(|e| format!("convert IFACE_CTX_MAP to HashMap: {:?}", e))
 }
 
+fn open_pinned_tap_config(pin_path: &str) -> Result<HashMap<MapData, u32, TapConfig>, String> {
+    let map_path = format!("{}/TAP_CONFIG_MAP", pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open pinned TAP_CONFIG_MAP: {:?}", e))?;
+    HashMap::try_from(aya::maps::Map::HashMap(map_data))
+        .map_err(|e| format!("convert TAP_CONFIG_MAP to HashMap: {:?}", e))
+}
+
 pub fn sync_iface_ctx(runtime: TapMapRuntime<'_>, ifindex: u32) -> Result<(), String> {
     let mut map = open_pinned_iface_ctx(runtime.pin_path)?;
     let ctx = IfaceCtx {
@@ -74,6 +82,70 @@ pub fn clear_iface_ctx(pin_path: &str, ifindex: u32) -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(e) => Err(format!("IFACE_CTX_MAP remove for ifindex {}: {:?}", ifindex, e)),
     }
+}
+
+pub fn write_tap_config(runtime: TapMapRuntime<'_>, config: TapConfig) -> Result<(), String> {
+    let mut map = open_pinned_tap_config(runtime.pin_path)?;
+    map.insert(&runtime.tap_id, &config, 0)
+        .map_err(|e| format!("TAP_CONFIG_MAP insert for tap_id {}: {:?}", runtime.tap_id, e))
+}
+
+pub fn delete_tap_config(runtime: TapMapRuntime<'_>) -> Result<(), String> {
+    let mut map = open_pinned_tap_config(runtime.pin_path)?;
+    match map.remove(&runtime.tap_id) {
+        Ok(()) => Ok(()),
+        Err(e) => Err(format!("TAP_CONFIG_MAP remove for tap_id {}: {:?}", runtime.tap_id, e)),
+    }
+}
+
+pub fn update_runtime_config(
+    runtime: TapMapRuntime<'_>,
+    conntrack_enabled: Option<bool>,
+    monitoring_enabled: Option<bool>,
+    acl_enabled: Option<bool>,
+    qos_enabled: Option<bool>,
+    mirror_enabled: Option<bool>,
+    tcprt_enabled: Option<bool>,
+    ssl_enabled: Option<bool>,
+) -> Result<(), String> {
+    if runtime.tap_id == TAP_ID_UNASSIGNED {
+        return update_firewall_config(
+            runtime,
+            conntrack_enabled,
+            monitoring_enabled,
+            acl_enabled,
+            qos_enabled,
+            mirror_enabled,
+            tcprt_enabled,
+            ssl_enabled,
+        );
+    }
+
+    let mut map = open_pinned_tap_config(runtime.pin_path)?;
+    let current = map.get(&runtime.tap_id, 0).ok();
+    let cfg = TapConfig {
+        conntrack_enabled: conntrack_enabled
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or_else(|| current.as_ref().map(|c| c.conntrack_enabled).unwrap_or(1)),
+        monitoring_enabled: monitoring_enabled
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or_else(|| current.as_ref().map(|c| c.monitoring_enabled).unwrap_or(1)),
+        acl_enabled: acl_enabled
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or_else(|| current.as_ref().map(|c| c.acl_enabled).unwrap_or(1)),
+        qos_enabled: qos_enabled
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or_else(|| current.as_ref().map(|c| c.qos_enabled).unwrap_or(0)),
+        mirror_enabled: mirror_enabled
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or_else(|| current.as_ref().map(|c| c.mirror_enabled).unwrap_or(0)),
+        tcprt_enabled: tcprt_enabled
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or_else(|| current.as_ref().map(|c| c.tcprt_enabled).unwrap_or(1)),
+        pad: [0; 2],
+    };
+    map.insert(&runtime.tap_id, &cfg, 0)
+        .map_err(|e| format!("TAP_CONFIG_MAP insert for tap_id {}: {:?}", runtime.tap_id, e))
 }
 
 pub fn parse_cidr(cidr: &str) -> Result<(IpAddr, u8), String> {
@@ -368,6 +440,7 @@ pub fn delete_port_set(
 /// Network-instance map names pinned under each tap/system instance directory.
 pub const NETWORK_MAP_NAMES: &[&str] = &[
     "IFACE_CTX_MAP",
+    "TAP_CONFIG_MAP",
     "SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE",
     "POLICY_TABLE", "PORT_BITMAP_POOL",
     "CT_TABLE_V4", "CT_TABLE_V6", "CT_CONFIG",
@@ -385,6 +458,7 @@ pub const NETWORK_MAP_NAMES: &[&str] = &[
 /// If any of these fail to pin, startup must fail and roll back.
 pub const CRITICAL_NETWORK_MAP_NAMES: &[&str] = &[
     "IFACE_CTX_MAP",
+    "TAP_CONFIG_MAP",
     "SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE",
     "POLICY_TABLE", "PORT_BITMAP_POOL",
     "CT_TABLE_V4", "CT_TABLE_V6", "CT_CONFIG",
@@ -406,6 +480,7 @@ pub const SSL_MAP_NAMES: &[&str] = &[
 /// Complete map inventory, used by diagnostics and legacy paths.
 pub const ALL_MAP_NAMES: &[&str] = &[
     "IFACE_CTX_MAP",
+    "TAP_CONFIG_MAP",
     "SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE",
     "POLICY_TABLE", "PORT_BITMAP_POOL",
     "CT_TABLE_V4", "CT_TABLE_V6", "CT_CONFIG",
@@ -724,6 +799,29 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
         }
     }
 
+    if tap_id != TAP_ID_UNASSIGNED {
+        let tap_cfg = TapConfig {
+            conntrack_enabled: if state.conntrack_enabled { 1 } else { 0 },
+            monitoring_enabled: if state.monitoring_enabled { 1 } else { 0 },
+            acl_enabled: if state.acl_enabled { 1 } else { 0 },
+            qos_enabled: if state.qos_enabled && !state.qos_rules.is_empty() { 1 } else { 0 },
+            mirror_enabled: if state.mirror_enabled && !state.mirror_rules.is_empty() { 1 } else { 0 },
+            tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
+            pad: [0; 2],
+        };
+        match bpf.map_mut("TAP_CONFIG_MAP")
+            .ok_or_else(|| "TAP_CONFIG_MAP not found".to_string())
+            .and_then(|m| aya::maps::HashMap::<_, u32, TapConfig>::try_from(m).map_err(|e| format!("{:?}", e)))
+        {
+            Ok(mut map) => {
+                if let Err(e) = map.insert(&tap_id, &tap_cfg, 0) {
+                    errors.push(format!("TAP_CONFIG_MAP tap_id={}: {:?}", tap_id, e));
+                }
+            }
+            Err(e) => errors.push(format!("TAP_CONFIG_MAP: {}", e)),
+        }
+    }
+
     info!(
         group_cidrs = group_count,
         rules = rule_count,
@@ -988,4 +1086,39 @@ pub fn read_firewall_config(runtime: TapMapRuntime<'_>) -> Result<FirewallConfig
 
     map.get(&0u32, 0)
         .map_err(|e| format!("read FIREWALL_CONFIG: {:?}", e))
+}
+
+pub fn read_runtime_config(runtime: TapMapRuntime<'_>) -> Result<FirewallConfig, String> {
+    if runtime.tap_id == TAP_ID_UNASSIGNED {
+        return read_firewall_config(runtime);
+    }
+
+    let global = read_firewall_config(runtime).unwrap_or_else(|_| {
+        let raw = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        FirewallConfig {
+            conntrack_enabled: 1,
+            monitoring_enabled: 1,
+            num_cpus: if raw > 0 { raw as u16 } else { 1u16 },
+            qos_enabled: 0,
+            acl_enabled: 1,
+            mirror_enabled: 0,
+            tcprt_enabled: 1,
+            ssl_enabled: 0,
+        }
+    });
+
+    let map = open_pinned_tap_config(runtime.pin_path)?;
+    let tap_cfg = map.get(&runtime.tap_id, 0)
+        .map_err(|e| format!("read TAP_CONFIG_MAP for tap_id {}: {:?}", runtime.tap_id, e))?;
+
+    Ok(FirewallConfig {
+        conntrack_enabled: tap_cfg.conntrack_enabled,
+        monitoring_enabled: tap_cfg.monitoring_enabled,
+        num_cpus: global.num_cpus,
+        qos_enabled: tap_cfg.qos_enabled,
+        acl_enabled: tap_cfg.acl_enabled,
+        mirror_enabled: tap_cfg.mirror_enabled,
+        tcprt_enabled: tap_cfg.tcprt_enabled,
+        ssl_enabled: global.ssl_enabled,
+    })
 }

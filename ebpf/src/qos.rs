@@ -1,5 +1,5 @@
 use crate::common::{QosKey, QosStatsValue, TokenBucket, DIR_EGRESS, DIR_INGRESS};
-use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, QOS_STATS, FIREWALL_CONFIG};
+use crate::maps::{QOS_CONFIG, QOS_TOKEN_BUCKET, QOS_STATS};
 
 /// QoS mode constants
 const QOS_MODE_SHAPING: u8 = 1;
@@ -7,13 +7,8 @@ const QOS_MODE_SHAPING: u8 = 1;
 /// Check if QoS is globally enabled. When no QoS rules are configured,
 /// the control plane sets this to 0, allowing fast-path to skip LPM lookups entirely.
 #[inline(always)]
-pub fn qos_enabled() -> bool {
-    let key: u32 = 0;
-    if let Some(cfg) = unsafe { FIREWALL_CONFIG.get(&key) } {
-        cfg.qos_enabled != 0
-    } else {
-        false
-    }
+pub fn qos_enabled(tap_id: u32) -> bool {
+    crate::runtime::qos_enabled(tap_id)
 }
 
 /// Compute token refill without 128-bit multiplication.

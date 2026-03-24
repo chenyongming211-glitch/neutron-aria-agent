@@ -12,6 +12,7 @@ use aya_ebpf::bindings::{__sk_buff, xdp_md};
 mod common;
 mod maps;
 mod parser;
+mod runtime;
 mod conntrack;
 mod stats;
 mod qos;
@@ -339,7 +340,7 @@ unsafe fn try_tc_ingress(ctx: &TcContext, info: *const parser::PacketInfo, pipe:
         p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
     }
 
-    if mirror::mirror_enabled() {
+    if mirror::mirror_enabled(p.tap_id) {
         let skb = ctx.as_ptr() as *mut __sk_buff;
         mirror::try_mirror_tc(skb, p.tap_id, p.src_id, p.dst_id, info.proto, DIR_INGRESS, p.pkt_len);
     }
@@ -356,10 +357,10 @@ unsafe fn try_tc_ingress(ctx: &TcContext, info: *const parser::PacketInfo, pipe:
 
 #[inline(always)]
 unsafe fn load_feature_flags(p: &mut PipelineCtx, info: &parser::PacketInfo) {
-    if qos::qos_enabled() { p.flags |= FLAG_QOS_ON; }
-    if tcprt::tcprt_enabled() { p.flags |= FLAG_TCPRT_ON; }
-    if policy::acl_enabled() { p.flags |= FLAG_ACL_ON; }
-    if mirror::mirror_enabled() { p.flags |= FLAG_MIRROR_ON; }
+    if qos::qos_enabled(p.tap_id) { p.flags |= FLAG_QOS_ON; }
+    if tcprt::tcprt_enabled(p.tap_id) { p.flags |= FLAG_TCPRT_ON; }
+    if policy::acl_enabled(p.tap_id) { p.flags |= FLAG_ACL_ON; }
+    if mirror::mirror_enabled(p.tap_id) { p.flags |= FLAG_MIRROR_ON; }
     if trace::should_trace(info) { p.flags |= FLAG_TRACING; }
 }
 
@@ -486,7 +487,7 @@ unsafe fn phase_ct_fastpath_xdp_v4(info: &parser::PacketInfo, p: &mut PipelineCt
             }
         }
 
-    let need_ids = (p.flags & FLAG_QOS_ON) != 0 || stats::monitoring_enabled();
+    let need_ids = (p.flags & FLAG_QOS_ON) != 0 || stats::monitoring_enabled(p.tap_id);
     if need_ids {
         p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
         p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
@@ -522,7 +523,7 @@ unsafe fn phase_ct_fastpath_xdp_v6(info: &parser::PacketInfo, p: &mut PipelineCt
             }
         }
 
-    let need_ids = (p.flags & FLAG_QOS_ON) != 0 || stats::monitoring_enabled();
+    let need_ids = (p.flags & FLAG_QOS_ON) != 0 || stats::monitoring_enabled(p.tap_id);
     if need_ids {
         p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);
         p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
@@ -558,7 +559,7 @@ unsafe fn phase_ct_fastpath_tc_v4(ctx: &TcContext, info: &parser::PacketInfo, p:
             }
         }
 
-    let need_ids = (p.flags & FLAG_QOS_ON) != 0 || (p.flags & FLAG_MIRROR_ON) != 0 || stats::monitoring_enabled();
+    let need_ids = (p.flags & FLAG_QOS_ON) != 0 || (p.flags & FLAG_MIRROR_ON) != 0 || stats::monitoring_enabled(p.tap_id);
     if need_ids {
         p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, info.dst_ip).unwrap_or(0);
         p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, info.src_ip).unwrap_or(0);
@@ -602,7 +603,7 @@ unsafe fn phase_ct_fastpath_tc_v6(ctx: &TcContext, info: &parser::PacketInfo, p:
             }
         }
 
-    let need_ids = (p.flags & FLAG_QOS_ON) != 0 || (p.flags & FLAG_MIRROR_ON) != 0 || stats::monitoring_enabled();
+    let need_ids = (p.flags & FLAG_QOS_ON) != 0 || (p.flags & FLAG_MIRROR_ON) != 0 || stats::monitoring_enabled(p.tap_id);
     if need_ids {
         p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, info.dst_ip_v6).unwrap_or(0);
         p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, info.src_ip_v6).unwrap_or(0);

@@ -9,6 +9,7 @@ pub use crate::common::{
     GroupStatsKey, GroupStatsValue,
     MirrorKey, GlobalMirrorKey, MirrorConfig, MirrorStatsValue,
     FirewallConfig,
+    TapConfig,
     TcpRtValue,
     DropKey, DropValue,
     TraceFilter, TraceEvent,
@@ -71,6 +72,9 @@ pub static CT_CONFIG: HashMap<u32, CtConfig> = HashMap::with_max_entries(1, 0);
 // 全局配置：特性开关等（key=0）
 #[map(name = "FIREWALL_CONFIG")]
 pub static FIREWALL_CONFIG: HashMap<u32, FirewallConfig> = HashMap::with_max_entries(1, 0);
+
+#[map(name = "TAP_CONFIG_MAP")]
+pub static TAP_CONFIG_MAP: HashMap<u32, TapConfig> = HashMap::with_max_entries(1024, 0);
 
 // --- Traffic statistics maps ---
 

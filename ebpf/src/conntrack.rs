@@ -3,7 +3,7 @@ use crate::common::{
     CT_NEW, CT_ESTABLISHED,
     IPPROTO_TCP, IPPROTO_UDP, IPPROTO_ICMP, IPPROTO_ICMPV6,
 };
-use crate::maps::{CT_TABLE_V4, CT_TABLE_V6, CT_CONFIG, FIREWALL_CONFIG};
+use crate::maps::{CT_TABLE_V4, CT_TABLE_V6, CT_CONFIG};
 
 const CT_FLAG_SEEN_REPLY: u8 = 1;
 
@@ -12,16 +12,6 @@ const DEFAULT_TCP_ESTABLISHED_NS: u64 = 300_000_000_000; // 300s
 const DEFAULT_TCP_NEW_NS: u64 = 30_000_000_000;          // 30s
 const DEFAULT_UDP_NS: u64 = 60_000_000_000;              // 60s
 const DEFAULT_ICMP_NS: u64 = 30_000_000_000;             // 30s
-
-#[inline(always)]
-fn conntrack_enabled() -> bool {
-    let key: u32 = 0;
-    if let Some(cfg) = unsafe { FIREWALL_CONFIG.get(&key) } {
-        cfg.conntrack_enabled != 0
-    } else {
-        true
-    }
-}
 
 #[inline(always)]
 fn get_timeout(proto: u8, state: u8) -> u64 {
@@ -121,7 +111,7 @@ fn extract_matched(entry: &CtValue, tap_id: u32) -> MatchedPolicy {
 /// Lookup CT for IPv4 packet.
 #[inline(always)]
 pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResult {
-    if !conntrack_enabled() {
+    if !crate::runtime::conntrack_enabled(key.tap_id) {
         return CtLookupResult::NotFound;
     }
     // Forward lookup
@@ -167,7 +157,7 @@ pub unsafe fn ct_lookup_v4(key: &CtKey4, now: u64, pkt_len: u32) -> CtLookupResu
 /// Lookup CT for IPv6 packet.
 #[inline(always)]
 pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResult {
-    if !conntrack_enabled() {
+    if !crate::runtime::conntrack_enabled(key.tap_id) {
         return CtLookupResult::NotFound;
     }
     // Forward lookup
@@ -212,7 +202,7 @@ pub unsafe fn ct_lookup_v6(key: &CtKey6, now: u64, pkt_len: u32) -> CtLookupResu
 /// Create a new CT entry for IPv4 with matched policy info.
 #[inline(always)]
 pub unsafe fn ct_create_v4(key: &CtKey4, now: u64, pkt_len: u32, matched: &MatchedPolicy) {
-    if !conntrack_enabled() {
+    if !crate::runtime::conntrack_enabled(key.tap_id) {
         return;
     }
     let val = CtValue {
@@ -232,7 +222,7 @@ pub unsafe fn ct_create_v4(key: &CtKey4, now: u64, pkt_len: u32, matched: &Match
 /// Create a new CT entry for IPv6 with matched policy info.
 #[inline(always)]
 pub unsafe fn ct_create_v6(key: &CtKey6, now: u64, pkt_len: u32, matched: &MatchedPolicy) {
-    if !conntrack_enabled() {
+    if !crate::runtime::conntrack_enabled(key.tap_id) {
         return;
     }
     let val = CtValue {

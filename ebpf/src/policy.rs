@@ -3,7 +3,7 @@ use crate::common::{
     XDP_PASS, XDP_DROP,
     DROP_ACL_DENY, DROP_ACL_PORT_DENY, DROP_ACL_DEFAULT_DENY,
 };
-use crate::maps::{POLICY_TABLE, PORT_BITMAP_POOL, FIREWALL_CONFIG};
+use crate::maps::{POLICY_TABLE, PORT_BITMAP_POOL};
 use crate::conntrack::MatchedPolicy;
 use crate::stats;
 use crate::drops;
@@ -25,13 +25,8 @@ pub struct PolicyArgs {
 /// Check if ACL (policy evaluation) is enabled.
 /// When disabled, all traffic is passed without policy evaluation.
 #[inline(always)]
-pub fn acl_enabled() -> bool {
-    let key: u32 = 0;
-    if let Some(cfg) = unsafe { FIREWALL_CONFIG.get(&key) } {
-        cfg.acl_enabled != 0
-    } else {
-        true // default: ACL enabled
-    }
+pub fn acl_enabled(tap_id: u32) -> bool {
+    crate::runtime::acl_enabled(tap_id)
 }
 
 /// 8-level fallback policy matching. Returns (XDP action, drop_reason, matched_policy).

@@ -1,16 +1,11 @@
 use crate::common::{MirrorKey, GlobalMirrorKey, MirrorStatsValue};
-use crate::maps::{FIREWALL_CONFIG, MIRROR_POLICY, MIRROR_GLOBAL, MIRROR_STATS, MIRROR_GLOBAL_STATS};
+use crate::maps::{MIRROR_POLICY, MIRROR_GLOBAL, MIRROR_STATS, MIRROR_GLOBAL_STATS};
 use aya_ebpf::helpers::gen::bpf_clone_redirect;
 
 /// Check if mirror is globally enabled via FIREWALL_CONFIG.
 #[inline(always)]
-pub fn mirror_enabled() -> bool {
-    let key: u32 = 0;
-    if let Some(cfg) = unsafe { FIREWALL_CONFIG.get(&key) } {
-        cfg.mirror_enabled != 0
-    } else {
-        false
-    }
+pub fn mirror_enabled(tap_id: u32) -> bool {
+    crate::runtime::mirror_enabled(tap_id)
 }
 
 /// Update per-rule mirror stats (MIRROR_STATS).

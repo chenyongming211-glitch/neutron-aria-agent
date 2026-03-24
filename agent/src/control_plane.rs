@@ -195,6 +195,16 @@ impl ControlPlane {
         let tap_id = state.tap_id;
         let runtime = TapMapRuntime::new(&pin_path, tap_id);
         aria_core::ebpf_ops::sync_iface_ctx(runtime, ifindex)?;
+        aria_core::ebpf_ops::update_runtime_config(
+            runtime,
+            Some(state.conntrack_enabled),
+            Some(state.monitoring_enabled),
+            Some(state.acl_enabled),
+            Some(state.qos_enabled && !state.qos_rules.is_empty()),
+            Some(state.mirror_enabled && !state.mirror_rules.is_empty()),
+            Some(state.tcprt_enabled),
+            None,
+        )?;
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             tap_id,
@@ -267,6 +277,17 @@ impl ControlPlane {
         }
 
         let tap_id = state.tap_id;
+        let runtime = TapMapRuntime::new(pin_path, tap_id);
+        aria_core::ebpf_ops::update_runtime_config(
+            runtime,
+            Some(state.conntrack_enabled),
+            Some(state.monitoring_enabled),
+            Some(state.acl_enabled),
+            Some(state.qos_enabled && !state.qos_rules.is_empty()),
+            Some(state.mirror_enabled && !state.mirror_rules.is_empty()),
+            Some(state.tcprt_enabled),
+            None,
+        )?;
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             tap_id,
@@ -304,6 +325,11 @@ impl ControlPlane {
             if let Some(ifindex) = ifindex {
                 if let Err(e) = aria_core::ebpf_ops::clear_iface_ctx(&state.pin_path, ifindex) {
                     warn!(instance = %name, tap_id, ifindex, error = %e, "failed to clear iface context");
+                }
+            }
+            if tap_id != aria_core::common::TAP_ID_UNASSIGNED {
+                if let Err(e) = aria_core::ebpf_ops::delete_tap_config(state.map_runtime()) {
+                    warn!(instance = %name, tap_id, error = %e, "failed to clear tap runtime config");
                 }
             }
             state.shutdown_wal().await;
@@ -865,7 +891,7 @@ impl ControlPlane {
         let inst = self.get_instance(instance).await?;
         let mut cfg = {
             let state = inst.read().await;
-            aria_core::ebpf_ops::read_firewall_config(state.map_runtime())
+            aria_core::ebpf_ops::read_runtime_config(state.map_runtime())
                 .map_err(|e| ControlPlaneError::KernelError(e))?
         };
         if let Ok(enabled) = self.get_ssl_global_config().await {
@@ -909,7 +935,7 @@ impl ControlPlane {
         // For mirror, the kernel flag = user_wants_mirror && has_rules
         let kernel_mirror = mirror.map(|m| m && !state.state.mirror_rules.is_empty());
 
-        if let Err(e) = aria_core::ebpf_ops::update_firewall_config(
+        if let Err(e) = aria_core::ebpf_ops::update_runtime_config(
             state.map_runtime(),
             conntrack,
             monitoring,
@@ -1459,7 +1485,7 @@ impl ControlPlane {
                 .await;
         }
 
-        match aria_core::ebpf_ops::read_firewall_config(state.map_runtime()) {
+        match aria_core::ebpf_ops::read_runtime_config(state.map_runtime()) {
             Ok(cfg) if (cfg.ssl_enabled != 0) == enabled => {
                 if state.ssl_sync_pending {
                     state.ssl_sync_pending = false;
