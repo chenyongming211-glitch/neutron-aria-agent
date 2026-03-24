@@ -361,13 +361,12 @@ impl FirewallInstance {
         Ok(())
     }
 
-    /// Replay state to already-pinned maps after control-plane registration succeeds.
+    /// Replay state to already-pinned maps.
     pub fn replay_state(&self, _ebpf_path: &str) -> Result<(), String> {
         let pin_path_str = self.pin_path.to_str().unwrap();
         let state_path_str = self.state_path.to_str().unwrap();
 
-        aria_core::ebpf_ops::replay_state_to_pinned_maps(pin_path_str, state_path_str);
-        Ok(())
+        aria_core::ebpf_ops::replay_state_to_pinned_maps(pin_path_str, state_path_str)
     }
 
     fn detach_with_cleanup(&self, remove_pin_path: bool) -> Result<(), String> {

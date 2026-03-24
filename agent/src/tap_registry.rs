@@ -124,7 +124,7 @@ impl TapRegistry {
 
         instance.attach(self.ebpf_path.to_str().unwrap())?;
 
-        // Only expose the instance after state/WAL registration succeeds.
+        // Only expose the instance after control-plane registration and replay succeed.
         if let Err(e) = self.control_plane.register_instance(iface).await {
             if let Err(detach_err) = instance.detach() {
                 warn!(
@@ -137,21 +137,6 @@ impl TapRegistry {
                 self.cleanup_shared_runtime_dir();
             }
             return Err(format!("control-plane register failed: {}", e));
-        }
-
-        if let Err(e) = instance.replay_state(self.ebpf_path.to_str().unwrap()) {
-            self.control_plane.unregister_instance(iface).await;
-            if let Err(detach_err) = instance.detach() {
-                warn!(
-                    instance = %iface,
-                    error = %detach_err,
-                    "failed to roll back attach after replay failure"
-                );
-            }
-            if !had_managed_instances {
-                self.cleanup_shared_runtime_dir();
-            }
-            return Err(format!("state replay failed: {}", e));
         }
 
         let mut instances = self.instances.write().await;

@@ -120,6 +120,30 @@ impl ControlPlaneError {
 }
 
 impl ControlPlane {
+    async fn cleanup_failed_managed_registration(
+        name: &str,
+        pin_path: &str,
+        tap_id: u32,
+        ifindex: u32,
+        wal: WalClient,
+        preserve_existing_runtime: bool,
+        iface_ctx_synced: bool,
+        tap_config_written: bool,
+    ) {
+        if !preserve_existing_runtime && iface_ctx_synced {
+            if let Err(e) = aria_core::ebpf_ops::clear_iface_ctx(pin_path, ifindex) {
+                warn!(instance = %name, tap_id, ifindex, error = %e, "failed to clear iface context after register failure");
+            }
+        }
+        if !preserve_existing_runtime && tap_config_written && tap_id != aria_core::common::TAP_ID_UNASSIGNED {
+            let runtime = TapMapRuntime::new(pin_path, tap_id);
+            if let Err(e) = aria_core::ebpf_ops::delete_tap_config(runtime) {
+                warn!(instance = %name, tap_id, error = %e, "failed to clear tap runtime config after register failure");
+            }
+        }
+        wal.shutdown().await;
+    }
+
     pub fn new(
         ebpf_path: &str,
         base_pin_path: &str,
@@ -159,7 +183,7 @@ impl ControlPlane {
     }
 
     /// Register an instance (called when TapRegistry attaches a tap).
-    /// If already registered, compacts state first to avoid data loss.
+    /// Replays persisted state into pinned maps before exposing the instance via API.
     pub async fn register_instance(&self, name: &str) -> Result<(), String> {
         let pin_path = self.managed_pin_path();
         let state_path = format!("{}/{}", self.base_state_path, name);
@@ -173,13 +197,16 @@ impl ControlPlane {
         };
 
         // If already registered, compact before replacing
-        {
+        let replacing_existing = {
             let instances = self.instances.read().await;
             if let Some(existing) = instances.get(name) {
                 let mut st = existing.write().await;
                 st.do_compact().await;
+                true
+            } else {
+                false
             }
-        }
+        };
 
         let mut state = aria_core::wal::load_with_wal(&state_path);
         let tap_id_assigned = self.ensure_managed_tap_id(name, &mut state).await?;
@@ -215,8 +242,13 @@ impl ControlPlane {
 
         let tap_id = state.tap_id;
         let runtime = TapMapRuntime::new(&pin_path, tap_id);
-        aria_core::ebpf_ops::sync_iface_ctx(runtime, ifindex)?;
-        aria_core::ebpf_ops::update_runtime_config(
+        if let Err(e) = aria_core::ebpf_ops::sync_iface_ctx(runtime, ifindex) {
+            wal.shutdown().await;
+            return Err(e);
+        }
+
+        let mut tap_config_written = false;
+        if let Err(e) = aria_core::ebpf_ops::update_runtime_config(
             runtime,
             Some(state.conntrack_enabled),
             Some(state.monitoring_enabled),
@@ -225,7 +257,37 @@ impl ControlPlane {
             Some(state.mirror_enabled && !state.mirror_rules.is_empty()),
             Some(state.tcprt_enabled),
             None,
-        )?;
+        ) {
+            Self::cleanup_failed_managed_registration(
+                name,
+                &pin_path,
+                tap_id,
+                ifindex,
+                wal,
+                replacing_existing,
+                true,
+                tap_config_written,
+            )
+            .await;
+            return Err(e);
+        }
+        tap_config_written = tap_id != aria_core::common::TAP_ID_UNASSIGNED;
+
+        if let Err(e) = aria_core::ebpf_ops::replay_state_to_pinned_maps(&pin_path, &state_path) {
+            Self::cleanup_failed_managed_registration(
+                name,
+                &pin_path,
+                tap_id,
+                ifindex,
+                wal,
+                replacing_existing,
+                true,
+                tap_config_written,
+            )
+            .await;
+            return Err(e);
+        }
+
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             tap_id,

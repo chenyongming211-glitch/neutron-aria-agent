@@ -925,14 +925,14 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
 }
 
 /// Replay snapshot + WAL directly into already pinned maps without loading a new eBPF object.
-pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) {
+pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(), String> {
     let state = crate::wal::load_with_wal(state_path);
     let tap_id = state.tap_id;
     let runtime = TapMapRuntime::new(pin_path, tap_id);
 
     if state.groups.is_empty() && state.rules.is_empty() && state.qos_rules.is_empty() && state.mirror_rules.is_empty() {
         info!(state_path = %state_path, "state is empty; nothing to replay");
-        return;
+        return Ok(());
     }
 
     info!(
@@ -1045,7 +1045,7 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) {
         let target_ifindex = match crate::mirror_ops::resolve_ifindex(&mr.target_iface) {
             Ok(idx) => idx,
             Err(e) => {
-                warn!(target_iface = %mr.target_iface, error = %e, "mirror target not found during pinned replay");
+                errors.push(format!("mirror target '{}' not found: {}", mr.target_iface, e));
                 continue;
             }
         };
@@ -1088,7 +1088,20 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) {
         for err in &errors {
             warn!(error = %err, "pinned replay error");
         }
+        let preview = errors.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
+        let suffix = if errors.len() > 3 {
+            format!("; ... {} more", errors.len() - 3)
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "pinned replay encountered {} errors: {}{}",
+            errors.len(),
+            preview,
+            suffix
+        ));
     }
+    Ok(())
 }
 
 pub fn show_stats(pin_path: &str, state_path: &str) -> Result<(), String> {
