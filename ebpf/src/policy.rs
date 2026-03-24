@@ -36,13 +36,14 @@ pub fn acl_enabled(tap_id: u32) -> bool {
 /// Tries 8 candidate keys from most-specific to least-specific (wildcarding
 /// src_id, dst_id, proto with 0). The matched_policy records the exact key
 /// that hit (including wildcards) so the CT fast path can replay rule stats.
+/// The final bool indicates whether a policy entry actually matched.
 ///
 /// Priority order (bitmask: bit0=src_wildcard, bit1=dst_wildcard, bit2=proto_wildcard):
 ///   0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111
 #[inline(always)]
 pub unsafe fn evaluate_policy(
     args: &PolicyArgs,
-) -> (u32, u8, MatchedPolicy) {
+) -> (u32, u8, MatchedPolicy, bool) {
     // Priority-ordered bitmask: which fields to wildcard (0=specific value, 1=wildcard to 0)
     // bit 0: src_id, bit 1: dst_id, bit 2: proto
     const ORDER: [u8; 8] = [0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111];
@@ -64,10 +65,6 @@ pub unsafe fn evaluate_policy(
         };
         if let Some(policy) = POLICY_TABLE.get(&key) {
             let (result, drop_reason) = apply_policy(args.tap_id, policy, args.dst_port);
-            stats::update_rule_stats(&key, args.pkt_len, result == XDP_DROP);
-            if result == XDP_DROP {
-                drops::record_drop(&drops::DropArgs { tap_id: args.tap_id, reason: drop_reason, direction: args.direction, proto: args.proto, src_id: args.src_id, dst_id: args.dst_id, pkt_len: args.pkt_len, now: args.now, _pad: 0 });
-            }
             let matched = MatchedPolicy {
                 tap_id: args.tap_id,
                 src_id: s,
@@ -75,7 +72,7 @@ pub unsafe fn evaluate_policy(
                 proto: p,
                 direction: args.direction,
             };
-            return (result, drop_reason, matched);
+            return (result, drop_reason, matched, true);
         }
         i += 1;
     }
@@ -87,7 +84,35 @@ pub unsafe fn evaluate_policy(
         proto: 0,
         direction: args.direction,
     };
-    (XDP_PASS, 0, matched)
+    (XDP_PASS, 0, matched, false)
+}
+
+#[inline(always)]
+pub unsafe fn account_policy_result(
+    args: &PolicyArgs,
+    matched: &MatchedPolicy,
+    result: u32,
+    drop_reason: u8,
+) {
+    stats::update_rule_stats(&matched.to_policy_key(), args.pkt_len, result == XDP_DROP);
+    if result == XDP_DROP {
+        record_policy_drop(args, drop_reason);
+    }
+}
+
+#[inline(always)]
+pub unsafe fn record_policy_drop(args: &PolicyArgs, drop_reason: u8) {
+    drops::record_drop(&drops::DropArgs {
+        tap_id: args.tap_id,
+        reason: drop_reason,
+        direction: args.direction,
+        proto: args.proto,
+        src_id: args.src_id,
+        dst_id: args.dst_id,
+        pkt_len: args.pkt_len,
+        now: args.now,
+        _pad: 0,
+    });
 }
 
 /// Returns (XDP action, drop_reason). drop_reason is 0 for PASS.

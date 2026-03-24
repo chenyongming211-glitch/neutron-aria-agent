@@ -27,8 +27,8 @@ use common::{
     CtKey4, CtKey6,
     XDP_PASS, XDP_DROP, DIR_INGRESS, DIR_EGRESS,
     IPPROTO_TCP,
-    DROP_QOS_INGRESS, DROP_QOS_EGRESS,
-    TRACE_XDP_INGRESS, TRACE_XDP_DROP, TRACE_TC_EGRESS, TRACE_TC_DROP, TRACE_TC_INGRESS,
+    DROP_QOS_EGRESS,
+    TRACE_TC_EGRESS, TRACE_TC_DROP, TRACE_TC_INGRESS,
     TRACE_RESULT_PASS, TRACE_RESULT_DROP_QOS,
     PipelineCtx,
     FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING, FLAG_ACL_ON, FLAG_MIRROR_ON,
@@ -90,7 +90,7 @@ unsafe fn try_xdp_firewall(ctx: &XdpContext, info: *const parser::PacketInfo, pi
     p.now = bpf_ktime_get_ns();
     p.proto = info.proto;
     load_runtime_ctx_xdp(ctx, p);
-    load_feature_flags(p, info);
+    load_feature_flags_xdp(p);
 
     if info.is_ipv6 {
         let ct_key = CtKey6 {
@@ -107,20 +107,10 @@ unsafe fn try_xdp_firewall(ctx: &XdpContext, info: *const parser::PacketInfo, pi
             return Ok(p.action);
         }
 
-        p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, p.tap_id, info.src_ip_v6).unwrap_or(0);
-        p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, p.tap_id, info.dst_ip_v6).unwrap_or(0);
-
         if (p.flags & FLAG_ACL_ON) != 0 {
+            p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, p.tap_id, info.src_ip_v6).unwrap_or(0);
+            p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, p.tap_id, info.dst_ip_v6).unwrap_or(0);
             phase_policy_xdp(info, p);
-            if p.action == XDP_DROP {
-                return Ok(p.action);
-            }
-        }
-
-        phase_flow_tcprt_v6(info, p, &ct_key);
-
-        if (p.flags & FLAG_QOS_ON) != 0 {
-            phase_qos_ingress_xdp(info, p);
             if p.action == XDP_DROP {
                 return Ok(p.action);
             }
@@ -145,20 +135,10 @@ unsafe fn try_xdp_firewall(ctx: &XdpContext, info: *const parser::PacketInfo, pi
         return Ok(p.action);
     }
 
-    p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, p.tap_id, info.src_ip).unwrap_or(0);
-    p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, p.tap_id, info.dst_ip).unwrap_or(0);
-
     if (p.flags & FLAG_ACL_ON) != 0 {
+        p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, p.tap_id, info.src_ip).unwrap_or(0);
+        p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, p.tap_id, info.dst_ip).unwrap_or(0);
         phase_policy_xdp(info, p);
-        if p.action == XDP_DROP {
-            return Ok(p.action);
-        }
-    }
-
-    phase_flow_tcprt_v4(info, p, &ct_key);
-
-    if (p.flags & FLAG_QOS_ON) != 0 {
-        phase_qos_ingress_xdp(info, p);
         if p.action == XDP_DROP {
             return Ok(p.action);
         }
@@ -211,7 +191,7 @@ unsafe fn try_tc_egress(ctx: &TcContext, info: *const parser::PacketInfo, pipe: 
     p.now = bpf_ktime_get_ns();
     p.proto = info.proto;
     load_runtime_ctx_tc(ctx, p);
-    load_feature_flags(p, info);
+    load_feature_flags_tc(p, info);
 
     if info.is_ipv6 {
         let ct_key = CtKey6 {
@@ -356,7 +336,12 @@ unsafe fn try_tc_ingress(ctx: &TcContext, info: *const parser::PacketInfo, pipe:
 // --- Helpers ---
 
 #[inline(always)]
-unsafe fn load_feature_flags(p: &mut PipelineCtx, info: &parser::PacketInfo) {
+unsafe fn load_feature_flags_xdp(p: &mut PipelineCtx) {
+    if policy::acl_enabled(p.tap_id) { p.flags |= FLAG_ACL_ON; }
+}
+
+#[inline(always)]
+unsafe fn load_feature_flags_tc(p: &mut PipelineCtx, info: &parser::PacketInfo) {
     if qos::qos_enabled(p.tap_id) { p.flags |= FLAG_QOS_ON; }
     if tcprt::tcprt_enabled(p.tap_id) { p.flags |= FLAG_TCPRT_ON; }
     if policy::acl_enabled(p.tap_id) { p.flags |= FLAG_ACL_ON; }
@@ -477,75 +462,15 @@ unsafe fn phase_ct_v6(_info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &
     }
 }
 
-/// CT fast-path for XDP ingress IPv4: stats, tcprt, qos, group stats, trace.
+/// CT fast-path for XDP ingress IPv4.
 #[inline(never)]
-unsafe fn phase_ct_fastpath_xdp_v4(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
-    let tracing = (p.flags & FLAG_TRACING) != 0;
-    let matched = get_matched(p);
-    stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
-    stats::update_flow_stats_v4(ct_key, p.pkt_len, p.now);
-
-        if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
-            if (p.flags & FLAG_IS_FORWARD) != 0 {
-                tcprt::track_tcp_rt_v4(ct_key, info, p.now, true);
-            } else {
-                tcprt::track_tcp_rt_v4_rev(p.tap_id, info, p.now);
-            }
-        }
-
-    let need_ids = (p.flags & FLAG_QOS_ON) != 0 || stats::monitoring_enabled(p.tap_id);
-    if need_ids {
-        p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, p.tap_id, info.src_ip).unwrap_or(0);
-        p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, p.tap_id, info.dst_ip).unwrap_or(0);
-        if (p.flags & FLAG_QOS_ON) != 0 && !qos::apply_qos_ingress(p.tap_id, p.src_id, p.dst_id, p.pkt_len, p.now) {
-            p.drop_reason = DROP_QOS_INGRESS;
-            p.action = XDP_DROP;
-            do_drop(p);
-            if tracing { do_trace(info, p, TRACE_XDP_DROP, TRACE_RESULT_DROP_QOS); }
-            return;
-        }
-        stats::update_group_stats(p.tap_id, p.src_id, DIR_EGRESS, p.pkt_len);
-        stats::update_group_stats(p.tap_id, p.dst_id, DIR_INGRESS, p.pkt_len);
-        if tracing { do_trace(info, p, TRACE_XDP_INGRESS, TRACE_RESULT_PASS); }
-    } else if tracing {
-        do_trace(info, p, TRACE_XDP_INGRESS, TRACE_RESULT_PASS);
-    }
+unsafe fn phase_ct_fastpath_xdp_v4(_info: &parser::PacketInfo, p: &mut PipelineCtx, _ct_key: &CtKey4) {
     p.action = XDP_PASS;
 }
 
 /// CT fast-path for XDP ingress IPv6.
 #[inline(never)]
-unsafe fn phase_ct_fastpath_xdp_v6(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
-    let tracing = (p.flags & FLAG_TRACING) != 0;
-    let matched = get_matched(p);
-    stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
-    stats::update_flow_stats_v6(ct_key, p.pkt_len, p.now);
-
-        if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
-            if (p.flags & FLAG_IS_FORWARD) != 0 {
-                tcprt::track_tcp_rt_v6(ct_key, info, p.now, true);
-            } else {
-                tcprt::track_tcp_rt_v6_rev(p.tap_id, info, p.now);
-            }
-        }
-
-    let need_ids = (p.flags & FLAG_QOS_ON) != 0 || stats::monitoring_enabled(p.tap_id);
-    if need_ids {
-        p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, p.tap_id, info.src_ip_v6).unwrap_or(0);
-        p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, p.tap_id, info.dst_ip_v6).unwrap_or(0);
-        if (p.flags & FLAG_QOS_ON) != 0 && !qos::apply_qos_ingress(p.tap_id, p.src_id, p.dst_id, p.pkt_len, p.now) {
-            p.drop_reason = DROP_QOS_INGRESS;
-            p.action = XDP_DROP;
-            do_drop(p);
-            if tracing { do_trace(info, p, TRACE_XDP_DROP, TRACE_RESULT_DROP_QOS); }
-            return;
-        }
-        stats::update_group_stats(p.tap_id, p.src_id, DIR_EGRESS, p.pkt_len);
-        stats::update_group_stats(p.tap_id, p.dst_id, DIR_INGRESS, p.pkt_len);
-        if tracing { do_trace(info, p, TRACE_XDP_INGRESS, TRACE_RESULT_PASS); }
-    } else if tracing {
-        do_trace(info, p, TRACE_XDP_INGRESS, TRACE_RESULT_PASS);
-    }
+unsafe fn phase_ct_fastpath_xdp_v6(_info: &parser::PacketInfo, p: &mut PipelineCtx, _ct_key: &CtKey6) {
     p.action = XDP_PASS;
 }
 
@@ -640,29 +565,33 @@ unsafe fn phase_ct_fastpath_tc_v6(ctx: &TcContext, info: &parser::PacketInfo, p:
 /// Phase: Policy evaluation for XDP (sets p.action, p.drop_reason, p.matched_*).
 #[inline(never)]
 unsafe fn phase_policy_xdp(info: &parser::PacketInfo, p: &mut PipelineCtx) {
-    let (result, drop_reason, matched) = policy::evaluate_policy(&policy::PolicyArgs {
+    let args = policy::PolicyArgs {
         tap_id: p.tap_id,
-        src_id: p.src_id, dst_id: p.dst_id, proto: info.proto,
+        src_id: p.src_id, dst_id: p.dst_id, proto: p.proto,
         direction: p.direction, dst_port: info.dst_port, pkt_len: p.pkt_len, now: p.now,
-    });
+    };
+    let (result, drop_reason, matched, _) = policy::evaluate_policy(&args);
     p.action = result;
     p.drop_reason = drop_reason;
     set_matched(p, &matched);
 
-    if result == XDP_DROP && (p.flags & FLAG_TRACING) != 0 {
-        let trace_result = match drop_reason { 1 => 1, 2 => 2, 3 => 3, _ => 1 };
-        do_trace(info, p, TRACE_XDP_DROP, trace_result);
+    if result == XDP_DROP {
+        policy::record_policy_drop(&args, drop_reason);
     }
 }
 
 /// Phase: Policy evaluation for TC.
 #[inline(always)]
 unsafe fn phase_policy_tc(info: &parser::PacketInfo, p: &mut PipelineCtx) {
-    let (result, drop_reason, matched) = policy::evaluate_policy(&policy::PolicyArgs {
+    let args = policy::PolicyArgs {
         tap_id: p.tap_id,
         src_id: p.src_id, dst_id: p.dst_id, proto: info.proto,
         direction: p.direction, dst_port: info.dst_port, pkt_len: p.pkt_len, now: p.now,
-    });
+    };
+    let (result, drop_reason, matched, policy_hit) = policy::evaluate_policy(&args);
+    if policy_hit {
+        policy::account_policy_result(&args, &matched, result, drop_reason);
+    }
     p.drop_reason = drop_reason;
     set_matched(p, &matched);
 
@@ -695,19 +624,6 @@ unsafe fn phase_flow_tcprt_v6(info: &parser::PacketInfo, p: &mut PipelineCtx, ct
     }
 }
 
-/// Phase: QoS ingress check for XDP. Sets p.action = XDP_DROP if rate-limited.
-#[inline(never)]
-unsafe fn phase_qos_ingress_xdp(info: &parser::PacketInfo, p: &mut PipelineCtx) {
-    if !qos::apply_qos_ingress(p.tap_id, p.src_id, p.dst_id, p.pkt_len, p.now) {
-        p.drop_reason = DROP_QOS_INGRESS;
-        p.action = XDP_DROP;
-        do_drop(p);
-        if (p.flags & FLAG_TRACING) != 0 {
-            do_trace(info, p, TRACE_XDP_DROP, TRACE_RESULT_DROP_QOS);
-        }
-    }
-}
-
 /// Phase: QoS egress for TC. Sets p.action = TC_ACT_SHOT if dropped.
 #[inline(always)]
 unsafe fn phase_qos_egress_tc(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx) {
@@ -724,34 +640,24 @@ unsafe fn phase_qos_egress_tc(ctx: &TcContext, info: &parser::PacketInfo, p: &mu
     apply_edt_prio(ctx, edt, prio);
 }
 
-/// Phase: Post-accept for XDP ingress IPv4 (group stats, CT create, trace).
+/// Phase: Post-accept for XDP ingress IPv4.
 #[inline(never)]
-unsafe fn phase_post_accept_xdp_v4(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
-    stats::update_group_stats(p.tap_id, p.src_id, DIR_EGRESS, p.pkt_len);
-    stats::update_group_stats(p.tap_id, p.dst_id, DIR_INGRESS, p.pkt_len);
+unsafe fn phase_post_accept_xdp_v4(_info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
     if (p.flags & FLAG_ACL_ON) != 0 {
         let matched = get_matched(p);
         conntrack::ct_create_v4(ct_key, p.now, p.pkt_len, &matched);
         p.ct_state = 1;
-    }
-    if (p.flags & FLAG_TRACING) != 0 {
-        do_trace(info, p, TRACE_XDP_INGRESS, TRACE_RESULT_PASS);
     }
     p.action = XDP_PASS;
 }
 
 /// Phase: Post-accept for XDP ingress IPv6.
 #[inline(never)]
-unsafe fn phase_post_accept_xdp_v6(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
-    stats::update_group_stats(p.tap_id, p.src_id, DIR_EGRESS, p.pkt_len);
-    stats::update_group_stats(p.tap_id, p.dst_id, DIR_INGRESS, p.pkt_len);
+unsafe fn phase_post_accept_xdp_v6(_info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
     if (p.flags & FLAG_ACL_ON) != 0 {
         let matched = get_matched(p);
         conntrack::ct_create_v6(ct_key, p.now, p.pkt_len, &matched);
         p.ct_state = 1;
-    }
-    if (p.flags & FLAG_TRACING) != 0 {
-        do_trace(info, p, TRACE_XDP_INGRESS, TRACE_RESULT_PASS);
     }
     p.action = XDP_PASS;
 }
