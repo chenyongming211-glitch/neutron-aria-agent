@@ -2185,17 +2185,18 @@ async fn main() {
             }
             DropsCommands::Flush { iface, include_unattributed, force } => {
                 if !force {
-                    return Err("Refusing to flush kernel-drop statistics without --force".to_string());
-                }
-                let query = kernel_drop_query_from_cli(
-                    tap_filter.as_ref(),
-                    iface,
-                    None,
-                    include_unattributed,
-                );
-                match client.flush_kernel_drops(&query).await {
-                    Ok(resp) => { println!("Flushed {} kernel drop entries", resp.flushed); Ok(()) }
-                    Err(e) => Err(e),
+                    Err("Refusing to flush kernel-drop statistics without --force".to_string())
+                } else {
+                    let query = kernel_drop_query_from_cli(
+                        tap_filter.as_ref(),
+                        iface,
+                        None,
+                        include_unattributed,
+                    );
+                    match client.flush_kernel_drops(&query).await {
+                        Ok(resp) => { println!("Flushed {} kernel drop entries", resp.flushed); Ok(()) }
+                        Err(e) => Err(e),
+                    }
                 }
             }
         },
