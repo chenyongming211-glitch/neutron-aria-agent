@@ -2475,5 +2475,5 @@ async fn main() {
     if let Err(e) = result {
         eprintln!("Error: {}", e);
         std::process::exit(1);
-    }
+    };
 }
