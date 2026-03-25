@@ -130,17 +130,23 @@ pub static GROUP_STATS_BUF: PerCpuArray<GroupStatsValue> = PerCpuArray::with_max
 
 // --- Mirror (Port SPAN) maps ---
 
+// Shared managed runtime supports up to 1024 tap IDs. Global mirror rules are
+// keyed by (tap_id, direction), so reserve two entries per tap.
+const MIRROR_GLOBAL_MAX_ENTRIES: u32 = 2048;
+
 #[map(name = "MIRROR_POLICY")]
 pub static MIRROR_POLICY: HashMap<MirrorKey, MirrorConfig> = HashMap::with_max_entries(4096, 0);
 
 #[map(name = "MIRROR_GLOBAL")]
-pub static MIRROR_GLOBAL: HashMap<GlobalMirrorKey, MirrorConfig> = HashMap::with_max_entries(2, 0);
+pub static MIRROR_GLOBAL: HashMap<GlobalMirrorKey, MirrorConfig> =
+    HashMap::with_max_entries(MIRROR_GLOBAL_MAX_ENTRIES, 0);
 
 #[map(name = "MIRROR_STATS")]
 pub static MIRROR_STATS: PerCpuHashMap<MirrorKey, MirrorStatsValue> = PerCpuHashMap::with_max_entries(4096, 0);
 
 #[map(name = "MIRROR_GLOBAL_STATS")]
-pub static MIRROR_GLOBAL_STATS: PerCpuHashMap<GlobalMirrorKey, MirrorStatsValue> = PerCpuHashMap::with_max_entries(2, 0);
+pub static MIRROR_GLOBAL_STATS: PerCpuHashMap<GlobalMirrorKey, MirrorStatsValue> =
+    PerCpuHashMap::with_max_entries(MIRROR_GLOBAL_MAX_ENTRIES, 0);
 
 #[map(name = "MIRROR_STATS_BUF")]
 pub static MIRROR_STATS_BUF: PerCpuArray<MirrorStatsValue> = PerCpuArray::with_max_entries(1, 0);
