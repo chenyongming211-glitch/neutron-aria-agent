@@ -99,11 +99,6 @@ impl TapRegistry {
             }
         }
 
-        let had_managed_instances = {
-            let instances = self.instances.read().await;
-            !instances.is_empty()
-        };
-
         let mut instance = FirewallInstance::new(
             iface,
             PathBuf::from(self.control_plane.managed_pin_path()),
@@ -120,24 +115,31 @@ impl TapRegistry {
             }
         }
 
-        self.control_plane.prepare_managed_instance(iface).await?;
+        let runtime_pin = instance.ensure_runtime_pinned(self.ebpf_path.to_str().unwrap())?;
 
-        instance.attach(self.ebpf_path.to_str().unwrap())?;
-
-        // Only expose the instance after control-plane registration and replay succeed.
-        if let Err(e) = self.control_plane.register_instance(iface).await {
-            if let Err(detach_err) = instance.detach() {
-                warn!(
-                    instance = %iface,
-                    error = %detach_err,
-                    "failed to roll back attach after register failure"
-                );
+        let prepared = match self
+            .control_plane
+            .prepare_managed_registration(iface, &runtime_pin)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                if runtime_pin.created_shared_runtime {
+                    self.cleanup_shared_runtime_dir();
+                }
+                return Err(format!("control-plane prepare failed: {}", e));
             }
-            if !had_managed_instances {
+        };
+
+        if let Err(e) = instance.attach_links_from_pinned_runtime(&runtime_pin) {
+            self.control_plane.abort_managed_registration(prepared).await;
+            if runtime_pin.created_shared_runtime {
                 self.cleanup_shared_runtime_dir();
             }
-            return Err(format!("control-plane register failed: {}", e));
+            return Err(format!("interface link attach failed: {}", e));
         }
+
+        self.control_plane.publish_managed_instance(prepared).await;
 
         let mut instances = self.instances.write().await;
         instances.insert(iface.to_string(), instance);

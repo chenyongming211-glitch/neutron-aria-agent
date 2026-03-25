@@ -6,6 +6,7 @@ use tracing::{error, info, warn};
 use aria_core::common::TapMapRuntime;
 use aria_core::state::{FirewallState, GroupInfo, RuleInfo, QosRuleInfo, MirrorRuleInfo};
 use aria_core::wal::{WalClient, WalEntry};
+use crate::instance::RuntimePinState;
 use crate::service_chain::{ServiceChain, self};
 use crate::ssl_manager::SslManager;
 
@@ -63,6 +64,20 @@ impl InstanceState {
     async fn shutdown_wal(&mut self) {
         self.wal.shutdown().await;
     }
+}
+
+pub struct PreparedManagedInstance {
+    name: String,
+    state: FirewallState,
+    tap_id: u32,
+    ifindex: u32,
+    pin_path: String,
+    state_path: String,
+    wal: WalClient,
+    desired_ssl_enabled: Option<bool>,
+    preserve_existing_runtime: bool,
+    iface_ctx_synced: bool,
+    tap_config_written: bool,
 }
 
 pub struct ControlPlane {
@@ -172,25 +187,12 @@ impl ControlPlane {
         format!("{}/{}", self.base_pin_path, MANAGED_SHARED_PIN_NAMESPACE)
     }
 
-    pub async fn prepare_managed_instance(&self, name: &str) -> Result<u32, String> {
-        let state_path = format!("{}/{}", self.base_state_path, name);
-        let mut state = aria_core::wal::load_with_wal(&state_path);
-        let tap_id_assigned = self.ensure_managed_tap_id(name, &mut state).await?;
-
-        if tap_id_assigned {
-            let state_manager = aria_core::state::StateManager::new(&state_path);
-            state_manager
-                .set_tap_id(state.tap_id)
-                .map_err(|e| format!("failed to persist tap_id for {}: {}", name, e))?;
-            info!(instance = %name, tap_id = state.tap_id, "prepared managed tap state");
-        }
-
-        Ok(state.tap_id)
-    }
-
-    /// Register an instance (called when TapRegistry attaches a tap).
-    /// Replays persisted state into pinned maps before exposing the instance via API.
-    pub async fn register_instance(&self, name: &str) -> Result<(), String> {
+    /// Prepare tap-scoped runtime state before any interface link goes live.
+    pub async fn prepare_managed_registration(
+        &self,
+        name: &str,
+        pin_state: &RuntimePinState,
+    ) -> Result<PreparedManagedInstance, String> {
         let pin_path = self.managed_pin_path();
         let state_path = format!("{}/{}", self.base_state_path, name);
         let ifindex = Self::resolve_ifindex(name)?;
@@ -216,6 +218,13 @@ impl ControlPlane {
 
         let mut state = aria_core::wal::load_with_wal(&state_path);
         let tap_id_assigned = self.ensure_managed_tap_id(name, &mut state).await?;
+        if tap_id_assigned {
+            let state_manager = aria_core::state::StateManager::new(&state_path);
+            state_manager
+                .set_tap_id(state.tap_id)
+                .map_err(|e| format!("failed to persist tap_id for {}: {}", name, e))?;
+            info!(instance = %name, tap_id = state.tap_id, "prepared managed tap state");
+        }
         let ssl_changed = global_ssl_enabled
             .map(|enabled| state.ssl_enabled != enabled)
             .unwrap_or(false);
@@ -247,23 +256,27 @@ impl ControlPlane {
         }
 
         let tap_id = state.tap_id;
-        let runtime = TapMapRuntime::new(&pin_path, tap_id);
-        if !replacing_existing {
-            if let Err(e) = aria_core::ebpf_ops::scrub_managed_runtime_state(runtime) {
+        let preserve_existing_runtime = replacing_existing || pin_state.preexisting_xdp_link;
+        let mut iface_ctx_synced = false;
+        let mut tap_config_written = false;
+
+        if pin_state.preexisting_xdp_link {
+            if let Err(e) = aria_core::ebpf_ops::sync_iface_ctx(TapMapRuntime::new(&pin_path, tap_id), ifindex) {
+                wal.shutdown().await;
+                return Err(e);
+            }
+            iface_ctx_synced = true;
+        } else if !replacing_existing {
+            if let Err(e) = aria_core::ebpf_ops::scrub_managed_runtime_state(TapMapRuntime::new(&pin_path, tap_id)) {
                 wal.shutdown().await;
                 return Err(format!("failed to scrub stale tap runtime state: {}", e));
             }
         } else {
             info!(instance = %name, tap_id, "skipping pre-replay scrub while replacing existing registered instance");
         }
-        if let Err(e) = aria_core::ebpf_ops::sync_iface_ctx(runtime, ifindex) {
-            wal.shutdown().await;
-            return Err(e);
-        }
 
-        let mut tap_config_written = false;
         if let Err(e) = aria_core::ebpf_ops::update_runtime_config(
-            runtime,
+            TapMapRuntime::new(&pin_path, tap_id),
             Some(state.conntrack_enabled),
             Some(state.monitoring_enabled),
             Some(state.acl_enabled),
@@ -278,8 +291,8 @@ impl ControlPlane {
                 tap_id,
                 ifindex,
                 wal,
-                replacing_existing,
-                true,
+                preserve_existing_runtime,
+                iface_ctx_synced,
                 tap_config_written,
             )
             .await;
@@ -294,13 +307,59 @@ impl ControlPlane {
                 tap_id,
                 ifindex,
                 wal,
-                replacing_existing,
-                true,
+                preserve_existing_runtime,
+                iface_ctx_synced,
                 tap_config_written,
             )
             .await;
             return Err(e);
         }
+
+        if !pin_state.preexisting_xdp_link {
+            if let Err(e) = aria_core::ebpf_ops::sync_iface_ctx(TapMapRuntime::new(&pin_path, tap_id), ifindex) {
+                Self::cleanup_failed_managed_registration(
+                    name,
+                    &pin_path,
+                    tap_id,
+                    ifindex,
+                    wal,
+                    preserve_existing_runtime,
+                    iface_ctx_synced,
+                    tap_config_written,
+                )
+                .await;
+                return Err(e);
+            }
+            iface_ctx_synced = true;
+        }
+
+        Ok(PreparedManagedInstance {
+            name: name.to_string(),
+            state,
+            tap_id,
+            ifindex,
+            pin_path,
+            state_path,
+            wal,
+            desired_ssl_enabled: global_ssl_enabled,
+            preserve_existing_runtime,
+            iface_ctx_synced,
+            tap_config_written,
+        })
+    }
+
+    pub async fn publish_managed_instance(&self, prepared: PreparedManagedInstance) {
+        let PreparedManagedInstance {
+            name,
+            state,
+            tap_id,
+            ifindex,
+            pin_path,
+            state_path,
+            wal,
+            desired_ssl_enabled,
+            ..
+        } = prepared;
 
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
@@ -317,14 +376,27 @@ impl ControlPlane {
         instances.insert(name.to_string(), instance.clone());
         drop(instances);
 
-        if let Some(enabled) = global_ssl_enabled {
+        if let Some(enabled) = desired_ssl_enabled {
             let _ = self
-                .reconcile_instance_ssl_state(name, &instance, enabled)
+                .reconcile_instance_ssl_state(&name, &instance, enabled)
                 .await;
         }
 
         info!(instance = %name, tap_id, ifindex, "registered instance");
-        Ok(())
+    }
+
+    pub async fn abort_managed_registration(&self, prepared: PreparedManagedInstance) {
+        Self::cleanup_failed_managed_registration(
+            &prepared.name,
+            &prepared.pin_path,
+            prepared.tap_id,
+            prepared.ifindex,
+            prepared.wal,
+            prepared.preserve_existing_runtime,
+            prepared.iface_ctx_synced,
+            prepared.tap_config_written,
+        )
+        .await;
     }
 
     /// Register the "system" instance (standalone mode)
