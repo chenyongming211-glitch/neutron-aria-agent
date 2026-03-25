@@ -291,6 +291,12 @@ pub fn sync_iface_ctx(runtime: TapMapRuntime<'_>, ifindex: u32) -> Result<(), St
         .map_err(|e| format!("IFACE_CTX_MAP insert for ifindex {}: {:?}", ifindex, e))
 }
 
+pub fn read_iface_ctx(pin_path: &str, ifindex: u32) -> Result<IfaceCtx, String> {
+    let map = open_pinned_iface_ctx(pin_path)?;
+    map.get(&ifindex, 0)
+        .map_err(|e| format!("read IFACE_CTX_MAP for ifindex {}: {:?}", ifindex, e))
+}
+
 pub fn clear_iface_ctx(pin_path: &str, ifindex: u32) -> Result<(), String> {
     let mut map = open_pinned_iface_ctx(pin_path)?;
     match map.remove(&ifindex) {

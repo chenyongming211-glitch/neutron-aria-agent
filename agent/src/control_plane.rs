@@ -135,6 +135,57 @@ impl ControlPlaneError {
 }
 
 impl ControlPlane {
+    fn expected_runtime_flags(state: &FirewallState) -> (u8, u8, u8, u8, u8, u8, u8) {
+        (
+            state.conntrack_enabled as u8,
+            state.monitoring_enabled as u8,
+            state.acl_enabled as u8,
+            (state.qos_enabled && !state.qos_rules.is_empty()) as u8,
+            (state.mirror_enabled && !state.mirror_rules.is_empty()) as u8,
+            state.tcprt_enabled as u8,
+            state.ssl_enabled as u8,
+        )
+    }
+
+    fn validate_preexisting_live_runtime(
+        &self,
+        name: &str,
+        pin_path: &str,
+        tap_id: u32,
+        ifindex: u32,
+        state: &FirewallState,
+    ) -> Result<(), String> {
+        let iface_ctx = aria_core::ebpf_ops::read_iface_ctx(pin_path, ifindex)?;
+        if iface_ctx.tap_id != tap_id {
+            return Err(format!(
+                "preexisting live runtime mismatch for {}: IFACE_CTX_MAP ifindex {} points to tap_id {}, expected {}",
+                name, ifindex, iface_ctx.tap_id, tap_id
+            ));
+        }
+
+        let runtime = TapMapRuntime::new(pin_path, tap_id);
+        let actual = aria_core::ebpf_ops::read_runtime_config(runtime)?;
+        let expected = Self::expected_runtime_flags(state);
+        let actual_flags = (
+            actual.conntrack_enabled,
+            actual.monitoring_enabled,
+            actual.acl_enabled,
+            actual.qos_enabled,
+            actual.mirror_enabled,
+            actual.tcprt_enabled,
+            actual.ssl_enabled,
+        );
+
+        if actual_flags != expected {
+            return Err(format!(
+                "preexisting live runtime mismatch for {}: actual flags {:?}, expected {:?}; detach and reattach to rebuild safely",
+                name, actual_flags, expected
+            ));
+        }
+
+        Ok(())
+    }
+
     async fn cleanup_failed_managed_registration(
         name: &str,
         pin_path: &str,
@@ -261,11 +312,10 @@ impl ControlPlane {
         let mut tap_config_written = false;
 
         if pin_state.preexisting_xdp_link {
-            if let Err(e) = aria_core::ebpf_ops::sync_iface_ctx(TapMapRuntime::new(&pin_path, tap_id), ifindex) {
+            if let Err(e) = self.validate_preexisting_live_runtime(name, &pin_path, tap_id, ifindex, &state) {
                 wal.shutdown().await;
                 return Err(e);
             }
-            iface_ctx_synced = true;
         } else if !replacing_existing {
             if let Err(e) = aria_core::ebpf_ops::scrub_managed_runtime_state(TapMapRuntime::new(&pin_path, tap_id)) {
                 wal.shutdown().await;
@@ -275,47 +325,47 @@ impl ControlPlane {
             info!(instance = %name, tap_id, "skipping pre-replay scrub while replacing existing registered instance");
         }
 
-        if let Err(e) = aria_core::ebpf_ops::update_runtime_config(
-            TapMapRuntime::new(&pin_path, tap_id),
-            Some(state.conntrack_enabled),
-            Some(state.monitoring_enabled),
-            Some(state.acl_enabled),
-            Some(state.qos_enabled && !state.qos_rules.is_empty()),
-            Some(state.mirror_enabled && !state.mirror_rules.is_empty()),
-            Some(state.tcprt_enabled),
-            None,
-        ) {
-            Self::cleanup_failed_managed_registration(
-                name,
-                &pin_path,
-                tap_id,
-                ifindex,
-                wal,
-                preserve_existing_runtime,
-                iface_ctx_synced,
-                tap_config_written,
-            )
-            .await;
-            return Err(e);
-        }
-        tap_config_written = tap_id != aria_core::common::TAP_ID_UNASSIGNED;
-
-        if let Err(e) = aria_core::ebpf_ops::replay_state_to_pinned_maps(&pin_path, &state_path) {
-            Self::cleanup_failed_managed_registration(
-                name,
-                &pin_path,
-                tap_id,
-                ifindex,
-                wal,
-                preserve_existing_runtime,
-                iface_ctx_synced,
-                tap_config_written,
-            )
-            .await;
-            return Err(e);
-        }
-
         if !pin_state.preexisting_xdp_link {
+            if let Err(e) = aria_core::ebpf_ops::update_runtime_config(
+                TapMapRuntime::new(&pin_path, tap_id),
+                Some(state.conntrack_enabled),
+                Some(state.monitoring_enabled),
+                Some(state.acl_enabled),
+                Some(state.qos_enabled && !state.qos_rules.is_empty()),
+                Some(state.mirror_enabled && !state.mirror_rules.is_empty()),
+                Some(state.tcprt_enabled),
+                None,
+            ) {
+                Self::cleanup_failed_managed_registration(
+                    name,
+                    &pin_path,
+                    tap_id,
+                    ifindex,
+                    wal,
+                    preserve_existing_runtime,
+                    iface_ctx_synced,
+                    tap_config_written,
+                )
+                .await;
+                return Err(e);
+            }
+            tap_config_written = tap_id != aria_core::common::TAP_ID_UNASSIGNED;
+
+            if let Err(e) = aria_core::ebpf_ops::replay_state_to_pinned_maps(&pin_path, &state_path) {
+                Self::cleanup_failed_managed_registration(
+                    name,
+                    &pin_path,
+                    tap_id,
+                    ifindex,
+                    wal,
+                    preserve_existing_runtime,
+                    iface_ctx_synced,
+                    tap_config_written,
+                )
+                .await;
+                return Err(e);
+            }
+
             if let Err(e) = aria_core::ebpf_ops::sync_iface_ctx(TapMapRuntime::new(&pin_path, tap_id), ifindex) {
                 Self::cleanup_failed_managed_registration(
                     name,
@@ -341,7 +391,11 @@ impl ControlPlane {
             pin_path,
             state_path,
             wal,
-            desired_ssl_enabled: global_ssl_enabled,
+            desired_ssl_enabled: if pin_state.preexisting_xdp_link {
+                None
+            } else {
+                global_ssl_enabled
+            },
             preserve_existing_runtime,
             iface_ctx_synced,
             tap_config_written,

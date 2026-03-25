@@ -166,9 +166,9 @@ impl FirewallInstance {
 
         if pin_state.preexisting_xdp_link {
             attached.xdp = LinkOwnership::ClaimedExisting;
-            self.ensure_tc_runtime(&mut attached);
-            self.ensure_fq_runtime();
-            info!(instance = %self.iface, edt_available = self.edt_available, "recovered preexisting live links");
+            self.claim_existing_tc_links(&mut attached);
+            self.edt_available = aria_core::ebpf_ops::check_fq_qdisc(&self.iface);
+            info!(instance = %self.iface, edt_available = self.edt_available, "claimed preexisting live links without runtime mutation");
             return Ok(attached);
         }
 
@@ -331,6 +331,15 @@ impl FirewallInstance {
                 warn!(instance = %self.iface, purpose = %purpose, error = %e, "failed to recover TC runtime");
             } else {
                 Self::set_tc_link_ownership(attached, prog_name, LinkOwnership::AttachedNow);
+            }
+        }
+    }
+
+    fn claim_existing_tc_links(&self, attached: &mut AttachedLinks) {
+        for prog_name in ["tc_egress", "tc_ingress"] {
+            let link_pin = self.tc_link_pin_path(prog_name);
+            if std::path::Path::new(&link_pin).exists() {
+                Self::set_tc_link_ownership(attached, prog_name, LinkOwnership::ClaimedExisting);
             }
         }
     }
