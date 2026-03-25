@@ -12,6 +12,7 @@ pub use crate::common::{
     TapConfig,
     TcpRtValue,
     DropKey, DropValue,
+    KernelDropFilterValue, KernelDropKey, KernelDropValue,
     TraceFilter, TraceEvent, TraceEventKey, TraceEventV6,
     PipelineCtx,
     IfaceCtx,
@@ -169,6 +170,20 @@ pub static DROP_REASON_STATS: PerCpuHashMap<DropKey, DropValue> = PerCpuHashMap:
 
 #[map(name = "DROP_VALUE_BUF")]
 pub static DROP_VALUE_BUF: PerCpuArray<DropValue> = PerCpuArray::with_max_entries(1, 0);
+
+// --- Kernel Drop Observability ---
+
+#[map(name = "MANAGED_IFINDEX_FILTER")]
+pub static MANAGED_IFINDEX_FILTER: HashMap<u32, KernelDropFilterValue> =
+    HashMap::with_max_entries(1024, 0);
+
+#[map(name = "KERNEL_DROP_STATS")]
+pub static KERNEL_DROP_STATS: LruPerCpuHashMap<KernelDropKey, KernelDropValue> =
+    LruPerCpuHashMap::with_max_entries(4096, 0);
+
+#[map(name = "KERNEL_DROP_VALUE_BUF")]
+pub static KERNEL_DROP_VALUE_BUF: PerCpuArray<KernelDropValue> =
+    PerCpuArray::with_max_entries(1, 0);
 
 // --- Packet Trace ---
 

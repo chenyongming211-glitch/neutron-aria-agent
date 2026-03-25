@@ -318,6 +318,32 @@ pub struct DropValue {
     pub last_seen: u64,
 }
 
+// --- Kernel Drop Observability ---
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct KernelDropFilterValue {
+    pub tap_id: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct KernelDropKey {
+    pub tap_id: u32,
+    pub ifindex: u32,
+    pub reason_code: u16,
+    pub proto: u16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct KernelDropValue {
+    pub packets: u64,
+    pub bytes: u64,
+    pub last_seen_ns: u64,
+    pub last_location: u64,
+}
+
 // --- Packet Trace ---
 
 pub const TRACE_XDP_INGRESS: u8 = 1;

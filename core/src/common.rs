@@ -448,6 +448,35 @@ pub struct DropValue {
 }
 unsafe impl Pod for DropValue {}
 
+// --- Kernel Drop Observability ---
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct KernelDropFilterValue {
+    pub tap_id: u32,
+}
+unsafe impl Pod for KernelDropFilterValue {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct KernelDropKey {
+    pub tap_id: u32,
+    pub ifindex: u32,
+    pub reason_code: u16,
+    pub proto: u16,
+}
+unsafe impl Pod for KernelDropKey {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct KernelDropValue {
+    pub packets: u64,
+    pub bytes: u64,
+    pub last_seen_ns: u64,
+    pub last_location: u64,
+}
+unsafe impl Pod for KernelDropValue {}
+
 // --- Packet Trace ---
 
 #[repr(C)]
