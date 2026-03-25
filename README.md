@@ -320,17 +320,20 @@ chain.json 示例：
 }
 ```
 
-### 8. Drop 原因分析
+### 8. Kernel Drop 分析
 
 ```bash
-# 查看丢包统计
-ariactl stats --drops
+# 查看所有受管接口的内核丢包统计
+ariactl drops list
 
-# 清空计数器
-ariactl drops flush --tap eth0
+# 按实例过滤
+ariactl --tap eth0 drops list
+
+# 清空内核丢包统计
+ariactl drops flush --force
 ```
 
-丢包原因：`acl-deny`、`acl-port-deny`、`acl-default-deny`、`qos-ingress`、`qos-egress`。
+防火墙主动丢弃统计仍保留在 `ariactl stats --rules` 和 `ariactl stats --qos` 中。
 
 ### 9. 连接跟踪
 
@@ -414,7 +417,7 @@ ariactl --tap tap2 policy list
 | `tcprt top/flow/flush` | 业务延迟分析（支持 `--chain` 逐跳归因） |
 | `trace start` | 丢包溯源（支持 `--chain` 服务链透视） |
 | `chain apply/list/show/delete` | 服务链拓扑定义（供 tcprt/trace 共用） |
-| `drops list/flush` | Drop 原因分析 |
+| `drops list/flush` | Kernel drop 溯源 |
 | `stats` | 统计信息 |
 | `config show/set` | 运行时配置 |
 
@@ -542,7 +545,8 @@ aria-firewall/
 | GET/DELETE | `/{instance}/conntrack` | 连接跟踪查看/清空 |
 | GET/PUT | `/{instance}/config` | 配置查看/更新 |
 | GET | `/{instance}/stats` | 统计概览 |
-| GET | `/{instance}/stats/rules\|flows\|qos\|groups\|mirror\|drops` | 详细统计 |
+| GET | `/{instance}/stats/rules\|flows\|qos\|groups\|mirror\|drops` | 详细统计（其中 `drops` 为旧防火墙 drop 接口） |
+| GET/DELETE | `/stats/kernel_drops` | 全局 kernel drop 查看/清空 |
 | GET/DELETE | `/{instance}/tcprt` | TCP-RT 查看/清空 |
 | POST | `/tcprt/query` | 跨实例批量查询 |
 | POST | `/tcprt/filter` | 按目标聚合查询 |

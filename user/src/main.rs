@@ -73,7 +73,7 @@ enum Commands {
         #[command(subcommand)]
         action: ChainCommands,
     },
-    /// Drop reason profiler
+    /// Kernel drop observability
     Drops {
         #[command(subcommand)]
         action: DropsCommands,
@@ -275,10 +275,24 @@ enum TcprtCommands {
 
 #[derive(Subcommand)]
 enum DropsCommands {
-    /// List drop reason statistics
-    List,
-    /// Flush all drop statistics
-    Flush,
+    /// List kernel drop statistics
+    List {
+        #[arg(long, help = "Filter by interface name")]
+        iface: Option<String>,
+        #[arg(long, default_value = "50", help = "Maximum number of entries to show")]
+        top: usize,
+        #[arg(long, help = "Include unattributed early drops")]
+        include_unattributed: bool,
+    },
+    /// Flush kernel drop statistics
+    Flush {
+        #[arg(long, help = "Filter by interface name")]
+        iface: Option<String>,
+        #[arg(long, help = "Include unattributed early drops")]
+        include_unattributed: bool,
+        #[arg(long, help = "Actually perform the flush")]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -376,6 +390,42 @@ fn get_instance(cli: &Cli) -> String {
 fn note_ssl_is_global(has_tap: bool) {
     if has_tap {
         eprintln!("Note: --tap is ignored for SSL observability commands; SSL data is host-global.");
+    }
+}
+
+fn kernel_drop_query_from_cli(
+    tap: Option<&String>,
+    iface: Option<String>,
+    top: Option<usize>,
+    include_unattributed: bool,
+) -> aria_api::KernelDropQuery {
+    aria_api::KernelDropQuery {
+        instance: tap.cloned(),
+        iface,
+        ifindex: None,
+        reason: None,
+        top,
+        include_unattributed,
+    }
+}
+
+fn print_kernel_drop_stats(entries: &[aria_api::KernelDropStatsEntry]) {
+    println!(
+        "{:<16} {:<16} {:<8} {:<20} {:<10} {:>12} {:>12} {}",
+        "Instance", "Iface", "Ifindex", "Reason", "Proto", "Packets", "Bytes", "Source"
+    );
+    for entry in entries {
+        println!(
+            "{:<16} {:<16} {:<8} {:<20} {:<10} {:>12} {:>12} {}",
+            entry.instance.as_deref().unwrap_or("-"),
+            entry.iface.as_deref().unwrap_or("-"),
+            entry.ifindex,
+            entry.reason,
+            entry.proto,
+            entry.packets,
+            entry.bytes,
+            entry.source,
+        );
     }
 }
 
@@ -1372,14 +1422,27 @@ async fn run_diagnose(
 
     // --- Drops ---
     println!("\n--- Drops ---");
-    match client.list_drops(instance).await {
+    match client.list_kernel_drops(&aria_api::KernelDropQuery {
+        instance: Some(instance.to_string()),
+        iface: None,
+        ifindex: None,
+        reason: None,
+        top: None,
+        include_unattributed: false,
+    }).await {
         Ok(resp) => {
             if resp.drops.is_empty() {
                 println!("  (none)");
             } else {
                 for d in &resp.drops {
-                    println!("  {}: {} pkts ({} bytes) - {} {}",
-                        d.reason, d.packets, d.bytes, d.direction, d.proto);
+                    println!(
+                        "  {}: {} pkts ({} bytes) - iface={} proto={}",
+                        d.reason,
+                        d.packets,
+                        d.bytes,
+                        d.iface.as_deref().unwrap_or("-"),
+                        d.proto
+                    );
                 }
             }
         }
@@ -1420,7 +1483,14 @@ async fn run_diagnose(
     }
 
     // Check drops
-    if let Ok(resp) = client.list_drops(instance).await {
+    if let Ok(resp) = client.list_kernel_drops(&aria_api::KernelDropQuery {
+        instance: Some(instance.to_string()),
+        iface: None,
+        ifindex: None,
+        reason: None,
+        top: None,
+        include_unattributed: false,
+    }).await {
         let total_drops: u64 = resp.drops.iter().map(|d| d.packets).sum();
         if total_drops > 0 {
             verdict = "UNHEALTHY";
@@ -1442,6 +1512,7 @@ async fn main() {
     let client = api_client::ApiClient::new(&cli.api_url);
     let instance = get_instance(&cli);
     let has_tap = cli.tap.is_some();
+    let tap_filter = cli.tap.clone();
 
     let result: Result<(), String> = match cli.command {
         Commands::System { action } => match action {
@@ -1755,24 +1826,18 @@ async fn main() {
                     }
                 }
                 if drops {
-                    match client.list_drops(&instance).await {
+                    let query = kernel_drop_query_from_cli(tap_filter.as_ref(), None, Some(top), false);
+                    match client.list_kernel_drops(&query).await {
                         Ok(resp) => {
-                            println!("=== Drop Reason Statistics ===");
+                            println!("=== Kernel Drop Statistics ===");
                             if resp.drops.is_empty() {
-                                println!("  No drops recorded");
+                                println!("  No kernel drops recorded");
                             } else {
-                                println!("{:<25} {:<10} {:<8} {:<12} {:<12} {:<12} {}",
-                                    "Reason", "Direction", "Proto", "SrcGroup", "DstGroup", "Packets", "Bytes");
-                                for e in &resp.drops {
-                                    println!("{:<25} {:<10} {:<8} {:<12} {:<12} {:<12} {}",
-                                        e.reason, e.direction, e.proto,
-                                        e.src_group, e.dst_group,
-                                        e.packets, e.bytes);
-                                }
+                                print_kernel_drop_stats(&resp.drops);
                             }
                             println!();
                         }
-                        Err(e) => { eprintln!("Error reading drop stats: {}", e); has_error = true; }
+                        Err(e) => { eprintln!("Error reading kernel drop stats: {}", e); has_error = true; }
                     }
                 }
                 if flows {
@@ -2099,29 +2164,37 @@ async fn main() {
             }
         },
         Commands::Drops { action } => match action {
-            DropsCommands::List => {
-                match client.list_drops(&instance).await {
+            DropsCommands::List { iface, top, include_unattributed } => {
+                let query = kernel_drop_query_from_cli(
+                    tap_filter.as_ref(),
+                    iface,
+                    Some(top),
+                    include_unattributed,
+                );
+                match client.list_kernel_drops(&query).await {
                     Ok(resp) => {
                         if resp.drops.is_empty() {
-                            println!("No drops recorded");
+                            println!("No kernel drops recorded");
                         } else {
-                            println!("{:<25} {:<10} {:<8} {:<12} {:<12} {:<12} {}",
-                                "Reason", "Direction", "Proto", "SrcGroup", "DstGroup", "Packets", "Bytes");
-                            for e in &resp.drops {
-                                println!("{:<25} {:<10} {:<8} {:<12} {:<12} {:<12} {}",
-                                    e.reason, e.direction, e.proto,
-                                    e.src_group, e.dst_group,
-                                    e.packets, e.bytes);
-                            }
+                            print_kernel_drop_stats(&resp.drops);
                         }
                         Ok(())
                     }
                     Err(e) => Err(e),
                 }
             }
-            DropsCommands::Flush => {
-                match client.flush_drops(&instance).await {
-                    Ok(resp) => { println!("Flushed {} drop entries", resp.flushed); Ok(()) }
+            DropsCommands::Flush { iface, include_unattributed, force } => {
+                if !force {
+                    return Err("Refusing to flush kernel-drop statistics without --force".to_string());
+                }
+                let query = kernel_drop_query_from_cli(
+                    tap_filter.as_ref(),
+                    iface,
+                    None,
+                    include_unattributed,
+                );
+                match client.flush_kernel_drops(&query).await {
+                    Ok(resp) => { println!("Flushed {} kernel drop entries", resp.flushed); Ok(()) }
                     Err(e) => Err(e),
                 }
             }

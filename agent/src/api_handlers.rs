@@ -2,7 +2,7 @@ use async_stream::stream;
 use axum::{
     body::Body,
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -27,6 +27,25 @@ fn err_response(e: ControlPlaneError) -> impl IntoResponse {
             error: e.to_string(),
         }),
     )
+}
+
+fn legacy_drop_headers(instance: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("deprecation"),
+        HeaderValue::from_static("true"),
+    );
+    headers.insert(
+        HeaderName::from_static("sunset"),
+        HeaderValue::from_static("Tue, 30 Jun 2026 00:00:00 GMT"),
+    );
+    if let Ok(value) = HeaderValue::from_str(&format!(
+        "</api/v1/stats/kernel_drops?instance={}>; rel=\"successor-version\"",
+        instance
+    )) {
+        headers.insert(header::LINK, value);
+    }
+    headers
 }
 
 // ── Health ──
@@ -1753,22 +1772,25 @@ pub async fn list_drops(
                     .map(|g| g.name.clone())
                     .unwrap_or_else(|| format!("id:{}", id))
             };
-            Ok(Json(aria_api::DropStatsResponse {
-                drops: entries
-                    .into_iter()
-                    .map(|e| aria_api::DropStatsEntry {
-                        reason: aria_core::trace_ops::drop_reason_name(e.reason),
-                        direction: direction_to_string(e.direction),
-                        proto: proto_to_string(e.proto),
-                        src_group: find_name(e.src_id),
-                        src_id: e.src_id,
-                        dst_group: find_name(e.dst_id),
-                        dst_id: e.dst_id,
-                        packets: e.packets,
-                        bytes: e.bytes,
-                    })
-                    .collect(),
-            }))
+            Ok((
+                legacy_drop_headers(&instance),
+                Json(aria_api::DropStatsResponse {
+                    drops: entries
+                        .into_iter()
+                        .map(|e| aria_api::DropStatsEntry {
+                            reason: aria_core::trace_ops::drop_reason_name(e.reason),
+                            direction: direction_to_string(e.direction),
+                            proto: proto_to_string(e.proto),
+                            src_group: find_name(e.src_id),
+                            src_id: e.src_id,
+                            dst_group: find_name(e.dst_id),
+                            dst_id: e.dst_id,
+                            packets: e.packets,
+                            bytes: e.bytes,
+                        })
+                        .collect(),
+                }),
+            ))
         }
         Err(e) => Err(err_response(e)),
     }
@@ -1779,7 +1801,10 @@ pub async fn flush_drops(
     Path(instance): Path<String>,
 ) -> impl IntoResponse {
     match cp.flush_drop_stats(&instance).await {
-        Ok(count) => Ok(Json(aria_api::DropFlushResponse { flushed: count })),
+        Ok(count) => Ok((
+            legacy_drop_headers(&instance),
+            Json(aria_api::DropFlushResponse { flushed: count }),
+        )),
         Err(e) => Err(err_response(e)),
     }
 }
