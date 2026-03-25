@@ -1,5 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use aria_core::ebpf_ops::{CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 /// Represents a single tap interface with its attached XDP firewall instance.
@@ -14,6 +16,8 @@ pub struct FirewallInstance {
     /// If false, QoS shaping is unavailable — only policing works.
     pub edt_available: bool,
 }
+
+const RUNTIME_METADATA_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct RuntimePinState {
@@ -44,6 +48,20 @@ impl Default for AttachedLinks {
             tc_ingress: LinkOwnership::Absent,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeMetadata {
+    schema_version: u32,
+    ebpf_sha256: String,
+    program_pins: Vec<String>,
+    critical_map_pins: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+enum RuntimeInventoryStatus {
+    Healthy,
+    StaleOrIncomplete(String),
 }
 
 impl FirewallInstance {
@@ -93,36 +111,177 @@ impl FirewallInstance {
         }
     }
 
-    /// Ensure the shared runtime objects are pinned before any interface link goes live.
-    pub fn ensure_runtime_pinned(&self, ebpf_path: &str) -> Result<RuntimePinState, String> {
-        let pin_path_preexisted = self.pin_path.exists();
-        let created_shared_runtime = self.shared_runtime && !pin_path_preexisted;
+    fn runtime_namespace(&self) -> String {
+        self.pin_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("shared-runtime")
+            .to_string()
+    }
+
+    fn runtime_metadata_path(&self) -> PathBuf {
+        let state_root = self
+            .state_path
+            .parent()
+            .unwrap_or(self.state_path.as_path());
+        state_root.join(format!(".{}.runtime.meta.json", self.runtime_namespace()))
+    }
+
+    fn expected_program_pins() -> Vec<String> {
+        vec![
+            "xdp_firewall".to_string(),
+            "tc_egress".to_string(),
+            "tc_ingress".to_string(),
+        ]
+    }
+
+    fn expected_critical_map_pins() -> Vec<String> {
+        CRITICAL_NETWORK_MAP_NAMES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect()
+    }
+
+    fn compute_ebpf_sha256(&self, ebpf_path: &str) -> Result<String, String> {
+        let bytes = std::fs::read(ebpf_path)
+            .map_err(|e| format!("read ebpf for hash: {}", e))?;
+        let digest = Sha256::digest(bytes);
+        Ok(digest
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(""))
+    }
+
+    fn expected_runtime_metadata(&self, ebpf_path: &str) -> Result<RuntimeMetadata, String> {
+        Ok(RuntimeMetadata {
+            schema_version: RUNTIME_METADATA_SCHEMA_VERSION,
+            ebpf_sha256: self.compute_ebpf_sha256(ebpf_path)?,
+            program_pins: Self::expected_program_pins(),
+            critical_map_pins: Self::expected_critical_map_pins(),
+        })
+    }
+
+    fn load_runtime_metadata(&self) -> Result<RuntimeMetadata, String> {
+        let path = self.runtime_metadata_path();
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read runtime metadata {}: {}", path.display(), e))?;
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("parse runtime metadata {}: {}", path.display(), e))
+    }
+
+    fn store_runtime_metadata_atomically(&self, metadata: &RuntimeMetadata) -> Result<(), String> {
+        let path = self.runtime_metadata_path();
+        let tmp_path = path.with_extension("tmp");
+        let json = serde_json::to_string_pretty(metadata)
+            .map_err(|e| format!("serialize runtime metadata: {}", e))?;
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create runtime metadata dir {}: {}", parent.display(), e))?;
+        }
+
+        std::fs::write(&tmp_path, json)
+            .map_err(|e| format!("write runtime metadata tmp {}: {}", tmp_path.display(), e))?;
+        std::fs::rename(&tmp_path, &path)
+            .map_err(|e| format!("rename runtime metadata {}: {}", path.display(), e))?;
+        Ok(())
+    }
+
+    fn clear_runtime_metadata(&self) {
+        let metadata_path = self.runtime_metadata_path();
+        if metadata_path.exists() {
+            if let Err(e) = std::fs::remove_file(&metadata_path) {
+                warn!(instance = %self.iface, path = %metadata_path.display(), error = %e, "failed to remove runtime metadata");
+            }
+        }
+    }
+
+    fn shared_runtime_has_live_links(&self) -> Result<bool, String> {
+        if !self.pin_path.exists() {
+            return Ok(false);
+        }
+
+        let entries = std::fs::read_dir(&self.pin_path)
+            .map_err(|e| format!("read shared pin dir {}: {}", self.pin_path.display(), e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("read shared pin entry: {}", e))?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with("_xdp_link")
+                || name.ends_with("_tc_egress_link")
+                || name.ends_with("_tc_ingress_link")
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn validate_runtime_inventory(
+        &self,
+        expected: &RuntimeMetadata,
+    ) -> RuntimeInventoryStatus {
+        let metadata = match self.load_runtime_metadata() {
+            Ok(metadata) => metadata,
+            Err(e) => return RuntimeInventoryStatus::StaleOrIncomplete(e),
+        };
+
+        if metadata.schema_version != expected.schema_version {
+            return RuntimeInventoryStatus::StaleOrIncomplete(format!(
+                "runtime metadata schema {} != expected {}",
+                metadata.schema_version, expected.schema_version
+            ));
+        }
+        if metadata.ebpf_sha256 != expected.ebpf_sha256 {
+            return RuntimeInventoryStatus::StaleOrIncomplete(format!(
+                "runtime eBPF hash {} != expected {}",
+                metadata.ebpf_sha256, expected.ebpf_sha256
+            ));
+        }
+        if metadata.program_pins != expected.program_pins {
+            return RuntimeInventoryStatus::StaleOrIncomplete(format!(
+                "runtime program inventory {:?} != expected {:?}",
+                metadata.program_pins, expected.program_pins
+            ));
+        }
+        if metadata.critical_map_pins != expected.critical_map_pins {
+            return RuntimeInventoryStatus::StaleOrIncomplete(format!(
+                "runtime critical map inventory {:?} != expected {:?}",
+                metadata.critical_map_pins, expected.critical_map_pins
+            ));
+        }
+
+        for program in &metadata.program_pins {
+            let path = self.pin_path.join(program);
+            if !path.exists() {
+                return RuntimeInventoryStatus::StaleOrIncomplete(format!(
+                    "pinned program missing: {}",
+                    path.display()
+                ));
+            }
+        }
+
+        for map_name in &metadata.critical_map_pins {
+            let path = self.pin_path.join(map_name);
+            if !path.exists() {
+                return RuntimeInventoryStatus::StaleOrIncomplete(format!(
+                    "critical pinned map missing: {}",
+                    path.display()
+                ));
+            }
+        }
+
+        RuntimeInventoryStatus::Healthy
+    }
+
+    fn load_and_pin_runtime(&self, ebpf_path: &str, metadata: &RuntimeMetadata) -> Result<(), String> {
         let pin_path_str = self.pin_path.to_str().unwrap();
-        let xdp_link_pin = self.xdp_link_pin_path();
 
         std::fs::create_dir_all(&self.pin_path)
             .map_err(|e| format!("Failed to create pin directory {:?}: {}", self.pin_path, e))?;
         std::fs::create_dir_all(&self.state_path)
             .map_err(|e| format!("Failed to create state directory {:?}: {}", self.state_path, e))?;
-
-        if std::path::Path::new(&xdp_link_pin).exists() {
-            info!(instance = %self.iface, "found pinned XDP link; reusing live runtime");
-            return Ok(RuntimePinState {
-                created_shared_runtime,
-                reused_existing_runtime: true,
-                preexisting_xdp_link: true,
-            });
-        }
-
-        let xdp_prog_pin = format!("{}/xdp_firewall", pin_path_str);
-        if std::path::Path::new(&xdp_prog_pin).exists() {
-            info!(instance = %self.iface, "found pinned XDP runtime; reusing pinned programs");
-            return Ok(RuntimePinState {
-                created_shared_runtime,
-                reused_existing_runtime: true,
-                preexisting_xdp_link: false,
-            });
-        }
 
         info!(instance = %self.iface, ebpf_path = %ebpf_path, "loading eBPF");
         let bpf_bytes = std::fs::read(ebpf_path)
@@ -132,28 +291,86 @@ impl FirewallInstance {
             .load(&bpf_bytes)
             .map_err(|e| format!("[{}] load error: {:?}", self.iface, e))?;
 
-        if let Err(e) = self.load_runtime_programs(&mut bpf) {
-            if created_shared_runtime && self.pin_path.exists() {
+        self.load_runtime_programs(&mut bpf)?;
+        self.pin_runtime_maps(&mut bpf, pin_path_str)
+            .map_err(|e| format!("pin runtime maps failed: {}", e))?;
+        self.pin_runtime_programs(&mut bpf, pin_path_str);
+        self.store_runtime_metadata_atomically(metadata)?;
+
+        Ok(())
+    }
+
+    fn rebuild_shared_runtime(&self, ebpf_path: &str, metadata: &RuntimeMetadata) -> Result<(), String> {
+        info!(instance = %self.iface, path = %self.pin_path.display(), "rebuilding dormant shared runtime");
+
+        if self.pin_path.exists() {
+            std::fs::remove_dir_all(&self.pin_path)
+                .map_err(|e| format!("remove stale shared pin dir {}: {}", self.pin_path.display(), e))?;
+        }
+        self.clear_runtime_metadata();
+
+        if let Err(e) = self.load_and_pin_runtime(ebpf_path, metadata) {
+            if self.pin_path.exists() {
                 let _ = std::fs::remove_dir_all(&self.pin_path);
             }
+            self.clear_runtime_metadata();
             return Err(e);
         }
 
-        if let Err(e) = self.pin_runtime_maps(&mut bpf, pin_path_str) {
-            if created_shared_runtime && self.pin_path.exists() {
-                let _ = std::fs::remove_dir_all(&self.pin_path);
+        Ok(())
+    }
+
+    /// Ensure the shared runtime objects are pinned before any interface link goes live.
+    pub fn ensure_runtime_pinned(&self, ebpf_path: &str) -> Result<RuntimePinState, String> {
+        let pin_path_preexisted = self.pin_path.exists();
+        let created_shared_runtime = self.shared_runtime && !pin_path_preexisted;
+        let xdp_link_pin = self.xdp_link_pin_path();
+        let preexisting_xdp_link = Path::new(&xdp_link_pin).exists();
+        let expected_metadata = self.expected_runtime_metadata(ebpf_path)?;
+
+        if !pin_path_preexisted {
+            if let Err(e) = self.load_and_pin_runtime(ebpf_path, &expected_metadata) {
+                if self.pin_path.exists() {
+                    let _ = std::fs::remove_dir_all(&self.pin_path);
+                }
+                self.clear_runtime_metadata();
+                return Err(e);
             }
-            return Err(format!("pin runtime maps failed: {}", e));
+            info!(instance = %self.iface, created_shared_runtime, "runtime pinned and ready for link attach");
+            return Ok(RuntimePinState {
+                created_shared_runtime,
+                reused_existing_runtime: false,
+                preexisting_xdp_link: false,
+            });
         }
 
-        self.pin_runtime_programs(&mut bpf, pin_path_str);
+        let live_runtime = self.shared_runtime_has_live_links()?;
+        match self.validate_runtime_inventory(&expected_metadata) {
+            RuntimeInventoryStatus::Healthy => {
+                info!(instance = %self.iface, preexisting_xdp_link, live_runtime, "reusing healthy shared runtime");
+                Ok(RuntimePinState {
+                    created_shared_runtime: false,
+                    reused_existing_runtime: true,
+                    preexisting_xdp_link,
+                })
+            }
+            RuntimeInventoryStatus::StaleOrIncomplete(reason) => {
+                if live_runtime {
+                    return Err(format!(
+                        "shared runtime is live but pinned eBPF/schema is stale or incomplete: {}; detach managed taps and reattach to rebuild safely",
+                        reason
+                    ));
+                }
 
-        info!(instance = %self.iface, created_shared_runtime, "runtime pinned and ready for link attach");
-        Ok(RuntimePinState {
-            created_shared_runtime,
-            reused_existing_runtime: false,
-            preexisting_xdp_link: false,
-        })
+                self.rebuild_shared_runtime(ebpf_path, &expected_metadata)?;
+                info!(instance = %self.iface, "rebuilt dormant shared runtime from current eBPF");
+                Ok(RuntimePinState {
+                    created_shared_runtime: false,
+                    reused_existing_runtime: false,
+                    preexisting_xdp_link: false,
+                })
+            }
+        }
     }
 
     /// Attach or recover interface links from an already-pinned runtime.
