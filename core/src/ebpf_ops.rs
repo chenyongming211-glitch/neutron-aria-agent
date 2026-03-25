@@ -324,7 +324,7 @@ fn collect_lpm_entries_v4(
         let (key, value) = item.map_err(|e| format!("iterate {}: {:?}", map_name, e))?;
         let data = key.data();
         if data[..4] == tap_prefix {
-            entries.insert(format!("{:?}=>{}", key, value));
+            entries.insert(format_lpm_entry_v4(&key, value));
         }
     }
     Ok(entries)
@@ -342,10 +342,32 @@ fn collect_lpm_entries_v6(
         let (key, value) = item.map_err(|e| format!("iterate {}: {:?}", map_name, e))?;
         let data = key.data();
         if data[..4] == tap_prefix {
-            entries.insert(format!("{:?}=>{}", key, value));
+            entries.insert(format_lpm_entry_v6(&key, value));
         }
     }
     Ok(entries)
+}
+
+fn format_lpm_entry_v4(key: &Key<[u8; 8]>, value: u32) -> String {
+    let data = key.data();
+    format!(
+        "prefix_len={} tap_id={} ip={:?}=>{}",
+        key.prefix_len(),
+        u32::from_be_bytes(data[..4].try_into().unwrap()),
+        &data[4..],
+        value,
+    )
+}
+
+fn format_lpm_entry_v6(key: &Key<[u8; 20]>, value: u32) -> String {
+    let data = key.data();
+    format!(
+        "prefix_len={} tap_id={} ip={:?}=>{}",
+        key.prefix_len(),
+        u32::from_be_bytes(data[..4].try_into().unwrap()),
+        &data[4..],
+        value,
+    )
 }
 
 pub fn validate_pinned_runtime_state(
@@ -400,12 +422,12 @@ pub fn validate_pinned_runtime_state(
                 .map_err(|e| format!("group '{}' cidr '{}': {}", name, cidr, e))?;
             match ip {
                 IpAddr::V4(v4) => {
-                    expected_src_ipv4.insert(format!("{:?}=>{}", tap_lpm_key_v4(tap_id, v4.octets(), prefix), group.id));
-                    expected_dst_ipv4.insert(format!("{:?}=>{}", tap_lpm_key_v4(tap_id, v4.octets(), prefix), group.id));
+                    expected_src_ipv4.insert(format_lpm_entry_v4(&tap_lpm_key_v4(tap_id, v4.octets(), prefix), group.id));
+                    expected_dst_ipv4.insert(format_lpm_entry_v4(&tap_lpm_key_v4(tap_id, v4.octets(), prefix), group.id));
                 }
                 IpAddr::V6(v6) => {
-                    expected_src_ipv6.insert(format!("{:?}=>{}", tap_lpm_key_v6(tap_id, v6.octets(), prefix), group.id));
-                    expected_dst_ipv6.insert(format!("{:?}=>{}", tap_lpm_key_v6(tap_id, v6.octets(), prefix), group.id));
+                    expected_src_ipv6.insert(format_lpm_entry_v6(&tap_lpm_key_v6(tap_id, v6.octets(), prefix), group.id));
+                    expected_dst_ipv6.insert(format_lpm_entry_v6(&tap_lpm_key_v6(tap_id, v6.octets(), prefix), group.id));
                 }
             }
         }
