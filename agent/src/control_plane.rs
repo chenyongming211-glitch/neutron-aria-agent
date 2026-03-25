@@ -892,6 +892,20 @@ impl ControlPlane {
             .or_else(|| instance_match.as_ref().and_then(|inst| inst.ifindex))
             .or_else(|| iface_match.as_ref().and_then(|inst| inst.ifindex));
 
+        if query.instance.is_some() && resolved_tap.is_none() && resolved_ifindex.is_none() {
+            return Err(ControlPlaneError::InstanceNotReady(format!(
+                "Instance '{}' does not have a resolved kernel-drop filter target yet",
+                query.instance.as_deref().unwrap_or_default()
+            )));
+        }
+
+        if query.iface.is_some() && resolved_tap.is_none() && resolved_ifindex.is_none() {
+            return Err(ControlPlaneError::InstanceNotReady(format!(
+                "Interface '{}' does not have a resolved kernel-drop filter target yet",
+                query.iface.as_deref().unwrap_or_default()
+            )));
+        }
+
         Ok(ResolvedKernelDropQuery {
             tap_id: resolved_tap,
             ifindex: resolved_ifindex,
