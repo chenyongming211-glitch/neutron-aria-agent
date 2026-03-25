@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use aria_core::common::{KernelDropConfig, KernelDropFilterValue, KERNEL_DROP_FLAG_HAS_REASON};
+use aria_core::wal;
 use aya::maps::{HashMap as BpfHashMap, Map, MapData};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::control_plane::MANAGED_SHARED_PIN_NAMESPACE;
 use crate::kernel_drop_support::{
     load_tracepoint_program, pin_map_if_needed, replace_pinned_program,
     replace_pinned_tracepoint_link, resolve_kernel_drop_config, KERNEL_DROP_LINK_NAME,
@@ -18,6 +20,7 @@ use crate::kernel_drop_support::{
 pub const KERNEL_DROP_PIN_NAMESPACE: &str = "kernel-drops-global";
 const KERNEL_DROP_RUNTIME_METADATA_SCHEMA_VERSION: u32 = 1;
 const KERNEL_DROP_MAP_SCHEMA_VERSION: u32 = 1;
+const KERNEL_DROP_PERSISTED_LIVE_IFACES_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum KernelDropMode {
@@ -59,6 +62,18 @@ enum KernelDropMapInventoryStatus {
     StaleOrIncomplete(String),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedLiveIface {
+    iface: String,
+    ifindex: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedLiveIfaces {
+    schema_version: u32,
+    ifaces: Vec<PersistedLiveIface>,
+}
+
 pub struct KernelDropManager {
     ebpf_path: String,
     base_pin_path: String,
@@ -89,6 +104,8 @@ impl KernelDropManager {
 
     pub async fn ensure_loaded(&self) -> Result<(), String> {
         let mut state = self.state.lock().await;
+        let recovery_snapshot_authoritative =
+            self.seed_recovered_managed_ifaces(&mut state.managed_ifaces)?;
         let need_core_init = !state.loaded || !self.core_pins_ready();
         let need_link_init = !state.loaded || !self.link_pins_ready();
 
@@ -98,7 +115,9 @@ impl KernelDropManager {
 
         match self.load_impl() {
             Ok(mode) => {
-                if let Err(e) = self.sync_all_managed_ifaces(&state.managed_ifaces) {
+                if let Err(e) = self
+                    .sync_all_managed_ifaces(&state.managed_ifaces, recovery_snapshot_authoritative)
+                {
                     state.last_error = Some(e.clone());
                     return Err(e);
                 }
@@ -236,6 +255,17 @@ impl KernelDropManager {
         )
     }
 
+    fn managed_persisted_live_ifaces_path(&self) -> String {
+        format!(
+            "{}/.{}.live-ifaces.json",
+            self.base_state_path, MANAGED_SHARED_PIN_NAMESPACE
+        )
+    }
+
+    fn system_state_path(&self) -> String {
+        format!("{}/system", self.base_state_path)
+    }
+
     fn compute_ebpf_sha256(&self) -> Result<String, String> {
         let bytes =
             std::fs::read(&self.ebpf_path).map_err(|e| format!("read ebpf for hash: {}", e))?;
@@ -292,6 +322,83 @@ impl KernelDropManager {
         std::fs::rename(&tmp_path, &path)
             .map_err(|e| format!("rename kernel-drop runtime metadata {}: {}", path, e))?;
         Ok(())
+    }
+
+    fn current_ifindex_for_iface(iface: &str) -> Option<u32> {
+        let path = format!("/sys/class/net/{}/ifindex", iface);
+        let raw = std::fs::read_to_string(&path).ok()?;
+        raw.trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|ifindex| *ifindex != 0)
+    }
+
+    fn load_persisted_live_ifaces(&self) -> Result<PersistedLiveIfaces, String> {
+        let path = self.managed_persisted_live_ifaces_path();
+        if !Path::new(&path).exists() {
+            return Ok(PersistedLiveIfaces {
+                schema_version: KERNEL_DROP_PERSISTED_LIVE_IFACES_SCHEMA_VERSION,
+                ifaces: Vec::new(),
+            });
+        }
+
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read kernel-drop persisted live ifaces {}: {}", path, e))?;
+        let state: PersistedLiveIfaces = serde_json::from_str(&raw)
+            .map_err(|e| format!("parse kernel-drop persisted live ifaces {}: {}", path, e))?;
+        if state.schema_version != KERNEL_DROP_PERSISTED_LIVE_IFACES_SCHEMA_VERSION {
+            return Err(format!(
+                "kernel-drop persisted live ifaces schema {} != expected {}",
+                state.schema_version, KERNEL_DROP_PERSISTED_LIVE_IFACES_SCHEMA_VERSION
+            ));
+        }
+        Ok(state)
+    }
+
+    fn seed_recovered_managed_ifaces(
+        &self,
+        managed_ifaces: &mut HashMap<u32, u32>,
+    ) -> Result<bool, String> {
+        let (persisted_live, authoritative_snapshot) = match self.load_persisted_live_ifaces() {
+            Ok(state) => (state, true),
+            Err(e) => {
+                warn!(error = %e, "failed to load persisted live-iface state for kernel-drop recovery");
+                (
+                    PersistedLiveIfaces {
+                        schema_version: KERNEL_DROP_PERSISTED_LIVE_IFACES_SCHEMA_VERSION,
+                        ifaces: Vec::new(),
+                    },
+                    false,
+                )
+            }
+        };
+        for persisted in persisted_live.ifaces {
+            let Some(current_ifindex) = Self::current_ifindex_for_iface(&persisted.iface) else {
+                continue;
+            };
+            let state_path = format!("{}/{}", self.base_state_path, persisted.iface);
+            let state = wal::load_with_wal(&state_path);
+            if state.tap_id == aria_core::common::TAP_ID_UNASSIGNED {
+                continue;
+            }
+            managed_ifaces
+                .entry(current_ifindex)
+                .or_insert(state.tap_id);
+        }
+
+        let system_state_path = self.system_state_path();
+        if Path::new(&system_state_path).exists() {
+            let system_state = wal::load_with_wal(&system_state_path);
+            if let Some(iface) = system_state.attached_iface {
+                if let Some(current_ifindex) = Self::current_ifindex_for_iface(&iface) {
+                    managed_ifaces
+                        .entry(current_ifindex)
+                        .or_insert(aria_core::common::TAP_ID_UNASSIGNED);
+                }
+            }
+        }
+
+        Ok(authoritative_snapshot)
     }
 
     fn validate_runtime_inventory(
@@ -392,8 +499,25 @@ impl KernelDropManager {
             .map_err(|e| format!("insert KERNEL_DROP_CONFIG: {:?}", e))
     }
 
-    fn sync_all_managed_ifaces(&self, managed_ifaces: &HashMap<u32, u32>) -> Result<(), String> {
+    fn sync_all_managed_ifaces(
+        &self,
+        managed_ifaces: &HashMap<u32, u32>,
+        prune_missing: bool,
+    ) -> Result<(), String> {
         let mut map = self.open_managed_ifindex_filter()?;
+        if prune_missing {
+            let existing_keys: Vec<u32> = map.keys().filter_map(|item| item.ok()).collect();
+            for ifindex in existing_keys {
+                if managed_ifaces.contains_key(&ifindex) {
+                    continue;
+                }
+                if map.get(&ifindex, 0).is_ok() {
+                    map.remove(&ifindex).map_err(|e| {
+                        format!("remove stale MANAGED_IFINDEX_FILTER {}: {:?}", ifindex, e)
+                    })?;
+                }
+            }
+        }
         for (ifindex, tap_id) in managed_ifaces {
             let value = KernelDropFilterValue { tap_id: *tap_id };
             map.insert(ifindex, &value, 0).map_err(|e| {
