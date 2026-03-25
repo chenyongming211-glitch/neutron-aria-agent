@@ -139,7 +139,18 @@ impl TapRegistry {
             }
         };
 
+        if let Err(e) = instance.reserve_persisted_live_iface() {
+            self.control_plane.abort_managed_registration(prepared).await;
+            if runtime_pin.created_shared_runtime {
+                self.cleanup_shared_runtime_dir();
+            }
+            return Err(format!("failed to reserve persisted live runtime state: {}", e));
+        }
+
         if let Err(e) = instance.attach_links_from_pinned_runtime(&runtime_pin) {
+            if let Err(release_err) = instance.release_persisted_live_iface() {
+                warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
+            }
             self.control_plane.abort_managed_registration(prepared).await;
             if runtime_pin.created_shared_runtime {
                 self.cleanup_shared_runtime_dir();
@@ -170,6 +181,9 @@ impl TapRegistry {
             let instances = self.instances.read().await;
             let instance = instances.get(iface).expect("instance existence checked above");
             instance.detach()?;
+            if let Err(e) = instance.release_persisted_live_iface() {
+                warn!(instance = %iface, error = %e, "failed to release persisted live runtime state");
+            }
         }
 
         {

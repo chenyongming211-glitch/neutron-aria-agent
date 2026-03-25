@@ -18,6 +18,7 @@ pub struct FirewallInstance {
 }
 
 const RUNTIME_METADATA_SCHEMA_VERSION: u32 = 2;
+const PERSISTED_LIVE_IFACES_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct RuntimePinState {
@@ -58,6 +59,18 @@ struct RuntimeMetadata {
     optional_program_pins: Vec<String>,
     present_program_pins: Vec<String>,
     critical_map_pins: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedLiveIface {
+    iface: String,
+    ifindex: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedLiveIfaces {
+    schema_version: u32,
+    ifaces: Vec<PersistedLiveIface>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +142,14 @@ impl FirewallInstance {
         state_root.join(format!(".{}.runtime.meta.json", self.runtime_namespace()))
     }
 
+    fn persisted_live_ifaces_path(&self) -> PathBuf {
+        let state_root = self
+            .state_path
+            .parent()
+            .unwrap_or(self.state_path.as_path());
+        state_root.join(format!(".{}.live-ifaces.json", self.runtime_namespace()))
+    }
+
     fn required_program_pins() -> Vec<String> {
         vec!["xdp_firewall".to_string()]
     }
@@ -174,6 +195,29 @@ impl FirewallInstance {
             .map_err(|e| format!("parse runtime metadata {}: {}", path.display(), e))
     }
 
+    fn load_persisted_live_ifaces(&self) -> Result<PersistedLiveIfaces, String> {
+        let path = self.persisted_live_ifaces_path();
+        if !path.exists() {
+            return Ok(PersistedLiveIfaces {
+                schema_version: PERSISTED_LIVE_IFACES_SCHEMA_VERSION,
+                ifaces: Vec::new(),
+            });
+        }
+
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read persisted live ifaces {}: {}", path.display(), e))?;
+        let state: PersistedLiveIfaces = serde_json::from_str(&raw)
+            .map_err(|e| format!("parse persisted live ifaces {}: {}", path.display(), e))?;
+        if state.schema_version != PERSISTED_LIVE_IFACES_SCHEMA_VERSION {
+            return Err(format!(
+                "persisted live ifaces schema {} != expected {}",
+                state.schema_version,
+                PERSISTED_LIVE_IFACES_SCHEMA_VERSION,
+            ));
+        }
+        Ok(state)
+    }
+
     fn store_runtime_metadata_atomically(&self, metadata: &RuntimeMetadata) -> Result<(), String> {
         let path = self.runtime_metadata_path();
         let tmp_path = path.with_extension("tmp");
@@ -192,6 +236,24 @@ impl FirewallInstance {
         Ok(())
     }
 
+    fn store_persisted_live_ifaces_atomically(&self, state: &PersistedLiveIfaces) -> Result<(), String> {
+        let path = self.persisted_live_ifaces_path();
+        let tmp_path = path.with_extension("tmp");
+        let json = serde_json::to_string_pretty(state)
+            .map_err(|e| format!("serialize persisted live ifaces: {}", e))?;
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create persisted live ifaces dir {}: {}", parent.display(), e))?;
+        }
+
+        std::fs::write(&tmp_path, json)
+            .map_err(|e| format!("write persisted live ifaces tmp {}: {}", tmp_path.display(), e))?;
+        std::fs::rename(&tmp_path, &path)
+            .map_err(|e| format!("rename persisted live ifaces {}: {}", path.display(), e))?;
+        Ok(())
+    }
+
     fn clear_runtime_metadata(&self) {
         let metadata_path = self.runtime_metadata_path();
         if metadata_path.exists() {
@@ -199,6 +261,51 @@ impl FirewallInstance {
                 warn!(instance = %self.iface, path = %metadata_path.display(), error = %e, "failed to remove runtime metadata");
             }
         }
+    }
+
+    fn current_ifindex(&self) -> Result<u32, String> {
+        let path = format!("/sys/class/net/{}/ifindex", self.iface);
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read ifindex for {}: {}", self.iface, e))?;
+        raw.trim()
+            .parse::<u32>()
+            .map_err(|e| format!("parse ifindex for {}: {}", self.iface, e))
+    }
+
+    pub fn reserve_persisted_live_iface(&self) -> Result<(), String> {
+        if !self.shared_runtime {
+            return Ok(());
+        }
+
+        let mut state = self.load_persisted_live_ifaces()?;
+        state.ifaces.retain(|entry| entry.iface != self.iface);
+        state.ifaces.push(PersistedLiveIface {
+            iface: self.iface.clone(),
+            ifindex: self.current_ifindex()?,
+        });
+        self.store_persisted_live_ifaces_atomically(&state)
+    }
+
+    pub fn release_persisted_live_iface(&self) -> Result<(), String> {
+        if !self.shared_runtime {
+            return Ok(());
+        }
+
+        let path = self.persisted_live_ifaces_path();
+        let mut state = self.load_persisted_live_ifaces()?;
+        state.ifaces.retain(|entry| entry.iface != self.iface);
+        if state.ifaces.is_empty() {
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .map_err(|e| format!("remove persisted live ifaces {}: {}", path.display(), e))?;
+            }
+            return Ok(());
+        }
+        self.store_persisted_live_ifaces_atomically(&state)
+    }
+
+    fn persisted_live_ifaces_nonempty(&self) -> Result<bool, String> {
+        Ok(!self.load_persisted_live_ifaces()?.ifaces.is_empty())
     }
 
     fn shared_runtime_has_pinned_live_links(&self) -> Result<bool, String> {
@@ -362,8 +469,21 @@ impl FirewallInstance {
         let xdp_link_pin = self.xdp_link_pin_path();
         let preexisting_xdp_link = Path::new(&xdp_link_pin).exists();
         let expected_metadata = self.expected_runtime_metadata(ebpf_path)?;
+        let persisted_live_runtime = self.persisted_live_ifaces_nonempty()?;
+        let pinned_live_runtime = if pin_path_preexisted {
+            self.shared_runtime_has_pinned_live_links()?
+        } else {
+            false
+        };
+        let live_runtime = known_live_runtime || pinned_live_runtime || persisted_live_runtime;
 
         if !pin_path_preexisted {
+            if live_runtime {
+                return Err(
+                    "shared runtime appears live but the pinned runtime directory is missing; detach managed taps and reattach to rebuild safely"
+                        .to_string(),
+                );
+            }
             if let Err(e) = self.load_and_pin_runtime(ebpf_path, &expected_metadata) {
                 if self.pin_path.exists() {
                     let _ = std::fs::remove_dir_all(&self.pin_path);
@@ -378,8 +498,6 @@ impl FirewallInstance {
                 preexisting_xdp_link: false,
             });
         }
-
-        let live_runtime = known_live_runtime || self.shared_runtime_has_pinned_live_links()?;
         match self.validate_runtime_inventory(&expected_metadata) {
             RuntimeInventoryStatus::Healthy => {
                 info!(instance = %self.iface, preexisting_xdp_link, live_runtime, "reusing healthy shared runtime");
