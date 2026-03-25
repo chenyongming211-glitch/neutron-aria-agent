@@ -12,6 +12,7 @@ mod netlink;
 mod control_plane;
 mod service_chain;
 mod system_manager;
+mod kernel_drop_manager;
 mod ssl_manager;
 mod ssl_support;
 mod api_handlers;
@@ -200,6 +201,24 @@ async fn main() {
     }
     if let Err(e) = ssl_manager.cleanup_legacy_instance_pins().await {
         warn!(error = %e, "failed to clean legacy SSL pins");
+    }
+
+    let kernel_drop_manager = Arc::new(kernel_drop_manager::KernelDropManager::new(
+        &config.ebpf_path,
+        &config.pin_path,
+    ));
+    if let Err(e) = kernel_drop_manager.ensure_loaded().await {
+        warn!(error = %e, "failed to initialize kernel drop manager scaffold");
+    } else {
+        let status = kernel_drop_manager.status_snapshot().await;
+        info!(
+            loaded = status.loaded,
+            mode = ?status.mode,
+            managed_ifaces = status.managed_ifaces,
+            pin_path = %kernel_drop_manager.pin_path(),
+            last_error = ?status.last_error,
+            "kernel drop manager scaffold ready"
+        );
     }
 
     // Create ControlPlane

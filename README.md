@@ -23,6 +23,12 @@
 - **Netlink 监听** — 实时感知接口增删，60 秒对账兜底
 - **Pinned Maps** — eBPF map 固定到 bpffs，agent 重启后自动恢复
 
+## 设计文档
+
+- [Runtime Repair Design](docs/runtime-repair-design.md)
+- [Global Shared Data Plane Design](docs/global-shared-data-plane-design.md)
+- [Kernel Drop Observability Design](docs/kernel-drop-observability-design.md)
+
 ## 系统要求
 
 - Linux 内核 4.18+（RHEL/CentOS 8.2+）或 5.8+（推荐）
