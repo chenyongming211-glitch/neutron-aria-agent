@@ -594,6 +594,21 @@ impl ControlPlane {
                 state.ssl_enabled = enabled;
             }
         }
+        let ifindex = match state.attached_iface.as_deref() {
+            Some(iface) => match Self::resolve_ifindex(iface) {
+                Ok(ifindex) => Some(ifindex),
+                Err(e) => {
+                    warn!(
+                        instance = "system",
+                        iface = %iface,
+                        error = %e,
+                        "failed to resolve system interface ifindex for kernel drop manager"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
 
         let wal = match WalClient::open(state_path) {
             Ok(w) => w,
@@ -631,7 +646,7 @@ impl ControlPlane {
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             tap_id,
-            ifindex: None,
+            ifindex,
             pin_path: pin_path.to_string(),
             state_path: state_path.to_string(),
             wal,
@@ -649,7 +664,23 @@ impl ControlPlane {
                 .await;
         }
 
-        info!(instance = "system", tap_id, "registered system instance");
+        if let Some(ifindex) = ifindex {
+            if let Err(e) = self
+                .kernel_drop_manager
+                .sync_managed_iface("system", ifindex, tap_id)
+                .await
+            {
+                warn!(
+                    instance = "system",
+                    ifindex,
+                    tap_id,
+                    error = %e,
+                    "failed to register system interface with kernel drop manager"
+                );
+            }
+        }
+
+        info!(instance = "system", tap_id, ifindex = ?ifindex, "registered system instance");
         Ok(())
     }
 
@@ -684,9 +715,11 @@ impl ControlPlane {
                         "failed to scrub managed runtime state during unregister"
                     );
                 }
-            } else if let Some(ifindex) = ifindex {
-                if let Err(e) = aria_core::ebpf_ops::clear_iface_ctx(&state.pin_path, ifindex) {
-                    warn!(instance = %name, tap_id, ifindex, error = %e, "failed to clear iface context");
+            } else if name != "system" {
+                if let Some(ifindex) = ifindex {
+                    if let Err(e) = aria_core::ebpf_ops::clear_iface_ctx(&state.pin_path, ifindex) {
+                        warn!(instance = %name, tap_id, ifindex, error = %e, "failed to clear iface context");
+                    }
                 }
             }
             state.shutdown_wal().await;
