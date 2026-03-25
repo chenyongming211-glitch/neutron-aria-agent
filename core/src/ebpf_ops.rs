@@ -356,7 +356,7 @@ pub fn update_runtime_config(
             .unwrap_or_else(|| current.as_ref().map(|c| c.mirror_enabled).unwrap_or(0)),
         tcprt_enabled: tcprt_enabled
             .map(|b| if b { 1 } else { 0 })
-            .unwrap_or_else(|| current.as_ref().map(|c| c.tcprt_enabled).unwrap_or(1)),
+            .unwrap_or_else(|| current.as_ref().map(|c| c.tcprt_enabled).unwrap_or(0)),
         pad: [0; 2],
     };
     map.insert(&runtime.tap_id, &cfg, 0)

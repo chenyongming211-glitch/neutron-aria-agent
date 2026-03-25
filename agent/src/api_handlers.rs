@@ -213,12 +213,23 @@ pub async fn add_policy(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
 
-    match cp.add_policy(&instance, &req.src_group, &req.dst_group, proto, action, direction, req.ports.as_deref()).await {
-        Ok(()) => Ok((StatusCode::CREATED, Json(MessageResponse {
-            message: format!("Added policy: {} -> {} ({})", req.src_group, req.dst_group, req.direction),
-        }))),
-        Err(e) => Err(err_response(e)),
+    let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
+    let mut applied: Vec<u8> = Vec::new();
+
+    for dir in &directions {
+        if let Err(e) = cp.add_policy(&instance, &req.src_group, &req.dst_group, proto, action, *dir, req.ports.as_deref()).await {
+            for prev_dir in &applied {
+                let _ = cp.delete_policy(&instance, &req.src_group, &req.dst_group, proto, *prev_dir).await;
+            }
+            return Err(err_response(e));
+        }
+        applied.push(*dir);
     }
+
+    let dir_label = if direction == 2 { "both" } else { &req.direction };
+    Ok((StatusCode::CREATED, Json(MessageResponse {
+        message: format!("Added policy: {} -> {} ({})", req.src_group, req.dst_group, dir_label),
+    })))
 }
 
 pub async fn delete_policy(
@@ -235,12 +246,18 @@ pub async fn delete_policy(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
 
-    match cp.delete_policy(&instance, &req.src_group, &req.dst_group, proto, direction).await {
-        Ok(()) => Ok(Json(MessageResponse {
-            message: format!("Deleted policy: {} -> {}", req.src_group, req.dst_group),
-        })),
-        Err(e) => Err(err_response(e)),
+    let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
+
+    for dir in &directions {
+        if let Err(e) = cp.delete_policy(&instance, &req.src_group, &req.dst_group, proto, *dir).await {
+            return Err(err_response(e));
+        }
     }
+
+    let dir_label = if direction == 2 { "both" } else { &req.direction };
+    Ok(Json(MessageResponse {
+        message: format!("Deleted policy: {} -> {} ({})", req.src_group, req.dst_group, dir_label),
+    }))
 }
 
 pub async fn list_policies_with_stats(
@@ -315,9 +332,25 @@ pub async fn batch_add_policies(
             Err(e) => { errors.push(e); continue; }
         };
 
-        match cp.add_policy(&instance, &policy.src_group, &policy.dst_group, proto, action, direction, policy.ports.as_deref()).await {
-            Ok(()) => added += 1,
-            Err(e) => errors.push(e.to_string()),
+        let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
+        let mut applied: Vec<u8> = Vec::new();
+        let mut add_error: Option<String> = None;
+
+        for dir in &directions {
+            if let Err(e) = cp.add_policy(&instance, &policy.src_group, &policy.dst_group, proto, action, *dir, policy.ports.as_deref()).await {
+                add_error = Some(e.to_string());
+                break;
+            }
+            applied.push(*dir);
+        }
+
+        if let Some(err) = add_error {
+            for prev_dir in &applied {
+                let _ = cp.delete_policy(&instance, &policy.src_group, &policy.dst_group, proto, *prev_dir).await;
+            }
+            errors.push(err);
+        } else {
+            added += 1;
         }
     }
 
