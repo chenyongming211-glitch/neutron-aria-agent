@@ -116,182 +116,220 @@ ariactl --tap eth0 group add --name db --cidr 192.168.1.0/24
 ariactl --tap eth0 group list
 ```
 
-### 3. ACL 策略
+### 3. ACL 策略（`ariactl policy`）
+
+产品能力上通常叫 ACL，但 CLI 子命令实际是 `ariactl policy`。除特别说明外，规则默认作用在 `--tap` 指定实例上；省略 `--tap` 时默认操作 `system` 实例。
+
+策略匹配维度：
+
+- `--src-group` / `--dst-group`：源/目的 IP 组，`any` 表示任意
+- `--proto`：`tcp`、`udp`、`icmp` 或 `any`
+- `--direction`：`ingress` 或 `egress`
+- `--ports`：可选，仅对有端口概念的协议生效，支持逗号分隔端口和范围，例如 `80,443,10000-20000`
+- `--action`：常用值是 `accept` 或 `drop`
+
+常见用法：
 
 ```bash
-# 入向：允许 web 到 db 的 MySQL 流量
+# 入向：允许 web -> db 的 MySQL
 ariactl --tap eth0 policy add \
   --src-group web --dst-group db \
   --proto tcp --ports 3306 \
   --action accept --direction ingress
 
-# 出向：允许 HTTP/HTTPS
+# 出向：允许 web 访问 HTTP/HTTPS
 ariactl --tap eth0 policy add \
-  --src-group any --dst-group web \
+  --src-group web --dst-group any \
   --proto tcp --ports 80,443 \
   --action accept --direction egress
 
-# 批量导入策略
-ariactl --tap eth0 policy batch --file policies.json
-
-# 查看 / 删除
-ariactl --tap eth0 policy list
-ariactl --tap eth0 policy delete --src-group web --dst-group db --proto tcp --direction ingress
+# 入向：显式拒绝任意来源访问 db 的 Redis
+ariactl --tap eth0 policy add \
+  --src-group any --dst-group db \
+  --proto tcp --ports 6379 \
+  --action drop --direction ingress
 ```
 
-### 4. QoS 限速
+查看、统计和删除：
 
 ```bash
-# 出向 EDT shaping（平滑限速）
-ariactl --tap eth0 qos add --group web --direction egress --rate 100mbps --burst 1mb --mode shaping
+# 仅查看配置
+ariactl --tap eth0 policy list
 
-# 入向 policing（超限丢包）
-ariactl --tap eth0 qos add --group web --direction ingress --rate 50mbps
+# 配置 + 命中统计
+ariactl --tap eth0 policy with-stats
 
-# 双向同时限速
-ariactl --tap eth0 qos add --group db --direction both --rate 200mbps
+# 删除单条规则
+ariactl --tap eth0 policy delete \
+  --src-group web --dst-group db \
+  --proto tcp --direction ingress
+```
 
-# 查看 / 删除
+批量导入支持 JSON 文件或标准输入。`direction` 必须写成 `ingress` 或 `egress`；如果同一规则要双向生效，请写两条。
+
+```bash
+cat <<'EOF' > policies.json
+{
+  "policies": [
+    {
+      "src_group": "web",
+      "dst_group": "db",
+      "proto": "tcp",
+      "action": "accept",
+      "direction": "ingress",
+      "ports": "3306"
+    },
+    {
+      "src_group": "db",
+      "dst_group": "web",
+      "proto": "tcp",
+      "action": "accept",
+      "direction": "egress",
+      "ports": "3306"
+    }
+  ]
+}
+EOF
+
+ariactl --tap eth0 policy batch --file policies.json
+```
+
+### 4. QoS 限速（`ariactl qos`）
+
+QoS 用于按 IP 组做带宽约束，支持：
+
+- `--direction ingress|egress|both`
+- `--rate`：支持 `gbps`、`mbps`、`kbps`、`bps`，也支持纯数字字节/秒
+- `--burst`：突发桶大小，`0` 表示自动
+- `--priority`：`0` 最高、`7` 最低
+- `--mode policing|shaping`
+
+`policing` 的语义是超限直接丢包；`shaping` 的语义是通过 EDT 做平滑整形，通常更适合 egress。
+
+```bash
+# 出向 shaping：把 web 组整形成 100 Mbps
+ariactl --tap eth0 qos add \
+  --group web --direction egress \
+  --rate 100mbps --burst 1mb \
+  --priority 1 --mode shaping
+
+# 入向 policing：把 db 组限制到 50 Mbps
+ariactl --tap eth0 qos add \
+  --group db --direction ingress \
+  --rate 50mbps --mode policing
+
+# 默认组双向限速
+ariactl --tap eth0 qos add \
+  --group default --direction both \
+  --rate 200mbps --burst 0
+```
+
+查看、统计和删除：
+
+```bash
 ariactl --tap eth0 qos list
+ariactl --tap eth0 qos with-stats
 ariactl --tap eth0 qos delete --group web --direction egress
 ```
 
-速率支持单位：`gbps`、`mbps`、`kbps`、`bps`，或纯数字（字节/秒）。
+### 5. 端口镜像（`ariactl mirror`）
 
-### 5. 端口镜像（SPAN）
+Mirror 用于把符合条件的报文镜像到目标接口，支持按源组、目的组、协议和方向过滤。
+
+- `--target`：镜像目标接口
+- `--direction ingress|egress|both`
+- `--src-group` / `--dst-group`：默认都是 `any`
+- `--proto`：默认 `any`
 
 ```bash
-# 镜像 web→db 的 TCP 流量到 tapmirror 接口
+# 精确镜像：web -> db 的 TCP 双向流量
 ariactl --tap eth0 mirror add \
-  --src-group web --dst-group db --proto tcp \
-  --direction both --target tapmirror
+  --src-group web --dst-group db \
+  --proto tcp --direction both \
+  --target tapmirror
 
-# 全局镜像（所有流量）
+# 全局镜像：所有入向流量
 ariactl --tap eth0 mirror add \
-  --src-group any --dst-group any --proto any \
-  --direction ingress --target tapmirror
+  --src-group any --dst-group any \
+  --proto any --direction ingress \
+  --target tapmirror
+```
 
-# 查看 / 删除
+查看、统计和删除：
+
+```bash
 ariactl --tap eth0 mirror list
-ariactl --tap eth0 mirror delete --src-group web --dst-group db --proto tcp --direction both
+ariactl --tap eth0 mirror with-stats
+ariactl --tap eth0 mirror delete \
+  --src-group web --dst-group db \
+  --proto tcp --direction both
 ```
 
-### 6. 业务延迟分析（TCP-RT）
+`mirror with-stats` 会额外显示镜像报文数、字节数和错误计数。
 
-每条 TCP 流自动采集：握手延迟、客户端 RTT、服务端 RTT、应用响应时间（ART）、重传次数。
+### 6. 业务延迟分析（`ariactl tcprt`）
 
-在 bond1 等同时挂载 XDP（ingress）和 TC（egress）的物理口上，eBPF 自动启用**双观测模式**：SYN 和 SYN-ACK 各被观测两次（入/出），从而精确分解出 5 段延迟：
+TCP-RT 负责做业务延迟可观测，自动采集：
 
-```
-Client ──── bond1(in) ──── OVS/NFs ──── bond1(out) ──── Server
-         t0          t1                t2          t3
-         │     ①     │       ②        │     ③     │
-         │ Platform  │  Server Net    │ Platform  │
-         │ (forward) │               │ (reverse) │
-    ④ Client Net                              ⑤ Server Processing
-```
+- 握手延迟 `hs`
+- 客户端 RTT `crtt`
+- 服务端 RTT `srtt`
+- 应用响应时间 `art`
+- 请求/响应方向重传次数
+- NQA 评分 `nqa`
 
-| # | 段 | 说明 |
-|---|---|---|
-| ① | Platform (forward) | SYN 从 ingress 到 egress，宿主机正向处理耗时 |
-| ② | Server Network | SYN 出 bond1 到 SYN-ACK 回到 bond1，网络往返 |
-| ③ | Platform (reverse) | SYN-ACK 从 ingress 到 egress，宿主机反向处理耗时 |
-| ④ | Client Network | ACK 到达 bond1 减去 SYN-ACK 离开，客户端网络往返 |
-| ⑤ | Server Processing | 数据阶段 ART 减去 Server Network，服务端业务耗时 |
+命令分成两类：
+
+- 跨实例分析：`top`、`flow`
+- 单实例视图：`histogram`、`states`、`flush`，通常配合全局 `--tap`
+
+Top-N 和实时观察：
 
 ```bash
-# Top-N 流按 ART 排序
+# 按应用响应时间排序
 ariactl tcprt top --by art --top 10
 
-# 实时刷新模式
+# 实时刷新
 ariactl tcprt top --by crtt --top 20 --watch --interval 2
+```
 
-# 单服务延迟分解（自动检测双观测，展示 5 段 breakdown）
+单服务延迟分解：
+
+```bash
 ariactl tcprt flow --dst 10.0.0.5 --dport 3306
 ```
 
-5 段 breakdown 输出示例：
+排序维度支持：
 
-```
-Service: 10.0.0.5:3306  (128 flows)
+- `art`：应用响应时间
+- `crtt`：客户端 RTT
+- `srtt`：服务端 RTT
+- `hs`：握手时延
+- `retrans`：重传
+- `nqa`：综合质量评分
 
-  Latency Breakdown (avg)
-  ─────────────────────────  ────────────
-  Client Network                350.2 us
-  Platform (forward)            120.0 us
-  Server Network                180.0 us
-  Platform (reverse)            130.0 us
-  Server Processing             450.0 us  <- bottleneck
-
-  Retransmissions (total)
-  ─────────────────────────  ─────────  ─────────
-                               Req        Resp
-  Total                        5          2
-```
-
-排序维度：`art`（应用响应）、`crtt`（客户端 RTT）、`srtt`（服务端 RTT）、`hs`（握手）、`retrans`（重传）。
-
-**逐跳延迟归因**：结合 `--chain` 指定服务链拓扑，自动按 hop 拆分延迟瓶颈：
+实例级视图：
 
 ```bash
-ariactl tcprt flow --dst 10.0.0.5 --dport 3306 --chain prod-chain
+# 指定实例查看 ART 分布
+ariactl --tap eth0 tcprt histogram
+
+# 查看 TCP 状态分布和异常
+ariactl --tap eth0 tcprt states
+
+# 清空该实例的 TCP-RT 状态
+ariactl --tap eth0 tcprt flush
 ```
 
-### 7. 丢包溯源（Chain X-Ray）
+#### 服务链逐跳归因（`ariactl chain`）
 
-实时包级别追踪，查看每个包在 XDP/TC 各阶段的处理结果，支持 IPv4 和 IPv6。
+`tcprt flow --chain <name>` 和 `trace start --chain <name>` 共享同一套服务链拓扑定义。
 
 ```bash
-# 单实例追踪
-ariactl trace start --tap eth0 --dst 10.0.0.5 --proto tcp --dport 3306 --wait 5
-
-# 跨实例追踪（自动发现所有活跃实例）
-ariactl trace start --dst 10.0.0.5 --wait 5
-
-# 连续模式（Ctrl+C 结束）
-ariactl trace start --dst 10.0.0.5
-```
-
-**服务链透视**：结合 `--chain` 按 hop 顺序展示包的流转路径，自动归因丢包位置。即使安全设备内部的 drop 无法被 eBPF 捕获，也能通过 in/out 口的包数差定位到具体设备：
-
-```bash
-ariactl trace start --chain prod-chain --dst 10.0.0.5 --dport 3306 --wait 5
-```
-
-```
-Chain: prod-chain    Filter: * → 10.0.0.5:3306
-
-  Hop            Tap     Role   In        Out       Drops
-  ──────────     ──────  ────   ────────  ────────  ──────────────────
-  load-balancer  tap1    in     50 pkts   -         -
-  load-balancer  tap2    out    -         48 pkts   -
-                                          ↓ 2 pkts lost between load-balancer and firewall
-  firewall       tap3    in     46 pkts   -         ✗ 40 acl_deny
-  firewall       tap4    out    -         0 pkts    ✗ 6 qos_drop
-                         ★ dropped 46/46 inside firewall
-                           ├─ ingress: 40 (acl_deny)
-                           └─ egress: 6 (qos_drop)
-  app-server     tap5    bidi   0 pkts    0 pkts    -
-```
-
-丢包归因标记：
-
-| 标记 | 含义 |
-|------|------|
-| `✗ N reason` | eBPF 捕获到的 drop 事件，按 reason 分组 |
-| `★ dropped M/N inside <hop>` | 设备内部丢包（in 口进入但 out 口未出），附带方向+原因树状展开 |
-| `└─ no drop reason captured` | 黑盒丢包：设备内部阻拦，eBPF 未捕获 drop 事件 |
-| `↓ N pkts lost between A and B` | hop 间网络丢包 |
-
-### 服务链拓扑定义
-
-TCP-RT 的 `--chain` 和 Trace 的 `--chain` 共享同一份拓扑定义：
-
-```bash
-ariactl chain apply --file chain.json    # 创建/更新
-ariactl chain list                       # 列出
-ariactl chain show prod-chain            # 详情
-ariactl chain delete prod-chain          # 删除
+ariactl chain apply --file chain.json
+ariactl chain list
+ariactl chain show prod-chain
+ariactl chain delete prod-chain
 ```
 
 chain.json 示例：
@@ -320,57 +358,150 @@ chain.json 示例：
 }
 ```
 
-### 8. Kernel Drop 分析
+结合服务链做单服务逐跳分析：
 
 ```bash
-# 查看所有受管接口的内核丢包统计
-ariactl drops list
-
-# 按实例过滤
-ariactl --tap eth0 drops list
-
-# 清空内核丢包统计
-ariactl drops flush --force
+ariactl tcprt flow --dst 10.0.0.5 --dport 3306 --chain prod-chain
 ```
 
-防火墙主动丢弃统计仍保留在 `ariactl stats --rules` 和 `ariactl stats --qos` 中。
+### 7. 丢包溯源（`ariactl trace`）
 
-### 9. 连接跟踪
+`trace` 用于实时包级别追踪，支持 IPv4 和 IPv6。当前 CLI 只有一个子命令：`start`。
+
+需要注意的是，`trace start` 使用自己的 `--tap` 参数，而不是全局 `--tap`：
+
+- `ariactl trace start --tap tap1 ...`：只追踪一个实例
+- `ariactl trace start ...`：自动追踪所有活跃实例
+- `--wait <seconds>`：追踪固定秒数后自动退出
+- 省略 `--wait`：持续输出，直到手动 `Ctrl+C`
+
+```bash
+# 单实例追踪
+ariactl trace start \
+  --tap eth0 \
+  --dst 10.0.0.5 --proto tcp --dport 3306 \
+  --wait 5
+
+# 跨实例追踪
+ariactl trace start \
+  --dst 10.0.0.5 --proto tcp --dport 3306 \
+  --wait 5
+
+# 连续模式
+ariactl trace start \
+  --src 10.0.0.10 --dst 10.0.0.5 \
+  --proto tcp --dport 3306
+```
+
+结合服务链按 hop 展示：
+
+```bash
+ariactl trace start --chain prod-chain --dst 10.0.0.5 --dport 3306 --wait 5
+```
+
+在 chain 模式下，输出会把包在各 hop 的 in/out 口、eBPF 直接捕获的 drop reason，以及 hop 间黑盒丢包一起展示出来，适合做链路级排障。
+
+### 8. Kernel Drop 观测（`ariactl drops`）
+
+`drops` 统计的是内核层 `kfree_skb` 相关丢包事件，和防火墙主动丢弃是两条不同的观测链路：
+
+- 防火墙主动丢弃：看 `ariactl stats --rules`、`ariactl stats --qos`
+- 内核层 drop：看 `ariactl drops list/flush`
+
+过滤维度：
+
+- 全局 `--tap <instance>`：先按实例过滤
+- 子命令 `--iface <name>`：再按真实接口名过滤
+- `--include-unattributed`：包含无法归属到具体接口的早期 drop
+
+```bash
+# 查看所有实例上的 kernel drop
+ariactl drops list
+
+# 只看某个实例
+ariactl --tap eth0 drops list
+
+# 只看某个实例下的具体接口
+ariactl --tap eth0 drops list --iface eth0 --top 20
+
+# 包含 early unattributed drop
+ariactl drops list --include-unattributed
+```
+
+清理统计必须显式带 `--force`：
+
+```bash
+# 清空某个实例上的所有 kernel drop 统计
+ariactl --tap eth0 drops flush --force
+
+# 只清某个接口
+ariactl --tap eth0 drops flush --iface eth0 --force
+
+# 清空全局 unattributed drop
+ariactl drops flush --include-unattributed --force
+```
+
+### 9. 连接跟踪（`ariactl conntrack`）
+
+Conntrack 用于查看和清理实例级连接表，通常配合 `--tap` 使用。
 
 ```bash
 # 查看活跃连接
 ariactl --tap eth0 conntrack list
 
-# 清空连接表
+# 清空该实例连接表
 ariactl --tap eth0 conntrack flush
 ```
 
-### 10. 监控与统计
+`list` 输出包含五元组、协议、状态、报文数和字节数，适合确认连接是否已经进入 fast-path。
+
+### 10. 监控与统计（`ariactl stats`）
+
+`stats` 是统一统计入口。不带任何子选项时返回概览；带标志时可以一次输出多个统计分区。
+
+概览：
 
 ```bash
-# 概览（groups/policies/qos/mirror/conntrack 数量）
 ariactl --tap eth0 stats
+```
 
-# 按规则统计（命中次数、字节数）
+会返回该实例当前的：
+
+- group 数量
+- policy 数量
+- QoS 规则数量
+- mirror 规则数量
+- conntrack IPv4 / IPv6 条目数量
+
+详细统计：
+
+```bash
+# 规则命中和丢弃字节/报文
 ariactl --tap eth0 stats --rules
 
-# Top 流量
+# Top-N 流量
 ariactl --tap eth0 stats --flows --top 20
 
-# QoS 统计（通过/丢弃/整形）
+# QoS 通过 / 丢弃 / 整形
 ariactl --tap eth0 stats --qos
 
-# 按组统计
+# 按组流量统计
 ariactl --tap eth0 stats --groups
 
-# 镜像统计
+# Mirror 统计
 ariactl --tap eth0 stats --mirror
 
-# TCP-RT 统计
-ariactl --tap eth0 stats --tcprt
+# TCP-RT Top-N
+ariactl --tap eth0 stats --tcprt --top 20
 
-# Drop 统计
-ariactl --tap eth0 stats --drops
+# Kernel drop 统计
+ariactl --tap eth0 stats --drops --top 50
+```
+
+多个统计标志可以组合使用，例如：
+
+```bash
+ariactl --tap eth0 stats --rules --qos --mirror
 ```
 
 ### 11. 运行时配置
@@ -416,16 +547,16 @@ ariactl --tap tap2 policy list
 | `health` | Agent 健康检查 |
 | `instances` | 列出所有实例 |
 | `system start/stop` | 独立模式启停 |
-| `group add/delete/list` | IP 组管理（CIDR） |
-| `policy add/delete/list/batch` | ACL 策略管理 |
-| `qos add/delete/list` | QoS 限速管理 |
-| `mirror add/delete/list` | 端口镜像管理 |
+| `group add/delete/list/with-stats` | IP 组管理（CIDR） |
+| `policy add/delete/list/with-stats/batch` | ACL 策略管理 |
+| `qos add/delete/list/with-stats` | QoS 限速管理 |
+| `mirror add/delete/list/with-stats` | 端口镜像管理 |
 | `conntrack list/flush` | 连接跟踪操作 |
-| `tcprt top/flow/flush` | 业务延迟分析（支持 `--chain` 逐跳归因） |
+| `tcprt top/flow/histogram/states/flush` | 业务延迟分析（支持 `--chain` 逐跳归因） |
 | `trace start` | 丢包溯源（支持 `--chain` 服务链透视） |
 | `chain apply/list/show/delete` | 服务链拓扑定义（供 tcprt/trace 共用） |
-| `drops list/flush` | Kernel drop 溯源 |
-| `stats` | 统计信息 |
+| `drops list/flush` | Kernel drop 观测与清理 |
+| `stats [--rules|--flows|--qos|--groups|--mirror|--tcprt|--drops]` | 统一统计入口 |
 | `config show/set` | 运行时配置 |
 
 ## 技术架构
