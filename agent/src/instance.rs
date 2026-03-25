@@ -219,12 +219,19 @@ impl FirewallInstance {
             .map_err(|e| format!("read persisted live ifaces {}: {}", path.display(), e))?;
         let mut state: PersistedLiveIfaces = serde_json::from_str(&raw)
             .map_err(|e| format!("parse persisted live ifaces {}: {}", path.display(), e))?;
-        if state.schema_version != 1 && state.schema_version != PERSISTED_LIVE_IFACES_SCHEMA_VERSION
+        let original_schema_version = state.schema_version;
+        if original_schema_version != 1
+            && original_schema_version != PERSISTED_LIVE_IFACES_SCHEMA_VERSION
         {
             return Err(format!(
                 "persisted live ifaces schema {} is unsupported (expected 1 or {})",
-                state.schema_version, PERSISTED_LIVE_IFACES_SCHEMA_VERSION,
+                original_schema_version, PERSISTED_LIVE_IFACES_SCHEMA_VERSION,
             ));
+        }
+        if original_schema_version == 1 {
+            for entry in &mut state.ifaces {
+                entry.active = false;
+            }
         }
         state.schema_version = PERSISTED_LIVE_IFACES_SCHEMA_VERSION;
         Ok(state)
@@ -688,6 +695,7 @@ impl FirewallInstance {
             attached.xdp = LinkOwnership::ClaimedExisting;
             self.claim_existing_tc_links(&mut attached);
             self.edt_available = aria_core::ebpf_ops::check_fq_qdisc(&self.iface);
+            self.activate_persisted_live_iface()?;
             info!(instance = %self.iface, edt_available = self.edt_available, "claimed preexisting live links without runtime mutation");
             return Ok(attached);
         }
@@ -703,6 +711,12 @@ impl FirewallInstance {
 
         self.attach_xdp_from_pin(&xdp_prog_pin, &xdp_link_pin)?;
         attached.xdp = LinkOwnership::AttachedNow;
+        if let Err(e) = self.activate_persisted_live_iface() {
+            if let Err(rollback_err) = self.rollback_attached_links(&attached, false) {
+                warn!(instance = %self.iface, error = %rollback_err, "failed to roll back links after persisted live activation failure");
+            }
+            return Err(e);
+        }
 
         self.ensure_tc_runtime(&mut attached);
         self.ensure_fq_runtime();

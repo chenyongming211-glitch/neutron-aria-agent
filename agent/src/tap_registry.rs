@@ -151,26 +151,7 @@ impl TapRegistry {
             ));
         }
 
-        let attached_links = match instance.attach_links_from_pinned_runtime(&runtime_pin) {
-            Ok(attached) => attached,
-            Err(e) => {
-                if let Err(release_err) = instance.release_persisted_live_iface() {
-                    warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
-                }
-                self.control_plane
-                    .abort_managed_registration(prepared)
-                    .await;
-                if runtime_pin.created_shared_runtime {
-                    self.cleanup_shared_runtime_dir();
-                }
-                return Err(format!("interface link attach failed: {}", e));
-            }
-        };
-
-        if let Err(e) = instance.activate_persisted_live_iface() {
-            if let Err(rollback_err) = instance.rollback_attached_links(&attached_links, false) {
-                warn!(instance = %iface, error = %rollback_err, "failed to roll back attached links after persisted live activation failure");
-            }
+        if let Err(e) = instance.attach_links_from_pinned_runtime(&runtime_pin) {
             if let Err(release_err) = instance.release_persisted_live_iface() {
                 warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
             }
@@ -180,10 +161,7 @@ impl TapRegistry {
             if runtime_pin.created_shared_runtime {
                 self.cleanup_shared_runtime_dir();
             }
-            return Err(format!(
-                "failed to activate persisted live runtime state: {}",
-                e
-            ));
+            return Err(format!("interface link attach failed: {}", e));
         }
 
         self.control_plane.publish_managed_instance(prepared).await;
