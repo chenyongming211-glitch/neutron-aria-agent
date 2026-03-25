@@ -135,6 +135,10 @@ impl ControlPlaneError {
 }
 
 impl ControlPlane {
+    fn requested_directions(direction: u8) -> Vec<u8> {
+        if direction == 2 { vec![0, 1] } else { vec![direction] }
+    }
+
     fn expected_runtime_flags(state: &FirewallState) -> (u8, u8, u8, u8, u8, u8, u8) {
         (
             state.conntrack_enabled as u8,
@@ -221,6 +225,76 @@ impl ControlPlane {
             }
         }
         wal.shutdown().await;
+    }
+
+    fn rollback_policy_deletes(
+        runtime: TapMapRuntime<'_>,
+        ebpf_path: &str,
+        deleted_rules: &[RuleInfo],
+    ) -> Result<(), String> {
+        for rule in deleted_rules {
+            aria_core::ebpf_ops::add_policy(
+                rule.src_group_id,
+                rule.dst_group_id,
+                rule.proto,
+                rule.action,
+                rule.ports.as_deref(),
+                rule.bitmap_idx,
+                false,
+                rule.direction,
+                runtime,
+                ebpf_path,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn rollback_qos_deletes(
+        runtime: TapMapRuntime<'_>,
+        deleted_rules: &[QosRuleInfo],
+        user_qos_enabled: bool,
+    ) -> Result<(), String> {
+        for rule in deleted_rules {
+            aria_core::qos_ops::add_qos_rule(
+                rule.group_id,
+                rule.direction,
+                rule.rate_bps,
+                rule.burst_bytes,
+                rule.priority,
+                rule.mode,
+                runtime,
+                user_qos_enabled,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn rollback_mirror_deletes(
+        runtime: TapMapRuntime<'_>,
+        deleted_rules: &[MirrorRuleInfo],
+        user_mirror_enabled: bool,
+    ) -> Result<(), String> {
+        for rule in deleted_rules {
+            if rule.is_global {
+                aria_core::mirror_ops::add_global_mirror(
+                    rule.direction,
+                    rule.target_ifindex,
+                    runtime,
+                    user_mirror_enabled,
+                )?;
+            } else {
+                aria_core::mirror_ops::add_mirror_rule(
+                    rule.src_group_id,
+                    rule.dst_group_id,
+                    rule.proto,
+                    rule.direction,
+                    rule.target_ifindex,
+                    runtime,
+                    user_mirror_enabled,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub fn new(
@@ -799,40 +873,74 @@ impl ControlPlane {
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
 
-        // Validate rule exists in state before touching kernel
-        let rule_exists = state.state.rules.iter().any(|r| {
-            r.src_group_id == src_id
-                && r.dst_group_id == dst_id
-                && r.proto == proto
-                && r.direction == direction
-        });
-        if !rule_exists {
+        let target_directions = Self::requested_directions(direction);
+        let matching_rules: Vec<RuleInfo> = target_directions
+            .iter()
+            .filter_map(|dir| {
+                state.state.rules.iter().find(|r| {
+                    r.src_group_id == src_id
+                        && r.dst_group_id == dst_id
+                        && r.proto == proto
+                        && r.direction == *dir
+                }).cloned()
+            })
+            .collect();
+        if matching_rules.is_empty() {
             return Err(ControlPlaneError::PolicyNotFound(
                 format!("Policy not found: src={}, dst={}, proto={}, direction={}", src_group, dst_group, proto, direction)
             ));
         }
 
-        // Delete from kernel
-        if let Err(e) = aria_core::ebpf_ops::delete_policy(src_id, dst_id, proto, direction, state.map_runtime(), &self.ebpf_path) {
-            return Err(ControlPlaneError::KernelError(e));
+        let mut deleted_rules: Vec<RuleInfo> = Vec::new();
+        for rule in &matching_rules {
+            if let Err(e) = aria_core::ebpf_ops::delete_policy(
+                rule.src_group_id,
+                rule.dst_group_id,
+                rule.proto,
+                rule.direction,
+                state.map_runtime(),
+                &self.ebpf_path,
+            ) {
+                let rollback = Self::rollback_policy_deletes(
+                    state.map_runtime(),
+                    &self.ebpf_path,
+                    &deleted_rules,
+                );
+                let error = match rollback {
+                    Ok(()) => e,
+                    Err(rollback_err) => format!("{}; rollback failed: {}", e, rollback_err),
+                };
+                return Err(ControlPlaneError::KernelError(error));
+            }
+            deleted_rules.push(rule.clone());
         }
 
-        // Remove from in-memory state
-        let remove_result = state.state.apply_remove_rule(src_id, dst_id, proto, direction)
-            .map_err(|e| ControlPlaneError::PolicyNotFound(e))?;
+        let mut released_port_sets: Vec<(u32, String)> = Vec::new();
+        for rule in &matching_rules {
+            let remove_result = state.state.apply_remove_rule(
+                rule.src_group_id,
+                rule.dst_group_id,
+                rule.proto,
+                rule.direction,
+            ).map_err(|e| ControlPlaneError::PolicyNotFound(e))?;
 
-        if let (Some(idx), Some(ref ports_normalized)) = (remove_result.bitmap_idx, &remove_result.port_set_released) {
-            if let Err(e) = aria_core::ebpf_ops::delete_port_set(idx, ports_normalized, state.map_runtime(), &self.ebpf_path) {
-                warn!(error = %e, "failed to clean port bitmap");
+            if let (Some(idx), Some(ports_normalized)) = (remove_result.bitmap_idx, remove_result.port_set_released) {
+                released_port_sets.push((idx, ports_normalized));
+            }
+
+            state.wal_append(&WalEntry::RemoveRule {
+                src_id: rule.src_group_id,
+                dst_id: rule.dst_group_id,
+                proto: rule.proto,
+                direction: rule.direction,
+            }).await;
+        }
+
+        for (idx, ports_normalized) in released_port_sets {
+            if let Err(e) = aria_core::ebpf_ops::delete_port_set(idx, &ports_normalized, state.map_runtime(), &self.ebpf_path) {
+                warn!(error = %e, bitmap_idx = idx, "failed to clean port bitmap");
             }
         }
-
-        state.wal_append(&WalEntry::RemoveRule {
-            src_id,
-            dst_id,
-            proto,
-            direction,
-        }).await;
         Ok(())
     }
 
@@ -926,23 +1034,48 @@ impl ControlPlane {
                 .ok_or_else(|| ControlPlaneError::GroupNotFound(group_name.to_string()))?
         };
 
-        // Validate rule exists in state BEFORE deleting from kernel
-        let exists = state.state.qos_rules.iter().any(|r| r.group_id == group_id && r.direction == direction);
-        if !exists {
+        let target_directions = Self::requested_directions(direction);
+        let matching_rules: Vec<QosRuleInfo> = target_directions
+            .iter()
+            .filter_map(|dir| {
+                state.state.qos_rules.iter().find(|r| r.group_id == group_id && r.direction == *dir).cloned()
+            })
+            .collect();
+        if matching_rules.is_empty() {
             return Err(ControlPlaneError::PolicyNotFound(
                 format!("QoS rule not found: group={}, direction={}", group_name, direction)
             ));
         }
 
-        if let Err(e) = aria_core::qos_ops::delete_qos_rule(group_id, direction, state.map_runtime(), state.state.qos_enabled) {
-            return Err(ControlPlaneError::KernelError(e));
+        let mut deleted_rules: Vec<QosRuleInfo> = Vec::new();
+        for rule in &matching_rules {
+            if let Err(e) = aria_core::qos_ops::delete_qos_rule(
+                rule.group_id,
+                rule.direction,
+                state.map_runtime(),
+                state.state.qos_enabled,
+            ) {
+                let rollback = Self::rollback_qos_deletes(
+                    state.map_runtime(),
+                    &deleted_rules,
+                    state.state.qos_enabled,
+                );
+                let error = match rollback {
+                    Ok(()) => e,
+                    Err(rollback_err) => format!("{}; rollback failed: {}", e, rollback_err),
+                };
+                return Err(ControlPlaneError::KernelError(error));
+            }
+            deleted_rules.push(rule.clone());
         }
 
-        state.state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
-        state.wal_append(&WalEntry::DeleteQos {
-            group_id,
-            direction,
-        }).await;
+        for rule in &matching_rules {
+            state.state.qos_rules.retain(|r| !(r.group_id == rule.group_id && r.direction == rule.direction));
+            state.wal_append(&WalEntry::DeleteQos {
+                group_id: rule.group_id,
+                direction: rule.direction,
+            }).await;
+        }
         Ok(())
     }
 
@@ -1047,39 +1180,75 @@ impl ControlPlane {
 
         let is_global = src_id == 0 && dst_id == 0 && proto == 0;
 
-        // Validate rule exists
-        let exists = if is_global {
-            state.state.mirror_rules.iter().any(|r| r.is_global && r.direction == direction)
-        } else {
-            state.state.mirror_rules.iter().any(|r| r.src_group_id == src_id && r.dst_group_id == dst_id && r.proto == proto && r.direction == direction && !r.is_global)
-        };
-        if !exists {
+        let target_directions = Self::requested_directions(direction);
+        let matching_rules: Vec<MirrorRuleInfo> = target_directions
+            .iter()
+            .filter_map(|dir| {
+                state.state.mirror_rules.iter().find(|r| {
+                    if is_global {
+                        r.is_global && r.direction == *dir
+                    } else {
+                        !r.is_global
+                            && r.src_group_id == src_id
+                            && r.dst_group_id == dst_id
+                            && r.proto == proto
+                            && r.direction == *dir
+                    }
+                }).cloned()
+            })
+            .collect();
+        if matching_rules.is_empty() {
             return Err(ControlPlaneError::PolicyNotFound("Mirror rule not found".to_string()));
         }
 
-        if is_global {
-            if let Err(e) = aria_core::mirror_ops::delete_global_mirror(direction, state.map_runtime(), state.state.mirror_enabled) {
-                return Err(ControlPlaneError::KernelError(e));
+        let mut deleted_rules: Vec<MirrorRuleInfo> = Vec::new();
+        for rule in &matching_rules {
+            let result = if rule.is_global {
+                aria_core::mirror_ops::delete_global_mirror(
+                    rule.direction,
+                    state.map_runtime(),
+                    state.state.mirror_enabled,
+                )
+            } else {
+                aria_core::mirror_ops::delete_mirror_rule(
+                    rule.src_group_id,
+                    rule.dst_group_id,
+                    rule.proto,
+                    rule.direction,
+                    state.map_runtime(),
+                    state.state.mirror_enabled,
+                )
+            };
+            if let Err(e) = result {
+                let rollback = Self::rollback_mirror_deletes(
+                    state.map_runtime(),
+                    &deleted_rules,
+                    state.state.mirror_enabled,
+                );
+                let error = match rollback {
+                    Ok(()) => e,
+                    Err(rollback_err) => format!("{}; rollback failed: {}", e, rollback_err),
+                };
+                return Err(ControlPlaneError::KernelError(error));
             }
-        } else {
-            if let Err(e) = aria_core::mirror_ops::delete_mirror_rule(src_id, dst_id, proto, direction, state.map_runtime(), state.state.mirror_enabled) {
-                return Err(ControlPlaneError::KernelError(e));
-            }
+            deleted_rules.push(rule.clone());
         }
 
-        if is_global {
-            state.state.mirror_rules.retain(|r| !(r.is_global && r.direction == direction));
-        } else {
-            state.state.mirror_rules.retain(|r| !(r.src_group_id == src_id && r.dst_group_id == dst_id && r.proto == proto && r.direction == direction && !r.is_global));
-        }
+        for rule in &matching_rules {
+            if rule.is_global {
+                state.state.mirror_rules.retain(|r| !(r.is_global && r.direction == rule.direction));
+            } else {
+                state.state.mirror_rules.retain(|r| !(r.src_group_id == rule.src_group_id && r.dst_group_id == rule.dst_group_id && r.proto == rule.proto && r.direction == rule.direction && !r.is_global));
+            }
 
-        state.wal_append(&WalEntry::DeleteMirror {
-            src_group_id: src_id,
-            dst_group_id: dst_id,
-            proto,
-            direction,
-            is_global,
-        }).await;
+            state.wal_append(&WalEntry::DeleteMirror {
+                src_group_id: rule.src_group_id,
+                dst_group_id: rule.dst_group_id,
+                proto: rule.proto,
+                direction: rule.direction,
+                is_global: rule.is_global,
+            }).await;
+        }
         Ok(())
     }
 

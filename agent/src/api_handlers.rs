@@ -246,12 +246,8 @@ pub async fn delete_policy(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
 
-    let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
-
-    for dir in &directions {
-        if let Err(e) = cp.delete_policy(&instance, &req.src_group, &req.dst_group, proto, *dir).await {
-            return Err(err_response(e));
-        }
+    if let Err(e) = cp.delete_policy(&instance, &req.src_group, &req.dst_group, proto, direction).await {
+        return Err(err_response(e));
     }
 
     let dir_label = if direction == 2 { "both" } else { &req.direction };
@@ -450,13 +446,8 @@ pub async fn delete_qos(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
 
-    // direction=2 means "both": delete ingress and egress
-    let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
-
-    for dir in &directions {
-        if let Err(e) = cp.delete_qos(&instance, &req.group, *dir).await {
-            return Err(err_response(e));
-        }
+    if let Err(e) = cp.delete_qos(&instance, &req.group, direction).await {
+        return Err(err_response(e));
     }
 
     let dir_label = if direction == 2 { "both" } else { &req.direction };
@@ -806,12 +797,8 @@ pub async fn delete_mirror(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
 
-    let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
-
-    for dir in &directions {
-        if let Err(e) = cp.delete_mirror(&instance, &req.src_group, &req.dst_group, proto, *dir).await {
-            return Err(err_response(e));
-        }
+    if let Err(e) = cp.delete_mirror(&instance, &req.src_group, &req.dst_group, proto, direction).await {
+        return Err(err_response(e));
     }
 
     let dir_label = if direction == 2 { "both" } else { &req.direction };
