@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::net::IpAddr;
 use aya::maps::{HashMap, LpmTrie, MapData, PerCpuHashMap};
 use aya::maps::lpm_trie::Key;
@@ -279,6 +279,287 @@ fn init_ct_config_pinned(pin_path: &str) -> Result<(), String> {
     };
     map.insert(&0u32, &config, 0)
         .map_err(|e| format!("CT_CONFIG insert: {:?}", e))
+}
+
+fn summarize_entries(entries: &BTreeSet<String>) -> String {
+    if entries.is_empty() {
+        return "none".to_string();
+    }
+    entries.iter().take(3).cloned().collect::<Vec<_>>().join("; ")
+}
+
+fn validate_entry_set(
+    map_name: &str,
+    tap_id: u32,
+    expected: BTreeSet<String>,
+    actual: BTreeSet<String>,
+) -> Result<(), String> {
+    if expected == actual {
+        return Ok(());
+    }
+
+    let missing: BTreeSet<String> = expected.difference(&actual).cloned().collect();
+    let unexpected: BTreeSet<String> = actual.difference(&expected).cloned().collect();
+
+    Err(format!(
+        "{} drift for tap_id {}: missing={} ({}) unexpected={} ({})",
+        map_name,
+        tap_id,
+        missing.len(),
+        summarize_entries(&missing),
+        unexpected.len(),
+        summarize_entries(&unexpected),
+    ))
+}
+
+fn collect_lpm_entries_v4(
+    pin_path: &str,
+    map_name: &str,
+    tap_id: u32,
+) -> Result<BTreeSet<String>, String> {
+    let map = open_pinned_lpm_v4(pin_path, map_name)?;
+    let tap_prefix = tap_id.to_be_bytes();
+    let mut entries = BTreeSet::new();
+    for item in map.iter() {
+        let (key, value) = item.map_err(|e| format!("iterate {}: {:?}", map_name, e))?;
+        let data = key.data();
+        if data[..4] == tap_prefix {
+            entries.insert(format!("{:?}=>{}", key, value));
+        }
+    }
+    Ok(entries)
+}
+
+fn collect_lpm_entries_v6(
+    pin_path: &str,
+    map_name: &str,
+    tap_id: u32,
+) -> Result<BTreeSet<String>, String> {
+    let map = open_pinned_lpm_v6(pin_path, map_name)?;
+    let tap_prefix = tap_id.to_be_bytes();
+    let mut entries = BTreeSet::new();
+    for item in map.iter() {
+        let (key, value) = item.map_err(|e| format!("iterate {}: {:?}", map_name, e))?;
+        let data = key.data();
+        if data[..4] == tap_prefix {
+            entries.insert(format!("{:?}=>{}", key, value));
+        }
+    }
+    Ok(entries)
+}
+
+pub fn validate_pinned_runtime_state(
+    runtime: TapMapRuntime<'_>,
+    state: &FirewallState,
+) -> Result<(), String> {
+    if runtime.tap_id == TAP_ID_UNASSIGNED {
+        return Ok(());
+    }
+    if state.tap_id != runtime.tap_id {
+        return Err(format!(
+            "state tap_id {} does not match runtime tap_id {}",
+            state.tap_id, runtime.tap_id
+        ));
+    }
+
+    let pin_path = runtime.pin_path;
+    let tap_id = runtime.tap_id;
+
+    let expected_tap_config = TapConfig {
+        conntrack_enabled: if state.conntrack_enabled { 1 } else { 0 },
+        monitoring_enabled: if state.monitoring_enabled { 1 } else { 0 },
+        acl_enabled: if state.acl_enabled { 1 } else { 0 },
+        qos_enabled: if state.qos_enabled && !state.qos_rules.is_empty() { 1 } else { 0 },
+        mirror_enabled: if state.mirror_enabled && !state.mirror_rules.is_empty() { 1 } else { 0 },
+        tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
+        pad: [0; 2],
+    };
+    let tap_config_map = open_pinned_tap_config(pin_path)?;
+    let actual_tap_config = tap_config_map.get(&tap_id, 0)
+        .map_err(|e| format!("read TAP_CONFIG_MAP for tap_id {}: {:?}", tap_id, e))?;
+    if actual_tap_config.conntrack_enabled != expected_tap_config.conntrack_enabled
+        || actual_tap_config.monitoring_enabled != expected_tap_config.monitoring_enabled
+        || actual_tap_config.acl_enabled != expected_tap_config.acl_enabled
+        || actual_tap_config.qos_enabled != expected_tap_config.qos_enabled
+        || actual_tap_config.mirror_enabled != expected_tap_config.mirror_enabled
+        || actual_tap_config.tcprt_enabled != expected_tap_config.tcprt_enabled
+    {
+        return Err(format!(
+            "TAP_CONFIG_MAP drift for tap_id {}: actual={:?} expected={:?}",
+            tap_id, actual_tap_config, expected_tap_config
+        ));
+    }
+
+    let mut expected_src_ipv4 = BTreeSet::new();
+    let mut expected_dst_ipv4 = BTreeSet::new();
+    let mut expected_src_ipv6 = BTreeSet::new();
+    let mut expected_dst_ipv6 = BTreeSet::new();
+    for (name, group) in &state.groups {
+        for cidr in &group.cidrs {
+            let (ip, prefix) = parse_cidr(cidr)
+                .map_err(|e| format!("group '{}' cidr '{}': {}", name, cidr, e))?;
+            match ip {
+                IpAddr::V4(v4) => {
+                    expected_src_ipv4.insert(format!("{:?}=>{}", tap_lpm_key_v4(tap_id, v4.octets(), prefix), group.id));
+                    expected_dst_ipv4.insert(format!("{:?}=>{}", tap_lpm_key_v4(tap_id, v4.octets(), prefix), group.id));
+                }
+                IpAddr::V6(v6) => {
+                    expected_src_ipv6.insert(format!("{:?}=>{}", tap_lpm_key_v6(tap_id, v6.octets(), prefix), group.id));
+                    expected_dst_ipv6.insert(format!("{:?}=>{}", tap_lpm_key_v6(tap_id, v6.octets(), prefix), group.id));
+                }
+            }
+        }
+    }
+
+    validate_entry_set(
+        "SRC_IPV4_TRIE",
+        tap_id,
+        expected_src_ipv4,
+        collect_lpm_entries_v4(pin_path, "SRC_IPV4_TRIE", tap_id)?,
+    )?;
+    validate_entry_set(
+        "DST_IPV4_TRIE",
+        tap_id,
+        expected_dst_ipv4,
+        collect_lpm_entries_v4(pin_path, "DST_IPV4_TRIE", tap_id)?,
+    )?;
+    validate_entry_set(
+        "SRC_IPV6_TRIE",
+        tap_id,
+        expected_src_ipv6,
+        collect_lpm_entries_v6(pin_path, "SRC_IPV6_TRIE", tap_id)?,
+    )?;
+    validate_entry_set(
+        "DST_IPV6_TRIE",
+        tap_id,
+        expected_dst_ipv6,
+        collect_lpm_entries_v6(pin_path, "DST_IPV6_TRIE", tap_id)?,
+    )?;
+
+    let mut expected_policy = BTreeSet::new();
+    let mut expected_ports = BTreeSet::new();
+    for rule in &state.rules {
+        let ports = rule.ports.as_deref();
+        let is_all_ports = matches!(ports, Some("all") | Some("") | None);
+        let has_port_filter = (ports.is_some() && !is_all_ports) as u8;
+        let policy_key = PolicyKey {
+            tap_id,
+            src_id: rule.src_group_id,
+            dst_id: rule.dst_group_id,
+            proto: rule.proto,
+            direction: rule.direction,
+            pad: [0; 2],
+        };
+        let policy_value = PolicyValue {
+            action: stored_policy_action(rule.action, has_port_filter != 0),
+            has_port_filter,
+            pad1: [0; 2],
+            bitmap_idx: rule.bitmap_idx.unwrap_or(0),
+        };
+        expected_policy.insert(format!("{:?}=>{:?}", policy_key, policy_value));
+
+        if let (Some(idx), Some(ports_str)) = (rule.bitmap_idx, ports) {
+            if !ports_str.is_empty() && ports_str != "all" {
+                for (start, end, rule_action) in parse_ports(ports_str, rule.action)? {
+                    for port in start..=end {
+                        let key = PortKey { tap_id, idx, port, pad: 0 };
+                        expected_ports.insert(format!("{:?}=>{}", key, rule_action));
+                    }
+                }
+            }
+        }
+    }
+
+    let policy_table = open_pinned_policy_table(pin_path)?;
+    let mut actual_policy = BTreeSet::new();
+    for item in policy_table.iter() {
+        let (key, value) = item.map_err(|e| format!("iterate POLICY_TABLE: {:?}", e))?;
+        if key.tap_id == tap_id {
+            actual_policy.insert(format!("{:?}=>{:?}", key, value));
+        }
+    }
+    validate_entry_set("POLICY_TABLE", tap_id, expected_policy, actual_policy)?;
+
+    let port_pool = open_pinned_port_pool(pin_path)?;
+    let mut actual_ports = BTreeSet::new();
+    for item in port_pool.iter() {
+        let (key, value) = item.map_err(|e| format!("iterate PORT_BITMAP_POOL: {:?}", e))?;
+        if key.tap_id == tap_id {
+            actual_ports.insert(format!("{:?}=>{}", key, value));
+        }
+    }
+    validate_entry_set("PORT_BITMAP_POOL", tap_id, expected_ports, actual_ports)?;
+
+    let expected_qos: BTreeSet<String> = state.qos_rules.iter().map(|rule| {
+        let key = QosKey {
+            tap_id,
+            group_id: rule.group_id,
+            direction: rule.direction,
+            pad: [0; 3],
+        };
+        let value = QosConfig {
+            rate_bps: rule.rate_bps,
+            burst_bytes: rule.burst_bytes,
+            priority: rule.priority,
+            mode: rule.mode,
+            pad: [0; 6],
+        };
+        format!("{:?}=>{:?}", key, value)
+    }).collect();
+    let actual_qos: BTreeSet<String> = crate::qos_ops::list_qos_rules(runtime)?
+        .into_iter()
+        .map(|(key, value)| format!("{:?}=>{:?}", key, value))
+        .collect();
+    validate_entry_set("QOS_CONFIG", tap_id, expected_qos, actual_qos)?;
+
+    let mut expected_policy_mirror = BTreeSet::new();
+    let mut expected_global_mirror = BTreeSet::new();
+    for rule in &state.mirror_rules {
+        let target_ifindex = crate::mirror_ops::resolve_ifindex(&rule.target_iface)
+            .map_err(|e| format!("resolve mirror target '{}' for validation: {}", rule.target_iface, e))?;
+        if rule.is_global {
+            let key = GlobalMirrorKey {
+                tap_id,
+                direction: rule.direction,
+                pad: [0; 3],
+            };
+            let value = MirrorConfig { target_ifindex };
+            expected_global_mirror.insert(format!("{:?}=>{:?}", key, value));
+        } else {
+            let key = MirrorKey {
+                tap_id,
+                src_id: rule.src_group_id,
+                dst_id: rule.dst_group_id,
+                proto: rule.proto,
+                direction: rule.direction,
+                pad: [0; 2],
+            };
+            let value = MirrorConfig { target_ifindex };
+            expected_policy_mirror.insert(format!("{:?}=>{:?}", key, value));
+        }
+    }
+    let actual_policy_mirror: BTreeSet<String> = crate::mirror_ops::list_mirror_rules(runtime)?
+        .into_iter()
+        .map(|(key, value)| format!("{:?}=>{:?}", key, value))
+        .collect();
+    validate_entry_set(
+        "MIRROR_POLICY",
+        tap_id,
+        expected_policy_mirror,
+        actual_policy_mirror,
+    )?;
+    let actual_global_mirror: BTreeSet<String> = crate::mirror_ops::list_global_mirrors(runtime)?
+        .into_iter()
+        .map(|(key, value)| format!("{:?}=>{:?}", key, value))
+        .collect();
+    validate_entry_set(
+        "MIRROR_GLOBAL",
+        tap_id,
+        expected_global_mirror,
+        actual_global_mirror,
+    )?;
+
+    Ok(())
 }
 
 pub fn sync_iface_ctx(runtime: TapMapRuntime<'_>, ifindex: u32) -> Result<(), String> {

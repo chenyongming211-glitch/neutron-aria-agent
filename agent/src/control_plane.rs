@@ -183,6 +183,13 @@ impl ControlPlane {
             ));
         }
 
+        aria_core::ebpf_ops::validate_pinned_runtime_state(runtime, state).map_err(|e| {
+            format!(
+                "preexisting live runtime mismatch for {}: {}; detach and reattach to rebuild safely",
+                name, e
+            )
+        })?;
+
         Ok(())
     }
 
