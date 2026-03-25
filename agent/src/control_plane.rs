@@ -4,7 +4,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
 use crate::instance::RuntimePinState;
-use crate::kernel_drop_manager::KernelDropManager;
+use crate::kernel_drop_manager::{KernelDropManager, KernelDropStatusSnapshot};
 use crate::service_chain::{self, ServiceChain};
 use crate::ssl_manager::SslManager;
 use aria_core::common::TapMapRuntime;
@@ -2158,6 +2158,10 @@ impl ControlPlane {
             },
         )
         .map_err(ControlPlaneError::KernelError)
+    }
+
+    pub async fn get_kernel_drop_status(&self) -> KernelDropStatusSnapshot {
+        self.kernel_drop_manager.status_snapshot().await
     }
 
     // ── Packet Trace ──

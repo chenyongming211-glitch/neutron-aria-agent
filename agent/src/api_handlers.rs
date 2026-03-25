@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::control_plane::{ControlPlane, ControlPlaneError};
+use crate::kernel_drop_manager::KernelDropMode;
 use aria_api::*;
 
 type AppState = Arc<ControlPlane>;
@@ -48,14 +49,28 @@ fn legacy_drop_headers(instance: &str) -> HeaderMap {
     headers
 }
 
+fn kernel_drop_mode_name(mode: KernelDropMode) -> &'static str {
+    match mode {
+        KernelDropMode::Disabled => "disabled",
+        KernelDropMode::ScaffoldOnly => "scaffold_only",
+        KernelDropMode::KfreeSkbLegacy => "kfree_skb_legacy",
+        KernelDropMode::KfreeSkbReasonful => "kfree_skb_reasonful",
+    }
+}
+
 // ── Health ──
 
 pub async fn health(State(cp): State<AppState>) -> impl IntoResponse {
     let instances = cp.list_instances().await;
+    let kernel_drop = cp.get_kernel_drop_status().await;
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         instances: instances.len(),
+        kernel_drop_available: kernel_drop.loaded,
+        kernel_drop_mode: Some(kernel_drop_mode_name(kernel_drop.mode).to_string()),
+        kernel_drop_managed_ifaces: kernel_drop.managed_ifaces,
+        kernel_drop_last_error: kernel_drop.last_error,
     })
 }
 
@@ -2185,9 +2200,85 @@ fn write_ssl_http_summary_metrics(
 
 pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
     let instances = cp.list_instances().await;
+    let kernel_drop = cp.get_kernel_drop_status().await;
 
     let stream = stream! {
         let mut out = String::with_capacity(METRICS_CHUNK_SIZE * 2);
+
+        // ── Kernel drop observability status ──
+        let _ = writeln!(out, "# HELP aria_kernel_drop_observability_up Whether kernel drop observability is available");
+        let _ = writeln!(out, "# TYPE aria_kernel_drop_observability_up gauge");
+        let _ = writeln!(out, "# HELP aria_kernel_drop_managed_ifaces Number of interfaces tracked by kernel drop observability");
+        let _ = writeln!(out, "# TYPE aria_kernel_drop_managed_ifaces gauge");
+        let _ = writeln!(out, "# HELP aria_kernel_drop_mode_info Kernel drop observability mode");
+        let _ = writeln!(out, "# TYPE aria_kernel_drop_mode_info gauge");
+        let _ = writeln!(out, "# HELP aria_kernel_drop_last_error Kernel drop observability last error indicator");
+        let _ = writeln!(out, "# TYPE aria_kernel_drop_last_error gauge");
+        let mode = prom_escape(kernel_drop_mode_name(kernel_drop.mode));
+        let _ = writeln!(
+            out,
+            "aria_kernel_drop_observability_up {}",
+            if kernel_drop.loaded { 1 } else { 0 }
+        );
+        let _ = writeln!(
+            out,
+            "aria_kernel_drop_managed_ifaces {}",
+            kernel_drop.managed_ifaces
+        );
+        let _ = writeln!(
+            out,
+            "aria_kernel_drop_mode_info{{mode=\"{mode}\"}} 1"
+        );
+        let _ = writeln!(
+            out,
+            "aria_kernel_drop_last_error {}",
+            if kernel_drop.last_error.is_some() { 1 } else { 0 }
+        );
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
+        }
+
+        // ── Kernel drop counters ──
+        let _ = writeln!(out, "# HELP aria_kernel_drop_packets_total Kernel drop packets by reason");
+        let _ = writeln!(out, "# TYPE aria_kernel_drop_packets_total counter");
+        let _ = writeln!(out, "# HELP aria_kernel_drop_bytes_total Kernel drop bytes by reason");
+        let _ = writeln!(out, "# TYPE aria_kernel_drop_bytes_total counter");
+
+        if kernel_drop.loaded {
+            match cp.get_kernel_drop_stats(&KernelDropQuery {
+                include_unattributed: true,
+                ..Default::default()
+            }).await {
+                Ok(entries) => {
+                    for entry in &entries {
+                        let instance = prom_escape(entry.instance.as_deref().unwrap_or(""));
+                        let iface = prom_escape(entry.iface.as_deref().unwrap_or(""));
+                        let reason = prom_escape(&entry.reason);
+                        let proto = prom_escape(&entry.proto);
+                        let source = prom_escape(&entry.source);
+                        let _ = writeln!(
+                            out,
+                            "aria_kernel_drop_packets_total{{instance=\"{instance}\",iface=\"{iface}\",ifindex=\"{}\",reason=\"{reason}\",proto=\"{proto}\",source=\"{source}\"}} {}",
+                            entry.ifindex,
+                            entry.packets
+                        );
+                        let _ = writeln!(
+                            out,
+                            "aria_kernel_drop_bytes_total{{instance=\"{instance}\",iface=\"{iface}\",ifindex=\"{}\",reason=\"{reason}\",proto=\"{proto}\",source=\"{source}\"}} {}",
+                            entry.ifindex,
+                            entry.bytes
+                        );
+                        if let Some(chunk) = flush_metrics_chunk(&mut out, false) {
+                            yield Ok::<_, std::convert::Infallible>(chunk);
+                        }
+                    }
+                }
+                Err(e) => warn!("Failed to collect kernel drop metrics: {}", e),
+            }
+        }
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
+        }
 
         // ── Overview gauges ──
         let _ = writeln!(out, "# HELP aria_groups_total Number of IP groups configured");

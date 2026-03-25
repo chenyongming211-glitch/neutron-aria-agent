@@ -22,6 +22,14 @@ pub struct HealthResponse {
     pub status: String,
     pub version: String,
     pub instances: usize,
+    #[serde(default)]
+    pub kernel_drop_available: bool,
+    #[serde(default)]
+    pub kernel_drop_mode: Option<String>,
+    #[serde(default)]
+    pub kernel_drop_managed_ifaces: usize,
+    #[serde(default)]
+    pub kernel_drop_last_error: Option<String>,
 }
 
 // ── Instances ──

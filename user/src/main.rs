@@ -2466,6 +2466,24 @@ async fn main() {
                     println!("Status:    {}", resp.status);
                     println!("Version:   {}", resp.version);
                     println!("Instances: {}", resp.instances);
+                    println!(
+                        "KernelDrop: {}",
+                        if resp.kernel_drop_available {
+                            "available"
+                        } else {
+                            "unavailable"
+                        }
+                    );
+                    if let Some(mode) = &resp.kernel_drop_mode {
+                        println!("DropMode:  {}", mode);
+                    }
+                    println!(
+                        "DropIfaces: {}",
+                        resp.kernel_drop_managed_ifaces
+                    );
+                    if let Some(last_error) = &resp.kernel_drop_last_error {
+                        println!("DropError: {}", last_error);
+                    }
                     Ok(())
                 }
                 Err(e) => Err(e),
