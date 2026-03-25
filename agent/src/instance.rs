@@ -19,7 +19,7 @@ pub struct FirewallInstance {
 }
 
 const RUNTIME_METADATA_SCHEMA_VERSION: u32 = 2;
-const PERSISTED_LIVE_IFACES_SCHEMA_VERSION: u32 = 1;
+const PERSISTED_LIVE_IFACES_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct RuntimePinState {
@@ -66,6 +66,8 @@ struct RuntimeMetadata {
 struct PersistedLiveIface {
     iface: String,
     ifindex: u32,
+    #[serde(default = "default_persisted_live_iface_active")]
+    active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +80,10 @@ struct PersistedLiveIfaces {
 enum RuntimeInventoryStatus {
     Healthy,
     StaleOrIncomplete(String),
+}
+
+fn default_persisted_live_iface_active() -> bool {
+    true
 }
 
 impl FirewallInstance {
@@ -211,14 +217,16 @@ impl FirewallInstance {
 
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| format!("read persisted live ifaces {}: {}", path.display(), e))?;
-        let state: PersistedLiveIfaces = serde_json::from_str(&raw)
+        let mut state: PersistedLiveIfaces = serde_json::from_str(&raw)
             .map_err(|e| format!("parse persisted live ifaces {}: {}", path.display(), e))?;
-        if state.schema_version != PERSISTED_LIVE_IFACES_SCHEMA_VERSION {
+        if state.schema_version != 1 && state.schema_version != PERSISTED_LIVE_IFACES_SCHEMA_VERSION
+        {
             return Err(format!(
-                "persisted live ifaces schema {} != expected {}",
+                "persisted live ifaces schema {} is unsupported (expected 1 or {})",
                 state.schema_version, PERSISTED_LIVE_IFACES_SCHEMA_VERSION,
             ));
         }
+        state.schema_version = PERSISTED_LIVE_IFACES_SCHEMA_VERSION;
         Ok(state)
     }
 
@@ -320,7 +328,36 @@ impl FirewallInstance {
         state.ifaces.push(PersistedLiveIface {
             iface: self.iface.clone(),
             ifindex: self.current_ifindex()?,
+            active: false,
         });
+        self.store_persisted_live_ifaces_atomically(&state)
+    }
+
+    pub fn activate_persisted_live_iface(&self) -> Result<(), String> {
+        if !self.shared_runtime {
+            return Ok(());
+        }
+
+        let mut state = self.load_persisted_live_ifaces()?;
+        let ifindex = self.current_ifindex()?;
+        let mut found = false;
+        for entry in &mut state.ifaces {
+            if entry.iface != self.iface {
+                continue;
+            }
+            entry.ifindex = ifindex;
+            entry.active = true;
+            found = true;
+            break;
+        }
+
+        if !found {
+            return Err(format!(
+                "persisted live runtime reservation for {} missing before activation",
+                self.iface
+            ));
+        }
+
         self.store_persisted_live_ifaces_atomically(&state)
     }
 
@@ -367,6 +404,7 @@ impl FirewallInstance {
                 retained.push(PersistedLiveIface {
                     iface: current_iface.clone(),
                     ifindex: entry.ifindex,
+                    active: entry.active,
                 });
             } else {
                 changed = true;

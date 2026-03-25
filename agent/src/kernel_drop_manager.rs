@@ -20,7 +20,7 @@ use crate::kernel_drop_support::{
 pub const KERNEL_DROP_PIN_NAMESPACE: &str = "kernel-drops-global";
 const KERNEL_DROP_RUNTIME_METADATA_SCHEMA_VERSION: u32 = 1;
 const KERNEL_DROP_MAP_SCHEMA_VERSION: u32 = 1;
-const KERNEL_DROP_PERSISTED_LIVE_IFACES_SCHEMA_VERSION: u32 = 1;
+const KERNEL_DROP_PERSISTED_LIVE_IFACES_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum KernelDropMode {
@@ -66,12 +66,18 @@ enum KernelDropMapInventoryStatus {
 struct PersistedLiveIface {
     iface: String,
     ifindex: u32,
+    #[serde(default = "default_persisted_live_iface_active")]
+    active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedLiveIfaces {
     schema_version: u32,
     ifaces: Vec<PersistedLiveIface>,
+}
+
+fn default_persisted_live_iface_active() -> bool {
+    true
 }
 
 pub struct KernelDropManager {
@@ -344,14 +350,17 @@ impl KernelDropManager {
 
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| format!("read kernel-drop persisted live ifaces {}: {}", path, e))?;
-        let state: PersistedLiveIfaces = serde_json::from_str(&raw)
+        let mut state: PersistedLiveIfaces = serde_json::from_str(&raw)
             .map_err(|e| format!("parse kernel-drop persisted live ifaces {}: {}", path, e))?;
-        if state.schema_version != KERNEL_DROP_PERSISTED_LIVE_IFACES_SCHEMA_VERSION {
+        if state.schema_version != 1
+            && state.schema_version != KERNEL_DROP_PERSISTED_LIVE_IFACES_SCHEMA_VERSION
+        {
             return Err(format!(
-                "kernel-drop persisted live ifaces schema {} != expected {}",
+                "kernel-drop persisted live ifaces schema {} is unsupported (expected 1 or {})",
                 state.schema_version, KERNEL_DROP_PERSISTED_LIVE_IFACES_SCHEMA_VERSION
             ));
         }
+        state.schema_version = KERNEL_DROP_PERSISTED_LIVE_IFACES_SCHEMA_VERSION;
         Ok(state)
     }
 
@@ -359,8 +368,10 @@ impl KernelDropManager {
         &self,
         managed_ifaces: &mut HashMap<u32, u32>,
     ) -> Result<bool, String> {
+        let persisted_live_path = self.managed_persisted_live_ifaces_path();
+        let persisted_live_exists = Path::new(&persisted_live_path).exists();
         let (persisted_live, authoritative_snapshot) = match self.load_persisted_live_ifaces() {
-            Ok(state) => (state, true),
+            Ok(state) => (state, persisted_live_exists),
             Err(e) => {
                 warn!(error = %e, "failed to load persisted live-iface state for kernel-drop recovery");
                 (
@@ -373,6 +384,9 @@ impl KernelDropManager {
             }
         };
         for persisted in persisted_live.ifaces {
+            if !persisted.active {
+                continue;
+            }
             let Some(current_ifindex) = Self::current_ifindex_for_iface(&persisted.iface) else {
                 continue;
             };
