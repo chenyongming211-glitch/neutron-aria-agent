@@ -26,6 +26,24 @@ struct InstanceState {
     last_ssl_sync_error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct KernelDropInstanceView {
+    instance_name: String,
+    tap_id: u32,
+    ifindex: Option<u32>,
+    iface_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedKernelDropQuery {
+    tap_id: Option<u32>,
+    ifindex: Option<u32>,
+    include_unattributed: bool,
+    by_tap: HashMap<u32, String>,
+    by_ifindex: HashMap<u32, String>,
+    iface_name_by_ifindex: HashMap<u32, String>,
+}
+
 impl InstanceState {
     fn map_runtime(&self) -> TapMapRuntime<'_> {
         TapMapRuntime::new(&self.pin_path, self.tap_id)
@@ -746,6 +764,142 @@ impl ControlPlane {
             .get(name)
             .cloned()
             .ok_or_else(|| ControlPlaneError::InstanceNotFound(name.to_string()))
+    }
+
+    async fn snapshot_kernel_drop_instances(&self) -> Vec<KernelDropInstanceView> {
+        let instances: Vec<(String, Arc<tokio::sync::RwLock<InstanceState>>)> = {
+            let instances = self.instances.read().await;
+            instances
+                .iter()
+                .map(|(name, inst)| (name.clone(), inst.clone()))
+                .collect()
+        };
+
+        let mut snapshot = Vec::with_capacity(instances.len());
+        for (name, inst) in instances {
+            let state = inst.read().await;
+            let iface_name = if name == "system" {
+                state.state.attached_iface.clone()
+            } else {
+                Some(name.clone())
+            };
+            snapshot.push(KernelDropInstanceView {
+                instance_name: name,
+                tap_id: state.tap_id,
+                ifindex: state.ifindex,
+                iface_name,
+            });
+        }
+
+        snapshot
+    }
+
+    async fn resolve_kernel_drop_query(
+        &self,
+        query: &aria_api::KernelDropQuery,
+    ) -> Result<ResolvedKernelDropQuery, ControlPlaneError> {
+        let instances = self.snapshot_kernel_drop_instances().await;
+
+        let mut by_tap = HashMap::new();
+        let mut by_ifindex = HashMap::new();
+        let mut iface_name_by_ifindex = HashMap::new();
+        for inst in &instances {
+            by_tap.insert(inst.tap_id, inst.instance_name.clone());
+            if let Some(ifindex) = inst.ifindex {
+                by_ifindex.insert(ifindex, inst.instance_name.clone());
+                if let Some(iface_name) = &inst.iface_name {
+                    iface_name_by_ifindex.insert(ifindex, iface_name.clone());
+                }
+            }
+        }
+
+        let instance_match = if let Some(instance_name) = &query.instance {
+            Some(
+                instances
+                    .iter()
+                    .find(|inst| inst.instance_name == *instance_name)
+                    .cloned()
+                    .ok_or_else(|| ControlPlaneError::InstanceNotFound(instance_name.clone()))?,
+            )
+        } else {
+            None
+        };
+
+        let iface_match = if let Some(iface_name) = &query.iface {
+            let matches: Vec<KernelDropInstanceView> = instances
+                .iter()
+                .filter(|inst| inst.iface_name.as_deref() == Some(iface_name.as_str()))
+                .cloned()
+                .collect();
+            match matches.as_slice() {
+                [] => {
+                    return Err(ControlPlaneError::ValidationError(format!(
+                        "Interface '{}' is not attached to an active instance",
+                        iface_name
+                    )));
+                }
+                [inst] => Some(inst.clone()),
+                _ => {
+                    return Err(ControlPlaneError::ValidationError(format!(
+                        "Interface '{}' maps to multiple active instances",
+                        iface_name
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+
+        if let (Some(instance), Some(iface)) = (&instance_match, &iface_match) {
+            if instance.ifindex != iface.ifindex {
+                return Err(ControlPlaneError::ValidationError(format!(
+                    "Instance '{}' does not match interface '{}'",
+                    instance.instance_name,
+                    query.iface.as_deref().unwrap_or_default()
+                )));
+            }
+        }
+
+        if let (Some(instance), Some(ifindex)) = (&instance_match, query.ifindex) {
+            if instance.ifindex != Some(ifindex) {
+                return Err(ControlPlaneError::ValidationError(format!(
+                    "Instance '{}' does not match ifindex {}",
+                    instance.instance_name, ifindex
+                )));
+            }
+        }
+
+        if let (Some(iface), Some(ifindex)) = (&iface_match, query.ifindex) {
+            if iface.ifindex != Some(ifindex) {
+                return Err(ControlPlaneError::ValidationError(format!(
+                    "Interface '{}' does not match ifindex {}",
+                    query.iface.as_deref().unwrap_or_default(),
+                    ifindex
+                )));
+            }
+        }
+
+        let resolved_tap = instance_match
+            .as_ref()
+            .or(iface_match.as_ref())
+            .and_then(|inst| {
+                (inst.tap_id != aria_core::common::TAP_ID_UNASSIGNED || inst.ifindex.is_some())
+                    .then_some(inst.tap_id)
+            });
+
+        let resolved_ifindex = query
+            .ifindex
+            .or_else(|| instance_match.as_ref().and_then(|inst| inst.ifindex))
+            .or_else(|| iface_match.as_ref().and_then(|inst| inst.ifindex));
+
+        Ok(ResolvedKernelDropQuery {
+            tap_id: resolved_tap,
+            ifindex: resolved_ifindex,
+            include_unattributed: query.include_unattributed && resolved_ifindex.is_none(),
+            by_tap,
+            by_ifindex,
+            iface_name_by_ifindex,
+        })
     }
 
     fn check_xdp_ready(pin_path: &str) -> Result<(), ControlPlaneError> {
@@ -2061,60 +2215,37 @@ impl ControlPlane {
             ));
         }
 
-        let tap_filter = if let Some(instance) = &query.instance {
-            let inst = self.get_instance(instance).await?;
-            let state = inst.read().await;
-            Some(state.tap_id)
-        } else {
-            None
-        };
+        let resolved = self.resolve_kernel_drop_query(query).await?;
 
         let entries = aria_core::kernel_drop_ops::get_kernel_drop_stats(
             self.kernel_drop_manager.pin_path(),
             &aria_core::kernel_drop_ops::KernelDropQuery {
-                tap_id: tap_filter,
-                ifindex: query.ifindex,
+                tap_id: resolved.tap_id,
+                ifindex: resolved.ifindex,
                 reason_code: query.reason,
                 top: query.top,
-                include_unattributed: query.include_unattributed,
+                include_unattributed: resolved.include_unattributed,
             },
         )
         .map_err(ControlPlaneError::KernelError)?;
 
-        let instances: Vec<(String, Arc<tokio::sync::RwLock<InstanceState>>)> = {
-            let instances = self.instances.read().await;
-            instances
-                .iter()
-                .map(|(name, inst)| (name.clone(), inst.clone()))
-                .collect()
-        };
-        let mut by_tap = HashMap::new();
-        let mut by_ifindex = HashMap::new();
-        for (name, inst) in instances.iter() {
-            let state = inst.read().await;
-            by_tap.insert(state.tap_id, name.clone());
-            if let Some(ifindex) = state.ifindex {
-                by_ifindex.insert(ifindex, name.clone());
-            }
-        }
-
         Ok(entries
             .into_iter()
-            .filter(|entry| {
-                if let Some(iface) = &query.iface {
-                    if by_ifindex
-                        .get(&entry.ifindex)
-                        .map(|name| name != iface)
-                        .unwrap_or(true)
-                    {
-                        return false;
-                    }
-                }
-                true
-            })
             .map(|entry| aria_api::KernelDropStatsEntry {
-                instance: by_tap.get(&entry.tap_id).cloned(),
-                iface: by_ifindex.get(&entry.ifindex).cloned(),
+                instance: if entry.ifindex == 0 {
+                    None
+                } else {
+                    resolved
+                        .by_ifindex
+                        .get(&entry.ifindex)
+                        .cloned()
+                        .or_else(|| resolved.by_tap.get(&entry.tap_id).cloned())
+                },
+                iface: if entry.ifindex == 0 {
+                    None
+                } else {
+                    resolved.iface_name_by_ifindex.get(&entry.ifindex).cloned()
+                },
                 ifindex: entry.ifindex,
                 reason_code: entry.reason_code,
                 reason: aria_core::kernel_drop_ops::kernel_drop_reason_name(entry.reason_code),
@@ -2139,22 +2270,16 @@ impl ControlPlane {
             ));
         }
 
-        let tap_filter = if let Some(instance) = &query.instance {
-            let inst = self.get_instance(instance).await?;
-            let state = inst.read().await;
-            Some(state.tap_id)
-        } else {
-            None
-        };
+        let resolved = self.resolve_kernel_drop_query(query).await?;
 
         aria_core::kernel_drop_ops::flush_kernel_drop_stats(
             self.kernel_drop_manager.pin_path(),
             &aria_core::kernel_drop_ops::KernelDropQuery {
-                tap_id: tap_filter,
-                ifindex: query.ifindex,
+                tap_id: resolved.tap_id,
+                ifindex: resolved.ifindex,
                 reason_code: query.reason,
                 top: query.top,
-                include_unattributed: query.include_unattributed,
+                include_unattributed: resolved.include_unattributed,
             },
         )
         .map_err(ControlPlaneError::KernelError)
