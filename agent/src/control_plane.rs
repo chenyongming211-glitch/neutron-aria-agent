@@ -552,20 +552,19 @@ impl ControlPlane {
             let mut state = inst.write().await;
             let tap_id = state.tap_id;
             let ifindex = state.ifindex;
-            if let Some(ifindex) = ifindex {
+            if tap_id != aria_core::common::TAP_ID_UNASSIGNED {
+                if let Err(e) = aria_core::ebpf_ops::scrub_managed_runtime_state(state.map_runtime()) {
+                    warn!(
+                        instance = %name,
+                        tap_id,
+                        ifindex = ?ifindex,
+                        error = %e,
+                        "failed to scrub managed runtime state during unregister"
+                    );
+                }
+            } else if let Some(ifindex) = ifindex {
                 if let Err(e) = aria_core::ebpf_ops::clear_iface_ctx(&state.pin_path, ifindex) {
                     warn!(instance = %name, tap_id, ifindex, error = %e, "failed to clear iface context");
-                }
-            }
-            if tap_id != aria_core::common::TAP_ID_UNASSIGNED {
-                if let Err(e) = aria_core::ebpf_ops::delete_tap_config(state.map_runtime()) {
-                    warn!(instance = %name, tap_id, error = %e, "failed to clear tap runtime config");
-                }
-                if let Err(e) = aria_core::trace_ops::clear_trace_filter(state.map_runtime()) {
-                    warn!(instance = %name, tap_id, error = %e, "failed to clear trace filter");
-                }
-                if let Err(e) = aria_core::trace_ops::flush_trace_log(state.map_runtime()) {
-                    warn!(instance = %name, tap_id, error = %e, "failed to flush trace log");
                 }
             }
             state.shutdown_wal().await;
