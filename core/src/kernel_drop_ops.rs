@@ -153,6 +153,15 @@ pub struct KernelDropStatsEntry {
     pub source: String,
 }
 
+#[derive(Debug, Clone)]
+struct KernelDropStatsRow {
+    key: KernelDropKey,
+    packets: u64,
+    bytes: u64,
+    last_seen_ns: u64,
+    last_location: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct KernelDropQuery {
     pub tap_id: Option<u32>,
@@ -201,6 +210,15 @@ fn sum_per_cpu_kernel_drop(values: PerCpuValues<KernelDropValue>) -> (u64, u64, 
     }
 
     (packets, bytes, last_seen_ns, last_location)
+}
+
+fn sort_kernel_drop_rows(rows: &mut [KernelDropStatsRow]) {
+    rows.sort_by(|a, b| {
+        b.packets
+            .cmp(&a.packets)
+            .then_with(|| b.bytes.cmp(&a.bytes))
+            .then_with(|| b.last_seen_ns.cmp(&a.last_seen_ns))
+    });
 }
 
 fn should_include_entry(key: &KernelDropKey, query: &KernelDropQuery) -> bool {
@@ -259,13 +277,11 @@ fn open_kernel_drop_stats_map(
         .map_err(|e| format!("convert {}: {:?}", KERNEL_DROP_STATS_MAP, e))
 }
 
-pub fn get_kernel_drop_stats(
-    pin_path: &str,
+fn collect_kernel_drop_rows(
+    map: &PerCpuHashMap<MapData, KernelDropKey, KernelDropValue>,
     query: &KernelDropQuery,
-) -> Result<Vec<KernelDropStatsEntry>, String> {
-    let map = open_kernel_drop_stats_map(pin_path)?;
-    let source_label = kernel_drop_source_label(pin_path);
-    let mut entries = Vec::new();
+) -> Vec<KernelDropStatsRow> {
+    let mut rows = Vec::new();
 
     for item in map.iter() {
         let Ok((key, values)) = item else {
@@ -280,44 +296,55 @@ pub fn get_kernel_drop_stats(
             continue;
         }
 
-        entries.push(KernelDropStatsEntry {
-            tap_id: key.tap_id,
-            ifindex: key.ifindex,
-            reason_code: (key.reason_code != 0).then_some(key.reason_code),
-            proto: key.proto,
+        rows.push(KernelDropStatsRow {
+            key,
             packets,
             bytes,
             last_seen_ns,
-            last_location: (last_location != 0).then_some(last_location),
-            source: source_label.clone(),
+            last_location,
         });
     }
 
-    entries.sort_by(|a, b| {
-        b.packets
-            .cmp(&a.packets)
-            .then_with(|| b.bytes.cmp(&a.bytes))
-            .then_with(|| b.last_seen_ns.cmp(&a.last_seen_ns))
-    });
-
+    sort_kernel_drop_rows(&mut rows);
     if let Some(top) = query.top {
-        entries.truncate(top);
+        rows.truncate(top);
     }
+
+    rows
+}
+
+pub fn get_kernel_drop_stats(
+    pin_path: &str,
+    query: &KernelDropQuery,
+) -> Result<Vec<KernelDropStatsEntry>, String> {
+    let map = open_kernel_drop_stats_map(pin_path)?;
+    let source_label = kernel_drop_source_label(pin_path);
+    let rows = collect_kernel_drop_rows(&map, query);
+    let entries = rows
+        .into_iter()
+        .map(|row| KernelDropStatsEntry {
+            tap_id: row.key.tap_id,
+            ifindex: row.key.ifindex,
+            reason_code: (row.key.reason_code != 0).then_some(row.key.reason_code),
+            proto: row.key.proto,
+            packets: row.packets,
+            bytes: row.bytes,
+            last_seen_ns: row.last_seen_ns,
+            last_location: (row.last_location != 0).then_some(row.last_location),
+            source: source_label.clone(),
+        })
+        .collect();
 
     Ok(entries)
 }
 
 pub fn flush_kernel_drop_stats(pin_path: &str, query: &KernelDropQuery) -> Result<u64, String> {
     let mut map = open_kernel_drop_stats_map(pin_path)?;
-    let keys: Vec<KernelDropKey> = map
-        .keys()
-        .filter_map(|item| item.ok())
-        .filter(|key| should_include_entry(key, query))
-        .collect();
+    let rows = collect_kernel_drop_rows(&map, query);
 
-    let count = keys.len() as u64;
-    for key in keys {
-        let _ = map.remove(&key);
+    let count = rows.len() as u64;
+    for row in rows {
+        let _ = map.remove(&row.key);
     }
 
     Ok(count)
