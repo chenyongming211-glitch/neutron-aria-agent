@@ -470,7 +470,7 @@ unsafe impl Pod for TraceFilter {}
 #[derive(Copy, Clone, Debug)]
 pub struct TraceEventKey {
     pub tap_id: u32,
-    pub pad: u32,
+    pub cpu_id: u32,
     pub seq: u64,
 }
 unsafe impl Pod for TraceEventKey {}

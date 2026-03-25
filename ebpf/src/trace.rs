@@ -54,11 +54,11 @@ unsafe fn next_trace_event_key(tap_id: u32, seq_ptr: *mut u64) -> TraceEventKey 
     let local_seq = *seq_ptr;
     *seq_ptr = local_seq.wrapping_add(1);
 
-    let cpu_id = (bpf_get_smp_processor_id() as u64) & 0xff;
+    let cpu_id = bpf_get_smp_processor_id() as u32;
     TraceEventKey {
         tap_id,
-        pad: 0,
-        seq: ((local_seq & 0x00ff_ffff_ffff_ffff) << 8) | cpu_id,
+        cpu_id,
+        seq: local_seq,
     }
 }
 

@@ -793,6 +793,8 @@ pub fn scrub_managed_runtime_state(runtime: TapMapRuntime<'_>) -> Result<u64, St
 
     removed += crate::tcprt_ops::scrub_tcprt_tables_strict(runtime)?;
     record_optional_scrub(tap_id, "DROP_REASON_STATS", &mut removed, crate::drop_ops::flush_drop_stats(runtime));
+    removed += crate::trace_ops::scrub_trace_filter(runtime)?;
+    record_optional_scrub(tap_id, "TRACE_LOG", &mut removed, crate::trace_ops::flush_trace_log(runtime));
 
     info!(tap_id, removed_entries = removed, "scrubbed managed tap runtime state");
     Ok(removed)

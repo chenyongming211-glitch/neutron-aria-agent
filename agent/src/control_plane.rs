@@ -428,6 +428,12 @@ impl ControlPlane {
                 if let Err(e) = aria_core::ebpf_ops::delete_tap_config(state.map_runtime()) {
                     warn!(instance = %name, tap_id, error = %e, "failed to clear tap runtime config");
                 }
+                if let Err(e) = aria_core::trace_ops::clear_trace_filter(state.map_runtime()) {
+                    warn!(instance = %name, tap_id, error = %e, "failed to clear trace filter");
+                }
+                if let Err(e) = aria_core::trace_ops::flush_trace_log(state.map_runtime()) {
+                    warn!(instance = %name, tap_id, error = %e, "failed to flush trace log");
+                }
             }
             state.shutdown_wal().await;
             info!(instance = %name, tap_id, ifindex = ?ifindex, "unregistered instance");

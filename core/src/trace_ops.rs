@@ -109,7 +109,29 @@ pub fn set_trace_filter(
 }
 
 pub fn clear_trace_filter(runtime: TapMapRuntime<'_>) -> Result<(), String> {
-    set_trace_filter(runtime, 0, 0, [0u8; 16], [0u8; 16], 0, 0, 0, 0, false)
+    delete_trace_filter(runtime).map(|_| ())
+}
+
+pub fn delete_trace_filter(runtime: TapMapRuntime<'_>) -> Result<bool, String> {
+    let pin_path = runtime.pin_path;
+    let map_path = format!("{}/TRACE_FILTER", pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open TRACE_FILTER: {:?}", e))?;
+    let mut map = HashMap::<_, u32, TraceFilter>::try_from(
+        aya::maps::Map::HashMap(map_data)
+    ).map_err(|e| format!("convert TRACE_FILTER: {:?}", e))?;
+
+    if map.get(&runtime.tap_id, 0).is_err() {
+        return Ok(false);
+    }
+
+    map.remove(&runtime.tap_id)
+        .map_err(|e| format!("remove TRACE_FILTER: {:?}", e))?;
+    Ok(true)
+}
+
+pub fn scrub_trace_filter(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
+    delete_trace_filter(runtime).map(|deleted| if deleted { 1 } else { 0 })
 }
 
 pub fn get_trace_events(runtime: TapMapRuntime<'_>, limit: usize) -> Result<Vec<TraceEventEntry>, String> {

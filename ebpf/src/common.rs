@@ -354,7 +354,7 @@ pub struct TraceFilter {
 #[derive(Copy, Clone)]
 pub struct TraceEventKey {
     pub tap_id: u32,
-    pub pad: u32,
+    pub cpu_id: u32,
     pub seq: u64,
 }
 
