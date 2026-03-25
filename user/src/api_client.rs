@@ -427,6 +427,22 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
+    pub async fn list_kernel_drops(&self, query: &KernelDropQuery) -> Result<KernelDropStatsResponse, String> {
+        let resp = self.client.get(self.url("/api/v1/stats/kernel_drops"))
+            .query(query)
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
+    pub async fn flush_kernel_drops(&self, query: &KernelDropQuery) -> Result<KernelDropFlushResponse, String> {
+        let resp = self.client.delete(self.url("/api/v1/stats/kernel_drops"))
+            .query(query)
+            .send().await
+            .map_err(|e| self.connection_error(e))?;
+        self.parse_response(resp).await
+    }
+
     // ── Packet Trace ──
 
     pub async fn start_trace(&self, instance: &str, req: &TraceStartRequest) -> Result<MessageResponse, String> {

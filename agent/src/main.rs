@@ -227,6 +227,7 @@ async fn main() {
         &config.pin_path,
         &config.state_path,
         ssl_manager.clone(),
+        kernel_drop_manager.clone(),
     ));
 
     // Note: instances are registered by TapRegistry::attach when XDP is actually attached.

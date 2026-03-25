@@ -7,6 +7,7 @@ use aria_core::common::TapMapRuntime;
 use aria_core::state::{FirewallState, GroupInfo, RuleInfo, QosRuleInfo, MirrorRuleInfo};
 use aria_core::wal::{WalClient, WalEntry};
 use crate::instance::RuntimePinState;
+use crate::kernel_drop_manager::KernelDropManager;
 use crate::service_chain::{ServiceChain, self};
 use crate::ssl_manager::SslManager;
 
@@ -87,6 +88,7 @@ pub struct ControlPlane {
     pub base_pin_path: String,
     pub base_state_path: String,
     ssl_manager: Arc<SslManager>,
+    kernel_drop_manager: Arc<KernelDropManager>,
     chains: RwLock<Vec<ServiceChain>>,
 }
 
@@ -302,6 +304,7 @@ impl ControlPlane {
         base_pin_path: &str,
         base_state_path: &str,
         ssl_manager: Arc<SslManager>,
+        kernel_drop_manager: Arc<KernelDropManager>,
     ) -> Self {
         let chains = service_chain::load_chains(base_state_path);
         Self {
@@ -311,6 +314,7 @@ impl ControlPlane {
             base_pin_path: base_pin_path.to_string(),
             base_state_path: base_state_path.to_string(),
             ssl_manager,
+            kernel_drop_manager,
             chains: RwLock::new(chains),
         }
     }
@@ -517,6 +521,20 @@ impl ControlPlane {
                 .await;
         }
 
+        if let Err(e) = self
+            .kernel_drop_manager
+            .sync_managed_iface(&name, ifindex, tap_id)
+            .await
+        {
+            warn!(
+                instance = %name,
+                ifindex,
+                tap_id,
+                error = %e,
+                "failed to register managed interface with kernel drop manager"
+            );
+        }
+
         info!(instance = %name, tap_id, ifindex, "registered instance");
     }
 
@@ -626,6 +644,16 @@ impl ControlPlane {
             let mut state = inst.write().await;
             let tap_id = state.tap_id;
             let ifindex = state.ifindex;
+            if let Some(ifindex) = ifindex {
+                if let Err(e) = self.kernel_drop_manager.remove_managed_iface(ifindex).await {
+                    warn!(
+                        instance = %name,
+                        ifindex,
+                        error = %e,
+                        "failed to remove managed interface from kernel drop manager"
+                    );
+                }
+            }
             if tap_id != aria_core::common::TAP_ID_UNASSIGNED {
                 if let Err(e) = aria_core::ebpf_ops::scrub_managed_runtime_state(state.map_runtime()) {
                     warn!(
@@ -1661,6 +1689,110 @@ impl ControlPlane {
         let state = inst.read().await;
         aria_core::drop_ops::flush_drop_stats(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))
+    }
+
+    pub async fn get_kernel_drop_stats(
+        &self,
+        query: &aria_api::KernelDropQuery,
+    ) -> Result<Vec<aria_api::KernelDropStatsEntry>, ControlPlaneError> {
+        let status = self.kernel_drop_manager.status_snapshot().await;
+        if !status.loaded {
+            return Err(ControlPlaneError::InstanceNotReady(
+                "kernel drop observability is not available".to_string(),
+            ));
+        }
+
+        let tap_filter = if let Some(instance) = &query.instance {
+            let inst = self.get_instance(instance).await?;
+            let state = inst.read().await;
+            Some(state.tap_id)
+        } else {
+            None
+        };
+
+        let entries = aria_core::kernel_drop_ops::get_kernel_drop_stats(
+            self.kernel_drop_manager.pin_path(),
+            &aria_core::kernel_drop_ops::KernelDropQuery {
+                tap_id: tap_filter,
+                ifindex: query.ifindex,
+                reason_code: query.reason,
+                top: query.top,
+                include_unattributed: query.include_unattributed,
+            },
+        ).map_err(ControlPlaneError::KernelError)?;
+
+        let instances: Vec<(String, Arc<tokio::sync::RwLock<InstanceState>>)> = {
+            let instances = self.instances.read().await;
+            instances
+                .iter()
+                .map(|(name, inst)| (name.clone(), inst.clone()))
+                .collect()
+        };
+        let mut by_tap = HashMap::new();
+        let mut by_ifindex = HashMap::new();
+        for (name, inst) in instances.iter() {
+            let state = inst.read().await;
+            by_tap.insert(state.tap_id, name.clone());
+            if let Some(ifindex) = state.ifindex {
+                by_ifindex.insert(ifindex, name.clone());
+            }
+        }
+
+        Ok(entries
+            .into_iter()
+            .filter(|entry| {
+                if let Some(iface) = &query.iface {
+                    if by_ifindex.get(&entry.ifindex).map(|name| name != iface).unwrap_or(true) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|entry| aria_api::KernelDropStatsEntry {
+                instance: by_tap.get(&entry.tap_id).cloned(),
+                iface: by_ifindex.get(&entry.ifindex).cloned(),
+                ifindex: entry.ifindex,
+                reason_code: entry.reason_code,
+                reason: aria_core::kernel_drop_ops::kernel_drop_reason_name(entry.reason_code),
+                proto: aria_core::kernel_drop_ops::kernel_drop_proto_name(entry.proto),
+                packets: entry.packets,
+                bytes: entry.bytes,
+                last_seen_ns: entry.last_seen_ns,
+                last_location: entry.last_location,
+                source: entry.source,
+            })
+            .collect())
+    }
+
+    pub async fn flush_kernel_drop_stats(
+        &self,
+        query: &aria_api::KernelDropQuery,
+    ) -> Result<u64, ControlPlaneError> {
+        let status = self.kernel_drop_manager.status_snapshot().await;
+        if !status.loaded {
+            return Err(ControlPlaneError::InstanceNotReady(
+                "kernel drop observability is not available".to_string(),
+            ));
+        }
+
+        let tap_filter = if let Some(instance) = &query.instance {
+            let inst = self.get_instance(instance).await?;
+            let state = inst.read().await;
+            Some(state.tap_id)
+        } else {
+            None
+        };
+
+        aria_core::kernel_drop_ops::flush_kernel_drop_stats(
+            self.kernel_drop_manager.pin_path(),
+            &aria_core::kernel_drop_ops::KernelDropQuery {
+                tap_id: tap_filter,
+                ifindex: query.ifindex,
+                reason_code: query.reason,
+                top: query.top,
+                include_unattributed: query.include_unattributed,
+            },
+        ).map_err(ControlPlaneError::KernelError)
     }
 
     // ── Packet Trace ──

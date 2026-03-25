@@ -692,6 +692,44 @@ pub struct DropFlushResponse {
     pub flushed: u64,
 }
 
+// ── Kernel Drop Observability ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KernelDropQuery {
+    pub instance: Option<String>,
+    pub iface: Option<String>,
+    pub ifindex: Option<u32>,
+    pub reason: Option<u16>,
+    pub top: Option<usize>,
+    #[serde(default)]
+    pub include_unattributed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KernelDropStatsEntry {
+    pub instance: Option<String>,
+    pub iface: Option<String>,
+    pub ifindex: u32,
+    pub reason_code: Option<u16>,
+    pub reason: String,
+    pub proto: String,
+    pub packets: u64,
+    pub bytes: u64,
+    pub last_seen_ns: u64,
+    pub last_location: Option<u64>,
+    pub source: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct KernelDropStatsResponse {
+    pub drops: Vec<KernelDropStatsEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct KernelDropFlushResponse {
+    pub flushed: u64,
+}
+
 // ── Packet Trace ──
 
 #[derive(Debug, Serialize, Deserialize)]

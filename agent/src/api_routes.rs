@@ -29,6 +29,7 @@ pub fn build_router(control_plane: Arc<ControlPlane>) -> Router {
         .route("/api/v1/ssl/http", get(api_handlers::list_ssl_http_global).delete(api_handlers::flush_ssl_http_global))
         .route("/api/v1/ssl/config", get(api_handlers::get_ssl_config).put(api_handlers::update_ssl_config))
         .route("/api/v1/ssl/errors", get(api_handlers::list_ssl_errors).delete(api_handlers::flush_ssl_errors))
+        .route("/api/v1/stats/kernel_drops", get(api_handlers::list_kernel_drops).delete(api_handlers::flush_kernel_drops))
         // Per-instance routes
         .route("/api/v1/{instance}/groups", get(api_handlers::list_groups).post(api_handlers::add_group))
         .route("/api/v1/{instance}/groups/{name}", delete(api_handlers::delete_group))

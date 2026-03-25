@@ -1395,6 +1395,26 @@ pub async fn flush_drops(
     }
 }
 
+pub async fn list_kernel_drops(
+    State(cp): State<AppState>,
+    Query(query): Query<aria_api::KernelDropQuery>,
+) -> impl IntoResponse {
+    match cp.get_kernel_drop_stats(&query).await {
+        Ok(drops) => Ok(Json(aria_api::KernelDropStatsResponse { drops })),
+        Err(e) => Err(err_response(e)),
+    }
+}
+
+pub async fn flush_kernel_drops(
+    State(cp): State<AppState>,
+    Query(query): Query<aria_api::KernelDropQuery>,
+) -> impl IntoResponse {
+    match cp.flush_kernel_drop_stats(&query).await {
+        Ok(flushed) => Ok(Json(aria_api::KernelDropFlushResponse { flushed })),
+        Err(e) => Err(err_response(e)),
+    }
+}
+
 // ── Packet Trace ──
 
 pub async fn start_trace(
