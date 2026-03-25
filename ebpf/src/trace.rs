@@ -1,12 +1,13 @@
 use crate::maps::{TRACE_EVENT_BUF, TRACE_FILTER, TRACE_LOG, TRACE_SEQ};
+use crate::common::TraceEventKey;
 use crate::parser::PacketInfo;
+use aya_ebpf::helpers::bpf_get_smp_processor_id;
 
 /// Check if tracing is enabled and packet matches filter.
 /// Returns false quickly if filter is not set or not matching (zero overhead path).
 #[inline(always)]
-pub unsafe fn should_trace(info: &PacketInfo) -> bool {
-    let key: u32 = 0;
-    let filter = match TRACE_FILTER.get(&key) {
+pub unsafe fn should_trace(tap_id: u32, info: &PacketInfo) -> bool {
+    let filter = match TRACE_FILTER.get(&tap_id) {
         Some(f) => f,
         None => return false,
     };
@@ -48,6 +49,19 @@ pub unsafe fn should_trace(info: &PacketInfo) -> bool {
     true
 }
 
+#[inline(always)]
+unsafe fn next_trace_event_key(tap_id: u32, seq_ptr: *mut u64) -> TraceEventKey {
+    let local_seq = *seq_ptr;
+    *seq_ptr = local_seq.wrapping_add(1);
+
+    let cpu_id = (bpf_get_smp_processor_id() as u64) & 0xff;
+    TraceEventKey {
+        tap_id,
+        pad: 0,
+        seq: ((local_seq & 0x00ff_ffff_ffff_ffff) << 8) | cpu_id,
+    }
+}
+
 /// Packed parameters for trace_event to stay within BPF's 5-argument limit.
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -67,13 +81,14 @@ pub struct TraceArgs {
 /// Record a trace event into the TRACE_LOG LRU map.
 #[inline(always)]
 pub unsafe fn trace_event(
+    tap_id: u32,
     info: &PacketInfo,
     args: &TraceArgs,
 ) {
     let seq_key: u32 = 0;
     if let Some(seq) = TRACE_SEQ.get_ptr_mut(seq_key) {
         if let Some(event) = TRACE_EVENT_BUF.get_ptr_mut(0) {
-            *seq += 1;
+            let event_key = next_trace_event_key(tap_id, seq);
             (*event).timestamp = args.now;
             (*event).src_ip = info.src_ip;
             (*event).dst_ip = info.dst_ip;
@@ -89,7 +104,7 @@ pub unsafe fn trace_event(
             (*event).ct_state = args.ct_state;
             (*event).drop_reason = args.drop_reason;
             (*event).pad = [0; 2];
-            let _ = TRACE_LOG.insert(&*seq, &*event, 0);
+            let _ = TRACE_LOG.insert(&event_key, &*event, 0);
         }
     }
 }

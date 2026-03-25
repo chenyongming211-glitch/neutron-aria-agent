@@ -1,5 +1,5 @@
 use aya::maps::{HashMap, MapData};
-use crate::common::{TraceFilter, TraceEvent, TapMapRuntime};
+use crate::common::{TapMapRuntime, TraceEvent, TraceEventKey, TraceFilter};
 use std::net::Ipv4Addr;
 
 pub struct TraceEventEntry {
@@ -103,7 +103,7 @@ pub fn set_trace_filter(
         is_ipv6,
         pad: [0; 1],
     };
-    map.insert(&0u32, &filter, 0)
+    map.insert(&runtime.tap_id, &filter, 0)
         .map_err(|e| format!("insert TRACE_FILTER: {:?}", e))?;
     Ok(())
 }
@@ -117,15 +117,18 @@ pub fn get_trace_events(runtime: TapMapRuntime<'_>, limit: usize) -> Result<Vec<
     let map_path = format!("{}/TRACE_LOG", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open TRACE_LOG: {:?}", e))?;
-    let map = HashMap::<_, u64, TraceEvent>::try_from(
+    let map = HashMap::<_, TraceEventKey, TraceEvent>::try_from(
         aya::maps::Map::LruHashMap(map_data)
     ).map_err(|e| format!("convert TRACE_LOG: {:?}", e))?;
 
     let mut entries = Vec::new();
     for item in map.iter() {
-        if let Ok((seq, event)) = item {
+        if let Ok((key, event)) = item {
+            if key.tap_id != runtime.tap_id {
+                continue;
+            }
             entries.push(TraceEventEntry {
-                seq,
+                seq: key.seq,
                 timestamp: event.timestamp,
                 src_ip: Ipv4Addr::from(event.src_ip).to_string(),
                 dst_ip: Ipv4Addr::from(event.dst_ip).to_string(),
@@ -144,8 +147,12 @@ pub fn get_trace_events(runtime: TapMapRuntime<'_>, limit: usize) -> Result<Vec<
         }
     }
 
-    // Sort by seq descending (newest first)
-    entries.sort_by(|a, b| b.seq.cmp(&a.seq));
+    // Sort by timestamp descending (newest first), then seq as a stable tiebreaker.
+    entries.sort_by(|a, b| {
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then_with(|| b.seq.cmp(&a.seq))
+    });
     entries.truncate(limit);
     Ok(entries)
 }
@@ -155,11 +162,14 @@ pub fn flush_trace_log(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
     let map_path = format!("{}/TRACE_LOG", pin_path);
     let map_data = MapData::from_pin(&map_path)
         .map_err(|e| format!("open TRACE_LOG: {:?}", e))?;
-    let mut map = HashMap::<_, u64, TraceEvent>::try_from(
+    let mut map = HashMap::<_, TraceEventKey, TraceEvent>::try_from(
         aya::maps::Map::LruHashMap(map_data)
     ).map_err(|e| format!("convert TRACE_LOG: {:?}", e))?;
 
-    let keys: Vec<u64> = map.keys().filter_map(|k| k.ok()).collect();
+    let keys: Vec<TraceEventKey> = map.iter()
+        .filter_map(|item| item.ok().map(|(key, _)| key))
+        .filter(|key| key.tap_id == runtime.tap_id)
+        .collect();
     let count = keys.len() as u64;
     for key in keys {
         let _ = map.remove(&key);

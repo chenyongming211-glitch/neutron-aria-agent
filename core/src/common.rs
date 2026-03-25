@@ -468,6 +468,15 @@ unsafe impl Pod for TraceFilter {}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
+pub struct TraceEventKey {
+    pub tap_id: u32,
+    pub pad: u32,
+    pub seq: u64,
+}
+unsafe impl Pod for TraceEventKey {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
 pub struct TraceEvent {
     pub timestamp: u64,
     pub src_ip: u32,

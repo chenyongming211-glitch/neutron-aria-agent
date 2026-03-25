@@ -12,7 +12,7 @@ pub use crate::common::{
     TapConfig,
     TcpRtValue,
     DropKey, DropValue,
-    TraceFilter, TraceEvent,
+    TraceFilter, TraceEvent, TraceEventKey,
     PipelineCtx,
     IfaceCtx,
     SslScratch, SslConnValue,
@@ -167,10 +167,10 @@ pub static DROP_VALUE_BUF: PerCpuArray<DropValue> = PerCpuArray::with_max_entrie
 // --- Packet Trace ---
 
 #[map(name = "TRACE_FILTER")]
-pub static TRACE_FILTER: HashMap<u32, TraceFilter> = HashMap::with_max_entries(1, 0);
+pub static TRACE_FILTER: HashMap<u32, TraceFilter> = HashMap::with_max_entries(1024, 0);
 
 #[map(name = "TRACE_LOG")]
-pub static TRACE_LOG: LruHashMap<u64, TraceEvent> = LruHashMap::with_max_entries(4096, 0);
+pub static TRACE_LOG: LruHashMap<TraceEventKey, TraceEvent> = LruHashMap::with_max_entries(4096, 0);
 
 #[map(name = "TRACE_SEQ")]
 pub static TRACE_SEQ: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);

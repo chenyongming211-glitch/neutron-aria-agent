@@ -352,6 +352,14 @@ pub struct TraceFilter {
 
 #[repr(C)]
 #[derive(Copy, Clone)]
+pub struct TraceEventKey {
+    pub tap_id: u32,
+    pub pad: u32,
+    pub seq: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
 pub struct TraceEvent {
     pub timestamp: u64,
     pub src_ip: u32,

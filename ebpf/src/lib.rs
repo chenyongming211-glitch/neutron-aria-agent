@@ -368,7 +368,7 @@ unsafe fn load_feature_flags_tc(p: &mut PipelineCtx, info: &parser::PacketInfo) 
     if tcprt::tcprt_enabled(p.tap_id) { p.flags |= FLAG_TCPRT_ON; }
     if policy::acl_enabled(p.tap_id) { p.flags |= FLAG_ACL_ON; }
     if mirror::mirror_enabled(p.tap_id) { p.flags |= FLAG_MIRROR_ON; }
-    if trace::should_trace(info) { p.flags |= FLAG_TRACING; }
+    if trace::should_trace(p.tap_id, info) { p.flags |= FLAG_TRACING; }
 }
 
 #[inline(always)]
@@ -417,7 +417,7 @@ fn get_matched(p: &PipelineCtx) -> conntrack::MatchedPolicy {
 /// Inline helper: emit a trace event from PipelineCtx.
 #[inline(always)]
 unsafe fn do_trace(info: &parser::PacketInfo, p: &PipelineCtx, hook: u8, result: u8) {
-    trace::trace_event(info, &trace::TraceArgs {
+    trace::trace_event(p.tap_id, info, &trace::TraceArgs {
         hook, result, direction: p.direction, ct_state: p.ct_state,
         drop_reason: p.drop_reason, _pad: [0;3],
         src_id: p.src_id, dst_id: p.dst_id, pkt_len: p.pkt_len, now: p.now,
