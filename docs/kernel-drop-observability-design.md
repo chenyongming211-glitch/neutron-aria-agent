@@ -1,6 +1,6 @@
 # Aria Firewall Kernel Drop Observability Design
 
-Status: Draft
+Status: Implemented in v0.8.0 (core path), with deprecation cleanup deferred
 Date: 2026-03-25
 Scope: Replace CLI/API-facing `drops` semantics with host-global kernel drop attribution while preserving existing firewall rule/QoS drop accounting.
 
@@ -339,21 +339,36 @@ Firewall-local active drops remain visible through:
 
 ## 11. Metrics
 
-Add new Prometheus metrics after the data path is in place:
+The implementation now exports:
 
+- `aria_kernel_drop_observability_up`
+- `aria_kernel_drop_managed_ifaces`
+- `aria_kernel_drop_mode_info`
+- `aria_kernel_drop_last_error`
 - `aria_kernel_drop_packets_total`
 - `aria_kernel_drop_bytes_total`
 
-Labels should stay conservative:
+Labels stay conservative:
 
 - `instance`
 - `iface`
+- `ifindex`
 - `reason`
 - `proto`
+- `source`
 
 Do not expose high-cardinality raw locations as labels.
 
-## 12. Delivery Plan
+## 12. Health
+
+`GET /api/v1/health` now includes:
+
+- `kernel_drop_available`
+- `kernel_drop_mode`
+- `kernel_drop_managed_ifaces`
+- `kernel_drop_last_error`
+
+## 13. Delivery Plan
 
 ### Phase 0
 
@@ -386,7 +401,7 @@ Do not expose high-cardinality raw locations as labels.
 - document migration
 - remove legacy CLI/API path after the deprecation window
 
-## 13. Explicit Design Decisions
+## 14. Explicit Design Decisions
 
 - Use a host-global manager, not per-instance shared runtime state.
 - Use `tracepoint/skb/kfree_skb` as the canonical first hook.
@@ -395,7 +410,7 @@ Do not expose high-cardinality raw locations as labels.
 - Keep old firewall drop accounting intact, but move it out of the primary `drops` UX.
 - Keep kernel-drop statistics separate from rule/QoS statistics at the API schema level.
 
-## 14. Open Questions
+## 15. Open Questions
 
 - Whether the first production release should expose unattributed early drops by default or behind an explicit flag.
 - Whether the CLI should show raw `last_location` in a debug mode.

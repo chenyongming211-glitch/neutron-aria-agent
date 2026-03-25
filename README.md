@@ -402,6 +402,13 @@ ariactl --tap tap1 stats
 ariactl --tap tap2 policy list
 ```
 
+`ariactl health` 现在会额外显示 kernel drop 观测状态，包括：
+
+- 是否可用
+- 当前模式（`kfree_skb_reasonful` / `kfree_skb_legacy` / `disabled`）
+- 当前已跟踪接口数量
+- 最近一次初始化错误（如果存在）
+
 ## 命令参考
 
 | 命令 | 说明 |
@@ -552,6 +559,22 @@ aria-firewall/
 | POST | `/tcprt/filter` | 按目标聚合查询 |
 | POST/GET/DELETE | `/{instance}/trace` | 追踪启动/查看/停止 |
 | GET/POST/DELETE | `/chains` | Service Chain CRUD |
+
+`GET /health` 还会返回以下 kernel drop 状态字段：
+
+- `kernel_drop_available`
+- `kernel_drop_mode`
+- `kernel_drop_managed_ifaces`
+- `kernel_drop_last_error`
+
+`GET /metrics` 还会导出以下 kernel drop 指标：
+
+- `aria_kernel_drop_observability_up`
+- `aria_kernel_drop_managed_ifaces`
+- `aria_kernel_drop_mode_info`
+- `aria_kernel_drop_last_error`
+- `aria_kernel_drop_packets_total`
+- `aria_kernel_drop_bytes_total`
 
 ## 配置文件
 
