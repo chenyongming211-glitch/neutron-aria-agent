@@ -17,7 +17,7 @@ pub struct FirewallInstance {
     pub edt_available: bool,
 }
 
-const RUNTIME_METADATA_SCHEMA_VERSION: u32 = 1;
+const RUNTIME_METADATA_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct RuntimePinState {
@@ -54,7 +54,9 @@ impl Default for AttachedLinks {
 struct RuntimeMetadata {
     schema_version: u32,
     ebpf_sha256: String,
-    program_pins: Vec<String>,
+    required_program_pins: Vec<String>,
+    optional_program_pins: Vec<String>,
+    present_program_pins: Vec<String>,
     critical_map_pins: Vec<String>,
 }
 
@@ -127,12 +129,12 @@ impl FirewallInstance {
         state_root.join(format!(".{}.runtime.meta.json", self.runtime_namespace()))
     }
 
-    fn expected_program_pins() -> Vec<String> {
-        vec![
-            "xdp_firewall".to_string(),
-            "tc_egress".to_string(),
-            "tc_ingress".to_string(),
-        ]
+    fn required_program_pins() -> Vec<String> {
+        vec!["xdp_firewall".to_string()]
+    }
+
+    fn optional_program_pins() -> Vec<String> {
+        vec!["tc_egress".to_string(), "tc_ingress".to_string()]
     }
 
     fn expected_critical_map_pins() -> Vec<String> {
@@ -157,7 +159,9 @@ impl FirewallInstance {
         Ok(RuntimeMetadata {
             schema_version: RUNTIME_METADATA_SCHEMA_VERSION,
             ebpf_sha256: self.compute_ebpf_sha256(ebpf_path)?,
-            program_pins: Self::expected_program_pins(),
+            required_program_pins: Self::required_program_pins(),
+            optional_program_pins: Self::optional_program_pins(),
+            present_program_pins: Vec::new(),
             critical_map_pins: Self::expected_critical_map_pins(),
         })
     }
@@ -197,7 +201,7 @@ impl FirewallInstance {
         }
     }
 
-    fn shared_runtime_has_live_links(&self) -> Result<bool, String> {
+    fn shared_runtime_has_pinned_live_links(&self) -> Result<bool, String> {
         if !self.pin_path.exists() {
             return Ok(false);
         }
@@ -239,10 +243,16 @@ impl FirewallInstance {
                 metadata.ebpf_sha256, expected.ebpf_sha256
             ));
         }
-        if metadata.program_pins != expected.program_pins {
+        if metadata.required_program_pins != expected.required_program_pins {
             return RuntimeInventoryStatus::StaleOrIncomplete(format!(
-                "runtime program inventory {:?} != expected {:?}",
-                metadata.program_pins, expected.program_pins
+                "runtime required program inventory {:?} != expected {:?}",
+                metadata.required_program_pins, expected.required_program_pins
+            ));
+        }
+        if metadata.optional_program_pins != expected.optional_program_pins {
+            return RuntimeInventoryStatus::StaleOrIncomplete(format!(
+                "runtime optional program inventory {:?} != expected {:?}",
+                metadata.optional_program_pins, expected.optional_program_pins
             ));
         }
         if metadata.critical_map_pins != expected.critical_map_pins {
@@ -252,11 +262,30 @@ impl FirewallInstance {
             ));
         }
 
-        for program in &metadata.program_pins {
+        for program in &metadata.required_program_pins {
             let path = self.pin_path.join(program);
             if !path.exists() {
                 return RuntimeInventoryStatus::StaleOrIncomplete(format!(
                     "pinned program missing: {}",
+                    path.display()
+                ));
+            }
+        }
+
+        for program in &metadata.present_program_pins {
+            let is_known_program = metadata.required_program_pins.iter().any(|p| p == program)
+                || metadata.optional_program_pins.iter().any(|p| p == program);
+            if !is_known_program {
+                return RuntimeInventoryStatus::StaleOrIncomplete(format!(
+                    "runtime metadata references unknown pinned program: {}",
+                    program
+                ));
+            }
+
+            let path = self.pin_path.join(program);
+            if !path.exists() {
+                return RuntimeInventoryStatus::StaleOrIncomplete(format!(
+                    "declared pinned program missing: {}",
                     path.display()
                 ));
             }
@@ -275,7 +304,7 @@ impl FirewallInstance {
         RuntimeInventoryStatus::Healthy
     }
 
-    fn load_and_pin_runtime(&self, ebpf_path: &str, metadata: &RuntimeMetadata) -> Result<(), String> {
+    fn load_and_pin_runtime(&self, ebpf_path: &str, expected_metadata: &RuntimeMetadata) -> Result<(), String> {
         let pin_path_str = self.pin_path.to_str().unwrap();
 
         std::fs::create_dir_all(&self.pin_path)
@@ -291,11 +320,13 @@ impl FirewallInstance {
             .load(&bpf_bytes)
             .map_err(|e| format!("[{}] load error: {:?}", self.iface, e))?;
 
-        self.load_runtime_programs(&mut bpf)?;
+        let loaded_optional_programs = self.load_runtime_programs(&mut bpf)?;
         self.pin_runtime_maps(&mut bpf, pin_path_str)
             .map_err(|e| format!("pin runtime maps failed: {}", e))?;
-        self.pin_runtime_programs(&mut bpf, pin_path_str);
-        self.store_runtime_metadata_atomically(metadata)?;
+        let present_program_pins = self.pin_runtime_programs(&mut bpf, pin_path_str, &loaded_optional_programs)?;
+        let mut metadata = expected_metadata.clone();
+        metadata.present_program_pins = present_program_pins;
+        self.store_runtime_metadata_atomically(&metadata)?;
 
         Ok(())
     }
@@ -321,7 +352,11 @@ impl FirewallInstance {
     }
 
     /// Ensure the shared runtime objects are pinned before any interface link goes live.
-    pub fn ensure_runtime_pinned(&self, ebpf_path: &str) -> Result<RuntimePinState, String> {
+    pub fn ensure_runtime_pinned(
+        &self,
+        ebpf_path: &str,
+        known_live_runtime: bool,
+    ) -> Result<RuntimePinState, String> {
         let pin_path_preexisted = self.pin_path.exists();
         let created_shared_runtime = self.shared_runtime && !pin_path_preexisted;
         let xdp_link_pin = self.xdp_link_pin_path();
@@ -344,7 +379,7 @@ impl FirewallInstance {
             });
         }
 
-        let live_runtime = self.shared_runtime_has_live_links()?;
+        let live_runtime = known_live_runtime || self.shared_runtime_has_pinned_live_links()?;
         match self.validate_runtime_inventory(&expected_metadata) {
             RuntimeInventoryStatus::Healthy => {
                 info!(instance = %self.iface, preexisting_xdp_link, live_runtime, "reusing healthy shared runtime");
@@ -452,7 +487,7 @@ impl FirewallInstance {
         Ok(())
     }
 
-    fn load_runtime_programs(&self, bpf: &mut aya::Ebpf) -> Result<(), String> {
+    fn load_runtime_programs(&self, bpf: &mut aya::Ebpf) -> Result<Vec<String>, String> {
         {
             let xdp_program = bpf
                 .program_mut("xdp_firewall")
@@ -466,13 +501,16 @@ impl FirewallInstance {
                 .map_err(|e| format!("[{}] xdp.load error: {:?}", self.iface, e))?;
         }
 
-        for prog_name in ["tc_egress", "tc_ingress"] {
-            if let Err(e) = self.load_tc_program(bpf, prog_name) {
+        let mut loaded_optional_programs = Vec::new();
+        for prog_name in Self::optional_program_pins() {
+            if let Err(e) = self.load_tc_program(bpf, &prog_name) {
                 warn!(instance = %self.iface, program = %prog_name, error = %e, "TC program load failed; runtime will continue without it");
+            } else {
+                loaded_optional_programs.push(prog_name);
             }
         }
 
-        Ok(())
+        Ok(loaded_optional_programs)
     }
 
     fn load_tc_program(&self, bpf: &mut aya::Ebpf, prog_name: &str) -> Result<(), String> {
@@ -486,18 +524,43 @@ impl FirewallInstance {
         tc.load().map_err(|e| format!("{} load: {:?}", prog_name, e))
     }
 
-    fn pin_runtime_programs(&self, bpf: &mut aya::Ebpf, pin_path: &str) {
-        for name in &["xdp_firewall", "tc_egress", "tc_ingress"] {
-            if let Some(program) = bpf.program_mut(name) {
-                let target = format!("{}/{}", pin_path, name);
-                if std::path::Path::new(&target).exists() {
-                    continue;
-                }
-                if let Err(e) = program.pin(target) {
-                    warn!(instance = %self.iface, program = %name, error = ?e, "failed to pin runtime program");
-                }
+    fn pin_runtime_programs(
+        &self,
+        bpf: &mut aya::Ebpf,
+        pin_path: &str,
+        loaded_optional_programs: &[String],
+    ) -> Result<Vec<String>, String> {
+        let mut present_program_pins = Vec::new();
+
+        let required_program = "xdp_firewall";
+        let required_target = format!("{}/{}", pin_path, required_program);
+        let required_program_ref = bpf
+            .program_mut(required_program)
+            .ok_or_else(|| format!("required runtime program {} not found", required_program))?;
+        if !Path::new(&required_target).exists() {
+            required_program_ref
+                .pin(required_target)
+                .map_err(|e| format!("failed to pin required runtime program {}: {:?}", required_program, e))?;
+        }
+        present_program_pins.push(required_program.to_string());
+
+        for name in loaded_optional_programs {
+            let Some(program) = bpf.program_mut(name.as_str()) else {
+                continue;
+            };
+            let target = format!("{}/{}", pin_path, name);
+            if Path::new(&target).exists() {
+                present_program_pins.push(name.clone());
+                continue;
+            }
+            if let Err(e) = program.pin(target) {
+                warn!(instance = %self.iface, program = %name, error = ?e, "failed to pin optional runtime program");
+            } else {
+                present_program_pins.push(name.clone());
             }
         }
+
+        Ok(present_program_pins)
     }
 
     /// Try to pin XDP link to bpffs. Returns Ok if pinned, Err if kernel doesn't support bpf_link.

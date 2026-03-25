@@ -99,6 +99,11 @@ impl TapRegistry {
             }
         }
 
+        let known_live_runtime = {
+            let instances = self.instances.read().await;
+            !instances.is_empty()
+        };
+
         let mut instance = FirewallInstance::new(
             iface,
             PathBuf::from(self.control_plane.managed_pin_path()),
@@ -115,7 +120,10 @@ impl TapRegistry {
             }
         }
 
-        let runtime_pin = instance.ensure_runtime_pinned(self.ebpf_path.to_str().unwrap())?;
+        let runtime_pin = instance.ensure_runtime_pinned(
+            self.ebpf_path.to_str().unwrap(),
+            known_live_runtime,
+        )?;
 
         let prepared = match self
             .control_plane
