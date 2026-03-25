@@ -1,6 +1,6 @@
 use aya::maps::{HashMap, MapData};
-use crate::common::{TapMapRuntime, TraceEvent, TraceEventKey, TraceFilter};
-use std::net::Ipv4Addr;
+use crate::common::{TapMapRuntime, TraceEvent, TraceEventKey, TraceEventV6, TraceFilter};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub struct TraceEventEntry {
     pub seq: u64,
@@ -68,6 +68,46 @@ fn direction_name(dir: u8) -> String {
         0 => "ingress".to_string(),
         1 => "egress".to_string(),
         _ => format!("dir:{}", dir),
+    }
+}
+
+fn trace_event_entry_from_v4(key: TraceEventKey, event: TraceEvent) -> TraceEventEntry {
+    TraceEventEntry {
+        seq: key.seq,
+        timestamp: event.timestamp,
+        src_ip: Ipv4Addr::from(event.src_ip).to_string(),
+        dst_ip: Ipv4Addr::from(event.dst_ip).to_string(),
+        src_port: event.src_port,
+        dst_port: event.dst_port,
+        proto: event.proto,
+        hook: hook_name(event.hook),
+        result: result_name(event.result),
+        direction: direction_name(event.direction),
+        src_id: event.src_id,
+        dst_id: event.dst_id,
+        pkt_len: event.pkt_len,
+        ct_state: ct_state_name(event.ct_state),
+        drop_reason: drop_reason_name(event.drop_reason),
+    }
+}
+
+fn trace_event_entry_from_v6(key: TraceEventKey, event: TraceEventV6) -> TraceEventEntry {
+    TraceEventEntry {
+        seq: key.seq,
+        timestamp: event.timestamp,
+        src_ip: Ipv6Addr::from(event.src_ip).to_string(),
+        dst_ip: Ipv6Addr::from(event.dst_ip).to_string(),
+        src_port: event.src_port,
+        dst_port: event.dst_port,
+        proto: event.proto,
+        hook: hook_name(event.hook),
+        result: result_name(event.result),
+        direction: direction_name(event.direction),
+        src_id: event.src_id,
+        dst_id: event.dst_id,
+        pkt_len: event.pkt_len,
+        ct_state: ct_state_name(event.ct_state),
+        drop_reason: drop_reason_name(event.drop_reason),
     }
 }
 
@@ -149,23 +189,23 @@ pub fn get_trace_events(runtime: TapMapRuntime<'_>, limit: usize) -> Result<Vec<
             if key.tap_id != runtime.tap_id {
                 continue;
             }
-            entries.push(TraceEventEntry {
-                seq: key.seq,
-                timestamp: event.timestamp,
-                src_ip: Ipv4Addr::from(event.src_ip).to_string(),
-                dst_ip: Ipv4Addr::from(event.dst_ip).to_string(),
-                src_port: event.src_port,
-                dst_port: event.dst_port,
-                proto: event.proto,
-                hook: hook_name(event.hook),
-                result: result_name(event.result),
-                direction: direction_name(event.direction),
-                src_id: event.src_id,
-                dst_id: event.dst_id,
-                pkt_len: event.pkt_len,
-                ct_state: ct_state_name(event.ct_state),
-                drop_reason: drop_reason_name(event.drop_reason),
-            });
+            entries.push(trace_event_entry_from_v4(key, event));
+        }
+    }
+
+    let v6_map_path = format!("{}/TRACE_LOG_V6", pin_path);
+    if let Ok(v6_map_data) = MapData::from_pin(&v6_map_path) {
+        if let Ok(v6_map) = HashMap::<_, TraceEventKey, TraceEventV6>::try_from(
+            aya::maps::Map::LruHashMap(v6_map_data)
+        ) {
+            for item in v6_map.iter() {
+                if let Ok((key, event)) = item {
+                    if key.tap_id != runtime.tap_id {
+                        continue;
+                    }
+                    entries.push(trace_event_entry_from_v6(key, event));
+                }
+            }
         }
     }
 
@@ -192,9 +232,26 @@ pub fn flush_trace_log(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
         .filter_map(|item| item.ok().map(|(key, _)| key))
         .filter(|key| key.tap_id == runtime.tap_id)
         .collect();
-    let count = keys.len() as u64;
+    let mut count = keys.len() as u64;
     for key in keys {
         let _ = map.remove(&key);
     }
+
+    let v6_map_path = format!("{}/TRACE_LOG_V6", pin_path);
+    if let Ok(v6_map_data) = MapData::from_pin(&v6_map_path) {
+        if let Ok(mut v6_map) = HashMap::<_, TraceEventKey, TraceEventV6>::try_from(
+            aya::maps::Map::LruHashMap(v6_map_data)
+        ) {
+            let keys: Vec<TraceEventKey> = v6_map.iter()
+                .filter_map(|item| item.ok().map(|(key, _)| key))
+                .filter(|key| key.tap_id == runtime.tap_id)
+                .collect();
+            count += keys.len() as u64;
+            for key in keys {
+                let _ = v6_map.remove(&key);
+            }
+        }
+    }
+
     Ok(count)
 }

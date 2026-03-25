@@ -12,7 +12,7 @@ pub use crate::common::{
     TapConfig,
     TcpRtValue,
     DropKey, DropValue,
-    TraceFilter, TraceEvent, TraceEventKey,
+    TraceFilter, TraceEvent, TraceEventKey, TraceEventV6,
     PipelineCtx,
     IfaceCtx,
     SslScratch, SslConnValue,
@@ -178,11 +178,17 @@ pub static TRACE_FILTER: HashMap<u32, TraceFilter> = HashMap::with_max_entries(1
 #[map(name = "TRACE_LOG")]
 pub static TRACE_LOG: LruHashMap<TraceEventKey, TraceEvent> = LruHashMap::with_max_entries(4096, 0);
 
+#[map(name = "TRACE_LOG_V6")]
+pub static TRACE_LOG_V6: LruHashMap<TraceEventKey, TraceEventV6> = LruHashMap::with_max_entries(4096, 0);
+
 #[map(name = "TRACE_SEQ")]
 pub static TRACE_SEQ: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
 #[map(name = "TRACE_EVENT_BUF")]
 pub static TRACE_EVENT_BUF: PerCpuArray<TraceEvent> = PerCpuArray::with_max_entries(1, 0);
+
+#[map(name = "TRACE_EVENT_V6_BUF")]
+pub static TRACE_EVENT_V6_BUF: PerCpuArray<TraceEventV6> = PerCpuArray::with_max_entries(1, 0);
 
 // --- SSL Observability maps ---
 

@@ -378,6 +378,26 @@ pub struct TraceEvent {
     pub pad: [u8; 2],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct TraceEventV6 {
+    pub timestamp: u64,
+    pub src_ip: [u8; 16],
+    pub dst_ip: [u8; 16],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub hook: u8,           // TRACE_XDP_INGRESS / TRACE_TC_EGRESS / etc.
+    pub result: u8,         // TRACE_RESULT_PASS / TRACE_RESULT_DROP_*
+    pub direction: u8,
+    pub src_id: u32,
+    pub dst_id: u32,
+    pub pkt_len: u32,
+    pub ct_state: u8,       // 0=none, 1=new, 2=established
+    pub drop_reason: u8,    // DROP_* code if dropped, 0 if passed
+    pub pad: [u8; 2],
+}
+
 // --- Pipeline scratch context (per-CPU, inter-phase communication) ---
 
 /// Feature flag bits for PipelineCtx.flags

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -37,6 +37,16 @@ pub struct WalWriter {
     wal_path: PathBuf,
     entry_count: u64,
     last_compact_time: Instant,
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 impl WalWriter {
@@ -126,6 +136,7 @@ impl WalWriter {
             f.write_all(state_json.as_bytes())?;
             f.sync_all()?;
             fs::rename(&tmp_file, &state_file)?;
+            sync_directory(state_dir)?;
             Ok(())
         })();
 
@@ -140,6 +151,8 @@ impl WalWriter {
             .truncate(true)
             .open(&self.wal_path)
             .map_err(|e| format!("Failed to truncate WAL: {}", e))?;
+        file.sync_all()
+            .map_err(|e| format!("Failed to sync truncated WAL: {}", e))?;
         self.file = BufWriter::new(file);
         self.entry_count = 0;
         self.last_compact_time = Instant::now();

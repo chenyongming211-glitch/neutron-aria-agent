@@ -1,4 +1,4 @@
-use crate::maps::{TRACE_EVENT_BUF, TRACE_FILTER, TRACE_LOG, TRACE_SEQ};
+use crate::maps::{TRACE_EVENT_BUF, TRACE_EVENT_V6_BUF, TRACE_FILTER, TRACE_LOG, TRACE_LOG_V6, TRACE_SEQ};
 use crate::common::TraceEventKey;
 use crate::parser::PacketInfo;
 use aya_ebpf::helpers::bpf_get_smp_processor_id;
@@ -87,8 +87,27 @@ pub unsafe fn trace_event(
 ) {
     let seq_key: u32 = 0;
     if let Some(seq) = TRACE_SEQ.get_ptr_mut(seq_key) {
-        if let Some(event) = TRACE_EVENT_BUF.get_ptr_mut(0) {
-            let event_key = next_trace_event_key(tap_id, seq);
+        let event_key = next_trace_event_key(tap_id, seq);
+        if info.is_ipv6 {
+            if let Some(event) = TRACE_EVENT_V6_BUF.get_ptr_mut(0) {
+                (*event).timestamp = args.now;
+                (*event).src_ip = info.src_ip_v6;
+                (*event).dst_ip = info.dst_ip_v6;
+                (*event).src_port = info.src_port;
+                (*event).dst_port = info.dst_port;
+                (*event).proto = info.proto;
+                (*event).hook = args.hook;
+                (*event).result = args.result;
+                (*event).direction = args.direction;
+                (*event).src_id = args.src_id;
+                (*event).dst_id = args.dst_id;
+                (*event).pkt_len = args.pkt_len;
+                (*event).ct_state = args.ct_state;
+                (*event).drop_reason = args.drop_reason;
+                (*event).pad = [0; 2];
+                let _ = TRACE_LOG_V6.insert(&event_key, &*event, 0);
+            }
+        } else if let Some(event) = TRACE_EVENT_BUF.get_ptr_mut(0) {
             (*event).timestamp = args.now;
             (*event).src_ip = info.src_ip;
             (*event).dst_ip = info.dst_ip;

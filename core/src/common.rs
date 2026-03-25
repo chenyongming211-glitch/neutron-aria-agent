@@ -496,6 +496,27 @@ pub struct TraceEvent {
 }
 unsafe impl Pod for TraceEvent {}
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct TraceEventV6 {
+    pub timestamp: u64,
+    pub src_ip: [u8; 16],
+    pub dst_ip: [u8; 16],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub hook: u8,
+    pub result: u8,
+    pub direction: u8,
+    pub src_id: u32,
+    pub dst_id: u32,
+    pub pkt_len: u32,
+    pub ct_state: u8,
+    pub drop_reason: u8,
+    pub pad: [u8; 2],
+}
+unsafe impl Pod for TraceEventV6 {}
+
 pub const CT_NEW: u8 = 1;
 pub const CT_ESTABLISHED: u8 = 2;
 pub const DIR_INGRESS: u8 = 0;
