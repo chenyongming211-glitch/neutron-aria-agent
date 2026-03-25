@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use aria_core::ebpf_ops::{CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES};
 use serde::{Deserialize, Serialize};
@@ -272,6 +273,27 @@ impl FirewallInstance {
             .map_err(|e| format!("parse ifindex for {}: {}", self.iface, e))
     }
 
+    fn existing_ifaces_by_ifindex(&self) -> Result<HashMap<u32, String>, String> {
+        let mut ifaces = HashMap::new();
+        let entries = std::fs::read_dir("/sys/class/net")
+            .map_err(|e| format!("read /sys/class/net: {}", e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("read /sys/class/net entry: {}", e))?;
+            let iface = entry.file_name().to_string_lossy().to_string();
+            let raw = match std::fs::read_to_string(entry.path().join("ifindex")) {
+                Ok(raw) => raw,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("read ifindex for {}: {}", iface, e)),
+            };
+            let ifindex = raw
+                .trim()
+                .parse::<u32>()
+                .map_err(|e| format!("parse ifindex for {}: {}", iface, e))?;
+            ifaces.insert(ifindex, iface);
+        }
+        Ok(ifaces)
+    }
+
     pub fn reserve_persisted_live_iface(&self) -> Result<(), String> {
         if !self.shared_runtime {
             return Ok(());
@@ -304,8 +326,66 @@ impl FirewallInstance {
         self.store_persisted_live_ifaces_atomically(&state)
     }
 
+    fn reconcile_persisted_live_ifaces(&self) -> Result<PersistedLiveIfaces, String> {
+        let path = self.persisted_live_ifaces_path();
+        let state = self.load_persisted_live_ifaces()?;
+        if state.ifaces.is_empty() {
+            return Ok(state);
+        }
+
+        let existing_ifaces = self.existing_ifaces_by_ifindex()?;
+        let mut seen_ifindices = HashSet::new();
+        let mut changed = false;
+        let mut retained = Vec::new();
+
+        for entry in state.ifaces {
+            if let Some(current_iface) = existing_ifaces.get(&entry.ifindex) {
+                if !seen_ifindices.insert(entry.ifindex) {
+                    changed = true;
+                    continue;
+                }
+                if entry.iface != *current_iface {
+                    changed = true;
+                }
+                retained.push(PersistedLiveIface {
+                    iface: current_iface.clone(),
+                    ifindex: entry.ifindex,
+                });
+            } else {
+                changed = true;
+                info!(
+                    instance = %self.iface,
+                    stale_iface = %entry.iface,
+                    stale_ifindex = entry.ifindex,
+                    "dropping stale persisted live runtime reservation"
+                );
+            }
+        }
+
+        if !changed {
+            return Ok(PersistedLiveIfaces {
+                schema_version: PERSISTED_LIVE_IFACES_SCHEMA_VERSION,
+                ifaces: retained,
+            });
+        }
+
+        let reconciled = PersistedLiveIfaces {
+            schema_version: PERSISTED_LIVE_IFACES_SCHEMA_VERSION,
+            ifaces: retained,
+        };
+        if reconciled.ifaces.is_empty() {
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .map_err(|e| format!("remove persisted live ifaces {}: {}", path.display(), e))?;
+            }
+        } else {
+            self.store_persisted_live_ifaces_atomically(&reconciled)?;
+        }
+        Ok(reconciled)
+    }
+
     fn persisted_live_ifaces_nonempty(&self) -> Result<bool, String> {
-        Ok(!self.load_persisted_live_ifaces()?.ifaces.is_empty())
+        Ok(!self.reconcile_persisted_live_ifaces()?.ifaces.is_empty())
     }
 
     fn shared_runtime_has_pinned_live_links(&self) -> Result<bool, String> {
