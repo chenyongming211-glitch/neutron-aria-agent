@@ -1,11 +1,11 @@
+use crate::control_plane::{ControlPlane, MANAGED_SHARED_PIN_NAMESPACE};
+use crate::instance::FirewallInstance;
+use regex::Regex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use regex::Regex;
 use tracing::{info, warn};
-use crate::instance::FirewallInstance;
-use crate::control_plane::{ControlPlane, MANAGED_SHARED_PIN_NAMESPACE};
 
 pub struct TapRegistry {
     instances: RwLock<HashMap<String, FirewallInstance>>,
@@ -52,7 +52,8 @@ impl TapRegistry {
         drop(locks);
 
         let mut locks = self.iface_locks.write().await;
-        locks.entry(iface.to_string())
+        locks
+            .entry(iface.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
@@ -120,10 +121,8 @@ impl TapRegistry {
             }
         }
 
-        let runtime_pin = instance.ensure_runtime_pinned(
-            self.ebpf_path.to_str().unwrap(),
-            known_live_runtime,
-        )?;
+        let runtime_pin =
+            instance.ensure_runtime_pinned(self.ebpf_path.to_str().unwrap(), known_live_runtime)?;
 
         let prepared = match self
             .control_plane
@@ -140,18 +139,25 @@ impl TapRegistry {
         };
 
         if let Err(e) = instance.reserve_persisted_live_iface() {
-            self.control_plane.abort_managed_registration(prepared).await;
+            self.control_plane
+                .abort_managed_registration(prepared)
+                .await;
             if runtime_pin.created_shared_runtime {
                 self.cleanup_shared_runtime_dir();
             }
-            return Err(format!("failed to reserve persisted live runtime state: {}", e));
+            return Err(format!(
+                "failed to reserve persisted live runtime state: {}",
+                e
+            ));
         }
 
         if let Err(e) = instance.attach_links_from_pinned_runtime(&runtime_pin) {
             if let Err(release_err) = instance.release_persisted_live_iface() {
                 warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
             }
-            self.control_plane.abort_managed_registration(prepared).await;
+            self.control_plane
+                .abort_managed_registration(prepared)
+                .await;
             if runtime_pin.created_shared_runtime {
                 self.cleanup_shared_runtime_dir();
             }
@@ -179,7 +185,9 @@ impl TapRegistry {
 
         if instance_exists {
             let instances = self.instances.read().await;
-            let instance = instances.get(iface).expect("instance existence checked above");
+            let instance = instances
+                .get(iface)
+                .expect("instance existence checked above");
             instance.detach()?;
             if let Err(e) = instance.release_persisted_live_iface() {
                 warn!(instance = %iface, error = %e, "failed to release persisted live runtime state");

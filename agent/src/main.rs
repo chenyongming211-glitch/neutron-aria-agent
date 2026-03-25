@@ -1,22 +1,23 @@
 use clap::Parser;
+use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use serde::Deserialize;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-mod instance;
-mod tap_registry;
-mod netlink;
-mod control_plane;
-mod service_chain;
-mod system_manager;
-mod kernel_drop_manager;
-mod ssl_manager;
-mod ssl_support;
 mod api_handlers;
 mod api_routes;
+mod control_plane;
+mod instance;
+mod kernel_drop_manager;
+mod kernel_drop_support;
+mod netlink;
+mod service_chain;
+mod ssl_manager;
+mod ssl_support;
+mod system_manager;
+mod tap_registry;
 
 #[derive(Parser)]
 #[command(name = "aria-agent")]
@@ -118,25 +119,26 @@ fn init_tracing(config: &Config) -> Result<(), String> {
             .with_thread_names(true)
             .try_init()
             .map_err(|e| format!("failed to initialize json logger: {}", e)),
-        other => Err(format!("unsupported log_format '{}': expected 'text' or 'json'", other)),
+        other => Err(format!(
+            "unsupported log_format '{}': expected 'text' or 'json'",
+            other
+        )),
     }
 }
 
 fn load_config(path: &PathBuf) -> Config {
     if path.exists() {
         match std::fs::read_to_string(path) {
-            Ok(contents) => {
-                match toml::from_str(&contents) {
-                    Ok(config) => {
-                        println!("Loaded config from {:?}", path);
-                        return config;
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: failed to parse config {:?}: {}", path, e);
-                        eprintln!("Using default configuration");
-                    }
+            Ok(contents) => match toml::from_str(&contents) {
+                Ok(config) => {
+                    println!("Loaded config from {:?}", path);
+                    return config;
                 }
-            }
+                Err(e) => {
+                    eprintln!("Warning: failed to parse config {:?}: {}", path, e);
+                    eprintln!("Using default configuration");
+                }
+            },
             Err(e) => {
                 eprintln!("Warning: failed to read config {:?}: {}", path, e);
                 eprintln!("Using default configuration");
@@ -208,7 +210,7 @@ async fn main() {
         &config.pin_path,
     ));
     if let Err(e) = kernel_drop_manager.ensure_loaded().await {
-        warn!(error = %e, "failed to initialize kernel drop manager scaffold");
+        warn!(error = %e, "failed to initialize kernel drop manager");
     } else {
         let status = kernel_drop_manager.status_snapshot().await;
         info!(
@@ -217,7 +219,7 @@ async fn main() {
             managed_ifaces = status.managed_ifaces,
             pin_path = %kernel_drop_manager.pin_path(),
             last_error = ?status.last_error,
-            "kernel drop manager scaffold ready"
+            "kernel drop manager ready"
         );
     }
 
@@ -296,10 +298,8 @@ async fn main() {
     info!("aria-agent running");
 
     // Wait for shutdown signal
-    let mut sigterm = signal(SignalKind::terminate())
-        .expect("failed to create SIGTERM handler");
-    let mut sigint = signal(SignalKind::interrupt())
-        .expect("failed to create SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to create SIGTERM handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("failed to create SIGINT handler");
 
     tokio::select! {
         _ = sigterm.recv() => info!("received SIGTERM"),

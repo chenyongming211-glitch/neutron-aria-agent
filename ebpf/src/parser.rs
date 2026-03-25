@@ -40,7 +40,12 @@ unsafe fn read_be32(data: usize, offset: usize) -> u32 {
 /// Parse IPv4 packet, writing result directly to `out` pointer (scratch map).
 /// Returns true on success, false if not an IPv4 packet.
 #[inline(never)]
-pub unsafe fn parse_eth_ipv4(data: usize, data_end: usize, offset: usize, out: *mut PacketInfo) -> bool {
+pub unsafe fn parse_eth_ipv4(
+    data: usize,
+    data_end: usize,
+    offset: usize,
+    out: *mut PacketInfo,
+) -> bool {
     if data + offset + ETH_HLEN + 20 > data_end {
         return false;
     }
@@ -93,14 +98,26 @@ pub unsafe fn parse_eth_ipv4(data: usize, data_end: usize, offset: usize, out: *
             };
             (sp, dp, flags, seq, pl)
         } else if transport_offset + 4 <= data_end {
-            (read_be16(transport_offset, 0), read_be16(transport_offset, 2), 0, 0, 0)
+            (
+                read_be16(transport_offset, 0),
+                read_be16(transport_offset, 2),
+                0,
+                0,
+                0,
+            )
         } else {
             (0, 0, 0, 0, 0)
         }
     } else if proto == IPPROTO_UDP {
         let transport_offset = ip_offset + ihl;
         if transport_offset + 4 <= data_end {
-            (read_be16(transport_offset, 0), read_be16(transport_offset, 2), 0, 0, 0)
+            (
+                read_be16(transport_offset, 0),
+                read_be16(transport_offset, 2),
+                0,
+                0,
+                0,
+            )
         } else {
             (0, 0, 0, 0, 0)
         }
@@ -126,20 +143,28 @@ pub unsafe fn parse_eth_ipv4(data: usize, data_end: usize, offset: usize, out: *
 }
 
 // IPv6 扩展头类型
-const IPPROTO_HOPOPTS: u8 = 0;   // Hop-by-Hop Options
-const IPPROTO_ROUTING: u8 = 43;  // Routing Header
-const IPPROTO_DSTOPTS: u8 = 60;  // Destination Options
+const IPPROTO_HOPOPTS: u8 = 0; // Hop-by-Hop Options
+const IPPROTO_ROUTING: u8 = 43; // Routing Header
+const IPPROTO_DSTOPTS: u8 = 60; // Destination Options
 const IPPROTO_FRAGMENT: u8 = 44; // Fragment Header
 
 #[inline]
 fn is_ipv6_extension_header(next_header: u8) -> bool {
-    matches!(next_header, IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS | IPPROTO_FRAGMENT)
+    matches!(
+        next_header,
+        IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS | IPPROTO_FRAGMENT
+    )
 }
 
 /// Parse IPv6 packet, writing result directly to `out` pointer (scratch map).
 /// Returns true on success, false if not an IPv6 packet.
 #[inline(never)]
-pub unsafe fn parse_eth_ipv6(data: usize, data_end: usize, offset: usize, out: *mut PacketInfo) -> bool {
+pub unsafe fn parse_eth_ipv6(
+    data: usize,
+    data_end: usize,
+    offset: usize,
+    out: *mut PacketInfo,
+) -> bool {
     if data + offset + ETH_HLEN + 40 > data_end {
         return false;
     }
@@ -222,13 +247,25 @@ pub unsafe fn parse_eth_ipv6(data: usize, data_end: usize, offset: usize, out: *
             };
             (sp, dp, flags, seq, pl)
         } else if transport_offset + 4 <= data_end {
-            (read_be16(transport_offset, 0), read_be16(transport_offset, 2), 0, 0, 0)
+            (
+                read_be16(transport_offset, 0),
+                read_be16(transport_offset, 2),
+                0,
+                0,
+                0,
+            )
         } else {
             (0, 0, 0, 0, 0)
         }
     } else if next_header == IPPROTO_UDP {
         if transport_offset + 4 <= data_end {
-            (read_be16(transport_offset, 0), read_be16(transport_offset, 2), 0, 0, 0)
+            (
+                read_be16(transport_offset, 0),
+                read_be16(transport_offset, 2),
+                0,
+                0,
+                0,
+            )
         } else {
             (0, 0, 0, 0, 0)
         }

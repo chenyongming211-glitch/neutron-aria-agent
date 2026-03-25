@@ -155,7 +155,11 @@ pub fn link_pin_path(pin_path: &str, prog_name: &str) -> String {
     format!("{}/{}_link", pin_path, prog_name)
 }
 
-pub fn pin_map_if_needed(bpf: &mut aya::Ebpf, map_name: &str, pin_path: &str) -> Result<(), String> {
+pub fn pin_map_if_needed(
+    bpf: &mut aya::Ebpf,
+    map_name: &str,
+    pin_path: &str,
+) -> Result<(), String> {
     let target = format!("{}/{}", pin_path, map_name);
     if Path::new(&target).exists() {
         return Ok(());
@@ -189,7 +193,11 @@ pub fn load_uprobe_program(bpf: &mut aya::Ebpf, prog_name: &str) -> Result<(), S
     }
 }
 
-pub fn pin_program_if_needed(bpf: &mut aya::Ebpf, prog_name: &str, pin_path: &str) -> Result<(), String> {
+pub fn pin_program_if_needed(
+    bpf: &mut aya::Ebpf,
+    prog_name: &str,
+    pin_path: &str,
+) -> Result<(), String> {
     let target = format!("{}/{}", pin_path, prog_name);
     if Path::new(&target).exists() {
         return Ok(());

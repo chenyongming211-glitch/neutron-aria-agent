@@ -4,9 +4,8 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::ssl_support::{
-    attach_uprobe_if_needed, find_libssl, is_ssl_pin_name, pin_map_if_needed,
-    pin_program_if_needed, load_uprobe_program, SSL_LINK_NAMES, SSL_MAP_NAMES,
-    SSL_PROGRAM_NAMES, SSL_UPROBE_SPECS,
+    attach_uprobe_if_needed, find_libssl, is_ssl_pin_name, load_uprobe_program, pin_map_if_needed,
+    pin_program_if_needed, SSL_LINK_NAMES, SSL_MAP_NAMES, SSL_PROGRAM_NAMES, SSL_UPROBE_SPECS,
 };
 
 struct SslManagerState {
@@ -135,13 +134,13 @@ impl SslManager {
         std::fs::create_dir_all(&self.pin_path)
             .map_err(|e| format!("create ssl-global pin dir {}: {}", self.pin_path, e))?;
 
-        let bpf_bytes = std::fs::read(&self.ebpf_path)
-            .map_err(|e| format!("read ebpf: {}", e))?;
+        let bpf_bytes = std::fs::read(&self.ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
         let mut preserved_ssl_enabled = None;
         let mut bpf = match self.load_bpf_with_pins(&bpf_bytes) {
             Ok(bpf) => bpf,
             Err(first_err) => {
-                preserved_ssl_enabled = aria_core::ssl_ops::get_ssl_global_config(&self.pin_path).ok();
+                preserved_ssl_enabled =
+                    aria_core::ssl_ops::get_ssl_global_config(&self.pin_path).ok();
                 warn!(error = %first_err, "failed to reuse pinned SSL state; recreating ssl-global pins");
                 self.reset_ssl_global_pins()?;
                 self.load_bpf_with_pins(&bpf_bytes).map_err(|retry_err| {
@@ -228,8 +227,12 @@ impl SslManager {
     }
 
     fn core_pins_ready(&self) -> bool {
-        SSL_MAP_NAMES.iter().all(|name| Path::new(&format!("{}/{}", self.pin_path, name)).exists())
-            && SSL_PROGRAM_NAMES.iter().all(|name| Path::new(&format!("{}/{}", self.pin_path, name)).exists())
+        SSL_MAP_NAMES
+            .iter()
+            .all(|name| Path::new(&format!("{}/{}", self.pin_path, name)).exists())
+            && SSL_PROGRAM_NAMES
+                .iter()
+                .all(|name| Path::new(&format!("{}/{}", self.pin_path, name)).exists())
     }
 
     fn link_pins_ready(&self) -> bool {

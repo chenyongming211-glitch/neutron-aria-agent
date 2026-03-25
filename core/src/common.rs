@@ -7,7 +7,7 @@ pub struct PolicyKey {
     pub src_id: u32,
     pub dst_id: u32,
     pub proto: u8,
-    pub direction: u8,     // 0=ingress, 1=egress
+    pub direction: u8, // 0=ingress, 1=egress
     pub pad: [u8; 2],
 }
 unsafe impl Pod for PolicyKey {}
@@ -154,7 +154,7 @@ pub struct QosConfig {
     pub rate_bps: u64,
     pub burst_bytes: u64,
     pub priority: u8,
-    pub mode: u8,            // 0=policing, 1=shaping
+    pub mode: u8, // 0=policing, 1=shaping
     pub pad: [u8; 6],
 }
 unsafe impl Pod for QosConfig {}
@@ -380,7 +380,7 @@ pub struct SslHttpValue {
     pub latency_ns: u64,
     pub status_code: u16,
     pub _pad: [u8; 6],
-    pub req_data: [u8; 256],  // raw HTTP request header (was 128)
+    pub req_data: [u8; 256], // raw HTTP request header (was 128)
 }
 unsafe impl Pod for SslHttpValue {}
 
@@ -393,9 +393,9 @@ pub struct SslErrorEvent {
     pub tid: u32,
     pub timestamp: u64,
     pub ssl_ptr: u64,
-    pub ret_code: i32,     // SSL_read/write return value
-    pub syscall: u8,       // 0=read, 1=write
-    pub error_hint: u8,    // 0=none, 1=zero_return, 2=want_retry, 3=syscall_err
+    pub ret_code: i32,  // SSL_read/write return value
+    pub syscall: u8,    // 0=read, 1=write
+    pub error_hint: u8, // 0=none, 1=zero_return, 2=want_retry, 3=syscall_err
     pub _pad: [u8; 2],
 }
 unsafe impl Pod for SslErrorEvent {}
@@ -450,12 +450,30 @@ unsafe impl Pod for DropValue {}
 
 // --- Kernel Drop Observability ---
 
+pub const KERNEL_DROP_FLAG_HAS_PROTOCOL: u32 = 1 << 0;
+pub const KERNEL_DROP_FLAG_HAS_LOCATION: u32 = 1 << 1;
+pub const KERNEL_DROP_FLAG_HAS_REASON: u32 = 1 << 2;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct KernelDropFilterValue {
     pub tap_id: u32,
 }
 unsafe impl Pod for KernelDropFilterValue {}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct KernelDropConfig {
+    pub flags: u32,
+    pub trace_skbaddr_offset: u32,
+    pub trace_location_offset: u32,
+    pub trace_protocol_offset: u32,
+    pub trace_reason_offset: u32,
+    pub skb_dev_offset: u32,
+    pub skb_len_offset: u32,
+    pub net_device_ifindex_offset: u32,
+}
+unsafe impl Pod for KernelDropConfig {}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -490,7 +508,7 @@ pub struct TraceFilter {
     pub dst_port: u16,
     pub proto: u8,
     pub enabled: u8,
-    pub is_ipv6: u8,        // 0=IPv4, 1=IPv6, 2=both
+    pub is_ipv6: u8, // 0=IPv4, 1=IPv6, 2=both
     pub pad: [u8; 1],
 }
 unsafe impl Pod for TraceFilter {}

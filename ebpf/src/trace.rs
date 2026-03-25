@@ -1,5 +1,7 @@
-use crate::maps::{TRACE_EVENT_BUF, TRACE_EVENT_V6_BUF, TRACE_FILTER, TRACE_LOG, TRACE_LOG_V6, TRACE_SEQ};
 use crate::common::TraceEventKey;
+use crate::maps::{
+    TRACE_EVENT_BUF, TRACE_EVENT_V6_BUF, TRACE_FILTER, TRACE_LOG, TRACE_LOG_V6, TRACE_SEQ,
+};
 use crate::parser::PacketInfo;
 use aya_ebpf::helpers::bpf_get_smp_processor_id;
 
@@ -80,11 +82,7 @@ pub struct TraceArgs {
 
 /// Record a trace event into the TRACE_LOG LRU map.
 #[inline(always)]
-pub unsafe fn trace_event(
-    tap_id: u32,
-    info: &PacketInfo,
-    args: &TraceArgs,
-) {
+pub unsafe fn trace_event(tap_id: u32, info: &PacketInfo, args: &TraceArgs) {
     let seq_key: u32 = 0;
     if let Some(seq) = TRACE_SEQ.get_ptr_mut(seq_key) {
         let event_key = next_trace_event_key(tap_id, seq);

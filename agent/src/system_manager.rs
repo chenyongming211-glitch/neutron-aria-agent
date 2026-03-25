@@ -1,11 +1,10 @@
+use crate::control_plane::ControlPlane;
 use std::fs;
 use std::sync::Arc;
 use tracing::{info, warn};
-use crate::control_plane::ControlPlane;
 
 use aria_core::ebpf_ops::{
-    detach_tc_egress, setup_fq_qdisc,
-    replay_state, CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES,
+    detach_tc_egress, replay_state, setup_fq_qdisc, CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES,
 };
 
 fn cleanup_failed_start(iface: &str, pin_path: &str) {
@@ -44,8 +43,7 @@ pub async fn system_start(
     max_port_policies: u32,
     control_plane: Arc<ControlPlane>,
 ) -> Result<(), String> {
-    fs::create_dir_all(pin_path)
-        .map_err(|e| format!("Failed to create pin directory: {}", e))?;
+    fs::create_dir_all(pin_path).map_err(|e| format!("Failed to create pin directory: {}", e))?;
     fs::create_dir_all(state_path)
         .map_err(|e| format!("Failed to create state directory: {}", e))?;
 
@@ -83,25 +81,42 @@ pub async fn system_start(
     // Try to pin the XDP link (requires bpf_link, kernel 5.7+)
     let xdp_link_pin = format!("{}/xdp_link", pin_path);
     match (|| -> Result<(), String> {
-        let xdp_link = xdp.take_link(link_id)
+        let xdp_link = xdp
+            .take_link(link_id)
             .map_err(|e| format!("take_link: {:?}", e))?;
-        let fd_link: aya::programs::links::FdLink = xdp_link.try_into()
+        let fd_link: aya::programs::links::FdLink = xdp_link
+            .try_into()
             .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
-        fd_link.pin(&xdp_link_pin)
+        fd_link
+            .pin(&xdp_link_pin)
             .map_err(|e| format!("pin: {:?}", e))?;
         Ok(())
     })() {
         Ok(()) => info!(iface = %iface, "XDP link pinned"),
-        Err(e) => warn!(iface = %iface, error = %e, "XDP link pin not supported; XDP will detach on agent exit"),
+        Err(e) => {
+            warn!(iface = %iface, error = %e, "XDP link pin not supported; XDP will detach on agent exit")
+        }
     }
 
     // Attach TC egress (with graceful link pin fallback)
-    if let Err(e) = attach_tc_program(&mut bpf, "tc_egress", iface, aya::programs::tc::TcAttachType::Egress, pin_path) {
+    if let Err(e) = attach_tc_program(
+        &mut bpf,
+        "tc_egress",
+        iface,
+        aya::programs::tc::TcAttachType::Egress,
+        pin_path,
+    ) {
         warn!(iface = %iface, error = %e, "TC egress attach failed; egress control disabled");
     }
 
     // Attach TC ingress (mirror, with graceful link pin fallback)
-    if let Err(e) = attach_tc_program(&mut bpf, "tc_ingress", iface, aya::programs::tc::TcAttachType::Ingress, pin_path) {
+    if let Err(e) = attach_tc_program(
+        &mut bpf,
+        "tc_ingress",
+        iface,
+        aya::programs::tc::TcAttachType::Ingress,
+        pin_path,
+    ) {
         warn!(iface = %iface, error = %e, "TC ingress attach failed; ingress mirror disabled");
     }
 
@@ -141,7 +156,10 @@ pub async fn system_start(
     replay_state(&mut bpf, state_path);
 
     // Register with control plane
-    if let Err(e) = control_plane.register_system_instance(pin_path, state_path).await {
+    if let Err(e) = control_plane
+        .register_system_instance(pin_path, state_path)
+        .await
+    {
         cleanup_failed_start(iface, pin_path);
         return Err(format!("control-plane register failed: {}", e));
     }
@@ -173,7 +191,9 @@ pub async fn system_stop(
                     .args(["link", "set", "dev", &iface, "xdp", "off"])
                     .output();
                 match output {
-                    Ok(o) if o.status.success() => info!(iface = %iface, "detached XDP via ip link"),
+                    Ok(o) if o.status.success() => {
+                        info!(iface = %iface, "detached XDP via ip link")
+                    }
                     Ok(o) => warn!(
                         iface = %iface,
                         stderr = %String::from_utf8_lossy(&o.stderr),
@@ -241,14 +261,16 @@ fn attach_tc_program(
         }
     }
 
-    let tc_program = bpf.program_mut(prog_name)
+    let tc_program = bpf
+        .program_mut(prog_name)
         .ok_or_else(|| format!("{} program not found", prog_name))?;
 
     let tc: &mut aya::programs::SchedClassifier = tc_program
         .try_into()
         .map_err(|e: aya::programs::ProgramError| format!("{} try_into: {:?}", prog_name, e))?;
 
-    tc.load().map_err(|e| format!("{} load: {:?}", prog_name, e))?;
+    tc.load()
+        .map_err(|e| format!("{} load: {:?}", prog_name, e))?;
 
     let dir_str = match attach_type {
         aya::programs::tc::TcAttachType::Ingress => "ingress",
@@ -256,22 +278,30 @@ fn attach_tc_program(
         _ => "unknown",
     };
 
-    let link_id = tc.attach(iface, attach_type)
+    let link_id = tc
+        .attach(iface, attach_type)
         .map_err(|e| format!("{} attach: {:?}", prog_name, e))?;
 
     // Try to pin TC link (graceful fallback)
     match (|| -> Result<(), String> {
-        let tc_link = tc.take_link(link_id)
+        let tc_link = tc
+            .take_link(link_id)
             .map_err(|e| format!("take_link: {:?}", e))?;
-        let fd_link: aya::programs::links::FdLink = tc_link.try_into()
+        let fd_link: aya::programs::links::FdLink = tc_link
+            .try_into()
             .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
         let link_pin = format!("{}/{}_link", pin_path, prog_name);
-        fd_link.pin(&link_pin)
+        fd_link
+            .pin(&link_pin)
             .map_err(|e| format!("pin: {:?}", e))?;
         Ok(())
     })() {
-        Ok(()) => info!(iface = %iface, direction = %dir_str, "TC program attached with pinned link"),
-        Err(e) => info!(iface = %iface, direction = %dir_str, error = %e, "TC program attached without link pin"),
+        Ok(()) => {
+            info!(iface = %iface, direction = %dir_str, "TC program attached with pinned link")
+        }
+        Err(e) => {
+            info!(iface = %iface, direction = %dir_str, error = %e, "TC program attached without link pin")
+        }
     }
 
     Ok(())

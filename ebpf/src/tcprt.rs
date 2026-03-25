@@ -1,10 +1,8 @@
 use crate::common::{
-    CtKey4, CtKey6, TcpRtValue,
-    TCP_FLAG_SYN, TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_RST,
-    TCPRT_STATE_SYN_SENT, TCPRT_STATE_ESTABLISHED,
-    TCPRT_STATE_FIN_WAIT, TCPRT_STATE_CLOSE_WAIT, TCPRT_STATE_TIME_WAIT, TCPRT_STATE_RST,
-    TCPRT_FLAG_SYN_SEEN, TCPRT_FLAG_SYNACK_SEEN, TCPRT_FLAG_ESTABLISHED,
-    TCPRT_FLAG_FIN_FWD, TCPRT_FLAG_FIN_REV,
+    CtKey4, CtKey6, TcpRtValue, TCPRT_FLAG_ESTABLISHED, TCPRT_FLAG_FIN_FWD, TCPRT_FLAG_FIN_REV,
+    TCPRT_FLAG_SYNACK_SEEN, TCPRT_FLAG_SYN_SEEN, TCPRT_STATE_CLOSE_WAIT, TCPRT_STATE_ESTABLISHED,
+    TCPRT_STATE_FIN_WAIT, TCPRT_STATE_RST, TCPRT_STATE_SYN_SENT, TCPRT_STATE_TIME_WAIT,
+    TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_RST, TCP_FLAG_SYN,
 };
 use crate::maps::{TCPRT_TABLE_V4, TCPRT_TABLE_V6, TCPRT_VALUE_BUF};
 use crate::parser::PacketInfo;
@@ -75,8 +73,7 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
     if is_syn && !is_ack && is_forward {
         // Dual-observation: if entry exists with syn_ingress_ts == syn_ts, this is the egress pass
         if let Some(entry) = TCPRT_TABLE_V4.get_ptr_mut(ct_key) {
-            if (*entry).state == TCPRT_STATE_SYN_SENT
-                && (*entry).syn_ingress_ts == (*entry).syn_ts
+            if (*entry).state == TCPRT_STATE_SYN_SENT && (*entry).syn_ingress_ts == (*entry).syn_ts
             {
                 (*entry).syn_ts = now; // update to egress timestamp, preserve syn_ingress_ts
                 return;
@@ -99,19 +96,25 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
 
     // FIN — fine-grained close tracking
     if is_fin {
-        if (*entry).fin_ts == 0 { (*entry).fin_ts = now; }
+        if (*entry).fin_ts == 0 {
+            (*entry).fin_ts = now;
+        }
         if is_forward {
             (*entry).flags |= TCPRT_FLAG_FIN_FWD;
             (*entry).state = if ((*entry).flags & TCPRT_FLAG_FIN_REV) != 0 {
                 (*entry).close_ts = now;
                 TCPRT_STATE_TIME_WAIT
-            } else { TCPRT_STATE_FIN_WAIT };
+            } else {
+                TCPRT_STATE_FIN_WAIT
+            };
         } else {
             (*entry).flags |= TCPRT_FLAG_FIN_REV;
             (*entry).state = if ((*entry).flags & TCPRT_FLAG_FIN_FWD) != 0 {
                 (*entry).close_ts = now;
                 TCPRT_STATE_TIME_WAIT
-            } else { TCPRT_STATE_CLOSE_WAIT };
+            } else {
+                TCPRT_STATE_CLOSE_WAIT
+            };
         }
         return;
     }
@@ -135,9 +138,12 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
     }
 
     // Handshake completion ACK — forward direction, no payload, synack seen
-    if is_ack && !is_syn && (*entry).state == TCPRT_STATE_SYN_SENT
+    if is_ack
+        && !is_syn
+        && (*entry).state == TCPRT_STATE_SYN_SENT
         && ((*entry).flags & TCPRT_FLAG_SYNACK_SEEN) != 0
-        && info.payload_len == 0 && is_forward
+        && info.payload_len == 0
+        && is_forward
     {
         (*entry).ack_ts = now;
         (*entry).handshake_ns = now.wrapping_sub((*entry).syn_ts);
@@ -222,8 +228,7 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
     if is_syn && !is_ack && is_forward {
         // Dual-observation: if entry exists with syn_ingress_ts == syn_ts, this is the egress pass
         if let Some(entry) = TCPRT_TABLE_V6.get_ptr_mut(ct_key) {
-            if (*entry).state == TCPRT_STATE_SYN_SENT
-                && (*entry).syn_ingress_ts == (*entry).syn_ts
+            if (*entry).state == TCPRT_STATE_SYN_SENT && (*entry).syn_ingress_ts == (*entry).syn_ts
             {
                 (*entry).syn_ts = now;
                 return;
@@ -245,19 +250,25 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
 
     // FIN — fine-grained close tracking
     if is_fin {
-        if (*entry).fin_ts == 0 { (*entry).fin_ts = now; }
+        if (*entry).fin_ts == 0 {
+            (*entry).fin_ts = now;
+        }
         if is_forward {
             (*entry).flags |= TCPRT_FLAG_FIN_FWD;
             (*entry).state = if ((*entry).flags & TCPRT_FLAG_FIN_REV) != 0 {
                 (*entry).close_ts = now;
                 TCPRT_STATE_TIME_WAIT
-            } else { TCPRT_STATE_FIN_WAIT };
+            } else {
+                TCPRT_STATE_FIN_WAIT
+            };
         } else {
             (*entry).flags |= TCPRT_FLAG_FIN_REV;
             (*entry).state = if ((*entry).flags & TCPRT_FLAG_FIN_FWD) != 0 {
                 (*entry).close_ts = now;
                 TCPRT_STATE_TIME_WAIT
-            } else { TCPRT_STATE_CLOSE_WAIT };
+            } else {
+                TCPRT_STATE_CLOSE_WAIT
+            };
         }
         return;
     }
@@ -279,9 +290,12 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
         return;
     }
 
-    if is_ack && !is_syn && (*entry).state == TCPRT_STATE_SYN_SENT
+    if is_ack
+        && !is_syn
+        && (*entry).state == TCPRT_STATE_SYN_SENT
         && ((*entry).flags & TCPRT_FLAG_SYNACK_SEEN) != 0
-        && info.payload_len == 0 && is_forward
+        && info.payload_len == 0
+        && is_forward
     {
         (*entry).ack_ts = now;
         (*entry).handshake_ns = now.wrapping_sub((*entry).syn_ts);

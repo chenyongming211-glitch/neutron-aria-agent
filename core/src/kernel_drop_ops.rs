@@ -1,7 +1,10 @@
 use aya::maps::{Map, MapData, PerCpuHashMap, PerCpuValues};
 
-use crate::common::{KernelDropKey, KernelDropValue};
+use crate::common::{
+    KernelDropConfig, KernelDropKey, KernelDropValue, KERNEL_DROP_FLAG_HAS_REASON,
+};
 
+const KERNEL_DROP_CONFIG_MAP: &str = "KERNEL_DROP_CONFIG";
 const KERNEL_DROP_STATS_MAP: &str = "KERNEL_DROP_STATS";
 
 #[derive(Debug, Clone)]
@@ -35,12 +38,13 @@ pub fn kernel_drop_reason_name(code: Option<u16>) -> String {
 
 pub fn kernel_drop_proto_name(proto: u16) -> String {
     match proto {
-        6 => "tcp".to_string(),
-        17 => "udp".to_string(),
-        1 => "icmp".to_string(),
-        58 => "icmpv6".to_string(),
+        0x0800 => "ipv4".to_string(),
+        0x86dd => "ipv6".to_string(),
+        0x0806 => "arp".to_string(),
+        0x8100 => "802.1q".to_string(),
+        0x88a8 => "802.1ad".to_string(),
         0 => "unknown".to_string(),
-        other => other.to_string(),
+        other => format!("0x{:04x}", other),
     }
 }
 
@@ -78,10 +82,34 @@ fn should_include_entry(key: &KernelDropKey, query: &KernelDropQuery) -> bool {
             return false;
         }
     }
-    if !query.include_unattributed && (key.tap_id == 0 || key.ifindex == 0) {
+    if !query.include_unattributed && key.ifindex == 0 {
         return false;
     }
     true
+}
+
+fn open_kernel_drop_config_map(
+    pin_path: &str,
+) -> Result<aya::maps::HashMap<MapData, u32, KernelDropConfig>, String> {
+    let map_path = format!("{}/{}", pin_path, KERNEL_DROP_CONFIG_MAP);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open {}: {:?}", KERNEL_DROP_CONFIG_MAP, e))?;
+    aya::maps::HashMap::<_, u32, KernelDropConfig>::try_from(Map::HashMap(map_data))
+        .map_err(|e| format!("convert {}: {:?}", KERNEL_DROP_CONFIG_MAP, e))
+}
+
+fn kernel_drop_source_label(pin_path: &str) -> String {
+    let Ok(map) = open_kernel_drop_config_map(pin_path) else {
+        return "kfree_skb_unknown".to_string();
+    };
+    let Ok(config) = map.get(&0u32, 0) else {
+        return "kfree_skb_unknown".to_string();
+    };
+    if (config.flags & KERNEL_DROP_FLAG_HAS_REASON) != 0 {
+        "kfree_skb_reasonful".to_string()
+    } else {
+        "kfree_skb_legacy".to_string()
+    }
 }
 
 fn open_kernel_drop_stats_map(
@@ -99,6 +127,7 @@ pub fn get_kernel_drop_stats(
     query: &KernelDropQuery,
 ) -> Result<Vec<KernelDropStatsEntry>, String> {
     let map = open_kernel_drop_stats_map(pin_path)?;
+    let source_label = kernel_drop_source_label(pin_path);
     let mut entries = Vec::new();
 
     for item in map.iter() {
@@ -123,7 +152,7 @@ pub fn get_kernel_drop_stats(
             bytes,
             last_seen_ns,
             last_location: (last_location != 0).then_some(last_location),
-            source: "kfree_skb_scaffold".to_string(),
+            source: source_label.clone(),
         });
     }
 

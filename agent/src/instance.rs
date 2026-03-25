@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use aria_core::ebpf_ops::{CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 /// Represents a single tap interface with its attached XDP firewall instance.
@@ -91,7 +91,12 @@ impl FirewallInstance {
 
     fn tc_link_pin_path(&self, prog_name: &str) -> String {
         if self.shared_runtime {
-            format!("{}/{}_{}_link", self.pin_path.display(), self.iface, prog_name)
+            format!(
+                "{}/{}_{}_link",
+                self.pin_path.display(),
+                self.iface,
+                prog_name
+            )
         } else {
             format!("{}/{}_link", self.pin_path.display(), prog_name)
         }
@@ -167,8 +172,7 @@ impl FirewallInstance {
     }
 
     fn compute_ebpf_sha256(&self, ebpf_path: &str) -> Result<String, String> {
-        let bytes = std::fs::read(ebpf_path)
-            .map_err(|e| format!("read ebpf for hash: {}", e))?;
+        let bytes = std::fs::read(ebpf_path).map_err(|e| format!("read ebpf for hash: {}", e))?;
         let digest = Sha256::digest(bytes);
         Ok(digest
             .iter()
@@ -212,8 +216,7 @@ impl FirewallInstance {
         if state.schema_version != PERSISTED_LIVE_IFACES_SCHEMA_VERSION {
             return Err(format!(
                 "persisted live ifaces schema {} != expected {}",
-                state.schema_version,
-                PERSISTED_LIVE_IFACES_SCHEMA_VERSION,
+                state.schema_version, PERSISTED_LIVE_IFACES_SCHEMA_VERSION,
             ));
         }
         Ok(state)
@@ -237,19 +240,32 @@ impl FirewallInstance {
         Ok(())
     }
 
-    fn store_persisted_live_ifaces_atomically(&self, state: &PersistedLiveIfaces) -> Result<(), String> {
+    fn store_persisted_live_ifaces_atomically(
+        &self,
+        state: &PersistedLiveIfaces,
+    ) -> Result<(), String> {
         let path = self.persisted_live_ifaces_path();
         let tmp_path = path.with_extension("tmp");
         let json = serde_json::to_string_pretty(state)
             .map_err(|e| format!("serialize persisted live ifaces: {}", e))?;
 
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("create persisted live ifaces dir {}: {}", parent.display(), e))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "create persisted live ifaces dir {}: {}",
+                    parent.display(),
+                    e
+                )
+            })?;
         }
 
-        std::fs::write(&tmp_path, json)
-            .map_err(|e| format!("write persisted live ifaces tmp {}: {}", tmp_path.display(), e))?;
+        std::fs::write(&tmp_path, json).map_err(|e| {
+            format!(
+                "write persisted live ifaces tmp {}: {}",
+                tmp_path.display(),
+                e
+            )
+        })?;
         std::fs::rename(&tmp_path, &path)
             .map_err(|e| format!("rename persisted live ifaces {}: {}", path.display(), e))?;
         Ok(())
@@ -318,8 +334,9 @@ impl FirewallInstance {
         state.ifaces.retain(|entry| entry.iface != self.iface);
         if state.ifaces.is_empty() {
             if path.exists() {
-                std::fs::remove_file(&path)
-                    .map_err(|e| format!("remove persisted live ifaces {}: {}", path.display(), e))?;
+                std::fs::remove_file(&path).map_err(|e| {
+                    format!("remove persisted live ifaces {}: {}", path.display(), e)
+                })?;
             }
             return Ok(());
         }
@@ -375,8 +392,9 @@ impl FirewallInstance {
         };
         if reconciled.ifaces.is_empty() {
             if path.exists() {
-                std::fs::remove_file(&path)
-                    .map_err(|e| format!("remove persisted live ifaces {}: {}", path.display(), e))?;
+                std::fs::remove_file(&path).map_err(|e| {
+                    format!("remove persisted live ifaces {}: {}", path.display(), e)
+                })?;
             }
         } else {
             self.store_persisted_live_ifaces_atomically(&reconciled)?;
@@ -409,10 +427,7 @@ impl FirewallInstance {
         Ok(false)
     }
 
-    fn validate_runtime_inventory(
-        &self,
-        expected: &RuntimeMetadata,
-    ) -> RuntimeInventoryStatus {
+    fn validate_runtime_inventory(&self, expected: &RuntimeMetadata) -> RuntimeInventoryStatus {
         let metadata = match self.load_runtime_metadata() {
             Ok(metadata) => metadata,
             Err(e) => return RuntimeInventoryStatus::StaleOrIncomplete(e),
@@ -491,17 +506,24 @@ impl FirewallInstance {
         RuntimeInventoryStatus::Healthy
     }
 
-    fn load_and_pin_runtime(&self, ebpf_path: &str, expected_metadata: &RuntimeMetadata) -> Result<(), String> {
+    fn load_and_pin_runtime(
+        &self,
+        ebpf_path: &str,
+        expected_metadata: &RuntimeMetadata,
+    ) -> Result<(), String> {
         let pin_path_str = self.pin_path.to_str().unwrap();
 
         std::fs::create_dir_all(&self.pin_path)
             .map_err(|e| format!("Failed to create pin directory {:?}: {}", self.pin_path, e))?;
-        std::fs::create_dir_all(&self.state_path)
-            .map_err(|e| format!("Failed to create state directory {:?}: {}", self.state_path, e))?;
+        std::fs::create_dir_all(&self.state_path).map_err(|e| {
+            format!(
+                "Failed to create state directory {:?}: {}",
+                self.state_path, e
+            )
+        })?;
 
         info!(instance = %self.iface, ebpf_path = %ebpf_path, "loading eBPF");
-        let bpf_bytes = std::fs::read(ebpf_path)
-            .map_err(|e| format!("read ebpf: {}", e))?;
+        let bpf_bytes = std::fs::read(ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
         let mut bpf = aya::EbpfLoader::new()
             .map_pin_path(pin_path_str)
             .load(&bpf_bytes)
@@ -510,7 +532,8 @@ impl FirewallInstance {
         let loaded_optional_programs = self.load_runtime_programs(&mut bpf)?;
         self.pin_runtime_maps(&mut bpf, pin_path_str)
             .map_err(|e| format!("pin runtime maps failed: {}", e))?;
-        let present_program_pins = self.pin_runtime_programs(&mut bpf, pin_path_str, &loaded_optional_programs)?;
+        let present_program_pins =
+            self.pin_runtime_programs(&mut bpf, pin_path_str, &loaded_optional_programs)?;
         let mut metadata = expected_metadata.clone();
         metadata.present_program_pins = present_program_pins;
         self.store_runtime_metadata_atomically(&metadata)?;
@@ -518,12 +541,21 @@ impl FirewallInstance {
         Ok(())
     }
 
-    fn rebuild_shared_runtime(&self, ebpf_path: &str, metadata: &RuntimeMetadata) -> Result<(), String> {
+    fn rebuild_shared_runtime(
+        &self,
+        ebpf_path: &str,
+        metadata: &RuntimeMetadata,
+    ) -> Result<(), String> {
         info!(instance = %self.iface, path = %self.pin_path.display(), "rebuilding dormant shared runtime");
 
         if self.pin_path.exists() {
-            std::fs::remove_dir_all(&self.pin_path)
-                .map_err(|e| format!("remove stale shared pin dir {}: {}", self.pin_path.display(), e))?;
+            std::fs::remove_dir_all(&self.pin_path).map_err(|e| {
+                format!(
+                    "remove stale shared pin dir {}: {}",
+                    self.pin_path.display(),
+                    e
+                )
+            })?;
         }
         self.clear_runtime_metadata();
 
@@ -625,7 +657,10 @@ impl FirewallInstance {
         let pin_path_str = self.pin_path.to_str().unwrap();
         let xdp_prog_pin = format!("{}/xdp_firewall", pin_path_str);
         if !std::path::Path::new(&xdp_prog_pin).exists() {
-            return Err(format!("[{}] pinned XDP program missing at {}", self.iface, xdp_prog_pin));
+            return Err(format!(
+                "[{}] pinned XDP program missing at {}",
+                self.iface, xdp_prog_pin
+            ));
         }
 
         self.attach_xdp_from_pin(&xdp_prog_pin, &xdp_link_pin)?;
@@ -646,8 +681,9 @@ impl FirewallInstance {
         if attached.xdp == LinkOwnership::AttachedNow {
             let xdp_link_pin = self.xdp_link_pin_path();
             if std::path::Path::new(&xdp_link_pin).exists() {
-                std::fs::remove_file(&xdp_link_pin)
-                    .map_err(|e| format!("[{}] Failed to remove pinned XDP link: {}", self.iface, e))?;
+                std::fs::remove_file(&xdp_link_pin).map_err(|e| {
+                    format!("[{}] Failed to remove pinned XDP link: {}", self.iface, e)
+                })?;
             } else {
                 let _ = std::process::Command::new("ip")
                     .args(["link", "set", "dev", &self.iface, "xdp", "off"])
@@ -668,8 +704,12 @@ impl FirewallInstance {
                 }
                 let link_pin = self.tc_link_pin_path(prog_name);
                 if std::path::Path::new(&link_pin).exists() {
-                    std::fs::remove_file(&link_pin)
-                        .map_err(|e| format!("[{}] Failed to remove pinned {} link: {}", self.iface, prog_name, e))?;
+                    std::fs::remove_file(&link_pin).map_err(|e| {
+                        format!(
+                            "[{}] Failed to remove pinned {} link: {}",
+                            self.iface, prog_name, e
+                        )
+                    })?;
                 }
             }
             aria_core::ebpf_ops::detach_tc_egress(&self.iface);
@@ -691,9 +731,12 @@ impl FirewallInstance {
                 .program_mut("xdp_firewall")
                 .ok_or_else(|| format!("[{}] XDP program not found", self.iface))?;
 
-            let xdp: &mut aya::programs::Xdp = xdp_program
-                .try_into()
-                .map_err(|e: aya::programs::ProgramError| format!("[{}] xdp try_into error: {:?}", self.iface, e))?;
+            let xdp: &mut aya::programs::Xdp =
+                xdp_program
+                    .try_into()
+                    .map_err(|e: aya::programs::ProgramError| {
+                        format!("[{}] xdp try_into error: {:?}", self.iface, e)
+                    })?;
 
             xdp.load()
                 .map_err(|e| format!("[{}] xdp.load error: {:?}", self.iface, e))?;
@@ -712,14 +755,16 @@ impl FirewallInstance {
     }
 
     fn load_tc_program(&self, bpf: &mut aya::Ebpf, prog_name: &str) -> Result<(), String> {
-        let tc_program = bpf.program_mut(prog_name)
+        let tc_program = bpf
+            .program_mut(prog_name)
             .ok_or_else(|| format!("{} program not found", prog_name))?;
 
         let tc: &mut aya::programs::SchedClassifier = tc_program
             .try_into()
             .map_err(|e: aya::programs::ProgramError| format!("{} try_into: {:?}", prog_name, e))?;
 
-        tc.load().map_err(|e| format!("{} load: {:?}", prog_name, e))
+        tc.load()
+            .map_err(|e| format!("{} load: {:?}", prog_name, e))
     }
 
     fn pin_runtime_programs(
@@ -736,9 +781,12 @@ impl FirewallInstance {
             .program_mut(required_program)
             .ok_or_else(|| format!("required runtime program {} not found", required_program))?;
         if !Path::new(&required_target).exists() {
-            required_program_ref
-                .pin(required_target)
-                .map_err(|e| format!("failed to pin required runtime program {}: {:?}", required_program, e))?;
+            required_program_ref.pin(required_target).map_err(|e| {
+                format!(
+                    "failed to pin required runtime program {}: {:?}",
+                    required_program, e
+                )
+            })?;
         }
         present_program_pins.push(required_program.to_string());
 
@@ -768,12 +816,13 @@ impl FirewallInstance {
         link_id: aya::programs::xdp::XdpLinkId,
         pin_path: &str,
     ) -> Result<(), String> {
-        let xdp_link = xdp.take_link(link_id)
+        let xdp_link = xdp
+            .take_link(link_id)
             .map_err(|e| format!("take_link: {:?}", e))?;
-        let fd_link: aya::programs::links::FdLink = xdp_link.try_into()
+        let fd_link: aya::programs::links::FdLink = xdp_link
+            .try_into()
             .map_err(|e: aya::programs::links::LinkError| format!("FdLink convert: {:?}", e))?;
-        fd_link.pin(pin_path)
-            .map_err(|e| format!("pin: {:?}", e))?;
+        fd_link.pin(pin_path).map_err(|e| format!("pin: {:?}", e))?;
         Ok(())
     }
 
@@ -783,8 +832,16 @@ impl FirewallInstance {
 
     fn ensure_tc_runtime(&self, attached: &mut AttachedLinks) {
         let tc_programs = [
-            ("tc_egress", aya::programs::tc::TcAttachType::Egress, "Egress control"),
-            ("tc_ingress", aya::programs::tc::TcAttachType::Ingress, "Ingress mirror"),
+            (
+                "tc_egress",
+                aya::programs::tc::TcAttachType::Egress,
+                "Egress control",
+            ),
+            (
+                "tc_ingress",
+                aya::programs::tc::TcAttachType::Ingress,
+                "Ingress mirror",
+            ),
         ];
 
         for (prog_name, attach_type, purpose) in tc_programs {
@@ -822,7 +879,11 @@ impl FirewallInstance {
         }
     }
 
-    fn set_tc_link_ownership(attached: &mut AttachedLinks, prog_name: &str, ownership: LinkOwnership) {
+    fn set_tc_link_ownership(
+        attached: &mut AttachedLinks,
+        prog_name: &str,
+        ownership: LinkOwnership,
+    ) {
         match prog_name {
             "tc_egress" => attached.tc_egress = ownership,
             "tc_ingress" => attached.tc_ingress = ownership,
@@ -852,11 +913,9 @@ impl FirewallInstance {
 
     /// Attach XDP from the already pinned shared runtime without loading a new eBPF object.
     fn attach_xdp_from_pin(&self, prog_pin: &str, xdp_link_pin: &str) -> Result<(), String> {
-        let mut xdp = aya::programs::Xdp::from_pin(
-            prog_pin,
-            aya_obj::programs::XdpAttachType::Interface,
-        )
-            .map_err(|e| format!("[{}] XDP from_pin during recovery: {:?}", self.iface, e))?;
+        let mut xdp =
+            aya::programs::Xdp::from_pin(prog_pin, aya_obj::programs::XdpAttachType::Interface)
+                .map_err(|e| format!("[{}] XDP from_pin during recovery: {:?}", self.iface, e))?;
 
         let link_id = xdp
             .attach(&self.iface, aya::programs::XdpFlags::default())
@@ -864,7 +923,9 @@ impl FirewallInstance {
 
         match self.try_pin_xdp_link(&mut xdp, link_id, xdp_link_pin) {
             Ok(()) => info!(instance = %self.iface, "recovered XDP link pin"),
-            Err(e) => warn!(instance = %self.iface, error = %e, "XDP link re-pin skipped during recovery"),
+            Err(e) => {
+                warn!(instance = %self.iface, error = %e, "XDP link re-pin skipped during recovery")
+            }
         }
         Ok(())
     }
@@ -891,21 +952,29 @@ impl FirewallInstance {
             _ => "unknown",
         };
 
-        let link_id = tc.attach(&self.iface, attach_type)
+        let link_id = tc
+            .attach(&self.iface, attach_type)
             .map_err(|e| format!("{} attach from pin: {:?}", prog_name, e))?;
 
         match (|| -> Result<(), String> {
-            let tc_link = tc.take_link(link_id)
+            let tc_link = tc
+                .take_link(link_id)
                 .map_err(|e| format!("take_link: {:?}", e))?;
-            let fd_link: aya::programs::links::FdLink = tc_link.try_into()
+            let fd_link: aya::programs::links::FdLink = tc_link
+                .try_into()
                 .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
             let link_pin = self.tc_link_pin_path(prog_name);
-            fd_link.pin(&link_pin)
+            fd_link
+                .pin(&link_pin)
                 .map_err(|e| format!("pin: {:?}", e))?;
             Ok(())
         })() {
-            Ok(()) => info!(instance = %self.iface, direction = %dir_str, "TC program reattached from pinned runtime"),
-            Err(e) => info!(instance = %self.iface, direction = %dir_str, error = %e, "TC program reattached without link pin"),
+            Ok(()) => {
+                info!(instance = %self.iface, direction = %dir_str, "TC program reattached from pinned runtime")
+            }
+            Err(e) => {
+                info!(instance = %self.iface, direction = %dir_str, error = %e, "TC program reattached without link pin")
+            }
         }
 
         Ok(())
@@ -930,8 +999,12 @@ impl FirewallInstance {
         for prog_name in ["tc_egress", "tc_ingress"] {
             let link_pin = self.tc_link_pin_path(prog_name);
             if std::path::Path::new(&link_pin).exists() {
-                std::fs::remove_file(&link_pin)
-                    .map_err(|e| format!("[{}] Failed to remove pinned {} link: {}", self.iface, prog_name, e))?;
+                std::fs::remove_file(&link_pin).map_err(|e| {
+                    format!(
+                        "[{}] Failed to remove pinned {} link: {}",
+                        self.iface, prog_name, e
+                    )
+                })?;
                 info!(instance = %self.iface, program = %prog_name, "TC link unpinned");
             }
         }

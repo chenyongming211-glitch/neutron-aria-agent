@@ -1,12 +1,11 @@
 use crate::common::{
-    PolicyKey, PolicyValue, PortKey,
-    XDP_PASS, XDP_DROP,
-    DROP_ACL_DENY, DROP_ACL_PORT_DENY, DROP_ACL_DEFAULT_DENY,
+    PolicyKey, PolicyValue, PortKey, DROP_ACL_DEFAULT_DENY, DROP_ACL_DENY, DROP_ACL_PORT_DENY,
+    XDP_DROP, XDP_PASS,
 };
-use crate::maps::{POLICY_TABLE, PORT_BITMAP_POOL};
 use crate::conntrack::MatchedPolicy;
-use crate::stats;
 use crate::drops;
+use crate::maps::{POLICY_TABLE, PORT_BITMAP_POOL};
+use crate::stats;
 
 /// Packed parameters for evaluate_policy to stay within BPF's 5-argument limit.
 #[repr(C)]
@@ -41,9 +40,7 @@ pub fn acl_enabled(tap_id: u32) -> bool {
 /// Priority order (bitmask: bit0=src_wildcard, bit1=dst_wildcard, bit2=proto_wildcard):
 ///   0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111
 #[inline(always)]
-pub unsafe fn evaluate_policy(
-    args: &PolicyArgs,
-) -> (u32, u8, MatchedPolicy, bool) {
+pub unsafe fn evaluate_policy(args: &PolicyArgs) -> (u32, u8, MatchedPolicy, bool) {
     // Priority-ordered bitmask: which fields to wildcard (0=specific value, 1=wildcard to 0)
     // bit 0: src_id, bit 1: dst_id, bit 2: proto
     const ORDER: [u8; 8] = [0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111];
@@ -125,16 +122,23 @@ fn apply_policy(tap_id: u32, policy: &PolicyValue, dst_port: u16) -> (u32, u8) {
         };
     }
 
-    let key = PortKey { tap_id, idx: policy.bitmap_idx, port: dst_port, pad: 0 };
+    let key = PortKey {
+        tap_id,
+        idx: policy.bitmap_idx,
+        port: dst_port,
+        pad: 0,
+    };
     let rule_action = unsafe { PORT_BITMAP_POOL.get(&key).copied().unwrap_or(0) };
 
     match rule_action {
         1 => (XDP_DROP, DROP_ACL_PORT_DENY),
         2 => (XDP_PASS, 0),
-        _ => if policy.action == 0 {
-            (XDP_PASS, 0)
-        } else {
-            (XDP_DROP, DROP_ACL_DEFAULT_DENY)
-        },
+        _ => {
+            if policy.action == 0 {
+                (XDP_PASS, 0)
+            } else {
+                (XDP_DROP, DROP_ACL_DEFAULT_DENY)
+            }
+        }
     }
 }

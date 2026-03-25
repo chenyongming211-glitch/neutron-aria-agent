@@ -1,17 +1,16 @@
 use crate::common::{
-    CtKey4, CtKey6, CtValue, PolicyKey,
-    CT_NEW, CT_ESTABLISHED,
-    IPPROTO_TCP, IPPROTO_UDP, IPPROTO_ICMP, IPPROTO_ICMPV6,
+    CtKey4, CtKey6, CtValue, PolicyKey, CT_ESTABLISHED, CT_NEW, IPPROTO_ICMP, IPPROTO_ICMPV6,
+    IPPROTO_TCP, IPPROTO_UDP,
 };
-use crate::maps::{CT_TABLE_V4, CT_TABLE_V6, CT_CONFIG};
+use crate::maps::{CT_CONFIG, CT_TABLE_V4, CT_TABLE_V6};
 
 const CT_FLAG_SEEN_REPLY: u8 = 1;
 
 // Default timeouts in nanoseconds
 const DEFAULT_TCP_ESTABLISHED_NS: u64 = 300_000_000_000; // 300s
-const DEFAULT_TCP_NEW_NS: u64 = 30_000_000_000;          // 30s
-const DEFAULT_UDP_NS: u64 = 60_000_000_000;              // 60s
-const DEFAULT_ICMP_NS: u64 = 30_000_000_000;             // 30s
+const DEFAULT_TCP_NEW_NS: u64 = 30_000_000_000; // 30s
+const DEFAULT_UDP_NS: u64 = 60_000_000_000; // 60s
+const DEFAULT_ICMP_NS: u64 = 30_000_000_000; // 30s
 
 #[inline(always)]
 fn get_timeout(proto: u8, state: u8) -> u64 {
@@ -19,7 +18,11 @@ fn get_timeout(proto: u8, state: u8) -> u64 {
     if let Some(cfg) = unsafe { CT_CONFIG.get(&config_key) } {
         match proto {
             IPPROTO_TCP => {
-                if state == CT_ESTABLISHED { cfg.tcp_established_ns } else { cfg.tcp_new_ns }
+                if state == CT_ESTABLISHED {
+                    cfg.tcp_established_ns
+                } else {
+                    cfg.tcp_new_ns
+                }
             }
             IPPROTO_UDP => cfg.udp_ns,
             IPPROTO_ICMP | IPPROTO_ICMPV6 => cfg.icmp_ns,
@@ -28,7 +31,11 @@ fn get_timeout(proto: u8, state: u8) -> u64 {
     } else {
         match proto {
             IPPROTO_TCP => {
-                if state == CT_ESTABLISHED { DEFAULT_TCP_ESTABLISHED_NS } else { DEFAULT_TCP_NEW_NS }
+                if state == CT_ESTABLISHED {
+                    DEFAULT_TCP_ESTABLISHED_NS
+                } else {
+                    DEFAULT_TCP_NEW_NS
+                }
             }
             IPPROTO_UDP => DEFAULT_UDP_NS,
             IPPROTO_ICMP | IPPROTO_ICMPV6 => DEFAULT_ICMP_NS,

@@ -1,5 +1,3 @@
-use std::fmt::Write;
-use std::sync::Arc;
 use async_stream::stream;
 use axum::{
     body::Body,
@@ -10,17 +8,25 @@ use axum::{
 };
 use bytes::Bytes;
 use serde::Deserialize;
+use std::fmt::Write;
+use std::sync::Arc;
 use tracing::warn;
 
-use aria_api::*;
 use crate::control_plane::{ControlPlane, ControlPlaneError};
+use aria_api::*;
 
 type AppState = Arc<ControlPlane>;
 
 fn err_response(e: ControlPlaneError) -> impl IntoResponse {
     let code = e.status_code();
     let status = StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (status, Json(ApiError { code, error: e.to_string() }))
+    (
+        status,
+        Json(ApiError {
+            code,
+            error: e.to_string(),
+        }),
+    )
 }
 
 // ── Health ──
@@ -39,10 +45,10 @@ pub async fn health(State(cp): State<AppState>) -> impl IntoResponse {
 pub async fn list_instances(State(cp): State<AppState>) -> impl IntoResponse {
     let names = cp.list_instances().await;
     Json(InstancesResponse {
-        instances: names.into_iter().map(|name| InstanceInfo {
-            name,
-            active: true,
-        }).collect(),
+        instances: names
+            .into_iter()
+            .map(|name| InstanceInfo { name, active: true })
+            .collect(),
     })
 }
 
@@ -56,15 +62,32 @@ pub async fn system_start(
     let state_path = format!("{}/system", cp.base_state_path);
 
     match crate::system_manager::system_start(
-        &req.iface, &cp.ebpf_path, &pin_path, &state_path,
-        req.max_port_policies, cp.clone(),
-    ).await {
-        Ok(()) => (StatusCode::OK, Json(MessageResponse {
-            message: format!("System firewall started on {}", req.iface),
-        })).into_response(),
+        &req.iface,
+        &cp.ebpf_path,
+        &pin_path,
+        &state_path,
+        req.max_port_policies,
+        cp.clone(),
+    )
+    .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(MessageResponse {
+                message: format!("System firewall started on {}", req.iface),
+            }),
+        )
+            .into_response(),
         Err(e) => {
             let status = StatusCode::INTERNAL_SERVER_ERROR;
-            (status, Json(ApiError { code: 500, error: e })).into_response()
+            (
+                status,
+                Json(ApiError {
+                    code: 500,
+                    error: e,
+                }),
+            )
+                .into_response()
         }
     }
 }
@@ -74,12 +97,23 @@ pub async fn system_stop(State(cp): State<AppState>) -> impl IntoResponse {
     let state_path = format!("{}/system", cp.base_state_path);
 
     match crate::system_manager::system_stop(&pin_path, &state_path, cp.clone()).await {
-        Ok(()) => (StatusCode::OK, Json(MessageResponse {
-            message: "System firewall stopped".to_string(),
-        })).into_response(),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(MessageResponse {
+                message: "System firewall stopped".to_string(),
+            }),
+        )
+            .into_response(),
         Err(e) => {
             let status = StatusCode::INTERNAL_SERVER_ERROR;
-            (status, Json(ApiError { code: 500, error: e })).into_response()
+            (
+                status,
+                Json(ApiError {
+                    code: 500,
+                    error: e,
+                }),
+            )
+                .into_response()
         }
     }
 }
@@ -92,11 +126,14 @@ pub async fn list_groups(
 ) -> impl IntoResponse {
     match cp.list_groups(&instance).await {
         Ok(groups) => Ok(Json(GroupsResponse {
-            groups: groups.into_iter().map(|g| GroupEntry {
-                id: g.id,
-                name: g.name,
-                cidrs: g.cidrs,
-            }).collect(),
+            groups: groups
+                .into_iter()
+                .map(|g| GroupEntry {
+                    id: g.id,
+                    name: g.name,
+                    cidrs: g.cidrs,
+                })
+                .collect(),
         })),
         Err(e) => Err(err_response(e)),
     }
@@ -108,10 +145,10 @@ pub async fn add_group(
     Json(req): Json<AddGroupRequest>,
 ) -> impl IntoResponse {
     match cp.add_group(&instance, &req.name, &req.cidr).await {
-        Ok(id) => Ok((StatusCode::CREATED, Json(AddGroupResponse {
-            id,
-            name: req.name,
-        }))),
+        Ok(id) => Ok((
+            StatusCode::CREATED,
+            Json(AddGroupResponse { id, name: req.name }),
+        )),
         Err(e) => Err(err_response(e)),
     }
 }
@@ -135,27 +172,35 @@ pub async fn list_groups_with_stats(
     match cp.list_groups_with_stats(&instance).await {
         Ok((groups, stats)) => {
             // Build stats map for O(1) lookup: (group_id, direction) -> stats
-            let mut stats_map: std::collections::HashMap<(u32, u8), aria_core::monitoring::GroupStatsEntry> =
-                stats.into_iter().map(|s| {
-                    ((s.key.group_id, s.key.direction), s)
-                }).collect();
+            let mut stats_map: std::collections::HashMap<
+                (u32, u8),
+                aria_core::monitoring::GroupStatsEntry,
+            > = stats
+                .into_iter()
+                .map(|s| ((s.key.group_id, s.key.direction), s))
+                .collect();
 
-            let groups_with_stats = groups.into_iter().map(|g| {
-                let ingress_key = (g.id, 0u8); // direction=0 for ingress
-                let egress_key = (g.id, 1u8); // direction=1 for egress
-                let ingress_stats = stats_map.remove(&ingress_key);
-                let egress_stats = stats_map.remove(&egress_key);
-                GroupWithStatsEntry {
-                    id: g.id,
-                    name: g.name,
-                    cidrs: g.cidrs,
-                    ingress_packets: ingress_stats.as_ref().map(|s| s.packets).unwrap_or(0),
-                    ingress_bytes: ingress_stats.as_ref().map(|s| s.bytes).unwrap_or(0),
-                    egress_packets: egress_stats.as_ref().map(|s| s.packets).unwrap_or(0),
-                    egress_bytes: egress_stats.as_ref().map(|s| s.bytes).unwrap_or(0),
-                }
-            }).collect();
-            Ok(Json(GroupsWithStatsResponse { groups: groups_with_stats }))
+            let groups_with_stats = groups
+                .into_iter()
+                .map(|g| {
+                    let ingress_key = (g.id, 0u8); // direction=0 for ingress
+                    let egress_key = (g.id, 1u8); // direction=1 for egress
+                    let ingress_stats = stats_map.remove(&ingress_key);
+                    let egress_stats = stats_map.remove(&egress_key);
+                    GroupWithStatsEntry {
+                        id: g.id,
+                        name: g.name,
+                        cidrs: g.cidrs,
+                        ingress_packets: ingress_stats.as_ref().map(|s| s.packets).unwrap_or(0),
+                        ingress_bytes: ingress_stats.as_ref().map(|s| s.bytes).unwrap_or(0),
+                        egress_packets: egress_stats.as_ref().map(|s| s.packets).unwrap_or(0),
+                        egress_bytes: egress_stats.as_ref().map(|s| s.bytes).unwrap_or(0),
+                    }
+                })
+                .collect();
+            Ok(Json(GroupsWithStatsResponse {
+                groups: groups_with_stats,
+            }))
         }
         Err(e) => Err(err_response(e)),
     }
@@ -170,14 +215,18 @@ pub async fn list_policies(
     match cp.list_policies(&instance).await {
         Ok((rules, groups)) => {
             let find_name = |id: u32| -> String {
-                if id == 0 { return "any".to_string(); }
-                groups.values()
+                if id == 0 {
+                    return "any".to_string();
+                }
+                groups
+                    .values()
                     .find(|g| g.id == id)
                     .map(|g| g.name.clone())
                     .unwrap_or_else(|| format!("id:{}", id))
             };
-            let policies = rules.into_iter().map(|r| {
-                PolicyEntry {
+            let policies = rules
+                .into_iter()
+                .map(|r| PolicyEntry {
                     src_group: find_name(r.src_group_id),
                     src_group_id: r.src_group_id,
                     dst_group: find_name(r.dst_group_id),
@@ -187,8 +236,8 @@ pub async fn list_policies(
                     direction: direction_to_string(r.direction),
                     ports: r.ports,
                     bitmap_idx: r.bitmap_idx,
-                }
-            }).collect();
+                })
+                .collect();
             Ok(Json(PoliciesResponse { policies }))
         }
         Err(e) => Err(err_response(e)),
@@ -213,23 +262,50 @@ pub async fn add_policy(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
 
-    let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
+    let directions: Vec<u8> = if direction == 2 {
+        vec![0, 1]
+    } else {
+        vec![direction]
+    };
     let mut applied: Vec<u8> = Vec::new();
 
     for dir in &directions {
-        if let Err(e) = cp.add_policy(&instance, &req.src_group, &req.dst_group, proto, action, *dir, req.ports.as_deref()).await {
+        if let Err(e) = cp
+            .add_policy(
+                &instance,
+                &req.src_group,
+                &req.dst_group,
+                proto,
+                action,
+                *dir,
+                req.ports.as_deref(),
+            )
+            .await
+        {
             for prev_dir in &applied {
-                let _ = cp.delete_policy(&instance, &req.src_group, &req.dst_group, proto, *prev_dir).await;
+                let _ = cp
+                    .delete_policy(&instance, &req.src_group, &req.dst_group, proto, *prev_dir)
+                    .await;
             }
             return Err(err_response(e));
         }
         applied.push(*dir);
     }
 
-    let dir_label = if direction == 2 { "both" } else { &req.direction };
-    Ok((StatusCode::CREATED, Json(MessageResponse {
-        message: format!("Added policy: {} -> {} ({})", req.src_group, req.dst_group, dir_label),
-    })))
+    let dir_label = if direction == 2 {
+        "both"
+    } else {
+        &req.direction
+    };
+    Ok((
+        StatusCode::CREATED,
+        Json(MessageResponse {
+            message: format!(
+                "Added policy: {} -> {} ({})",
+                req.src_group, req.dst_group, dir_label
+            ),
+        }),
+    ))
 }
 
 pub async fn delete_policy(
@@ -246,13 +322,23 @@ pub async fn delete_policy(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
 
-    if let Err(e) = cp.delete_policy(&instance, &req.src_group, &req.dst_group, proto, direction).await {
+    if let Err(e) = cp
+        .delete_policy(&instance, &req.src_group, &req.dst_group, proto, direction)
+        .await
+    {
         return Err(err_response(e));
     }
 
-    let dir_label = if direction == 2 { "both" } else { &req.direction };
+    let dir_label = if direction == 2 {
+        "both"
+    } else {
+        &req.direction
+    };
     Ok(Json(MessageResponse {
-        message: format!("Deleted policy: {} -> {} ({})", req.src_group, req.dst_group, dir_label),
+        message: format!(
+            "Deleted policy: {} -> {} ({})",
+            req.src_group, req.dst_group, dir_label
+        ),
     }))
 }
 
@@ -265,38 +351,55 @@ pub async fn list_policies_with_stats(
             match cp.get_rule_stats(&instance).await {
                 Ok((stats, _stats_groups)) => {
                     let find_name = |id: u32| -> String {
-                        if id == 0 { return "any".to_string(); }
-                        groups.values()
+                        if id == 0 {
+                            return "any".to_string();
+                        }
+                        groups
+                            .values()
                             .find(|g| g.id == id)
                             .map(|g| g.name.clone())
                             .unwrap_or_else(|| format!("id:{}", id))
                     };
 
                     // Build stats map for O(1) lookup
-                    let mut stats_map: std::collections::HashMap<(u32, u32, u8, u8), aria_core::monitoring::RuleStatsEntry> =
-                        stats.into_iter().map(|s| {
-                            ((s.key.src_id, s.key.dst_id, s.key.proto, s.key.direction), s)
-                        }).collect();
+                    let mut stats_map: std::collections::HashMap<
+                        (u32, u32, u8, u8),
+                        aria_core::monitoring::RuleStatsEntry,
+                    > = stats
+                        .into_iter()
+                        .map(|s| {
+                            (
+                                (s.key.src_id, s.key.dst_id, s.key.proto, s.key.direction),
+                                s,
+                            )
+                        })
+                        .collect();
 
-                    let policies = rules.into_iter().map(|r| {
-                        let key = (r.src_group_id, r.dst_group_id, r.proto, r.direction);
-                        let stat = stats_map.remove(&key);
-                        PolicyWithStatsEntry {
-                            src_group: find_name(r.src_group_id),
-                            src_group_id: r.src_group_id,
-                            dst_group: find_name(r.dst_group_id),
-                            dst_group_id: r.dst_group_id,
-                            proto: proto_to_string(r.proto),
-                            action: action_to_string(r.action),
-                            direction: direction_to_string(r.direction),
-                            ports: r.ports,
-                            bitmap_idx: r.bitmap_idx,
-                            packets: stat.as_ref().map(|s| s.packets).unwrap_or(0),
-                            bytes: stat.as_ref().map(|s| s.bytes).unwrap_or(0),
-                            dropped_packets: stat.as_ref().map(|s| s.dropped_packets).unwrap_or(0),
-                            dropped_bytes: stat.as_ref().map(|s| s.dropped_bytes).unwrap_or(0),
-                        }
-                    }).collect();
+                    let policies = rules
+                        .into_iter()
+                        .map(|r| {
+                            let key = (r.src_group_id, r.dst_group_id, r.proto, r.direction);
+                            let stat = stats_map.remove(&key);
+                            PolicyWithStatsEntry {
+                                src_group: find_name(r.src_group_id),
+                                src_group_id: r.src_group_id,
+                                dst_group: find_name(r.dst_group_id),
+                                dst_group_id: r.dst_group_id,
+                                proto: proto_to_string(r.proto),
+                                action: action_to_string(r.action),
+                                direction: direction_to_string(r.direction),
+                                ports: r.ports,
+                                bitmap_idx: r.bitmap_idx,
+                                packets: stat.as_ref().map(|s| s.packets).unwrap_or(0),
+                                bytes: stat.as_ref().map(|s| s.bytes).unwrap_or(0),
+                                dropped_packets: stat
+                                    .as_ref()
+                                    .map(|s| s.dropped_packets)
+                                    .unwrap_or(0),
+                                dropped_bytes: stat.as_ref().map(|s| s.dropped_bytes).unwrap_or(0),
+                            }
+                        })
+                        .collect();
                     Ok(Json(PoliciesWithStatsResponse { policies }))
                 }
                 Err(e) => Err(err_response(e)),
@@ -317,23 +420,47 @@ pub async fn batch_add_policies(
     for policy in &req.policies {
         let proto = match proto_from_string(&policy.proto) {
             Ok(p) => p,
-            Err(e) => { errors.push(e); continue; }
+            Err(e) => {
+                errors.push(e);
+                continue;
+            }
         };
         let action = match action_from_string(&policy.action) {
             Ok(a) => a,
-            Err(e) => { errors.push(e); continue; }
+            Err(e) => {
+                errors.push(e);
+                continue;
+            }
         };
         let direction = match direction_from_string(&policy.direction) {
             Ok(d) => d,
-            Err(e) => { errors.push(e); continue; }
+            Err(e) => {
+                errors.push(e);
+                continue;
+            }
         };
 
-        let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
+        let directions: Vec<u8> = if direction == 2 {
+            vec![0, 1]
+        } else {
+            vec![direction]
+        };
         let mut applied: Vec<u8> = Vec::new();
         let mut add_error: Option<String> = None;
 
         for dir in &directions {
-            if let Err(e) = cp.add_policy(&instance, &policy.src_group, &policy.dst_group, proto, action, *dir, policy.ports.as_deref()).await {
+            if let Err(e) = cp
+                .add_policy(
+                    &instance,
+                    &policy.src_group,
+                    &policy.dst_group,
+                    proto,
+                    action,
+                    *dir,
+                    policy.ports.as_deref(),
+                )
+                .await
+            {
                 add_error = Some(e.to_string());
                 break;
             }
@@ -342,7 +469,15 @@ pub async fn batch_add_policies(
 
         if let Some(err) = add_error {
             for prev_dir in &applied {
-                let _ = cp.delete_policy(&instance, &policy.src_group, &policy.dst_group, proto, *prev_dir).await;
+                let _ = cp
+                    .delete_policy(
+                        &instance,
+                        &policy.src_group,
+                        &policy.dst_group,
+                        proto,
+                        *prev_dir,
+                    )
+                    .await;
             }
             errors.push(err);
         } else {
@@ -350,7 +485,11 @@ pub async fn batch_add_policies(
         }
     }
 
-    let status = if errors.is_empty() { StatusCode::CREATED } else { StatusCode::OK };
+    let status = if errors.is_empty() {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
     (status, Json(BatchPoliciesResponse { added, errors }))
 }
 
@@ -362,15 +501,22 @@ pub async fn list_qos(
 ) -> impl IntoResponse {
     match cp.list_qos(&instance).await {
         Ok(rules) => Ok(Json(QosListResponse {
-            rules: rules.into_iter().map(|r| QosEntry {
-                group: r.group_name,
-                group_id: r.group_id,
-                direction: direction_to_string(r.direction),
-                rate_bps: r.rate_bps,
-                burst_bytes: r.burst_bytes,
-                priority: r.priority,
-                mode: if r.mode == 1 { "shaping".to_string() } else { "policing".to_string() },
-            }).collect(),
+            rules: rules
+                .into_iter()
+                .map(|r| QosEntry {
+                    group: r.group_name,
+                    group_id: r.group_id,
+                    direction: direction_to_string(r.direction),
+                    rate_bps: r.rate_bps,
+                    burst_bytes: r.burst_bytes,
+                    priority: r.priority,
+                    mode: if r.mode == 1 {
+                        "shaping".to_string()
+                    } else {
+                        "policing".to_string()
+                    },
+                })
+                .collect(),
         })),
         Err(e) => Err(err_response(e)),
     }
@@ -400,13 +546,20 @@ pub async fn add_qos(
     let mode: u8 = match req.mode.to_lowercase().as_str() {
         "policing" | "" => 0,
         "shaping" => 1,
-        other => return Err(err_response(ControlPlaneError::ValidationError(
-            format!("Invalid mode '{}': must be 'policing' or 'shaping'", other)
-        ))),
+        other => {
+            return Err(err_response(ControlPlaneError::ValidationError(format!(
+                "Invalid mode '{}': must be 'policing' or 'shaping'",
+                other
+            ))))
+        }
     };
 
     // direction=2 means "both": apply to ingress and egress
-    let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
+    let directions: Vec<u8> = if direction == 2 {
+        vec![0, 1]
+    } else {
+        vec![direction]
+    };
     let mut applied: Vec<u8> = Vec::new();
     let mut shaping_downgraded = false;
 
@@ -418,7 +571,18 @@ pub async fn add_qos(
         } else {
             mode
         };
-        if let Err(e) = cp.add_qos(&instance, &req.group, *dir, rate_bps, burst_bytes, req.priority, effective_mode).await {
+        if let Err(e) = cp
+            .add_qos(
+                &instance,
+                &req.group,
+                *dir,
+                rate_bps,
+                burst_bytes,
+                req.priority,
+                effective_mode,
+            )
+            .await
+        {
             // Rollback previously applied directions
             for prev_dir in &applied {
                 let _ = cp.delete_qos(&instance, &req.group, *prev_dir).await;
@@ -428,7 +592,11 @@ pub async fn add_qos(
         applied.push(*dir);
     }
 
-    let dir_label = if direction == 2 { "both" } else { &req.direction };
+    let dir_label = if direction == 2 {
+        "both"
+    } else {
+        &req.direction
+    };
     let mut msg = format!("Added QoS rule for group '{}' ({})", req.group, dir_label);
     if shaping_downgraded {
         msg.push_str(". Warning: ingress shaping is not supported, downgraded to policing");
@@ -450,7 +618,11 @@ pub async fn delete_qos(
         return Err(err_response(e));
     }
 
-    let dir_label = if direction == 2 { "both" } else { &req.direction };
+    let dir_label = if direction == 2 {
+        "both"
+    } else {
+        &req.direction
+    };
     Ok(Json(MessageResponse {
         message: format!("Deleted QoS rule for group '{}' ({})", req.group, dir_label),
     }))
@@ -465,31 +637,52 @@ pub async fn list_qos_with_stats(
             match cp.get_qos_stats(&instance).await {
                 Ok((stats, _)) => {
                     // Build stats map for O(1) lookup
-                    let mut stats_map: std::collections::HashMap<(u32, u8), aria_core::monitoring::QosStatsEntry> =
-                        stats.into_iter().map(|s| {
-                            ((s.key.group_id, s.key.direction), s)
-                        }).collect();
+                    let mut stats_map: std::collections::HashMap<
+                        (u32, u8),
+                        aria_core::monitoring::QosStatsEntry,
+                    > = stats
+                        .into_iter()
+                        .map(|s| ((s.key.group_id, s.key.direction), s))
+                        .collect();
 
-                    let rules_with_stats = rules.into_iter().map(|r| {
-                        let key = (r.group_id, r.direction);
-                        let stat = stats_map.remove(&key);
-                        QosWithStatsEntry {
-                            group: r.group_name,
-                            group_id: r.group_id,
-                            direction: direction_to_string(r.direction),
-                            rate_bps: r.rate_bps,
-                            burst_bytes: r.burst_bytes,
-                            priority: r.priority,
-                            mode: if r.mode == 1 { "shaping".to_string() } else { "policing".to_string() },
-                            passed_packets: stat.as_ref().map(|s| s.passed_packets).unwrap_or(0),
-                            passed_bytes: stat.as_ref().map(|s| s.passed_bytes).unwrap_or(0),
-                            dropped_packets: stat.as_ref().map(|s| s.dropped_packets).unwrap_or(0),
-                            dropped_bytes: stat.as_ref().map(|s| s.dropped_bytes).unwrap_or(0),
-                            shaped_packets: stat.as_ref().map(|s| s.shaped_packets).unwrap_or(0),
-                            shaped_bytes: stat.as_ref().map(|s| s.shaped_bytes).unwrap_or(0),
-                        }
-                    }).collect();
-                    Ok(Json(QosWithStatsResponse { rules: rules_with_stats }))
+                    let rules_with_stats = rules
+                        .into_iter()
+                        .map(|r| {
+                            let key = (r.group_id, r.direction);
+                            let stat = stats_map.remove(&key);
+                            QosWithStatsEntry {
+                                group: r.group_name,
+                                group_id: r.group_id,
+                                direction: direction_to_string(r.direction),
+                                rate_bps: r.rate_bps,
+                                burst_bytes: r.burst_bytes,
+                                priority: r.priority,
+                                mode: if r.mode == 1 {
+                                    "shaping".to_string()
+                                } else {
+                                    "policing".to_string()
+                                },
+                                passed_packets: stat
+                                    .as_ref()
+                                    .map(|s| s.passed_packets)
+                                    .unwrap_or(0),
+                                passed_bytes: stat.as_ref().map(|s| s.passed_bytes).unwrap_or(0),
+                                dropped_packets: stat
+                                    .as_ref()
+                                    .map(|s| s.dropped_packets)
+                                    .unwrap_or(0),
+                                dropped_bytes: stat.as_ref().map(|s| s.dropped_bytes).unwrap_or(0),
+                                shaped_packets: stat
+                                    .as_ref()
+                                    .map(|s| s.shaped_packets)
+                                    .unwrap_or(0),
+                                shaped_bytes: stat.as_ref().map(|s| s.shaped_bytes).unwrap_or(0),
+                            }
+                        })
+                        .collect();
+                    Ok(Json(QosWithStatsResponse {
+                        rules: rules_with_stats,
+                    }))
                 }
                 Err(e) => Err(err_response(e)),
             }
@@ -507,20 +700,23 @@ pub async fn list_conntrack(
     match cp.list_conntrack(&instance).await {
         Ok(entries) => {
             let total = entries.len();
-            let connections: Vec<ConntrackEntry> = entries.into_iter().map(|e| ConntrackEntry {
-                src_ip: e.src_ip,
-                dst_ip: e.dst_ip,
-                src_port: e.src_port,
-                dst_port: e.dst_port,
-                proto: proto_to_string(e.proto),
-                state: match e.state {
-                    1 => "NEW".to_string(),
-                    2 => "ESTABLISHED".to_string(),
-                    _ => "UNKNOWN".to_string(),
-                },
-                packets: e.pkt_count,
-                bytes: e.byte_count,
-            }).collect();
+            let connections: Vec<ConntrackEntry> = entries
+                .into_iter()
+                .map(|e| ConntrackEntry {
+                    src_ip: e.src_ip,
+                    dst_ip: e.dst_ip,
+                    src_port: e.src_port,
+                    dst_port: e.dst_port,
+                    proto: proto_to_string(e.proto),
+                    state: match e.state {
+                        1 => "NEW".to_string(),
+                        2 => "ESTABLISHED".to_string(),
+                        _ => "UNKNOWN".to_string(),
+                    },
+                    packets: e.pkt_count,
+                    bytes: e.byte_count,
+                })
+                .collect();
             Ok(Json(ConntrackResponse { connections, total }))
         }
         Err(e) => Err(err_response(e)),
@@ -563,7 +759,19 @@ pub async fn update_config(
     Path(instance): Path<String>,
     Json(req): Json<UpdateConfigRequest>,
 ) -> impl IntoResponse {
-    match cp.update_config(&instance, req.conntrack, req.monitoring, req.acl, req.qos, req.mirror, req.tcprt, req.ssl).await {
+    match cp
+        .update_config(
+            &instance,
+            req.conntrack,
+            req.monitoring,
+            req.acl,
+            req.qos,
+            req.mirror,
+            req.tcprt,
+            req.ssl,
+        )
+        .await
+    {
         Ok(()) => Ok(Json(MessageResponse {
             message: "Configuration updated".to_string(),
         })),
@@ -597,25 +805,31 @@ pub async fn stats_rules(
     match cp.get_rule_stats(&instance).await {
         Ok((entries, groups)) => {
             let find_name = |id: u32| -> String {
-                if id == 0 { return "any".to_string(); }
-                groups.values()
+                if id == 0 {
+                    return "any".to_string();
+                }
+                groups
+                    .values()
                     .find(|g| g.id == id)
                     .map(|g| g.name.clone())
                     .unwrap_or_else(|| format!("id:{}", id))
             };
             Ok(Json(RuleStatsResponse {
-                rules: entries.into_iter().map(|e| aria_api::RuleStatsEntry {
-                    src_group: find_name(e.key.src_id),
-                    src_id: e.key.src_id,
-                    dst_group: find_name(e.key.dst_id),
-                    dst_id: e.key.dst_id,
-                    proto: proto_to_string(e.key.proto),
-                    direction: direction_to_string(e.key.direction),
-                    packets: e.packets,
-                    bytes: e.bytes,
-                    dropped_packets: e.dropped_packets,
-                    dropped_bytes: e.dropped_bytes,
-                }).collect(),
+                rules: entries
+                    .into_iter()
+                    .map(|e| aria_api::RuleStatsEntry {
+                        src_group: find_name(e.key.src_id),
+                        src_id: e.key.src_id,
+                        dst_group: find_name(e.key.dst_id),
+                        dst_id: e.key.dst_id,
+                        proto: proto_to_string(e.key.proto),
+                        direction: direction_to_string(e.key.direction),
+                        packets: e.packets,
+                        bytes: e.bytes,
+                        dropped_packets: e.dropped_packets,
+                        dropped_bytes: e.dropped_bytes,
+                    })
+                    .collect(),
             }))
         }
         Err(e) => Err(err_response(e)),
@@ -628,7 +842,9 @@ pub struct TopQuery {
     pub top: usize,
 }
 
-fn default_top() -> usize { 20 }
+fn default_top() -> usize {
+    20
+}
 
 pub async fn stats_flows(
     State(cp): State<AppState>,
@@ -673,24 +889,30 @@ pub async fn stats_qos(
     match cp.get_qos_stats(&instance).await {
         Ok((entries, groups)) => {
             let find_name = |id: u32| -> String {
-                if id == 0 { return "any".to_string(); }
-                groups.values()
+                if id == 0 {
+                    return "any".to_string();
+                }
+                groups
+                    .values()
                     .find(|g| g.id == id)
                     .map(|g| g.name.clone())
                     .unwrap_or_else(|| format!("id:{}", id))
             };
             Ok(Json(QosStatsResponse {
-                rules: entries.into_iter().map(|e| aria_api::QosStatsEntry {
-                    group: find_name(e.key.group_id),
-                    group_id: e.key.group_id,
-                    direction: direction_to_string(e.key.direction),
-                    passed_packets: e.passed_packets,
-                    passed_bytes: e.passed_bytes,
-                    dropped_packets: e.dropped_packets,
-                    dropped_bytes: e.dropped_bytes,
-                    shaped_packets: e.shaped_packets,
-                    shaped_bytes: e.shaped_bytes,
-                }).collect(),
+                rules: entries
+                    .into_iter()
+                    .map(|e| aria_api::QosStatsEntry {
+                        group: find_name(e.key.group_id),
+                        group_id: e.key.group_id,
+                        direction: direction_to_string(e.key.direction),
+                        passed_packets: e.passed_packets,
+                        passed_bytes: e.passed_bytes,
+                        dropped_packets: e.dropped_packets,
+                        dropped_bytes: e.dropped_bytes,
+                        shaped_packets: e.shaped_packets,
+                        shaped_bytes: e.shaped_bytes,
+                    })
+                    .collect(),
             }))
         }
         Err(e) => Err(err_response(e)),
@@ -704,20 +926,26 @@ pub async fn stats_groups(
     match cp.get_group_stats(&instance).await {
         Ok((entries, groups)) => {
             let find_name = |id: u32| -> String {
-                if id == 0 { return "any".to_string(); }
-                groups.values()
+                if id == 0 {
+                    return "any".to_string();
+                }
+                groups
+                    .values()
                     .find(|g| g.id == id)
                     .map(|g| g.name.clone())
                     .unwrap_or_else(|| format!("id:{}", id))
             };
             Ok(Json(GroupStatsResponse {
-                groups: entries.into_iter().map(|e| aria_api::GroupStatsEntry {
-                    group: find_name(e.key.group_id),
-                    group_id: e.key.group_id,
-                    direction: direction_to_string(e.key.direction),
-                    packets: e.packets,
-                    bytes: e.bytes,
-                }).collect(),
+                groups: entries
+                    .into_iter()
+                    .map(|e| aria_api::GroupStatsEntry {
+                        group: find_name(e.key.group_id),
+                        group_id: e.key.group_id,
+                        direction: direction_to_string(e.key.direction),
+                        packets: e.packets,
+                        bytes: e.bytes,
+                    })
+                    .collect(),
             }))
         }
         Err(e) => Err(err_response(e)),
@@ -732,17 +960,20 @@ pub async fn list_mirror(
 ) -> impl IntoResponse {
     match cp.list_mirror(&instance).await {
         Ok(rules) => Ok(Json(MirrorListResponse {
-            rules: rules.into_iter().map(|r| MirrorEntry {
-                src_group: r.src_group_name,
-                src_group_id: r.src_group_id,
-                dst_group: r.dst_group_name,
-                dst_group_id: r.dst_group_id,
-                proto: proto_to_string(r.proto),
-                direction: direction_to_string(r.direction),
-                target_iface: r.target_iface,
-                target_ifindex: r.target_ifindex,
-                is_global: r.is_global,
-            }).collect(),
+            rules: rules
+                .into_iter()
+                .map(|r| MirrorEntry {
+                    src_group: r.src_group_name,
+                    src_group_id: r.src_group_id,
+                    dst_group: r.dst_group_name,
+                    dst_group_id: r.dst_group_id,
+                    proto: proto_to_string(r.proto),
+                    direction: direction_to_string(r.direction),
+                    target_iface: r.target_iface,
+                    target_ifindex: r.target_ifindex,
+                    is_global: r.is_global,
+                })
+                .collect(),
         })),
         Err(e) => Err(err_response(e)),
     }
@@ -763,24 +994,50 @@ pub async fn add_mirror(
     };
 
     // direction=2 means "both": apply to ingress and egress
-    let directions: Vec<u8> = if direction == 2 { vec![0, 1] } else { vec![direction] };
+    let directions: Vec<u8> = if direction == 2 {
+        vec![0, 1]
+    } else {
+        vec![direction]
+    };
     let mut applied: Vec<u8> = Vec::new();
 
     for dir in &directions {
-        if let Err(e) = cp.add_mirror(&instance, &req.src_group, &req.dst_group, proto, *dir, &req.target).await {
+        if let Err(e) = cp
+            .add_mirror(
+                &instance,
+                &req.src_group,
+                &req.dst_group,
+                proto,
+                *dir,
+                &req.target,
+            )
+            .await
+        {
             // Rollback previously applied directions
             for prev_dir in &applied {
-                let _ = cp.delete_mirror(&instance, &req.src_group, &req.dst_group, proto, *prev_dir).await;
+                let _ = cp
+                    .delete_mirror(&instance, &req.src_group, &req.dst_group, proto, *prev_dir)
+                    .await;
             }
             return Err(err_response(e));
         }
         applied.push(*dir);
     }
 
-    let dir_label = if direction == 2 { "both" } else { &req.direction };
-    Ok((StatusCode::CREATED, Json(MessageResponse {
-        message: format!("Added mirror rule ({}) -> target '{}'", dir_label, req.target),
-    })))
+    let dir_label = if direction == 2 {
+        "both"
+    } else {
+        &req.direction
+    };
+    Ok((
+        StatusCode::CREATED,
+        Json(MessageResponse {
+            message: format!(
+                "Added mirror rule ({}) -> target '{}'",
+                dir_label, req.target
+            ),
+        }),
+    ))
 }
 
 pub async fn delete_mirror(
@@ -797,11 +1054,18 @@ pub async fn delete_mirror(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
 
-    if let Err(e) = cp.delete_mirror(&instance, &req.src_group, &req.dst_group, proto, direction).await {
+    if let Err(e) = cp
+        .delete_mirror(&instance, &req.src_group, &req.dst_group, proto, direction)
+        .await
+    {
         return Err(err_response(e));
     }
 
-    let dir_label = if direction == 2 { "both" } else { &req.direction };
+    let dir_label = if direction == 2 {
+        "both"
+    } else {
+        &req.direction
+    };
     Ok(Json(MessageResponse {
         message: format!("Deleted mirror rule ({})", dir_label),
     }))
@@ -814,25 +1078,31 @@ pub async fn stats_mirror(
     match cp.get_mirror_stats(&instance).await {
         Ok((entries, groups)) => {
             let find_name = |id: u32| -> String {
-                if id == 0 { return "any".to_string(); }
-                groups.values()
+                if id == 0 {
+                    return "any".to_string();
+                }
+                groups
+                    .values()
                     .find(|g| g.id == id)
                     .map(|g| g.name.clone())
                     .unwrap_or_else(|| format!("id:{}", id))
             };
             Ok(Json(MirrorStatsResponse {
-                rules: entries.into_iter().map(|e| aria_api::MirrorStatsEntry {
-                    src_group: find_name(e.src_id),
-                    src_id: e.src_id,
-                    dst_group: find_name(e.dst_id),
-                    dst_id: e.dst_id,
-                    proto: proto_to_string(e.proto),
-                    direction: direction_to_string(e.direction),
-                    mirrored_packets: e.mirrored_packets,
-                    mirrored_bytes: e.mirrored_bytes,
-                    errors: e.errors,
-                    is_global: e.is_global,
-                }).collect(),
+                rules: entries
+                    .into_iter()
+                    .map(|e| aria_api::MirrorStatsEntry {
+                        src_group: find_name(e.src_id),
+                        src_id: e.src_id,
+                        dst_group: find_name(e.dst_id),
+                        dst_id: e.dst_id,
+                        proto: proto_to_string(e.proto),
+                        direction: direction_to_string(e.direction),
+                        mirrored_packets: e.mirrored_packets,
+                        mirrored_bytes: e.mirrored_bytes,
+                        errors: e.errors,
+                        is_global: e.is_global,
+                    })
+                    .collect(),
             }))
         }
         Err(e) => Err(err_response(e)),
@@ -848,30 +1118,50 @@ pub async fn list_mirror_with_stats(
             match cp.get_mirror_stats(&instance).await {
                 Ok((stats, _)) => {
                     // Build stats map for O(1) lookup
-                    let mut stats_map: std::collections::HashMap<(u32, u32, u8, u8, bool), aria_core::monitoring::MirrorStatsEntry> =
-                        stats.into_iter().map(|s| {
-                            ((s.src_id, s.dst_id, s.proto, s.direction, s.is_global), s)
-                        }).collect();
+                    let mut stats_map: std::collections::HashMap<
+                        (u32, u32, u8, u8, bool),
+                        aria_core::monitoring::MirrorStatsEntry,
+                    > = stats
+                        .into_iter()
+                        .map(|s| ((s.src_id, s.dst_id, s.proto, s.direction, s.is_global), s))
+                        .collect();
 
-                    let rules_with_stats = rules.into_iter().map(|r| {
-                        let key = (r.src_group_id, r.dst_group_id, r.proto, r.direction, r.is_global);
-                        let stat = stats_map.remove(&key);
-                        MirrorWithStatsEntry {
-                            src_group: r.src_group_name,
-                            src_group_id: r.src_group_id,
-                            dst_group: r.dst_group_name,
-                            dst_group_id: r.dst_group_id,
-                            proto: proto_to_string(r.proto),
-                            direction: direction_to_string(r.direction),
-                            target_iface: r.target_iface,
-                            target_ifindex: r.target_ifindex,
-                            is_global: r.is_global,
-                            mirrored_packets: stat.as_ref().map(|s| s.mirrored_packets).unwrap_or(0),
-                            mirrored_bytes: stat.as_ref().map(|s| s.mirrored_bytes).unwrap_or(0),
-                            errors: stat.as_ref().map(|s| s.errors).unwrap_or(0),
-                        }
-                    }).collect();
-                    Ok(Json(MirrorWithStatsResponse { rules: rules_with_stats }))
+                    let rules_with_stats = rules
+                        .into_iter()
+                        .map(|r| {
+                            let key = (
+                                r.src_group_id,
+                                r.dst_group_id,
+                                r.proto,
+                                r.direction,
+                                r.is_global,
+                            );
+                            let stat = stats_map.remove(&key);
+                            MirrorWithStatsEntry {
+                                src_group: r.src_group_name,
+                                src_group_id: r.src_group_id,
+                                dst_group: r.dst_group_name,
+                                dst_group_id: r.dst_group_id,
+                                proto: proto_to_string(r.proto),
+                                direction: direction_to_string(r.direction),
+                                target_iface: r.target_iface,
+                                target_ifindex: r.target_ifindex,
+                                is_global: r.is_global,
+                                mirrored_packets: stat
+                                    .as_ref()
+                                    .map(|s| s.mirrored_packets)
+                                    .unwrap_or(0),
+                                mirrored_bytes: stat
+                                    .as_ref()
+                                    .map(|s| s.mirrored_bytes)
+                                    .unwrap_or(0),
+                                errors: stat.as_ref().map(|s| s.errors).unwrap_or(0),
+                            }
+                        })
+                        .collect();
+                    Ok(Json(MirrorWithStatsResponse {
+                        rules: rules_with_stats,
+                    }))
                 }
                 Err(e) => Err(err_response(e)),
             }
@@ -889,27 +1179,30 @@ pub async fn list_tcprt(
 ) -> impl IntoResponse {
     match cp.list_tcprt(&instance, query.top).await {
         Ok(entries) => {
-            let flows = entries.into_iter().map(|e| aria_api::TcpRtEntry {
-                src_ip: e.src_ip,
-                dst_ip: e.dst_ip,
-                src_port: e.src_port,
-                dst_port: e.dst_port,
-                handshake_us: e.handshake_us,
-                rtt_client_us: e.rtt_client_us,
-                rtt_server_us: e.rtt_server_us,
-                art_us: e.art_us,
-                retrans_req: e.retrans_req,
-                retrans_resp: e.retrans_resp,
-                request_count: e.request_count,
-                state: e.state,
-                forward_platform_us: e.forward_platform_us,
-                server_network_us: e.server_network_us,
-                reverse_platform_us: e.reverse_platform_us,
-                fin_us: e.fin_us,
-                rst_us: e.rst_us,
-                close_us: e.close_us,
-                nqa_score: e.nqa_score,
-            }).collect();
+            let flows = entries
+                .into_iter()
+                .map(|e| aria_api::TcpRtEntry {
+                    src_ip: e.src_ip,
+                    dst_ip: e.dst_ip,
+                    src_port: e.src_port,
+                    dst_port: e.dst_port,
+                    handshake_us: e.handshake_us,
+                    rtt_client_us: e.rtt_client_us,
+                    rtt_server_us: e.rtt_server_us,
+                    art_us: e.art_us,
+                    retrans_req: e.retrans_req,
+                    retrans_resp: e.retrans_resp,
+                    request_count: e.request_count,
+                    state: e.state,
+                    forward_platform_us: e.forward_platform_us,
+                    server_network_us: e.server_network_us,
+                    reverse_platform_us: e.reverse_platform_us,
+                    fin_us: e.fin_us,
+                    rst_us: e.rst_us,
+                    close_us: e.close_us,
+                    nqa_score: e.nqa_score,
+                })
+                .collect();
             Ok(Json(aria_api::TcpRtResponse { flows }))
         }
         Err(e) => Err(err_response(e)),
@@ -928,31 +1221,41 @@ pub async fn flush_tcprt(
 
 // ── SSL ──
 
-fn map_ssl_connections(entries: Vec<aria_core::ssl_ops::SslConnEntry>) -> aria_api::SslListResponse {
-    let connections = entries.into_iter().map(|e| aria_api::SslConnEntry {
-        seq: e.seq,
-        pid: e.pid,
-        tid: e.tid,
-        handshake_us: e.handshake_us,
-        timestamp: e.timestamp,
-        sni: e.sni,
-    }).collect();
+fn map_ssl_connections(
+    entries: Vec<aria_core::ssl_ops::SslConnEntry>,
+) -> aria_api::SslListResponse {
+    let connections = entries
+        .into_iter()
+        .map(|e| aria_api::SslConnEntry {
+            seq: e.seq,
+            pid: e.pid,
+            tid: e.tid,
+            handshake_us: e.handshake_us,
+            timestamp: e.timestamp,
+            sni: e.sni,
+        })
+        .collect();
     aria_api::SslListResponse { connections }
 }
 
-fn map_ssl_http_events(entries: Vec<aria_core::ssl_ops::SslHttpEntry>) -> aria_api::SslHttpListResponse {
-    let events = entries.into_iter().map(|e| aria_api::SslHttpEntry {
-        seq: e.seq,
-        pid: e.pid,
-        tid: e.tid,
-        method: e.method,
-        path: e.path,
-        host: e.host,
-        status_code: e.status_code,
-        latency_us: e.latency_us,
-        request_ts: e.request_ts,
-        response_ts: e.response_ts,
-    }).collect();
+fn map_ssl_http_events(
+    entries: Vec<aria_core::ssl_ops::SslHttpEntry>,
+) -> aria_api::SslHttpListResponse {
+    let events = entries
+        .into_iter()
+        .map(|e| aria_api::SslHttpEntry {
+            seq: e.seq,
+            pid: e.pid,
+            tid: e.tid,
+            method: e.method,
+            path: e.path,
+            host: e.host,
+            status_code: e.status_code,
+            latency_us: e.latency_us,
+            request_ts: e.request_ts,
+            response_ts: e.response_ts,
+        })
+        .collect();
     aria_api::SslHttpListResponse { events }
 }
 
@@ -966,9 +1269,7 @@ pub async fn list_ssl_global(
     }
 }
 
-pub async fn flush_ssl_global(
-    State(cp): State<AppState>,
-) -> impl IntoResponse {
+pub async fn flush_ssl_global(State(cp): State<AppState>) -> impl IntoResponse {
     match cp.flush_ssl_global().await {
         Ok(count) => Ok(Json(aria_api::SslFlushResponse { flushed: count })),
         Err(e) => Err(err_response(e)),
@@ -1008,9 +1309,7 @@ pub async fn list_ssl_http_global(
     }
 }
 
-pub async fn flush_ssl_http_global(
-    State(cp): State<AppState>,
-) -> impl IntoResponse {
+pub async fn flush_ssl_http_global(State(cp): State<AppState>) -> impl IntoResponse {
     match cp.flush_ssl_http_global().await {
         Ok(count) => Ok(Json(aria_api::SslHttpFlushResponse { flushed: count })),
         Err(e) => Err(err_response(e)),
@@ -1054,7 +1353,10 @@ pub async fn update_ssl_config(
 ) -> impl IntoResponse {
     match cp.set_ssl_global_config(req.enabled).await {
         Ok(()) => Ok(Json(aria_api::MessageResponse {
-            message: format!("SSL observability {}", if req.enabled { "enabled" } else { "disabled" }),
+            message: format!(
+                "SSL observability {}",
+                if req.enabled { "enabled" } else { "disabled" }
+            ),
         })),
         Err(e) => Err(err_response(e)),
     }
@@ -1063,15 +1365,18 @@ pub async fn update_ssl_config(
 pub async fn list_ssl_errors(State(cp): State<AppState>) -> impl IntoResponse {
     match cp.get_ssl_errors().await {
         Ok(entries) => {
-            let errors = entries.into_iter().map(|e| aria_api::SslErrorEntry {
-                seq: e.seq,
-                pid: e.pid,
-                tid: e.tid,
-                timestamp: e.timestamp,
-                syscall: e.syscall,
-                ret_code: e.ret_code,
-                error_hint: e.error_hint,
-            }).collect();
+            let errors = entries
+                .into_iter()
+                .map(|e| aria_api::SslErrorEntry {
+                    seq: e.seq,
+                    pid: e.pid,
+                    tid: e.tid,
+                    timestamp: e.timestamp,
+                    syscall: e.syscall,
+                    ret_code: e.ret_code,
+                    error_hint: e.error_hint,
+                })
+                .collect();
             Ok(Json(aria_api::SslErrorListResponse { errors }))
         }
         Err(e) => Err(err_response(e)),
@@ -1089,35 +1394,40 @@ pub async fn batch_query_tcprt(
     State(cp): State<AppState>,
     Json(req): Json<aria_api::TcpRtBatchQueryRequest>,
 ) -> impl IntoResponse {
-    let tuples: Vec<(String, String, u16, u16)> = req.tuples.into_iter()
+    let tuples: Vec<(String, String, u16, u16)> = req
+        .tuples
+        .into_iter()
         .map(|t| (t.src_ip, t.dst_ip, t.src_port, t.dst_port))
         .collect();
     match cp.batch_query_tcprt(&tuples).await {
         Ok(entries) => {
-            let results = entries.into_iter().map(|(instance, e)| aria_api::TcpRtInstanceEntry {
-                instance,
-                entry: aria_api::TcpRtEntry {
-                    src_ip: e.src_ip,
-                    dst_ip: e.dst_ip,
-                    src_port: e.src_port,
-                    dst_port: e.dst_port,
-                    handshake_us: e.handshake_us,
-                    rtt_client_us: e.rtt_client_us,
-                    rtt_server_us: e.rtt_server_us,
-                    art_us: e.art_us,
-                    retrans_req: e.retrans_req,
-                    retrans_resp: e.retrans_resp,
-                    request_count: e.request_count,
-                    state: e.state,
-                    forward_platform_us: e.forward_platform_us,
-                    server_network_us: e.server_network_us,
-                    reverse_platform_us: e.reverse_platform_us,
-                    fin_us: e.fin_us,
-                    rst_us: e.rst_us,
-                    close_us: e.close_us,
-                    nqa_score: e.nqa_score,
-                },
-            }).collect();
+            let results = entries
+                .into_iter()
+                .map(|(instance, e)| aria_api::TcpRtInstanceEntry {
+                    instance,
+                    entry: aria_api::TcpRtEntry {
+                        src_ip: e.src_ip,
+                        dst_ip: e.dst_ip,
+                        src_port: e.src_port,
+                        dst_port: e.dst_port,
+                        handshake_us: e.handshake_us,
+                        rtt_client_us: e.rtt_client_us,
+                        rtt_server_us: e.rtt_server_us,
+                        art_us: e.art_us,
+                        retrans_req: e.retrans_req,
+                        retrans_resp: e.retrans_resp,
+                        request_count: e.request_count,
+                        state: e.state,
+                        forward_platform_us: e.forward_platform_us,
+                        server_network_us: e.server_network_us,
+                        reverse_platform_us: e.reverse_platform_us,
+                        fin_us: e.fin_us,
+                        rst_us: e.rst_us,
+                        close_us: e.close_us,
+                        nqa_score: e.nqa_score,
+                    },
+                })
+                .collect();
             Ok(Json(aria_api::TcpRtBatchQueryResponse { results }))
         }
         Err(e) => Err(err_response(e)),
@@ -1130,22 +1440,37 @@ pub async fn filter_tcprt(
 ) -> impl IntoResponse {
     match cp.filter_tcprt(&req.dst_ip, req.dst_port).await {
         Ok(instance_entries) => {
-            let instances: Vec<aria_api::TcpRtAggregatedEntry> = instance_entries.into_iter()
+            let instances: Vec<aria_api::TcpRtAggregatedEntry> = instance_entries
+                .into_iter()
                 .map(|(name, entries)| {
                     let count = entries.len() as u32;
                     let fc = count as f64;
                     aria_api::TcpRtAggregatedEntry {
                         instance: name,
                         flow_count: count,
-                        avg_rtt_client_us: entries.iter().map(|e| e.rtt_client_us).sum::<f64>() / fc,
-                        avg_rtt_server_us: entries.iter().map(|e| e.rtt_server_us).sum::<f64>() / fc,
+                        avg_rtt_client_us: entries.iter().map(|e| e.rtt_client_us).sum::<f64>()
+                            / fc,
+                        avg_rtt_server_us: entries.iter().map(|e| e.rtt_server_us).sum::<f64>()
+                            / fc,
                         avg_art_us: entries.iter().map(|e| e.art_us).sum::<f64>() / fc,
                         avg_handshake_us: entries.iter().map(|e| e.handshake_us).sum::<f64>() / fc,
                         total_retrans_req: entries.iter().map(|e| e.retrans_req).sum(),
                         total_retrans_resp: entries.iter().map(|e| e.retrans_resp).sum(),
-                        avg_forward_platform_us: entries.iter().map(|e| e.forward_platform_us).sum::<f64>() / fc,
-                        avg_server_network_us: entries.iter().map(|e| e.server_network_us).sum::<f64>() / fc,
-                        avg_reverse_platform_us: entries.iter().map(|e| e.reverse_platform_us).sum::<f64>() / fc,
+                        avg_forward_platform_us: entries
+                            .iter()
+                            .map(|e| e.forward_platform_us)
+                            .sum::<f64>()
+                            / fc,
+                        avg_server_network_us: entries
+                            .iter()
+                            .map(|e| e.server_network_us)
+                            .sum::<f64>()
+                            / fc,
+                        avg_reverse_platform_us: entries
+                            .iter()
+                            .map(|e| e.reverse_platform_us)
+                            .sum::<f64>()
+                            / fc,
                         avg_nqa_score: entries.iter().map(|e| e.nqa_score as f64).sum::<f64>() / fc,
                     }
                 })
@@ -1167,8 +1492,15 @@ pub async fn tcprt_histogram(
     match cp.list_tcprt(&instance, 100000).await {
         Ok(entries) => {
             let bucket_boundaries: Vec<f64> = vec![
-                1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0,
-                500_000.0, 1_000_000.0, 5_000_000.0, 10_000_000.0,
+                1_000.0,
+                5_000.0,
+                10_000.0,
+                50_000.0,
+                100_000.0,
+                500_000.0,
+                1_000_000.0,
+                5_000_000.0,
+                10_000_000.0,
             ];
             let mut counts = vec![0u64; bucket_boundaries.len()];
             let mut total = 0u64;
@@ -1190,14 +1522,21 @@ pub async fn tcprt_histogram(
 
             art_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let percentile = |p: f64| -> f64 {
-                if art_values.is_empty() { return 0.0; }
+                if art_values.is_empty() {
+                    return 0.0;
+                }
                 let idx = ((p / 100.0) * art_values.len() as f64).ceil() as usize;
                 art_values[idx.min(art_values.len()).saturating_sub(1)]
             };
 
-            let buckets = bucket_boundaries.iter().enumerate().map(|(i, &le_us)| {
-                aria_api::TcpRtHistogramBucket { le_us, count: counts[i] }
-            }).collect();
+            let buckets = bucket_boundaries
+                .iter()
+                .enumerate()
+                .map(|(i, &le_us)| aria_api::TcpRtHistogramBucket {
+                    le_us,
+                    count: counts[i],
+                })
+                .collect();
 
             Ok(Json(aria_api::TcpRtHistogramResponse {
                 buckets,
@@ -1234,17 +1573,24 @@ pub async fn tcprt_states(
                 for (state, count) in &state_counts {
                     let pct = *count as f64 / total_flows as f64 * 100.0;
                     if state == "close_wait" && pct > 10.0 {
-                        anomalies.push(format!("CLOSE_WAIT is {:.1}% (>10%) - possible connection leak", pct));
+                        anomalies.push(format!(
+                            "CLOSE_WAIT is {:.1}% (>10%) - possible connection leak",
+                            pct
+                        ));
                     }
                     if state == "rst" && pct > 20.0 {
-                        anomalies.push(format!("RST is {:.1}% (>20%) - possible network issue", pct));
+                        anomalies.push(format!(
+                            "RST is {:.1}% (>20%) - possible network issue",
+                            pct
+                        ));
                     }
                 }
             }
 
-            let states = state_counts.into_iter().map(|(state, count)| {
-                aria_api::TcpRtStateCount { state, count }
-            }).collect();
+            let states = state_counts
+                .into_iter()
+                .map(|(state, count)| aria_api::TcpRtStateCount { state, count })
+                .collect();
 
             Ok(Json(aria_api::TcpRtStatesResponse {
                 states,
@@ -1261,18 +1607,29 @@ pub async fn tcprt_states(
 pub async fn list_chains(State(cp): State<AppState>) -> impl IntoResponse {
     let chains = cp.list_chains().await;
     Json(aria_api::ServiceChainListResponse {
-        chains: chains.into_iter().map(|c| aria_api::ServiceChainEntry {
-            name: c.name,
-            description: c.description,
-            hops: c.hops.into_iter().map(|h| aria_api::ServiceHopEntry {
-                name: h.name,
-                hop_type: format!("{:?}", h.hop_type).to_lowercase(),
-                taps: h.taps.into_iter().map(|t| aria_api::TapBindingEntry {
-                    tap: t.tap,
-                    role: format!("{:?}", t.role).to_lowercase(),
-                }).collect(),
-            }).collect(),
-        }).collect(),
+        chains: chains
+            .into_iter()
+            .map(|c| aria_api::ServiceChainEntry {
+                name: c.name,
+                description: c.description,
+                hops: c
+                    .hops
+                    .into_iter()
+                    .map(|h| aria_api::ServiceHopEntry {
+                        name: h.name,
+                        hop_type: format!("{:?}", h.hop_type).to_lowercase(),
+                        taps: h
+                            .taps
+                            .into_iter()
+                            .map(|t| aria_api::TapBindingEntry {
+                                tap: t.tap,
+                                role: format!("{:?}", t.role).to_lowercase(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect(),
     })
 }
 
@@ -1280,25 +1637,43 @@ pub async fn create_chain(
     State(cp): State<AppState>,
     Json(req): Json<aria_api::CreateServiceChainRequest>,
 ) -> impl IntoResponse {
-    use crate::service_chain::{ServiceChain, ServiceHop, TapBinding, HopType, TapRole};
+    use crate::service_chain::{HopType, ServiceChain, ServiceHop, TapBinding, TapRole};
 
-    let hops: Result<Vec<ServiceHop>, String> = req.hops.into_iter().map(|h| {
-        let hop_type = match h.hop_type.to_lowercase().as_str() {
-            "bridge" => Ok(HopType::Bridge),
-            "proxy" => Ok(HopType::Proxy),
-            other => Err(format!("Invalid hop_type '{}': must be 'bridge' or 'proxy'", other)),
-        }?;
-        let taps: Result<Vec<TapBinding>, String> = h.taps.into_iter().map(|t| {
-            let role = match t.role.to_lowercase().as_str() {
-                "in" => Ok(TapRole::In),
-                "out" => Ok(TapRole::Out),
-                "bidirectional" | "bidi" => Ok(TapRole::Bidirectional),
-                other => Err(format!("Invalid tap role '{}': must be 'in', 'out', or 'bidirectional'", other)),
+    let hops: Result<Vec<ServiceHop>, String> = req
+        .hops
+        .into_iter()
+        .map(|h| {
+            let hop_type = match h.hop_type.to_lowercase().as_str() {
+                "bridge" => Ok(HopType::Bridge),
+                "proxy" => Ok(HopType::Proxy),
+                other => Err(format!(
+                    "Invalid hop_type '{}': must be 'bridge' or 'proxy'",
+                    other
+                )),
             }?;
-            Ok(TapBinding { tap: t.tap, role })
-        }).collect();
-        Ok(ServiceHop { name: h.name, hop_type, taps: taps? })
-    }).collect();
+            let taps: Result<Vec<TapBinding>, String> = h
+                .taps
+                .into_iter()
+                .map(|t| {
+                    let role = match t.role.to_lowercase().as_str() {
+                        "in" => Ok(TapRole::In),
+                        "out" => Ok(TapRole::Out),
+                        "bidirectional" | "bidi" => Ok(TapRole::Bidirectional),
+                        other => Err(format!(
+                            "Invalid tap role '{}': must be 'in', 'out', or 'bidirectional'",
+                            other
+                        )),
+                    }?;
+                    Ok(TapBinding { tap: t.tap, role })
+                })
+                .collect();
+            Ok(ServiceHop {
+                name: h.name,
+                hop_type,
+                taps: taps?,
+            })
+        })
+        .collect();
 
     let hops = match hops {
         Ok(h) => h,
@@ -1312,29 +1687,37 @@ pub async fn create_chain(
     };
 
     match cp.create_chain(chain).await {
-        Ok(()) => Ok((StatusCode::CREATED, Json(MessageResponse {
-            message: format!("Service chain '{}' created", req.name),
-        }))),
+        Ok(()) => Ok((
+            StatusCode::CREATED,
+            Json(MessageResponse {
+                message: format!("Service chain '{}' created", req.name),
+            }),
+        )),
         Err(e) => Err(err_response(e)),
     }
 }
 
-pub async fn get_chain(
-    State(cp): State<AppState>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+pub async fn get_chain(State(cp): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     match cp.get_chain(&name).await {
         Ok(c) => Ok(Json(aria_api::ServiceChainEntry {
             name: c.name,
             description: c.description,
-            hops: c.hops.into_iter().map(|h| aria_api::ServiceHopEntry {
-                name: h.name,
-                hop_type: format!("{:?}", h.hop_type).to_lowercase(),
-                taps: h.taps.into_iter().map(|t| aria_api::TapBindingEntry {
-                    tap: t.tap,
-                    role: format!("{:?}", t.role).to_lowercase(),
-                }).collect(),
-            }).collect(),
+            hops: c
+                .hops
+                .into_iter()
+                .map(|h| aria_api::ServiceHopEntry {
+                    name: h.name,
+                    hop_type: format!("{:?}", h.hop_type).to_lowercase(),
+                    taps: h
+                        .taps
+                        .into_iter()
+                        .map(|t| aria_api::TapBindingEntry {
+                            tap: t.tap,
+                            role: format!("{:?}", t.role).to_lowercase(),
+                        })
+                        .collect(),
+                })
+                .collect(),
         })),
         Err(e) => Err(err_response(e)),
     }
@@ -1361,24 +1744,30 @@ pub async fn list_drops(
     match cp.get_drop_stats(&instance).await {
         Ok((entries, groups)) => {
             let find_name = |id: u32| -> String {
-                if id == 0 { return "any".to_string(); }
-                groups.values()
+                if id == 0 {
+                    return "any".to_string();
+                }
+                groups
+                    .values()
                     .find(|g| g.id == id)
                     .map(|g| g.name.clone())
                     .unwrap_or_else(|| format!("id:{}", id))
             };
             Ok(Json(aria_api::DropStatsResponse {
-                drops: entries.into_iter().map(|e| aria_api::DropStatsEntry {
-                    reason: aria_core::trace_ops::drop_reason_name(e.reason),
-                    direction: direction_to_string(e.direction),
-                    proto: proto_to_string(e.proto),
-                    src_group: find_name(e.src_id),
-                    src_id: e.src_id,
-                    dst_group: find_name(e.dst_id),
-                    dst_id: e.dst_id,
-                    packets: e.packets,
-                    bytes: e.bytes,
-                }).collect(),
+                drops: entries
+                    .into_iter()
+                    .map(|e| aria_api::DropStatsEntry {
+                        reason: aria_core::trace_ops::drop_reason_name(e.reason),
+                        direction: direction_to_string(e.direction),
+                        proto: proto_to_string(e.proto),
+                        src_group: find_name(e.src_id),
+                        src_id: e.src_id,
+                        dst_group: find_name(e.dst_id),
+                        dst_id: e.dst_id,
+                        packets: e.packets,
+                        bytes: e.bytes,
+                    })
+                    .collect(),
             }))
         }
         Err(e) => Err(err_response(e)),
@@ -1437,9 +1826,10 @@ pub async fn start_trace(
             src_ip_v6 = ip.octets();
             src_is_v6 = true;
         } else {
-            return Err(err_response(ControlPlaneError::ValidationError(
-                format!("Invalid src_ip: {}", req.src_ip)
-            )));
+            return Err(err_response(ControlPlaneError::ValidationError(format!(
+                "Invalid src_ip: {}",
+                req.src_ip
+            ))));
         }
     }
     if !req.dst_ip.is_empty() {
@@ -1449,9 +1839,10 @@ pub async fn start_trace(
             dst_ip_v6 = ip.octets();
             dst_is_v6 = true;
         } else {
-            return Err(err_response(ControlPlaneError::ValidationError(
-                format!("Invalid dst_ip: {}", req.dst_ip)
-            )));
+            return Err(err_response(ControlPlaneError::ValidationError(format!(
+                "Invalid dst_ip: {}",
+                req.dst_ip
+            ))));
         }
     }
 
@@ -1460,7 +1851,7 @@ pub async fn start_trace(
         || (dst_is_v6 && !req.src_ip.is_empty() && !src_is_v6)
     {
         return Err(err_response(ControlPlaneError::ValidationError(
-            "Cannot mix IPv4 and IPv6 addresses in trace filter".to_string()
+            "Cannot mix IPv4 and IPv6 addresses in trace filter".to_string(),
         )));
     }
 
@@ -1481,10 +1872,26 @@ pub async fn start_trace(
         }
     };
 
-    match cp.start_trace(&instance, src_ip, dst_ip, src_ip_v6, dst_ip_v6, req.src_port, req.dst_port, proto, is_ipv6).await {
-        Ok(()) => Ok((StatusCode::OK, Json(MessageResponse {
-            message: "Trace started".to_string(),
-        }))),
+    match cp
+        .start_trace(
+            &instance,
+            src_ip,
+            dst_ip,
+            src_ip_v6,
+            dst_ip_v6,
+            req.src_port,
+            req.dst_port,
+            proto,
+            is_ipv6,
+        )
+        .await
+    {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(MessageResponse {
+                message: "Trace started".to_string(),
+            }),
+        )),
         Err(e) => Err(err_response(e)),
     }
 }
@@ -1509,32 +1916,38 @@ pub async fn list_trace(
     match cp.get_trace_events(&instance, query.top).await {
         Ok((entries, groups)) => {
             let find_name = |id: u32| -> String {
-                if id == 0 { return "any".to_string(); }
-                groups.values()
+                if id == 0 {
+                    return "any".to_string();
+                }
+                groups
+                    .values()
                     .find(|g| g.id == id)
                     .map(|g| g.name.clone())
                     .unwrap_or_else(|| format!("id:{}", id))
             };
             Ok(Json(aria_api::TraceResponse {
-                events: entries.into_iter().map(|e| aria_api::TraceEventEntry {
-                    seq: e.seq,
-                    timestamp: e.timestamp,
-                    src_ip: e.src_ip,
-                    dst_ip: e.dst_ip,
-                    src_port: e.src_port,
-                    dst_port: e.dst_port,
-                    proto: proto_to_string(e.proto),
-                    hook: e.hook,
-                    result: e.result,
-                    direction: e.direction,
-                    src_group: find_name(e.src_id),
-                    src_id: e.src_id,
-                    dst_group: find_name(e.dst_id),
-                    dst_id: e.dst_id,
-                    pkt_len: e.pkt_len,
-                    ct_state: e.ct_state,
-                    drop_reason: e.drop_reason,
-                }).collect(),
+                events: entries
+                    .into_iter()
+                    .map(|e| aria_api::TraceEventEntry {
+                        seq: e.seq,
+                        timestamp: e.timestamp,
+                        src_ip: e.src_ip,
+                        dst_ip: e.dst_ip,
+                        src_port: e.src_port,
+                        dst_port: e.dst_port,
+                        proto: proto_to_string(e.proto),
+                        hook: e.hook,
+                        result: e.result,
+                        direction: e.direction,
+                        src_group: find_name(e.src_id),
+                        src_id: e.src_id,
+                        dst_group: find_name(e.dst_id),
+                        dst_id: e.dst_id,
+                        pkt_len: e.pkt_len,
+                        ct_state: e.ct_state,
+                        drop_reason: e.drop_reason,
+                    })
+                    .collect(),
             }))
         }
         Err(e) => Err(err_response(e)),
@@ -1554,10 +1967,14 @@ pub async fn flush_trace(
 // ── Prometheus Metrics ──
 
 const METRICS_CHUNK_SIZE: usize = 16 * 1024;
-const LATENCY_BUCKET_LABELS: [&str; 9] = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10"];
+const LATENCY_BUCKET_LABELS: [&str; 9] = [
+    "0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10",
+];
 
 fn prom_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 fn ct_contract_hook_to_string(hook: u8) -> &'static str {
@@ -1602,11 +2019,24 @@ fn write_latency_histogram(
     count: u64,
 ) {
     for (idx, le) in LATENCY_BUCKET_LABELS.iter().enumerate() {
-        let _ = writeln!(out, "{metric_name}_bucket{{instance=\"{instance}\",le=\"{le}\"}} {}", bucket_counts[idx]);
+        let _ = writeln!(
+            out,
+            "{metric_name}_bucket{{instance=\"{instance}\",le=\"{le}\"}} {}",
+            bucket_counts[idx]
+        );
     }
-    let _ = writeln!(out, "{metric_name}_bucket{{instance=\"{instance}\",le=\"+Inf\"}} {count}");
-    let _ = writeln!(out, "{metric_name}_sum{{instance=\"{instance}\"}} {sum_seconds}");
-    let _ = writeln!(out, "{metric_name}_count{{instance=\"{instance}\"}} {count}");
+    let _ = writeln!(
+        out,
+        "{metric_name}_bucket{{instance=\"{instance}\",le=\"+Inf\"}} {count}"
+    );
+    let _ = writeln!(
+        out,
+        "{metric_name}_sum{{instance=\"{instance}\"}} {sum_seconds}"
+    );
+    let _ = writeln!(
+        out,
+        "{metric_name}_count{{instance=\"{instance}\"}} {count}"
+    );
 }
 
 fn write_tcprt_summary_metrics(
@@ -1614,14 +2044,46 @@ fn write_tcprt_summary_metrics(
     instance: &str,
     summary: &aria_core::monitoring::TcprtMetricsSummary,
 ) {
-    let _ = writeln!(out, "aria_tcprt_flows_total{{instance=\"{instance}\"}} {}", summary.flows);
-    let _ = writeln!(out, "aria_tcprt_retrans_req_total{{instance=\"{instance}\"}} {}", summary.retrans_req);
-    let _ = writeln!(out, "aria_tcprt_retrans_resp_total{{instance=\"{instance}\"}} {}", summary.retrans_resp);
-    let _ = writeln!(out, "aria_tcprt_requests_total{{instance=\"{instance}\"}} {}", summary.requests);
-    let _ = writeln!(out, "aria_tcprt_handshake_us_sum{{instance=\"{instance}\"}} {}", summary.handshake_sum_us);
-    let _ = writeln!(out, "aria_tcprt_art_us_sum{{instance=\"{instance}\"}} {}", summary.art_sum_us);
-    let _ = writeln!(out, "aria_tcprt_rtt_client_us_sum{{instance=\"{instance}\"}} {}", summary.rtt_client_sum_us);
-    let _ = writeln!(out, "aria_tcprt_rtt_server_us_sum{{instance=\"{instance}\"}} {}", summary.rtt_server_sum_us);
+    let _ = writeln!(
+        out,
+        "aria_tcprt_flows_total{{instance=\"{instance}\"}} {}",
+        summary.flows
+    );
+    let _ = writeln!(
+        out,
+        "aria_tcprt_retrans_req_total{{instance=\"{instance}\"}} {}",
+        summary.retrans_req
+    );
+    let _ = writeln!(
+        out,
+        "aria_tcprt_retrans_resp_total{{instance=\"{instance}\"}} {}",
+        summary.retrans_resp
+    );
+    let _ = writeln!(
+        out,
+        "aria_tcprt_requests_total{{instance=\"{instance}\"}} {}",
+        summary.requests
+    );
+    let _ = writeln!(
+        out,
+        "aria_tcprt_handshake_us_sum{{instance=\"{instance}\"}} {}",
+        summary.handshake_sum_us
+    );
+    let _ = writeln!(
+        out,
+        "aria_tcprt_art_us_sum{{instance=\"{instance}\"}} {}",
+        summary.art_sum_us
+    );
+    let _ = writeln!(
+        out,
+        "aria_tcprt_rtt_client_us_sum{{instance=\"{instance}\"}} {}",
+        summary.rtt_client_sum_us
+    );
+    let _ = writeln!(
+        out,
+        "aria_tcprt_rtt_server_us_sum{{instance=\"{instance}\"}} {}",
+        summary.rtt_server_sum_us
+    );
     write_latency_histogram(
         out,
         "aria_tcprt_art_seconds",
@@ -1635,7 +2097,10 @@ fn write_tcprt_summary_metrics(
     } else {
         0.0
     };
-    let _ = writeln!(out, "aria_tcprt_nqa_score_avg{{instance=\"{instance}\"}} {avg_nqa:.1}");
+    let _ = writeln!(
+        out,
+        "aria_tcprt_nqa_score_avg{{instance=\"{instance}\"}} {avg_nqa:.1}"
+    );
 }
 
 fn write_ssl_summary_metrics(
@@ -1643,7 +2108,11 @@ fn write_ssl_summary_metrics(
     instance: &str,
     summary: &aria_core::ssl_ops::SslMetricsSummary,
 ) {
-    let _ = writeln!(out, "aria_ssl_handshakes_total{{instance=\"{instance}\"}} {}", summary.total);
+    let _ = writeln!(
+        out,
+        "aria_ssl_handshakes_total{{instance=\"{instance}\"}} {}",
+        summary.total
+    );
     write_latency_histogram(
         out,
         "aria_ssl_handshake_seconds",
@@ -1659,7 +2128,11 @@ fn write_ssl_http_summary_metrics(
     instance: &str,
     summary: &aria_core::ssl_ops::SslHttpMetricsSummary,
 ) {
-    let _ = writeln!(out, "aria_ssl_http_requests_total{{instance=\"{instance}\"}} {}", summary.total);
+    let _ = writeln!(
+        out,
+        "aria_ssl_http_requests_total{{instance=\"{instance}\"}} {}",
+        summary.total
+    );
     write_latency_histogram(
         out,
         "aria_ssl_http_latency_seconds",
@@ -1668,9 +2141,21 @@ fn write_ssl_http_summary_metrics(
         summary.sum_seconds,
         summary.count,
     );
-    let _ = writeln!(out, "aria_ssl_http_status_2xx_total{{instance=\"{instance}\"}} {}", summary.status_2xx);
-    let _ = writeln!(out, "aria_ssl_http_status_4xx_total{{instance=\"{instance}\"}} {}", summary.status_4xx);
-    let _ = writeln!(out, "aria_ssl_http_status_5xx_total{{instance=\"{instance}\"}} {}", summary.status_5xx);
+    let _ = writeln!(
+        out,
+        "aria_ssl_http_status_2xx_total{{instance=\"{instance}\"}} {}",
+        summary.status_2xx
+    );
+    let _ = writeln!(
+        out,
+        "aria_ssl_http_status_4xx_total{{instance=\"{instance}\"}} {}",
+        summary.status_4xx
+    );
+    let _ = writeln!(
+        out,
+        "aria_ssl_http_status_5xx_total{{instance=\"{instance}\"}} {}",
+        summary.status_5xx
+    );
 }
 
 pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
@@ -1983,7 +2468,10 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
 
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         Body::from_stream(stream),
     )
 }

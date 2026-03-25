@@ -1,16 +1,16 @@
-use aya_ebpf::{check_bounds_signed, cty::c_void};
 use aya_ebpf::helpers::{
-    bpf_get_current_pid_tgid, bpf_get_smp_processor_id, bpf_ktime_get_ns,
-    bpf_probe_read_user_str_bytes, bpf_probe_read_user_buf, gen,
+    bpf_get_current_pid_tgid, bpf_get_smp_processor_id, bpf_ktime_get_ns, bpf_probe_read_user_buf,
+    bpf_probe_read_user_str_bytes, gen,
 };
 use aya_ebpf::programs::{ProbeContext, RetProbeContext};
+use aya_ebpf::{check_bounds_signed, cty::c_void};
 
 use crate::maps::{
-    SSL_HANDSHAKE_SCRATCH, SSL_CONN_TABLE, SSL_SNI_TABLE, SSL_SEQ,
-    SSL_HTTP_SCRATCH_BUF, SSL_HTTP_SCRATCH, SSL_READ_SCRATCH, SSL_HTTP_TABLE, SSL_HTTP_SEQ,
-    SSL_HTTP_PARSE_BUF, SSL_HTTP_VALUE_BUF, SSL_GLOBAL_CONFIG,
-    SSL_ERROR_TABLE, SSL_ERROR_SEQ, SSL_WRITE_SCRATCH,
-    SslScratch, SslConnValue, SslParseBuf, SslHttpScratch, SslReadScratch, SslHttpValue, SslErrorEvent, SslWriteScratch,
+    SslConnValue, SslErrorEvent, SslHttpScratch, SslHttpValue, SslParseBuf, SslReadScratch,
+    SslScratch, SslWriteScratch, SSL_CONN_TABLE, SSL_ERROR_SEQ, SSL_ERROR_TABLE, SSL_GLOBAL_CONFIG,
+    SSL_HANDSHAKE_SCRATCH, SSL_HTTP_PARSE_BUF, SSL_HTTP_SCRATCH, SSL_HTTP_SCRATCH_BUF,
+    SSL_HTTP_SEQ, SSL_HTTP_TABLE, SSL_HTTP_VALUE_BUF, SSL_READ_SCRATCH, SSL_SEQ, SSL_SNI_TABLE,
+    SSL_WRITE_SCRATCH,
 };
 
 const SSL_CTRL_SET_TLSEXT_HOSTNAME: u64 = 55;
@@ -277,11 +277,13 @@ const HTTP_PREFIX_MATCHED: u8 = 2;
 macro_rules! append_fragment_byte {
     ($scratch:expr, $parse_buf:expr, $copy_len:expr, $idx:expr $(,)?) => {
         if $copy_len > $idx {
-            let current_start = core::ptr::read_volatile(core::ptr::addr_of!(($scratch).data_len)) as usize;
+            let current_start =
+                core::ptr::read_volatile(core::ptr::addr_of!(($scratch).data_len)) as usize;
             if current_start > (SSL_HTTP_REQ_CAP - 1 - $idx) {
                 return false;
             }
-            *((($scratch).req_data.as_mut_ptr()).add(current_start + $idx)) = ($parse_buf).data[$idx];
+            *((($scratch).req_data.as_mut_ptr()).add(current_start + $idx)) =
+                ($parse_buf).data[$idx];
         }
     };
 }
@@ -904,8 +906,13 @@ unsafe fn handle_ssl_read_return(pid_tgid: u64, ret: i32) -> u32 {
     }
 
     let d = &parse_buf.data;
-    if d[0] != b'H' || d[1] != b'T' || d[2] != b'T' || d[3] != b'P'
-        || d[4] != b'/' || d[5] != b'1' || d[6] != b'.'
+    if d[0] != b'H'
+        || d[1] != b'T'
+        || d[2] != b'T'
+        || d[3] != b'P'
+        || d[4] != b'/'
+        || d[5] != b'1'
+        || d[6] != b'.'
     {
         return 0;
     }
@@ -1143,9 +1150,9 @@ pub unsafe fn ssl_write_return_impl(ctx: &RetProbeContext) -> u32 {
 
     if ret <= 0 {
         let error_hint = if ret == 0 {
-            1  // zero_return
+            1 // zero_return
         } else {
-            3  // syscall_err
+            3 // syscall_err
         };
 
         emit_ssl_error_event(pid_tgid, write_scratch.ssl_ptr, 1, ret, error_hint);

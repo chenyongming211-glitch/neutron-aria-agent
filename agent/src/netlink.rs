@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use futures::stream::TryStreamExt;
-use futures::stream::StreamExt;
-use netlink_packet_core::NetlinkPayload;
-use netlink_packet_route::RouteNetlinkMessage;
-use netlink_packet_route::link::LinkAttribute;
-use netlink_sys::AsyncSocket;
-use tracing::{info, warn};
 use crate::control_plane::MANAGED_SHARED_PIN_NAMESPACE;
 use crate::tap_registry::TapRegistry;
+use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
+use netlink_packet_core::NetlinkPayload;
+use netlink_packet_route::link::LinkAttribute;
+use netlink_packet_route::RouteNetlinkMessage;
+use netlink_sys::AsyncSocket;
+use std::sync::Arc;
+use tracing::{info, warn};
 
 /// Enumerate all current network interfaces and return names matching the pattern
 async fn scan_existing_interfaces(registry: &TapRegistry) -> Vec<String> {
@@ -111,10 +111,7 @@ pub async fn monitor(registry: Arc<TapRegistry>) -> Result<(), String> {
     info!(count = existing.len(), interfaces = ?existing, "initial netlink scan complete");
 
     // 2. Clean orphaned pins
-    cleanup_orphaned_pins(
-        registry.base_pin_path.to_str().unwrap(),
-        &existing,
-    );
+    cleanup_orphaned_pins(registry.base_pin_path.to_str().unwrap(), &existing);
 
     // 3. Attach all existing tap interfaces
     for iface in &existing {
@@ -130,7 +127,9 @@ pub async fn monitor(registry: Arc<TapRegistry>) -> Result<(), String> {
     // Join the RTNLGRP_LINK multicast group via bind
     let mgroup_flags = rtnetlink::constants::RTMGRP_LINK;
     let addr = netlink_sys::SocketAddr::new(0, mgroup_flags);
-    connection.socket_mut().socket_mut()
+    connection
+        .socket_mut()
+        .socket_mut()
         .bind(&addr)
         .map_err(|e| format!("Failed to bind RTMGRP_LINK: {}", e))?;
 

@@ -29,7 +29,9 @@ fn compute_refill(rate: u64, elapsed_ns: u64) -> u64 {
 /// deficit is at most one packet (~64 KB), so deficit * 1e9 < 6.5e13, well within u64.
 #[inline(always)]
 fn compute_delay_ns(deficit: u64, rate: u64) -> u64 {
-    if rate == 0 { return 0; }
+    if rate == 0 {
+        return 0;
+    }
     deficit * 1_000_000_000 / rate
 }
 
@@ -129,14 +131,22 @@ pub unsafe fn apply_qos_egress(
                 let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
                 let refill = compute_refill(rate, elapsed);
                 let new_tokens = (*bucket).tokens + refill;
-                let tokens = if new_tokens > burst { burst } else { new_tokens };
+                let tokens = if new_tokens > burst {
+                    burst
+                } else {
+                    new_tokens
+                };
 
                 let result;
                 if mode == QOS_MODE_SHAPING {
                     // Every packet gets an EDT timestamp to enforce rate limit.
                     // Tokens only control stats (pass vs shaped), not whether EDT is set.
                     let pkt_delay_ns = compute_delay_ns(pkt_len as u64, rate);
-                    let base = if (*bucket).last_edt > now_ns { (*bucket).last_edt } else { now_ns };
+                    let base = if (*bucket).last_edt > now_ns {
+                        (*bucket).last_edt
+                    } else {
+                        now_ns
+                    };
                     let edt = base + pkt_delay_ns;
                     (*bucket).last_edt = edt;
 
@@ -170,7 +180,11 @@ pub unsafe fn apply_qos_egress(
             } else {
                 // First packet: initialize bucket
                 let new_bucket = TokenBucket {
-                    tokens: if burst >= pkt_len as u64 { burst - pkt_len as u64 } else { 0 },
+                    tokens: if burst >= pkt_len as u64 {
+                        burst - pkt_len as u64
+                    } else {
+                        0
+                    },
                     last_refill_ns: now_ns,
                     last_edt: 0,
                 };
@@ -220,7 +234,11 @@ pub unsafe fn apply_qos_ingress(
                 let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
                 let refill = compute_refill(rate, elapsed);
                 let new_tokens = (*bucket).tokens + refill;
-                let tokens = if new_tokens > burst { burst } else { new_tokens };
+                let tokens = if new_tokens > burst {
+                    burst
+                } else {
+                    new_tokens
+                };
 
                 let pass;
                 if tokens >= pkt_len as u64 {
@@ -238,7 +256,11 @@ pub unsafe fn apply_qos_ingress(
                 return pass;
             } else {
                 let new_bucket = TokenBucket {
-                    tokens: if burst >= pkt_len as u64 { burst - pkt_len as u64 } else { 0 },
+                    tokens: if burst >= pkt_len as u64 {
+                        burst - pkt_len as u64
+                    } else {
+                        0
+                    },
                     last_refill_ns: now_ns,
                     last_edt: 0,
                 };

@@ -109,6 +109,7 @@ If the manager cannot safely read the fields required to extract `ifindex`, the 
 Add the following maps in `ebpf/src/maps.rs`:
 
 - `MANAGED_IFINDEX_FILTER: HashMap<u32, KernelDropFilterValue>`
+- `KERNEL_DROP_CONFIG: HashMap<u32, KernelDropConfig>`
 - `KERNEL_DROP_STATS: LruPerCpuHashMap<KernelDropKey, KernelDropValue>`
 - `KERNEL_DROP_VALUE_BUF: PerCpuArray<KernelDropValue>`
 
@@ -127,6 +128,7 @@ Add matching layout definitions in:
 Recommended structures:
 
 - `KernelDropFilterValue { tap_id: u32 }`
+- `KernelDropConfig { flags, tracepoint field offsets, sk_buff/net_device member offsets }`
 - `KernelDropKey { tap_id: u32, ifindex: u32, reason_code: u16, proto: u16 }`
 - `KernelDropValue { packets: u64, bytes: u64, last_seen_ns: u64, last_location: u64 }`
 
@@ -141,6 +143,7 @@ Add a dedicated module:
 Responsibilities:
 
 - read tracepoint context
+- use runtime-supplied offsets from `KERNEL_DROP_CONFIG`
 - perform null checks before dereferencing `skb->dev`
 - read `ifindex`
 - read packet length if available
@@ -171,6 +174,13 @@ In `legacy_no_reason` mode:
 - `reason_code` is reported as unavailable or zero
 - `reason` is rendered as `"unknown"`
 - `location` may still be retained as raw metadata for debugging
+
+The initial implementation will populate `KERNEL_DROP_CONFIG` from userspace by:
+
+- parsing `/sys/kernel/tracing/.../kfree_skb/format` for tracepoint payload offsets
+- parsing `/sys/kernel/btf/vmlinux` for `sk_buff.dev`, `sk_buff.len`, and `net_device.ifindex`
+
+This keeps the eBPF program verifier-safe while avoiding hard-coded kernel layout offsets.
 
 ## 7. Core Library Design
 

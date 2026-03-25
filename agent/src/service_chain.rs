@@ -54,6 +54,5 @@ pub fn save_chains(base_state_path: &str, chains: &[ServiceChain]) -> Result<(),
     let path = format!("{}/{}", base_state_path, CHAINS_FILE);
     let json = serde_json::to_string_pretty(chains)
         .map_err(|e| format!("Failed to serialize chains: {}", e))?;
-    std::fs::write(&path, json)
-        .map_err(|e| format!("Failed to write {}: {}", path, e))
+    std::fs::write(&path, json).map_err(|e| format!("Failed to write {}: {}", path, e))
 }
