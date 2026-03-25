@@ -103,6 +103,26 @@ pub fn pin_program_if_needed(
         .map_err(|e| format!("{} pin: {:?}", prog_name, e))
 }
 
+pub fn replace_pinned_program(
+    bpf: &mut aya::Ebpf,
+    prog_name: &str,
+    pin_path: &str,
+) -> Result<(), String> {
+    let target = format!("{}/{}", pin_path, prog_name);
+    if Path::new(&target).exists() {
+        std::fs::remove_file(&target)
+            .map_err(|e| format!("{} remove old pin {}: {}", prog_name, target, e))?;
+    }
+
+    let program = bpf
+        .program_mut(prog_name)
+        .ok_or_else(|| format!("{} program not found in eBPF binary", prog_name))?;
+
+    program
+        .pin(&target)
+        .map_err(|e| format!("{} pin: {:?}", prog_name, e))
+}
+
 pub fn attach_tracepoint_if_needed(
     bpf: &mut aya::Ebpf,
     prog_name: &str,
@@ -124,6 +144,47 @@ pub fn attach_tracepoint_if_needed(
                 return Err(format!("{} load: {}", prog_name, err));
             }
         }
+    }
+
+    let link_id = program
+        .attach(category, name)
+        .map_err(|e| format!("{} attach {}/{}: {:?}", prog_name, category, name, e))?;
+
+    let link = program
+        .take_link(link_id)
+        .map_err(|e| format!("{} take_link: {:?}", prog_name, e))?;
+    let fd_link: aya::programs::links::FdLink = link
+        .try_into()
+        .map_err(|e: aya::programs::links::LinkError| format!("{} FdLink: {:?}", prog_name, e))?;
+    fd_link
+        .pin(&link_pin)
+        .map_err(|e| format!("{} pin link: {:?}", prog_name, e))?;
+
+    Ok(())
+}
+
+pub fn replace_pinned_tracepoint_link(
+    bpf: &mut aya::Ebpf,
+    prog_name: &str,
+    category: &str,
+    name: &str,
+    pin_path: &str,
+) -> Result<(), String> {
+    let link_pin = format!("{}/{}", pin_path, KERNEL_DROP_LINK_NAME);
+    let program = tracepoint_program(bpf, prog_name)?;
+    match program.load() {
+        Ok(()) => {}
+        Err(e) => {
+            let err = format!("{:?}", e);
+            if !is_already_loaded_error(&err) {
+                return Err(format!("{} load: {}", prog_name, err));
+            }
+        }
+    }
+
+    if Path::new(&link_pin).exists() {
+        std::fs::remove_file(&link_pin)
+            .map_err(|e| format!("{} remove old link {}: {}", prog_name, link_pin, e))?;
     }
 
     let link_id = program

@@ -3,16 +3,21 @@ use std::path::Path;
 
 use aria_core::common::{KernelDropConfig, KernelDropFilterValue, KERNEL_DROP_FLAG_HAS_REASON};
 use aya::maps::{HashMap as BpfHashMap, Map, MapData};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::kernel_drop_support::{
-    attach_tracepoint_if_needed, load_tracepoint_program, pin_map_if_needed, pin_program_if_needed,
-    resolve_kernel_drop_config, KERNEL_DROP_LINK_NAME, KERNEL_DROP_MAP_NAMES,
-    KERNEL_DROP_PROGRAM_NAME, KERNEL_DROP_TRACEPOINT_CATEGORY, KERNEL_DROP_TRACEPOINT_NAME,
+    load_tracepoint_program, pin_map_if_needed, replace_pinned_program,
+    replace_pinned_tracepoint_link, resolve_kernel_drop_config, KERNEL_DROP_LINK_NAME,
+    KERNEL_DROP_MAP_NAMES, KERNEL_DROP_PROGRAM_NAME, KERNEL_DROP_TRACEPOINT_CATEGORY,
+    KERNEL_DROP_TRACEPOINT_NAME,
 };
 
 pub const KERNEL_DROP_PIN_NAMESPACE: &str = "kernel-drops-global";
+const KERNEL_DROP_RUNTIME_METADATA_SCHEMA_VERSION: u32 = 1;
+const KERNEL_DROP_MAP_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum KernelDropMode {
@@ -37,18 +42,37 @@ struct KernelDropManagerState {
     last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KernelDropRuntimeMetadata {
+    schema_version: u32,
+    map_schema_version: u32,
+    ebpf_sha256: String,
+    expected_map_pins: Vec<String>,
+    program_name: String,
+    tracepoint_category: String,
+    tracepoint_name: String,
+}
+
+#[derive(Debug, Clone)]
+enum KernelDropMapInventoryStatus {
+    Healthy,
+    StaleOrIncomplete(String),
+}
+
 pub struct KernelDropManager {
     ebpf_path: String,
     base_pin_path: String,
+    base_state_path: String,
     pin_path: String,
     state: Mutex<KernelDropManagerState>,
 }
 
 impl KernelDropManager {
-    pub fn new(ebpf_path: &str, base_pin_path: &str) -> Self {
+    pub fn new(ebpf_path: &str, base_pin_path: &str, base_state_path: &str) -> Self {
         Self {
             ebpf_path: ebpf_path.to_string(),
             base_pin_path: base_pin_path.to_string(),
+            base_state_path: base_state_path.to_string(),
             pin_path: format!("{}/{}", base_pin_path, KERNEL_DROP_PIN_NAMESPACE),
             state: Mutex::new(KernelDropManagerState {
                 loaded: false,
@@ -153,6 +177,14 @@ impl KernelDropManager {
             .map_err(|e| format!("create kernel-drop pin dir {}: {}", self.pin_path, e))?;
 
         let config = resolve_kernel_drop_config()?;
+        let expected_metadata = self.expected_runtime_metadata()?;
+        if let KernelDropMapInventoryStatus::StaleOrIncomplete(reason) =
+            self.validate_runtime_inventory(&expected_metadata)
+        {
+            info!(reason = %reason, "rebuilding kernel-drop runtime due to stale map inventory");
+            self.rebuild_runtime()?;
+        }
+
         let bpf_bytes = std::fs::read(&self.ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
         let mut bpf = self.load_bpf_with_pins(&bpf_bytes)?;
 
@@ -162,14 +194,15 @@ impl KernelDropManager {
         self.store_kernel_drop_config(&config)?;
 
         load_tracepoint_program(&mut bpf, KERNEL_DROP_PROGRAM_NAME)?;
-        pin_program_if_needed(&mut bpf, KERNEL_DROP_PROGRAM_NAME, &self.pin_path)?;
-        attach_tracepoint_if_needed(
+        replace_pinned_program(&mut bpf, KERNEL_DROP_PROGRAM_NAME, &self.pin_path)?;
+        replace_pinned_tracepoint_link(
             &mut bpf,
             KERNEL_DROP_PROGRAM_NAME,
             KERNEL_DROP_TRACEPOINT_CATEGORY,
             KERNEL_DROP_TRACEPOINT_NAME,
             &self.pin_path,
         )?;
+        self.store_runtime_metadata_atomically(&expected_metadata)?;
 
         Ok(if (config.flags & KERNEL_DROP_FLAG_HAS_REASON) != 0 {
             KernelDropMode::KfreeSkbReasonful
@@ -194,6 +227,134 @@ impl KernelDropManager {
 
     fn link_pins_ready(&self) -> bool {
         Path::new(&format!("{}/{}", self.pin_path, KERNEL_DROP_LINK_NAME)).exists()
+    }
+
+    fn runtime_metadata_path(&self) -> String {
+        format!(
+            "{}/.{}.runtime.meta.json",
+            self.base_state_path, KERNEL_DROP_PIN_NAMESPACE
+        )
+    }
+
+    fn compute_ebpf_sha256(&self) -> Result<String, String> {
+        let bytes =
+            std::fs::read(&self.ebpf_path).map_err(|e| format!("read ebpf for hash: {}", e))?;
+        let digest = Sha256::digest(bytes);
+        Ok(digest
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(""))
+    }
+
+    fn expected_runtime_metadata(&self) -> Result<KernelDropRuntimeMetadata, String> {
+        Ok(KernelDropRuntimeMetadata {
+            schema_version: KERNEL_DROP_RUNTIME_METADATA_SCHEMA_VERSION,
+            map_schema_version: KERNEL_DROP_MAP_SCHEMA_VERSION,
+            ebpf_sha256: self.compute_ebpf_sha256()?,
+            expected_map_pins: KERNEL_DROP_MAP_NAMES
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+            program_name: KERNEL_DROP_PROGRAM_NAME.to_string(),
+            tracepoint_category: KERNEL_DROP_TRACEPOINT_CATEGORY.to_string(),
+            tracepoint_name: KERNEL_DROP_TRACEPOINT_NAME.to_string(),
+        })
+    }
+
+    fn load_runtime_metadata(&self) -> Result<KernelDropRuntimeMetadata, String> {
+        let path = self.runtime_metadata_path();
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read kernel-drop runtime metadata {}: {}", path, e))?;
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("parse kernel-drop runtime metadata {}: {}", path, e))
+    }
+
+    fn store_runtime_metadata_atomically(
+        &self,
+        metadata: &KernelDropRuntimeMetadata,
+    ) -> Result<(), String> {
+        let path = self.runtime_metadata_path();
+        let tmp_path = format!("{}.tmp", path);
+        let json = serde_json::to_string_pretty(metadata)
+            .map_err(|e| format!("serialize kernel-drop runtime metadata: {}", e))?;
+        if let Some(parent) = Path::new(&path).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "create kernel-drop runtime metadata dir {}: {}",
+                    parent.display(),
+                    e
+                )
+            })?;
+        }
+        std::fs::write(&tmp_path, json)
+            .map_err(|e| format!("write kernel-drop runtime metadata tmp {}: {}", tmp_path, e))?;
+        std::fs::rename(&tmp_path, &path)
+            .map_err(|e| format!("rename kernel-drop runtime metadata {}: {}", path, e))?;
+        Ok(())
+    }
+
+    fn validate_runtime_inventory(
+        &self,
+        expected: &KernelDropRuntimeMetadata,
+    ) -> KernelDropMapInventoryStatus {
+        let metadata = match self.load_runtime_metadata() {
+            Ok(metadata) => metadata,
+            Err(e) => return KernelDropMapInventoryStatus::StaleOrIncomplete(e),
+        };
+
+        if metadata.schema_version != expected.schema_version {
+            return KernelDropMapInventoryStatus::StaleOrIncomplete(format!(
+                "kernel-drop metadata schema {} != expected {}",
+                metadata.schema_version, expected.schema_version
+            ));
+        }
+
+        if metadata.map_schema_version != expected.map_schema_version {
+            return KernelDropMapInventoryStatus::StaleOrIncomplete(format!(
+                "kernel-drop map schema {} != expected {}",
+                metadata.map_schema_version, expected.map_schema_version
+            ));
+        }
+
+        if metadata.expected_map_pins != expected.expected_map_pins {
+            return KernelDropMapInventoryStatus::StaleOrIncomplete(format!(
+                "kernel-drop map inventory {:?} != expected {:?}",
+                metadata.expected_map_pins, expected.expected_map_pins
+            ));
+        }
+
+        for map_name in &metadata.expected_map_pins {
+            let path = format!("{}/{}", self.pin_path, map_name);
+            if !Path::new(&path).exists() {
+                return KernelDropMapInventoryStatus::StaleOrIncomplete(format!(
+                    "kernel-drop map pin {} missing",
+                    path
+                ));
+            }
+        }
+
+        KernelDropMapInventoryStatus::Healthy
+    }
+
+    fn rebuild_runtime(&self) -> Result<(), String> {
+        if Path::new(&self.pin_path).exists() {
+            std::fs::remove_dir_all(&self.pin_path).map_err(|e| {
+                format!("remove stale kernel-drop runtime {}: {}", self.pin_path, e)
+            })?;
+        }
+        let metadata_path = self.runtime_metadata_path();
+        if Path::new(&metadata_path).exists() {
+            std::fs::remove_file(&metadata_path).map_err(|e| {
+                format!(
+                    "remove stale kernel-drop runtime metadata {}: {}",
+                    metadata_path, e
+                )
+            })?;
+        }
+        std::fs::create_dir_all(&self.pin_path)
+            .map_err(|e| format!("recreate kernel-drop pin dir {}: {}", self.pin_path, e))?;
+        Ok(())
     }
 
     fn managed_ifindex_filter_path(&self) -> String {
@@ -233,14 +394,6 @@ impl KernelDropManager {
 
     fn sync_all_managed_ifaces(&self, managed_ifaces: &HashMap<u32, u32>) -> Result<(), String> {
         let mut map = self.open_managed_ifindex_filter()?;
-        let existing_keys: Vec<u32> = map.keys().filter_map(|item| item.ok()).collect();
-        for ifindex in existing_keys {
-            if map.get(&ifindex, 0).is_ok() {
-                map.remove(&ifindex).map_err(|e| {
-                    format!("remove stale MANAGED_IFINDEX_FILTER {}: {:?}", ifindex, e)
-                })?;
-            }
-        }
         for (ifindex, tap_id) in managed_ifaces {
             let value = KernelDropFilterValue { tap_id: *tap_id };
             map.insert(ifindex, &value, 0).map_err(|e| {

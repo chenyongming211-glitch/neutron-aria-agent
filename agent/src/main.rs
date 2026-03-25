@@ -208,6 +208,7 @@ async fn main() {
     let kernel_drop_manager = Arc::new(kernel_drop_manager::KernelDropManager::new(
         &config.ebpf_path,
         &config.pin_path,
+        &config.state_path,
     ));
     if let Err(e) = kernel_drop_manager.ensure_loaded().await {
         warn!(error = %e, "failed to initialize kernel drop manager");
