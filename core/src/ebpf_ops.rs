@@ -1599,7 +1599,7 @@ pub fn update_firewall_config(
     let mir = mirror_enabled.map(|b| if b { 1u8 } else { 0 })
         .unwrap_or_else(|| current.as_ref().map(|c| c.mirror_enabled).unwrap_or(0));
     let tcprt = tcprt_enabled.map(|b| if b { 1u8 } else { 0 })
-        .unwrap_or_else(|| current.as_ref().map(|c| c.tcprt_enabled).unwrap_or(1));
+        .unwrap_or_else(|| current.as_ref().map(|c| c.tcprt_enabled).unwrap_or(0));
     let ssl = ssl_enabled.map(|b| if b { 1u8 } else { 0 })
         .unwrap_or_else(|| current.as_ref().map(|c| c.ssl_enabled).unwrap_or(0));
 
