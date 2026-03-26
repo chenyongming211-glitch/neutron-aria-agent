@@ -13,7 +13,7 @@ pub fn tcprt_enabled(tap_id: u32) -> bool {
 }
 
 #[inline(always)]
-unsafe fn init_tcprt_value(val: *mut TcpRtValue, now: u64, tcp_seq: u32) {
+unsafe fn init_tcprt_value(val: *mut TcpRtValue, now: u64, tcp_seq: u32, from_ingress_hook: bool) {
     (*val).syn_ts = now;
     (*val).synack_ts = 0;
     (*val).ack_ts = 0;
@@ -23,7 +23,7 @@ unsafe fn init_tcprt_value(val: *mut TcpRtValue, now: u64, tcp_seq: u32) {
     (*val).rtt_client_ns = 0;
     (*val).rtt_server_ns = 0;
     (*val).art_ns = 0;
-    (*val).syn_ingress_ts = now;
+    (*val).syn_ingress_ts = if from_ingress_hook { now } else { 0 };
     (*val).synack_ingress_ts = 0;
     (*val).retrans_req = 0;
     (*val).retrans_resp = 0;
@@ -62,7 +62,13 @@ unsafe fn is_retrans_resp(entry: *mut TcpRtValue, seq: u32) -> bool {
 /// `ct_key` must be the forward (original direction) key.
 /// `is_forward` indicates whether this packet is in the original direction.
 #[inline(always)]
-pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_forward: bool) {
+pub unsafe fn track_tcp_rt_v4(
+    ct_key: &CtKey4,
+    info: &PacketInfo,
+    now: u64,
+    is_forward: bool,
+    from_ingress_hook: bool,
+) {
     let flags = info.tcp_flags;
     let is_syn = (flags & TCP_FLAG_SYN) != 0;
     let is_ack = (flags & TCP_FLAG_ACK) != 0;
@@ -71,19 +77,21 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
 
     // SYN (no ACK) — new connection, forward direction
     if is_syn && !is_ack && is_forward {
-        // Dual-observation: if entry exists with syn_ingress_ts == syn_ts, this is the egress pass
         if let Some(entry) = TCPRT_TABLE_V4.get_ptr_mut(ct_key) {
-            if (*entry).state == TCPRT_STATE_SYN_SENT && (*entry).syn_ingress_ts == (*entry).syn_ts
+            if !from_ingress_hook
+                && (*entry).state == TCPRT_STATE_SYN_SENT
+                && (*entry).syn_ingress_ts > 0
+                && (*entry).syn_ingress_ts == (*entry).syn_ts
             {
                 (*entry).syn_ts = now; // update to egress timestamp, preserve syn_ingress_ts
-                return;
             }
+            return;
         }
         let val = match TCPRT_VALUE_BUF.get_ptr_mut(0) {
             Some(v) => v,
             None => return,
         };
-        init_tcprt_value(val, now, info.tcp_seq);
+        init_tcprt_value(val, now, info.tcp_seq, from_ingress_hook);
         let _ = TCPRT_TABLE_V4.insert(ct_key, &*val, 0);
         return;
     }
@@ -128,12 +136,29 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
 
     // SYN-ACK — reverse direction (server response)
     if is_syn && is_ack && !is_forward {
-        if (*entry).synack_ingress_ts == 0 {
-            (*entry).synack_ingress_ts = now; // first observation (ingress)
+        if from_ingress_hook {
+            if (*entry).synack_ingress_ts == 0 {
+                (*entry).synack_ingress_ts = now; // first observation (ingress)
+                (*entry).synack_ts = now;
+                (*entry).rtt_server_ns = now.wrapping_sub((*entry).syn_ts);
+                (*entry).flags |= TCPRT_FLAG_SYNACK_SEEN;
+            }
+            return;
         }
-        (*entry).synack_ts = now;
-        (*entry).rtt_server_ns = now.wrapping_sub((*entry).syn_ts);
-        (*entry).flags |= TCPRT_FLAG_SYNACK_SEEN;
+
+        if (*entry).synack_ingress_ts > 0 && (*entry).synack_ingress_ts == (*entry).synack_ts {
+            (*entry).synack_ts = now;
+            (*entry).rtt_server_ns = now.wrapping_sub((*entry).syn_ts);
+            (*entry).flags |= TCPRT_FLAG_SYNACK_SEEN;
+            return;
+        }
+
+        if (*entry).synack_ts == 0 {
+            // First observation happened on egress-only path.
+            (*entry).synack_ts = now;
+            (*entry).rtt_server_ns = now.wrapping_sub((*entry).syn_ts);
+            (*entry).flags |= TCPRT_FLAG_SYNACK_SEEN;
+        }
         return;
     }
 
@@ -202,7 +227,12 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
 
 /// Track TCP-RT for reverse direction IPv4 (constructs forward key internally).
 #[inline(always)]
-pub unsafe fn track_tcp_rt_v4_rev(tap_id: u32, info: &PacketInfo, now: u64) {
+pub unsafe fn track_tcp_rt_v4_rev(
+    tap_id: u32,
+    info: &PacketInfo,
+    now: u64,
+    from_ingress_hook: bool,
+) {
     let fwd_key = CtKey4 {
         tap_id,
         src_ip: info.dst_ip,
@@ -212,13 +242,18 @@ pub unsafe fn track_tcp_rt_v4_rev(tap_id: u32, info: &PacketInfo, now: u64) {
         proto: info.proto,
         pad: [0; 3],
     };
-    track_tcp_rt_v4(&fwd_key, info, now, false);
+    track_tcp_rt_v4(&fwd_key, info, now, false, from_ingress_hook);
 }
 
 /// Track TCP-RT for either direction without relying on conntrack direction hints.
 /// Used on degraded paths where we only have the packet tuple and current TCPRT table state.
 #[inline(always)]
-pub unsafe fn track_tcp_rt_v4_auto(tap_id: u32, info: &PacketInfo, now: u64) {
+pub unsafe fn track_tcp_rt_v4_auto(
+    tap_id: u32,
+    info: &PacketInfo,
+    now: u64,
+    from_ingress_hook: bool,
+) {
     let is_syn = (info.tcp_flags & TCP_FLAG_SYN) != 0;
     let is_ack = (info.tcp_flags & TCP_FLAG_ACK) != 0;
     let fwd_key = CtKey4 {
@@ -235,13 +270,13 @@ pub unsafe fn track_tcp_rt_v4_auto(tap_id: u32, info: &PacketInfo, now: u64) {
         // Degraded auto-path cannot distinguish a true second-hook observation
         // from a client SYN retransmission. Keep the first SYN timestamp stable.
         if TCPRT_TABLE_V4.get(&fwd_key).is_none() {
-            track_tcp_rt_v4(&fwd_key, info, now, true);
+            track_tcp_rt_v4(&fwd_key, info, now, true, from_ingress_hook);
         }
         return;
     }
 
     if TCPRT_TABLE_V4.get(&fwd_key).is_some() {
-        track_tcp_rt_v4(&fwd_key, info, now, true);
+        track_tcp_rt_v4(&fwd_key, info, now, true, from_ingress_hook);
         return;
     }
 
@@ -255,14 +290,20 @@ pub unsafe fn track_tcp_rt_v4_auto(tap_id: u32, info: &PacketInfo, now: u64) {
         pad: [0; 3],
     };
     if TCPRT_TABLE_V4.get(&rev_key).is_some() {
-        track_tcp_rt_v4_rev(tap_id, info, now);
+        track_tcp_rt_v4_rev(tap_id, info, now, from_ingress_hook);
     }
 }
 
 /// Track TCP response time for an IPv6 flow.
 /// Same logic as V4, different map.
 #[inline(always)]
-pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_forward: bool) {
+pub unsafe fn track_tcp_rt_v6(
+    ct_key: &CtKey6,
+    info: &PacketInfo,
+    now: u64,
+    is_forward: bool,
+    from_ingress_hook: bool,
+) {
     let flags = info.tcp_flags;
     let is_syn = (flags & TCP_FLAG_SYN) != 0;
     let is_ack = (flags & TCP_FLAG_ACK) != 0;
@@ -270,19 +311,21 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
     let is_rst = (flags & TCP_FLAG_RST) != 0;
 
     if is_syn && !is_ack && is_forward {
-        // Dual-observation: if entry exists with syn_ingress_ts == syn_ts, this is the egress pass
         if let Some(entry) = TCPRT_TABLE_V6.get_ptr_mut(ct_key) {
-            if (*entry).state == TCPRT_STATE_SYN_SENT && (*entry).syn_ingress_ts == (*entry).syn_ts
+            if !from_ingress_hook
+                && (*entry).state == TCPRT_STATE_SYN_SENT
+                && (*entry).syn_ingress_ts > 0
+                && (*entry).syn_ingress_ts == (*entry).syn_ts
             {
                 (*entry).syn_ts = now;
-                return;
             }
+            return;
         }
         let val = match TCPRT_VALUE_BUF.get_ptr_mut(0) {
             Some(v) => v,
             None => return,
         };
-        init_tcprt_value(val, now, info.tcp_seq);
+        init_tcprt_value(val, now, info.tcp_seq, from_ingress_hook);
         let _ = TCPRT_TABLE_V6.insert(ct_key, &*val, 0);
         return;
     }
@@ -325,12 +368,28 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
     }
 
     if is_syn && is_ack && !is_forward {
-        if (*entry).synack_ingress_ts == 0 {
-            (*entry).synack_ingress_ts = now;
+        if from_ingress_hook {
+            if (*entry).synack_ingress_ts == 0 {
+                (*entry).synack_ingress_ts = now;
+                (*entry).synack_ts = now;
+                (*entry).rtt_server_ns = now.wrapping_sub((*entry).syn_ts);
+                (*entry).flags |= TCPRT_FLAG_SYNACK_SEEN;
+            }
+            return;
         }
-        (*entry).synack_ts = now;
-        (*entry).rtt_server_ns = now.wrapping_sub((*entry).syn_ts);
-        (*entry).flags |= TCPRT_FLAG_SYNACK_SEEN;
+
+        if (*entry).synack_ingress_ts > 0 && (*entry).synack_ingress_ts == (*entry).synack_ts {
+            (*entry).synack_ts = now;
+            (*entry).rtt_server_ns = now.wrapping_sub((*entry).syn_ts);
+            (*entry).flags |= TCPRT_FLAG_SYNACK_SEEN;
+            return;
+        }
+
+        if (*entry).synack_ts == 0 {
+            (*entry).synack_ts = now;
+            (*entry).rtt_server_ns = now.wrapping_sub((*entry).syn_ts);
+            (*entry).flags |= TCPRT_FLAG_SYNACK_SEEN;
+        }
         return;
     }
 
@@ -388,7 +447,12 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
 
 /// Track TCP-RT for reverse direction IPv6 (constructs forward key internally).
 #[inline(always)]
-pub unsafe fn track_tcp_rt_v6_rev(tap_id: u32, info: &PacketInfo, now: u64) {
+pub unsafe fn track_tcp_rt_v6_rev(
+    tap_id: u32,
+    info: &PacketInfo,
+    now: u64,
+    from_ingress_hook: bool,
+) {
     let fwd_key = CtKey6 {
         tap_id,
         src_ip: info.dst_ip_v6,
@@ -398,12 +462,17 @@ pub unsafe fn track_tcp_rt_v6_rev(tap_id: u32, info: &PacketInfo, now: u64) {
         proto: info.proto,
         pad: [0; 3],
     };
-    track_tcp_rt_v6(&fwd_key, info, now, false);
+    track_tcp_rt_v6(&fwd_key, info, now, false, from_ingress_hook);
 }
 
 /// Track TCP-RT for either direction without relying on conntrack direction hints.
 #[inline(always)]
-pub unsafe fn track_tcp_rt_v6_auto(tap_id: u32, info: &PacketInfo, now: u64) {
+pub unsafe fn track_tcp_rt_v6_auto(
+    tap_id: u32,
+    info: &PacketInfo,
+    now: u64,
+    from_ingress_hook: bool,
+) {
     let is_syn = (info.tcp_flags & TCP_FLAG_SYN) != 0;
     let is_ack = (info.tcp_flags & TCP_FLAG_ACK) != 0;
     let fwd_key = CtKey6 {
@@ -418,13 +487,13 @@ pub unsafe fn track_tcp_rt_v6_auto(tap_id: u32, info: &PacketInfo, now: u64) {
 
     if is_syn && !is_ack {
         if TCPRT_TABLE_V6.get(&fwd_key).is_none() {
-            track_tcp_rt_v6(&fwd_key, info, now, true);
+            track_tcp_rt_v6(&fwd_key, info, now, true, from_ingress_hook);
         }
         return;
     }
 
     if TCPRT_TABLE_V6.get(&fwd_key).is_some() {
-        track_tcp_rt_v6(&fwd_key, info, now, true);
+        track_tcp_rt_v6(&fwd_key, info, now, true, from_ingress_hook);
         return;
     }
 
@@ -438,6 +507,6 @@ pub unsafe fn track_tcp_rt_v6_auto(tap_id: u32, info: &PacketInfo, now: u64) {
         pad: [0; 3],
     };
     if TCPRT_TABLE_V6.get(&rev_key).is_some() {
-        track_tcp_rt_v6_rev(tap_id, info, now);
+        track_tcp_rt_v6_rev(tap_id, info, now, from_ingress_hook);
     }
 }
