@@ -1,5 +1,7 @@
-use aya::maps::{HashMap, MapData};
-use crate::common::{MirrorKey, GlobalMirrorKey, MirrorConfig, TapMapRuntime};
+use aya::maps::{HashMap, MapData, PerCpuHashMap};
+use crate::common::{
+    GlobalMirrorKey, MirrorConfig, MirrorKey, MirrorStatsValue, TapMapRuntime,
+};
 
 /// Resolve interface name to ifindex.
 pub fn resolve_ifindex(iface: &str) -> Result<u32, String> {
@@ -8,6 +10,20 @@ pub fn resolve_ifindex(iface: &str) -> Result<u32, String> {
         .map_err(|e| format!("Interface '{}' not found: {}", iface, e))?;
     contents.trim().parse::<u32>()
         .map_err(|e| format!("Invalid ifindex for '{}': {}", iface, e))
+}
+
+fn ignore_missing_remove<E: std::fmt::Debug>(result: Result<(), E>, map_name: &str) -> Result<(), String> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let err = format!("{:?}", e);
+            if err.contains("KeyNotFound") || err.contains("No such file or directory") {
+                Ok(())
+            } else {
+                Err(format!("{} remove: {}", map_name, err))
+            }
+        }
+    }
 }
 
 /// Update the mirror_enabled flag in FIREWALL_CONFIG map.
@@ -126,6 +142,32 @@ pub fn delete_mirror_rule(
     Ok(())
 }
 
+pub fn clear_mirror_rule_stats(
+    src_id: u32,
+    dst_id: u32,
+    proto: u8,
+    direction: u8,
+    runtime: TapMapRuntime<'_>,
+) -> Result<(), String> {
+    let map_path = format!("{}/MIRROR_STATS", runtime.pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open MIRROR_STATS: {:?}", e))?;
+    let mut map = PerCpuHashMap::<_, MirrorKey, MirrorStatsValue>::try_from(
+        aya::maps::Map::PerCpuHashMap(map_data)
+    ).map_err(|e| format!("convert MIRROR_STATS: {:?}", e))?;
+
+    let key = MirrorKey {
+        tap_id: runtime.tap_id,
+        src_id,
+        dst_id,
+        proto,
+        direction,
+        pad: [0; 2],
+    };
+
+    ignore_missing_remove(map.remove(&key), "MIRROR_STATS")
+}
+
 pub fn add_global_mirror(
     direction: u8,
     target_ifindex: u32,
@@ -178,6 +220,26 @@ pub fn delete_global_mirror(
 
     sync_mirror_enabled(runtime, user_mirror_enabled && has_mirror_rules(runtime))?;
     Ok(())
+}
+
+pub fn clear_global_mirror_stats(
+    direction: u8,
+    runtime: TapMapRuntime<'_>,
+) -> Result<(), String> {
+    let map_path = format!("{}/MIRROR_GLOBAL_STATS", runtime.pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|e| format!("open MIRROR_GLOBAL_STATS: {:?}", e))?;
+    let mut map = PerCpuHashMap::<_, GlobalMirrorKey, MirrorStatsValue>::try_from(
+        aya::maps::Map::PerCpuHashMap(map_data)
+    ).map_err(|e| format!("convert MIRROR_GLOBAL_STATS: {:?}", e))?;
+
+    let key = GlobalMirrorKey {
+        tap_id: runtime.tap_id,
+        direction,
+        pad: [0; 3],
+    };
+
+    ignore_missing_remove(map.remove(&key), "MIRROR_GLOBAL_STATS")
 }
 
 pub fn list_mirror_rules(runtime: TapMapRuntime<'_>) -> Result<Vec<(MirrorKey, MirrorConfig)>, String> {

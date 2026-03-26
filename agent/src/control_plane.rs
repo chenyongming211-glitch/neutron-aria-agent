@@ -1654,6 +1654,33 @@ impl ControlPlane {
         }
 
         for rule in &matching_rules {
+            let clear_stats_result = if rule.is_global {
+                aria_core::mirror_ops::clear_global_mirror_stats(
+                    rule.direction,
+                    state.map_runtime(),
+                )
+            } else {
+                aria_core::mirror_ops::clear_mirror_rule_stats(
+                    rule.src_group_id,
+                    rule.dst_group_id,
+                    rule.proto,
+                    rule.direction,
+                    state.map_runtime(),
+                )
+            };
+            if let Err(e) = clear_stats_result {
+                warn!(
+                    instance,
+                    src_group_id = rule.src_group_id,
+                    dst_group_id = rule.dst_group_id,
+                    proto = rule.proto,
+                    direction = rule.direction,
+                    is_global = rule.is_global,
+                    error = %e,
+                    "failed to clear mirror stats after delete"
+                );
+            }
+
             if rule.is_global {
                 state
                     .state
