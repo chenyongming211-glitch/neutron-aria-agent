@@ -313,8 +313,17 @@ impl FirewallInstance {
             .map_err(|e| format!("read /sys/class/net: {}", e))?;
         for entry in entries {
             let entry = entry.map_err(|e| format!("read /sys/class/net entry: {}", e))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|e| format!("read /sys/class/net entry type: {}", e))?;
+            // Sysfs may expose helper files like bonding_masters alongside real
+            // interfaces. Only interface directories/symlinks carry ifindex.
+            if !file_type.is_dir() && !file_type.is_symlink() {
+                continue;
+            }
             let iface = entry.file_name().to_string_lossy().to_string();
-            let raw = match std::fs::read_to_string(entry.path().join("ifindex")) {
+            let ifindex_path = entry.path().join("ifindex");
+            let raw = match std::fs::read_to_string(&ifindex_path) {
                 Ok(raw) => raw,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(format!("read ifindex for {}: {}", iface, e)),
