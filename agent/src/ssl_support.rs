@@ -218,10 +218,10 @@ pub fn attach_uprobe_if_needed(
     target: &str,
     fn_name: &str,
     pin_path: &str,
-) -> Result<(), String> {
+) -> Result<Option<aya::programs::uprobe::UProbeLink>, String> {
     let link_pin = link_pin_path(pin_path, prog_name);
     if Path::new(&link_pin).exists() {
-        return Ok(());
+        return Ok(None);
     }
 
     let probe = uprobe_program(bpf, prog_name)?;
@@ -242,14 +242,10 @@ pub fn attach_uprobe_if_needed(
     let link = probe
         .take_link(link_id)
         .map_err(|e| format!("{} take_link: {:?}", prog_name, e))?;
-    let fd_link: aya::programs::links::FdLink = link
-        .try_into()
-        .map_err(|e: aya::programs::links::LinkError| format!("{} FdLink: {:?}", prog_name, e))?;
-    fd_link
-        .pin(&link_pin)
-        .map_err(|e| format!("{} pin link: {:?}", prog_name, e))?;
 
-    Ok(())
+    // Older kernels can attach these uprobes successfully but do not expose a
+    // pinnable FdLink. Keep the owned link alive in userspace instead.
+    Ok(Some(link))
 }
 
 pub fn find_libssl() -> Option<String> {

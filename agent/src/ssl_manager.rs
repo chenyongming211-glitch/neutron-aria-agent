@@ -5,13 +5,16 @@ use tracing::{info, warn};
 
 use crate::ssl_support::{
     attach_uprobe_if_needed, find_libssl, is_ssl_pin_name, load_uprobe_program, pin_map_if_needed,
-    pin_program_if_needed, SSL_LINK_NAMES, SSL_MAP_NAMES, SSL_PROGRAM_NAMES, SSL_UPROBE_SPECS,
+    pin_program_if_needed, SSL_MAP_NAMES, SSL_PROGRAM_NAMES, SSL_UPROBE_SPECS,
 };
 
 struct SslManagerState {
     loaded: bool,
+    links_attached: bool,
     libssl_path: Option<String>,
     last_error: Option<String>,
+    // Keep owned uprobe links alive on kernels that cannot expose pinnable FdLinks.
+    active_links: Vec<aya::programs::uprobe::UProbeLink>,
 }
 
 pub struct SslManager {
@@ -29,8 +32,10 @@ impl SslManager {
             pin_path: format!("{}/ssl-global", base_pin_path),
             state: Mutex::new(SslManagerState {
                 loaded: false,
+                links_attached: false,
                 libssl_path: None,
                 last_error: None,
+                active_links: Vec::new(),
             }),
         }
     }
@@ -43,7 +48,7 @@ impl SslManager {
         let mut state = self.state.lock().await;
         let libssl_path = find_libssl();
         let need_core_init = !state.loaded || !self.core_pins_ready();
-        let need_link_init = libssl_path.is_some() && !self.link_pins_ready();
+        let need_link_init = libssl_path.is_some() && !state.links_attached;
 
         if !need_core_init && !need_link_init {
             state.libssl_path = libssl_path;
@@ -53,10 +58,12 @@ impl SslManager {
 
         let result = self.load_impl(libssl_path.clone());
         match result {
-            Ok(()) => {
+            Ok(runtime) => {
                 state.loaded = true;
+                state.links_attached = runtime.links_attached;
                 state.libssl_path = libssl_path;
                 state.last_error = None;
+                state.active_links = runtime.active_links;
                 Ok(())
             }
             Err(e) => {
@@ -130,7 +137,7 @@ impl SslManager {
         Ok(())
     }
 
-    fn load_impl(&self, libssl_path: Option<String>) -> Result<(), String> {
+    fn load_impl(&self, libssl_path: Option<String>) -> Result<LoadedSslRuntime, String> {
         std::fs::create_dir_all(&self.pin_path)
             .map_err(|e| format!("create ssl-global pin dir {}: {}", self.pin_path, e))?;
 
@@ -167,22 +174,30 @@ impl SslManager {
             pin_program_if_needed(&mut bpf, prog_name, &self.pin_path)?;
         }
 
+        let mut active_links = Vec::new();
+        let mut links_attached = false;
         if let Some(libssl) = libssl_path {
             for spec in SSL_UPROBE_SPECS {
-                attach_uprobe_if_needed(
+                if let Some(link) = attach_uprobe_if_needed(
                     &mut bpf,
                     spec.program_name,
                     &libssl,
                     spec.symbol_name,
                     &self.pin_path,
-                )?;
+                )? {
+                    active_links.push(link);
+                }
             }
+            links_attached = true;
             info!(libssl = %libssl, "SSL uprobes ready");
         } else {
             info!("libssl not found; SSL probes will attach when libssl becomes available");
         }
 
-        Ok(())
+        Ok(LoadedSslRuntime {
+            links_attached,
+            active_links,
+        })
     }
 
     fn load_bpf_with_pins(&self, bpf_bytes: &[u8]) -> Result<aya::Ebpf, String> {
@@ -234,10 +249,9 @@ impl SslManager {
                 .iter()
                 .all(|name| Path::new(&format!("{}/{}", self.pin_path, name)).exists())
     }
+}
 
-    fn link_pins_ready(&self) -> bool {
-        SSL_LINK_NAMES
-            .iter()
-            .all(|name| Path::new(&format!("{}/{}", self.pin_path, name)).exists())
-    }
+struct LoadedSslRuntime {
+    links_attached: bool,
+    active_links: Vec<aya::programs::uprobe::UProbeLink>,
 }
