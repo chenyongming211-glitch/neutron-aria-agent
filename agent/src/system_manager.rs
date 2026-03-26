@@ -160,6 +160,9 @@ pub async fn system_start(
         .register_system_instance(pin_path, state_path)
         .await
     {
+        if let Err(clear_err) = sm.clear_attached_iface() {
+            warn!(iface = %iface, error = %clear_err, "failed to clear attached interface record after register failure");
+        }
         cleanup_failed_start(iface, pin_path);
         return Err(format!("control-plane register failed: {}", e));
     }

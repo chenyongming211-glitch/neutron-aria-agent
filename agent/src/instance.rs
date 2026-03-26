@@ -447,8 +447,12 @@ impl FirewallInstance {
         Ok(reconciled)
     }
 
-    fn persisted_live_ifaces_nonempty(&self) -> Result<bool, String> {
-        Ok(!self.reconcile_persisted_live_ifaces()?.ifaces.is_empty())
+    fn persisted_live_ifaces_active(&self) -> Result<bool, String> {
+        Ok(self
+            .reconcile_persisted_live_ifaces()?
+            .ifaces
+            .iter()
+            .any(|entry| entry.active))
     }
 
     fn shared_runtime_has_pinned_live_links(&self) -> Result<bool, String> {
@@ -626,7 +630,7 @@ impl FirewallInstance {
         let xdp_link_pin = self.xdp_link_pin_path();
         let preexisting_xdp_link = Path::new(&xdp_link_pin).exists();
         let expected_metadata = self.expected_runtime_metadata(ebpf_path)?;
-        let persisted_live_runtime = self.persisted_live_ifaces_nonempty()?;
+        let persisted_live_runtime = self.persisted_live_ifaces_active()?;
         let pinned_live_runtime = if pin_path_preexisted {
             self.shared_runtime_has_pinned_live_links()?
         } else {
