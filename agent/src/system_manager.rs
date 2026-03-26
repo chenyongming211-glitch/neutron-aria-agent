@@ -152,6 +152,22 @@ pub async fn system_start(
         warn!(iface = %iface, error = %e, "failed to record attached interface");
     }
 
+    match sm.get_tap_id() {
+        Ok(tap_id) if tap_id != aria_core::common::TAP_ID_UNASSIGNED => {
+            sm.set_tap_id(aria_core::common::TAP_ID_UNASSIGNED)
+                .map_err(|e| {
+                    cleanup_failed_start(iface, pin_path);
+                    format!("failed to reset system tap_id before replay: {}", e)
+                })?;
+            info!(iface = %iface, stale_tap_id = tap_id, "reset stale system tap_id before replay");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            cleanup_failed_start(iface, pin_path);
+            return Err(format!("failed to read system tap_id before replay: {}", e));
+        }
+    }
+
     // Replay state
     replay_state(&mut bpf, state_path);
 

@@ -1176,11 +1176,10 @@ pub const ALL_MAP_NAMES: &[&str] = &[
 pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
     let state = crate::wal::load_with_wal(state_path);
     let tap_id = state.tap_id;
-
-    if state.groups.is_empty() && state.rules.is_empty() && state.qos_rules.is_empty() && state.mirror_rules.is_empty() {
-        info!(state_path = %state_path, "state is empty; nothing to replay");
-        return;
-    }
+    let has_runtime_objects = !(state.groups.is_empty()
+        && state.rules.is_empty()
+        && state.qos_rules.is_empty()
+        && state.mirror_rules.is_empty());
 
     info!(
         state_path = %state_path,
@@ -1190,6 +1189,9 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
         mirror_rules = state.mirror_rules.len(),
         "replaying state into eBPF maps"
     );
+    if !has_runtime_objects {
+        info!(state_path = %state_path, "state has no groups or rules; replay will apply runtime config only");
+    }
 
     let mut errors: Vec<String> = Vec::new();
     let mut group_count: u32 = 0;
@@ -1517,11 +1519,10 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
     let state = crate::wal::load_with_wal(state_path);
     let tap_id = state.tap_id;
     let runtime = TapMapRuntime::new(pin_path, tap_id);
-
-    if state.groups.is_empty() && state.rules.is_empty() && state.qos_rules.is_empty() && state.mirror_rules.is_empty() {
-        info!(state_path = %state_path, "state is empty; nothing to replay");
-        return Ok(());
-    }
+    let has_runtime_objects = !(state.groups.is_empty()
+        && state.rules.is_empty()
+        && state.qos_rules.is_empty()
+        && state.mirror_rules.is_empty());
 
     info!(
         state_path = %state_path,
@@ -1532,6 +1533,9 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
         mirror_rules = state.mirror_rules.len(),
         "replaying state into pinned maps"
     );
+    if !has_runtime_objects {
+        info!(state_path = %state_path, pin_path = %pin_path, "state has no groups or rules; replay will apply runtime config only");
+    }
 
     let mut errors: Vec<String> = Vec::new();
     let mut group_count: u32 = 0;
