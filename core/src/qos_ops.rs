@@ -49,7 +49,9 @@ fn clear_qos_token_bucket(runtime: TapMapRuntime<'_>, key: &QosKey) -> Result<()
         Ok(()) => Ok(()),
         Err(e) => {
             let err = format!("{:?}", e);
-            if err.contains("KeyNotFound") {
+            // Some kernel/map combinations report a missing hash key as ENOENT
+            // instead of Aya's KeyNotFound variant. Treat both as "nothing to clear".
+            if err.contains("KeyNotFound") || err.contains("No such file or directory") {
                 Ok(())
             } else {
                 Err(format!("QOS_TOKEN_BUCKET remove: {}", err))
