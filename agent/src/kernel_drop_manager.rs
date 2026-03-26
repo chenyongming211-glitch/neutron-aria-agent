@@ -330,6 +330,34 @@ impl KernelDropManager {
         Ok(())
     }
 
+    fn store_persisted_live_ifaces_atomically(
+        &self,
+        state: &PersistedLiveIfaces,
+    ) -> Result<(), String> {
+        let path = self.managed_persisted_live_ifaces_path();
+        let tmp_path = format!("{}.tmp", path);
+        let json = serde_json::to_string_pretty(state)
+            .map_err(|e| format!("serialize kernel-drop persisted live ifaces: {}", e))?;
+        if let Some(parent) = Path::new(&path).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "create kernel-drop persisted live ifaces dir {}: {}",
+                    parent.display(),
+                    e
+                )
+            })?;
+        }
+        std::fs::write(&tmp_path, json).map_err(|e| {
+            format!(
+                "write kernel-drop persisted live ifaces tmp {}: {}",
+                tmp_path, e
+            )
+        })?;
+        std::fs::rename(&tmp_path, &path)
+            .map_err(|e| format!("rename kernel-drop persisted live ifaces {}: {}", path, e))?;
+        Ok(())
+    }
+
     fn current_ifindex_for_iface(iface: &str) -> Option<u32> {
         let path = format!("/sys/class/net/{}/ifindex", iface);
         let raw = std::fs::read_to_string(&path).ok()?;
@@ -372,6 +400,9 @@ impl KernelDropManager {
             }
         }
         state.schema_version = KERNEL_DROP_PERSISTED_LIVE_IFACES_SCHEMA_VERSION;
+        if original_schema_version == 1 {
+            self.store_persisted_live_ifaces_atomically(&state)?;
+        }
         Ok((state, authoritative))
     }
 

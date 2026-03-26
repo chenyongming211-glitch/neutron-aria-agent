@@ -234,6 +234,9 @@ impl FirewallInstance {
             }
         }
         state.schema_version = PERSISTED_LIVE_IFACES_SCHEMA_VERSION;
+        if original_schema_version == 1 {
+            self.store_persisted_live_ifaces_atomically(&state)?;
+        }
         Ok(state)
     }
 

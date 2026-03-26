@@ -35,6 +35,59 @@ fn pin_runtime_maps(bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn pin_runtime_programs(bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {
+    for name in &["xdp_firewall", "tc_egress", "tc_ingress"] {
+        let program = match bpf.program_mut(name) {
+            Some(program) => program,
+            None => return Err(format!("Program {} not found", name)),
+        };
+        if let Err(e) = program.pin(format!("{}/{}", pin_path, name)) {
+            return Err(format!("Failed to pin program {}: {:?}", name, e));
+        }
+    }
+    Ok(())
+}
+
+fn attach_xdp_program(bpf: &mut aya::Ebpf, iface: &str, pin_path: &str) -> Result<(), String> {
+    info!(iface = %iface, "attaching XDP");
+    let xdp_program = bpf
+        .program_mut("xdp_firewall")
+        .ok_or("XDP program not found")?;
+
+    let xdp: &mut aya::programs::Xdp = xdp_program
+        .try_into()
+        .map_err(|e: aya::programs::ProgramError| format!("try_into error: {:?}", e))?;
+
+    xdp.load().map_err(|e| format!("xdp.load error: {:?}", e))?;
+
+    let link_id = xdp
+        .attach(iface, aya::programs::XdpFlags::default())
+        .map_err(|e| format!("attach error: {:?}", e))?;
+
+    info!(iface = %iface, link_id = ?link_id, "XDP attached successfully");
+
+    let xdp_link_pin = format!("{}/xdp_link", pin_path);
+    match (|| -> Result<(), String> {
+        let xdp_link = xdp
+            .take_link(link_id)
+            .map_err(|e| format!("take_link: {:?}", e))?;
+        let fd_link: aya::programs::links::FdLink = xdp_link
+            .try_into()
+            .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
+        fd_link
+            .pin(&xdp_link_pin)
+            .map_err(|e| format!("pin: {:?}", e))?;
+        Ok(())
+    })() {
+        Ok(()) => info!(iface = %iface, "XDP link pinned"),
+        Err(e) => {
+            warn!(iface = %iface, error = %e, "XDP link pin not supported; XDP will detach on agent exit")
+        }
+    }
+
+    Ok(())
+}
+
 /// Start the system firewall (standalone mode, not tap-managed)
 pub async fn system_start(
     iface: &str,
@@ -61,90 +114,11 @@ pub async fn system_start(
         .load(&bpf_bytes)
         .map_err(|e| format!("load error: {:?}", e))?;
 
-    // Attach XDP
-    info!(iface = %iface, "attaching XDP");
-    let xdp_program = bpf
-        .program_mut("xdp_firewall")
-        .ok_or("XDP program not found")?;
-
-    let xdp: &mut aya::programs::Xdp = xdp_program
-        .try_into()
-        .map_err(|e: aya::programs::ProgramError| format!("try_into error: {:?}", e))?;
-
-    xdp.load().map_err(|e| format!("xdp.load error: {:?}", e))?;
-
-    let link_id = xdp
-        .attach(iface, aya::programs::XdpFlags::default())
-        .map_err(|e| format!("attach error: {:?}", e))?;
-
-    info!(iface = %iface, link_id = ?link_id, "XDP attached successfully");
-
-    // Try to pin the XDP link (requires bpf_link, kernel 5.7+)
-    let xdp_link_pin = format!("{}/xdp_link", pin_path);
-    match (|| -> Result<(), String> {
-        let xdp_link = xdp
-            .take_link(link_id)
-            .map_err(|e| format!("take_link: {:?}", e))?;
-        let fd_link: aya::programs::links::FdLink = xdp_link
-            .try_into()
-            .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
-        fd_link
-            .pin(&xdp_link_pin)
-            .map_err(|e| format!("pin: {:?}", e))?;
-        Ok(())
-    })() {
-        Ok(()) => info!(iface = %iface, "XDP link pinned"),
-        Err(e) => {
-            warn!(iface = %iface, error = %e, "XDP link pin not supported; XDP will detach on agent exit")
-        }
-    }
-
-    // Attach TC egress (with graceful link pin fallback)
-    if let Err(e) = attach_tc_program(
-        &mut bpf,
-        "tc_egress",
-        iface,
-        aya::programs::tc::TcAttachType::Egress,
-        pin_path,
-    ) {
-        warn!(iface = %iface, error = %e, "TC egress attach failed; egress control disabled");
-    }
-
-    // Attach TC ingress (mirror, with graceful link pin fallback)
-    if let Err(e) = attach_tc_program(
-        &mut bpf,
-        "tc_ingress",
-        iface,
-        aya::programs::tc::TcAttachType::Ingress,
-        pin_path,
-    ) {
-        warn!(iface = %iface, error = %e, "TC ingress attach failed; ingress mirror disabled");
-    }
-
-    // Setup FQ qdisc for QoS EDT
-    if let Err(e) = setup_fq_qdisc(iface) {
-        warn!(iface = %iface, error = %e, "FQ qdisc setup failed; QoS EDT disabled");
-    }
-
-    // Pin all maps. Missing critical maps means the dataplane is not safely manageable.
+    // Pin all maps before attaching any programs so replay can rebuild runtime state
+    // before packets hit the dataplane.
     if let Err(e) = pin_runtime_maps(&mut bpf, pin_path) {
         cleanup_failed_start(iface, pin_path);
         return Err(e);
-    }
-
-    // Pin runtime programs.
-    for name in &["xdp_firewall", "tc_egress", "tc_ingress"] {
-        let program = match bpf.program_mut(name) {
-            Some(program) => program,
-            None => {
-                cleanup_failed_start(iface, pin_path);
-                return Err(format!("Program {} not found", name));
-            }
-        };
-        if let Err(e) = program.pin(format!("{}/{}", pin_path, name)) {
-            cleanup_failed_start(iface, pin_path);
-            return Err(format!("Failed to pin program {}: {:?}", name, e));
-        }
     }
 
     let sm = aria_core::state::StateManager::new(state_path);
@@ -173,6 +147,40 @@ pub async fn system_start(
     if let Err(e) = replay_state(&mut bpf, state_path) {
         cleanup_failed_start(iface, pin_path);
         return Err(format!("failed to replay state: {}", e));
+    }
+
+    if let Err(e) = setup_fq_qdisc(iface) {
+        warn!(iface = %iface, error = %e, "FQ qdisc setup failed; QoS EDT disabled");
+    }
+
+    if let Err(e) = attach_xdp_program(&mut bpf, iface, pin_path) {
+        cleanup_failed_start(iface, pin_path);
+        return Err(e);
+    }
+
+    if let Err(e) = attach_tc_program(
+        &mut bpf,
+        "tc_egress",
+        iface,
+        aya::programs::tc::TcAttachType::Egress,
+        pin_path,
+    ) {
+        warn!(iface = %iface, error = %e, "TC egress attach failed; egress control disabled");
+    }
+
+    if let Err(e) = attach_tc_program(
+        &mut bpf,
+        "tc_ingress",
+        iface,
+        aya::programs::tc::TcAttachType::Ingress,
+        pin_path,
+    ) {
+        warn!(iface = %iface, error = %e, "TC ingress attach failed; ingress mirror disabled");
+    }
+
+    if let Err(e) = pin_runtime_programs(&mut bpf, pin_path) {
+        cleanup_failed_start(iface, pin_path);
+        return Err(e);
     }
 
     if let Err(e) = sm.set_attached_iface(iface) {
