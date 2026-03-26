@@ -68,7 +68,7 @@ unsafe fn update_global_mirror_stats(key: &GlobalMirrorKey, pkt_len: u32, succes
 
 /// Try to mirror a packet via TC (bpf_clone_redirect).
 /// Two-level lookup:
-///   1. Exact match in MIRROR_POLICY[src_id, dst_id, proto, direction]
+///   1. 8-level fallback match in MIRROR_POLICY[src_id, dst_id, proto, direction]
 ///   2. Global match in MIRROR_GLOBAL[direction]
 ///
 /// `skb_ptr` must be the raw `*mut __sk_buff` from TcContext.
@@ -83,20 +83,28 @@ pub unsafe fn try_mirror_tc(
     direction: u8,
     pkt_len: u32,
 ) {
-    // Level 1: per-rule mirror policy
-    let policy_key = MirrorKey {
-        tap_id,
-        src_id,
-        dst_id,
-        proto,
-        direction,
-        pad: [0; 2],
-    };
+    // bit 0: src_id wildcard, bit 1: dst_id wildcard, bit 2: proto wildcard
+    const ORDER: [u8; 8] = [0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111];
 
-    if let Some(cfg) = MIRROR_POLICY.get(&policy_key) {
-        let ret = bpf_clone_redirect(skb_ptr, cfg.target_ifindex, 0);
-        update_mirror_stats(&policy_key, pkt_len, ret == 0);
-        return;
+    let mut i = 0u8;
+    while i < 8 {
+        let mask = ORDER[i as usize];
+        let policy_key = MirrorKey {
+            tap_id,
+            src_id: if (mask & 1) != 0 { 0 } else { src_id },
+            dst_id: if (mask & 2) != 0 { 0 } else { dst_id },
+            proto: if (mask & 4) != 0 { 0 } else { proto },
+            direction,
+            pad: [0; 2],
+        };
+
+        if let Some(cfg) = MIRROR_POLICY.get(&policy_key) {
+            let ret = bpf_clone_redirect(skb_ptr, cfg.target_ifindex, 0);
+            update_mirror_stats(&policy_key, pkt_len, ret == 0);
+            return;
+        }
+
+        i += 1;
     }
 
     // Level 2: global mirror
