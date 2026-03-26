@@ -175,6 +175,29 @@ impl ControlPlane {
         )
     }
 
+    fn validate_policy_ports(proto: u8, ports: Option<&str>) -> Result<(), ControlPlaneError> {
+        let Some(ports) = ports else {
+            return Ok(());
+        };
+
+        let ports = ports.trim();
+        if ports.is_empty() || ports.eq_ignore_ascii_case("all") {
+            return Ok(());
+        }
+
+        match proto {
+            aria_core::common::IPPROTO_TCP | aria_core::common::IPPROTO_UDP => Ok(()),
+            0 => Err(ControlPlaneError::ValidationError(
+                "Port filters require a concrete protocol; use 'tcp' or 'udp' instead of 'any'"
+                    .to_string(),
+            )),
+            other => Err(ControlPlaneError::ValidationError(format!(
+                "Protocol {} does not support port filters",
+                other
+            ))),
+        }
+    }
+
     fn validate_preexisting_live_runtime(
         &self,
         name: &str,
@@ -1104,6 +1127,7 @@ impl ControlPlane {
 
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
+        Self::validate_policy_ports(proto, ports)?;
 
         // Snapshot state for rollback (clone the parts that apply_add_rule mutates)
         let snapshot_rules = state.state.rules.clone();
