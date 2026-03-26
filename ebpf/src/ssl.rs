@@ -801,9 +801,6 @@ unsafe fn append_http_fragment(
     }
 
     scratch.data_len = end as u16;
-    if end < SSL_HTTP_REQ_CAP as i64 {
-        *scratch.req_data.as_mut_ptr().add(end as usize) = 0;
-    }
 
     true
 }
@@ -1027,7 +1024,9 @@ pub unsafe fn ssl_write_entry_impl(ctx: &ProbeContext) -> u32 {
     scratch.data_len = 0;
     scratch.flags = 0;
     scratch._pad = [0u8; 5];
-    scratch.req_data[0] = 0;
+    // Keep unused bytes zeroed so userspace can still treat req_data as a
+    // NUL-terminated buffer without requiring an extra byte store at req_data[end].
+    scratch.req_data = [0u8; SSL_HTTP_REQ_CAP];
 
     if !append_http_fragment(scratch, buf_ptr as *const u8, num as usize) {
         return 0;
