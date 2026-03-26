@@ -176,29 +176,8 @@ impl ControlPlane {
     }
 
     fn validate_policy_ports(proto: u8, ports: Option<&str>) -> Result<(), ControlPlaneError> {
-        const TCP_PROTO: u8 = libc::IPPROTO_TCP as u8;
-        const UDP_PROTO: u8 = libc::IPPROTO_UDP as u8;
-
-        let Some(ports) = ports else {
-            return Ok(());
-        };
-
-        let ports = ports.trim();
-        if ports.is_empty() || ports.eq_ignore_ascii_case("all") {
-            return Ok(());
-        }
-
-        match proto {
-            TCP_PROTO | UDP_PROTO => Ok(()),
-            0 => Err(ControlPlaneError::ValidationError(
-                "Port filters require a concrete protocol; use 'tcp' or 'udp' instead of 'any'"
-                    .to_string(),
-            )),
-            other => Err(ControlPlaneError::ValidationError(format!(
-                "Protocol {} does not support port filters",
-                other
-            ))),
-        }
+        aria_core::ebpf_ops::validate_policy_ports(proto, ports)
+            .map_err(ControlPlaneError::ValidationError)
     }
 
     fn validate_preexisting_live_runtime(

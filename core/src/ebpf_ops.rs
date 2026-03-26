@@ -891,7 +891,15 @@ pub fn add_policy(
         return Err("Firewall not started. Run 'system start' first.".to_string());
     }
 
-    let is_all_ports = matches!(ports, Some("all") | Some("") | None);
+    validate_policy_ports(proto, ports)?;
+
+    let is_all_ports = match ports {
+        Some(p) => {
+            let p = p.trim();
+            p.is_empty() || p.eq_ignore_ascii_case("all")
+        }
+        None => true,
+    };
     let has_port_filter = (ports.is_some() && !is_all_ports) as u8;
 
     if is_new_port_set {
@@ -951,6 +959,29 @@ pub fn add_policy(
         "added policy"
     );
     Ok(())
+}
+
+pub fn validate_policy_ports(proto: u8, ports: Option<&str>) -> Result<(), String> {
+    const TCP_PROTO: u8 = libc::IPPROTO_TCP as u8;
+    const UDP_PROTO: u8 = libc::IPPROTO_UDP as u8;
+
+    let Some(ports) = ports else {
+        return Ok(());
+    };
+
+    let ports = ports.trim();
+    if ports.is_empty() || ports.eq_ignore_ascii_case("all") {
+        return Ok(());
+    }
+
+    match proto {
+        TCP_PROTO | UDP_PROTO => Ok(()),
+        0 => Err(
+            "Port filters require a concrete protocol; use 'tcp' or 'udp' instead of 'any'"
+                .to_string(),
+        ),
+        other => Err(format!("Protocol {} does not support port filters", other)),
+    }
 }
 
 /// 从内核 POLICY_TABLE 中删除指定策略条目
@@ -1180,6 +1211,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
         && state.rules.is_empty()
         && state.qos_rules.is_empty()
         && state.mirror_rules.is_empty());
+    let mut valid_rules: Vec<&crate::state::RuleInfo> = Vec::new();
 
     info!(
         state_path = %state_path,
@@ -1191,6 +1223,20 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
     );
     if !has_runtime_objects {
         info!(state_path = %state_path, "state has no groups or rules; replay will apply runtime config only");
+    }
+    for rule in &state.rules {
+        match validate_policy_ports(rule.proto, rule.ports.as_deref()) {
+            Ok(()) => valid_rules.push(rule),
+            Err(e) => warn!(
+                state_path = %state_path,
+                src_id = rule.src_group_id,
+                dst_id = rule.dst_group_id,
+                proto = rule.proto,
+                direction = rule.direction,
+                error = %e,
+                "skipping invalid persisted ACL rule during replay"
+            ),
+        }
     }
 
     let mut errors: Vec<String> = Vec::new();
@@ -1304,9 +1350,13 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
             .and_then(|m| aya::maps::HashMap::<_, PortKey, u8>::try_from(m).map_err(|e| format!("{:?}", e)))
         {
             Ok(mut port_pool) => {
-                for rule in &state.rules {
+                for rule in &valid_rules {
                     if let (Some(idx), Some(ref ports)) = (rule.bitmap_idx, &rule.ports) {
-                        if !ports.is_empty() && ports != "all" && !written_bitmaps.contains(&idx) {
+                        let ports = ports.trim();
+                        if !ports.is_empty()
+                            && !ports.eq_ignore_ascii_case("all")
+                            && !written_bitmaps.contains(&idx)
+                        {
                             match parse_ports(ports, rule.action) {
                                 Ok(port_rules) => {
                                     for (start, end, action) in port_rules {
@@ -1337,9 +1387,12 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
             .and_then(|m| aya::maps::HashMap::<_, PolicyKey, PolicyValue>::try_from(m).map_err(|e| format!("{:?}", e)))
         {
             Ok(mut policy_table) => {
-                for rule in &state.rules {
+                for rule in &valid_rules {
                     let is_all_ports = match &rule.ports {
-                        Some(p) => p == "all" || p.is_empty(),
+                        Some(p) => {
+                            let p = p.trim();
+                            p.is_empty() || p.eq_ignore_ascii_case("all")
+                        }
                         None => true,
                     };
                     let has_port_filter = (rule.ports.is_some() && !is_all_ports) as u8;
@@ -1523,6 +1576,7 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
         && state.rules.is_empty()
         && state.qos_rules.is_empty()
         && state.mirror_rules.is_empty());
+    let mut valid_rules: Vec<&crate::state::RuleInfo> = Vec::new();
 
     info!(
         state_path = %state_path,
@@ -1535,6 +1589,21 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
     );
     if !has_runtime_objects {
         info!(state_path = %state_path, pin_path = %pin_path, "state has no groups or rules; replay will apply runtime config only");
+    }
+    for rule in &state.rules {
+        match validate_policy_ports(rule.proto, rule.ports.as_deref()) {
+            Ok(()) => valid_rules.push(rule),
+            Err(e) => warn!(
+                state_path = %state_path,
+                pin_path = %pin_path,
+                src_id = rule.src_group_id,
+                dst_id = rule.dst_group_id,
+                proto = rule.proto,
+                direction = rule.direction,
+                error = %e,
+                "skipping invalid persisted ACL rule during pinned replay"
+            ),
+        }
     }
 
     let mut errors: Vec<String> = Vec::new();
@@ -1587,10 +1656,15 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
     }
 
     let mut written_bitmaps: HashSet<u32> = HashSet::new();
-    for rule in &state.rules {
+    for rule in &valid_rules {
         let ports = rule.ports.as_deref();
         let write_port_set = match (rule.bitmap_idx, ports) {
-            (Some(idx), Some(ports)) if !ports.is_empty() && ports != "all" => written_bitmaps.insert(idx),
+            (Some(idx), Some(ports)) => {
+                let ports = ports.trim();
+                !ports.is_empty()
+                    && !ports.eq_ignore_ascii_case("all")
+                    && written_bitmaps.insert(idx)
+            }
             _ => false,
         };
 
