@@ -5,7 +5,7 @@ use tracing::{info, warn};
 
 use crate::ssl_support::{
     attach_uprobe_if_needed, find_libssl, is_ssl_pin_name, load_uprobe_program, pin_map_if_needed,
-    pin_program_if_needed, SSL_MAP_NAMES, SSL_PROGRAM_NAMES, SSL_UPROBE_SPECS,
+    pin_program_if_needed, SSL_LINK_NAMES, SSL_MAP_NAMES, SSL_PROGRAM_NAMES, SSL_UPROBE_SPECS,
 };
 
 struct SslManagerState {
@@ -48,7 +48,12 @@ impl SslManager {
         let mut state = self.state.lock().await;
         let libssl_path = find_libssl();
         let need_core_init = !state.loaded || !self.core_pins_ready();
-        let need_link_init = libssl_path.is_some() && !state.links_attached;
+        let need_link_init = libssl_path.is_some()
+            && if aya::features().bpf_perf_link() {
+                !self.link_pins_ready()
+            } else {
+                !state.links_attached
+            };
 
         if !need_core_init && !need_link_init {
             state.libssl_path = libssl_path;
@@ -248,6 +253,12 @@ impl SslManager {
             && SSL_PROGRAM_NAMES
                 .iter()
                 .all(|name| Path::new(&format!("{}/{}", self.pin_path, name)).exists())
+    }
+
+    fn link_pins_ready(&self) -> bool {
+        SSL_LINK_NAMES
+            .iter()
+            .all(|name| Path::new(&format!("{}/{}", self.pin_path, name)).exists())
     }
 }
 

@@ -243,9 +243,19 @@ pub fn attach_uprobe_if_needed(
         .take_link(link_id)
         .map_err(|e| format!("{} take_link: {:?}", prog_name, e))?;
 
-    // Older kernels can attach these uprobes successfully but do not expose a
-    // pinnable FdLink. Keep the owned link alive in userspace instead.
-    Ok(Some(link))
+    if aya::features().bpf_perf_link() {
+        let fd_link: aya::programs::links::FdLink = link
+            .try_into()
+            .map_err(|e: aya::programs::links::LinkError| format!("{} FdLink: {:?}", prog_name, e))?;
+        fd_link
+            .pin(&link_pin)
+            .map_err(|e| format!("{} pin link: {:?}", prog_name, e))?;
+        Ok(None)
+    } else {
+        // Older kernels can attach these uprobes successfully but do not expose a
+        // pinnable FdLink. Keep the owned link alive in userspace instead.
+        Ok(Some(link))
+    }
 }
 
 pub fn find_libssl() -> Option<String> {
