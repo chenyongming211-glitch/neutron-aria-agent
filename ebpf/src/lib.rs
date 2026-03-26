@@ -662,6 +662,14 @@ unsafe fn phase_ct_fastpath_tc_ingress_v4(
     p: &mut PipelineCtx,
     ct_key: &CtKey4,
 ) {
+    if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
+        if (p.flags & FLAG_IS_FORWARD) != 0 {
+            tcprt::track_tcp_rt_v4(ct_key, info, p.now, true);
+        } else {
+            tcprt::track_tcp_rt_v4_rev(p.tap_id, info, p.now);
+        }
+    }
+
     if stats::monitoring_enabled(p.tap_id) {
         if (p.flags & FLAG_ACL_ON) != 0 {
             let matched = get_matched(p);
@@ -693,6 +701,14 @@ unsafe fn phase_ct_fastpath_tc_ingress_v6(
     p: &mut PipelineCtx,
     ct_key: &CtKey6,
 ) {
+    if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
+        if (p.flags & FLAG_IS_FORWARD) != 0 {
+            tcprt::track_tcp_rt_v6(ct_key, info, p.now, true);
+        } else {
+            tcprt::track_tcp_rt_v6_rev(p.tap_id, info, p.now);
+        }
+    }
+
     if stats::monitoring_enabled(p.tap_id) {
         if (p.flags & FLAG_ACL_ON) != 0 {
             let matched = get_matched(p);
@@ -723,6 +739,10 @@ unsafe fn phase_ct_miss_tc_ingress_v4(
     info: &parser::PacketInfo,
     p: &mut PipelineCtx,
 ) {
+    if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
+        tcprt::track_tcp_rt_v4_auto(p.tap_id, info, p.now);
+    }
+
     let need_ids = need_ingress_ids(p);
     if need_ids {
         record_tc_ingress_contract_fallback(p, CT_CONTRACT_FAMILY_IPV4);
@@ -747,6 +767,10 @@ unsafe fn phase_ct_miss_tc_ingress_v6(
     info: &parser::PacketInfo,
     p: &mut PipelineCtx,
 ) {
+    if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
+        tcprt::track_tcp_rt_v6_auto(p.tap_id, info, p.now);
+    }
+
     let need_ids = need_ingress_ids(p);
     if need_ids {
         record_tc_ingress_contract_fallback(p, CT_CONTRACT_FAMILY_IPV6);
@@ -949,7 +973,7 @@ unsafe fn phase_policy_tc(info: &parser::PacketInfo, p: &mut PipelineCtx) {
 unsafe fn phase_flow_tcprt_v4(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
     stats::update_flow_stats_v4(ct_key, p.pkt_len, p.now);
     if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
-        tcprt::track_tcp_rt_v4(ct_key, info, p.now, true);
+        tcprt::track_tcp_rt_v4_auto(p.tap_id, info, p.now);
     }
 }
 
@@ -958,7 +982,7 @@ unsafe fn phase_flow_tcprt_v4(info: &parser::PacketInfo, p: &mut PipelineCtx, ct
 unsafe fn phase_flow_tcprt_v6(info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
     stats::update_flow_stats_v6(ct_key, p.pkt_len, p.now);
     if (p.flags & FLAG_TCPRT_ON) != 0 && info.proto == IPPROTO_TCP {
-        tcprt::track_tcp_rt_v6(ct_key, info, p.now, true);
+        tcprt::track_tcp_rt_v6_auto(p.tap_id, info, p.now);
     }
 }
 

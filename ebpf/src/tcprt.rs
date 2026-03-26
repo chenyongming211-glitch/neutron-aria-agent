@@ -215,6 +215,46 @@ pub unsafe fn track_tcp_rt_v4_rev(tap_id: u32, info: &PacketInfo, now: u64) {
     track_tcp_rt_v4(&fwd_key, info, now, false);
 }
 
+/// Track TCP-RT for either direction without relying on conntrack direction hints.
+/// Used on degraded paths where we only have the packet tuple and current TCPRT table state.
+#[inline(always)]
+pub unsafe fn track_tcp_rt_v4_auto(tap_id: u32, info: &PacketInfo, now: u64) {
+    let is_syn = (info.tcp_flags & TCP_FLAG_SYN) != 0;
+    let is_ack = (info.tcp_flags & TCP_FLAG_ACK) != 0;
+    let fwd_key = CtKey4 {
+        tap_id,
+        src_ip: info.src_ip,
+        dst_ip: info.dst_ip,
+        src_port: info.src_port,
+        dst_port: info.dst_port,
+        proto: info.proto,
+        pad: [0; 3],
+    };
+
+    if is_syn && !is_ack {
+        track_tcp_rt_v4(&fwd_key, info, now, true);
+        return;
+    }
+
+    if TCPRT_TABLE_V4.get(&fwd_key).is_some() {
+        track_tcp_rt_v4(&fwd_key, info, now, true);
+        return;
+    }
+
+    let rev_key = CtKey4 {
+        tap_id,
+        src_ip: info.dst_ip,
+        dst_ip: info.src_ip,
+        src_port: info.dst_port,
+        dst_port: info.src_port,
+        proto: info.proto,
+        pad: [0; 3],
+    };
+    if TCPRT_TABLE_V4.get(&rev_key).is_some() {
+        track_tcp_rt_v4_rev(tap_id, info, now);
+    }
+}
+
 /// Track TCP response time for an IPv6 flow.
 /// Same logic as V4, different map.
 #[inline(always)]
@@ -355,4 +395,43 @@ pub unsafe fn track_tcp_rt_v6_rev(tap_id: u32, info: &PacketInfo, now: u64) {
         pad: [0; 3],
     };
     track_tcp_rt_v6(&fwd_key, info, now, false);
+}
+
+/// Track TCP-RT for either direction without relying on conntrack direction hints.
+#[inline(always)]
+pub unsafe fn track_tcp_rt_v6_auto(tap_id: u32, info: &PacketInfo, now: u64) {
+    let is_syn = (info.tcp_flags & TCP_FLAG_SYN) != 0;
+    let is_ack = (info.tcp_flags & TCP_FLAG_ACK) != 0;
+    let fwd_key = CtKey6 {
+        tap_id,
+        src_ip: info.src_ip_v6,
+        dst_ip: info.dst_ip_v6,
+        src_port: info.src_port,
+        dst_port: info.dst_port,
+        proto: info.proto,
+        pad: [0; 3],
+    };
+
+    if is_syn && !is_ack {
+        track_tcp_rt_v6(&fwd_key, info, now, true);
+        return;
+    }
+
+    if TCPRT_TABLE_V6.get(&fwd_key).is_some() {
+        track_tcp_rt_v6(&fwd_key, info, now, true);
+        return;
+    }
+
+    let rev_key = CtKey6 {
+        tap_id,
+        src_ip: info.dst_ip_v6,
+        dst_ip: info.src_ip_v6,
+        src_port: info.dst_port,
+        dst_port: info.src_port,
+        proto: info.proto,
+        pad: [0; 3],
+    };
+    if TCPRT_TABLE_V6.get(&rev_key).is_some() {
+        track_tcp_rt_v6_rev(tap_id, info, now);
+    }
 }
