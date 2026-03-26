@@ -176,6 +176,9 @@ impl ControlPlane {
     }
 
     fn validate_policy_ports(proto: u8, ports: Option<&str>) -> Result<(), ControlPlaneError> {
+        const TCP_PROTO: u8 = libc::IPPROTO_TCP as u8;
+        const UDP_PROTO: u8 = libc::IPPROTO_UDP as u8;
+
         let Some(ports) = ports else {
             return Ok(());
         };
@@ -186,7 +189,7 @@ impl ControlPlane {
         }
 
         match proto {
-            aria_core::common::IPPROTO_TCP | aria_core::common::IPPROTO_UDP => Ok(()),
+            TCP_PROTO | UDP_PROTO => Ok(()),
             0 => Err(ControlPlaneError::ValidationError(
                 "Port filters require a concrete protocol; use 'tcp' or 'udp' instead of 'any'"
                     .to_string(),
