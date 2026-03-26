@@ -1117,6 +1117,16 @@ pub fn ssl_set_accept_state(ctx: ProbeContext) -> u32 {
 }
 
 #[uprobe]
+pub fn ssl_shutdown_entry(ctx: ProbeContext) -> u32 {
+    unsafe { ssl::ssl_shutdown_entry_impl(&ctx) }
+}
+
+#[uprobe]
+pub fn ssl_free_entry(ctx: ProbeContext) -> u32 {
+    unsafe { ssl::ssl_free_entry_impl(&ctx) }
+}
+
+#[uprobe]
 pub fn ssl_set_sni(ctx: ProbeContext) -> u32 {
     unsafe { ssl::ssl_set_sni_impl(&ctx) }
 }

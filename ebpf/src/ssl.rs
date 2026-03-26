@@ -164,6 +164,24 @@ unsafe fn handshake_pending_for(pid_tgid: u64, ssl_ptr: u64) -> bool {
 }
 
 #[inline(always)]
+unsafe fn cleanup_handshake_state_for_ssl(pid_tgid: u64, ssl_ptr: u64) {
+    if ssl_ptr == 0 {
+        return;
+    }
+
+    let should_remove = match SSL_HANDSHAKE_SCRATCH.get(&pid_tgid) {
+        Some(s) => s.ssl_ptr == ssl_ptr,
+        None => false,
+    };
+    if !should_remove {
+        return;
+    }
+
+    let _ = SSL_HANDSHAKE_SCRATCH.remove(&pid_tgid);
+    let _ = SSL_SNI_TABLE.remove(&pid_tgid);
+}
+
+#[inline(always)]
 unsafe fn start_handshake_from_arg0(ctx: &ProbeContext) -> u32 {
     if !ssl_enabled() {
         return 0;
@@ -229,6 +247,25 @@ pub unsafe fn ssl_set_connect_state_impl(ctx: &ProbeContext) -> u32 {
 
 pub unsafe fn ssl_set_accept_state_impl(ctx: &ProbeContext) -> u32 {
     start_handshake_from_arg0(ctx)
+}
+
+#[inline(always)]
+unsafe fn cleanup_handshake_from_arg0(ctx: &ProbeContext) -> u32 {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let ssl_ptr: u64 = match ctx.arg(0) {
+        Some(v) => v,
+        None => return 0,
+    };
+    cleanup_handshake_state_for_ssl(pid_tgid, ssl_ptr);
+    0
+}
+
+pub unsafe fn ssl_shutdown_entry_impl(ctx: &ProbeContext) -> u32 {
+    cleanup_handshake_from_arg0(ctx)
+}
+
+pub unsafe fn ssl_free_entry_impl(ctx: &ProbeContext) -> u32 {
+    cleanup_handshake_from_arg0(ctx)
 }
 
 pub unsafe fn ssl_set_sni_impl(ctx: &ProbeContext) -> u32 {

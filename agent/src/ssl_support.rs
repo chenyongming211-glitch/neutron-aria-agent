@@ -32,6 +32,8 @@ pub const SSL_PROGRAM_NAMES: &[&str] = &[
     "ssl_accept_return",
     "ssl_set_connect_state",
     "ssl_set_accept_state",
+    "ssl_shutdown_entry",
+    "ssl_free_entry",
     "ssl_set_sni",
     "ssl_write_entry",
     "ssl_write_ex_entry",
@@ -52,6 +54,8 @@ pub const SSL_LINK_NAMES: &[&str] = &[
     "ssl_accept_return_link",
     "ssl_set_connect_state_link",
     "ssl_set_accept_state_link",
+    "ssl_shutdown_entry_link",
+    "ssl_free_entry_link",
     "ssl_set_sni_link",
     "ssl_write_entry_link",
     "ssl_write_ex_entry_link",
@@ -95,6 +99,14 @@ pub const SSL_UPROBE_SPECS: &[SslUprobeSpec] = &[
     SslUprobeSpec {
         program_name: "ssl_set_accept_state",
         symbol_name: "SSL_set_accept_state",
+    },
+    SslUprobeSpec {
+        program_name: "ssl_shutdown_entry",
+        symbol_name: "SSL_shutdown",
+    },
+    SslUprobeSpec {
+        program_name: "ssl_free_entry",
+        symbol_name: "SSL_free",
     },
     SslUprobeSpec {
         program_name: "ssl_set_sni",
