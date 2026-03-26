@@ -1,5 +1,6 @@
 use aya::maps::{HashMap, MapData};
-use crate::common::{QosKey, QosConfig, TapMapRuntime};
+
+use crate::common::{QosConfig, QosKey, TapMapRuntime, TokenBucket};
 
 /// Update the qos_enabled flag in FIREWALL_CONFIG map.
 /// Called after every add/delete of a QoS rule to keep the flag in sync.
@@ -20,10 +21,13 @@ fn sync_qos_enabled(runtime: TapMapRuntime<'_>, enabled: bool) -> Result<(), Str
 fn has_qos_rules(runtime: TapMapRuntime<'_>) -> bool {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/QOS_CONFIG", pin_path);
-    let Ok(map_data) = MapData::from_pin(&map_path) else { return false };
-    let Ok(map) = HashMap::<_, QosKey, QosConfig>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ) else { return false };
+    let Ok(map_data) = MapData::from_pin(&map_path) else {
+        return false;
+    };
+    let Ok(map) = HashMap::<_, QosKey, QosConfig>::try_from(aya::maps::Map::HashMap(map_data))
+    else {
+        return false;
+    };
     for item in map.iter() {
         if let Ok((key, _)) = item {
             if key.tap_id == runtime.tap_id {
@@ -32,6 +36,26 @@ fn has_qos_rules(runtime: TapMapRuntime<'_>) -> bool {
         }
     }
     false
+}
+
+fn clear_qos_token_bucket(runtime: TapMapRuntime<'_>, key: &QosKey) -> Result<(), String> {
+    let map_path = format!("{}/QOS_TOKEN_BUCKET", runtime.pin_path);
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open QOS_TOKEN_BUCKET: {:?}", e))?;
+    let mut map = HashMap::<_, QosKey, TokenBucket>::try_from(aya::maps::Map::HashMap(map_data))
+        .map_err(|e| format!("convert QOS_TOKEN_BUCKET: {:?}", e))?;
+
+    match map.remove(key) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let err = format!("{:?}", e);
+            if err.contains("KeyNotFound") {
+                Ok(())
+            } else {
+                Err(format!("QOS_TOKEN_BUCKET remove: {}", err))
+            }
+        }
+    }
 }
 
 pub fn add_qos_rule(
@@ -46,11 +70,9 @@ pub fn add_qos_rule(
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/QOS_CONFIG", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open QOS_CONFIG: {:?}", e))?;
-    let mut map = HashMap::<_, QosKey, QosConfig>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert QOS_CONFIG: {:?}", e))?;
+    let map_data = MapData::from_pin(&map_path).map_err(|e| format!("open QOS_CONFIG: {:?}", e))?;
+    let mut map = HashMap::<_, QosKey, QosConfig>::try_from(aya::maps::Map::HashMap(map_data))
+        .map_err(|e| format!("convert QOS_CONFIG: {:?}", e))?;
 
     let key = QosKey {
         tap_id: runtime.tap_id,
@@ -66,6 +88,7 @@ pub fn add_qos_rule(
         pad: [0; 6],
     };
 
+    clear_qos_token_bucket(runtime, &key)?;
     map.insert(&key, &config, 0)
         .map_err(|e| format!("QOS_CONFIG insert: {:?}", e))?;
 
@@ -83,11 +106,9 @@ pub fn delete_qos_rule(
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/QOS_CONFIG", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open QOS_CONFIG: {:?}", e))?;
-    let mut map = HashMap::<_, QosKey, QosConfig>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert QOS_CONFIG: {:?}", e))?;
+    let map_data = MapData::from_pin(&map_path).map_err(|e| format!("open QOS_CONFIG: {:?}", e))?;
+    let mut map = HashMap::<_, QosKey, QosConfig>::try_from(aya::maps::Map::HashMap(map_data))
+        .map_err(|e| format!("convert QOS_CONFIG: {:?}", e))?;
 
     let key = QosKey {
         tap_id: runtime.tap_id,
@@ -98,6 +119,7 @@ pub fn delete_qos_rule(
 
     map.remove(&key)
         .map_err(|e| format!("QOS_CONFIG remove: {:?}", e))?;
+    clear_qos_token_bucket(runtime, &key)?;
 
     // After deleting, check if any rules remain and user wants QoS
     sync_qos_enabled(runtime, user_qos_enabled && has_qos_rules(runtime))?;
@@ -108,11 +130,9 @@ pub fn delete_qos_rule(
 pub fn list_qos_rules(runtime: TapMapRuntime<'_>) -> Result<Vec<(QosKey, QosConfig)>, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/QOS_CONFIG", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open QOS_CONFIG: {:?}", e))?;
-    let map = HashMap::<_, QosKey, QosConfig>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert QOS_CONFIG: {:?}", e))?;
+    let map_data = MapData::from_pin(&map_path).map_err(|e| format!("open QOS_CONFIG: {:?}", e))?;
+    let map = HashMap::<_, QosKey, QosConfig>::try_from(aya::maps::Map::HashMap(map_data))
+        .map_err(|e| format!("convert QOS_CONFIG: {:?}", e))?;
 
     let mut entries = Vec::new();
     for item in map.iter() {
@@ -126,10 +146,15 @@ pub fn list_qos_rules(runtime: TapMapRuntime<'_>) -> Result<Vec<(QosKey, QosConf
     Ok(entries)
 }
 
-pub fn replay_qos_rules(bpf: &mut aya::Ebpf, tap_id: u32, rules: &[(u32, u8, u64, u64, u8, u8)]) -> Vec<String> {
+pub fn replay_qos_rules(
+    bpf: &mut aya::Ebpf,
+    tap_id: u32,
+    rules: &[(u32, u8, u64, u64, u8, u8)],
+) -> Vec<String> {
     let mut errors = Vec::new();
 
-    match bpf.map_mut("QOS_CONFIG")
+    match bpf
+        .map_mut("QOS_CONFIG")
         .ok_or_else(|| "QOS_CONFIG not found".to_string())
         .and_then(|m| HashMap::<_, QosKey, QosConfig>::try_from(m).map_err(|e| format!("{:?}", e)))
     {
@@ -149,7 +174,10 @@ pub fn replay_qos_rules(bpf: &mut aya::Ebpf, tap_id: u32, rules: &[(u32, u8, u64
                     pad: [0; 6],
                 };
                 if let Err(e) = map.insert(&key, &config, 0) {
-                    errors.push(format!("QOS_CONFIG group_id={} dir={}: {:?}", group_id, direction, e));
+                    errors.push(format!(
+                        "QOS_CONFIG group_id={} dir={}: {:?}",
+                        group_id, direction, e
+                    ));
                 }
             }
         }
@@ -171,25 +199,43 @@ pub fn replay_qos_rules(bpf: &mut aya::Ebpf, tap_id: u32, rules: &[(u32, u8, u64
 /// Minimum 256 KB to handle at least a few jumbo frames at very low rates.
 pub fn compute_default_burst(rate_bps: u64) -> u64 {
     let burst = rate_bps / 2;
-    if burst > 256 * 1024 { burst } else { 256 * 1024 }
+    if burst > 256 * 1024 {
+        burst
+    } else {
+        256 * 1024
+    }
 }
 
 pub fn parse_rate(rate_str: &str) -> Result<u64, String> {
     let s = rate_str.trim().to_lowercase();
     let bytes_per_sec = if let Some(num) = s.strip_suffix("gbps") {
-        let n: f64 = num.trim().parse().map_err(|_| format!("Invalid rate: {}", rate_str))?;
+        let n: f64 = num
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid rate: {}", rate_str))?;
         n * 1_000_000_000.0 / 8.0
     } else if let Some(num) = s.strip_suffix("mbps") {
-        let n: f64 = num.trim().parse().map_err(|_| format!("Invalid rate: {}", rate_str))?;
+        let n: f64 = num
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid rate: {}", rate_str))?;
         n * 1_000_000.0 / 8.0
     } else if let Some(num) = s.strip_suffix("kbps") {
-        let n: f64 = num.trim().parse().map_err(|_| format!("Invalid rate: {}", rate_str))?;
+        let n: f64 = num
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid rate: {}", rate_str))?;
         n * 1_000.0 / 8.0
     } else if let Some(num) = s.strip_suffix("bps") {
-        let n: f64 = num.trim().parse().map_err(|_| format!("Invalid rate: {}", rate_str))?;
+        let n: f64 = num
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid rate: {}", rate_str))?;
         n / 8.0
     } else {
-        return s.parse::<u64>().map_err(|_| format!("Invalid rate: {}. Use format like 100mbps, 1gbps", rate_str));
+        return s
+            .parse::<u64>()
+            .map_err(|_| format!("Invalid rate: {}. Use format like 100mbps, 1gbps", rate_str));
     };
     if bytes_per_sec < 0.0 {
         return Err(format!("Rate must be positive: {}", rate_str));
@@ -200,16 +246,27 @@ pub fn parse_rate(rate_str: &str) -> Result<u64, String> {
 pub fn parse_burst(burst_str: &str) -> Result<u64, String> {
     let s = burst_str.trim().to_lowercase();
     let bytes = if let Some(num) = s.strip_suffix("gb") {
-        let n: f64 = num.trim().parse().map_err(|_| format!("Invalid burst: {}", burst_str))?;
+        let n: f64 = num
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid burst: {}", burst_str))?;
         n * 1_073_741_824.0
     } else if let Some(num) = s.strip_suffix("mb") {
-        let n: f64 = num.trim().parse().map_err(|_| format!("Invalid burst: {}", burst_str))?;
+        let n: f64 = num
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid burst: {}", burst_str))?;
         n * 1_048_576.0
     } else if let Some(num) = s.strip_suffix("kb") {
-        let n: f64 = num.trim().parse().map_err(|_| format!("Invalid burst: {}", burst_str))?;
+        let n: f64 = num
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid burst: {}", burst_str))?;
         n * 1024.0
     } else {
-        return s.parse::<u64>().map_err(|_| format!("Invalid burst: {}. Use format like 1mb, 512kb", burst_str));
+        return s
+            .parse::<u64>()
+            .map_err(|_| format!("Invalid burst: {}. Use format like 1mb, 512kb", burst_str));
     };
     if bytes < 0.0 {
         return Err(format!("Burst must be positive: {}", burst_str));
