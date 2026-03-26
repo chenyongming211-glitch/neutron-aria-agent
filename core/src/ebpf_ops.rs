@@ -1042,13 +1042,7 @@ pub fn delete_port_set(
     Ok(())
 }
 
-/// Scrub all tap-scoped entries from the shared managed runtime before replay.
-/// This makes replay idempotent and cleans up partial state left by failed attach attempts.
-pub fn scrub_managed_runtime_state(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
-    if runtime.tap_id == TAP_ID_UNASSIGNED {
-        return Ok(0);
-    }
-
+fn scrub_runtime_state(runtime: TapMapRuntime<'_>, scope: &'static str) -> Result<u64, String> {
     let pin_path = runtime.pin_path;
     let tap_id = runtime.tap_id;
     let mut removed = 0u64;
@@ -1136,8 +1130,23 @@ pub fn scrub_managed_runtime_state(runtime: TapMapRuntime<'_>) -> Result<u64, St
     removed += crate::trace_ops::scrub_trace_filter(runtime)?;
     record_optional_scrub(tap_id, "TRACE_LOG", &mut removed, crate::trace_ops::flush_trace_log(runtime));
 
-    info!(tap_id, removed_entries = removed, "scrubbed managed tap runtime state");
+    info!(tap_id, removed_entries = removed, scope, "scrubbed runtime state");
     Ok(removed)
+}
+
+/// Scrub all tap-scoped entries from the shared managed runtime before replay.
+/// This makes replay idempotent and cleans up partial state left by failed attach attempts.
+pub fn scrub_managed_runtime_state(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
+    if runtime.tap_id == TAP_ID_UNASSIGNED {
+        return Ok(0);
+    }
+
+    scrub_runtime_state(runtime, "managed")
+}
+
+/// Scrub all standalone tap-scoped entries before replaying persisted system state.
+pub fn scrub_standalone_runtime_state(pin_path: &str) -> Result<u64, String> {
+    scrub_runtime_state(TapMapRuntime::new(pin_path, TAP_ID_UNASSIGNED), "standalone")
 }
 
 /// Network-instance map names pinned under each tap/system instance directory.
@@ -1204,7 +1213,7 @@ pub const ALL_MAP_NAMES: &[&str] = &[
 ];
 
 /// 从 snapshot + WAL 重放所有组和规则到已加载的 eBPF maps。
-pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
+pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String> {
     let state = crate::wal::load_with_wal(state_path);
     let tap_id = state.tap_id;
     let has_runtime_objects = !(state.groups.is_empty()
@@ -1564,7 +1573,20 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) {
         for err in &errors {
             warn!(error = %err, "replay error");
         }
+        let preview = errors.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
+        let suffix = if errors.len() > 3 {
+            format!("; ... {} more", errors.len() - 3)
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "replay encountered {} errors: {}{}",
+            errors.len(),
+            preview,
+            suffix
+        ));
     }
+    Ok(())
 }
 
 /// Replay snapshot + WAL directly into already pinned maps without loading a new eBPF object.

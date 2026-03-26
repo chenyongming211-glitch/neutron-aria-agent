@@ -4,7 +4,8 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use aria_core::ebpf_ops::{
-    detach_tc_egress, replay_state, setup_fq_qdisc, CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES,
+    detach_tc_egress, replay_state, scrub_standalone_runtime_state, setup_fq_qdisc,
+    CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES,
 };
 
 fn cleanup_failed_start(iface: &str, pin_path: &str) {
@@ -146,12 +147,7 @@ pub async fn system_start(
         }
     }
 
-    // Record attached iface
     let sm = aria_core::state::StateManager::new(state_path);
-    if let Err(e) = sm.set_attached_iface(iface) {
-        warn!(iface = %iface, error = %e, "failed to record attached interface");
-    }
-
     match sm.get_tap_id() {
         Ok(tap_id) if tap_id != aria_core::common::TAP_ID_UNASSIGNED => {
             sm.set_tap_id(aria_core::common::TAP_ID_UNASSIGNED)
@@ -168,8 +164,20 @@ pub async fn system_start(
         }
     }
 
+    if let Err(e) = scrub_standalone_runtime_state(pin_path) {
+        cleanup_failed_start(iface, pin_path);
+        return Err(format!("failed to scrub standalone runtime state before replay: {}", e));
+    }
+
     // Replay state
-    replay_state(&mut bpf, state_path);
+    if let Err(e) = replay_state(&mut bpf, state_path) {
+        cleanup_failed_start(iface, pin_path);
+        return Err(format!("failed to replay state: {}", e));
+    }
+
+    if let Err(e) = sm.set_attached_iface(iface) {
+        warn!(iface = %iface, error = %e, "failed to record attached interface");
+    }
 
     // Register with control plane
     if let Err(e) = control_plane
