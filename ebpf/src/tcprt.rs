@@ -164,9 +164,8 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
             if is_retrans_req(entry, info.tcp_seq) {
                 (*entry).retrans_req += 1;
             } else {
-                // Only count as new request cycle if NOT a retransmit
+                // Start a new request/response cycle after the prior one completed.
                 if (*entry).first_response_ts > 0 {
-                    (*entry).request_count += 1;
                     (*entry).first_response_ts = 0;
                 }
             }
@@ -185,10 +184,11 @@ pub unsafe fn track_tcp_rt_v4(ct_key: &CtKey4, info: &PacketInfo, now: u64, is_f
                 (*entry).retrans_resp += 1;
             }
 
-            // ART: first response after last request
+            // ART and completed cycle count: first response after the latest request.
             if (*entry).first_response_ts == 0 && (*entry).last_request_ts > 0 {
                 (*entry).first_response_ts = now;
                 (*entry).art_ns = now.wrapping_sub((*entry).last_request_ts);
+                (*entry).request_count += 1;
             }
 
             // Rotate: last → prev, new → last
@@ -232,7 +232,11 @@ pub unsafe fn track_tcp_rt_v4_auto(tap_id: u32, info: &PacketInfo, now: u64) {
     };
 
     if is_syn && !is_ack {
-        track_tcp_rt_v4(&fwd_key, info, now, true);
+        // Degraded auto-path cannot distinguish a true second-hook observation
+        // from a client SYN retransmission. Keep the first SYN timestamp stable.
+        if TCPRT_TABLE_V4.get(&fwd_key).is_none() {
+            track_tcp_rt_v4(&fwd_key, info, now, true);
+        }
         return;
     }
 
@@ -355,7 +359,6 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
                 (*entry).retrans_req += 1;
             } else {
                 if (*entry).first_response_ts > 0 {
-                    (*entry).request_count += 1;
                     (*entry).first_response_ts = 0;
                 }
             }
@@ -373,6 +376,7 @@ pub unsafe fn track_tcp_rt_v6(ct_key: &CtKey6, info: &PacketInfo, now: u64, is_f
             if (*entry).first_response_ts == 0 && (*entry).last_request_ts > 0 {
                 (*entry).first_response_ts = now;
                 (*entry).art_ns = now.wrapping_sub((*entry).last_request_ts);
+                (*entry).request_count += 1;
             }
             (*entry).prev_resp_seq = (*entry).last_resp_seq;
             (*entry).prev_resp_payload_len = (*entry).last_resp_payload_len;
@@ -413,7 +417,9 @@ pub unsafe fn track_tcp_rt_v6_auto(tap_id: u32, info: &PacketInfo, now: u64) {
     };
 
     if is_syn && !is_ack {
-        track_tcp_rt_v6(&fwd_key, info, now, true);
+        if TCPRT_TABLE_V6.get(&fwd_key).is_none() {
+            track_tcp_rt_v6(&fwd_key, info, now, true);
+        }
         return;
     }
 

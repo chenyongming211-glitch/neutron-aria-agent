@@ -1,9 +1,9 @@
-use aya::maps::{HashMap, MapData, PerCpuHashMap, PerCpuValues};
 use crate::common::{
-    PolicyKey, RuleStatsValue, FlowStatsValue, CtKey4, CtKey6, CtValue, CT_NEW, CT_ESTABLISHED,
-    QosKey, QosStatsValue, GroupStatsKey, GroupStatsValue, TapMapRuntime,
-    MirrorKey, GlobalMirrorKey, MirrorStatsValue, TcpRtValue,
+    CtKey4, CtKey6, CtValue, FlowStatsValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue,
+    MirrorKey, MirrorStatsValue, PolicyKey, QosKey, QosStatsValue, RuleStatsValue, TapMapRuntime,
+    TcpRtValue, CT_ESTABLISHED, CT_NEW,
 };
+use aya::maps::{HashMap, MapData, PerCpuHashMap, PerCpuValues};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
@@ -75,11 +75,11 @@ fn sum_per_cpu_flow_stats(values: PerCpuValues<FlowStatsValue>) -> (u64, u64, u6
 pub fn get_rule_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<RuleStatsEntry>, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/RULE_STATS", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open RULE_STATS: {:?}", e))?;
+    let map_data = MapData::from_pin(&map_path).map_err(|e| format!("open RULE_STATS: {:?}", e))?;
     let map = PerCpuHashMap::<_, PolicyKey, RuleStatsValue>::try_from(
-        aya::maps::Map::PerCpuHashMap(map_data)
-    ).map_err(|e| format!("convert RULE_STATS: {:?}", e))?;
+        aya::maps::Map::PerCpuHashMap(map_data),
+    )
+    .map_err(|e| format!("convert RULE_STATS: {:?}", e))?;
 
     let mut entries = Vec::new();
     for item in map.iter() {
@@ -88,9 +88,16 @@ pub fn get_rule_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<RuleStatsEntry>,
                 if key.tap_id != runtime.tap_id {
                     continue;
                 }
-                let (packets, bytes, dropped_packets, dropped_bytes) = sum_per_cpu_rule_stats(values);
+                let (packets, bytes, dropped_packets, dropped_bytes) =
+                    sum_per_cpu_rule_stats(values);
                 if packets > 0 {
-                    entries.push(RuleStatsEntry { key, packets, bytes, dropped_packets, dropped_bytes });
+                    entries.push(RuleStatsEntry {
+                        key,
+                        packets,
+                        bytes,
+                        dropped_packets,
+                        dropped_bytes,
+                    });
                 }
             }
             Err(_) => continue,
@@ -101,15 +108,19 @@ pub fn get_rule_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<RuleStatsEntry>,
     Ok(entries)
 }
 
-pub fn get_top_flows_v4(runtime: TapMapRuntime<'_>, n: usize) -> Result<Vec<FlowStatsEntry>, String> {
+pub fn get_top_flows_v4(
+    runtime: TapMapRuntime<'_>,
+    n: usize,
+) -> Result<Vec<FlowStatsEntry>, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/FLOW_STATS_V4", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open FLOW_STATS_V4: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open FLOW_STATS_V4: {:?}", e))?;
     // LruPerCpuHashMap on kernel side → PerCpuLruHashMap enum variant in aya
     let map = PerCpuHashMap::<_, CtKey4, FlowStatsValue>::try_from(
-        aya::maps::Map::PerCpuLruHashMap(map_data)
-    ).map_err(|e| format!("convert FLOW_STATS_V4: {:?}", e))?;
+        aya::maps::Map::PerCpuLruHashMap(map_data),
+    )
+    .map_err(|e| format!("convert FLOW_STATS_V4: {:?}", e))?;
 
     let mut entries = Vec::new();
     for item in map.iter() {
@@ -141,11 +152,14 @@ pub fn get_top_flows_v4(runtime: TapMapRuntime<'_>, n: usize) -> Result<Vec<Flow
     Ok(entries)
 }
 
-pub fn get_top_flows_v6(runtime: TapMapRuntime<'_>, n: usize) -> Result<Vec<FlowStatsEntryV6>, String> {
+pub fn get_top_flows_v6(
+    runtime: TapMapRuntime<'_>,
+    n: usize,
+) -> Result<Vec<FlowStatsEntryV6>, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/FLOW_STATS_V6", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open FLOW_STATS_V6: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open FLOW_STATS_V6: {:?}", e))?;
     // 内核端是 LruPerCpuHashMap，这里对应 PerCpuLruHashMap 分支。
     let map = PerCpuHashMap::<_, CtKey6, FlowStatsValue>::try_from(
         aya::maps::Map::PerCpuLruHashMap(map_data),
@@ -194,9 +208,9 @@ pub fn get_conntrack_stats(runtime: TapMapRuntime<'_>) -> Result<ConntrackSummar
     // CT_TABLE_V4 — LruHashMap on kernel side
     let map_path = format!("{}/CT_TABLE_V4", pin_path);
     if let Ok(map_data) = MapData::from_pin(&map_path) {
-        if let Ok(map) = HashMap::<_, CtKey4, CtValue>::try_from(
-            aya::maps::Map::LruHashMap(map_data)
-        ) {
+        if let Ok(map) =
+            HashMap::<_, CtKey4, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        {
             for item in map.iter() {
                 if let Ok((key, val)) = item {
                     if key.tap_id != runtime.tap_id {
@@ -216,9 +230,9 @@ pub fn get_conntrack_stats(runtime: TapMapRuntime<'_>) -> Result<ConntrackSummar
     // CT_TABLE_V6 — LruHashMap on kernel side
     let map_path = format!("{}/CT_TABLE_V6", pin_path);
     if let Ok(map_data) = MapData::from_pin(&map_path) {
-        if let Ok(map) = HashMap::<_, CtKey6, CtValue>::try_from(
-            aya::maps::Map::LruHashMap(map_data)
-        ) {
+        if let Ok(map) =
+            HashMap::<_, CtKey6, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        {
             for item in map.iter() {
                 if let Ok((key, val)) = item {
                     if key.tap_id != runtime.tap_id {
@@ -271,11 +285,11 @@ fn sum_per_cpu_qos_stats(values: PerCpuValues<QosStatsValue>) -> (u64, u64, u64,
 pub fn get_qos_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<QosStatsEntry>, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/QOS_STATS", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open QOS_STATS: {:?}", e))?;
-    let map = PerCpuHashMap::<_, QosKey, QosStatsValue>::try_from(
-        aya::maps::Map::PerCpuHashMap(map_data)
-    ).map_err(|e| format!("convert QOS_STATS: {:?}", e))?;
+    let map_data = MapData::from_pin(&map_path).map_err(|e| format!("open QOS_STATS: {:?}", e))?;
+    let map = PerCpuHashMap::<_, QosKey, QosStatsValue>::try_from(aya::maps::Map::PerCpuHashMap(
+        map_data,
+    ))
+    .map_err(|e| format!("convert QOS_STATS: {:?}", e))?;
 
     let mut entries = Vec::new();
     for item in map.iter() {
@@ -326,11 +340,12 @@ fn sum_per_cpu_group_stats(values: PerCpuValues<GroupStatsValue>) -> (u64, u64) 
 pub fn get_group_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<GroupStatsEntry>, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/GROUP_STATS", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open GROUP_STATS: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open GROUP_STATS: {:?}", e))?;
     let map = PerCpuHashMap::<_, GroupStatsKey, GroupStatsValue>::try_from(
-        aya::maps::Map::PerCpuHashMap(map_data)
-    ).map_err(|e| format!("convert GROUP_STATS: {:?}", e))?;
+        aya::maps::Map::PerCpuHashMap(map_data),
+    )
+    .map_err(|e| format!("convert GROUP_STATS: {:?}", e))?;
 
     let mut entries = Vec::new();
     for item in map.iter() {
@@ -341,7 +356,11 @@ pub fn get_group_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<GroupStatsEntry
                 }
                 let (packets, bytes) = sum_per_cpu_group_stats(values);
                 if packets > 0 {
-                    entries.push(GroupStatsEntry { key, packets, bytes });
+                    entries.push(GroupStatsEntry {
+                        key,
+                        packets,
+                        bytes,
+                    });
                 }
             }
             Err(_) => continue,
@@ -416,7 +435,7 @@ pub fn get_mirror_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<MirrorStatsEnt
     let map_path = format!("{}/MIRROR_STATS", pin_path);
     if let Ok(map_data) = MapData::from_pin(&map_path) {
         if let Ok(map) = PerCpuHashMap::<_, MirrorKey, MirrorStatsValue>::try_from(
-            aya::maps::Map::PerCpuHashMap(map_data)
+            aya::maps::Map::PerCpuHashMap(map_data),
         ) {
             for item in map.iter() {
                 if let Ok((key, values)) = item {
@@ -445,7 +464,7 @@ pub fn get_mirror_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<MirrorStatsEnt
     let map_path = format!("{}/MIRROR_GLOBAL_STATS", pin_path);
     if let Ok(map_data) = MapData::from_pin(&map_path) {
         if let Ok(map) = PerCpuHashMap::<_, GlobalMirrorKey, MirrorStatsValue>::try_from(
-            aya::maps::Map::PerCpuHashMap(map_data)
+            aya::maps::Map::PerCpuHashMap(map_data),
         ) {
             for item in map.iter() {
                 if let Ok((key, values)) = item {
@@ -505,6 +524,10 @@ pub struct TcprtMetricsSummary {
 }
 
 fn accumulate_tcprt_value(summary: &mut TcprtMetricsSummary, val: &TcpRtValue) {
+    if val.close_ts > 0 {
+        return;
+    }
+
     let handshake_us = val.handshake_ns as f64 / 1000.0;
     let art_us = val.art_ns as f64 / 1000.0;
     let rtt_client_us = val.rtt_client_ns as f64 / 1000.0;
@@ -531,18 +554,20 @@ fn accumulate_tcprt_value(summary: &mut TcprtMetricsSummary, val: &TcpRtValue) {
     }
 }
 
-fn collect_tcprt_metrics_v4(runtime: TapMapRuntime<'_>, summary: &mut TcprtMetricsSummary) -> Result<bool, String> {
+fn collect_tcprt_metrics_v4(
+    runtime: TapMapRuntime<'_>,
+    summary: &mut TcprtMetricsSummary,
+) -> Result<bool, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/TCPRT_TABLE_V4", pin_path);
     if !Path::new(&map_path).exists() {
         return Ok(false);
     }
 
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open TCPRT_TABLE_V4: {:?}", e))?;
-    let map = HashMap::<_, CtKey4, TcpRtValue>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert TCPRT_TABLE_V4: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open TCPRT_TABLE_V4: {:?}", e))?;
+    let map = HashMap::<_, CtKey4, TcpRtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        .map_err(|e| format!("convert TCPRT_TABLE_V4: {:?}", e))?;
 
     for item in map.iter() {
         if let Ok((key, val)) = item {
@@ -556,18 +581,20 @@ fn collect_tcprt_metrics_v4(runtime: TapMapRuntime<'_>, summary: &mut TcprtMetri
     Ok(true)
 }
 
-fn collect_tcprt_metrics_v6(runtime: TapMapRuntime<'_>, summary: &mut TcprtMetricsSummary) -> Result<bool, String> {
+fn collect_tcprt_metrics_v6(
+    runtime: TapMapRuntime<'_>,
+    summary: &mut TcprtMetricsSummary,
+) -> Result<bool, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/TCPRT_TABLE_V6", pin_path);
     if !Path::new(&map_path).exists() {
         return Ok(false);
     }
 
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open TCPRT_TABLE_V6: {:?}", e))?;
-    let map = HashMap::<_, CtKey6, TcpRtValue>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert TCPRT_TABLE_V6: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open TCPRT_TABLE_V6: {:?}", e))?;
+    let map = HashMap::<_, CtKey6, TcpRtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        .map_err(|e| format!("convert TCPRT_TABLE_V6: {:?}", e))?;
 
     for item in map.iter() {
         if let Ok((key, val)) = item {
@@ -583,7 +610,9 @@ fn collect_tcprt_metrics_v6(runtime: TapMapRuntime<'_>, summary: &mut TcprtMetri
 
 /// Best-effort aggregate over a live TCP-RT map. This is not a snapshot read:
 /// entries may be added or removed while iteration is in progress.
-pub fn get_tcprt_metrics_summary(runtime: TapMapRuntime<'_>) -> Result<Option<TcprtMetricsSummary>, String> {
+pub fn get_tcprt_metrics_summary(
+    runtime: TapMapRuntime<'_>,
+) -> Result<Option<TcprtMetricsSummary>, String> {
     let mut summary = TcprtMetricsSummary::default();
     let mut available = false;
 
@@ -597,11 +626,18 @@ pub fn get_tcprt_metrics_summary(runtime: TapMapRuntime<'_>) -> Result<Option<Tc
     Ok(Some(summary))
 }
 
-pub fn get_tcprt_stats(runtime: TapMapRuntime<'_>, top_n: usize) -> Result<Vec<crate::tcprt_ops::TcpRtEntry>, String> {
+pub fn get_tcprt_stats(
+    runtime: TapMapRuntime<'_>,
+    top_n: usize,
+) -> Result<Vec<crate::tcprt_ops::TcpRtEntry>, String> {
     let mut entries = crate::tcprt_ops::get_tcprt_flows_v4(runtime).unwrap_or_default();
     entries.extend(crate::tcprt_ops::get_tcprt_flows_v6(runtime).unwrap_or_default());
     // Sort by ART descending (slowest responses first)
-    entries.sort_by(|a, b| b.art_us.partial_cmp(&a.art_us).unwrap_or(std::cmp::Ordering::Equal));
+    entries.sort_by(|a, b| {
+        b.art_us
+            .partial_cmp(&a.art_us)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     entries.truncate(top_n);
     Ok(entries)
 }

@@ -281,6 +281,18 @@ impl ControlPlane {
         Ok(())
     }
 
+    fn rollback_group_deletes(
+        runtime: TapMapRuntime<'_>,
+        ebpf_path: &str,
+        group_id: u32,
+        deleted_networks: &[(&'static str, String)],
+    ) -> Result<(), String> {
+        for (direction, cidr) in deleted_networks.iter().rev() {
+            aria_core::ebpf_ops::add_network(direction, cidr, group_id, runtime, ebpf_path)?;
+        }
+        Ok(())
+    }
+
     fn rollback_qos_deletes(
         runtime: TapMapRuntime<'_>,
         deleted_rules: &[QosRuleInfo],
@@ -1032,28 +1044,43 @@ impl ControlPlane {
 
         // Delete from kernel
         let mut errors = Vec::new();
+        let mut deleted_networks: Vec<(&'static str, String)> = Vec::new();
         for cidr in &group.cidrs {
-            if let Err(e) = aria_core::ebpf_ops::delete_network(
+            match aria_core::ebpf_ops::delete_network(
                 "src",
                 cidr,
                 group.id,
                 state.map_runtime(),
                 &self.ebpf_path,
             ) {
-                errors.push(format!("src {}: {}", cidr, e));
+                Ok(()) => deleted_networks.push(("src", cidr.clone())),
+                Err(e) => errors.push(format!("src {}: {}", cidr, e)),
             }
-            if let Err(e) = aria_core::ebpf_ops::delete_network(
+            match aria_core::ebpf_ops::delete_network(
                 "dst",
                 cidr,
                 group.id,
                 state.map_runtime(),
                 &self.ebpf_path,
             ) {
-                errors.push(format!("dst {}: {}", cidr, e));
+                Ok(()) => deleted_networks.push(("dst", cidr.clone())),
+                Err(e) => errors.push(format!("dst {}: {}", cidr, e)),
             }
         }
         if !errors.is_empty() {
-            return Err(ControlPlaneError::KernelError(errors.join("; ")));
+            let rollback = Self::rollback_group_deletes(
+                state.map_runtime(),
+                &self.ebpf_path,
+                group.id,
+                &deleted_networks,
+            );
+            let error = match rollback {
+                Ok(()) => errors.join("; "),
+                Err(rollback_err) => {
+                    format!("{}; rollback failed: {}", errors.join("; "), rollback_err)
+                }
+            };
+            return Err(ControlPlaneError::KernelError(error));
         }
 
         state.state.groups.remove(name);
