@@ -591,7 +591,9 @@ unsafe fn should_create_ct(p: &PipelineCtx) -> bool {
 
 #[inline(always)]
 unsafe fn should_apply_ingress_qos(p: &PipelineCtx) -> bool {
-    (p.flags & FLAG_QOS_ON) != 0 && runtime::conntrack_enabled(p.tap_id)
+    // Ingress QoS is a standalone feature. TC ingress can enforce policing
+    // on both CT hits and CT-miss fallback paths after doing its own ID lookup.
+    (p.flags & FLAG_QOS_ON) != 0
 }
 
 #[inline(always)]
