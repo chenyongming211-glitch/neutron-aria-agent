@@ -30,8 +30,9 @@ use common::{
     CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_MISS,
     DIR_EGRESS, DIR_INGRESS, DROP_QOS_EGRESS, DROP_QOS_INGRESS, FLAG_ACL_ON, FLAG_CT_HIT,
     FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP,
-    TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_QOS, TRACE_RESULT_PASS, TRACE_TC_DROP, TRACE_TC_EGRESS,
-    TRACE_TC_INGRESS, XDP_DROP, XDP_PASS,
+    TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL, TRACE_RESULT_DROP_ACL_DEFAULT,
+    TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_QOS, TRACE_RESULT_PASS, TRACE_TC_DROP,
+    TRACE_TC_EGRESS, TRACE_TC_INGRESS, TRACE_XDP_DROP, XDP_DROP, XDP_PASS,
 };
 use conntrack::CtLookupResult;
 use maps::{DST_IPV4_TRIE, DST_IPV6_TRIE, SRC_IPV4_TRIE, SRC_IPV6_TRIE};
@@ -91,7 +92,7 @@ unsafe fn try_xdp_firewall(
     p.now = bpf_ktime_get_ns();
     p.proto = info.proto;
     load_runtime_ctx_xdp(ctx, p);
-    load_feature_flags_xdp(p);
+    load_feature_flags_xdp(p, info);
 
     if info.is_ipv6 {
         let ct_key = CtKey6 {
@@ -375,9 +376,12 @@ unsafe fn try_tc_ingress(
 // --- Helpers ---
 
 #[inline(always)]
-unsafe fn load_feature_flags_xdp(p: &mut PipelineCtx) {
+unsafe fn load_feature_flags_xdp(p: &mut PipelineCtx, info: &parser::PacketInfo) {
     if policy::acl_enabled(p.tap_id) {
         p.flags |= FLAG_ACL_ON;
+    }
+    if trace::should_trace(p.tap_id, info) {
+        p.flags |= FLAG_TRACING;
     }
 }
 
@@ -489,6 +493,16 @@ unsafe fn do_trace(info: &parser::PacketInfo, p: &PipelineCtx, hook: u8, result:
             now: p.now,
         },
     );
+}
+
+#[inline(always)]
+fn trace_result_from_drop_reason(drop_reason: u8) -> u8 {
+    match drop_reason {
+        1 => TRACE_RESULT_DROP_ACL,
+        2 => TRACE_RESULT_DROP_ACL_PORT,
+        3 => TRACE_RESULT_DROP_ACL_DEFAULT,
+        _ => TRACE_RESULT_DROP_ACL,
+    }
 }
 
 /// Inline helper: record a drop from PipelineCtx.
@@ -948,6 +962,9 @@ unsafe fn phase_policy_xdp(info: &parser::PacketInfo, p: &mut PipelineCtx) {
             stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, true);
         }
         policy::record_policy_drop(&args, drop_reason);
+        if (p.flags & FLAG_TRACING) != 0 {
+            do_trace(info, p, TRACE_XDP_DROP, trace_result_from_drop_reason(drop_reason));
+        }
     }
 }
 
@@ -976,13 +993,7 @@ unsafe fn phase_policy_tc(info: &parser::PacketInfo, p: &mut PipelineCtx) {
     } else {
         p.action = TC_ACT_SHOT as u32;
         if (p.flags & FLAG_TRACING) != 0 {
-            let trace_result = match drop_reason {
-                1 => 1,
-                2 => 2,
-                3 => 3,
-                _ => 1,
-            };
-            do_trace(info, p, TRACE_TC_DROP, trace_result);
+            do_trace(info, p, TRACE_TC_DROP, trace_result_from_drop_reason(drop_reason));
         }
     }
 }
