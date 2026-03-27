@@ -524,10 +524,6 @@ pub struct TcprtMetricsSummary {
 }
 
 fn accumulate_tcprt_value(summary: &mut TcprtMetricsSummary, val: &TcpRtValue) {
-    if val.close_ts > 0 {
-        return;
-    }
-
     let handshake_us = val.handshake_ns as f64 / 1000.0;
     let art_us = val.art_ns as f64 / 1000.0;
     let rtt_client_us = val.rtt_client_ns as f64 / 1000.0;

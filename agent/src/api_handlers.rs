@@ -2514,7 +2514,7 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
         }
 
         // ── TCP-RT aggregated ──
-        let _ = writeln!(out, "# HELP aria_tcprt_flows_total Number of active TCP-RT flows");
+        let _ = writeln!(out, "# HELP aria_tcprt_flows_total Number of retained TCP-RT flows");
         let _ = writeln!(out, "# TYPE aria_tcprt_flows_total gauge");
         let _ = writeln!(out, "# HELP aria_tcprt_retrans_req_total Total request retransmissions");
         let _ = writeln!(out, "# TYPE aria_tcprt_retrans_req_total counter");

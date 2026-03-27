@@ -24,11 +24,6 @@ pub struct TcpRtEntry {
     pub nqa_score: u8,
 }
 
-#[inline]
-fn is_active_tcprt(val: &TcpRtValue) -> bool {
-    val.close_ts == 0
-}
-
 fn state_name(state: u8) -> String {
     match state {
         0 => "syn_sent".to_string(),
@@ -56,9 +51,9 @@ pub fn get_tcprt_flows_v4(runtime: TapMapRuntime<'_>) -> Result<Vec<TcpRtEntry>,
             if key.tap_id != runtime.tap_id {
                 continue;
             }
-            if !is_active_tcprt(&val) {
-                continue;
-            }
+            // Export retained closed flows as well: TCP-RT analysis runs after
+            // short-lived request/response exchanges complete, and flush/eviction
+            // is what should remove historical entries from the map.
             entries.push(value_to_entry(
                 Ipv4Addr::from(key.src_ip).to_string(),
                 Ipv4Addr::from(key.dst_ip).to_string(),
@@ -83,9 +78,6 @@ pub fn get_tcprt_flows_v6(runtime: TapMapRuntime<'_>) -> Result<Vec<TcpRtEntry>,
     for item in map.iter() {
         if let Ok((key, val)) = item {
             if key.tap_id != runtime.tap_id {
-                continue;
-            }
-            if !is_active_tcprt(&val) {
                 continue;
             }
             entries.push(value_to_entry(
@@ -211,9 +203,6 @@ pub fn lookup_tcprt_flows(
                         pad: [0; 3],
                     };
                     if let Ok(val) = map.get(&key, 0) {
-                        if !is_active_tcprt(&val) {
-                            continue;
-                        }
                         entries.push(value_to_entry(
                             src_ip.clone(),
                             dst_ip.clone(),
@@ -246,9 +235,6 @@ pub fn lookup_tcprt_flows(
                         pad: [0; 3],
                     };
                     if let Ok(val) = map.get(&key, 0) {
-                        if !is_active_tcprt(&val) {
-                            continue;
-                        }
                         entries.push(value_to_entry(
                             src_ip.clone(),
                             dst_ip.clone(),
@@ -286,9 +272,6 @@ pub fn filter_tcprt_flows(
                     if key.tap_id != runtime.tap_id {
                         continue;
                     }
-                    if !is_active_tcprt(&val) {
-                        continue;
-                    }
                     if key.dst_port != dst_port {
                         continue;
                     }
@@ -321,9 +304,6 @@ pub fn filter_tcprt_flows(
             for item in map.iter() {
                 if let Ok((key, val)) = item {
                     if key.tap_id != runtime.tap_id {
-                        continue;
-                    }
-                    if !is_active_tcprt(&val) {
                         continue;
                     }
                     if key.dst_port != dst_port {
