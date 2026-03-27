@@ -160,17 +160,13 @@ unsafe fn try_xdp_firewall(
 
 #[classifier]
 pub fn tc_egress(ctx: TcContext) -> i32 {
-    let data = ctx.data();
-    let data_end = ctx.data_end();
     let pkt_len = ctx.len();
     unsafe {
         let info_ptr = match maps::PKT_SCRATCH.get_ptr_mut(0) {
             Some(p) => p,
             None => return TC_ACT_OK,
         };
-        if !parser::parse_eth_ipv4(data, data_end, 0, info_ptr)
-            && !parser::parse_eth_ipv6(data, data_end, 0, info_ptr)
-        {
+        if !parse_tc_packet(&ctx, info_ptr) {
             return TC_ACT_OK;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
@@ -292,17 +288,13 @@ unsafe fn try_tc_egress(
 
 #[classifier]
 pub fn tc_ingress(ctx: TcContext) -> i32 {
-    let data = ctx.data();
-    let data_end = ctx.data_end();
     let pkt_len = ctx.len();
     unsafe {
         let info_ptr = match maps::PKT_SCRATCH.get_ptr_mut(0) {
             Some(p) => p,
             None => return TC_ACT_OK,
         };
-        if !parser::parse_eth_ipv4(data, data_end, 0, info_ptr)
-            && !parser::parse_eth_ipv6(data, data_end, 0, info_ptr)
-        {
+        if !parse_tc_packet(&ctx, info_ptr) {
             return TC_ACT_OK;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
@@ -430,6 +422,33 @@ unsafe fn load_runtime_ctx_xdp(ctx: &XdpContext, p: &mut PipelineCtx) {
 unsafe fn load_runtime_ctx_tc(ctx: &TcContext, p: &mut PipelineCtx) {
     let skb = ctx.as_ptr() as *const __sk_buff;
     p.tap_id = resolve_tap_id_for_ifindex((*skb).ifindex);
+}
+
+#[inline(always)]
+unsafe fn parse_tc_packet(ctx: &TcContext, out: *mut parser::PacketInfo) -> bool {
+    let mut data = ctx.data();
+    let mut data_end = ctx.data_end();
+    let mut parsed = parser::parse_eth_ipv4(data, data_end, 0, out)
+        || parser::parse_eth_ipv6(data, data_end, 0, out);
+    if !parsed {
+        return false;
+    }
+
+    let info = &*out;
+    // TC direct packet access can stop at the linear head on non-linear skbs.
+    // That leaves ports available but zeros TCP seq/flags/payload, which breaks
+    // TCP-RT while leaving port-based features apparently healthy. Re-pull only
+    // for this suspicious truncated TCP shape and re-parse.
+    if info.proto == IPPROTO_TCP && info.tcp_flags == 0 && info.tcp_seq == 0 {
+        if ctx.pull_data(0).is_ok() {
+            data = ctx.data();
+            data_end = ctx.data_end();
+            parsed = parser::parse_eth_ipv4(data, data_end, 0, out)
+                || parser::parse_eth_ipv6(data, data_end, 0, out);
+        }
+    }
+
+    parsed
 }
 
 #[inline(always)]
