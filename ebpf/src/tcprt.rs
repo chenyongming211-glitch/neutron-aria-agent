@@ -78,6 +78,10 @@ pub unsafe fn track_tcp_rt_v4(
     // SYN (no ACK) — new connection, forward direction
     if is_syn && !is_ack && is_forward {
         if let Some(entry) = TCPRT_TABLE_V4.get_ptr_mut(ct_key) {
+            if (*entry).close_ts > 0 {
+                init_tcprt_value(entry, now, info.tcp_seq, from_ingress_hook);
+                return;
+            }
             if !from_ingress_hook
                 && (*entry).state == TCPRT_STATE_SYN_SENT
                 && (*entry).syn_ingress_ts > 0
@@ -101,6 +105,13 @@ pub unsafe fn track_tcp_rt_v4(
         Some(e) => e,
         None => return,
     };
+
+    // Closed entries stay in the LRU map until eviction or explicit flush.
+    // Do not let late packets mutate the old connection state; only a new SYN
+    // is allowed to reinitialize the slot above.
+    if (*entry).close_ts > 0 {
+        return;
+    }
 
     // FIN — fine-grained close tracking
     if is_fin {
@@ -268,8 +279,13 @@ pub unsafe fn track_tcp_rt_v4_auto(
 
     if is_syn && !is_ack {
         // Degraded auto-path cannot distinguish a true second-hook observation
-        // from a client SYN retransmission. Keep the first SYN timestamp stable.
-        if TCPRT_TABLE_V4.get(&fwd_key).is_none() {
+        // from a client SYN retransmission. Keep the first SYN timestamp stable,
+        // but allow a previously closed slot to be reinitialized for a new flow.
+        if TCPRT_TABLE_V4
+            .get(&fwd_key)
+            .map(|entry| entry.close_ts > 0)
+            .unwrap_or(true)
+        {
             track_tcp_rt_v4(&fwd_key, info, now, true, from_ingress_hook);
         }
         return;
@@ -312,6 +328,10 @@ pub unsafe fn track_tcp_rt_v6(
 
     if is_syn && !is_ack && is_forward {
         if let Some(entry) = TCPRT_TABLE_V6.get_ptr_mut(ct_key) {
+            if (*entry).close_ts > 0 {
+                init_tcprt_value(entry, now, info.tcp_seq, from_ingress_hook);
+                return;
+            }
             if !from_ingress_hook
                 && (*entry).state == TCPRT_STATE_SYN_SENT
                 && (*entry).syn_ingress_ts > 0
@@ -334,6 +354,10 @@ pub unsafe fn track_tcp_rt_v6(
         Some(e) => e,
         None => return,
     };
+
+    if (*entry).close_ts > 0 {
+        return;
+    }
 
     // FIN — fine-grained close tracking
     if is_fin {
@@ -486,7 +510,11 @@ pub unsafe fn track_tcp_rt_v6_auto(
     };
 
     if is_syn && !is_ack {
-        if TCPRT_TABLE_V6.get(&fwd_key).is_none() {
+        if TCPRT_TABLE_V6
+            .get(&fwd_key)
+            .map(|entry| entry.close_ts > 0)
+            .unwrap_or(true)
+        {
             track_tcp_rt_v6(&fwd_key, info, now, true, from_ingress_hook);
         }
         return;
