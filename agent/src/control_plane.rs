@@ -7,6 +7,7 @@ use crate::instance::RuntimePinState;
 use crate::kernel_drop_manager::{KernelDropManager, KernelDropStatusSnapshot};
 use crate::service_chain::{self, ServiceChain};
 use crate::ssl_manager::SslManager;
+use crate::trace_backend::TraceManager;
 use aria_core::common::TapMapRuntime;
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
 use aria_core::wal::{WalClient, WalEntry};
@@ -107,6 +108,7 @@ pub struct ControlPlane {
     pub base_state_path: String,
     ssl_manager: Arc<SslManager>,
     kernel_drop_manager: Arc<KernelDropManager>,
+    trace_manager: Arc<TraceManager>,
     chains: RwLock<Vec<ServiceChain>>,
 }
 
@@ -347,6 +349,7 @@ impl ControlPlane {
         base_state_path: &str,
         ssl_manager: Arc<SslManager>,
         kernel_drop_manager: Arc<KernelDropManager>,
+        trace_manager: Arc<TraceManager>,
     ) -> Self {
         let chains = service_chain::load_chains(base_state_path);
         Self {
@@ -357,6 +360,7 @@ impl ControlPlane {
             base_state_path: base_state_path.to_string(),
             ssl_manager,
             kernel_drop_manager,
+            trace_manager,
             chains: RwLock::new(chains),
         }
     }
@@ -739,6 +743,7 @@ impl ControlPlane {
                 }
             }
             if tap_id != aria_core::common::TAP_ID_UNASSIGNED {
+                self.trace_manager.clear_tap_cache(&state.pin_path, tap_id).await;
                 if let Err(e) =
                     aria_core::ebpf_ops::scrub_managed_runtime_state(state.map_runtime())
                 {
@@ -2414,7 +2419,10 @@ impl ControlPlane {
     > {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        let events = aria_core::trace_ops::get_trace_events(state.map_runtime(), limit)
+        let events = self
+            .trace_manager
+            .get_trace_events(state.map_runtime(), limit)
+            .await
             .map_err(|e| ControlPlaneError::KernelError(e))?;
         Ok((events, state.state.groups.clone()))
     }
@@ -2422,7 +2430,9 @@ impl ControlPlane {
     pub async fn flush_trace(&self, instance: &str) -> Result<u64, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        aria_core::trace_ops::flush_trace_log(state.map_runtime())
+        self.trace_manager
+            .flush_trace_events(state.map_runtime())
+            .await
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 

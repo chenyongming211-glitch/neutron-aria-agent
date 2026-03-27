@@ -1,7 +1,10 @@
 use aya::maps::{HashMap, MapData};
-use crate::common::{TapMapRuntime, TraceEvent, TraceEventKey, TraceEventV6, TraceFilter};
+use crate::common::{
+    TapMapRuntime, TraceEvent, TraceEventKey, TraceEventV6, TraceFilter, TraceStreamEvent,
+};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+#[derive(Clone, Debug)]
 pub struct TraceEventEntry {
     pub seq: u64,
     pub timestamp: u64,
@@ -97,6 +100,34 @@ fn trace_event_entry_from_v6(key: TraceEventKey, event: TraceEventV6) -> TraceEv
         timestamp: event.timestamp,
         src_ip: Ipv6Addr::from(event.src_ip).to_string(),
         dst_ip: Ipv6Addr::from(event.dst_ip).to_string(),
+        src_port: event.src_port,
+        dst_port: event.dst_port,
+        proto: event.proto,
+        hook: hook_name(event.hook),
+        result: result_name(event.result),
+        direction: direction_name(event.direction),
+        src_id: event.src_id,
+        dst_id: event.dst_id,
+        pkt_len: event.pkt_len,
+        ct_state: ct_state_name(event.ct_state),
+        drop_reason: drop_reason_name(event.drop_reason),
+    }
+}
+
+pub fn trace_event_entry_from_stream(event: TraceStreamEvent) -> TraceEventEntry {
+    TraceEventEntry {
+        seq: event.seq,
+        timestamp: event.timestamp,
+        src_ip: if event.is_ipv6 != 0 {
+            Ipv6Addr::from(event.src_ip_v6).to_string()
+        } else {
+            Ipv4Addr::from(event.src_ip).to_string()
+        },
+        dst_ip: if event.is_ipv6 != 0 {
+            Ipv6Addr::from(event.dst_ip_v6).to_string()
+        } else {
+            Ipv4Addr::from(event.dst_ip).to_string()
+        },
         src_port: event.src_port,
         dst_port: event.dst_port,
         proto: event.proto,

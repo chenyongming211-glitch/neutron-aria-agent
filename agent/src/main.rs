@@ -9,6 +9,7 @@ use tracing_subscriber::EnvFilter;
 mod api_handlers;
 mod api_routes;
 mod control_plane;
+mod ebpf_binary;
 mod instance;
 mod kernel_drop_manager;
 mod kernel_drop_support;
@@ -18,6 +19,7 @@ mod ssl_manager;
 mod ssl_support;
 mod system_manager;
 mod tap_registry;
+mod trace_backend;
 
 #[derive(Parser)]
 #[command(name = "aria-agent")]
@@ -167,9 +169,20 @@ async fn main() {
         std::process::exit(1);
     }
 
+    let resolved_ebpf = match ebpf_binary::resolve_ebpf_binary(&config.ebpf_path) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            error!(requested_ebpf_path = %config.ebpf_path, error = %e, "failed to resolve eBPF binary");
+            std::process::exit(1);
+        }
+    };
+
     info!(
         config_path = %args.config.display(),
-        ebpf_path = %config.ebpf_path,
+        requested_ebpf_path = %resolved_ebpf.requested_path,
+        ebpf_path = %resolved_ebpf.selected_path,
+        trace_backend = %resolved_ebpf.trace_backend,
+        kernel_version = ?resolved_ebpf.kernel_version,
         pin_path = %config.pin_path,
         state_path = %config.state_path,
         iface_pattern = %config.iface_pattern,
@@ -181,8 +194,8 @@ async fn main() {
     );
 
     // Verify eBPF binary exists
-    if !std::path::Path::new(&config.ebpf_path).exists() {
-        error!(ebpf_path = %config.ebpf_path, "eBPF binary not found");
+    if !std::path::Path::new(&resolved_ebpf.selected_path).exists() {
+        error!(ebpf_path = %resolved_ebpf.selected_path, "eBPF binary not found");
         std::process::exit(1);
     }
 
@@ -194,8 +207,12 @@ async fn main() {
         warn!(path = %config.state_path, error = %e, "failed to create state directory");
     }
 
+    let trace_manager = Arc::new(trace_backend::TraceManager::new(
+        resolved_ebpf.trace_backend,
+    ));
+
     let ssl_manager = Arc::new(ssl_manager::SslManager::new(
-        &config.ebpf_path,
+        &resolved_ebpf.selected_path,
         &config.pin_path,
     ));
     if let Err(e) = ssl_manager.ensure_loaded().await {
@@ -206,7 +223,7 @@ async fn main() {
     }
 
     let kernel_drop_manager = Arc::new(kernel_drop_manager::KernelDropManager::new(
-        &config.ebpf_path,
+        &resolved_ebpf.selected_path,
         &config.pin_path,
         &config.state_path,
     ));
@@ -226,18 +243,19 @@ async fn main() {
 
     // Create ControlPlane
     let control_plane = Arc::new(control_plane::ControlPlane::new(
-        &config.ebpf_path,
+        &resolved_ebpf.selected_path,
         &config.pin_path,
         &config.state_path,
         ssl_manager.clone(),
         kernel_drop_manager.clone(),
+        trace_manager,
     ));
 
     // Note: instances are registered by TapRegistry::attach when XDP is actually attached.
     // Pre-loading state files without XDP would expose stale data via the API.
 
     let registry = Arc::new(tap_registry::TapRegistry::new(
-        &config.ebpf_path,
+        &resolved_ebpf.selected_path,
         &config.pin_path,
         &config.state_path,
         &config.iface_pattern,
