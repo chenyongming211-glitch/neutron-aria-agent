@@ -8,12 +8,35 @@ pub enum TraceBackendKind {
     RingBuf,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TraceBackendPreference {
+    Auto,
+    LegacyMap,
+    PerfEventArray,
+    RingBuf,
+}
+
 impl TraceBackendKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LegacyMap => "legacy-map",
             Self::PerfEventArray => "perf-event-array",
             Self::RingBuf => "ringbuf",
+        }
+    }
+}
+
+impl TraceBackendPreference {
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(Self::Auto),
+            "legacy" | "legacy-map" => Ok(Self::LegacyMap),
+            "perf" | "perf-event" | "perf-event-array" => Ok(Self::PerfEventArray),
+            "ringbuf" => Ok(Self::RingBuf),
+            other => Err(format!(
+                "invalid trace backend preference '{}': expected auto, legacy-map, perf-event-array, or ringbuf",
+                other
+            )),
         }
     }
 }
@@ -45,7 +68,10 @@ pub struct ResolvedEbpfBinary {
     pub kernel_version: Option<String>,
 }
 
-pub fn resolve_ebpf_binary(requested_path: &str) -> Result<ResolvedEbpfBinary, String> {
+pub fn resolve_ebpf_binary(
+    requested_path: &str,
+    preference: TraceBackendPreference,
+) -> Result<ResolvedEbpfBinary, String> {
     let requested = Path::new(requested_path);
     let explicit_backend = explicit_backend_from_path(requested);
 
@@ -61,21 +87,63 @@ pub fn resolve_ebpf_binary(requested_path: &str) -> Result<ResolvedEbpfBinary, S
         let ringbuf_path = sibling_variant_path(requested, "_ringbuf")?;
         let perf_path = sibling_variant_path(requested, "_perf")?;
         let kernel_version = current_kernel_version();
-
-        if matches!(kernel_version, Some(version) if version.supports_ringbuf()) && ringbuf_path.exists()
-        {
-            (ringbuf_path, TraceBackendKind::RingBuf)
-        } else if perf_path.exists() {
-            (perf_path, TraceBackendKind::PerfEventArray)
-        } else if requested.exists() {
-            (requested.to_path_buf(), TraceBackendKind::LegacyMap)
-        } else {
-            return Err(format!(
-                "eBPF binary not found: checked '{}', '{}' and '{}'",
-                requested.display(),
-                ringbuf_path.display(),
-                perf_path.display()
-            ));
+        match preference {
+            TraceBackendPreference::Auto => {
+                if matches!(kernel_version, Some(version) if version.supports_ringbuf())
+                    && ringbuf_path.exists()
+                {
+                    (ringbuf_path, TraceBackendKind::RingBuf)
+                } else if perf_path.exists() {
+                    (perf_path, TraceBackendKind::PerfEventArray)
+                } else if requested.exists() {
+                    (requested.to_path_buf(), TraceBackendKind::LegacyMap)
+                } else {
+                    return Err(format!(
+                        "eBPF binary not found: checked '{}', '{}' and '{}'",
+                        requested.display(),
+                        ringbuf_path.display(),
+                        perf_path.display()
+                    ));
+                }
+            }
+            TraceBackendPreference::LegacyMap => {
+                if requested.exists() {
+                    (requested.to_path_buf(), TraceBackendKind::LegacyMap)
+                } else {
+                    return Err(format!(
+                        "preferred legacy-map backend not found at '{}'",
+                        requested.display()
+                    ));
+                }
+            }
+            TraceBackendPreference::PerfEventArray => {
+                if perf_path.exists() {
+                    (perf_path, TraceBackendKind::PerfEventArray)
+                } else {
+                    return Err(format!(
+                        "preferred perf-event-array backend not found at '{}'",
+                        perf_path.display()
+                    ));
+                }
+            }
+            TraceBackendPreference::RingBuf => {
+                if matches!(kernel_version, Some(version) if !version.supports_ringbuf()) {
+                    return Err(format!(
+                        "preferred ringbuf backend requires kernel >= 5.8 but found '{}'",
+                        kernel_version
+                            .map(kernel_version_string)
+                            .unwrap_or_else(|| "unknown".to_string())
+                    ));
+                }
+                if ringbuf_path.exists() {
+                    (ringbuf_path, TraceBackendKind::RingBuf)
+                } else {
+                    return Err(format!(
+                        "preferred ringbuf backend not found at '{}'",
+                        ringbuf_path.display()
+                    ));
+                }
+            }
         }
     };
 

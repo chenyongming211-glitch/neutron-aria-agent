@@ -33,6 +33,8 @@ struct Args {
 struct Config {
     #[serde(default = "default_ebpf_path")]
     ebpf_path: String,
+    #[serde(default = "default_trace_backend")]
+    trace_backend: String,
     #[serde(default = "default_pin_path")]
     pin_path: String,
     #[serde(default = "default_state_path")]
@@ -51,6 +53,10 @@ struct Config {
 
 fn default_ebpf_path() -> String {
     "/usr/local/lib/libebpf_firewall.so".to_string()
+}
+
+fn default_trace_backend() -> String {
+    "auto".to_string()
 }
 
 fn default_pin_path() -> String {
@@ -85,6 +91,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             ebpf_path: default_ebpf_path(),
+            trace_backend: default_trace_backend(),
             pin_path: default_pin_path(),
             state_path: default_state_path(),
             iface_pattern: default_iface_pattern(),
@@ -169,7 +176,19 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let resolved_ebpf = match ebpf_binary::resolve_ebpf_binary(&config.ebpf_path) {
+    let trace_backend_preference =
+        match ebpf_binary::TraceBackendPreference::parse(&config.trace_backend) {
+            Ok(preference) => preference,
+            Err(e) => {
+                error!(trace_backend = %config.trace_backend, error = %e, "invalid trace backend preference");
+                std::process::exit(1);
+            }
+        };
+
+    let resolved_ebpf = match ebpf_binary::resolve_ebpf_binary(
+        &config.ebpf_path,
+        trace_backend_preference,
+    ) {
         Ok(resolved) => resolved,
         Err(e) => {
             error!(requested_ebpf_path = %config.ebpf_path, error = %e, "failed to resolve eBPF binary");
@@ -181,6 +200,7 @@ async fn main() {
         config_path = %args.config.display(),
         requested_ebpf_path = %resolved_ebpf.requested_path,
         ebpf_path = %resolved_ebpf.selected_path,
+        trace_backend_preference = %config.trace_backend,
         trace_backend = %resolved_ebpf.trace_backend,
         kernel_version = ?resolved_ebpf.kernel_version,
         pin_path = %config.pin_path,

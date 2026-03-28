@@ -182,19 +182,23 @@ This means the `perf-event-array` backend is now a real dataplane path. The
 `ringbuf` backend is still userspace scaffolding until a dedicated ringbuf eBPF
 artifact exists.
 
-### 2. Dual artifact packaging is not done yet
+### 2. Ringbuf packaging is not done yet
 
-The CI and release packaging still build and publish a single eBPF artifact:
+The CI/release flow now publishes:
 
 - `libebpf_firewall.so`
-
-The following artifacts do **not** exist yet:
-
-- `libebpf_firewall_ringbuf.so`
 - `libebpf_firewall_perf.so`
 
-Until CI/package changes land, runtime selection will keep falling back to the
-legacy single object in normal deployments.
+For the current perf-first rollout, `_perf` is an explicit packaged sibling of
+the perf-capable transitional object so resolver auto mode can pick it while
+the default base path stays unchanged.
+
+The following artifact still does **not** exist yet:
+
+- `libebpf_firewall_ringbuf.so`
+
+Until ringbuf packaging lands, `auto` can only choose between the base object
+and the packaged perf sibling.
 
 ### 3. Runtime inventory rollout is only partially done
 
@@ -310,13 +314,14 @@ Current status can be summarized as:
 - stream event schema is in
 - perf-event-array dataplane output is in
 - backend-aware critical runtime inventory is in
-- CI dual-object packaging is **not** in yet
+- perf artifact packaging is in
+- ringbuf artifact packaging is **not** in yet
 - ringbuf dataplane output is **not** in yet
 
 In other words:
 
-**Phase 2 perf cutover is implemented in code, but packaging/rollout and the
-ringbuf follow-up are still pending.**
+**Phase 2 perf cutover is implemented in code; the remaining work is rollout
+validation plus the ringbuf follow-up.**
 
 ## Optimization Update
 
@@ -451,7 +456,7 @@ So this phase should either:
 
 After perf cutover works:
 
-- update CI to publish the perf-capable artifact
+- keep CI publishing the perf-capable artifact and its explicit `_perf` sibling
 - ensure `auto` selection still resolves to perf during this phase
 - wire runtime selection so normal deployments can actually pick it
 - rerun churn retention tests
