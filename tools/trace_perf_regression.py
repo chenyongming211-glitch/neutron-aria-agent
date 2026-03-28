@@ -151,7 +151,7 @@ def build_remote_script(config: dict) -> str:
                     raise
 
 
-        def run_round(packet_count, round_index, dport):
+        def run_round(packet_count, round_index, dport, expected_flushed):
             trace_delete()
             flushed = get_json(TRACE_ROOT + "/trace/flush", method="DELETE")["flushed"]
             empty = len(get_json(TRACE_ROOT + f"/trace?top={{CONFIG['read_limit']}}")["events"])
@@ -184,7 +184,6 @@ def build_remote_script(config: dict) -> str:
             tx_delta = after_tx - before_tx
             peer_rx_delta = after_peer_rx - before_peer_rx
 
-            expected_flushed = 0 if round_index == 1 else packet_count
             ok = (
                 flushed == expected_flushed
                 and empty == 0
@@ -224,9 +223,17 @@ def build_remote_script(config: dict) -> str:
                 wait_for_instance()
                 time.sleep(CONFIG["post_setup_wait_secs"])
                 dport = CONFIG["dport_base"]
+                previous_visible_count = 0
                 for packet_count in CONFIG["packet_counts"]:
                     for round_index in range(1, CONFIG["rounds"] + 1):
-                        results.append(run_round(packet_count, round_index, dport))
+                        result = run_round(
+                            packet_count,
+                            round_index,
+                            dport,
+                            previous_visible_count,
+                        )
+                        results.append(result)
+                        previous_visible_count = result["count"]
                         dport += 1
                 trace_delete()
                 print(json.dumps({{"ok": all(item["ok"] for item in results), "results": results}}))
