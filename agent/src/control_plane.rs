@@ -7,7 +7,7 @@ use crate::instance::RuntimePinState;
 use crate::kernel_drop_manager::{KernelDropManager, KernelDropStatusSnapshot};
 use crate::service_chain::{self, ServiceChain};
 use crate::ssl_manager::SslManager;
-use crate::trace_backend::TraceManager;
+use crate::trace_backend::{TraceManager, TraceRuntimeStatusSnapshot};
 use aria_core::common::TapMapRuntime;
 use aria_core::ebpf_ops::TraceMapMode;
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
@@ -372,6 +372,14 @@ impl ControlPlane {
 
     pub fn trace_map_mode(&self) -> TraceMapMode {
         self.trace_manager.map_mode()
+    }
+
+    pub fn trace_backend_name(&self) -> &'static str {
+        self.trace_manager.backend().as_str()
+    }
+
+    pub async fn get_trace_runtime_status(&self) -> HashMap<String, TraceRuntimeStatusSnapshot> {
+        self.trace_manager.runtime_status().await
     }
 
     /// Prepare tap-scoped runtime state before any interface link goes live.

@@ -712,6 +712,17 @@ aria-firewall/
 - `aria_kernel_drop_packets_total`
 - `aria_kernel_drop_bytes_total`
 
+同时还会导出 trace backend 运行时指标：
+
+- `aria_trace_backend_info`
+- `aria_trace_runtime_registered_taps`
+- `aria_trace_runtime_active_consumers`
+- `aria_trace_runtime_lost_events_total`
+- `aria_trace_runtime_cache_evictions_total`
+- `aria_trace_runtime_consumer_failures_total`
+- `aria_trace_runtime_consumer_restarts_total`
+- `aria_trace_runtime_last_error`
+
 ## 配置文件
 
 `/etc/aria-agent/config.toml`：

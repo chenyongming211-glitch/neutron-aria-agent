@@ -14,6 +14,7 @@ use tracing::warn;
 
 use crate::control_plane::{ControlPlane, ControlPlaneError};
 use crate::kernel_drop_manager::KernelDropMode;
+use aria_core::ebpf_ops::TraceMapMode;
 use aria_api::*;
 
 type AppState = Arc<ControlPlane>;
@@ -55,6 +56,13 @@ fn kernel_drop_mode_name(mode: KernelDropMode) -> &'static str {
         KernelDropMode::ScaffoldOnly => "scaffold_only",
         KernelDropMode::KfreeSkbLegacy => "kfree_skb_legacy",
         KernelDropMode::KfreeSkbReasonful => "kfree_skb_reasonful",
+    }
+}
+
+fn trace_map_mode_name(mode: TraceMapMode) -> &'static str {
+    match mode {
+        TraceMapMode::Legacy => "legacy",
+        TraceMapMode::Stream => "stream",
     }
 }
 
@@ -2201,6 +2209,10 @@ fn write_ssl_http_summary_metrics(
 pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
     let instances = cp.list_instances().await;
     let kernel_drop = cp.get_kernel_drop_status().await;
+    let trace_backend = prom_escape(cp.trace_backend_name());
+    let trace_mode = prom_escape(trace_map_mode_name(cp.trace_map_mode()));
+    let mut trace_runtime: Vec<_> = cp.get_trace_runtime_status().await.into_iter().collect();
+    trace_runtime.sort_by(|a, b| a.0.cmp(&b.0));
 
     let stream = stream! {
         let mut out = String::with_capacity(METRICS_CHUNK_SIZE * 2);
@@ -2274,6 +2286,73 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
                     }
                 }
                 Err(e) => warn!("Failed to collect kernel drop metrics: {}", e),
+            }
+        }
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
+        }
+
+        // ── Trace backend runtime status ──
+        let _ = writeln!(out, "# HELP aria_trace_backend_info Trace backend selection");
+        let _ = writeln!(out, "# TYPE aria_trace_backend_info gauge");
+        let _ = writeln!(out, "# HELP aria_trace_runtime_registered_taps Number of taps registered to each trace runtime");
+        let _ = writeln!(out, "# TYPE aria_trace_runtime_registered_taps gauge");
+        let _ = writeln!(out, "# HELP aria_trace_runtime_active_consumers Number of active userspace stream consumers per runtime");
+        let _ = writeln!(out, "# TYPE aria_trace_runtime_active_consumers gauge");
+        let _ = writeln!(out, "# HELP aria_trace_runtime_lost_events_total Trace stream events reported lost by the backend");
+        let _ = writeln!(out, "# TYPE aria_trace_runtime_lost_events_total counter");
+        let _ = writeln!(out, "# HELP aria_trace_runtime_cache_evictions_total Trace stream events evicted from the userspace cache");
+        let _ = writeln!(out, "# TYPE aria_trace_runtime_cache_evictions_total counter");
+        let _ = writeln!(out, "# HELP aria_trace_runtime_consumer_failures_total Trace stream consumer failures");
+        let _ = writeln!(out, "# TYPE aria_trace_runtime_consumer_failures_total counter");
+        let _ = writeln!(out, "# HELP aria_trace_runtime_consumer_restarts_total Trace stream consumer restarts");
+        let _ = writeln!(out, "# TYPE aria_trace_runtime_consumer_restarts_total counter");
+        let _ = writeln!(out, "# HELP aria_trace_runtime_last_error Whether the trace runtime has a recorded last error");
+        let _ = writeln!(out, "# TYPE aria_trace_runtime_last_error gauge");
+        let _ = writeln!(
+            out,
+            "aria_trace_backend_info{{backend=\"{trace_backend}\",mode=\"{trace_mode}\"}} 1"
+        );
+
+        for (pin_path, status) in &trace_runtime {
+            let pin_path = prom_escape(pin_path);
+            let _ = writeln!(
+                out,
+                "aria_trace_runtime_registered_taps{{pin_path=\"{pin_path}\"}} {}",
+                status.registered_taps
+            );
+            let _ = writeln!(
+                out,
+                "aria_trace_runtime_active_consumers{{pin_path=\"{pin_path}\"}} {}",
+                status.active_consumers
+            );
+            let _ = writeln!(
+                out,
+                "aria_trace_runtime_lost_events_total{{pin_path=\"{pin_path}\"}} {}",
+                status.lost_events
+            );
+            let _ = writeln!(
+                out,
+                "aria_trace_runtime_cache_evictions_total{{pin_path=\"{pin_path}\"}} {}",
+                status.cache_evictions
+            );
+            let _ = writeln!(
+                out,
+                "aria_trace_runtime_consumer_failures_total{{pin_path=\"{pin_path}\"}} {}",
+                status.consumer_failures
+            );
+            let _ = writeln!(
+                out,
+                "aria_trace_runtime_consumer_restarts_total{{pin_path=\"{pin_path}\"}} {}",
+                status.consumer_restarts
+            );
+            let _ = writeln!(
+                out,
+                "aria_trace_runtime_last_error{{pin_path=\"{pin_path}\"}} {}",
+                if status.last_error.is_some() { 1 } else { 0 }
+            );
+            if let Some(chunk) = flush_metrics_chunk(&mut out, false) {
+                yield Ok::<_, std::convert::Infallible>(chunk);
             }
         }
         if let Some(chunk) = flush_metrics_chunk(&mut out, true) {

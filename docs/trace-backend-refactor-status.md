@@ -497,6 +497,20 @@ state. The final design should expose at least metrics for:
 Without that, retention improvements will be difficult to validate in the
 field.
 
+Initial runtime observability is now exported via `GET /metrics`:
+
+- `aria_trace_backend_info`
+- `aria_trace_runtime_registered_taps`
+- `aria_trace_runtime_active_consumers`
+- `aria_trace_runtime_lost_events_total`
+- `aria_trace_runtime_cache_evictions_total`
+- `aria_trace_runtime_consumer_failures_total`
+- `aria_trace_runtime_consumer_restarts_total`
+- `aria_trace_runtime_last_error`
+
+That gives the rollout a stable baseline for stream health, even though richer
+event-rate accounting can still be added later if needed.
+
 ### 2. Keep flush semantics stable before removing legacy maps
 
 Legacy flush removes kernel-stored events.
