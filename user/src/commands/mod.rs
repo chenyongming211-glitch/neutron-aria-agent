@@ -7,6 +7,7 @@ pub(crate) mod mirror;
 pub(crate) mod policy;
 pub(crate) mod qos;
 pub(crate) mod chain;
+pub(crate) mod ssl;
 pub(crate) mod system;
 pub(crate) mod trace;
 pub(crate) mod tcprt;
