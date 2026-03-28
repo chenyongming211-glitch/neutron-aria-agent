@@ -4,7 +4,7 @@ mod api_client;
 mod cli;
 mod commands;
 
-use self::cli::{Cli, Commands, TraceCommands};
+use self::cli::{Cli, Commands};
 
 fn get_instance(cli: &Cli) -> String {
     cli.tap.clone().unwrap_or_else(|| "system".to_string())
@@ -44,22 +44,7 @@ async fn main() {
         Commands::Tcprt { action } => commands::tcprt::handle_action(&client, &instance, action).await,
         Commands::Chain { action } => commands::chain::handle_action(&client, action).await,
         Commands::Drops { action } => commands::drops::handle_action(&client, tap_filter.as_ref(), action).await,
-        Commands::Trace { action } => match action {
-            TraceCommands::Start { tap, src, dst, sport, dport, proto, wait, chain } => {
-                commands::trace::handle_trace_start(
-                    &client,
-                    tap,
-                    src,
-                    dst,
-                    sport,
-                    dport,
-                    proto,
-                    wait,
-                    chain,
-                )
-                .await
-            }
-        },
+        Commands::Trace { action } => commands::trace::handle_action(&client, action).await,
         Commands::Ssl { action } => commands::ssl::handle_action(&client, &instance, has_tap, action).await,
         Commands::Config { action } => commands::config::handle_action(&client, &instance, has_tap, action).await,
         Commands::Diagnose { dst, dport, chain } => {

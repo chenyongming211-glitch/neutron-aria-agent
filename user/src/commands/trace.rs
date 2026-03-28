@@ -1,4 +1,4 @@
-use crate::api_client;
+use crate::{api_client, cli::TraceCommands};
 
 /// Collect trace events from all taps, keyed by instance name.
 async fn collect_trace_events(
@@ -574,5 +574,23 @@ pub(crate) async fn handle_trace_start(
         } else {
             run_trace(client, &taps, &src, &dst, sport, dport, &proto, wait).await
         }
+    }
+}
+
+pub(crate) async fn handle_action(
+    client: &api_client::ApiClient,
+    action: TraceCommands,
+) -> Result<(), String> {
+    match action {
+        TraceCommands::Start {
+            tap,
+            src,
+            dst,
+            sport,
+            dport,
+            proto,
+            wait,
+            chain,
+        } => handle_trace_start(client, tap, src, dst, sport, dport, proto, wait, chain).await,
     }
 }
