@@ -5,8 +5,8 @@ mod cli;
 mod commands;
 
 use self::cli::{
-    ChainCommands, Cli, Commands, ConfigCommands, ConntrackCommands, GroupCommands,
-    MirrorCommands, PolicyCommands, QosCommands, SslCommands, SystemCommands, TraceCommands,
+    ChainCommands, Cli, Commands, ConfigCommands, GroupCommands, MirrorCommands,
+    PolicyCommands, QosCommands, SslCommands, TraceCommands,
 };
 
 fn get_instance(cli: &Cli) -> String {
@@ -28,31 +28,7 @@ async fn main() {
     let tap_filter = cli.tap.clone();
 
     let result: Result<(), String> = match cli.command {
-        Commands::System { action } => match action {
-            SystemCommands::Start { iface, max_port_policies } => {
-                if cli.tap.is_some() {
-                    eprintln!("Error: 'system start' cannot be used with --tap. Use aria-agent to manage tap instances.");
-                    std::process::exit(1);
-                }
-                match client.system_start(&aria_api::SystemStartRequest {
-                    iface,
-                    max_port_policies,
-                }).await {
-                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-            SystemCommands::Stop => {
-                if cli.tap.is_some() {
-                    eprintln!("Error: 'system stop' cannot be used with --tap. Use aria-agent to manage tap instances.");
-                    std::process::exit(1);
-                }
-                match client.system_stop().await {
-                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-        },
+        Commands::System { action } => commands::system::handle_system_action(&client, has_tap, action).await,
         Commands::Group { action } => match action {
             GroupCommands::Add { name, cidr } => {
                 match client.add_group(&instance, &aria_api::AddGroupRequest { name, cidr }).await {
@@ -381,35 +357,7 @@ async fn main() {
                 if has_error { Err("Some stats queries failed".to_string()) } else { Ok(()) }
             }
         },
-        Commands::Conntrack { action } => match action {
-            ConntrackCommands::List => {
-                match client.list_conntrack(&instance).await {
-                    Ok(resp) => {
-                        if resp.connections.is_empty() {
-                            println!("No active connections");
-                        } else {
-                            println!("{:<20} {:<20} {:<8} {:<8} {:<8} {:<12} {:<15} {}",
-                                "Source", "Destination", "SPort", "DPort", "Proto", "State",
-                                "Packets", "Bytes");
-                            for c in &resp.connections {
-                                println!("{:<20} {:<20} {:<8} {:<8} {:<8} {:<12} {:<15} {}",
-                                    c.src_ip, c.dst_ip, c.src_port, c.dst_port, c.proto,
-                                    c.state, c.packets, c.bytes);
-                            }
-                            println!("\nTotal: {} connections", resp.total);
-                        }
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            ConntrackCommands::Flush => {
-                match client.flush_conntrack(&instance).await {
-                    Ok(resp) => { println!("Flushed {} connections", resp.flushed); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-        },
+        Commands::Conntrack { action } => commands::conntrack::handle_action(&client, &instance, action).await,
         Commands::Qos { action } => match action {
             QosCommands::Add { group, direction, rate, burst, priority, mode } => {
                 match client.add_qos(&instance, &aria_api::AddQosRequest {
@@ -833,52 +781,8 @@ async fn main() {
         Commands::Diagnose { dst, dport, chain } => {
             commands::diagnose::handle(&client, &instance, &dst, dport, chain.as_deref()).await
         },
-        Commands::Instances => {
-            match client.list_instances().await {
-                Ok(resp) => {
-                    if resp.instances.is_empty() {
-                        println!("No instances registered");
-                    } else {
-                        println!("{:<20} {}", "Instance", "Status");
-                        for inst in &resp.instances {
-                            let status = if inst.active { "active" } else { "inactive" };
-                            println!("{:<20} {}", inst.name, status);
-                        }
-                    }
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            }
-        }
-        Commands::Health => {
-            match client.health().await {
-                Ok(resp) => {
-                    println!("Status:    {}", resp.status);
-                    println!("Version:   {}", resp.version);
-                    println!("Instances: {}", resp.instances);
-                    println!(
-                        "KernelDrop: {}",
-                        if resp.kernel_drop_available {
-                            "available"
-                        } else {
-                            "unavailable"
-                        }
-                    );
-                    if let Some(mode) = &resp.kernel_drop_mode {
-                        println!("DropMode:  {}", mode);
-                    }
-                    println!(
-                        "DropIfaces: {}",
-                        resp.kernel_drop_managed_ifaces
-                    );
-                    if let Some(last_error) = &resp.kernel_drop_last_error {
-                        println!("DropError: {}", last_error);
-                    }
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            }
-        }
+        Commands::Instances => commands::system::handle_instances(&client).await,
+        Commands::Health => commands::system::handle_health(&client).await,
     };
 
     if let Err(e) = result {
