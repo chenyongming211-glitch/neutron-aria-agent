@@ -35,6 +35,8 @@ struct Config {
     ebpf_path: String,
     #[serde(default = "default_trace_backend")]
     trace_backend: String,
+    #[serde(default = "default_trace_auto_allow_ringbuf")]
+    trace_auto_allow_ringbuf: bool,
     #[serde(default = "default_pin_path")]
     pin_path: String,
     #[serde(default = "default_state_path")]
@@ -57,6 +59,10 @@ fn default_ebpf_path() -> String {
 
 fn default_trace_backend() -> String {
     "auto".to_string()
+}
+
+fn default_trace_auto_allow_ringbuf() -> bool {
+    false
 }
 
 fn default_pin_path() -> String {
@@ -92,6 +98,7 @@ impl Default for Config {
         Self {
             ebpf_path: default_ebpf_path(),
             trace_backend: default_trace_backend(),
+            trace_auto_allow_ringbuf: default_trace_auto_allow_ringbuf(),
             pin_path: default_pin_path(),
             state_path: default_state_path(),
             iface_pattern: default_iface_pattern(),
@@ -188,6 +195,9 @@ async fn main() {
     let resolved_ebpf = match ebpf_binary::resolve_ebpf_binary(
         &config.ebpf_path,
         trace_backend_preference,
+        ebpf_binary::TraceBackendResolverOptions {
+            allow_auto_ringbuf: config.trace_auto_allow_ringbuf,
+        },
     ) {
         Ok(resolved) => resolved,
         Err(e) => {
@@ -201,6 +211,7 @@ async fn main() {
         requested_ebpf_path = %resolved_ebpf.requested_path,
         ebpf_path = %resolved_ebpf.selected_path,
         trace_backend_preference = %config.trace_backend,
+        trace_auto_allow_ringbuf = config.trace_auto_allow_ringbuf,
         trace_backend = %resolved_ebpf.trace_backend,
         kernel_version = ?resolved_ebpf.kernel_version,
         pin_path = %config.pin_path,

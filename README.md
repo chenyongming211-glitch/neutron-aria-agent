@@ -68,6 +68,8 @@ sudo chmod +x /usr/local/bin/aria-agent /usr/local/bin/ariactl
 sudo mkdir -p /etc/aria-agent
 sudo cat > /etc/aria-agent/config.toml << 'EOF'
 ebpf_path = "/usr/local/lib/libebpf_firewall.so"
+trace_backend = "auto"
+trace_auto_allow_ringbuf = false
 pin_path = "/sys/fs/bpf/aria"
 state_path = "/var/lib/aria-agent"
 iface_pattern = "^(eth|tap)"
@@ -729,6 +731,8 @@ aria-firewall/
 
 ```toml
 ebpf_path = "/usr/local/lib/libebpf_firewall.so"
+trace_backend = "auto"                 # auto / legacy-map / perf-event-array / ringbuf
+trace_auto_allow_ringbuf = false      # rollout gate: auto 模式默认仍保持 perf-first
 pin_path = "/sys/fs/bpf/aria"
 state_path = "/var/lib/aria-agent"
 iface_pattern = "^(eth|tap)"    # 正则匹配要管理的接口

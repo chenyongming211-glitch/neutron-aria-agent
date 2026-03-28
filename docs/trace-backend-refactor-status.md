@@ -97,7 +97,8 @@ Selection behavior:
 - if config points directly to a file ending with `_ringbuf`, use `ringbuf`
 - if config points directly to a file ending with `_perf`, use `perf event`
 - otherwise:
-  - if kernel `>= 5.8` and sibling `<base>_ringbuf.so` exists, use that
+  - if `trace_auto_allow_ringbuf = true`, kernel `>= 5.8`, and sibling
+    `<base>_ringbuf.so` exists, use that
   - else if sibling `<base>_perf.so` exists, use that
   - else fall back to the configured single legacy object and `legacy-map`
 
@@ -199,6 +200,9 @@ The following artifact still does **not** exist yet:
 
 Until ringbuf packaging lands, `auto` can only choose between the base object
 and the packaged perf sibling.
+
+Even after ringbuf packaging lands, `auto` will stay on `perf-event-array`
+unless `trace_auto_allow_ringbuf = true` is explicitly enabled in config.
 
 ### 3. Runtime inventory rollout is only partially done
 
@@ -367,11 +371,11 @@ not call out strongly enough:
    - userspace cache eviction
    - consumer restart/failure state
 
-5. Backend rollout gating is missing.
-   The current resolver prefers `ringbuf` on `>= 5.8` whenever the sibling
-   artifact exists. That means a "perf first, ringbuf later" rollout can still
-   be bypassed accidentally if both artifacts are published before ringbuf is
-   declared production-ready.
+5. Backend rollout gating is now explicit.
+   `auto` no longer switches to `ringbuf` just because a sibling artifact
+   exists on `>= 5.8`. The resolver now requires an explicit
+   `trace_auto_allow_ringbuf = true` config gate, so the current rollout stays
+   perf-first unless operators deliberately opt in.
 
 6. Event ordering semantics are not defined yet.
    Legacy map-backed reads sort by `timestamp desc, seq desc`. The current
@@ -404,11 +408,10 @@ Before any real dataplane cutover:
 - define event ordering semantics explicitly:
   - preserve legacy newest-first behavior on reads
   - implement that by sorting cached events on read in Phase 1.5
-- add an explicit backend rollout gate so `perf-first` remains true in
-  production:
-  - config override
-  - feature flag
-  - or resolver preference switch
+- keep the explicit backend rollout gate so `perf-first` remains true in
+  production until ringbuf is declared ready:
+  - `trace_auto_allow_ringbuf = false` by default
+  - explicit `trace_backend = "ringbuf"` still allowed for direct opt-in
 - add explicit counters for:
   - kernel lost stream events
   - userspace cache evictions

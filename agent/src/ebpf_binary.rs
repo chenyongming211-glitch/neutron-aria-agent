@@ -68,9 +68,15 @@ pub struct ResolvedEbpfBinary {
     pub kernel_version: Option<String>,
 }
 
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct TraceBackendResolverOptions {
+    pub allow_auto_ringbuf: bool,
+}
+
 pub fn resolve_ebpf_binary(
     requested_path: &str,
     preference: TraceBackendPreference,
+    options: TraceBackendResolverOptions,
 ) -> Result<ResolvedEbpfBinary, String> {
     let requested = Path::new(requested_path);
     let explicit_backend = explicit_backend_from_path(requested);
@@ -89,7 +95,8 @@ pub fn resolve_ebpf_binary(
         let kernel_version = current_kernel_version();
         match preference {
             TraceBackendPreference::Auto => {
-                if matches!(kernel_version, Some(version) if version.supports_ringbuf())
+                if options.allow_auto_ringbuf
+                    && matches!(kernel_version, Some(version) if version.supports_ringbuf())
                     && ringbuf_path.exists()
                 {
                     (ringbuf_path, TraceBackendKind::RingBuf)
