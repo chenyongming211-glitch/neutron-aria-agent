@@ -28,6 +28,7 @@
 - [Runtime Repair Design](docs/runtime-repair-design.md)
 - [Global Shared Data Plane Design](docs/global-shared-data-plane-design.md)
 - [Kernel Drop Observability Design](docs/kernel-drop-observability-design.md)
+- [Codebase Refactor Plan](docs/codebase-refactor-plan.md)
 
 ## 系统要求
 
