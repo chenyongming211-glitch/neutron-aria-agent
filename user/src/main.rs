@@ -5,8 +5,7 @@ mod cli;
 mod commands;
 
 use self::cli::{
-    ChainCommands, Cli, Commands, ConfigCommands, GroupCommands, MirrorCommands,
-    PolicyCommands, QosCommands, SslCommands, TraceCommands,
+    Cli, Commands, ConfigCommands, PolicyCommands, SslCommands, TraceCommands,
 };
 
 fn get_instance(cli: &Cli) -> String {
@@ -29,57 +28,7 @@ async fn main() {
 
     let result: Result<(), String> = match cli.command {
         Commands::System { action } => commands::system::handle_system_action(&client, has_tap, action).await,
-        Commands::Group { action } => match action {
-            GroupCommands::Add { name, cidr } => {
-                match client.add_group(&instance, &aria_api::AddGroupRequest { name, cidr }).await {
-                    Ok(resp) => { println!("Added group '{}' with id {}", resp.name, resp.id); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-            GroupCommands::Delete { name } => {
-                match client.delete_group(&instance, &name).await {
-                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-            GroupCommands::List => {
-                match client.list_groups(&instance).await {
-                    Ok(resp) => {
-                        if resp.groups.is_empty() {
-                            println!("No groups configured");
-                        } else {
-                            println!("{:<10} {:<15} {}", "ID", "Name", "CIDRs");
-                            for g in &resp.groups {
-                                println!("{:<10} {:<15} {}", g.id, g.name, g.cidrs.join(", "));
-                            }
-                        }
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            GroupCommands::WithStats => {
-                match client.list_groups_with_stats(&instance).await {
-                    Ok(resp) => {
-                        if resp.groups.is_empty() {
-                            println!("No groups configured");
-                        } else {
-                            println!("{:<10} {:<15} {:>15} {:>15} {:>15} {:>15} {}",
-                                "ID", "Name", "InPkts", "InBytes", "OutPkts", "OutBytes", "CIDRs");
-                            for g in &resp.groups {
-                                println!("{:<10} {:<15} {:>15} {:>15} {:>15} {:>15} {}",
-                                    g.id, g.name,
-                                    g.ingress_packets, g.ingress_bytes,
-                                    g.egress_packets, g.egress_bytes,
-                                    g.cidrs.join(", "));
-                            }
-                        }
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-        },
+        Commands::Group { action } => commands::group::handle_action(&client, &instance, action).await,
         Commands::Policy { action } => match action {
             PolicyCommands::Add { src_group, dst_group, proto, action, ports, direction } => {
                 match client.add_policy(&instance, &aria_api::AddPolicyRequest {
@@ -358,197 +307,10 @@ async fn main() {
             }
         },
         Commands::Conntrack { action } => commands::conntrack::handle_action(&client, &instance, action).await,
-        Commands::Qos { action } => match action {
-            QosCommands::Add { group, direction, rate, burst, priority, mode } => {
-                match client.add_qos(&instance, &aria_api::AddQosRequest {
-                    group,
-                    direction,
-                    rate,
-                    burst,
-                    priority,
-                    mode,
-                }).await {
-                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-            QosCommands::Delete { group, direction } => {
-                match client.delete_qos(&instance, &aria_api::DeleteQosRequest {
-                    group,
-                    direction,
-                }).await {
-                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-            QosCommands::List => {
-                match client.list_qos(&instance).await {
-                    Ok(resp) => {
-                        if resp.rules.is_empty() {
-                            println!("No QoS rules configured");
-                        } else {
-                            println!("{:<15} {:<10} {:<10} {:<15} {:<15} {:<10} {}",
-                                "Group", "GroupID", "Direction", "Rate (B/s)", "Burst (B)", "Mode", "Priority");
-                            for r in &resp.rules {
-                                println!("{:<15} {:<10} {:<10} {:<15} {:<15} {:<10} {}",
-                                    r.group, r.group_id, r.direction, r.rate_bps, r.burst_bytes, r.mode, r.priority);
-                            }
-                        }
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            QosCommands::WithStats => {
-                match client.list_qos_with_stats(&instance).await {
-                    Ok(resp) => {
-                        if resp.rules.is_empty() {
-                            println!("No QoS rules configured");
-                        } else {
-                            println!("{:<15} {:<10} {:<10} {:<15} {:<15} {:<10} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {}",
-                                "Group", "GroupID", "Direction", "Rate (B/s)", "Burst (B)", "Mode",
-                                "PassPkts", "PassBytes", "DropPkts", "DropBytes", "ShapePkts", "ShapeBytes", "Priority");
-                            for r in &resp.rules {
-                                println!("{:<15} {:<10} {:<10} {:<15} {:<15} {:<10} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {}",
-                                    r.group, r.group_id, r.direction, r.rate_bps, r.burst_bytes, r.mode,
-                                    r.passed_packets, r.passed_bytes,
-                                    r.dropped_packets, r.dropped_bytes,
-                                    r.shaped_packets, r.shaped_bytes,
-                                    r.priority);
-                            }
-                        }
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-        },
-        Commands::Mirror { action } => match action {
-            MirrorCommands::Add { direction, target, src_group, dst_group, proto } => {
-                match client.add_mirror(&instance, &aria_api::AddMirrorRequest {
-                    src_group,
-                    dst_group,
-                    proto,
-                    direction,
-                    target,
-                }).await {
-                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-            MirrorCommands::Delete { direction, src_group, dst_group, proto } => {
-                match client.delete_mirror(&instance, &aria_api::DeleteMirrorRequest {
-                    src_group,
-                    dst_group,
-                    proto,
-                    direction,
-                }).await {
-                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-            MirrorCommands::List => {
-                match client.list_mirror(&instance).await {
-                    Ok(resp) => {
-                        if resp.rules.is_empty() {
-                            println!("No mirror rules configured");
-                        } else {
-                            println!("{:<12} {:<12} {:<8} {:<10} {:<15} {:<8} {}",
-                                "SrcGroup", "DstGroup", "Proto", "Direction", "Target", "IfIdx", "Global");
-                            for r in &resp.rules {
-                                println!("{:<12} {:<12} {:<8} {:<10} {:<15} {:<8} {}",
-                                    r.src_group, r.dst_group, r.proto, r.direction,
-                                    r.target_iface, r.target_ifindex,
-                                    if r.is_global { "yes" } else { "no" });
-                            }
-                        }
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            MirrorCommands::WithStats => {
-                match client.list_mirror_with_stats(&instance).await {
-                    Ok(resp) => {
-                        if resp.rules.is_empty() {
-                            println!("No mirror rules configured");
-                        } else {
-                            println!("{:<12} {:<12} {:<8} {:<10} {:<15} {:<8} {:>12} {:>12} {}",
-                                "SrcGroup", "DstGroup", "Proto", "Direction", "Target", "Global",
-                                "MirrorPkts", "MirrorBytes", "Errors");
-                            for r in &resp.rules {
-                                println!("{:<12} {:<12} {:<8} {:<10} {:<15} {:<8} {:>12} {:>12} {}",
-                                    r.src_group, r.dst_group, r.proto, r.direction,
-                                    r.target_iface, if r.is_global { "yes" } else { "no" },
-                                    r.mirrored_packets, r.mirrored_bytes,
-                                    r.errors);
-                            }
-                        }
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-        },
+        Commands::Qos { action } => commands::qos::handle_action(&client, &instance, action).await,
+        Commands::Mirror { action } => commands::mirror::handle_action(&client, &instance, action).await,
         Commands::Tcprt { action } => commands::tcprt::handle_action(&client, &instance, action).await,
-        Commands::Chain { action } => match action {
-            ChainCommands::Apply { file } => {
-                let json_str = match std::fs::read_to_string(&file) {
-                    Ok(s) => s,
-                    Err(e) => { eprintln!("Error: Failed to read file '{}': {}", file, e); std::process::exit(1); },
-                };
-                let req: aria_api::CreateServiceChainRequest = match serde_json::from_str(&json_str) {
-                    Ok(r) => r,
-                    Err(e) => { eprintln!("Error: Invalid JSON: {}", e); std::process::exit(1); },
-                };
-                match client.create_chain(&req).await {
-                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-            ChainCommands::List => {
-                match client.list_chains().await {
-                    Ok(resp) => {
-                        if resp.chains.is_empty() {
-                            println!("No service chains configured");
-                        } else {
-                            println!("{:<20} {:<30} {}", "Name", "Description", "Hops");
-                            for c in &resp.chains {
-                                let hop_names: Vec<&str> = c.hops.iter().map(|h| h.name.as_str()).collect();
-                                println!("{:<20} {:<30} {}", c.name, c.description, hop_names.join(" → "));
-                            }
-                        }
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            ChainCommands::Show { name } => {
-                match client.get_chain(&name).await {
-                    Ok(chain) => {
-                        println!("Chain: {}", chain.name);
-                        if !chain.description.is_empty() {
-                            println!("Description: {}", chain.description);
-                        }
-                        println!();
-                        for (i, hop) in chain.hops.iter().enumerate() {
-                            println!("  Hop #{}: {} ({})", i + 1, hop.name, hop.hop_type);
-                            for tap in &hop.taps {
-                                println!("    tap: {} ({})", tap.tap, tap.role);
-                            }
-                        }
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            ChainCommands::Delete { name } => {
-                match client.delete_chain(&name).await {
-                    Ok(resp) => { println!("{}", resp.message); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-        },
+        Commands::Chain { action } => commands::chain::handle_action(&client, action).await,
         Commands::Drops { action } => commands::drops::handle_action(&client, tap_filter.as_ref(), action).await,
         Commands::Trace { action } => match action {
             TraceCommands::Start { tap, src, dst, sport, dport, proto, wait, chain } => {

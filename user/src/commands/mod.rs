@@ -1,6 +1,10 @@
 pub(crate) mod drops;
 pub(crate) mod diagnose;
+pub(crate) mod group;
 pub(crate) mod conntrack;
+pub(crate) mod mirror;
+pub(crate) mod qos;
+pub(crate) mod chain;
 pub(crate) mod system;
 pub(crate) mod trace;
 pub(crate) mod tcprt;
