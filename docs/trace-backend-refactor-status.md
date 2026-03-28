@@ -515,8 +515,8 @@ The best fit for the current code is a per-CPU watermark vector keyed by
 
 - `TRACE_SEQ` already exists and is per-CPU
 - each stream event already carries `cpu_id` and `seq`
-- reads can discard cached events older than the tap's recorded CPU-local
-  watermark
+- `TRACE_SEQ` is the next seq-to-allocate watermark on each CPU, so post-flush
+  reads must keep events with `seq >= watermark`
 
 This keeps Phase 1.5 mostly userspace-side while still making `flush` race-safe
 against in-flight perf events already queued in the kernel.

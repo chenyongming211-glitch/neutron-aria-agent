@@ -65,6 +65,16 @@ struct StreamRuntimeState {
     last_error: Option<String>,
 }
 
+#[inline]
+fn visible_after_flush_watermark(seq: u64, next_seq_watermark: Option<&u64>) -> bool {
+    // TRACE_SEQ stores the next sequence number that will be assigned on each CPU.
+    // After a flush, the first post-flush event on that CPU uses exactly that seq,
+    // so visibility must be `>= watermark`, not `> watermark`.
+    next_seq_watermark
+        .map(|watermark| seq >= *watermark)
+        .unwrap_or(true)
+}
+
 pub struct TraceManager {
     backend: TraceBackendKind,
     caches: RwLock<HashMap<RuntimeTapKey, VecDeque<CachedTraceEvent>>>,
@@ -117,10 +127,10 @@ impl TraceManager {
                         entries
                             .iter()
                             .filter(|cached| {
-                                flush_watermark
-                                    .get(&cached.cpu_id)
-                                    .map(|watermark| cached.entry.seq > *watermark)
-                                    .unwrap_or(true)
+                                visible_after_flush_watermark(
+                                    cached.entry.seq,
+                                    flush_watermark.get(&cached.cpu_id),
+                                )
                             })
                             .cloned()
                             .collect()
@@ -163,10 +173,10 @@ impl TraceManager {
                             events
                                 .iter()
                                 .filter(|cached| {
-                                    flush_watermark
-                                        .get(&cached.cpu_id)
-                                        .map(|watermark| cached.entry.seq > *watermark)
-                                        .unwrap_or(true)
+                                    visible_after_flush_watermark(
+                                        cached.entry.seq,
+                                        flush_watermark.get(&cached.cpu_id),
+                                    )
                                 })
                                 .count() as u64
                         })
