@@ -1,4 +1,4 @@
-use aria_core::ebpf_ops::{CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES};
+use aria_core::ebpf_ops::{critical_network_map_names, NETWORK_MAP_NAMES, TraceMapMode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -13,6 +13,7 @@ pub struct FirewallInstance {
     pub pin_path: PathBuf,
     pub state_path: PathBuf,
     pub shared_runtime: bool,
+    trace_map_mode: TraceMapMode,
     /// Whether FQ qdisc (EDT) was successfully configured.
     /// If false, QoS shaping is unavailable — only policing works.
     pub edt_available: bool,
@@ -109,6 +110,7 @@ impl FirewallInstance {
     }
 
     fn pin_runtime_maps(&self, bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {
+        let critical_map_names = critical_network_map_names(self.trace_map_mode);
         for name in NETWORK_MAP_NAMES {
             if let Some(map) = bpf.map_mut(name) {
                 let target = format!("{}/{}", pin_path, name);
@@ -116,24 +118,31 @@ impl FirewallInstance {
                     continue;
                 }
                 if let Err(e) = map.pin(target) {
-                    if CRITICAL_NETWORK_MAP_NAMES.contains(name) {
+                    if critical_map_names.contains(name) {
                         return Err(format!("failed to pin critical map {}: {}", name, e));
                     }
                     warn!(instance = %self.iface, map = %name, error = %e, "failed to pin runtime map");
                 }
-            } else if CRITICAL_NETWORK_MAP_NAMES.contains(name) {
+            } else if critical_map_names.contains(name) {
                 return Err(format!("critical map {} not found", name));
             }
         }
         Ok(())
     }
 
-    pub fn new(iface: &str, pin_path: PathBuf, state_path: PathBuf, shared_runtime: bool) -> Self {
+    pub fn new(
+        iface: &str,
+        pin_path: PathBuf,
+        state_path: PathBuf,
+        shared_runtime: bool,
+        trace_map_mode: TraceMapMode,
+    ) -> Self {
         Self {
             iface: iface.to_string(),
             pin_path,
             state_path,
             shared_runtime,
+            trace_map_mode,
             edt_available: false,
         }
     }
@@ -170,8 +179,8 @@ impl FirewallInstance {
         vec!["tc_egress".to_string(), "tc_ingress".to_string()]
     }
 
-    fn expected_critical_map_pins() -> Vec<String> {
-        CRITICAL_NETWORK_MAP_NAMES
+    fn expected_critical_map_pins(&self) -> Vec<String> {
+        critical_network_map_names(self.trace_map_mode)
             .iter()
             .map(|name| (*name).to_string())
             .collect()
@@ -194,7 +203,7 @@ impl FirewallInstance {
             required_program_pins: Self::required_program_pins(),
             optional_program_pins: Self::optional_program_pins(),
             present_program_pins: Vec::new(),
-            critical_map_pins: Self::expected_critical_map_pins(),
+            critical_map_pins: self.expected_critical_map_pins(),
         })
     }
 

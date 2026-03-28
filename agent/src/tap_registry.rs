@@ -110,6 +110,7 @@ impl TapRegistry {
             PathBuf::from(self.control_plane.managed_pin_path()),
             self.base_state_path.join(iface),
             true,
+            self.control_plane.trace_map_mode(),
         );
 
         // 为该 tap 实例设置端口策略上限（写入对应 state.json）

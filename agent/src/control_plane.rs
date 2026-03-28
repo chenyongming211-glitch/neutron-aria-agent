@@ -9,6 +9,7 @@ use crate::service_chain::{self, ServiceChain};
 use crate::ssl_manager::SslManager;
 use crate::trace_backend::TraceManager;
 use aria_core::common::TapMapRuntime;
+use aria_core::ebpf_ops::TraceMapMode;
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
 use aria_core::wal::{WalClient, WalEntry};
 
@@ -369,6 +370,10 @@ impl ControlPlane {
         format!("{}/{}", self.base_pin_path, MANAGED_SHARED_PIN_NAMESPACE)
     }
 
+    pub fn trace_map_mode(&self) -> TraceMapMode {
+        self.trace_manager.map_mode()
+    }
+
     /// Prepare tap-scoped runtime state before any interface link goes live.
     pub async fn prepare_managed_registration(
         &self,
@@ -568,6 +573,19 @@ impl ControlPlane {
         instances.insert(name.to_string(), instance.clone());
         drop(instances);
 
+        let trace_pin_path = {
+            let state = instance.read().await;
+            state.pin_path.clone()
+        };
+        if let Err(e) = self.trace_manager.register_tap(&trace_pin_path, tap_id).await {
+            warn!(
+                instance = %name,
+                tap_id,
+                error = %e,
+                "failed to register trace runtime for managed instance"
+            );
+        }
+
         if let Some(enabled) = desired_ssl_enabled {
             let _ = self
                 .reconcile_instance_ssl_state(&name, &instance, enabled)
@@ -697,6 +715,15 @@ impl ControlPlane {
         instances.insert("system".to_string(), instance.clone());
         drop(instances);
 
+        if let Err(e) = self.trace_manager.register_tap(pin_path, tap_id).await {
+            warn!(
+                instance = "system",
+                tap_id,
+                error = %e,
+                "failed to register trace runtime for system instance"
+            );
+        }
+
         if let Some(enabled) = global_ssl_enabled {
             let _ = self
                 .reconcile_instance_ssl_state("system", &instance, enabled)
@@ -743,7 +770,7 @@ impl ControlPlane {
                 }
             }
             if tap_id != aria_core::common::TAP_ID_UNASSIGNED {
-                self.trace_manager.clear_tap_cache(&state.pin_path, tap_id).await;
+                self.trace_manager.unregister_tap(&state.pin_path, tap_id).await;
                 if let Err(e) =
                     aria_core::ebpf_ops::scrub_managed_runtime_state(state.map_runtime())
                 {
@@ -755,6 +782,8 @@ impl ControlPlane {
                         "failed to scrub managed runtime state during unregister"
                     );
                 }
+            } else if name == "system" {
+                self.trace_manager.unregister_tap(&state.pin_path, tap_id).await;
             } else if name != "system" {
                 if let Some(ifindex) = ifindex {
                     if let Err(e) = aria_core::ebpf_ops::clear_iface_ctx(&state.pin_path, ifindex) {

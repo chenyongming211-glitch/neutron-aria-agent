@@ -1,5 +1,7 @@
 use aya_ebpf::macros::map;
-use aya_ebpf::maps::{HashMap, LpmTrie, LruHashMap, LruPerCpuHashMap, PerCpuArray, PerCpuHashMap};
+use aya_ebpf::maps::{
+    HashMap, LpmTrie, LruHashMap, LruPerCpuHashMap, PerCpuArray, PerCpuHashMap, PerfEventArray,
+};
 
 pub use crate::common::{
     CtConfig, CtContractKey, CtContractValue, CtKey4, CtKey6, CtValue, DropKey, DropValue,
@@ -8,7 +10,7 @@ pub use crate::common::{
     MirrorKey, MirrorStatsValue, PipelineCtx, PolicyKey, PolicyValue, PortKey, QosConfig, QosKey,
     QosStatsValue, RuleStatsValue, SslConnValue, SslErrorEvent, SslHttpScratch, SslHttpValue,
     SslParseBuf, SslReadScratch, SslScratch, SslWriteScratch, TapConfig, TcpRtValue, TokenBucket,
-    TraceEvent, TraceEventKey, TraceEventV6, TraceFilter,
+    TraceEvent, TraceEventKey, TraceEventV6, TraceFilter, TraceStreamEvent,
 };
 use crate::parser::PacketInfo;
 
@@ -201,11 +203,17 @@ pub static TRACE_LOG_V6: LruHashMap<TraceEventKey, TraceEventV6> =
 #[map(name = "TRACE_SEQ")]
 pub static TRACE_SEQ: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
+#[map(name = "TRACE_EVENTS")]
+pub static TRACE_EVENTS: PerfEventArray<TraceStreamEvent> = PerfEventArray::new(0);
+
 #[map(name = "TRACE_EVENT_BUF")]
 pub static TRACE_EVENT_BUF: PerCpuArray<TraceEvent> = PerCpuArray::with_max_entries(1, 0);
 
 #[map(name = "TRACE_EVENT_V6_BUF")]
 pub static TRACE_EVENT_V6_BUF: PerCpuArray<TraceEventV6> = PerCpuArray::with_max_entries(1, 0);
+
+#[map(name = "TRACE_STREAM_EVENT_BUF")]
+pub static TRACE_STREAM_EVENT_BUF: PerCpuArray<TraceStreamEvent> = PerCpuArray::with_max_entries(1, 0);
 
 // --- SSL Observability maps ---
 

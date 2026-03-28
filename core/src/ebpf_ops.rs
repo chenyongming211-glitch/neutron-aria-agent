@@ -1163,7 +1163,7 @@ pub const NETWORK_MAP_NAMES: &[&str] = &[
     "MIRROR_POLICY", "MIRROR_GLOBAL", "MIRROR_STATS", "MIRROR_GLOBAL_STATS",
     "TCPRT_TABLE_V4", "TCPRT_TABLE_V6",
     "DROP_REASON_STATS",
-    "TRACE_FILTER", "TRACE_LOG", "TRACE_LOG_V6", "TRACE_SEQ",
+    "TRACE_FILTER", "TRACE_LOG", "TRACE_LOG_V6", "TRACE_SEQ", "TRACE_EVENTS",
     "FIREWALL_CONFIG",
 ];
 
@@ -1181,6 +1181,34 @@ pub const CRITICAL_NETWORK_MAP_NAMES: &[&str] = &[
     "TRACE_FILTER", "TRACE_SEQ",
     "FIREWALL_CONFIG",
 ];
+
+/// Trace map inventory mode used to validate runtime completeness during the
+/// legacy-to-stream transition.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TraceMapMode {
+    Legacy,
+    Stream,
+}
+
+pub const STREAM_CRITICAL_NETWORK_MAP_NAMES: &[&str] = &[
+    "IFACE_CTX_MAP",
+    "TAP_CONFIG_MAP",
+    "SRC_IPV4_TRIE", "DST_IPV4_TRIE", "SRC_IPV6_TRIE", "DST_IPV6_TRIE",
+    "POLICY_TABLE", "PORT_BITMAP_POOL",
+    "CT_TABLE_V4", "CT_TABLE_V6", "CT_CONFIG",
+    "QOS_CONFIG", "QOS_TOKEN_BUCKET",
+    "MIRROR_POLICY", "MIRROR_GLOBAL",
+    "TCPRT_TABLE_V4", "TCPRT_TABLE_V6",
+    "TRACE_FILTER", "TRACE_SEQ", "TRACE_EVENTS",
+    "FIREWALL_CONFIG",
+];
+
+pub fn critical_network_map_names(trace_mode: TraceMapMode) -> &'static [&'static str] {
+    match trace_mode {
+        TraceMapMode::Legacy => CRITICAL_NETWORK_MAP_NAMES,
+        TraceMapMode::Stream => STREAM_CRITICAL_NETWORK_MAP_NAMES,
+    }
+}
 
 /// Host-global SSL maps pinned under `ssl-global`.
 pub const SSL_MAP_NAMES: &[&str] = &[
@@ -1204,7 +1232,7 @@ pub const ALL_MAP_NAMES: &[&str] = &[
     "MIRROR_POLICY", "MIRROR_GLOBAL", "MIRROR_STATS", "MIRROR_GLOBAL_STATS",
     "TCPRT_TABLE_V4", "TCPRT_TABLE_V6",
     "DROP_REASON_STATS",
-    "TRACE_FILTER", "TRACE_LOG", "TRACE_LOG_V6", "TRACE_SEQ",
+    "TRACE_FILTER", "TRACE_LOG", "TRACE_LOG_V6", "TRACE_SEQ", "TRACE_EVENTS",
     "FIREWALL_CONFIG",
     "SSL_HANDSHAKE_SCRATCH", "SSL_CONN_TABLE", "SSL_SNI_TABLE", "SSL_SEQ",
     "SSL_HTTP_PARSE_BUF", "SSL_HTTP_SCRATCH", "SSL_HTTP_SCRATCH_BUF", "SSL_READ_SCRATCH",

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use aria_core::ebpf_ops::{
-    detach_tc_egress, replay_state, scrub_standalone_runtime_state, setup_fq_qdisc,
-    CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES,
+    critical_network_map_names, detach_tc_egress, replay_state, scrub_standalone_runtime_state,
+    setup_fq_qdisc, NETWORK_MAP_NAMES, TraceMapMode,
 };
 
 fn cleanup_failed_start(iface: &str, pin_path: &str) {
@@ -19,16 +19,21 @@ fn cleanup_failed_start(iface: &str, pin_path: &str) {
     let _ = fs::remove_dir_all(pin_path);
 }
 
-fn pin_runtime_maps(bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {
+fn pin_runtime_maps(
+    bpf: &mut aya::Ebpf,
+    pin_path: &str,
+    trace_map_mode: TraceMapMode,
+) -> Result<(), String> {
+    let critical_map_names = critical_network_map_names(trace_map_mode);
     for name in NETWORK_MAP_NAMES {
         if let Some(map) = bpf.map_mut(name) {
             if let Err(e) = map.pin(format!("{}/{}", pin_path, name)) {
-                if CRITICAL_NETWORK_MAP_NAMES.contains(name) {
+                if critical_map_names.contains(name) {
                     return Err(format!("failed to pin critical map {}: {}", name, e));
                 }
                 warn!(map = %name, error = %e, "failed to pin runtime map");
             }
-        } else if CRITICAL_NETWORK_MAP_NAMES.contains(name) {
+        } else if critical_map_names.contains(name) {
             return Err(format!("critical map {} not found", name));
         }
     }
@@ -113,10 +118,11 @@ pub async fn system_start(
         .map_pin_path(pin_path)
         .load(&bpf_bytes)
         .map_err(|e| format!("load error: {:?}", e))?;
+    let trace_map_mode = control_plane.trace_map_mode();
 
     // Pin all maps before attaching any programs so replay can rebuild runtime state
     // before packets hit the dataplane.
-    if let Err(e) = pin_runtime_maps(&mut bpf, pin_path) {
+    if let Err(e) = pin_runtime_maps(&mut bpf, pin_path, trace_map_mode) {
         cleanup_failed_start(iface, pin_path);
         return Err(e);
     }

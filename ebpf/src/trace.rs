@@ -1,9 +1,11 @@
 use crate::common::TraceEventKey;
 use crate::maps::{
-    TRACE_EVENT_BUF, TRACE_EVENT_V6_BUF, TRACE_FILTER, TRACE_LOG, TRACE_LOG_V6, TRACE_SEQ,
+    TRACE_EVENTS, TRACE_EVENT_BUF, TRACE_EVENT_V6_BUF, TRACE_FILTER, TRACE_LOG, TRACE_LOG_V6,
+    TRACE_SEQ, TRACE_STREAM_EVENT_BUF,
 };
 use crate::parser::PacketInfo;
 use aya_ebpf::helpers::bpf_get_smp_processor_id;
+use aya_ebpf::EbpfContext;
 
 /// Check if tracing is enabled and packet matches filter.
 /// Returns false quickly if filter is not set or not matching (zero overhead path).
@@ -80,9 +82,14 @@ pub struct TraceArgs {
     pub now: u64,
 }
 
-/// Record a trace event into the TRACE_LOG LRU map.
+/// Record a trace event into the legacy trace maps and the stream event array.
 #[inline(always)]
-pub unsafe fn trace_event(tap_id: u32, info: &PacketInfo, args: &TraceArgs) {
+pub unsafe fn trace_event<C: EbpfContext>(
+    ctx: &C,
+    tap_id: u32,
+    info: &PacketInfo,
+    args: &TraceArgs,
+) {
     let seq_key: u32 = 0;
     if let Some(seq) = TRACE_SEQ.get_ptr_mut(seq_key) {
         let event_key = next_trace_event_key(tap_id, seq);
@@ -123,5 +130,39 @@ pub unsafe fn trace_event(tap_id: u32, info: &PacketInfo, args: &TraceArgs) {
             (*event).pad = [0; 2];
             let _ = TRACE_LOG.insert(&event_key, &*event, 0);
         }
+        emit_trace_stream_event(ctx, event_key, info, args);
+    }
+}
+
+#[inline(always)]
+unsafe fn emit_trace_stream_event<C: EbpfContext>(
+    ctx: &C,
+    event_key: TraceEventKey,
+    info: &PacketInfo,
+    args: &TraceArgs,
+) {
+    if let Some(event) = TRACE_STREAM_EVENT_BUF.get_ptr_mut(0) {
+        (*event).tap_id = event_key.tap_id;
+        (*event).cpu_id = event_key.cpu_id;
+        (*event).seq = event_key.seq;
+        (*event).timestamp = args.now;
+        (*event).src_ip = info.src_ip;
+        (*event).dst_ip = info.dst_ip;
+        (*event).src_ip_v6 = info.src_ip_v6;
+        (*event).dst_ip_v6 = info.dst_ip_v6;
+        (*event).src_port = info.src_port;
+        (*event).dst_port = info.dst_port;
+        (*event).proto = info.proto;
+        (*event).hook = args.hook;
+        (*event).result = args.result;
+        (*event).direction = args.direction;
+        (*event).src_id = args.src_id;
+        (*event).dst_id = args.dst_id;
+        (*event).pkt_len = args.pkt_len;
+        (*event).ct_state = args.ct_state;
+        (*event).drop_reason = args.drop_reason;
+        (*event).is_ipv6 = if info.is_ipv6 { 1 } else { 0 };
+        (*event).pad = [0; 1];
+        let _ = TRACE_EVENTS.output(ctx, &*event, 0);
     }
 }
