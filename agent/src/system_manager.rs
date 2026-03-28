@@ -8,14 +8,35 @@ use aria_core::ebpf_ops::{
     setup_fq_qdisc, NETWORK_MAP_NAMES, TraceMapMode,
 };
 
+fn cleanup_root_qdisc(iface: &str) {
+    match std::process::Command::new("tc")
+        .args(["qdisc", "del", "dev", iface, "root"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            info!(iface = %iface, "removed root qdisc");
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let benign = stderr.contains("Cannot delete qdisc with handle of zero")
+                || stderr.contains("No such file or directory")
+                || stderr.trim().is_empty();
+            if !benign {
+                warn!(iface = %iface, stderr = %stderr.trim(), "failed to remove root qdisc");
+            }
+        }
+        Err(e) => {
+            warn!(iface = %iface, error = %e, "failed to run tc qdisc del root");
+        }
+    }
+}
+
 fn cleanup_failed_start(iface: &str, pin_path: &str) {
     let _ = std::process::Command::new("ip")
         .args(["link", "set", "dev", iface, "xdp", "off"])
         .output();
     detach_tc_egress(iface);
-    let _ = std::process::Command::new("tc")
-        .args(["qdisc", "del", "dev", iface, "root"])
-        .output();
+    cleanup_root_qdisc(iface);
     let _ = fs::remove_dir_all(pin_path);
 }
 
@@ -261,6 +282,7 @@ pub async fn system_stop(
             }
 
             detach_tc_egress(&iface);
+            cleanup_root_qdisc(&iface);
 
             if let Err(e) = sm.clear_attached_iface() {
                 warn!(iface = %iface, error = %e, "failed to clear attached interface record");
