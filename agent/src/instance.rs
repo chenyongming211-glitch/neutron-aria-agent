@@ -21,6 +21,7 @@ pub struct FirewallInstance {
 
 const RUNTIME_METADATA_SCHEMA_VERSION: u32 = 2;
 const PERSISTED_LIVE_IFACES_SCHEMA_VERSION: u32 = 2;
+const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct RuntimePinState {
@@ -88,6 +89,41 @@ fn default_persisted_live_iface_active() -> bool {
 }
 
 impl FirewallInstance {
+    fn fq_qdisc_marker_path(&self) -> PathBuf {
+        self.state_path.join(FQ_QDISC_MARKER)
+    }
+
+    fn mark_owned_fq_qdisc(&self) {
+        let marker_path = self.fq_qdisc_marker_path();
+        if let Err(e) = std::fs::write(&marker_path, b"owned\n") {
+            warn!(
+                instance = %self.iface,
+                path = %marker_path.display(),
+                error = %e,
+                "failed to persist FQ qdisc ownership marker"
+            );
+        }
+    }
+
+    fn cleanup_owned_fq_qdisc(&self) -> Result<(), String> {
+        let marker_path = self.fq_qdisc_marker_path();
+        if !marker_path.exists() {
+            return Ok(());
+        }
+
+        aria_core::ebpf_ops::cleanup_root_qdisc(&self.iface)
+            .map_err(|e| format!("[{}] Failed to remove owned root qdisc: {}", self.iface, e))?;
+        std::fs::remove_file(&marker_path).map_err(|e| {
+            format!(
+                "[{}] Failed to remove FQ qdisc ownership marker {}: {}",
+                self.iface,
+                marker_path.display(),
+                e
+            )
+        })?;
+        Ok(())
+    }
+
     fn xdp_link_pin_path(&self) -> String {
         if self.shared_runtime {
             format!("{}/{}_xdp_link", self.pin_path.display(), self.iface)
@@ -974,8 +1010,14 @@ impl FirewallInstance {
         let requires_shaping = state.qos_rules.iter().any(|rule| rule.mode == 1);
 
         if requires_shaping {
-            match aria_core::ebpf_ops::setup_fq_qdisc(&self.iface) {
-                Ok(()) => self.edt_available = true,
+            match aria_core::ebpf_ops::ensure_fq_qdisc(&self.iface) {
+                Ok(aria_core::ebpf_ops::FqQdiscState::InstalledNow) => {
+                    self.edt_available = true;
+                    self.mark_owned_fq_qdisc();
+                }
+                Ok(aria_core::ebpf_ops::FqQdiscState::AlreadyPresent) => {
+                    self.edt_available = true;
+                }
                 Err(e) => {
                     self.edt_available = aria_core::ebpf_ops::check_fq_qdisc(&self.iface);
                     if !self.edt_available {
@@ -1088,6 +1130,7 @@ impl FirewallInstance {
 
         // Detach TC egress
         aria_core::ebpf_ops::detach_tc_egress(&self.iface);
+        self.cleanup_owned_fq_qdisc()?;
 
         // Clean up pinned runtime dir only for non-shared runtimes or explicit rollback.
         if remove_pin_path && self.pin_path.exists() {

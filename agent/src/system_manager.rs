@@ -1,42 +1,53 @@
 use crate::control_plane::ControlPlane;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
 
 use aria_core::ebpf_ops::{
-    critical_network_map_names, detach_tc_egress, replay_state, scrub_standalone_runtime_state,
-    setup_fq_qdisc, NETWORK_MAP_NAMES, TraceMapMode,
+    cleanup_root_qdisc, critical_network_map_names, detach_tc_egress, ensure_fq_qdisc,
+    replay_state, scrub_standalone_runtime_state, FqQdiscState, NETWORK_MAP_NAMES,
+    TraceMapMode,
 };
 
-fn cleanup_root_qdisc(iface: &str) {
-    match std::process::Command::new("tc")
-        .args(["qdisc", "del", "dev", iface, "root"])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            info!(iface = %iface, "removed root qdisc");
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let benign = stderr.contains("Cannot delete qdisc with handle of zero")
-                || stderr.contains("No such file or directory")
-                || stderr.trim().is_empty();
-            if !benign {
-                warn!(iface = %iface, stderr = %stderr.trim(), "failed to remove root qdisc");
-            }
-        }
-        Err(e) => {
-            warn!(iface = %iface, error = %e, "failed to run tc qdisc del root");
-        }
-    }
+const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
+
+fn fq_qdisc_marker_path(state_path: &str) -> PathBuf {
+    Path::new(state_path).join(FQ_QDISC_MARKER)
 }
 
-fn cleanup_failed_start(iface: &str, pin_path: &str) {
+fn mark_owned_root_qdisc(state_path: &str) -> Result<(), String> {
+    let marker_path = fq_qdisc_marker_path(state_path);
+    fs::write(&marker_path, b"owned\n")
+        .map_err(|e| format!("failed to persist FQ qdisc ownership marker: {}", e))
+}
+
+fn cleanup_owned_root_qdisc(iface: &str, state_path: &str) -> Result<(), String> {
+    let marker_path = fq_qdisc_marker_path(state_path);
+    if !marker_path.exists() {
+        return Ok(());
+    }
+
+    cleanup_root_qdisc(iface)
+        .map_err(|e| format!("failed to clean owned root qdisc on {}: {}", iface, e))?;
+    fs::remove_file(&marker_path).map_err(|e| {
+        format!(
+            "failed to remove FQ qdisc ownership marker {}: {}",
+            marker_path.display(),
+            e
+        )
+    })?;
+    Ok(())
+}
+
+fn cleanup_failed_start(iface: &str, pin_path: &str, state_path: &str) {
     let _ = std::process::Command::new("ip")
         .args(["link", "set", "dev", iface, "xdp", "off"])
         .output();
     detach_tc_egress(iface);
-    cleanup_root_qdisc(iface);
+    if let Err(e) = cleanup_owned_root_qdisc(iface, state_path) {
+        warn!(iface = %iface, error = %e, "failed to clean owned root qdisc during start rollback");
+    }
     let _ = fs::remove_dir_all(pin_path);
 }
 
@@ -144,7 +155,7 @@ pub async fn system_start(
     // Pin all maps before attaching any programs so replay can rebuild runtime state
     // before packets hit the dataplane.
     if let Err(e) = pin_runtime_maps(&mut bpf, pin_path, trace_map_mode) {
-        cleanup_failed_start(iface, pin_path);
+        cleanup_failed_start(iface, pin_path, state_path);
         return Err(e);
     }
 
@@ -153,35 +164,47 @@ pub async fn system_start(
         Ok(tap_id) if tap_id != aria_core::common::TAP_ID_UNASSIGNED => {
             sm.set_tap_id(aria_core::common::TAP_ID_UNASSIGNED)
                 .map_err(|e| {
-                    cleanup_failed_start(iface, pin_path);
+                    cleanup_failed_start(iface, pin_path, state_path);
                     format!("failed to reset system tap_id before replay: {}", e)
                 })?;
             info!(iface = %iface, stale_tap_id = tap_id, "reset stale system tap_id before replay");
         }
         Ok(_) => {}
         Err(e) => {
-            cleanup_failed_start(iface, pin_path);
+            cleanup_failed_start(iface, pin_path, state_path);
             return Err(format!("failed to read system tap_id before replay: {}", e));
         }
     }
 
     if let Err(e) = scrub_standalone_runtime_state(pin_path) {
-        cleanup_failed_start(iface, pin_path);
+        cleanup_failed_start(iface, pin_path, state_path);
         return Err(format!("failed to scrub standalone runtime state before replay: {}", e));
     }
 
     // Replay state
     if let Err(e) = replay_state(&mut bpf, state_path) {
-        cleanup_failed_start(iface, pin_path);
+        cleanup_failed_start(iface, pin_path, state_path);
         return Err(format!("failed to replay state: {}", e));
     }
 
-    if let Err(e) = setup_fq_qdisc(iface) {
-        warn!(iface = %iface, error = %e, "FQ qdisc setup failed; QoS EDT disabled");
+    match ensure_fq_qdisc(iface) {
+        Ok(FqQdiscState::InstalledNow) => {
+            if let Err(e) = mark_owned_root_qdisc(state_path) {
+                if let Err(cleanup_err) = cleanup_root_qdisc(iface) {
+                    warn!(iface = %iface, error = %cleanup_err, "failed to roll back root qdisc after marker write failure");
+                }
+                cleanup_failed_start(iface, pin_path, state_path);
+                return Err(e);
+            }
+        }
+        Ok(FqQdiscState::AlreadyPresent) => {}
+        Err(e) => {
+            warn!(iface = %iface, error = %e, "FQ qdisc setup failed; QoS EDT disabled");
+        }
     }
 
     if let Err(e) = attach_xdp_program(&mut bpf, iface, pin_path) {
-        cleanup_failed_start(iface, pin_path);
+        cleanup_failed_start(iface, pin_path, state_path);
         return Err(e);
     }
 
@@ -206,7 +229,7 @@ pub async fn system_start(
     }
 
     if let Err(e) = pin_runtime_programs(&mut bpf, pin_path) {
-        cleanup_failed_start(iface, pin_path);
+        cleanup_failed_start(iface, pin_path, state_path);
         return Err(e);
     }
 
@@ -222,7 +245,7 @@ pub async fn system_start(
         if let Err(clear_err) = sm.clear_attached_iface() {
             warn!(iface = %iface, error = %clear_err, "failed to clear attached interface record after register failure");
         }
-        cleanup_failed_start(iface, pin_path);
+        cleanup_failed_start(iface, pin_path, state_path);
         return Err(format!("control-plane register failed: {}", e));
     }
 
@@ -282,7 +305,7 @@ pub async fn system_stop(
             }
 
             detach_tc_egress(&iface);
-            cleanup_root_qdisc(&iface);
+            cleanup_owned_root_qdisc(&iface, state_path)?;
 
             if let Err(e) = sm.clear_attached_iface() {
                 warn!(iface = %iface, error = %e, "failed to clear attached interface record");

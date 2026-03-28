@@ -36,7 +36,10 @@ pub use attach::{
     attach_tc_egress,
     attach_tc_ingress,
     check_fq_qdisc,
+    cleanup_root_qdisc,
     detach_tc_egress,
+    ensure_fq_qdisc,
+    FqQdiscState,
     setup_fq_qdisc,
 };
 pub use scrub::{scrub_managed_runtime_state, scrub_standalone_runtime_state};

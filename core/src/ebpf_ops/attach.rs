@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FqQdiscState {
+    AlreadyPresent,
+    InstalledNow,
+}
+
 /// Setup TC ingress: add clsact qdisc and attach the tc_ingress classifier program (mirror only).
 /// The TC link is pinned to `{pin_path}/tc_ingress_link` to prevent detach on drop.
 #[allow(dead_code)]
@@ -105,6 +111,40 @@ pub fn setup_fq_qdisc(iface: &str) -> Result<(), String> {
     }
     info!(iface = %iface, "FQ qdisc configured");
     Ok(())
+}
+
+/// Ensure an interface has an `fq` root qdisc for EDT-based QoS.
+pub fn ensure_fq_qdisc(iface: &str) -> Result<FqQdiscState, String> {
+    if check_fq_qdisc(iface) {
+        info!(iface = %iface, "FQ qdisc already present");
+        return Ok(FqQdiscState::AlreadyPresent);
+    }
+
+    setup_fq_qdisc(iface)?;
+    Ok(FqQdiscState::InstalledNow)
+}
+
+/// Remove the root qdisc if present.
+pub fn cleanup_root_qdisc(iface: &str) -> Result<(), String> {
+    let output = std::process::Command::new("tc")
+        .args(["qdisc", "del", "dev", iface, "root"])
+        .output()
+        .map_err(|e| format!("failed to run tc qdisc del root: {}", e))?;
+
+    if output.status.success() {
+        info!(iface = %iface, "removed root qdisc");
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let benign = stderr.contains("Cannot delete qdisc with handle of zero")
+        || stderr.contains("No such file or directory")
+        || stderr.trim().is_empty();
+    if benign {
+        return Ok(());
+    }
+
+    Err(format!("tc qdisc del root failed: {}", stderr.trim()))
 }
 
 /// Check if FQ qdisc is currently active on the interface.
