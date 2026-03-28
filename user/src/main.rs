@@ -7,7 +7,7 @@ mod commands;
 use self::cli::{
     ChainCommands, Cli, Commands, ConfigCommands, ConntrackCommands, DropsCommands,
     GroupCommands, MirrorCommands, PolicyCommands, QosCommands, SslCommands, SystemCommands,
-    TcprtCommands, TraceCommands,
+    TraceCommands,
 };
 
 fn get_instance(cli: &Cli) -> String {
@@ -574,77 +574,7 @@ async fn main() {
                 }
             }
         },
-        Commands::Tcprt { action } => match action {
-            TcprtCommands::Top { by, top, watch, interval } => {
-                commands::tcprt::handle_top(&client, &by, top, watch, interval).await
-            }
-            TcprtCommands::Flow { dst, dport, chain } => {
-                commands::tcprt::handle_flow(&client, &dst, dport, chain.as_deref()).await
-            }
-            TcprtCommands::Histogram => {
-                match client.tcprt_histogram(&instance).await {
-                    Ok(resp) => {
-                        if resp.total == 0 {
-                            println!("No ART data collected yet");
-                        } else {
-                            println!("=== ART Latency Distribution ===\n");
-                            let max_count = resp.buckets.iter().map(|b| b.count).max().unwrap_or(1);
-                            let bar_width = 40;
-                            for b in &resp.buckets {
-                                let label = if b.le_us >= 1_000_000.0 {
-                                    format!("{:.0}s", b.le_us / 1_000_000.0)
-                                } else if b.le_us >= 1_000.0 {
-                                    format!("{:.0}ms", b.le_us / 1_000.0)
-                                } else {
-                                    format!("{:.0}us", b.le_us)
-                                };
-                                let filled = if max_count > 0 { (b.count as usize * bar_width) / max_count as usize } else { 0 };
-                                let bar: String = "\u{2588}".repeat(filled);
-                                println!("  <= {:<8} {:>8} |{}", label, b.count, bar);
-                            }
-                            println!();
-                            println!("  Total: {}  Sum: {:.1} us", resp.total, resp.sum_us);
-                            println!("  p50: {:.1} us  p95: {:.1} us  p99: {:.1} us",
-                                resp.p50_us, resp.p95_us, resp.p99_us);
-                        }
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            TcprtCommands::States => {
-                match client.tcprt_states(&instance).await {
-                    Ok(resp) => {
-                        if resp.total_flows == 0 {
-                            println!("No TCP-RT flows found");
-                        } else {
-                            println!("=== TCP State Distribution ({} flows) ===\n", resp.total_flows);
-                            println!("  {:<15} {:>8} {:>8}", "State", "Count", "Percent");
-                            println!("  {:<15} {:>8} {:>8}", "───────────", "──────", "───────");
-                            for s in &resp.states {
-                                let pct = s.count as f64 / resp.total_flows as f64 * 100.0;
-                                println!("  {:<15} {:>8} {:>7.1}%", s.state, s.count, pct);
-                            }
-                            if !resp.anomalies.is_empty() {
-                                println!();
-                                println!("  Anomalies:");
-                                for a in &resp.anomalies {
-                                    println!("    ! {}", a);
-                                }
-                            }
-                        }
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            TcprtCommands::Flush => {
-                match client.flush_tcprt(&instance).await {
-                    Ok(resp) => { println!("Flushed {} TCP-RT entries", resp.flushed); Ok(()) }
-                    Err(e) => Err(e),
-                }
-            }
-        },
+        Commands::Tcprt { action } => commands::tcprt::handle_action(&client, &instance, action).await,
         Commands::Chain { action } => match action {
             ChainCommands::Apply { file } => {
                 let json_str = match std::fs::read_to_string(&file) {
