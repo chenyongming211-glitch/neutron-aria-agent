@@ -61,6 +61,7 @@ unzip firewall-binaries-x86_64.zip -d /tmp/aria
 sudo cp /tmp/aria/aria-agent /usr/local/bin/
 sudo cp /tmp/aria/ariactl /usr/local/bin/
 sudo cp /tmp/aria/libebpf_firewall.so /usr/local/lib/
+sudo cp /tmp/aria/libebpf_firewall_perf.so /usr/local/lib/
 sudo chmod +x /usr/local/bin/aria-agent /usr/local/bin/ariactl
 
 # 创建配置（首次）
@@ -76,6 +77,10 @@ EOF
 # 启动
 sudo aria-agent
 ```
+
+> Trace perf rollout 期间，请始终原子更新 `aria-agent`、`ariactl`、
+> `libebpf_firewall.so` 和 `libebpf_firewall_perf.so`。只更新 `.so`
+> 而不更新 `aria-agent`，会导致用户态 trace backend 逻辑仍停留在旧版本。
 
 ### 从源码编译
 

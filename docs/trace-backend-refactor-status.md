@@ -531,6 +531,33 @@ Because consumer startup is currently lazy, the refactor should add a test for:
 
 This is an easy issue to miss and will otherwise reappear later.
 
+The repository now includes a reusable remote regression runner:
+
+- `tools/trace_perf_regression.py`
+
+Example:
+
+```bash
+python3 tools/trace_perf_regression.py \
+  --host root@118.195.135.53 \
+  --packet-counts 200 \
+  --rounds 5
+```
+
+Current validation status as of `2026-03-28`:
+
+- `6.8` + `perf-event-array`: passed `5` rounds of
+  `flush -> start trace -> send 200 -> first read 200`
+- each round returned exact counts, unique contiguous `seq` ranges, and kept
+  the first `ct_state=new` event
+- `4.18` remains a release gate and is still pending environment availability
+
+One deployment pitfall was also confirmed during field verification:
+
+- updating only `libebpf_firewall*.so` is not enough
+- `aria-agent` must be deployed atomically with the eBPF objects, otherwise the
+  userspace trace cache / flush logic can remain on an older implementation
+
 ### 4. Add detach / re-register lifecycle tests
 
 The stream backend must be tested across:
