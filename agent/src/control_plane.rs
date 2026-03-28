@@ -13,6 +13,7 @@ use aria_core::ebpf_ops::TraceMapMode;
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
 use aria_core::wal::{WalClient, WalEntry};
 
+mod tcprt;
 mod trace;
 
 const WAL_COMPACT_THRESHOLD: u64 = 1000;
@@ -2087,36 +2088,6 @@ impl ControlPlane {
         let stats = aria_core::monitoring::get_group_stats(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))?;
         Ok((stats, state.state.groups.clone()))
-    }
-
-    // ── TCP-RT ──
-
-    pub async fn list_tcprt(
-        &self,
-        instance: &str,
-        top: usize,
-    ) -> Result<Vec<aria_core::tcprt_ops::TcpRtEntry>, ControlPlaneError> {
-        let inst = self.get_instance(instance).await?;
-        let state = inst.read().await;
-        aria_core::monitoring::get_tcprt_stats(state.map_runtime(), top)
-            .map_err(|e| ControlPlaneError::KernelError(e))
-    }
-
-    pub async fn get_tcprt_metrics_summary(
-        &self,
-        instance: &str,
-    ) -> Result<Option<aria_core::monitoring::TcprtMetricsSummary>, ControlPlaneError> {
-        let inst = self.get_instance(instance).await?;
-        let state = inst.read().await;
-        aria_core::monitoring::get_tcprt_metrics_summary(state.map_runtime())
-            .map_err(ControlPlaneError::KernelError)
-    }
-
-    pub async fn flush_tcprt(&self, instance: &str) -> Result<u64, ControlPlaneError> {
-        let inst = self.get_instance(instance).await?;
-        let state = inst.read().await;
-        aria_core::tcprt_ops::flush_tcprt(state.map_runtime())
-            .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
     // ── SSL ──
