@@ -1,3 +1,4 @@
+pub(crate) mod config;
 pub(crate) mod drops;
 pub(crate) mod diagnose;
 pub(crate) mod group;
