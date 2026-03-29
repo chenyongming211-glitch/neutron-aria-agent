@@ -73,6 +73,46 @@ python3 tools/trace_perf_regression.py --host root@<host> --packet-counts 20,200
 
 ### 从 Release 安装
 
+推荐优先使用仓库根目录的 `install.sh` 做一键安装/更新。  
+把下面两个文件放在同一个目录：
+
+- `firewall-binaries-x86_64.zip`
+- `install.sh`
+
+然后执行：
+
+```bash
+chmod +x install.sh
+sudo ./install.sh
+```
+
+脚本会自动完成：
+
+- 检测 root、内核版本、BTF、bpffs
+- 解压 zip 并校验 release 产物
+- 备份当前安装
+- 安装/更新 `aria-agent`、`ariactl`、`libebpf_firewall.so`、`libebpf_firewall_perf.so`
+- 写入/更新 `aria-agent.service`
+- 首次创建默认 `/etc/aria-agent/config.toml`
+- 重启 `aria-agent` 并做健康检查
+
+常用参数：
+
+```bash
+# 指定 zip 路径
+sudo ./install.sh --zip /path/to/firewall-binaries-x86_64.zip
+
+# 覆盖默认配置
+sudo ./install.sh --force-config
+
+# 只安装，不启动服务
+sudo ./install.sh --no-start
+```
+
+后续更新也使用同一个脚本，直接换成新的 zip 再执行一次即可。
+
+如果你想手工安装，也可以按下面步骤操作：
+
 ```bash
 # 下载最新 release
 wget https://github.com/chenyongming211-glitch/aria-firewall/releases/latest/download/firewall-binaries-x86_64.zip
