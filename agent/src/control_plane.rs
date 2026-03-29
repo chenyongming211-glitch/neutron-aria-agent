@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
@@ -20,6 +22,7 @@ mod observability;
 
 const WAL_COMPACT_THRESHOLD: u64 = 1000;
 pub const MANAGED_SHARED_PIN_NAMESPACE: &str = "global-v2";
+const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
 
 /// Per-instance in-memory state
 struct InstanceState {
@@ -163,6 +166,58 @@ impl ControlPlaneError {
 }
 
 impl ControlPlane {
+    fn runtime_iface_name(
+        instance: &str,
+        state: &InstanceState,
+    ) -> Result<String, ControlPlaneError> {
+        if instance == "system" {
+            state
+                .state
+                .attached_iface
+                .clone()
+                .ok_or_else(|| {
+                    ControlPlaneError::InstanceNotReady(
+                        "system interface is not attached".to_string(),
+                    )
+                })
+        } else {
+            Ok(instance.to_string())
+        }
+    }
+
+    fn fq_qdisc_marker_path(state: &InstanceState) -> std::path::PathBuf {
+        Path::new(&state.state_path).join(FQ_QDISC_MARKER)
+    }
+
+    fn mark_owned_fq_qdisc(state: &InstanceState, iface: &str) -> Result<(), ControlPlaneError> {
+        let marker_path = Self::fq_qdisc_marker_path(state);
+        fs::write(&marker_path, b"owned\n").map_err(|e| {
+            ControlPlaneError::KernelError(format!(
+                "[{}] failed to persist FQ qdisc ownership marker {}: {}",
+                iface,
+                marker_path.display(),
+                e
+            ))
+        })
+    }
+
+    fn rollback_installed_fq_qdisc(instance: &str, state: &InstanceState) {
+        let Ok(iface) = Self::runtime_iface_name(instance, state) else {
+            return;
+        };
+
+        if let Err(e) = aria_core::ebpf_ops::cleanup_root_qdisc(&iface) {
+            warn!(instance = %instance, iface = %iface, error = %e, "failed to roll back FQ qdisc after QoS add failure");
+        }
+
+        let marker_path = Self::fq_qdisc_marker_path(state);
+        if let Err(e) = fs::remove_file(&marker_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(instance = %instance, iface = %iface, path = %marker_path.display(), error = %e, "failed to remove FQ qdisc marker after QoS add failure");
+            }
+        }
+    }
+
     fn requested_directions(direction: u8) -> Vec<u8> {
         if direction == 2 {
             vec![0, 1]
@@ -1414,6 +1469,27 @@ impl ControlPlane {
                 .ok_or_else(|| ControlPlaneError::GroupNotFound(group_name.to_string()))?
         };
 
+        let fq_state = if mode == 1 {
+            let iface = Self::runtime_iface_name(instance, &state)?;
+            match aria_core::ebpf_ops::ensure_fq_qdisc(&iface) {
+                Ok(aria_core::ebpf_ops::FqQdiscState::InstalledNow) => {
+                    Self::mark_owned_fq_qdisc(&state, &iface)?;
+                    Some(aria_core::ebpf_ops::FqQdiscState::InstalledNow)
+                }
+                Ok(aria_core::ebpf_ops::FqQdiscState::AlreadyPresent) => {
+                    Some(aria_core::ebpf_ops::FqQdiscState::AlreadyPresent)
+                }
+                Err(e) => {
+                    return Err(ControlPlaneError::KernelError(format!(
+                        "[{}] failed to prepare FQ qdisc for QoS shaping: {}",
+                        iface, e
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+
         // Write to kernel
         if let Err(e) = aria_core::qos_ops::add_qos_rule(
             group_id,
@@ -1425,6 +1501,12 @@ impl ControlPlane {
             state.map_runtime(),
             state.state.qos_enabled,
         ) {
+            if matches!(
+                fq_state,
+                Some(aria_core::ebpf_ops::FqQdiscState::InstalledNow)
+            ) {
+                Self::rollback_installed_fq_qdisc(instance, &state);
+            }
             return Err(ControlPlaneError::KernelError(e));
         }
 
