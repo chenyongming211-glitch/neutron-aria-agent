@@ -25,6 +25,7 @@
 
 ## 设计文档
 
+- [User Manual](docs/user-manual.md)
 - [Runtime Repair Design](docs/runtime-repair-design.md)
 - [Global Shared Data Plane Design](docs/global-shared-data-plane-design.md)
 - [Kernel Drop Observability Design](docs/kernel-drop-observability-design.md)
