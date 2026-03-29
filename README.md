@@ -30,6 +30,25 @@
 - [Kernel Drop Observability Design](docs/kernel-drop-observability-design.md)
 - [Codebase Refactor Plan](docs/codebase-refactor-plan.md)
 
+## 回归脚本
+
+仓库当前提供两类可直接远端执行的回归脚本：
+
+- `tools/trace_perf_regression.py`
+  - 覆盖 `flush -> start trace -> send -> first read`
+  - 用于 perf trace backend 的 first-read / flush / retention 验证
+- `tools/runtime_lifecycle_regression.py`
+  - 覆盖 `system stop + vanished iface`
+  - 覆盖 `system preexisting fq`
+  - 覆盖 `managed crash recovery -> DelLink`
+
+示例：
+
+```bash
+python3 tools/runtime_lifecycle_regression.py --host root@<host>
+python3 tools/trace_perf_regression.py --host root@<host> --packet-counts 20,200 --rounds 2
+```
+
 ## 系统要求
 
 - Linux 内核 4.18+（RHEL/CentOS 8.2+）或 5.8+（推荐）

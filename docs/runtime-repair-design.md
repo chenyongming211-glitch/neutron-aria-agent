@@ -547,6 +547,14 @@ Reason:
   - confirm `ssl-global` survives orphan cleanup
   - confirm legacy per-instance SSL pins are removed
 
+Current repository helper:
+
+- `tools/runtime_lifecycle_regression.py`
+  - validates `system stop + vanished iface`
+  - validates `system preexisting fq`
+  - validates `managed crash recovery -> DelLink`
+  - should be used as the baseline `6.8` runtime lifecycle smoke before any future repair changes are merged
+
 ### 8.3 Compatibility tests
 
 - Existing CLI with `--tap` still works for SSL commands.
