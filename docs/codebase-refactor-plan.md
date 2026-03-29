@@ -33,6 +33,64 @@
 | `core/src/ebpf_ops.rs` | 2106 | 中到高 | 对外调用面很广，属于核心基础设施 |
 | `ebpf/src/lib.rs` | 1239 | 中 | 目前层次尚可，短期收益不高 |
 
+## 当前状态
+
+截至 `2026-03-29`，本轮结构化重构主线已经完成，状态如下：
+
+| 阶段 | 状态 | 说明 |
+| --- | --- | --- |
+| Phase 1 `api_handlers` 模块化 | 已完成 | `agent/src/api_handlers/` 已按领域拆分，`mod.rs` 仅保留模块声明和 re-export |
+| Phase 2 `user/src/main.rs` 拆分 | 已完成 | `main.rs` 已收成薄分发层，复杂工作流迁到 `user/src/commands/` |
+| Phase 3 `control_plane` 只读域抽取 | 已完成 | `trace` / `tcprt` / `ssl` / `observability` 已迁到 `agent/src/control_plane/` |
+| Phase 4 `ebpf_ops` 内部模块化 | 已完成 | `runtime` / `network` / `attach` / `scrub` / `inventory` / `policy` / `replay` 已迁到 `core/src/ebpf_ops/` |
+| Phase 5 `ControlPlane` 写路径重构 | 暂缓 | 明确不纳入本轮，留待下一轮单独规划 |
+
+这意味着本轮计划里的“目录模块化 + 保持行为不变”的主体工作已经收口。当前剩余工作主要是：
+
+- 文档和测试记录同步
+- 未来 `4.18` 环境恢复后的补测
+- 独立于本轮结构重构的 trace runtime backlog（如 consumer failure 注入）
+
+## 重构后的运行时修复补记
+
+虽然本计划刻意避免把“目录拆分”和“行为修复”混在同一批 PR 中，但在重构收尾和线上回归期间，仍然发现并修复了几类与运行时生命周期相关的真实 bug。这些修复不是本计划的主目标，但它们影响了最终的稳定性判断，需要在这里记录。
+
+### 1. `system stop` / managed detach 的 `fq` 生命周期修复
+
+相关结果：
+
+- `system stop` 之前存在 root qdisc 清理与实例注销不对称的问题
+- managed `instance` 在启用 `QoS shaping` 时存在同类 `fq` ownership 缺口
+- 后续通过 ownership marker、stale marker 清理和 gone-device cleanup 收敛了这条链路
+
+最终语义：
+
+- 我们自己安装的 `fq` 会在 stop/detach 时清理
+- 接口原本就存在的 `fq` 不会被误删
+- 如果接口已经消失，则 cleanup 会直接清 marker，不再阻断实例注销
+
+### 2. crash recovery 路径补回 TC/FQ 运行时
+
+相关结果：
+
+- pinned XDP 仍在、但 `tc_egress` / `tc_ingress` link pin 缺失时，恢复路径现在会补回 TC runtime
+- 若恢复后的状态需要 `QoS shaping`，也会补回 `fq`
+- `6.8` 上已完成“恢复后 trace 20/20 正常、恢复后 managed tap 可再次删除”的闭环验证
+
+### 3. ghost instance 清理问题已修复
+
+这轮线上回归里确认过一个 recovery 副作用：
+
+- managed tap 在 crash recovery 后再次删除时，`DelLink` 会到达
+- 但 `owned fq qdisc` 清理在接口已消失时失败，导致 `instances.remove()` 和 `unregister_instance()` 没有执行
+
+后续修复后，当前行为是：
+
+- `system stop + vanished iface`：实例和 marker 都会被清掉
+- `crash recovery -> DelLink`：实例会正常消失，marker 也会一起删除
+
+这些修复说明：虽然本轮没有继续拆 `ControlPlane` 写路径，但 runtime attach/detach/recovery 相关的 correctness 已经在 `6.8` 线上回归中补齐。
+
 ## 设计原则
 
 ### 1. 先拆“天然边界”，后拆“状态核心”
@@ -223,6 +281,8 @@
 
 ## Phase 1: 拆分 `agent/src/api_handlers.rs`
 
+状态：已完成
+
 ### 目标
 
 - 将 handler 按领域路由拆分为目录模块
@@ -405,6 +465,8 @@ PR 3:
 
 ## Phase 2: 拆分 `user/src/main.rs`
 
+状态：已完成
+
 ### 目标
 
 - 把 CLI 定义、复杂工作流、渲染逻辑拆开
@@ -543,6 +605,8 @@ PR 3:
 
 ## Phase 3: 抽取 `agent/src/control_plane.rs` 的只读域
 
+状态：已完成
+
 ### 目标
 
 - 先降低 `ControlPlane` 文件体积
@@ -650,6 +714,8 @@ agent/src/control_plane/
 - CI 通过
 
 ## Phase 4: 内部模块化 `core/src/ebpf_ops.rs`
+
+状态：已完成
 
 ### 目标
 
@@ -765,6 +831,8 @@ core/src/ebpf_ops/
 因为当前外部调用是按函数粒度分散引用的，不是按领域对象引用的。过早改变外部 import 结构，会把一次“内部模块化”放大成全仓库改名。
 
 ## Phase 5: 后续是否继续拆 `ControlPlane` 写路径
+
+状态：暂缓，不纳入本轮
 
 只有满足以下条件，才建议继续：
 
