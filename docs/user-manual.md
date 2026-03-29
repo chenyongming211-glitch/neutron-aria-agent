@@ -1,178 +1,51 @@
 # Aria Firewall 用户手册
 
-本文档按功能模块组织，面向实际使用和运维，不按代码层或架构层展开。阅读顺序建议是：
+本文档按用户实际使用的功能模块组织，不按代码目录和内部实现分层展开。  
+阅读建议是：
 
-1. 先看“运行模式与基础对象”
-2. 再看具体功能模块
-3. 最后看“运维、排障与已知限制”
+1. 先看安装、启动和实例管理
+2. 再看 ACL、QoS、Mirror 这些控制类能力
+3. 然后看 TCP-RT、Trace、Drops、Conntrack、SSL 这些观测类能力
+4. 最后看排障、回归和已知限制
 
-`ariactl` 是 `aria-agent` 的薄客户端，绝大多数命令最终都调用 HTTP API。除特别说明外，省略全局 `--tap` 时，CLI 默认操作 `system` 实例。
+`ariactl` 是 `aria-agent` 的薄客户端。绝大多数 CLI 命令都会转成 `/api/v1/...` HTTP 请求。
 
 ## 1. 产品概览
 
-Aria Firewall 是基于 eBPF/XDP + TC 的高性能防火墙与可观测平台，核心能力包括：
+Aria Firewall 是基于 eBPF/XDP + TC 的网络防火墙与可观测平台，核心能力包括：
 
-- 基于 IP 组、协议、方向和端口的 ACL 控制
-- 连接跟踪和 fast-path 放行
+- 基于 IP 组、方向、协议、端口的 ACL 控制
+- 连接跟踪与 fast-path 放行
 - QoS policing / shaping
 - 流量镜像
-- TCP 业务时延分析（TCP-RT）
+- TCP 业务延迟分析（TCP-RT）
 - 实时包级 trace
 - kernel drop 观测
 - SSL/TLS 与 HTTP 观测
-- 多实例管理与运行时自动恢复
+- 多实例运行、自动恢复和 pinned runtime repair
 
-从使用视角看，它可以拆成三类能力：
+从使用视角，可以把它分成三类能力：
 
-- 控制类：`policy`、`qos`、`mirror`、`config`
-- 观测类：`stats`、`conntrack`、`tcprt`、`trace`、`drops`、`ssl`
-- 运行类：`system`、`instances`、`health`
+- 控制类
+  - `policy`
+  - `qos`
+  - `mirror`
+  - `config`
+- 观测类
+  - `stats`
+  - `conntrack`
+  - `tcprt`
+  - `trace`
+  - `drops`
+  - `ssl`
+- 运行类
+  - `system`
+  - `instances`
+  - `health`
 
-## 2. 运行模式与基础对象
+## 2. 安装与部署
 
-### 2.1 实例模型
-
-Aria 有两种运行模式：
-
-- `managed` 模式
-  - `aria-agent` 根据 `iface_pattern` 自动发现并接管 tap/veth/eth 等接口
-  - 每个接口对应一个独立实例
-  - 适合多 tap、多租户、多链路并存的场景
-- `system` 模式
-  - 通过 `ariactl system start --iface <iface>` 显式接管单个接口
-  - 不需要全局 `--tap`
-  - 更接近传统“独占接管一块网卡”的模式
-
-常用命令：
-
-```bash
-ariactl instances
-ariactl health
-ariactl system start --iface eth0
-ariactl system stop
-```
-
-重要语义：
-
-- 对多数命令，`--tap` 用于选择实例
-- `system start/stop` 不能和 `--tap` 一起用
-- `trace start` 自己带 `--tap` 参数，不复用全局 `--tap`
-- SSL 相关命令是 host-global，`--tap` 会被忽略
-
-### 2.2 地址分组（group）
-
-`group` 不是一个孤立的业务模块，而是给 `policy`、`qos`、`mirror`、`stats`、`drops` 等能力复用的基础对象。
-
-它的主要作用是：
-
-- 把一组 CIDR 抽象成稳定的名字和 group id
-- 让策略定义与地址变化解耦
-- 让 eBPF 数据面先做地址归类，再按 group id 匹配规则
-- 统一统计与观测口径
-
-示例：
-
-```bash
-ariactl --tap eth0 group add --name web --cidr 10.0.0.0/8
-ariactl --tap eth0 group add --name db --cidr 192.168.1.0/24
-ariactl --tap eth0 group list
-ariactl --tap eth0 group with-stats
-```
-
-关键语义：
-
-- `any` 是保留字，不能创建同名 group
-- `any` 在规则语义里表示通配
-- group id `0` 保留给通配/默认语义
-- `default` 主要用于 QoS，表示 group id `0` 的默认规则
-
-何时值得用 group：
-
-- IP 范围会变化，但规则语义不变
-- 多个模块需要复用同一地址对象
-- 想按“应用组/业务组”而不是硬编码 IP 写策略
-
-#### 作用域与命名空间
-
-这是使用 `group` 时最需要先搞清楚的点：
-
-- `group` 是按实例隔离的，不是全局共享对象
-- `ariactl --tap eth0 group add --name web ...` 的意思是“给实例 `eth0` 新增一个名为 `web` 的 group”
-- `ariactl --tap eth1 group add --name web ...` 也是合法的，但它是另一个实例里的另一个 `web`
-
-换句话说：
-
-- 不同 tap / instance 可以存在同名 group
-- 这些同名 group 互不共享、互不影响
-- `eth0` 上的 `policy/qos/mirror/stats` 只会解析和使用 `eth0` 自己的 group
-- `eth1` 上的规则不会直接引用 `eth0` 的 group 定义
-
-可以把它理解成“每个实例都有自己的一套地址对象命名空间”。
-
-这也是为什么大多数 CLI 命令都需要全局 `--tap`：
-
-- 你不只是告诉系统“操作哪个接口”
-- 你也是在告诉系统“去哪个实例的状态空间里查 group、rule、qos、mirror”
-
-如果省略 `--tap`，CLI 默认操作的是 `system` 实例，而不是“全局所有实例”。
-
-### 2.3 方向语义
-
-方向是全产品里最容易误用的概念之一。
-
-- `ingress`
-  - 指报文进入当前实例/接口
-- `egress`
-  - 指报文从当前实例/接口发出
-
-这会影响：
-
-- `policy` 是否命中
-- `qos` 规则适配哪一侧
-- `mirror` 是否触发
-- `stats` 统计结果怎么看
-
-经验法则：
-
-- 如果流量方向是 `tap -> peer`，通常在当前 tap 上更容易命中 `egress`
-- 如果流量方向是 `peer -> tap`，通常更容易命中 `ingress`
-
-### 2.4 服务链拓扑（chain）
-
-`chain` 不是一级主功能，而是 `tcprt` 和 `trace` 的配套拓扑定义能力。
-
-它的作用是：
-
-- 为跨 hop 的 `trace` 输出提供链路视图
-- 为 `tcprt flow --chain` 提供逐跳延迟分解
-
-它本身只负责维护一份服务链定义：
-
-```bash
-ariactl chain apply --file chain.json
-ariactl chain list
-ariactl chain show prod-chain
-ariactl chain delete prod-chain
-```
-
-数据结构包含：
-
-- `name`
-- `description`
-- `hops`
-- 每个 hop 的 `hop_type`
-  - `bridge`
-  - `proxy`
-- 每个 hop 绑定的 `tap` 及 `role`
-  - `in`
-  - `out`
-  - `bidirectional`
-
-如果你的目标只是普通 ACL、QoS、镜像，通常不需要先定义 chain；只有在要做逐跳分析时才需要。
-
-## 3. 安装、配置与启动
-
-### 3.1 Release 安装
+### 2.1 Release 安装
 
 推荐直接使用 release 产物：
 
@@ -189,7 +62,9 @@ sudo chmod +x /usr/local/bin/aria-agent /usr/local/bin/ariactl
 
 首次配置：
 
-```toml
+```bash
+sudo mkdir -p /etc/aria-agent
+sudo tee /etc/aria-agent/config.toml >/dev/null <<'EOF'
 ebpf_path = "/usr/local/lib/libebpf_firewall.so"
 trace_backend = "auto"
 trace_auto_allow_ringbuf = false
@@ -198,18 +73,35 @@ state_path = "/var/lib/aria-agent"
 iface_pattern = "^(eth|tap)"
 max_port_policies = 16384
 listen_addr = "127.0.0.1:8080"
+EOF
 ```
 
-重要注意：
+### 2.2 配置项说明
 
-- trace backend rollout 期间，要原子更新以下四个文件：
-  - `aria-agent`
-  - `ariactl`
-  - `libebpf_firewall.so`
-  - `libebpf_firewall_perf.so`
-- 只更新 `.so` 不更新 `aria-agent`，会造成用户态 trace backend 逻辑仍停留在旧版本
+常用配置项：
 
-### 3.2 启动与健康检查
+- `ebpf_path`
+  - 默认 eBPF 对象路径
+- `trace_backend`
+  - `auto`
+  - `legacy-map`
+  - `perf-event-array`
+  - `ringbuf`
+- `trace_auto_allow_ringbuf`
+  - `auto` 模式下是否允许自动切到 ringbuf
+  - 当前推荐保持 `false`
+- `pin_path`
+  - bpffs 根目录
+- `state_path`
+  - 用户态状态目录
+- `iface_pattern`
+  - managed 模式自动接管的接口正则
+- `max_port_policies`
+  - 端口 bitmap 上限
+- `listen_addr`
+  - HTTP API 监听地址
+
+### 2.3 启动与版本确认
 
 ```bash
 sudo aria-agent
@@ -220,53 +112,62 @@ ariactl health
 ariactl instances
 ```
 
-`ariactl health` 会输出：
+`ariactl health` 会显示：
 
-- agent 状态
+- 当前状态
 - 版本
-- 当前实例数
+- 实例数量
 - kernel drop observability 是否可用
 - kernel drop 当前模式
-- 当前已管理接口数
+- 当前已跟踪接口数
 - 最近一次 kernel drop 初始化错误
 
-## 4. 快速开始
+### 2.4 升级注意事项
 
-下面用最小流程跑通一套实例。
+Trace backend rollout 期间，必须原子更新以下四个文件：
 
-### 4.1 启动 agent
+- `aria-agent`
+- `ariactl`
+- `libebpf_firewall.so`
+- `libebpf_firewall_perf.so`
+
+不要只更新 `.so` 而不更新 `aria-agent`，否则用户态 trace backend 逻辑可能仍停留在旧版本。
+
+## 3. 快速开始
+
+下面用最小链路跑通一个实例。
+
+### 3.1 启动 agent
 
 ```bash
 sudo systemctl start aria-agent
 ariactl health
+ariactl instances
 ```
 
-### 4.2 创建基础 group
+### 3.2 创建地址对象并配置 ACL
 
 ```bash
 ariactl --tap eth0 group add --name web --cidr 10.0.0.0/8
 ariactl --tap eth0 group add --name db --cidr 192.168.1.0/24
-ariactl --tap eth0 group list
-```
 
-### 4.3 添加 ACL
-
-```bash
 ariactl --tap eth0 policy add \
   --src-group web --dst-group db \
   --proto tcp --ports 3306 \
   --action accept --direction ingress
 ```
 
-### 4.4 查看统计
+### 3.3 查看配置与统计
 
 ```bash
+ariactl --tap eth0 group list
+ariactl --tap eth0 policy list
 ariactl --tap eth0 stats
 ariactl --tap eth0 stats --rules
 ariactl --tap eth0 conntrack list
 ```
 
-### 4.5 观察 trace
+### 3.4 跑一次 trace
 
 ```bash
 ariactl trace start \
@@ -275,41 +176,179 @@ ariactl trace start \
   --wait 5
 ```
 
-推荐 trace 验证方式是：
+最稳的 trace 验证顺序是：
 
-1. `flush`
-2. `start`
-3. 发一小批匹配流量
+1. 先 `flush`
+2. 再 `start`
+3. 发一批匹配流量
 4. 第一次读取结果
 
-## 5. 功能模块：ACL 策略（policy）
+## 4. 实例管理与运行模式
 
-### 5.1 作用
+### 4.1 managed 模式
+
+managed 模式由 `aria-agent` 自动接管接口。接口是否被接管，取决于：
+
+- 接口名是否匹配 `iface_pattern`
+- agent 是否成功完成 attach / replay / registration
+
+每个被接管的接口都会形成一个独立实例。
+
+### 4.2 system 模式
+
+system 模式用于显式接管一个接口：
+
+```bash
+ariactl system start --iface eth0
+ariactl system stop
+```
+
+特点：
+
+- 不依赖全局 `--tap`
+- 更接近传统“独占管理一块网卡”的模式
+- `system stop` 只影响 `system` 实例，不影响 managed 实例
+
+### 4.3 `--tap` 的真实含义
+
+全局 `--tap` 不只是“选哪个接口”，更准确地说，它是在选“哪个实例的状态命名空间”。
+
+例如：
+
+```bash
+ariactl --tap eth0 policy list
+```
+
+这条命令的含义是：
+
+- 去实例 `eth0` 的状态里查 ACL 配置
+- 不是去全局对象池里查
+
+省略 `--tap` 时，CLI 默认操作 `system` 实例，见 [/Users/chen/code/aria-firewall/user/src/main.rs#L9](/Users/chen/code/aria-firewall/user/src/main.rs#L9)。
+
+### 4.4 `instances` 与 `health`
+
+```bash
+ariactl instances
+ariactl health
+```
+
+`instances` 用于查看当前已注册实例及其 `active` 状态。  
+`health` 更适合做全局健康检查。
+
+### 4.5 生命周期与自动恢复
+
+当前运行时支持的恢复能力包括：
+
+- agent restart 后实例恢复
+- shared runtime repair
+- crash recovery 后补回缺失的 TC link
+- QoS shaping 场景下补回缺失的 `fq`
+- `system` / managed 生命周期里对 owned `fq` 的清理与保留
+
+## 5. 功能模块：ACL 与地址对象（group / policy）
+
+这一章把 `group` 和 `policy` 放在一起讲，因为 `group` 在产品语义上不是一个独立业务模块，而是 ACL、QoS、Mirror 等能力共享的地址对象抽象。
+
+### 5.1 为什么需要 group
+
+`group` 的主要价值是：
+
+- 把 CIDR 集合抽象成稳定名字和 group id
+- 让规则定义与地址变化解耦
+- 让数据面先做地址归类，再做 policy/qos/mirror 匹配
+- 让统计和观测结果按业务组展示，而不是直接暴露 IP
+
+### 5.2 group 的作用域
+
+这是最容易误解的点。
+
+`group` 是按实例隔离的，不是全局共享对象。
+
+例如：
+
+```bash
+ariactl --tap eth0 group add --name web --cidr 10.0.0.0/8
+ariactl --tap eth1 group add --name web --cidr 172.16.0.0/16
+```
+
+这两条命令都是合法的。它们表示：
+
+- `eth0` 实例里有一个叫 `web` 的 group
+- `eth1` 实例里也有一个叫 `web` 的 group
+
+但这两个 `web`：
+
+- 名字可以一样
+- 定义可以不同
+- 互不共享
+- 互不影响
+
+为什么会这样：
+
+- group API 路由本身就是按实例作用域设计的，见 [/Users/chen/code/aria-firewall/agent/src/api_routes.rs#L54](/Users/chen/code/aria-firewall/agent/src/api_routes.rs#L54)
+- 每个 managed 实例都有自己独立的 `state_path`，见 [/Users/chen/code/aria-firewall/agent/src/tap_registry.rs#L108](/Users/chen/code/aria-firewall/agent/src/tap_registry.rs#L108)
+- 每个实例的 `FirewallState` 里都有各自的 `groups` 和 `next_group_id`，见 [/Users/chen/code/aria-firewall/core/src/state.rs#L122](/Users/chen/code/aria-firewall/core/src/state.rs#L122)
+
+所以你可以直接记成一句话：
+
+- `group` 是每个实例自己的地址对象
+- 不是整个主机共享的全局字典
+
+### 5.3 特殊名字：`any`
+
+`any` 是保留字：
+
+- 不能创建名为 `any` 的 group
+- 在规则语义里，`any` 表示通配
+- group id `0` 保留给 `any`
+
+对应实现见 [/Users/chen/code/aria-firewall/core/src/state.rs#L147](/Users/chen/code/aria-firewall/core/src/state.rs#L147) 和 [/Users/chen/code/aria-firewall/agent/src/control_plane.rs#L2300](/Users/chen/code/aria-firewall/agent/src/control_plane.rs#L2300)。
+
+### 5.4 group 常用命令
+
+```bash
+ariactl --tap eth0 group add --name web --cidr 10.0.0.0/8
+ariactl --tap eth0 group add --name db --cidr 192.168.1.0/24
+ariactl --tap eth0 group list
+ariactl --tap eth0 group with-stats
+ariactl --tap eth0 group delete --name web
+```
+
+`group with-stats` 会同时展示：
+
+- ingress 包数 / 字节数
+- egress 包数 / 字节数
+- group 绑定的 CIDR 列表
+
+### 5.5 policy 的匹配维度
 
 `policy` 是防火墙主体能力，用于按以下维度匹配：
 
-- 源组 `src_group`
-- 目的组 `dst_group`
-- 协议 `proto`
-- 方向 `direction`
-- 可选端口集合 `ports`
+- `src_group`
+- `dst_group`
+- `proto`
+- `direction`
+- `ports`
+- `action`
 
-CLI 子命令是 `ariactl policy`，但产品能力上通常把它理解为 ACL。
+其中：
 
-这里的 `src_group` 和 `dst_group` 都是“当前实例里的 group 名称”，不是全局名字。
-所以：
+- `src_group` / `dst_group` 都是在“当前实例”里解析
+- 如果 group 只存在于别的实例，这里会报 `GroupNotFound`
 
-- `ariactl --tap eth0 policy add --src-group web ...`
-  只会去 `eth0` 实例里找 `web`
-- 如果 `web` 只存在于 `eth1`，这条命令会报 group not found
-
-### 5.2 常见命令
+### 5.6 policy 常见命令
 
 ```bash
 ariactl --tap eth0 policy add \
   --src-group web --dst-group db \
   --proto tcp --ports 3306 \
   --action accept --direction ingress
+
+ariactl --tap eth0 policy add \
+  --src-group web --dst-group any \
+  --proto tcp --ports 80,443 \
+  --action accept --direction egress
 
 ariactl --tap eth0 policy list
 ariactl --tap eth0 policy with-stats
@@ -319,58 +358,77 @@ ariactl --tap eth0 policy delete \
   --proto tcp --direction ingress
 ```
 
-### 5.3 端口匹配
+### 5.7 方向语义
 
-`--ports` 可选，仅对有端口概念的协议有意义。支持：
+`direction` 的语义始终是相对于“当前实例/接口”而言：
+
+- `ingress`
+  - 包进入当前实例
+- `egress`
+  - 包从当前实例发出
+
+这点非常重要，因为：
+
+- 你明明配置了正确的 group 和端口
+- 但如果方向配反了
+- 规则也不会命中
+
+经验法则：
+
+- 如果是 `tap -> peer` 的发包路径，通常更容易命中 `egress`
+- 如果是 `peer -> tap` 的发包路径，通常更容易命中 `ingress`
+
+### 5.8 端口集合与 `Bitmap`
+
+`--ports` 可选，仅对有端口语义的协议生效。支持：
 
 - 单端口：`80`
 - 多端口：`80,443`
 - 范围：`10000-20000`
 - 混合：`80,443,10000-20000`
 
-策略 `list` / `with-stats` 输出里的 `Bitmap` 是端口集合在底层 bitmap 池里的索引。普通用户只需要知道：
+`policy list` 和 `policy with-stats` 会显示 `Bitmap` 字段。这个字段是底层端口 bitmap 池索引，使用上只需要理解：
 
-- `-` 表示这条规则没有端口位图
-- 非 `-` 表示这条规则启用了端口集合
+- `-`
+  - 这条规则没有端口位图
+- 非 `-`
+  - 这条规则绑定了一个端口集合
 
-### 5.4 批量导入
+### 5.9 批量导入
 
 ```bash
 ariactl --tap eth0 policy batch --file policies.json
 cat policies.json | ariactl --tap eth0 policy batch --file -
 ```
 
-实际行为不是“整批事务”。当前语义是：
+当前语义不是全局事务，而是：
 
-- 合法项会继续写入
-- 非法项会记录到 `errors`
-- CLI 会输出 `Batch complete: N added`
-- 只要存在错误，CLI 会以非零退出
+- 合法项尽量写入
+- 非法项收集到 `errors`
+- CLI 输出 `Batch complete: N added`
+- 只要存在错误，CLI 最终以非零退出
 
-这适合做“尽量导入 + 明确列出失败项”，不适合当严格全-or-nothing 事务用。
+这适合“批量导入 + 明确列出失败项”，不适合拿来做严格 all-or-nothing 配置发布。
 
-### 5.5 删除 group 的约束
+### 5.10 删除 group 的约束
 
-如果某个 group 仍被以下对象引用，删除会失败：
+如果某个 group 仍被引用，删除会失败。当前至少包括：
 
-- policy
-- mirror
+- 被 policy 引用
+- 被 mirror 引用
 
-这属于正常保护行为，用来避免内存态和内核态失配。
+这是正常保护逻辑，用来避免把内存态和内核态弄分叉。
 
 ## 6. 功能模块：QoS 限速（qos）
 
 ### 6.1 作用
 
-`qos` 用于按 group 限制带宽。支持：
+QoS 用于按 group 做带宽约束，支持两种模式：
 
 - `policing`
   - 超限直接丢包
 - `shaping`
   - 使用 EDT 做平滑整形
-
-这里的 `--group` 也是“当前实例里的 group 名称”。
-同名 group 在不同实例里可以独立存在，QoS 只会绑定到当前实例解析出来的 group id。
 
 ### 6.2 常见命令
 
@@ -385,21 +443,26 @@ ariactl --tap eth0 qos with-stats
 ariactl --tap eth0 qos delete --group web --direction egress
 ```
 
-### 6.3 方向和 group 命中语义
+### 6.3 `--group` 的作用域
 
-这部分必须按代码逻辑理解：
+和 policy 一样，这里的 `--group` 也是在“当前实例”里解析的 group 名称。
 
-- egress QoS 优先按“目标组”命中，再回退到默认组 `group_id=0`
-- ingress QoS 优先按“源组”命中，再回退到默认组 `group_id=0`
+例如：
 
-所以实践上：
+```bash
+ariactl --tap eth0 qos add --group web ...
+```
 
-- 如果你要限制“发往 db 的出向流量”，更自然的是把 egress QoS 绑到 `db`
-- 如果你要限制“来自 web 的入向流量”，更自然的是把 ingress QoS 绑到 `web`
+只会去 `eth0` 实例里找 `web`，不会去别的 tap 里找。
 
 ### 6.4 `default` 与 `any`
 
-QoS 里 `default` 和 `any` 都会映射到 group id `0`，作为全局默认桶使用。
+QoS 有一个和 ACL 不太一样但很实用的语义：
+
+- `default`
+- `any`
+
+这两个名字在 QoS 里都会映射到 group id `0`，也就是全局默认桶。
 
 示例：
 
@@ -409,39 +472,103 @@ ariactl --tap eth0 qos add \
   --rate 200mbps --burst 0
 ```
 
-### 6.5 `policing` 与 `shaping`
+### 6.5 ingress / egress 的真实命中逻辑
+
+这里必须按代码理解，而不能只按直觉理解。
+
+当前数据面逻辑是：
+
+- egress QoS 优先按“目标组”命中，再回退到 `group_id=0`
+- ingress QoS 优先按“源组”命中，再回退到 `group_id=0`
+
+这意味着：
+
+- 如果你想限制“发往 db 的流量”，更合理的是在 egress QoS 上绑定 `db`
+- 如果你想限制“来自 web 的流量”，更合理的是在 ingress QoS 上绑定 `web`
+
+对应实现见 [/Users/chen/code/aria-firewall/ebpf/src/qos.rs#L98](/Users/chen/code/aria-firewall/ebpf/src/qos.rs#L98) 和 [/Users/chen/code/aria-firewall/ebpf/src/qos.rs#L207](/Users/chen/code/aria-firewall/ebpf/src/qos.rs#L207)。
+
+### 6.6 `policing` 与 `shaping`
 
 使用建议：
 
-- ingress：优先理解成 policing
-- egress：既可以 policing，也适合 shaping
+- ingress
+  - 主要理解成 policing
+- egress
+  - 可以 policing
+  - 更适合 shaping
 
-`shaping` 依赖 root `fq` qdisc。系统会尽量自动安装和恢复；如果 qdisc 不可用，EDT 效果会受限。
+`shaping` 依赖 root `fq` qdisc。系统会自动尝试安装、恢复和清理 owned `fq`。
 
-### 6.6 统计解释
+### 6.7 速率和 burst
 
-`qos with-stats` 和 `stats --qos` 会输出：
+`--rate` 支持：
+
+- `gbps`
+- `mbps`
+- `kbps`
+- `bps`
+- 纯数字字节/秒
+
+`--burst` 支持：
+
+- `0`
+  - 自动计算
+- `1mb`
+- `512kb`
+- 纯数字字节数
+
+### 6.8 优先级
+
+`--priority`：
+
+- `0` 最高
+- `7` 最低
+
+### 6.9 统计字段解释
+
+`qos with-stats` 与 `stats --qos` 会输出：
 
 - `PassPkts/PassBytes`
 - `DropPkts/DropBytes`
 - `ShapePkts/ShapeBytes`
 
-其中：
+含义：
 
-- `Shape*` 主要在 egress shaping 下有意义
-- `Drop*` 表示被 policing 直接丢弃
+- `Pass*`
+  - 通过的流量
+- `Drop*`
+  - policing 直接丢弃的流量
+- `Shape*`
+  - 进入 EDT 整形路径的流量
 
 ## 7. 功能模块：端口镜像（mirror）
 
 ### 7.1 作用
 
-`mirror` 用于把符合条件的报文镜像到目标接口，适合：
+Mirror 用于把符合条件的报文镜像到目标接口，适合：
 
-- 抓包旁路分析
-- 流量审计
-- 与第三方 IDS/流量分析器对接
+- 旁路抓包
+- 与 IDS/分析器联动
+- 对指定业务流量做复制观测
 
-### 7.2 常见命令
+### 7.2 规则维度
+
+支持：
+
+- `src_group`
+- `dst_group`
+- `proto`
+- `direction`
+- `target`
+
+默认值：
+
+- `src_group any`
+- `dst_group any`
+- `proto any`
+
+### 7.3 常见命令
 
 ```bash
 ariactl --tap eth0 mirror add \
@@ -457,57 +584,54 @@ ariactl --tap eth0 mirror delete \
   --proto tcp --direction both
 ```
 
-### 7.3 规则维度
+### 7.4 `--tap` 与 group 作用域
 
-支持按以下条件过滤：
+Mirror 和 policy/QoS 一样，都是在当前实例内解析 group 名称。  
+所以：
 
-- `src_group`
-- `dst_group`
-- `proto`
-- `direction`
-- `target`
+- `eth0` 上的 mirror 规则只引用 `eth0` 自己的 group
+- 不能直接复用 `eth1` 的 group 定义
 
-其中：
+### 7.5 统计字段
 
-- `src_group` / `dst_group` 默认都是 `any`
-- `proto` 默认 `any`
-- `direction` 可选 `ingress` / `egress` / `both`
-
-### 7.4 `with-stats` 如何看
-
-镜像统计包含：
+`mirror with-stats` 会给出：
 
 - `MirrorPkts`
 - `MirrorBytes`
 - `Errors`
 
-如果 `Errors` 增长，优先排查：
+如果 `Errors` 持续增长，优先排查：
 
 - target 接口是否存在
-- target 接口是否可用
-- target ifindex 是否变化
+- target 接口 ifindex 是否变化
+- target 接口是否仍适合做镜像出口
 
-### 7.5 mirror target 消失时的恢复语义
+### 7.6 目标接口消失后的恢复语义
 
-如果 mirror target 在运行时不存在：
+运行时如果 mirror target 不存在：
 
-- 正常 replay 不应该因为单个失效 target 把整次恢复拖垮
+- replay 不应该因为一个失效 target 而整体验证失败
 - 当前实现会记录 warning，并跳过不可达 target
 
-这意味着其它功能对象仍能完成 replay。
+这样可以避免单个坏 target 把其它规则、ACL、QoS、实例恢复全部拖垮。
 
 ## 8. 功能模块：业务延迟分析（tcprt）
 
 ### 8.1 作用
 
-`tcprt` 用于做 TCP 业务响应时间分析，关注的核心指标包括：
+TCP-RT 用于做 TCP 业务响应时间分析，关注以下指标：
 
-- `hs`：握手时延
-- `crtt`：客户端 RTT
-- `srtt`：服务端 RTT
-- `art`：应用响应时间
+- `hs`
+  - 握手时延
+- `crtt`
+  - 客户端 RTT
+- `srtt`
+  - 服务端 RTT
+- `art`
+  - 应用响应时间
 - 请求/响应方向重传
-- `nqa`：综合质量分
+- `nqa`
+  - 综合质量分
 
 ### 8.2 命令分类
 
@@ -522,14 +646,14 @@ ariactl --tap eth0 mirror delete \
 - `tcprt states`
 - `tcprt flush`
 
-### 8.3 Top-N 分析
+### 8.3 Top-N
 
 ```bash
 ariactl tcprt top --by art --top 10
 ariactl tcprt top --by crtt --top 20 --watch --interval 2
 ```
 
-排序维度：
+支持排序维度：
 
 - `art`
 - `crtt`
@@ -538,7 +662,7 @@ ariactl tcprt top --by crtt --top 20 --watch --interval 2
 - `retrans`
 - `nqa`
 
-`top` 会从所有活跃实例抓取 TCP-RT 数据并做跨实例聚合排序。
+`top` 会从所有活跃实例抓取 TCP-RT 数据，然后做跨实例排序。
 
 ### 8.4 单服务分析
 
@@ -550,575 +674,26 @@ ariactl tcprt flow --dst 10.0.0.5 --dport 3306 --chain prod-chain
 不带 `--chain` 时：
 
 - 优先尝试双观测拆解
-- 如果只是普通多实例聚合，会给出较粗粒度的 per-instance 视图
-- 多实例场景下，CLI 会提示你可以用 `--chain`
+- 如果只是普通多实例聚合，会给出较粗的 per-instance 视图
+- 当场景更复杂时，CLI 会提示可以使用 `--chain`
 
 带 `--chain` 时：
 
-- 会先读取服务链定义
+- 会先读取一份服务链定义
 - 再按 hop 聚合各实例的 TCP-RT 数据
-- 输出“客户端网络、hop 之间、服务端处理”的逐跳拆解
+- 最终输出逐跳延迟拆解
 
-### 8.5 直方图与状态分布
+### 8.5 `chain` 在 TCP-RT 里的定位
 
-```bash
-ariactl --tap eth0 tcprt histogram
-ariactl --tap eth0 tcprt states
-ariactl --tap eth0 tcprt flush
-```
+这里的 `chain` 不是独立主功能，而是 TCP-RT 的配套拓扑定义。
 
-用途分别是：
+你通常只有在以下场景才需要它：
 
-- `histogram`
-  - 看 ART 分布
-  - 适合判断尾延迟
-- `states`
-  - 看状态分布和异常提示
-- `flush`
-  - 清空该实例的 TCP-RT 表
+- 一个业务路径跨多个 tap
+- 你关心哪一跳慢
+- 你需要把总时延拆成 hop-to-hop 贡献
 
-### 8.6 active flow 语义
-
-当前对外暴露的 active flow 口径已经过滤掉关闭流，但 map 生命周期仍是内部实现细节。使用上只需要记住：
-
-- `top`
-- `flow`
-- `stats --tcprt`
-
-都以“当前对外可见的活跃流”口径展示。
-
-## 9. 功能模块：包级追踪（trace）
-
-### 9.1 作用
-
-`trace` 用于做包级追踪和丢包定位，适合：
-
-- 验证规则是否命中
-- 确认包在哪个 hook 被丢掉
-- 多实例路径上的逐跳追踪
-
-### 9.2 命令特点
-
-当前 CLI 只有一个主动作：`trace start`
-
-```bash
-ariactl trace start \
-  --tap eth0 \
-  --dst 10.0.0.5 --proto tcp --dport 3306 \
-  --wait 5
-```
-
-注意：
-
-- 这里的 `--tap` 是 `trace start` 自己的参数
-- 不带 `--tap` 时，CLI 会自动选择所有活跃实例
-- 带 `--wait` 时做 timed trace
-- 不带 `--wait` 时做 live trace，直到 `Ctrl+C`
-
-### 9.3 推荐使用方式
-
-推荐顺序：
-
-1. `flush`
-2. `start`
-3. 发匹配流量
-4. 第一次读取结果
-
-CLI 内部会在开始前先尝试 `flush`，结束后再 `stop`，适合快速闭环验证。
-
-### 9.4 输出如何理解
-
-非 chain 模式下，trace 更像“按实例汇总”：
-
-- 每个实例显示 `In` / `Out`
-- 如果发现 drop，会给出 `drop_reason`
-- 最后按实例列出 detail
-
-chain 模式下：
-
-- 先按 hop 展示每个 tap 的 `in/out`
-- 再做 hop 内和 hop 间的丢包归因
-- 最后列出各 hop 上的 detail
-
-### 9.5 `--chain` 的作用
-
-```bash
-ariactl trace start --chain prod-chain --dst 10.0.0.5 --dport 3306 --wait 5
-```
-
-适用场景：
-
-- 多个 tap 串联成一条业务路径
-- 你关心“哪一跳丢了包”
-- 你关心“这是 eBPF 明确捕获的 drop，还是 hop 间黑盒丢包”
-
-### 9.6 trace backend 与缓存上限
-
-当前默认 rollout 路径是：
-
-- `trace_backend = "auto"`
-- `trace_auto_allow_ringbuf = false`
-
-实际优先使用 perf backend。当前 userspace trace cache 有固定上限，已知默认上限是 `4096` 条。也就是说：
-
-- `20`
-- `200`
-- `1000`
-- `4096`
-
-这类回归通常没有问题；更大批次如果在第一次读取前积压过多，可能触发 cache eviction。
-
-## 10. 功能模块：Kernel Drop 观测（drops）
-
-### 10.1 作用
-
-`drops` 看的是内核层 drop，不是防火墙主动 drop。
-
-区别：
-
-- 防火墙主动 drop
-  - 看 `stats --rules`
-  - 看 `stats --qos`
-- 内核层 drop
-  - 看 `drops list/flush`
-
-### 10.2 常见命令
-
-```bash
-ariactl drops list
-ariactl --tap eth0 drops list
-ariactl --tap eth0 drops list --iface eth0 --top 20
-ariactl drops list --include-unattributed
-```
-
-清理必须带 `--force`：
-
-```bash
-ariactl --tap eth0 drops flush --force
-ariactl --tap eth0 drops flush --iface eth0 --force
-ariactl drops flush --include-unattributed --force
-```
-
-### 10.3 过滤维度
-
-- 全局 `--tap`
-- 子命令 `--iface`
-- `top`
-- `include_unattributed`
-
-### 10.4 输出字段
-
-- `Instance`
-- `Iface`
-- `Ifindex`
-- `Reason`
-- `Proto`
-- `Packets`
-- `Bytes`
-- `Source`
-
-如果返回“kernel drop observability is not available”，通常是环境不支持或当前模式未启用，不一定是功能 bug。
-
-## 11. 功能模块：连接跟踪（conntrack）
-
-### 11.1 作用
-
-`conntrack` 用于查看实例级连接表，适合：
-
-- 确认连接是否已建立
-- 确认是否进入 fast-path
-- 清空连接表做回归
-
-### 11.2 常见命令
-
-```bash
-ariactl --tap eth0 conntrack list
-ariactl --tap eth0 conntrack flush
-```
-
-输出包含：
-
-- 源/目的地址
-- 源/目的端口
-- 协议
-- 状态
-- 包计数
-- 字节计数
-
-## 12. 功能模块：监控与统计（stats / metrics）
-
-### 12.1 `stats` 概览
-
-不带子选项时：
-
-```bash
-ariactl --tap eth0 stats
-```
-
-返回的是当前实例的：
-
-- group 数量
-- policy 数量
-- QoS 规则数量
-- mirror 规则数量
-- conntrack IPv4 / IPv6 数量
-
-### 12.2 详细统计
-
-```bash
-ariactl --tap eth0 stats --rules
-ariactl --tap eth0 stats --flows --top 20
-ariactl --tap eth0 stats --qos
-ariactl --tap eth0 stats --groups
-ariactl --tap eth0 stats --mirror
-ariactl --tap eth0 stats --tcprt --top 20
-ariactl --tap eth0 stats --drops --top 50
-```
-
-这些选项可以组合：
-
-```bash
-ariactl --tap eth0 stats --rules --qos --mirror
-```
-
-### 12.3 统计口径建议
-
-测试统计前，要先确认：
-
-- 流量方向是否和规则方向一致
-- group 是否绑在正确的一侧
-- `qos egress` 是否绑到了目标组
-- `mirror` 是否配置了匹配当前流量方向的规则
-
-### 12.4 `/metrics`
-
-`GET /metrics` 会导出 Prometheus 指标，包括：
-
-- 基础对象计数
-- rule/group/qos/mirror 统计
-- kernel drop 指标
-- trace backend 运行时指标
-
-尤其值得关注：
-
-- `aria_trace_backend_info`
-- `aria_trace_runtime_registered_taps`
-- `aria_trace_runtime_active_consumers`
-- `aria_trace_runtime_consumer_failures_total`
-- `aria_trace_runtime_consumer_restarts_total`
-- `aria_trace_runtime_last_error`
-
-## 13. 功能模块：SSL 可观测性（ssl）
-
-### 13.1 作用
-
-`ssl` 模块提供：
-
-- TLS 握手观测
-- SSL HTTP 请求/响应观测
-- SSL 错误观测
-
-### 13.2 最重要的语义
-
-SSL 是 host-global，不是 per-instance。
-
-这意味着：
-
-- `ariactl --tap eth0 ssl ...` 可以执行
-- 但 `--tap` 会被忽略
-- CLI 会显式提示这一点
-
-### 13.3 常见命令
-
-```bash
-ariactl ssl enable
-ariactl ssl disable
-ariactl ssl status
-
-ariactl ssl list --top 100
-ariactl ssl flush
-
-ariactl ssl http --top 100
-ariactl ssl http-flush
-
-ariactl ssl errors --top 20
-ariactl ssl errors-flush
-```
-
-### 13.4 输出解释
-
-`ssl list`：
-
-- `PID`
-- `TID`
-- `Handshake(us)`
-- `SNI`
-- `Seq`
-
-`ssl http`：
-
-- `Method`
-- `Host`
-- `Path`
-- `Status`
-- `Latency(us)`
-
-`ssl errors`：
-
-- `syscall`
-- `timestamp`
-- `ret_code`
-- `error_hint`
-
-## 14. 功能模块：运行时配置（config）
-
-### 14.1 作用
-
-所有主要开关都支持热切换，无需重启 agent。
-
-```bash
-ariactl --tap eth0 config show
-ariactl --tap eth0 config set conntrack on
-ariactl --tap eth0 config set monitoring on
-ariactl --tap eth0 config set acl on
-ariactl --tap eth0 config set qos off
-ariactl --tap eth0 config set mirror off
-ariactl --tap eth0 config set tcprt on
-ariactl config set ssl on
-```
-
-### 14.2 支持的 key
-
-- `conntrack`
-- `monitoring`
-- `acl`
-- `qos`
-- `mirror`
-- `tcprt`
-- `ssl`
-
-### 14.3 特殊点：SSL
-
-`ssl` 配置是全局的，不走普通实例配置路径：
-
-- `config set ssl on/off` 会走专门的全局 SSL 配置接口
-- 即使你带了 `--tap`，也只会影响提示，不影响实际作用域
-
-## 15. 运行管理、恢复与排障
-
-### 15.1 `instances`
-
-```bash
-ariactl instances
-```
-
-用于查看当前已注册实例及其 `active` 状态。
-
-### 15.2 `health`
-
-```bash
-ariactl health
-```
-
-用于做：
-
-- agent 存活确认
-- kernel drop 模式确认
-- 已管理实例数量确认
-
-### 15.3 `system start/stop`
-
-```bash
-ariactl system start --iface eth0
-ariactl system stop
-```
-
-用途：
-
-- 接管单一系统接口
-- 不依赖全局 `--tap`
-
-运行时会涉及：
-
-- XDP attach
-- TC attach
-- pinned objects
-- root `fq` qdisc 管理
-
-### 15.4 managed 自动恢复
-
-managed 模式下，系统具备以下恢复能力：
-
-- agent restart 后实例恢复
-- shared runtime repair
-- crash recovery 后补回缺失的 TC link
-- QoS shaping 场景下补回缺失的 `fq`
-
-### 15.5 `diagnose`
-
-```bash
-ariactl --tap eth0 diagnose --dst 10.0.0.5 --dport 3306
-```
-
-它会组合多个观测面做摘要：
-
-- TCP-RT
-- SSL/TLS
-- HTTP
-- kernel drop
-
-适合快速判断：
-
-- 健康
-- 降级
-- 不健康
-
-### 15.6 建议排障路径
-
-推荐顺序：
-
-1. `ariactl health`
-2. `ariactl instances`
-3. `ariactl --tap <tap> config show`
-4. `ariactl --tap <tap> stats`
-5. `ariactl --tap <tap> conntrack list`
-6. `ariactl trace start ...`
-7. `ariactl tcprt flow ...`
-8. 必要时看 `/metrics`
-
-## 16. REST API 概览
-
-所有接口前缀都是 `/api/v1/`。
-
-常用分组：
-
-- 健康与实例
-  - `GET /health`
-  - `GET /instances`
-- system
-  - `POST /system/start`
-  - `POST /system/stop`
-- group / policy / qos / mirror / conntrack / config
-  - 都是实例作用域接口
-- tcprt
-  - 实例内查看
-  - 全局 filter/query
-- trace
-  - `POST/GET/DELETE /{instance}/trace`
-  - `DELETE /{instance}/trace/flush`
-- ssl
-  - 全局 `ssl` / `ssl/http` / `ssl/config` / `ssl/errors`
-- chains
-  - `GET/POST/DELETE /chains`
-- kernel drops
-  - `GET/DELETE /stats/kernel_drops`
-
-如果你更习惯 CLI，可以把 CLI 理解为这些 API 的薄封装。
-
-## 17. 测试与回归
-
-仓库当前提供两个直接可用的远端回归脚本：
-
-```bash
-python3 tools/runtime_lifecycle_regression.py --host root@<host>
-python3 tools/trace_perf_regression.py --host root@<host> --packet-counts 20,200 --rounds 2
-```
-
-适用范围：
-
-- runtime lifecycle
-- trace flush/start/first-read
-- system vanished iface
-- preexisting fq
-- managed crash recovery
-
-## 18. 已知限制
-
-### 18.1 trace cache 上限
-
-当前 userspace trace cache 有固定容量上限，已知默认值是 `4096`。因此：
-
-- `5000` 级别回归不是未知 bug
-- 它反映的是当前产品容量边界
-
-### 18.2 4.18 回归待补
-
-当前主要闭环验证在 `6.8` 上完成；`4.18` 环境仍然需要补回归。
-
-### 18.3 SSL 是 host-global
-
-这不是 bug，而是产品语义：
-
-- `ssl` 数据和配置都不是实例私有
-- `--tap` 对 SSL 只起到 UI 提示效果
-
-## 19. 附录：常用命令速查
-
-### 19.1 基础
-
-```bash
-ariactl health
-ariactl instances
-ariactl system start --iface eth0
-ariactl system stop
-```
-
-### 19.2 group
-
-```bash
-ariactl --tap eth0 group add --name web --cidr 10.0.0.0/8
-ariactl --tap eth0 group list
-ariactl --tap eth0 group with-stats
-ariactl --tap eth0 group delete --name web
-```
-
-### 19.3 policy
-
-```bash
-ariactl --tap eth0 policy add --src-group web --dst-group db --proto tcp --ports 3306 --action accept --direction ingress
-ariactl --tap eth0 policy list
-ariactl --tap eth0 policy with-stats
-ariactl --tap eth0 policy delete --src-group web --dst-group db --proto tcp --direction ingress
-```
-
-### 19.4 qos
-
-```bash
-ariactl --tap eth0 qos add --group db --direction egress --rate 100mbps --mode shaping
-ariactl --tap eth0 qos list
-ariactl --tap eth0 qos with-stats
-ariactl --tap eth0 qos delete --group db --direction egress
-```
-
-### 19.5 mirror
-
-```bash
-ariactl --tap eth0 mirror add --src-group web --dst-group db --proto tcp --direction both --target tapmirror
-ariactl --tap eth0 mirror list
-ariactl --tap eth0 mirror with-stats
-ariactl --tap eth0 mirror delete --src-group web --dst-group db --proto tcp --direction both
-```
-
-### 19.6 tcprt / trace
-
-```bash
-ariactl tcprt top --by art --top 10
-ariactl tcprt flow --dst 10.0.0.5 --dport 3306 --chain prod-chain
-ariactl trace start --tap eth0 --dst 10.0.0.5 --proto tcp --dport 3306 --wait 5
-ariactl trace start --chain prod-chain --dst 10.0.0.5 --dport 3306 --wait 5
-```
-
-### 19.7 conntrack / drops / stats / ssl
-
-```bash
-ariactl --tap eth0 conntrack list
-ariactl --tap eth0 stats --rules --qos --mirror
-ariactl drops list --top 50
-ariactl ssl status
-ariactl ssl list --top 100
-```
-
-### 19.8 chain（供 `tcprt` / `trace` 使用）
+常见命令：
 
 ```bash
 ariactl chain apply --file chain.json
@@ -1151,4 +726,572 @@ ariactl chain delete prod-chain
     }
   ]
 }
+```
+
+### 8.6 实例级视图
+
+```bash
+ariactl --tap eth0 tcprt histogram
+ariactl --tap eth0 tcprt states
+ariactl --tap eth0 tcprt flush
+```
+
+用途：
+
+- `histogram`
+  - 看 ART 分布
+  - 适合分析尾延迟
+- `states`
+  - 看状态分布和异常提示
+- `flush`
+  - 清空实例内 TCP-RT 状态
+
+### 8.7 active flow 语义
+
+当前对外显示的 active flow 已经过滤掉已关闭流。  
+使用上可以认为：
+
+- `top`
+- `flow`
+- `stats --tcprt`
+
+都只展示当前可见的活跃流。
+
+## 9. 功能模块：包级追踪（trace）
+
+### 9.1 作用
+
+Trace 用于做包级追踪和丢包定位，适合：
+
+- 验证规则命中情况
+- 定位包在哪个 hook 被丢掉
+- 做跨实例、跨 hop 的路径观测
+
+### 9.2 当前 CLI 入口
+
+当前 CLI 主动作是：
+
+```bash
+ariactl trace start ...
+```
+
+示例：
+
+```bash
+ariactl trace start \
+  --tap eth0 \
+  --dst 10.0.0.5 --proto tcp --dport 3306 \
+  --wait 5
+```
+
+### 9.3 `trace start` 的 `--tap`
+
+要特别注意：
+
+- 这里的 `--tap` 是 `trace start` 自己的参数
+- 不是全局 `--tap`
+
+语义是：
+
+- `ariactl trace start --tap tap1 ...`
+  - 只追一个实例
+- `ariactl trace start ...`
+  - 自动追所有活跃实例
+
+### 9.4 timed 模式与 live 模式
+
+- 带 `--wait`
+  - timed trace
+  - 到时间后自动读取并停止
+- 不带 `--wait`
+  - live trace
+  - 持续显示，直到 `Ctrl+C`
+
+### 9.5 推荐使用方式
+
+最稳的 trace 使用顺序是：
+
+1. 先 `flush`
+2. 再 `start`
+3. 发匹配流量
+4. 第一次读取结果
+
+CLI 的 trace 工作流本身也会尽量遵循这个模式。
+
+### 9.6 输出怎么看
+
+非 chain 模式：
+
+- 按实例汇总 `In` / `Out`
+- 如果有 drop，会给出 `drop_reason`
+- 最后列出 detail
+
+chain 模式：
+
+- 先按 hop 展示各 tap 的 `in/out`
+- 再做 hop 内和 hop 间丢包归因
+- 最后列出各 hop detail
+
+### 9.7 `chain` 在 trace 里的定位
+
+和 TCP-RT 一样，trace 里的 `chain` 不是独立主功能，而是配套拓扑输入。
+
+示例：
+
+```bash
+ariactl trace start --chain prod-chain --dst 10.0.0.5 --dport 3306 --wait 5
+```
+
+适合：
+
+- 多个 tap 串成一条链路
+- 你要判断“哪一跳掉了包”
+- 你要区分“明确捕获的 drop”和“hop 间黑盒丢包”
+
+### 9.8 trace backend 与缓存限制
+
+当前 rollout 推荐配置是：
+
+```toml
+trace_backend = "auto"
+trace_auto_allow_ringbuf = false
+```
+
+实际优先走 perf backend。当前 userspace trace cache 有固定容量上限，已知默认上限是 `4096` 条。这意味着：
+
+- `20`
+- `200`
+- `1000`
+- `4096`
+
+这类回归一般没问题；如果你在第一次读取前堆得更多，可能会看到 cache eviction。
+
+## 10. 功能模块：Kernel Drop 观测（drops）
+
+### 10.1 作用
+
+`drops` 看的是内核层丢包，不是防火墙主动丢包。
+
+区别要分清：
+
+- 防火墙主动丢包
+  - 看 `stats --rules`
+  - 看 `stats --qos`
+- 内核层 drop
+  - 看 `drops list/flush`
+
+### 10.2 常见命令
+
+```bash
+ariactl drops list
+ariactl --tap eth0 drops list
+ariactl --tap eth0 drops list --iface eth0 --top 20
+ariactl drops list --include-unattributed
+```
+
+清理必须显式带 `--force`：
+
+```bash
+ariactl --tap eth0 drops flush --force
+ariactl --tap eth0 drops flush --iface eth0 --force
+ariactl drops flush --include-unattributed --force
+```
+
+### 10.3 过滤维度
+
+- 全局 `--tap`
+- 子命令 `--iface`
+- `top`
+- `include_unattributed`
+
+### 10.4 输出字段
+
+- `Instance`
+- `Iface`
+- `Ifindex`
+- `Reason`
+- `Proto`
+- `Packets`
+- `Bytes`
+- `Source`
+
+如果返回“kernel drop observability is not available”，更常见的原因是环境或模式不支持，而不是产品 bug。
+
+## 11. 功能模块：连接跟踪（conntrack）
+
+### 11.1 作用
+
+Conntrack 用于查看和清理实例级连接表，适合：
+
+- 确认连接是否已建立
+- 确认是否进入 fast-path
+- 清空连接表做回归
+
+### 11.2 常见命令
+
+```bash
+ariactl --tap eth0 conntrack list
+ariactl --tap eth0 conntrack flush
+```
+
+输出包括：
+
+- 源地址
+- 目的地址
+- 源端口
+- 目的端口
+- 协议
+- 状态
+- 包计数
+- 字节计数
+
+## 12. 功能模块：监控与统计（stats / metrics）
+
+### 12.1 `stats` 概览
+
+不带任何子选项时：
+
+```bash
+ariactl --tap eth0 stats
+```
+
+输出的是实例级概览，包括：
+
+- group 数量
+- policy 数量
+- QoS 规则数量
+- mirror 规则数量
+- conntrack IPv4 / IPv6 条目数
+
+### 12.2 详细统计
+
+```bash
+ariactl --tap eth0 stats --rules
+ariactl --tap eth0 stats --flows --top 20
+ariactl --tap eth0 stats --qos
+ariactl --tap eth0 stats --groups
+ariactl --tap eth0 stats --mirror
+ariactl --tap eth0 stats --tcprt --top 20
+ariactl --tap eth0 stats --drops --top 50
+```
+
+这些标志可以组合：
+
+```bash
+ariactl --tap eth0 stats --rules --qos --mirror
+```
+
+### 12.3 统计口径的常见误区
+
+做统计验证时，优先检查：
+
+- 流量方向是否和规则方向一致
+- `policy` 是否绑定到了正确的 group 组合
+- `qos egress` 是否绑到了目标组
+- `mirror` 是否配置了正确的方向和 group
+
+### 12.4 `/metrics`
+
+`GET /metrics` 会导出 Prometheus 指标，包含：
+
+- group / policy / qos / mirror 计数
+- rule/group/qos/mirror/drop 统计
+- kernel drop 观测指标
+- trace backend 运行时指标
+
+trace backend 相关最值得看的是：
+
+- `aria_trace_backend_info`
+- `aria_trace_runtime_registered_taps`
+- `aria_trace_runtime_active_consumers`
+- `aria_trace_runtime_consumer_failures_total`
+- `aria_trace_runtime_consumer_restarts_total`
+- `aria_trace_runtime_last_error`
+
+## 13. 功能模块：SSL 可观测性（ssl）
+
+### 13.1 作用
+
+SSL 模块提供三类数据：
+
+- TLS 握手
+- SSL HTTP 请求/响应
+- SSL 错误
+
+### 13.2 最重要的语义：它是 host-global
+
+SSL 不是 per-instance 数据，而是 host-global。
+
+也就是说：
+
+- `ariactl --tap eth0 ssl list`
+  可以执行
+- 但 `--tap` 实际会被忽略
+- CLI 会明确提示这一点
+
+### 13.3 常见命令
+
+```bash
+ariactl ssl enable
+ariactl ssl disable
+ariactl ssl status
+
+ariactl ssl list --top 100
+ariactl ssl flush
+
+ariactl ssl http --top 100
+ariactl ssl http-flush
+
+ariactl ssl errors --top 20
+ariactl ssl errors-flush
+```
+
+### 13.4 输出字段
+
+`ssl list`：
+
+- `PID`
+- `TID`
+- `Handshake(us)`
+- `SNI`
+- `Seq`
+
+`ssl http`：
+
+- `Method`
+- `Host`
+- `Path`
+- `Status`
+- `Latency(us)`
+
+`ssl errors`：
+
+- `syscall`
+- `timestamp`
+- `ret_code`
+- `error_hint`
+
+## 14. 功能模块：运行时配置（config）
+
+### 14.1 作用
+
+运行时配置支持热切换，无需重启 agent。
+
+```bash
+ariactl --tap eth0 config show
+
+ariactl --tap eth0 config set conntrack on
+ariactl --tap eth0 config set monitoring on
+ariactl --tap eth0 config set acl on
+ariactl --tap eth0 config set qos off
+ariactl --tap eth0 config set mirror off
+ariactl --tap eth0 config set tcprt on
+
+ariactl config set ssl on
+```
+
+### 14.2 支持的 key
+
+- `conntrack`
+- `monitoring`
+- `acl`
+- `qos`
+- `mirror`
+- `tcprt`
+- `ssl`
+
+### 14.3 SSL 配置的特殊性
+
+`ssl` 配置不是普通实例配置，而是全局配置：
+
+- `config set ssl on/off` 会走专门的全局 SSL 配置接口
+- 即使带了 `--tap`，也只影响提示，不改变作用域
+
+## 15. REST API 概览
+
+所有接口前缀都是 `/api/v1/`。
+
+主要分组：
+
+- 健康与实例
+  - `GET /health`
+  - `GET /instances`
+- system
+  - `POST /system/start`
+  - `POST /system/stop`
+- 实例作用域对象
+  - `/{instance}/groups`
+  - `/{instance}/policies`
+  - `/{instance}/qos`
+  - `/{instance}/mirror`
+  - `/{instance}/conntrack`
+  - `/{instance}/config`
+  - `/{instance}/stats/...`
+  - `/{instance}/tcprt`
+  - `/{instance}/trace`
+- 全局功能
+  - `/tcprt/query`
+  - `/tcprt/filter`
+  - `/chains`
+  - `/ssl`
+  - `/ssl/http`
+  - `/ssl/config`
+  - `/ssl/errors`
+  - `/stats/kernel_drops`
+
+如果你更习惯 CLI，可以直接把 CLI 理解成这些 API 的薄封装。
+
+## 16. 运维、恢复与排障
+
+### 16.1 常用运行命令
+
+```bash
+ariactl health
+ariactl instances
+ariactl system start --iface eth0
+ariactl system stop
+```
+
+### 16.2 `diagnose`
+
+```bash
+ariactl --tap eth0 diagnose --dst 10.0.0.5 --dport 3306
+```
+
+它会组合多个观测面做摘要：
+
+- TCP-RT
+- SSL/TLS
+- HTTP
+- kernel drop
+
+适合快速判断：
+
+- 健康
+- 降级
+- 不健康
+
+### 16.3 推荐排障路径
+
+建议按这个顺序看：
+
+1. `ariactl health`
+2. `ariactl instances`
+3. `ariactl --tap <tap> config show`
+4. `ariactl --tap <tap> stats`
+5. `ariactl --tap <tap> conntrack list`
+6. `ariactl trace start ...`
+7. `ariactl tcprt flow ...`
+8. 必要时看 `/metrics`
+
+### 16.4 生命周期相关注意事项
+
+实际运维里最值得关注的几个点：
+
+- `system` 和 managed 的清理语义不同
+- QoS shaping 会涉及 root `fq` qdisc 生命周期
+- preexisting `fq` 不应被误删
+- crash recovery 需要同时恢复 XDP、TC link 和 `fq`
+
+## 17. 测试与回归
+
+仓库现在提供两类可直接远端执行的回归脚本：
+
+```bash
+python3 tools/runtime_lifecycle_regression.py --host root@<host>
+python3 tools/trace_perf_regression.py --host root@<host> --packet-counts 20,200 --rounds 2
+```
+
+覆盖范围：
+
+- system stop + vanished iface
+- preexisting fq
+- managed crash recovery -> DelLink
+- trace flush/start/first-read
+
+## 18. 已知限制
+
+### 18.1 trace cache 上限
+
+当前 userspace trace cache 有固定容量上限，已知默认值是 `4096`。因此：
+
+- `5000` 级别回归如果在第一次读取前积压太多，可能触发 eviction
+- 这反映的是当前容量边界，不是未知 bug
+
+### 18.2 4.18 回归待补
+
+当前主要闭环验证在 `6.8` 上完成；`4.18` 环境仍然需要补回归。
+
+### 18.3 SSL 是 host-global
+
+这是产品语义，不是 bug：
+
+- SSL 数据不是实例私有
+- `--tap` 对 SSL 只起提示作用
+
+## 19. 附录：命令速查
+
+### 19.1 运行类
+
+```bash
+ariactl health
+ariactl instances
+ariactl system start --iface eth0
+ariactl system stop
+```
+
+### 19.2 ACL / group / policy
+
+```bash
+ariactl --tap eth0 group add --name web --cidr 10.0.0.0/8
+ariactl --tap eth0 group list
+ariactl --tap eth0 group with-stats
+
+ariactl --tap eth0 policy add --src-group web --dst-group db --proto tcp --ports 3306 --action accept --direction ingress
+ariactl --tap eth0 policy list
+ariactl --tap eth0 policy with-stats
+ariactl --tap eth0 policy delete --src-group web --dst-group db --proto tcp --direction ingress
+```
+
+### 19.3 QoS / mirror
+
+```bash
+ariactl --tap eth0 qos add --group db --direction egress --rate 100mbps --mode shaping
+ariactl --tap eth0 qos list
+ariactl --tap eth0 qos with-stats
+
+ariactl --tap eth0 mirror add --src-group web --dst-group db --proto tcp --direction both --target tapmirror
+ariactl --tap eth0 mirror list
+ariactl --tap eth0 mirror with-stats
+```
+
+### 19.4 TCP-RT / trace / chain
+
+```bash
+ariactl tcprt top --by art --top 10
+ariactl tcprt flow --dst 10.0.0.5 --dport 3306
+ariactl tcprt flow --dst 10.0.0.5 --dport 3306 --chain prod-chain
+
+ariactl trace start --tap eth0 --dst 10.0.0.5 --proto tcp --dport 3306 --wait 5
+ariactl trace start --chain prod-chain --dst 10.0.0.5 --dport 3306 --wait 5
+
+ariactl chain apply --file chain.json
+ariactl chain list
+ariactl chain show prod-chain
+ariactl chain delete prod-chain
+```
+
+### 19.5 conntrack / drops / stats / ssl / config
+
+```bash
+ariactl --tap eth0 conntrack list
+ariactl --tap eth0 conntrack flush
+
+ariactl drops list --top 50
+ariactl --tap eth0 drops flush --force
+
+ariactl --tap eth0 stats --rules --qos --mirror
+ariactl ssl status
+ariactl ssl list --top 100
+ariactl --tap eth0 config show
 ```
