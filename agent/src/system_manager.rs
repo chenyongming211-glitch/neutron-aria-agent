@@ -28,6 +28,18 @@ fn cleanup_owned_root_qdisc(iface: &str, state_path: &str) -> Result<(), String>
         return Ok(());
     }
 
+    let iface_sys_path = Path::new("/sys/class/net").join(iface);
+    if !iface_sys_path.exists() {
+        fs::remove_file(&marker_path).map_err(|e| {
+            format!(
+                "failed to remove FQ qdisc ownership marker for gone device {}: {}",
+                marker_path.display(),
+                e
+            )
+        })?;
+        return Ok(());
+    }
+
     cleanup_root_qdisc(iface)
         .map_err(|e| format!("failed to clean owned root qdisc on {}: {}", iface, e))?;
     fs::remove_file(&marker_path).map_err(|e| {
@@ -331,7 +343,7 @@ pub async fn system_stop(
         info!(pin_path = %pin_path, "removed pinned maps and programs");
     }
 
-    // Unregister AFTER cleanup succeeds, so retry is possible on failure
+    // Unregister after best-effort interface cleanup and pin removal.
     control_plane.unregister_instance("system").await;
 
     info!("system firewall stopped");

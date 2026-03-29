@@ -111,6 +111,19 @@ impl FirewallInstance {
             return Ok(());
         }
 
+        let iface_sys_path = Path::new("/sys/class/net").join(&self.iface);
+        if !iface_sys_path.exists() {
+            std::fs::remove_file(&marker_path).map_err(|e| {
+                format!(
+                    "[{}] Failed to remove FQ marker for gone device {}: {}",
+                    self.iface,
+                    marker_path.display(),
+                    e
+                )
+            })?;
+            return Ok(());
+        }
+
         aria_core::ebpf_ops::cleanup_root_qdisc(&self.iface)
             .map_err(|e| format!("[{}] Failed to remove owned root qdisc: {}", self.iface, e))?;
         std::fs::remove_file(&marker_path).map_err(|e| {
