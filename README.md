@@ -273,6 +273,9 @@ QoS 用于按 IP 组做带宽约束，支持：
 - `--mode policing|shaping`
 
 `policing` 的语义是超限直接丢包；`shaping` 的语义是通过 EDT 做平滑整形，通常更适合 egress。
+`shaping` 依赖 root `fq` qdisc。系统会自动安装 `fq`，并使用更高的
+默认 `flow_limit` 来吸收单 flow 突发，避免默认 `100p` 队列过小导致的
+平滑整形边界丢包。
 
 ```bash
 # 出向 shaping：把 web 组整形成 100 Mbps

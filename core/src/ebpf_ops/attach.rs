@@ -102,7 +102,16 @@ pub fn detach_tc_egress(iface: &str) {
 /// Setup FQ qdisc for EDT-based QoS
 pub fn setup_fq_qdisc(iface: &str) -> Result<(), String> {
     let output = std::process::Command::new("tc")
-        .args(["qdisc", "replace", "dev", iface, "root", "fq"])
+        .args([
+            "qdisc",
+            "replace",
+            "dev",
+            iface,
+            "root",
+            "fq",
+            "flow_limit",
+            "1000",
+        ])
         .output()
         .map_err(|e| format!("Failed to run tc: {}", e))?;
     if !output.status.success() {

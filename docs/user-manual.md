@@ -499,6 +499,8 @@ ariactl --tap eth0 qos add \
   - 更适合 shaping
 
 `shaping` 依赖 root `fq` qdisc。系统会自动尝试安装、恢复和清理 owned `fq`。
+当前默认会为 root `fq` 安装更高的 `flow_limit`，避免单 flow 瞬时突发时
+被内核默认 `100p` 队列上限过早裁掉。
 
 ### 6.7 速率和 burst
 
