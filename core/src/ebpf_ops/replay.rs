@@ -528,13 +528,18 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
 
     for (name, group) in &state.groups {
         for cidr in &group.cidrs {
+            let mut failed = false;
             if let Err(e) = add_network("src", cidr, group.id, runtime, "") {
                 errors.push(format!("group '{}' cidr '{}' src: {}", name, cidr, e));
+                failed = true;
             }
             if let Err(e) = add_network("dst", cidr, group.id, runtime, "") {
                 errors.push(format!("group '{}' cidr '{}' dst: {}", name, cidr, e));
+                failed = true;
             }
-            group_count += 1;
+            if !failed {
+                group_count += 1;
+            }
         }
     }
 
