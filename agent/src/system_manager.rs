@@ -138,6 +138,10 @@ pub async fn system_start(
     fs::create_dir_all(state_path)
         .map_err(|e| format!("Failed to create state directory: {}", e))?;
 
+    // Clear stale FQ qdisc ownership marker from a previous start/stop cycle.
+    // Only a fresh InstalledNow in this cycle will (re)create the marker.
+    let _ = fs::remove_file(fq_qdisc_marker_path(state_path));
+
     // Set max_port_policies
     let sm = aria_core::state::StateManager::new(state_path);
     if let Err(e) = sm.set_max_port_policies(max_port_policies) {
