@@ -138,6 +138,7 @@ pub fn cleanup_root_qdisc(iface: &str) -> Result<(), String> {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let benign = stderr.contains("Cannot delete qdisc with handle of zero")
+        || stderr.contains("Cannot find device")
         || stderr.contains("No such file or directory")
         || stderr.trim().is_empty();
     if benign {
