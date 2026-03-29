@@ -92,6 +92,30 @@ ariactl --tap eth0 group with-stats
 - 多个模块需要复用同一地址对象
 - 想按“应用组/业务组”而不是硬编码 IP 写策略
 
+#### 作用域与命名空间
+
+这是使用 `group` 时最需要先搞清楚的点：
+
+- `group` 是按实例隔离的，不是全局共享对象
+- `ariactl --tap eth0 group add --name web ...` 的意思是“给实例 `eth0` 新增一个名为 `web` 的 group”
+- `ariactl --tap eth1 group add --name web ...` 也是合法的，但它是另一个实例里的另一个 `web`
+
+换句话说：
+
+- 不同 tap / instance 可以存在同名 group
+- 这些同名 group 互不共享、互不影响
+- `eth0` 上的 `policy/qos/mirror/stats` 只会解析和使用 `eth0` 自己的 group
+- `eth1` 上的规则不会直接引用 `eth0` 的 group 定义
+
+可以把它理解成“每个实例都有自己的一套地址对象命名空间”。
+
+这也是为什么大多数 CLI 命令都需要全局 `--tap`：
+
+- 你不只是告诉系统“操作哪个接口”
+- 你也是在告诉系统“去哪个实例的状态空间里查 group、rule、qos、mirror”
+
+如果省略 `--tap`，CLI 默认操作的是 `system` 实例，而不是“全局所有实例”。
+
 ### 2.3 方向语义
 
 方向是全产品里最容易误用的概念之一。
@@ -272,6 +296,13 @@ ariactl trace start \
 
 CLI 子命令是 `ariactl policy`，但产品能力上通常把它理解为 ACL。
 
+这里的 `src_group` 和 `dst_group` 都是“当前实例里的 group 名称”，不是全局名字。
+所以：
+
+- `ariactl --tap eth0 policy add --src-group web ...`
+  只会去 `eth0` 实例里找 `web`
+- 如果 `web` 只存在于 `eth1`，这条命令会报 group not found
+
 ### 5.2 常见命令
 
 ```bash
@@ -337,6 +368,9 @@ cat policies.json | ariactl --tap eth0 policy batch --file -
   - 超限直接丢包
 - `shaping`
   - 使用 EDT 做平滑整形
+
+这里的 `--group` 也是“当前实例里的 group 名称”。
+同名 group 在不同实例里可以独立存在，QoS 只会绑定到当前实例解析出来的 group id。
 
 ### 6.2 常见命令
 
