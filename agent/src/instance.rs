@@ -983,15 +983,6 @@ impl FirewallInstance {
         }
     }
 
-    fn claim_existing_tc_links(&self, attached: &mut AttachedLinks) {
-        for prog_name in ["tc_egress", "tc_ingress"] {
-            let link_pin = self.tc_link_pin_path(prog_name);
-            if std::path::Path::new(&link_pin).exists() {
-                Self::set_tc_link_ownership(attached, prog_name, LinkOwnership::ClaimedExisting);
-            }
-        }
-    }
-
     fn set_tc_link_ownership(
         attached: &mut AttachedLinks,
         prog_name: &str,
