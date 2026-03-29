@@ -754,8 +754,8 @@ impl FirewallInstance {
 
         if pin_state.preexisting_xdp_link {
             attached.xdp = LinkOwnership::ClaimedExisting;
-            self.claim_existing_tc_links(&mut attached);
-            self.edt_available = aria_core::ebpf_ops::check_fq_qdisc(&self.iface);
+            self.ensure_tc_runtime(&mut attached);
+            self.ensure_fq_runtime();
             self.activate_persisted_live_iface()?;
             info!(instance = %self.iface, edt_available = self.edt_available, "claimed preexisting live links without runtime mutation");
             return Ok(attached);
