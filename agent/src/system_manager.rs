@@ -305,7 +305,9 @@ pub async fn system_stop(
             }
 
             detach_tc_egress(&iface);
-            cleanup_owned_root_qdisc(&iface, state_path)?;
+            if let Err(e) = cleanup_owned_root_qdisc(&iface, state_path) {
+                warn!(iface = %iface, error = %e, "failed to clean owned root qdisc");
+            }
 
             if let Err(e) = sm.clear_attached_iface() {
                 warn!(iface = %iface, error = %e, "failed to clear attached interface record");
