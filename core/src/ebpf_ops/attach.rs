@@ -155,7 +155,8 @@ pub fn check_fq_qdisc(iface: &str) -> bool {
     match output {
         Ok(o) => {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.contains("fq")
+            // Match "qdisc fq " to distinguish from "qdisc fq_codel"
+            stdout.contains("qdisc fq ")
         }
         Err(_) => false,
     }

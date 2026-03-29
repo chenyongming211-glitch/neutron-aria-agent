@@ -592,7 +592,7 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
         let target_ifindex = match crate::mirror_ops::resolve_ifindex(&mr.target_iface) {
             Ok(idx) => idx,
             Err(e) => {
-                errors.push(format!("mirror target '{}' not found: {}", mr.target_iface, e));
+                warn!(target_iface = %mr.target_iface, error = %e, "mirror target not found during pinned replay");
                 continue;
             }
         };
