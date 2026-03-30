@@ -404,8 +404,10 @@ impl BtfBlob {
     }
 
     /// Find the byte offset in self.types of a named type with the given kind.
+    /// Skips forward declarations (vlen=0 for struct/union) to find the full definition.
     fn find_named_type(&self, name: &str, kind: u32) -> Result<usize, String> {
         let mut offset = 0usize;
+        let mut found: Option<usize> = None;
         while offset + 12 <= self.types.len() {
             let Ok(name_off) = read_u32(&self.types, offset) else { break };
             let Ok(info) = read_u32(&self.types, offset + 4) else { break };
@@ -418,13 +420,18 @@ impl BtfBlob {
             if k == kind {
                 if let Ok(n) = self.string(name_off) {
                     if n == name {
-                        return Ok(offset);
+                        // Prefer the full definition (vlen > 0) over a forward declaration.
+                        if vlen > 0 {
+                            return Ok(offset);
+                        } else if found.is_none() {
+                            found = Some(offset);
+                        }
                     }
                 }
             }
             offset += rs;
         }
-        Err(format!("BTF struct {} not found", name))
+        found.ok_or_else(|| format!("BTF struct {} not found", name))
     }
 
     /// Recursively search members of a struct/union at `type_offset` for `member_name`.
