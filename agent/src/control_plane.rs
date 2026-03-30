@@ -1191,6 +1191,14 @@ impl ControlPlane {
                 name: name.to_string(),
             })
             .await;
+
+        // Clear stale GROUP_STATS entries so the deleted group no longer appears in API responses.
+        if let Err(e) = aria_core::monitoring::clear_group_stats_for_id(
+            state.map_runtime(),
+            group.id,
+        ) {
+            warn!(error = %e, group_id = group.id, "failed to clear group stats after group delete");
+        }
         Ok(())
     }
 
@@ -1411,6 +1419,19 @@ impl ControlPlane {
                 warn!(error = %e, bitmap_idx = idx, "failed to clean port bitmap");
             }
         }
+
+        // Clear stale RULE_STATS entries so deleted rules no longer appear in API responses.
+        for rule in &matching_rules {
+            if let Err(e) = aria_core::monitoring::clear_rule_stats_for_policy(
+                state.map_runtime(),
+                rule.src_group_id,
+                rule.dst_group_id,
+                rule.proto,
+                rule.direction,
+            ) {
+                warn!(error = %e, "failed to clear rule stats after policy delete");
+            }
+        }
         Ok(())
     }
 
@@ -1612,7 +1633,38 @@ impl ControlPlane {
                     direction: rule.direction,
                 })
                 .await;
+
+            // Clear stale QOS_STATS entries so deleted rules no longer appear in API responses.
+            if let Err(e) = aria_core::monitoring::clear_qos_stats_for_rule(
+                state.map_runtime(),
+                rule.group_id,
+                rule.direction,
+            ) {
+                warn!(error = %e, group_id = rule.group_id, direction = rule.direction,
+                    "failed to clear qos stats after qos rule delete");
+            }
         }
+
+        // If no shaping rules remain, clean up the owned fq qdisc.
+        let has_shaping = state.state.qos_rules.iter().any(|r| r.mode == 1);
+        if !has_shaping {
+            let marker_path = Self::fq_qdisc_marker_path(&state);
+            if marker_path.exists() {
+                if let Ok(iface) = Self::runtime_iface_name(instance, &state) {
+                    if let Err(e) = aria_core::ebpf_ops::cleanup_root_qdisc(&iface) {
+                        warn!(instance = %instance, iface = %iface, error = %e,
+                            "failed to remove owned fq qdisc after last shaping rule deleted");
+                    }
+                }
+                if let Err(e) = fs::remove_file(&marker_path) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!(instance = %instance, path = %marker_path.display(), error = %e,
+                            "failed to remove fq qdisc ownership marker");
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 

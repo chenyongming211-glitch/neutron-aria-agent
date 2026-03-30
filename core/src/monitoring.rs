@@ -638,6 +638,86 @@ pub fn get_tcprt_stats(
     Ok(entries)
 }
 
+/// Remove all RULE_STATS entries for a specific policy key.
+/// Called after delete_policy to prevent stale stats from appearing in API responses.
+pub fn clear_rule_stats_for_policy(
+    runtime: TapMapRuntime<'_>,
+    src_id: u32,
+    dst_id: u32,
+    proto: u8,
+    direction: u8,
+) -> Result<(), String> {
+    let map_path = format!("{}/RULE_STATS", runtime.pin_path);
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open RULE_STATS: {:?}", e))?;
+    let mut map = PerCpuHashMap::<_, PolicyKey, RuleStatsValue>::try_from(
+        aya::maps::Map::PerCpuHashMap(map_data),
+    )
+    .map_err(|e| format!("convert RULE_STATS: {:?}", e))?;
+
+    let key = PolicyKey {
+        tap_id: runtime.tap_id,
+        src_id,
+        dst_id,
+        proto,
+        direction,
+        pad: [0; 2],
+    };
+    match map.remove(&key) {
+        Ok(()) | Err(_) => Ok(()),
+    }
+}
+
+/// Remove all GROUP_STATS entries for a specific group id (both directions).
+/// Called after delete_group to prevent stale stats from appearing in API responses.
+pub fn clear_group_stats_for_id(runtime: TapMapRuntime<'_>, group_id: u32) -> Result<(), String> {
+    let map_path = format!("{}/GROUP_STATS", runtime.pin_path);
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open GROUP_STATS: {:?}", e))?;
+    let mut map = PerCpuHashMap::<_, GroupStatsKey, GroupStatsValue>::try_from(
+        aya::maps::Map::PerCpuHashMap(map_data),
+    )
+    .map_err(|e| format!("convert GROUP_STATS: {:?}", e))?;
+
+    // GROUP_STATS is keyed by (tap_id, group_id, direction); remove both directions.
+    for direction in [0u8, 1u8] {
+        let key = GroupStatsKey {
+            tap_id: runtime.tap_id,
+            group_id,
+            direction,
+            pad: [0; 3],
+        };
+        let _ = map.remove(&key);
+    }
+    Ok(())
+}
+
+/// Remove the QOS_STATS entry for a specific QoS rule key.
+/// Called after delete_qos to prevent stale stats from appearing in API responses.
+pub fn clear_qos_stats_for_rule(
+    runtime: TapMapRuntime<'_>,
+    group_id: u32,
+    direction: u8,
+) -> Result<(), String> {
+    let map_path = format!("{}/QOS_STATS", runtime.pin_path);
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open QOS_STATS: {:?}", e))?;
+    let mut map = PerCpuHashMap::<_, QosKey, QosStatsValue>::try_from(
+        aya::maps::Map::PerCpuHashMap(map_data),
+    )
+    .map_err(|e| format!("convert QOS_STATS: {:?}", e))?;
+
+    let key = QosKey {
+        tap_id: runtime.tap_id,
+        group_id,
+        direction,
+        pad: [0; 3],
+    };
+    match map.remove(&key) {
+        Ok(()) | Err(_) => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
