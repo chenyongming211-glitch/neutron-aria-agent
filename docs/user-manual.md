@@ -415,6 +415,7 @@ cat policies.json | ariactl --tap eth0 policy batch --file -
 如果某个 group 仍被引用，删除会失败。当前至少包括：
 
 - 被 policy 引用
+- 被 QoS 引用
 - 被 mirror 引用
 
 这是正常保护逻辑，用来避免把内存态和内核态弄分叉。

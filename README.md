@@ -29,6 +29,9 @@
 - [Runtime Repair Design](docs/runtime-repair-design.md)
 - [Global Shared Data Plane Design](docs/global-shared-data-plane-design.md)
 - [Kernel Drop Observability Design](docs/kernel-drop-observability-design.md)
+- [SSL Handshake Coverage Design](docs/ssl-handshake-coverage-design.md)
+- [SSL HTTP Verifier Repair Design](docs/ssl-http-verifier-repair-design.md)
+- [Trace Backend Refactor Status](docs/trace-backend-refactor-status.md)
 - [Codebase Refactor Plan](docs/codebase-refactor-plan.md)
 
 ## 回归脚本
@@ -512,7 +515,41 @@ ariactl --tap eth0 drops flush --iface eth0 --force
 ariactl drops flush --include-unattributed --force
 ```
 
-### 9. 连接跟踪（`ariactl conntrack`）
+### 9. SSL/TLS 观测（`ariactl ssl`）
+
+SSL 模块提供 TLS 握手、HTTP 请求/响应和 SSL 错误三类观测数据。注意 SSL 数据是 host-global 的，不是 per-instance，`--tap` 对 SSL 只起提示作用。
+
+```bash
+# 启用/禁用/状态
+ariactl ssl enable
+ariactl ssl disable
+ariactl ssl status
+
+# TLS 握手记录
+ariactl ssl list --top 100
+ariactl ssl flush
+
+# HTTP 请求/响应
+ariactl ssl http --top 100
+ariactl ssl http-flush
+
+# SSL 错误
+ariactl ssl errors --top 20
+ariactl ssl errors-flush
+```
+
+### 10. 连接诊断（`ariactl diagnose`）
+
+`diagnose` 组合多个观测面（TCP-RT、SSL/TLS、HTTP、kernel drop）做全栈连接诊断，快速判断连接健康状态。
+
+```bash
+ariactl --tap eth0 diagnose --dst 10.0.0.5 --dport 3306
+
+# 结合服务链做逐跳诊断
+ariactl --tap eth0 diagnose --dst 10.0.0.5 --dport 3306 --chain prod-chain
+```
+
+### 11. 连接跟踪（`ariactl conntrack`）
 
 Conntrack 用于查看和清理实例级连接表，通常配合 `--tap` 使用。
 
@@ -526,7 +563,7 @@ ariactl --tap eth0 conntrack flush
 
 `list` 输出包含五元组、协议、状态、报文数和字节数，适合确认连接是否已经进入 fast-path。
 
-### 10. 监控与统计（`ariactl stats`）
+### 12. 监控与统计（`ariactl stats`）
 
 `stats` 是统一统计入口。不带任何子选项时返回概览；带标志时可以一次输出多个统计分区。
 
@@ -575,7 +612,7 @@ ariactl --tap eth0 stats --drops --top 50
 ariactl --tap eth0 stats --rules --qos --mirror
 ```
 
-### 11. 运行时配置
+### 13. 运行时配置
 
 所有开关可热切换，无需重启：
 
@@ -590,7 +627,7 @@ ariactl --tap eth0 config set mirror off
 ariactl --tap eth0 config set tcprt on
 ```
 
-### 12. 实例管理
+### 14. 实例管理
 
 ```bash
 # 列出所有实例
@@ -627,6 +664,8 @@ ariactl --tap tap2 policy list
 | `trace start` | 丢包溯源（支持 `--chain` 服务链透视） |
 | `chain apply/list/show/delete` | 服务链拓扑定义（供 tcprt/trace 共用） |
 | `drops list/flush` | Kernel drop 观测与清理 |
+| `ssl enable/disable/status/list/flush/http/http-flush/errors/errors-flush` | SSL/TLS 观测（host-global） |
+| `diagnose` | 全栈连接诊断（TCP-RT + SSL + HTTP + kernel drop） |
 | `stats [--rules|--flows|--qos|--groups|--mirror|--tcprt|--drops]` | 统一统计入口 |
 | `config show/set` | 运行时配置 |
 
@@ -761,6 +800,11 @@ aria-firewall/
 | POST | `/tcprt/filter` | 按目标聚合查询 |
 | POST/GET/DELETE | `/{instance}/trace` | 追踪启动/查看/停止 |
 | GET/POST/DELETE | `/chains` | Service Chain CRUD |
+| GET/POST/DELETE | `/ssl` | SSL 握手记录查看/清空 |
+| GET/DELETE | `/ssl/http` | SSL HTTP 事件查看/清空 |
+| GET/PUT | `/ssl/config` | SSL 全局配置查看/更新 |
+| GET/DELETE | `/ssl/errors` | SSL 错误查看/清空 |
+| POST | `/{instance}/diagnose` | 全栈连接诊断 |
 
 `GET /health` 还会返回以下 kernel drop 状态字段：
 
