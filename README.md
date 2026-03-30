@@ -23,16 +23,9 @@
 - **Netlink 监听** — 实时感知接口增删，60 秒对账兜底
 - **Pinned Maps** — eBPF map 固定到 bpffs，agent 重启后自动恢复
 
-## 设计文档
+## 文档
 
-- [User Manual](docs/user-manual.md)
-- [Runtime Repair Design](docs/runtime-repair-design.md)
-- [Global Shared Data Plane Design](docs/global-shared-data-plane-design.md)
-- [Kernel Drop Observability Design](docs/kernel-drop-observability-design.md)
-- [SSL Handshake Coverage Design](docs/ssl-handshake-coverage-design.md)
-- [SSL HTTP Verifier Repair Design](docs/ssl-http-verifier-repair-design.md)
-- [Trace Backend Refactor Status](docs/trace-backend-refactor-status.md)
-- [Codebase Refactor Plan](docs/codebase-refactor-plan.md)
+- [用户手册](docs/user-manual.md)
 
 ## 回归脚本
 
