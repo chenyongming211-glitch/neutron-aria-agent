@@ -368,58 +368,159 @@ impl BtfBlob {
         struct_name: &str,
         member_name: &str,
     ) -> Result<u32, String> {
+        // Build a type_id -> byte_offset_in_types index for fast lookup.
+        // BTF type IDs start at 1; index[0] is unused.
+        let type_offsets = self.build_type_offset_index();
+
+        // Find the named struct first.
+        let struct_type_offset = self.find_named_type(struct_name, BTF_KIND_STRUCT)?;
+
+        // Then recursively search its members (including anonymous union/struct).
+        self.search_members_recursive(struct_type_offset, member_name, 0, &type_offsets)
+            .and_then(|result| {
+                result.ok_or_else(|| {
+                    format!("BTF struct {} missing member {}", struct_name, member_name)
+                })
+            })
+    }
+
+    /// Build a vec mapping BTF type_id -> byte offset in self.types.
+    /// type_id 0 is void (no entry), type_id 1 is the first record.
+    fn build_type_offset_index(&self) -> Vec<usize> {
+        let mut index = vec![0usize]; // index[0] = void placeholder
         let mut offset = 0usize;
         while offset + 12 <= self.types.len() {
-            let name_off = read_u32(&self.types, offset)?;
-            let info = read_u32(&self.types, offset + 4)?;
-            let _size_or_type = read_u32(&self.types, offset + 8)?;
+            let Ok(info) = read_u32(&self.types, offset + 4) else { break };
             let kind = (info >> 24) & 0x1f;
             let vlen = (info & 0xffff) as usize;
-            let kind_flag = (info >> 31) != 0;
-            let record_size = record_size(kind, vlen)?;
-
-            if offset + record_size > self.types.len() {
-                return Err("kernel BTF type record exceeds type section".to_string());
+            let Ok(rs) = record_size(kind, vlen) else { break };
+            if offset + rs > self.types.len() {
+                break;
             }
+            index.push(offset);
+            offset += rs;
+        }
+        index
+    }
 
-            if kind == BTF_KIND_STRUCT {
-                let name = self.string(name_off)?;
-                if name == struct_name {
-                    let members_base = offset + 12;
-                    for member_index in 0..vlen {
-                        let member_offset = members_base + member_index * 12;
-                        let member_name_off = read_u32(&self.types, member_offset)?;
-                        let raw_bit_offset = read_u32(&self.types, member_offset + 8)?;
-                        let member = self.string(member_name_off)?;
-                        if member != member_name {
-                            continue;
-                        }
-
-                        let bit_offset = if kind_flag {
-                            raw_bit_offset & 0x00ff_ffff
-                        } else {
-                            raw_bit_offset
-                        };
-                        if bit_offset % 8 != 0 {
-                            return Err(format!(
-                                "BTF member {}.{} has non-byte-aligned offset {}",
-                                struct_name, member_name, bit_offset
-                            ));
-                        }
-                        return Ok(bit_offset / 8);
+    /// Find the byte offset in self.types of a named type with the given kind.
+    fn find_named_type(&self, name: &str, kind: u32) -> Result<usize, String> {
+        let mut offset = 0usize;
+        while offset + 12 <= self.types.len() {
+            let Ok(name_off) = read_u32(&self.types, offset) else { break };
+            let Ok(info) = read_u32(&self.types, offset + 4) else { break };
+            let k = (info >> 24) & 0x1f;
+            let vlen = (info & 0xffff) as usize;
+            let Ok(rs) = record_size(k, vlen) else { break };
+            if offset + rs > self.types.len() {
+                break;
+            }
+            if k == kind {
+                if let Ok(n) = self.string(name_off) {
+                    if n == name {
+                        return Ok(offset);
                     }
-
-                    return Err(format!(
-                        "BTF struct {} missing member {}",
-                        struct_name, member_name
-                    ));
                 }
             }
+            offset += rs;
+        }
+        Err(format!("BTF struct {} not found", name))
+    }
 
-            offset += record_size;
+    /// Recursively search members of a struct/union at `type_offset` for `member_name`.
+    /// `base_bit_offset` is the accumulated bit offset of the parent within the root struct.
+    /// Returns Ok(Some(byte_offset)) if found, Ok(None) if not found in this type.
+    fn search_members_recursive(
+        &self,
+        type_offset: usize,
+        member_name: &str,
+        base_bit_offset: u32,
+        type_offsets: &[usize],
+    ) -> Result<Option<u32>, String> {
+        let info = read_u32(&self.types, type_offset + 4)?;
+        let kind = (info >> 24) & 0x1f;
+        let vlen = (info & 0xffff) as usize;
+        let kind_flag = (info >> 31) != 0;
+
+        if kind != BTF_KIND_STRUCT && kind != BTF_KIND_UNION {
+            return Ok(None);
         }
 
-        Err(format!("BTF struct {} not found", struct_name))
+        let members_base = type_offset + 12;
+        for i in 0..vlen {
+            let member_off = members_base + i * 12;
+            let member_name_off = read_u32(&self.types, member_off)?;
+            let member_type_id = read_u32(&self.types, member_off + 4)?;
+            let raw_bit_offset = read_u32(&self.types, member_off + 8)?;
+
+            let bit_offset = if kind_flag {
+                raw_bit_offset & 0x00ff_ffff
+            } else {
+                raw_bit_offset
+            };
+            let abs_bit_offset = base_bit_offset + bit_offset;
+
+            let mname = self.string(member_name_off)?;
+
+            if mname == member_name {
+                // Found it.
+                if abs_bit_offset % 8 != 0 {
+                    return Err(format!(
+                        "BTF member {} has non-byte-aligned offset {}",
+                        member_name, abs_bit_offset
+                    ));
+                }
+                return Ok(Some(abs_bit_offset / 8));
+            }
+
+            // If this member is anonymous (empty name) and is a struct/union,
+            // recurse into it.
+            if mname.is_empty() {
+                let nested_type_offset = self.resolve_type_offset(member_type_id, type_offsets);
+                if let Some(nested_offset) = nested_type_offset {
+                    if let Some(found) = self.search_members_recursive(
+                        nested_offset,
+                        member_name,
+                        abs_bit_offset,
+                        type_offsets,
+                    )? {
+                        return Ok(Some(found));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Resolve a type_id to its byte offset in self.types, following TYPEDEF/CONST/VOLATILE/RESTRICT.
+    fn resolve_type_offset(&self, type_id: u32, type_offsets: &[usize]) -> Option<usize> {
+        // BTF modifier kinds that wrap another type
+        const BTF_KIND_TYPEDEF: u32 = 8;
+        const BTF_KIND_VOLATILE: u32 = 9;
+        const BTF_KIND_CONST: u32 = 10;
+        const BTF_KIND_RESTRICT: u32 = 11;
+
+        let mut current_id = type_id;
+        for _ in 0..32 {
+            let idx = current_id as usize;
+            if idx == 0 || idx >= type_offsets.len() {
+                return None;
+            }
+            let off = type_offsets[idx];
+            let Ok(info) = read_u32(&self.types, off + 4) else { return None };
+            let kind = (info >> 24) & 0x1f;
+            match kind {
+                BTF_KIND_STRUCT | BTF_KIND_UNION => return Some(off),
+                BTF_KIND_TYPEDEF | BTF_KIND_VOLATILE | BTF_KIND_CONST | BTF_KIND_RESTRICT => {
+                    // size_or_type field holds the wrapped type_id
+                    let Ok(next_id) = read_u32(&self.types, off + 8) else { return None };
+                    current_id = next_id;
+                }
+                _ => return None,
+            }
+        }
+        None
     }
 
     fn string(&self, offset: u32) -> Result<&str, String> {
