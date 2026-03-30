@@ -1,4 +1,5 @@
 use crate::control_plane::MANAGED_SHARED_PIN_NAMESPACE;
+use crate::kernel_drop_manager::KERNEL_DROP_PIN_NAMESPACE;
 use crate::tap_registry::TapRegistry;
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
@@ -59,6 +60,7 @@ fn cleanup_orphaned_pins(base_pin_path: &str, existing_ifaces: &[String]) {
                     if name == "system"
                         || name == "ssl-global"
                         || name == MANAGED_SHARED_PIN_NAMESPACE
+                        || name == KERNEL_DROP_PIN_NAMESPACE
                     {
                         continue;
                     }
