@@ -87,10 +87,173 @@ pub struct KernelDropManager {
     base_state_path: String,
     pin_path: String,
     state: Mutex<KernelDropManagerState>,
+    kallsyms: Vec<(u64, String)>,
+}
+
+/// Resolved location info for a kernel drop event.
+pub struct ResolvedLocation {
+    pub symbol: String,
+    pub hint: Option<String>,
+}
+
+fn load_kallsyms() -> Vec<(u64, String)> {
+    let raw = match std::fs::read_to_string("/proc/kallsyms") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut syms: Vec<(u64, String)> = Vec::new();
+    for line in raw.lines() {
+        let mut parts = line.split_whitespace();
+        let addr = match parts.next().and_then(|s| u64::from_str_radix(s, 16).ok()) {
+            Some(a) if a > 0 => a,
+            _ => continue,
+        };
+        let _kind = parts.next();
+        let name = match parts.next() {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        syms.push((addr, name));
+    }
+    syms.sort_by_key(|(addr, _)| *addr);
+    syms
+}
+
+fn resolve_symbol(kallsyms: &[(u64, String)], addr: u64) -> Option<String> {
+    if kallsyms.is_empty() || addr == 0 {
+        return None;
+    }
+    let idx = match kallsyms.binary_search_by_key(&addr, |(a, _)| *a) {
+        Ok(i) => i,
+        Err(0) => return None,
+        Err(i) => i - 1,
+    };
+    let (base, name) = &kallsyms[idx];
+    let offset = addr - base;
+    Some(format!("{}+0x{:x}", name, offset))
+}
+
+fn location_hint(symbol: &str) -> Option<String> {
+    // Extract function name (before '+')
+    let func = symbol.split('+').next().unwrap_or(symbol);
+
+    // Netfilter / iptables / nftables
+    if func.starts_with("nf_hook_slow")
+        || func.starts_with("nf_iterate")
+        || func.starts_with("ipt_do_table")
+        || func.starts_with("nft_do_chain")
+    {
+        return Some("iptables/netfilter 规则丢包".to_string());
+    }
+
+    // Conntrack
+    if func.starts_with("nf_conntrack") || func.starts_with("nf_ct_") {
+        return Some("conntrack 丢包（表满或状态异常）".to_string());
+    }
+
+    // IP routing / forwarding
+    if func.starts_with("ip_forward")
+        || func.starts_with("ip_route_")
+        || func.starts_with("ip_error")
+        || func.starts_with("fib_validate_source")
+    {
+        return Some("路由转发失败".to_string());
+    }
+    if func.starts_with("ip_rcv_finish") || func.starts_with("ip_rcv") {
+        return Some("IP 层接收丢包".to_string());
+    }
+
+    // TCP
+    if func.starts_with("tcp_v4_rcv")
+        || func.starts_with("tcp_v6_rcv")
+        || func.starts_with("tcp_rcv_")
+    {
+        return Some("TCP 协议栈丢包".to_string());
+    }
+    if func.starts_with("tcp_drop") || func.starts_with("tcp_data_queue") {
+        return Some("TCP 数据处理丢包".to_string());
+    }
+
+    // UDP
+    if func.starts_with("udp_rcv")
+        || func.starts_with("udp_unicast_rcv")
+        || func.starts_with("__udp4_lib_rcv")
+        || func.starts_with("udp_queue_rcv")
+    {
+        return Some("UDP 端口未监听或接收失败".to_string());
+    }
+
+    // Queue / backlog / memory
+    if func.starts_with("__netif_receive_skb")
+        || func.starts_with("netif_rx")
+        || func.starts_with("enqueue_to_backlog")
+    {
+        return Some("网卡队列满或 CPU backlog 溢出".to_string());
+    }
+    if func.starts_with("kfree_skb_reason") || func.starts_with("__kfree_skb") {
+        return Some("通用 skb 释放".to_string());
+    }
+
+    // IP fragmentation
+    if func.starts_with("ip_defrag")
+        || func.starts_with("inet_frag_")
+        || func.starts_with("ip_expire")
+    {
+        return Some("IP 分片重组失败或超时".to_string());
+    }
+
+    // IPSec / xfrm
+    if func.starts_with("xfrm_") || func.starts_with("esp_") {
+        return Some("IPSec/xfrm 策略丢包".to_string());
+    }
+
+    // Bridge
+    if func.starts_with("br_forward")
+        || func.starts_with("br_handle_frame")
+        || func.starts_with("br_pass_frame_up")
+    {
+        return Some("bridge 转发丢包".to_string());
+    }
+
+    // Qdisc / TC
+    if func.starts_with("sch_direct_xmit")
+        || func.starts_with("qdisc_")
+        || func.starts_with("htb_")
+        || func.starts_with("fq_")
+        || func.starts_with("tbf_")
+    {
+        return Some("qdisc 队列丢包".to_string());
+    }
+    if func.starts_with("tc_") || func.starts_with("tcf_") {
+        return Some("TC 分类器丢包".to_string());
+    }
+
+    // XDP
+    if func.starts_with("xdp_") || func.starts_with("do_xdp_generic") {
+        return Some("XDP 丢包".to_string());
+    }
+
+    // ICMP
+    if func.starts_with("icmp_rcv") || func.starts_with("icmp_") {
+        return Some("ICMP 处理丢包".to_string());
+    }
+
+    // Device driver
+    if func.starts_with("dev_queue_xmit") || func.starts_with("dev_hard_start_xmit") {
+        return Some("网卡发送队列丢包".to_string());
+    }
+
+    None
 }
 
 impl KernelDropManager {
     pub fn new(ebpf_path: &str, base_pin_path: &str, base_state_path: &str) -> Self {
+        let kallsyms = load_kallsyms();
+        if kallsyms.is_empty() {
+            warn!("failed to load /proc/kallsyms; kernel drop location hints will be unavailable");
+        } else {
+            info!(symbols = kallsyms.len(), "loaded kernel symbol table for drop location hints");
+        }
         Self {
             ebpf_path: ebpf_path.to_string(),
             base_pin_path: base_pin_path.to_string(),
@@ -103,6 +266,7 @@ impl KernelDropManager {
                 last_error: None,
                 reason_names: HashMap::new(),
             }),
+            kallsyms,
         }
     }
 
@@ -217,6 +381,20 @@ impl KernelDropManager {
     pub async fn reason_names_snapshot(&self) -> HashMap<u16, String> {
         let state = self.state.lock().await;
         state.reason_names.clone()
+    }
+
+    pub fn resolve_location(&self, addr: Option<u64>) -> (Option<String>, Option<String>) {
+        let addr = match addr {
+            Some(a) if a != 0 => a,
+            _ => return (None, None),
+        };
+        match resolve_symbol(&self.kallsyms, addr) {
+            Some(symbol) => {
+                let hint = location_hint(&symbol);
+                (Some(symbol), hint)
+            }
+            None => (Some(format!("0x{:x}", addr)), None),
+        }
     }
 
     fn load_impl(&self) -> Result<(KernelDropMode, HashMap<u16, String>), String> {

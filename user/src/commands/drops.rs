@@ -17,22 +17,46 @@ pub(crate) fn kernel_drop_query_from_cli(
 }
 
 pub(crate) fn print_kernel_drop_stats(entries: &[aria_api::KernelDropStatsEntry]) {
-    println!(
-        "{:<16} {:<16} {:<8} {:<20} {:<10} {:>12} {:>12} {}",
-        "Instance", "Iface", "Ifindex", "Reason", "Proto", "Packets", "Bytes", "Source"
-    );
-    for entry in entries {
+    // Check if any entry has location data
+    let has_location = entries.iter().any(|e| e.location.is_some());
+
+    if has_location {
+        println!(
+            "{:<16} {:<16} {:<8} {:<20} {:<10} {:>10} {:>10} {:<30} {}",
+            "Instance", "Iface", "Ifindex", "Reason", "Proto", "Packets", "Bytes", "Location", "Hint"
+        );
+        for entry in entries {
+            println!(
+                "{:<16} {:<16} {:<8} {:<20} {:<10} {:>10} {:>10} {:<30} {}",
+                entry.instance.as_deref().unwrap_or("-"),
+                entry.iface.as_deref().unwrap_or("-"),
+                entry.ifindex,
+                entry.reason,
+                entry.proto,
+                entry.packets,
+                entry.bytes,
+                entry.location.as_deref().unwrap_or("-"),
+                entry.location_hint.as_deref().unwrap_or(""),
+            );
+        }
+    } else {
         println!(
             "{:<16} {:<16} {:<8} {:<20} {:<10} {:>12} {:>12} {}",
-            entry.instance.as_deref().unwrap_or("-"),
-            entry.iface.as_deref().unwrap_or("-"),
-            entry.ifindex,
-            entry.reason,
-            entry.proto,
-            entry.packets,
-            entry.bytes,
-            entry.source,
+            "Instance", "Iface", "Ifindex", "Reason", "Proto", "Packets", "Bytes", "Source"
         );
+        for entry in entries {
+            println!(
+                "{:<16} {:<16} {:<8} {:<20} {:<10} {:>12} {:>12} {}",
+                entry.instance.as_deref().unwrap_or("-"),
+                entry.iface.as_deref().unwrap_or("-"),
+                entry.ifindex,
+                entry.reason,
+                entry.proto,
+                entry.packets,
+                entry.bytes,
+                entry.source,
+            );
+        }
     }
 }
 

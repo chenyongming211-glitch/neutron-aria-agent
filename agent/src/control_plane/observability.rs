@@ -173,6 +173,8 @@ impl ControlPlane {
                         .unwrap_or_else(|| format!("reason_{}", c)),
                     None => "unknown".to_string(),
                 };
+                let (location, location_hint) =
+                    self.kernel_drop_manager.resolve_location(entry.last_location);
                 aria_api::KernelDropStatsEntry {
                     instance: if entry.ifindex == 0 {
                         None
@@ -196,6 +198,8 @@ impl ControlPlane {
                     bytes: entry.bytes,
                     last_seen_ns: entry.last_seen_ns,
                     last_location: entry.last_location,
+                    location,
+                    location_hint,
                     source: entry.source,
                 }
             })

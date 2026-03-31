@@ -725,6 +725,8 @@ pub struct KernelDropStatsEntry {
     pub bytes: u64,
     pub last_seen_ns: u64,
     pub last_location: Option<u64>,
+    pub location: Option<String>,
+    pub location_hint: Option<String>,
     pub source: String,
 }
 
