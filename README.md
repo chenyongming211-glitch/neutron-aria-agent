@@ -508,6 +508,43 @@ ariactl --tap eth0 drops flush --iface eth0 --force
 ariactl drops flush --include-unattributed --force
 ```
 
+#### 丢包位置反解与语义提示
+
+在 5.17+ 内核上，`drops list` 会直接显示内核 drop reason（如 `netfilter_drop`、`tcp_old_sequence`），reason 名称从当前内核的 tracepoint format 动态解析，自动适配不同内核版本。
+
+在 4.18/5.8/5.16 等没有 reason 字段的内核上，agent 会通过 `/proc/kallsyms` 反解丢包地址为内核函数名，并自动映射为可读的语义提示。输出示例：
+
+```
+Instance  Iface  Reason   Proto  Packets  Location                       Hint
+eth0      eth0   unknown  ipv4   55       nf_hook_slow+0x8f              iptables/netfilter 规则丢包
+eth0      eth0   unknown  ipv4   12       tcp_v4_rcv+0x1a3               TCP 协议栈丢包
+eth0      eth0   unknown  ipv4   3        ip_forward+0x2c1               路由转发失败
+```
+
+当前支持的语义映射：
+
+| 内核函数前缀 | 语义提示 |
+|-------------|---------|
+| `nf_hook_slow`, `nf_iterate`, `ipt_do_table`, `nft_do_chain` | iptables/netfilter 规则丢包 |
+| `nf_conntrack`, `nf_ct_` | conntrack 丢包（表满或状态异常） |
+| `ip_forward`, `ip_route_`, `ip_error`, `fib_validate_source` | 路由转发失败 |
+| `ip_rcv_finish`, `ip_rcv` | IP 层接收丢包 |
+| `tcp_v4_rcv`, `tcp_v6_rcv`, `tcp_rcv_` | TCP 协议栈丢包 |
+| `tcp_drop`, `tcp_data_queue` | TCP 数据处理丢包 |
+| `udp_rcv`, `udp_unicast_rcv`, `__udp4_lib_rcv`, `udp_queue_rcv` | UDP 端口未监听或接收失败 |
+| `__netif_receive_skb`, `netif_rx`, `enqueue_to_backlog` | 网卡队列满或 CPU backlog 溢出 |
+| `ip_defrag`, `inet_frag_`, `ip_expire` | IP 分片重组失败或超时 |
+| `xfrm_`, `esp_` | IPSec/xfrm 策略丢包 |
+| `br_forward`, `br_handle_frame`, `br_pass_frame_up` | bridge 转发丢包 |
+| `sch_direct_xmit`, `qdisc_`, `htb_`, `fq_`, `tbf_` | qdisc 队列丢包 |
+| `tc_`, `tcf_` | TC 分类器丢包 |
+| `xdp_`, `do_xdp_generic` | XDP 丢包 |
+| `icmp_rcv`, `icmp_` | ICMP 处理丢包 |
+| `dev_queue_xmit`, `dev_hard_start_xmit` | 网卡发送队列丢包 |
+| `kfree_skb_reason`, `__kfree_skb` | 通用 skb 释放 |
+
+未匹配到的函数名仍会显示原始地址，Hint 列为空。
+
 ### 9. SSL/TLS 观测（`ariactl ssl`）
 
 SSL 模块提供 TLS 握手、HTTP 请求/响应和 SSL 错误三类观测数据。注意 SSL 数据是 host-global 的，不是 per-instance，`--tap` 对 SSL 只起提示作用。
