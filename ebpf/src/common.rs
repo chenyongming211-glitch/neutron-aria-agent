@@ -285,7 +285,6 @@ pub const TCPRT_STATE_FIN_WAIT: u8 = 2;
 pub const TCPRT_STATE_CLOSE_WAIT: u8 = 3;
 pub const TCPRT_STATE_TIME_WAIT: u8 = 4;
 pub const TCPRT_STATE_RST: u8 = 5;
-pub const TCPRT_STATE_CLOSED: u8 = 6;
 
 pub const TCPRT_FLAG_SYN_SEEN: u8 = 1;
 pub const TCPRT_FLAG_SYNACK_SEEN: u8 = 2;
