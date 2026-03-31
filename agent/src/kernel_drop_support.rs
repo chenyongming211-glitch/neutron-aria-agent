@@ -204,7 +204,7 @@ pub fn replace_pinned_tracepoint_link(
     Ok(())
 }
 
-pub fn resolve_kernel_drop_config() -> Result<KernelDropConfig, String> {
+pub fn resolve_kernel_drop_config() -> Result<(KernelDropConfig, std::collections::HashMap<u16, String>), String> {
     let trace_format = parse_tracepoint_format()?;
     let btf = BtfBlob::load(Path::new(KERNEL_BTF_PATH))?;
 
@@ -223,7 +223,7 @@ pub fn resolve_kernel_drop_config() -> Result<KernelDropConfig, String> {
         flags |= KERNEL_DROP_FLAG_HAS_REASON;
     }
 
-    Ok(KernelDropConfig {
+    let config = KernelDropConfig {
         flags,
         trace_skbaddr_offset: trace_format.skbaddr_offset,
         trace_location_offset: trace_format.location_offset.unwrap_or(0),
@@ -232,7 +232,9 @@ pub fn resolve_kernel_drop_config() -> Result<KernelDropConfig, String> {
         skb_dev_offset,
         skb_len_offset,
         net_device_ifindex_offset,
-    })
+    };
+
+    Ok((config, trace_format.reason_names))
 }
 
 struct TracepointFormatOffsets {
@@ -240,6 +242,7 @@ struct TracepointFormatOffsets {
     location_offset: Option<u32>,
     protocol_offset: Option<u32>,
     reason_offset: Option<u32>,
+    reason_names: std::collections::HashMap<u16, String>,
 }
 
 fn parse_tracepoint_format() -> Result<TracepointFormatOffsets, String> {
@@ -265,6 +268,7 @@ fn parse_tracepoint_format() -> Result<TracepointFormatOffsets, String> {
         location_offset: None,
         protocol_offset: None,
         reason_offset: None,
+        reason_names: std::collections::HashMap::new(),
     };
     let mut saw_skbaddr = false;
 
@@ -299,6 +303,19 @@ fn parse_tracepoint_format() -> Result<TracepointFormatOffsets, String> {
             "tracepoint format {} missing skbaddr field",
             path.display()
         ));
+    }
+
+    // Parse __print_symbolic(REC->reason, { N, "NAME" }, ...) for reason name mapping.
+    let symbolic_re = Regex::new(r#"\{\s*(\d+)\s*,\s*"([^"]+)"\s*\}"#)
+        .map_err(|e| format!("compile symbolic regex: {}", e))?;
+    for captures in symbolic_re.captures_iter(&raw) {
+        if let (Some(val_match), Some(name_match)) = (captures.get(1), captures.get(2)) {
+            if let Ok(val) = val_match.as_str().parse::<u16>() {
+                offsets
+                    .reason_names
+                    .insert(val, name_match.as_str().to_lowercase());
+            }
+        }
     }
 
     Ok(offsets)

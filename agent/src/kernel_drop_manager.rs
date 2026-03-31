@@ -43,6 +43,7 @@ struct KernelDropManagerState {
     mode: KernelDropMode,
     managed_ifaces: HashMap<u32, u32>,
     last_error: Option<String>,
+    reason_names: HashMap<u16, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +101,7 @@ impl KernelDropManager {
                 mode: KernelDropMode::Disabled,
                 managed_ifaces: HashMap::new(),
                 last_error: None,
+                reason_names: HashMap::new(),
             }),
         }
     }
@@ -120,7 +122,7 @@ impl KernelDropManager {
         }
 
         match self.load_impl() {
-            Ok(mode) => {
+            Ok((mode, reason_names)) => {
                 if let Err(e) = self
                     .sync_all_managed_ifaces(&state.managed_ifaces, recovery_snapshot_authoritative)
                 {
@@ -129,6 +131,7 @@ impl KernelDropManager {
                 }
                 state.loaded = true;
                 state.mode = mode;
+                state.reason_names = reason_names;
                 state.last_error = None;
             }
             Err(e) => {
@@ -197,11 +200,30 @@ impl KernelDropManager {
         }
     }
 
-    fn load_impl(&self) -> Result<KernelDropMode, String> {
+    pub async fn reason_name(&self, code: Option<u16>) -> String {
+        match code {
+            Some(c) => {
+                let state = self.state.lock().await;
+                state
+                    .reason_names
+                    .get(&c)
+                    .cloned()
+                    .unwrap_or_else(|| format!("reason_{}", c))
+            }
+            None => "unknown".to_string(),
+        }
+    }
+
+    pub async fn reason_names_snapshot(&self) -> HashMap<u16, String> {
+        let state = self.state.lock().await;
+        state.reason_names.clone()
+    }
+
+    fn load_impl(&self) -> Result<(KernelDropMode, HashMap<u16, String>), String> {
         std::fs::create_dir_all(&self.pin_path)
             .map_err(|e| format!("create kernel-drop pin dir {}: {}", self.pin_path, e))?;
 
-        let config = resolve_kernel_drop_config()?;
+        let (config, reason_names) = resolve_kernel_drop_config()?;
         let expected_metadata = self.expected_runtime_metadata()?;
         if let KernelDropMapInventoryStatus::StaleOrIncomplete(reason) =
             self.validate_runtime_inventory(&expected_metadata)
@@ -229,11 +251,13 @@ impl KernelDropManager {
         )?;
         self.store_runtime_metadata_atomically(&expected_metadata)?;
 
-        Ok(if (config.flags & KERNEL_DROP_FLAG_HAS_REASON) != 0 {
+        let mode = if (config.flags & KERNEL_DROP_FLAG_HAS_REASON) != 0 {
             KernelDropMode::KfreeSkbReasonful
         } else {
             KernelDropMode::KfreeSkbLegacy
-        })
+        };
+
+        Ok((mode, reason_names))
     }
 
     fn load_bpf_with_pins(&self, bpf_bytes: &[u8]) -> Result<aya::Ebpf, String> {

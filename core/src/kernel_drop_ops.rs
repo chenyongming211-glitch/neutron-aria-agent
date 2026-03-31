@@ -140,6 +140,11 @@ const CORE_SKB_DROP_REASON_NAMES: &[&str] = &[
     "psp_output",
 ];
 
+// Note: CORE_SKB_DROP_REASON_NAMES is kept only as a fallback for the rare case
+// where the agent cannot parse __print_symbolic from the tracepoint format.
+// The primary reason name resolution is now done dynamically at agent startup
+// by parsing the kernel tracepoint format file. See kernel_drop_manager.rs.
+
 #[derive(Debug, Clone)]
 pub struct KernelDropStatsEntry {
     pub tap_id: u32,
@@ -171,13 +176,11 @@ pub struct KernelDropQuery {
     pub include_unattributed: bool,
 }
 
+/// Fallback reason name resolver. The primary resolution is done by
+/// KernelDropManager using dynamically parsed tracepoint format data.
 pub fn kernel_drop_reason_name(code: Option<u16>) -> String {
     match code {
-        Some(code) => CORE_SKB_DROP_REASON_NAMES
-            .get(code as usize)
-            .copied()
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("reason_{}", code)),
+        Some(code) => format!("reason_{}", code),
         None => "unknown".to_string(),
     }
 }

@@ -161,32 +161,43 @@ impl ControlPlane {
         )
         .map_err(ControlPlaneError::KernelError)?;
 
+        let reason_names = self.kernel_drop_manager.reason_names_snapshot().await;
+
         Ok(entries
             .into_iter()
-            .map(|entry| aria_api::KernelDropStatsEntry {
-                instance: if entry.ifindex == 0 {
-                    None
-                } else {
-                    resolved
-                        .by_ifindex
-                        .get(&entry.ifindex)
+            .map(|entry| {
+                let reason = match entry.reason_code {
+                    Some(c) => reason_names
+                        .get(&c)
                         .cloned()
-                        .or_else(|| resolved.by_tap.get(&entry.tap_id).cloned())
-                },
-                iface: if entry.ifindex == 0 {
-                    None
-                } else {
-                    resolved.iface_name_by_ifindex.get(&entry.ifindex).cloned()
-                },
-                ifindex: entry.ifindex,
-                reason_code: entry.reason_code,
-                reason: aria_core::kernel_drop_ops::kernel_drop_reason_name(entry.reason_code),
-                proto: aria_core::kernel_drop_ops::kernel_drop_proto_name(entry.proto),
-                packets: entry.packets,
-                bytes: entry.bytes,
-                last_seen_ns: entry.last_seen_ns,
-                last_location: entry.last_location,
-                source: entry.source,
+                        .unwrap_or_else(|| format!("reason_{}", c)),
+                    None => "unknown".to_string(),
+                };
+                aria_api::KernelDropStatsEntry {
+                    instance: if entry.ifindex == 0 {
+                        None
+                    } else {
+                        resolved
+                            .by_ifindex
+                            .get(&entry.ifindex)
+                            .cloned()
+                            .or_else(|| resolved.by_tap.get(&entry.tap_id).cloned())
+                    },
+                    iface: if entry.ifindex == 0 {
+                        None
+                    } else {
+                        resolved.iface_name_by_ifindex.get(&entry.ifindex).cloned()
+                    },
+                    ifindex: entry.ifindex,
+                    reason_code: entry.reason_code,
+                    reason,
+                    proto: aria_core::kernel_drop_ops::kernel_drop_proto_name(entry.proto),
+                    packets: entry.packets,
+                    bytes: entry.bytes,
+                    last_seen_ns: entry.last_seen_ns,
+                    last_location: entry.last_location,
+                    source: entry.source,
+                }
             })
             .collect())
     }
