@@ -18,6 +18,7 @@ use aria_api::{
     path = "/api/v1/{instance}/stats",
     tag = "stats",
     summary = "Get statistics overview for an instance",
+    operation_id = "getStatsOverview",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -49,6 +50,7 @@ pub async fn stats_overview(
     path = "/api/v1/{instance}/stats/rules",
     tag = "stats",
     summary = "List policy rule statistics",
+    operation_id = "listRuleStats",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -101,6 +103,7 @@ pub async fn stats_rules(
     path = "/api/v1/{instance}/stats/flows",
     tag = "stats",
     summary = "List top flow statistics",
+    operation_id = "listTopFlows",
     params(
         ("instance" = String, Path, description = "Managed instance name"),
         ("top" = Option<usize>, Query, description = "Maximum number of flow entries to return")
@@ -152,6 +155,7 @@ pub async fn stats_flows(
     path = "/api/v1/{instance}/stats/qos",
     tag = "stats",
     summary = "List QoS statistics",
+    operation_id = "listQosStats",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -203,6 +207,7 @@ pub async fn stats_qos(
     path = "/api/v1/{instance}/stats/groups",
     tag = "stats",
     summary = "List group statistics",
+    operation_id = "listGroupStats",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),

@@ -40,6 +40,7 @@ fn map_tcprt_entry(e: aria_core::tcprt_ops::TcpRtEntry) -> aria_api::TcpRtEntry 
     path = "/api/v1/{instance}/tcprt",
     tag = "tcprt",
     summary = "List TCP-RT flow records for an instance",
+    operation_id = "listTcpRtFlows",
     params(
         ("instance" = String, Path, description = "Managed instance name"),
         ("top" = Option<usize>, Query, description = "Maximum number of TCP-RT flows to return")
@@ -69,6 +70,7 @@ pub async fn list_tcprt(
     path = "/api/v1/{instance}/tcprt",
     tag = "tcprt",
     summary = "Flush TCP-RT flow records for an instance",
+    operation_id = "flushTcpRtFlows",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -93,6 +95,7 @@ pub async fn flush_tcprt(
     path = "/api/v1/tcprt/query",
     tag = "tcprt",
     summary = "Batch query TCP-RT tuples across instances",
+    operation_id = "batchQueryTcpRt",
     request_body = aria_api::TcpRtBatchQueryRequest,
     responses(
         (status = 200, description = "TCP-RT entries matched across instances", body = aria_api::TcpRtBatchQueryResponse),
@@ -129,6 +132,7 @@ pub async fn batch_query_tcprt(
     path = "/api/v1/tcprt/filter",
     tag = "tcprt",
     summary = "Aggregate TCP-RT metrics by service address",
+    operation_id = "filterTcpRtByService",
     request_body = aria_api::TcpRtFilterRequest,
     responses(
         (status = 200, description = "Aggregated TCP-RT metrics by instance", body = aria_api::TcpRtFilterResponse),
@@ -192,6 +196,7 @@ pub async fn filter_tcprt(
     path = "/api/v1/{instance}/tcprt/histogram",
     tag = "tcprt",
     summary = "Get TCP-RT ART histogram for an instance",
+    operation_id = "getTcpRtHistogram",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -272,6 +277,7 @@ pub async fn tcprt_histogram(
     path = "/api/v1/{instance}/tcprt/states",
     tag = "tcprt",
     summary = "Get TCP-RT state distribution for an instance",
+    operation_id = "getTcpRtStates",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),

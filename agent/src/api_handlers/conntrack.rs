@@ -12,6 +12,7 @@ use aria_api::{proto_to_string, ConntrackEntry, ConntrackFlushResponse, Conntrac
     path = "/api/v1/{instance}/conntrack",
     tag = "conntrack",
     summary = "List conntrack entries for an instance",
+    operation_id = "listConntrackEntries",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -56,6 +57,7 @@ pub async fn list_conntrack(
     path = "/api/v1/{instance}/conntrack",
     tag = "conntrack",
     summary = "Flush conntrack entries for an instance",
+    operation_id = "flushConntrackEntries",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),

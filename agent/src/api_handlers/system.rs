@@ -13,6 +13,7 @@ use aria_api::{ApiError, InstanceInfo, InstancesResponse, MessageResponse, Syste
     path = "/api/v1/instances",
     tag = "system",
     summary = "List managed instances",
+    operation_id = "listInstances",
     responses(
         (status = 200, description = "Currently managed firewall instances", body = InstancesResponse)
     )
@@ -32,6 +33,7 @@ pub async fn list_instances(State(cp): State<AppState>) -> impl IntoResponse {
     path = "/api/v1/system/start",
     tag = "system",
     summary = "Start the standalone system firewall",
+    operation_id = "startSystemFirewall",
     request_body = SystemStartRequest,
     responses(
         (status = 200, description = "System firewall started", body = MessageResponse),
@@ -81,6 +83,7 @@ pub async fn system_start(
     path = "/api/v1/system/stop",
     tag = "system",
     summary = "Stop the standalone system firewall",
+    operation_id = "stopSystemFirewall",
     responses(
         (status = 200, description = "System firewall stopped", body = MessageResponse),
         (status = 500, description = "System stop failed", body = ApiError)

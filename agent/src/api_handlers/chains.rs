@@ -13,6 +13,7 @@ use crate::control_plane::ControlPlaneError;
     path = "/api/v1/chains",
     tag = "chains",
     summary = "List service chains",
+    operation_id = "listServiceChains",
     responses(
         (status = 200, description = "Configured service chains", body = aria_api::ServiceChainListResponse),
         (status = 500, description = "Internal server error", body = aria_api::ApiError)
@@ -52,6 +53,7 @@ pub async fn list_chains(State(cp): State<AppState>) -> impl IntoResponse {
     path = "/api/v1/chains",
     tag = "chains",
     summary = "Create a service chain",
+    operation_id = "createServiceChain",
     request_body = aria_api::CreateServiceChainRequest,
     responses(
         (status = 201, description = "Service chain created", body = aria_api::MessageResponse),
@@ -129,6 +131,7 @@ pub async fn create_chain(
     path = "/api/v1/chains/{name}",
     tag = "chains",
     summary = "Get a service chain by name",
+    operation_id = "getServiceChain",
     params(
         ("name" = String, Path, description = "Service chain name")
     ),
@@ -169,6 +172,7 @@ pub async fn get_chain(State(cp): State<AppState>, Path(name): Path<String>) -> 
     path = "/api/v1/chains/{name}",
     tag = "chains",
     summary = "Delete a service chain",
+    operation_id = "deleteServiceChain",
     params(
         ("name" = String, Path, description = "Service chain name")
     ),

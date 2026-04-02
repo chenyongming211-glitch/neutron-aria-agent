@@ -213,5 +213,47 @@ mod tests {
         assert!(doc.pointer("/components/schemas/TcpRtBatchQueryRequest").is_some());
         assert!(doc.pointer("/components/schemas/TraceStartRequest").is_some());
         assert!(doc.pointer("/components/schemas/SslGlobalConfigResponse").is_some());
+
+        assert_eq!(
+            doc.pointer("/paths/~1api~1v1~1health/get/operationId")
+                .and_then(|value| value.as_str()),
+            Some("healthCheck")
+        );
+        assert_eq!(
+            doc.pointer("/paths/~1api~1v1~1{instance}~1policies/get/operationId")
+                .and_then(|value| value.as_str()),
+            Some("listPolicies")
+        );
+        assert_eq!(
+            doc.pointer("/paths/~1api~1v1~1tcprt~1query/post/operationId")
+                .and_then(|value| value.as_str()),
+            Some("batchQueryTcpRt")
+        );
+        assert_eq!(
+            doc.pointer("/paths/~1api~1v1~1ssl~1config/put/operationId")
+                .and_then(|value| value.as_str()),
+            Some("updateGlobalSslConfig")
+        );
+
+        assert_eq!(
+            doc.pointer("/components/schemas/SystemStartRequest/example/iface")
+                .and_then(|value| value.as_str()),
+            Some("eth0")
+        );
+        assert_eq!(
+            doc.pointer("/components/schemas/AddPolicyRequest/example/src_group")
+                .and_then(|value| value.as_str()),
+            Some("web")
+        );
+        assert_eq!(
+            doc.pointer("/components/schemas/AddQosRequest/properties/rate/description")
+                .and_then(|value| value.as_str()),
+            Some("Human-readable rate value such as `100mbit` or `10gbit`.")
+        );
+        assert_eq!(
+            doc.pointer("/components/schemas/KernelDropQuery/properties/include_unattributed/description")
+                .and_then(|value| value.as_str()),
+            Some("Include drop entries that could not be mapped back to a managed instance.")
+        );
     }
 }

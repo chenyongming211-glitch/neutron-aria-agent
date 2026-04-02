@@ -20,6 +20,7 @@ use aria_api::{
     path = "/api/v1/{instance}/mirror",
     tag = "mirror",
     summary = "List mirror rules for an instance",
+    operation_id = "listMirrorRules",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -59,6 +60,7 @@ pub async fn list_mirror(
     path = "/api/v1/{instance}/mirror",
     tag = "mirror",
     summary = "Add a mirror rule",
+    operation_id = "addMirrorRule",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -134,6 +136,7 @@ pub async fn add_mirror(
     path = "/api/v1/{instance}/mirror",
     tag = "mirror",
     summary = "Delete a mirror rule",
+    operation_id = "deleteMirrorRule",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -181,6 +184,7 @@ pub async fn delete_mirror(
     path = "/api/v1/{instance}/stats/mirror",
     tag = "mirror",
     summary = "List mirror statistics",
+    operation_id = "listMirrorStats",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -233,6 +237,7 @@ pub async fn stats_mirror(
     path = "/api/v1/{instance}/mirror/with_stats",
     tag = "mirror",
     summary = "List mirror rules with aggregated statistics",
+    operation_id = "listMirrorRulesWithStats",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),

@@ -16,6 +16,7 @@ use aria_api::*;
     path = "/api/v1/{instance}/policies",
     tag = "policies",
     summary = "List policies for an instance",
+    operation_id = "listPolicies",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -66,6 +67,7 @@ pub async fn list_policies(
     path = "/api/v1/{instance}/policies",
     tag = "policies",
     summary = "Add a policy",
+    operation_id = "addPolicy",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -146,6 +148,7 @@ pub async fn add_policy(
     path = "/api/v1/{instance}/policies",
     tag = "policies",
     summary = "Delete a policy",
+    operation_id = "deletePolicy",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -196,6 +199,7 @@ pub async fn delete_policy(
     path = "/api/v1/{instance}/policies/with_stats",
     tag = "policies",
     summary = "List policies with aggregated statistics",
+    operation_id = "listPoliciesWithStats",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -267,6 +271,7 @@ pub async fn list_policies_with_stats(
     path = "/api/v1/{instance}/policies/batch",
     tag = "policies",
     summary = "Batch add policies",
+    operation_id = "batchAddPolicies",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),

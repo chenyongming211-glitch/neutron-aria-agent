@@ -1,12 +1,21 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::fmt;
 use utoipa::ToSchema;
 
 // ── Error ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "code": 400,
+    "error": "Validation error: Invalid protocol 'gre'"
+}))]
 pub struct ApiError {
+    /// HTTP-style status or application error code.
+    #[schema(example = 400)]
     pub code: u16,
+    /// Human-readable error message safe to display to operators.
+    #[schema(example = "Validation error: Invalid protocol 'gre'")]
     pub error: String,
 }
 
@@ -19,16 +28,39 @@ impl fmt::Display for ApiError {
 // ── Health ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "status": "ok",
+    "version": "0.9.0",
+    "instances": 2,
+    "kernel_drop_available": true,
+    "kernel_drop_mode": "kfree_skb_reasonful",
+    "kernel_drop_managed_ifaces": 1,
+    "kernel_drop_last_error": null
+}))]
 pub struct HealthResponse {
+    /// Overall agent status.
+    #[schema(example = "ok")]
     pub status: String,
+    /// Running agent version string.
+    #[schema(example = "0.9.0")]
     pub version: String,
+    /// Number of managed firewall instances currently active.
+    #[schema(example = 2)]
     pub instances: usize,
+    /// Whether kernel-attributed drop observability is currently available.
+    #[schema(example = true)]
     #[serde(default)]
     pub kernel_drop_available: bool,
+    /// Active kernel drop collection mode when the feature is enabled.
+    #[schema(example = "kfree_skb_reasonful")]
     #[serde(default)]
     pub kernel_drop_mode: Option<String>,
+    /// Number of managed interfaces participating in kernel drop collection.
+    #[schema(example = 1)]
     #[serde(default)]
     pub kernel_drop_managed_ifaces: usize,
+    /// Last kernel drop initialization error, if any.
+    #[schema(example = "failed to attach kprobe to kfree_skb_reason")]
     #[serde(default)]
     pub kernel_drop_last_error: Option<String>,
 }
@@ -36,21 +68,44 @@ pub struct HealthResponse {
 // ── Instances ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "name": "eth0",
+    "active": true
+}))]
 pub struct InstanceInfo {
+    /// Managed instance or tap name.
+    #[schema(example = "eth0")]
     pub name: String,
+    /// Whether the instance currently has active data plane programs attached.
+    #[schema(example = true)]
     pub active: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "instances": [
+        {"name": "eth0", "active": true},
+        {"name": "tapkd01", "active": false}
+    ]
+}))]
 pub struct InstancesResponse {
+    /// All managed instances known to the agent.
     pub instances: Vec<InstanceInfo>,
 }
 
 // ── System ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "iface": "eth0",
+    "max_port_policies": 16384
+}))]
 pub struct SystemStartRequest {
+    /// Physical or virtual interface to manage as the standalone firewall instance.
+    #[schema(example = "eth0")]
     pub iface: String,
+    /// Maximum number of port bitmap-backed policies to allocate for the instance.
+    #[schema(example = 16384)]
     #[serde(default = "default_max_port_policies")]
     pub max_port_policies: u32,
 }
@@ -60,88 +115,225 @@ fn default_max_port_policies() -> u32 {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "message": "Added policy: web -> db (ingress)"
+}))]
 pub struct MessageResponse {
+    /// Short operator-facing status message describing the completed action.
+    #[schema(example = "Added policy: web -> db (ingress)")]
     pub message: String,
 }
 
 // ── Groups ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "id": 1,
+    "name": "web",
+    "cidrs": ["10.0.1.0/24", "10.0.2.0/24"]
+}))]
 pub struct GroupEntry {
+    /// Stable numeric identifier allocated to the group.
+    #[schema(example = 1)]
     pub id: u32,
+    /// Human-readable group name referenced by ACL, QoS, and mirror rules.
+    #[schema(example = "web")]
     pub name: String,
+    /// CIDR members contained in the group.
     pub cidrs: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "groups": [
+        {"id": 1, "name": "web", "cidrs": ["10.0.1.0/24"]},
+        {"id": 2, "name": "db", "cidrs": ["10.0.10.0/24"]}
+    ]
+}))]
 pub struct GroupsResponse {
+    /// Configured address groups for the instance.
     pub groups: Vec<GroupEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "name": "web",
+    "cidr": "10.0.1.0/24"
+}))]
 pub struct AddGroupRequest {
+    /// Group name to create or extend.
+    #[schema(example = "web")]
     pub name: String,
+    /// CIDR to add to the group.
+    #[schema(example = "10.0.1.0/24")]
     pub cidr: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "id": 1,
+    "name": "web"
+}))]
 pub struct AddGroupResponse {
+    /// Stable numeric identifier assigned to the group.
+    #[schema(example = 1)]
     pub id: u32,
+    /// Name of the created or extended group.
+    #[schema(example = "web")]
     pub name: String,
 }
 
 // ── Groups with Stats (Aggregation) ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "id": 1,
+    "name": "web",
+    "cidrs": ["10.0.1.0/24"],
+    "ingress_packets": 128,
+    "ingress_bytes": 8192,
+    "egress_packets": 256,
+    "egress_bytes": 16384
+}))]
 pub struct GroupWithStatsEntry {
-    // Group configuration
+    /// Stable numeric identifier allocated to the group.
+    #[schema(example = 1)]
     pub id: u32,
+    /// Human-readable group name.
+    #[schema(example = "web")]
     pub name: String,
+    /// CIDR members contained in the group.
     pub cidrs: Vec<String>,
-    // Statistics (per-direction)
+    /// Total ingress packets matched to the group.
+    #[schema(example = 128)]
     #[serde(default)]
     pub ingress_packets: u64,
+    /// Total ingress bytes matched to the group.
+    #[schema(example = 8192)]
     #[serde(default)]
     pub ingress_bytes: u64,
+    /// Total egress packets matched to the group.
+    #[schema(example = 256)]
     #[serde(default)]
     pub egress_packets: u64,
+    /// Total egress bytes matched to the group.
+    #[schema(example = 16384)]
     #[serde(default)]
     pub egress_bytes: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "groups": [
+        {
+            "id": 1,
+            "name": "web",
+            "cidrs": ["10.0.1.0/24"],
+            "ingress_packets": 128,
+            "ingress_bytes": 8192,
+            "egress_packets": 256,
+            "egress_bytes": 16384
+        }
+    ]
+}))]
 pub struct GroupsWithStatsResponse {
+    /// Groups enriched with aggregated per-direction traffic counters.
     pub groups: Vec<GroupWithStatsEntry>,
 }
 
 // ── Policies ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "src_group": "web",
+    "src_group_id": 1,
+    "dst_group": "db",
+    "dst_group_id": 2,
+    "proto": "tcp",
+    "action": "allow",
+    "direction": "ingress",
+    "ports": "5432",
+    "bitmap_idx": 7
+}))]
 pub struct PolicyEntry {
+    /// Source group name or `any`.
+    #[schema(example = "web")]
     pub src_group: String,
+    /// Numeric identifier of the source group.
+    #[schema(example = 1)]
     pub src_group_id: u32,
+    /// Destination group name or `any`.
+    #[schema(example = "db")]
     pub dst_group: String,
+    /// Numeric identifier of the destination group.
+    #[schema(example = 2)]
     pub dst_group_id: u32,
+    /// Matched L4 protocol name or protocol number.
+    #[schema(example = "tcp")]
     pub proto: String,
+    /// Rule action, typically `allow` or `drop`.
+    #[schema(example = "allow")]
     pub action: String,
+    /// Traffic direction: `ingress` or `egress`.
+    #[schema(example = "ingress")]
     pub direction: String,
+    /// Optional port filter expression.
+    #[schema(example = "5432")]
     pub ports: Option<String>,
+    /// Optional bitmap index used for expanded port matching.
+    #[schema(example = 7)]
     pub bitmap_idx: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "policies": [
+        {
+            "src_group": "web",
+            "src_group_id": 1,
+            "dst_group": "db",
+            "dst_group_id": 2,
+            "proto": "tcp",
+            "action": "allow",
+            "direction": "ingress",
+            "ports": "5432",
+            "bitmap_idx": 7
+        }
+    ]
+}))]
 pub struct PoliciesResponse {
+    /// Configured policies for the instance.
     pub policies: Vec<PolicyEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "src_group": "web",
+    "dst_group": "db",
+    "proto": "tcp",
+    "action": "allow",
+    "direction": "ingress",
+    "ports": "5432"
+}))]
 pub struct AddPolicyRequest {
+    /// Source group name or `any`.
+    #[schema(example = "web")]
     pub src_group: String,
+    /// Destination group name or `any`.
+    #[schema(example = "db")]
     pub dst_group: String,
+    /// Protocol name (`tcp`, `udp`, `icmp`, `any`) or protocol number.
+    #[schema(example = "tcp")]
     pub proto: String,
+    /// Action to apply when the rule matches.
+    #[schema(example = "allow")]
     pub action: String,
+    /// Traffic direction: `ingress`, `egress`, or `both`.
+    #[schema(example = "ingress")]
     #[serde(default = "default_direction")]
     pub direction: String,
+    /// Optional port filter expression such as `80,443`, `1000-2000`, or `all`.
+    #[schema(example = "5432")]
     pub ports: Option<String>,
 }
 
@@ -154,90 +346,256 @@ fn default_mode_string() -> String {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "src_group": "web",
+    "dst_group": "db",
+    "proto": "tcp",
+    "direction": "ingress"
+}))]
 pub struct DeletePolicyRequest {
+    /// Source group name or `any`.
+    #[schema(example = "web")]
     pub src_group: String,
+    /// Destination group name or `any`.
+    #[schema(example = "db")]
     pub dst_group: String,
+    /// Protocol name (`tcp`, `udp`, `icmp`, `any`) or protocol number.
+    #[schema(example = "tcp")]
     pub proto: String,
+    /// Traffic direction: `ingress`, `egress`, or `both`.
+    #[schema(example = "ingress")]
     #[serde(default = "default_direction")]
     pub direction: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "policies": [
+        {
+            "src_group": "web",
+            "dst_group": "db",
+            "proto": "tcp",
+            "action": "allow",
+            "direction": "ingress",
+            "ports": "5432"
+        },
+        {
+            "src_group": "web",
+            "dst_group": "any",
+            "proto": "udp",
+            "action": "drop",
+            "direction": "egress",
+            "ports": "53"
+        }
+    ]
+}))]
 pub struct BatchAddPoliciesRequest {
+    /// Policies to create in order.
     pub policies: Vec<AddPolicyRequest>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "added": 2,
+    "errors": []
+}))]
 pub struct BatchPoliciesResponse {
+    /// Number of policies successfully added.
+    #[schema(example = 2)]
     pub added: usize,
+    /// Validation or apply errors for entries that could not be created.
     pub errors: Vec<String>,
 }
 
 // ── Policies with Stats (Aggregation) ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "src_group": "web",
+    "src_group_id": 1,
+    "dst_group": "db",
+    "dst_group_id": 2,
+    "proto": "tcp",
+    "action": "allow",
+    "direction": "ingress",
+    "ports": "5432",
+    "bitmap_idx": 7,
+    "packets": 1024,
+    "bytes": 65536,
+    "dropped_packets": 0,
+    "dropped_bytes": 0
+}))]
 pub struct PolicyWithStatsEntry {
-    // Policy configuration
+    /// Source group name or `any`.
+    #[schema(example = "web")]
     pub src_group: String,
+    /// Numeric identifier of the source group.
+    #[schema(example = 1)]
     pub src_group_id: u32,
+    /// Destination group name or `any`.
+    #[schema(example = "db")]
     pub dst_group: String,
+    /// Numeric identifier of the destination group.
+    #[schema(example = 2)]
     pub dst_group_id: u32,
+    /// Matched L4 protocol name or protocol number.
+    #[schema(example = "tcp")]
     pub proto: String,
+    /// Rule action, typically `allow` or `drop`.
+    #[schema(example = "allow")]
     pub action: String,
+    /// Traffic direction: `ingress` or `egress`.
+    #[schema(example = "ingress")]
     pub direction: String,
+    /// Optional port filter expression.
+    #[schema(example = "5432")]
     pub ports: Option<String>,
+    /// Optional bitmap index used for expanded port matching.
+    #[schema(example = 7)]
     pub bitmap_idx: Option<u32>,
-    // Statistics
+    /// Total packets matched by the rule.
+    #[schema(example = 1024)]
     #[serde(default)]
     pub packets: u64,
+    /// Total bytes matched by the rule.
+    #[schema(example = 65536)]
     #[serde(default)]
     pub bytes: u64,
+    /// Total packets dropped by the rule.
+    #[schema(example = 0)]
     #[serde(default)]
     pub dropped_packets: u64,
+    /// Total bytes dropped by the rule.
+    #[schema(example = 0)]
     #[serde(default)]
     pub dropped_bytes: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "policies": [
+        {
+            "src_group": "web",
+            "src_group_id": 1,
+            "dst_group": "db",
+            "dst_group_id": 2,
+            "proto": "tcp",
+            "action": "allow",
+            "direction": "ingress",
+            "ports": "5432",
+            "bitmap_idx": 7,
+            "packets": 1024,
+            "bytes": 65536,
+            "dropped_packets": 0,
+            "dropped_bytes": 0
+        }
+    ]
+}))]
 pub struct PoliciesWithStatsResponse {
+    /// Policies enriched with aggregated hit and drop counters.
     pub policies: Vec<PolicyWithStatsEntry>,
 }
 
 // ── QoS ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "group": "web",
+    "group_id": 1,
+    "direction": "egress",
+    "rate_bps": 100000000,
+    "burst_bytes": 1048576,
+    "priority": 3,
+    "mode": "policing"
+}))]
 pub struct QosEntry {
+    /// Group name the QoS rule applies to.
+    #[schema(example = "web")]
     pub group: String,
+    /// Numeric identifier of the matched group.
+    #[schema(example = 1)]
     pub group_id: u32,
+    /// Traffic direction: `ingress` or `egress`.
+    #[schema(example = "egress")]
     pub direction: String,
+    /// Rate limit in bits per second after unit parsing.
+    #[schema(example = 100000000)]
     pub rate_bps: u64,
+    /// Burst budget in bytes.
+    #[schema(example = 1048576)]
     pub burst_bytes: u64,
+    /// Scheduling priority applied to matched packets.
+    #[schema(example = 3)]
     pub priority: u8,
+    /// Enforcement mode, typically `policing` or `shaping`.
+    #[schema(example = "policing")]
     #[serde(default = "default_mode_string")]
     pub mode: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "rules": [
+        {
+            "group": "web",
+            "group_id": 1,
+            "direction": "egress",
+            "rate_bps": 100000000,
+            "burst_bytes": 1048576,
+            "priority": 3,
+            "mode": "policing"
+        }
+    ]
+}))]
 pub struct QosListResponse {
+    /// Configured QoS rules for the instance.
     pub rules: Vec<QosEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "group": "web",
+    "direction": "egress",
+    "rate": "100mbit",
+    "burst": "1mb",
+    "priority": 3,
+    "mode": "policing"
+}))]
 pub struct AddQosRequest {
+    /// Group name the QoS rule applies to.
+    #[schema(example = "web")]
     pub group: String,
+    /// Traffic direction: `ingress` or `egress`.
+    #[schema(example = "egress")]
     pub direction: String,
+    /// Human-readable rate value such as `100mbit` or `10gbit`.
+    #[schema(example = "100mbit")]
     pub rate: String,
+    /// Optional burst size such as `1mb`; empty string keeps the default.
+    #[schema(example = "1mb")]
     #[serde(default)]
     pub burst: String,
+    /// Scheduling priority applied to matched packets.
+    #[schema(example = 3)]
     #[serde(default)]
     pub priority: u8,
+    /// Enforcement mode, typically `policing` or `shaping`.
+    #[schema(example = "policing")]
     #[serde(default = "default_mode_string")]
     pub mode: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "group": "web",
+    "direction": "egress"
+}))]
 pub struct DeleteQosRequest {
+    /// Group name the QoS rule applies to.
+    #[schema(example = "web")]
     pub group: String,
+    /// Traffic direction: `ingress` or `egress`.
+    #[schema(example = "egress")]
     pub direction: String,
 }
 
@@ -269,37 +627,95 @@ pub struct ConntrackFlushResponse {
 // ── Config ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "conntrack": true,
+    "monitoring": true,
+    "acl": true,
+    "qos": true,
+    "mirror": false,
+    "tcprt": true,
+    "ssl": false,
+    "num_cpus": 8
+}))]
 pub struct ConfigResponse {
+    /// Whether conntrack collection is enabled for the instance.
+    #[schema(example = true)]
     pub conntrack: bool,
+    /// Whether base monitoring counters are enabled.
+    #[schema(example = true)]
     pub monitoring: bool,
+    /// Whether ACL enforcement is enabled.
+    #[schema(example = true)]
     pub acl: bool,
+    /// Whether QoS enforcement is enabled.
+    #[schema(example = true)]
     pub qos: bool,
+    /// Whether mirror rule evaluation is enabled.
+    #[schema(example = false)]
     pub mirror: bool,
+    /// Whether TCP-RT observability is enabled.
+    #[schema(example = true)]
     pub tcprt: bool,
+    /// Whether SSL observability is enabled for the instance.
+    #[schema(example = false)]
     pub ssl: bool,
+    /// Number of CPUs provisioned for per-CPU maps.
+    #[schema(example = 8)]
     pub num_cpus: u16,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "qos": true,
+    "mirror": true,
+    "ssl": false
+}))]
 pub struct UpdateConfigRequest {
+    /// Toggle conntrack collection.
     pub conntrack: Option<bool>,
+    /// Toggle base monitoring counters.
     pub monitoring: Option<bool>,
+    /// Toggle ACL enforcement.
     pub acl: Option<bool>,
+    /// Toggle QoS enforcement.
     pub qos: Option<bool>,
+    /// Toggle mirror rule evaluation.
     pub mirror: Option<bool>,
+    /// Toggle TCP-RT observability.
     pub tcprt: Option<bool>,
+    /// Toggle SSL observability for the instance.
     pub ssl: Option<bool>,
 }
 
 // ── Stats ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "groups": 4,
+    "policies": 12,
+    "qos_rules": 2,
+    "mirror_rules": 1,
+    "conntrack_v4": 38,
+    "conntrack_v6": 0
+}))]
 pub struct StatsOverview {
+    /// Number of configured groups.
+    #[schema(example = 4)]
     pub groups: usize,
+    /// Number of configured ACL policies.
+    #[schema(example = 12)]
     pub policies: usize,
+    /// Number of configured QoS rules.
+    #[schema(example = 2)]
     pub qos_rules: usize,
+    /// Number of configured mirror rules.
+    #[schema(example = 1)]
     pub mirror_rules: usize,
+    /// Active IPv4 conntrack entries.
+    #[schema(example = 38)]
     pub conntrack_v4: u64,
+    /// Active IPv6 conntrack entries.
+    #[schema(example = 0)]
     pub conntrack_v6: u64,
 }
 
@@ -411,32 +827,94 @@ pub struct GroupStatsResponse {
 // ── Mirror ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "src_group": "any",
+    "src_group_id": 0,
+    "dst_group": "db",
+    "dst_group_id": 2,
+    "proto": "tcp",
+    "direction": "egress",
+    "target_iface": "eth1",
+    "target_ifindex": 3,
+    "is_global": false
+}))]
 pub struct MirrorEntry {
+    /// Source group name or `any`.
+    #[schema(example = "any")]
     pub src_group: String,
+    /// Numeric identifier of the source group.
+    #[schema(example = 0)]
     pub src_group_id: u32,
+    /// Destination group name or `any`.
+    #[schema(example = "db")]
     pub dst_group: String,
+    /// Numeric identifier of the destination group.
+    #[schema(example = 2)]
     pub dst_group_id: u32,
+    /// Matched L4 protocol name or protocol number.
+    #[schema(example = "tcp")]
     pub proto: String,
+    /// Traffic direction: `ingress` or `egress`.
+    #[schema(example = "egress")]
     pub direction: String,
+    /// Interface name that receives mirrored packets.
+    #[schema(example = "eth1")]
     pub target_iface: String,
+    /// Interface index resolved from the target interface name.
+    #[schema(example = 3)]
     pub target_ifindex: u32,
+    /// Whether the rule applies globally across all groups.
+    #[schema(example = false)]
     pub is_global: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "rules": [
+        {
+            "src_group": "any",
+            "src_group_id": 0,
+            "dst_group": "db",
+            "dst_group_id": 2,
+            "proto": "tcp",
+            "direction": "egress",
+            "target_iface": "eth1",
+            "target_ifindex": 3,
+            "is_global": false
+        }
+    ]
+}))]
 pub struct MirrorListResponse {
+    /// Configured mirror rules for the instance.
     pub rules: Vec<MirrorEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "src_group": "any",
+    "dst_group": "db",
+    "proto": "tcp",
+    "direction": "egress",
+    "target": "eth1"
+}))]
 pub struct AddMirrorRequest {
+    /// Source group name or `any`.
+    #[schema(example = "any")]
     #[serde(default = "default_any")]
     pub src_group: String,
+    /// Destination group name or `any`.
+    #[schema(example = "db")]
     #[serde(default = "default_any")]
     pub dst_group: String,
+    /// Protocol name (`tcp`, `udp`, `icmp`, `any`) or protocol number.
+    #[schema(example = "tcp")]
     #[serde(default = "default_any_proto")]
     pub proto: String,
+    /// Traffic direction: `ingress` or `egress`.
+    #[schema(example = "egress")]
     pub direction: String,
+    /// Target interface name that should receive mirrored packets.
+    #[schema(example = "eth1")]
     pub target: String,
 }
 
@@ -449,13 +927,27 @@ fn default_any_proto() -> String {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "src_group": "any",
+    "dst_group": "db",
+    "proto": "tcp",
+    "direction": "egress"
+}))]
 pub struct DeleteMirrorRequest {
+    /// Source group name or `any`.
+    #[schema(example = "any")]
     #[serde(default = "default_any")]
     pub src_group: String,
+    /// Destination group name or `any`.
+    #[schema(example = "db")]
     #[serde(default = "default_any")]
     pub dst_group: String,
+    /// Protocol name (`tcp`, `udp`, `icmp`, `any`) or protocol number.
+    #[schema(example = "tcp")]
     #[serde(default = "default_any_proto")]
     pub proto: String,
+    /// Traffic direction: `ingress` or `egress`.
+    #[schema(example = "egress")]
     pub direction: String,
 }
 
@@ -549,15 +1041,46 @@ pub struct TcpRtFlushResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "src_ip": "10.0.1.10",
+    "dst_ip": "10.0.10.20",
+    "src_port": 52344,
+    "dst_port": 443
+}))]
 pub struct TcpRtQueryTuple {
+    /// Client or source IP address.
+    #[schema(example = "10.0.1.10")]
     pub src_ip: String,
+    /// Server or destination IP address.
+    #[schema(example = "10.0.10.20")]
     pub dst_ip: String,
+    /// Client or source port.
+    #[schema(example = 52344)]
     pub src_port: u16,
+    /// Server or destination port.
+    #[schema(example = 443)]
     pub dst_port: u16,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "tuples": [
+        {
+            "src_ip": "10.0.1.10",
+            "dst_ip": "10.0.10.20",
+            "src_port": 52344,
+            "dst_port": 443
+        },
+        {
+            "src_ip": "10.0.1.11",
+            "dst_ip": "10.0.10.20",
+            "src_port": 52345,
+            "dst_port": 443
+        }
+    ]
+}))]
 pub struct TcpRtBatchQueryRequest {
+    /// Tuples to query across all managed instances.
     pub tuples: Vec<TcpRtQueryTuple>,
 }
 
@@ -575,8 +1098,16 @@ pub struct TcpRtBatchQueryResponse {
 // ── TCP-RT Filter (by service address) ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "dst_ip": "10.0.10.20",
+    "dst_port": 443
+}))]
 pub struct TcpRtFilterRequest {
+    /// Service IP address to aggregate by.
+    #[schema(example = "10.0.10.20")]
     pub dst_ip: String,
+    /// Service port to aggregate by.
+    #[schema(example = 443)]
     pub dst_port: u16,
 }
 
@@ -643,23 +1174,52 @@ pub struct TcpRtStatesResponse {
 // ── Service Chain ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "tap": "tapfw0",
+    "role": "in"
+}))]
 pub struct TapBindingEntry {
+    /// Tap interface name bound to the hop.
+    #[schema(example = "tapfw0")]
     pub tap: String,
+    /// Logical role of the tap within the hop.
+    #[schema(example = "in")]
     pub role: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ServiceHopEntry {
+    /// Friendly hop name.
+    #[schema(example = "fw-west")]
     pub name: String,
+    /// Hop type such as `bridge` or `proxy`.
+    #[schema(example = "bridge")]
     pub hop_type: String,
+    /// Tap bindings associated with the hop.
     pub taps: Vec<TapBindingEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "name": "frontend-to-db",
+    "description": "Traffic chain from frontend to database",
+    "hops": [
+        {
+            "name": "fw-west",
+            "hop_type": "bridge",
+            "taps": [{"tap": "tapfw0", "role": "in"}]
+        }
+    ]
+}))]
 pub struct ServiceChainEntry {
+    /// Stable service chain name.
+    #[schema(example = "frontend-to-db")]
     pub name: String,
+    /// Optional operator-facing description.
+    #[schema(example = "Traffic chain from frontend to database")]
     #[serde(default)]
     pub description: String,
+    /// Ordered list of hops in the chain.
     pub hops: Vec<ServiceHopEntry>,
 }
 
@@ -669,10 +1229,31 @@ pub struct ServiceChainListResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "name": "frontend-to-db",
+    "description": "Traffic chain from frontend to database",
+    "hops": [
+        {
+            "name": "fw-west",
+            "hop_type": "bridge",
+            "taps": [{"tap": "tapfw0", "role": "in"}]
+        },
+        {
+            "name": "db-service",
+            "hop_type": "proxy",
+            "taps": [{"tap": "tapdb0", "role": "out"}]
+        }
+    ]
+}))]
 pub struct CreateServiceChainRequest {
+    /// Stable service chain name.
+    #[schema(example = "frontend-to-db")]
     pub name: String,
+    /// Optional operator-facing description.
+    #[schema(example = "Traffic chain from frontend to database")]
     #[serde(default)]
     pub description: String,
+    /// Ordered list of hops in the chain.
     pub hops: Vec<ServiceHopEntry>,
 }
 
@@ -704,12 +1285,32 @@ pub struct DropFlushResponse {
 // ── Kernel Drop Observability ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
+#[schema(example = json!({
+    "instance": "eth0",
+    "iface": "eth0",
+    "ifindex": 2,
+    "reason": 38,
+    "top": 20,
+    "include_unattributed": false
+}))]
 pub struct KernelDropQuery {
+    /// Optional managed instance name filter.
+    #[schema(example = "eth0")]
     pub instance: Option<String>,
+    /// Optional interface name filter.
+    #[schema(example = "eth0")]
     pub iface: Option<String>,
+    /// Optional interface index filter.
+    #[schema(example = 2)]
     pub ifindex: Option<u32>,
+    /// Optional numeric kernel drop reason code filter.
+    #[schema(example = 38)]
     pub reason: Option<u16>,
+    /// Maximum number of aggregated results to return.
+    #[schema(example = 20)]
     pub top: Option<usize>,
+    /// Include drop entries that could not be mapped back to a managed instance.
+    #[schema(example = false)]
     #[serde(default)]
     pub include_unattributed: bool,
 }
@@ -744,15 +1345,32 @@ pub struct KernelDropFlushResponse {
 // ── Packet Trace ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "src_ip": "10.0.1.10",
+    "dst_ip": "10.0.10.20",
+    "src_port": 52344,
+    "dst_port": 443,
+    "proto": "tcp"
+}))]
 pub struct TraceStartRequest {
+    /// Source IP filter; empty string matches any source.
+    #[schema(example = "10.0.1.10")]
     #[serde(default)]
     pub src_ip: String,
+    /// Destination IP filter; empty string matches any destination.
+    #[schema(example = "10.0.10.20")]
     #[serde(default)]
     pub dst_ip: String,
+    /// Source port filter; `0` matches any source port.
+    #[schema(example = 52344)]
     #[serde(default)]
     pub src_port: u16,
+    /// Destination port filter; `0` matches any destination port.
+    #[schema(example = 443)]
     #[serde(default)]
     pub dst_port: u16,
+    /// Protocol filter such as `tcp`, `udp`, or empty string for any protocol.
+    #[schema(example = "tcp")]
     #[serde(default)]
     pub proto: String,
 }
@@ -842,12 +1460,22 @@ pub struct SslHttpFlushResponse {
 // SSL uprobe is process-level, not tied to any network interface
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "enabled": true
+}))]
 pub struct SslGlobalConfigResponse {
+    /// Whether process-level SSL observability is enabled.
+    #[schema(example = true)]
     pub enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "enabled": true
+}))]
 pub struct UpdateSslGlobalConfigRequest {
+    /// Desired global SSL observability state.
+    #[schema(example = true)]
     pub enabled: bool,
 }
 

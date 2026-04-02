@@ -16,6 +16,7 @@ use aria_api::*;
     path = "/api/v1/{instance}/qos",
     tag = "qos",
     summary = "List QoS rules for an instance",
+    operation_id = "listQosRules",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -57,6 +58,7 @@ pub async fn list_qos(
     path = "/api/v1/{instance}/qos",
     tag = "qos",
     summary = "Add or update a QoS rule",
+    operation_id = "addOrUpdateQosRule",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -152,6 +154,7 @@ pub async fn add_qos(
     path = "/api/v1/{instance}/qos",
     tag = "qos",
     summary = "Delete a QoS rule",
+    operation_id = "deleteQosRule",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -192,6 +195,7 @@ pub async fn delete_qos(
     path = "/api/v1/{instance}/qos/with_stats",
     tag = "qos",
     summary = "List QoS rules with aggregated statistics",
+    operation_id = "listQosRulesWithStats",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),

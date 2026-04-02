@@ -50,6 +50,7 @@ fn map_ssl_http_events(
     path = "/api/v1/ssl",
     tag = "ssl",
     summary = "List global SSL connection observations",
+    operation_id = "listGlobalSslConnections",
     params(
         ("top" = Option<usize>, Query, description = "Maximum number of SSL connections to return")
     ),
@@ -73,6 +74,7 @@ pub async fn list_ssl_global(
     path = "/api/v1/ssl",
     tag = "ssl",
     summary = "Flush global SSL connection observations",
+    operation_id = "flushGlobalSslConnections",
     responses(
         (status = 200, description = "Flushed SSL connection count", body = aria_api::SslFlushResponse),
         (status = 500, description = "Internal server error", body = aria_api::ApiError)
@@ -90,6 +92,7 @@ pub async fn flush_ssl_global(State(cp): State<AppState>) -> impl IntoResponse {
     path = "/api/v1/{instance}/ssl",
     tag = "ssl",
     summary = "List SSL connection observations for an instance",
+    operation_id = "listInstanceSslConnections",
     params(
         ("instance" = String, Path, description = "Managed instance name"),
         ("top" = Option<usize>, Query, description = "Maximum number of SSL connections to return")
@@ -116,6 +119,7 @@ pub async fn list_ssl(
     path = "/api/v1/{instance}/ssl",
     tag = "ssl",
     summary = "Flush SSL connection observations for an instance",
+    operation_id = "flushInstanceSslConnections",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -140,6 +144,7 @@ pub async fn flush_ssl(
     path = "/api/v1/ssl/http",
     tag = "ssl",
     summary = "List global SSL HTTP observations",
+    operation_id = "listGlobalSslHttpEvents",
     params(
         ("top" = Option<usize>, Query, description = "Maximum number of SSL HTTP events to return")
     ),
@@ -163,6 +168,7 @@ pub async fn list_ssl_http_global(
     path = "/api/v1/ssl/http",
     tag = "ssl",
     summary = "Flush global SSL HTTP observations",
+    operation_id = "flushGlobalSslHttpEvents",
     responses(
         (status = 200, description = "Flushed SSL HTTP event count", body = aria_api::SslHttpFlushResponse),
         (status = 500, description = "Internal server error", body = aria_api::ApiError)
@@ -180,6 +186,7 @@ pub async fn flush_ssl_http_global(State(cp): State<AppState>) -> impl IntoRespo
     path = "/api/v1/{instance}/ssl/http",
     tag = "ssl",
     summary = "List SSL HTTP observations for an instance",
+    operation_id = "listInstanceSslHttpEvents",
     params(
         ("instance" = String, Path, description = "Managed instance name"),
         ("top" = Option<usize>, Query, description = "Maximum number of SSL HTTP events to return")
@@ -206,6 +213,7 @@ pub async fn list_ssl_http(
     path = "/api/v1/{instance}/ssl/http",
     tag = "ssl",
     summary = "Flush SSL HTTP observations for an instance",
+    operation_id = "flushInstanceSslHttpEvents",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -230,6 +238,7 @@ pub async fn flush_ssl_http(
     path = "/api/v1/ssl/config",
     tag = "ssl",
     summary = "Get global SSL observability configuration",
+    operation_id = "getGlobalSslConfig",
     responses(
         (status = 200, description = "Global SSL observability configuration", body = aria_api::SslGlobalConfigResponse),
         (status = 500, description = "Internal server error", body = aria_api::ApiError)
@@ -247,6 +256,7 @@ pub async fn get_ssl_config(State(cp): State<AppState>) -> impl IntoResponse {
     path = "/api/v1/ssl/config",
     tag = "ssl",
     summary = "Update global SSL observability configuration",
+    operation_id = "updateGlobalSslConfig",
     request_body = aria_api::UpdateSslGlobalConfigRequest,
     responses(
         (status = 200, description = "SSL observability configuration updated", body = aria_api::MessageResponse),
@@ -274,6 +284,7 @@ pub async fn update_ssl_config(
     path = "/api/v1/ssl/errors",
     tag = "ssl",
     summary = "List SSL error observations",
+    operation_id = "listSslErrors",
     responses(
         (status = 200, description = "SSL error observations", body = aria_api::SslErrorListResponse),
         (status = 500, description = "Internal server error", body = aria_api::ApiError)
@@ -305,6 +316,7 @@ pub async fn list_ssl_errors(State(cp): State<AppState>) -> impl IntoResponse {
     path = "/api/v1/ssl/errors",
     tag = "ssl",
     summary = "Flush SSL error observations",
+    operation_id = "flushSslErrors",
     responses(
         (status = 200, description = "Flushed SSL error count", body = aria_api::SslErrorFlushResponse),
         (status = 500, description = "Internal server error", body = aria_api::ApiError)

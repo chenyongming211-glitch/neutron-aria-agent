@@ -18,6 +18,7 @@ use aria_api::{
     path = "/api/v1/{instance}/groups",
     tag = "groups",
     summary = "List groups for an instance",
+    operation_id = "listGroups",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -51,6 +52,7 @@ pub async fn list_groups(
     path = "/api/v1/{instance}/groups",
     tag = "groups",
     summary = "Create or extend a group",
+    operation_id = "addGroup",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -81,6 +83,7 @@ pub async fn add_group(
     path = "/api/v1/{instance}/groups/{name}",
     tag = "groups",
     summary = "Delete a group",
+    operation_id = "deleteGroup",
     params(
         ("instance" = String, Path, description = "Managed instance name"),
         ("name" = String, Path, description = "Group name")
@@ -108,6 +111,7 @@ pub async fn delete_group(
     path = "/api/v1/{instance}/groups/with_stats",
     tag = "groups",
     summary = "List groups with aggregated statistics",
+    operation_id = "listGroupsWithStats",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),

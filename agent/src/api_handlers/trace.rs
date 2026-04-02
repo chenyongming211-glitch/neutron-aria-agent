@@ -17,6 +17,7 @@ use aria_api::{proto_from_string, proto_to_string, MessageResponse};
     path = "/api/v1/{instance}/trace",
     tag = "trace",
     summary = "Start packet tracing for an instance",
+    operation_id = "startPacketTrace",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -120,6 +121,7 @@ pub async fn start_trace(
     path = "/api/v1/{instance}/trace",
     tag = "trace",
     summary = "Stop packet tracing for an instance",
+    operation_id = "stopPacketTrace",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -146,6 +148,7 @@ pub async fn stop_trace(
     path = "/api/v1/{instance}/trace",
     tag = "trace",
     summary = "List packet trace events for an instance",
+    operation_id = "listPacketTraceEvents",
     params(
         ("instance" = String, Path, description = "Managed instance name"),
         ("top" = Option<usize>, Query, description = "Maximum number of trace events to return")
@@ -207,6 +210,7 @@ pub async fn list_trace(
     path = "/api/v1/{instance}/trace/flush",
     tag = "trace",
     summary = "Flush packet trace events for an instance",
+    operation_id = "flushPacketTraceEvents",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),

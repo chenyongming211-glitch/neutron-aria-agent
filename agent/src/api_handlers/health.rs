@@ -8,6 +8,7 @@ use aria_api::HealthResponse;
     path = "/api/v1/health",
     tag = "health",
     summary = "Get agent health status",
+    operation_id = "healthCheck",
     responses(
         (status = 200, description = "Health status and runtime capabilities", body = HealthResponse)
     )

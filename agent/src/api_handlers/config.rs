@@ -12,6 +12,7 @@ use aria_api::{ConfigResponse, MessageResponse, UpdateConfigRequest};
     path = "/api/v1/{instance}/config",
     tag = "config",
     summary = "Get instance feature configuration",
+    operation_id = "getInstanceConfig",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -45,6 +46,7 @@ pub async fn get_config(
     path = "/api/v1/{instance}/config",
     tag = "config",
     summary = "Update instance feature configuration",
+    operation_id = "updateInstanceConfig",
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),

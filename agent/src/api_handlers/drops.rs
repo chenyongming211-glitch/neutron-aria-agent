@@ -12,6 +12,7 @@ use aria_api::{direction_to_string, proto_to_string};
     path = "/api/v1/{instance}/stats/drops",
     tag = "drops",
     summary = "List legacy drop statistics for an instance",
+    operation_id = "listLegacyDropStats",
     description = "Deprecated legacy drop statistics endpoint. Prefer /api/v1/stats/kernel_drops for kernel-attributed drops.",
     params(
         ("instance" = String, Path, description = "Managed instance name")
@@ -67,6 +68,7 @@ pub async fn list_drops(
     path = "/api/v1/{instance}/stats/drops",
     tag = "drops",
     summary = "Flush legacy drop statistics for an instance",
+    operation_id = "flushLegacyDropStats",
     description = "Deprecated legacy drop statistics endpoint. Prefer /api/v1/stats/kernel_drops for kernel-attributed drops.",
     params(
         ("instance" = String, Path, description = "Managed instance name")
@@ -95,6 +97,7 @@ pub async fn flush_drops(
     path = "/api/v1/stats/kernel_drops",
     tag = "drops",
     summary = "List kernel-attributed drop statistics",
+    operation_id = "listKernelDropStats",
     params(
         ("instance" = Option<String>, Query, description = "Filter by managed instance name"),
         ("iface" = Option<String>, Query, description = "Filter by interface name"),
@@ -124,6 +127,7 @@ pub async fn list_kernel_drops(
     path = "/api/v1/stats/kernel_drops",
     tag = "drops",
     summary = "Flush kernel-attributed drop statistics",
+    operation_id = "flushKernelDropStats",
     params(
         ("instance" = Option<String>, Query, description = "Filter by managed instance name"),
         ("iface" = Option<String>, Query, description = "Filter by interface name"),
