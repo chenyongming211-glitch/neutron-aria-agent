@@ -1,9 +1,12 @@
 use clap::Parser;
 use serde::Deserialize;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info, warn};
+use tracing_subscriber::fmt::writer::MakeWriter;
 use tracing_subscriber::EnvFilter;
 
 mod api_handlers;
@@ -51,6 +54,8 @@ struct Config {
     log_format: String,
     #[serde(default = "default_log_filter")]
     log_filter: String,
+    #[serde(default = "default_log_file_path")]
+    log_file_path: String,
 }
 
 fn default_ebpf_path() -> String {
@@ -93,6 +98,10 @@ fn default_log_filter() -> String {
     "info".to_string()
 }
 
+fn default_log_file_path() -> String {
+    "/var/log/aria-agent/agent.log".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -106,6 +115,7 @@ impl Default for Config {
             listen_addr: default_listen_addr(),
             log_format: default_log_format(),
             log_filter: default_log_filter(),
+            log_file_path: default_log_file_path(),
         }
     }
 }
@@ -116,6 +126,87 @@ fn build_env_filter(config: &Config) -> Result<EnvFilter, String> {
         .map_err(|e| format!("failed to build log filter: {}", e))
 }
 
+#[derive(Clone)]
+struct DualMakeWriter {
+    file: Option<Arc<Mutex<File>>>,
+}
+
+struct DualWriter {
+    stdout: io::Stdout,
+    file: Option<Arc<Mutex<File>>>,
+}
+
+impl<'a> MakeWriter<'a> for DualMakeWriter {
+    type Writer = DualWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        DualWriter {
+            stdout: io::stdout(),
+            file: self.file.clone(),
+        }
+    }
+}
+
+impl Write for DualWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stdout.write_all(buf)?;
+        if let Some(file) = &self.file {
+            let mut file = file
+                .lock()
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "log file mutex poisoned"))?;
+            file.write_all(buf)?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stdout.flush()?;
+        if let Some(file) = &self.file {
+            let mut file = file
+                .lock()
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "log file mutex poisoned"))?;
+            file.flush()?;
+        }
+        Ok(())
+    }
+}
+
+fn build_log_writer(config: &Config) -> DualMakeWriter {
+    let path = config.log_file_path.trim();
+    if path.is_empty() {
+        return DualMakeWriter { file: None };
+    }
+
+    let log_path = PathBuf::from(path);
+    let parent = log_path.parent().unwrap_or_else(|| Path::new("."));
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        eprintln!(
+            "Warning: failed to create log directory {:?}: {}; file logging disabled",
+            parent, e
+        );
+        return DualMakeWriter { file: None };
+    }
+
+    let file = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to open log file {:?}: {}; file logging disabled",
+                log_path, e
+            );
+            return DualMakeWriter { file: None };
+        }
+    };
+
+    DualMakeWriter {
+        file: Some(Arc::new(Mutex::new(file))),
+    }
+}
+
 fn init_tracing(config: &Config) -> Result<(), String> {
     match config.log_format.to_ascii_lowercase().as_str() {
         "text" => tracing_subscriber::fmt()
@@ -123,6 +214,7 @@ fn init_tracing(config: &Config) -> Result<(), String> {
             .with_env_filter(build_env_filter(config)?)
             .with_target(true)
             .with_thread_names(true)
+            .with_writer(build_log_writer(config))
             .try_init()
             .map_err(|e| format!("failed to initialize text logger: {}", e)),
         "json" => tracing_subscriber::fmt()
@@ -133,6 +225,7 @@ fn init_tracing(config: &Config) -> Result<(), String> {
             .with_env_filter(build_env_filter(config)?)
             .with_target(true)
             .with_thread_names(true)
+            .with_writer(build_log_writer(config))
             .try_init()
             .map_err(|e| format!("failed to initialize json logger: {}", e)),
         other => Err(format!(
@@ -221,6 +314,7 @@ async fn main() {
         listen_addr = %config.listen_addr,
         log_format = %config.log_format,
         log_filter = %config.log_filter,
+        log_file_path = %config.log_file_path,
         "starting aria-agent"
     );
 

@@ -9,6 +9,9 @@ INSTALL_LIB_DIR="/usr/local/lib"
 CONFIG_DIR="/etc/aria-agent"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
 STATE_DIR="/var/lib/aria-agent"
+LOG_DIR="/var/log/aria-agent"
+LOG_FILE="$LOG_DIR/agent.log"
+LOGROTATE_FILE="/etc/logrotate.d/aria-agent"
 PIN_ROOT="/sys/fs/bpf"
 PIN_DIR="$PIN_ROOT/aria"
 SYSTEMD_UNIT="/etc/systemd/system/aria-agent.service"
@@ -208,6 +211,7 @@ backup_existing() {
         "$INSTALL_LIB_DIR/libebpf_firewall_perf.so"
         "$SYSTEMD_UNIT"
         "$CONFIG_FILE"
+        "$LOGROTATE_FILE"
     )
 
     local path
@@ -244,11 +248,26 @@ User=root
 Group=root
 LimitMEMLOCK=infinity
 ProtectSystem=strict
-ReadWritePaths=/sys/fs/bpf /var/lib/aria-agent
+ReadWritePaths=/sys/fs/bpf /var/lib/aria-agent /var/log
 ProtectHome=yes
 
 [Install]
 WantedBy=multi-user.target
+EOF
+}
+
+write_logrotate_config() {
+    cat >"$LOGROTATE_FILE" <<EOF
+$LOG_FILE {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    create 0640 root root
+}
 EOF
 }
 
@@ -264,11 +283,13 @@ max_port_policies = 16384
 listen_addr = "127.0.0.1:8080"
 log_format = "text"
 log_filter = "info"
+log_file_path = "/var/log/aria-agent/agent.log"
 EOF
 }
 
 install_files() {
-    mkdir -p "$INSTALL_BIN_DIR" "$INSTALL_LIB_DIR" "$CONFIG_DIR" "$STATE_DIR"
+    mkdir -p "$INSTALL_BIN_DIR" "$INSTALL_LIB_DIR" "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
+    chmod 0755 "$LOG_DIR"
 
     log "安装 aria-agent 到 $INSTALL_BIN_DIR"
     install -m 0755 "$TMP_DIR/aria-agent" "$INSTALL_BIN_DIR/aria-agent"
@@ -284,6 +305,9 @@ install_files() {
 
     log "写入/更新 systemd 单元: $SYSTEMD_UNIT"
     write_systemd_unit
+
+    log "写入/更新 logrotate 配置: $LOGROTATE_FILE"
+    write_logrotate_config
 
     if [[ ! -f "$CONFIG_FILE" || "$FORCE_CONFIG" -eq 1 ]]; then
         log "写入默认配置: $CONFIG_FILE"
@@ -356,7 +380,9 @@ main() {
     printf '下一步建议:\n'
     printf '  1. 检查服务状态: systemctl status aria-agent --no-pager\n'
     printf '  2. 检查健康状态: ariactl health\n'
-    printf '  3. 如需首次部署，确认 /etc/aria-agent/config.toml 中的 iface_pattern\n'
+    printf '  3. 查看 journald 日志: journalctl -u aria-agent -n 50 --no-pager\n'
+    printf '  4. 查看文件日志: tail -n 50 %s\n' "$LOG_FILE"
+    printf '  5. 如需首次部署，确认 /etc/aria-agent/config.toml 中的 iface_pattern\n'
     printf '\n'
 }
 
