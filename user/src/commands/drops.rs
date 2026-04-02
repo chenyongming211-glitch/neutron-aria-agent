@@ -22,12 +22,21 @@ pub(crate) fn print_kernel_drop_stats(entries: &[aria_api::KernelDropStatsEntry]
 
     if has_location {
         println!(
-            "{:<16} {:<16} {:<8} {:<20} {:<10} {:>10} {:>10} {:<30} {}",
-            "Instance", "Iface", "Ifindex", "Reason", "Proto", "Packets", "Bytes", "Location", "Hint"
+            "{:<16} {:<16} {:<8} {:<20} {:<10} {:>10} {:>10} {:<22} {:<30} {}",
+            "Instance",
+            "Iface",
+            "Ifindex",
+            "Reason",
+            "Proto",
+            "Packets",
+            "Bytes",
+            "Source",
+            "Location",
+            "Hint"
         );
         for entry in entries {
             println!(
-                "{:<16} {:<16} {:<8} {:<20} {:<10} {:>10} {:>10} {:<30} {}",
+                "{:<16} {:<16} {:<8} {:<20} {:<10} {:>10} {:>10} {:<22} {:<30} {}",
                 entry.instance.as_deref().unwrap_or("-"),
                 entry.iface.as_deref().unwrap_or("-"),
                 entry.ifindex,
@@ -35,6 +44,7 @@ pub(crate) fn print_kernel_drop_stats(entries: &[aria_api::KernelDropStatsEntry]
                 entry.proto,
                 entry.packets,
                 entry.bytes,
+                entry.source,
                 entry.location.as_deref().unwrap_or("-"),
                 entry.location_hint.as_deref().unwrap_or(""),
             );
