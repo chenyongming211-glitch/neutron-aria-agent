@@ -11,6 +11,20 @@ use super::common::{err_response, AppState};
 use crate::control_plane::ControlPlaneError;
 use aria_api::*;
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/policies",
+    tag = "policies",
+    summary = "List policies for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Configured policies", body = PoliciesResponse),
+        (status = 404, description = "Instance not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError)
+    )
+)]
 pub async fn list_policies(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -47,6 +61,22 @@ pub async fn list_policies(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/{instance}/policies",
+    tag = "policies",
+    summary = "Add a policy",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    request_body = AddPolicyRequest,
+    responses(
+        (status = 201, description = "Policy created", body = MessageResponse),
+        (status = 400, description = "Validation error", body = ApiError),
+        (status = 404, description = "Instance or group not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError)
+    )
+)]
 pub async fn add_policy(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -111,6 +141,22 @@ pub async fn add_policy(
     ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/{instance}/policies",
+    tag = "policies",
+    summary = "Delete a policy",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    request_body = DeletePolicyRequest,
+    responses(
+        (status = 200, description = "Policy deleted", body = MessageResponse),
+        (status = 400, description = "Validation error", body = ApiError),
+        (status = 404, description = "Instance or policy not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError)
+    )
+)]
 pub async fn delete_policy(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -145,6 +191,20 @@ pub async fn delete_policy(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/policies/with_stats",
+    tag = "policies",
+    summary = "List policies with aggregated statistics",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Policies with statistics", body = PoliciesWithStatsResponse),
+        (status = 404, description = "Instance not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError)
+    )
+)]
 pub async fn list_policies_with_stats(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -202,6 +262,22 @@ pub async fn list_policies_with_stats(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/{instance}/policies/batch",
+    tag = "policies",
+    summary = "Batch add policies",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    request_body = BatchAddPoliciesRequest,
+    responses(
+        (status = 201, description = "All policies were created", body = BatchPoliciesResponse),
+        (status = 200, description = "Request processed with partial failures", body = BatchPoliciesResponse),
+        (status = 404, description = "Instance not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError)
+    )
+)]
 pub async fn batch_add_policies(
     State(cp): State<AppState>,
     Path(instance): Path<String>,

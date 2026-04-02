@@ -8,6 +8,15 @@ use axum::{
 use super::common::AppState;
 use aria_api::{ApiError, InstanceInfo, InstancesResponse, MessageResponse, SystemStartRequest};
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/instances",
+    tag = "system",
+    summary = "List managed instances",
+    responses(
+        (status = 200, description = "Currently managed firewall instances", body = InstancesResponse)
+    )
+)]
 pub async fn list_instances(State(cp): State<AppState>) -> impl IntoResponse {
     let names = cp.list_instances().await;
     Json(InstancesResponse {
@@ -18,6 +27,17 @@ pub async fn list_instances(State(cp): State<AppState>) -> impl IntoResponse {
     })
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/system/start",
+    tag = "system",
+    summary = "Start the standalone system firewall",
+    request_body = SystemStartRequest,
+    responses(
+        (status = 200, description = "System firewall started", body = MessageResponse),
+        (status = 500, description = "System start failed", body = ApiError)
+    )
+)]
 pub async fn system_start(
     State(cp): State<AppState>,
     Json(req): Json<SystemStartRequest>,
@@ -56,6 +76,16 @@ pub async fn system_start(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/system/stop",
+    tag = "system",
+    summary = "Stop the standalone system firewall",
+    responses(
+        (status = 200, description = "System firewall stopped", body = MessageResponse),
+        (status = 500, description = "System stop failed", body = ApiError)
+    )
+)]
 pub async fn system_stop(State(cp): State<AppState>) -> impl IntoResponse {
     let pin_path = format!("{}/system", cp.base_pin_path);
     let state_path = format!("{}/system", cp.base_state_path);

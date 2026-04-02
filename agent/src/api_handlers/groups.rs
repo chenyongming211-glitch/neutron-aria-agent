@@ -13,6 +13,20 @@ use aria_api::{
     GroupsWithStatsResponse, MessageResponse,
 };
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/groups",
+    tag = "groups",
+    summary = "List groups for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Configured groups", body = GroupsResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_groups(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -32,6 +46,22 @@ pub async fn list_groups(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/{instance}/groups",
+    tag = "groups",
+    summary = "Create or extend a group",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    request_body = AddGroupRequest,
+    responses(
+        (status = 201, description = "Group created or updated", body = AddGroupResponse),
+        (status = 400, description = "Validation error", body = aria_api::ApiError),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn add_group(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -46,6 +76,21 @@ pub async fn add_group(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/{instance}/groups/{name}",
+    tag = "groups",
+    summary = "Delete a group",
+    params(
+        ("instance" = String, Path, description = "Managed instance name"),
+        ("name" = String, Path, description = "Group name")
+    ),
+    responses(
+        (status = 200, description = "Group deleted", body = MessageResponse),
+        (status = 404, description = "Instance or group not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn delete_group(
     State(cp): State<AppState>,
     Path((instance, name)): Path<(String, String)>,
@@ -58,6 +103,20 @@ pub async fn delete_group(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/groups/with_stats",
+    tag = "groups",
+    summary = "List groups with aggregated statistics",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Groups with statistics", body = GroupsWithStatsResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_groups_with_stats(
     State(cp): State<AppState>,
     Path(instance): Path<String>,

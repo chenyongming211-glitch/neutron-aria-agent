@@ -3,6 +3,15 @@ use axum::{extract::State, response::IntoResponse, Json};
 use super::common::{kernel_drop_mode_name, AppState};
 use aria_api::HealthResponse;
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/health",
+    tag = "health",
+    summary = "Get agent health status",
+    responses(
+        (status = 200, description = "Health status and runtime capabilities", body = HealthResponse)
+    )
+)]
 pub async fn health(State(cp): State<AppState>) -> impl IntoResponse {
     let instances = cp.list_instances().await;
     let kernel_drop = cp.get_kernel_drop_status().await;

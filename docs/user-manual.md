@@ -9,6 +9,10 @@
 4. 最后看排障、回归和已知限制
 
 `ariactl` 是 `aria-agent` 的薄客户端。绝大多数 CLI 命令都会转成 `/api/v1/...` HTTP 请求。
+`aria-agent` 同时会暴露：
+
+- `/openapi.json`
+- `/docs`
 
 ## 1. 产品概览
 
@@ -119,6 +123,13 @@ sudo systemctl start aria-agent
 
 ariactl health
 ariactl instances
+```
+
+OpenAPI 检查：
+
+```bash
+curl -s http://127.0.0.1:8080/openapi.json | jq '.paths | keys'
+open http://127.0.0.1:8080/docs
 ```
 
 `ariactl health` 会显示：

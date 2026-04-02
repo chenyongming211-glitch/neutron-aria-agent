@@ -4,12 +4,15 @@ use axum::{
     Router,
 };
 use std::sync::Arc;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::api_handlers;
 use crate::control_plane::ControlPlane;
 
 pub fn build_router(control_plane: Arc<ControlPlane>) -> Router {
     Router::new()
+        .merge(SwaggerUi::new("/docs").url("/openapi.json", crate::openapi::ApiDoc::openapi()))
         // Health & instances
         .route("/metrics", get(api_handlers::metrics))
         .route("/api/v1/health", get(api_handlers::health))

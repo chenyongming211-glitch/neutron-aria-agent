@@ -19,6 +19,7 @@
 
 - **多实例管理** — 自动发现 tap/veth/eth 接口，每个接口独立状态
 - **REST API** — 完整的 HTTP API，CLI 是其薄客户端
+- **OpenAPI 文档** — 内置 `/openapi.json` 和 `/docs`，便于联调、SDK 生成和第三方集成
 - **WAL 持久化** — 操作追加写入日志（O(1)），定期 compact 为快照，crash-safe
 - **Netlink 监听** — 实时感知接口增删，60 秒对账兜底
 - **Pinned Maps** — eBPF map 固定到 bpffs，agent 重启后自动恢复
@@ -148,6 +149,13 @@ sudo aria-agent
 ```bash
 journalctl -u aria-agent -f
 tail -f /var/log/aria-agent/agent.log
+```
+
+API 文档入口：
+
+```bash
+curl -s http://127.0.0.1:8080/openapi.json
+open http://127.0.0.1:8080/docs
 ```
 
 ### 从源码编译

@@ -11,6 +11,20 @@ use super::common::{err_response, AppState};
 use crate::control_plane::ControlPlaneError;
 use aria_api::*;
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/qos",
+    tag = "qos",
+    summary = "List QoS rules for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Configured QoS rules", body = QosListResponse),
+        (status = 404, description = "Instance not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError)
+    )
+)]
 pub async fn list_qos(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -38,6 +52,22 @@ pub async fn list_qos(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/{instance}/qos",
+    tag = "qos",
+    summary = "Add or update a QoS rule",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    request_body = AddQosRequest,
+    responses(
+        (status = 201, description = "QoS rule created or updated", body = MessageResponse),
+        (status = 400, description = "Validation error", body = ApiError),
+        (status = 404, description = "Instance or group not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError)
+    )
+)]
 pub async fn add_qos(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -117,6 +147,22 @@ pub async fn add_qos(
     Ok((StatusCode::CREATED, Json(MessageResponse { message: msg })))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/{instance}/qos",
+    tag = "qos",
+    summary = "Delete a QoS rule",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    request_body = DeleteQosRequest,
+    responses(
+        (status = 200, description = "QoS rule deleted", body = MessageResponse),
+        (status = 400, description = "Validation error", body = ApiError),
+        (status = 404, description = "Instance or group not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError)
+    )
+)]
 pub async fn delete_qos(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -141,6 +187,20 @@ pub async fn delete_qos(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/qos/with_stats",
+    tag = "qos",
+    summary = "List QoS rules with aggregated statistics",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "QoS rules with statistics", body = QosWithStatsResponse),
+        (status = 404, description = "Instance not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError)
+    )
+)]
 pub async fn list_qos_with_stats(
     State(cp): State<AppState>,
     Path(instance): Path<String>,

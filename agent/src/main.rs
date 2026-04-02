@@ -17,6 +17,7 @@ mod instance;
 mod kernel_drop_manager;
 mod kernel_drop_support;
 mod netlink;
+mod openapi;
 mod service_chain;
 mod ssl_manager;
 mod ssl_support;

@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use utoipa::ToSchema;
 
 // ── Error ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ApiError {
     pub code: u16,
     pub error: String,
@@ -17,7 +18,7 @@ impl fmt::Display for ApiError {
 
 // ── Health ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
@@ -34,20 +35,20 @@ pub struct HealthResponse {
 
 // ── Instances ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct InstanceInfo {
     pub name: String,
     pub active: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct InstancesResponse {
     pub instances: Vec<InstanceInfo>,
 }
 
 // ── System ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SystemStartRequest {
     pub iface: String,
     #[serde(default = "default_max_port_policies")]
@@ -58,32 +59,32 @@ fn default_max_port_policies() -> u32 {
     16384
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct MessageResponse {
     pub message: String,
 }
 
 // ── Groups ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct GroupEntry {
     pub id: u32,
     pub name: String,
     pub cidrs: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct GroupsResponse {
     pub groups: Vec<GroupEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AddGroupRequest {
     pub name: String,
     pub cidr: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AddGroupResponse {
     pub id: u32,
     pub name: String,
@@ -91,7 +92,7 @@ pub struct AddGroupResponse {
 
 // ── Groups with Stats (Aggregation) ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct GroupWithStatsEntry {
     // Group configuration
     pub id: u32,
@@ -108,14 +109,14 @@ pub struct GroupWithStatsEntry {
     pub egress_bytes: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct GroupsWithStatsResponse {
     pub groups: Vec<GroupWithStatsEntry>,
 }
 
 // ── Policies ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PolicyEntry {
     pub src_group: String,
     pub src_group_id: u32,
@@ -128,12 +129,12 @@ pub struct PolicyEntry {
     pub bitmap_idx: Option<u32>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct PoliciesResponse {
     pub policies: Vec<PolicyEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AddPolicyRequest {
     pub src_group: String,
     pub dst_group: String,
@@ -152,7 +153,7 @@ fn default_mode_string() -> String {
     "policing".to_string()
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DeletePolicyRequest {
     pub src_group: String,
     pub dst_group: String,
@@ -161,12 +162,12 @@ pub struct DeletePolicyRequest {
     pub direction: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct BatchAddPoliciesRequest {
     pub policies: Vec<AddPolicyRequest>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct BatchPoliciesResponse {
     pub added: usize,
     pub errors: Vec<String>,
@@ -174,7 +175,7 @@ pub struct BatchPoliciesResponse {
 
 // ── Policies with Stats (Aggregation) ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PolicyWithStatsEntry {
     // Policy configuration
     pub src_group: String,
@@ -197,14 +198,14 @@ pub struct PolicyWithStatsEntry {
     pub dropped_bytes: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct PoliciesWithStatsResponse {
     pub policies: Vec<PolicyWithStatsEntry>,
 }
 
 // ── QoS ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct QosEntry {
     pub group: String,
     pub group_id: u32,
@@ -216,12 +217,12 @@ pub struct QosEntry {
     pub mode: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct QosListResponse {
     pub rules: Vec<QosEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AddQosRequest {
     pub group: String,
     pub direction: String,
@@ -234,7 +235,7 @@ pub struct AddQosRequest {
     pub mode: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DeleteQosRequest {
     pub group: String,
     pub direction: String,
@@ -361,7 +362,7 @@ pub struct QosStatsResponse {
 
 // ── QoS with Stats (Aggregation) ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct QosWithStatsEntry {
     // QoS configuration
     pub group: String,
@@ -386,7 +387,7 @@ pub struct QosWithStatsEntry {
     pub shaped_bytes: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct QosWithStatsResponse {
     pub rules: Vec<QosWithStatsEntry>,
 }
