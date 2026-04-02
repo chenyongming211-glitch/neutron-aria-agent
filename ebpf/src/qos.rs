@@ -83,6 +83,87 @@ unsafe fn update_qos_stats(key: &QosKey, pkt_len: u32, outcome: u8) {
     }
 }
 
+#[inline(always)]
+fn available_tokens(bucket: &TokenBucket, now_ns: u64, rate: u64, burst: u64) -> u64 {
+    let elapsed = now_ns.wrapping_sub(bucket.last_refill_ns);
+    let refill = compute_refill(rate, elapsed);
+    let new_tokens = bucket.tokens + refill;
+    if new_tokens > burst {
+        burst
+    } else {
+        new_tokens
+    }
+}
+
+#[inline(always)]
+fn decide_egress_qos(
+    bucket: &mut TokenBucket,
+    pkt_len: u32,
+    now_ns: u64,
+    rate: u64,
+    burst: u64,
+    priority: u8,
+    mode: u8,
+) -> ((u64, u8), u8) {
+    let tokens = available_tokens(bucket, now_ns, rate, burst);
+
+    let (result, outcome) = if mode == QOS_MODE_SHAPING {
+        // Every packet gets an EDT timestamp to enforce rate limit.
+        // Tokens only control stats (pass vs shaped), not whether EDT is set.
+        let pkt_delay_ns = compute_delay_ns(pkt_len as u64, rate);
+        let base = if bucket.last_edt > now_ns {
+            bucket.last_edt
+        } else {
+            now_ns
+        };
+        let edt = base + pkt_delay_ns;
+        bucket.last_edt = edt;
+
+        if tokens >= pkt_len as u64 {
+            bucket.tokens = tokens - pkt_len as u64;
+            ((edt, priority), 0)
+        } else {
+            bucket.tokens = 0;
+            ((edt, priority), 2)
+        }
+    } else if tokens >= pkt_len as u64 {
+        bucket.tokens = tokens - pkt_len as u64;
+        ((0u64, priority), 0)
+    } else {
+        // Drop: write back refilled tokens (don't deduct pkt_len)
+        // Packet was dropped so no bandwidth was consumed,
+        // but the refill MUST be persisted or it's lost.
+        bucket.tokens = tokens;
+        ((u64::MAX, priority), 1)
+    };
+
+    bucket.last_refill_ns = now_ns;
+    (result, outcome)
+}
+
+#[inline(always)]
+fn decide_ingress_qos(
+    bucket: &mut TokenBucket,
+    pkt_len: u32,
+    now_ns: u64,
+    rate: u64,
+    burst: u64,
+) -> (bool, u8) {
+    let tokens = available_tokens(bucket, now_ns, rate, burst);
+
+    let (pass, outcome) = if tokens >= pkt_len as u64 {
+        bucket.tokens = tokens - pkt_len as u64;
+        (true, 0)
+    } else {
+        // Drop: write back refilled tokens (don't deduct pkt_len)
+        bucket.tokens = tokens;
+        (false, 1)
+    };
+
+    bucket.last_refill_ns = now_ns;
+    (pass, outcome)
+}
+
 /// Apply QoS rate limiting for egress. Returns (EDT timestamp, priority).
 /// EDT=0 means no delay needed. EDT=u64::MAX means packet should be dropped.
 /// No QoS config → pass through (0, 0).
@@ -128,69 +209,29 @@ pub unsafe fn apply_qos_egress(
             let burst = if burst > 0 { burst } else { rate };
 
             if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
-                let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
-                let refill = compute_refill(rate, elapsed);
-                let new_tokens = (*bucket).tokens + refill;
-                let tokens = if new_tokens > burst {
-                    burst
-                } else {
-                    new_tokens
-                };
-
-                let result;
-                if mode == QOS_MODE_SHAPING {
-                    // Every packet gets an EDT timestamp to enforce rate limit.
-                    // Tokens only control stats (pass vs shaped), not whether EDT is set.
-                    let pkt_delay_ns = compute_delay_ns(pkt_len as u64, rate);
-                    let base = if (*bucket).last_edt > now_ns {
-                        (*bucket).last_edt
-                    } else {
-                        now_ns
-                    };
-                    let edt = base + pkt_delay_ns;
-                    (*bucket).last_edt = edt;
-
-                    if tokens >= pkt_len as u64 {
-                        (*bucket).tokens = tokens - pkt_len as u64;
-                        update_qos_stats(&qos_key, pkt_len, 0);
-                    } else {
-                        (*bucket).tokens = 0;
-                        update_qos_stats(&qos_key, pkt_len, 2);
-                    }
-                    result = (edt, priority);
-                } else {
-                    // Policing mode
-                    if tokens >= pkt_len as u64 {
-                        (*bucket).tokens = tokens - pkt_len as u64;
-                        update_qos_stats(&qos_key, pkt_len, 0);
-                        result = (0u64, priority);
-                    } else {
-                        // Drop: write back refilled tokens (don't deduct pkt_len)
-                        // Packet was dropped so no bandwidth was consumed,
-                        // but the refill MUST be persisted or it's lost.
-                        (*bucket).tokens = tokens;
-                        update_qos_stats(&qos_key, pkt_len, 1);
-                        result = (u64::MAX, priority);
-                    }
-                }
-
-                (*bucket).last_refill_ns = now_ns;
-
+                let (result, outcome) =
+                    decide_egress_qos(&mut *bucket, pkt_len, now_ns, rate, burst, priority, mode);
+                update_qos_stats(&qos_key, pkt_len, outcome);
                 return result;
             } else {
                 // First packet: initialize bucket
-                let new_bucket = TokenBucket {
-                    tokens: if burst >= pkt_len as u64 {
-                        burst - pkt_len as u64
-                    } else {
-                        0
-                    },
+                let mut new_bucket = TokenBucket {
+                    tokens: burst,
                     last_refill_ns: now_ns,
                     last_edt: 0,
                 };
+                let (result, outcome) = decide_egress_qos(
+                    &mut new_bucket,
+                    pkt_len,
+                    now_ns,
+                    rate,
+                    burst,
+                    priority,
+                    mode,
+                );
                 let _ = QOS_TOKEN_BUCKET.insert(&qos_key, &new_bucket, 0);
-                update_qos_stats(&qos_key, pkt_len, 0);
-                return (0, priority);
+                update_qos_stats(&qos_key, pkt_len, outcome);
+                return result;
             }
         }
     }
@@ -231,42 +272,21 @@ pub unsafe fn apply_qos_ingress(
             let burst = if burst > 0 { burst } else { rate };
 
             if let Some(bucket) = QOS_TOKEN_BUCKET.get_ptr_mut(&qos_key) {
-                let elapsed = now_ns.wrapping_sub((*bucket).last_refill_ns);
-                let refill = compute_refill(rate, elapsed);
-                let new_tokens = (*bucket).tokens + refill;
-                let tokens = if new_tokens > burst {
-                    burst
-                } else {
-                    new_tokens
-                };
-
-                let pass;
-                if tokens >= pkt_len as u64 {
-                    (*bucket).tokens = tokens - pkt_len as u64;
-                    update_qos_stats(&qos_key, pkt_len, 0);
-                    pass = true;
-                } else {
-                    // Drop: write back refilled tokens (don't deduct pkt_len)
-                    (*bucket).tokens = tokens;
-                    update_qos_stats(&qos_key, pkt_len, 1);
-                    pass = false;
-                }
-
-                (*bucket).last_refill_ns = now_ns;
+                let (pass, outcome) =
+                    decide_ingress_qos(&mut *bucket, pkt_len, now_ns, rate, burst);
+                update_qos_stats(&qos_key, pkt_len, outcome);
                 return pass;
             } else {
-                let new_bucket = TokenBucket {
-                    tokens: if burst >= pkt_len as u64 {
-                        burst - pkt_len as u64
-                    } else {
-                        0
-                    },
+                let mut new_bucket = TokenBucket {
+                    tokens: burst,
                     last_refill_ns: now_ns,
                     last_edt: 0,
                 };
+                let (pass, outcome) =
+                    decide_ingress_qos(&mut new_bucket, pkt_len, now_ns, rate, burst);
                 let _ = QOS_TOKEN_BUCKET.insert(&qos_key, &new_bucket, 0);
-                update_qos_stats(&qos_key, pkt_len, 0);
-                return true;
+                update_qos_stats(&qos_key, pkt_len, outcome);
+                return pass;
             }
         }
     }

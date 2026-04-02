@@ -1,5 +1,19 @@
 use crate::{api_client, cli::PolicyCommands};
 
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum PolicyBatchInput {
+    Wrapped(aria_api::BatchAddPoliciesRequest),
+    Bare(Vec<aria_api::AddPolicyRequest>),
+}
+
+fn parse_batch_add_policies(json_str: &str) -> Result<aria_api::BatchAddPoliciesRequest, serde_json::Error> {
+    match serde_json::from_str::<PolicyBatchInput>(json_str)? {
+        PolicyBatchInput::Wrapped(req) => Ok(req),
+        PolicyBatchInput::Bare(policies) => Ok(aria_api::BatchAddPoliciesRequest { policies }),
+    }
+}
+
 pub(crate) async fn handle_action(
     client: &api_client::ApiClient,
     instance: &str,
@@ -81,18 +95,15 @@ pub(crate) async fn handle_action(
                 }
             };
 
-            let policies: Vec<aria_api::AddPolicyRequest> = match serde_json::from_str(&json_str) {
-                Ok(p) => p,
+            let req = match parse_batch_add_policies(&json_str) {
+                Ok(req) => req,
                 Err(e) => {
                     eprintln!("Error: Invalid JSON: {}", e);
                     std::process::exit(1);
                 }
             };
 
-            match client
-                .batch_add_policies(instance, &aria_api::BatchAddPoliciesRequest { policies })
-                .await
-            {
+            match client.batch_add_policies(instance, &req).await {
                 Ok(resp) => {
                     println!("Batch complete: {} added", resp.added);
                     if !resp.errors.is_empty() {
@@ -181,5 +192,34 @@ pub(crate) async fn handle_action(
             }
             Err(e) => Err(e),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_batch_add_policies;
+
+    #[test]
+    fn parse_batch_accepts_documented_wrapper() {
+        let req = parse_batch_add_policies(
+            r#"{"policies":[{"src_group":"any","dst_group":"web","proto":"tcp","action":"accept","direction":"ingress","ports":"443"}]}"#,
+        )
+        .expect("wrapper payload should parse");
+
+        assert_eq!(req.policies.len(), 1);
+        assert_eq!(req.policies[0].dst_group, "web");
+        assert_eq!(req.policies[0].ports.as_deref(), Some("443"));
+    }
+
+    #[test]
+    fn parse_batch_accepts_legacy_array() {
+        let req = parse_batch_add_policies(
+            r#"[{"src_group":"any","dst_group":"db","proto":"tcp","action":"accept","direction":"egress","ports":"3306"}]"#,
+        )
+        .expect("legacy array payload should parse");
+
+        assert_eq!(req.policies.len(), 1);
+        assert_eq!(req.policies[0].dst_group, "db");
+        assert_eq!(req.policies[0].ports.as_deref(), Some("3306"));
     }
 }

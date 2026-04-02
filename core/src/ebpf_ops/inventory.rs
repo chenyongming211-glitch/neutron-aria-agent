@@ -202,7 +202,13 @@ pub fn validate_pinned_runtime_state(
     let mut expected_ports = BTreeSet::new();
     for rule in &state.rules {
         let ports = rule.ports.as_deref();
-        let is_all_ports = matches!(ports, Some("all") | Some("") | None);
+        let is_all_ports = match ports {
+            Some(p) => {
+                let p = p.trim();
+                p.is_empty() || p.eq_ignore_ascii_case("all")
+            }
+            None => true,
+        };
         let has_port_filter = (ports.is_some() && !is_all_ports) as u8;
         let policy_key = PolicyKey {
             tap_id,

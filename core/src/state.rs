@@ -195,40 +195,48 @@ impl FirewallState {
             old_port_set_released: None,
         };
 
-        let (bitmap_idx, is_new) = if let Some(p) = ports {
-            if p != "all" && !p.is_empty() {
-                let normalized = normalize_ports(p, action)?;
-
-                if let Some(existing_ps) = self.port_sets.get_mut(&normalized) {
-                    existing_ps.ref_count += 1;
-                    (Some(existing_ps.bitmap_idx), false)
-                } else {
-                    let idx = if let Some(recycled) = self.free_bitmap_indices.pop() {
-                        recycled
-                    } else {
-                        if self.next_bitmap_idx >= self.max_port_policies {
-                            return Err(format!(
-                                "Port set limit ({}) reached. Unique port combinations: {}",
-                                self.max_port_policies,
-                                self.port_sets.len()
-                            ));
-                        }
-                        let idx = self.next_bitmap_idx;
-                        self.next_bitmap_idx += 1;
-                        idx
-                    };
-                    self.port_sets.insert(
-                        normalized.clone(),
-                        PortSetInfo {
-                            bitmap_idx: idx,
-                            ports_normalized: normalized,
-                            ref_count: 1,
-                        },
-                    );
-                    (Some(idx), true)
-                }
+        let stored_ports = ports.map(|p| {
+            let trimmed = p.trim();
+            if trimmed.eq_ignore_ascii_case("all") {
+                "all".to_string()
             } else {
-                (None, false)
+                trimmed.to_string()
+            }
+        });
+
+        let (bitmap_idx, is_new) = if let Some(p) = stored_ports
+            .as_deref()
+            .filter(|p| !p.is_empty() && !p.eq_ignore_ascii_case("all"))
+        {
+            let normalized = normalize_ports(p, action)?;
+
+            if let Some(existing_ps) = self.port_sets.get_mut(&normalized) {
+                existing_ps.ref_count += 1;
+                (Some(existing_ps.bitmap_idx), false)
+            } else {
+                let idx = if let Some(recycled) = self.free_bitmap_indices.pop() {
+                    recycled
+                } else {
+                    if self.next_bitmap_idx >= self.max_port_policies {
+                        return Err(format!(
+                            "Port set limit ({}) reached. Unique port combinations: {}",
+                            self.max_port_policies,
+                            self.port_sets.len()
+                        ));
+                    }
+                    let idx = self.next_bitmap_idx;
+                    self.next_bitmap_idx += 1;
+                    idx
+                };
+                self.port_sets.insert(
+                    normalized.clone(),
+                    PortSetInfo {
+                        bitmap_idx: idx,
+                        ports_normalized: normalized,
+                        ref_count: 1,
+                    },
+                );
+                (Some(idx), true)
             }
         } else {
             (None, false)
@@ -271,7 +279,7 @@ impl FirewallState {
                 }
             }
             existing.action = action;
-            existing.ports = ports.map(|s| s.to_string());
+            existing.ports = stored_ports.clone();
             existing.bitmap_idx = bitmap_idx;
         } else {
             self.rules.push(RuleInfo {
@@ -280,7 +288,7 @@ impl FirewallState {
                 dst_group_id,
                 proto,
                 action,
-                ports: ports.map(|s| s.to_string()),
+                ports: stored_ports,
                 bitmap_idx,
                 direction,
             });
@@ -749,6 +757,20 @@ mod tests {
     fn normalize_ports_rejects_invalid_range_and_action() {
         assert!(normalize_ports("200-100", 0).is_err(), "start>end 应报错");
         assert!(normalize_ports("80:2", 0).is_err(), "action>1 应报错");
+    }
+
+    #[test]
+    fn apply_add_rule_canonicalizes_all_ports_without_bitmap() {
+        let mut state = FirewallState::default();
+
+        let result = state
+            .apply_add_rule(1, 2, 6, 0, Some(" ALL "), 0)
+            .expect("apply_add_rule should accept case-insensitive all");
+
+        assert!(result.bitmap_idx.is_none(), "'all' 不应分配位图");
+        assert!(state.port_sets.is_empty(), "'all' 不应创建 port set");
+        assert_eq!(state.rules.len(), 1);
+        assert_eq!(state.rules[0].ports.as_deref(), Some("all"));
     }
 
     #[test]
