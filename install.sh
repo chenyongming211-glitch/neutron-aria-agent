@@ -10,7 +10,7 @@ CONFIG_DIR="/etc/aria-agent"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
 STATE_DIR="/var/lib/aria-agent"
 LOG_DIR="/var/log/aria-agent"
-LOG_FILE="$LOG_DIR/agent.log"
+LOG_FILE="$LOG_DIR/aria-agent.log"
 LOGROTATE_FILE="/etc/logrotate.d/aria-agent"
 PIN_ROOT="/sys/fs/bpf"
 PIN_DIR="$PIN_ROOT/aria"
@@ -283,7 +283,7 @@ max_port_policies = 16384
 listen_addr = "127.0.0.1:8080"
 log_format = "text"
 log_filter = "info"
-log_file_path = "/var/log/aria-agent/agent.log"
+log_file_path = "/var/log/aria-agent/aria-agent.log"
 EOF
 }
 

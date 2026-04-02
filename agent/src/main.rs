@@ -100,7 +100,7 @@ fn default_log_filter() -> String {
 }
 
 fn default_log_file_path() -> String {
-    "/var/log/aria-agent/agent.log".to_string()
+    "/var/log/aria-agent/aria-agent.log".to_string()
 }
 
 impl Default for Config {

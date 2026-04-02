@@ -132,7 +132,7 @@ pin_path = "/sys/fs/bpf/aria"
 state_path = "/var/lib/aria-agent"
 iface_pattern = "^(eth|tap)"
 max_port_policies = 16384
-log_file_path = "/var/log/aria-agent/agent.log"
+log_file_path = "/var/log/aria-agent/aria-agent.log"
 EOF
 
 # 启动
@@ -144,11 +144,11 @@ sudo aria-agent
 > 而不更新 `aria-agent`，会导致用户态 trace backend 逻辑仍停留在旧版本。
 
 默认情况下，`aria-agent` 日志会同时写入 `journald` 和
-`/var/log/aria-agent/agent.log`。常用查看方式：
+`/var/log/aria-agent/aria-agent.log`。常用查看方式：
 
 ```bash
 journalctl -u aria-agent -f
-tail -f /var/log/aria-agent/agent.log
+tail -f /var/log/aria-agent/aria-agent.log
 ```
 
 API 文档入口：

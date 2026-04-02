@@ -77,7 +77,7 @@ state_path = "/var/lib/aria-agent"
 iface_pattern = "^(eth|tap)"
 max_port_policies = 16384
 listen_addr = "127.0.0.1:8080"
-log_file_path = "/var/log/aria-agent/agent.log"
+log_file_path = "/var/log/aria-agent/aria-agent.log"
 EOF
 ```
 
@@ -112,7 +112,7 @@ EOF
 默认情况下，`aria-agent` 日志会同时写到：
 
 - `journalctl -u aria-agent`
-- `/var/log/aria-agent/agent.log`
+- `/var/log/aria-agent/aria-agent.log`
 
 ### 2.3 启动与版本确认
 
