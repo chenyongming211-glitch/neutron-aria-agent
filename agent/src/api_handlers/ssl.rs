@@ -45,6 +45,19 @@ fn map_ssl_http_events(
     aria_api::SslHttpListResponse { events }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssl",
+    tag = "ssl",
+    summary = "List global SSL connection observations",
+    params(
+        ("top" = Option<usize>, Query, description = "Maximum number of SSL connections to return")
+    ),
+    responses(
+        (status = 200, description = "Global SSL connection observations", body = aria_api::SslListResponse),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_ssl_global(
     State(cp): State<AppState>,
     Query(query): Query<TopQuery>,
@@ -55,6 +68,16 @@ pub async fn list_ssl_global(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/ssl",
+    tag = "ssl",
+    summary = "Flush global SSL connection observations",
+    responses(
+        (status = 200, description = "Flushed SSL connection count", body = aria_api::SslFlushResponse),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn flush_ssl_global(State(cp): State<AppState>) -> impl IntoResponse {
     match cp.flush_ssl_global().await {
         Ok(count) => Ok(Json(aria_api::SslFlushResponse { flushed: count })),
@@ -62,6 +85,21 @@ pub async fn flush_ssl_global(State(cp): State<AppState>) -> impl IntoResponse {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/ssl",
+    tag = "ssl",
+    summary = "List SSL connection observations for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name"),
+        ("top" = Option<usize>, Query, description = "Maximum number of SSL connections to return")
+    ),
+    responses(
+        (status = 200, description = "SSL connection observations", body = aria_api::SslListResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_ssl(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -73,6 +111,20 @@ pub async fn list_ssl(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/{instance}/ssl",
+    tag = "ssl",
+    summary = "Flush SSL connection observations for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Flushed SSL connection count", body = aria_api::SslFlushResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn flush_ssl(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -83,6 +135,19 @@ pub async fn flush_ssl(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssl/http",
+    tag = "ssl",
+    summary = "List global SSL HTTP observations",
+    params(
+        ("top" = Option<usize>, Query, description = "Maximum number of SSL HTTP events to return")
+    ),
+    responses(
+        (status = 200, description = "Global SSL HTTP observations", body = aria_api::SslHttpListResponse),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_ssl_http_global(
     State(cp): State<AppState>,
     Query(query): Query<TopQuery>,
@@ -93,6 +158,16 @@ pub async fn list_ssl_http_global(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/ssl/http",
+    tag = "ssl",
+    summary = "Flush global SSL HTTP observations",
+    responses(
+        (status = 200, description = "Flushed SSL HTTP event count", body = aria_api::SslHttpFlushResponse),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn flush_ssl_http_global(State(cp): State<AppState>) -> impl IntoResponse {
     match cp.flush_ssl_http_global().await {
         Ok(count) => Ok(Json(aria_api::SslHttpFlushResponse { flushed: count })),
@@ -100,6 +175,21 @@ pub async fn flush_ssl_http_global(State(cp): State<AppState>) -> impl IntoRespo
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/ssl/http",
+    tag = "ssl",
+    summary = "List SSL HTTP observations for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name"),
+        ("top" = Option<usize>, Query, description = "Maximum number of SSL HTTP events to return")
+    ),
+    responses(
+        (status = 200, description = "SSL HTTP observations", body = aria_api::SslHttpListResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_ssl_http(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -111,6 +201,20 @@ pub async fn list_ssl_http(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/{instance}/ssl/http",
+    tag = "ssl",
+    summary = "Flush SSL HTTP observations for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Flushed SSL HTTP event count", body = aria_api::SslHttpFlushResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn flush_ssl_http(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -121,6 +225,16 @@ pub async fn flush_ssl_http(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssl/config",
+    tag = "ssl",
+    summary = "Get global SSL observability configuration",
+    responses(
+        (status = 200, description = "Global SSL observability configuration", body = aria_api::SslGlobalConfigResponse),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn get_ssl_config(State(cp): State<AppState>) -> impl IntoResponse {
     match cp.get_ssl_global_config().await {
         Ok(enabled) => Ok(Json(aria_api::SslGlobalConfigResponse { enabled })),
@@ -128,6 +242,18 @@ pub async fn get_ssl_config(State(cp): State<AppState>) -> impl IntoResponse {
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/v1/ssl/config",
+    tag = "ssl",
+    summary = "Update global SSL observability configuration",
+    request_body = aria_api::UpdateSslGlobalConfigRequest,
+    responses(
+        (status = 200, description = "SSL observability configuration updated", body = aria_api::MessageResponse),
+        (status = 400, description = "Validation error", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn update_ssl_config(
     State(cp): State<AppState>,
     Json(req): Json<aria_api::UpdateSslGlobalConfigRequest>,
@@ -143,6 +269,16 @@ pub async fn update_ssl_config(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssl/errors",
+    tag = "ssl",
+    summary = "List SSL error observations",
+    responses(
+        (status = 200, description = "SSL error observations", body = aria_api::SslErrorListResponse),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_ssl_errors(State(cp): State<AppState>) -> impl IntoResponse {
     match cp.get_ssl_errors().await {
         Ok(entries) => {
@@ -164,6 +300,16 @@ pub async fn list_ssl_errors(State(cp): State<AppState>) -> impl IntoResponse {
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/ssl/errors",
+    tag = "ssl",
+    summary = "Flush SSL error observations",
+    responses(
+        (status = 200, description = "Flushed SSL error count", body = aria_api::SslErrorFlushResponse),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn flush_ssl_errors(State(cp): State<AppState>) -> impl IntoResponse {
     match cp.flush_ssl_errors().await {
         Ok(count) => Ok(Json(aria_api::SslErrorFlushResponse { flushed: count })),

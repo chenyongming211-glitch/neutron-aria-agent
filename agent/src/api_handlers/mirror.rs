@@ -15,6 +15,20 @@ use aria_api::{
     MirrorStatsResponse, MirrorWithStatsEntry, MirrorWithStatsResponse,
 };
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/mirror",
+    tag = "mirror",
+    summary = "List mirror rules for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Configured mirror rules", body = MirrorListResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_mirror(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -40,6 +54,22 @@ pub async fn list_mirror(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/{instance}/mirror",
+    tag = "mirror",
+    summary = "Add a mirror rule",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    request_body = AddMirrorRequest,
+    responses(
+        (status = 201, description = "Mirror rule created", body = MessageResponse),
+        (status = 400, description = "Validation error", body = aria_api::ApiError),
+        (status = 404, description = "Instance or group not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn add_mirror(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -99,6 +129,22 @@ pub async fn add_mirror(
     ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/{instance}/mirror",
+    tag = "mirror",
+    summary = "Delete a mirror rule",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    request_body = DeleteMirrorRequest,
+    responses(
+        (status = 200, description = "Mirror rule deleted", body = MessageResponse),
+        (status = 400, description = "Validation error", body = aria_api::ApiError),
+        (status = 404, description = "Instance or mirror rule not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn delete_mirror(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -130,6 +176,20 @@ pub async fn delete_mirror(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/stats/mirror",
+    tag = "mirror",
+    summary = "List mirror statistics",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Mirror statistics", body = MirrorStatsResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn stats_mirror(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -168,6 +228,20 @@ pub async fn stats_mirror(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/mirror/with_stats",
+    tag = "mirror",
+    summary = "List mirror rules with aggregated statistics",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Mirror rules with statistics", body = MirrorWithStatsResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_mirror_with_stats(
     State(cp): State<AppState>,
     Path(instance): Path<String>,

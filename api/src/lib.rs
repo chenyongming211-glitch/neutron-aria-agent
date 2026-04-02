@@ -243,7 +243,7 @@ pub struct DeleteQosRequest {
 
 // ── Conntrack ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ConntrackEntry {
     pub src_ip: String,
     pub dst_ip: String,
@@ -255,20 +255,20 @@ pub struct ConntrackEntry {
     pub bytes: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ConntrackResponse {
     pub connections: Vec<ConntrackEntry>,
     pub total: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ConntrackFlushResponse {
     pub flushed: u64,
 }
 
 // ── Config ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ConfigResponse {
     pub conntrack: bool,
     pub monitoring: bool,
@@ -280,7 +280,7 @@ pub struct ConfigResponse {
     pub num_cpus: u16,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateConfigRequest {
     pub conntrack: Option<bool>,
     pub monitoring: Option<bool>,
@@ -293,7 +293,7 @@ pub struct UpdateConfigRequest {
 
 // ── Stats ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct StatsOverview {
     pub groups: usize,
     pub policies: usize,
@@ -303,7 +303,7 @@ pub struct StatsOverview {
     pub conntrack_v6: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct RuleStatsEntry {
     pub src_group: String,
     pub src_id: u32,
@@ -319,12 +319,12 @@ pub struct RuleStatsEntry {
     pub dropped_bytes: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct RuleStatsResponse {
     pub rules: Vec<RuleStatsEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct FlowEntry {
     pub src_ip: String,
     pub dst_ip: String,
@@ -335,14 +335,14 @@ pub struct FlowEntry {
     pub bytes: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct FlowStatsResponse {
     pub flows: Vec<FlowEntry>,
 }
 
 // --- QoS Statistics ---
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct QosStatsEntry {
     pub group: String,
     pub group_id: u32,
@@ -355,7 +355,7 @@ pub struct QosStatsEntry {
     pub shaped_bytes: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct QosStatsResponse {
     pub rules: Vec<QosStatsEntry>,
 }
@@ -394,7 +394,7 @@ pub struct QosWithStatsResponse {
 
 // --- Per-Group Statistics ---
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct GroupStatsEntry {
     pub group: String,
     pub group_id: u32,
@@ -403,14 +403,14 @@ pub struct GroupStatsEntry {
     pub bytes: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct GroupStatsResponse {
     pub groups: Vec<GroupStatsEntry>,
 }
 
 // ── Mirror ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MirrorEntry {
     pub src_group: String,
     pub src_group_id: u32,
@@ -423,12 +423,12 @@ pub struct MirrorEntry {
     pub is_global: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct MirrorListResponse {
     pub rules: Vec<MirrorEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AddMirrorRequest {
     #[serde(default = "default_any")]
     pub src_group: String,
@@ -448,7 +448,7 @@ fn default_any_proto() -> String {
     "any".to_string()
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DeleteMirrorRequest {
     #[serde(default = "default_any")]
     pub src_group: String,
@@ -459,7 +459,7 @@ pub struct DeleteMirrorRequest {
     pub direction: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct MirrorStatsEntry {
     pub src_group: String,
     pub src_id: u32,
@@ -473,14 +473,14 @@ pub struct MirrorStatsEntry {
     pub is_global: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct MirrorStatsResponse {
     pub rules: Vec<MirrorStatsEntry>,
 }
 
 // ── Mirror with Stats (Aggregation) ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MirrorWithStatsEntry {
     // Mirror configuration
     pub src_group: String,
@@ -501,14 +501,14 @@ pub struct MirrorWithStatsEntry {
     pub errors: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct MirrorWithStatsResponse {
     pub rules: Vec<MirrorWithStatsEntry>,
 }
 
 // ── TCP-RT ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtEntry {
     pub src_ip: String,
     pub dst_ip: String,
@@ -538,17 +538,17 @@ pub struct TcpRtEntry {
     pub nqa_score: u8,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtResponse {
     pub flows: Vec<TcpRtEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtFlushResponse {
     pub flushed: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtQueryTuple {
     pub src_ip: String,
     pub dst_ip: String,
@@ -556,31 +556,31 @@ pub struct TcpRtQueryTuple {
     pub dst_port: u16,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtBatchQueryRequest {
     pub tuples: Vec<TcpRtQueryTuple>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtInstanceEntry {
     pub instance: String,
     pub entry: TcpRtEntry,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtBatchQueryResponse {
     pub results: Vec<TcpRtInstanceEntry>,
 }
 
 // ── TCP-RT Filter (by service address) ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtFilterRequest {
     pub dst_ip: String,
     pub dst_port: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtAggregatedEntry {
     pub instance: String,
     pub flow_count: u32,
@@ -600,7 +600,7 @@ pub struct TcpRtAggregatedEntry {
     pub avg_nqa_score: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtFilterResponse {
     pub dst_ip: String,
     pub dst_port: u16,
@@ -609,13 +609,13 @@ pub struct TcpRtFilterResponse {
 
 // ── TCP-RT Histogram ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtHistogramBucket {
     pub le_us: f64,
     pub count: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtHistogramResponse {
     pub buckets: Vec<TcpRtHistogramBucket>,
     pub total: u64,
@@ -627,13 +627,13 @@ pub struct TcpRtHistogramResponse {
 
 // ── TCP-RT States ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtStateCount {
     pub state: String,
     pub count: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TcpRtStatesResponse {
     pub states: Vec<TcpRtStateCount>,
     pub total_flows: u64,
@@ -642,20 +642,20 @@ pub struct TcpRtStatesResponse {
 
 // ── Service Chain ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TapBindingEntry {
     pub tap: String,
     pub role: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ServiceHopEntry {
     pub name: String,
     pub hop_type: String,
     pub taps: Vec<TapBindingEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ServiceChainEntry {
     pub name: String,
     #[serde(default)]
@@ -663,12 +663,12 @@ pub struct ServiceChainEntry {
     pub hops: Vec<ServiceHopEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ServiceChainListResponse {
     pub chains: Vec<ServiceChainEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateServiceChainRequest {
     pub name: String,
     #[serde(default)]
@@ -678,7 +678,7 @@ pub struct CreateServiceChainRequest {
 
 // ── Drop Reason Profiler ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DropStatsEntry {
     pub reason: String,
     pub direction: String,
@@ -691,19 +691,19 @@ pub struct DropStatsEntry {
     pub bytes: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DropStatsResponse {
     pub drops: Vec<DropStatsEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DropFlushResponse {
     pub flushed: u64,
 }
 
 // ── Kernel Drop Observability ──
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
 pub struct KernelDropQuery {
     pub instance: Option<String>,
     pub iface: Option<String>,
@@ -714,7 +714,7 @@ pub struct KernelDropQuery {
     pub include_unattributed: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct KernelDropStatsEntry {
     pub instance: Option<String>,
     pub iface: Option<String>,
@@ -731,19 +731,19 @@ pub struct KernelDropStatsEntry {
     pub source: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct KernelDropStatsResponse {
     pub drops: Vec<KernelDropStatsEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct KernelDropFlushResponse {
     pub flushed: u64,
 }
 
 // ── Packet Trace ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TraceStartRequest {
     #[serde(default)]
     pub src_ip: String,
@@ -757,7 +757,7 @@ pub struct TraceStartRequest {
     pub proto: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TraceEventEntry {
     pub seq: u64,
     pub timestamp: u64,
@@ -778,12 +778,12 @@ pub struct TraceEventEntry {
     pub drop_reason: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TraceResponse {
     pub events: Vec<TraceEventEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TraceFlushResponse {
     pub flushed: u64,
 }
@@ -792,7 +792,7 @@ pub struct TraceFlushResponse {
 
 // ── SSL Observability ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SslConnEntry {
     pub seq: u64,
     pub pid: u32,
@@ -802,19 +802,19 @@ pub struct SslConnEntry {
     pub sni: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SslListResponse {
     pub connections: Vec<SslConnEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SslFlushResponse {
     pub flushed: u64,
 }
 
 // ── SSL HTTP Observability ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SslHttpEntry {
     pub seq: u64,
     pub pid: u32,
@@ -828,12 +828,12 @@ pub struct SslHttpEntry {
     pub response_ts: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SslHttpListResponse {
     pub events: Vec<SslHttpEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SslHttpFlushResponse {
     pub flushed: u64,
 }
@@ -841,19 +841,19 @@ pub struct SslHttpFlushResponse {
 // ── Global SSL Observability Config ──
 // SSL uprobe is process-level, not tied to any network interface
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SslGlobalConfigResponse {
     pub enabled: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateSslGlobalConfigRequest {
     pub enabled: bool,
 }
 
 // ── SSL Error Events ──
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SslErrorEntry {
     pub seq: u64,
     pub pid: u32,
@@ -864,12 +864,12 @@ pub struct SslErrorEntry {
     pub error_hint: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SslErrorListResponse {
     pub errors: Vec<SslErrorEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SslErrorFlushResponse {
     pub flushed: u64,
 }

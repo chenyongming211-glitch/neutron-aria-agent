@@ -12,6 +12,22 @@ use super::{
 use crate::control_plane::ControlPlaneError;
 use aria_api::{proto_from_string, proto_to_string, MessageResponse};
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/{instance}/trace",
+    tag = "trace",
+    summary = "Start packet tracing for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    request_body = aria_api::TraceStartRequest,
+    responses(
+        (status = 200, description = "Trace started", body = MessageResponse),
+        (status = 400, description = "Validation error", body = aria_api::ApiError),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn start_trace(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -99,6 +115,20 @@ pub async fn start_trace(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/{instance}/trace",
+    tag = "trace",
+    summary = "Stop packet tracing for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Trace stopped", body = MessageResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn stop_trace(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -111,6 +141,21 @@ pub async fn stop_trace(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/trace",
+    tag = "trace",
+    summary = "List packet trace events for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name"),
+        ("top" = Option<usize>, Query, description = "Maximum number of trace events to return")
+    ),
+    responses(
+        (status = 200, description = "Trace events", body = aria_api::TraceResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_trace(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -157,6 +202,20 @@ pub async fn list_trace(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/{instance}/trace/flush",
+    tag = "trace",
+    summary = "Flush packet trace events for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Flushed trace event count", body = aria_api::TraceFlushResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn flush_trace(
     State(cp): State<AppState>,
     Path(instance): Path<String>,

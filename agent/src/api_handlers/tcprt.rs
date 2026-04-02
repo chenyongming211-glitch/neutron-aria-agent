@@ -35,6 +35,21 @@ fn map_tcprt_entry(e: aria_core::tcprt_ops::TcpRtEntry) -> aria_api::TcpRtEntry 
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/tcprt",
+    tag = "tcprt",
+    summary = "List TCP-RT flow records for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name"),
+        ("top" = Option<usize>, Query, description = "Maximum number of TCP-RT flows to return")
+    ),
+    responses(
+        (status = 200, description = "TCP-RT flow records", body = aria_api::TcpRtResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_tcprt(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -49,6 +64,20 @@ pub async fn list_tcprt(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/{instance}/tcprt",
+    tag = "tcprt",
+    summary = "Flush TCP-RT flow records for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Flushed TCP-RT record count", body = aria_api::TcpRtFlushResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn flush_tcprt(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -59,6 +88,18 @@ pub async fn flush_tcprt(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/tcprt/query",
+    tag = "tcprt",
+    summary = "Batch query TCP-RT tuples across instances",
+    request_body = aria_api::TcpRtBatchQueryRequest,
+    responses(
+        (status = 200, description = "TCP-RT entries matched across instances", body = aria_api::TcpRtBatchQueryResponse),
+        (status = 400, description = "Validation error", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn batch_query_tcprt(
     State(cp): State<AppState>,
     Json(req): Json<aria_api::TcpRtBatchQueryRequest>,
@@ -83,6 +124,18 @@ pub async fn batch_query_tcprt(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/tcprt/filter",
+    tag = "tcprt",
+    summary = "Aggregate TCP-RT metrics by service address",
+    request_body = aria_api::TcpRtFilterRequest,
+    responses(
+        (status = 200, description = "Aggregated TCP-RT metrics by instance", body = aria_api::TcpRtFilterResponse),
+        (status = 400, description = "Validation error", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn filter_tcprt(
     State(cp): State<AppState>,
     Json(req): Json<aria_api::TcpRtFilterRequest>,
@@ -134,6 +187,20 @@ pub async fn filter_tcprt(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/tcprt/histogram",
+    tag = "tcprt",
+    summary = "Get TCP-RT ART histogram for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "TCP-RT ART histogram", body = aria_api::TcpRtHistogramResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn tcprt_histogram(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -200,6 +267,20 @@ pub async fn tcprt_histogram(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/tcprt/states",
+    tag = "tcprt",
+    summary = "Get TCP-RT state distribution for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "TCP-RT state distribution", body = aria_api::TcpRtStatesResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn tcprt_states(
     State(cp): State<AppState>,
     Path(instance): Path<String>,

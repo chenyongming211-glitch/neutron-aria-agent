@@ -13,6 +13,20 @@ use aria_api::{
     QosStatsResponse, RuleStatsResponse, StatsOverview,
 };
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/stats",
+    tag = "stats",
+    summary = "Get statistics overview for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Statistics overview", body = StatsOverview),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn stats_overview(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -30,6 +44,20 @@ pub async fn stats_overview(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/stats/rules",
+    tag = "stats",
+    summary = "List policy rule statistics",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Rule statistics", body = RuleStatsResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn stats_rules(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -68,6 +96,21 @@ pub async fn stats_rules(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/stats/flows",
+    tag = "stats",
+    summary = "List top flow statistics",
+    params(
+        ("instance" = String, Path, description = "Managed instance name"),
+        ("top" = Option<usize>, Query, description = "Maximum number of flow entries to return")
+    ),
+    responses(
+        (status = 200, description = "Top flow statistics", body = FlowStatsResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn stats_flows(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -104,6 +147,20 @@ pub async fn stats_flows(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/stats/qos",
+    tag = "stats",
+    summary = "List QoS statistics",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "QoS statistics", body = QosStatsResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn stats_qos(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -141,6 +198,20 @@ pub async fn stats_qos(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/stats/groups",
+    tag = "stats",
+    summary = "List group statistics",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Group statistics", body = GroupStatsResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn stats_groups(
     State(cp): State<AppState>,
     Path(instance): Path<String>,

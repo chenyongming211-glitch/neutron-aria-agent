@@ -8,6 +8,16 @@ use axum::{
 use super::common::{err_response, AppState};
 use crate::control_plane::ControlPlaneError;
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/chains",
+    tag = "chains",
+    summary = "List service chains",
+    responses(
+        (status = 200, description = "Configured service chains", body = aria_api::ServiceChainListResponse),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_chains(State(cp): State<AppState>) -> impl IntoResponse {
     let chains = cp.list_chains().await;
     Json(aria_api::ServiceChainListResponse {
@@ -37,6 +47,19 @@ pub async fn list_chains(State(cp): State<AppState>) -> impl IntoResponse {
     })
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/chains",
+    tag = "chains",
+    summary = "Create a service chain",
+    request_body = aria_api::CreateServiceChainRequest,
+    responses(
+        (status = 201, description = "Service chain created", body = aria_api::MessageResponse),
+        (status = 400, description = "Validation error", body = aria_api::ApiError),
+        (status = 409, description = "Service chain already exists", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn create_chain(
     State(cp): State<AppState>,
     Json(req): Json<aria_api::CreateServiceChainRequest>,
@@ -101,6 +124,20 @@ pub async fn create_chain(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/chains/{name}",
+    tag = "chains",
+    summary = "Get a service chain by name",
+    params(
+        ("name" = String, Path, description = "Service chain name")
+    ),
+    responses(
+        (status = 200, description = "Service chain details", body = aria_api::ServiceChainEntry),
+        (status = 404, description = "Service chain not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn get_chain(State(cp): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     match cp.get_chain(&name).await {
         Ok(c) => Ok(Json(aria_api::ServiceChainEntry {
@@ -127,6 +164,20 @@ pub async fn get_chain(State(cp): State<AppState>, Path(name): Path<String>) -> 
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/chains/{name}",
+    tag = "chains",
+    summary = "Delete a service chain",
+    params(
+        ("name" = String, Path, description = "Service chain name")
+    ),
+    responses(
+        (status = 200, description = "Service chain deleted", body = aria_api::MessageResponse),
+        (status = 404, description = "Service chain not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn delete_chain(
     State(cp): State<AppState>,
     Path(name): Path<String>,

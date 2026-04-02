@@ -7,6 +7,22 @@ use axum::{
 use super::common::{err_response, legacy_drop_headers, AppState};
 use aria_api::{direction_to_string, proto_to_string};
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/stats/drops",
+    tag = "drops",
+    summary = "List legacy drop statistics for an instance",
+    description = "Deprecated legacy drop statistics endpoint. Prefer /api/v1/stats/kernel_drops for kernel-attributed drops.",
+    deprecated,
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Legacy drop statistics", body = aria_api::DropStatsResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_drops(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -47,6 +63,22 @@ pub async fn list_drops(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/{instance}/stats/drops",
+    tag = "drops",
+    summary = "Flush legacy drop statistics for an instance",
+    description = "Deprecated legacy drop statistics endpoint. Prefer /api/v1/stats/kernel_drops for kernel-attributed drops.",
+    deprecated,
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Flushed legacy drop statistics count", body = aria_api::DropFlushResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn flush_drops(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -60,6 +92,25 @@ pub async fn flush_drops(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats/kernel_drops",
+    tag = "drops",
+    summary = "List kernel-attributed drop statistics",
+    params(
+        ("instance" = Option<String>, Query, description = "Filter by managed instance name"),
+        ("iface" = Option<String>, Query, description = "Filter by interface name"),
+        ("ifindex" = Option<u32>, Query, description = "Filter by interface index"),
+        ("reason" = Option<u16>, Query, description = "Filter by kernel drop reason code"),
+        ("top" = Option<usize>, Query, description = "Maximum number of drop records to return"),
+        ("include_unattributed" = Option<bool>, Query, description = "Include drops that cannot be mapped to a managed instance")
+    ),
+    responses(
+        (status = 200, description = "Kernel-attributed drop statistics", body = aria_api::KernelDropStatsResponse),
+        (status = 400, description = "Validation error", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_kernel_drops(
     State(cp): State<AppState>,
     Query(query): Query<aria_api::KernelDropQuery>,
@@ -70,6 +121,25 @@ pub async fn list_kernel_drops(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/stats/kernel_drops",
+    tag = "drops",
+    summary = "Flush kernel-attributed drop statistics",
+    params(
+        ("instance" = Option<String>, Query, description = "Filter by managed instance name"),
+        ("iface" = Option<String>, Query, description = "Filter by interface name"),
+        ("ifindex" = Option<u32>, Query, description = "Filter by interface index"),
+        ("reason" = Option<u16>, Query, description = "Filter by kernel drop reason code"),
+        ("top" = Option<usize>, Query, description = "Maximum number of drop records to target"),
+        ("include_unattributed" = Option<bool>, Query, description = "Include drops that cannot be mapped to a managed instance")
+    ),
+    responses(
+        (status = 200, description = "Flushed kernel drop statistics count", body = aria_api::KernelDropFlushResponse),
+        (status = 400, description = "Validation error", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn flush_kernel_drops(
     State(cp): State<AppState>,
     Query(query): Query<aria_api::KernelDropQuery>,

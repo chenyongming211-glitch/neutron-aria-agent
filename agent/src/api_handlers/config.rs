@@ -7,6 +7,20 @@ use axum::{
 use super::common::{err_response, AppState};
 use aria_api::{ConfigResponse, MessageResponse, UpdateConfigRequest};
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/config",
+    tag = "config",
+    summary = "Get instance feature configuration",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Current instance configuration", body = ConfigResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn get_config(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -26,6 +40,22 @@ pub async fn get_config(
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/v1/{instance}/config",
+    tag = "config",
+    summary = "Update instance feature configuration",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    request_body = UpdateConfigRequest,
+    responses(
+        (status = 200, description = "Configuration updated", body = MessageResponse),
+        (status = 400, description = "Validation error", body = aria_api::ApiError),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn update_config(
     State(cp): State<AppState>,
     Path(instance): Path<String>,

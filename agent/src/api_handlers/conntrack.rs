@@ -7,6 +7,20 @@ use axum::{
 use super::common::{err_response, AppState};
 use aria_api::{proto_to_string, ConntrackEntry, ConntrackFlushResponse, ConntrackResponse};
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/{instance}/conntrack",
+    tag = "conntrack",
+    summary = "List conntrack entries for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Conntrack table contents", body = ConntrackResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn list_conntrack(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
@@ -37,6 +51,20 @@ pub async fn list_conntrack(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/{instance}/conntrack",
+    tag = "conntrack",
+    summary = "Flush conntrack entries for an instance",
+    params(
+        ("instance" = String, Path, description = "Managed instance name")
+    ),
+    responses(
+        (status = 200, description = "Flushed conntrack entry count", body = ConntrackFlushResponse),
+        (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 500, description = "Internal server error", body = aria_api::ApiError)
+    )
+)]
 pub async fn flush_conntrack(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
