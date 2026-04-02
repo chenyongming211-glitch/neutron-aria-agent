@@ -13,7 +13,6 @@ use aria_api::{direction_to_string, proto_to_string};
     tag = "drops",
     summary = "List legacy drop statistics for an instance",
     description = "Deprecated legacy drop statistics endpoint. Prefer /api/v1/stats/kernel_drops for kernel-attributed drops.",
-    deprecated,
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
@@ -69,7 +68,6 @@ pub async fn list_drops(
     tag = "drops",
     summary = "Flush legacy drop statistics for an instance",
     description = "Deprecated legacy drop statistics endpoint. Prefer /api/v1/stats/kernel_drops for kernel-attributed drops.",
-    deprecated,
     params(
         ("instance" = String, Path, description = "Managed instance name")
     ),
