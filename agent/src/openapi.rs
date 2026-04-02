@@ -3,23 +3,23 @@ use utoipa::OpenApi;
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        crate::api_handlers::health,
-        crate::api_handlers::list_instances,
-        crate::api_handlers::system_start,
-        crate::api_handlers::system_stop,
-        crate::api_handlers::list_groups,
-        crate::api_handlers::add_group,
-        crate::api_handlers::delete_group,
-        crate::api_handlers::list_groups_with_stats,
-        crate::api_handlers::list_policies,
-        crate::api_handlers::add_policy,
-        crate::api_handlers::delete_policy,
-        crate::api_handlers::list_policies_with_stats,
-        crate::api_handlers::batch_add_policies,
-        crate::api_handlers::list_qos,
-        crate::api_handlers::add_qos,
-        crate::api_handlers::delete_qos,
-        crate::api_handlers::list_qos_with_stats
+        crate::api_handlers::health::health,
+        crate::api_handlers::system::list_instances,
+        crate::api_handlers::system::system_start,
+        crate::api_handlers::system::system_stop,
+        crate::api_handlers::groups::list_groups,
+        crate::api_handlers::groups::add_group,
+        crate::api_handlers::groups::delete_group,
+        crate::api_handlers::groups::list_groups_with_stats,
+        crate::api_handlers::policies::list_policies,
+        crate::api_handlers::policies::add_policy,
+        crate::api_handlers::policies::delete_policy,
+        crate::api_handlers::policies::list_policies_with_stats,
+        crate::api_handlers::policies::batch_add_policies,
+        crate::api_handlers::qos::list_qos,
+        crate::api_handlers::qos::add_qos,
+        crate::api_handlers::qos::delete_qos,
+        crate::api_handlers::qos::list_qos_with_stats
     ),
     components(
         schemas(
