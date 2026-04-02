@@ -130,10 +130,10 @@ pub fn attach_tracepoint_if_needed(
     category: &str,
     name: &str,
     pin_path: &str,
-) -> Result<(), String> {
+) -> Result<Option<aya::programs::trace_point::TracePointLink>, String> {
     let link_pin = format!("{}/{}", pin_path, KERNEL_DROP_LINK_NAME);
     if Path::new(&link_pin).exists() {
-        return Ok(());
+        return Ok(None);
     }
 
     let program = tracepoint_program(bpf, prog_name)?;
@@ -154,14 +154,17 @@ pub fn attach_tracepoint_if_needed(
     let link = program
         .take_link(link_id)
         .map_err(|e| format!("{} take_link: {:?}", prog_name, e))?;
-    let fd_link: aya::programs::links::FdLink = link
-        .try_into()
-        .map_err(|e: aya::programs::links::LinkError| format!("{} FdLink: {:?}", prog_name, e))?;
-    fd_link
-        .pin(&link_pin)
-        .map_err(|e| format!("{} pin link: {:?}", prog_name, e))?;
-
-    Ok(())
+    if aya::features().bpf_perf_link() {
+        let fd_link: aya::programs::links::FdLink = link
+            .try_into()
+            .map_err(|e: aya::programs::links::LinkError| format!("{} FdLink: {:?}", prog_name, e))?;
+        fd_link
+            .pin(&link_pin)
+            .map_err(|e| format!("{} pin link: {:?}", prog_name, e))?;
+        Ok(None)
+    } else {
+        Ok(Some(link))
+    }
 }
 
 pub fn replace_pinned_tracepoint_link(
@@ -170,7 +173,7 @@ pub fn replace_pinned_tracepoint_link(
     category: &str,
     name: &str,
     pin_path: &str,
-) -> Result<(), String> {
+) -> Result<Option<aya::programs::trace_point::TracePointLink>, String> {
     let link_pin = format!("{}/{}", pin_path, KERNEL_DROP_LINK_NAME);
     let program = tracepoint_program(bpf, prog_name)?;
     match program.load() {
@@ -183,7 +186,7 @@ pub fn replace_pinned_tracepoint_link(
         }
     }
 
-    if Path::new(&link_pin).exists() {
+    if aya::features().bpf_perf_link() && Path::new(&link_pin).exists() {
         std::fs::remove_file(&link_pin)
             .map_err(|e| format!("{} remove old link {}: {}", prog_name, link_pin, e))?;
     }
@@ -195,14 +198,17 @@ pub fn replace_pinned_tracepoint_link(
     let link = program
         .take_link(link_id)
         .map_err(|e| format!("{} take_link: {:?}", prog_name, e))?;
-    let fd_link: aya::programs::links::FdLink = link
-        .try_into()
-        .map_err(|e: aya::programs::links::LinkError| format!("{} FdLink: {:?}", prog_name, e))?;
-    fd_link
-        .pin(&link_pin)
-        .map_err(|e| format!("{} pin link: {:?}", prog_name, e))?;
-
-    Ok(())
+    if aya::features().bpf_perf_link() {
+        let fd_link: aya::programs::links::FdLink = link
+            .try_into()
+            .map_err(|e: aya::programs::links::LinkError| format!("{} FdLink: {:?}", prog_name, e))?;
+        fd_link
+            .pin(&link_pin)
+            .map_err(|e| format!("{} pin link: {:?}", prog_name, e))?;
+        Ok(None)
+    } else {
+        Ok(Some(link))
+    }
 }
 
 pub fn resolve_kernel_drop_config() -> Result<(KernelDropConfig, std::collections::HashMap<u16, String>), String> {

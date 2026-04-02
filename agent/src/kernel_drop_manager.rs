@@ -44,6 +44,8 @@ struct KernelDropManagerState {
     managed_ifaces: HashMap<u32, u32>,
     last_error: Option<String>,
     reason_names: HashMap<u16, String>,
+    links_attached: bool,
+    active_links: Vec<aya::programs::trace_point::TracePointLink>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +267,8 @@ impl KernelDropManager {
                 managed_ifaces: HashMap::new(),
                 last_error: None,
                 reason_names: HashMap::new(),
+                links_attached: false,
+                active_links: Vec::new(),
             }),
             kallsyms,
         }
@@ -279,14 +283,18 @@ impl KernelDropManager {
         let recovery_snapshot_authoritative =
             self.seed_recovered_managed_ifaces(&mut state.managed_ifaces)?;
         let need_core_init = !state.loaded || !self.core_pins_ready();
-        let need_link_init = !state.loaded || !self.link_pins_ready();
+        let need_link_init = if aya::features().bpf_perf_link() {
+            !state.loaded || !self.link_pins_ready()
+        } else {
+            !state.loaded || !state.links_attached
+        };
 
         if !need_core_init && !need_link_init {
             return Ok(());
         }
 
         match self.load_impl() {
-            Ok((mode, reason_names)) => {
+            Ok(runtime) => {
                 if let Err(e) = self
                     .sync_all_managed_ifaces(&state.managed_ifaces, recovery_snapshot_authoritative)
                 {
@@ -294,12 +302,16 @@ impl KernelDropManager {
                     return Err(e);
                 }
                 state.loaded = true;
-                state.mode = mode;
-                state.reason_names = reason_names;
+                state.mode = runtime.mode;
+                state.reason_names = runtime.reason_names;
+                state.links_attached = runtime.links_attached;
+                state.active_links = runtime.active_links;
                 state.last_error = None;
             }
             Err(e) => {
                 state.loaded = false;
+                state.links_attached = false;
+                state.active_links.clear();
                 state.last_error = Some(e.clone());
                 return Err(e);
             }
@@ -397,7 +409,7 @@ impl KernelDropManager {
         }
     }
 
-    fn load_impl(&self) -> Result<(KernelDropMode, HashMap<u16, String>), String> {
+    fn load_impl(&self) -> Result<LoadedKernelDropRuntime, String> {
         std::fs::create_dir_all(&self.pin_path)
             .map_err(|e| format!("create kernel-drop pin dir {}: {}", self.pin_path, e))?;
 
@@ -423,7 +435,7 @@ impl KernelDropManager {
 
         load_tracepoint_program(&mut bpf, KERNEL_DROP_PROGRAM_NAME)?;
         replace_pinned_program(&mut bpf, KERNEL_DROP_PROGRAM_NAME, &self.pin_path)?;
-        replace_pinned_tracepoint_link(
+        let active_link = replace_pinned_tracepoint_link(
             &mut bpf,
             KERNEL_DROP_PROGRAM_NAME,
             KERNEL_DROP_TRACEPOINT_CATEGORY,
@@ -438,7 +450,17 @@ impl KernelDropManager {
             KernelDropMode::KfreeSkbLegacy
         };
 
-        Ok((mode, reason_names))
+        let mut active_links = Vec::new();
+        if let Some(link) = active_link {
+            active_links.push(link);
+        }
+
+        Ok(LoadedKernelDropRuntime {
+            mode,
+            reason_names,
+            links_attached: true,
+            active_links,
+        })
     }
 
     fn load_bpf_with_pins(&self, bpf_bytes: &[u8]) -> Result<aya::Ebpf, String> {
@@ -812,4 +834,11 @@ impl KernelDropManager {
         map.remove(&ifindex)
             .map_err(|e| format!("remove MANAGED_IFINDEX_FILTER {}: {:?}", ifindex, e))
     }
+}
+
+struct LoadedKernelDropRuntime {
+    mode: KernelDropMode,
+    reason_names: HashMap<u16, String>,
+    links_attached: bool,
+    active_links: Vec<aya::programs::trace_point::TracePointLink>,
 }
