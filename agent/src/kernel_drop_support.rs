@@ -33,14 +33,15 @@ const BTF_KIND_VAR: u32 = 14;
 const BTF_KIND_DATASEC: u32 = 15;
 const BTF_KIND_ENUM64: u32 = 19;
 
-pub fn pin_map_if_needed(
+pub fn replace_pinned_map(
     bpf: &mut aya::Ebpf,
     map_name: &str,
     pin_path: &str,
 ) -> Result<(), String> {
     let target = format!("{}/{}", pin_path, map_name);
     if Path::new(&target).exists() {
-        return Ok(());
+        std::fs::remove_file(&target)
+            .map_err(|e| format!("{} remove old pin {}: {}", map_name, target, e))?;
     }
 
     let map = bpf

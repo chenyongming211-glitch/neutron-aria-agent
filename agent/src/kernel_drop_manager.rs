@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use crate::control_plane::MANAGED_SHARED_PIN_NAMESPACE;
 use crate::kernel_drop_support::{
-    load_tracepoint_program, pin_map_if_needed, replace_pinned_program,
+    load_tracepoint_program, replace_pinned_map, replace_pinned_program,
     replace_pinned_tracepoint_link, resolve_kernel_drop_config, KERNEL_DROP_LINK_NAME,
     KERNEL_DROP_MAP_NAMES, KERNEL_DROP_PROGRAM_NAME, KERNEL_DROP_TRACEPOINT_CATEGORY,
     KERNEL_DROP_TRACEPOINT_NAME,
@@ -414,7 +414,10 @@ impl KernelDropManager {
         let mut bpf = self.load_bpf_with_pins(&bpf_bytes)?;
 
         for map_name in KERNEL_DROP_MAP_NAMES {
-            pin_map_if_needed(&mut bpf, map_name, &self.pin_path)?;
+            // Always repin the maps from the currently loaded runtime so the
+            // tracepoint program and the userspace control plane never drift
+            // onto different kernel-drop map generations.
+            replace_pinned_map(&mut bpf, map_name, &self.pin_path)?;
         }
         self.store_kernel_drop_config(&config)?;
 
