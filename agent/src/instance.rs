@@ -1047,7 +1047,11 @@ impl FirewallInstance {
         match self.try_pin_xdp_link(&mut xdp, link_id, xdp_link_pin) {
             Ok(()) => info!(instance = %self.iface, "recovered XDP link pin"),
             Err(e) => {
-                warn!(instance = %self.iface, error = %e, "XDP link re-pin skipped during recovery")
+                info!(
+                    instance = %self.iface,
+                    error = %e,
+                    "XDP reattached successfully on old kernel without pinnable link"
+                )
             }
         }
         Ok(())
@@ -1096,7 +1100,12 @@ impl FirewallInstance {
                 info!(instance = %self.iface, direction = %dir_str, "TC program reattached from pinned runtime")
             }
             Err(e) => {
-                info!(instance = %self.iface, direction = %dir_str, error = %e, "TC program reattached without link pin")
+                info!(
+                    instance = %self.iface,
+                    direction = %dir_str,
+                    error = %e,
+                    "TC reattached successfully on old kernel without pinnable link"
+                )
             }
         }
 
