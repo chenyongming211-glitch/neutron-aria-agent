@@ -172,9 +172,26 @@ cargo install bpf-linker
 cargo build --release
 ```
 
+## 使用指南（按场景）
+
+- [快速开始](#快速开始)
+- [实例与部署模式](#实例与部署模式)
+- [ACL 防火墙](#acl-防火墙)
+- [QoS 限速](#qos-限速)
+- [端口镜像](#端口镜像)
+- [连接诊断](#连接诊断)
+- [丢包定位](#丢包定位)
+- [包级追踪](#包级追踪)
+- [SSL/TLS 观测](#ssltls-观测)
+- [监控与统计](#监控与统计)
+- [连接跟踪](#连接跟踪)
+- [运行时恢复与运维](#运行时恢复与运维)
+
 ## 快速开始
 
-### 1. 启动 Agent
+这一章适合第一次把 agent 跑起来、确认接口已经被托管，并完成最小可用的策略配置。建议先在隔离测试接口上走完这一章，再进入后面的专项功能章节。
+
+### 启动 Agent
 
 ```bash
 # 前台运行（调试）
@@ -186,7 +203,9 @@ sudo systemctl start aria-agent
 
 Agent 启动后自动扫描匹配 `iface_pattern` 的网卡并挂载 eBPF 程序。
 
-### 2. IP 组管理
+### IP 组管理
+
+IP 组是 ACL、QoS、Mirror 这些能力的共同基础。通常先把“业务角色”整理成组，例如 `web`、`db`、`cache`，后面的策略会更清晰，也更容易复用。
 
 ```bash
 # 添加 IP 组
@@ -197,7 +216,18 @@ ariactl --tap eth0 group add --name db --cidr 192.168.1.0/24
 ariactl --tap eth0 group list
 ```
 
-### 3. ACL 策略（`ariactl policy`）
+## 实例与部署模式
+
+这一章主要解决“这个命令到底作用在哪个接口实例上”。开始做功能验证前，建议先明确自己是在操作单个托管实例，还是在操作 `system` 实例。
+
+- `tap` / `veth` / `eth` 等匹配 `iface_pattern` 的接口会被自动发现并独立托管
+- 默认通过 `--tap <iface>` 对指定实例操作；省略 `--tap` 时默认操作 `system` 实例
+- 建议线上验证时使用新建的隔离 `tap + netns`，避免直接绑定现网接口
+- `ariactl instances` 和 `ariactl health` 可用于查看实例状态与运行健康
+
+## ACL 防火墙
+
+这一章适合回答“哪些流量应该放、哪些流量应该拦”。通常做法是先建组，再从最关键的业务访问关系开始写 allow / drop 规则，最后再结合 `with-stats` 看是否按预期命中。
 
 产品能力上通常叫 ACL，但 CLI 子命令实际是 `ariactl policy`。除特别说明外，规则默认作用在 `--tap` 指定实例上；省略 `--tap` 时默认操作 `system` 实例。
 
@@ -248,6 +278,12 @@ ariactl --tap eth0 policy delete \
 
 批量导入支持 JSON 文件或标准输入。`direction` 必须写成 `ingress` 或 `egress`；如果同一规则要双向生效，请写两条。
 
+注意：
+
+- 大批量策略建议按 chunk 分批导入，不要一次塞入过大的 JSON 文件
+- 带 `ports` 的规则除了受总规则容量影响，还受 `max_port_policies` 限制；它限制的是“唯一端口组合”的数量，不是总规则数
+- 如果多个规则复用同一组端口组合（例如都使用 `80,443`），会复用同一个端口集额度
+
 ```bash
 cat <<'EOF' > policies.json
 {
@@ -275,7 +311,9 @@ EOF
 ariactl --tap eth0 policy batch --file policies.json
 ```
 
-### 4. QoS 限速（`ariactl qos`）
+## QoS 限速
+
+这一章适合回答“某一类流量应该限制到多少带宽”。如果你的目标是保护链路、限制突发、或者给不同业务做带宽隔离，通常从这里开始；先做 `policing`，需要更平滑的发送控制时再考虑 `shaping`。
 
 QoS 用于按 IP 组做带宽约束，支持：
 
@@ -316,7 +354,9 @@ ariactl --tap eth0 qos with-stats
 ariactl --tap eth0 qos delete --group web --direction egress
 ```
 
-### 5. 端口镜像（`ariactl mirror`）
+## 端口镜像
+
+这一章适合回答“我要把哪类流量复制到分析口”。常见场景是把某个业务流、某个方向的报文，或者整类入口流量镜像到抓包/分析接口，而不改变原始转发路径。
 
 Mirror 用于把符合条件的报文镜像到目标接口，支持按源组、目的组、协议和方向过滤。
 
@@ -351,7 +391,14 @@ ariactl --tap eth0 mirror delete \
 
 `mirror with-stats` 会额外显示镜像报文数、字节数和错误计数。
 
-### 6. 业务延迟分析（`ariactl tcprt`）
+## 连接诊断
+当你面对“连接慢、延迟高、重传多、用户侧感知不稳定”这类问题时，建议先从这一章开始：
+
+- 先用 `ariactl tcprt` 看 TCP 握手、双向 RTT、应用响应时间
+- 再用 `ariactl diagnose` 做一次跨 TCP / SSL / HTTP / kernel drop 的汇总诊断
+- 如果确认是丢包或路径问题，再转到后面的“丢包定位”和“包级追踪”
+
+### 业务延迟分析（`ariactl tcprt`）
 
 TCP-RT 负责做业务延迟可观测，自动采集：
 
@@ -448,26 +495,47 @@ chain.json 示例：
 ariactl tcprt flow --dst 10.0.0.5 --dport 3306 --chain prod-chain
 ```
 
-### 7. 丢包溯源（`ariactl trace`）
+## 包级追踪
+这一章适合回答“这一个包到底经过了哪里、在哪一步被放行或丢弃”。它更偏单包、实时、定位路径。
+
+- 如果你已经怀疑是 ACL / XDP / TC 某一步拦截，优先用 `trace`
+- 如果你更关心“内核整体为什么在丢包”，先看下一章的 `drops`
+- 如果你想做长期统计和 Top-N 汇总，去“监控与统计”
+
+### 丢包溯源（`ariactl trace`）
 
 `trace` 用于实时包级别追踪，支持 IPv4 和 IPv6。当前 CLI 只有一个子命令：`start`。
 
-需要注意的是，`trace start` 使用自己的 `--tap` 参数，而不是全局 `--tap`：
+`trace` 是按需启动、按需停止的临时追踪功能，不是常驻采集。推荐按下面的排障路径使用：
+
+1. 先不指定 `--tap`，对当前节点上所有 active 实例做一次跨实例追踪，快速判断问题流量大致落在哪些实例
+2. 再带上业务 `src/dst/proto/sport/dport` 缩小范围，确认是哪个业务流、哪个方向有异常
+3. 最后如果已经定位到某个实例，再用 `trace start --tap <iface>` 做单实例详细追踪
+4. 如果已经定义了 service chain，可以再结合 `--chain` 按 hop 展示每一跳的 in/out 和 drop
+
+这里的 `--tap` 也需要特别注意：
 
 - `ariactl trace start --tap tap1 ...`：只追踪一个实例
 - `ariactl trace start ...`：自动追踪所有活跃实例
+- 不要写成 `ariactl --tap tap1 trace start ...`；`trace` 不使用顶层公共 `--tap` 参数，只认 `trace start` 自己的 `--tap`
 - `--wait <seconds>`：追踪固定秒数后自动退出
 - 省略 `--wait`：持续输出，直到手动 `Ctrl+C`
 
 ```bash
-# 单实例追踪
+# 第一步：先跨实例看整个节点上哪些实例命中了这类流量
 ariactl trace start \
-  --tap eth0 \
   --dst 10.0.0.5 --proto tcp --dport 3306 \
   --wait 5
 
-# 跨实例追踪
+# 第二步：按业务 IP/端口继续缩小范围
 ariactl trace start \
+  --src 10.0.0.10 --dst 10.0.0.5 \
+  --proto tcp --sport 42318 --dport 3306 \
+  --wait 5
+
+# 第三步：只追踪单实例
+ariactl trace start \
+  --tap eth0 \
   --dst 10.0.0.5 --proto tcp --dport 3306 \
   --wait 5
 
@@ -477,7 +545,7 @@ ariactl trace start \
   --proto tcp --dport 3306
 ```
 
-结合服务链按 hop 展示：
+第四步：如果已经有 service chain 定义，再结合服务链按 hop 展示：
 
 ```bash
 ariactl trace start --chain prod-chain --dst 10.0.0.5 --dport 3306 --wait 5
@@ -485,7 +553,14 @@ ariactl trace start --chain prod-chain --dst 10.0.0.5 --dport 3306 --wait 5
 
 在 chain 模式下，输出会把包在各 hop 的 in/out 口、eBPF 直接捕获的 drop reason，以及 hop 间黑盒丢包一起展示出来，适合做链路级排障。
 
-### 8. Kernel Drop 观测（`ariactl drops`）
+## 丢包定位
+这一章回答的是“内核为什么丢了这些包”。它关注的是 `kfree_skb` 相关 drop 事件，而不是防火墙规则本身的主动丢弃。
+
+- 看单次、实时、按五元组定位的路径问题，用上一章的 `trace`
+- 看长期累计的 kernel drop reason / location / hint，用 `drops`
+- 看 ACL / QoS 自己的 drop 计数，去“监控与统计”里的 `stats --rules` 和 `stats --qos`
+
+### Kernel Drop 观测（`ariactl drops`）
 
 `drops` 统计的是内核层 `kfree_skb` 相关丢包事件，和防火墙主动丢弃是两条不同的观测链路：
 
@@ -562,7 +637,10 @@ eth0      eth0   unknown  ipv4   3        ip_forward+0x2c1               路由�
 
 未匹配到的函数名仍会显示原始地址，Hint 列为空。
 
-### 9. SSL/TLS 观测（`ariactl ssl`）
+## SSL/TLS 观测
+这一章适合回答“TLS 是否握手正常、HTTP 是否慢、是否有 SSL 错误”。如果你不确定问题落在 TCP、TLS 还是应用层，也可以直接跳到下面的 `diagnose`。
+
+### SSL/TLS 观测（`ariactl ssl`）
 
 SSL 模块提供 TLS 握手、HTTP 请求/响应和 SSL 错误三类观测数据。注意 SSL 数据是 host-global 的，不是 per-instance，`--tap` 对 SSL 只起提示作用。
 
@@ -585,7 +663,12 @@ ariactl ssl errors --top 20
 ariactl ssl errors-flush
 ```
 
-### 10. 连接诊断（`ariactl diagnose`）
+### 汇总诊断（`ariactl diagnose`）
+适合做第一轮排障入口：
+
+- 连接慢，但还不确定是 TCP、TLS、应用还是内核丢包
+- 想先拿到一个 `HEALTHY / DEGRADED / UNHEALTHY` 的高层判断
+- 后续再根据输出跳转到 `tcprt`、`ssl` 或 `drops` 深挖
 
 `diagnose` 组合多个观测面（TCP-RT、SSL/TLS、HTTP、kernel drop）做全栈连接诊断，快速判断连接健康状态。
 
@@ -596,7 +679,10 @@ ariactl --tap eth0 diagnose --dst 10.0.0.5 --dport 3306
 ariactl --tap eth0 diagnose --dst 10.0.0.5 --dport 3306 --chain prod-chain
 ```
 
-### 11. 连接跟踪（`ariactl conntrack`）
+## 连接跟踪
+这一章更偏运行态连接视角，适合确认某条连接是否已经进入 fast-path、连接表里有没有状态、刷新策略后是否还留着旧连接。
+
+### 连接跟踪（`ariactl conntrack`）
 
 Conntrack 用于查看和清理实例级连接表，通常配合 `--tap` 使用。
 
@@ -610,7 +696,14 @@ ariactl --tap eth0 conntrack flush
 
 `list` 输出包含五元组、协议、状态、报文数和字节数，适合确认连接是否已经进入 fast-path。
 
-### 12. 监控与统计（`ariactl stats`）
+## 监控与统计
+这一章是汇总入口，适合回答“这段时间到底命中了多少规则、丢了多少包、哪些流量最大、哪些 QoS/镜像规则最忙”。
+
+- 想做长期观察、Top-N、对象级统计，看 `stats`
+- 想看单次事件或实时链路，去 `trace` / `drops`
+- 想看某条具体连接的时延拆解，回到“连接诊断”
+
+### 监控与统计（`ariactl stats`）
 
 `stats` 是统一统计入口。不带任何子选项时返回概览；带标志时可以一次输出多个统计分区。
 
@@ -659,7 +752,13 @@ ariactl --tap eth0 stats --drops --top 50
 ariactl --tap eth0 stats --rules --qos --mirror
 ```
 
-### 13. 运行时配置
+## 运行时恢复与运维
+
+这一章适合日常运维和变更控制：看当前开关状态、按需热切换功能、检查实例健康，以及确认恢复和托管状态是否符合预期。
+
+### 运行时配置
+
+如果你想快速验证某个能力是否开启，或者在不重启 agent 的情况下临时开关某个功能，这里是最直接的入口。
 
 所有开关可热切换，无需重启：
 
@@ -674,7 +773,9 @@ ariactl --tap eth0 config set mirror off
 ariactl --tap eth0 config set tcprt on
 ```
 
-### 14. 实例管理
+### 实例管理
+
+这里更适合做全局运维视角的检查：当前有哪些实例、哪些实例处于 active、agent 整体是否健康，以及指定实例当前是否已经被正确接管。
 
 ```bash
 # 列出所有实例
@@ -695,7 +796,16 @@ ariactl --tap tap2 policy list
 - 当前已跟踪接口数量
 - 最近一次初始化错误（如果存在）
 
-## 命令参考
+## 已知限制与兼容性
+
+- 4.18 内核上不支持 pinnable `XDP/TC` link，运行时会降级为“attach 成功但不做 link pin”
+- 4.18 内核上的 `QoS shaping` 会自动降级为 `policing`
+- 当前端口镜像规则容量上限为 `4096`
+- Trace backend 当前默认仍以 `perf` 路径为主，`trace_auto_allow_ringbuf = false` 时不会自动切到 `ringbuf`
+
+## 参考附录
+
+### 命令参考
 
 | 命令 | 说明 |
 |------|------|
@@ -716,7 +826,7 @@ ariactl --tap tap2 policy list
 | `stats [--rules|--flows|--qos|--groups|--mirror|--tcprt|--drops]` | 统一统计入口 |
 | `config show/set` | 运行时配置 |
 
-## 技术架构
+### 技术架构
 
 ```
                 ariactl (CLI)
@@ -775,7 +885,7 @@ ariactl --tap tap2 policy list
                                                                                       └─ drop stats
 ```
 
-## 项目结构
+### 项目结构
 
 ```
 aria-firewall/
@@ -822,7 +932,7 @@ aria-firewall/
 └── Cargo.toml             Workspace 配置
 ```
 
-## REST API
+### REST API
 
 所有路由前缀 `/api/v1/`。
 
@@ -880,7 +990,7 @@ aria-firewall/
 - `aria_trace_runtime_consumer_restarts_total`
 - `aria_trace_runtime_last_error`
 
-## 配置文件
+### 配置文件
 
 `/etc/aria-agent/config.toml`：
 
