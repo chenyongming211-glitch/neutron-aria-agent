@@ -32,6 +32,7 @@ impl fmt::Display for ApiError {
     "status": "ok",
     "version": "0.9.0",
     "instances": 2,
+    "wal_replay_failures": 0,
     "kernel_drop_available": true,
     "kernel_drop_mode": "kfree_skb_reasonful",
     "kernel_drop_managed_ifaces": 1,
@@ -47,6 +48,10 @@ pub struct HealthResponse {
     /// Number of managed firewall instances currently active.
     #[schema(example = 2)]
     pub instances: usize,
+    /// Number of WAL lines that failed to parse or apply during the last replay.
+    #[schema(example = 0)]
+    #[serde(default)]
+    pub wal_replay_failures: u64,
     /// Whether kernel-attributed drop observability is currently available.
     #[schema(example = true)]
     #[serde(default)]

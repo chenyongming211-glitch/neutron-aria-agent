@@ -15,6 +15,11 @@ use crate::state::FirewallState;
 const WAL_COMPACT_INTERVAL_SECS: u64 = 300;
 const MAX_BATCH_SIZE: usize = 100;
 const WAL_CHANNEL_CAPACITY: usize = 1024;
+static LAST_WAL_REPLAY_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+pub fn last_wal_replay_failures() -> u64 {
+    LAST_WAL_REPLAY_FAILURES.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WalEntry {
@@ -351,11 +356,12 @@ impl WalActor {
 
 /// Apply a single WAL entry to an in-memory FirewallState.
 /// Errors in individual entries are logged and skipped (best-effort replay).
-pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) {
+pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
     match entry {
         WalEntry::AddGroup { name, cidr } => {
             if let Err(e) = state.add_group(&name, &cidr) {
                 warn!(error = %e, group = %name, cidr = %cidr, "WAL replay AddGroup failed");
+                return false;
             }
         }
         WalEntry::DeleteGroup { name } => {
@@ -365,11 +371,13 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) {
             let ports_ref = ports.as_deref();
             if let Err(e) = state.apply_add_rule(src_id, dst_id, proto, action, ports_ref, direction) {
                 warn!(error = %e, src_id, dst_id, proto, direction, "WAL replay AddRule failed");
+                return false;
             }
         }
         WalEntry::RemoveRule { src_id, dst_id, proto, direction } => {
             if let Err(e) = state.apply_remove_rule(src_id, dst_id, proto, direction) {
                 warn!(error = %e, src_id, dst_id, proto, direction, "WAL replay RemoveRule failed");
+                return false;
             }
         }
         WalEntry::AddQos { group_name, group_id, direction, rate_bps, burst_bytes, priority, mode } => {
@@ -447,6 +455,7 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) {
             state.attached_iface = None;
         }
     }
+    true
 }
 
 /// Load state from snapshot + replay WAL entries.
@@ -471,6 +480,7 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
     if let Ok(file) = File::open(&wal_path) {
         let reader = BufReader::new(file);
         let mut replayed = 0u64;
+        let mut failed = 0u64;
         for (line_num, line_result) in reader.lines().enumerate() {
             match line_result {
                 Ok(line) => {
@@ -479,23 +489,34 @@ pub fn load_with_wal(state_path: &str) -> FirewallState {
                     }
                     match serde_json::from_str::<WalEntry>(&line) {
                         Ok(entry) => {
-                            apply_wal_entry(&mut state, entry);
-                            replayed += 1;
+                            if apply_wal_entry(&mut state, entry) {
+                                replayed += 1;
+                            } else {
+                                failed += 1;
+                            }
                         }
                         Err(e) => {
                             warn!(path = %wal_path, line = line_num + 1, error = %e, "skipping corrupt WAL entry");
+                            failed += 1;
                         }
                     }
                 }
                 Err(e) => {
                     warn!(path = %wal_path, line = line_num + 1, error = %e, "read error while replaying WAL");
+                    failed += 1;
                     break;
                 }
             }
         }
+        LAST_WAL_REPLAY_FAILURES.store(failed, Ordering::Relaxed);
         if replayed > 0 {
             info!(path = %wal_path, replayed, "replayed WAL entries");
         }
+        if failed > 0 {
+            warn!(path = %wal_path, failed, "WAL replay completed with failures");
+        }
+    } else {
+        LAST_WAL_REPLAY_FAILURES.store(0, Ordering::Relaxed);
     }
 
     state

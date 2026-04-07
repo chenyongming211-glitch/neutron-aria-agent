@@ -113,7 +113,14 @@ pub async fn monitor(registry: Arc<TapRegistry>) -> Result<(), String> {
     info!(count = existing.len(), interfaces = ?existing, "initial netlink scan complete");
 
     // 2. Clean orphaned pins
-    cleanup_orphaned_pins(registry.base_pin_path.to_str().unwrap(), &existing);
+    if let Some(pin_path) = registry.base_pin_path.to_str() {
+        cleanup_orphaned_pins(pin_path, &existing);
+    } else {
+        warn!(
+            path = %registry.base_pin_path.display(),
+            "skip orphaned pin cleanup: non-UTF-8 base pin path"
+        );
+    }
 
     // 3. Attach all existing tap interfaces
     for iface in &existing {

@@ -20,6 +20,7 @@ pub async fn health(State(cp): State<AppState>) -> impl IntoResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         instances: instances.len(),
+        wal_replay_failures: aria_core::wal::last_wal_replay_failures(),
         kernel_drop_available: kernel_drop.loaded,
         kernel_drop_mode: Some(kernel_drop_mode_name(kernel_drop.mode).to_string()),
         kernel_drop_managed_ifaces: kernel_drop.managed_ifaces,

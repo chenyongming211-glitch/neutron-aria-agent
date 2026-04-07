@@ -630,7 +630,10 @@ impl FirewallInstance {
         ebpf_path: &str,
         expected_metadata: &RuntimeMetadata,
     ) -> Result<(), String> {
-        let pin_path_str = self.pin_path.to_str().unwrap();
+        let pin_path_str = self
+            .pin_path
+            .to_str()
+            .ok_or_else(|| format!("non-UTF-8 pin path: {}", self.pin_path.display()))?;
 
         std::fs::create_dir_all(&self.pin_path)
             .map_err(|e| format!("Failed to create pin directory {:?}: {}", self.pin_path, e))?;
@@ -774,7 +777,10 @@ impl FirewallInstance {
             return Ok(attached);
         }
 
-        let pin_path_str = self.pin_path.to_str().unwrap();
+        let pin_path_str = self
+            .pin_path
+            .to_str()
+            .ok_or_else(|| format!("non-UTF-8 pin path: {}", self.pin_path.display()))?;
         let xdp_prog_pin = format!("{}/xdp_firewall", pin_path_str);
         if !std::path::Path::new(&xdp_prog_pin).exists() {
             return Err(format!(
@@ -1009,7 +1015,15 @@ impl FirewallInstance {
     }
 
     fn ensure_fq_runtime(&mut self) {
-        let state_path_str = self.state_path.to_str().unwrap();
+        let Some(state_path_str) = self.state_path.to_str() else {
+            warn!(
+                instance = %self.iface,
+                state_path = %self.state_path.display(),
+                "non-UTF-8 state path; skipping persisted QoS shaping check"
+            );
+            self.edt_available = aria_core::ebpf_ops::check_fq_qdisc(&self.iface);
+            return;
+        };
         let state = aria_core::wal::load_with_wal(state_path_str);
         let requires_shaping = state.qos_rules.iter().any(|rule| rule.mode == 1);
 

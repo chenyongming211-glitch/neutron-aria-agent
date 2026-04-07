@@ -490,5 +490,10 @@ fn decode_trace_stream_event(bytes: &[u8]) -> Option<TraceStreamEvent> {
         return None;
     }
 
-    Some(unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<TraceStreamEvent>()) })
+    let event = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<TraceStreamEvent>()) };
+    if event.is_ipv6 > 1 || event.direction > 1 {
+        return None;
+    }
+
+    Some(event)
 }

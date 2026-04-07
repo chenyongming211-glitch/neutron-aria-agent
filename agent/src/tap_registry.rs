@@ -122,8 +122,11 @@ impl TapRegistry {
             }
         }
 
-        let runtime_pin =
-            instance.ensure_runtime_pinned(self.ebpf_path.to_str().unwrap(), known_live_runtime)?;
+        let ebpf_path = self
+            .ebpf_path
+            .to_str()
+            .ok_or_else(|| format!("non-UTF-8 ebpf path: {}", self.ebpf_path.display()))?;
+        let runtime_pin = instance.ensure_runtime_pinned(ebpf_path, known_live_runtime)?;
 
         let prepared = match self
             .control_plane
@@ -186,12 +189,13 @@ impl TapRegistry {
 
         if instance_exists {
             let instances = self.instances.read().await;
-            let instance = instances
-                .get(iface)
-                .expect("instance existence checked above");
-            instance.detach()?;
-            if let Err(e) = instance.release_persisted_live_iface() {
-                warn!(instance = %iface, error = %e, "failed to release persisted live runtime state");
+            if let Some(instance) = instances.get(iface) {
+                instance.detach()?;
+                if let Err(e) = instance.release_persisted_live_iface() {
+                    warn!(instance = %iface, error = %e, "failed to release persisted live runtime state");
+                }
+            } else {
+                warn!(instance = %iface, "instance disappeared before detach");
             }
         }
 
