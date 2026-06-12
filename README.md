@@ -27,6 +27,7 @@
 ## 文档
 
 - [用户手册](docs/user-manual.md)
+- [OpenStack Neutron Agent Mode 方案](docs/openstack-neutron-agent-mode.md)
 
 ## 回归脚本
 
