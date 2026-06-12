@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-themes="tokyo-night,dracula,catppuccin-mocha,terminal-green,blueprint,corporate-clean">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aria Firewall OpenStack Neutron Agent Mode 开发汇报</title>
+<link rel="stylesheet" href="assets/fonts.css">
+<link rel="stylesheet" href="assets/base.css">
+<link rel="stylesheet" id="theme-link" href="assets/themes/tokyo-night.css">
+<link rel="stylesheet" href="assets/animations/animations.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="aria-report">
+<div class="deck">
+
+  <section class="slide is-active" data-title="Cover">
+    <p class="kicker">development report / openstack mode</p>
+    <div class="split" style="align-items:center">
+      <div>
+        <h1 class="hero-title">Aria Firewall<br><span class="accent">Neutron Agent Mode</span></h1>
+        <p class="subtitle">把 Aria eBPF datapath 放进 OpenStack compute node，用 Neutron 做唯一控制入口，替代节点侧安全组、QoS、Mirror 与 TCPrt 能力。</p>
+        <div class="quote">结论：方向继续，但第一阶段只做 Coexist Mode，不做完整 L2 替代，不引入自研控制面。</div>
+      </div>
+      <div class="rail">
+        <div class="metric"><strong>v0.9</strong><span>从没有控制面开发内容的基线切出，避免混入 v0.10 controller。</span></div>
+        <div class="metric"><strong>2 containers</strong><span>高权限 aria-datapath + 低权限 neutron-aria-agent。</span></div>
+        <div class="metric"><strong>4 domains</strong><span>ACL / QoS / Mirror / TCPrt 对外进入 OpenStack 模式。</span></div>
+      </div>
+    </div>
+    <div class="footer"><span>Aria Firewall · v0.9-neutron-agent</span><span>01 / 20</span></div>
+    <aside class="notes">
+      <p>开场先讲结论。这次不是做一个新的控制平台，也不是把 v0.10 的 controller 搬进来。我们要做的是 OpenStack 的 Neutron Agent Mode。</p>
+      <p>也就是说，OpenStack 用户还是通过 Neutron、Horizon、Terraform 这些入口配置网络；Aria 只在 compute node 上接管节点侧 datapath 能力。</p>
+      <p>第一阶段的边界非常重要：只做 Coexist Mode，OVS 或 OVN 仍负责 L2 连接，Aria 负责安全组、QoS、镜像和 TCPrt。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Executive Summary">
+    <p class="kicker">executive summary</p>
+    <h2 class="title">这不是控制面重写，而是把 Aria 变成 OpenStack 的本机执行面。</h2>
+    <div class="g3 grid">
+      <div class="card"><h3>应该继续</h3><p>复用 Neutron 做 northbound 和多租户语义，避免自建控制面重复造 RBAC、project、port binding、QoS policy。</p></div>
+      <div class="card"><h3>必须收边界</h3><p>第一阶段不宣称完整 L2 agent，不负责 port binding，不替代 OVS/OVN 的连接路径。</p></div>
+      <div class="card"><h3>先打通纵向闭环</h3><p>先把 ACL、QoS、Mirror、TCPrt 四个 domain 从 Neutron 投影到本机 eBPF runtime。</p></div>
+    </div>
+    <div class="quote">判断标准：Neutron 是唯一 source of truth；Aria 是 compute node 上可恢复、可审计、可降级的 datapath runtime。</div>
+    <div class="footer"><span>开发汇报 · 结论页</span><span>02 / 20</span></div>
+    <aside class="notes">
+      <p>这一页是给管理层和开发团队对齐用的。我们不再讨论自研控制面是否替代 Neutron，因为在 OpenStack 里这个方向不划算。</p>
+      <p>Neutron 已经承担了租户、端口、网络、QoS、绑定、RBAC、agent heartbeat。我们应该做的是把 Aria 接进 Neutron 体系，成为一个本机 agent。</p>
+      <p>开发顺序也要收敛：先做四个能力的纵向闭环，再谈扩展；先把失败边界、WAL、Netlink、pinned maps 打牢，再进入生产 smoke。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Current Assets">
+    <p class="kicker">what we have now</p>
+    <h2 class="title">现在已有的东西足够做 datapath，但还不能直接接 Neutron。</h2>
+    <div class="split">
+      <div class="card">
+        <h3>v0.9 基线已有</h3>
+        <div class="checklist">
+          <div class="check"><i>✓</i><p>Rust `aria-agent` 二进制，本机 REST API 和 ariactl 管理入口。</p></div>
+          <div class="check"><i>✓</i><p>eBPF datapath runtime，具备本机 attach、map apply、观测和配置能力。</p></div>
+          <div class="check"><i>✓</i><p>WAL / compact state 基础，已有持久化和 replay 思路。</p></div>
+          <div class="check"><i>✓</i><p>ACL、QoS、Mirror、TCPrt、trace、drops、diagnose 等能力代码基础。</p></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>还缺的关键接口</h3>
+        <div class="checklist">
+          <div class="check"><i>!</i><p>没有 Neutron snapshot schema / status / delete API。</p></div>
+          <div class="check"><i>!</i><p>没有 Python `neutron-aria-agent` 消费 Neutron RPC 和 full resync。</p></div>
+          <div class="check"><i>!</i><p>没有 OpenStack 托管状态下的本机写入 gate。</p></div>
+          <div class="check"><i>!</i><p>没有多租户 scoped key、Neutron WAL 隔离、容器化部署和 smoke。</p></div>
+        </div>
+      </div>
+    </div>
+    <div class="footer"><span>现状 · v0.9 基线能力</span><span>03 / 20</span></div>
+    <aside class="notes">
+      <p>我们现在不是从零开始。v0.9 已经有 Rust agent、本机 API、ariactl、eBPF runtime、WAL 和多个功能模块。</p>
+      <p>但是这些能力现在是本机产品形态，不是 OpenStack agent 形态。它缺少 Neutron 的对象模型、snapshot 下发、host binding 判断、租户隔离和状态上报。</p>
+      <p>所以开发重点不是重写 datapath，而是在现有 runtime 外面补一层 Neutron 适配和托管边界。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Branch Decision">
+    <p class="kicker">branch decision</p>
+    <h2 class="title">开发分支应该继续从 v0.9 走，不搬 v0.10 控制面。</h2>
+    <div class="table row4" style="margin-top:28px">
+      <div class="th">分支</div><div class="th">状态</div><div class="th">适合做什么</div><div class="th">结论</div>
+      <div class="td">v0.9.0</div><div class="td">本机 agent + eBPF runtime</div><div class="td">适合接 Neutron 做 compute node agent</div><div class="td"><span class="tag ok">采用</span> 作为 OpenStack agent mode 基线</div>
+      <div class="td">v0.10.0</div><div class="td">已有控制面方向</div><div class="td">适合自研 controller / southbound 继续演进</div><div class="td"><span class="tag no">不搬</span> 避免和 Neutron 重复控制入口</div>
+      <div class="td">自研控制面</div><div class="td">可做 IaaS 控制平台</div><div class="td">不适合直接嵌入 OpenStack 替代安全组</div><div class="td"><span class="tag warn">保留设计</span> 本路线不使用</div>
+    </div>
+    <div class="quote">OpenStack 场景下，Neutron 已经是控制面；Aria 只需要成为可信的本机执行面。</div>
+    <div class="footer"><span>分支与路线选择</span><span>04 / 20</span></div>
+    <aside class="notes">
+      <p>这里解释为什么我们之前切了 v0.9-neutron-agent 分支。v0.9 没有控制面开发内容，正好适合做一个干净的 OpenStack agent 分支。</p>
+      <p>v0.10 的 controller 方向不是错，但它解决的是另一类问题。如果把它搬进 OpenStack，会和 Neutron 的 northbound、RBAC、租户模型、agent 管理重叠。</p>
+      <p>所以这条线的原则是：复用 Neutron，不复制 Neutron；强化 datapath，不扩张控制面。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Target Architecture">
+    <p class="kicker">target architecture</p>
+    <h2 class="title">目标架构是两个容器、一条 Unix socket、本机 eBPF datapath。</h2>
+    <div class="arch">
+      <div class="arch-row">
+        <div class="node"><h3>OpenStack User</h3><p>Horizon / Terraform / Heat / Neutron API</p></div>
+        <div class="arrow">→</div>
+        <div class="node"><h3>Neutron Server</h3><p>port、SG、QoS、RBAC、binding、agent heartbeat</p></div>
+        <div class="arrow">→</div>
+        <div class="node primary"><h3>neutron-aria-agent</h3><p>Python adapter，拉取本 host 状态，生成 snapshot</p></div>
+      </div>
+      <div class="arch-row">
+        <div class="node"><h3>OVS / OVN</h3><p>继续做 L2 binding 和 VM tap/vif plug</p></div>
+        <div class="arrow">↔</div>
+        <div class="node primary"><h3>/run/aria/aria-agent.sock</h3><p>OpenStack 模式唯一 datapath API 通道</p></div>
+        <div class="arrow">→</div>
+        <div class="node primary"><h3>aria-datapath</h3><p>Rust `aria-agent` binary，负责 eBPF/WAL/Netlink/pinned maps</p></div>
+      </div>
+    </div>
+    <div class="footer"><span>架构 · 两容器边界</span><span>05 / 20</span></div>
+    <aside class="notes">
+      <p>目标架构很简单。上游仍然是 OpenStack 用户通过 Neutron 配置对象。Neutron server 继续掌握 port、security group、QoS、binding 和多租户关系。</p>
+      <p>compute node 上新增一个 Python 的 neutron-aria-agent，它只负责读 Neutron、本机投影、生成 snapshot，然后通过 Unix socket 调用本机 datapath。</p>
+      <p>Rust 侧叫 aria-datapath，这是角色名和容器名，里面仍然跑现有 aria-agent 二进制。两个容器之间只通过 /run/aria/aria-agent.sock 通信。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Component Boundaries">
+    <p class="kicker">component boundaries</p>
+    <h2 class="title">三个边界必须守住：Neutron 管语义，Python 管投影，Rust 管执行。</h2>
+    <div class="g3 grid">
+      <div class="card"><h3>Neutron</h3><ul><li>source of truth</li><li>project / RBAC / shared network</li><li>port binding / SG / QoS</li><li>agent heartbeat</li></ul></div>
+      <div class="card"><h3>neutron-aria-agent</h3><ul><li>Python 编写</li><li>只处理本 host ports</li><li>翻译 SG/QoS/Mirror/TCPrt</li><li>full resync + event merge</li></ul></div>
+      <div class="card"><h3>aria-datapath</h3><ul><li>Rust runtime</li><li>不访问 Neutron DB</li><li>eBPF attach/map apply</li><li>WAL / Netlink / pinned maps</li></ul></div>
+    </div>
+    <div class="quote">Rust 侧不解释 Neutron 内部语义；Python 侧不直接操作 eBPF map。</div>
+    <div class="footer"><span>职责边界</span><span>06 / 20</span></div>
+    <aside class="notes">
+      <p>这页是后面代码 review 的基本边界。Neutron 负责用户语义，Python adapter 负责投影，Rust datapath 负责执行。</p>
+      <p>Rust 不应该知道 Neutron DB 内部结构，也不消费 Neutron RPC；否则后面版本兼容会很痛苦。</p>
+      <p>Python 也不应该直接写 eBPF map，它只生成声明式 snapshot。这样失败恢复、幂等、WAL 和 status 才能统一。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Functional Scope">
+    <p class="kicker">functional scope</p>
+    <h2 class="title">OpenStack 模式只暴露 4 个功能域，底层支撑能力必须保留。</h2>
+    <div class="g4 grid">
+      <div class="card"><h3>ACL</h3><p>对应 Neutron Security Group / port security，第一优先级，fail closed。</p></div>
+      <div class="card"><h3>QoS</h3><p>对应 Neutron QoS policy，port-level 覆盖 network-level，失败独立 degraded。</p></div>
+      <div class="card"><h3>Mirror</h3><p>admin-only，支持 TaaS 或 vendor extension 输入，跨租户默认拒绝。</p></div>
+      <div class="card"><h3>TCPrt</h3><p>观察能力，不是 policy，不回写 Neutron DB，只做 per-port final flag。</p></div>
+    </div>
+    <div class="g4 grid" style="margin-top:18px">
+      <div class="metric"><strong>Group</strong><span>必选中间层，ACL/QoS/Mirror 共用 scoped object。</span></div>
+      <div class="metric"><strong>WAL</strong><span>Neutron state 与 local override 必须分离。</span></div>
+      <div class="metric"><strong>Netlink</strong><span>接口生命周期必须独立监听，不能只靠 Neutron RPC。</span></div>
+      <div class="metric"><strong>Pinned</strong><span>map/link schema 需要版本握手和 repair。</span></div>
+    </div>
+    <div class="footer"><span>功能范围 · 四个 domain</span><span>07 / 20</span></div>
+    <aside class="notes">
+      <p>OpenStack 模式对外只暴露四个功能域：ACL、QoS、Mirror、TCPrt。其它已有能力不是删除，而是不进入 Neutron agent 暴露面。</p>
+      <p>同时有四个支撑能力必须保留：Group、WAL、Netlink 和 pinned maps。这些不是可选项。</p>
+      <p>尤其 ACL 是硬门槛；QoS、Mirror、TCPrt 可以独立 degraded，但不能掩盖 ACL 的 fail-closed 状态。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Snapshot API">
+    <p class="kicker">local snapshot api</p>
+    <h2 class="title">开发第一步是 Unix socket 上的 Neutron snapshot API。</h2>
+    <div class="split">
+      <div class="card">
+        <h3>需要新增的 API</h3>
+        <div class="code">PUT    /api/v1/neutron/snapshot
+GET    /api/v1/neutron/status
+DELETE /api/v1/neutron/ports/{port_id}</div>
+        <p style="margin-top:14px">只监听 <span class="mono">/run/aria/aria-agent.sock</span>，不挂到现有 TCP REST router。</p>
+      </div>
+      <div class="card">
+        <h3>Snapshot 必填语义</h3>
+        <div class="status-row"><b>schema</b><p>schema_version、host、mode、local_generation。</p></div>
+        <div class="status-row"><b>ports</b><p>port_id、project_id、binding_host、if_name、ifindex、security、QoS、flags。</p></div>
+        <div class="status-row"><b>domains</b><p>groups、acl、qos、mirror、tcprt，按 domain 返回 status。</p></div>
+      </div>
+    </div>
+    <div class="footer"><span>本机 API · Unix socket only</span><span>08 / 20</span></div>
+    <aside class="notes">
+      <p>第一批开发从 API 契约开始。Rust 侧要有 Neutron snapshot、status 和 port delete 三个接口。</p>
+      <p>注意这里明确不使用 localhost HTTP 过渡方案。OpenStack 模式只走 Unix socket，这样权限边界清楚，也和 OVS agent 访问 OVSDB socket 的方式类似。</p>
+      <p>现有 TCP REST API 可以继续服务 ariactl 和本机管理员，但不能注册 Neutron snapshot route。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Apply Ordering">
+    <p class="kicker">apply engine</p>
+    <h2 class="title">Apply 顺序要先保证接口存在，再做 durable state，最后推进 generation。</h2>
+    <div class="flow">
+      <div class="step"><b>01 schema</b><span>校验 schema_version、host、mode、authority。</span></div>
+      <div class="step"><b>02 preflight</b><span>确认 binding_host、if_name、ifindex、Netlink。</span></div>
+      <div class="step"><b>03 WAL intent</b><span>写入可恢复 intent，防止半 apply 无法解释。</span></div>
+      <div class="step"><b>04 domains</b><span>groups → ACL → QoS → Mirror → TCPrt。</span></div>
+      <div class="step"><b>05 commit</b><span>WAL commit 后再更新 accepted_generation。</span></div>
+      <div class="step"><b>06 status</b><span>返回 domain status、last_good、degraded reason。</span></div>
+    </div>
+    <div class="quote">`accepted_generation` 只能在 WAL durable 与 required domain 成功后推进。</div>
+    <div class="footer"><span>执行顺序 · generation 语义</span><span>09 / 20</span></div>
+    <aside class="notes">
+      <p>这一页是 Rust apply engine 的核心约束。不能先把 eBPF map 写了，然后 WAL 失败还说成功。</p>
+      <p>推荐顺序是先校验 schema 和 authority，再做接口 preflight，然后写 WAL intent，再按 domain apply，最后 WAL commit 和更新 status。</p>
+      <p>accepted_generation 必须非常保守，只有 durable state 和 required domain 都成功才推进。QoS、Mirror、TCPrt 可以独立 degraded，但不能影响 ACL 成功路径。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Authority Model">
+    <p class="kicker">authority and local writes</p>
+    <h2 class="title">进入 OpenStack 模式后，通信失败也不能自动允许本机写入。</h2>
+    <div class="table row5" style="margin-top:24px">
+      <div class="th">状态</div><div class="th">触发</div><div class="th">权威来源</div><div class="th">本机持久写入</div><div class="th">行为</div>
+      <div class="td">openstack_managed</div><div class="td">snapshot 成功</div><div class="td">Neutron</div><div class="td">拒绝</div><div class="td">执行 last_good_generation</div>
+      <div class="td">openstack_degraded</div><div class="td">RPC/socket/status 异常</div><div class="td">Neutron</div><div class="td">拒绝</div><div class="td">保留最后成功 snapshot</div>
+      <div class="td">local_break_glass</div><div class="td">管理员显式接管</div><div class="td">Local admin</div><div class="td">允许</div><div class="td">写 local-override.wal</div>
+      <div class="td">rejoin_pending</div><div class="td">break-glass 后恢复</div><div class="td">Neutron pending</div><div class="td">拒绝新写入</div><div class="td">默认 Neutron wins</div>
+    </div>
+    <div class="footer"><span>控制权 · 本机写入保护</span><span>10 / 20</span></div>
+    <aside class="notes">
+      <p>这是最容易出事故的地方。通信失败不能等价于退出 OpenStack 模式。</p>
+      <p>只要这个 port 由 Neutron 托管，本机手动改 ACL、QoS、Mirror、TCPrt 都要拒绝。trace 可以临时排障，但不能写 WAL，也不能改变 Neutron generation。</p>
+      <p>如果确实要本机接管，必须显式进入 break-glass，并把本机覆盖写到独立 local-override WAL。恢复时默认 Neutron wins，不做自动 local wins 合并。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Multi Tenant">
+    <p class="kicker">multi tenant</p>
+    <h2 class="title">多租户不能靠 Rust 侧按 project_id 硬丢包，要靠 Neutron 语义投影。</h2>
+    <div class="split">
+      <div class="card">
+        <h3>正确做法</h3>
+        <div class="checklist">
+          <div class="check"><i>✓</i><p>所有对象使用 scoped key：source/project_id/domain/object_id。</p></div>
+          <div class="check"><i>✓</i><p>Python 侧解析 shared network、RBAC、shared QoS、admin mirror。</p></div>
+          <div class="check"><i>✓</i><p>Rust 侧只消费 per-port effective policy，不重新判断 Neutron RBAC。</p></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>错误做法</h3>
+        <div class="checklist">
+          <div class="check"><i>×</i><p>看到 project_id 不同就直接丢包，会破坏 shared network 和 router/FIP 路径。</p></div>
+          <div class="check"><i>×</i><p>用 security group 名称或 QoS 名称做 key，会跨租户串 policy。</p></div>
+          <div class="check"><i>×</i><p>允许 tenant 直接访问 Aria 本机 socket，会绕过 Neutron RBAC。</p></div>
+        </div>
+      </div>
+    </div>
+    <div class="footer"><span>多租户 · scoped object key</span><span>11 / 20</span></div>
+    <aside class="notes">
+      <p>多租户适配不能偷懒。最危险的错误是 Rust 侧看到 project_id 不同就 drop，这会直接破坏 shared network、router、floating IP 和 provider network 场景。</p>
+      <p>正确方式是 Python adapter 读取 Neutron 的 RBAC 和对象关系，然后产出每个 port 的 effective policy。</p>
+      <p>Rust 侧只需要执行已经解析好的 snapshot。WAL、refcount、pinned map numeric ID 都要从 scoped key 派生或持久化映射。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Lifecycle Scenarios">
+    <p class="kicker">runtime lifecycle scenarios</p>
+    <h2 class="title">VM 迁移、重启、tap 重建，都要靠 Neutron binding + Netlink 对账收敛。</h2>
+    <div class="g3 grid">
+      <div class="card"><h3>VM create / bind</h3><p>Neutron event 先到、tap 后出现时，先记录 desired state，返回 `PORT_IFACE_NOT_FOUND`，Netlink NEWLINK 后再 attach。</p></div>
+      <div class="card"><h3>VM migration</h3><p>旧 host 看到 binding_host 不再本机就 delete；新 host 等 tap ready 后 port-scoped snapshot。</p></div>
+      <div class="card"><h3>VM reboot</h3><p>旧 tap 删除会导致 attach 失效；保留 Neutron desired state，新 ifindex 出现后重新 preflight + attach。</p></div>
+    </div>
+    <div class="quote">tap 口不存在时不得挂载 eBPF；ifindex 改变时不能复用旧 ifindex runtime。</div>
+    <div class="footer"><span>生命周期 · port / tap / ifindex</span><span>12 / 20</span></div>
+    <aside class="notes">
+      <p>这页对应真实 OpenStack 环境里最常见的运行时问题。Neutron port 生命周期和 Linux interface 生命周期不是一回事。</p>
+      <p>迁移时以 binding_host 为准，旧 host 清理，新 host 等 tap 出现再 attach。重启时 binding_host 不变，但 tap 和 ifindex 可能删除重建。</p>
+      <p>所以 Netlink 监听是必选项。不能只依赖 Neutron RPC，也不能在 tap 还没创建时提前写 accepted state。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Fail Closed">
+    <p class="kicker">fail-closed policy</p>
+    <h2 class="title">安全组替代场景必须 fail closed，但非关键 domain 不能拖垮 ACL。</h2>
+    <div class="table row4" style="margin-top:26px">
+      <div class="th">Domain</div><div class="th">失败默认行为</div><div class="th">是否影响 port ready</div><div class="th">说明</div>
+      <div class="td">ACL / SG</div><div class="td">fail closed</div><div class="td">是</div><div class="td">除非 Neutron 明确 port_security_enabled=false</div>
+      <div class="td">Group / WAL / Netlink</div><div class="td">不接受新 generation</div><div class="td">是</div><div class="td">这些是 required path，不能绕过</div>
+      <div class="td">QoS</div><div class="td">QoS degraded</div><div class="td">不影响 ACL ready</div><div class="td">但必须在 status 里明显暴露</div>
+      <div class="td">Mirror / TCPrt</div><div class="td">对应 domain degraded</div><div class="td">不影响 ACL ready</div><div class="td">观测能力失败不能放大为安全组失败</div>
+    </div>
+    <div class="footer"><span>安全边界 · fail closed</span><span>13 / 20</span></div>
+    <aside class="notes">
+      <p>如果我们要替代原安全组，这页是硬门槛。ACL、Group、WAL、Netlink 这些 required domain 失败时必须 fail closed。</p>
+      <p>但是 QoS、Mirror、TCPrt 是 independent domain。它们失败要清楚上报 degraded，但不能让 ACL 成功路径失效。</p>
+      <p>这能避免两个极端：一个是出错就全放通，另一个是 mirror target 缺失就把整台 compute node 打死。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Container Deployment">
+    <p class="kicker">container deployment</p>
+    <h2 class="title">容器化交付，但权限必须拆开：datapath 高权限，Neutron adapter 低权限。</h2>
+    <div class="split">
+      <div class="card">
+        <h3>aria-datapath container</h3>
+        <ul><li>运行现有 `aria-agent` binary，不改 binary 名。</li><li>需要 host network 或等价 namespace。</li><li>挂载 `/sys/fs/bpf`、BTF、`/var/lib/aria-agent`、日志目录。</li><li>包含 ariactl 和 eBPF artifact。</li></ul>
+      </div>
+      <div class="card">
+        <h3>neutron-aria-agent container</h3>
+        <ul><li>Python 容器，接 Neutron RPC/config/heartbeat。</li><li>只挂载 `/run/aria` 和 Neutron 配置。</li><li>不需要 eBPF capability，不访问 bpffs。</li><li>通过 Unix socket 调用 snapshot API。</li></ul>
+      </div>
+    </div>
+    <div class="quote">没有编排平台也可以：两个容器共享宿主机 `/run/aria/aria-agent.sock`。</div>
+    <div class="footer"><span>部署 · 两容器模型</span><span>14 / 20</span></div>
+    <aside class="notes">
+      <p>之前讨论过是裸机二进制还是容器，最终结论是容器。但容器不是普通隔离应用容器，aria-datapath 仍然是宿主机 datapath runtime。</p>
+      <p>两个容器不能合并。合并会让 Python adapter 继承 eBPF 特权，安全面扩大，升级和故障定位也复杂。</p>
+      <p>通信方式参考 OVS agent 和 OVSDB：通过宿主机 Unix socket bind mount，不做 localhost HTTP fallback。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="What To Build">
+    <p class="kicker">what we need to build</p>
+    <h2 class="title">需要开发的内容可以拆成 8 个工作包。</h2>
+    <div class="lane">
+      <div class="lane-label">Rust<br>datapath</div>
+      <div class="lane-body">
+        <div class="stage"><b>WP1 API 契约</b><span>Neutron DTO、OpenAPI schema、generation。</span></div>
+        <div class="stage"><b>WP2 Unix Router</b><span>UDS listener，Neutron-only routes。</span></div>
+        <div class="stage"><b>WP3 Snapshot Apply</b><span>preflight、domain status、WAL。</span></div>
+        <div class="stage"><b>WP4 Local Gate</b><span>managed/degraded 下拒绝本机持久写。</span></div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="lane-label">Python<br>adapter</div>
+      <div class="lane-body">
+        <div class="stage"><b>WP5 Skeleton</b><span>config、models、generation、UDS client。</span></div>
+        <div class="stage"><b>WP6 Translator</b><span>SG/QoS/Mirror/TCPrt 投影。</span></div>
+        <div class="stage"><b>WP7 Main Loop</b><span>full resync、event merge、heartbeat。</span></div>
+        <div class="stage"><b>WP8 Containers</b><span>两容器、smoke、部署示例。</span></div>
+      </div>
+    </div>
+    <div class="footer"><span>开发拆分 · 8 work packages</span><span>15 / 20</span></div>
+    <aside class="notes">
+      <p>真正开始开发时，不建议一口气改。方案里已经拆成 8 个工作包。</p>
+      <p>前四个主要在 Rust 侧：API 契约、Unix socket router、snapshot apply 骨架、本机写入 gate。</p>
+      <p>后四个在 Python 和部署侧：agent 骨架、Neutron translator、主循环 heartbeat、容器和 OpenStack smoke。这个拆法能让每个 PR 都有明确验收。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Phase Gates">
+    <p class="kicker">phase gates</p>
+    <h2 class="title">阶段门槛要前置，尤其 N0.5 和 N3 前不能跳过。</h2>
+    <div class="table row4" style="margin-top:24px">
+      <div class="th">阶段</div><div class="th">目标</div><div class="th">门槛</div><div class="th">是否需要 OpenStack</div>
+      <div class="td">N0 / N0.5</div><div class="td">文档基线 + 目标环境发现</div><div class="td">确认 OVS/OVN、SG 关闭方式、tap 命名、unsupported port 策略</div><div class="td">N0.5 需要</div>
+      <div class="td">N1 / N2</div><div class="td">Rust API + Python agent 原型</div><div class="td">UDS API、snapshot/status/delete、本机写入 gate、mock 单测</div><div class="td">不需要</div>
+      <div class="td">N3 / N4</div><div class="td">ACL + QoS 垂直闭环</div><div class="td">SG 语义、port security、QoS 覆盖关系、fail-closed smoke</div><div class="td">需要</div>
+      <div class="td">N5 - N8</div><div class="td">Mirror / TCPrt / 容器 / 生产化</div><div class="td">domain isolation、双实例、防回滚、metrics/runbook</div><div class="td">需要</div>
+    </div>
+    <div class="footer"><span>阶段计划 · 不跳门槛</span><span>16 / 20</span></div>
+    <aside class="notes">
+      <p>这里强调阶段门槛。N1、N2 可以先用 mock 推进，不必等完整 OpenStack 环境。</p>
+      <p>但是 N3 前必须完成 N0.5。因为一旦要验证 ACL 替代安全组，就必须知道目标环境怎么关闭或旁路原 SG enforcement，tap/qvo/qvb 命名是什么，port security disabled 怎么表达。</p>
+      <p>后面 N5 到 N8 才进入 Mirror、TCPrt、容器、生产化和大规模测试。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Do Not Build">
+    <p class="kicker">what not to build</p>
+    <h2 class="title">这些东西第一阶段明确不做，否则范围会失控。</h2>
+    <div class="g3 grid">
+      <div class="card"><h3>不做自研 northbound</h3><p>不让用户绕过 Neutron 创建 OpenStack 网络对象，不开放 tenant 直接调用 Aria。</p></div>
+      <div class="card"><h3>不做完整 L2 替代</h3><p>不接管 port binding，不替代 OVS/OVN connectivity，不宣称完整 L2 agent。</p></div>
+      <div class="card"><h3>不搬 v0.10 controller</h3><p>不迁移 aria-controller，不把 RFC 控制面体系放进这个分支。</p></div>
+      <div class="card"><h3>不做 TCP 过渡</h3><p>Neutron snapshot API 只走 Unix socket，不做 localhost HTTP fallback。</p></div>
+      <div class="card"><h3>不改核心名字</h3><p>binary 仍是 aria-agent；aria-datapath 只是角色名和容器名。</p></div>
+      <div class="card"><h3>不暴露非范围能力</h3><p>trace/drops/ssl/diagnose/service chain 保留代码，但不进 Neutron agent mode API。</p></div>
+    </div>
+    <div class="footer"><span>不做项 · scope guard</span><span>17 / 20</span></div>
+    <aside class="notes">
+      <p>这页很重要，因为范围失控通常不是因为大家不知道要做什么，而是因为不清楚什么不做。</p>
+      <p>第一阶段不做自研 northbound，不做完整 L2 替代，不搬 v0.10 controller，不做 TCP 过渡，不改二进制名字，不把 trace 等本机能力扩成 Neutron 租户功能。</p>
+      <p>这些约束不是保守，而是为了让第一阶段能交付、能验证、能回滚。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Risk Register">
+    <p class="kicker">risk register</p>
+    <h2 class="title">风险集中在三类：OpenStack 语义、接口生命周期、持久化一致性。</h2>
+    <div class="g3 grid">
+      <div class="card"><h3>OpenStack 语义风险</h3><ul><li>OVS/OVN SG 双重过滤</li><li>shared network / shared QoS 误拦截</li><li>port security disabled 被误伤</li><li>DHCP / metadata / IPv6 ND 被默认 deny</li></ul></div>
+      <div class="card"><h3>接口生命周期风险</h3><ul><li>tap 未创建就 attach</li><li>VM reboot 后 ifindex 改变</li><li>migration 乱序 event</li><li>unsupported trunk / SR-IOV 假 ready</li></ul></div>
+      <div class="card"><h3>状态一致性风险</h3><ul><li>WAL 写失败但 generation 推进</li><li>pinned map schema 不兼容</li><li>local override 与 Neutron rejoin 冲突</li><li>双容器实例同时写 runtime</li></ul></div>
+    </div>
+    <div class="quote">每个风险都要变成 status、metric、smoke 或代码 gate，不能只留在文档里。</div>
+    <div class="footer"><span>风险与门槛</span><span>18 / 20</span></div>
+    <aside class="notes">
+      <p>风险主要分三类。第一类是 OpenStack 语义，比如双重过滤、shared network、port security disabled、DHCP 和 metadata 被误伤。</p>
+      <p>第二类是接口生命周期，比如 tap 还没出现、ifindex 重建、迁移事件乱序、SR-IOV 这种 unsupported port 被误报 ready。</p>
+      <p>第三类是状态一致性，比如 WAL、pinned map、local override、双实例。所有这些都不能停留在文档里，必须进入 status、metric、smoke 或代码 gate。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="OpenStack Discovery">
+    <p class="kicker">before coding into target env</p>
+    <h2 class="title">进入真实 OpenStack 前，必须先完成 N0.5 兼容性发现。</h2>
+    <div class="g2 grid">
+      <div class="card"><h3>必须确认的环境事实</h3><ul><li>OpenStack 版本，OVS 还是 OVN。</li><li>当前 SG backend / firewall driver。</li><li>关闭或旁路原 SG enforcement 的最小回滚步骤。</li><li>tap/qvo/qvb/veth 命名和真实 attach 点。</li><li>QoS、TaaS、vendor extension 可用性。</li></ul></div>
+      <div class="card"><h3>必须确认的内核/容器事实</h3><ul><li>BTF、bpffs、qdisc、TC/XDP attach 能力。</li><li>`/run/aria`、`/var/lib/aria-agent`、`/sys/fs/bpf` 挂载策略。</li><li>双容器无编排部署下的单实例锁。</li><li>schema/capability 握手和回滚最低兼容版本。</li><li>unsupported port 类型如何 degraded 或 ignored。</li></ul></div>
+    </div>
+    <div class="footer"><span>N0.5 · 目标环境发现</span><span>19 / 20</span></div>
+    <aside class="notes">
+      <p>这页是实际落地前的清单。我们不能只在文档里假设目标环境是某一种 OVS 或 OVN 形态。</p>
+      <p>需要确认 OpenStack 版本、SG backend、firewall driver、关闭原安全组的回滚方式、tap 命名、attach 点，以及 QoS 和 Mirror extension 是否存在。</p>
+      <p>同时要确认内核和容器能力，尤其 BTF、bpffs、qdisc、XDP/TC attach、host mounts 和单实例锁。</p>
+    </aside>
+  </section>
+
+  <section class="slide" data-title="Next Steps">
+    <p class="kicker">next execution</p>
+    <h2 class="title">下一步不要直接写大功能，先落 PR-1 到 PR-4 的基础闭环。</h2>
+    <div class="flow">
+      <div class="step"><b>PR-1</b><span>Neutron DTO / OpenAPI / schema examples。</span></div>
+      <div class="step"><b>PR-2</b><span>Unix socket router + Rust apply skeleton + local write gate。</span></div>
+      <div class="step"><b>PR-3</b><span>Python project skeleton + UDS local client。</span></div>
+      <div class="step"><b>PR-4</b><span>translator、event loop、heartbeat、mock full resync。</span></div>
+      <div class="step"><b>PR-5</b><span>ACL + QoS 真实 OpenStack smoke。</span></div>
+      <div class="step"><b>PR-6+</b><span>Mirror、TCPrt、容器、生产化硬化。</span></div>
+    </div>
+    <div class="quote">开发目标：先让接口、状态、权限、WAL、full resync 能闭环，再打开 OpenStack 真实流量。</div>
+    <div class="footer"><span>执行建议 · start small</span><span>20 / 20</span></div>
+    <aside class="notes">
+      <p>最后说开发建议。下一步不要直接冲 ACL 全功能，更不要一边接 OpenStack 一边改 datapath 热路径。</p>
+      <p>先做 PR-1 到 PR-4：schema、Unix socket、apply skeleton、本机写入 gate、Python skeleton、UDS client、translator 和 mock full resync。</p>
+      <p>等这些基础闭环都通过 CI，再进入 PR-5 做 ACL 和 QoS 的真实 OpenStack smoke。这样失败面可控，回滚也清楚。</p>
+    </aside>
+  </section>
+
+</div>
+<div style="position:fixed;bottom:10px;left:12px;font:11px var(--font-mono,monospace);color:var(--text-3);z-index:100;pointer-events:none">
+  S 演讲者视图 · T 切换主题 · ← → 翻页 · F 全屏 · O 总览
+</div>
+<script src="assets/runtime.js"></script>
+</body>
+</html>

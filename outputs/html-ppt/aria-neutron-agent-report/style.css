@@ -1,0 +1,531 @@
+/* Aria Firewall OpenStack report deck.
+ * Built with html-ppt-skill static runtime.
+ */
+
+.aria-report {
+  background: var(--bg);
+  color: var(--text-1);
+}
+
+.aria-report .slide {
+  padding: 64px 76px 58px;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg) 88%, #060b16) 0%, var(--bg) 100%);
+}
+
+.aria-report .slide::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent) 1px, transparent 1px),
+    linear-gradient(0deg, color-mix(in srgb, var(--accent) 10%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--accent-2) 12%, transparent) 1px, transparent 1px),
+    linear-gradient(0deg, color-mix(in srgb, var(--accent-2) 10%, transparent) 1px, transparent 1px);
+  background-size: 44px 44px, 44px 44px, 176px 176px, 176px 176px;
+  opacity: 0.42;
+}
+
+.aria-report .slide::after {
+  content: "";
+  position: absolute;
+  left: 76px;
+  right: 76px;
+  bottom: 48px;
+  height: 1px;
+  background: linear-gradient(90deg, var(--accent), transparent 64%);
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.aria-report .slide > * {
+  position: relative;
+  z-index: 1;
+}
+
+.aria-report .kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 26px;
+  padding: 0 10px;
+  margin: 0 0 18px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 74%, transparent);
+  color: var(--text-2);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.aria-report .kicker::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent),
+    0 0 18px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.aria-report h1,
+.aria-report h2,
+.aria-report h3,
+.aria-report p {
+  max-width: none;
+}
+
+.aria-report .hero-title {
+  margin: 0;
+  color: var(--text-1);
+  font-size: 64px;
+  line-height: 1.08;
+  letter-spacing: -0.01em;
+  text-shadow: 0 0 34px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.aria-report .title {
+  margin: 0 0 22px;
+  color: var(--text-1);
+  font-size: 42px;
+  line-height: 1.16;
+  letter-spacing: -0.01em;
+}
+
+.aria-report .subtitle {
+  margin: 18px 0 0;
+  color: var(--text-2);
+  font-size: 22px;
+  line-height: 1.46;
+}
+
+.aria-report .accent {
+  color: var(--accent);
+}
+
+.aria-report .muted {
+  color: var(--text-3);
+}
+
+.aria-report .mono {
+  font-family: var(--font-mono, monospace);
+}
+
+.aria-report .grid {
+  display: grid;
+  gap: 18px;
+}
+
+.aria-report .g2 {
+  grid-template-columns: 1fr 1fr;
+}
+
+.aria-report .g3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.aria-report .g4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.aria-report .split {
+  display: grid;
+  grid-template-columns: 0.92fr 1.08fr;
+  gap: 34px;
+  align-items: stretch;
+}
+
+.aria-report .card,
+.aria-report .box,
+.aria-report .callout {
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface) 88%, transparent), color-mix(in srgb, var(--bg-soft) 86%, transparent));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text-1) 7%, transparent),
+    0 14px 38px rgba(0,0,0,.28);
+}
+
+.aria-report .card {
+  padding: 20px 22px;
+  min-height: 130px;
+}
+
+.aria-report .card h3,
+.aria-report .card h4 {
+  margin: 0 0 10px;
+  color: var(--text-1);
+  font-size: 19px;
+  line-height: 1.25;
+}
+
+.aria-report .card p,
+.aria-report .card li {
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.aria-report ul {
+  margin: 0;
+  padding-left: 19px;
+}
+
+.aria-report li + li {
+  margin-top: 7px;
+}
+
+.aria-report .metric {
+  border-left: 4px solid var(--accent);
+  padding: 17px 18px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 10%, transparent), transparent 70%),
+    color-mix(in srgb, var(--surface) 76%, transparent);
+}
+
+.aria-report .metric strong {
+  display: block;
+  color: var(--text-1);
+  font-size: 33px;
+  line-height: 1;
+}
+
+.aria-report .metric span {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.aria-report .rail {
+  display: grid;
+  gap: 12px;
+}
+
+.aria-report .status-row {
+  display: grid;
+  grid-template-columns: 118px 1fr;
+  align-items: start;
+  gap: 14px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.aria-report .status-row:last-child {
+  border-bottom: 0;
+}
+
+.aria-report .status-row b {
+  color: var(--accent);
+  font-family: var(--font-mono, monospace);
+  font-size: 14px;
+}
+
+.aria-report .status-row p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 15px;
+  line-height: 1.46;
+}
+
+.aria-report .tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 25px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.aria-report .tag.ok {
+  border-color: color-mix(in srgb, var(--good) 45%, var(--border));
+  color: var(--good);
+}
+
+.aria-report .tag.warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  color: var(--warn);
+}
+
+.aria-report .tag.no {
+  border-color: color-mix(in srgb, var(--bad) 42%, var(--border));
+  color: var(--bad);
+}
+
+.aria-report .arch {
+  display: grid;
+  gap: 14px;
+  margin-top: 22px;
+}
+
+.aria-report .arch-row {
+  display: grid;
+  grid-template-columns: 1fr 44px 1fr 44px 1fr;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.aria-report .node {
+  min-height: 82px;
+  padding: 16px 17px;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface) 86%, transparent), color-mix(in srgb, var(--bg-soft) 92%, transparent));
+}
+
+.aria-report .node h3 {
+  margin: 0 0 7px;
+  color: var(--text-1);
+  font-size: 18px;
+}
+
+.aria-report .node p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.42;
+}
+
+.aria-report .node.primary {
+  border-color: var(--accent);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 18%, var(--surface)), color-mix(in srgb, var(--surface) 82%, transparent));
+  box-shadow: 0 0 26px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.aria-report .arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  font-size: 31px;
+}
+
+.aria-report .lane {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 14px;
+  align-items: stretch;
+  margin-top: 12px;
+}
+
+.aria-report .lane-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  color: var(--text-1);
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  text-align: center;
+}
+
+.aria-report .lane-body {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+.aria-report .stage {
+  padding: 15px 14px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface) 84%, transparent), color-mix(in srgb, var(--bg-soft) 82%, transparent));
+}
+
+.aria-report .stage b {
+  display: block;
+  color: var(--text-1);
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+
+.aria-report .stage span {
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.aria-report .table {
+  display: grid;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+}
+
+.aria-report .table.row4 {
+  grid-template-columns: 1.05fr 1fr 1.2fr 1.4fr;
+}
+
+.aria-report .table.row5 {
+  grid-template-columns: 0.86fr 1fr 1.05fr 1.25fr 1.3fr;
+}
+
+.aria-report .th,
+.aria-report .td {
+  padding: 12px 13px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.36;
+}
+
+.aria-report .th {
+  color: var(--text-1);
+  font-family: var(--font-mono, monospace);
+  font-weight: 700;
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+}
+
+.aria-report .td {
+  color: var(--text-2);
+}
+
+.aria-report .table > :nth-child(4n),
+.aria-report .table.row5 > :nth-child(5n) {
+  border-right: 0;
+}
+
+.aria-report .code {
+  padding: 20px 22px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  background:
+    linear-gradient(180deg, #08111f, #050916);
+  color: #dbeafe;
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  line-height: 1.72;
+  white-space: pre-wrap;
+}
+
+.aria-report .quote {
+  margin-top: 28px;
+  padding: 22px 24px;
+  border-left: 5px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  color: var(--text-1);
+  font-size: 24px;
+  line-height: 1.36;
+}
+
+.aria-report .footer {
+  position: absolute;
+  left: 76px;
+  right: 76px;
+  bottom: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-3);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  z-index: 2;
+}
+
+.aria-report .big-number {
+  color: var(--accent);
+  font-family: var(--font-mono, monospace);
+  font-size: 72px;
+  line-height: 1;
+  letter-spacing: -0.06em;
+}
+
+.aria-report .checklist {
+  display: grid;
+  gap: 10px;
+}
+
+.aria-report .check {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.aria-report .check:last-child {
+  border-bottom: 0;
+}
+
+.aria-report .check i {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  font-style: normal;
+  font-size: 14px;
+}
+
+.aria-report .check p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.aria-report .flow {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.aria-report .flow .step {
+  min-height: 112px;
+  padding: 13px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface) 84%, transparent), color-mix(in srgb, var(--bg-soft) 82%, transparent));
+}
+
+.aria-report .flow .step b {
+  color: var(--accent);
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+}
+
+.aria-report .flow .step span {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.aria-report .notes {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .aria-report .slide {
+    padding: 34px 28px 44px;
+  }
+  .aria-report .g2,
+  .aria-report .g3,
+  .aria-report .g4,
+  .aria-report .split,
+  .aria-report .arch-row,
+  .aria-report .lane,
+  .aria-report .lane-body,
+  .aria-report .flow {
+    grid-template-columns: 1fr;
+  }
+  .aria-report .arrow {
+    display: none;
+  }
+}
