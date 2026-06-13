@@ -81,6 +81,7 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 | heartbeat 注册方式 | 查 Neutron agent 配置和日志 | agent alive/degraded 可上报 | 未执行 | 未执行 | 不进入 PR-4 |
 | port binding/full resync API | mock 或目标环境查询 | 可按 host 拉取 authoritative ports | 未执行 | 未执行 | 不进入 translator full resync |
 | port update event source | RPC topic / callback / polling 记录 | 有明确 event source | 未执行 | 未执行 | PR-4 只能使用 full resync |
+| 第一阶段功能白名单 | 检查主方案、schema、translator、PR gate | 只包含 ACL enhancement 和 QoS；其它能力只能是支撑能力或保留代码 | 未执行 | 未执行 | 删除非 ACL/QoS 的功能模块入口 |
 | QoS extension 可用性 | 查 Neutron extension list | 明确 `support_disposition=supported` 或 `unsupported` | 未执行 | 未执行 | PR-5B 降级或延期 |
 | Mirror/TCPrt Neutron 对接 scope | 检查本方案 scope 与 PR gate | 不进入第一阶段；不作为 N0.5、PR-6A 或 PR-6B gate | 未执行 | 未执行 | Rust 既有代码保留，但不接入 `neutron-aria-agent` |
 

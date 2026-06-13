@@ -8,7 +8,7 @@
 
 ### 1.1 建设目标
 
-把 `aria-firewall` 放到 OpenStack compute node 中使用，让 OpenStack 继续以 Neutron 作为唯一网络控制入口，同时让 Aria 的 eBPF datapath 承担节点侧安全、限速、镜像和可观测能力。
+把 `aria-firewall` 放到 OpenStack compute node 中使用，让 OpenStack 继续以 Neutron 作为唯一网络控制入口，同时让 Aria 的 eBPF datapath 在第一阶段只承接两个 Neutron 驱动的功能模块：ACL enhancement 和 QoS。
 
 第一阶段目标不是完整替代 OVS 的 L2 datapath，而是做 Neutron Agent Mode：
 
@@ -16,7 +16,7 @@
 - OpenStack 用户继续通过 Neutron API、Horizon、Terraform、Heat 等入口配置网络对象。
 - `neutron-aria-agent` 消费 Neutron 本 host 状态，生成本机声明式 snapshot。
 - `aria-datapath` 接收 Neutron snapshot，负责本机 group、ACL、QoS、runtime status、WAL、Netlink、Pinned Maps 和 eBPF map apply。
-- 其它已有能力代码保留，但不进入 `neutron-aria-agent` 对外暴露面。
+- 第一阶段新增功能模块只有 ACL/QoS；其它已有能力代码保留，但不进入 `neutron-aria-agent`、Neutron snapshot、translator、feature flag、status domain、smoke 或 PR gate。
 
 ### 1.2 核心结论
 
@@ -45,7 +45,7 @@ aria-datapath               Rust datapath runtime, compute node
 eBPF datapath               XDP / TC
 ```
 
-第一阶段保留 OVS 的基础 L2 connectivity。Aria 只增强节点侧功能，不替代原有 OVS 转发：
+第一阶段保留 OVS 的基础 L2 connectivity。Aria 只新增两个节点侧功能模块，不替代原有 OVS 转发：
 
 - ACL enhancement：只消费显式 Aria ACL enhancement 输入，映射为 Aria Firewall 现有的 `group + policy` 模型；不消费 Neutron Security Group、remote group、port security 或 allowed address pairs，不作为默认转发门槛。
 - QoS：对应 Neutron QoS policy。
@@ -53,6 +53,8 @@ eBPF datapath               XDP / TC
 - Conntrack：作为 Aria ACL 状态化、连接跟踪、fast-path 和 flow 统计的基础能力；不是 Neutron ACL mapping 输入，但状态化 ACL enhancement 需要它 ready。
 - Monitoring：作为 ACL/QoS/flow/group 统计和 metrics 的基础能力。
 - WAL / Netlink / Pinned Maps：作为 OpenStack 模式的必选运行时支撑能力。
+
+除 ACL enhancement 和 QoS 之外，任何能力都不能写成第一阶段新增功能模块。Group、Conntrack、Monitoring、WAL、Netlink、Pinned Maps 只能作为支撑能力进入方案；Mirror、TCPrt、Trace、Drops、SSL、Diagnose、Service Chain、Route、NAT、L4 LB、Service 都不进入第一阶段功能交付。
 
 ### 1.3 第一阶段明确不做
 
@@ -63,7 +65,7 @@ eBPF datapath               XDP / TC
 - 不让用户绕过 Neutron 创建 OpenStack 网络对象。
 - 不替代 OVS 的 L2 bridge、tunnel、local switching、VLAN/VXLAN/GENEVE 管理。
 - 不实现 Neutron Security Group projection、remote group 展开、anti-spoof 或 port security enforcement。
-- 不把 `trace`、`drops`、`ssl`、`diagnose`、`service chain` 扩成 Neutron tenant API。
+- 不新增 `trace`、`drops`、`ssl`、`diagnose`、`service chain` 等功能模块，也不把它们扩成 Neutron tenant API。
 - 不把 Mirror 或 TCPrt 接入 Neutron Agent Mode；Rust 既有 Mirror/TCPrt 本机能力保留，但不进入 Neutron snapshot、translator、feature flag、status domain、smoke 或 PR gate。
 
 ### 1.4 能力分类边界
@@ -77,12 +79,13 @@ eBPF datapath               XDP / TC
 | 有状态基础 | Conntrack / CT config / CT stats | ACL 状态化、连接表、fast-path 和 flow 统计的运行基础 | operator 基础配置；状态化 ACL 需要时失败必须 degraded/bypass |
 | 观测基础 | Monitoring / stats / metrics | rule、flow、group、QoS 统计和 Prometheus 输出 | operator 基础配置；关闭后相关统计不可用 |
 | 第一阶段功能模块 | ACL、QoS | Neutron snapshot 驱动的可开关功能面 | 只暴露这两个 feature flags |
-| 既有本机能力 | Mirror、TCPrt、Trace、Drops、SSL、Diagnose、Service Chain | standalone/local legacy 或本机排障能力 | Rust 代码保留，不进入 Neutron Agent Mode |
+| 非第一阶段功能 | Mirror、TCPrt、Trace、Drops、SSL、Diagnose、Service Chain | standalone/local legacy 或本机排障能力 | Rust 代码保留，但第一阶段不新增、不接入 Neutron Agent Mode |
 | 后续平台能力 | Route、NAT、L4 LB、Service | IaaS 数据面扩展能力 | 不进入第一阶段 Neutron Agent Mode |
 
 关键规则：
 
 - `Group / Conntrack / Monitoring / WAL / Netlink / Pinned Maps` 必须有，但不是租户可配置功能。
+- 第一阶段功能模块白名单只有 `acl/qos`；任何新增功能模块都必须被显式排除，不能默认跟随 Rust 现有代码进入 OpenStack scope。
 - `feature_flags` 只允许表达 `acl/qos`。
 - `runtime_foundations` 只允许表达 `conntrack/monitoring` 这类运行基础要求，不得表达租户 feature。
 - `Mirror / TCPrt / Trace / Drops / SSL / Diagnose` 可以保留代码和本机管理员入口，但不能变成 Neutron tenant feature。
@@ -97,6 +100,7 @@ eBPF datapath               XDP / TC
 
 | 分类 | 约束 |
 | --- | --- |
+| 范围边界 | 第一阶段新增功能模块白名单固定为 ACL enhancement 和 QoS；其它能力只能作为支撑能力或保留代码出现，不能作为功能模块、feature flag、status domain、smoke 或 PR gate |
 | 范围边界 | 当前阶段固定为 OVS enhancement mode；不支持 OVN；不做 Neutron Security Group projection、remote group 展开、anti-spoof 或 port security enforcement |
 | 范围边界 | ACL 输入源固定为 operator-admin 管理的 Neutron port/network tags 加本机只读 mapping；不新增 tenant northbound，不消费 Security Group、remote group、port security 或 allowed address pairs |
 | 范围边界 | Trace、Drops、SSL、Diagnose、Service Chain 等既有能力保留为 admin/operator-only，不进入 `neutron-aria-agent` schema |
@@ -301,6 +305,12 @@ OpenStack 模式必须处理和现有 OVS 转发的边界：
 - 调用本机 datapath 的 Neutron snapshot API。
 - 记录 latest desired generation、last applied generation、last error 和 domain status。
 
+功能边界：
+
+- 只把 ACL enhancement 和 QoS 翻译成 Neutron snapshot。
+- 不读取、不翻译、不下发 Mirror、TCPrt、Trace、Drops、SSL、Diagnose、Service Chain、Route、NAT、L4 LB 或 Service。
+- 不为其它 Rust 既有能力新增 Neutron RPC、配置项、translator 输入、feature flag、status domain 或 smoke。
+
 不负责：
 
 - 不直接写 eBPF map。
@@ -328,7 +338,7 @@ OpenStack 模式必须处理和现有 OVS 转发的边界：
 - 通过 Netlink 感知接口生命周期。
 - 通过 WAL 保存本机状态变更。
 - 通过 Pinned Maps / pinned links 保持 runtime。
-- 提供 status、metrics、stats、diagnose、trace 等本机管理员能力。
+- 提供 status、metrics、stats、diagnose、trace 等既有本机管理员能力；这些能力不因为本方案而新增 Neutron 对接。
 
 不负责：
 
@@ -336,6 +346,7 @@ OpenStack 模式必须处理和现有 OVS 转发的边界：
 - 不消费 Neutron RPC。
 - 不理解 Neutron server 内部对象生命周期。
 - 不作为 OpenStack northbound。
+- 不把 Rust 现有本机能力自动提升为第一阶段功能模块。
 
 ## 3. 工作模式
 
@@ -364,7 +375,7 @@ aria-datapath    负责节点侧 eBPF 执行
 
 - port plug / bridge / tunnel
 - local switching
-- 安全能力插件
+- 原生安全能力插件
 - QoS
 - agent heartbeat
 - port status
@@ -377,6 +388,8 @@ aria-datapath    负责节点侧 eBPF 执行
 - 显式 ACL enhancement/QoS 翻译
 - 调用本机 datapath snapshot API
 - 上报 Aria runtime status
+
+这里的“只负责”是功能 scope 边界：第一阶段新增功能模块只有 ACL/QoS。agent heartbeat、full resync、port 归属、runtime status、UDS、WAL、Netlink、Pinned Maps 都是为 ACL/QoS 服务的支撑能力，不是额外功能交付。
 
 完整 L2 替代不是本路线目标。OVS 的 bridge、tunnel、local switching、port plug 和基础连通能力始终由 OVS 负责；`neutron-aria-agent` 只负责 ACL、QoS 这些节点侧功能的 Neutron 适配与下发。
 
@@ -423,11 +436,11 @@ Neutron 是 source of truth：
 - group/address-set/port-set。
 - ACL map。
 - QoS map。
-- feature flags。
+- feature flags，仅允许 `acl/qos`。
 - WAL。
 - Netlink 监听与接口对账。
 - Pinned Maps / pinned links。
-- metrics、stats、diagnose、trace。
+- metrics、stats、diagnose、trace 等既有本机管理员能力；不进入第一阶段 Neutron 功能模块。
 
 `aria-datapath` 只接受本机 snapshot，不解释 Neutron RPC。
 
@@ -483,8 +496,8 @@ Neutron 权威配置包括：
 
 | 类型 | 例子 | OpenStack 模式策略 | 是否进入 WAL |
 | --- | --- | --- | --- |
-| 只读观测 | stats、metrics、diagnose、tcprt query | 允许 | 否 |
-| 临时排障 | trace start/stop/flush、drop stats flush | 允许，但不进入 Neutron schema | 否 |
+| 只读观测 | stats、metrics、diagnose、tcprt query | 作为既有本机管理员入口允许；不新增 Neutron 功能 | 否 |
+| 临时排障 | trace start/stop/flush、drop stats flush | 作为既有本机管理员入口允许；不进入 Neutron schema | 否 |
 | Neutron 权威配置写入 | group、policy、qos、ACL enable | 禁止本机手动写 Neutron-managed port | 是，只能由 snapshot 写 |
 | 非 Neutron 持久配置 | service chain、host-global ssl、手动 config toggle | OpenStack 模式默认不作为落地范围 | 不得混入 Neutron WAL 命名空间 |
 
@@ -1996,9 +2009,9 @@ OpenStack 方案不规划裸机服务形态；生产交付只描述 `aria-datapa
 - privileged 容器，或至少具备 `CAP_NET_ADMIN`、`CAP_BPF`、`CAP_PERFMON`、`CAP_SYS_ADMIN` 等目标内核需要的能力。
 - 挂载 `/sys/fs/bpf`，用于 pinned maps / pinned links。
 - 挂载 `/sys/kernel/btf`，用于 BTF。
-- 挂载 tracefs/debugfs，供 trace、kernel drop、部分 eBPF 观测能力使用。
+- 挂载 tracefs/debugfs，仅供既有本机管理员排障入口和 eBPF 运行诊断使用；不代表第一阶段新增 trace/drop 功能。
 - 挂载 `/proc`，用于接口、进程和部分观测能力。
-- 挂载 `/var/lib/aria-agent`，用于 WAL、compact state、service chain 等持久化状态。
+- 挂载 `/var/lib/aria-agent`，用于 WAL、compact state 和既有本机 legacy state；不代表第一阶段新增 service chain 功能。
 - 挂载 `/var/log/aria-agent`，用于日志。
 - 需要时只读挂载 `/lib/modules`，用于目标内核相关探测。
 
@@ -2217,7 +2230,7 @@ Datapath Neutron snapshot API 必须是本机接口：
 
 ### 11.3 观测能力权限
 
-`trace`、`drops`、`ssl`、`diagnose`、`service chain`、`mirror`、`tcprt` 保留为本机管理员能力：
+`trace`、`drops`、`ssl`、`diagnose`、`service chain`、`mirror`、`tcprt` 保留为既有本机管理员能力，不作为第一阶段新增功能模块：
 
 - 不进入 Neutron tenant API。
 - 不进入 `neutron-aria-agent` snapshot schema。
@@ -2228,6 +2241,8 @@ Datapath Neutron snapshot API 必须是本机接口：
 - SSL 是 host-global，默认不得作为租户功能暴露。
 
 ## 12. 可观测性与运维
+
+本章只定义 ACL/QoS Neutron Agent Mode 的运行状态、告警和排障入口，不新增可观测性功能模块。stats、metrics、diagnose、trace、drops 等只作为既有本机管理员能力或支撑性观测入口出现，不进入第一阶段 Neutron snapshot、translator、feature flag、status domain、smoke 或 PR gate。
 
 ### 12.1 neutron-aria-agent 指标
 
@@ -2833,11 +2848,11 @@ N0.5 分成两层：
 | 身份与选择器基础 | `agent/src/api_handlers/groups.rs`、`core/src/state.rs` | group/address-set 由 Neutron snapshot 投影，本机托管写入被 gate 拒绝 |
 | 有状态基础 | `agent/src/api_handlers/conntrack.rs`、`core/src/ct_ops.rs`、`core/src/ct_contract_ops.rs`、`ebpf/src/conntrack.rs`、`ebpf/src/ct_contract.rs` | 作为 ACL 状态化、连接跟踪、fast-path 和 flow 观测基础，不作为 tenant feature |
 | 观测基础 | `core/src/monitoring.rs`、`agent/src/api_handlers/stats.rs`、`agent/src/api_handlers/metrics.rs`、`ebpf/src/stats.rs` | 作为 rule/flow/group/QoS 统计基础，失败进入 observability degraded |
-| ACL 功能 | `agent/src/api_handlers/policies.rs`、`core/src/ebpf_ops/policy.rs`、`ebpf/src/policy.rs` | enhancement domain；失败时 `DomainStatus=degraded,effective_action=bypass`，不影响 OVS 转发 |
-| QoS 功能 | `agent/src/api_handlers/qos.rs`、`core/src/qos_ops.rs`、`ebpf/src/qos.rs` | independent domain；失败 degraded，不影响 OVS 转发 |
-| Mirror 功能 | `agent/src/api_handlers/mirror.rs`、`core/src/mirror_ops.rs`、`ebpf/src/mirror.rs` | 既有本机能力保留；不进入 Neutron snapshot、translator、feature flag、status domain 或 smoke |
-| TCPrt 功能 | `agent/src/api_handlers/tcprt.rs`、`agent/src/control_plane/tcprt.rs`、`core/src/tcprt_ops.rs`、`ebpf/src/tcprt.rs` | 既有本机观测能力保留；不进入 Neutron snapshot、translator、feature flag、status domain 或 smoke |
-| 运维排障能力 | `agent/src/api_handlers/trace.rs`、`agent/src/api_handlers/drops.rs`、`agent/src/api_handlers/ssl.rs`、`agent/src/api_handlers/chains.rs`、`agent/src/control_plane/trace.rs`、`agent/src/control_plane/ssl.rs`、`agent/src/service_chain.rs` | 保留本机 admin-only；不进入 `neutron-aria-agent` snapshot schema |
+| 第一阶段功能模块：ACL | `agent/src/api_handlers/policies.rs`、`core/src/ebpf_ops/policy.rs`、`ebpf/src/policy.rs` | enhancement domain；失败时 `DomainStatus=degraded,effective_action=bypass`，不影响 OVS 转发 |
+| 第一阶段功能模块：QoS | `agent/src/api_handlers/qos.rs`、`core/src/qos_ops.rs`、`ebpf/src/qos.rs` | independent domain；失败 degraded，不影响 OVS 转发 |
+| 非第一阶段功能：Mirror | `agent/src/api_handlers/mirror.rs`、`core/src/mirror_ops.rs`、`ebpf/src/mirror.rs` | 既有本机能力保留；不新增、不进入 Neutron snapshot、translator、feature flag、status domain 或 smoke |
+| 非第一阶段功能：TCPrt | `agent/src/api_handlers/tcprt.rs`、`agent/src/control_plane/tcprt.rs`、`core/src/tcprt_ops.rs`、`ebpf/src/tcprt.rs` | 既有本机观测能力保留；不新增、不进入 Neutron snapshot、translator、feature flag、status domain 或 smoke |
+| 非第一阶段功能：运维排障 | `agent/src/api_handlers/trace.rs`、`agent/src/api_handlers/drops.rs`、`agent/src/api_handlers/ssl.rs`、`agent/src/api_handlers/chains.rs`、`agent/src/control_plane/trace.rs`、`agent/src/control_plane/ssl.rs`、`agent/src/service_chain.rs` | 保留本机 admin-only；不新增、不进入 `neutron-aria-agent` snapshot schema |
 
 新增 Python 子项目：
 
@@ -2876,7 +2891,7 @@ neutron-aria-agent/
 - `aria-datapath` 不访问 Neutron DB，不消费 Neutron RPC。
 - `trace`、`drops`、`ssl`、`diagnose`、`service chain` 不进入 `neutron-aria-agent` 配置、事件、snapshot schema 或 status domain。
 - Group、Conntrack、Monitoring、WAL、Netlink、Pinned Maps 不能做成可选能力。
-- ACL、QoS 是 Phase-1 Neutron Agent Mode roadmap domains；Mirror/TCPrt 代码保留为本机能力，不进入当前阶段 Neutron roadmap、domain status 或 smoke。失败时用 `DomainStatus` 和 `effective_action` 表达，不影响 OVS 转发。
+- 第一阶段功能模块白名单只有 ACL/QoS；Mirror/TCPrt 代码保留为本机能力，不进入当前阶段 Neutron roadmap、domain status 或 smoke。ACL/QoS 失败时用 `DomainStatus` 和 `effective_action` 表达，不影响 OVS 转发。
 - 所有 port 删除、迁移和 unbind 都必须最终清理 orphan map entry。
 
 ### 16.3 推荐提交拆分
@@ -3432,6 +3447,7 @@ rg -n "[ \t]+$" docs/openstack-neutron-agent-mode.md README.md
 
 - README 能跳转到 OpenStack Neutron Agent Mode 方案。
 - 方案明确 `neutron-aria-agent`、`aria-datapath`、Unix socket、容器化、多租户、authority state 和 N1-N6 阶段门槛。
+- 方案明确第一阶段新增功能模块白名单只有 ACL/QoS；其它能力只允许作为支撑能力或既有本机能力出现。
 - README、主方案、报告材料都使用 OVS enhancement / ACL enhancement 统一口径。
 - `docs/openstack-target-env-discovery.md` 模板存在，并被 N0.5 阶段引用。
 - 不残留旧式安全组组合投影、更新或 port-security-disabled 这类当前阶段交付口径。
@@ -3824,9 +3840,9 @@ OpenStack 默认：
 
 功能默认：
 
-- ACL、QoS 是 Phase-1 Neutron Agent Mode roadmap domains；N3 MVP 只要求 ACL enhancement 闭环。
+- 第一阶段功能模块白名单只有 ACL/QoS；N3 MVP 只要求 ACL enhancement 闭环，N4 才进入 QoS 闭环。
 - Group、Conntrack、Monitoring、WAL、Netlink、Pinned Maps 是必选支撑能力。
-- trace、drops、ssl、diagnose、service chain 代码保留，但不进入 `neutron-aria-agent` 暴露面。
+- trace、drops、ssl、diagnose、service chain 代码保留为既有本机管理员能力，但不新增、不进入 `neutron-aria-agent` 暴露面。
 - Mirror/TCPrt Rust 代码保留为既有本机能力，但不进入 `neutron-aria-agent`、snapshot、translator、feature flag、status domain、smoke 或 PR gate。
 
 WAL 默认：
