@@ -4,6 +4,8 @@
 基线分支：`v0.9.0`
 目标分支：`v0.9-neutron-agent`
 
+ACL 产品化独立 Neutron 扩展的详细设计见：[Aria ACL Neutron 独立扩展产品化设计](aria-acl-neutron-extension-product-design.md)。
+
 ## 1. 目标与结论
 
 ### 1.1 建设目标
