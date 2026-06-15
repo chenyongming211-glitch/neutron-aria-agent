@@ -1359,16 +1359,239 @@ bpf on /sys/fs/bpf type bpf
 - `tc` 或等价 QoS shaping 依赖。
 - `bpftool` 是否作为排障工具进入镜像或宿主机。
 
-## 13. 变更流程
+## 13. Security Group 与 Aria ACL 流程对比
 
-### 13.1 创建 ACL 策略
+### 13.1 OpenStack 默认 Security Group 开发流程
+
+OpenStack Security Group 是 Neutron 原生 port security 体系的一部分，不是一个与数据面解耦的普通 service plugin。开启 Security Group 后，开发和执行链路通常如下：
 
 ```text
-1. admin 调用 POST /v2.0/aria-acl-policies。
+Neutron API extension
+  security-groups / security-group-rules
+        |
+Neutron DB / Object
+  securitygroups
+  securitygrouprules
+  securitygroupportbindings
+        |
+ML2 port create/update
+  port.security_groups
+  port_security_enabled
+        |
+RPC 通知 L2 agent
+        |
+neutron-openvswitch-agent / neutron-linuxbridge-agent
+        |
+firewall_driver
+  OVSHybridIptablesFirewallDriver / OVS firewall driver / LinuxBridge iptables driver
+        |
+iptables、OVS flow 或 conntrack 生效
+```
+
+默认 Security Group 开发会涉及：
+
+- Neutron 原生 API extension：`security-groups`、`security-group-rules`。
+- Neutron 原生 DB：security group、security group rule、port binding。
+- Neutron port 字段：`security_groups`、`port_security_enabled`。
+- ML2 plugin 与 L2 agent 的 RPC 通知。
+- `neutron-openvswitch-agent` 或 `neutron-linuxbridge-agent`。
+- firewall driver，例如 hybrid iptables 或 OVS native firewall。
+- remote group、port security、anti-spoof 等原生安全组语义。
+
+在 hybrid iptables driver 下，Security Group 可能引入：
+
+```text
+tap -> qbr -> qvb/qvo -> br-int
+```
+
+而当前目标环境没有启用 Security Group，也没有 `qbr/qvo/qvb` 作为主路径，因此 Aria ACL 不应该回到这条链路。
+
+### 13.2 OpenStack 默认 Security Group 业务流程
+
+用户视角的默认 Security Group 流程如下：
+
+```text
+创建 project
+        |
+Neutron 创建 default security group
+        |
+创建 VM / port
+        |
+如果用户没有显式指定 security group
+        |
+Neutron 自动绑定 default security group
+        |
+用户添加 allow rule
+        |
+Neutron Server 保存 security group rule
+        |
+Neutron Server 找到绑定该 security group 的 ports
+        |
+Neutron Server RPC 通知对应 compute L2 agent
+        |
+L2 agent 调用 firewall driver
+        |
+iptables / OVS flow / conntrack 生效
+```
+
+典型业务语义：
+
+```text
+ingress:
+  未显式 allow 时默认不允许进入 VM。
+
+egress:
+  默认通常允许出方向。
+
+default security group:
+  port 创建时可能自动绑定。
+
+rule model:
+  主要表达 allow rule。
+```
+
+因此默认 Security Group 更像是：
+
+```text
+每个 port 自动带一个安全边界。
+没有允许规则就进不来。
+用户通过增加 allow rule 放通流量。
+```
+
+### 13.3 Aria ACL 开发流程
+
+Aria ACL 是独立 Neutron ACL enhancement，不复用 Security Group。它的 northbound 入口仍然是 Neutron Server，不允许绕过 Neutron 直接创建 OpenStack 托管 ACL。
+
+开发链路如下：
+
+```text
+Neutron API extension
+  aria-acl-policies
+  aria-acl-rules
+  aria-acl-address-sets
+  aria-acl-bindings
+        |
+aria_acl service plugin
+        |
+Aria ACL DB / Object
+  aria_acl_policies
+  aria_acl_rules
+  aria_acl_address_sets
+  aria_acl_address_set_members
+  aria_acl_bindings
+        |
+RPC / notification / full resync API
+        |
+neutron-aria-agent
+        |
+OVSDB port discovery
+  br-int interface external_ids:iface-id=<neutron-port-id>
+        |
+per-port ACL snapshot
+        |
+aria-agent Unix socket
+  /run/aria/aria-agent.sock
+        |
+Aria eBPF map apply
+        |
+tap 上 ACL 生效
+```
+
+开发对象包括：
+
+- `aria_acl_policy`
+- `aria_acl_rule`
+- `aria_acl_address_set`
+- `aria_acl_binding`
+- `neutron-aria-agent`
+- `aria-agent` Neutron snapshot UDS API
+- Aria eBPF ACL apply/status/WAL
+
+明确不开发：
+
+- Security Group projection。
+- remote group 展开。
+- port security enforcement。
+- allowed address pairs enforcement。
+- anti-spoof。
+- hybrid iptables `qbr/qvb/qvo` 链路。
+
+### 13.4 Aria ACL 业务流程
+
+Aria ACL 的准确业务流程如下：
+
+```text
+管理员 / 平台调用 Neutron API 创建 Aria ACL policy
+        |
+Neutron Server 写 aria_acl_policies DB
+        |
+管理员 / 平台调用 Neutron API 创建 Aria ACL rule / address-set
+        |
+Neutron Server 写 aria_acl_rules / aria_acl_address_sets DB
+        |
+管理员 / 平台调用 Neutron API 绑定 policy 到 network 或 port
+        |
+Neutron Server 写 aria_acl_bindings DB
+        |
+Neutron Server 发 RPC / notification
+        |
+neutron-aria-agent 收到事件或执行 full resync
+        |
+neutron-aria-agent 找到本机 OVS tap port
+        |
+neutron-aria-agent 生成 per-port ACL snapshot
+        |
+neutron-aria-agent 通过 /run/aria/aria-agent.sock 下发给 aria-agent
+        |
+aria-agent 写 eBPF map
+        |
+tap 上 ACL 生效
+```
+
+这条流程的关键点：
+
+- Aria ACL 的 northbound 入口是 Neutron Server。
+- 管理员或平台通过 Neutron API 创建 ACL 对象。
+- `aria-agent` 不提供租户 northbound。
+- `neutron-aria-agent` 不直接接受租户请求。
+- `aria-agent` 不访问 Neutron DB，也不判断租户权限。
+- 未绑定 Aria ACL 的 port 保持 bypass。
+- ACL apply 失败时对应 port `degraded + bypass`，不破坏 OVS 原有转发。
+
+### 13.5 Security Group 与 Aria ACL 业务差异
+
+| 项目 | OpenStack Security Group | Aria ACL |
+| --- | --- | --- |
+| northbound 入口 | Neutron Server | Neutron Server |
+| API 对象 | `security_group`、`security_group_rule` | `aria_acl_policy`、`aria_acl_rule`、`aria_acl_address_set`、`aria_acl_binding` |
+| 是否自动绑定 | port 可能自动绑定 default SG | 不自动绑定，必须显式绑定 |
+| 未配置时行为 | 受 default SG 影响 | `not_requested + bypass` |
+| 规则语义 | 主要是 allow-list | 支持显式 allow / deny |
+| remote group | 支持 | 当前不支持 |
+| port security | 强相关 | 不消费 |
+| anti-spoof | 相关 | 当前不实现 |
+| 执行 agent | OVS/LinuxBridge L2 agent | `neutron-aria-agent` + `aria-agent` |
+| 数据面 | iptables / OVS firewall | Aria eBPF |
+| hybrid bridge | 可能出现 `qbr/qvo/qvb` | 不引入 |
+| 失败策略 | 原生安全组语义 | degraded + bypass，保护 OVS 原有转发 |
+
+一句话：
+
+```text
+Aria ACL 的 northbound 入口是 Neutron Server；
+只是它不复用 Security Group 的 default SG 自动绑定机制。
+```
+
+## 14. 变更流程
+
+### 14.1 创建 ACL 策略
+
+```text
+1. admin / 平台调用 Neutron API: POST /v2.0/aria-acl-policies。
 2. neutron-server 写 aria_acl_policies。
-3. admin 调用 POST /v2.0/aria-acl-rules。
+3. admin / 平台调用 Neutron API: POST /v2.0/aria-acl-rules。
 4. neutron-server 写 aria_acl_rules。
-5. admin 调用 POST /v2.0/aria-acl-bindings。
+5. admin / 平台调用 Neutron API: POST /v2.0/aria-acl-bindings。
 6. neutron-server 写 aria_acl_bindings。
 7. aria_acl plugin 发送 binding update notification。
 8. 对应 host 的 neutron-aria-agent 发现 affected port。
@@ -1378,10 +1601,10 @@ bpf on /sys/fs/bpf type bpf
 12. agent 上报 status。
 ```
 
-### 13.2 更新 ACL 规则
+### 14.2 更新 ACL 规则
 
 ```text
-1. admin 更新 rule。
+1. admin / 平台通过 Neutron API 更新 rule。
 2. neutron-server 增加 rule revision。
 3. plugin 发送 rule update notification。
 4. agent 找出绑定该 policy 的 ports。
@@ -1391,10 +1614,10 @@ bpf on /sys/fs/bpf type bpf
 8. agent 下发 port-scoped snapshot。
 ```
 
-### 13.3 删除绑定
+### 14.3 删除绑定
 
 ```text
-1. admin 删除 aria_acl_binding。
+1. admin / 平台通过 Neutron API 删除 aria_acl_binding。
 2. agent 收到 binding delete。
 3. agent 重算 port effective ACL。
 4. 如果没有 network-level binding，该 port 进入 not_requested + bypass。
@@ -1402,7 +1625,7 @@ bpf on /sys/fs/bpf type bpf
 6. OVS 转发保持原状。
 ```
 
-### 13.4 Port 迁移
+### 14.4 Port 迁移
 
 live migration 或冷迁移：
 
@@ -1424,9 +1647,9 @@ ACL domain=not_requested 或 degraded
 effective_action=bypass
 ```
 
-## 14. 错误处理与状态
+## 15. 错误处理与状态
 
-### 14.1 Domain Status
+### 15.1 Domain Status
 
 ACL domain 使用结构化状态：
 
@@ -1439,7 +1662,7 @@ ACL domain 使用结构化状态：
 | `degraded` | `bypass` | tap identity 不稳定 |
 | `blocked` | `unchanged` | WAL 或 schema 严重错误，无法安全 apply |
 
-### 14.2 错误码
+### 15.2 错误码
 
 建议错误码：
 
@@ -1457,7 +1680,7 @@ ACL domain 使用结构化状态：
 | `ARIA_ACL_APPLY_FAILED` | datapath | eBPF map apply 失败 | degraded + bypass |
 | `CONNTRACK_REQUIRED_UNAVAILABLE` | datapath | stateful ACL 缺少 conntrack | degraded + bypass |
 
-### 14.3 告警
+### 15.3 告警
 
 建议 Prometheus/告警指标：
 
@@ -1484,7 +1707,7 @@ aria_acl_last_successful_generation
 | `AriaAclApplyFailureSpike` | apply failure 增长 | datapath apply 异常 |
 | `AriaAclUnsupportedPortBound` | ACL binding 指向 unsupported port | 配置对象无法执行 |
 
-## 15. 与 QoS 的关系
+## 16. 与 QoS 的关系
 
 ACL 和 QoS 必须分层：
 
@@ -1509,7 +1732,7 @@ QoS 不应该放进 `aria_acl` plugin。
 - ACL 是新产品语义，QoS 是已有 Neutron 语义。
 - 分开后可以独立灰度、独立回滚、独立排障。
 
-### 15.1 现场 QoS 基线
+### 16.1 现场 QoS 基线
 
 真实环境中，QoS 当前状态是：
 
@@ -1525,7 +1748,7 @@ QoS 不应该放进 `aria_acl` plugin。
 
 因此 QoS 路线不是“重新开发 QoS API”，而是“启用已有 Neutron QoS API/DB，并新增 Aria 执行路径”。
 
-### 15.2 QoS 启用配置
+### 16.2 QoS 启用配置
 
 Neutron Server 侧：
 
@@ -1561,7 +1784,7 @@ extensions = mirror,qos
 
 除非明确要让 OVS agent 执行 QoS。当前 Aria 方案要求避免 OVS QoS 和 Aria QoS 双重 enforcement。
 
-### 15.3 Aria QoS notification / translator
+### 16.3 Aria QoS notification / translator
 
 QoS plugin 已有 notification driver manager。产品化时推荐新增 Aria QoS notification driver 或由 `neutron-aria-agent` 通过 full resync + RPC 监听获取 QoS 状态。
 
@@ -1604,7 +1827,7 @@ packet_rate_limit
 
 unsupported rule 必须进入 status，不允许静默忽略后宣称 QoS ready。
 
-### 15.4 QoS 执行后端
+### 16.4 QoS 执行后端
 
 Aria QoS 执行必须满足：
 
@@ -1634,7 +1857,7 @@ QoS apply 失败:
   OVS L2 forwarding 不受影响
 ```
 
-### 15.5 QoS 产品化验收
+### 16.5 QoS 产品化验收
 
 QoS 进入生产 smoke 前必须完成：
 
@@ -1647,9 +1870,9 @@ QoS 进入生产 smoke 前必须完成：
 - 删除 QoS policy 后 eBPF token bucket / map entry 清理。
 - QoS 失败不影响 ACL。
 
-## 16. 测试方案
+## 17. 测试方案
 
-### 16.1 Neutron Server 单元测试
+### 17.1 Neutron Server 单元测试
 
 覆盖：
 
@@ -1665,7 +1888,7 @@ QoS 进入生产 smoke 前必须完成：
 - revision_number 更新。
 - delete policy 时引用检查。
 
-### 16.2 Neutron DB migration 测试
+### 17.2 Neutron DB migration 测试
 
 覆盖：
 
@@ -1675,7 +1898,7 @@ QoS 进入生产 smoke 前必须完成：
 - foreign key 存在。
 - unique 约束有效。
 
-### 16.3 RPC 测试
+### 17.3 RPC 测试
 
 覆盖：
 
@@ -1686,7 +1909,7 @@ QoS 进入生产 smoke 前必须完成：
 - stale revision 丢弃。
 - RPC 断开后 full resync。
 
-### 16.4 neutron-aria-agent 单元测试
+### 17.4 neutron-aria-agent 单元测试
 
 覆盖：
 
@@ -1701,7 +1924,7 @@ QoS 进入生产 smoke 前必须完成：
 - snapshot generation 单调递增。
 - UDS contract drift。
 
-### 16.5 aria-agent Rust 测试
+### 17.5 aria-agent Rust 测试
 
 覆盖：
 
@@ -1714,7 +1937,7 @@ QoS 进入生产 smoke 前必须完成：
 - delete port cleanup。
 - capability mismatch。
 
-### 16.6 目标环境 smoke
+### 17.6 目标环境 smoke
 
 必须覆盖：
 
@@ -1765,7 +1988,7 @@ QoS enforcement:
   tc 缺失时 shaping 返回 degraded/unsupported，不宣称 ready
 ```
 
-### 16.7 三节点一致性检查
+### 17.7 三节点一致性检查
 
 当前 `ostack3`、`ostack4` SSH 受限，不能用交互式 root 命令完整验证。正式部署 smoke 必须通过容器和自动化脚本完成三节点一致性检查：
 
@@ -1781,9 +2004,9 @@ QoS enforcement:
 | LinuxBridge port skip | 必须 | 必须 | 必须 |
 | QoS `tc` 依赖 | 如启用 shaping 则必须 | 如启用 shaping 则必须 | 如启用 shaping 则必须 |
 
-## 17. 灰度与回滚
+## 18. 灰度与回滚
 
-### 17.1 灰度开关
+### 18.1 灰度开关
 
 建议配置：
 
@@ -1817,7 +2040,7 @@ enforcement_enabled=false
 enforcement_enabled=true
 ```
 
-### 17.2 回滚策略
+### 18.2 回滚策略
 
 按层回滚：
 
@@ -1832,7 +2055,7 @@ enforcement_enabled=true
 
 不建议生产回滚时立即 drop DB 表。
 
-### 17.3 失败隔离
+### 18.3 失败隔离
 
 ACL 失败不得影响：
 
@@ -1843,7 +2066,7 @@ ACL 失败不得影响：
 - LinuxBridge。
 - 非 Aria-managed port。
 
-## 18. 实施阶段
+## 19. 实施阶段
 
 ### Phase 0: 产品环境兼容基线
 
@@ -1943,9 +2166,9 @@ ACL 失败不得影响：
 - tap recreate 恢复。
 - 回滚流程通过。
 
-## 19. OpenStack 配置示例
+## 20. OpenStack 配置示例
 
-### 19.1 ACL-only 首次灰度配置
+### 20.1 ACL-only 首次灰度配置
 
 首次在当前产品环境中引入 Aria ACL 时，建议先不要同时启用 QoS。
 
@@ -1969,7 +2192,7 @@ enforcement_enabled = false
 - `neutron-aria-agent` 能 full resync。
 - 未开启 enforcement 时业务流量不受影响。
 
-### 19.2 ACL enforcement 配置
+### 20.2 ACL enforcement 配置
 
 ACL API/DB/agent 验证完成后，再打开 enforcement：
 
@@ -1982,7 +2205,7 @@ default_stateful = true
 enforcement_enabled = true
 ```
 
-### 19.3 ACL + QoS 配置
+### 20.3 ACL + QoS 配置
 
 QoS 验证通过后再启用：
 
@@ -2009,7 +2232,7 @@ extensions = mirror,qos
 
 除非已经切换为 OVS QoS 执行模式，或明确证明不会和 Aria 双重限速。
 
-### 19.4 neutron-aria-agent.ini
+### 20.4 neutron-aria-agent.ini
 
 ```ini
 [DEFAULT]
@@ -2041,7 +2264,7 @@ unsupported_rule_action = degraded
 shaping_requires_tc = true
 ```
 
-### 19.5 policy.yaml
+### 20.5 policy.yaml
 
 第一版 admin-only：
 
@@ -2057,7 +2280,7 @@ shaping_requires_tc = true
 "delete_aria_acl_binding": "rule:admin_only"
 ```
 
-## 20. 产品边界总结
+## 21. 产品边界总结
 
 最终产品口径：
 
