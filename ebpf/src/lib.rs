@@ -168,6 +168,7 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
             None => return TC_ACT_OK,
         };
         if !parse_tc_packet(&ctx, info_ptr) {
+            try_raw_global_mirror_tc(&ctx, DIR_EGRESS, pkt_len);
             return TC_ACT_OK;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
@@ -296,6 +297,7 @@ pub fn tc_ingress(ctx: TcContext) -> i32 {
             None => return TC_ACT_OK,
         };
         if !parse_tc_packet(&ctx, info_ptr) {
+            try_raw_global_mirror_tc(&ctx, DIR_INGRESS, pkt_len);
             return TC_ACT_OK;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
@@ -453,6 +455,15 @@ unsafe fn parse_tc_packet(ctx: &TcContext, out: *mut parser::PacketInfo) -> bool
     }
 
     parsed
+}
+
+#[inline(always)]
+unsafe fn try_raw_global_mirror_tc(ctx: &TcContext, direction: u8, pkt_len: u32) {
+    let skb = ctx.as_ptr() as *mut __sk_buff;
+    let tap_id = resolve_tap_id_for_ifindex((*skb).ifindex);
+    if mirror::mirror_enabled(tap_id) {
+        mirror::try_global_mirror_tc(skb, tap_id, direction, pkt_len);
+    }
 }
 
 #[inline(always)]

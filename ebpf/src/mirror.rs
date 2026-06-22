@@ -108,6 +108,20 @@ pub unsafe fn try_mirror_tc(
     }
 
     // Level 2: global mirror
+    let _ = try_global_mirror_tc(skb_ptr, tap_id, direction, pkt_len);
+}
+
+/// Try to mirror a packet using only the global mirror map.
+///
+/// This is used by TC entrypoints for frames that cannot be parsed as IP, so
+/// global mirror behaves like a span-like L2 mirror instead of IP-only mirror.
+#[inline(always)]
+pub unsafe fn try_global_mirror_tc(
+    skb_ptr: *mut aya_ebpf::bindings::__sk_buff,
+    tap_id: u32,
+    direction: u8,
+    pkt_len: u32,
+) -> bool {
     let global_key = GlobalMirrorKey {
         tap_id,
         direction,
@@ -117,5 +131,8 @@ pub unsafe fn try_mirror_tc(
     if let Some(cfg) = MIRROR_GLOBAL.get(&global_key) {
         let ret = bpf_clone_redirect(skb_ptr, cfg.target_ifindex, 0);
         update_global_mirror_stats(&global_key, pkt_len, ret == 0);
+        return true;
     }
+
+    false
 }
