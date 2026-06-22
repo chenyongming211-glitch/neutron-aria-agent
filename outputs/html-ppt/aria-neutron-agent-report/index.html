@@ -18,37 +18,37 @@
     <div class="split" style="align-items:center">
       <div>
         <h1 class="hero-title">Aria Firewall<br><span class="accent">Neutron Agent Mode</span></h1>
-        <p class="subtitle">把 Aria eBPF datapath 放进 OpenStack compute node，用 Neutron 做唯一控制入口，在不影响原 OVS 转发的前提下只增强 ACL enhancement 与 QoS。</p>
-        <div class="quote">结论：方向继续，但第一阶段只做 Coexist Mode，不做完整 L2 替代，不引入自研控制面。</div>
+        <p class="subtitle">在旧版 OpenStack 中把 Aria 做成 Neutron 可管理的 ACL/QoS 执行后端：ACL 独立扩展，QoS 复用原生模型，只接管普通虚机 OVS tap port。</p>
+        <div class="quote">结论：方案可行，优先落 ACL 产品化闭环；QoS 第二阶段复用 Neutron QoS API/DB，由 Aria 执行。</div>
       </div>
       <div class="rail">
-        <div class="metric"><strong>v0.9</strong><span>从没有控制面开发内容的基线切出，避免混入 v0.10 controller。</span></div>
-        <div class="metric"><strong>2 containers</strong><span>高权限 aria-datapath + 低权限 neutron-aria-agent。</span></div>
-        <div class="metric"><strong>2 features</strong><span>第一阶段只把 ACL enhancement / QoS 接入 Neutron Agent Mode。</span></div>
+        <div class="metric"><strong>ACL</strong><span>新增 Aria 独立 Neutron extension、DB、Legacy neutron CLI 和 port-show 摘要。</span></div>
+        <div class="metric"><strong>QoS</strong><span>启用 Neutron 原生 QoS policy/rule，执行路径切到 Aria。</span></div>
+        <div class="metric"><strong>Scope</strong><span>普通虚机 OVS tap 支持；SR-IOV、LinuxBridge、Neutron 服务端口第一阶段跳过。</span></div>
       </div>
     </div>
     <div class="footer"><span>Aria Firewall · v0.9-neutron-agent</span><span>01 / 22</span></div>
     <aside class="notes">
-      <p>开场先讲结论。这次不是做一个新的控制平台，也不是把 v0.10 的 controller 搬进来。我们要做的是 OpenStack 的 Neutron Agent Mode。</p>
-      <p>也就是说，OpenStack 用户还是通过 Neutron、Horizon、Terraform 这些入口配置网络；Aria 只在 compute node 上接管节点侧 datapath 能力。</p>
-      <p>第一阶段的边界非常重要：目标环境固定 OVS，Aria 不替代 L2 连接路径，只新增 ACL enhancement 和 QoS 两个功能模块。</p>
+      <p>开场先讲结论。现在方案已经从早期 agent mode 收敛到产品化 Neutron 扩展：ACL 自建 Aria extension，QoS 复用 Neutron QoS。</p>
+      <p>OpenStack 用户仍通过 Neutron、Horizon、平台后端或 Legacy neutron CLI 配置网络能力；Aria 在 compute node 上作为执行面。</p>
+      <p>第一阶段只接管普通虚机 OVS tap port。SR-IOV、LinuxBridge、DHCP/router/metadata 等 Neutron 服务端口不纳入 enforcement。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Executive Summary">
     <p class="kicker">executive summary</p>
-    <h2 class="title">这不是控制面重写，而是把 Aria 变成 OpenStack 的本机执行面。</h2>
+    <h2 class="title">最终方案：ACL 独立扩展，QoS 复用 Neutron，Aria 只做执行后端。</h2>
     <div class="g3 grid">
-      <div class="card"><h3>应该继续</h3><p>复用 Neutron 做 northbound 和多租户语义，避免自建控制面重复造 RBAC、project、port binding、QoS policy。</p></div>
-      <div class="card"><h3>必须收边界</h3><p>第一阶段不宣称完整 L2 agent，不负责 port binding，不替代 OVS 的连接路径。</p></div>
-      <div class="card"><h3>先打通纵向闭环</h3><p>先把 ACL enhancement 和 QoS 从 Neutron 投影到本机 eBPF runtime。</p></div>
+      <div class="card"><h3>ACL 主线</h3><p>开发 `aria_acl` service plugin、独立 API/DB/RBAC/RPC、Legacy neutron CLI 和 port-show 只读摘要。</p></div>
+      <div class="card"><h3>QoS 路线</h3><p>不重造 QoS API；启用 Neutron QoS policy/rule/binding，由 neutron-aria-agent 翻译给 Aria 执行。</p></div>
+      <div class="card"><h3>接管范围</h3><p>只接管 `device_owner=compute:*` 的普通 OVS tap port；SR-IOV、LinuxBridge、Neutron 服务端口跳过。</p></div>
     </div>
-    <div class="quote">判断标准：Neutron 是唯一 source of truth；Aria 是 compute node 上可恢复、可审计、可降级的 datapath runtime。</div>
+    <div class="quote">判断标准：Neutron 是唯一 source of truth；Aria 是 compute node 上可审计、可降级、可恢复的 per-port ACL/QoS runtime。</div>
     <div class="footer"><span>开发汇报 · 结论页</span><span>02 / 22</span></div>
     <aside class="notes">
-      <p>这一页是给管理层和开发团队对齐用的。我们不再讨论自研控制面是否替代 Neutron，因为在 OpenStack 里这个方向不划算。</p>
-      <p>Neutron 已经承担了租户、端口、网络、QoS、绑定、RBAC、agent heartbeat。我们应该做的是把 Aria 接进 Neutron 体系，成为一个本机 agent。</p>
-      <p>开发顺序也要收敛：先做 ACL/QoS 两条纵向闭环，再谈其它能力；先把失败边界、WAL、Netlink、pinned maps 打牢，再进入生产 smoke。</p>
+      <p>这一页是给管理层和开发团队对齐用的。ACL 不走 Security Group，也不靠 tag/mapping 作为产品形态，而是做独立 Neutron 扩展。</p>
+      <p>QoS 则相反，不重新设计 API。Neutron 里已有 QoS 代码，现场只是未启用，所以开发重点是启用模型并切换执行后端。</p>
+      <p>边界要收紧：Aria 不改 binding:vif_type，不替代 OVS L2，不接管 SR-IOV 第一阶段，也不能误伤 DHCP/router/metadata 端口。</p>
     </aside>
   </section>
 
@@ -83,48 +83,49 @@
     </aside>
   </section>
 
-  <section class="slide" data-title="Branch Decision">
-    <p class="kicker">branch decision</p>
-    <h2 class="title">开发分支应该继续从 v0.9 走，不搬 v0.10 控制面。</h2>
+  <section class="slide" data-title="Environment Findings">
+    <p class="kicker">target environment findings</p>
+    <h2 class="title">现场环境支持 OVS tap 路线，但不支持“全端口接管”。</h2>
     <div class="table row4" style="margin-top:28px">
-      <div class="th">分支</div><div class="th">状态</div><div class="th">适合做什么</div><div class="th">结论</div>
-      <div class="td">v0.9.0</div><div class="td">本机 agent + eBPF runtime</div><div class="td">适合接 Neutron 做 compute node agent</div><div class="td"><span class="tag ok">采用</span> 作为 OpenStack agent mode 基线</div>
-      <div class="td">v0.10.0</div><div class="td">已有控制面方向</div><div class="td">适合自研 controller / southbound 继续演进</div><div class="td"><span class="tag no">不搬</span> 避免和 Neutron 重复控制入口</div>
-      <div class="td">自研控制面</div><div class="td">可做 IaaS 控制平台</div><div class="td">不适合直接嵌入 OpenStack 替代安全组</div><div class="td"><span class="tag warn">保留设计</span> 本路线不使用</div>
+      <div class="th">现场事实</div><div class="th">当前状态</div><div class="th">对方案影响</div><div class="th">结论</div>
+      <div class="td">Neutron 版本</div><div class="td">Python2，`neutronclient 2016.9.9`</div><div class="td">必须支持 Legacy `neutron` CLI 和老式 extension 写法</div><div class="td"><span class="tag ok">已纳入</span></div>
+      <div class="td">ML2/Agent</div><div class="td">OVS、LinuxBridge、SR-IOV agent 同时存在</div><div class="td">不能宣称统一接管所有端口</div><div class="td"><span class="tag warn">按端口类型声明能力</span></div>
+      <div class="td">安全组</div><div class="td">`enable_security_group=False`</div><div class="td">不能描述成 Security Group replacement</div><div class="td"><span class="tag ok">独立 ACL enhancement</span></div>
+      <div class="td">OVS tap</div><div class="td">tap 直挂 `br-int`，有 `external_ids:iface-id`</div><div class="td">普通 VM OVS tap 可建立 port 到 tap 的稳定映射</div><div class="td"><span class="tag ok">第一阶段主线</span></div>
     </div>
-    <div class="quote">OpenStack 场景下，Neutron 已经是控制面；Aria 只需要成为可信的本机执行面。</div>
-    <div class="footer"><span>分支与路线选择</span><span>04 / 22</span></div>
+    <div class="quote">新增发现：DHCP port 也可能是 ovs/normal tap，所以必须按 `device_owner=compute:*` 过滤，只接管虚机端口。</div>
+    <div class="footer"><span>现场结论 · 端口范围</span><span>04 / 22</span></div>
     <aside class="notes">
-      <p>这里解释为什么我们之前切了 v0.9-neutron-agent 分支。v0.9 没有控制面开发内容，正好适合做一个干净的 OpenStack agent 分支。</p>
-      <p>v0.10 的 controller 方向不是错，但它解决的是另一类问题。如果把它搬进 OpenStack，会和 Neutron 的 northbound、RBAC、租户模型、agent 管理重叠。</p>
-      <p>所以这条线的原则是：复用 Neutron，不复制 Neutron；强化 datapath，不扩张控制面。</p>
+      <p>这页汇报真实环境探测结论。Neutron 是旧版 Python2，所以客户端和服务端扩展都不能按现代 neutron-lib 方案默认实现。</p>
+      <p>现场不是纯 OVS：OVS、LinuxBridge、SR-IOV agent 同时存在。但业务普通 VM tap 确实直接挂在 br-int，且 OVSDB external_ids 里有 iface-id。</p>
+      <p>最关键修正是服务端口过滤。DHCP port 也可能是 ovs normal tap，不能只按 binding:vif_type 判断接管范围，必须排除 network:* 端口。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Target Architecture">
     <p class="kicker">target architecture</p>
-    <h2 class="title">目标架构是两个容器、一条 Unix socket、本机 eBPF datapath。</h2>
+    <h2 class="title">目标架构：Neutron 管对象，Aria 在计算节点执行 per-port ACL/QoS。</h2>
     <div class="arch">
       <div class="arch-row">
         <div class="node"><h3>OpenStack User</h3><p>Horizon / Terraform / Heat / Neutron API</p></div>
         <div class="arrow">→</div>
-        <div class="node"><h3>Neutron Server</h3><p>port、QoS、RBAC、binding、agent heartbeat</p></div>
+        <div class="node"><h3>Neutron Server</h3><p>Aria ACL API/DB、QoS policy、port binding、RBAC</p></div>
         <div class="arrow">→</div>
-        <div class="node primary"><h3>neutron-aria-agent</h3><p>Python adapter，拉取本 host 状态，生成 snapshot</p></div>
+        <div class="node primary"><h3>neutron-aria-agent</h3><p>监听 RPC/full resync，计算 per-port effective ACL/QoS</p></div>
       </div>
       <div class="arch-row">
-        <div class="node"><h3>OVS</h3><p>继续做 L2 binding 和 VM tap/vif plug</p></div>
+        <div class="node"><h3>OVS br-int</h3><p>继续做 L2 转发；tap 用 iface-id 映射 Neutron port</p></div>
         <div class="arrow">↔</div>
         <div class="node primary"><h3>/run/aria/aria-agent.sock</h3><p>OpenStack 模式唯一 datapath API 通道</p></div>
         <div class="arrow">→</div>
-        <div class="node primary"><h3>aria-datapath</h3><p>Rust `aria-agent` binary，负责 eBPF/WAL/Netlink/pinned maps</p></div>
+        <div class="node primary"><h3>aria-agent / eBPF</h3><p>接收 snapshot，写 map，在 VM tap 上执行 ACL/QoS</p></div>
       </div>
     </div>
     <div class="footer"><span>架构 · 两容器边界</span><span>05 / 22</span></div>
     <aside class="notes">
-      <p>目标架构很简单。上游仍然是 OpenStack 用户通过 Neutron 配置对象。Neutron server 继续掌握 port、QoS、binding 和多租户关系；当前阶段不把 Security Group 投影给 Aria。</p>
-      <p>compute node 上新增一个 Python 的 neutron-aria-agent，它只负责读 Neutron、本机投影、生成 snapshot，然后通过 Unix socket 调用本机 datapath。</p>
-      <p>Rust 侧叫 aria-datapath，这是角色名和容器名，里面仍然跑现有 aria-agent 二进制。两个容器之间只通过 /run/aria/aria-agent.sock 通信。</p>
+      <p>目标架构分两层。Neutron Server 提供 Aria ACL 的 northbound API、DB 和 RBAC；QoS 仍走 Neutron 原生 QoS policy/rule。</p>
+      <p>compute 节点新增 neutron-aria-agent。它不替代 OVS agent，只读取 Neutron 状态、发现本 host 的 VM tap、生成 per-port snapshot。</p>
+      <p>aria-agent 不访问 Neutron DB，也不判断租户权限。它只接收 UDS snapshot，在 tap 上执行 eBPF ACL/QoS。</p>
     </aside>
   </section>
 
@@ -132,9 +133,9 @@
     <p class="kicker">component boundaries</p>
     <h2 class="title">三个边界必须守住：Neutron 管语义，Python 管投影，Rust 管执行。</h2>
     <div class="g3 grid">
-      <div class="card"><h3>Neutron</h3><ul><li>source of truth</li><li>project / RBAC / shared network</li><li>port binding / QoS</li><li>agent heartbeat</li></ul></div>
-      <div class="card"><h3>neutron-aria-agent</h3><ul><li>Python 编写</li><li>只处理本 host ports</li><li>翻译 ACL enhancement / QoS</li><li>full resync + event merge</li></ul></div>
-      <div class="card"><h3>aria-datapath</h3><ul><li>Rust runtime</li><li>不访问 Neutron DB</li><li>eBPF attach/map apply</li><li>WAL / Netlink / pinned maps</li></ul></div>
+      <div class="card"><h3>Neutron Server</h3><ul><li>Aria ACL API/DB/RBAC</li><li>QoS policy/rule/binding</li><li>project / port / network</li><li>agent heartbeat</li></ul></div>
+      <div class="card"><h3>neutron-aria-agent</h3><ul><li>Python2 兼容</li><li>只处理本 host VM OVS tap</li><li>翻译 ACL / QoS snapshot</li><li>full resync + event merge</li></ul></div>
+      <div class="card"><h3>aria-agent</h3><ul><li>Rust runtime</li><li>不访问 Neutron DB/API</li><li>eBPF attach/map apply</li><li>WAL / Netlink / runtime status</li></ul></div>
     </div>
     <div class="quote">Rust 侧不解释 Neutron 内部语义；Python 侧不直接操作 eBPF map。</div>
     <div class="footer"><span>职责边界</span><span>06 / 22</span></div>
@@ -147,78 +148,78 @@
 
   <section class="slide" data-title="Functional Scope">
     <p class="kicker">functional scope</p>
-    <h2 class="title">第一阶段只暴露 ACL enhancement 和 QoS，底层支撑能力必须保留。</h2>
+    <h2 class="title">功能范围收敛为两条线：ACL 产品化先落地，QoS 复用原生模型。</h2>
     <div class="g2 grid">
-      <div class="card"><h3>ACL</h3><p>显式 ACL enhancement；第一版来自 admin tag + 只读 mapping，未 ready 时 bypass/degraded。</p></div>
-      <div class="card"><h3>QoS</h3><p>对应 Neutron QoS policy，port-level 覆盖 network-level，失败独立 degraded。</p></div>
+      <div class="card"><h3>ACL：第一阶段主线</h3><p>开发 `aria_acl` 独立 Neutron extension，包含 policy/rule/address-set/binding、Legacy CLI、port-show 摘要和 runtime status。</p></div>
+      <div class="card"><h3>QoS：第二阶段</h3><p>启用 Neutron 原生 QoS API/DB/ML2 extension，保留原生 `qos_policy_id`，由 Aria 接管执行后端。</p></div>
     </div>
     <div class="g4 grid" style="margin-top:18px">
-      <div class="metric"><strong>Group / Conntrack</strong><span>ACL/QoS 选择器、状态化 ACL 和统计归因基础。</span></div>
-      <div class="metric"><strong>WAL</strong><span>Neutron state 与 local override 必须分离。</span></div>
-      <div class="metric"><strong>Netlink</strong><span>接口生命周期必须独立监听，不能只靠 Neutron RPC。</span></div>
-      <div class="metric"><strong>Pinned</strong><span>map/link schema 需要版本握手和 repair。</span></div>
+      <div class="metric"><strong>ext-show</strong><span>`neutron ext-show aria-acl` 可见。</span></div>
+      <div class="metric"><strong>aria-acl-*</strong><span>Legacy `neutron` 命令可创建、查询、绑定 ACL。</span></div>
+      <div class="metric"><strong>port-show</strong><span>展示 `aria_acl_*` 只读摘要字段。</span></div>
+      <div class="metric"><strong>agent-list</strong><span>`neutron-aria-agent` heartbeat alive。</span></div>
     </div>
-    <div class="quote">Mirror、TCPrt、Trace、Drops、SSL、Diagnose、Service Chain 等 Rust 既有代码保留，但不进入第一阶段 Neutron 对接。</div>
+    <div class="quote">不接管 SR-IOV、LinuxBridge、DHCP/router/metadata 等端口；这些必须显示 unsupported 或 not_applicable。</div>
     <div class="footer"><span>功能范围 · 两个 feature domain</span><span>07 / 22</span></div>
     <aside class="notes">
-      <p>OpenStack 模式第一阶段对外只暴露两个功能域：ACL enhancement 和 QoS。其它已有能力不是删除，而是不进入 Neutron agent 暴露面。</p>
-      <p>同时有 Group、Conntrack、Monitoring、WAL、Netlink 和 pinned maps 这些支撑能力必须保留。这些不是租户功能。</p>
-      <p>ACL 不是当前阶段的业务连通性硬门槛；ACL 或 conntrack 未 ready 时，Aria 必须 degraded/bypass，原 OVS 转发不能中断。</p>
+      <p>功能范围现在更清楚：ACL 是第一阶段主线，QoS 放到第二阶段，但 QoS 不重新定义 API。</p>
+      <p>开发完成后不是只看内部日志，而是能从 Neutron CLI 和 port-show 看到能力可用、绑定关系、effective policy 和 runtime status。</p>
+      <p>端口范围是汇报重点。只处理普通虚机 OVS tap；SR-IOV、LinuxBridge 和 Neutron 服务端口都不能误接管。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="ACL Principle">
     <p class="kicker">acl implementation principle</p>
-    <h2 class="title">ACL 只做显式 enhancement：Neutron 负责输入，Aria 负责本机执行。</h2>
+    <h2 class="title">ACL 是 Aria 独立 Neutron 扩展，不复用 Security Group。</h2>
     <div class="flow">
-      <div class="step"><b>01 intent</b><span>operator-admin 通过 Neutron tag 指向显式 ACL policy。</span></div>
-      <div class="step"><b>02 mapping</b><span>Python 读取只读 mapping，不新增 tenant northbound。</span></div>
-      <div class="step"><b>03 scope</b><span>按 port owner project 编译 scoped group/address-set。</span></div>
-      <div class="step"><b>04 snapshot</b><span>输出 ACL domain，不包含 Security Group projection。</span></div>
-      <div class="step"><b>05 datapath</b><span>Rust apply groups → conntrack → ACL maps。</span></div>
-      <div class="step"><b>06 status</b><span>ready/degraded/not_requested 都带 effective_action。</span></div>
+      <div class="step"><b>01 API</b><span>Legacy CLI / 平台调用 Neutron 创建 policy、rule、address-set。</span></div>
+      <div class="step"><b>02 DB</b><span>neutron-server 写 `aria_acl_*` 表，生成 revision。</span></div>
+      <div class="step"><b>03 binding</b><span>policy 绑定到 network 或 port，不写入原生 ports 表。</span></div>
+      <div class="step"><b>04 event</b><span>RPC notification 或 full resync 触发 agent 重算。</span></div>
+      <div class="step"><b>05 tap</b><span>agent 用 OVS `external_ids:iface-id` 找本机 VM tap。</span></div>
+      <div class="step"><b>06 apply</b><span>UDS 下发 snapshot，aria-agent 写 eBPF map。</span></div>
     </div>
     <div class="split" style="margin-top:26px">
-      <div class="card"><h3>语义边界</h3><p>不消费 Neutron Security Group、remote group、port security 或 allowed address pairs；跨 project 访问必须来自显式 ACL enhancement policy。</p></div>
-      <div class="card"><h3>失败边界</h3><p>ACL 未配置就是 bypass；配置错误或 apply 失败是 degraded + bypass，不形成默认拒绝，也不影响原 OVS connectivity。</p></div>
+      <div class="card"><h3>API 对象</h3><p>`aria_acl_policy`、`aria_acl_rule`、`aria_acl_address_set`、`aria_acl_binding`，由 Neutron Server 统一鉴权和审计。</p></div>
+      <div class="card"><h3>port-show 表达</h3><p>port 上只展示只读摘要：`aria_acl_enabled`、`effective_policy_id`、`runtime_status`，不改变 `binding:vif_type=ovs`。</p></div>
     </div>
     <div class="footer"><span>ACL 原理 · 显式增强</span><span>08 / 22</span></div>
     <aside class="notes">
-      <p>ACL 的关键不是把 Neutron Security Group 复制一遍，而是只做显式 enhancement。输入来自 operator-admin 管理的 Neutron tag 和本机只读 mapping。</p>
-      <p>Python translator 负责把 port、project、ACL group 和 CIDR 编译成 scoped address-set 和 per-port ACL policy。Rust 侧只执行 snapshot，不重新解释 Neutron RBAC。</p>
-      <p>失败语义必须保守：未配置是 bypass，配置失败是 degraded + bypass，不能因为 Aria ACL 未 ready 就让原 OVS 转发中断。</p>
+      <p>这页讲 ACL 的业务流程。管理员或者平台通过 Neutron API 创建 Aria ACL 对象，Neutron Server 写独立 DB，不复用安全组表。</p>
+      <p>绑定关系通过 `aria_acl_bindings` 表表达。绑定到 network 时也只展开到 eligible VM ports，不展开到 DHCP/router/metadata 服务端口。</p>
+      <p>agent 只消费 Neutron 状态并生成 snapshot，aria-agent 只执行 snapshot。这样 ACL 有审计、有回滚、有 runtime status。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="QoS Principle">
     <p class="kicker">qos implementation principle</p>
-    <h2 class="title">QoS 以 per-port effective policy 为准，失败只降级 QoS domain。</h2>
+    <h2 class="title">QoS 不重造 API：复用 Neutron QoS，执行后端切到 Aria。</h2>
     <div class="split">
       <div class="card">
-        <h3>Translator 计算规则</h3>
+        <h3>Neutron 侧开发</h3>
         <div class="checklist">
-          <div class="check"><i>1</i><p>先收集 Neutron port-level、network-level 和 shared QoS policy。</p></div>
-          <div class="check"><i>2</i><p>按 port-level &gt; network-level &gt; shared default 生成 effective QoS。</p></div>
-          <div class="check"><i>3</i><p>第一版只把 bandwidth limit 进入可执行路径。</p></div>
-          <div class="check"><i>4</i><p>minimum bandwidth、DSCP 等不支持项进入 unsupported/degraded status。</p></div>
+          <div class="check"><i>1</i><p>启用 `service_plugins += qos`，让 `qos` extension 可见。</p></div>
+          <div class="check"><i>2</i><p>启用 ML2 `extension_drivers = qos`，保留原生 `qos_policy_id`。</p></div>
+          <div class="check"><i>3</i><p>复用 policy/rule/bandwidth-limit 数据模型和 CLI/API。</p></div>
+          <div class="check"><i>4</i><p>新增 Aria QoS translator / notification，不重造 QoS API。</p></div>
         </div>
       </div>
       <div class="card">
-        <h3>Datapath 执行规则</h3>
+        <h3>Aria 执行规则</h3>
         <div class="checklist">
-          <div class="check"><i>✓</i><p>Rust 按 port policy 写入 QoS map / qdisc 相关状态。</p></div>
-          <div class="check"><i>✓</i><p>egress shaping 可观察；ingress policing 降级必须明确上报。</p></div>
-          <div class="check"><i>✓</i><p>删除 QoS policy 后必须清理 token bucket 和对应状态。</p></div>
-          <div class="check"><i>✓</i><p>QoS degraded 不影响 ACL ready，也不影响原 OVS 转发。</p></div>
+          <div class="check"><i>✓</i><p>neutron-aria-agent 计算 port-level &gt; network-level effective QoS。</p></div>
+          <div class="check"><i>✓</i><p>aria-agent 写 eBPF QoS map，带 status 和统计。</p></div>
+          <div class="check"><i>✓</i><p>OVS agent 保持 `extensions = mirror`，不启用 `qos` execution。</p></div>
+          <div class="check"><i>✓</i><p>tc/shaping 不满足时进入 degraded/unsupported，不宣称 ready。</p></div>
         </div>
       </div>
     </div>
-    <div class="quote">QoS 是独立 feature domain：policy 绑定、运行状态和失败原因都按 port 可观测。</div>
+    <div class="quote">开发后现象：`qos` extension 可见，原生 QoS policy 可绑定到 port/network，Aria 侧能显示 per-port QoS runtime status。</div>
     <div class="footer"><span>QoS 原理 · per-port effective policy</span><span>09 / 22</span></div>
     <aside class="notes">
-      <p>QoS 的核心是 per-port effective policy，而不是把 Neutron policy 名称直接传给 Rust。</p>
-      <p>Python translator 先解析 port-level、network-level 和 shared QoS，再按优先级计算每个 port 的最终策略。第一版只支持 bandwidth limit；minimum bandwidth 和 DSCP 不能静默忽略，要进入 unsupported 或 degraded status。</p>
-      <p>Rust 侧只执行这个最终策略。QoS 失败只影响 QoS domain，不能拖垮 ACL，也不能影响原 OVS 转发。</p>
+      <p>QoS 和 ACL 的策略不一样。ACL 是新产品语义，所以新增 Aria ACL API；QoS 是 Neutron 已有成熟模型，所以应该复用。</p>
+      <p>现场镜像里已有 QoS plugin 和 ML2 extension 代码，只是未启用。我们要做的是启用模型，再把执行后端接到 Aria。</p>
+      <p>不要启用 OVS agent qos execution，避免同一个 port 被 OVS QoS 和 Aria QoS 双重限速。</p>
     </aside>
   </section>
 
@@ -374,40 +375,40 @@ DELETE /api/v1/neutron/ports/{port_id}</div>
 
   <section class="slide" data-title="What To Build">
     <p class="kicker">what we need to build</p>
-    <h2 class="title">最终方案按 9 个管理步骤跟踪，落地拆成 10 个 PR/commit。</h2>
+    <h2 class="title">要开发的是一整条 Neutron 到 Aria 的产品化闭环。</h2>
     <div class="table row4" style="margin-top:24px">
-      <div class="th">管理步骤</div><div class="th">内容</div><div class="th">落地 PR</div><div class="th">关键门槛</div>
-      <div class="td">S0</div><div class="td">文档基线和范围冻结</div><div class="td">PR-0</div><div class="td">第一阶段功能白名单固定为 ACL/QoS</div>
-      <div class="td">S0.5</div><div class="td">目标环境发现与 gate</div><div class="td">PR-1A 前 lite，PR-5A 前完整</div><div class="td">确认 OVS/tap/attach direction 不返工 DTO</div>
-      <div class="td">S1 / S2</div><div class="td">Rust schema、UDS router、snapshot apply、local write gate</div><div class="td">PR-1A / PR-1B / PR-2</div><div class="td">schema、socket 权限、WAL intent/commit 可验证</div>
-      <div class="td">S3 / S4</div><div class="td">Python skeleton、UDS client、translator、event loop、heartbeat</div><div class="td">PR-3 / PR-4</div><div class="td">mock full resync 和完整 snapshot 断言</div>
-      <div class="td">S5</div><div class="td">ACL enhancement 垂直闭环</div><div class="td">PR-5A</div><div class="td">ACL degraded + bypass 不影响 OVS 转发</div>
-      <div class="td">S6</div><div class="td">QoS 垂直闭环</div><div class="td">PR-5B</div><div class="td">bandwidth limit 可观察，QoS 失败不影响 ACL</div>
-      <div class="td">S7 / S8</div><div class="td">容器骨架、完整 smoke、生产化硬化</div><div class="td">PR-6A / PR-6B</div><div class="td">等 ACL/QoS gate 通过后再做 full smoke</div>
+      <div class="th">模块</div><div class="th">开发内容</div><div class="th">开发后现象</div><div class="th">验收方式</div>
+      <div class="td">Neutron Server</div><div class="td">`aria_acl` service plugin、API extension、DB migration、policy.yaml</div><div class="td">`neutron ext-show aria-acl` 可见，`aria_acl_*` 表存在</div><div class="td">CRUD + DB migration + neutron-server 启动</div>
+      <div class="td">Legacy CLI</div><div class="td">`neutron aria-acl-policy/rule/address-set/binding-*` 命令</div><div class="td">旧版运维入口可直接创建、查询、绑定 ACL</div><div class="td">Python2 neutronclient 命令测试</div>
+      <div class="td">Port 展示</div><div class="td">port API 增加 `aria_acl_*` 只读摘要字段</div><div class="td">`neutron port-show` 显示 enabled、effective policy、runtime status</div><div class="td">show/list 不允许写入只读字段</div>
+      <div class="td">Agent 闭环</div><div class="td">`neutron-aria-agent`、RPC/full resync、OVS tap discovery</div><div class="td">`neutron agent-list` 显示 Aria agent alive，VM port 可映射 tap</div><div class="td">host filter + restart + migration smoke</div>
+      <div class="td">Datapath</div><div class="td">UDS snapshot API、ACL/QoS apply、runtime status 上报</div><div class="td">allow/deny/limit 在 VM tap 生效，失败显示 degraded/bypass</div><div class="td">流量 smoke + port status show</div>
+      <div class="td">产品化</div><div class="td">Kolla 镜像、配置、日志、metrics、runbook、回滚</div><div class="td">三节点可部署，能灰度启停，故障不影响原 OVS 转发</div><div class="td">部署 smoke + 回滚演练</div>
     </div>
     <div class="footer"><span>开发拆分 · 9 steps / 10 PRs</span><span>17 / 22</span></div>
     <aside class="notes">
-      <p>当前方案不能再用旧的 8 个大步骤作为最终口径。8 个 WP 只是技术执行章节，管理和汇报按 9 个步骤。</p>
-      <p>真正落地时按 10 个 PR 或连续 commit 推进：PR-1、PR-5、PR-6 都拆开，避免 schema、ACL、安全边界、QoS 调试和部署 smoke 混在一起。</p>
-      <p>这个拆法的目的不是增加功能，而是把验收门槛放在正确位置，防止过度设计和范围漂移。</p>
+      <p>这一页直接回答“要开发哪些”。不是只写一个 agent，也不是只改 datapath，而是 Neutron Server、Legacy CLI、port 展示、agent、datapath、产品化六块一起闭环。</p>
+      <p>每一块都绑定开发后能看到的现象：extension 可见、命令可用、port-show 有字段、agent-list 有 heartbeat、VM tap 上流量生效。</p>
+      <p>汇报时要强调这些现象是验收标准，不是内部实现细节。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Phase Gates">
     <p class="kicker">phase gates</p>
-    <h2 class="title">阶段门槛要前置，尤其 N0.5 和 N3 前不能跳过。</h2>
+    <h2 class="title">开发路线按五阶段推进，ACL 和 QoS 分开交付。</h2>
     <div class="table row4" style="margin-top:24px">
-      <div class="th">阶段</div><div class="th">目标</div><div class="th">门槛</div><div class="th">是否需要 OpenStack</div>
-      <div class="td">N0 / N0.5</div><div class="td">文档基线 + 目标环境发现</div><div class="td">确认 OVS br-int、tap 直连、无 qvo/qvb/veth、bypass smoke</div><div class="td">N0.5 需要</div>
-      <div class="td">N1 / N2</div><div class="td">Rust API + Python agent 原型</div><div class="td">UDS API、snapshot/status/delete、本机写入 gate、mock 单测</div><div class="td">不需要</div>
-      <div class="td">N3 / N4</div><div class="td">ACL enhancement + QoS 垂直闭环</div><div class="td">ACL bypass/degraded 不影响 OVS，QoS 覆盖关系可观察</div><div class="td">需要</div>
-      <div class="td">N5 / N6</div><div class="td">容器骨架 + 完整 smoke + 生产化</div><div class="td">UDS 权限、host mounts、ACL/QoS gate、双实例、防回滚、metrics/runbook</div><div class="td">需要</div>
+      <div class="th">阶段</div><div class="th">开发目标</div><div class="th">上线可见现象</div><div class="th">关键边界</div>
+      <div class="td">Phase 1</div><div class="td">ACL 控制面：extension、API、DB、CLI、port-show</div><div class="td">能创建 ACL，能绑定 port/network，能查询摘要</div><div class="td">不启用 datapath enforcement 也可先灰度</div>
+      <div class="td">Phase 2</div><div class="td">Agent 闭环：RPC/full resync、OVS tap discovery、status 上报</div><div class="td">agent alive，能算 effective ACL，能解释 unsupported/not_applicable</div><div class="td">只处理 compute-owned OVS tap</div>
+      <div class="td">Phase 3</div><div class="td">ACL datapath：UDS snapshot、eBPF apply、allow/deny smoke</div><div class="td">规则实时生效，重启/迁移/tap 重建后恢复</div><div class="td">失败 degraded+bypass，不中断原 OVS</div>
+      <div class="td">Phase 4</div><div class="td">QoS：启用 Neutron QoS，Aria translator 和 eBPF 执行</div><div class="td">QoS policy 可绑定，限速可观察，失败只影响 QoS domain</div><div class="td">不启用 OVS agent qos execution</div>
+      <div class="td">Phase 5</div><div class="td">产品化：Kolla 镜像、三节点 smoke、日志/metrics/runbook</div><div class="td">可部署、可灰度、可回滚、可定位故障</div><div class="td">三台节点一致性必须自动化验证</div>
     </div>
     <div class="footer"><span>阶段计划 · 不跳门槛</span><span>18 / 22</span></div>
     <aside class="notes">
-      <p>这里强调阶段门槛。N1、N2 可以先用 mock 推进，不必等完整 OpenStack 环境。</p>
-      <p>但是 N3 前必须完成 N0.5。因为当前目标环境是 tap 直接接 OVS br-int，没有 Linux bridge、qvo/qvb/veth，也不能因为 Aria ACL 未 ready 影响原 OVS 转发。</p>
-      <p>后面 N5、N6 只进入容器、部署 smoke 和生产化硬化；Mirror 和 TCPrt 不进入当前阶段。</p>
+      <p>这页是开发路线。ACL 控制面和 datapath 要拆开，先让 Neutron API/DB/CLI 可用，再打开真实 enforcement。</p>
+      <p>QoS 放在 ACL 之后，因为现场 QoS plugin 未启用，且 tc/shaping 条件还要补齐。</p>
+      <p>产品化阶段要把 Kolla 镜像、三节点 smoke、回滚、日志和 metrics 都补齐，不只是功能验证。</p>
     </aside>
   </section>
 
@@ -415,17 +416,17 @@ DELETE /api/v1/neutron/ports/{port_id}</div>
     <p class="kicker">what not to build</p>
     <h2 class="title">这些东西第一阶段明确不做，否则范围会失控。</h2>
     <div class="g3 grid">
-      <div class="card"><h3>不做自研 northbound</h3><p>不让用户绕过 Neutron 创建 OpenStack 网络对象，不开放 tenant 直接调用 Aria。</p></div>
-      <div class="card"><h3>不做完整 L2 替代</h3><p>不接管 port binding，不替代 OVS connectivity，不宣称完整 L2 agent。</p></div>
-      <div class="card"><h3>不搬 v0.10 controller</h3><p>不迁移 aria-controller，不把 RFC 控制面体系放进这个分支。</p></div>
-      <div class="card"><h3>不做 TCP 过渡</h3><p>Neutron snapshot API 只走 Unix socket，不做 localhost HTTP fallback。</p></div>
-      <div class="card"><h3>不改核心名字</h3><p>binary 仍是 aria-agent；aria-datapath 只是角色名和容器名。</p></div>
-      <div class="card"><h3>不接 Mirror / TCPrt</h3><p>Mirror、TCPrt 以及 trace/drops/ssl/diagnose/service chain 保留代码，但不进 Neutron agent mode API。</p></div>
+      <div class="card"><h3>不复用安全组</h3><p>不消费 `security_group_ids`、remote group、port security，也不做默认安全组自动绑定。</p></div>
+      <div class="card"><h3>不改 VIF 类型</h3><p>`binding:vif_type` 仍然是 `ovs`，Aria 不是新的 Nova/libvirt plug 类型。</p></div>
+      <div class="card"><h3>不接管 SR-IOV</h3><p>SR-IOV direct / direct-physical 第一阶段标记 unsupported，需要后续独立 backend。</p></div>
+      <div class="card"><h3>不接管服务端口</h3><p>`network:dhcp`、router、metadata 等 Neutron 服务端口显示 not_applicable，不进 ACL snapshot。</p></div>
+      <div class="card"><h3>不启用 OVS QoS 执行</h3><p>Aria QoS 路线下 OVS agent 保持 `extensions = mirror`，避免双重限速。</p></div>
+      <div class="card"><h3>不开放本机租户 API</h3><p>租户和平台只能走 Neutron API/CLI，不能直接调用 aria-agent socket 绕过 RBAC。</p></div>
     </div>
     <div class="footer"><span>不做项 · scope guard</span><span>19 / 22</span></div>
     <aside class="notes">
       <p>这页很重要，因为范围失控通常不是因为大家不知道要做什么，而是因为不清楚什么不做。</p>
-      <p>第一阶段不做自研 northbound，不做完整 L2 替代，不搬 v0.10 controller，不做 TCP 过渡，不改二进制名字，不接 Mirror/TCPrt，也不把 trace 等本机能力扩成 Neutron 租户功能。</p>
+      <p>第一阶段不走安全组替代链路，不改 VM plug 方式，不接管 SR-IOV，不接管 DHCP/router/metadata 服务端口，不启用 OVS agent QoS 执行。</p>
       <p>这些约束不是保守，而是为了让第一阶段能交付、能验证、能回滚。</p>
     </aside>
   </section>
@@ -449,36 +450,36 @@ DELETE /api/v1/neutron/ports/{port_id}</div>
 
   <section class="slide" data-title="OpenStack Discovery">
     <p class="kicker">before coding into target env</p>
-    <h2 class="title">进入真实 OpenStack 前，必须先完成 N0.5 兼容性发现。</h2>
+    <h2 class="title">真实环境已验证主路径，但三节点一致性还要产品化脚本补齐。</h2>
     <div class="g2 grid">
-      <div class="card"><h3>必须确认的环境事实</h3><ul><li>OpenStack 版本和 OVS br-int 拓扑。</li><li>tap 是否直接接入 br-int。</li><li>当前没有 Linux bridge、qvo/qvb/veth 和原 SG 过滤链路。</li><li>Aria degraded/bypass 是否不影响原 OVS 转发。</li><li>Neutron QoS extension 和 ACL tag/mapping 输入是否可用。</li></ul></div>
-      <div class="card"><h3>必须确认的内核/容器事实</h3><ul><li>BTF、bpffs、qdisc、TC/XDP attach 能力。</li><li>`/run/aria`、`/var/lib/aria-agent`、`/sys/fs/bpf` 挂载策略。</li><li>双容器无编排部署下的单实例锁。</li><li>schema/capability 握手和回滚最低兼容版本。</li><li>unsupported port 类型如何 degraded 或 ignored。</li></ul></div>
+      <div class="card"><h3>已确认</h3><ul><li>Neutron Server 是 Python2，镜像版本 `2.0.6sp2`。</li><li>`service_plugins` 当前无 `qos` / `aria_acl`。</li><li>Security Group 关闭，`enable_security_group=False`。</li><li>普通 tap 直挂 `br-int`，带 `external_ids:iface-id`。</li><li>Legacy `neutron port-show` 可展示服务端返回字段。</li></ul></div>
+      <div class="card"><h3>仍需补齐</h3><ul><li>ostack3/4 受 SSH 策略限制，需容器内脚本核验。</li><li>三台 compute 的 bpffs、BTF、OVSDB、socket 权限一致性。</li><li>`tc` 或 eBPF QoS shaping/policing 能力。</li><li>Kolla 镜像构建、配置分发和回滚路径。</li><li>迁移、重启、tap recreate 的完整 smoke。</li></ul></div>
     </div>
     <div class="footer"><span>N0.5 · 目标环境发现</span><span>21 / 22</span></div>
     <aside class="notes">
-      <p>这页是实际落地前的清单。目标环境固定 OVS，不能只在文档里假设 tap、hook direction 和 bypass 行为。</p>
-      <p>需要确认 OpenStack 版本、tap 命名、attach 点、原 OVS 转发不被 Aria bypass/degraded 影响，以及 QoS extension 和 ACL tag/mapping 输入是否存在。发现结果必须写入 docs/openstack-target-env-discovery.md。</p>
-      <p>同时要确认内核和容器能力，尤其 BTF、bpffs、qdisc、XDP/TC attach、host mounts 和单实例锁。</p>
+      <p>这页讲真实环境探测。ostack2 可以深度确认，ostack3/4 当前 SSH 网关限制很强，但从 Neutron agent-list 看三台 agent 都 alive。</p>
+      <p>已确认的事实支持 OVS tap 路线：tap 直挂 br-int，iface-id 可以映射 Neutron port。也确认当前没有 qos 和 aria_acl，需要新增配置和镜像。</p>
+      <p>上线前还要用产品容器或白名单脚本在三台 compute 上补齐一致性检查，不能只依赖 SSH 手工命令。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Next Steps">
     <p class="kicker">next execution</p>
-    <h2 class="title">下一步先落 PR-1A 到 PR-4 的基础闭环，ACL/QoS 分开验证。</h2>
+    <h2 class="title">下一步先交付 ACL 可见闭环，再打开 datapath enforcement。</h2>
     <div class="flow">
-      <div class="step"><b>PR-1A/1B</b><span>Neutron DTO、OpenAPI、UDS router、agent_mode。</span></div>
-      <div class="step"><b>PR-2</b><span>Snapshot apply、WAL intent/commit、local write gate。</span></div>
-      <div class="step"><b>PR-3</b><span>Python project skeleton + UDS local client。</span></div>
-      <div class="step"><b>PR-4</b><span>translator、event loop、heartbeat、mock full resync。</span></div>
-      <div class="step"><b>PR-5A/5B</b><span>ACL enhancement 与 QoS 各自垂直闭环。</span></div>
-      <div class="step"><b>PR-6A/6B</b><span>容器骨架、完整 smoke、生产化硬化。</span></div>
+      <div class="step"><b>1 控制面</b><span>`aria_acl` extension、DB migration、policy/rule/binding API。</span></div>
+      <div class="step"><b>2 CLI</b><span>Legacy `neutron aria-acl-*` 命令和 `port-show` 摘要字段。</span></div>
+      <div class="step"><b>3 Agent</b><span>neutron-aria-agent、RPC/full resync、OVS tap discovery。</span></div>
+      <div class="step"><b>4 ACL 执行</b><span>UDS snapshot、eBPF ACL apply、runtime status。</span></div>
+      <div class="step"><b>5 QoS</b><span>启用 Neutron QoS，Aria translator 和执行后端。</span></div>
+      <div class="step"><b>6 产品化</b><span>Kolla 镜像、三节点 smoke、日志、metrics、回滚。</span></div>
     </div>
-    <div class="quote">开发目标：先让接口、状态、权限、WAL、full resync 能闭环，再打开 ACL/QoS 的真实 OpenStack 流量。</div>
+    <div class="quote">开发目标：先让 Neutron 里“看得见、查得到、能绑定”，再让 VM tap 上“能生效、可恢复、可回滚”。</div>
     <div class="footer"><span>执行建议 · start small</span><span>22 / 22</span></div>
     <aside class="notes">
-      <p>最后说开发建议。下一步不要直接冲 ACL 全功能，更不要一边接 OpenStack 一边改 datapath 热路径。</p>
-      <p>先做 PR-1A 到 PR-4：schema、Unix socket、apply skeleton、本机写入 gate、Python skeleton、UDS client、translator 和 mock full resync。</p>
-      <p>等这些基础闭环都通过 CI，再分别进入 PR-5A 的 ACL 和 PR-5B 的 QoS。容器和完整 smoke 放到 PR-6A/PR-6B，不把 Mirror/TCPrt 混进当前阶段。</p>
+      <p>最后落到执行。建议先做 ACL 控制面和 CLI，这样即使 enforcement 没打开，也能在 Neutron 中看到完整对象和绑定关系。</p>
+      <p>第二步做 agent 和 runtime status，再打开 ACL datapath。这样每一步都有可见现象，便于灰度。</p>
+      <p>QoS 放在 ACL 闭环之后，因为它涉及启用原生 QoS plugin、ML2 extension driver 和 Aria 执行后端，风险要单独验收。</p>
     </aside>
   </section>
 
