@@ -59,37 +59,31 @@ tap interface on br-int
 - 当前没有 `qbr/qvo/qvb` hybrid 安全组端口链路。
 - Neutron 仍然是网络配置唯一入口，Aria 不暴露独立租户 northbound。
 - 宿主机已挂载 bpffs，`/sys/fs/bpf` 可用；`/sys/kernel/btf/vmlinux` 可读。
-- 当前未确认 `tc` 命令可用，QoS shaping 依赖必须单独补齐或降级为 eBPF policing。
+- 三台宿主机当前均缺少 `tc` 命令，QoS shaping 依赖必须单独补齐或降级为 eBPF policing。
 
 ### 2.1 真实环境探测摘要
 
-探测时间：2026-06-15
+探测时间：2026-06-15；2026-06-22 重新确认三节点 root 级只读证据
 探测节点：`ostack2=10.58.159.2`、`ostack3=10.58.159.3`、`ostack4=10.58.159.4`
 
-`ostack2` 可取得 root 级只读证据，结论如下：
+三台节点均可取得 root 级只读证据，结论如下：
 
 | 项目 | 现场结果 | 对方案的影响 |
 | --- | --- | --- |
-| 操作系统 | Rocky Linux 8.6，kernel `4.18.0-553.5.1.el8_10.x86_64` | eBPF 能力需按该内核验证，不按新内核特性假设 |
-| 部署形态 | Kolla 风格容器，`neutron_server`、`neutron_openvswitch_agent`、`neutron_linuxbridge_agent`、`neutron_sriov_agent` 等容器运行 | ACL/QoS 能力必须进入产品镜像和 Kolla 配置 |
+| 操作系统 | 三台均为 kernel `4.18.0-553.5.1.el8_10.x86_64` | eBPF 能力需按该内核验证，不按新内核特性假设 |
+| 部署形态 | Kolla 风格容器；三台均有 `neutron_openvswitch_agent`、`neutron_linuxbridge_agent`、`neutron_sriov_agent`、`nova_compute`；`ostack2`、`ostack3` 有 `neutron_server`；`ostack4` 为 compute/agent 侧 | ACL/QoS 能力必须进入产品镜像和 Kolla 配置；Neutron Server 扩展至少要覆盖控制节点容器 |
 | Neutron 运行时 | neutron-server 使用 Python 2 | 插件实现必须兼容 Python 2 和当前 Neutron 代码结构 |
 | Neutron 插件 | `service_plugins = router,network_ip_availability,mirror` | 当前没有 QoS API，也没有 Aria ACL，需要改 neutron-server 配置和镜像 |
 | ML2 drivers | `openvswitch,linuxbridge,l2population,sriovnicswitch` | Aria 只接管普通虚机 OVS tap，SR-IOV/LinuxBridge/Neutron 服务端口标记 unsupported 或 not_applicable |
 | ML2 type drivers | `vxlan,vlan,flat` | ACL/QoS 不改变 L2/VXLAN/VLAN 管理 |
-| OVS agent | `integration_bridge = br-int`，`extensions = mirror` | Aria 可作为并行增强 agent；QoS 不应开启 OVS agent 执行后端 |
+| OVS agent | 三台均为 `integration_bridge = br-int`、`extensions = mirror`、`l2_population = True`、`enable_security_group = False` | Aria 可作为并行增强 agent；QoS 不应开启 OVS agent 执行后端 |
 | Security Group | `enable_security_group = False` | ACL 不能走 SG projection，也不需要启用 SG |
-| tap 形态 | `tap*` 直接挂在 `br-int`，带 `iface-id` | 端口发现路径成立 |
+| tap 形态 | `ostack2` 有 VM tap `tap86b83885-67` 直接挂在 `br-int`，带 `iface-id` 和 `vm-id`；`ostack3` 当前只有 DHCP 类 OVS internal tap；`ostack4` 当前 `br-int` 无 Neutron port | 端口发现路径成立，但 agent 必须按 host 和 port 类型过滤；无 eligible port 的节点应保持 idle/ready |
 | QoS 代码 | 镜像中存在 Neutron QoS plugin/extension 代码，但未启用 | QoS 可复用现有模型，但需要启用 API/DB/extension，并接入 Aria 执行 |
-| bpffs/BTF | `/sys/fs/bpf` 已挂载，BTF 可读 | Aria datapath 基础条件较好 |
-| `tc` | 未确认可用 | shaping 不能直接承诺，第一版 QoS 应优先 policing 或补包 |
-
-`ostack3` 和 `ostack4` 当前 SSH 为受限命令环境，不能完整执行 root 级验证。它们在 Neutron agent list 中均存在 alive 的 Open vSwitch agent、Linux bridge agent 和 SR-IOV agent。正式上线前必须补齐同等检查：
-
-- `br-int` tap 与 `external_ids:iface-id`。
-- bpffs 和 BTF。
-- `tc` / iproute 依赖。
-- `/run/aria`、`/var/lib/aria-agent` 和 socket 权限。
-- Kolla 容器配置与镜像版本一致性。
+| bpffs/BTF | 三台 `/sys/fs/bpf` 均已挂载，`/sys/kernel/btf/vmlinux` 均可读 | Aria datapath 基础条件较好 |
+| `tc` | 三台宿主机均未找到 `tc` 命令 | QoS shaping 不能直接承诺；第一版 QoS 应优先 eBPF policing，或在产品镜像/宿主机补齐 iproute-tc 后再打开 shaping |
+| SR-IOV | 三台均运行 SR-IOV agent，物理网卡存在 `sriov_totalvfs`，但 `physical_device_mappings` 为空且 `sriov_numvfs=0` | 当前环境未实际分配 SR-IOV VF；方案仍应把 SR-IOV direct port 标记 unsupported，不纳入第一阶段接管 |
+| LinuxBridge | 三台均运行 LinuxBridge agent，但 `enable_vxlan=false`、安全组关闭，现场未发现 `qbr/qvb/qvo` 主路径 | 第一阶段仍不接管 LinuxBridge；service/bridge 端口必须跳过 |
 
 ### 2.2 基于现场事实的方案修正
 
@@ -259,7 +253,7 @@ aria_acl API CRUD 可用
 
 ```ini
 # neutron.conf
-service_plugins = router,network_ip_availability,mirror,qos,aria_acl
+service_plugins = router,network_ip_availability,mirror,qos,aria_acl,aria_qos
 ```
 
 现场当前配置没有 `qos`，因此启用 `aria_acl` 时应分两步灰度：
@@ -270,8 +264,8 @@ Step 1:
   只验证 ACL API/DB/RPC/agent。
 
 Step 2:
-  service_plugins = router,network_ip_availability,mirror,qos,aria_acl
-  再启用 QoS API/DB，并接入 Aria QoS translator。
+  service_plugins = router,network_ip_availability,mirror,qos,aria_acl,aria_qos
+  再启用 Neutron 原生 QoS API/DB、Aria QoS facade，并接入 Aria QoS translator。
 ```
 
 这样可以把 ACL 插件风险和 QoS 激活风险拆开。
@@ -1482,7 +1476,7 @@ config sample
 ```ini
 # /etc/kolla/neutron-server/neutron.conf
 [DEFAULT]
-service_plugins = router,network_ip_availability,mirror,qos,aria_acl
+service_plugins = router,network_ip_availability,mirror,qos,aria_acl,aria_qos
 
 [aria_acl]
 enabled = true
@@ -1503,7 +1497,7 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 ```ini
 # ACL + QoS rollout
 [DEFAULT]
-service_plugins = router,network_ip_availability,mirror,qos,aria_acl
+service_plugins = router,network_ip_availability,mirror,qos,aria_acl,aria_qos
 ```
 
 DB migration 要求：
@@ -1593,8 +1587,11 @@ ovsdb_connection = unix:/run/openvswitch/db.sock
 
 三节点部署注意：
 
-- `ostack2` 已验证 root 级信息。
-- `ostack3`、`ostack4` 当前受限 shell 无法完整确认 bpffs、BTF、tc 和 OVSDB 细节。
+- `ostack2`、`ostack3`、`ostack4` 已验证 root 级只读信息。
+- 三台 OVS agent 配置一致：`integration_bridge=br-int`、`extensions=mirror`、`enable_security_group=False`。
+- 三台均已挂载 bpffs 且 BTF 可读。
+- 三台宿主机当前均缺少 `tc` 命令，QoS shaping 不能作为第一阶段默认承诺。
+- `ostack2` 当前存在 eligible VM OVS tap；`ostack3` 当前只有 DHCP 类 OVS internal port；`ostack4` 当前没有 br-int Neutron port。
 - 上线前必须给 `neutron-aria-agent` 容器足够权限读取 OVSDB，不依赖 SSH 受限命令。
 - 三台 compute 的 agent 配置、镜像 tag 和 socket 权限必须一致。
 
@@ -2065,8 +2062,10 @@ ACL:
   不复用 Security Group
 
 QoS:
+  产品入口统一叫 aria-qos
   复用 Neutron QoS service plugin
   复用 Neutron QoS policy/rule/binding
+  不复用 qhqos / qcloud floating IP QoS
   neutron-aria-agent 增加 QoS translator
   aria-agent 执行 eBPF QoS
 ```
@@ -2091,9 +2090,12 @@ QoS 不应该放进 `aria_acl` plugin。
 | ML2 QoS extension driver | 代码存在，配置未启用 |
 | OVS agent QoS extension | 代码存在，配置未启用 |
 | 当前 OVS agent extensions | `mirror` |
-| 宿主机 `tc` | 未确认可用 |
+| 宿主机 `tc` | 三台宿主机均未找到 `tc` 命令 |
+| `qhqos` 定制扩展 | 代码和 Legacy CLI 命令存在，但服务端未启用 |
 
 因此 QoS 路线不是“重新开发 QoS API”，而是“启用已有 Neutron QoS API/DB，并新增 Aria 执行路径”。
+
+`qhqos` 不纳入 Aria QoS 基础模型。线上镜像里的 `qhqos` 是 `qcloud/qos` 定制扩展，服务端入口为 `neutron.services.qcloud.qos.plugin:QhQoSPlugin`，API path 为 `/qcloud/qos/qhqos-policies`，DB 表为 `qhqos_rules`，字段围绕 `floating_ip_id`、`floating_ip`、`router_id`、`gw_port_id`、`upload_bandwidth`、`download_bandwidth`。当前产品场景不使用 Floating IP、Router、网关 QoS，因此它不适合承担普通 VM OVS tap 的 Aria QoS 模型。
 
 ### 16.2 QoS 启用配置
 
@@ -2102,7 +2104,7 @@ Neutron Server 侧：
 ```ini
 # /etc/kolla/neutron-server/neutron.conf
 [DEFAULT]
-service_plugins = router,network_ip_availability,mirror,qos,aria_acl
+service_plugins = router,network_ip_availability,mirror,qos,aria_acl,aria_qos
 ```
 
 ML2 侧：
@@ -2131,7 +2133,85 @@ extensions = mirror,qos
 
 除非明确要让 OVS agent 执行 QoS。当前 Aria 方案要求避免 OVS QoS 和 Aria QoS 双重 enforcement。
 
-### 16.3 Aria QoS notification / translator
+### 16.3 Aria QoS 产品入口
+
+为保持产品命名一致，对外入口统一为：
+
+| 能力 | 产品入口 | 底层模型 |
+| --- | --- | --- |
+| ACL | `aria-acl` | Aria 独立 ACL DB/API |
+| QoS | `aria-qos` | Neutron 原生 QoS DB/API，Aria 执行 |
+| Mirror | `aria-mirror` | Aria 独立 Mirror DB/API |
+
+`aria-qos` 不是重新造一套 QoS DB。它是产品 facade：
+
+```text
+用户看到:
+  neutron aria-qos-policy-create
+  neutron aria-qos-bandwidth-limit-rule-create
+  neutron aria-qos-port-bind
+  neutron aria-qos-status-show
+
+底层写入:
+  Neutron 原生 qos_policies
+  Neutron 原生 qos_bandwidth_limit_rules
+  Neutron 原生 port/network qos_policy_id binding
+
+Aria 侧新增:
+  aria_qos_port_statuses
+  aria-qos runtime status / capability / degraded reason
+```
+
+因此产品 CLI 建议：
+
+```bash
+neutron aria-qos-policy-create web-limit
+
+neutron aria-qos-bandwidth-limit-rule-create \
+  web-limit \
+  --max-kbps 100000 \
+  --max-burst-kbps 10000
+
+neutron aria-qos-port-bind \
+  --port $PORT_ID \
+  --policy web-limit
+
+neutron aria-qos-status-show \
+  --port $PORT_ID
+```
+
+这些命令的实现方式：
+
+```text
+aria-qos-policy-*:
+  调用/代理 Neutron 原生 QoS policy API。
+  不创建 aria_qos_policies 表。
+
+aria-qos-bandwidth-limit-rule-*:
+  调用/代理 Neutron 原生 QoS bandwidth limit rule API。
+  不创建 aria_qos_rules 表。
+
+aria-qos-port-bind / network-bind:
+  更新原生 port/network 的 qos_policy_id。
+
+aria-qos-status-show:
+  读取 aria_qos_port_statuses 和 aria-agent runtime stats。
+```
+
+服务端 extension 建议：
+
+```text
+qos:
+  必须启用。提供原生 QoS policy/rule/binding API 和 DB。
+
+aria-qos:
+  必须启用。提供 Aria QoS capability/status API，并声明该环境 QoS 执行后端为 Aria。
+  依赖 qos 已启用；如果 qos 未启用，aria-qos plugin 启动应失败或进入 disabled。
+```
+
+对外推荐只使用 `aria-qos-*` 作为产品入口；原生 `qos-*` 命令保留为兼容入口，不作为产品主文档入口。
+
+### 16.4 Aria QoS notification / translator
 
 QoS plugin 已有 notification driver manager。产品化时推荐新增 Aria QoS notification driver 或由 `neutron-aria-agent` 通过 full resync + RPC 监听获取 QoS 状态。
 
@@ -2174,7 +2254,7 @@ packet_rate_limit
 
 unsupported rule 必须进入 status，不允许静默忽略后宣称 QoS ready。
 
-### 16.4 QoS 执行后端
+### 16.5 QoS 执行后端
 
 Aria QoS 执行必须满足：
 
@@ -2204,11 +2284,13 @@ QoS apply 失败:
   OVS L2 forwarding 不受影响
 ```
 
-### 16.5 QoS 产品化验收
+### 16.6 QoS 产品化验收
 
 QoS 进入生产 smoke 前必须完成：
 
 - `openstack extension list --network` 能看到 `qos`。
+- `neutron ext-show aria-qos` 成功。
+- `neutron aria-qos-policy-*` facade 命令可用。
 - QoS policy/rule CRUD 通过。
 - port/network QoS binding 生效。
 - `neutron-aria-agent` 能计算 per-port effective QoS。
@@ -2216,6 +2298,7 @@ QoS 进入生产 smoke 前必须完成：
 - bandwidth limit 在 tap 上可观察。
 - 删除 QoS policy 后 eBPF token bucket / map entry 清理。
 - QoS 失败不影响 ACL。
+- `qhqos-policy-*` 不作为 Aria QoS 路线入口。
 
 ## 17. 测试方案
 
@@ -2373,19 +2456,21 @@ QoS enforcement:
 
 ### 17.8 三节点一致性检查
 
-当前 `ostack3`、`ostack4` SSH 受限，不能用交互式 root 命令完整验证。正式部署 smoke 必须通过容器和自动化脚本完成三节点一致性检查：
+2026-06-22 已可登录 `ostack3`、`ostack4` 并完成 root 级只读确认。正式部署 smoke 仍必须通过容器和自动化脚本完成三节点一致性检查：
 
 | 检查项 | ostack2 | ostack3 | ostack4 |
 | --- | --- | --- | --- |
+| OVS agent 配置 | 已确认，`br-int`/`mirror`/SG off | 已确认，`br-int`/`mirror`/SG off | 已确认，`br-int`/`mirror`/SG off |
+| 当前 br-int Neutron port | 有 VM tap 和 DHCP internal port | 只有 DHCP internal port | 当前无 Neutron port |
 | `neutron-aria-agent` 容器运行 | 必须 | 必须 | 必须 |
 | `aria-agent` 容器运行 | 必须 | 必须 | 必须 |
 | `/run/aria/aria-agent.sock` 权限 | 必须 | 必须 | 必须 |
-| `/sys/fs/bpf` 挂载 | 必须 | 必须 | 必须 |
-| BTF 可读 | 必须 | 必须 | 必须 |
-| br-int tap `iface-id` | 必须 | 必须 | 按是否有 VM 判断 |
+| `/sys/fs/bpf` 挂载 | 已确认，部署后复测 | 已确认，部署后复测 | 已确认，部署后复测 |
+| BTF 可读 | 已确认，部署后复测 | 已确认，部署后复测 | 已确认，部署后复测 |
+| br-int tap `iface-id` | 已确认，部署后复测 | 已确认 DHCP internal，创建 VM 后复测 VM tap | 当前无 port，创建 VM 后复测 |
 | SR-IOV port skip | 必须 | 必须 | 必须 |
 | LinuxBridge port skip | 必须 | 必须 | 必须 |
-| QoS `tc` 依赖 | 如启用 shaping 则必须 | 如启用 shaping 则必须 | 如启用 shaping 则必须 |
+| QoS `tc` 依赖 | 当前缺失；如启用 shaping 则必须补齐 | 当前缺失；如启用 shaping 则必须补齐 | 当前缺失；如启用 shaping 则必须补齐 |
 
 ## 18. 灰度与回滚
 
@@ -2603,10 +2688,17 @@ QoS 验证通过后再启用：
 
 ```ini
 [DEFAULT]
-service_plugins = router,network_ip_availability,mirror,qos,aria_acl
+service_plugins = router,network_ip_availability,mirror,qos,aria_acl,aria_qos
 
 [ml2]
 extension_drivers = qos
+
+[aria_qos]
+enabled = true
+product_facade = true
+enforcement_driver = aria
+require_native_qos = true
+unsupported_rule_action = degraded
 ```
 
 OVS agent 保持：
@@ -2654,6 +2746,11 @@ enabled = true
 enforcement_driver = aria
 unsupported_rule_action = degraded
 shaping_requires_tc = true
+
+[aria_qos]
+enabled = true
+use_native_qos_model = true
+status_table = aria_qos_port_statuses
 ```
 
 ### 20.5 policy.yaml
@@ -2672,7 +2769,738 @@ shaping_requires_tc = true
 "delete_aria_acl_binding": "rule:admin_only"
 ```
 
-## 21. 产品边界总结
+## 21. Aria Mirror 第二阶段设计
+
+Aria Mirror 不放在第一阶段。第一阶段主线仍然是 `aria_acl` 独立 ACL 扩展和基于 Neutron 原生 QoS 模型的 Aria QoS 执行。Mirror 作为第二阶段开发，原因是现场已经存在一个 `networking_mirror` 插件和 OVS agent mirror extension，但它的语义、数据面和 Aria-agent 已有 mirror 能力并不相同，不能简单认为“已有 mirror API 可以直接等价接入 Aria”。
+
+### 21.1 现有 `networking_mirror` 的真实实现语义
+
+基于源码和线上环境确认，现有 `networking_mirror` 是一个 Neutron service plugin + OVS agent extension/补丁组合。
+
+北向入口：
+
+```text
+Neutron extension alias:
+  mirror
+
+Neutron service plugin:
+  networking_mirror.plugins.plugin.MirrorPlugin
+
+OVS agent extension:
+  networking_mirror.agent.driver:MirrorAgentExtension
+```
+
+它暴露的主要对象字段包括：
+
+```text
+tenant_id
+id
+port_id
+vm_type
+ethertype
+ip_prefix
+```
+
+这里最容易误解的是 `port_id`。从现有代码的数据面看，`port_id` 不是“被镜像的源 VM port”，而是“接收镜像流量的目标 VM port”。OVS driver 中会执行类似逻辑：
+
+```text
+port = br_int.get_vif_port_by_id(flowrule["port"])
+actions = output:<port.ofport>
+br_int.add_flow(table=<vm_type_table>, priority=10, match=<ip_prefix/proto>, actions=actions)
+```
+
+也就是说：
+
+```text
+源流量来源:
+  [mirror] interface 配置指定的宿主机采集口
+  -> br-mirror
+  -> patch port
+  -> br-int
+
+目的端口:
+  Neutron mirror 对象里的 port_id
+  -> br-int 上某个 VM tap/ofport
+```
+
+现有数据面不是 OVSDB `Mirror` 表，也不是对 VM tap 做 per-port SPAN。它是 OpenFlow table + group 方案：
+
+```text
+物理/采集接口
+  |
+  v
+br-mirror
+  |
+  v
+patch: phy-br-mirror / int-br-mirror
+  |
+  v
+br-int table 0
+  |
+  v
+group 10 type=all
+  |
+  +--> table 100: ICG
+  +--> table 101: DLP
+  +--> table 102: NDS
+```
+
+三个 table 的作用：
+
+| Table | 当前语义 | 作用 |
+| --- | --- | --- |
+| `100` | `vm_type=icg` | 把进入 br-int 的镜像流量按规则分发给 ICG 类型分析 VM |
+| `101` | `vm_type=dlp` | 把进入 br-int 的镜像流量按规则分发给 DLP 类型分析 VM |
+| `102` | `vm_type=nds` | 把进入 br-int 的镜像流量按规则分发给 NDS 类型分析 VM；线上包存在，离线 zip 分支不一定完整 |
+
+`ip_prefix` 的作用不是 ACL，也不是“镜像必须过滤后才算镜像”。它是为了在同一股外部镜像流量进入宿主机后，把不同网段的流量分流到不同类型或不同用途的分析 VM。代码会把一个 prefix 展开成双向匹配：
+
+```text
+nw_src=0.0.0.0/0,nw_dst=<ip_prefix>
+nw_src=<ip_prefix>,nw_dst=0.0.0.0/0
+```
+
+因此，现有 `networking_mirror` 的业务模型更接近：
+
+```text
+交换机或外部设备把流量镜像到宿主机采集口。
+宿主机把采集口接入 br-mirror。
+br-mirror 通过 patch 口把镜像流量送到 br-int。
+br-int 根据 vm_type table 和 ip_prefix 把流量输出到目标分析 VM port。
+```
+
+现场当前状态：
+
+```text
+service_plugins:
+  已包含 mirror
+
+OVS agent extensions:
+  已包含 mirror
+
+[mirror] interface:
+  为空
+
+OVSDB Mirror table:
+  无 Mirror 对象
+
+br-int group 10:
+  未看到有效 group
+
+br-int table 100/101/102:
+  未看到有效分发表
+```
+
+结论：现有 mirror 功能代码和 API 是存在的，但当前环境没有配置采集接口，也没有看到实际 mirror OpenFlow 生效状态，不能直接按“线上正在可用”来对外承诺。
+
+### 21.2 `networking_mirror` 与 `aria_mirror` 对比
+
+| 对比项 | 现有 `networking_mirror` | 第二阶段 `aria_mirror` 建议 |
+| --- | --- | --- |
+| Neutron extension alias | `mirror` | `aria-mirror` |
+| 北向 API 语义 | 创建某类分析 VM 的镜像接收规则 | 创建 Aria 管理的镜像会话、规则和目标 |
+| 源的表达 | `[mirror] interface` 指定宿主机采集口；API 里没有真正的 source port 字段 | 明确表达 `source_port_id`、`source_network_id` 或 admin-only `source_host_interface` |
+| `port_id` 语义 | 目标 VM port，用于 `output:<ofport>` | 不建议复用为单一字段；应拆成 `source_port_id` 和 `target_port_id` |
+| 目标的表达 | `port_id` + `vm_type` | `target_type` + `target_port_id` / `target_interface` / 后续 remote collector |
+| 分类条件 | `vm_type`、`ethertype`、`ip_prefix`、协议/端口字段 | `direction`、`protocol`、`src_address_set`、`dst_address_set`，必要时支持 prefix |
+| 数据面位置 | OVS br-mirror/br-int OpenFlow group/table | Aria-agent TC/eBPF `bpf_clone_redirect` |
+| 是否修改原始业务流 | 不应修改原始流量，只复制进入的镜像流量 | 不修改原始业务流，只 clone 到目标 ifindex |
+| 对 VM tap 的源镜像 | 不是当前 API 的主要语义 | 是核心能力之一 |
+| 对物理采集口的镜像 | 支持外部镜像流量从采集口进入，再分发给分析 VM | 支持 admin-only host interface source；适合交换机 SPAN -> 宿主机采集 NIC -> VM/接口 |
+| 跨物理节点 | 代码未实现跨节点 tunnel；要求源镜像流量已到目标 VM 所在节点 | 第二阶段第一版也不做跨节点；如需跨节点，后续增加 tunnel/remote collector |
+| LinuxBridge 关系 | 未看到 LinuxBridge 数据面路径 | 不接管 LinuxBridge；只处理 Aria 可 attach 的接口 |
+| SR-IOV 关系 | 不接管 VF representor 语义 | 第二阶段第一版不接管 SR-IOV；除非后续证明 representor/TC attach 可控 |
+| 状态可见性 | 依赖现有 mirror API 和 OVS flow 排查 | 增加 `aria_mirror_status`，展示 source、target、ifindex、packets、bytes、errors |
+| 产品边界 | 更像外部镜像流量分发系统 | Aria eBPF clone 能力的 Neutron 产品化入口 |
+
+核心差异可以压缩成一句话：
+
+```text
+networking_mirror 是“把外部采集口进入的镜像流量，按 vm_type/ip_prefix 分发给目标分析 VM”；
+aria_mirror 应该是“对 Aria 管理的源接口或采集接口做 clone，把副本送到明确的目标接口或目标 VM”。
+```
+
+### 21.3 为什么第二阶段建议新增 `aria_mirror`，而不是直接复用 `mirror`
+
+最初可以考虑“复用现有 mirror API，新增 Aria 执行后端”。但结合实际代码后，这条路存在明显歧义：
+
+- 现有 `mirror.port_id` 是目标 VM port，不是源 port。
+- Aria-agent 的 mirror API 是围绕 source instance/tap 上的 ingress/egress clone 设计的。
+- 现有 `vm_type=icg/dlp/nds` 是业务分发表语义，不等价于 Aria 的 source/destination group。
+- 现有 `ip_prefix` 是镜像流量分流条件，不是完整 ACL 风格的 match model。
+- 现有实现依赖 `br-mirror`、patch port、br-int group/table；Aria 实现依赖 TC/eBPF map 和 target ifindex。
+- 如果在同一个 `mirror` API 下同时支持两套语义，用户很难判断 `port_id` 到底是源还是目的，也很难解释一条规则到底走 OVS flow 还是 Aria eBPF。
+
+因此产品化建议是：
+
+```text
+保留现有 networking_mirror:
+  继续服务已有外部采集口 -> 分析 VM 的场景。
+
+新增 aria_mirror:
+  服务 Aria-agent 已具备的 eBPF mirror 能力。
+  字段显式拆分 source 和 target。
+  第二阶段作为独立 Neutron extension/plugin 落地。
+
+可选兼容:
+  后续可以提供 mirror -> aria_mirror 的迁移工具或只读对照视图。
+  不建议把现有 mirror 对象自动投影为 aria_mirror 对象。
+```
+
+### 21.4 `aria_mirror` 产品语义
+
+`aria_mirror` 是 Aria 的独立镜像增强扩展，北向仍然走 Neutron Server，但不复用 Security Group，也不复用现有 `networking_mirror` 的 `mirror` 对象。
+
+建议 extension：
+
+```text
+alias: aria-mirror
+python symbol prefix: aria_mirror
+service plugin: aria_mirror
+```
+
+建议资源：
+
+```text
+aria_mirror_session
+aria_mirror_rule
+aria_mirror_binding
+aria_mirror_status
+```
+
+`aria_mirror_session` 表达一个镜像会话：
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | session UUID |
+| `project_id` | project/tenant |
+| `name` | 名称 |
+| `description` | 描述 |
+| `enabled` | 是否启用 |
+| `source_type` | `port`、`network`、`host_interface` |
+| `source_port_id` | source_type 为 `port` 时使用 |
+| `source_network_id` | source_type 为 `network` 时使用，表示该 network 下符合条件的本机 VM tap |
+| `source_host` | source_type 为 `host_interface` 时必填，admin-only |
+| `source_interface` | 宿主机采集接口名，admin-only |
+| `target_type` | `port`、`local_interface`，后续可扩展 `remote_collector` |
+| `target_port_id` | target_type 为 `port` 时使用，第一版要求和 source 在同一宿主机 |
+| `target_host` | target_type 为 `local_interface` 时使用 |
+| `target_interface` | 目标接口名 |
+| `direction` | `ingress`、`egress`、`both` |
+| `mirror_mode` | `global` 或 `policy`；`global` 表示全量镜像，`policy` 表示按 rule 条件镜像 |
+| `admin_state_up` | 管理状态 |
+| `status` | `ACTIVE`、`DOWN`、`DEGRADED`、`UNSUPPORTED` |
+
+`aria_mirror_rule` 表达可选匹配条件：
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | rule UUID |
+| `session_id` | 所属 session |
+| `priority` | 优先级 |
+| `ethertype` | `IPv4` / `IPv6` |
+| `protocol` | `any`、`tcp`、`udp`、`icmp` 或协议号 |
+| `src_address_set_id` | 可选，复用或独立使用 Aria address set |
+| `dst_address_set_id` | 可选 |
+| `src_ip_prefix` | 可选；简单 prefix 场景 |
+| `dst_ip_prefix` | 可选 |
+| `target_type` | 可选；为空时继承 session target |
+| `target_port_id` | 可选；用于把不同 IP 网段镜像到不同 VM port |
+| `target_host` | 可选；target_type 为 `local_interface` 时使用 |
+| `target_interface` | 可选；target_type 为 `local_interface` 时使用 |
+| `enabled` | 是否启用 |
+
+目标选择规则：
+
+```text
+rule.target_* 存在:
+  使用 rule 级别 target。
+  适合“不同 IP 网段 -> 不同分析 VM port”。
+
+rule.target_* 为空:
+  继承 session.target_*。
+  适合“同一个源 -> 同一个分析 VM port”。
+```
+
+全局镜像规则：
+
+```text
+session.mirror_mode = global:
+  不需要创建 rule，或者只允许一条 any/any/any 规则。
+  neutron-aria-agent 翻译为 Aria-agent 的 MIRROR_GLOBAL。
+  语义是：该 source + direction 上所有流量都 clone 到 session target。
+
+session.mirror_mode = policy:
+  必须至少有一条 rule。
+  每条 rule 可以指定 src/dst prefix、address-set、protocol 和可选 rule target。
+  neutron-aria-agent 翻译为 Aria-agent 的 MIRROR_POLICY。
+```
+
+按 IP 网段分流到不同 VM port 的推荐表达：
+
+```text
+source: host_interface ensXfY
+direction: ingress
+mode: policy
+
+rule 10:
+  dst_ip_prefix = 10.10.0.0/16
+  target_port_id = analyzer_vm_a_port
+
+rule 20:
+  dst_ip_prefix = 10.20.0.0/16
+  target_port_id = analyzer_vm_b_port
+
+rule 30:
+  dst_ip_prefix = 10.30.0.0/16
+  target_port_id = analyzer_vm_c_port
+```
+
+冲突处理：
+
+- 同一 source + direction 下，rule 必须有 `priority`。
+- 如果两个 prefix/address-set 重叠，优先级高的 rule 先匹配。
+- 第一版建议默认禁止同一优先级的重叠 prefix。
+- 如果同时配置 global 和 policy，默认语义是 policy 命中优先，未命中的流量再走 global；如果产品希望“同一包同时镜像到 global target 和 policy target”，需要后续增加 multi-target mirror map，不作为第二阶段第一版承诺。
+
+`aria_mirror_binding` 用于把 session 绑定到 port/network，便于后续和 `aria_acl_binding` 保持一致的产品交互方式：
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | binding UUID |
+| `session_id` | mirror session |
+| `target_type` | `port` / `network` |
+| `target_id` | 绑定对象 UUID |
+| `project_id` | project/tenant |
+
+第一版可以把 `source_*` 直接放在 session 中，不一定强制单独 binding；如果产品希望 ACL/Mirror 操作风格统一，则使用 binding 表。
+
+### 21.5 `aria_mirror` Legacy CLI 表达
+
+旧版本 OpenStack 环境优先支持 Legacy `neutron` CLI：
+
+```bash
+neutron ext-show aria-mirror
+
+neutron aria-mirror-session-create \
+  --name span-web-01 \
+  --source-port $SRC_PORT_ID \
+  --target-port $TARGET_PORT_ID \
+  --direction both
+
+neutron aria-mirror-rule-create $SESSION_ID \
+  --protocol tcp \
+  --src-address-set $SRC_SET_ID \
+  --dst-address-set $DST_SET_ID
+
+neutron aria-mirror-session-show $SESSION_ID
+neutron aria-mirror-session-list
+neutron aria-mirror-session-update $SESSION_ID --disable
+neutron aria-mirror-session-delete $SESSION_ID
+
+neutron aria-mirror-status-show --port $SRC_PORT_ID
+```
+
+全局镜像：
+
+```bash
+neutron aria-mirror-session-create \
+  --name vm-global-mirror \
+  --source-port $SRC_PORT_ID \
+  --target-port $ANALYZER_VM_PORT_ID \
+  --direction both \
+  --mirror-mode global
+```
+
+不同 IP 网段镜像到不同 VM port：
+
+```bash
+neutron aria-mirror-session-create \
+  --name span-by-prefix \
+  --source-host ostack2 \
+  --source-interface ensXfY \
+  --direction ingress \
+  --mirror-mode policy
+
+neutron aria-mirror-rule-create $SESSION_ID \
+  --priority 10 \
+  --dst-ip-prefix 10.10.0.0/16 \
+  --target-port $ANALYZER_VM_A_PORT_ID
+
+neutron aria-mirror-rule-create $SESSION_ID \
+  --priority 20 \
+  --dst-ip-prefix 10.20.0.0/16 \
+  --target-port $ANALYZER_VM_B_PORT_ID
+```
+
+物理采集口场景必须 admin-only：
+
+```bash
+neutron aria-mirror-session-create \
+  --name span-uplink-to-vm \
+  --source-host ostack2 \
+  --source-interface ensXfY \
+  --target-port $ANALYZER_VM_PORT_ID \
+  --direction ingress
+```
+
+限制：
+
+- `--source-interface` 只能由 admin 使用。
+- 第一版 `source_host` 和 `target_port` 所在 host 必须一致。
+- 目标 port 必须是普通 OVS tap port。
+- 不能把 Neutron DHCP/router/metadata port 作为目标分析 VM port。
+- 不支持把 SR-IOV VF 直接作为 source 或 target。
+
+### 21.6 DB 表设计
+
+建议新增：
+
+```text
+aria_mirror_sessions
+aria_mirror_rules
+aria_mirror_bindings
+aria_mirror_port_statuses
+```
+
+`aria_mirror_sessions`：
+
+```text
+id
+project_id
+name
+description
+enabled
+source_type
+source_port_id
+source_network_id
+source_host
+source_interface
+target_type
+target_port_id
+target_host
+target_interface
+direction
+mirror_mode
+admin_state_up
+status
+created_at
+updated_at
+revision_number
+```
+
+`aria_mirror_rules`：
+
+```text
+id
+session_id
+project_id
+priority
+ethertype
+protocol
+src_address_set_id
+dst_address_set_id
+src_ip_prefix
+dst_ip_prefix
+target_type
+target_port_id
+target_host
+target_interface
+enabled
+created_at
+updated_at
+revision_number
+```
+
+`aria_mirror_port_statuses`：
+
+```text
+port_id
+host
+session_id
+source_ifname
+source_ifindex
+target_ifname
+target_ifindex
+runtime_status
+status_reason
+mirrored_packets
+mirrored_bytes
+mirror_errors
+last_applied_revision
+updated_at
+```
+
+状态必须能解释为什么没有生效：
+
+```text
+ACTIVE
+  已下发并有明确 source/target ifindex。
+
+PENDING
+  Neutron DB 已保存，agent 尚未完成下发。
+
+UNSUPPORTED
+  source/target 不是 Aria 支持的接口类型，例如 SR-IOV VF 或 LinuxBridge。
+
+DEGRADED
+  部分规则失败，例如 target ifindex 不存在、TC attach 失败或 eBPF map 写入失败。
+
+NO_LOCAL_BINDING
+  当前 host 上没有该 source port。
+
+CROSS_HOST_UNSUPPORTED
+  第一版检测到 source 与 target 不在同一 host。
+```
+
+### 21.7 `neutron-aria-agent` mirror translator
+
+`neutron-aria-agent` 第二阶段新增 mirror translator，职责是把 Neutron DB/API 中的 `aria_mirror` 对象翻译成 Aria-agent 已支持的 mirror snapshot。
+
+输入：
+
+```text
+Neutron port
+Neutron binding:host_id
+OVSDB Interface external_ids:iface-id
+aria_mirror_session
+aria_mirror_rule
+address set / prefix
+```
+
+输出给 `aria-agent`：
+
+```text
+source instance/tap identity
+direction: ingress / egress / both
+protocol: any / tcp / udp / icmp / number
+src_group_id
+dst_group_id
+target_iface
+target_ifindex
+is_global
+priority
+```
+
+处理流程：
+
+```text
+neutron-aria-agent 收到 aria_mirror session/rule/port 事件
+  |
+  v
+full resync 或增量重算 effective mirror
+  |
+  v
+根据 source_type 找到本机 source tap 或 source host interface
+  |
+  v
+根据 target_type 找到本机 target tap/interface 和 ifindex
+  |
+  v
+校验 source/target 是否同 host、是否 OVS tap、是否 admin-only host interface
+  |
+  v
+生成 per-source mirror snapshot
+  |
+  v
+global session 生成 MIRROR_GLOBAL，policy rule 生成 MIRROR_POLICY
+  |
+  v
+通过 /run/aria/aria-agent.sock 下发给 aria-agent
+  |
+  v
+回写 aria_mirror_port_statuses
+```
+
+与 ACL/QoS 一样，`neutron-server` 只保存意图和发布事件；`neutron-aria-agent` 负责宿主机本地发现和翻译；`aria-agent` 负责真正写 eBPF map。
+
+### 21.8 `aria-agent` 执行模型
+
+现有 Aria-agent 已有 mirror 能力，核心模型是：
+
+```text
+MirrorEntry:
+  src_group
+  src_group_id
+  dst_group
+  dst_group_id
+  proto
+  direction
+  target_iface
+  target_ifindex
+  is_global
+```
+
+数据面使用 TC/eBPF：
+
+```text
+TC ingress/egress hook
+  |
+  v
+根据 tap_id、src_group_id、dst_group_id、proto、direction 查 MIRROR_POLICY
+  |
+  v
+查不到时按 wildcard fallback
+  |
+  v
+必要时查 MIRROR_GLOBAL
+  |
+  v
+bpf_clone_redirect(skb, target_ifindex, 0)
+  |
+  v
+更新 mirrored_packets / mirrored_bytes / errors
+```
+
+这对 Neutron 产品化有两个重要约束：
+
+- `aria_mirror` 下发的目标必须最终能解析成 target ifindex。
+- 原始业务包不应被 consume，mirror 失败只能影响 mirror 状态，不能阻断业务转发。
+- 全局镜像必须映射到 Aria-agent 现有 `MIRROR_GLOBAL`。
+- 按 IP 网段分流必须映射到带 `src_group_id` / `dst_group_id` / `proto` / `direction` / `target_ifindex` 的 `MIRROR_POLICY`；IP prefix 可编译为 Aria address group。
+
+### 21.9 物理端口镜像场景
+
+如果要做物理端口镜像，推荐模型是：
+
+```text
+交换机配置 SPAN / port mirror
+  |
+  v
+镜像流量进入宿主机专用采集 NIC
+  |
+  v
+aria_mirror source_type=host_interface
+  |
+  v
+aria-agent 在采集接口 ingress 方向 clone
+  |
+  v
+target_port_id 指向本机分析 VM tap
+```
+
+要求：
+
+- 采集 NIC 建议为专用网卡，不承载宿主机管理、存储或租户业务流量。
+- 第一版只支持本机目标 VM，不做跨宿主机转发。
+- 如果交换机镜像流量已经包含 VLAN tag，需要明确 Aria eBPF 是否保留、解析或过滤 VLAN。
+- 如果目标 VM 需要看到原始二层帧，目标 tap 的 MTU、offload 和 promisc 行为要单独验收。
+
+### 21.10 第二阶段开发计划
+
+第二阶段建议拆成 6 个子阶段：
+
+**阶段 2.1：现有 mirror 兼容性冻结**
+
+- 固化 `networking_mirror` 现状说明。
+- 明确现有 `mirror` API 继续保留。
+- 禁止在 `mirror.port_id` 上新增 Aria source 语义。
+- 给运维文档补充现有 mirror 排查命令：`ovs-ofctl dump-flows br-int table=100,101,102`、`ovs-ofctl dump-groups br-int`、`ovs-vsctl list-br`。
+
+**阶段 2.2：Neutron Server `aria_mirror` API/DB**
+
+- 新增 `aria-mirror` extension descriptor。
+- 新增 `aria_mirror` service plugin。
+- 新增 DB migration。
+- 新增 CRUD、validator、RBAC。
+- 支持 session/rule/status show。
+- 保证 `neutron ext-show aria-mirror` 可见。
+
+**阶段 2.3：Legacy CLI**
+
+- 新增 `neutron aria-mirror-session-*`。
+- 新增 `neutron aria-mirror-rule-*`。
+- 新增 `neutron aria-mirror-status-show`。
+- 对 admin-only host interface 参数做 CLI 侧和 server 侧双重校验。
+
+**阶段 2.4：`neutron-aria-agent` mirror translator**
+
+- 增加 mirror full resync。
+- 监听 port binding、session、rule、address set 变化。
+- 解析 OVS tap 的 ifname/ifindex。
+- 解析 target port / target interface。
+- 拒绝 cross-host target，并写状态。
+- 生成 Aria mirror snapshot。
+
+**阶段 2.5：`aria-agent` OpenStack UDS contract**
+
+- 在 OpenStack snapshot contract 中加入 mirror domain。
+- 支持 session/rule revision。
+- 支持 mirror apply/delete/status。
+- 保证 mirror apply 失败不影响 ACL/QoS 域。
+- 把 Aria-agent 现有 mirror stats 暴露给 `neutron-aria-agent`。
+
+**阶段 2.6：数据面验收**
+
+- VM tap -> 本机分析 VM tap。
+- 物理采集 NIC -> 本机分析 VM tap。
+- ingress、egress、both 三种方向。
+- protocol/address-set/prefix 匹配。
+- target VM 重启后 target ifindex 恢复。
+- source VM 迁移后源宿主机清理，目的宿主机重建。
+- cross-host target 返回 `CROSS_HOST_UNSUPPORTED`。
+- 删除 session 后 eBPF mirror map 清理。
+- global mirror 能把 source + direction 上全部流量 clone 到目标 VM port。
+- policy mirror 能把不同 IP prefix/address-set clone 到不同目标 VM port。
+
+### 21.11 第二阶段配置示例
+
+Neutron Server：
+
+```ini
+[DEFAULT]
+service_plugins = router,network_ip_availability,mirror,qos,aria_acl,aria_qos,aria_mirror
+```
+
+`neutron-aria-agent`：
+
+```ini
+[mirror]
+enabled = true
+enforcement_driver = aria
+allow_host_interface_source = true
+allow_cross_host_target = false
+default_unmatched_action = no_mirror
+```
+
+`policy.yaml`：
+
+```yaml
+"create_aria_mirror_session": "rule:admin_only"
+"update_aria_mirror_session": "rule:admin_only"
+"delete_aria_mirror_session": "rule:admin_only"
+"get_aria_mirror_session": "rule:admin_only"
+"create_aria_mirror_rule": "rule:admin_only"
+"delete_aria_mirror_rule": "rule:admin_only"
+"get_aria_mirror_status": "rule:admin_only"
+```
+
+### 21.12 第二阶段验收口径
+
+第二阶段可以对外承诺的现象：
+
+```text
+neutron ext-show aria-mirror 成功。
+neutron aria-mirror-session-create 能创建 VM tap 镜像会话。
+neutron aria-mirror-status-show 能显示 source/target ifindex 和 stats。
+本机 VM tap 的 ingress/egress 流量可以 clone 到本机分析 VM。
+交换机 SPAN 到宿主机采集 NIC 的流量可以 clone 到本机分析 VM。
+删除 session 后 clone 停止，原业务流量不受影响。
+source/target 跨宿主机时明确显示 CROSS_HOST_UNSUPPORTED。
+SR-IOV、LinuxBridge、Neutron 服务端口明确显示 UNSUPPORTED 或 NOT_APPLICABLE。
+```
+
+第二阶段不承诺：
+
+```text
+不承诺跨宿主机 mirror。
+不承诺直接接管 SR-IOV VF。
+不承诺替代现有 networking_mirror。
+不承诺兼容现有 mirror.port_id 语义。
+不承诺 tenant 自助配置宿主机物理采集口。
+```
+
+## 22. 产品边界总结
 
 最终产品口径：
 
@@ -2682,6 +3510,8 @@ Aria ACL 是 OpenStack Neutron 的独立 ACL enhancement 扩展。
 它不复用 Neutron Security Group，不做 Security Group projection，不展开 remote group，不依赖 port security。
 它只增强普通虚机 OVS tap port，不替代 OVS L2，不接管 SR-IOV、LinuxBridge 和 Neutron 服务端口。
 QoS 不重造 API，复用 Neutron QoS policy/rule，由 Aria 执行。
+QoS 对外产品入口统一叫 aria-qos；aria-qos facade 复用 Neutron 原生 QoS DB/API，不复用 qhqos。
+Mirror 第二阶段新增 aria_mirror 独立扩展，不复用现有 networking_mirror 的 port_id/vm_type 语义。
 ```
 
 这个路线比 tag + 本地 mapping 更适合产品化，因为 ACL 对象可审计、可回滚、可 RBAC、可 API 化，也能被 Horizon、Terraform、Heat 或平台编排系统长期集成。
@@ -2692,6 +3522,7 @@ QoS 不重造 API，复用 Neutron QoS policy/rule，由 Aria 执行。
 目标 neutron-server 是 Python2 老版本/定制产品镜像，不按新版 Python3 neutron-lib 方案默认实现。
 aria_acl 必须打进 neutron-server 产品镜像，并通过当前 neutron-db-manage / service plugin 机制验收。
 当前环境 QoS 代码存在但未启用，QoS 要分阶段打开 API/DB/ML2 extension，再由 Aria 接管执行。
+当前环境 qhqos 是 qcloud/floating IP/router QoS 定制扩展，不适合作为普通 VM OVS tap 的 Aria QoS 基础。
 neutron-openvswitch-agent 当前只启用 mirror extension；Aria QoS 路线不启用 OVS agent qos execution，避免双重限速。
 当前 tap -> br-int + iface-id 证据支持 Aria 端口发现路径。
 SR-IOV 和 LinuxBridge 存在但不纳入 Aria ACL/QoS 管理范围。

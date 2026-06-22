@@ -1,10 +1,10 @@
-# Aria ACL/QoS Neutron Productization Implementation Plan
+# Aria ACL / Aria QoS / Aria Mirror Neutron Productization Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a productized OpenStack Neutron integration where Aria ACL is an independent Neutron extension, QoS reuses Neutron native QoS policy/rule models, and Aria enforces ACL/QoS only on eligible VM OVS tap ports.
+**Goal:** Build a productized OpenStack Neutron integration where Aria ACL is an independent Neutron extension, Aria QoS is the product-facing facade over Neutron native QoS policy/rule models, Aria Mirror is a second-phase independent extension, and Aria enforces ACL/QoS/Mirror only on eligible VM OVS tap ports or explicitly configured host capture interfaces.
 
-**Architecture:** Neutron Server is the source of truth for ACL/QoS API, DB, RBAC, port binding, and runtime status. `neutron-aria-agent` runs on compute nodes, consumes Neutron state, discovers local OVS tap interfaces through `external_ids:iface-id`, computes per-port effective ACL/QoS snapshots, and sends those snapshots to local `aria-agent` over `/run/aria/aria-agent.sock`. `aria-agent` does not access Neutron; it only validates snapshots, updates eBPF maps, preserves WAL/runtime state, and reports per-domain status.
+**Architecture:** Neutron Server is the source of truth for ACL/QoS/Mirror API, DB, RBAC, port binding, and runtime status. `neutron-aria-agent` runs on compute nodes, consumes Neutron state, discovers local OVS tap interfaces through `external_ids:iface-id`, computes per-port effective ACL/QoS/Mirror snapshots, and sends those snapshots to local `aria-agent` over `/run/aria/aria-agent.sock`. `aria-agent` does not access Neutron; it only validates snapshots, updates eBPF maps, preserves WAL/runtime state, and reports per-domain status.
 
 **Tech Stack:** OpenStack Neutron Python 2.7, Legacy `python-neutronclient` 2016.9.9, ML2/Open vSwitch, Kolla-style containers, RabbitMQ/oslo.messaging, MySQL/Alembic `neutron-db-manage`, Rust 2021, Axum/UDS API, Aya/eBPF.
 
@@ -30,13 +30,14 @@
 3. `neutron-aria-agent` inventory/effective-policy/status loop.
 4. `aria-agent` UDS snapshot/status/delete API.
 5. ACL datapath enforcement.
-6. QoS native Neutron enablement and Aria execution.
-7. Kolla packaging, smoke, rollout, rollback.
+6. Aria QoS facade, native Neutron QoS enablement, and Aria execution.
+7. Aria Mirror second-phase productization.
+8. Kolla packaging, smoke, rollout, rollback.
 
 ### 0.3 Commit Discipline
 
 - Commit after each task group that passes tests.
-- Keep ACL and QoS commits separate.
+- Keep ACL, Aria QoS facade, native QoS enablement, and Aria Mirror commits separate.
 - Keep server-side Neutron plugin, Legacy CLI, Python agent, Rust UDS API, datapath, and deployment packaging separable.
 
 ---
@@ -56,9 +57,16 @@ openstack/neutron_aria/
     extensions/
       __init__.py
       aria_acl.py
+      aria_qos.py
     services/
       __init__.py
       aria_acl/
+        __init__.py
+        constants.py
+        exceptions.py
+        validators.py
+        plugin.py
+      aria_qos/
         __init__.py
         constants.py
         exceptions.py
@@ -74,6 +82,14 @@ openstack/neutron_aria/
           __init__.py
           versions/
             8b9c2d1e4f60_add_aria_acl_tables.py
+      aria_qos/
+        __init__.py
+        models.py
+        api.py
+        migration/
+          __init__.py
+          versions/
+            <rev>_add_aria_qos_status_tables.py
     rpc/
       __init__.py
       aria_acl.py
@@ -93,6 +109,8 @@ openstack/neutron_aria/
       unit/
         test_aria_acl_plugin.py
         test_aria_acl_validators.py
+        test_aria_qos_facade.py
+        test_aria_qos_status.py
         test_port_extension_fields.py
         test_agent_inventory.py
         test_effective_acl.py
@@ -115,11 +133,16 @@ openstack/neutronclient_aria/
       aria_acl_address_set.py
       aria_acl_binding.py
       aria_acl_status.py
+      aria_qos_policy.py
+      aria_qos_rule.py
+      aria_qos_binding.py
+      aria_qos_status.py
     tests/
       test_policy_cli.py
       test_rule_cli.py
       test_binding_cli.py
       test_status_cli.py
+      test_aria_qos_cli.py
 ```
 
 ### 1.3 Rust API And Agent Additions
@@ -623,27 +646,67 @@ VM hard reboot causes temporary `pending`/`unknown`, then returns to `applied` w
 
 ---
 
-## 7. Chapter Six: QoS Reuse Of Neutron Native Model
+## 7. Chapter Six: Aria QoS Facade Over Neutron Native Model
 
-### 7.1 Neutron QoS Enablement
+Aria QoS uses a product-facing `aria-qos` name while preserving Neutron native QoS as the underlying semantic model. Do not use the onsite `qhqos` / `qcloud qos` code as the Aria QoS base: it is Floating IP / router gateway oriented and does not match ordinary VM OVS tap QoS.
+
+### 7.1 Neutron Native QoS And Aria QoS Enablement
 
 **Files:**
 - Modify: Kolla `neutron.conf` template
 - Modify: Kolla `ml2_conf.ini` template
+- Create: `openstack/neutron_aria/neutron_aria/extensions/aria_qos.py`
+- Create: `openstack/neutron_aria/neutron_aria/services/aria_qos/plugin.py`
+- Create: `openstack/neutron_aria/neutron_aria/db/aria_qos/models.py`
+- Create: `openstack/neutron_aria/neutron_aria/db/aria_qos/api.py`
+- Create: `openstack/neutron_aria/neutron_aria/db/aria_qos/migration/versions/<rev>_add_aria_qos_status_tables.py`
 
 - [ ] Add `qos` to `service_plugins` only in QoS rollout phase.
+- [ ] Add `aria_qos` to `service_plugins` only after native `qos` is enabled.
 - [ ] Add `qos` to `[ml2] extension_drivers`.
 - [ ] Do not add `qos` to OVS agent `extensions`; keep onsite `extensions = mirror`.
+- [ ] Add `aria-qos` extension alias for product-facing capability/status.
+- [ ] Add `aria_qos_port_statuses`; do not add `aria_qos_policies` or `aria_qos_rules`.
+- [ ] Make `aria_qos` startup fail or report disabled when native `qos` is missing.
+- [ ] Keep onsite `qhqos` disabled and out of the Aria QoS path.
 - [ ] Verify:
 
 ```bash
 openstack extension list --network | grep qos
 neutron ext-list | grep qos
+neutron ext-show aria-qos
 ```
 
-Expected: `qos` visible only after QoS phase configuration.
+Expected: native `qos` and product-facing `aria-qos` are visible only after QoS phase configuration.
 
-### 7.2 Aria QoS Translator
+### 7.2 Legacy `neutron aria-qos-*` Product CLI
+
+**Files:**
+- Create: `openstack/neutronclient_aria/neutronclient_aria/v2_0/aria_qos_policy.py`
+- Create: `openstack/neutronclient_aria/neutronclient_aria/v2_0/aria_qos_rule.py`
+- Create: `openstack/neutronclient_aria/neutronclient_aria/v2_0/aria_qos_binding.py`
+- Create: `openstack/neutronclient_aria/neutronclient_aria/v2_0/aria_qos_status.py`
+
+- [ ] Add `neutron aria-qos-policy-create/list/show/update/delete`.
+- [ ] Add `neutron aria-qos-bandwidth-limit-rule-create/list/show/update/delete`.
+- [ ] Add `neutron aria-qos-port-bind --port $PORT_ID --policy $POLICY`.
+- [ ] Add `neutron aria-qos-network-bind --network $NETWORK_ID --policy $POLICY`.
+- [ ] Add `neutron aria-qos-status-show --port $PORT_ID`.
+- [ ] Implement `aria-qos-policy-*` as a facade over native `/qos/policies`.
+- [ ] Implement `aria-qos-bandwidth-limit-rule-*` as a facade over native `/qos/policies/{policy}/bandwidth_limit_rules`.
+- [ ] Implement bind commands by updating native `qos_policy_id` on port/network.
+- [ ] Document native `qos-*` commands as compatibility/debug entrypoints, not the product-facing path.
+
+Expected product commands:
+
+```bash
+neutron aria-qos-policy-create web-limit
+neutron aria-qos-bandwidth-limit-rule-create web-limit --max-kbps 100000
+neutron aria-qos-port-bind --port $PORT_ID --policy web-limit
+neutron aria-qos-status-show --port $PORT_ID
+```
+
+### 7.3 Aria QoS Translator
 
 **Files:**
 - Create: `openstack/neutron_aria/neutron_aria/agent/effective_qos.py`
@@ -660,17 +723,21 @@ Expected: `qos` visible only after QoS phase configuration.
   - direction when available
 - [ ] Mark unsupported rules as QoS domain degraded, not silently ignored.
 - [ ] Translate into Aria snapshot.
+- [ ] Write `aria_qos_port_statuses` with runtime state, unsupported reason, effective policy, and applied generation.
 
-### 7.3 QoS Smoke Tests
+### 7.4 QoS Smoke Tests
 
 **Files:**
 - Create: `deploy/kolla/smoke/qos_smoke.sh`
 
-- [ ] Create Neutron QoS policy.
-- [ ] Create bandwidth limit rule.
-- [ ] Bind to a VM port.
+- [ ] Confirm `qhqos-policy-list` is not part of the Aria QoS smoke path.
+- [ ] Create policy through `neutron aria-qos-policy-create`.
+- [ ] Create bandwidth limit rule through `neutron aria-qos-bandwidth-limit-rule-create`.
+- [ ] Bind to a VM port through `neutron aria-qos-port-bind`.
+- [ ] Verify the underlying native `qos_policy_id` is set on the port.
 - [ ] Verify `neutron-aria-agent` computes effective QoS.
 - [ ] Verify Aria runtime status shows QoS applied.
+- [ ] Verify `neutron aria-qos-status-show --port $PORT_ID`.
 - [ ] Verify bandwidth limit is observable.
 - [ ] Remove QoS policy and verify token bucket/map state is cleaned.
 - [ ] Verify QoS failure does not change ACL status.
@@ -688,6 +755,7 @@ Expected: `qos` visible only after QoS phase configuration.
 - [ ] Install `neutron_aria` Python 2 package.
 - [ ] Install DB migration files where `neutron-db-manage` can discover them.
 - [ ] Add `aria_acl` service plugin registration path.
+- [ ] Add `aria_qos` service plugin registration path, but enable it only in the QoS rollout phase.
 - [ ] Start with ACL-only config:
 
 ```ini
@@ -733,14 +801,296 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 - [ ] Rollout step 3: deploy `aria-agent` UDS snapshot API.
 - [ ] Rollout step 4: enable ACL enforcement for selected test ports.
 - [ ] Rollout step 5: enable broader ACL enforcement.
-- [ ] Rollout step 6: enable QoS only after ACL stable.
+- [ ] Rollout step 6: enable native `qos` and product-facing `aria_qos` only after ACL stable.
+- [ ] Rollout step 7: keep `qhqos` disabled unless a separate Floating IP / router QoS product decision requires it.
 - [ ] Rollback closes `enforcement_enabled`, sends cleanup snapshots, stops `neutron-aria-agent`, removes service plugin from config, and preserves DB tables.
 
 ---
 
-## 9. Chapter Eight: Test Matrix And Acceptance
+## 9. Chapter Eight: Aria Mirror Phase Two
 
-### 9.1 Unit Tests
+Aria Mirror is a second-phase feature. Phase one delivers independent `aria_acl` plus Aria execution for native Neutron QoS. Phase two adds an explicit `aria_mirror` extension instead of overloading the existing `networking_mirror` API.
+
+The reason is semantic: the current `networking_mirror` code treats `port_id` as the destination analyzer VM port and receives source traffic from `[mirror] interface` through `br-mirror`; Aria-agent mirror treats the managed source interface/tap as the clone point and sends a copy to a target ifindex. Reusing the same API would make `port_id` ambiguous.
+
+### 9.1 Existing `networking_mirror` Compatibility Freeze
+
+**Files:**
+- Document: `docs/aria-acl-neutron-extension-product-design.md`
+- Existing package: `networking_mirror`
+
+- [ ] Keep the existing `mirror` extension alias for the current OpenFlow based implementation.
+- [ ] Do not change the meaning of existing `mirror.port_id`.
+- [ ] Document that existing `mirror.port_id` is the destination analyzer VM port.
+- [ ] Document that source traffic is provided by `[mirror] interface` and `br-mirror`.
+- [ ] Document table usage:
+  - table `100`: ICG distribution.
+  - table `101`: DLP distribution.
+  - table `102`: NDS distribution when present in the deployed package.
+- [ ] Add operational checks:
+
+```bash
+ovs-ofctl -O OpenFlow11 dump-groups br-int
+ovs-ofctl -O OpenFlow11 dump-flows br-int table=100
+ovs-ofctl -O OpenFlow11 dump-flows br-int table=101
+ovs-ofctl -O OpenFlow11 dump-flows br-int table=102
+ovs-vsctl list-br
+ovs-vsctl show
+```
+
+**Expected visible result:**
+
+Existing `mirror` behavior remains unchanged, and operators can distinguish `networking_mirror` from `aria_mirror` during troubleshooting.
+
+### 9.2 Neutron Server `aria_mirror` API And DB
+
+**Files:**
+- Create: `openstack/neutron_aria/neutron_aria/extensions/aria_mirror.py`
+- Create: `openstack/neutron_aria/neutron_aria/services/aria_mirror/plugin.py`
+- Create: `openstack/neutron_aria/neutron_aria/db/aria_mirror_db.py`
+- Create: `openstack/neutron_aria/neutron_aria/db/migration/alembic_migrations/versions/<rev>_aria_mirror.py`
+- Modify: package entrypoint / built-in plugin registration
+- Modify: `deploy/kolla/config/policy.yaml`
+
+- [ ] Register extension alias `aria-mirror`.
+- [ ] Register service plugin alias `aria_mirror`.
+- [ ] Add `aria_mirror_sessions`.
+- [ ] Add `aria_mirror_rules`.
+- [ ] Add `aria_mirror_bindings` if product UX requires ACL-like bind/unbind operations.
+- [ ] Add `aria_mirror_port_statuses`.
+- [ ] Implement session CRUD.
+- [ ] Implement rule CRUD.
+- [ ] Add session-level `mirror_mode`:
+  - `global`
+  - `policy`
+- [ ] Add rule-level optional target override:
+  - `target_type`
+  - `target_port_id`
+  - `target_host`
+  - `target_interface`
+- [ ] Support prefix/address-set based distribution to different target VM ports.
+- [ ] Validate prefix/address-set overlap with explicit `priority`.
+- [ ] Reject overlapping rules with the same priority for the same source and direction.
+- [ ] Implement status show/list.
+- [ ] Validate `source_type`:
+  - `port`
+  - `network`
+  - `host_interface`
+- [ ] Validate `target_type`:
+  - `port`
+  - `local_interface`
+- [ ] Make `host_interface` source admin-only.
+- [ ] Reject raw writes to runtime fields such as `source_ifindex`, `target_ifindex`, packet counters, and error counters.
+- [ ] Emit RPC/notification events for session/rule/binding changes.
+
+**Expected visible result:**
+
+```bash
+neutron ext-show aria-mirror
+neutron aria-mirror-session-list
+neutron aria-mirror-session-show $SESSION_ID
+```
+
+### 9.3 Legacy `neutron` CLI For `aria_mirror`
+
+**Files:**
+- Create: `openstack/neutron_aria/neutron_aria/client/commands/aria_mirror.py`
+- Modify: legacy client registration path used by the product image
+
+- [ ] Add `neutron aria-mirror-session-create`.
+- [ ] Add `neutron aria-mirror-session-update`.
+- [ ] Add `neutron aria-mirror-session-delete`.
+- [ ] Add `neutron aria-mirror-session-show`.
+- [ ] Add `neutron aria-mirror-session-list`.
+- [ ] Add `neutron aria-mirror-rule-create`.
+- [ ] Add `neutron aria-mirror-rule-delete`.
+- [ ] Add `neutron aria-mirror-rule-list`.
+- [ ] Add `neutron aria-mirror-status-show`.
+- [ ] Support VM tap source:
+
+```bash
+neutron aria-mirror-session-create \
+  --name vm-to-analyzer \
+  --source-port $SRC_PORT_ID \
+  --target-port $TARGET_PORT_ID \
+  --direction both
+```
+
+- [ ] Support global mirror using Aria-agent's existing global mirror capability:
+
+```bash
+neutron aria-mirror-session-create \
+  --name vm-global-mirror \
+  --source-port $SRC_PORT_ID \
+  --target-port $ANALYZER_PORT_ID \
+  --direction both \
+  --mirror-mode global
+```
+
+- [ ] Support IP-prefix distribution to different analyzer VM ports:
+
+```bash
+neutron aria-mirror-session-create \
+  --name span-by-prefix \
+  --source-host ostack2 \
+  --source-interface ensXfY \
+  --direction ingress \
+  --mirror-mode policy
+
+neutron aria-mirror-rule-create $SESSION_ID \
+  --priority 10 \
+  --dst-ip-prefix 10.10.0.0/16 \
+  --target-port $ANALYZER_VM_A_PORT_ID
+
+neutron aria-mirror-rule-create $SESSION_ID \
+  --priority 20 \
+  --dst-ip-prefix 10.20.0.0/16 \
+  --target-port $ANALYZER_VM_B_PORT_ID
+```
+
+- [ ] Support physical capture NIC source, admin-only:
+
+```bash
+neutron aria-mirror-session-create \
+  --name span-uplink-to-analyzer \
+  --source-host ostack2 \
+  --source-interface ensXfY \
+  --target-port $ANALYZER_PORT_ID \
+  --direction ingress
+```
+
+**Expected visible result:**
+
+Operators can create a mirror session without touching OVS commands or Aria local CLI directly.
+
+### 9.4 `neutron-aria-agent` Mirror Translator
+
+**Files:**
+- Create: `openstack/neutron_aria/neutron_aria/agent/effective_mirror.py`
+- Modify: `openstack/neutron_aria/neutron_aria/agent/event_loop.py`
+- Modify: `openstack/neutron_aria/neutron_aria/agent/ovs_discovery.py`
+- Modify: `openstack/neutron_aria/neutron_aria/agent/status_reporter.py`
+
+- [ ] Full resync all `aria_mirror` sessions.
+- [ ] Subscribe to session/rule/binding changes.
+- [ ] Subscribe to port binding and port delete changes.
+- [ ] Resolve `source_port_id` to local OVS tap by `external_ids:iface-id`.
+- [ ] Resolve `source_network_id` to all eligible local VM OVS tap ports on that network.
+- [ ] Resolve `source_host_interface` only when `source_host` equals the local host.
+- [ ] Resolve `target_port_id` to local target OVS tap and ifindex.
+- [ ] Resolve rule-level `target_port_id` when a rule overrides the session target.
+- [ ] Resolve `target_interface` to local ifindex.
+- [ ] Reject first-version cross-host source/target with `CROSS_HOST_UNSUPPORTED`.
+- [ ] Reject SR-IOV/LinuxBridge/service ports with `UNSUPPORTED` or `NOT_APPLICABLE`.
+- [ ] Generate per-source mirror snapshot:
+  - source tap identity.
+  - direction.
+  - protocol.
+  - source group/address set.
+  - destination group/address set.
+  - target ifindex.
+  - mirror mode.
+  - priority.
+  - revision.
+- [ ] Translate `mirror_mode=global` to Aria-agent `MIRROR_GLOBAL`.
+- [ ] Translate `mirror_mode=policy` rules to Aria-agent `MIRROR_POLICY`.
+- [ ] Compile `src_ip_prefix` / `dst_ip_prefix` into Aria address groups when needed.
+- [ ] Define precedence: policy rule hit first, global fallback for unmatched traffic.
+- [ ] Do not promise one packet cloned to both global and policy targets until multi-target mirror maps are implemented.
+- [ ] Report status and counters back to `aria_mirror_port_statuses`.
+
+**Expected visible result:**
+
+`neutron aria-mirror-status-show --port $SRC_PORT_ID` displays local host, source ifname/ifindex, target ifname/ifindex, revision, status, mirrored packets, mirrored bytes, and errors.
+
+### 9.5 `aria-agent` Mirror UDS Contract
+
+**Files:**
+- Modify: `api/src/neutron.rs`
+- Modify: `agent/src/api_routes.rs`
+- Modify: `agent/src/control_plane.rs`
+- Modify: `core/src/mirror_ops.rs`
+- Modify: `ebpf/src/mirror.rs` only if OpenStack-specific semantics require map/schema changes
+
+- [ ] Add mirror domain to the OpenStack snapshot DTO.
+- [ ] Map Neutron direction values to Aria values:
+  - `ingress`
+  - `egress`
+  - `both`
+- [ ] Map Neutron protocol values to Aria protocol numbers.
+- [ ] Map address sets/prefixes to Aria group IDs.
+- [ ] Preserve existing Aria global mirror behavior for `mirror_mode=global`.
+- [ ] Support rule-specific target ifindex for prefix/address-set distribution.
+- [ ] Apply mirror entries without changing ACL/QoS domains.
+- [ ] Delete stale mirror entries by session/revision.
+- [ ] Expose mirror stats to `neutron-aria-agent`.
+- [ ] Preserve original traffic when mirror apply fails.
+
+**Expected visible result:**
+
+Aria-agent applies mirror entries using existing TC/eBPF clone behavior and reports packet/byte/error counters.
+
+### 9.6 Mirror Datapath Smoke Tests
+
+**Files:**
+- Create: `deploy/kolla/smoke/aria_mirror_smoke.sh`
+
+- [ ] Boot source VM and analyzer VM on the same host.
+- [ ] Create `aria_mirror` session from source VM port to analyzer VM port.
+- [ ] Verify ingress clone.
+- [ ] Verify egress clone.
+- [ ] Verify `both` creates both directions.
+- [ ] Create global mirror session and verify all source traffic is cloned to the target VM port.
+- [ ] Create protocol-specific mirror rule.
+- [ ] Create address-set or prefix-specific mirror rule.
+- [ ] Create two prefix rules under one source and verify different prefixes go to different analyzer VM ports.
+- [ ] Create overlapping prefixes with the same priority and verify server-side rejection.
+- [ ] Create overlapping prefixes with different priority and verify higher priority wins.
+- [ ] Delete the session and verify clone stops.
+- [ ] Reboot analyzer VM and verify target ifindex recovery.
+- [ ] Migrate source VM and verify source host cleanup plus destination host reapply.
+- [ ] Create a cross-host target and verify `CROSS_HOST_UNSUPPORTED`.
+- [ ] Try SR-IOV/LinuxBridge ports and verify explicit unsupported status.
+- [ ] Configure a physical capture NIC source in a lab and verify SPAN traffic can be cloned to a local analyzer VM.
+
+**Expected visible result:**
+
+Mirror failures are visible in `aria_mirror` status and do not block original VM traffic.
+
+### 9.7 Mirror Kolla Packaging
+
+**Files:**
+- Modify: `deploy/kolla/neutron-server/Dockerfile`
+- Modify: `deploy/kolla/config/neutron.conf`
+- Modify: `deploy/kolla/config/neutron-aria-agent.ini`
+- Modify: `deploy/kolla/config/policy.yaml`
+
+- [ ] Package `aria_mirror` Neutron Server code into the product neutron-server image.
+- [ ] Add `aria_mirror` only in second-phase configuration:
+
+```ini
+[DEFAULT]
+service_plugins = router,network_ip_availability,mirror,qos,aria_acl,aria_qos,aria_mirror
+```
+
+- [ ] Add mirror-specific agent config:
+
+```ini
+[mirror]
+enabled = true
+enforcement_driver = aria
+allow_host_interface_source = true
+allow_cross_host_target = false
+```
+
+- [ ] Keep existing `mirror` plugin enabled unless product decides to retire it separately.
+- [ ] Do not require tenants to run OVS commands.
+
+---
+
+## 10. Chapter Nine: Test Matrix And Acceptance
+
+### 10.1 Unit Tests
 
 - [ ] Neutron extension attributes.
 - [ ] DB CRUD and validators.
@@ -752,18 +1102,25 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 - [ ] UDS schema serde.
 - [ ] Snapshot apply status.
 - [ ] Local write gate.
+- [ ] Aria Mirror session/rule validators.
+- [ ] Aria Mirror source/target host validation.
+- [ ] Aria Mirror unsupported-port classification.
 
-### 9.2 Integration Tests
+### 10.2 Integration Tests
 
 - [ ] `neutron ext-show aria-acl`.
+- [ ] `neutron ext-show aria-qos` after QoS phase.
 - [ ] ACL policy/rule/address-set/binding CRUD.
 - [ ] `neutron port-show` shows `aria_acl_*`.
 - [ ] `neutron agent-list` shows Aria agent alive.
 - [ ] Full resync after agent restart.
 - [ ] Port migration source cleanup and destination apply.
 - [ ] VM reboot/tap recreate recovery.
+- [ ] Second phase: `neutron ext-show aria-mirror`.
+- [ ] Second phase: `neutron aria-mirror-session-*` CRUD.
+- [ ] Second phase: `neutron aria-mirror-status-show`.
 
-### 9.3 Production Smoke
+### 10.3 Production Smoke
 
 - [ ] Three-node OVSDB/interface discovery consistency.
 - [ ] bpffs/BTF availability.
@@ -773,8 +1130,10 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 - [ ] Not-applicable DHCP/router/metadata behavior.
 - [ ] QoS bandwidth limit behavior.
 - [ ] Rollback behavior.
+- [ ] Second phase: same-host VM tap mirror behavior.
+- [ ] Second phase: physical capture NIC to local analyzer VM in a lab.
 
-### 9.4 Final Acceptance Criteria
+### 10.4 Final Acceptance Criteria
 
 The release is accepted when all of the following are true:
 
@@ -790,13 +1149,32 @@ Unsupported SR-IOV ports show unsupported
 Neutron service ports show not_applicable
 Unbound VM ports remain bypass
 QoS extension is visible only in QoS phase
+aria-qos extension is visible only in QoS phase
+neutron aria-qos-* commands work as the product-facing QoS entrypoint
 QoS policy binding is executed by Aria, not OVS agent qos extension
+qhqos remains outside the Aria QoS path
 Rollback keeps original OVS connectivity
+```
+
+Second-phase `aria_mirror` acceptance is separate:
+
+```text
+neutron ext-show aria-mirror succeeds
+neutron aria-mirror-session-* commands work in the Legacy CLI environment
+neutron aria-mirror-status-show shows source/target ifindex and counters
+Same-host VM tap mirror works for ingress, egress, and both
+Global mirror clones all traffic on the selected source/direction to the configured target
+Policy mirror can send different IP prefixes/address sets to different analyzer VM ports
+Physical capture NIC to local analyzer VM works in a controlled lab
+Cross-host target returns CROSS_HOST_UNSUPPORTED
+SR-IOV/LinuxBridge/service ports return explicit unsupported/not_applicable status
+Deleting the session removes mirror map entries and does not affect original VM traffic
+Existing networking_mirror behavior remains unchanged
 ```
 
 ---
 
-## 10. Recommended Work Breakdown
+## 11. Recommended Work Breakdown
 
 ### Milestone A: ACL Control Plane Visible
 
@@ -828,10 +1206,12 @@ Rollback keeps original OVS connectivity
 ### Milestone D: QoS
 
 - Task D1: enable Neutron QoS API/DB.
-- Task D2: effective QoS calculator.
-- Task D3: Aria QoS snapshot DTO.
-- Task D4: eBPF QoS apply.
-- Task D5: QoS smoke.
+- Task D2: add `aria_qos` product facade extension and status table.
+- Task D3: add Legacy `neutron aria-qos-*` commands.
+- Task D4: effective QoS calculator.
+- Task D5: Aria QoS snapshot DTO.
+- Task D6: eBPF QoS apply.
+- Task D7: QoS smoke through `aria-qos-*` commands.
 
 ### Milestone E: Productization
 
@@ -842,34 +1222,52 @@ Rollback keeps original OVS connectivity
 - Task E5: rollback drill.
 - Task E6: runbook and release notes.
 
+### Milestone F: Aria Mirror Phase Two
+
+- Task F1: freeze and document existing `networking_mirror` semantics.
+- Task F2: `aria_mirror` extension descriptor and DB migration.
+- Task F3: `aria_mirror` service plugin CRUD and RBAC.
+- Task F4: Legacy CLI commands.
+- Task F5: `neutron-aria-agent` mirror translator.
+- Task F6: Aria-agent OpenStack mirror DTO/status integration.
+- Task F7: VM tap mirror smoke.
+- Task F8: physical capture NIC mirror lab smoke.
+- Task F9: second-phase Kolla config and rollout/rollback.
+
 ---
 
-## 11. Self-Review
+## 12. Self-Review
 
-### 11.1 Spec Coverage
+### 12.1 Spec Coverage
 
 - ACL independent API/DB/CLI: covered in Chapters 2 and 3.
 - `port-show` readonly expression: covered in 2.4.
 - Neutron Server as northbound source of truth: covered across Chapters 2 and 4.
 - OVS tap only, service ports excluded: covered in 0.1 and 4.2.
-- SR-IOV first-stage unsupported: covered in 0.1, 4.2, and 9.3.
+- SR-IOV first-stage unsupported: covered in 0.1, 4.2, and 10.3.
 - QoS native model reuse: covered in Chapter 7.
-- No OVS agent QoS execution: covered in 7.1 and 9.4.
-- Kolla productization: covered in Chapter 8.
-- Smoke and rollback: covered in Chapters 8 and 9.
+- Aria QoS product facade: covered in 7.1 and 7.2.
+- No OVS agent QoS execution: covered in 7.1 and 10.4.
+- Aria Mirror second-phase plan: covered in Chapter 9.
+- Kolla productization: covered in section 8.
+- Smoke and rollback: covered in Chapters 8, 9, and 10.
 
-### 11.2 Placeholder Scan
+### 12.2 Placeholder Scan
 
 This plan contains no unfinished steps. Commands use shell variables such as `$PORT_ID` and `$DHCP_PORT_ID` for environment-specific Neutron object IDs captured during smoke setup; product image names are selected by the release pipeline, while required files and validation behavior are specified above.
 
-### 11.3 Type And Naming Consistency
+### 12.3 Type And Naming Consistency
 
 The plan consistently uses:
 
 ```text
 aria-acl             Neutron extension alias
 aria_acl_*           DB table and Python symbol prefix
+aria-qos            Product-facing QoS extension/CLI facade
+aria_qos_*          Status/capability table and Python symbol prefix; no policy/rule DB duplication
 neutron-aria-agent   compute-side Python agent
 aria-agent           existing Rust binary
 aria_acl_*           port response readonly fields
+aria-mirror          Neutron extension alias for second-phase mirror
+aria_mirror_*        DB table and Python symbol prefix for second-phase mirror
 ```
