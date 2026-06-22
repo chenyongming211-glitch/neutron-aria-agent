@@ -37,7 +37,7 @@ tap interface on br-int
 - QoS 复用 Neutron 原生 QoS policy/rule 模型，只把执行后端切换到 Aria。
 - ACL 不消费 Neutron Security Group、remote group、port security、allowed address pairs，也不承担 Security Group replacement 语义。
 - ACL 不启用 `OVSHybridIptablesFirewallDriver` 链路，不引入 `qbr/qvo/qvb`。
-- Aria 只增强普通 OVS tap 端口，SR-IOV 和 LinuxBridge 端口不纳入 Aria ACL 管理。
+- Aria 只增强普通虚机 OVS tap 端口，SR-IOV、LinuxBridge 端口和 Neutron 服务端口不纳入 Aria ACL enforcement。
 
 ## 2. 目标环境约束
 
@@ -74,7 +74,7 @@ tap interface on br-int
 | 部署形态 | Kolla 风格容器，`neutron_server`、`neutron_openvswitch_agent`、`neutron_linuxbridge_agent`、`neutron_sriov_agent` 等容器运行 | ACL/QoS 能力必须进入产品镜像和 Kolla 配置 |
 | Neutron 运行时 | neutron-server 使用 Python 2 | 插件实现必须兼容 Python 2 和当前 Neutron 代码结构 |
 | Neutron 插件 | `service_plugins = router,network_ip_availability,mirror` | 当前没有 QoS API，也没有 Aria ACL，需要改 neutron-server 配置和镜像 |
-| ML2 drivers | `openvswitch,linuxbridge,l2population,sriovnicswitch` | Aria 只接管普通 OVS tap，SR-IOV/LinuxBridge 标记 unsupported 或 not_applicable |
+| ML2 drivers | `openvswitch,linuxbridge,l2population,sriovnicswitch` | Aria 只接管普通虚机 OVS tap，SR-IOV/LinuxBridge/Neutron 服务端口标记 unsupported 或 not_applicable |
 | ML2 type drivers | `vxlan,vlan,flat` | ACL/QoS 不改变 L2/VXLAN/VLAN 管理 |
 | OVS agent | `integration_bridge = br-int`，`extensions = mirror` | Aria 可作为并行增强 agent；QoS 不应开启 OVS agent 执行后端 |
 | Security Group | `enable_security_group = False` | ACL 不能走 SG projection，也不需要启用 SG |
@@ -112,12 +112,14 @@ tap interface on br-int
   binding:host_id == 当前 compute host
   binding:vif_type == ovs
   binding:vnic_type 为 normal 或等价普通虚机端口
+  device_owner 为空或以 compute: 开头
   OVS br-int 上存在 external_ids:iface-id=<neutron-port-id>
 
 明确跳过：
   SR-IOV direct / direct-physical 端口
   LinuxBridge 端口
   OVN 端口
+  network:dhcp、network:router_gateway、network:router_interface 等 Neutron 服务端口
   无法在 br-int 找到 iface-id 的端口
   迁移中、binding 未完成或 tap 尚未出现的端口
 ```
@@ -281,7 +283,7 @@ Step 2:
 - 注册为独立 Neutron agent。
 - 订阅 port、network、Aria ACL、QoS 相关事件。
 - 定期或按需执行 full resync。
-- 只处理绑定到本 host 的普通 OVS tap port。
+- 只处理绑定到本 host 的普通虚机 OVS tap port。
 - 计算每个 port 的 effective ACL。
 - 查询 OVSDB，建立 `port_id -> tap_name -> ifindex` 映射。
 - 生成 Aria Neutron snapshot。
@@ -973,11 +975,13 @@ ingress:
 
 ### 7.2 Policy 匹配
 
-每个 port 最终只能得到一个 effective ACL policy：
+每个 eligible VM port 最终只能得到一个 effective ACL policy：
 
 ```text
 port-level binding > network-level binding > no binding
 ```
+
+eligible VM port 必须同时满足 Port 过滤条件。特别是，network-level binding 只向该 network 下的 VM compute port 展开，不向 DHCP、router、metadata 等 Neutron 服务端口展开。
 
 第一版不做多个 policy 叠加。
 
@@ -1179,6 +1183,8 @@ binding_cache
 effective_acl_by_port
 ```
 
+full resync 可以拉取本 host 全量 port，但进入 `effective_acl_by_port` 的只能是 eligible VM ports。Neutron 服务端口必须保留在 inventory/status 中用于解释 `not_applicable`，不能进入 ACL snapshot。
+
 ### 9.3 Port 过滤
 
 agent 只处理满足条件的 port：
@@ -1187,9 +1193,12 @@ agent 只处理满足条件的 port：
 port.binding_host_id == local_host
 port.binding_vif_type == ovs
 port.binding_vnic_type in ["normal", "", null]
+port.device_owner is empty or port.device_owner startswith "compute:"
 port.admin_state_up == true
 OVS br-int interface external_ids:iface-id == port.id
 ```
+
+现场 `neutron port-list` 已确认 DHCP port 也可能同时满足 `binding:vif_type=ovs` 和 `binding:vnic_type=normal`，例如 `device_owner=network:dhcp`。因此过滤条件不能只看 OVS 绑定字段，必须排除 Neutron 服务端口。
 
 跳过端口需要写入 status：
 
@@ -1198,6 +1207,7 @@ OVS br-int interface external_ids:iface-id == port.id
 | SR-IOV direct | `unsupported` | Aria 不接管 SR-IOV datapath |
 | LinuxBridge | `unsupported` | 当前只支持 OVS br-int tap |
 | OVN | `unsupported` | 当前不支持 OVN |
+| Neutron service port | `not_applicable` | DHCP、router、metadata 等服务端口不做 ACL enforcement |
 | tap 未出现 | `unknown` 或 `not_applicable` | binding 未完成或迁移中 |
 | 无 ACL binding | `not_applicable` | ACL 未请求 |
 
@@ -1207,6 +1217,9 @@ OVS br-int interface external_ids:iface-id == port.id
 
 ```python
 def resolve_effective_acl(port):
+    if not is_eligible_vm_port(port):
+        return None
+
     port_binding = find_enabled_binding("port", port.id)
     if port_binding:
         return build_policy(port_binding.policy_id, source="port")
@@ -2272,6 +2285,7 @@ QoS 进入生产 smoke 前必须完成：
 - OVS tap 映射。
 - SR-IOV skip。
 - LinuxBridge skip。
+- Neutron service port skip。
 - port-level binding 覆盖 network-level binding。
 - 未绑定 port bypass。
 - address set 展开。
@@ -2339,6 +2353,9 @@ tap recreate:
 
 SR-IOV port:
   明确 unsupported，不被 Aria 接管
+
+Neutron service port:
+  network:dhcp / network:router_* 即使是 ovs normal tap，也显示 not_applicable，不进入 ACL snapshot
 
 DHCP / metadata / ARP / IPv6 ND:
   无显式 ACL 时不被误伤
@@ -2663,7 +2680,7 @@ shaping_requires_tc = true
 Aria ACL 是 OpenStack Neutron 的独立 ACL enhancement 扩展。
 它使用独立 API、独立 DB、独立 RBAC、独立 agent 同步和 Aria eBPF datapath 执行。
 它不复用 Neutron Security Group，不做 Security Group projection，不展开 remote group，不依赖 port security。
-它只增强普通 OVS tap port，不替代 OVS L2，不接管 SR-IOV 和 LinuxBridge。
+它只增强普通虚机 OVS tap port，不替代 OVS L2，不接管 SR-IOV、LinuxBridge 和 Neutron 服务端口。
 QoS 不重造 API，复用 Neutron QoS policy/rule，由 Aria 执行。
 ```
 
