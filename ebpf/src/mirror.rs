@@ -66,10 +66,11 @@ unsafe fn update_global_mirror_stats(key: &GlobalMirrorKey, pkt_len: u32, succes
     }
 }
 
-/// Try to mirror a packet via TC (bpf_clone_redirect).
-/// Two-level lookup:
-///   1. 8-level fallback match in MIRROR_POLICY[src_id, dst_id, proto, direction]
-///   2. Global match in MIRROR_GLOBAL[direction]
+/// Try to mirror a parsed IP packet via TC (bpf_clone_redirect).
+///
+/// Global mirror is applied first so it keeps span-like semantics even when
+/// policy mirrors also exist. A matching policy can clone to an additional
+/// target; if it uses the same target as global mirror, only stats are updated.
 ///
 /// `skb_ptr` must be the raw `*mut __sk_buff` from TcContext.
 /// This function always returns — the original packet is never consumed.
@@ -83,6 +84,8 @@ pub unsafe fn try_mirror_tc(
     direction: u8,
     pkt_len: u32,
 ) {
+    let global_target_ifindex = clone_global_mirror_tc(skb_ptr, tap_id, direction, pkt_len);
+
     // bit 0: src_id wildcard, bit 1: dst_id wildcard, bit 2: proto wildcard
     const ORDER: [u8; 8] = [0b000, 0b001, 0b010, 0b100, 0b011, 0b101, 0b110, 0b111];
 
@@ -99,16 +102,17 @@ pub unsafe fn try_mirror_tc(
         };
 
         if let Some(cfg) = MIRROR_POLICY.get(&policy_key) {
-            let ret = bpf_clone_redirect(skb_ptr, cfg.target_ifindex, 0);
-            update_mirror_stats(&policy_key, pkt_len, ret == 0);
+            if global_target_ifindex == cfg.target_ifindex {
+                update_mirror_stats(&policy_key, pkt_len, true);
+            } else {
+                let ret = bpf_clone_redirect(skb_ptr, cfg.target_ifindex, 0);
+                update_mirror_stats(&policy_key, pkt_len, ret == 0);
+            }
             return;
         }
 
         i += 1;
     }
-
-    // Level 2: global mirror
-    let _ = try_global_mirror_tc(skb_ptr, tap_id, direction, pkt_len);
 }
 
 /// Try to mirror a packet using only the global mirror map.
@@ -122,6 +126,16 @@ pub unsafe fn try_global_mirror_tc(
     direction: u8,
     pkt_len: u32,
 ) -> bool {
+    clone_global_mirror_tc(skb_ptr, tap_id, direction, pkt_len) != 0
+}
+
+#[inline(always)]
+unsafe fn clone_global_mirror_tc(
+    skb_ptr: *mut aya_ebpf::bindings::__sk_buff,
+    tap_id: u32,
+    direction: u8,
+    pkt_len: u32,
+) -> u32 {
     let global_key = GlobalMirrorKey {
         tap_id,
         direction,
@@ -131,8 +145,10 @@ pub unsafe fn try_global_mirror_tc(
     if let Some(cfg) = MIRROR_GLOBAL.get(&global_key) {
         let ret = bpf_clone_redirect(skb_ptr, cfg.target_ifindex, 0);
         update_global_mirror_stats(&global_key, pkt_len, ret == 0);
-        return true;
+        if ret == 0 {
+            return cfg.target_ifindex;
+        }
     }
 
-    false
+    0
 }
