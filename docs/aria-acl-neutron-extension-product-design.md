@@ -538,6 +538,218 @@ port
 - 同一 target 第一版只允许一个 enabled policy 生效。
 - 删除 policy 前必须先删除 binding，或由服务端执行级联清理并通知 agent。
 
+### 5.6 Legacy `neutron` CLI 表达
+
+目标产品环境是旧版 OpenStack，因此北向管理入口优先支持 Legacy `neutron` CLI，而不是只设计新版 `openstack network ...` 命令。
+
+命令设计原则：
+
+- `neutron` CLI 只是 Neutron REST API 的客户端封装，不直接访问 DB。
+- CLI 命令名必须和 API 资源一一对应，便于排障时从命令反推 API 和 DB 表。
+- ACL 对象使用独立命令族，不复用 `security-group-*` 命令。
+- port/network 绑定使用 `aria-acl-binding-*` 命令表达，不修改 `binding:vif_type`、`binding:vnic_type` 等 ML2 绑定字段。
+- CLI 第一版只开放 admin 使用；如果后续开放租户自服务，再按 policy.yaml 放开只读或写权限。
+- 旧版环境仍可能习惯使用 `tenant_id`，CLI 应兼容 `--tenant-id`，服务端内部统一映射为 `project_id`。
+
+extension 查询：
+
+```bash
+neutron ext-list | grep aria-acl
+neutron ext-show aria-acl
+```
+
+policy 命令：
+
+```bash
+neutron aria-acl-policy-list
+neutron aria-acl-policy-show <policy-id-or-name>
+neutron aria-acl-policy-create \
+  --name web-db-acl \
+  --description "web to db acl" \
+  --default-action allow \
+  --stateful true
+neutron aria-acl-policy-update <policy-id> --default-action deny
+neutron aria-acl-policy-delete <policy-id>
+```
+
+rule 命令：
+
+```bash
+neutron aria-acl-rule-list --policy <policy-id-or-name>
+neutron aria-acl-rule-show <rule-id>
+neutron aria-acl-rule-create \
+  --policy <policy-id-or-name> \
+  --direction egress \
+  --priority 100 \
+  --action deny \
+  --ethertype IPv4 \
+  --protocol tcp \
+  --dst-address-set <address-set-id-or-name> \
+  --dst-port-min 3306 \
+  --dst-port-max 3306
+neutron aria-acl-rule-update <rule-id> --priority 90
+neutron aria-acl-rule-delete <rule-id>
+```
+
+为了贴近安全组和 QoS 的使用习惯，`aria-acl-rule-create` 可以额外支持简写：
+
+```bash
+neutron aria-acl-rule-create \
+  --policy <policy-id-or-name> \
+  --direction egress \
+  --priority 100 \
+  --action deny \
+  --protocol tcp \
+  --dst-address-set db-subnets \
+  --dst-port 3306
+```
+
+CLI 将 `--dst-port 3306` 展开成：
+
+```text
+dst_port_min = 3306
+dst_port_max = 3306
+```
+
+address set 命令：
+
+```bash
+neutron aria-acl-address-set-list
+neutron aria-acl-address-set-show <address-set-id-or-name>
+neutron aria-acl-address-set-create \
+  --name db-subnets \
+  --description "database subnets" \
+  --member 10.10.20.0/24 \
+  --member 10.10.21.15/32
+neutron aria-acl-address-set-member-add <address-set-id> 10.10.22.0/24
+neutron aria-acl-address-set-member-remove <address-set-id> 10.10.21.15/32
+neutron aria-acl-address-set-delete <address-set-id>
+```
+
+binding 命令：
+
+```bash
+neutron aria-acl-binding-list
+neutron aria-acl-binding-list --policy <policy-id-or-name>
+neutron aria-acl-binding-list --port <port-id>
+neutron aria-acl-binding-list --network <network-id>
+neutron aria-acl-binding-show <binding-id>
+neutron aria-acl-binding-create --policy <policy-id-or-name> --port <port-id>
+neutron aria-acl-binding-create --policy <policy-id-or-name> --network <network-id>
+neutron aria-acl-binding-update <binding-id> --disable
+neutron aria-acl-binding-update <binding-id> --enable
+neutron aria-acl-binding-delete <binding-id>
+```
+
+运行态查询命令：
+
+```bash
+neutron aria-acl-port-status-show <port-id>
+neutron aria-acl-effective-show --port <port-id>
+```
+
+`aria-acl-port-status-show` 面向运维排障，展示 agent 是否已经在本机 tap 上应用成功。`aria-acl-effective-show` 面向策略确认，展示某个 port 最终命中的 policy、rule、address set 展开结果和来源。
+
+完整业务示例：
+
+```bash
+neutron aria-acl-policy-create --name web-db-acl --default-action allow --stateful true
+neutron aria-acl-address-set-create --name db-subnets --member 10.10.20.0/24
+neutron aria-acl-rule-create \
+  --policy web-db-acl \
+  --direction egress \
+  --priority 100 \
+  --action deny \
+  --protocol tcp \
+  --dst-address-set db-subnets \
+  --dst-port 3306
+neutron aria-acl-binding-create --policy web-db-acl --port <port-id>
+neutron aria-acl-binding-list --port <port-id>
+neutron aria-acl-port-status-show <port-id>
+neutron port-show <port-id>
+```
+
+### 5.7 `neutron port-show` 只读摘要字段
+
+Aria ACL 不应把策略字段塞进 Neutron 原生 `ports` 表，但可以把摘要字段扩展到 port API response，让旧版运维命令 `neutron port-show` 能看到 ACL 状态。
+
+推荐在 `aria_acl` extension 中扩展 `ports` 资源的只读字段：
+
+```text
+aria_acl_enabled
+aria_acl_effective_policy_id
+aria_acl_effective_policy_name
+aria_acl_effective_source
+aria_acl_binding_id
+aria_acl_effective_revision
+aria_acl_runtime_status
+aria_acl_runtime_host
+aria_acl_runtime_reason
+```
+
+字段语义：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `aria_acl_enabled` | bool | 是否存在 enabled 的 effective ACL policy |
+| `aria_acl_effective_policy_id` | uuid/string | 当前 port 最终命中的 ACL policy |
+| `aria_acl_effective_policy_name` | string | 当前 port 最终命中的 ACL policy 名称 |
+| `aria_acl_effective_source` | enum | `port`、`network` 或 `none` |
+| `aria_acl_binding_id` | uuid/string | 产生 effective policy 的 binding |
+| `aria_acl_effective_revision` | int | policy、rule、address-set、binding 合成后的版本号 |
+| `aria_acl_runtime_status` | enum | `not_requested`、`pending`、`applied`、`degraded`、`unsupported`、`unknown` |
+| `aria_acl_runtime_host` | string | 最近上报该 port Aria 状态的 compute host |
+| `aria_acl_runtime_reason` | string | 未生效、降级或跳过的原因 |
+
+示例：
+
+```bash
+neutron port-show 2b7550c2-5378-41e9-a066-68008a35f532
+```
+
+预期输出增加：
+
+```text
++------------------------------+--------------------------------------+
+| Field                        | Value                                |
++------------------------------+--------------------------------------+
+| id                           | 2b7550c2-5378-41e9-a066-68008a35f532 |
+| binding:vif_type             | ovs                                  |
+| binding:vnic_type            | normal                               |
+| binding:host_id              | ostack3.bj159.net                    |
+| aria_acl_enabled             | True                                 |
+| aria_acl_effective_policy_id | 5a3f3b72-1f8e-43f9-87bb-711a99c5f2f1 |
+| aria_acl_effective_source    | port                                 |
+| aria_acl_binding_id          | 37bd7c9e-0a4f-48c3-b862-4f1c60b7a270 |
+| aria_acl_effective_revision  | 18                                   |
+| aria_acl_runtime_status      | applied                              |
+| aria_acl_runtime_host        | ostack3.bj159.net                    |
+| aria_acl_runtime_reason      |                                      |
++------------------------------+--------------------------------------+
+```
+
+实现要求：
+
+- `aria_acl.py` extension 定义独立 ACL 资源，同时定义 `ports` 的 read-only extended attributes。
+- `allow_post=False`、`allow_put=False`、`is_visible=True`，禁止用户通过 `port-create` 或 `port-update` 写入这些字段。
+- `Ml2Plugin.get_port()` / `get_ports()` 或产品 Neutron 当前可用的 resource extend hook 负责填充这些字段。
+- `get_ports()` 必须批量查询 binding/status，避免 port list 出现 N+1 DB 查询。
+- 如果当前 Legacy `neutron` CLI 能原样打印服务端返回字段，则 `port-show` 无需单独改命令；如果客户端会过滤未知字段，则需要同步扩展 `python-neutronclient` 的 port resource field map。
+- `port-show` 中的 Aria 字段只是摘要。权威 ACL 对象仍以 `aria-acl-policy-show`、`aria-acl-rule-list`、`aria-acl-binding-show`、`aria-acl-effective-show` 为准。
+
+字段来源：
+
+```text
+aria_acl_enabled / effective_policy / binding:
+  neutron-server 查询 aria_acl_bindings、aria_acl_policies 和 port/network 关系后动态计算。
+
+aria_acl_runtime_status / host / reason:
+  neutron-aria-agent 上报到 neutron-server 的 runtime status。
+
+binding:vif_type / binding:vnic_type / binding:host_id:
+  仍然由 ML2/Open vSwitch mechanism driver 和 Nova binding 流程维护，Aria 不更新这些字段。
+```
+
 ## 6. DB 模型
 
 ### 6.1 表结构
@@ -551,6 +763,7 @@ aria_acl_address_sets
 aria_acl_address_set_members
 aria_acl_bindings
 aria_acl_rbac
+aria_acl_port_statuses
 ```
 
 ### 6.2 `aria_acl_policies`
@@ -687,6 +900,54 @@ updated_at         DateTime
 ```text
 access_as_shared
 ```
+
+### 6.8 `aria_acl_port_statuses`
+
+`aria_acl_port_statuses` 用于保存 `neutron-aria-agent` 最近一次上报的 per-port 运行态，支撑 `neutron port-show` 的只读摘要和 `neutron aria-acl-port-status-show` 排障命令。
+
+这张表不表达用户期望策略，只表达执行态。用户期望策略仍来自 `aria_acl_policies`、`aria_acl_rules`、`aria_acl_address_sets` 和 `aria_acl_bindings`。
+
+```text
+port_id                    UUID primary key
+host                       String indexed not null
+project_id                 String indexed nullable
+network_id                 UUID indexed nullable
+binding_id                 UUID nullable
+effective_policy_id         UUID nullable
+effective_source            Enum port/network/none not null
+effective_revision          Integer nullable
+runtime_status              Enum not_requested/pending/applied/degraded/unsupported/unknown not null
+support_disposition         Enum supported/unsupported/not_applicable/unknown nullable
+effective_action            Enum enforce/bypass/cleanup nullable
+tap_name                   String nullable
+ifindex                    Integer nullable
+reason                     String nullable
+last_applied_at             DateTime nullable
+updated_at                 DateTime not null
+```
+
+索引：
+
+```text
+(host)
+(network_id)
+(effective_policy_id)
+(runtime_status)
+(updated_at)
+```
+
+更新方：
+
+- `neutron-aria-agent` 在 full resync、port update、ACL binding update、apply success/failure 后上报。
+- `aria_acl` service plugin 接收状态上报并写入该表。
+- neutron-server 读取该表填充 `port-show` 的 `aria_acl_runtime_*` 字段。
+
+清理规则：
+
+- Neutron port 删除时删除对应 `aria_acl_port_statuses`。
+- port 迁移到其它 host 后，新 host 上报会覆盖 `host`、`tap_name`、`ifindex` 和 runtime 状态。
+- agent 长时间未上报时，`runtime_status` 不应继续显示为可靠 `applied`；查询层应结合 agent heartbeat 或 `updated_at` 标记为 `unknown` 或 `stale`。
+- 该表不参与策略决策，不能用它反向推导是否应该启用 ACL。
 
 ## 7. ACL 生效语义
 
@@ -1359,6 +1620,79 @@ bpf on /sys/fs/bpf type bpf
 - `tc` 或等价 QoS shaping 依赖。
 - `bpftool` 是否作为排障工具进入镜像或宿主机。
 
+### 12.4 Legacy `neutron` CLI 交付
+
+旧版 OpenStack 环境下，服务端 extension 可用不代表 `neutron` 命令自动可用。产品化交付必须同时包含 Legacy CLI 扩展。
+
+交付位置：
+
+```text
+neutron-server 镜像:
+  提供 aria_acl REST API、DB、RPC、policy。
+
+运维节点 / toolbox / controller CLI 环境:
+  提供 neutron aria-acl-* 命令。
+
+Horizon 或平台后端:
+  如需页面集成，调用同一组 Neutron REST API。
+```
+
+客户端包建议：
+
+```text
+python-neutronclient-aria
+```
+
+或合并进产品当前的 `python-neutronclient` 派生包。
+
+需要新增的客户端能力：
+
+```text
+neutron aria-acl-policy-*
+neutron aria-acl-rule-*
+neutron aria-acl-address-set-*
+neutron aria-acl-binding-*
+neutron aria-acl-port-status-show
+neutron aria-acl-effective-show
+```
+
+如果 `neutron port-show` 无法自动显示服务端返回的 `aria_acl_*` 字段，还必须扩展客户端 port resource 的显示字段，确保旧版运维习惯可用：
+
+```bash
+neutron port-show <port-id>
+```
+
+能看到：
+
+```text
+aria_acl_enabled
+aria_acl_effective_policy_id
+aria_acl_effective_source
+aria_acl_runtime_status
+aria_acl_runtime_reason
+```
+
+CLI 验收条件：
+
+```text
+neutron ext-show aria-acl 成功
+neutron aria-acl-policy-create/list/show/delete 成功
+neutron aria-acl-rule-create/list/show/delete 成功
+neutron aria-acl-address-set-create/member-add/member-remove/show 成功
+neutron aria-acl-binding-create/list --port/delete 成功
+neutron aria-acl-effective-show --port <port-id> 能展示 effective policy
+neutron aria-acl-port-status-show <port-id> 能展示 runtime status
+neutron port-show <port-id> 能展示 aria_acl_* 只读摘要字段
+```
+
+兼容性要求：
+
+- CLI 必须兼容 Python 2 运行环境。
+- 命令参数必须支持 UUID；名称解析可以作为便利能力，但不能代替 UUID。
+- `--tenant-id` 和 `--project-id` 至少支持一种；推荐两者都支持，内部统一为 `project_id`。
+- CLI 不保存本地状态，不缓存 policy，不直接调用 `aria-agent`。
+- CLI 错误信息必须保留 Neutron request id，便于和 neutron-server 日志关联。
+
 ## 13. Security Group 与 Aria ACL 流程对比
 
 ### 13.1 OpenStack 默认 Security Group 开发流程
@@ -1887,6 +2221,9 @@ QoS 进入生产 smoke 前必须完成：
 - address CIDR validator。
 - revision_number 更新。
 - delete policy 时引用检查。
+- port response 只读扩展字段填充。
+- port response 只读字段禁止 create/update 写入。
+- `aria_acl_port_statuses` 写入、覆盖和 stale 判断。
 
 ### 17.2 Neutron DB migration 测试
 
@@ -1897,19 +2234,37 @@ QoS 进入生产 smoke 前必须完成：
 - 索引存在。
 - foreign key 存在。
 - unique 约束有效。
+- `aria_acl_port_statuses` 随 port 删除清理。
+- migration 后 `neutron-db-manage current` 正常。
 
-### 17.3 RPC 测试
+### 17.3 Legacy `neutron` CLI 测试
+
+覆盖：
+
+- `neutron ext-show aria-acl`。
+- `neutron aria-acl-policy-create/list/show/update/delete`。
+- `neutron aria-acl-rule-create/list/show/update/delete`。
+- `neutron aria-acl-address-set-create/member-add/member-remove/show/delete`。
+- `neutron aria-acl-binding-create/list --port/list --network/show/update/delete`。
+- `neutron aria-acl-effective-show --port <port-id>`。
+- `neutron aria-acl-port-status-show <port-id>`。
+- `neutron port-show <port-id>` 显示 `aria_acl_*` 只读摘要字段。
+- CLI 在 Python 2 环境可运行。
+- CLI 错误输出保留 Neutron request id。
+
+### 17.4 RPC 测试
 
 覆盖：
 
 - policy update notification。
 - rule update notification。
 - binding update notification。
+- port runtime status 上报。
 - event merge。
 - stale revision 丢弃。
 - RPC 断开后 full resync。
 
-### 17.4 neutron-aria-agent 单元测试
+### 17.5 neutron-aria-agent 单元测试
 
 覆盖：
 
@@ -1923,8 +2278,10 @@ QoS 进入生产 smoke 前必须完成：
 - stateful conntrack required。
 - snapshot generation 单调递增。
 - UDS contract drift。
+- runtime status 上报。
+- port 迁移后旧 host cleanup、新 host apply。
 
-### 17.5 aria-agent Rust 测试
+### 17.6 aria-agent Rust 测试
 
 覆盖：
 
@@ -1937,7 +2294,7 @@ QoS 进入生产 smoke 前必须完成：
 - delete port cleanup。
 - capability mismatch。
 
-### 17.6 目标环境 smoke
+### 17.7 目标环境 smoke
 
 必须覆盖：
 
@@ -1946,6 +2303,15 @@ QoS 进入生产 smoke 前必须完成：
   neutron-server:2.0.6sp2 派生镜像可启动
   python2 import neutron_aria 成功
   aria-acl extension 可见
+
+Legacy neutron CLI:
+  neutron ext-show aria-acl 成功
+  neutron aria-acl-policy-create/list/show 成功
+  neutron aria-acl-rule-create/list/show 成功
+  neutron aria-acl-binding-create/list --port 成功
+  neutron aria-acl-effective-show --port 成功
+  neutron aria-acl-port-status-show 成功
+  neutron port-show 显示 aria_acl_* 只读摘要字段
 
 无 ACL binding:
   VM 连通性不变
@@ -1988,7 +2354,7 @@ QoS enforcement:
   tc 缺失时 shaping 返回 degraded/unsupported，不宣称 ready
 ```
 
-### 17.7 三节点一致性检查
+### 17.8 三节点一致性检查
 
 当前 `ostack3`、`ostack4` SSH 受限，不能用交互式 root 命令完整验证。正式部署 smoke 必须通过容器和自动化脚本完成三节点一致性检查：
 
@@ -2092,13 +2458,17 @@ ACL 失败不得影响：
 
 - `aria_acl` service plugin 可加载。
 - API extension 可被 `openstack extension list` 看到。
+- API extension 可被 `neutron ext-show aria-acl` 看到。
 - DB migration 可执行。
 - policy/rule/address-set/binding CRUD 可用。
+- Legacy `neutron aria-acl-*` CLI 可用。
+- `neutron port-show` 可显示 `aria_acl_*` 只读摘要字段。
 
 验收：
 
 - Neutron server 启动成功。
 - API CRUD 测试通过。
+- Legacy neutron CLI CRUD 测试通过。
 - DB 表创建成功。
 - 不影响现有 network/port/router API。
 - 不要求同时启用 QoS。
@@ -2155,6 +2525,7 @@ ACL 失败不得影响：
 目标：
 
 - neutron-server 镜像包含 plugin。
+- 运维/控制节点 CLI 环境包含 Legacy `neutron aria-acl-*` 命令。
 - neutron-aria-agent 镜像可部署。
 - aria-agent 容器权限和挂载完成。
 - 配置、日志、metrics、runbook 完成。
@@ -2162,6 +2533,7 @@ ACL 失败不得影响：
 验收：
 
 - 三节点部署 smoke。
+- `neutron port-show`、`neutron aria-acl-effective-show`、`neutron aria-acl-port-status-show` 可用于现场排障。
 - agent restart 恢复。
 - tap recreate 恢复。
 - 回滚流程通过。
@@ -2188,7 +2560,10 @@ enforcement_enabled = false
 
 - neutron-server 能启动。
 - `aria-acl` extension 可见。
+- `neutron ext-show aria-acl` 成功。
 - ACL API/DB CRUD 可用。
+- `neutron aria-acl-policy-*`、`neutron aria-acl-rule-*`、`neutron aria-acl-binding-*` 命令可用。
+- `neutron port-show <port-id>` 能看到 `aria_acl_*` 只读摘要字段。
 - `neutron-aria-agent` 能 full resync。
 - 未开启 enforcement 时业务流量不受影响。
 
