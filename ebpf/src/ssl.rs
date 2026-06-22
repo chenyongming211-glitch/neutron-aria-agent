@@ -6,8 +6,8 @@ use aya_ebpf::programs::{ProbeContext, RetProbeContext};
 use aya_ebpf::{check_bounds_signed, cty::c_void};
 
 use crate::maps::{
-    SslConnValue, SslErrorEvent, SslHttpScratch, SslHttpValue, SslParseBuf, SslReadScratch,
-    SslScratch, SslWriteScratch, SSL_CONN_TABLE, SSL_ERROR_SEQ, SSL_ERROR_TABLE, SSL_GLOBAL_CONFIG,
+    SslConnValue, SslErrorEvent, SslHttpScratch, SslParseBuf, SslReadScratch, SslScratch,
+    SslWriteScratch, SSL_CONN_TABLE, SSL_ERROR_SEQ, SSL_ERROR_TABLE, SSL_GLOBAL_CONFIG,
     SSL_HANDSHAKE_SCRATCH, SSL_HTTP_PARSE_BUF, SSL_HTTP_SCRATCH, SSL_HTTP_SCRATCH_BUF,
     SSL_HTTP_SEQ, SSL_HTTP_TABLE, SSL_HTTP_VALUE_BUF, SSL_READ_SCRATCH, SSL_SEQ, SSL_SNI_TABLE,
     SSL_WRITE_SCRATCH,

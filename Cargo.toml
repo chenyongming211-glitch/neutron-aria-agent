@@ -43,6 +43,9 @@ utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"] }
 [profile.dev]
 panic = "abort"
 
+[profile.dev.package.ebpf-firewall]
+opt-level = 3
+
 [profile.release]
 lto = true
 codegen-units = 1
