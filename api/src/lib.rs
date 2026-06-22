@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
+#[allow(unused_imports)]
+use serde_json::json;
 use std::fmt;
 use utoipa::ToSchema;
 
 // ── Error ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "code": 400,
     "error": "Validation error: Invalid protocol 'gre'"
 }))]
@@ -27,7 +29,7 @@ impl fmt::Display for ApiError {
 // ── Health ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "status": "ok",
     "version": "0.9.0",
     "instances": 2,
@@ -72,7 +74,7 @@ pub struct HealthResponse {
 // ── Instances ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "name": "eth0",
     "active": true
 }))]
@@ -86,7 +88,7 @@ pub struct InstanceInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "instances": [
         {"name": "eth0", "active": true},
         {"name": "tapkd01", "active": false}
@@ -100,7 +102,7 @@ pub struct InstancesResponse {
 // ── System ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "iface": "eth0",
     "max_port_policies": 16384
 }))]
@@ -119,7 +121,7 @@ fn default_max_port_policies() -> u32 {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "message": "Added policy: web -> db (ingress)"
 }))]
 pub struct MessageResponse {
@@ -131,7 +133,7 @@ pub struct MessageResponse {
 // ── Groups ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "id": 1,
     "name": "web",
     "cidrs": ["10.0.1.0/24", "10.0.2.0/24"]
@@ -148,7 +150,7 @@ pub struct GroupEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "groups": [
         {"id": 1, "name": "web", "cidrs": ["10.0.1.0/24"]},
         {"id": 2, "name": "db", "cidrs": ["10.0.10.0/24"]}
@@ -160,7 +162,7 @@ pub struct GroupsResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "name": "web",
     "cidr": "10.0.1.0/24"
 }))]
@@ -174,7 +176,7 @@ pub struct AddGroupRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "id": 1,
     "name": "web"
 }))]
@@ -190,7 +192,7 @@ pub struct AddGroupResponse {
 // ── Groups with Stats (Aggregation) ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "id": 1,
     "name": "web",
     "cidrs": ["10.0.1.0/24"],
@@ -227,7 +229,7 @@ pub struct GroupWithStatsEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "groups": [
         {
             "id": 1,
@@ -248,7 +250,7 @@ pub struct GroupsWithStatsResponse {
 // ── Policies ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "src_group": "web",
     "src_group_id": 1,
     "dst_group": "db",
@@ -290,7 +292,7 @@ pub struct PolicyEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "policies": [
         {
             "src_group": "web",
@@ -311,7 +313,7 @@ pub struct PoliciesResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "src_group": "web",
     "dst_group": "db",
     "proto": "tcp",
@@ -350,7 +352,7 @@ fn default_mode_string() -> String {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "src_group": "web",
     "dst_group": "db",
     "proto": "tcp",
@@ -373,7 +375,7 @@ pub struct DeletePolicyRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "policies": [
         {
             "src_group": "web",
@@ -399,7 +401,7 @@ pub struct BatchAddPoliciesRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "added": 2,
     "errors": []
 }))]
@@ -414,7 +416,7 @@ pub struct BatchPoliciesResponse {
 // ── Policies with Stats (Aggregation) ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "src_group": "web",
     "src_group_id": 1,
     "dst_group": "db",
@@ -476,7 +478,7 @@ pub struct PolicyWithStatsEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "policies": [
         {
             "src_group": "web",
@@ -503,7 +505,7 @@ pub struct PoliciesWithStatsResponse {
 // ── QoS ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "group": "web",
     "group_id": 1,
     "direction": "egress",
@@ -538,7 +540,7 @@ pub struct QosEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "rules": [
         {
             "group": "web",
@@ -557,7 +559,7 @@ pub struct QosListResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "group": "web",
     "direction": "egress",
     "rate": "100mbit",
@@ -590,7 +592,7 @@ pub struct AddQosRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "group": "web",
     "direction": "egress"
 }))]
@@ -631,7 +633,7 @@ pub struct ConntrackFlushResponse {
 // ── Config ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "conntrack": true,
     "monitoring": true,
     "acl": true,
@@ -669,7 +671,7 @@ pub struct ConfigResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "qos": true,
     "mirror": true,
     "ssl": false
@@ -694,7 +696,7 @@ pub struct UpdateConfigRequest {
 // ── Stats ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "groups": 4,
     "policies": 12,
     "qos_rules": 2,
@@ -831,7 +833,7 @@ pub struct GroupStatsResponse {
 // ── Mirror ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "src_group": "any",
     "src_group_id": 0,
     "dst_group": "db",
@@ -873,7 +875,7 @@ pub struct MirrorEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "rules": [
         {
             "src_group": "any",
@@ -894,7 +896,7 @@ pub struct MirrorListResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "src_group": "any",
     "dst_group": "db",
     "proto": "tcp",
@@ -931,7 +933,7 @@ fn default_any_proto() -> String {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "src_group": "any",
     "dst_group": "db",
     "proto": "tcp",
@@ -1045,7 +1047,7 @@ pub struct TcpRtFlushResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "src_ip": "10.0.1.10",
     "dst_ip": "10.0.10.20",
     "src_port": 52344,
@@ -1067,7 +1069,7 @@ pub struct TcpRtQueryTuple {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "tuples": [
         {
             "src_ip": "10.0.1.10",
@@ -1102,7 +1104,7 @@ pub struct TcpRtBatchQueryResponse {
 // ── TCP-RT Filter (by service address) ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "dst_ip": "10.0.10.20",
     "dst_port": 443
 }))]
@@ -1178,7 +1180,7 @@ pub struct TcpRtStatesResponse {
 // ── Service Chain ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "tap": "tapfw0",
     "role": "in"
 }))]
@@ -1204,7 +1206,7 @@ pub struct ServiceHopEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "name": "frontend-to-db",
     "description": "Traffic chain from frontend to database",
     "hops": [
@@ -1233,7 +1235,7 @@ pub struct ServiceChainListResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "name": "frontend-to-db",
     "description": "Traffic chain from frontend to database",
     "hops": [
@@ -1289,7 +1291,7 @@ pub struct DropFlushResponse {
 // ── Kernel Drop Observability ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "instance": "eth0",
     "iface": "eth0",
     "ifindex": 2,
@@ -1349,7 +1351,7 @@ pub struct KernelDropFlushResponse {
 // ── Packet Trace ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "src_ip": "10.0.1.10",
     "dst_ip": "10.0.10.20",
     "src_port": 52344,
@@ -1464,7 +1466,7 @@ pub struct SslHttpFlushResponse {
 // SSL uprobe is process-level, not tied to any network interface
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "enabled": true
 }))]
 pub struct SslGlobalConfigResponse {
@@ -1474,7 +1476,7 @@ pub struct SslGlobalConfigResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = serde_json::json!({
+#[schema(example = json!({
     "enabled": true
 }))]
 pub struct UpdateSslGlobalConfigRequest {
