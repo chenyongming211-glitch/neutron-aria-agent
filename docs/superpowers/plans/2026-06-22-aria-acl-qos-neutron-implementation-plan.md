@@ -504,6 +504,43 @@ neutron port-show $PORT_ID | grep aria_acl_runtime_status
 
 ## 5. Chapter Four: `aria-agent` UDS Snapshot Runtime
 
+### 5.0 Startup Modes And Auto-Attach Boundary
+
+**Files:**
+- Modify: `agent/src/main.rs`
+- Modify: `agent/src/netlink.rs`
+- Modify: `agent/src/tap_registry.rs`
+- Modify: `deploy/kolla/config/aria-agent.toml`
+- Test: `agent` startup/config unit tests
+
+- [ ] Add explicit startup mode:
+  - `standalone`
+  - `neutron_managed`
+- [ ] Keep existing `iface_pattern` auto-discovery behavior only for `standalone` mode.
+- [ ] In `neutron_managed` mode, default `auto_attach=false`.
+- [ ] In product Kolla config, run aria-agent in `neutron_managed` mode.
+- [ ] In `neutron_managed` mode, do not scan and attach existing interfaces from `iface_pattern`.
+- [ ] In `neutron_managed` mode, do not attach new netlink-discovered interfaces from `iface_pattern`.
+- [ ] In `neutron_managed` mode, attach only ports present in the latest accepted Neutron snapshot.
+- [ ] In `neutron_managed` mode, validate snapshot tap identity before attach:
+  - Neutron `port_id`.
+  - local ifname.
+  - current ifindex.
+  - OVS `external_ids:iface-id`.
+  - supported port disposition.
+- [ ] In `neutron_managed` mode, snapshot deletion or empty snapshot must detach runtime for removed ports.
+- [ ] Allow an explicit lab-only override such as `auto_attach=true` only outside the product default; it must be visible in logs and status.
+
+**Verification command:**
+
+```bash
+cargo test -p aria-agent startup_mode
+```
+
+**Expected visible result:**
+
+Starting product-mode `aria-agent` on a host with existing `tap*` interfaces but no Neutron snapshot leaves all tap interfaces unattached. After `neutron-aria-agent` submits a snapshot for one eligible OVS VM tap, only that tap gets Aria runtime; DHCP/service/SR-IOV/LinuxBridge/unknown ports remain untouched and are reported through status instead of auto-attached.
+
 ### 5.1 Snapshot DTO
 
 **Files:**
@@ -622,9 +659,11 @@ Local `ariactl` write against Neutron-managed port returns a clear error instead
 - Modify: `agent/src/tap_registry.rs`
 
 - [ ] Attach only when tap name and ifindex match the latest snapshot.
+- [ ] Never attach from `iface_pattern` alone while in `neutron_managed` mode.
 - [ ] Detect ifindex changes and require reattach.
 - [ ] On VM reboot/tap recreate, keep desired state but rebuild runtime.
 - [ ] On port migration away, detach and delete local port runtime.
+- [ ] On agent restart, recover only snapshot-owned Neutron-managed ports, not arbitrary existing `tap*` interfaces.
 
 **Expected visible result:**
 
@@ -641,6 +680,8 @@ VM hard reboot causes temporary `pending`/`unknown`, then returns to `applied` w
 - [ ] Delete binding and prove traffic returns to baseline.
 - [ ] Restart `neutron-aria-agent` and prove full resync restores status.
 - [ ] Restart `aria-agent` and prove WAL/status recovery.
+- [ ] Start product-mode `aria-agent` with existing non-snapshot `tap*` interfaces and prove it does not attach them.
+- [ ] Submit a snapshot for exactly one eligible VM OVS tap and prove only that tap is attached.
 - [ ] Reboot VM and prove tap recreate recovery.
 - [ ] Verify DHCP/metadata path is not affected when no explicit VM ACL blocks it.
 
@@ -813,6 +854,38 @@ Aria Mirror is a second-phase feature. Phase one delivers independent `aria_acl`
 
 The reason is semantic: the current `networking_mirror` code treats `port_id` as the destination analyzer VM port and receives source traffic from `[mirror] interface` through `br-mirror`; Aria-agent mirror treats the managed source interface/tap as the clone point and sends a copy to a target ifindex. Reusing the same API would make `port_id` ambiguous.
 
+### 9.0 2026-06-23 Ostack2 Mirror Validation Baseline
+
+This baseline was captured on the deployed product environment `ostack2.bj159.net` before productizing the Neutron API layer. It validates that the current Aria-agent/eBPF mirror datapath can support the second-phase `aria_mirror` semantics.
+
+Environment facts:
+
+- Compute host: `ostack2.bj159.net`, kernel `4.18.0-553.5.1.el8_10.x86_64`.
+- ML2 agents include Open vSwitch, LinuxBridge, SR-IOV NIC, DHCP, and metadata agents.
+- The VM ports used for live validation were normal OVS ports:
+  - `wp-test`: Neutron port `86b83885-671f-474c-9556-8af98cf1cdc8`, tap `tap86b83885-67`, fixed IP `10.58.159.26`.
+  - `test1111`: Neutron port `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f`, tap `tape607e86b-9e`, fixed IP `10.58.159.27`.
+- Both VM ports reported `binding:vif_type=ovs`, `binding:vnic_type=normal`, `binding:vif_details.port_filter=false`, and `binding:vif_details.ovs_hybrid_plug=false`.
+- The live VM tap validation used `test1111` / `tape607e86b-9e` and a temporary local veth target. The temporary agent process, veth pair, BPF pins, and `/tmp/aria-verify` payload were removed after validation.
+
+Validated datapath behavior:
+
+- Isolated veth validation proved that `aria-mirror global` clones IPv4 ICMP/TCP/UDP, ARP, DHCP-like broadcast, IPv6 ND/ICMPv6, LLDP, unknown EtherType, and VLAN `0x8100` frames.
+- Isolated `global + policy` validation proved the intended coexistence semantics:
+  - global-only: all source traffic is cloned to the global target.
+  - global plus policy, different targets: IP traffic matching the policy is cloned to both the global target and the policy target.
+  - global plus policy, same target: the packet is cloned once, while both global and policy counters are updated.
+  - non-IP frames such as ARP, LLDP, unknown EtherType, and VLAN frames are covered by global mirror and do not match policy mirror rules.
+- Live OVS tap validation on `tape607e86b-9e` proved that Aria-agent can attach to a real VM OVS tap, create a global mirror to a local target interface, clone ICMP/ARP packets, keep original VM traffic passing, and remove the XDP attachment after shutdown.
+- Live validation counters showed non-zero ingress/egress mirrored packets and bytes with `errors=0`.
+
+Product implications:
+
+- `aria-mirror global` must be documented and implemented as `global_l2` / SPAN-like mirror: clone all L2 frames seen on the source tap/source interface for the selected direction.
+- `aria-mirror policy` should be named as a selective mirror rule in user-facing documents where possible. It is IP-selective mirror based on source/destination address group or prefix, protocol, direction, priority, and target.
+- The second-phase implementation can commit to `global + selective rule` coexistence. It must not use the older "policy hit first, global fallback only" semantics.
+- QoS was not part of this mirror validation. `edt_available=false` on the live tap is still consistent with treating QoS execution as a separate second-stage readiness item.
+
 ### 9.1 Existing `networking_mirror` Compatibility Freeze
 
 **Files:**
@@ -858,6 +931,16 @@ Existing `mirror` behavior remains unchanged, and operators can distinguish `net
 - [ ] Add `aria_mirror_rules`.
 - [ ] Add `aria_mirror_bindings` if product UX requires ACL-like bind/unbind operations.
 - [ ] Add `aria_mirror_port_statuses`.
+- [ ] Add runtime status fields for cumulative mirror counters:
+  - `mirrored_packets`
+  - `mirrored_bytes`
+  - `errors`
+- [ ] Add runtime status fields for sampled mirror rates:
+  - `mirrored_pps`
+  - `mirrored_bps`
+  - `stats_window_seconds`
+  - `last_sampled_at`
+- [ ] Treat counters and rates as agent-reported runtime fields, not user-editable configuration.
 - [ ] Implement session CRUD.
 - [ ] Implement rule CRUD.
 - [ ] Add session-level `mirror_mode`:
@@ -995,13 +1078,29 @@ Operators can create a mirror session without touching OVS commands or Aria loca
 - [ ] Translate `mirror_mode=global` to Aria-agent `MIRROR_GLOBAL`.
 - [ ] Translate `mirror_mode=policy` rules to Aria-agent `MIRROR_POLICY`.
 - [ ] Compile `src_ip_prefix` / `dst_ip_prefix` into Aria address groups when needed.
-- [ ] Define precedence: policy rule hit first, global fallback for unmatched traffic.
-- [ ] Do not promise one packet cloned to both global and policy targets until multi-target mirror maps are implemented.
+- [ ] Define global mirror as `global_l2` / SPAN-like mirror:
+  - clone all L2 frames on the source tap/source interface for the selected direction.
+  - include IPv4, IPv6, ARP, broadcast, multicast, LLDP, unknown EtherType, and VLAN frames.
+- [ ] Define policy mirror as IP-selective mirror:
+  - match parsed IP packets by source group/prefix, destination group/prefix, protocol, direction, and priority.
+  - do not match ARP, LLDP, unknown EtherType, or other non-IP frames.
+- [ ] Define `global + policy` coexistence:
+  - global mirror is applied first and remains active for all traffic.
+  - policy mirror can clone matching IP packets to an additional target.
+  - if global and policy targets are different, one matched packet is cloned to both targets.
+  - if global and policy targets are the same, clone once and update both global and policy stats.
+  - non-IP frames are cloned only by global mirror.
+- [ ] Translate `global + policy` snapshots without collapsing policy rules into global fallback.
 - [ ] Report status and counters back to `aria_mirror_port_statuses`.
+- [ ] Report sampled rates back to `aria_mirror_port_statuses`:
+  - `mirrored_pps`
+  - `mirrored_bps`
+  - `stats_window_seconds`
+  - `last_sampled_at`
 
 **Expected visible result:**
 
-`neutron aria-mirror-status-show --port $SRC_PORT_ID` displays local host, source ifname/ifindex, target ifname/ifindex, revision, status, mirrored packets, mirrored bytes, and errors.
+`neutron aria-mirror-status-show --port $SRC_PORT_ID` displays local host, source ifname/ifindex, target ifname/ifindex, revision, status, mirrored packets, mirrored bytes, mirrored pps, mirrored bps, stats window, last sampled time, and errors.
 
 ### 9.5 `aria-agent` Mirror UDS Contract
 
@@ -1024,11 +1123,32 @@ Operators can create a mirror session without touching OVS commands or Aria loca
 - [ ] Apply mirror entries without changing ACL/QoS domains.
 - [ ] Delete stale mirror entries by session/revision.
 - [ ] Expose mirror stats to `neutron-aria-agent`.
+- [ ] Expose cumulative mirror counters per global session and selective rule:
+  - `mirrored_packets`
+  - `mirrored_bytes`
+  - `errors`
+- [ ] Add an aria-agent mirror stats sampler in the local control plane:
+  - keep eBPF datapath limited to fast cumulative counters only.
+  - periodically read `MIRROR_GLOBAL_STATS` and `MIRROR_STATS`.
+  - aggregate per-CPU values before calculating rates.
+  - keep the previous sample in memory keyed by tap/session/rule/direction.
+  - compute `mirrored_pps = delta_packets / interval_seconds`.
+  - compute `mirrored_bps = delta_bytes * 8 / interval_seconds`.
+  - return `0` or `null` rates for the first sample before a delta exists.
+  - detect counter reset or map reattach when the current counter is lower than the previous counter and restart the rate window.
+  - expose `stats_window_seconds` and `last_sampled_at` with every rate snapshot.
+- [ ] Default sampler interval:
+  - prefer `1s` for local aria-agent CLI/API display.
+  - allow product config to raise it to `5s` in large deployments to reduce polling load.
+- [ ] Keep Neutron Server out of high-frequency rate calculation:
+  - Neutron DB stores the latest reported counters/rates/status.
+  - `neutron-aria-agent` polls or receives local aria-agent snapshots and reports bounded status updates.
+  - Neutron Server should not poll eBPF maps directly.
 - [ ] Preserve original traffic when mirror apply fails.
 
 **Expected visible result:**
 
-Aria-agent applies mirror entries using existing TC/eBPF clone behavior and reports packet/byte/error counters.
+Aria-agent applies mirror entries using existing TC/eBPF clone behavior and reports packet/byte/error counters plus sampled pps/bps rates. eBPF remains responsible for counters only; rate math lives in the aria-agent control plane.
 
 ### 9.6 Mirror Datapath Smoke Tests
 
@@ -1040,18 +1160,45 @@ Aria-agent applies mirror entries using existing TC/eBPF clone behavior and repo
 - [ ] Verify ingress clone.
 - [ ] Verify egress clone.
 - [ ] Verify `both` creates both directions.
-- [ ] Create global mirror session and verify all source traffic is cloned to the target VM port.
+- [ ] Create global mirror session and verify all source traffic is cloned to the target VM port or local analyzer interface.
+- [ ] Verify global L2 coverage:
+  - IPv4 ICMP/TCP/UDP.
+  - ARP.
+  - DHCP broadcast.
+  - IPv6 ND/ICMPv6.
+  - LLDP.
+  - unknown EtherType.
+  - VLAN `0x8100`.
 - [ ] Create protocol-specific mirror rule.
 - [ ] Create address-set or prefix-specific mirror rule.
 - [ ] Create two prefix rules under one source and verify different prefixes go to different analyzer VM ports.
+- [ ] Create `global + policy` with different targets and verify matching IP traffic reaches both targets.
+- [ ] Create `global + policy` with the same target and verify one packet copy is observed while both stats entries increase.
+- [ ] Verify non-IP traffic only matches global and does not increment policy stats.
 - [ ] Create overlapping prefixes with the same priority and verify server-side rejection.
 - [ ] Create overlapping prefixes with different priority and verify higher priority wins.
+- [ ] Verify cumulative stats:
+  - `mirrored_packets`.
+  - `mirrored_bytes`.
+  - `errors`.
+- [ ] Verify sampled rates:
+  - `mirrored_pps`.
+  - `mirrored_bps`.
+  - `stats_window_seconds`.
+  - reset behavior after session delete/recreate or agent restart.
 - [ ] Delete the session and verify clone stops.
 - [ ] Reboot analyzer VM and verify target ifindex recovery.
 - [ ] Migrate source VM and verify source host cleanup plus destination host reapply.
 - [ ] Create a cross-host target and verify `CROSS_HOST_UNSUPPORTED`.
 - [ ] Try SR-IOV/LinuxBridge ports and verify explicit unsupported status.
 - [ ] Configure a physical capture NIC source in a lab and verify SPAN traffic can be cloned to a local analyzer VM.
+- [ ] Repeat the 2026-06-23 ostack2 live OVS tap scenario in product smoke:
+  - source VM `test1111`-like normal OVS tap.
+  - temporary local analyzer interface or analyzer VM port.
+  - global mirror to target.
+  - ping source traffic remains `0% packet loss`.
+  - ICMP and ARP are visible on target.
+  - cleanup removes XDP/TC attachments, temporary interfaces, BPF pins, and temporary state.
 
 **Expected visible result:**
 
@@ -1230,9 +1377,11 @@ Existing networking_mirror behavior remains unchanged
 - Task F4: Legacy CLI commands.
 - Task F5: `neutron-aria-agent` mirror translator.
 - Task F6: Aria-agent OpenStack mirror DTO/status integration.
-- Task F7: VM tap mirror smoke.
-- Task F8: physical capture NIC mirror lab smoke.
-- Task F9: second-phase Kolla config and rollout/rollback.
+- Task F7: Aria-agent mirror stats sampler and pps/bps rate reporting.
+- Task F8: `global_l2 + selective rule` coexistence smoke.
+- Task F9: VM tap mirror smoke.
+- Task F10: physical capture NIC mirror lab smoke.
+- Task F11: second-phase Kolla config and rollout/rollback.
 
 ---
 
@@ -1249,6 +1398,8 @@ Existing networking_mirror behavior remains unchanged
 - Aria QoS product facade: covered in 7.1 and 7.2.
 - No OVS agent QoS execution: covered in 7.1 and 10.4.
 - Aria Mirror second-phase plan: covered in Chapter 9.
+- Aria Mirror `global_l2 + selective rule` verified semantics: covered in 9.0, 9.4, and 9.6.
+- Aria Mirror stats and pps/bps rate calculation: covered in 9.2, 9.4, 9.5, and 9.6.
 - Kolla productization: covered in section 8.
 - Smoke and rollback: covered in Chapters 8, 9, and 10.
 

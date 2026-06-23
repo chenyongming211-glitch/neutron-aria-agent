@@ -1318,6 +1318,44 @@ Neutron agent heartbeat 中至少包含：
 
 ## 10. aria-agent / datapath 接口
 
+### 10.0 启动模式与自动 attach 边界
+
+当前 Aria-agent 已有 standalone 能力，可以通过 `iface_pattern` 扫描并自动接管匹配的本机接口。这个能力适合单机测试、非 OpenStack 部署和实验室验证，但不能作为 OpenStack 产品模式的默认行为。
+
+产品化必须显式区分两种模式：
+
+```text
+standalone:
+  保留 iface_pattern 自动扫描。
+  保留 netlink 新接口自动 attach。
+  面向本地 ariactl / 单机部署 / 实验室验证。
+
+neutron_managed:
+  默认 auto_attach = false。
+  不根据 iface_pattern 扫描并接管所有 tap。
+  不根据 netlink 事件自动接管新 tap。
+  只接管 neutron-aria-agent 通过 Unix socket snapshot 明确声明的 port。
+```
+
+推荐产品配置：
+
+```toml
+mode = "neutron_managed"
+auto_attach = false
+iface_pattern = "^$"
+neutron_socket_path = "/run/aria/aria-agent.sock"
+```
+
+在 `neutron_managed` 模式下，aria-agent attach 前必须校验：
+
+- snapshot 中声明的 Neutron `port_id`。
+- snapshot 中声明的 ifname。
+- 当前 ifindex。
+- OVSDB `external_ids:iface-id == port_id`。
+- `neutron-aria-agent` 已判定该 port 是 supported VM OVS tap。
+
+因此，即使宿主机存在多个 `tap*`，aria-agent 也不能自行 attach。没有进入 snapshot 的 DHCP、router、metadata、LinuxBridge、SR-IOV、临时测试 tap 或未知 tap，必须保持 untouched，只通过 status 解释为 `not_applicable`、`unsupported` 或 `unknown`。
+
 ### 10.1 Unix Socket API
 
 Neutron snapshot API 只能通过 Unix socket 暴露：
@@ -3061,7 +3099,12 @@ rule 30:
 - 同一 source + direction 下，rule 必须有 `priority`。
 - 如果两个 prefix/address-set 重叠，优先级高的 rule 先匹配。
 - 第一版建议默认禁止同一优先级的重叠 prefix。
-- 如果同时配置 global 和 policy，默认语义是 policy 命中优先，未命中的流量再走 global；如果产品希望“同一包同时镜像到 global target 和 policy target”，需要后续增加 multi-target mirror map，不作为第二阶段第一版承诺。
+- 如果同时配置 global 和 policy，默认语义是 `global_l2 + selective rule` 共存：
+  - global 总是保留 SPAN-like 全量二层镜像语义。
+  - policy 只对解析成功的 IP 包做选择性镜像。
+  - policy 命中且目标与 global 不同：同一包同时镜像到 global target 和 policy target。
+  - policy 命中且目标与 global 相同：只复制一份包，但 global/policy 两套统计都增加。
+  - ARP、LLDP、未知 EtherType、VLAN 等非 IP 包只由 global 覆盖，不进入 policy 规则。
 
 `aria_mirror_binding` 用于把 session 绑定到 port/network，便于后续和 `aria_acl_binding` 保持一致的产品交互方式：
 
@@ -3337,19 +3380,22 @@ MirrorEntry:
 TC ingress/egress hook
   |
   v
-根据 tap_id、src_group_id、dst_group_id、proto、direction 查 MIRROR_POLICY
+先按 tap_id、direction 查 MIRROR_GLOBAL
   |
   v
-查不到时按 wildcard fallback
+命中则 bpf_clone_redirect 到 global target，并更新 MIRROR_GLOBAL_STATS
   |
   v
-必要时查 MIRROR_GLOBAL
+如果是可解析 IP 包，继续根据 tap_id、src_group_id、dst_group_id、proto、direction 查 MIRROR_POLICY
   |
   v
-bpf_clone_redirect(skb, target_ifindex, 0)
+命中 policy 且 target 不同，则再 bpf_clone_redirect 到 policy target
   |
   v
-更新 mirrored_packets / mirrored_bytes / errors
+命中 policy 且 target 相同，则不重复 clone，只更新 policy stats
+  |
+  v
+原始业务包继续按原路径转发
 ```
 
 这对 Neutron 产品化有两个重要约束：
@@ -3358,6 +3404,11 @@ bpf_clone_redirect(skb, target_ifindex, 0)
 - 原始业务包不应被 consume，mirror 失败只能影响 mirror 状态，不能阻断业务转发。
 - 全局镜像必须映射到 Aria-agent 现有 `MIRROR_GLOBAL`。
 - 按 IP 网段分流必须映射到带 `src_group_id` / `dst_group_id` / `proto` / `direction` / `target_ifindex` 的 `MIRROR_POLICY`；IP prefix 可编译为 Aria address group。
+- 包数/字节数/error 由 eBPF map 累计；速率不放在 eBPF 数据面计算。
+- `aria-agent` 控制面周期读取 `MIRROR_GLOBAL_STATS` / `MIRROR_STATS`，按差值计算：
+  - `mirrored_pps = delta_packets / interval_seconds`
+  - `mirrored_bps = delta_bytes * 8 / interval_seconds`
+- `neutron-aria-agent` 只读取 aria-agent 的统计快照并回写 Neutron status；Neutron Server 不做秒级 eBPF 轮询。
 
 ### 21.9 物理端口镜像场景
 
@@ -3429,6 +3480,8 @@ target_port_id 指向本机分析 VM tap
 - 支持 mirror apply/delete/status。
 - 保证 mirror apply 失败不影响 ACL/QoS 域。
 - 把 Aria-agent 现有 mirror stats 暴露给 `neutron-aria-agent`。
+- 在 aria-agent 控制面实现 mirror stats sampler，输出累计 counters 和 `mirrored_pps` / `mirrored_bps`。
+- 在 `aria_mirror_port_statuses` 中保存最近一次上报的 counters、rates、`stats_window_seconds` 和 `last_sampled_at`。
 
 **阶段 2.6：数据面验收**
 
@@ -3442,6 +3495,10 @@ target_port_id 指向本机分析 VM tap
 - 删除 session 后 eBPF mirror map 清理。
 - global mirror 能把 source + direction 上全部流量 clone 到目标 VM port。
 - policy mirror 能把不同 IP prefix/address-set clone 到不同目标 VM port。
+- global + policy 目标不同时，命中 policy 的 IP 包同时到 global target 和 policy target。
+- global + policy 目标相同时，目标只收到一份包，但 global/policy stats 都增加。
+- 非 IP 包只进入 global，不进入 policy stats。
+- mirror status 能显示累计包数、字节数、errors、pps、bps。
 
 ### 21.11 第二阶段配置示例
 
@@ -3482,8 +3539,10 @@ default_unmatched_action = no_mirror
 ```text
 neutron ext-show aria-mirror 成功。
 neutron aria-mirror-session-create 能创建 VM tap 镜像会话。
-neutron aria-mirror-status-show 能显示 source/target ifindex 和 stats。
+neutron aria-mirror-status-show 能显示 source/target ifindex、累计 stats、pps、bps、统计窗口和最后采样时间。
 本机 VM tap 的 ingress/egress 流量可以 clone 到本机分析 VM。
+global mirror 覆盖 ARP、IPv4、IPv6、LLDP、广播、多播、未知 EtherType 和 VLAN 帧。
+policy mirror 支持按 IP prefix/address-set/protocol/direction 分流到不同分析 VM port。
 交换机 SPAN 到宿主机采集 NIC 的流量可以 clone 到本机分析 VM。
 删除 session 后 clone 停止，原业务流量不受影响。
 source/target 跨宿主机时明确显示 CROSS_HOST_UNSUPPORTED。
