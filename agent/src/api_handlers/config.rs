@@ -5,6 +5,7 @@ use axum::{
 };
 
 use super::common::{err_response, AppState};
+use crate::control_plane::LocalWriteDomain;
 use aria_api::{ConfigResponse, MessageResponse, UpdateConfigRequest};
 
 #[utoipa::path(
@@ -63,6 +64,63 @@ pub async fn update_config(
     Path(instance): Path<String>,
     Json(req): Json<UpdateConfigRequest>,
 ) -> impl IntoResponse {
+    if req.conntrack.is_some() {
+        if let Err(e) = cp
+            .ensure_local_write_allowed(&instance, LocalWriteDomain::Conntrack)
+            .await
+        {
+            return Err(err_response(e));
+        }
+    }
+    if req.monitoring.is_some() {
+        if let Err(e) = cp
+            .ensure_local_write_allowed(&instance, LocalWriteDomain::Config)
+            .await
+        {
+            return Err(err_response(e));
+        }
+    }
+    if req.acl.is_some() {
+        if let Err(e) = cp
+            .ensure_local_write_allowed(&instance, LocalWriteDomain::Acl)
+            .await
+        {
+            return Err(err_response(e));
+        }
+    }
+    if req.qos.is_some() {
+        if let Err(e) = cp
+            .ensure_local_write_allowed(&instance, LocalWriteDomain::Qos)
+            .await
+        {
+            return Err(err_response(e));
+        }
+    }
+    if req.mirror.is_some() {
+        if let Err(e) = cp
+            .ensure_local_write_allowed(&instance, LocalWriteDomain::Mirror)
+            .await
+        {
+            return Err(err_response(e));
+        }
+    }
+    if req.tcprt.is_some() {
+        if let Err(e) = cp
+            .ensure_local_write_allowed(&instance, LocalWriteDomain::Tcprt)
+            .await
+        {
+            return Err(err_response(e));
+        }
+    }
+    if req.ssl.is_some() {
+        if let Err(e) = cp
+            .ensure_local_write_allowed(&instance, LocalWriteDomain::Ssl)
+            .await
+        {
+            return Err(err_response(e));
+        }
+    }
+
     match cp
         .update_config(
             &instance,

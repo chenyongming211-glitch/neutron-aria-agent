@@ -617,19 +617,46 @@ Expected: UDS routes exist; TCP route table does not include `/api/v1/neutron/sn
 ### 5.4 Neutron-Managed Local Write Gate
 
 **Files:**
+- Modify: `agent/src/control_plane.rs`
+- Modify: `agent/src/neutron_api.rs`
 - Modify: `agent/src/api_handlers/groups.rs`
 - Modify: `agent/src/api_handlers/policies.rs`
 - Modify: `agent/src/api_handlers/qos.rs`
-- Modify: `core/src/state.rs`
+- Modify: `agent/src/api_handlers/mirror.rs`
+- Modify: `agent/src/api_handlers/config.rs`
+- Modify: `agent/src/api_handlers/conntrack.rs`
+- Modify: `agent/src/api_handlers/tcprt.rs`
+- Modify: `agent/src/api_handlers/drops.rs`
+- Modify: `agent/src/api_handlers/trace.rs`
+- Modify: `agent/src/api_handlers/ssl.rs`
+- Test: `agent` authority/gate unit tests
 
-- [ ] Mark Neutron-managed ports in runtime state.
-- [ ] Reject local `ariactl` writes that would modify group/ACL/QoS for a Neutron-managed port.
-- [ ] Allow read-only stats/trace operations.
+- [ ] Mark Neutron snapshot-attached ports with `attach_authority=neutron`.
+- [ ] Add per-port `managed_domains`, supplied by `NeutronPortSnapshot.managed_domains`.
+- [ ] Keep `neutron_managed` and `managed_domains` separate:
+  - `neutron_managed` controls who is allowed to attach/detach VM tap runtime.
+  - `managed_domains` controls which feature writes are owned by Neutron for that already-attached port.
+- [ ] Do not hard-code ACL/QoS/Mirror as always Neutron-owned.
+- [ ] Treat each domain independently, so product can start with only `managed_domains=["acl"]` and later add `qos` or `mirror` without changing attach semantics.
+- [ ] Gate local API writes by action domain:
+  - `acl`: policy add/delete/batch and ACL-owned group mutations.
+  - `qos`: QoS add/delete.
+  - `mirror`: mirror add/delete.
+  - `config`: reject config updates that toggle a Neutron-managed domain.
+  - `conntrack`, `tcprt`, `trace`, `drops`, `ssl`: default to local/admin domains unless explicitly added to `managed_domains`.
+- [ ] Allow local writes for domains not listed in `managed_domains`.
+- [ ] Allow read-only list/stats/health/metrics operations for Neutron-attached ports.
+- [ ] For shared groups/address-sets, do not globally block all group writes when only ACL is Neutron-managed:
+  - Reserve Neutron-generated object names with a stable prefix such as `neutron:`.
+  - Local `ariactl` may create/update local groups for local QoS/Mirror.
+  - Local `ariactl` must not delete or mutate Neutron-reserved groups, or groups referenced by Neutron-managed ACL rules.
+- [ ] Reject blocked local writes with stable error code `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`.
+- [ ] Include the blocked `domain` and instance in the error message.
 - [ ] Add explicit break-glass mode only if product owner approves; default plan does not enable it.
 
 **Expected visible result:**
 
-Local `ariactl` write against Neutron-managed port returns a clear error instead of silently overriding Neutron state.
+If `managed_domains=["acl"]`, local `ariactl policy add/delete` is rejected while local `ariactl qos add/delete`, `ariactl mirror add/delete`, `ariactl tcprt`, `ariactl trace`, and drop/SSL observability operations remain allowed. If `managed_domains=["acl","qos","mirror"]`, local writes for all three product domains are rejected. Read-only stats and observability queries remain available.
 
 ---
 

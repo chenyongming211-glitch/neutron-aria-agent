@@ -69,6 +69,10 @@ pub async fn add_group(
     Path(instance): Path<String>,
     Json(req): Json<AddGroupRequest>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp.ensure_local_group_write_allowed(&instance, &req.name).await {
+        return Err(err_response(e));
+    }
+
     match cp.add_group(&instance, &req.name, &req.cidr).await {
         Ok(id) => Ok((
             StatusCode::CREATED,
@@ -98,6 +102,10 @@ pub async fn delete_group(
     State(cp): State<AppState>,
     Path((instance, name)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp.ensure_local_group_write_allowed(&instance, &name).await {
+        return Err(err_response(e));
+    }
+
     match cp.delete_group(&instance, &name).await {
         Ok(()) => Ok(Json(MessageResponse {
             message: format!("Deleted group '{}'", name),

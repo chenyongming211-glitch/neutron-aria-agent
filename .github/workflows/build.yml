@@ -51,6 +51,7 @@ jobs:
         run: |
           cargo +stable test -p aria-agent startup_mode
           cargo +stable test -p aria-agent neutron_snapshot_plan
+          cargo +stable test -p aria-agent domain_authority
 
       - name: Build eBPF
         run: |

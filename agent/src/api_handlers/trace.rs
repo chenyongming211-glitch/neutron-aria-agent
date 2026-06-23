@@ -9,7 +9,7 @@ use super::{
     common::{err_response, AppState},
     TopQuery,
 };
-use crate::control_plane::ControlPlaneError;
+use crate::control_plane::{ControlPlaneError, LocalWriteDomain};
 use aria_api::{proto_from_string, proto_to_string, MessageResponse};
 
 #[utoipa::path(
@@ -34,6 +34,13 @@ pub async fn start_trace(
     Path(instance): Path<String>,
     Json(req): Json<aria_api::TraceStartRequest>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Trace)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     let mut src_ip: u32 = 0;
     let mut dst_ip: u32 = 0;
     let mut src_ip_v6: [u8; 16] = [0u8; 16];
@@ -135,6 +142,13 @@ pub async fn stop_trace(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Trace)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     match cp.stop_trace(&instance).await {
         Ok(()) => Ok(Json(MessageResponse {
             message: "Trace stopped".to_string(),
@@ -224,6 +238,13 @@ pub async fn flush_trace(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Trace)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     match cp.flush_trace(&instance).await {
         Ok(count) => Ok(Json(aria_api::TraceFlushResponse { flushed: count })),
         Err(e) => Err(err_response(e)),

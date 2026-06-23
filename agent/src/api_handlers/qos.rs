@@ -8,7 +8,7 @@ use axum::{
 };
 
 use super::common::{err_response, AppState};
-use crate::control_plane::ControlPlaneError;
+use crate::control_plane::{ControlPlaneError, LocalWriteDomain};
 use aria_api::*;
 
 #[utoipa::path(
@@ -75,6 +75,13 @@ pub async fn add_qos(
     Path(instance): Path<String>,
     Json(req): Json<AddQosRequest>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Qos)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     let direction = match direction_from_string(&req.direction) {
         Ok(d) => d,
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
@@ -171,6 +178,13 @@ pub async fn delete_qos(
     Path(instance): Path<String>,
     Json(req): Json<DeleteQosRequest>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Qos)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     let direction = match direction_from_string(&req.direction) {
         Ok(d) => d,
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),

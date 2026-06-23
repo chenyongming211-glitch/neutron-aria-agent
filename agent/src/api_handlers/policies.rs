@@ -8,7 +8,7 @@ use axum::{
 };
 
 use super::common::{err_response, AppState};
-use crate::control_plane::ControlPlaneError;
+use crate::control_plane::{ControlPlaneError, LocalWriteDomain};
 use aria_api::*;
 
 #[utoipa::path(
@@ -84,6 +84,13 @@ pub async fn add_policy(
     Path(instance): Path<String>,
     Json(req): Json<AddPolicyRequest>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Acl)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     let proto = match proto_from_string(&req.proto) {
         Ok(p) => p,
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
@@ -165,6 +172,13 @@ pub async fn delete_policy(
     Path(instance): Path<String>,
     Json(req): Json<DeletePolicyRequest>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Acl)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     let proto = match proto_from_string(&req.proto) {
         Ok(p) => p,
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
@@ -288,6 +302,13 @@ pub async fn batch_add_policies(
     Path(instance): Path<String>,
     Json(req): Json<BatchAddPoliciesRequest>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Acl)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     let mut added = 0;
     let mut errors = Vec::new();
 

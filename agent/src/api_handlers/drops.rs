@@ -5,6 +5,7 @@ use axum::{
 };
 
 use super::common::{err_response, legacy_drop_headers, AppState};
+use crate::control_plane::LocalWriteDomain;
 use aria_api::{direction_to_string, proto_to_string};
 
 #[utoipa::path(
@@ -83,6 +84,13 @@ pub async fn flush_drops(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Drops)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     match cp.flush_drop_stats(&instance).await {
         Ok(count) => Ok((
             legacy_drop_headers(&instance),
@@ -146,6 +154,23 @@ pub async fn flush_kernel_drops(
     State(cp): State<AppState>,
     Query(query): Query<aria_api::KernelDropQuery>,
 ) -> impl IntoResponse {
+    if let Some(instance) = &query.instance {
+        if let Err(e) = cp
+            .ensure_local_write_allowed(instance, LocalWriteDomain::Drops)
+            .await
+        {
+            return Err(err_response(e));
+        }
+    }
+    if let Some(iface) = &query.iface {
+        if let Err(e) = cp
+            .ensure_local_write_allowed(iface, LocalWriteDomain::Drops)
+            .await
+        {
+            return Err(err_response(e));
+        }
+    }
+
     match cp.flush_kernel_drop_stats(&query).await {
         Ok(flushed) => Ok(Json(aria_api::KernelDropFlushResponse { flushed })),
         Err(e) => Err(err_response(e)),

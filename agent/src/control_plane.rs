@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -111,6 +111,7 @@ pub struct PreparedManagedInstance {
 
 pub struct ControlPlane {
     instances: RwLock<HashMap<String, Arc<tokio::sync::RwLock<InstanceState>>>>,
+    neutron_authorities: RwLock<HashMap<String, NeutronPortAuthority>>,
     tap_id_lock: Mutex<()>,
     pub ebpf_path: String,
     pub base_pin_path: String,
@@ -119,6 +120,42 @@ pub struct ControlPlane {
     kernel_drop_manager: Arc<KernelDropManager>,
     trace_manager: Arc<TraceManager>,
     chains: RwLock<Vec<ServiceChain>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NeutronPortAuthority {
+    pub port_id: String,
+    pub managed_domains: BTreeSet<String>,
+    pub generation: u64,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LocalWriteDomain {
+    Acl,
+    Qos,
+    Mirror,
+    Config,
+    Conntrack,
+    Tcprt,
+    Trace,
+    Drops,
+    Ssl,
+}
+
+impl LocalWriteDomain {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Acl => "acl",
+            Self::Qos => "qos",
+            Self::Mirror => "mirror",
+            Self::Config => "config",
+            Self::Conntrack => "conntrack",
+            Self::Tcprt => "tcprt",
+            Self::Trace => "trace",
+            Self::Drops => "drops",
+            Self::Ssl => "ssl",
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -137,6 +174,10 @@ pub enum ControlPlaneError {
     ValidationError(String),
     KernelError(String),
     InstanceNotReady(String),
+    LocalWriteBlocked {
+        instance: String,
+        domain: String,
+    },
 }
 
 impl std::fmt::Display for ControlPlaneError {
@@ -149,6 +190,11 @@ impl std::fmt::Display for ControlPlaneError {
             Self::ValidationError(s) => write!(f, "Validation error: {}", s),
             Self::KernelError(s) => write!(f, "Kernel error: {}", s),
             Self::InstanceNotReady(s) => write!(f, "Instance not ready: {}", s),
+            Self::LocalWriteBlocked { instance, domain } => write!(
+                f,
+                "LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN: instance '{}' domain '{}' is managed by Neutron; update this domain through Neutron",
+                instance, domain
+            ),
         }
     }
 }
@@ -158,7 +204,7 @@ impl ControlPlaneError {
         match self {
             Self::ValidationError(_) => 400,
             Self::InstanceNotFound(_) | Self::GroupNotFound(_) | Self::PolicyNotFound(_) => 404,
-            Self::GroupInUse(_) => 409,
+            Self::GroupInUse(_) | Self::LocalWriteBlocked { .. } => 409,
             Self::KernelError(_) => 500,
             Self::InstanceNotReady(_) => 503,
         }
@@ -415,6 +461,7 @@ impl ControlPlane {
         let chains = service_chain::load_chains(base_state_path);
         Self {
             instances: RwLock::new(HashMap::new()),
+            neutron_authorities: RwLock::new(HashMap::new()),
             tap_id_lock: Mutex::new(()),
             ebpf_path: ebpf_path.to_string(),
             base_pin_path: base_pin_path.to_string(),
@@ -436,6 +483,106 @@ impl ControlPlane {
 
     pub fn trace_backend_name(&self) -> &'static str {
         self.trace_manager.backend().as_str()
+    }
+
+    fn normalize_domain_name(domain: &str) -> Option<String> {
+        let normalized = domain.trim().to_ascii_lowercase().replace('-', "_");
+        match normalized.as_str() {
+            "" => None,
+            "policy" | "policies" | "group" | "groups" | "address_set" | "address_sets"
+            | "aria_acl" => Some("acl".to_string()),
+            "aria_qos" => Some("qos".to_string()),
+            "aria_mirror" => Some("mirror".to_string()),
+            "acl" | "qos" | "mirror" | "config" | "conntrack" | "tcprt" | "trace"
+            | "drops" | "ssl" => Some(normalized),
+            _ => Some(normalized),
+        }
+    }
+
+    pub fn normalize_neutron_managed_domains(domains: &[String]) -> BTreeSet<String> {
+        domains
+            .iter()
+            .filter_map(|domain| Self::normalize_domain_name(domain))
+            .collect()
+    }
+
+    pub async fn mark_neutron_port_authority(
+        &self,
+        instance: &str,
+        port_id: &str,
+        managed_domains: &[String],
+        generation: u64,
+    ) {
+        let authority = NeutronPortAuthority {
+            port_id: port_id.to_string(),
+            managed_domains: Self::normalize_neutron_managed_domains(managed_domains),
+            generation,
+        };
+        let mut authorities = self.neutron_authorities.write().await;
+        authorities.insert(instance.to_string(), authority.clone());
+        info!(
+            instance = %instance,
+            port_id = %authority.port_id,
+            generation,
+            managed_domains = ?authority.managed_domains,
+            "marked Neutron port authority"
+        );
+    }
+
+    pub async fn clear_neutron_port_authority(&self, instance: &str) {
+        let mut authorities = self.neutron_authorities.write().await;
+        if let Some(authority) = authorities.remove(instance) {
+            info!(
+                instance = %instance,
+                port_id = %authority.port_id,
+                managed_domains = ?authority.managed_domains,
+                "cleared Neutron port authority"
+            );
+        }
+    }
+
+    pub async fn get_neutron_port_authority(
+        &self,
+        instance: &str,
+    ) -> Option<NeutronPortAuthority> {
+        self.neutron_authorities.read().await.get(instance).cloned()
+    }
+
+    pub async fn ensure_local_write_allowed(
+        &self,
+        instance: &str,
+        domain: LocalWriteDomain,
+    ) -> Result<(), ControlPlaneError> {
+        let domain_name = domain.as_str();
+        let authorities = self.neutron_authorities.read().await;
+        if authorities
+            .get(instance)
+            .map(|authority| authority.managed_domains.contains(domain_name))
+            .unwrap_or(false)
+        {
+            return Err(ControlPlaneError::LocalWriteBlocked {
+                instance: instance.to_string(),
+                domain: domain_name.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn ensure_local_group_write_allowed(
+        &self,
+        instance: &str,
+        group_name: &str,
+    ) -> Result<(), ControlPlaneError> {
+        if group_name.trim().to_ascii_lowercase().starts_with("neutron:") {
+            let authorities = self.neutron_authorities.read().await;
+            if authorities.contains_key(instance) {
+                return Err(ControlPlaneError::LocalWriteBlocked {
+                    instance: instance.to_string(),
+                    domain: "acl".to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 
     pub async fn get_trace_runtime_status(&self) -> HashMap<String, TraceRuntimeStatusSnapshot> {
@@ -2459,5 +2606,104 @@ impl ControlPlane {
             .find(|g| g.id == id)
             .map(|g| g.name.clone())
             .unwrap_or_else(|| format!("id:{}", id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_control_plane() -> ControlPlane {
+        let base = std::env::temp_dir().join(format!(
+            "aria-control-plane-domain-test-{}",
+            std::process::id()
+        ));
+        let base = base.to_string_lossy().to_string();
+        let ebpf_path = "/tmp/libebpf_firewall.so";
+
+        ControlPlane::new(
+            ebpf_path,
+            &base,
+            &base,
+            Arc::new(crate::ssl_manager::SslManager::new(ebpf_path, &base)),
+            Arc::new(crate::kernel_drop_manager::KernelDropManager::new(
+                ebpf_path, &base, &base,
+            )),
+            Arc::new(crate::trace_backend::TraceManager::new(
+                crate::ebpf_binary::TraceBackendKind::LegacyMap,
+            )),
+        )
+    }
+
+    #[test]
+    fn domain_authority_normalizes_neutron_domain_aliases() {
+        let domains = vec![
+            "aria-acl".to_string(),
+            "policies".to_string(),
+            "address_sets".to_string(),
+            "aria_qos".to_string(),
+            "aria-mirror".to_string(),
+            "trace".to_string(),
+            "".to_string(),
+        ];
+
+        let normalized = ControlPlane::normalize_neutron_managed_domains(&domains);
+
+        assert!(normalized.contains("acl"));
+        assert!(normalized.contains("qos"));
+        assert!(normalized.contains("mirror"));
+        assert!(normalized.contains("trace"));
+        assert_eq!(normalized.len(), 4);
+    }
+
+    #[test]
+    fn domain_authority_domain_labels_are_stable() {
+        assert_eq!(LocalWriteDomain::Acl.as_str(), "acl");
+        assert_eq!(LocalWriteDomain::Qos.as_str(), "qos");
+        assert_eq!(LocalWriteDomain::Mirror.as_str(), "mirror");
+        assert_eq!(LocalWriteDomain::Config.as_str(), "config");
+        assert_eq!(LocalWriteDomain::Conntrack.as_str(), "conntrack");
+        assert_eq!(LocalWriteDomain::Tcprt.as_str(), "tcprt");
+        assert_eq!(LocalWriteDomain::Trace.as_str(), "trace");
+        assert_eq!(LocalWriteDomain::Drops.as_str(), "drops");
+        assert_eq!(LocalWriteDomain::Ssl.as_str(), "ssl");
+    }
+
+    #[tokio::test]
+    async fn domain_authority_blocks_only_selected_domains() {
+        let cp = test_control_plane();
+        let managed_domains = vec!["acl".to_string(), "mirror".to_string()];
+        cp.mark_neutron_port_authority(
+            "tap-vm",
+            "port-vm",
+            &managed_domains,
+            7,
+        )
+        .await;
+
+        assert!(cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Acl)
+            .await
+            .is_err());
+        assert!(cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Mirror)
+            .await
+            .is_err());
+        assert!(cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Qos)
+            .await
+            .is_ok());
+        assert!(cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Trace)
+            .await
+            .is_ok());
+        assert!(cp
+            .ensure_local_group_write_allowed("tap-vm", "neutron:acl-source")
+            .await
+            .is_err());
+        assert!(cp
+            .ensure_local_group_write_allowed("tap-vm", "local-qos-group")
+            .await
+            .is_ok());
     }
 }

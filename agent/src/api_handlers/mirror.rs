@@ -8,7 +8,7 @@ use axum::{
 };
 
 use super::common::{err_response, AppState};
-use crate::control_plane::ControlPlaneError;
+use crate::control_plane::{ControlPlaneError, LocalWriteDomain};
 use aria_api::{
     direction_from_string, direction_to_string, proto_from_string, proto_to_string,
     AddMirrorRequest, DeleteMirrorRequest, MessageResponse, MirrorEntry, MirrorListResponse,
@@ -77,6 +77,13 @@ pub async fn add_mirror(
     Path(instance): Path<String>,
     Json(req): Json<AddMirrorRequest>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Mirror)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     let proto = match proto_from_string(&req.proto) {
         Ok(p) => p,
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
@@ -153,6 +160,13 @@ pub async fn delete_mirror(
     Path(instance): Path<String>,
     Json(req): Json<DeleteMirrorRequest>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Mirror)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     let proto = match proto_from_string(&req.proto) {
         Ok(p) => p,
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),

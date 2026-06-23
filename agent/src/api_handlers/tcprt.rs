@@ -10,6 +10,7 @@ use super::{
     common::{err_response, AppState},
     TopQuery,
 };
+use crate::control_plane::LocalWriteDomain;
 
 fn map_tcprt_entry(e: aria_core::tcprt_ops::TcpRtEntry) -> aria_api::TcpRtEntry {
     aria_api::TcpRtEntry {
@@ -84,6 +85,13 @@ pub async fn flush_tcprt(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Tcprt)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     match cp.flush_tcprt(&instance).await {
         Ok(count) => Ok(Json(aria_api::TcpRtFlushResponse { flushed: count })),
         Err(e) => Err(err_response(e)),

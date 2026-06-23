@@ -10,11 +10,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
+use crate::control_plane::ControlPlane;
 use crate::tap_registry::TapRegistry;
 
 #[derive(Clone)]
 pub(crate) struct NeutronApiState {
     registry: Arc<TapRegistry>,
+    control_plane: Arc<ControlPlane>,
     runtime: Arc<RwLock<NeutronRuntimeState>>,
     apply_lock: Arc<Mutex<()>>,
 }
@@ -56,6 +58,8 @@ pub(crate) struct NeutronPortSnapshot {
     pub network_backend: Option<String>,
     #[serde(default)]
     pub ovs_iface_id: Option<String>,
+    #[serde(default)]
+    pub managed_domains: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -63,6 +67,7 @@ pub(crate) struct ManagedNeutronPort {
     pub port_id: String,
     pub ifname: String,
     pub ifindex: Option<u32>,
+    pub managed_domains: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -109,21 +114,23 @@ struct NeutronPortApplyResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SnapshotPlan {
     attach: Vec<NeutronPortSnapshot>,
+    update: Vec<NeutronPortSnapshot>,
     detach: Vec<ManagedNeutronPort>,
     ignored: Vec<NeutronPortApplyResult>,
 }
 
 impl NeutronApiState {
-    fn new(registry: Arc<TapRegistry>) -> Self {
+    fn new(registry: Arc<TapRegistry>, control_plane: Arc<ControlPlane>) -> Self {
         Self {
             registry,
+            control_plane,
             runtime: Arc::new(RwLock::new(NeutronRuntimeState::default())),
             apply_lock: Arc::new(Mutex::new(())),
         }
     }
 }
 
-pub(crate) fn build_router(registry: Arc<TapRegistry>) -> Router {
+pub(crate) fn build_router(registry: Arc<TapRegistry>, control_plane: Arc<ControlPlane>) -> Router {
     Router::new()
         .route(
             "/api/v1/neutron/capabilities",
@@ -135,7 +142,7 @@ pub(crate) fn build_router(registry: Arc<TapRegistry>) -> Router {
             "/api/v1/neutron/ports/{port_id}",
             delete(delete_neutron_port),
         )
-        .with_state(NeutronApiState::new(registry))
+        .with_state(NeutronApiState::new(registry, control_plane))
 }
 
 async fn get_neutron_capabilities() -> impl IntoResponse {
@@ -144,7 +151,18 @@ async fn get_neutron_capabilities() -> impl IntoResponse {
         attach_authority: "neutron_snapshot",
         supports_full_snapshot: true,
         supports_port_delete: true,
-        supported_domains: vec!["attach", "acl", "qos", "mirror"],
+        supported_domains: vec![
+            "attach",
+            "acl",
+            "qos",
+            "mirror",
+            "config",
+            "conntrack",
+            "tcprt",
+            "trace",
+            "drops",
+            "ssl",
+        ],
     })
 }
 
@@ -176,6 +194,10 @@ async fn put_neutron_snapshot(
         match state.registry.detach(&port.ifname).await {
             Ok(()) => {
                 next_ports.remove(&port.port_id);
+                state
+                    .control_plane
+                    .clear_neutron_port_authority(&port.ifname)
+                    .await;
                 results.push(NeutronPortApplyResult {
                     port_id: port.port_id,
                     ifname: port.ifname,
@@ -196,20 +218,44 @@ async fn put_neutron_snapshot(
         }
     }
 
+    for port in plan.update {
+        let managed = managed_port_from_snapshot(&port);
+        state
+            .control_plane
+            .mark_neutron_port_authority(
+                &managed.ifname,
+                &managed.port_id,
+                &managed.managed_domains,
+                snapshot.generation,
+            )
+            .await;
+        next_ports.insert(managed.port_id.clone(), managed.clone());
+        results.push(NeutronPortApplyResult {
+            port_id: managed.port_id,
+            ifname: managed.ifname,
+            action: "update".to_string(),
+            status: "ok".to_string(),
+            reason: None,
+        });
+    }
+
     for port in plan.attach {
         match state.registry.attach(&port.ifname).await {
             Ok(()) => {
-                next_ports.insert(
-                    port.port_id.clone(),
-                    ManagedNeutronPort {
-                        port_id: port.port_id.clone(),
-                        ifname: port.ifname.clone(),
-                        ifindex: port.ifindex,
-                    },
-                );
+                let managed = managed_port_from_snapshot(&port);
+                state
+                    .control_plane
+                    .mark_neutron_port_authority(
+                        &managed.ifname,
+                        &managed.port_id,
+                        &managed.managed_domains,
+                        snapshot.generation,
+                    )
+                    .await;
+                next_ports.insert(managed.port_id.clone(), managed.clone());
                 results.push(NeutronPortApplyResult {
-                    port_id: port.port_id,
-                    ifname: port.ifname,
+                    port_id: managed.port_id,
+                    ifname: managed.ifname,
                     action: "attach".to_string(),
                     status: "ok".to_string(),
                     reason: None,
@@ -246,8 +292,8 @@ async fn delete_neutron_port(
 ) -> impl IntoResponse {
     let _guard = state.apply_lock.lock().await;
     let port = {
-        let mut runtime = state.runtime.write().await;
-        runtime.ports.remove(&port_id)
+        let runtime = state.runtime.read().await;
+        runtime.ports.get(&port_id).cloned()
     };
 
     let Some(port) = port else {
@@ -264,16 +310,26 @@ async fn delete_neutron_port(
     };
 
     match state.registry.detach(&port.ifname).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(NeutronDeleteResponse {
-                port_id: port.port_id,
-                ifname: Some(port.ifname),
-                detached: true,
-                status: "ok".to_string(),
-                error: None,
-            }),
-        ),
+        Ok(()) => {
+            {
+                let mut runtime = state.runtime.write().await;
+                runtime.ports.remove(&port_id);
+            }
+            state
+                .control_plane
+                .clear_neutron_port_authority(&port.ifname)
+                .await;
+            (
+                StatusCode::OK,
+                Json(NeutronDeleteResponse {
+                    port_id: port.port_id,
+                    ifname: Some(port.ifname),
+                    detached: true,
+                    status: "ok".to_string(),
+                    error: None,
+                }),
+            )
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(NeutronDeleteResponse {
@@ -284,6 +340,21 @@ async fn delete_neutron_port(
                 error: Some(e),
             }),
         ),
+    }
+}
+
+fn normalize_managed_domains(domains: &[String]) -> Vec<String> {
+    ControlPlane::normalize_neutron_managed_domains(domains)
+        .into_iter()
+        .collect()
+}
+
+fn managed_port_from_snapshot(port: &NeutronPortSnapshot) -> ManagedNeutronPort {
+    ManagedNeutronPort {
+        port_id: port.port_id.clone(),
+        ifname: port.ifname.clone(),
+        ifindex: port.ifindex,
+        managed_domains: normalize_managed_domains(&port.managed_domains),
     }
 }
 
@@ -346,18 +417,22 @@ fn build_snapshot_plan(
     }
 
     let mut attach = Vec::new();
+    let mut update = Vec::new();
     for (port_id, port) in desired {
-        let needs_attach = match current.get(&port_id) {
-            Some(managed) => managed.ifname != port.ifname,
-            None => true,
-        };
-        if needs_attach && desired_ids.contains(&port_id) {
-            attach.push(port);
+        match current.get(&port_id) {
+            Some(managed) if managed.ifname == port.ifname => {
+                update.push(port);
+            }
+            _ if desired_ids.contains(&port_id) => {
+                attach.push(port);
+            }
+            _ => {}
         }
     }
 
     SnapshotPlan {
         attach,
+        update,
         detach,
         ignored,
     }
@@ -372,6 +447,7 @@ mod tests {
             port_id: port_id.to_string(),
             ifname: ifname.to_string(),
             ifindex: None,
+            managed_domains: Vec::new(),
         }
     }
 
@@ -387,6 +463,7 @@ mod tests {
             vnic_type: None,
             network_backend: None,
             ovs_iface_id: None,
+            managed_domains: Vec::new(),
         }
     }
 
@@ -408,6 +485,7 @@ mod tests {
         let plan = build_snapshot_plan(&current, &snapshot);
 
         assert_eq!(plan.attach, vec![port("vm-port", "tap111", true)]);
+        assert!(plan.update.is_empty());
         assert!(plan.detach.is_empty());
         assert_eq!(plan.ignored.len(), 1);
         assert_eq!(plan.ignored[0].port_id, "dhcp-port");
@@ -427,6 +505,7 @@ mod tests {
         let plan = build_snapshot_plan(&current, &snapshot);
 
         assert!(plan.attach.is_empty());
+        assert_eq!(plan.update, vec![port("kept-port", "tap-kept", true)]);
         assert_eq!(plan.detach, vec![managed("old-port", "tap-old")]);
         assert!(plan.ignored.is_empty());
     }
@@ -445,6 +524,7 @@ mod tests {
 
         assert_eq!(plan.detach, vec![managed("vm-port", "tap-old")]);
         assert_eq!(plan.attach, vec![port("vm-port", "tap-new", true)]);
+        assert!(plan.update.is_empty());
         assert!(plan.ignored.is_empty());
     }
 
@@ -465,6 +545,37 @@ mod tests {
 
         assert_eq!(plan.detach, vec![managed("dhcp-port", "tap-dhcp")]);
         assert!(plan.attach.is_empty());
+        assert!(plan.update.is_empty());
         assert_eq!(plan.ignored[0].reason.as_deref(), Some("device_owner network:dhcp"));
+    }
+
+    #[test]
+    fn neutron_snapshot_plan_updates_existing_port_domains_without_reattach() {
+        let mut current = BTreeMap::new();
+        current.insert(
+            "vm-port".to_string(),
+            ManagedNeutronPort {
+                managed_domains: vec!["acl".to_string()],
+                ..managed("vm-port", "tap-vm")
+            },
+        );
+        let snapshot = NeutronSnapshotRequest {
+            generation: 5,
+            host: None,
+            ports: vec![NeutronPortSnapshot {
+                managed_domains: vec!["acl".to_string(), "qos".to_string()],
+                ..port("vm-port", "tap-vm", true)
+            }],
+        };
+
+        let plan = build_snapshot_plan(&current, &snapshot);
+
+        assert!(plan.attach.is_empty());
+        assert!(plan.detach.is_empty());
+        assert_eq!(plan.update.len(), 1);
+        assert_eq!(
+            normalize_managed_domains(&plan.update[0].managed_domains),
+            vec!["acl".to_string(), "qos".to_string()]
+        );
     }
 }

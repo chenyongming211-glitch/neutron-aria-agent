@@ -554,7 +554,7 @@ async fn main() {
     });
 
     let neutron_task = neutron_listener.map(|listener| {
-        let router = neutron_api::build_router(registry.clone());
+        let router = neutron_api::build_router(registry.clone(), control_plane.clone());
         tokio::spawn(async move {
             info!(socket_path = %neutron_socket_path, "Neutron UDS API server listening");
             if let Err(e) = axum::serve(listener, router).await {

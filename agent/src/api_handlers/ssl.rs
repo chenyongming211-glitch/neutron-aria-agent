@@ -8,6 +8,7 @@ use super::{
     common::{err_response, AppState},
     TopQuery,
 };
+use crate::control_plane::LocalWriteDomain;
 
 fn map_ssl_connections(entries: Vec<aria_core::ssl_ops::SslConnEntry>) -> aria_api::SslListResponse {
     let connections = entries
@@ -133,6 +134,13 @@ pub async fn flush_ssl(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Ssl)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     match cp.flush_ssl(&instance).await {
         Ok(count) => Ok(Json(aria_api::SslFlushResponse { flushed: count })),
         Err(e) => Err(err_response(e)),
@@ -227,6 +235,13 @@ pub async fn flush_ssl_http(
     State(cp): State<AppState>,
     Path(instance): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = cp
+        .ensure_local_write_allowed(&instance, LocalWriteDomain::Ssl)
+        .await
+    {
+        return Err(err_response(e));
+    }
+
     match cp.flush_ssl_http(&instance).await {
         Ok(count) => Ok(Json(aria_api::SslHttpFlushResponse { flushed: count })),
         Err(e) => Err(err_response(e)),
