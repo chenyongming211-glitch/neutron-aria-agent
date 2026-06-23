@@ -385,5 +385,5 @@ pub async fn batch_add_policies(
     } else {
         StatusCode::OK
     };
-    (status, Json(BatchPoliciesResponse { added, errors }))
+    Ok((status, Json(BatchPoliciesResponse { added, errors })))
 }
