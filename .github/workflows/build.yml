@@ -75,15 +75,19 @@ jobs:
           mkdir -p release
           cp target/x86_64-unknown-linux-musl/release/ariactl release/
           cp target/x86_64-unknown-linux-musl/release/aria-agent release/
-          # eBPF 产物搜索 ebpf/target 和 workspace target 两个位置
-          find ebpf/target target/bpfel-unknown-none -maxdepth 3 -name "*ebpf_firewall*" -type f ! -name "*.d" 2>/dev/null | while read f; do
-            cp "$f" release/
-          done
+          ebpf_artifact="$(find ebpf/target target -type f \
+            \( -path "*/bpfel-unknown-none/release/*" -o -name "libebpf_firewall.so" -o -name "ebpf-firewall" \) \
+            ! -path "*/deps/*" ! -path "*/.fingerprint/*" ! -name "*.d" ! -name "*.rlib" \
+            2>/dev/null | head -1)"
+          if [ -z "$ebpf_artifact" ]; then
+            echo "eBPF artifact not found" >&2
+            find ebpf/target target -maxdepth 5 -type f 2>/dev/null | sort | head -200 >&2
+            exit 1
+          fi
+          cp "$ebpf_artifact" release/libebpf_firewall.so
           # During the perf-first rollout we publish an explicit _perf sibling so
           # resolver auto mode can select it without changing the default base path.
-          if [ -f release/libebpf_firewall.so ] && [ ! -f release/libebpf_firewall_perf.so ]; then
-            cp release/libebpf_firewall.so release/libebpf_firewall_perf.so
-          fi
+          cp release/libebpf_firewall.so release/libebpf_firewall_perf.so
           echo "=== release contents ==="
           ls -la release/
 
