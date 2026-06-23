@@ -48,14 +48,29 @@ jobs:
           command -v bpf-linker >/dev/null 2>&1 || cargo +nightly install bpf-linker
 
       - name: Build eBPF
-        run: cd ebpf && cargo +nightly build --release --target-dir target
+        run: |
+          export LD_LIBRARY_PATH="$(rustc +nightly --print sysroot)/lib:${LD_LIBRARY_PATH:-}"
+          cd ebpf
+          cargo +nightly build --release --target bpfel-unknown-none -Z build-std=core --target-dir target
+          echo "=== eBPF output candidates ==="
+          find target -type f \( -name "libebpf_firewall.so" -o -name "ebpf-firewall" \) \
+            -printf '%s %p\n' 2>/dev/null | sort -nr
+          ebpf_artifact="$(find target -type f \
+            \( -path "*/release/libebpf_firewall.so" -o -path "*/release/ebpf-firewall" \) \
+            -size +0c 2>/dev/null | head -1)"
+          if [ -z "$ebpf_artifact" ]; then
+            echo "non-empty eBPF artifact not found" >&2
+            find target -maxdepth 5 -type f 2>/dev/null | sort | head -200 >&2
+            exit 1
+          fi
+          file "$ebpf_artifact"
+          mkdir -p ../ebpf-artifacts
+          cp "$ebpf_artifact" ../ebpf-artifacts/libebpf_firewall.so
 
       - name: Find eBPF artifacts
         run: |
-          echo "=== ebpf/target/ ==="
-          find ebpf/target -type f ! -path "*/deps/*" ! -path "*/.fingerprint/*" ! -name "*.d" ! -name "*.rlib" 2>/dev/null | head -20
-          echo "=== workspace target/bpfel* ==="
-          find target/bpfel-unknown-none -type f ! -path "*/deps/*" ! -path "*/.fingerprint/*" ! -name "*.d" ! -name "*.rlib" 2>/dev/null | head -20
+          ls -lh ebpf-artifacts/
+          file ebpf-artifacts/libebpf_firewall.so
 
       - name: Build userspace (static)
         run: cargo +stable build --release -p ariactl --target x86_64-unknown-linux-musl
@@ -75,16 +90,7 @@ jobs:
           mkdir -p release
           cp target/x86_64-unknown-linux-musl/release/ariactl release/
           cp target/x86_64-unknown-linux-musl/release/aria-agent release/
-          ebpf_artifact="$(find ebpf/target target -type f \
-            \( -path "*/bpfel-unknown-none/release/*" -o -name "libebpf_firewall.so" -o -name "ebpf-firewall" \) \
-            ! -path "*/deps/*" ! -path "*/.fingerprint/*" ! -name "*.d" ! -name "*.rlib" \
-            2>/dev/null | head -1)"
-          if [ -z "$ebpf_artifact" ]; then
-            echo "eBPF artifact not found" >&2
-            find ebpf/target target -maxdepth 5 -type f 2>/dev/null | sort | head -200 >&2
-            exit 1
-          fi
-          cp "$ebpf_artifact" release/libebpf_firewall.so
+          cp ebpf-artifacts/libebpf_firewall.so release/libebpf_firewall.so
           # During the perf-first rollout we publish an explicit _perf sibling so
           # resolver auto mode can select it without changing the default base path.
           cp release/libebpf_firewall.so release/libebpf_firewall_perf.so
