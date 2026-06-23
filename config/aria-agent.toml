@@ -4,6 +4,14 @@
 # Path to the compiled eBPF binary
 ebpf_path = "/usr/local/lib/libebpf_firewall.so"
 
+# Runtime authority mode.
+# standalone keeps the existing local auto-discovery behavior.
+# OpenStack product deployments should use:
+#   mode = "neutron_managed"
+#   auto_attach = false
+mode = "standalone"
+auto_attach = true
+
 # Base path for pinning eBPF maps (per-tap subdirectories created automatically)
 pin_path = "/sys/fs/bpf/aria"
 
@@ -18,3 +26,6 @@ iface_pattern = "^tap"
 
 # Maximum number of unique port filter combinations per tap instance
 max_port_policies = 16384
+
+# Unix socket used only in neutron_managed mode.
+neutron_socket_path = "/run/aria/aria-agent.sock"

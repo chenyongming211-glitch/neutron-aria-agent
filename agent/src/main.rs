@@ -2,6 +2,7 @@ use clap::Parser;
 use serde::Deserialize;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::signal::unix::{signal, SignalKind};
@@ -17,6 +18,7 @@ mod instance;
 mod kernel_drop_manager;
 mod kernel_drop_support;
 mod netlink;
+mod neutron_api;
 mod openapi;
 mod service_chain;
 mod ssl_manager;
@@ -35,6 +37,10 @@ struct Args {
 
 #[derive(Deserialize)]
 struct Config {
+    #[serde(default = "default_mode")]
+    mode: AgentMode,
+    #[serde(default)]
+    auto_attach: Option<bool>,
     #[serde(default = "default_ebpf_path")]
     ebpf_path: String,
     #[serde(default = "default_trace_backend")]
@@ -51,12 +57,34 @@ struct Config {
     max_port_policies: u32,
     #[serde(default = "default_listen_addr")]
     listen_addr: String,
+    #[serde(default = "default_neutron_socket_path")]
+    neutron_socket_path: String,
     #[serde(default = "default_log_format")]
     log_format: String,
     #[serde(default = "default_log_filter")]
     log_filter: String,
     #[serde(default = "default_log_file_path")]
     log_file_path: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AgentMode {
+    Standalone,
+    NeutronManaged,
+}
+
+impl AgentMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Standalone => "standalone",
+            Self::NeutronManaged => "neutron_managed",
+        }
+    }
+}
+
+fn default_mode() -> AgentMode {
+    AgentMode::Standalone
 }
 
 fn default_ebpf_path() -> String {
@@ -91,6 +119,10 @@ fn default_listen_addr() -> String {
     "127.0.0.1:8080".to_string()
 }
 
+fn default_neutron_socket_path() -> String {
+    "/run/aria/aria-agent.sock".to_string()
+}
+
 fn default_log_format() -> String {
     "text".to_string()
 }
@@ -106,6 +138,8 @@ fn default_log_file_path() -> String {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            mode: default_mode(),
+            auto_attach: None,
             ebpf_path: default_ebpf_path(),
             trace_backend: default_trace_backend(),
             trace_auto_allow_ringbuf: default_trace_auto_allow_ringbuf(),
@@ -114,10 +148,25 @@ impl Default for Config {
             iface_pattern: default_iface_pattern(),
             max_port_policies: default_max_port_policies(),
             listen_addr: default_listen_addr(),
+            neutron_socket_path: default_neutron_socket_path(),
             log_format: default_log_format(),
             log_filter: default_log_filter(),
             log_file_path: default_log_file_path(),
         }
+    }
+}
+
+impl Config {
+    fn requested_auto_attach(&self) -> bool {
+        self.auto_attach.unwrap_or(self.mode == AgentMode::Standalone)
+    }
+
+    fn effective_auto_attach(&self) -> bool {
+        self.mode == AgentMode::Standalone && self.requested_auto_attach()
+    }
+
+    fn neutron_socket_enabled(&self) -> bool {
+        self.mode == AgentMode::NeutronManaged
     }
 }
 
@@ -260,6 +309,39 @@ fn load_config(path: &PathBuf) -> Config {
     Config::default()
 }
 
+async fn bind_neutron_socket(path: &str) -> Result<tokio::net::UnixListener, String> {
+    let socket_path = Path::new(path);
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "failed to create neutron socket directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+
+    if socket_path.exists() {
+        let file_type = std::fs::metadata(socket_path)
+            .map_err(|e| format!("failed to stat neutron socket {}: {}", path, e))?
+            .file_type();
+        if !file_type.is_socket() {
+            return Err(format!(
+                "refusing to remove non-socket neutron API path {}",
+                path
+            ));
+        }
+        std::fs::remove_file(socket_path)
+            .map_err(|e| format!("failed to remove stale neutron socket {}: {}", path, e))?;
+    }
+
+    let listener = tokio::net::UnixListener::bind(socket_path)
+        .map_err(|e| format!("failed to bind neutron socket {}: {}", path, e))?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
+        .map_err(|e| format!("failed to chmod neutron socket {}: {}", path, e))?;
+    Ok(listener)
+}
+
 #[tokio::main]
 async fn main() {
     const SSL_RECONCILE_INTERVAL_SECS: u64 = 15;
@@ -275,6 +357,12 @@ async fn main() {
     if let Err(e) = init_tracing(&config) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
+    }
+    if config.mode == AgentMode::NeutronManaged && config.requested_auto_attach() {
+        warn!(
+            mode = config.mode.as_str(),
+            "auto_attach=true is ignored in neutron_managed mode; snapshot authority is required"
+        );
     }
 
     let trace_backend_preference =
@@ -308,11 +396,15 @@ async fn main() {
         trace_auto_allow_ringbuf = config.trace_auto_allow_ringbuf,
         trace_backend = %resolved_ebpf.trace_backend,
         kernel_version = ?resolved_ebpf.kernel_version,
+        mode = %config.mode.as_str(),
+        requested_auto_attach = config.requested_auto_attach(),
+        effective_auto_attach = config.effective_auto_attach(),
         pin_path = %config.pin_path,
         state_path = %config.state_path,
         iface_pattern = %config.iface_pattern,
         max_port_policies = config.max_port_policies,
         listen_addr = %config.listen_addr,
+        neutron_socket_path = %config.neutron_socket_path,
         log_format = %config.log_format,
         log_filter = %config.log_filter,
         log_file_path = %config.log_file_path,
@@ -399,17 +491,38 @@ async fn main() {
         }
     };
 
-    // Bind before starting background tasks so we fail before any interfaces are attached.
-    // Start netlink monitoring
-    let registry_clone = registry.clone();
-    let netlink_task = tokio::spawn(async move {
-        loop {
-            if let Err(e) = netlink::monitor(registry_clone.clone()).await {
-                warn!(error = %e, "netlink monitor failed; restarting");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let neutron_socket_path = config.neutron_socket_path.clone();
+    let neutron_listener = if config.neutron_socket_enabled() {
+        match bind_neutron_socket(&neutron_socket_path).await {
+            Ok(listener) => Some(listener),
+            Err(e) => {
+                error!(error = %e, "failed to bind Neutron UDS API");
+                std::process::exit(1);
             }
         }
-    });
+    } else {
+        None
+    };
+
+    // Bind before starting background tasks so we fail before any interfaces are attached.
+    let netlink_task = if config.effective_auto_attach() {
+        let registry_clone = registry.clone();
+        Some(tokio::spawn(async move {
+            loop {
+                if let Err(e) = netlink::monitor(registry_clone.clone()).await {
+                    warn!(error = %e, "netlink monitor failed; restarting");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }))
+    } else {
+        info!(
+            mode = config.mode.as_str(),
+            requested_auto_attach = config.requested_auto_attach(),
+            "auto attach disabled; netlink tap monitor not started"
+        );
+        None
+    };
 
     // Start background compact task (WAL → snapshot when threshold reached or periodically)
     let compact_cp = control_plane.clone();
@@ -440,6 +553,16 @@ async fn main() {
         }
     });
 
+    let neutron_task = neutron_listener.map(|listener| {
+        let router = neutron_api::build_router(registry.clone());
+        tokio::spawn(async move {
+            info!(socket_path = %neutron_socket_path, "Neutron UDS API server listening");
+            if let Err(e) = axum::serve(listener, router).await {
+                error!(error = %e, "Neutron UDS API server stopped with error");
+            }
+        })
+    });
+
     info!("aria-agent running");
 
     // Wait for shutdown signal
@@ -454,8 +577,13 @@ async fn main() {
     info!("shutting down aria-agent");
 
     // Abort tasks
-    netlink_task.abort();
+    if let Some(task) = netlink_task {
+        task.abort();
+    }
     http_task.abort();
+    if let Some(task) = neutron_task {
+        task.abort();
+    }
     compact_task.abort();
     ssl_reconcile_task.abort();
 
@@ -466,4 +594,51 @@ async fn main() {
     registry.shutdown().await;
 
     info!("aria-agent stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_mode_defaults_to_standalone_auto_attach() {
+        let config = Config::default();
+
+        assert_eq!(config.mode, AgentMode::Standalone);
+        assert!(config.requested_auto_attach());
+        assert!(config.effective_auto_attach());
+    }
+
+    #[test]
+    fn startup_mode_neutron_managed_disables_auto_attach_by_default() {
+        let config: Config = toml::from_str(r#"mode = "neutron_managed""#).unwrap();
+
+        assert_eq!(config.mode, AgentMode::NeutronManaged);
+        assert!(!config.requested_auto_attach());
+        assert!(!config.effective_auto_attach());
+        assert!(config.neutron_socket_enabled());
+    }
+
+    #[test]
+    fn startup_mode_neutron_managed_ignores_explicit_auto_attach_true() {
+        let config: Config = toml::from_str(
+            r#"
+mode = "neutron_managed"
+auto_attach = true
+"#,
+        )
+        .unwrap();
+
+        assert!(config.requested_auto_attach());
+        assert!(!config.effective_auto_attach());
+    }
+
+    #[test]
+    fn startup_mode_standalone_can_disable_auto_attach() {
+        let config: Config = toml::from_str(r#"auto_attach = false"#).unwrap();
+
+        assert_eq!(config.mode, AgentMode::Standalone);
+        assert!(!config.requested_auto_attach());
+        assert!(!config.effective_auto_attach());
+    }
 }

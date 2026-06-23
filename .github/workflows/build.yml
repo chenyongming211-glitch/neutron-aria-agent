@@ -47,6 +47,11 @@ jobs:
         run: |
           command -v bpf-linker >/dev/null 2>&1 || cargo +nightly install bpf-linker
 
+      - name: Test aria-agent Neutron attach authority
+        run: |
+          cargo +stable test -p aria-agent startup_mode
+          cargo +stable test -p aria-agent neutron_snapshot_plan
+
       - name: Build eBPF
         run: |
           export LD_LIBRARY_PATH="$(rustc +nightly --print sysroot)/lib:${LD_LIBRARY_PATH:-}"
