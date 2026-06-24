@@ -20,6 +20,8 @@ START_CONTAINER="${START_CONTAINER:-true}"
 PRIVILEGED="${PRIVILEGED:-true}"
 HOST_PID="${HOST_PID:-true}"
 WAIT_SECONDS="${WAIT_SECONDS:-20}"
+UDS_READY_RETRIES="${UDS_READY_RETRIES:-20}"
+UDS_READY_INTERVAL="${UDS_READY_INTERVAL:-1}"
 REQUIRE_NO_ACTIVE_INSTANCES="${REQUIRE_NO_ACTIVE_INSTANCES:-true}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 
@@ -216,7 +218,19 @@ assert_container_boundary() {
 }
 
 curl_uds() {
-    curl --silent --show-error --fail --unix-socket "${SOCKET_PATH}" "$@"
+    local attempt
+    local output
+    for attempt in $(seq 1 "${UDS_READY_RETRIES}"); do
+        if output="$(curl --silent --show-error --fail --unix-socket "${SOCKET_PATH}" "$@" 2>&1)"; then
+            printf '%s' "${output}"
+            return 0
+        fi
+        if [ "${attempt}" -lt "${UDS_READY_RETRIES}" ]; then
+            sleep "${UDS_READY_INTERVAL}"
+        fi
+    done
+    printf '%s\n' "${output}" >&2
+    return 1
 }
 
 check_uds_contract() {
