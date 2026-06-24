@@ -16,6 +16,8 @@ FIX_UDS_PERMISSIONS="${FIX_UDS_PERMISSIONS:-false}"
 LEGACY_VALIDATE_OVSDB_IN_NEUTRON_AGENT="${LEGACY_VALIDATE_OVSDB_IN_NEUTRON_AGENT:-false}"
 ROLLBACK="${ROLLBACK:-true}"
 MIN_MANAGED_PORTS="${MIN_MANAGED_PORTS:-0}"
+EXPECTED_PORT_ID="${EXPECTED_PORT_ID:-}"
+EXPECTED_IFNAME="${EXPECTED_IFNAME:-}"
 
 die() {
     echo "ERROR: $*" >&2
@@ -235,7 +237,7 @@ docker_exec_env neutron-aria-agent \
 
 echo "Checking post-snapshot status"
 managed_count="$(
-    docker_exec_env python - "${SOCKET_PATH}" <<'PY'
+    docker_exec_env python - "${SOCKET_PATH}" "${EXPECTED_PORT_ID}" "${EXPECTED_IFNAME}" <<'PY'
 from __future__ import print_function
 
 import json
@@ -244,10 +246,32 @@ import sys
 from neutron_aria.agent.uds_client import LocalClient
 
 client = LocalClient(sys.argv[1], timeout=3.0)
+expected_port_id = sys.argv[2]
+expected_ifname = sys.argv[3]
 status = client.status()
 managed = status.get("managed_ports") or []
 print(json.dumps(status, sort_keys=True))
 print("MANAGED_COUNT=%d" % len(managed))
+if expected_port_id:
+    matches = [
+        port for port in managed
+        if port.get("port_id") == expected_port_id
+        and (not expected_ifname or port.get("ifname") == expected_ifname)
+    ]
+    if not matches:
+        raise SystemExit(
+            "expected managed port not found: port_id=%s ifname=%s" % (
+                expected_port_id,
+                expected_ifname,
+            )
+        )
+    matched = matches[0]
+    print("EXPECTED_PORT_FOUND port_id=%s ifname=%s ifindex=%s domains=%s" % (
+        matched.get("port_id"),
+        matched.get("ifname"),
+        matched.get("ifindex"),
+        ",".join(matched.get("managed_domains") or []),
+    ))
 PY
 )"
 echo "${managed_count}"
