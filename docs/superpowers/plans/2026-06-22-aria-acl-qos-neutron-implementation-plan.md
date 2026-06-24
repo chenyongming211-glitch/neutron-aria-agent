@@ -671,6 +671,38 @@ The `neutron-aria-agent` now has a product packaging skeleton and safer full-res
 - Final UDS status returned `active_instances=[]` and `managed_ports=[]`; `ip -d link show` showed no XDP attachment left on the two tap ports.
 - Long-running `neutron_aria_agent` remains heartbeat-only by default. RPC event consumption remains disabled.
 
+**Product deployment boundary correction, 2026-06-24:**
+
+The full-resync smoke above intentionally used a temporary root/OVSDB path to
+prove the old snapshot mechanics. That is not the final product shape.
+
+Final product container boundary:
+
+- `aria-datapath`: independent Kolla container, privileged or granted the
+  required datapath capabilities. It owns eBPF load/attach, map writes, tap
+  access, OVS/tap identity validation, `/sys/fs/bpf`, `/run/openvswitch`,
+  `/var/lib/aria-agent`, and `/run/aria/aria-agent.sock`.
+- `neutron-aria-agent`: independent Kolla container, non-privileged, runs as
+  the image's `neutron` user, does not mount `/run/openvswitch`, `/sys/fs/bpf`,
+  or `/lib/modules`, and only talks to `aria-datapath` through
+  `/run/aria/aria-agent.sock`.
+
+Required follow-up before production full-resync:
+
+- Change the Python snapshot builder from authoritative OVSDB inventory to
+  Neutron logical candidate projection.
+- Extend the Rust UDS snapshot contract so `aria-datapath` validates
+  `br-int` membership, OVS `external_ids:iface-id`, tap existence, ifindex,
+  and supported/unsupported reasons locally.
+- Move current `OvsdbInterfaceReader` usage out of the product path. Keep it
+  only in legacy smoke/tests until the new UDS contract is verified.
+- Add a non-privileged container smoke asserting `neutron_aria_agent` is not
+  privileged, runs as `neutron`, has `/run/aria` mounted, and has no
+  `/run/openvswitch` mount.
+- Add an `aria-datapath` Kolla container smoke that proves UDS readiness,
+  `neutron_managed` mode, `auto_attach=false`, OVS/tap validation, attach,
+  and cleanup.
+
 The implemented full-resync source is legacy `python-neutronclient` with OS_* credentials. This is adequate for the first Kolla service smoke and controlled lab testing. The RPC event path is intentionally not hard-coded yet; it must be matched against the onsite Neutron source or `/usr/lib/python2.7/site-packages/neutron` callback/topic implementation before enabling event merge in production.
 
 **Real environment smoke, 2026-06-24:**
@@ -1120,7 +1152,8 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 - [x] Install Python 2 compatible package.
 - [x] Mount Neutron config and messaging credentials.
 - [x] Mount `/run/aria` for full-resync smoke.
-- [ ] Read OVSDB with the least privilege available in the target product. Current smoke uses root because the target OVSDB socket is root-only.
+- [ ] Remove OVSDB access from the `neutron-aria-agent` product path. Current root/OVSDB access is legacy smoke only.
+- [ ] Move OVS/tap identity validation into `aria-datapath` UDS handling.
 - [x] Ensure it does not mount `/sys/fs/bpf` and does not require eBPF privileges.
 - [x] Default to heartbeat-only service mode until full-resync dependencies are present.
 - [x] Provide heartbeat smoke for `neutron agent-list` and `agent-show`.
@@ -1140,6 +1173,9 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 - [ ] Mount `/sys/kernel/btf/vmlinux` read-only when needed.
 - [ ] Mount `/run/aria`.
 - [ ] Mount `/var/lib/aria-agent`.
+- [ ] Mount `/run/openvswitch` or provide equivalent OVSDB access for local tap validation.
+- [ ] Run as privileged initially; later narrow to CAP_NET_ADMIN, BPF, PERFMON, SYS_RESOURCE and required host namespace access where the target kernel/runtime supports it.
+- [ ] Set `mode = "neutron_managed"` and `auto_attach = false`.
 - [ ] Provide log path and metrics endpoint according to product standards.
 
 ### 8.4 Rollout And Rollback

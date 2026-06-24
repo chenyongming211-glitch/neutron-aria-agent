@@ -1563,7 +1563,6 @@ neutron-db-manage current 正常
 Python 2 compatible Neutron adapter
 RPC consumer
 full resync
-OVSDB read-only mapping
 UDS client
 heartbeat reporter
 ```
@@ -1576,23 +1575,30 @@ heartbeat reporter
 /var/lib/neutron-aria-agent/
 ```
 
-在当前产品环境中，还需要读取或挂载：
+在当前产品环境中，还需要读取或挂载 Neutron 配置：
 
 ```text
 /etc/kolla/neutron-openvswitch-agent/openvswitch_agent.ini
 /etc/kolla/neutron-server/neutron.conf 或等价 oslo messaging 配置
-/run/openvswitch/db.sock
 ```
 
 权限：
 
 - 需要访问 Neutron RPC 配置。
-- 需要读 OVSDB 或通过 host 工具查询 `br-int` 端口。
 - 需要访问 `/run/aria/aria-agent.sock`。
 - 不需要 `/sys/fs/bpf`。
 - 不需要 eBPF capability。
+- 不需要 `/run/openvswitch`。
+- 不需要特权容器。
 
-端口发现必须以现场验证过的 OVSDB external_ids 为主：
+产品边界修正：
+
+- `neutron-aria-agent` 只消费 Neutron 逻辑状态，生成候选 port snapshot。
+- `neutron-aria-agent` 不直接读 OVSDB，不判断本机 tap 是否真实在 `br-int` 上。
+- 本地 OVS/tap/ifindex 校验下沉到 `aria-agent / aria-datapath`，通过 UDS response 返回 structured result。
+- 当前 root + OVSDB full-resync smoke 仅用于验证旧契约可行性，不能作为最终产品形态。
+
+端口身份校验必须以现场验证过的 OVSDB external_ids 为主，但执行位置在 `aria-datapath`：
 
 ```text
 ovs-vsctl list Interface <tap>
@@ -1618,9 +1624,6 @@ integration_bridge = br-int
 integration_mode = coexist
 enable_acl = true
 enable_qos = true
-
-[ovs]
-ovsdb_connection = unix:/run/openvswitch/db.sock
 ```
 
 三节点部署注意：
@@ -1630,7 +1633,7 @@ ovsdb_connection = unix:/run/openvswitch/db.sock
 - 三台均已挂载 bpffs 且 BTF 可读。
 - 三台宿主机当前均缺少 `tc` 命令，QoS shaping 不能作为第一阶段默认承诺。
 - `ostack2` 当前存在 eligible VM OVS tap；`ostack3` 当前只有 DHCP 类 OVS internal port；`ostack4` 当前没有 br-int Neutron port。
-- 上线前必须给 `neutron-aria-agent` 容器足够权限读取 OVSDB，不依赖 SSH 受限命令。
+- 上线前必须给 `aria-datapath` 容器足够权限读取 OVSDB/访问 tap，不依赖 SSH 受限命令。
 - 三台 compute 的 agent 配置、镜像 tag 和 socket 权限必须一致。
 
 ### 12.3 aria-agent 容器
@@ -1644,6 +1647,7 @@ runtime status
 Unix socket server
 ACL/QoS apply
 metrics
+OVS/tap identity validation
 ```
 
 需要权限：
@@ -1652,6 +1656,7 @@ metrics
 - `/sys/fs/bpf`。
 - `/run/aria`。
 - `/var/lib/aria-agent`。
+- `/run/openvswitch` 或等价 OVSDB 访问能力。
 - 访问 tap interface 和 netlink。
 
 现场已确认 `ostack2` 有 bpffs 和 BTF：

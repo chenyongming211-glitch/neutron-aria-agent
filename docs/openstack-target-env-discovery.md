@@ -198,7 +198,7 @@ Boundary:
 - The long-running `neutron_aria_agent` service remains heartbeat-only in its default config.
 - RPC event consumption remains disabled.
 - The Rust `aria-agent` used here is a temporary host process, not yet a product Kolla service.
-- Product deployment still needs an explicit OVSDB least-privilege decision: either run this container as root, as tested, or provide a shared group that can read the OVSDB socket.
+- This root/OVSDB path is legacy smoke only. Final product shape must keep `neutron-aria-agent` non-privileged and move OVSDB/tap validation into the privileged `aria-datapath` container.
 
 ## 7. Unsupported Port 类型
 

@@ -33,9 +33,14 @@ For a controlled full-resync gate smoke after local `aria-agent` UDS is ready:
 sudo deploy/kolla/smoke/neutron_aria_full_resync_smoke.sh
 ```
 
-The full-resync smoke checks `/run/aria`, UDS capabilities, OVSDB access,
-legacy neutronclient credentials, one snapshot submission, and UDS rollback.
-It refuses to continue if the local UDS already has managed ports.
+The current full-resync smoke is a temporary legacy gate. It checks `/run/aria`,
+UDS capabilities, OVSDB access, legacy neutronclient credentials, one snapshot
+submission, and UDS rollback. It refuses to continue if the local UDS already
+has managed ports.
+
+This smoke does not define the final product boundary. The final product
+boundary keeps `neutron-aria-agent` non-privileged and moves local tap/OVS
+validation into the privileged `aria-datapath` container.
 
 ## Kolla Config Files
 
@@ -55,14 +60,15 @@ neutron-aria-agent.ini
 
 ## Required Mounts
 
-Heartbeat-only mode needs Neutron RPC access only. Full-resync mode additionally
-needs OVS and local Aria access:
+Product mode needs Neutron config/log access and local Aria UDS access:
 
 ```text
 /run/aria:/run/aria
-/var/run/openvswitch:/var/run/openvswitch
 /var/log/kolla/neutron:/var/log/kolla/neutron
 ```
+
+`neutron-aria-agent` should not mount `/sys/fs/bpf`, `/lib/modules`, or
+`/run/openvswitch` in the final product shape.
 
 ## Log Path
 
@@ -131,6 +137,8 @@ If credentials or OVS are missing, `neutron-aria-agent` should remain alive but
 degraded, and retry full resync with exponential backoff.
 
 In the current target environment, `/run/openvswitch/db.sock` is owned by
-`root:root` and is not readable by the image's `neutron` user. The smoke image
-therefore runs `neutron-aria-agent` as root until the product deployment
-provides a least-privilege OVSDB access group.
+`root:root` and is not readable by the image's `neutron` user. The temporary
+full-resync smoke may use a root `docker exec` path for OVSDB validation, but
+that path must be replaced before product rollout. The product solution is for
+`aria-datapath` to validate local tap/OVS state and report structured results
+over `/run/aria/aria-agent.sock`.

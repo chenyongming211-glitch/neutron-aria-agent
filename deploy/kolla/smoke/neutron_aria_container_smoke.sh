@@ -13,6 +13,9 @@ STOP_EMBEDDED_SMOKE="${STOP_EMBEDDED_SMOKE:-true}"
 BUILD_IMAGE="${BUILD_IMAGE:-true}"
 MOUNT_RUN_ARIA="${MOUNT_RUN_ARIA:-false}"
 RUN_ARIA_DIR="${RUN_ARIA_DIR:-/run/aria}"
+PRIVILEGED="${PRIVILEGED:-false}"
+MOUNT_OVSDB="${MOUNT_OVSDB:-false}"
+MOUNT_LIB_MODULES="${MOUNT_LIB_MODULES:-false}"
 
 echo "Building service image: ${IMAGE}"
 
@@ -51,16 +54,25 @@ docker_run_args=(
     -d
     --name "${SERVICE_NAME}"
     --net=host
-    --privileged
     --restart unless-stopped
     -e KOLLA_CONFIG_STRATEGY=COPY_ALWAYS
     -e KOLLA_SERVICE_NAME=neutron-aria-agent
     -v "${CONFIG_DIR}/:/var/lib/kolla/config_files/:ro"
-    -v /run/openvswitch:/run/openvswitch:shared
-    -v /lib/modules:/lib/modules:ro
     -v /etc/localtime:/etc/localtime:ro
     -v kolla_logs:/var/log/kolla/:rw
 )
+
+if [ "${PRIVILEGED}" = "true" ]; then
+    docker_run_args+=(--privileged)
+fi
+
+if [ "${MOUNT_OVSDB}" = "true" ]; then
+    docker_run_args+=(-v /run/openvswitch:/run/openvswitch:shared)
+fi
+
+if [ "${MOUNT_LIB_MODULES}" = "true" ]; then
+    docker_run_args+=(-v /lib/modules:/lib/modules:ro)
+fi
 
 if [ "${MOUNT_RUN_ARIA}" = "true" ]; then
     if [ ! -d "${RUN_ARIA_DIR}" ]; then

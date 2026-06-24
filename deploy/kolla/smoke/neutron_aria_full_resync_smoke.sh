@@ -88,6 +88,7 @@ ensure_run_aria_mount() {
 
     echo "Restarting ${SERVICE_NAME} with ${RUN_ARIA_DIR} mounted"
     MOUNT_RUN_ARIA=true \
+        MOUNT_OVSDB=true \
         RUN_ARIA_DIR="${RUN_ARIA_DIR}" \
         BUILD_IMAGE=false \
         STOP_EMBEDDED_SMOKE=false \
@@ -171,7 +172,7 @@ ensure_container_running
 fix_uds_permissions
 
 docker exec "${SERVICE_NAME}" test -S "${SOCKET_PATH}" || die "${SOCKET_PATH} is not visible in ${SERVICE_NAME}"
-docker exec "${SERVICE_NAME}" ovs-vsctl --timeout=5 br-exists "${OVS_BRIDGE}" || die "${OVS_BRIDGE} is not visible in ${SERVICE_NAME}"
+docker exec -u "${EXEC_USER}" "${SERVICE_NAME}" ovs-vsctl --timeout=5 br-exists "${OVS_BRIDGE}" || die "${OVS_BRIDGE} is not visible in ${SERVICE_NAME}"
 
 echo "Checking UDS capabilities and initial status"
 docker_exec_env python - "${SOCKET_PATH}" <<'PY'
