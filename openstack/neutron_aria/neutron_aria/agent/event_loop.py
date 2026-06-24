@@ -2,7 +2,7 @@ from __future__ import absolute_import
 
 import logging
 
-from neutron_aria.agent.inventory import PortInventoryBuilder
+from neutron_aria.agent.inventory import PortCandidateBuilder
 from neutron_aria.agent.status import AgentRuntimeStatus
 from neutron_aria.agent.uds_client import LocalApiError
 
@@ -49,15 +49,12 @@ class SnapshotSynchronizer(object):
     def full_resync(self):
         self.check_capabilities()
         ports = self._list_ports()
-        interfaces = self.ovs_reader.list_interfaces()
-        builder = PortInventoryBuilder(
+        builder = PortCandidateBuilder(
             self.host,
             managed_domains=self.managed_domains,
-            ovs_bridge=self.ovs_bridge,
         )
         snapshot = builder.build_snapshot(
             ports,
-            interfaces,
             generation=self.generation_store.next(),
         )
         response = self.local_client.put_snapshot(snapshot)

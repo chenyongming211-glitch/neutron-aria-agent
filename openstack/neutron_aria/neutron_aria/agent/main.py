@@ -12,7 +12,6 @@ from neutron_aria.agent.neutron_client import NeutronClientFactoryError
 from neutron_aria.agent.neutron_client import StaticPortSource
 from neutron_aria.agent.neutron_client import UnavailablePortSource
 from neutron_aria.agent.neutron_client import build_port_source
-from neutron_aria.agent.ovsdb import OvsdbInterfaceReader
 from neutron_aria.agent.rpc import AriaAgentRpcCallback
 from neutron_aria.agent.rpc import build_rpc_connection
 from neutron_aria.agent.rpc import start_rpc_consumers
@@ -60,7 +59,7 @@ def build_synchronizer(config, neutron_port_source=None, status_reporter=None):
     return SnapshotSynchronizer(
         host=host,
         port_source=port_source,
-        ovs_reader=OvsdbInterfaceReader(bridge_name=config.ovs_bridge),
+        ovs_reader=None,
         local_client=LocalClient(config.socket_path, timeout=config.request_timeout),
         managed_domains=config.managed_domains,
         ovs_bridge=config.ovs_bridge,

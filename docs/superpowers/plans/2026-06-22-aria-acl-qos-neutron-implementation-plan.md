@@ -689,17 +689,17 @@ Final product container boundary:
 
 Required follow-up before production full-resync:
 
-- Change the Python snapshot builder from authoritative OVSDB inventory to
+- [x] Change the Python snapshot builder from authoritative OVSDB inventory to
   Neutron logical candidate projection.
-- Extend the Rust UDS snapshot contract so `aria-datapath` validates
+- [x] Extend the Rust UDS snapshot contract so `aria-datapath` validates
   `br-int` membership, OVS `external_ids:iface-id`, tap existence, ifindex,
   and supported/unsupported reasons locally.
-- Move current `OvsdbInterfaceReader` usage out of the product path. Keep it
+- [x] Move current `OvsdbInterfaceReader` usage out of the product path. Keep it
   only in legacy smoke/tests until the new UDS contract is verified.
-- Add a non-privileged container smoke asserting `neutron_aria_agent` is not
+- [x] Add a non-privileged container smoke asserting `neutron_aria_agent` is not
   privileged, runs as `neutron`, has `/run/aria` mounted, and has no
   `/run/openvswitch` mount.
-- Add an `aria-datapath` Kolla container smoke that proves UDS readiness,
+- [ ] Add an `aria-datapath` Kolla container smoke that proves UDS readiness,
   `neutron_managed` mode, `auto_attach=false`, OVS/tap validation, attach,
   and cleanup.
 
@@ -1148,12 +1148,13 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 - Create: `deploy/kolla/config/neutron-aria-agent.ini`
 - Create: `deploy/kolla/smoke/neutron_aria_heartbeat_smoke.sh`
 - Create: `deploy/kolla/smoke/neutron_aria_full_resync_smoke.sh`
+- Create: `deploy/kolla/smoke/neutron_aria_boundary_smoke.sh`
 
 - [x] Install Python 2 compatible package.
 - [x] Mount Neutron config and messaging credentials.
 - [x] Mount `/run/aria` for full-resync smoke.
-- [ ] Remove OVSDB access from the `neutron-aria-agent` product path. Current root/OVSDB access is legacy smoke only.
-- [ ] Move OVS/tap identity validation into `aria-datapath` UDS handling.
+- [x] Remove OVSDB access from the `neutron-aria-agent` product path. Current root/OVSDB access is legacy smoke only.
+- [x] Move OVS/tap identity validation into `aria-datapath` UDS handling.
 - [x] Ensure it does not mount `/sys/fs/bpf` and does not require eBPF privileges.
 - [x] Default to heartbeat-only service mode until full-resync dependencies are present.
 - [x] Provide heartbeat smoke for `neutron agent-list` and `agent-show`.
@@ -1166,7 +1167,12 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 **Files:**
 - Create: `deploy/kolla/aria-agent/Dockerfile`
 - Create: `deploy/kolla/config/aria-agent-openstack.toml`
+- Create: `deploy/kolla/aria-datapath/Dockerfile`
+- Create: `deploy/kolla/aria-datapath/config.json`
+- Create: `deploy/kolla/aria-datapath/start-aria-datapath.sh`
+- Create: `deploy/kolla/aria-datapath/README.md`
 
+- [x] Add Kolla packaging skeleton for the `aria-datapath` service.
 - [ ] Include existing `aria-agent` binary.
 - [ ] Include eBPF artifacts.
 - [ ] Mount `/sys/fs/bpf`.

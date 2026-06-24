@@ -97,7 +97,8 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertEqual(1, len(local_client.snapshots))
         port = local_client.snapshots[0]["ports"][0]
         self.assertTrue(port["eligible"])
-        self.assertEqual("tapaaaaaaaa-aa", port["ifname"])
+        self.assertEqual("", port["ifname"])
+        self.assertEqual("pending_local_validation", port["disposition"])
         self.assertEqual(
             set(["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]),
             sync.projected_port_ids,

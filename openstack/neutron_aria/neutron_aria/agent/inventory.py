@@ -10,6 +10,7 @@ except ImportError:
 
 
 ELIGIBLE_OVS_TAP = "eligible_ovs_tap"
+PENDING_LOCAL_VALIDATION = "pending_local_validation"
 NOT_LOCAL_HOST = "not_local_host"
 TAP_NOT_FOUND = "tap_not_found"
 IFINDEX_NOT_READY = "ifindex_not_ready"
@@ -180,6 +181,102 @@ class PortInventoryBuilder(object):
             "vnic_type": vnic_type,
             "network_backend": "openvswitch",
             "ovs_iface_id": ovs_iface_id,
+            "managed_domains": list(self.managed_domains) if eligible else [],
+        }
+
+    def _with_effective_domains(self, neutron_port, snapshot_port):
+        if self.acl_index is not None:
+            snapshot_port["acl"] = self.acl_index.effective_for_port(
+                neutron_port,
+                snapshot_port,
+            )
+        if self.qos_index is not None:
+            snapshot_port["qos"] = self.qos_index.effective_for_port(
+                neutron_port,
+                snapshot_port,
+            )
+        return snapshot_port
+
+
+class PortCandidateBuilder(object):
+    """Build a Neutron-logical candidate snapshot.
+
+    Product-mode neutron-aria-agent must not read OVSDB or inspect local tap
+    interfaces. It projects Neutron's authoritative logical state and lets the
+    local aria-datapath UDS endpoint validate br-int membership, ifname, and
+    ifindex before attach.
+    """
+
+    def __init__(self, host, managed_domains=None, acl_index=None, qos_index=None):
+        self.host = host
+        self.managed_domains = list(managed_domains or ["acl"])
+        self.acl_index = acl_index
+        self.qos_index = qos_index
+
+    def build_snapshot(self, neutron_ports, generation):
+        ports = []
+        for port in neutron_ports:
+            if port_get(port, "binding:host_id") not in (None, "", self.host):
+                continue
+            ports.append(self._snapshot_port(port))
+        return {
+            "generation": generation,
+            "host": self.host,
+            "ports": ports,
+        }
+
+    def _snapshot_port(self, port):
+        port_id = port.get("id") or port.get("port_id") or ""
+        device_owner = port.get("device_owner")
+        vif_type = port_get(port, "binding:vif_type")
+        vnic_type = port_get(port, "binding:vnic_type")
+
+        if not is_compute_owner(device_owner):
+            return self._with_effective_domains(port, self._port_dict(
+                port_id, False,
+                "not_applicable_device_owner:%s" % device_owner,
+                device_owner, vif_type, vnic_type,
+            ))
+
+        if vif_type not in (None, "", "ovs"):
+            return self._with_effective_domains(port, self._port_dict(
+                port_id, False,
+                "unsupported_vif_type:%s" % vif_type,
+                device_owner, vif_type, vnic_type,
+            ))
+
+        if not is_normal_vnic(vnic_type):
+            return self._with_effective_domains(port, self._port_dict(
+                port_id, False,
+                "unsupported_vnic_type:%s" % vnic_type,
+                device_owner, vif_type, vnic_type,
+            ))
+
+        return self._with_effective_domains(port, self._port_dict(
+            port_id, True, PENDING_LOCAL_VALIDATION,
+            device_owner, vif_type or "ovs", vnic_type or "normal",
+        ))
+
+    def _port_dict(
+        self,
+        port_id,
+        eligible,
+        disposition,
+        device_owner,
+        vif_type,
+        vnic_type,
+    ):
+        return {
+            "port_id": port_id,
+            "ifname": "",
+            "ifindex": None,
+            "eligible": bool(eligible),
+            "disposition": disposition,
+            "device_owner": device_owner,
+            "vif_type": vif_type,
+            "vnic_type": vnic_type,
+            "network_backend": "openvswitch",
+            "ovs_iface_id": None,
             "managed_domains": list(self.managed_domains) if eligible else [],
         }
 

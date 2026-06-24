@@ -1,9 +1,9 @@
+mode = "neutron_managed"
+auto_attach = false
+
 ebpf_path = "/usr/local/lib/libebpf_firewall.so"
 trace_backend = "auto"
 trace_auto_allow_ringbuf = false
-
-mode = "neutron_managed"
-auto_attach = false
 
 pin_path = "/sys/fs/bpf/aria"
 state_path = "/var/lib/aria-agent"
@@ -12,7 +12,8 @@ max_port_policies = 16384
 
 listen_addr = "127.0.0.1:8080"
 neutron_socket_path = "/run/aria/aria-agent.sock"
+ovs_bridge = "br-int"
 
 log_format = "text"
 log_filter = "info"
-log_file_path = "/var/log/aria-agent/aria-agent.log"
+log_file_path = "/var/log/kolla/aria-datapath/aria-datapath.log"

@@ -4,6 +4,8 @@ import unittest
 
 from neutron_aria.agent.inventory import ELIGIBLE_OVS_TAP
 from neutron_aria.agent.inventory import OVS_BRIDGE_MISMATCH
+from neutron_aria.agent.inventory import PENDING_LOCAL_VALIDATION
+from neutron_aria.agent.inventory import PortCandidateBuilder
 from neutron_aria.agent.inventory import PortInventoryBuilder
 from neutron_aria.agent.inventory import TAP_NOT_FOUND
 from neutron_aria.agent.ovsdb import OvsInterface
@@ -154,6 +156,37 @@ class AgentInventoryTestCase(unittest.TestCase):
         self.assertEqual("acl-port", vm_entry["acl"]["policy_id"])
         self.assertEqual("qos-port", vm_entry["qos"]["policy_id"])
         self.assertEqual(100000, vm_entry["qos"]["rules"][0]["max_kbps"])
+
+    def test_candidate_snapshot_defers_local_tap_validation_to_datapath(self):
+        ports = [
+            neutron_port(VM_PORT),
+            neutron_port(DHCP_PORT, owner="network:dhcp"),
+            neutron_port(SRIOV_PORT, vif_type="hw_veb", vnic_type="direct"),
+            neutron_port(REMOTE_PORT, host="ostack3"),
+        ]
+        builder = PortCandidateBuilder("ostack2", managed_domains=["acl"])
+
+        snapshot = builder.build_snapshot(ports, generation=10)
+        by_port = dict((entry["port_id"], entry) for entry in snapshot["ports"])
+
+        self.assertEqual(10, snapshot["generation"])
+        self.assertNotIn(REMOTE_PORT, by_port)
+
+        vm_entry = by_port[VM_PORT]
+        self.assertTrue(vm_entry["eligible"])
+        self.assertEqual(PENDING_LOCAL_VALIDATION, vm_entry["disposition"])
+        self.assertEqual("", vm_entry["ifname"])
+        self.assertEqual(None, vm_entry["ifindex"])
+        self.assertEqual(None, vm_entry["ovs_iface_id"])
+        self.assertEqual(["acl"], vm_entry["managed_domains"])
+
+        dhcp_entry = by_port[DHCP_PORT]
+        self.assertFalse(dhcp_entry["eligible"])
+        self.assertEqual("not_applicable_device_owner:network:dhcp", dhcp_entry["disposition"])
+
+        sriov_entry = by_port[SRIOV_PORT]
+        self.assertFalse(sriov_entry["eligible"])
+        self.assertEqual("unsupported_vif_type:hw_veb", sriov_entry["disposition"])
 
 
 if __name__ == "__main__":

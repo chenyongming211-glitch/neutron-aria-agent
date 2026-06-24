@@ -10,9 +10,10 @@ RUN_ARIA_DIR="${RUN_ARIA_DIR:-/run/aria}"
 SOCKET_PATH="${SOCKET_PATH:-/run/aria/aria-agent.sock}"
 OVS_BRIDGE="${OVS_BRIDGE:-br-int}"
 SMOKE_CONFIG="${SMOKE_CONFIG:-/tmp/neutron-aria-agent-full-resync.ini}"
-EXEC_USER="${EXEC_USER:-root}"
+EXEC_USER="${EXEC_USER:-neutron}"
 AUTO_RESTART_WITH_RUN_ARIA="${AUTO_RESTART_WITH_RUN_ARIA:-true}"
 FIX_UDS_PERMISSIONS="${FIX_UDS_PERMISSIONS:-false}"
+LEGACY_VALIDATE_OVSDB_IN_NEUTRON_AGENT="${LEGACY_VALIDATE_OVSDB_IN_NEUTRON_AGENT:-false}"
 ROLLBACK="${ROLLBACK:-true}"
 MIN_MANAGED_PORTS="${MIN_MANAGED_PORTS:-0}"
 
@@ -88,7 +89,6 @@ ensure_run_aria_mount() {
 
     echo "Restarting ${SERVICE_NAME} with ${RUN_ARIA_DIR} mounted"
     MOUNT_RUN_ARIA=true \
-        MOUNT_OVSDB=true \
         RUN_ARIA_DIR="${RUN_ARIA_DIR}" \
         BUILD_IMAGE=false \
         STOP_EMBEDDED_SMOKE=false \
@@ -157,14 +157,17 @@ cleanup() {
 trap cleanup EXIT
 
 need_command docker
-need_command ovs-vsctl
 source_adminrc
 require_openstack_env
 
 [ -d "${RUN_ARIA_DIR}" ] || die "missing ${RUN_ARIA_DIR}"
 [ -S "${SOCKET_PATH}" ] || die "missing UDS socket ${SOCKET_PATH}"
-[ -S /run/openvswitch/db.sock ] || die "missing /run/openvswitch/db.sock"
-ovs-vsctl --timeout=5 br-exists "${OVS_BRIDGE}" || die "missing OVS bridge ${OVS_BRIDGE}"
+
+if [ "${LEGACY_VALIDATE_OVSDB_IN_NEUTRON_AGENT}" = "true" ]; then
+    need_command ovs-vsctl
+    [ -S /run/openvswitch/db.sock ] || die "missing /run/openvswitch/db.sock"
+    ovs-vsctl --timeout=5 br-exists "${OVS_BRIDGE}" || die "missing OVS bridge ${OVS_BRIDGE}"
+fi
 
 ensure_container_running
 ensure_run_aria_mount
@@ -172,7 +175,9 @@ ensure_container_running
 fix_uds_permissions
 
 docker exec "${SERVICE_NAME}" test -S "${SOCKET_PATH}" || die "${SOCKET_PATH} is not visible in ${SERVICE_NAME}"
-docker exec -u "${EXEC_USER}" "${SERVICE_NAME}" ovs-vsctl --timeout=5 br-exists "${OVS_BRIDGE}" || die "${OVS_BRIDGE} is not visible in ${SERVICE_NAME}"
+if [ "${LEGACY_VALIDATE_OVSDB_IN_NEUTRON_AGENT}" = "true" ]; then
+    docker exec -u "${EXEC_USER}" "${SERVICE_NAME}" ovs-vsctl --timeout=5 br-exists "${OVS_BRIDGE}" || die "${OVS_BRIDGE} is not visible in ${SERVICE_NAME}"
+fi
 
 echo "Checking UDS capabilities and initial status"
 docker_exec_env python - "${SOCKET_PATH}" <<'PY'

@@ -27,20 +27,27 @@ The smoke starts an independent `neutron_aria_agent` container in
 heartbeat-only mode. It does not enable full resync, RPC events, snapshot
 submission, or tap datapath writes.
 
+To assert the product container boundary:
+
+```bash
+sudo deploy/kolla/smoke/neutron_aria_boundary_smoke.sh
+```
+
+The boundary smoke verifies that `neutron_aria_agent` is non-privileged, runs
+as `neutron`, and does not mount OVSDB, BPF, or kernel module paths.
+
 For a controlled full-resync gate smoke after local `aria-agent` UDS is ready:
 
 ```bash
 sudo deploy/kolla/smoke/neutron_aria_full_resync_smoke.sh
 ```
 
-The current full-resync smoke is a temporary legacy gate. It checks `/run/aria`,
-UDS capabilities, OVSDB access, legacy neutronclient credentials, one snapshot
-submission, and UDS rollback. It refuses to continue if the local UDS already
-has managed ports.
+The full-resync smoke checks `/run/aria`, UDS capabilities, legacy
+neutronclient credentials, one candidate snapshot submission, and UDS rollback.
+It refuses to continue if the local UDS already has managed ports.
 
-This smoke does not define the final product boundary. The final product
-boundary keeps `neutron-aria-agent` non-privileged and moves local tap/OVS
-validation into the privileged `aria-datapath` container.
+Local tap/OVS validation is performed by the privileged `aria-datapath`
+container behind the UDS socket, not by this container.
 
 ## Kolla Config Files
 
@@ -128,17 +135,15 @@ Do not enable full resync until all of these are true:
 
 - `aria-agent` is deployed in `neutron_managed` mode.
 - `/run/aria/aria-agent.sock` is mounted into this container.
-- `/var/run/openvswitch` is mounted and `ovs-vsctl list-ports br-int` works.
 - OS_* credentials are provided to the container for legacy neutronclient.
 - `[neutron] port_source = neutronclient`.
 - `[agent] full_resync_enabled = true`.
+- `aria-datapath` can validate local OVS/tap state through its own privileged
+  runtime.
 
 If credentials or OVS are missing, `neutron-aria-agent` should remain alive but
 degraded, and retry full resync with exponential backoff.
 
 In the current target environment, `/run/openvswitch/db.sock` is owned by
-`root:root` and is not readable by the image's `neutron` user. The temporary
-full-resync smoke may use a root `docker exec` path for OVSDB validation, but
-that path must be replaced before product rollout. The product solution is for
-`aria-datapath` to validate local tap/OVS state and report structured results
-over `/run/aria/aria-agent.sock`.
+`root:root` and is not readable by the image's `neutron` user. That is why
+OVSDB access belongs to `aria-datapath`, not `neutron-aria-agent`.

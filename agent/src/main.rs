@@ -59,6 +59,8 @@ struct Config {
     listen_addr: String,
     #[serde(default = "default_neutron_socket_path")]
     neutron_socket_path: String,
+    #[serde(default = "default_ovs_bridge")]
+    ovs_bridge: String,
     #[serde(default = "default_log_format")]
     log_format: String,
     #[serde(default = "default_log_filter")]
@@ -123,6 +125,10 @@ fn default_neutron_socket_path() -> String {
     "/run/aria/aria-agent.sock".to_string()
 }
 
+fn default_ovs_bridge() -> String {
+    "br-int".to_string()
+}
+
 fn default_log_format() -> String {
     "text".to_string()
 }
@@ -149,6 +155,7 @@ impl Default for Config {
             max_port_policies: default_max_port_policies(),
             listen_addr: default_listen_addr(),
             neutron_socket_path: default_neutron_socket_path(),
+            ovs_bridge: default_ovs_bridge(),
             log_format: default_log_format(),
             log_filter: default_log_filter(),
             log_file_path: default_log_file_path(),
@@ -405,6 +412,7 @@ async fn main() {
         max_port_policies = config.max_port_policies,
         listen_addr = %config.listen_addr,
         neutron_socket_path = %config.neutron_socket_path,
+        ovs_bridge = %config.ovs_bridge,
         log_format = %config.log_format,
         log_filter = %config.log_filter,
         log_file_path = %config.log_file_path,
@@ -554,7 +562,11 @@ async fn main() {
     });
 
     let neutron_task = neutron_listener.map(|listener| {
-        let router = neutron_api::build_router(registry.clone(), control_plane.clone());
+        let router = neutron_api::build_router(
+            registry.clone(),
+            control_plane.clone(),
+            config.ovs_bridge.clone(),
+        );
         tokio::spawn(async move {
             info!(socket_path = %neutron_socket_path, "Neutron UDS API server listening");
             if let Err(e) = axum::serve(listener, router).await {
