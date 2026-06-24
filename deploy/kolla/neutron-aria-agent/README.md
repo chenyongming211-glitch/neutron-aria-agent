@@ -17,6 +17,16 @@ docker build \
   .
 ```
 
+For a host-local smoke using the currently deployed OVS agent image as the base:
+
+```bash
+sudo deploy/kolla/smoke/neutron_aria_container_smoke.sh
+```
+
+The smoke starts an independent `neutron_aria_agent` container in
+heartbeat-only mode. It does not enable full resync, RPC events, snapshot
+submission, or tap datapath writes.
+
 ## Kolla Config Files
 
 The container expects a Kolla config directory mounted as

@@ -1,0 +1,10 @@
+.git
+.github
+.vscode
+.downloads
+outputs
+target
+**/target
+**/__pycache__
+*.pyc
+*.pyo

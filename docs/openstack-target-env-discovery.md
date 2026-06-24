@@ -138,6 +138,31 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 - `rpc_events_enabled=false` 时，不会消费 Neutron event，不会提交 snapshot，不会触碰 tap datapath。
 - 进入真实 event smoke 前，必须先把 `full_resync_enabled=true`、`port_source=neutronclient`、UDS socket、OVS mount 和回滚流程补齐。
 
+### 6.3 2026-06-24 Independent Kolla Container Smoke
+
+Hosts: `ostack2.bj159.net`, `ostack3.bj159.net`, `ostack4.bj159.net`
+
+Deployment shape:
+- Built `neutron-aria-agent:smoke-e68e1aa` from the onsite OVS agent image family.
+- Started an independent container named `neutron_aria_agent` on each host.
+- Prepared Kolla config under `/etc/kolla/neutron-aria-agent`.
+- Kept product-safe heartbeat-only mode:
+  - `full_resync_enabled = false`
+  - `port_source = disabled`
+  - `rpc_events_enabled = false`
+- Logs are written to `/var/log/kolla/neutron/neutron-aria-agent.log`.
+
+Validation result:
+- The previous temporary embedded `neutron-aria-agent` process inside `neutron_openvswitch_agent` was stopped on all three hosts.
+- The independent `neutron_aria_agent` container is `Up` on all three hosts.
+- Logs on all three hosts show `agent_start`, `service_initialize`, `heartbeat_reported`, and `service_result`.
+- `neutron agent-list` shows alive `Aria ACL agent` entries for all three hosts.
+
+Boundary:
+- This is an independent Kolla-style container smoke, not yet a full product Kolla rollout or registry-published image flow.
+- Full resync, RPC event consumption, UDS snapshot submission, and tap datapath writes remain disabled.
+- Before enabling full-resync smoke, the next gate is local `aria-agent` UDS readiness, OVS mount validation, rollback flow, and authoritative port-source credentials.
+
 ## 7. Unsupported Port 类型
 
 | port 类型 | 命令 / 检查 | 期望 | 实际 | 证据路径 | 失败动作 |

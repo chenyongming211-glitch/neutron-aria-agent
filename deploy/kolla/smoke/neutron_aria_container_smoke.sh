@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE_NAME="${SERVICE_NAME:-neutron_aria_agent}"
+BASE_CONTAINER="${BASE_CONTAINER:-neutron_openvswitch_agent}"
+BASE_IMAGE="${BASE_IMAGE:-}"
+IMAGE="${IMAGE:-neutron-aria-agent:smoke}"
+CONFIG_DIR="${CONFIG_DIR:-/etc/kolla/neutron-aria-agent}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+HOST_FQDN="${HOST_FQDN:-$(hostname -f)}"
+ADMINRC="${ADMINRC:-/root/adminrc}"
+STOP_EMBEDDED_SMOKE="${STOP_EMBEDDED_SMOKE:-true}"
+BUILD_IMAGE="${BUILD_IMAGE:-true}"
+
+if [ "${BASE_IMAGE}" = "" ]; then
+    BASE_IMAGE="$(docker inspect "${BASE_CONTAINER}" --format '{{.Config.Image}}')"
+fi
+
+echo "Using base image: ${BASE_IMAGE}"
+echo "Building service image: ${IMAGE}"
+
+if [ "${BUILD_IMAGE}" = "true" ]; then
+    docker build \
+        --build-arg BASE_IMAGE="${BASE_IMAGE}" \
+        -f "${REPO_ROOT}/deploy/kolla/neutron-aria-agent/Dockerfile" \
+        -t "${IMAGE}" \
+        "${REPO_ROOT}"
+fi
+
+echo "Preparing Kolla config directory: ${CONFIG_DIR}"
+mkdir -p "${CONFIG_DIR}"
+cp /etc/kolla/neutron-openvswitch-agent/neutron.conf "${CONFIG_DIR}/neutron.conf"
+cp /etc/kolla/neutron-openvswitch-agent/openvswitch_agent.ini "${CONFIG_DIR}/openvswitch_agent.ini"
+cp "${REPO_ROOT}/deploy/kolla/neutron-aria-agent/config.json" "${CONFIG_DIR}/config.json"
+sed "s/^host =.*/host = ${HOST_FQDN}/" \
+    "${REPO_ROOT}/deploy/kolla/config/neutron-aria-agent.ini" \
+    > "${CONFIG_DIR}/neutron-aria-agent.ini"
+
+if [ "${STOP_EMBEDDED_SMOKE}" = "true" ] && docker ps --format '{{.Names}}' | grep -qx "${BASE_CONTAINER}"; then
+    echo "Stopping temporary embedded neutron-aria-agent process in ${BASE_CONTAINER}"
+    docker exec -u root "${BASE_CONTAINER}" pkill -f '[n]eutron_aria.agent.main' || true
+    docker exec -u root "${BASE_CONTAINER}" pkill -f '[n]eutron-aria-agent.ini' || true
+fi
+
+echo "Starting independent container: ${SERVICE_NAME}"
+docker rm -f "${SERVICE_NAME}" >/dev/null 2>&1 || true
+docker run -d \
+    --name "${SERVICE_NAME}" \
+    --net=host \
+    --privileged \
+    --restart unless-stopped \
+    -e KOLLA_CONFIG_STRATEGY=COPY_ALWAYS \
+    -e KOLLA_SERVICE_NAME=neutron-aria-agent \
+    -v "${CONFIG_DIR}/:/var/lib/kolla/config_files/:ro" \
+    -v /run/openvswitch:/run/openvswitch:shared \
+    -v /lib/modules:/lib/modules:ro \
+    -v /etc/localtime:/etc/localtime:ro \
+    -v kolla_logs:/var/log/kolla/:rw \
+    "${IMAGE}"
+
+sleep "${SMOKE_WAIT_SECONDS:-8}"
+
+echo "Container status:"
+docker ps --filter "name=${SERVICE_NAME}" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+
+echo "Agent log tail:"
+docker exec "${SERVICE_NAME}" sh -c 'tail -n 30 /var/log/kolla/neutron/neutron-aria-agent.log'
+
+if [ -r "${ADMINRC}" ]; then
+    # shellcheck disable=SC1090
+    source "${ADMINRC}"
+fi
+
+if command -v neutron >/dev/null 2>&1; then
+    echo "Neutron agent-list entry:"
+    neutron agent-list | grep "Aria ACL agent" | grep " ${HOST_FQDN} "
+elif docker ps --format '{{.Names}}' | grep -qx openstack_client; then
+    neutron() {
+        docker exec \
+            -u root \
+            -e OS_USERNAME="${OS_USERNAME:-}" \
+            -e OS_PASSWORD="${OS_PASSWORD:-}" \
+            -e OS_TENANT_NAME="${OS_TENANT_NAME:-}" \
+            -e OS_AUTH_URL="${OS_AUTH_URL:-}" \
+            -e OS_NO_CACHE="${OS_NO_CACHE:-true}" \
+            -e OS_AUTH_STRATEGY="${OS_AUTH_STRATEGY:-keystone}" \
+            -e OS_REGION_NAME="${OS_REGION_NAME:-}" \
+            -e NEUTRON_ENDPOINT_TYPE="${NEUTRON_ENDPOINT_TYPE:-publicURL}" \
+            openstack_client neutron "$@"
+    }
+    echo "Neutron agent-list entry:"
+    neutron agent-list | grep "Aria ACL agent" | grep " ${HOST_FQDN} "
+else
+    echo "neutron command not found; skipping control-plane list check"
+fi
+
+echo "neutron-aria-agent independent container smoke passed on ${HOST_FQDN}"

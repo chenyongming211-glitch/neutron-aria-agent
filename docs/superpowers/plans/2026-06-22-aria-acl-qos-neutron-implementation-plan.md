@@ -635,11 +635,25 @@ The `neutron-aria-agent` now has a product packaging skeleton and safer full-res
   - `full_resync_enabled = false`
   - `[neutron] port_source = disabled`
 - `deploy/kolla/smoke/neutron_aria_heartbeat_smoke.sh` validates that all expected hosts show an alive `Aria ACL agent`.
+- `deploy/kolla/smoke/neutron_aria_container_smoke.sh` builds and starts an independent `neutron_aria_agent` container from the onsite OVS agent image family for heartbeat-only service smoke.
 - Full resync no longer falls back to an empty static port list. If full resync is enabled without `[neutron] port_source = neutronclient` and OS_* credentials, the agent reports degraded and does not submit an empty snapshot.
 - `AgentService` uses exponential backoff for degraded full-resync attempts:
   - `resync_backoff_initial`
   - `resync_backoff_max`
   - success resets backoff to the normal `resync_interval`.
+
+**Implementation checkpoint, 2026-06-24 independent Kolla container smoke:**
+
+- Built `neutron-aria-agent:smoke-e68e1aa` from the onsite OVS agent image family on the target compute hosts.
+- Started an independent `neutron_aria_agent` container on `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net`.
+- Stopped the previous temporary embedded `neutron-aria-agent` process inside `neutron_openvswitch_agent` on all three hosts.
+- Verified `/var/log/kolla/neutron/neutron-aria-agent.log` contains `agent_start`, `service_initialize`, `heartbeat_reported`, and `service_result`.
+- Verified `neutron agent-list` shows alive `Aria ACL agent` entries for all three hosts.
+- Kept the smoke in heartbeat-only mode:
+  - `full_resync_enabled = false`
+  - `port_source = disabled`
+  - `rpc_events_enabled = false`
+- Full resync, RPC event consumption, UDS snapshot submission, and tap datapath writes are still intentionally disabled.
 
 The implemented full-resync source is legacy `python-neutronclient` with OS_* credentials. This is adequate for the first Kolla service smoke and controlled lab testing. The RPC event path is intentionally not hard-coded yet; it must be matched against the onsite Neutron source or `/usr/lib/python2.7/site-packages/neutron` callback/topic implementation before enabling event merge in production.
 
@@ -1094,6 +1108,7 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 - [x] Default to heartbeat-only service mode until full-resync dependencies are present.
 - [x] Provide heartbeat smoke for `neutron agent-list` and `agent-show`.
 - [x] Write product logs to `/var/log/kolla/neutron/neutron-aria-agent.log`.
+- [x] Run independent `neutron_aria_agent` Kolla container smoke on each compute host.
 
 ### 8.3 Aria-Agent Image
 
