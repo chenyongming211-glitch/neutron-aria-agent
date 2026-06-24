@@ -21,6 +21,7 @@ PRIVILEGED="${PRIVILEGED:-true}"
 HOST_PID="${HOST_PID:-true}"
 WAIT_SECONDS="${WAIT_SECONDS:-20}"
 REQUIRE_NO_ACTIVE_INSTANCES="${REQUIRE_NO_ACTIVE_INSTANCES:-true}"
+PYTHON_BIN="${PYTHON_BIN:-}"
 
 die() {
     echo "ERROR: $*" >&2
@@ -45,7 +46,7 @@ json_check() {
     REQUIRE_NO_ACTIVE_INSTANCES="${REQUIRE_NO_ACTIVE_INSTANCES:-}" \
         JSON_PAYLOAD="${value}" \
         JSON_NAME="${name}" \
-        python - <<'PY'
+        "${PYTHON_BIN}" - <<'PY'
 from __future__ import print_function
 
 import json
@@ -231,7 +232,7 @@ check_uds_contract() {
 
     fake_port_id="00000000-0000-4000-8000-000000000001"
     snapshot="$(
-        python - "${fake_port_id}" <<'PY'
+        "${PYTHON_BIN}" - "${fake_port_id}" <<'PY'
 from __future__ import print_function
 
 import json
@@ -274,7 +275,10 @@ PY
 
 need_command docker
 need_command curl
-need_command python
+if [ -z "${PYTHON_BIN}" ]; then
+    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+fi
+[ -n "${PYTHON_BIN}" ] || die "missing command: python3 or python"
 
 build_image
 prepare_config
