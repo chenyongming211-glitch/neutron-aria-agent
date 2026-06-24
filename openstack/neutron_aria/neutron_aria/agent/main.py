@@ -6,7 +6,10 @@ import sys
 
 from neutron_aria.agent.config import load_config
 from neutron_aria.agent.event_loop import SnapshotSynchronizer
+from neutron_aria.agent.neutron_client import NeutronClientFactoryError
 from neutron_aria.agent.neutron_client import StaticPortSource
+from neutron_aria.agent.neutron_client import UnavailablePortSource
+from neutron_aria.agent.neutron_client import build_port_source
 from neutron_aria.agent.ovsdb import OvsdbInterfaceReader
 from neutron_aria.agent.service import AgentService
 from neutron_aria.agent.status_reporter import build_neutron_status_reporter
@@ -19,7 +22,15 @@ def _default_host(config):
 
 def build_synchronizer(config, neutron_port_source=None, status_reporter=None):
     host = _default_host(config)
-    port_source = neutron_port_source or StaticPortSource([])
+    port_source = neutron_port_source
+    if port_source is None:
+        if config.full_resync_enabled:
+            try:
+                port_source = build_port_source(config, host)
+            except NeutronClientFactoryError as exc:
+                port_source = UnavailablePortSource(str(exc))
+        else:
+            port_source = StaticPortSource([])
     return SnapshotSynchronizer(
         host=host,
         port_source=port_source,
@@ -114,6 +125,8 @@ def main(argv=None):
         full_resync_enabled=config.full_resync_enabled,
         report_interval=config.report_interval,
         resync_interval=config.resync_interval,
+        resync_backoff_initial=config.resync_backoff_initial,
+        resync_backoff_max=config.resync_backoff_max,
     )
     if options.report_once:
         result = service.initialize()

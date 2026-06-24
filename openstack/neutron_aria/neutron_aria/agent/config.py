@@ -10,6 +10,7 @@ DEFAULT_SOCKET_PATH = "/run/aria/aria-agent.sock"
 DEFAULT_OVS_BRIDGE = "br-int"
 DEFAULT_MANAGED_DOMAINS = ("acl",)
 DEFAULT_REPORT_INTERVAL = 30
+DEFAULT_PORT_SOURCE = "disabled"
 
 
 class AgentConfig(object):
@@ -23,6 +24,10 @@ class AgentConfig(object):
         resync_interval=60,
         report_interval=DEFAULT_REPORT_INTERVAL,
         full_resync_enabled=False,
+        port_source=DEFAULT_PORT_SOURCE,
+        port_page_size=None,
+        resync_backoff_initial=5,
+        resync_backoff_max=300,
     ):
         self.host = host
         self.ovs_bridge = ovs_bridge
@@ -32,6 +37,10 @@ class AgentConfig(object):
         self.resync_interval = int(resync_interval)
         self.report_interval = int(report_interval)
         self.full_resync_enabled = bool(full_resync_enabled)
+        self.port_source = port_source or DEFAULT_PORT_SOURCE
+        self.port_page_size = int(port_page_size) if port_page_size else None
+        self.resync_backoff_initial = int(resync_backoff_initial)
+        self.resync_backoff_max = int(resync_backoff_max)
 
 
 def _get(parser, section, option, default=None):
@@ -68,4 +77,8 @@ def load_config(path):
             _get(parser, "agent", "full_resync_enabled", "false"),
             default=False,
         ),
+        port_source=_get(parser, "neutron", "port_source", DEFAULT_PORT_SOURCE),
+        port_page_size=_get(parser, "neutron", "port_page_size"),
+        resync_backoff_initial=_get(parser, "agent", "resync_backoff_initial", "5"),
+        resync_backoff_max=_get(parser, "agent", "resync_backoff_max", "300"),
     )

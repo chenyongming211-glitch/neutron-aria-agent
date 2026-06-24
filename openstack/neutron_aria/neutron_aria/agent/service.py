@@ -16,6 +16,8 @@ class AgentService(object):
         full_resync_enabled=False,
         report_interval=30,
         resync_interval=60,
+        resync_backoff_initial=5,
+        resync_backoff_max=300,
         clock=None,
         sleeper=None,
     ):
@@ -23,6 +25,12 @@ class AgentService(object):
         self.full_resync_enabled = bool(full_resync_enabled)
         self.report_interval = max(1, int(report_interval))
         self.resync_interval = max(1, int(resync_interval))
+        self.resync_backoff_initial = max(1, int(resync_backoff_initial))
+        self.resync_backoff_max = max(
+            self.resync_backoff_initial,
+            int(resync_backoff_max),
+        )
+        self.current_resync_backoff = 0
         self.clock = clock or time.time
         self.sleeper = sleeper or time.sleep
         self.initialized = False
@@ -34,7 +42,7 @@ class AgentService(object):
         self.initialized = True
         if self.full_resync_enabled:
             result = self.synchronizer.safe_full_resync()
-            self.next_resync_at = now + self.resync_interval
+            self.next_resync_at = now + self._next_resync_delay(result)
             self.next_report_at = now + self.report_interval
             return result
 
@@ -58,7 +66,7 @@ class AgentService(object):
         now = self.clock()
         if self.full_resync_enabled and now >= self.next_resync_at:
             result = self.synchronizer.safe_full_resync()
-            self.next_resync_at = now + self.resync_interval
+            self.next_resync_at = now + self._next_resync_delay(result)
             self.next_report_at = now + self.report_interval
             return result
 
@@ -87,3 +95,20 @@ class AgentService(object):
         while True:
             self.run_once()
             self.sleeper(self.sleep_interval())
+
+    def _next_resync_delay(self, result):
+        status = result.get("status") or {}
+        heartbeat = result.get("heartbeat")
+        heartbeat_failed = heartbeat is not None and not heartbeat.get("ok", False)
+        if status.get("degraded") or heartbeat_failed:
+            if self.current_resync_backoff:
+                self.current_resync_backoff = min(
+                    self.current_resync_backoff * 2,
+                    self.resync_backoff_max,
+                )
+            else:
+                self.current_resync_backoff = self.resync_backoff_initial
+            return self.current_resync_backoff
+
+        self.current_resync_backoff = 0
+        return self.resync_interval

@@ -489,7 +489,8 @@ Expected: shows source `port`, `network`, or `none`.
 - [x] Add `safe_full_resync()` and an `AgentRuntimeStatus` model that turns UDS/local API failures into `local_api_degraded` instead of crashing the loop.
 - [x] Wire `AgentRuntimeStatus.heartbeat_payload()` into the real Neutron agent heartbeat path.
 - [x] Add a long-running service launcher with periodic Neutron heartbeat.
-- [ ] Add retry/backoff and event merge before full-resync service mode is enabled by default.
+- [x] Add retry/backoff before full-resync service mode is enabled.
+- [ ] Add event merge and real RPC event wiring before full-resync service mode is enabled by default.
 
 **Expected visible result:**
 
@@ -614,6 +615,24 @@ Aria ACL agent | ostack4.bj159.net | :-) | True | neutron-aria-agent
 ```
 
 This proves the `neutron-aria-agent` heartbeat path is compatible with the onsite legacy Neutron RPC stack. The smoke deployment is temporary and container-local; it is not persistent across container rebuild/restart. Product delivery still needs a Kolla service definition or image layer.
+
+**Implementation checkpoint, 2026-06-24 Kolla/full-resync safety update:**
+
+The `neutron-aria-agent` now has a product packaging skeleton and safer full-resync gate:
+
+- `deploy/kolla/neutron-aria-agent/Dockerfile` builds an image from the existing Neutron agent base image and installs the Python 2 compatible `neutron_aria` package.
+- `deploy/kolla/neutron-aria-agent/config.json` follows the onsite Kolla config-file pattern observed in `neutron_openvswitch_agent`.
+- `deploy/kolla/config/neutron-aria-agent.ini` now defaults to heartbeat-only:
+  - `full_resync_enabled = false`
+  - `[neutron] port_source = disabled`
+- `deploy/kolla/smoke/neutron_aria_heartbeat_smoke.sh` validates that all expected hosts show an alive `Aria ACL agent`.
+- Full resync no longer falls back to an empty static port list. If full resync is enabled without `[neutron] port_source = neutronclient` and OS_* credentials, the agent reports degraded and does not submit an empty snapshot.
+- `AgentService` uses exponential backoff for degraded full-resync attempts:
+  - `resync_backoff_initial`
+  - `resync_backoff_max`
+  - success resets backoff to the normal `resync_interval`.
+
+The implemented full-resync source is legacy `python-neutronclient` with OS_* credentials. This is adequate for the first Kolla service smoke and controlled lab testing. The RPC event path is intentionally not hard-coded yet; it must be matched against the onsite Neutron source or `/usr/lib/python2.7/site-packages/neutron` callback/topic implementation before enabling event merge in production.
 
 **Real environment smoke, 2026-06-24:**
 
@@ -1035,13 +1054,18 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 
 **Files:**
 - Create: `deploy/kolla/neutron-aria-agent/Dockerfile`
+- Create: `deploy/kolla/neutron-aria-agent/config.json`
+- Create: `deploy/kolla/neutron-aria-agent/README.md`
 - Create: `deploy/kolla/config/neutron-aria-agent.ini`
+- Create: `deploy/kolla/smoke/neutron_aria_heartbeat_smoke.sh`
 
-- [ ] Install Python 2 compatible package.
-- [ ] Mount Neutron config and messaging credentials.
+- [x] Install Python 2 compatible package.
+- [x] Mount Neutron config and messaging credentials.
 - [ ] Mount `/run/aria`.
 - [ ] Read OVSDB with the least privilege available in the target product.
-- [ ] Ensure it does not mount `/sys/fs/bpf` and does not require eBPF privileges.
+- [x] Ensure it does not mount `/sys/fs/bpf` and does not require eBPF privileges.
+- [x] Default to heartbeat-only service mode until full-resync dependencies are present.
+- [x] Provide heartbeat smoke for `neutron agent-list` and `agent-show`.
 
 ### 8.3 Aria-Agent Image
 

@@ -47,6 +47,19 @@ class FakeSynchronizer(object):
         }
 
 
+class DegradedSynchronizer(FakeSynchronizer):
+    def safe_full_resync(self):
+        self.resync_calls += 1
+        self.runtime_status.mark_degraded("resync_degraded", "port source unavailable")
+        heartbeat = self.report_status()
+        return {
+            "snapshot": None,
+            "response": None,
+            "status": self.runtime_status.to_dict(),
+            "heartbeat": heartbeat,
+        }
+
+
 class AgentServiceTestCase(unittest.TestCase):
     def test_heartbeat_only_initialize_reports_degraded_without_resync(self):
         clock = FakeClock()
@@ -95,6 +108,8 @@ class AgentServiceTestCase(unittest.TestCase):
             full_resync_enabled=True,
             report_interval=5,
             resync_interval=30,
+            resync_backoff_initial=3,
+            resync_backoff_max=12,
             clock=clock,
         )
 
@@ -105,6 +120,7 @@ class AgentServiceTestCase(unittest.TestCase):
         self.assertTrue(result["status"]["ready"])
         self.assertEqual(5, service.next_report_at)
         self.assertEqual(30, service.next_resync_at)
+        self.assertEqual(0, service.current_resync_backoff)
 
     def test_full_resync_run_once_prefers_resync_deadline(self):
         clock = FakeClock()
@@ -126,6 +142,34 @@ class AgentServiceTestCase(unittest.TestCase):
         self.assertEqual(2, result["snapshot"]["generation"])
         self.assertEqual(15, service.next_report_at)
         self.assertEqual(20, service.next_resync_at)
+
+    def test_full_resync_degraded_uses_exponential_backoff(self):
+        clock = FakeClock()
+        sync = DegradedSynchronizer()
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            resync_backoff_initial=3,
+            resync_backoff_max=10,
+            clock=clock,
+        )
+
+        first = service.initialize()
+        self.assertTrue(first["status"]["degraded"])
+        self.assertEqual(3, service.current_resync_backoff)
+        self.assertEqual(3, service.next_resync_at)
+
+        clock.advance(3)
+        service.run_once()
+        self.assertEqual(6, service.current_resync_backoff)
+        self.assertEqual(9, service.next_resync_at)
+
+        clock.advance(6)
+        service.run_once()
+        self.assertEqual(10, service.current_resync_backoff)
+        self.assertEqual(19, service.next_resync_at)
 
 
 if __name__ == "__main__":

@@ -4,3 +4,8 @@
 Cargo.lock linguist-generated=true
 Dockerfile.builder linguist-language=Dockerfile
 *.spec linguist-detectable=false
+
+# Deployment assets must keep Unix newlines when copied into Linux containers.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.json text eol=lf

@@ -18,6 +18,8 @@ managed_domains = acl,qos
 resync_interval = 120
 report_interval = 15
 full_resync_enabled = true
+resync_backoff_initial = 7
+resync_backoff_max = 77
 
 [ovs]
 bridge = br-int
@@ -25,6 +27,10 @@ bridge = br-int
 [aria]
 socket_path = /run/aria/aria-agent.sock
 request_timeout = 2.5
+
+[neutron]
+port_source = neutronclient
+port_page_size = 50
 """)
             os.close(fd)
             fd = None
@@ -36,6 +42,10 @@ request_timeout = 2.5
             self.assertEqual(120, config.resync_interval)
             self.assertEqual(15, config.report_interval)
             self.assertTrue(config.full_resync_enabled)
+            self.assertEqual(7, config.resync_backoff_initial)
+            self.assertEqual(77, config.resync_backoff_max)
+            self.assertEqual("neutronclient", config.port_source)
+            self.assertEqual(50, config.port_page_size)
             self.assertEqual("br-int", config.ovs_bridge)
             self.assertEqual("/run/aria/aria-agent.sock", config.socket_path)
             self.assertEqual(2.5, config.request_timeout)
