@@ -17,6 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check repository text policy
+        run: python3 ci/check_blocked_terms.py
+
       - name: Test neutron-aria Python adapter
         run: |
           PYTHONPATH=openstack/neutron_aria \
