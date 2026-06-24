@@ -57,11 +57,21 @@ def linux_ifindex(ifname):
 
 
 class PortInventoryBuilder(object):
-    def __init__(self, host, managed_domains=None, ifindex_lookup=None, ovs_bridge="br-int"):
+    def __init__(
+        self,
+        host,
+        managed_domains=None,
+        ifindex_lookup=None,
+        ovs_bridge="br-int",
+        acl_index=None,
+        qos_index=None,
+    ):
         self.host = host
         self.managed_domains = list(managed_domains or ["acl"])
         self.ifindex_lookup = ifindex_lookup or linux_ifindex
         self.ovs_bridge = ovs_bridge
+        self.acl_index = acl_index
+        self.qos_index = qos_index
 
     def build_snapshot(self, neutron_ports, ovs_interfaces, generation):
         ports = []
@@ -94,58 +104,58 @@ class PortInventoryBuilder(object):
         ovs_iface_id = iface.external_ids.get("iface-id") if iface is not None else None
 
         if not is_compute_owner(device_owner):
-            return self._port_dict(
+            return self._with_effective_domains(port, self._port_dict(
                 port_id, ifname, None, False,
                 "not_applicable_device_owner:%s" % device_owner,
                 device_owner, vif_type, vnic_type, ovs_iface_id,
-            )
+            ))
 
         if vif_type not in (None, "", "ovs"):
-            return self._port_dict(
+            return self._with_effective_domains(port, self._port_dict(
                 port_id, ifname, None, False,
                 "unsupported_vif_type:%s" % vif_type,
                 device_owner, vif_type, vnic_type, ovs_iface_id,
-            )
+            ))
 
         if not is_normal_vnic(vnic_type):
-            return self._port_dict(
+            return self._with_effective_domains(port, self._port_dict(
                 port_id, ifname, None, False,
                 "unsupported_vnic_type:%s" % vnic_type,
                 device_owner, vif_type, vnic_type, ovs_iface_id,
-            )
+            ))
 
         if iface is None:
-            return self._port_dict(
+            return self._with_effective_domains(port, self._port_dict(
                 port_id, ifname, None, False, TAP_NOT_FOUND,
                 device_owner, vif_type, vnic_type, ovs_iface_id,
-            )
+            ))
 
         if iface.bridge != self.ovs_bridge:
-            return self._port_dict(
+            return self._with_effective_domains(port, self._port_dict(
                 port_id, ifname, None, False,
                 "%s:%s" % (OVS_BRIDGE_MISMATCH, self.ovs_bridge),
                 device_owner, vif_type, vnic_type, ovs_iface_id,
-            )
+            ))
 
         ifindex = iface.ifindex
         if ifindex is None:
             try:
                 ifindex = self.ifindex_lookup(iface.name)
             except EnvironmentError:
-                return self._port_dict(
+                return self._with_effective_domains(port, self._port_dict(
                     port_id, ifname, None, False, IFINDEX_NOT_READY,
                     device_owner, vif_type, vnic_type, ovs_iface_id,
-                )
+                ))
             except OSError:
-                return self._port_dict(
+                return self._with_effective_domains(port, self._port_dict(
                     port_id, ifname, None, False, IFINDEX_NOT_READY,
                     device_owner, vif_type, vnic_type, ovs_iface_id,
-                )
+                ))
 
-        return self._port_dict(
+        return self._with_effective_domains(port, self._port_dict(
             port_id, ifname, ifindex, True, ELIGIBLE_OVS_TAP,
             device_owner, vif_type or "ovs", vnic_type or "normal", ovs_iface_id,
-        )
+        ))
 
     def _port_dict(
         self,
@@ -172,3 +182,16 @@ class PortInventoryBuilder(object):
             "ovs_iface_id": ovs_iface_id,
             "managed_domains": list(self.managed_domains) if eligible else [],
         }
+
+    def _with_effective_domains(self, neutron_port, snapshot_port):
+        if self.acl_index is not None:
+            snapshot_port["acl"] = self.acl_index.effective_for_port(
+                neutron_port,
+                snapshot_port,
+            )
+        if self.qos_index is not None:
+            snapshot_port["qos"] = self.qos_index.effective_for_port(
+                neutron_port,
+                snapshot_port,
+            )
+        return snapshot_port

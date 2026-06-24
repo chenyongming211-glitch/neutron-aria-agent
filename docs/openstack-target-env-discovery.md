@@ -107,6 +107,32 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 - Neutron event 是 fanout，Aria 不能对所有收到的 delete/update 都直接操作本地 datapath；必须结合本机 projected state 和 `binding:host_id` 过滤。
 - 当前没有 ACL/QoS translator 与 network->local ports 索引时，port/network update 只能触发 full-resync 或安全忽略，不能硬猜增量 port-scoped snapshot。
 
+### 6.2 2026-06-24 RPC skeleton 测试部署记录
+
+执行节点：`ostack2.bj159.net`、`ostack3.bj159.net`、`ostack4.bj159.net`
+
+部署形态：
+
+- 临时测试部署，源码位于各节点 `neutron_openvswitch_agent` 容器内 `/tmp/neutron_aria_agent_src`。
+- 进程命令保持 `--heartbeat-only`。
+- `/tmp/neutron-aria-agent.ini` 保持：
+  - `full_resync_enabled = false`
+  - `port_source = disabled`
+  - `rpc_events_enabled = false`
+  - `event_merge_interval = 0.2`
+
+验证结果：
+
+- 三台容器内均存在最新 `neutron_aria/agent/event_merge.py` 与 `neutron_aria/agent/rpc.py`。
+- 三台 `--report-once` 均可成功向 Neutron 上报 heartbeat。
+- 控制面查询 `neutron agent-list` 可见三个 `Aria ACL agent`，host 分别为 `ostack2.bj159.net`、`ostack3.bj159.net`、`ostack4.bj159.net`，alive 均为 `:-)`。
+
+边界说明：
+
+- 这是 RPC/event-merge 代码的 heartbeat-only 部署确认，不代表已经打开 RabbitMQ event consumer。
+- `rpc_events_enabled=false` 时，不会消费 Neutron event，不会提交 snapshot，不会触碰 tap datapath。
+- 进入真实 event smoke 前，必须先把 `full_resync_enabled=true`、`port_source=neutronclient`、UDS socket、OVS mount 和回滚流程补齐。
+
 ## 7. Unsupported Port 类型
 
 | port 类型 | 命令 / 检查 | 期望 | 实际 | 证据路径 | 失败动作 |

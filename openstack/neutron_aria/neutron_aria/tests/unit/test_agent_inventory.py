@@ -7,6 +7,8 @@ from neutron_aria.agent.inventory import OVS_BRIDGE_MISMATCH
 from neutron_aria.agent.inventory import PortInventoryBuilder
 from neutron_aria.agent.inventory import TAP_NOT_FOUND
 from neutron_aria.agent.ovsdb import OvsInterface
+from neutron_aria.agent.effective_acl import EffectiveAclIndex
+from neutron_aria.agent.effective_qos import EffectiveQosIndex
 
 
 VM_PORT = "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f"
@@ -105,6 +107,53 @@ class AgentInventoryTestCase(unittest.TestCase):
         self.assertFalse(port["eligible"])
         self.assertEqual(OVS_BRIDGE_MISMATCH + ":br-int", port["disposition"])
         self.assertEqual([], port["managed_domains"])
+
+    def test_snapshot_can_include_effective_acl_and_qos_extensions(self):
+        interfaces = [
+            OvsInterface(
+                "tape607e86b-9e",
+                external_ids={"iface-id": VM_PORT},
+                ifindex=27,
+                bridge="br-int",
+            ),
+        ]
+        port = neutron_port(VM_PORT)
+        port["network_id"] = "net-1"
+        port["qos_policy_id"] = "qos-port"
+        acl_index = EffectiveAclIndex(
+            policies=[{"id": "acl-port", "default_action": "allow"}],
+            bindings=[
+                {
+                    "id": "acl-binding",
+                    "policy_id": "acl-port",
+                    "target_type": "port",
+                    "target_id": VM_PORT,
+                },
+            ],
+        )
+        qos_index = EffectiveQosIndex(
+            policies=[
+                {
+                    "id": "qos-port",
+                    "rules": [{"id": "qos-rule", "max_kbps": 100000}],
+                },
+            ],
+        )
+        builder = PortInventoryBuilder(
+            "ostack2",
+            managed_domains=["acl", "qos"],
+            ifindex_lookup=lambda _name: 27,
+            acl_index=acl_index,
+            qos_index=qos_index,
+        )
+
+        snapshot = builder.build_snapshot([port], interfaces, generation=9)
+        vm_entry = snapshot["ports"][0]
+
+        self.assertEqual(["acl", "qos"], vm_entry["managed_domains"])
+        self.assertEqual("acl-port", vm_entry["acl"]["policy_id"])
+        self.assertEqual("qos-port", vm_entry["qos"]["policy_id"])
+        self.assertEqual(100000, vm_entry["qos"]["rules"][0]["max_kbps"])
 
 
 if __name__ == "__main__":

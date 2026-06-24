@@ -459,13 +459,13 @@ Expected: `neutron-aria-agent` shows alive on each enabled compute.
 - Create: `openstack/neutron_aria/neutron_aria/agent/effective_acl.py`
 - Test: `openstack/neutron_aria/neutron_aria/tests/unit/test_effective_acl.py`
 
-- [ ] Resolve port-level binding first.
-- [ ] Resolve network-level binding second.
-- [ ] Return no ACL for unsupported/not_applicable ports.
-- [ ] Expand address-set members into snapshot-ready structures.
-- [ ] Sort rules by direction and ascending priority.
-- [ ] Compute `effective_revision` from policy/rules/address-sets/binding revisions.
-- [ ] Emit `not_requested + bypass` when no binding exists.
+- [x] Resolve port-level binding first.
+- [x] Resolve network-level binding second.
+- [x] Return no ACL for unsupported/not_applicable ports.
+- [x] Expand address-set members into snapshot-ready structures.
+- [x] Sort rules by direction and ascending priority.
+- [x] Compute `effective_revision` from policy/rules/address-sets/binding revisions.
+- [x] Emit `not_requested + bypass` when no binding exists.
 
 **Expected visible result:**
 
@@ -660,6 +660,20 @@ The implemented full-resync source is legacy `python-neutronclient` with OS_* cr
 - Environment note:
   - In this product environment, `neutron` CLI is a shell function from `/root/adminrc` wrapping `docker exec openstack_client neutron`.
   - Product `neutron-aria-agent` must use Neutron client/RPC wiring, not this shell function; CLI was only used for smoke data extraction.
+
+**RPC skeleton deployment and ACL/QoS translator checkpoint, 2026-06-24:**
+
+- Latest `neutron-aria-agent` Python code, including RPC event merge skeleton files, was temporarily deployed into the three onsite `neutron_openvswitch_agent` containers under `/tmp/neutron_aria_agent_src`.
+- Runtime mode remained heartbeat-only:
+  - `full_resync_enabled = false`
+  - `port_source = disabled`
+  - `rpc_events_enabled = false`
+- Observed result: `neutron agent-list` shows alive `Aria ACL agent` entries for `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net`.
+- Boundary: this proves package layout and heartbeat compatibility with the target legacy Neutron runtime. It does not enable RPC event consumption, full-resync, snapshot submission, or datapath apply.
+- `effective_acl.py` now computes per-port effective Aria ACL from product ACL policies, rules, address sets, and port/network bindings.
+- `effective_qos.py` now computes per-port Aria QoS from native Neutron QoS policy semantics, with port policy taking precedence over network policy.
+- `inventory.PortInventoryBuilder` can embed optional `acl` and `qos` extension payloads into each snapshot port when the corresponding indexes are provided.
+- Remaining boundary: Neutron Server API/DB/CLI for `aria-acl` and the product `aria-qos` facade still require the target legacy Neutron source tree. Rust `aria-agent` also still needs the ACL/QoS snapshot DTO and apply path before these translator results can affect eBPF maps.
 
 ### 4.5 Runtime Status Reporting
 
@@ -1001,13 +1015,13 @@ neutron aria-qos-status-show --port $PORT_ID
 
 - [ ] Pull QoS policy bound to port.
 - [ ] Pull QoS policy inherited from network.
-- [ ] Apply precedence: port-level > network-level > none.
-- [ ] Support bandwidth limit rule fields:
+- [x] Apply precedence: port-level > network-level > none.
+- [x] Support bandwidth limit rule fields:
   - `max_kbps`
   - `max_burst_kbps`
   - direction when available
-- [ ] Mark unsupported rules as QoS domain degraded, not silently ignored.
-- [ ] Translate into Aria snapshot.
+- [x] Mark unsupported rules as QoS domain degraded, not silently ignored.
+- [x] Translate into Aria snapshot.
 - [ ] Write `aria_qos_port_statuses` with runtime state, unsupported reason, effective policy, and applied generation.
 
 ### 7.4 QoS Smoke Tests
@@ -1499,8 +1513,8 @@ allow_cross_host_target = false
 - [x] Python UDS client base contract.
 - [x] Python full-resync skeleton.
 - [x] Python local API degraded status model.
-- [ ] Effective ACL computation.
-- [ ] Effective QoS computation.
+- [x] Effective ACL computation.
+- [x] Effective QoS computation.
 - [x] Base Rust UDS schema serde.
 - [x] TCP OpenAPI does not expose Neutron UDS paths.
 - [ ] Snapshot apply status.
@@ -1515,7 +1529,7 @@ allow_cross_host_target = false
 - [ ] `neutron ext-show aria-qos` after QoS phase.
 - [ ] ACL policy/rule/address-set/binding CRUD.
 - [ ] `neutron port-show` shows `aria_acl_*`.
-- [ ] `neutron agent-list` shows Aria agent alive.
+- [x] `neutron agent-list` shows Aria agent alive.
 - [ ] Full resync after agent restart.
 - [ ] Port migration source cleanup and destination apply.
 - [ ] VM reboot/tap recreate recovery.
