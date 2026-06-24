@@ -592,17 +592,6 @@ fn build_snapshot_plan(
 
         let resolved_port = resolve_local_neutron_port(port, inventory);
 
-        if resolved_port.ifname.trim().is_empty() {
-            ignored.push(NeutronPortApplyResult {
-                port_id: resolved_port.port_id.clone(),
-                ifname: resolved_port.ifname.clone(),
-                action: "ignore".to_string(),
-                status: "ignored".to_string(),
-                reason: Some("missing ifname".to_string()),
-            });
-            continue;
-        }
-
         if !resolved_port.eligible {
             ignored.push(NeutronPortApplyResult {
                 port_id: resolved_port.port_id.clone(),
@@ -610,10 +599,22 @@ fn build_snapshot_plan(
                 action: "ignore".to_string(),
                 status: "ignored".to_string(),
                 reason: Some(
-                    resolved_port.disposition
+                    resolved_port
+                        .disposition
                         .clone()
                         .unwrap_or_else(|| "not eligible".to_string()),
                 ),
+            });
+            continue;
+        }
+
+        if resolved_port.ifname.trim().is_empty() {
+            ignored.push(NeutronPortApplyResult {
+                port_id: resolved_port.port_id.clone(),
+                ifname: resolved_port.ifname.clone(),
+                action: "ignore".to_string(),
+                status: "ignored".to_string(),
+                reason: Some("missing ifname".to_string()),
             });
             continue;
         }
