@@ -73,6 +73,10 @@ class NeutronStatusReporter(object):
         }
 
 
+def report_state_topic(topics):
+    return getattr(topics, "REPORTS", getattr(topics, "PLUGIN", "q-plugin"))
+
+
 def build_neutron_status_reporter(host, config, report_state_api=None, context=None):
     """Build a real Neutron report_state reporter inside a Neutron runtime.
 
@@ -86,7 +90,7 @@ def build_neutron_status_reporter(host, config, report_state_api=None, context=N
             from neutron.common import topics
         except Exception as exc:
             raise StatusReportError("Neutron report_state API unavailable: %s" % exc)
-        report_state_api = agent_rpc.PluginReportStateAPI(topics.REPORTS)
+        report_state_api = agent_rpc.PluginReportStateAPI(report_state_topic(topics))
 
     if context is None:
         try:

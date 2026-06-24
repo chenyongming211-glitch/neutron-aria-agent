@@ -6,6 +6,7 @@ from neutron_aria.agent.status import AgentRuntimeStatus
 from neutron_aria.agent.status import ARIA_AGENT_TYPE
 from neutron_aria.agent.status_reporter import NeutronStatusReporter
 from neutron_aria.agent.status_reporter import StatusReportError
+from neutron_aria.agent.status_reporter import report_state_topic
 
 
 class FakeReportStateApi(object):
@@ -22,6 +23,21 @@ class FailingReportStateApi(object):
 
 
 class StatusReporterTestCase(unittest.TestCase):
+    def test_report_state_topic_prefers_reports_and_falls_back_to_plugin(self):
+        class ModernTopics(object):
+            REPORTS = "q-reports"
+            PLUGIN = "q-plugin"
+
+        class LegacyTopics(object):
+            PLUGIN = "q-plugin"
+
+        class MinimalTopics(object):
+            pass
+
+        self.assertEqual("q-reports", report_state_topic(ModernTopics))
+        self.assertEqual("q-plugin", report_state_topic(LegacyTopics))
+        self.assertEqual("q-plugin", report_state_topic(MinimalTopics))
+
     def test_report_builds_neutron_agent_state(self):
         api = FakeReportStateApi()
         runtime_status = AgentRuntimeStatus("ostack2")

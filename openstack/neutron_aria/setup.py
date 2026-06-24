@@ -7,4 +7,9 @@ setup(
     version="0.1.0",
     description="OpenStack Neutron adapter for Aria datapath",
     packages=find_packages(),
+    entry_points={
+        "console_scripts": [
+            "neutron-aria-agent=neutron_aria.agent.main:main",
+        ],
+    },
 )

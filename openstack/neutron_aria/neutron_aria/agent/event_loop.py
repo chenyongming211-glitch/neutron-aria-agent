@@ -61,7 +61,7 @@ class SnapshotSynchronizer(object):
             len(snapshot["ports"]),
             len(managed_ports),
         )
-        heartbeat = self._report_status()
+        heartbeat = self.report_status()
         return {
             "snapshot": snapshot,
             "response": response,
@@ -74,7 +74,7 @@ class SnapshotSynchronizer(object):
             return self.full_resync()
         except LocalApiError as exc:
             self.runtime_status.mark_degraded("local_api_degraded", exc)
-            heartbeat = self._report_status()
+            heartbeat = self.report_status()
             return {
                 "snapshot": None,
                 "response": None,
@@ -83,7 +83,7 @@ class SnapshotSynchronizer(object):
             }
         except Exception as exc:
             self.runtime_status.mark_degraded("resync_degraded", exc)
-            heartbeat = self._report_status()
+            heartbeat = self.report_status()
             return {
                 "snapshot": None,
                 "response": None,
@@ -99,7 +99,7 @@ class SnapshotSynchronizer(object):
             return self.port_source.list_ports_for_host()
         return self.port_source.get_ports()
 
-    def _report_status(self):
+    def report_status(self):
         if self.status_reporter is None:
             return None
         try:

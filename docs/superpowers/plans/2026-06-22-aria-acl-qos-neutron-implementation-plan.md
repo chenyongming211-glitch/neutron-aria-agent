@@ -488,7 +488,8 @@ Expected: shows source `port`, `network`, or `none`.
 - [x] Add a `SnapshotSynchronizer.full_resync()` skeleton that performs capabilities -> inventory -> snapshot -> UDS submit.
 - [x] Add `safe_full_resync()` and an `AgentRuntimeStatus` model that turns UDS/local API failures into `local_api_degraded` instead of crashing the loop.
 - [x] Wire `AgentRuntimeStatus.heartbeat_payload()` into the real Neutron agent heartbeat path.
-- [ ] Add retry/backoff and event merge before long-running service mode is enabled.
+- [x] Add a long-running service launcher with periodic Neutron heartbeat.
+- [ ] Add retry/backoff and event merge before full-resync service mode is enabled by default.
 
 **Expected visible result:**
 
@@ -529,7 +530,48 @@ The Python-side product boundary no longer relies on the smoke CLI path. `neutro
 
 `SnapshotSynchronizer` now reports heartbeat after successful full resync and after degraded safe resync. This means a live `neutron-aria-agent` can publish `ready` or `local_api_degraded` into Neutron's normal agent heartbeat path, while `neutron agent-list` derives `alive` from the standard heartbeat timestamp. Heartbeat/RabbitMQ failure is reported as a bounded heartbeat error and does not hide the snapshot result.
 
-This is a `neutron-aria-agent` Python change. It does not require modifying Neutron Server or Rust `aria-agent`. The remaining work before daemon delivery is adding the long-running service launcher, periodic report interval, retry/backoff, event merge, and real oslo/neutron process wiring.
+This is a `neutron-aria-agent` Python change. It does not require modifying Neutron Server or Rust `aria-agent`. The remaining work before full-resync daemon delivery is retry/backoff, event merge, and real oslo/neutron RPC event wiring.
+
+**Implementation checkpoint, 2026-06-24 service launcher update:**
+
+`neutron_aria.agent.service.AgentService` now provides a long-running loop with two independent intervals:
+
+- `report_interval`: periodically publishes Neutron heartbeat through `PluginReportStateAPI.report_state()`.
+- `resync_interval`: periodically runs `SnapshotSynchronizer.safe_full_resync()` when full resync is explicitly enabled.
+
+The default product-safe startup mode is heartbeat-only:
+
+```ini
+[agent]
+host = ostack2.bj159.net
+managed_domains = acl
+report_interval = 30
+resync_interval = 60
+full_resync_enabled = false
+```
+
+In heartbeat-only mode the agent reports:
+
+```text
+agent_type = Aria ACL agent
+binary = neutron-aria-agent
+alive = derived by Neutron heartbeat timestamp
+configurations.reason = full_resync_disabled
+configurations.degraded = true
+```
+
+This lets `neutron agent-list` show the Aria agent as alive without submitting an empty snapshot or touching any tap datapath. Full snapshot submission remains gated behind `full_resync_enabled=true` or CLI `--enable-full-resync`, and must not be enabled in production until the real Neutron port source/RPC event path and retry/backoff are complete.
+
+CLI entry point:
+
+```bash
+neutron-aria-agent \
+  --config-file /etc/neutron-aria-agent/neutron-aria-agent.ini \
+  --neutron-config-file /etc/neutron/neutron.conf \
+  --heartbeat-only
+```
+
+The host value must match the existing Neutron agent host convention, for example `ostack2.bj159.net`, not merely `ostack2`.
 
 **Real environment smoke, 2026-06-24:**
 
