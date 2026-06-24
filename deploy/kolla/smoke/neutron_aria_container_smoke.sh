@@ -11,20 +11,23 @@ HOST_FQDN="${HOST_FQDN:-$(hostname -f)}"
 ADMINRC="${ADMINRC:-/root/adminrc}"
 STOP_EMBEDDED_SMOKE="${STOP_EMBEDDED_SMOKE:-true}"
 BUILD_IMAGE="${BUILD_IMAGE:-true}"
+MOUNT_RUN_ARIA="${MOUNT_RUN_ARIA:-false}"
+RUN_ARIA_DIR="${RUN_ARIA_DIR:-/run/aria}"
 
-if [ "${BASE_IMAGE}" = "" ]; then
-    BASE_IMAGE="$(docker inspect "${BASE_CONTAINER}" --format '{{.Config.Image}}')"
-fi
-
-echo "Using base image: ${BASE_IMAGE}"
 echo "Building service image: ${IMAGE}"
 
 if [ "${BUILD_IMAGE}" = "true" ]; then
+    if [ "${BASE_IMAGE}" = "" ]; then
+        BASE_IMAGE="$(docker inspect "${BASE_CONTAINER}" --format '{{.Config.Image}}')"
+    fi
+    echo "Using base image: ${BASE_IMAGE}"
     docker build \
         --build-arg BASE_IMAGE="${BASE_IMAGE}" \
         -f "${REPO_ROOT}/deploy/kolla/neutron-aria-agent/Dockerfile" \
         -t "${IMAGE}" \
         "${REPO_ROOT}"
+else
+    echo "Skipping image build; using existing image: ${IMAGE}"
 fi
 
 echo "Preparing Kolla config directory: ${CONFIG_DIR}"
@@ -44,19 +47,30 @@ fi
 
 echo "Starting independent container: ${SERVICE_NAME}"
 docker rm -f "${SERVICE_NAME}" >/dev/null 2>&1 || true
-docker run -d \
-    --name "${SERVICE_NAME}" \
-    --net=host \
-    --privileged \
-    --restart unless-stopped \
-    -e KOLLA_CONFIG_STRATEGY=COPY_ALWAYS \
-    -e KOLLA_SERVICE_NAME=neutron-aria-agent \
-    -v "${CONFIG_DIR}/:/var/lib/kolla/config_files/:ro" \
-    -v /run/openvswitch:/run/openvswitch:shared \
-    -v /lib/modules:/lib/modules:ro \
-    -v /etc/localtime:/etc/localtime:ro \
-    -v kolla_logs:/var/log/kolla/:rw \
-    "${IMAGE}"
+docker_run_args=(
+    -d
+    --name "${SERVICE_NAME}"
+    --net=host
+    --privileged
+    --restart unless-stopped
+    -e KOLLA_CONFIG_STRATEGY=COPY_ALWAYS
+    -e KOLLA_SERVICE_NAME=neutron-aria-agent
+    -v "${CONFIG_DIR}/:/var/lib/kolla/config_files/:ro"
+    -v /run/openvswitch:/run/openvswitch:shared
+    -v /lib/modules:/lib/modules:ro
+    -v /etc/localtime:/etc/localtime:ro
+    -v kolla_logs:/var/log/kolla/:rw
+)
+
+if [ "${MOUNT_RUN_ARIA}" = "true" ]; then
+    if [ ! -d "${RUN_ARIA_DIR}" ]; then
+        echo "missing ${RUN_ARIA_DIR}; cannot mount Aria UDS directory" >&2
+        exit 1
+    fi
+    docker_run_args+=(-v "${RUN_ARIA_DIR}:${RUN_ARIA_DIR}:rw")
+fi
+
+docker run "${docker_run_args[@]}" "${IMAGE}"
 
 sleep "${SMOKE_WAIT_SECONDS:-8}"
 

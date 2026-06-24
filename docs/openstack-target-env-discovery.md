@@ -163,6 +163,43 @@ Boundary:
 - Full resync, RPC event consumption, UDS snapshot submission, and tap datapath writes remain disabled.
 - Before enabling full-resync smoke, the next gate is local `aria-agent` UDS readiness, OVS mount validation, rollback flow, and authoritative port-source credentials.
 
+### 6.4 2026-06-24 Full-Resync Smoke Gate
+
+Host: `ostack2.bj159.net`
+
+Gate checks:
+- Started a temporary Rust `aria-agent` from the existing smoke artifact with:
+  - `mode = "neutron_managed"`
+  - `auto_attach = false`
+  - `neutron_socket_path = "/run/aria/aria-agent.sock"`
+- Restarted the independent `neutron_aria_agent` container with `/run/aria` mounted.
+- Rebuilt the smoke Python image so the container process runs as root. This is required because the target host exposes `/run/openvswitch/db.sock` as `root:root 0750`; the image's `neutron` user cannot read OVSDB.
+- Confirmed UDS capabilities:
+  - `api_version = v1`
+  - `attach_authority = neutron_snapshot`
+  - `supports_full_snapshot = true`
+  - `supports_port_delete = true`
+  - `supported_domains` includes `acl`
+- Confirmed initial UDS status had `managed_ports = []`.
+- Confirmed legacy neutronclient could list local ports for `ostack2.bj159.net`:
+  - total host ports: 5
+  - compute ports: 2
+- Submitted one full-resync snapshot through `neutron-aria-agent --once --enable-full-resync`.
+- UDS post-status showed two managed ports:
+  - `86b83885-671f-474c-9556-8af98cf1cdc8` -> `tap86b83885-67`, ifindex `26`, domains `["acl"]`
+  - `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f` -> `tape607e86b-9e`, ifindex `27`, domains `["acl"]`
+- Rollback used `DELETE /api/v1/neutron/ports/{port_id}` for both ports.
+- Final UDS status returned `active_instances = []` and `managed_ports = []`.
+- `ip -d link show` on both tap ports showed no XDP attachment after rollback.
+- `neutron agent-list` still showed the `Aria ACL agent` on `ostack2.bj159.net` as alive.
+
+Boundary:
+- This validates full-resync smoke mechanics on one compute host.
+- The long-running `neutron_aria_agent` service remains heartbeat-only in its default config.
+- RPC event consumption remains disabled.
+- The Rust `aria-agent` used here is a temporary host process, not yet a product Kolla service.
+- Product deployment still needs an explicit OVSDB least-privilege decision: either run this container as root, as tested, or provide a shared group that can read the OVSDB socket.
+
 ## 7. Unsupported Port 类型
 
 | port 类型 | 命令 / 检查 | 期望 | 实际 | 证据路径 | 失败动作 |

@@ -27,6 +27,16 @@ The smoke starts an independent `neutron_aria_agent` container in
 heartbeat-only mode. It does not enable full resync, RPC events, snapshot
 submission, or tap datapath writes.
 
+For a controlled full-resync gate smoke after local `aria-agent` UDS is ready:
+
+```bash
+sudo deploy/kolla/smoke/neutron_aria_full_resync_smoke.sh
+```
+
+The full-resync smoke checks `/run/aria`, UDS capabilities, OVSDB access,
+legacy neutronclient credentials, one snapshot submission, and UDS rollback.
+It refuses to continue if the local UDS already has managed ports.
+
 ## Kolla Config Files
 
 The container expects a Kolla config directory mounted as
@@ -119,3 +129,8 @@ Do not enable full resync until all of these are true:
 
 If credentials or OVS are missing, `neutron-aria-agent` should remain alive but
 degraded, and retry full resync with exponential backoff.
+
+In the current target environment, `/run/openvswitch/db.sock` is owned by
+`root:root` and is not readable by the image's `neutron` user. The smoke image
+therefore runs `neutron-aria-agent` as root until the product deployment
+provides a least-privilege OVSDB access group.

@@ -636,6 +636,7 @@ The `neutron-aria-agent` now has a product packaging skeleton and safer full-res
   - `[neutron] port_source = disabled`
 - `deploy/kolla/smoke/neutron_aria_heartbeat_smoke.sh` validates that all expected hosts show an alive `Aria ACL agent`.
 - `deploy/kolla/smoke/neutron_aria_container_smoke.sh` builds and starts an independent `neutron_aria_agent` container from the onsite OVS agent image family for heartbeat-only service smoke.
+- `deploy/kolla/smoke/neutron_aria_full_resync_smoke.sh` validates `/run/aria`, UDS capabilities, OVSDB access, neutronclient credentials, one full snapshot, and UDS rollback.
 - Full resync no longer falls back to an empty static port list. If full resync is enabled without `[neutron] port_source = neutronclient` and OS_* credentials, the agent reports degraded and does not submit an empty snapshot.
 - `AgentService` uses exponential backoff for degraded full-resync attempts:
   - `resync_backoff_initial`
@@ -654,6 +655,21 @@ The `neutron-aria-agent` now has a product packaging skeleton and safer full-res
   - `port_source = disabled`
   - `rpc_events_enabled = false`
 - Full resync, RPC event consumption, UDS snapshot submission, and tap datapath writes are still intentionally disabled.
+
+**Implementation checkpoint, 2026-06-24 full-resync smoke gate:**
+
+- Host: `ostack2.bj159.net`.
+- Started temporary Rust `aria-agent` in `neutron_managed` mode with `auto_attach=false` and UDS at `/run/aria/aria-agent.sock`.
+- Restarted `neutron_aria_agent` with `/run/aria` mounted.
+- Rebuilt the smoke image so the container process runs as root. This was required because the target OVSDB socket is `root:root 0750`; the `neutron` user cannot run `ovs-vsctl br-exists br-int`.
+- UDS capabilities passed for `api_version=v1`, `attach_authority=neutron_snapshot`, `supports_full_snapshot=true`, `supports_port_delete=true`, and `acl` domain support.
+- Legacy neutronclient listed 5 local ports for `ostack2.bj159.net`, including 2 compute ports.
+- One `neutron-aria-agent --once --enable-full-resync` submitted a snapshot and UDS status showed 2 managed ACL ports:
+  - `86b83885-671f-474c-9556-8af98cf1cdc8` -> `tap86b83885-67`, ifindex `26`.
+  - `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f` -> `tape607e86b-9e`, ifindex `27`.
+- Rollback deleted both ports through `DELETE /api/v1/neutron/ports/{port_id}`.
+- Final UDS status returned `active_instances=[]` and `managed_ports=[]`; `ip -d link show` showed no XDP attachment left on the two tap ports.
+- Long-running `neutron_aria_agent` remains heartbeat-only by default. RPC event consumption remains disabled.
 
 The implemented full-resync source is legacy `python-neutronclient` with OS_* credentials. This is adequate for the first Kolla service smoke and controlled lab testing. The RPC event path is intentionally not hard-coded yet; it must be matched against the onsite Neutron source or `/usr/lib/python2.7/site-packages/neutron` callback/topic implementation before enabling event merge in production.
 
@@ -1099,16 +1115,18 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 - Create: `deploy/kolla/neutron-aria-agent/README.md`
 - Create: `deploy/kolla/config/neutron-aria-agent.ini`
 - Create: `deploy/kolla/smoke/neutron_aria_heartbeat_smoke.sh`
+- Create: `deploy/kolla/smoke/neutron_aria_full_resync_smoke.sh`
 
 - [x] Install Python 2 compatible package.
 - [x] Mount Neutron config and messaging credentials.
-- [ ] Mount `/run/aria`.
-- [ ] Read OVSDB with the least privilege available in the target product.
+- [x] Mount `/run/aria` for full-resync smoke.
+- [ ] Read OVSDB with the least privilege available in the target product. Current smoke uses root because the target OVSDB socket is root-only.
 - [x] Ensure it does not mount `/sys/fs/bpf` and does not require eBPF privileges.
 - [x] Default to heartbeat-only service mode until full-resync dependencies are present.
 - [x] Provide heartbeat smoke for `neutron agent-list` and `agent-show`.
 - [x] Write product logs to `/var/log/kolla/neutron/neutron-aria-agent.log`.
 - [x] Run independent `neutron_aria_agent` Kolla container smoke on each compute host.
+- [x] Run one-host full-resync gate smoke with UDS rollback on `ostack2.bj159.net`.
 
 ### 8.3 Aria-Agent Image
 
