@@ -412,7 +412,8 @@ Expected: all `aria-acl-*` command families are listed.
 - [x] Add Python package skeleton for `neutron_aria`.
 - [x] Add stdlib-only config loader and Kolla-style sample config.
 - [ ] Add oslo config wiring compatible with current Python 2 Neutron environment.
-- [ ] Read `host`, RabbitMQ credentials, Neutron config, OVS bridge name, OVSDB connection, and UDS socket path.
+- [x] Read `host`, OVS bridge name, UDS socket path, managed domains, timeout, and resync interval from the stdlib config skeleton.
+- [ ] Read RabbitMQ credentials and Neutron service credentials from the product OpenStack config.
 - [ ] Register as Neutron agent type `Aria ACL agent`.
 - [ ] Heartbeat to Neutron agent table.
 - [ ] Provide process logs with host, generation, dirty target count, and status update count.
@@ -430,18 +431,22 @@ Expected: `neutron-aria-agent` shows alive on each enabled compute.
 **Files:**
 - Create: `openstack/neutron_aria/neutron_aria/agent/inventory.py`
 - Create: `openstack/neutron_aria/neutron_aria/agent/ovsdb.py`
+- Create: `openstack/neutron_aria/neutron_aria/agent/neutron_client.py`
 - Test: `openstack/neutron_aria/neutron_aria/tests/unit/test_agent_inventory.py`
 
-- [x] Add wrapper for pulling ports where `binding:host_id == local_host`.
+- [x] Add Neutron client wrapper for full-resync port pull where `binding:host_id == local_host`.
+- [x] Support legacy Neutron pagination through `ports_links rel=next` and marker.
 - [x] Query OVSDB interfaces through `ovs-vsctl --format=json`.
+- [x] Query target bridge membership through `ovs-vsctl list-ports br-int`.
 - [x] Build `port_id -> tap_name -> ifindex` by matching OVS `external_ids:iface-id`.
 - [x] Mark eligible VM ports only when:
   - `binding:vif_type == ovs`
   - `binding:vnic_type in ["normal", "", None]`
   - `device_owner` is empty or starts with `compute:`
   - local tap exists
+  - local tap is a member of the configured OVS bridge, default `br-int`
 - [x] Mark `network:dhcp`, SR-IOV/direct, missing tap, and non-OVS types as ineligible with explicit reason.
-- [ ] Add live OVS bridge membership validation for direct `br-int` tap ports.
+- [x] Add OVS bridge membership validation for direct `br-int` tap ports.
 - [ ] Add router, metadata, LinuxBridge, and unknown-port regression fixtures from the target environment.
 
 **Expected visible result:**
@@ -481,7 +486,8 @@ Expected: shows source `port`, `network`, or `none`.
 - [x] Submit `PUT /api/v1/neutron/snapshot`.
 - [x] Delete local runtime with `DELETE /api/v1/neutron/ports/{port_id}` when a port migrates away or is deleted.
 - [x] Add a `SnapshotSynchronizer.full_resync()` skeleton that performs capabilities -> inventory -> snapshot -> UDS submit.
-- [ ] Treat UDS failures as Aria runtime degraded in Neutron agent heartbeat/status.
+- [x] Add `safe_full_resync()` and an `AgentRuntimeStatus` model that turns UDS/local API failures into `local_api_degraded` instead of crashing the loop.
+- [ ] Wire `AgentRuntimeStatus.heartbeat_payload()` into the real Neutron agent heartbeat path.
 - [ ] Add retry/backoff and event merge before long-running service mode is enabled.
 
 **Expected visible result:**
@@ -491,6 +497,10 @@ Agent logs show snapshot accepted with generation number.
 **Implementation checkpoint, 2026-06-24:**
 
 The first Python-side stdlib skeleton is implemented and covered by unit tests. It does not yet register a Neutron agent heartbeat or consume Neutron RPC notifications. It is sufficient to validate the local contract boundary: legacy Neutron port dictionaries plus OVS `external_ids:iface-id` are translated into the Rust `NeutronSnapshotRequest` shape and submitted over `/run/aria/aria-agent.sock`.
+
+**Implementation checkpoint, 2026-06-24 update:**
+
+The Python-side product boundary no longer relies on the smoke CLI path. `neutron_client.NeutronPortSource` models the full-resync input as an injected legacy `python-neutronclient` object and supports paginated `list_ports(binding:host_id=...)` calls. `ovsdb.OvsdbInterfaceReader` now validates target bridge membership through `ovs-vsctl list-ports br-int`, and `inventory.PortInventoryBuilder` only marks a port eligible when the tap is both matched by `external_ids:iface-id` and present on the configured bridge. UDS failures now produce a degraded status dictionary through `safe_full_resync()`; the remaining product task is to publish that payload through the real Neutron agent heartbeat/status channel.
 
 **Real environment smoke, 2026-06-24:**
 
@@ -1347,8 +1357,11 @@ allow_cross_host_target = false
 - [ ] Port extension fields.
 - [x] Agent base port filtering.
 - [x] OVS `external_ids:iface-id` parser.
+- [x] OVS `br-int` membership validation.
+- [x] Neutron client full-resync pagination.
 - [x] Python UDS client base contract.
 - [x] Python full-resync skeleton.
+- [x] Python local API degraded status model.
 - [ ] Effective ACL computation.
 - [ ] Effective QoS computation.
 - [x] Base Rust UDS schema serde.

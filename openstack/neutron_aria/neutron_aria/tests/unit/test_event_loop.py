@@ -5,6 +5,7 @@ import unittest
 from neutron_aria.agent.event_loop import SnapshotSynchronizer
 from neutron_aria.agent.neutron_client import StaticPortSource
 from neutron_aria.agent.ovsdb import OvsInterface
+from neutron_aria.agent.uds_client import LocalApiTransportError
 
 
 class FakeOvsReader(object):
@@ -14,6 +15,7 @@ class FakeOvsReader(object):
                 "tapaaaaaaaa-aa",
                 external_ids={"iface-id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
                 ifindex=31,
+                bridge="br-int",
             )
         ]
 
@@ -35,6 +37,11 @@ class FakeLocalClient(object):
     def delete_port(self, port_id):
         self.deleted_ports.append(port_id)
         return {"port_id": port_id, "status": "ok"}
+
+
+class FailingLocalClient(FakeLocalClient):
+    def capabilities(self, required_domains=None):
+        raise LocalApiTransportError("socket unavailable")
 
 
 class EventLoopTestCase(unittest.TestCase):
@@ -59,10 +66,30 @@ class EventLoopTestCase(unittest.TestCase):
 
         self.assertEqual([["acl"]], local_client.capability_calls)
         self.assertEqual(1, result["snapshot"]["generation"])
+        self.assertTrue(result["status"]["ready"])
+        self.assertFalse(result["status"]["degraded"])
         self.assertEqual(1, len(local_client.snapshots))
         port = local_client.snapshots[0]["ports"][0]
         self.assertTrue(port["eligible"])
         self.assertEqual("tapaaaaaaaa-aa", port["ifname"])
+
+    def test_safe_full_resync_marks_local_api_degraded(self):
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FailingLocalClient(),
+            managed_domains=["acl"],
+        )
+
+        result = sync.safe_full_resync()
+
+        self.assertEqual(None, result["snapshot"])
+        self.assertEqual(None, result["response"])
+        self.assertFalse(result["status"]["ready"])
+        self.assertTrue(result["status"]["degraded"])
+        self.assertEqual("local_api_degraded", result["status"]["reason"])
+        self.assertIn("socket unavailable", result["status"]["last_error"])
 
     def test_delete_port_delegates_to_local_client(self):
         local_client = FakeLocalClient()

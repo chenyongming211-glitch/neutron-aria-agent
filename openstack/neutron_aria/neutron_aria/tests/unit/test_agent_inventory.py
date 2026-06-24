@@ -3,6 +3,7 @@ from __future__ import absolute_import
 import unittest
 
 from neutron_aria.agent.inventory import ELIGIBLE_OVS_TAP
+from neutron_aria.agent.inventory import OVS_BRIDGE_MISMATCH
 from neutron_aria.agent.inventory import PortInventoryBuilder
 from neutron_aria.agent.inventory import TAP_NOT_FOUND
 from neutron_aria.agent.ovsdb import OvsInterface
@@ -32,11 +33,13 @@ class AgentInventoryTestCase(unittest.TestCase):
                 "tape607e86b-9e",
                 external_ids={"iface-id": VM_PORT},
                 ifindex=27,
+                bridge="br-int",
             ),
             OvsInterface(
                 "tap11111111-22",
                 external_ids={"iface-id": DHCP_PORT},
                 ifindex=28,
+                bridge="br-int",
             ),
         ]
         ports = [
@@ -79,6 +82,29 @@ class AgentInventoryTestCase(unittest.TestCase):
         self.assertFalse(missing_entry["eligible"])
         self.assertEqual(TAP_NOT_FOUND, missing_entry["disposition"])
         self.assertEqual("tap44444444-55", missing_entry["ifname"])
+
+    def test_snapshot_rejects_iface_id_not_on_br_int(self):
+        interfaces = [
+            OvsInterface(
+                "tape607e86b-9e",
+                external_ids={"iface-id": VM_PORT},
+                ifindex=27,
+                bridge=None,
+            ),
+        ]
+        builder = PortInventoryBuilder(
+            "ostack2",
+            managed_domains=["acl"],
+            ifindex_lookup=lambda _name: 27,
+            ovs_bridge="br-int",
+        )
+
+        snapshot = builder.build_snapshot([neutron_port(VM_PORT)], interfaces, generation=8)
+        port = snapshot["ports"][0]
+
+        self.assertFalse(port["eligible"])
+        self.assertEqual(OVS_BRIDGE_MISMATCH + ":br-int", port["disposition"])
+        self.assertEqual([], port["managed_domains"])
 
 
 if __name__ == "__main__":

@@ -5,11 +5,12 @@ import subprocess
 
 
 class OvsInterface(object):
-    def __init__(self, name, ofport=None, external_ids=None, ifindex=None):
+    def __init__(self, name, ofport=None, external_ids=None, ifindex=None, bridge=None):
         self.name = name
         self.ofport = ofport
         self.external_ids = external_ids or {}
         self.ifindex = ifindex
+        self.bridge = bridge
 
     def to_dict(self):
         return {
@@ -17,6 +18,7 @@ class OvsInterface(object):
             "ofport": self.ofport,
             "external_ids": dict(self.external_ids),
             "ifindex": self.ifindex,
+            "bridge": self.bridge,
         }
 
 
@@ -30,10 +32,18 @@ def ovs_value_to_python(value):
     return value
 
 
-def parse_ovs_interfaces_json(payload, ifindex_lookup=None):
+def parse_ovs_interfaces_json(
+    payload,
+    ifindex_lookup=None,
+    bridge_name=None,
+    bridge_port_names=None,
+):
     document = json.loads(payload)
     headings = document.get("headings", [])
     interfaces = []
+    bridge_ports = None
+    if bridge_port_names is not None:
+        bridge_ports = set(bridge_port_names)
 
     for row in document.get("data", []):
         values = {}
@@ -59,6 +69,7 @@ def parse_ovs_interfaces_json(payload, ifindex_lookup=None):
                 ofport=values.get("ofport"),
                 external_ids=values.get("external_ids") or {},
                 ifindex=ifindex,
+                bridge=bridge_name if bridge_ports is not None and name in bridge_ports else None,
             )
         )
 
@@ -66,11 +77,13 @@ def parse_ovs_interfaces_json(payload, ifindex_lookup=None):
 
 
 class OvsdbInterfaceReader(object):
-    def __init__(self, ovs_vsctl="ovs-vsctl", ifindex_lookup=None):
+    def __init__(self, ovs_vsctl="ovs-vsctl", ifindex_lookup=None, bridge_name="br-int"):
         self.ovs_vsctl = ovs_vsctl
         self.ifindex_lookup = ifindex_lookup
+        self.bridge_name = bridge_name
 
     def list_interfaces(self):
+        bridge_port_names = self.list_bridge_ports()
         cmd = [
             self.ovs_vsctl,
             "--format=json",
@@ -81,4 +94,16 @@ class OvsdbInterfaceReader(object):
         output = subprocess.check_output(cmd)
         if not isinstance(output, str):
             output = output.decode("utf-8")
-        return parse_ovs_interfaces_json(output, self.ifindex_lookup)
+        return parse_ovs_interfaces_json(
+            output,
+            self.ifindex_lookup,
+            bridge_name=self.bridge_name,
+            bridge_port_names=bridge_port_names,
+        )
+
+    def list_bridge_ports(self):
+        cmd = [self.ovs_vsctl, "list-ports", self.bridge_name]
+        output = subprocess.check_output(cmd)
+        if not isinstance(output, str):
+            output = output.decode("utf-8")
+        return [line.strip() for line in output.splitlines() if line.strip()]

@@ -20,9 +20,10 @@ def build_synchronizer(config, neutron_port_source=None):
     return SnapshotSynchronizer(
         host=host,
         port_source=port_source,
-        ovs_reader=OvsdbInterfaceReader(),
+        ovs_reader=OvsdbInterfaceReader(bridge_name=config.ovs_bridge),
         local_client=LocalClient(config.socket_path, timeout=config.request_timeout),
         managed_domains=config.managed_domains,
+        ovs_bridge=config.ovs_bridge,
     )
 
 

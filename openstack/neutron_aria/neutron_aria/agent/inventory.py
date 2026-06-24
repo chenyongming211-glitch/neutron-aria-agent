@@ -13,6 +13,7 @@ ELIGIBLE_OVS_TAP = "eligible_ovs_tap"
 NOT_LOCAL_HOST = "not_local_host"
 TAP_NOT_FOUND = "tap_not_found"
 IFINDEX_NOT_READY = "ifindex_not_ready"
+OVS_BRIDGE_MISMATCH = "not_on_ovs_bridge"
 
 
 def port_get(port, key, default=None):
@@ -56,10 +57,11 @@ def linux_ifindex(ifname):
 
 
 class PortInventoryBuilder(object):
-    def __init__(self, host, managed_domains=None, ifindex_lookup=None):
+    def __init__(self, host, managed_domains=None, ifindex_lookup=None, ovs_bridge="br-int"):
         self.host = host
         self.managed_domains = list(managed_domains or ["acl"])
         self.ifindex_lookup = ifindex_lookup or linux_ifindex
+        self.ovs_bridge = ovs_bridge
 
     def build_snapshot(self, neutron_ports, ovs_interfaces, generation):
         ports = []
@@ -115,6 +117,13 @@ class PortInventoryBuilder(object):
         if iface is None:
             return self._port_dict(
                 port_id, ifname, None, False, TAP_NOT_FOUND,
+                device_owner, vif_type, vnic_type, ovs_iface_id,
+            )
+
+        if iface.bridge != self.ovs_bridge:
+            return self._port_dict(
+                port_id, ifname, None, False,
+                "%s:%s" % (OVS_BRIDGE_MISMATCH, self.ovs_bridge),
                 device_owner, vif_type, vnic_type, ovs_iface_id,
             )
 
