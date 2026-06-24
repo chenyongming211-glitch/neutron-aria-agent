@@ -4,6 +4,7 @@ set -euo pipefail
 SERVICE_NAME="${SERVICE_NAME:-neutron_aria_agent}"
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 SOCKET_PATH="${SOCKET_PATH:-/run/aria/aria-agent.sock}"
+DATAPATH_HTTP="${DATAPATH_HTTP:-http://127.0.0.1:8080}"
 EXEC_USER="${EXEC_USER:-neutron}"
 VM_IP="${VM_IP:-}"
 EXPECTED_PORT_ID="${EXPECTED_PORT_ID:-}"
@@ -87,8 +88,8 @@ print(json.dumps({
 PY
 }
 
-delete_managed_port() {
-    docker_agent_exec python - "${SOCKET_PATH}" "${EXPECTED_PORT_ID}" <<'PY'
+rollback_managed_ports() {
+    docker_agent_exec python - "${SOCKET_PATH}" <<'PY'
 from __future__ import print_function
 
 import sys
@@ -96,33 +97,43 @@ import sys
 from neutron_aria.agent.uds_client import LocalClient
 
 client = LocalClient(sys.argv[1], timeout=3.0)
-response = client.delete_port(sys.argv[2])
-print("rollback_delete port_id=%s status=%s detached=%s" % (
-    response.get("port_id"),
-    response.get("status"),
-    response.get("detached"),
-))
+status = client.status()
+for port in status.get("managed_ports") or []:
+    port_id = port.get("port_id")
+    if port_id:
+        response = client.delete_port(port_id)
+        print("rollback_delete port_id=%s status=%s detached=%s" % (
+            response.get("port_id"),
+            response.get("status"),
+            response.get("detached"),
+        ))
+after = client.status()
+remaining = after.get("managed_ports") or []
+print("rollback_remaining_managed_ports=%d" % len(remaining))
+if remaining:
+    raise SystemExit(1)
 PY
 }
 
 show_acl_state() {
-    docker_agent_exec python - "${SOCKET_PATH}" "${EXPECTED_IFNAME}" <<'PY'
+    "${PYTHON_BIN}" - "${DATAPATH_HTTP}" "${EXPECTED_IFNAME}" <<'PY'
 from __future__ import print_function
 
 import json
 import sys
 
-from neutron_aria.agent.uds_client import LocalClient
 try:
     from urllib import quote as urlquote
+    from urllib2 import urlopen
 except ImportError:
     from urllib.parse import quote as urlquote
+    from urllib.request import urlopen
 
-client = LocalClient(sys.argv[1], timeout=3.0)
+base = sys.argv[1].rstrip("/")
 ifname = sys.argv[2]
 encoded = urlquote(ifname, safe="")
-groups = client._request("GET", "/api/v1/%s/groups" % encoded).get("groups") or []
-policies = client._request("GET", "/api/v1/%s/policies" % encoded).get("policies") or []
+groups = json.loads(urlopen("%s/api/v1/%s/groups" % (base, encoded)).read()).get("groups") or []
+policies = json.loads(urlopen("%s/api/v1/%s/policies" % (base, encoded)).read()).get("policies") or []
 print("acl_groups=%s" % json.dumps(groups, sort_keys=True))
 print("acl_policies=%s" % json.dumps(policies, sort_keys=True))
 if not policies:
@@ -135,7 +146,7 @@ PY
 cleanup() {
     if [ "${ROLLBACK_ARMED:-false}" = "true" ]; then
         echo "Cleaning up ACL smoke managed port"
-        delete_managed_port || true
+        rollback_managed_ports || true
     fi
 }
 
@@ -181,7 +192,7 @@ if ping -c "${PING_COUNT}" -W "${PING_TIMEOUT}" "${VM_IP}" >/dev/null; then
 fi
 
 echo "Rolling back ACL smoke managed port"
-delete_managed_port
+rollback_managed_ports
 ROLLBACK_ARMED=false
 
 echo "Post-check: VM ${VM_IP} must recover after rollback"
