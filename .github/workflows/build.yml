@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Check repository text policy
         run: python3 ci/check_blocked_terms.py
@@ -51,6 +53,13 @@ jobs:
           if [[ "${rust_required}" != "true" ]]; then
             echo "Changed files:"
             printf '%s\n' "${changed_files:-}"
+            if [[ -z "${changed_files:-}" ]]; then
+              echo "Changed files could not be determined; requiring Rust/eBPF build as fail-closed."
+              rust_required=true
+            fi
+          fi
+
+          if [[ "${rust_required}" != "true" ]]; then
             if printf '%s\n' "${changed_files:-}" | grep -Eq '^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|\.cargo/|agent/|api/|core/|ebpf/|user/|config/|tools/|Dockerfile\.builder|aria-agent\.service|aria-firewall\.service|aria-firewall\.spec|install\.sh)'; then
               rust_required=true
             fi
