@@ -27,22 +27,62 @@ jobs:
               -s openstack/neutron_aria/neutron_aria/tests/unit \
               -p 'test_*.py'
 
+      - name: Detect Rust build changes
+        id: rust_changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          rust_required=false
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" || "${{ github.ref }}" == refs/tags/v* ]]; then
+            rust_required=true
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            changed_files="$(git diff --name-only "origin/${{ github.base_ref }}" "$GITHUB_SHA")"
+          elif [[ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+            changed_files="$(git diff --name-only "${{ github.event.before }}" "$GITHUB_SHA" || true)"
+            if [[ -z "${changed_files}" ]]; then
+              changed_files="$(git diff --name-only HEAD~1 HEAD || true)"
+            fi
+          else
+            changed_files="$(git diff --name-only HEAD~1 HEAD || true)"
+          fi
+
+          if [[ "${rust_required}" != "true" ]]; then
+            echo "Changed files:"
+            printf '%s\n' "${changed_files:-}"
+            if printf '%s\n' "${changed_files:-}" | grep -Eq '^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|\.cargo/|agent/|api/|core/|ebpf/|user/|config/|tools/|Dockerfile\.builder|aria-agent\.service|aria-firewall\.service|aria-firewall\.spec|install\.sh)'; then
+              rust_required=true
+            fi
+          fi
+
+          echo "rust_required=${rust_required}" >> "$GITHUB_OUTPUT"
+          echo "Rust/eBPF build required: ${rust_required}"
+
+      - name: Skip Rust/eBPF build
+        if: steps.rust_changes.outputs.rust_required != 'true'
+        run: echo "Skipping Rust/eBPF/static binary build; changed files only require repository policy and Python adapter checks."
+
       - name: Install Rust nightly (eBPF)
+        if: steps.rust_changes.outputs.rust_required == 'true'
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
 
       - name: Install Rust stable (userspace)
+        if: steps.rust_changes.outputs.rust_required == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
 
       - name: Install system dependencies
+        if: steps.rust_changes.outputs.rust_required == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y llvm-dev clang libelf-dev libbpf-dev musl-tools
 
       - name: Cache cargo
+        if: steps.rust_changes.outputs.rust_required == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -54,10 +94,12 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install bpf-linker
+        if: steps.rust_changes.outputs.rust_required == 'true'
         run: |
           command -v bpf-linker >/dev/null 2>&1 || cargo +nightly install bpf-linker
 
       - name: Test aria-agent Neutron attach authority
+        if: steps.rust_changes.outputs.rust_required == 'true'
         run: |
           cargo +stable test -p aria-api neutron_contract
           cargo +stable test -p aria-agent startup_mode
@@ -66,6 +108,7 @@ jobs:
           cargo +stable test -p aria-agent openapi_does_not_expose_neutron_uds_paths
 
       - name: Build eBPF
+        if: steps.rust_changes.outputs.rust_required == 'true'
         run: |
           export LD_LIBRARY_PATH="$(rustc +nightly --print sysroot)/lib:${LD_LIBRARY_PATH:-}"
           cd ebpf
@@ -86,17 +129,21 @@ jobs:
           cp "$ebpf_artifact" ../ebpf-artifacts/libebpf_firewall.so
 
       - name: Find eBPF artifacts
+        if: steps.rust_changes.outputs.rust_required == 'true'
         run: |
           ls -lh ebpf-artifacts/
           file ebpf-artifacts/libebpf_firewall.so
 
       - name: Build userspace (static)
+        if: steps.rust_changes.outputs.rust_required == 'true'
         run: cargo +stable build --release -p ariactl --target x86_64-unknown-linux-musl
 
       - name: Build agent (static)
+        if: steps.rust_changes.outputs.rust_required == 'true'
         run: cargo +stable build --release -p aria-agent --target x86_64-unknown-linux-musl
 
       - name: Verify static binaries
+        if: steps.rust_changes.outputs.rust_required == 'true'
         run: |
           file target/x86_64-unknown-linux-musl/release/ariactl
           ldd target/x86_64-unknown-linux-musl/release/ariactl 2>&1 || true
@@ -104,6 +151,7 @@ jobs:
           ldd target/x86_64-unknown-linux-musl/release/aria-agent 2>&1 || true
 
       - name: Prepare release files
+        if: steps.rust_changes.outputs.rust_required == 'true'
         run: |
           mkdir -p release
           cp target/x86_64-unknown-linux-musl/release/ariactl release/
@@ -116,7 +164,7 @@ jobs:
           ls -la release/
 
       - name: Create release archive
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && steps.rust_changes.outputs.rust_required == 'true'
         run: |
           cd release
           zip -r ../firewall-binaries-x86_64.zip .
@@ -124,14 +172,14 @@ jobs:
           ls -lh firewall-binaries-x86_64.zip
 
       - name: Upload artifacts
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && steps.rust_changes.outputs.rust_required == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: firewall-binaries-x86_64
           path: release/
 
       - name: Upload smoke-test artifacts
-        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && !startsWith(github.ref, 'refs/tags/v')
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && !startsWith(github.ref, 'refs/tags/v') && steps.rust_changes.outputs.rust_required == 'true'
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -140,7 +188,7 @@ jobs:
           retention-days: 1
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && steps.rust_changes.outputs.rust_required == 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: firewall-binaries-x86_64.zip
