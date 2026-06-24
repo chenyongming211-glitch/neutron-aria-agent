@@ -5,12 +5,16 @@ import socket
 import sys
 
 from neutron_aria.agent.config import load_config
+from neutron_aria.agent.event_merge import EventMerger
 from neutron_aria.agent.event_loop import SnapshotSynchronizer
 from neutron_aria.agent.neutron_client import NeutronClientFactoryError
 from neutron_aria.agent.neutron_client import StaticPortSource
 from neutron_aria.agent.neutron_client import UnavailablePortSource
 from neutron_aria.agent.neutron_client import build_port_source
 from neutron_aria.agent.ovsdb import OvsdbInterfaceReader
+from neutron_aria.agent.rpc import AriaAgentRpcCallback
+from neutron_aria.agent.rpc import build_rpc_connection
+from neutron_aria.agent.rpc import start_rpc_consumers
 from neutron_aria.agent.service import AgentService
 from neutron_aria.agent.status_reporter import build_neutron_status_reporter
 from neutron_aria.agent.uds_client import LocalClient
@@ -99,6 +103,20 @@ def main(argv=None):
         help="keep full resync disabled and only publish Neutron heartbeat",
     )
     parser.add_option(
+        "--enable-rpc-events",
+        action="store_true",
+        dest="enable_rpc_events",
+        default=False,
+        help="consume Neutron port/network RPC events",
+    )
+    parser.add_option(
+        "--disable-rpc-events",
+        action="store_true",
+        dest="disable_rpc_events",
+        default=False,
+        help="disable Neutron port/network RPC event consumption",
+    )
+    parser.add_option(
         "--neutron-config-file",
         action="append",
         dest="neutron_config_files",
@@ -111,6 +129,10 @@ def main(argv=None):
         config.full_resync_enabled = True
     if options.heartbeat_only:
         config.full_resync_enabled = False
+    if options.enable_rpc_events:
+        config.rpc_events_enabled = True
+    if options.disable_rpc_events:
+        config.rpc_events_enabled = False
 
     if options.once:
         result = build_synchronizer(config).full_resync()
@@ -120,6 +142,17 @@ def main(argv=None):
     initialize_neutron_runtime(options.neutron_config_files)
     host = _default_host(config)
     status_reporter = build_neutron_status_reporter(host, config)
+    event_merger = None
+    rpc_connection = None
+    if config.rpc_events_enabled:
+        event_merger = EventMerger(
+            max_pending_ports=config.event_queue_max_ports,
+            max_pending_networks=config.event_queue_max_networks,
+        )
+        rpc_callback = AriaAgentRpcCallback(event_merger, local_host=host)
+        rpc_connection = build_rpc_connection(rpc_callback, start_listening=False)
+        start_rpc_consumers(rpc_connection)
+
     service = AgentService(
         build_synchronizer(config, status_reporter=status_reporter),
         full_resync_enabled=config.full_resync_enabled,
@@ -127,6 +160,8 @@ def main(argv=None):
         resync_interval=config.resync_interval,
         resync_backoff_initial=config.resync_backoff_initial,
         resync_backoff_max=config.resync_backoff_max,
+        event_merger=event_merger,
+        event_merge_interval=config.event_merge_interval,
     )
     if options.report_once:
         result = service.initialize()

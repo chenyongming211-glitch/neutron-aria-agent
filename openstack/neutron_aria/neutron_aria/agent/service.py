@@ -5,6 +5,11 @@ import time
 
 HEARTBEAT_ONLY_REASON = "full_resync_disabled"
 HEARTBEAT_ONLY_ERROR = "full resync is disabled; heartbeat-only service mode"
+EVENTS_WITHOUT_RESYNC_REASON = "rpc_events_full_resync_disabled"
+EVENTS_WITHOUT_RESYNC_ERROR = (
+    "received Neutron RPC events but full resync is disabled; no local writes submitted"
+)
+DELETE_PORT_DEGRADED_REASON = "delete_port_degraded"
 
 
 class AgentService(object):
@@ -18,6 +23,8 @@ class AgentService(object):
         resync_interval=60,
         resync_backoff_initial=5,
         resync_backoff_max=300,
+        event_merger=None,
+        event_merge_interval=0.2,
         clock=None,
         sleeper=None,
     ):
@@ -31,6 +38,8 @@ class AgentService(object):
             int(resync_backoff_max),
         )
         self.current_resync_backoff = 0
+        self.event_merger = event_merger
+        self.event_merge_interval = float(event_merge_interval)
         self.clock = clock or time.time
         self.sleeper = sleeper or time.sleep
         self.initialized = False
@@ -64,6 +73,15 @@ class AgentService(object):
             return self.initialize()
 
         now = self.clock()
+        if self._events_ready():
+            result = self._process_event_batch()
+            if result is None:
+                return None
+            if self.full_resync_enabled and result.get("resync_attempted"):
+                self.next_resync_at = now + self._next_resync_delay(result)
+            self.next_report_at = now + self.report_interval
+            return result
+
         if self.full_resync_enabled and now >= self.next_resync_at:
             result = self.synchronizer.safe_full_resync()
             self.next_resync_at = now + self._next_resync_delay(result)
@@ -87,8 +105,14 @@ class AgentService(object):
         deadlines = [self.next_report_at]
         if self.full_resync_enabled:
             deadlines.append(self.next_resync_at)
+        event_deadline = self._event_deadline()
+        if event_deadline is not None:
+            deadlines.append(event_deadline)
         next_deadline = min([deadline for deadline in deadlines if deadline > 0])
-        return max(1, int(next_deadline - now))
+        delay = next_deadline - now
+        if delay <= 0:
+            return 0
+        return max(0.1, delay)
 
     def run_forever(self):
         self.initialize()
@@ -112,3 +136,100 @@ class AgentService(object):
 
         self.current_resync_backoff = 0
         return self.resync_interval
+
+    def _events_ready(self):
+        return (
+            self.event_merger is not None and
+            self.event_merger.ready(self.event_merge_interval)
+        )
+
+    def _event_deadline(self):
+        if self.event_merger is None or not self.event_merger.has_pending():
+            return None
+        first_pending_at = self.event_merger.first_pending_at()
+        if first_pending_at is None:
+            return None
+        return first_pending_at + self.event_merge_interval
+
+    def _process_event_batch(self):
+        batch = self.event_merger.drain()
+        if not batch.has_changes():
+            return None
+
+        if not self.full_resync_enabled:
+            self.synchronizer.runtime_status.mark_degraded(
+                EVENTS_WITHOUT_RESYNC_REASON,
+                EVENTS_WITHOUT_RESYNC_ERROR,
+            )
+            heartbeat = self.synchronizer.report_status()
+            return {
+                "snapshot": None,
+                "response": None,
+                "status": self.synchronizer.runtime_status.to_dict(),
+                "heartbeat": heartbeat,
+                "events": batch.to_dict(),
+            }
+
+        delete_errors = self._delete_known_ports(batch.deleted_ports)
+        if delete_errors:
+            self.synchronizer.runtime_status.mark_degraded(
+                DELETE_PORT_DEGRADED_REASON,
+                "; ".join(delete_errors),
+            )
+            heartbeat = self.synchronizer.report_status()
+            return {
+                "snapshot": None,
+                "response": None,
+                "status": self.synchronizer.runtime_status.to_dict(),
+                "heartbeat": heartbeat,
+                "events": batch.to_dict(),
+            }
+
+        port_updates_requiring_resync = {}
+        for port_id, event in batch.port_updates.items():
+            binding_host = event.get("binding_host")
+            if binding_host and binding_host != self.synchronizer.host:
+                if self.synchronizer.has_projected_port(port_id):
+                    try:
+                        self.synchronizer.delete_port(port_id)
+                    except Exception as exc:
+                        self.synchronizer.runtime_status.mark_degraded(
+                            DELETE_PORT_DEGRADED_REASON,
+                            "%s:%s" % (port_id, exc),
+                        )
+                        heartbeat = self.synchronizer.report_status()
+                        return {
+                            "snapshot": None,
+                            "response": None,
+                            "status": self.synchronizer.runtime_status.to_dict(),
+                            "heartbeat": heartbeat,
+                            "events": batch.to_dict(),
+                        }
+                continue
+            port_updates_requiring_resync[port_id] = event
+
+        if batch.full_resync or batch.dirty_networks or port_updates_requiring_resync:
+            result = self.synchronizer.safe_full_resync()
+            result["events"] = batch.to_dict()
+            result["resync_attempted"] = True
+            return result
+
+        heartbeat = self.synchronizer.report_status()
+        return {
+            "snapshot": None,
+            "response": None,
+            "status": self.synchronizer.runtime_status.to_dict(),
+            "heartbeat": heartbeat,
+            "events": batch.to_dict(),
+        }
+
+    def _delete_known_ports(self, port_ids):
+        errors = []
+        for port_id in port_ids:
+            if not self.synchronizer.has_projected_port(port_id):
+                continue
+            try:
+                self.synchronizer.delete_port(port_id)
+            except Exception as exc:
+                errors.append("%s:%s" % (port_id, exc))
+        return errors

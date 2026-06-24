@@ -6,6 +6,10 @@ Dockerfile.builder linguist-language=Dockerfile
 *.spec linguist-detectable=false
 
 # Deployment assets must keep Unix newlines when copied into Linux containers.
+.gitattributes text eol=lf
 *.sh text eol=lf
 Dockerfile text eol=lf
 *.json text eol=lf
+*.py text eol=lf
+*.ini text eol=lf
+*.md text eol=lf

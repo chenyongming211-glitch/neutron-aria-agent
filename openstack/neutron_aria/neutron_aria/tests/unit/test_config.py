@@ -31,6 +31,10 @@ request_timeout = 2.5
 [neutron]
 port_source = neutronclient
 port_page_size = 50
+rpc_events_enabled = true
+event_merge_interval = 0.3
+event_queue_max_ports = 42
+event_queue_max_networks = 7
 """)
             os.close(fd)
             fd = None
@@ -46,6 +50,10 @@ port_page_size = 50
             self.assertEqual(77, config.resync_backoff_max)
             self.assertEqual("neutronclient", config.port_source)
             self.assertEqual(50, config.port_page_size)
+            self.assertTrue(config.rpc_events_enabled)
+            self.assertEqual(0.3, config.event_merge_interval)
+            self.assertEqual(42, config.event_queue_max_ports)
+            self.assertEqual(7, config.event_queue_max_networks)
             self.assertEqual("br-int", config.ovs_bridge)
             self.assertEqual("/run/aria/aria-agent.sock", config.socket_path)
             self.assertEqual(2.5, config.request_timeout)

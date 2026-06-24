@@ -3249,6 +3249,8 @@ neutron-aria-agent/
 
 - `neutron-aria-agent/neutron_aria_agent/agent.py`
 - `neutron-aria-agent/neutron_aria_agent/event_loop.py`
+- `neutron-aria-agent/neutron_aria_agent/event_merge.py`
+- `neutron-aria-agent/neutron_aria_agent/rpc.py`
 - `neutron-aria-agent/neutron_aria_agent/neutron_client.py`
 - `neutron-aria-agent/neutron_aria_agent/status.py`
 - `neutron-aria-agent/tests/test_event_merge.py`
@@ -3264,7 +3266,15 @@ neutron-aria-agent/
   5. 下发 full snapshot。
   6. 进入事件合并循环。
 - event merge：
+  - 第一版 RPC event wiring 对照目标环境旧版 OVS agent，只订阅 `PORT UPDATE`、`PORT DELETE`、`NETWORK UPDATE`。
+  - `rpc_events_enabled` 默认关闭；未显式开启时只做 heartbeat/full-resync，不消费 RabbitMQ 事件。
+  - merge window 默认 `0.2s`，允许配置在 100ms-500ms 之间调优。
   - port update 按 port_id 合并。
+  - port update 带 `binding:host_id` / `revision_number` 时保留最新 revision 或最后 binding 结果。
+  - fanout 到本 agent 但 `binding_host` 明确不是本机的 update，不触发本机 full-resync；只有该 port 已在本机 projected state 中时才调用本地 delete。
+  - port delete 使用旧版 Neutron 的 `kwargs["port_id"]` 语义；只删除本机已知 port，避免误处理其它 compute 的 fanout delete。
+  - network update 当前没有 network->local ports 增量索引，第一版按 full-resync 处理。
+  - backlog 超过 `event_queue_max_ports/event_queue_max_networks` 时丢弃增量队列并触发 full-resync。
   - explicit ACL group/policy update 找出本 host 相关 ports。
   - QoS update 找出绑定 policy 的 ports。
   - 非 ACL/QoS 的本机能力 update 不进入 Neutron event merge。
@@ -3709,6 +3719,8 @@ python -m pytest tests/test_generation.py tests/test_local_client.py -q
 
 - `neutron-aria-agent/neutron_aria_agent/agent.py`
 - `neutron-aria-agent/neutron_aria_agent/event_loop.py`
+- `neutron-aria-agent/neutron_aria_agent/event_merge.py`
+- `neutron-aria-agent/neutron_aria_agent/rpc.py`
 - `neutron-aria-agent/neutron_aria_agent/neutron_client.py`
 - `neutron-aria-agent/neutron_aria_agent/status.py`
 - `neutron-aria-agent/tests/test_event_merge.py`
@@ -3719,12 +3731,15 @@ python -m pytest tests/test_generation.py tests/test_local_client.py -q
 - 启动后先检查 Unix socket status。
 - socket 不可达时 agent degraded，不本地接管。
 - full resync 后提交 full snapshot。
+- RPC event 第一版只消费目标环境已确认的旧版 Neutron topic：`q-agent-notifier` 下的 `port.update`、`port.delete`、`network.update`。
+- 默认 `rpc_events_enabled=false`；只有 full-resync、port source、UDS snapshot 都配置完成后才开启。
 - port update 按 port_id 合并。
 - port migration/rebind event 按 `source_revision` 去重，保留最新 `binding_host`。
-- 本 host 失去 port binding 时调用本地 delete。
-- 本 host 获得 port binding 时等待接口出现并下发 port-scoped snapshot。
-- ACL/QoS update 只重算相关 ports。
+- 本 host 失去 port binding 时，如果该 port 存在于本机 projected state，调用本地 delete；如果不是本机已知 port，忽略该 fanout event。
+- 本 host 获得 port binding 时，当前第一版触发 full-resync；port-scoped snapshot 等 translator/state cache 完成后再启用。
+- ACL/QoS update 后续只重算相关 ports；当前 RPC event skeleton 不提前硬编码 ACL/QoS translator。
 - burst window 内只提交一次 snapshot。
+- event backlog 超过上限时触发 full-resync。
 - status 模块必须区分 OVS connectivity ready 和 Aria security/features ready；不能把 Aria degraded 翻译成 OVS 停止转发。
 
 硬验收 checklist：
@@ -4184,6 +4199,8 @@ python -m pytest -q
 
 - `neutron-aria-agent/neutron_aria_agent/agent.py`
 - `neutron-aria-agent/neutron_aria_agent/event_loop.py`
+- `neutron-aria-agent/neutron_aria_agent/event_merge.py`
+- `neutron-aria-agent/neutron_aria_agent/rpc.py`
 - `neutron-aria-agent/neutron_aria_agent/neutron_client.py`
 - `neutron-aria-agent/neutron_aria_agent/status.py`
 - `neutron-aria-agent/tests/test_event_merge.py`
@@ -4201,16 +4218,18 @@ python -m pytest -q
 8. translator 生成 full snapshot。
 9. local client 下发 full snapshot。
 10. status 模块把 datapath domain status 转成 agent alive/degraded。
-11. event loop 合并 burst events。
-12. port update 按 `port_id` 合并，只保留最高 `source_revision` 或最后 binding 结果。
-13. migration/rebind event 中，如果最新 `binding_host != local_host`，从本机 projected state 删除该 port，并调用 local delete。
-14. migration/rebind event 中，如果最新 `binding_host == local_host`，加入 projected state，等待 Netlink 接口出现后提交 port-scoped snapshot。
-15. tap recreate event 中，DELLINK 标记 runtime degraded，NEWLINK 后触发 port-scoped snapshot。
-16. ACL group/policy update 找本 host 相关 ports。
-17. QoS update 找绑定 policy 的 ports。
-18. 非 ACL/QoS 的本机能力 update 不进入 Neutron event merge。
-19. burst window 内只提交一次 snapshot。
-20. 提交：`feat: add neutron aria agent event loop`。
+11. `rpc_events_enabled=false` 作为默认安全边界，未开启时不消费 RabbitMQ 事件。
+12. 开启后接入旧版 Neutron `q-agent-notifier` topic，只订阅 `port.update`、`port.delete`、`network.update`。
+13. event loop 合并 burst events，merge window 默认 `0.2s`。
+14. port update 按 `port_id` 合并，只保留最高 `source_revision/revision_number` 或最后 binding 结果。
+15. migration/rebind event 中，如果最新 `binding_host != local_host`，只有 port 存在于本机 projected state 时才调用 local delete。
+16. migration/rebind event 中，如果最新 `binding_host == local_host` 或缺少 binding host，当前第一版触发 full-resync；port-scoped snapshot 留到 translator/state cache 完成后开启。
+17. port delete 使用旧版 Neutron `port_id` kwarg，只删除本机已知 port。
+18. network update 当前触发 full-resync；后续有 network->local ports 索引后再缩小影响范围。
+19. ACL group/policy update 找本 host 相关 ports，QoS update 找绑定 policy 的 ports；该增量 translator 不在当前 RPC skeleton 中硬猜。
+20. 非 ACL/QoS 的本机能力 update 不进入 Neutron event merge。
+21. backlog 超过上限时触发 full-resync。
+22. 提交：`feat: wire neutron aria rpc event merge`。
 
 默认 degraded 规则：
 

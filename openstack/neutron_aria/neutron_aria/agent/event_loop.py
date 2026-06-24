@@ -36,6 +36,7 @@ class SnapshotSynchronizer(object):
         self.ovs_bridge = ovs_bridge
         self.runtime_status = runtime_status or AgentRuntimeStatus(host)
         self.status_reporter = status_reporter
+        self.projected_port_ids = set()
 
     def check_capabilities(self):
         return self.local_client.capabilities(required_domains=self.managed_domains)
@@ -55,6 +56,10 @@ class SnapshotSynchronizer(object):
             generation=self.generation_store.next(),
         )
         response = self.local_client.put_snapshot(snapshot)
+        self.projected_port_ids = set(
+            port.get("port_id") for port in snapshot["ports"]
+            if port.get("port_id") and (port.get("eligible") or port.get("managed_domains"))
+        )
         managed_ports = response.get("active_instances") or []
         self.runtime_status.mark_ready(
             snapshot["generation"],
@@ -92,7 +97,12 @@ class SnapshotSynchronizer(object):
             }
 
     def delete_port(self, port_id):
-        return self.local_client.delete_port(port_id)
+        response = self.local_client.delete_port(port_id)
+        self.projected_port_ids.discard(port_id)
+        return response
+
+    def has_projected_port(self, port_id):
+        return port_id in self.projected_port_ids
 
     def _list_ports(self):
         if hasattr(self.port_source, "list_ports_for_host"):

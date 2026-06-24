@@ -4,6 +4,8 @@ import unittest
 
 from neutron_aria.agent.service import AgentService
 from neutron_aria.agent.service import HEARTBEAT_ONLY_REASON
+from neutron_aria.agent.service import EVENTS_WITHOUT_RESYNC_REASON
+from neutron_aria.agent.event_merge import EventMerger
 from neutron_aria.agent.status import AgentRuntimeStatus
 
 
@@ -23,6 +25,9 @@ class FakeSynchronizer(object):
         self.runtime_status = AgentRuntimeStatus("ostack2.bj159.net")
         self.resync_calls = 0
         self.heartbeat_calls = 0
+        self.projected_port_ids = set()
+        self.delete_calls = []
+        self.host = "ostack2.bj159.net"
 
     def safe_full_resync(self):
         self.resync_calls += 1
@@ -45,6 +50,14 @@ class FakeSynchronizer(object):
             "ok": True,
             "status": self.runtime_status.to_dict(),
         }
+
+    def has_projected_port(self, port_id):
+        return port_id in self.projected_port_ids
+
+    def delete_port(self, port_id):
+        self.delete_calls.append(port_id)
+        self.projected_port_ids.discard(port_id)
+        return {"deleted": port_id}
 
 
 class DegradedSynchronizer(FakeSynchronizer):
@@ -170,6 +183,147 @@ class AgentServiceTestCase(unittest.TestCase):
         service.run_once()
         self.assertEqual(10, service.current_resync_backoff)
         self.assertEqual(19, service.next_resync_at)
+
+    def test_heartbeat_only_rpc_events_do_not_write_locally(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=False,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            clock=clock,
+        )
+        service.initialize()
+
+        merger.record_port_update("p1", binding_host="ostack2.bj159.net")
+        clock.advance(0.2)
+        result = service.run_once()
+
+        self.assertEqual(0, sync.resync_calls)
+        self.assertEqual([], sync.delete_calls)
+        self.assertEqual(EVENTS_WITHOUT_RESYNC_REASON, result["status"]["reason"])
+
+    def test_local_port_update_event_triggers_one_full_resync_after_window(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            clock=clock,
+        )
+        service.initialize()
+
+        merger.record_port_update("p1", binding_host="ostack2.bj159.net")
+        merger.record_port_update("p2", binding_host="ostack2.bj159.net")
+        self.assertEqual(None, service.run_once())
+        clock.advance(0.2)
+        result = service.run_once()
+
+        self.assertEqual(2, sync.resync_calls)
+        self.assertEqual(2, result["snapshot"]["generation"])
+        self.assertEqual(["p1", "p2"], result["events"]["port_updates"])
+
+    def test_remote_port_update_for_unknown_port_is_ignored_after_merge(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            clock=clock,
+        )
+        service.initialize()
+
+        merger.record_port_update("p1", binding_host="ostack3.bj159.net")
+        clock.advance(0.2)
+        result = service.run_once()
+
+        self.assertEqual(1, sync.resync_calls)
+        self.assertEqual([], sync.delete_calls)
+        self.assertEqual(None, result["snapshot"])
+
+    def test_remote_port_update_for_known_port_deletes_local_state(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            clock=clock,
+        )
+        service.initialize()
+        sync.projected_port_ids.add("p1")
+
+        merger.record_port_update("p1", binding_host="ostack3.bj159.net")
+        clock.advance(0.2)
+        result = service.run_once()
+
+        self.assertEqual(1, sync.resync_calls)
+        self.assertEqual(["p1"], sync.delete_calls)
+        self.assertEqual(None, result["snapshot"])
+
+    def test_port_delete_deletes_only_known_local_port(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            clock=clock,
+        )
+        service.initialize()
+        sync.projected_port_ids.add("p1")
+
+        merger.record_port_delete("p1")
+        merger.record_port_delete("p2")
+        clock.advance(0.2)
+        result = service.run_once()
+
+        self.assertEqual(["p1"], sync.delete_calls)
+        self.assertEqual(None, result["snapshot"])
+
+    def test_network_update_triggers_full_resync(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            clock=clock,
+        )
+        service.initialize()
+
+        merger.record_network_update("net1")
+        clock.advance(0.2)
+        result = service.run_once()
+
+        self.assertEqual(2, sync.resync_calls)
+        self.assertEqual(["net1"], result["events"]["dirty_networks"])
 
 
 if __name__ == "__main__":

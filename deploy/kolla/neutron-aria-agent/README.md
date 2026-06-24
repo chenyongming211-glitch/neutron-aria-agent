@@ -54,6 +54,7 @@ full_resync_enabled = false
 
 [neutron]
 port_source = disabled
+rpc_events_enabled = false
 ```
 
 This should make `neutron agent-list` show:
@@ -63,6 +64,21 @@ Aria ACL agent | <compute-fqdn> | :-) | True | neutron-aria-agent
 ```
 
 It must not submit an empty snapshot and must not touch any tap datapath.
+
+## RPC Event Gate
+
+Do not enable RPC event consumption until full resync is already safe. The
+first wired event set intentionally matches the onsite legacy OVS agent shape:
+
+```text
+port.update
+port.delete
+network.update
+```
+
+When `[neutron] rpc_events_enabled = true`, the container command must keep
+passing the same `neutron.conf` and `openvswitch_agent.ini` used by the OVS
+agent so oslo.messaging and host naming match the existing deployment.
 
 ## Full Resync Gate
 

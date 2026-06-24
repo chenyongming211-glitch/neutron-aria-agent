@@ -72,6 +72,12 @@ class EventLoopTestCase(unittest.TestCase):
             "binding:host_id": "ostack2",
             "binding:vif_type": "ovs",
             "binding:vnic_type": "normal",
+        }, {
+            "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "device_owner": "network:dhcp",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
         }])
         local_client = FakeLocalClient()
         sync = SnapshotSynchronizer(
@@ -92,6 +98,10 @@ class EventLoopTestCase(unittest.TestCase):
         port = local_client.snapshots[0]["ports"][0]
         self.assertTrue(port["eligible"])
         self.assertEqual("tapaaaaaaaa-aa", port["ifname"])
+        self.assertEqual(
+            set(["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]),
+            sync.projected_port_ids,
+        )
 
     def test_full_resync_reports_ready_heartbeat(self):
         status_reporter = FakeStatusReporter()

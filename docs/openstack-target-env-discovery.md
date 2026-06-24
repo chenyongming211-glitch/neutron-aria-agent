@@ -85,6 +85,28 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 | QoS extension 可用性 | 查 Neutron extension list | 明确 `support_disposition=supported` 或 `unsupported` | 未执行 | 未执行 | PR-5B 降级或延期 |
 | Mirror/TCPrt Neutron 对接 scope | 检查本方案 scope 与 PR gate | 不进入第一阶段；不作为 N0.5、PR-6A 或 PR-6B gate | 未执行 | 未执行 | Rust 既有代码保留，但不接入 `neutron-aria-agent` |
 
+### 6.1 2026-06-24 目标环境 RPC 源码确认记录
+
+执行节点：`ostack2.bj159.net`
+
+检查位置：`neutron_openvswitch_agent` 容器内 `/usr/lib/python2.7/site-packages/neutron/plugins/ml2/drivers/openvswitch/agent/ovs_neutron_agent.py` 与 `neutron/agent/rpc.py`。
+
+确认结果：
+
+- 旧版 OVS agent 的 `setup_rpc()` 使用 `self.topic = topics.AGENT`，目标环境中对应 fanout prefix 为 `q-agent-notifier`。
+- OVS agent 已消费的相关 topic 为 `PORT UPDATE`、`PORT DELETE`、`NETWORK UPDATE`；同时还消费 tunnel/security-group/DVR/l2population，但这些不属于 Aria 第一阶段 RPC event skeleton 范围。
+- `port_update(self, context, **kwargs)` 从 `kwargs["port"]["id"]` 取得 port ID，并加入本地 `updated_ports`。
+- `port_delete(self, context, **kwargs)` 从 `kwargs["port_id"]` 取得 port ID，加入 `deleted_ports`，并从 `updated_ports` 移除。
+- `network_update(self, context, **kwargs)` 从 `kwargs["network"]["id"]` 取得 network ID；OVS agent 有本地 `network_ports` 索引时只标记相关 ports。Aria 第一版没有该索引，因此按 full-resync 处理。
+- `agent_rpc.create_consumers(endpoints, prefix, topic_details, start_listening=False)` 会对每个 topic 调 `connection.create_consumer(topic_name, endpoints, fanout=True)`；开启监听时调用 `connection.consume_in_threads()`。
+
+对方案的约束：
+
+- `neutron-aria-agent` 第一版 RPC callback 只接入 `port.update`、`port.delete`、`network.update`。
+- `port.delete` 必须按旧版 `port_id` kwarg 兼容；不能假设删除事件携带完整 port。
+- Neutron event 是 fanout，Aria 不能对所有收到的 delete/update 都直接操作本地 datapath；必须结合本机 projected state 和 `binding:host_id` 过滤。
+- 当前没有 ACL/QoS translator 与 network->local ports 索引时，port/network update 只能触发 full-resync 或安全忽略，不能硬猜增量 port-scoped snapshot。
+
 ## 7. Unsupported Port 类型
 
 | port 类型 | 命令 / 检查 | 期望 | 实际 | 证据路径 | 失败动作 |
