@@ -690,6 +690,18 @@ fn normalize_default_action(action: &str) -> String {
     }
 }
 
+fn neutron_acl_to_datapath_directions(direction: u8) -> Vec<u8> {
+    match direction {
+        // Neutron ACL direction is VM-port centric. On a Linux tap, traffic
+        // entering the VM is observed by the host-side TC egress hook.
+        0 => vec![1],
+        // Traffic leaving the VM is observed by the host-side TC ingress hook.
+        1 => vec![0],
+        2 => vec![1, 0],
+        other => vec![other],
+    }
+}
+
 fn ensure_ipv4_cidrs(cidrs: &[String], rule_id: &str) -> Result<(), String> {
     for cidr in cidrs {
         if cidr.contains(':') {
@@ -792,18 +804,8 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
         let src_group = cidr_group(port_id, &rule_id, "src", &rule.src_cidrs, &mut groups);
         let dst_group = cidr_group(port_id, &rule_id, "dst", &rule.dst_cidrs, &mut groups);
 
-        let directions: Vec<u8> = if direction == 2 {
-            vec![0, 1]
-        } else {
-            vec![direction]
-        };
-        for direction in directions {
-            let key = (
-                src_group.clone(),
-                dst_group.clone(),
-                proto,
-                direction,
-            );
+        for direction in neutron_acl_to_datapath_directions(direction) {
+            let key = (src_group.clone(), dst_group.clone(), proto, direction);
             if !seen.insert(key.clone()) {
                 return Err(format!(
                     "duplicate effective ACL key src={} dst={} proto={} direction={}",
@@ -882,6 +884,27 @@ async fn purge_neutron_acl(
     Ok(())
 }
 
+async fn flush_neutron_acl_conntrack(
+    state: &NeutronApiState,
+    ifname: &str,
+    port_id: &str,
+) -> Result<(), String> {
+    let flushed = state
+        .control_plane
+        .flush_conntrack(ifname)
+        .await
+        .map_err(|e| e.to_string())?;
+    if flushed > 0 {
+        warn!(
+            port_id = %port_id,
+            ifname = %ifname,
+            flushed,
+            "flushed conntrack after Neutron ACL reconcile"
+        );
+    }
+    Ok(())
+}
+
 async fn reconcile_neutron_acl(
     state: &NeutronApiState,
     port: &NeutronPortSnapshot,
@@ -893,6 +916,7 @@ async fn reconcile_neutron_acl(
     purge_neutron_acl(state, &port.ifname, &port.port_id).await?;
 
     let Some(acl) = &port.acl else {
+        flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id).await?;
         state
             .control_plane
             .update_config(&port.ifname, None, None, Some(false), None, None, None, None)
@@ -903,6 +927,7 @@ async fn reconcile_neutron_acl(
 
     let plan = translate_neutron_acl(&port.port_id, acl)?;
     if plan.policies.is_empty() {
+        flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id).await?;
         state
             .control_plane
             .update_config(&port.ifname, None, None, Some(false), None, None, None, None)
@@ -947,6 +972,7 @@ async fn reconcile_neutron_acl(
         }
     }
 
+    flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id).await?;
     state
         .control_plane
         .update_config(&port.ifname, None, None, Some(true), None, None, None, None)
@@ -1331,7 +1357,7 @@ mod tests {
                 dst_group: "any".to_string(),
                 proto: 1,
                 action: 1,
-                direction: 0,
+                direction: 1,
                 ports: None,
             }]
         );

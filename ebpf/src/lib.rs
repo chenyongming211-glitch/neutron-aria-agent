@@ -617,7 +617,7 @@ unsafe fn phase_ct_fastpath_xdp_v6(
 
 #[inline(always)]
 fn need_ingress_ids(p: &PipelineCtx) -> bool {
-    (p.flags & (FLAG_QOS_ON | FLAG_MIRROR_ON | FLAG_TRACING)) != 0
+    (p.flags & (FLAG_ACL_ON | FLAG_QOS_ON | FLAG_MIRROR_ON | FLAG_TRACING)) != 0
         || stats::monitoring_enabled(p.tap_id)
 }
 
@@ -733,14 +733,20 @@ unsafe fn phase_ct_fastpath_tc_ingress_v4(
         stats::update_flow_stats_v4(ct_key, p.pkt_len, p.now);
     }
 
-        if need_ingress_ids(p) {
-            load_packet_ids_v4(info, p);
-            if should_apply_ingress_qos(p) {
-                phase_qos_ingress_tc(ctx, info, p);
-                if p.action == TC_ACT_SHOT as u32 {
-                    return;
-                }
+    if need_ingress_ids(p) {
+        load_packet_ids_v4(info, p);
+        if (p.flags & FLAG_ACL_ON) != 0 {
+            phase_policy_tc(ctx, info, p);
+            if p.action == TC_ACT_SHOT as u32 {
+                return;
             }
+        }
+        if should_apply_ingress_qos(p) {
+            phase_qos_ingress_tc(ctx, info, p);
+            if p.action == TC_ACT_SHOT as u32 {
+                return;
+            }
+        }
         phase_post_accept_tc_ingress(ctx, info, p);
         return;
     }
@@ -774,6 +780,12 @@ unsafe fn phase_ct_fastpath_tc_ingress_v6(
 
     if need_ingress_ids(p) {
         load_packet_ids_v6(info, p);
+        if (p.flags & FLAG_ACL_ON) != 0 {
+            phase_policy_tc(ctx, info, p);
+            if p.action == TC_ACT_SHOT as u32 {
+                return;
+            }
+        }
         if should_apply_ingress_qos(p) {
             phase_qos_ingress_tc(ctx, info, p);
             if p.action == TC_ACT_SHOT as u32 {
@@ -802,6 +814,12 @@ unsafe fn phase_ct_miss_tc_ingress_v4(
     if need_ids {
         record_tc_ingress_contract_fallback(p, CT_CONTRACT_FAMILY_IPV4);
         load_packet_ids_v4(info, p);
+        if (p.flags & FLAG_ACL_ON) != 0 {
+            phase_policy_tc(ctx, info, p);
+            if p.action == TC_ACT_SHOT as u32 {
+                return;
+            }
+        }
         if should_apply_ingress_qos(p) {
             phase_qos_ingress_tc(ctx, info, p);
             if p.action == TC_ACT_SHOT as u32 {
@@ -830,6 +848,12 @@ unsafe fn phase_ct_miss_tc_ingress_v6(
     if need_ids {
         record_tc_ingress_contract_fallback(p, CT_CONTRACT_FAMILY_IPV6);
         load_packet_ids_v6(info, p);
+        if (p.flags & FLAG_ACL_ON) != 0 {
+            phase_policy_tc(ctx, info, p);
+            if p.action == TC_ACT_SHOT as u32 {
+                return;
+            }
+        }
         if should_apply_ingress_qos(p) {
             phase_qos_ingress_tc(ctx, info, p);
             if p.action == TC_ACT_SHOT as u32 {
