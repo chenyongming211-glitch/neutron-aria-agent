@@ -25,6 +25,7 @@ class SnapshotSynchronizer(object):
         generation_store=None,
         ovs_bridge="br-int",
         runtime_status=None,
+        status_reporter=None,
     ):
         self.host = host
         self.port_source = port_source
@@ -34,6 +35,7 @@ class SnapshotSynchronizer(object):
         self.generation_store = generation_store or GenerationStore()
         self.ovs_bridge = ovs_bridge
         self.runtime_status = runtime_status or AgentRuntimeStatus(host)
+        self.status_reporter = status_reporter
 
     def check_capabilities(self):
         return self.local_client.capabilities(required_domains=self.managed_domains)
@@ -59,10 +61,12 @@ class SnapshotSynchronizer(object):
             len(snapshot["ports"]),
             len(managed_ports),
         )
+        heartbeat = self._report_status()
         return {
             "snapshot": snapshot,
             "response": response,
             "status": self.runtime_status.to_dict(),
+            "heartbeat": heartbeat,
         }
 
     def safe_full_resync(self):
@@ -70,17 +74,21 @@ class SnapshotSynchronizer(object):
             return self.full_resync()
         except LocalApiError as exc:
             self.runtime_status.mark_degraded("local_api_degraded", exc)
+            heartbeat = self._report_status()
             return {
                 "snapshot": None,
                 "response": None,
                 "status": self.runtime_status.to_dict(),
+                "heartbeat": heartbeat,
             }
         except Exception as exc:
             self.runtime_status.mark_degraded("resync_degraded", exc)
+            heartbeat = self._report_status()
             return {
                 "snapshot": None,
                 "response": None,
                 "status": self.runtime_status.to_dict(),
+                "heartbeat": heartbeat,
             }
 
     def delete_port(self, port_id):
@@ -90,3 +98,12 @@ class SnapshotSynchronizer(object):
         if hasattr(self.port_source, "list_ports_for_host"):
             return self.port_source.list_ports_for_host()
         return self.port_source.get_ports()
+
+    def _report_status(self):
+        if self.status_reporter is None:
+            return None
+        try:
+            agent_state = self.status_reporter.report(self.runtime_status)
+            return {"ok": True, "agent_state": agent_state}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}

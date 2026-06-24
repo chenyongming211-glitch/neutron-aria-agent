@@ -14,7 +14,7 @@ def _default_host(config):
     return config.host or socket.gethostname()
 
 
-def build_synchronizer(config, neutron_port_source=None):
+def build_synchronizer(config, neutron_port_source=None, status_reporter=None):
     host = _default_host(config)
     port_source = neutron_port_source or StaticPortSource([])
     return SnapshotSynchronizer(
@@ -24,6 +24,7 @@ def build_synchronizer(config, neutron_port_source=None):
         local_client=LocalClient(config.socket_path, timeout=config.request_timeout),
         managed_domains=config.managed_domains,
         ovs_bridge=config.ovs_bridge,
+        status_reporter=status_reporter,
     )
 
 

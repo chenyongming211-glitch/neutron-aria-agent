@@ -487,7 +487,7 @@ Expected: shows source `port`, `network`, or `none`.
 - [x] Delete local runtime with `DELETE /api/v1/neutron/ports/{port_id}` when a port migrates away or is deleted.
 - [x] Add a `SnapshotSynchronizer.full_resync()` skeleton that performs capabilities -> inventory -> snapshot -> UDS submit.
 - [x] Add `safe_full_resync()` and an `AgentRuntimeStatus` model that turns UDS/local API failures into `local_api_degraded` instead of crashing the loop.
-- [ ] Wire `AgentRuntimeStatus.heartbeat_payload()` into the real Neutron agent heartbeat path.
+- [x] Wire `AgentRuntimeStatus.heartbeat_payload()` into the real Neutron agent heartbeat path.
 - [ ] Add retry/backoff and event merge before long-running service mode is enabled.
 
 **Expected visible result:**
@@ -501,6 +501,35 @@ The first Python-side stdlib skeleton is implemented and covered by unit tests. 
 **Implementation checkpoint, 2026-06-24 update:**
 
 The Python-side product boundary no longer relies on the smoke CLI path. `neutron_client.NeutronPortSource` models the full-resync input as an injected legacy `python-neutronclient` object and supports paginated `list_ports(binding:host_id=...)` calls. `ovsdb.OvsdbInterfaceReader` now validates target bridge membership through `ovs-vsctl list-ports br-int`, and `inventory.PortInventoryBuilder` only marks a port eligible when the tap is both matched by `external_ids:iface-id` and present on the configured bridge. UDS failures now produce a degraded status dictionary through `safe_full_resync()`; the remaining product task is to publish that payload through the real Neutron agent heartbeat/status channel.
+
+**Implementation checkpoint, 2026-06-24 heartbeat update:**
+
+`AgentRuntimeStatus.heartbeat_payload()` is now connected to the Python-side Neutron report-state boundary through `neutron_aria.agent.status_reporter.NeutronStatusReporter`. The reporter converts Aria runtime status into the legacy Neutron agent-state shape:
+
+```python
+{
+    "binary": "neutron-aria-agent",
+    "host": "<compute-host>",
+    "topic": "N/A",
+    "agent_type": "Aria ACL agent",
+    "configurations": {
+        "ready": true,
+        "degraded": false,
+        "reason": "ready",
+        "last_generation": 12,
+        "last_snapshot_ports": 5,
+        "last_managed_ports": 2,
+        "managed_domains": ["acl"],
+        "ovs_bridge": "br-int",
+        "socket_path": "/run/aria/aria-agent.sock"
+    },
+    "start_flag": true
+}
+```
+
+`SnapshotSynchronizer` now reports heartbeat after successful full resync and after degraded safe resync. This means a live `neutron-aria-agent` can publish `ready` or `local_api_degraded` into Neutron's normal agent heartbeat path, while `neutron agent-list` derives `alive` from the standard heartbeat timestamp. Heartbeat/RabbitMQ failure is reported as a bounded heartbeat error and does not hide the snapshot result.
+
+This is a `neutron-aria-agent` Python change. It does not require modifying Neutron Server or Rust `aria-agent`. The remaining work before daemon delivery is adding the long-running service launcher, periodic report interval, retry/backoff, event merge, and real oslo/neutron process wiring.
 
 **Real environment smoke, 2026-06-24:**
 
