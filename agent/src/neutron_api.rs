@@ -5,7 +5,11 @@ use axum::{
     routing::{delete, get, put},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
+use aria_api::{
+    ManagedNeutronPort, NeutronCapabilitiesResponse, NeutronDeleteResponse,
+    NeutronPortApplyResult, NeutronPortSnapshot, NeutronSnapshotRequest,
+    NeutronSnapshotResponse, NeutronStatusResponse,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -25,90 +29,6 @@ pub(crate) struct NeutronApiState {
 struct NeutronRuntimeState {
     generation: u64,
     ports: BTreeMap<String, ManagedNeutronPort>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct NeutronSnapshotRequest {
-    #[serde(default)]
-    pub generation: u64,
-    #[serde(default)]
-    pub host: Option<String>,
-    #[serde(default)]
-    pub ports: Vec<NeutronPortSnapshot>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct NeutronPortSnapshot {
-    pub port_id: String,
-    #[serde(default)]
-    pub ifname: String,
-    #[serde(default)]
-    pub ifindex: Option<u32>,
-    #[serde(default)]
-    pub eligible: bool,
-    #[serde(default)]
-    pub disposition: Option<String>,
-    #[serde(default)]
-    pub device_owner: Option<String>,
-    #[serde(default)]
-    pub vif_type: Option<String>,
-    #[serde(default)]
-    pub vnic_type: Option<String>,
-    #[serde(default)]
-    pub network_backend: Option<String>,
-    #[serde(default)]
-    pub ovs_iface_id: Option<String>,
-    #[serde(default)]
-    pub managed_domains: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct ManagedNeutronPort {
-    pub port_id: String,
-    pub ifname: String,
-    pub ifindex: Option<u32>,
-    pub managed_domains: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-struct NeutronCapabilitiesResponse {
-    api_version: &'static str,
-    attach_authority: &'static str,
-    supports_full_snapshot: bool,
-    supports_port_delete: bool,
-    supported_domains: Vec<&'static str>,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-struct NeutronStatusResponse {
-    generation: u64,
-    managed_ports: Vec<ManagedNeutronPort>,
-    active_instances: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-struct NeutronSnapshotResponse {
-    generation: u64,
-    results: Vec<NeutronPortApplyResult>,
-    active_instances: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-struct NeutronDeleteResponse {
-    port_id: String,
-    ifname: Option<String>,
-    detached: bool,
-    status: String,
-    error: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-struct NeutronPortApplyResult {
-    port_id: String,
-    ifname: String,
-    action: String,
-    status: String,
-    reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,24 +66,7 @@ pub(crate) fn build_router(registry: Arc<TapRegistry>, control_plane: Arc<Contro
 }
 
 async fn get_neutron_capabilities() -> impl IntoResponse {
-    Json(NeutronCapabilitiesResponse {
-        api_version: "v1",
-        attach_authority: "neutron_snapshot",
-        supports_full_snapshot: true,
-        supports_port_delete: true,
-        supported_domains: vec![
-            "attach",
-            "acl",
-            "qos",
-            "mirror",
-            "config",
-            "conntrack",
-            "tcprt",
-            "trace",
-            "drops",
-            "ssl",
-        ],
-    })
+    Json(NeutronCapabilitiesResponse::current())
 }
 
 async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoResponse {

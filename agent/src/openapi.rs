@@ -256,4 +256,17 @@ mod tests {
             Some("Include drop entries that could not be mapped back to a managed instance.")
         );
     }
+
+    #[test]
+    fn openapi_does_not_expose_neutron_uds_paths() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).expect("openapi should serialize");
+
+        assert!(doc.pointer("/paths/~1api~1v1~1neutron~1capabilities").is_none());
+        assert!(doc.pointer("/paths/~1api~1v1~1neutron~1status").is_none());
+        assert!(doc.pointer("/paths/~1api~1v1~1neutron~1snapshot").is_none());
+        assert!(
+            doc.pointer("/paths/~1api~1v1~1neutron~1ports~1{port_id}")
+                .is_none()
+        );
+    }
 }

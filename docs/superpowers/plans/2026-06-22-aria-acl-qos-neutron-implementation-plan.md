@@ -541,51 +541,72 @@ cargo test -p aria-agent startup_mode
 
 Starting product-mode `aria-agent` on a host with existing `tap*` interfaces but no Neutron snapshot leaves all tap interfaces unattached. After `neutron-aria-agent` submits a snapshot for one eligible OVS VM tap, only that tap gets Aria runtime; DHCP/service/SR-IOV/LinuxBridge/unknown ports remain untouched and are reported through status instead of auto-attached.
 
+**Implementation checkpoint, 2026-06-24:**
+
+The Rust-side startup boundary and Neutron attach authority are implemented and smoke tested on `ostack2.bj159.net` with CI artifact `7d9e38d`. In `neutron_managed` mode, `aria-agent` no longer auto-attaches every `tap*`; attach/detach authority is driven by the Neutron UDS snapshot. This checkpoint intentionally does not mean ACL/QoS/Mirror northbound business APIs are complete.
+
 ### 5.1 Snapshot DTO
 
 **Files:**
-- Create: `api/src/neutron.rs`
 - Modify: `api/src/lib.rs`
+- Modify: `agent/src/neutron_api.rs`
 
-- [ ] Define `NeutronSnapshotRequest`.
-- [ ] Define `NeutronPortSnapshot`.
+- [x] Define stable base UDS constants:
+  - `NEUTRON_UDS_API_VERSION = v1`.
+  - `NEUTRON_ATTACH_AUTHORITY = neutron_snapshot`.
+  - `NEUTRON_SUPPORTED_DOMAINS = attach, acl, qos, mirror, config, conntrack, tcprt, trace, drops, ssl`.
+- [x] Define `NeutronSnapshotRequest`.
+- [x] Define `NeutronPortSnapshot`.
+- [x] Define `ManagedNeutronPort`.
+- [x] Define `NeutronCapabilitiesResponse`.
+- [x] Define `NeutronStatusResponse`.
+- [x] Define `NeutronSnapshotResponse`.
+- [x] Define `NeutronDeleteResponse`.
+- [x] Define `NeutronPortApplyResult`.
+- [x] Derive `Serialize`, `Deserialize`, and `utoipa::ToSchema` for the UDS contract DTOs.
+- [x] Move agent UDS handler code to reuse `aria-api` DTOs instead of keeping private duplicate structs.
+- [x] Add serde contract tests for:
+  - capabilities version, attach authority, and supported domain list.
+  - snapshot round-trip with `managed_domains`.
+  - backward-compatible default values for minimal snapshot JSON.
 - [ ] Define `NeutronAclPolicySnapshot`.
 - [ ] Define `NeutronQosPolicySnapshot`.
+- [ ] Define `NeutronMirrorSnapshot`.
 - [ ] Define `NeutronDomainStatus`.
 - [ ] Define enums for `RuntimeStatus`, `SupportDisposition`, and `EffectiveAction`.
-- [ ] Derive `Serialize`, `Deserialize`, and `utoipa::ToSchema` where supported by current crate setup.
 
 **Verification command:**
 
 ```bash
-cargo test -p aria-api neutron --all-features
+cargo test -p aria-api neutron_contract
 ```
 
-Expected: DTO serde tests pass.
+Expected: base UDS DTO serde tests pass. This verifies the Rust UDS contract shape before any full ACL/QoS/Mirror business snapshot is implemented.
 
 ### 5.2 Unix Socket Router
 
 **Files:**
-- Create: `agent/src/api_handlers/neutron.rs`
-- Create: `agent/src/neutron_socket.rs`
-- Modify: `agent/src/api_handlers/mod.rs`
-- Modify: `agent/src/api_routes.rs`
+- Modify: `agent/src/neutron_api.rs`
 - Modify: `agent/src/main.rs`
+- Later split target: `agent/src/api_handlers/neutron.rs`
+- Later split target: `agent/src/neutron_socket.rs`
 
-- [ ] Bind Neutron API only to Unix socket path from config, default `/run/aria/aria-agent.sock`.
-- [ ] Do not expose Neutron snapshot routes on TCP REST/OpenAPI listener.
-- [ ] Add routes:
+- [x] Bind Neutron API only to Unix socket path from config, default `/run/aria/aria-agent.sock`.
+- [x] Do not expose Neutron snapshot routes on TCP REST/OpenAPI listener.
+- [x] Add base routes:
   - `GET /api/v1/neutron/capabilities`
   - `GET /api/v1/neutron/status`
   - `PUT /api/v1/neutron/snapshot`
   - `DELETE /api/v1/neutron/ports/{port_id}`
 - [ ] Enforce socket file mode/group in startup or deployment scripts.
 - [ ] Reject requests that exceed configured body size.
+- [x] Add OpenAPI guard test proving Neutron UDS paths are not published by the TCP API document.
 
 **Verification command:**
 
 ```bash
-cargo test -p aria-agent neutron_socket
+cargo test -p aria-agent neutron_snapshot_plan
+cargo test -p aria-agent openapi_does_not_expose_neutron_uds_paths
 ```
 
 Expected: UDS routes exist; TCP route table does not include `/api/v1/neutron/snapshot`.
@@ -657,6 +678,22 @@ Expected: UDS routes exist; TCP route table does not include `/api/v1/neutron/sn
 **Expected visible result:**
 
 If `managed_domains=["acl"]`, local `ariactl policy add/delete` is rejected while local `ariactl qos add/delete`, `ariactl mirror add/delete`, `ariactl tcprt`, `ariactl trace`, and drop/SSL observability operations remain allowed. If `managed_domains=["acl","qos","mirror"]`, local writes for all three product domains are rejected. Read-only stats and observability queries remain available.
+
+**Real environment smoke, 2026-06-24:**
+
+- Host: `ostack2.bj159.net`.
+- Test interface: `tape607e86b-9e`.
+- Neutron port: `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f`.
+- Artifact commit: `7d9e38d`.
+- Snapshot: `managed_domains=["acl"]`.
+- Result:
+  - Neutron snapshot attached the target tap and status reported the port under Neutron authority.
+  - Local ACL writes were rejected with `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`.
+  - Local QoS writes still succeeded.
+  - Local Mirror writes still succeeded.
+  - Local Trace start/stop still succeeded.
+  - `DELETE /api/v1/neutron/ports/{port_id}` detached runtime and cleanup left no process, UDS listener, XDP program, or bpffs pin.
+- Evidence retained on the host: `/tmp/aria-domain-7d9e38d/domain-authority-smoke-2.log`.
 
 ---
 
@@ -1273,7 +1310,8 @@ allow_cross_host_target = false
 - [ ] Agent port filtering.
 - [ ] Effective ACL computation.
 - [ ] Effective QoS computation.
-- [ ] UDS schema serde.
+- [x] Base Rust UDS schema serde.
+- [x] TCP OpenAPI does not expose Neutron UDS paths.
 - [ ] Snapshot apply status.
 - [ ] Local write gate.
 - [ ] Aria Mirror session/rule validators.

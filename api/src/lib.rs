@@ -26,6 +26,280 @@ impl fmt::Display for ApiError {
     }
 }
 
+// --- Neutron UDS Contract ---
+
+pub const NEUTRON_UDS_API_VERSION: &str = "v1";
+pub const NEUTRON_ATTACH_AUTHORITY: &str = "neutron_snapshot";
+pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &[
+    "attach",
+    "acl",
+    "qos",
+    "mirror",
+    "config",
+    "conntrack",
+    "tcprt",
+    "trace",
+    "drops",
+    "ssl",
+];
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[schema(example = json!({
+    "generation": 101,
+    "host": "ostack2.bj159.net",
+    "ports": [
+        {
+            "port_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f",
+            "ifname": "tape607e86b-9e",
+            "ifindex": 27,
+            "eligible": true,
+            "disposition": "eligible_ovs_tap",
+            "device_owner": "compute:nova",
+            "vif_type": "ovs",
+            "vnic_type": "normal",
+            "network_backend": "openvswitch",
+            "ovs_iface_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f",
+            "managed_domains": ["acl"]
+        }
+    ]
+}))]
+pub struct NeutronSnapshotRequest {
+    /// Monotonic generation assigned by neutron-aria-agent.
+    #[serde(default)]
+    #[schema(example = 101)]
+    pub generation: u64,
+    /// Neutron host that produced the snapshot.
+    #[serde(default)]
+    #[schema(example = "ostack2.bj159.net")]
+    pub host: Option<String>,
+    /// Desired local port runtime state for this host.
+    #[serde(default)]
+    pub ports: Vec<NeutronPortSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[schema(example = json!({
+    "port_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f",
+    "ifname": "tape607e86b-9e",
+    "ifindex": 27,
+    "eligible": true,
+    "disposition": "eligible_ovs_tap",
+    "device_owner": "compute:nova",
+    "vif_type": "ovs",
+    "vnic_type": "normal",
+    "network_backend": "openvswitch",
+    "ovs_iface_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f",
+    "managed_domains": ["acl"]
+}))]
+pub struct NeutronPortSnapshot {
+    /// Neutron port UUID.
+    #[schema(example = "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f")]
+    pub port_id: String,
+    /// Local Linux interface name, usually the OVS tap name.
+    #[serde(default)]
+    #[schema(example = "tape607e86b-9e")]
+    pub ifname: String,
+    /// Current local ifindex observed by neutron-aria-agent.
+    #[serde(default)]
+    #[schema(example = 27)]
+    pub ifindex: Option<u32>,
+    /// Whether aria-agent is allowed to attach this port.
+    #[serde(default)]
+    #[schema(example = true)]
+    pub eligible: bool,
+    /// Classification reason such as eligible_ovs_tap, not_applicable, or unsupported.
+    #[serde(default)]
+    #[schema(example = "eligible_ovs_tap")]
+    pub disposition: Option<String>,
+    /// Neutron device_owner used for eligibility and diagnostics.
+    #[serde(default)]
+    #[schema(example = "compute:nova")]
+    pub device_owner: Option<String>,
+    /// Neutron binding:vif_type.
+    #[serde(default)]
+    #[schema(example = "ovs")]
+    pub vif_type: Option<String>,
+    /// Neutron binding:vnic_type.
+    #[serde(default)]
+    #[schema(example = "normal")]
+    pub vnic_type: Option<String>,
+    /// Local network backend classification.
+    #[serde(default)]
+    #[schema(example = "openvswitch")]
+    pub network_backend: Option<String>,
+    /// OVS external_ids:iface-id observed on the local interface.
+    #[serde(default)]
+    #[schema(example = "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f")]
+    pub ovs_iface_id: Option<String>,
+    /// Per-feature domains owned by Neutron for this attached port.
+    #[serde(default)]
+    pub managed_domains: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[schema(example = json!({
+    "port_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f",
+    "ifname": "tape607e86b-9e",
+    "ifindex": 27,
+    "managed_domains": ["acl"]
+}))]
+pub struct ManagedNeutronPort {
+    /// Neutron port UUID.
+    #[schema(example = "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f")]
+    pub port_id: String,
+    /// Local Linux interface name currently attached by aria-agent.
+    #[schema(example = "tape607e86b-9e")]
+    pub ifname: String,
+    /// Local ifindex from the accepted snapshot.
+    #[serde(default)]
+    #[schema(example = 27)]
+    pub ifindex: Option<u32>,
+    /// Per-feature domains owned by Neutron.
+    #[serde(default)]
+    pub managed_domains: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[schema(example = json!({
+    "api_version": "v1",
+    "attach_authority": "neutron_snapshot",
+    "supports_full_snapshot": true,
+    "supports_port_delete": true,
+    "supported_domains": ["attach", "acl", "qos", "mirror"]
+}))]
+pub struct NeutronCapabilitiesResponse {
+    /// Local UDS API version.
+    #[schema(example = "v1")]
+    pub api_version: String,
+    /// Authority model for attach/detach operations.
+    #[schema(example = "neutron_snapshot")]
+    pub attach_authority: String,
+    /// Whether PUT snapshot is authoritative for the full host set.
+    #[schema(example = true)]
+    pub supports_full_snapshot: bool,
+    /// Whether DELETE /ports/{port_id} is supported.
+    #[schema(example = true)]
+    pub supports_port_delete: bool,
+    /// Domains accepted in NeutronPortSnapshot.managed_domains.
+    pub supported_domains: Vec<String>,
+}
+
+impl NeutronCapabilitiesResponse {
+    pub fn current() -> Self {
+        Self {
+            api_version: NEUTRON_UDS_API_VERSION.to_string(),
+            attach_authority: NEUTRON_ATTACH_AUTHORITY.to_string(),
+            supports_full_snapshot: true,
+            supports_port_delete: true,
+            supported_domains: NEUTRON_SUPPORTED_DOMAINS
+                .iter()
+                .map(|domain| (*domain).to_string())
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[schema(example = json!({
+    "generation": 101,
+    "managed_ports": [
+        {
+            "port_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f",
+            "ifname": "tape607e86b-9e",
+            "ifindex": 27,
+            "managed_domains": ["acl"]
+        }
+    ],
+    "active_instances": ["tape607e86b-9e"]
+}))]
+pub struct NeutronStatusResponse {
+    /// Latest generation accepted by the UDS runtime.
+    #[schema(example = 101)]
+    pub generation: u64,
+    /// Ports currently attached through the Neutron snapshot authority.
+    pub managed_ports: Vec<ManagedNeutronPort>,
+    /// All active aria-agent instances, including those outside Neutron authority.
+    pub active_instances: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[schema(example = json!({
+    "generation": 101,
+    "results": [
+        {
+            "port_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f",
+            "ifname": "tape607e86b-9e",
+            "action": "attach",
+            "status": "ok",
+            "reason": null
+        }
+    ],
+    "active_instances": ["tape607e86b-9e"]
+}))]
+pub struct NeutronSnapshotResponse {
+    /// Snapshot generation returned after apply.
+    #[schema(example = 101)]
+    pub generation: u64,
+    /// Per-port apply results.
+    pub results: Vec<NeutronPortApplyResult>,
+    /// All active aria-agent instances after apply.
+    pub active_instances: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[schema(example = json!({
+    "port_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f",
+    "ifname": "tape607e86b-9e",
+    "action": "attach",
+    "status": "ok",
+    "reason": null
+}))]
+pub struct NeutronPortApplyResult {
+    /// Neutron port UUID.
+    #[schema(example = "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f")]
+    pub port_id: String,
+    /// Local interface name used for the action.
+    #[schema(example = "tape607e86b-9e")]
+    pub ifname: String,
+    /// Action taken: attach, update, detach, or ignore.
+    #[schema(example = "attach")]
+    pub action: String,
+    /// Result status: ok, error, or ignored.
+    #[schema(example = "ok")]
+    pub status: String,
+    /// Optional reason for ignored or failed actions.
+    #[serde(default)]
+    #[schema(example = "missing ifname")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[schema(example = json!({
+    "port_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f",
+    "ifname": "tape607e86b-9e",
+    "detached": true,
+    "status": "ok",
+    "error": null
+}))]
+pub struct NeutronDeleteResponse {
+    /// Neutron port UUID.
+    #[schema(example = "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f")]
+    pub port_id: String,
+    /// Local interface name that was detached, if known.
+    #[serde(default)]
+    #[schema(example = "tape607e86b-9e")]
+    pub ifname: Option<String>,
+    /// Whether a local runtime detach happened.
+    #[schema(example = true)]
+    pub detached: bool,
+    /// Result status: ok, error, or not_found.
+    #[schema(example = "ok")]
+    pub status: String,
+    /// Optional error string.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 // ── Health ──
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -1560,5 +1834,77 @@ pub fn direction_from_string(direction: &str) -> Result<u8, String> {
         "egress" | "out" => Ok(1),
         "both" | "all" => Ok(2),
         _ => Err(format!("Invalid direction '{}': must be 'ingress', 'egress', or 'both'", direction)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn neutron_contract_capabilities_are_stable() {
+        let capabilities = NeutronCapabilitiesResponse::current();
+        let expected_domains: Vec<String> = NEUTRON_SUPPORTED_DOMAINS
+            .iter()
+            .map(|domain| (*domain).to_string())
+            .collect();
+
+        assert_eq!(capabilities.api_version, NEUTRON_UDS_API_VERSION);
+        assert_eq!(capabilities.attach_authority, NEUTRON_ATTACH_AUTHORITY);
+        assert!(capabilities.supports_full_snapshot);
+        assert!(capabilities.supports_port_delete);
+        assert_eq!(capabilities.supported_domains, expected_domains);
+    }
+
+    #[test]
+    fn neutron_contract_snapshot_roundtrip_preserves_managed_domains() {
+        let snapshot = NeutronSnapshotRequest {
+            generation: 42,
+            host: Some("ostack2.bj159.net".to_string()),
+            ports: vec![NeutronPortSnapshot {
+                port_id: "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f".to_string(),
+                ifname: "tape607e86b-9e".to_string(),
+                ifindex: Some(27),
+                eligible: true,
+                disposition: Some("eligible_ovs_tap".to_string()),
+                device_owner: Some("compute:nova".to_string()),
+                vif_type: Some("ovs".to_string()),
+                vnic_type: Some("normal".to_string()),
+                network_backend: Some("openvswitch".to_string()),
+                ovs_iface_id: Some("e607e86b-9e5f-4c63-a5df-3dc8986a1b0f".to_string()),
+                managed_domains: vec!["acl".to_string(), "mirror".to_string()],
+            }],
+        };
+
+        let encoded = serde_json::to_string(&snapshot).expect("snapshot should serialize");
+        let decoded: NeutronSnapshotRequest =
+            serde_json::from_str(&encoded).expect("snapshot should deserialize");
+
+        assert_eq!(decoded, snapshot);
+        assert_eq!(decoded.ports[0].managed_domains, vec!["acl", "mirror"]);
+    }
+
+    #[test]
+    fn neutron_contract_defaults_are_backward_compatible() {
+        let decoded: NeutronSnapshotRequest =
+            serde_json::from_str(r#"{"ports":[{"port_id":"port-1"}]}"#)
+                .expect("minimal snapshot should deserialize");
+
+        assert_eq!(decoded.generation, 0);
+        assert_eq!(decoded.host, None);
+        assert_eq!(decoded.ports.len(), 1);
+
+        let port = &decoded.ports[0];
+        assert_eq!(port.port_id, "port-1");
+        assert_eq!(port.ifname, "");
+        assert_eq!(port.ifindex, None);
+        assert!(!port.eligible);
+        assert_eq!(port.disposition, None);
+        assert_eq!(port.device_owner, None);
+        assert_eq!(port.vif_type, None);
+        assert_eq!(port.vnic_type, None);
+        assert_eq!(port.network_backend, None);
+        assert_eq!(port.ovs_iface_id, None);
+        assert!(port.managed_domains.is_empty());
     }
 }

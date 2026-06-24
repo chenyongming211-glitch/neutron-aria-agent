@@ -49,9 +49,11 @@ jobs:
 
       - name: Test aria-agent Neutron attach authority
         run: |
+          cargo +stable test -p aria-api neutron_contract
           cargo +stable test -p aria-agent startup_mode
           cargo +stable test -p aria-agent neutron_snapshot_plan
           cargo +stable test -p aria-agent domain_authority
+          cargo +stable test -p aria-agent openapi_does_not_expose_neutron_uds_paths
 
       - name: Build eBPF
         run: |
