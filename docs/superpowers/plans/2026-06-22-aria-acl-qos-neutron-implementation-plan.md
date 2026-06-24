@@ -573,6 +573,48 @@ neutron-aria-agent \
 
 The host value must match the existing Neutron agent host convention, for example `ostack2.bj159.net`, not merely `ostack2`.
 
+**Real environment heartbeat-only service smoke, 2026-06-24:**
+
+- Git commit: `b0476f1`.
+- GitHub Actions run: `28085654256`, result `success`.
+- Deployment shape used for smoke:
+  - Source copied temporarily into each host's `neutron_openvswitch_agent` container under `/tmp/neutron_aria_agent_src`.
+  - Process launched with container Python 2.7 and `PYTHONPATH=/tmp/neutron_aria_agent_src`.
+  - Neutron runtime initialized with:
+    - `/etc/neutron/neutron.conf`
+    - `/etc/neutron/plugins/ml2/openvswitch_agent.ini`
+  - `--heartbeat-only` used, so no snapshot was submitted and no tap datapath was touched.
+- Host values:
+  - `ostack2.bj159.net`
+  - `ostack3.bj159.net`
+  - `ostack4.bj159.net`
+- Observed `neutron agent-list` result:
+
+```text
+Aria ACL agent | ostack2.bj159.net | :-) | True | neutron-aria-agent
+Aria ACL agent | ostack3.bj159.net | :-) | True | neutron-aria-agent
+Aria ACL agent | ostack4.bj159.net | :-) | True | neutron-aria-agent
+```
+
+- Observed `neutron agent-show` configuration on `ostack2.bj159.net`:
+
+```json
+{
+  "ready": false,
+  "degraded": true,
+  "reason": "full_resync_disabled",
+  "last_error": "full resync is disabled; heartbeat-only service mode",
+  "last_generation": 0,
+  "last_snapshot_ports": 0,
+  "last_managed_ports": 0,
+  "managed_domains": ["acl"],
+  "ovs_bridge": "br-int",
+  "socket_path": "/run/aria/aria-agent.sock"
+}
+```
+
+This proves the `neutron-aria-agent` heartbeat path is compatible with the onsite legacy Neutron RPC stack. The smoke deployment is temporary and container-local; it is not persistent across container rebuild/restart. Product delivery still needs a Kolla service definition or image layer.
+
 **Real environment smoke, 2026-06-24:**
 
 - Host: `ostack2.bj159.net`.
