@@ -1,6 +1,10 @@
 from __future__ import absolute_import
 
+import logging
 import time
+
+
+LOG = logging.getLogger(__name__)
 
 
 HEARTBEAT_ONLY_REASON = "full_resync_disabled"
@@ -49,10 +53,20 @@ class AgentService(object):
     def initialize(self):
         now = self.clock()
         self.initialized = True
+        LOG.info(
+            "service_initialize host=%s full_resync_enabled=%s report_interval=%s "
+            "resync_interval=%s event_merge_enabled=%s",
+            getattr(self.synchronizer, "host", ""),
+            self.full_resync_enabled,
+            self.report_interval,
+            self.resync_interval,
+            self.event_merger is not None,
+        )
         if self.full_resync_enabled:
             result = self.synchronizer.safe_full_resync()
             self.next_resync_at = now + self._next_resync_delay(result)
             self.next_report_at = now + self.report_interval
+            self._log_result("initialize_full_resync", result)
             return result
 
         self.synchronizer.runtime_status.mark_degraded(
@@ -61,12 +75,14 @@ class AgentService(object):
         )
         heartbeat = self.synchronizer.report_status()
         self.next_report_at = now + self.report_interval
-        return {
+        result = {
             "snapshot": None,
             "response": None,
             "status": self.synchronizer.runtime_status.to_dict(),
             "heartbeat": heartbeat,
         }
+        self._log_result("initialize_heartbeat_only", result)
+        return result
 
     def run_once(self):
         if not self.initialized:
@@ -80,23 +96,27 @@ class AgentService(object):
             if self.full_resync_enabled and result.get("resync_attempted"):
                 self.next_resync_at = now + self._next_resync_delay(result)
             self.next_report_at = now + self.report_interval
+            self._log_result("event_batch", result)
             return result
 
         if self.full_resync_enabled and now >= self.next_resync_at:
             result = self.synchronizer.safe_full_resync()
             self.next_resync_at = now + self._next_resync_delay(result)
             self.next_report_at = now + self.report_interval
+            self._log_result("periodic_full_resync", result)
             return result
 
         if now >= self.next_report_at:
             heartbeat = self.synchronizer.report_status()
             self.next_report_at = now + self.report_interval
-            return {
+            result = {
                 "snapshot": None,
                 "response": None,
                 "status": self.synchronizer.runtime_status.to_dict(),
                 "heartbeat": heartbeat,
             }
+            self._log_result("periodic_heartbeat", result)
+            return result
 
         return None
 
@@ -119,6 +139,34 @@ class AgentService(object):
         while True:
             self.run_once()
             self.sleeper(self.sleep_interval())
+
+    def _log_result(self, action, result):
+        if result is None:
+            return
+        status = result.get("status") or {}
+        heartbeat = result.get("heartbeat")
+        events = result.get("events") or {}
+        heartbeat_ok = heartbeat is None or heartbeat.get("ok", False)
+        LOG.info(
+            "service_result action=%s host=%s ready=%s degraded=%s reason=%s "
+            "generation=%s snapshot_ports=%s managed_ports=%s heartbeat_ok=%s "
+            "event_port_updates=%s event_deleted_ports=%s event_dirty_networks=%s "
+            "event_full_resync=%s event_overflowed=%s",
+            action,
+            status.get("host") or getattr(self.synchronizer, "host", ""),
+            status.get("ready"),
+            status.get("degraded"),
+            status.get("reason"),
+            status.get("last_generation"),
+            status.get("last_snapshot_ports"),
+            status.get("last_managed_ports"),
+            heartbeat_ok,
+            len(events.get("port_updates") or []),
+            len(events.get("deleted_ports") or []),
+            len(events.get("dirty_networks") or []),
+            events.get("full_resync", False),
+            events.get("overflowed", False),
+        )
 
     def _next_resync_delay(self, result):
         status = result.get("status") or {}
@@ -155,6 +203,18 @@ class AgentService(object):
         batch = self.event_merger.drain()
         if not batch.has_changes():
             return None
+        batch_dict = batch.to_dict()
+        LOG.info(
+            "event_batch_drained host=%s port_updates=%s deleted_ports=%s "
+            "dirty_networks=%s full_resync=%s overflowed=%s reasons=%s",
+            getattr(self.synchronizer, "host", ""),
+            len(batch_dict["port_updates"]),
+            len(batch_dict["deleted_ports"]),
+            len(batch_dict["dirty_networks"]),
+            batch_dict["full_resync"],
+            batch_dict["overflowed"],
+            ",".join(batch_dict["reasons"]),
+        )
 
         if not self.full_resync_enabled:
             self.synchronizer.runtime_status.mark_degraded(
@@ -167,7 +227,7 @@ class AgentService(object):
                 "response": None,
                 "status": self.synchronizer.runtime_status.to_dict(),
                 "heartbeat": heartbeat,
-                "events": batch.to_dict(),
+                "events": batch_dict,
             }
 
         delete_errors = self._delete_known_ports(batch.deleted_ports)
@@ -182,7 +242,7 @@ class AgentService(object):
                 "response": None,
                 "status": self.synchronizer.runtime_status.to_dict(),
                 "heartbeat": heartbeat,
-                "events": batch.to_dict(),
+                "events": batch_dict,
             }
 
         port_updates_requiring_resync = {}
@@ -203,14 +263,14 @@ class AgentService(object):
                             "response": None,
                             "status": self.synchronizer.runtime_status.to_dict(),
                             "heartbeat": heartbeat,
-                            "events": batch.to_dict(),
+                            "events": batch_dict,
                         }
                 continue
             port_updates_requiring_resync[port_id] = event
 
         if batch.full_resync or batch.dirty_networks or port_updates_requiring_resync:
             result = self.synchronizer.safe_full_resync()
-            result["events"] = batch.to_dict()
+            result["events"] = batch_dict
             result["resync_attempted"] = True
             return result
 
@@ -220,7 +280,7 @@ class AgentService(object):
             "response": None,
             "status": self.synchronizer.runtime_status.to_dict(),
             "heartbeat": heartbeat,
-            "events": batch.to_dict(),
+            "events": batch_dict,
         }
 
     def _delete_known_ports(self, port_ids):

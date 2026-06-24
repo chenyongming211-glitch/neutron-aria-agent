@@ -416,7 +416,7 @@ Expected: all `aria-acl-*` command families are listed.
 - [ ] Read RabbitMQ credentials and Neutron service credentials from the product OpenStack config.
 - [ ] Register as Neutron agent type `Aria ACL agent`.
 - [ ] Heartbeat to Neutron agent table.
-- [ ] Provide process logs with host, generation, dirty target count, and status update count.
+- [x] Provide process logs with host, generation, dirty target count, and status update count.
 
 **Expected visible result:**
 
@@ -562,6 +562,14 @@ configurations.degraded = true
 ```
 
 This lets `neutron agent-list` show the Aria agent as alive without submitting an empty snapshot or touching any tap datapath. Full snapshot submission remains gated behind `full_resync_enabled=true` or CLI `--enable-full-resync`, and must not be enabled in production until the real Neutron port source/RPC event path and retry/backoff are complete.
+
+The Python agent now emits process logs through stdlib `logging`, which the Kolla launcher writes to `/var/log/kolla/neutron/neutron-aria-agent.log`. The log includes:
+
+- `agent_start` with host, managed domains, full-resync flag, RPC event flag, port source, OVS bridge, and UDS socket path.
+- `heartbeat_reported` with ready/degraded status, reason, generation, snapshot port count, and managed port count.
+- `full_resync_complete` and `full_resync_degraded` with generation or degraded reason.
+- `event_batch_drained` and `service_result` with merged port update/delete/network counts, full-resync flag, overflow flag, and heartbeat result.
+- `delete_port_complete` with the local projected-port count after cleanup.
 
 CLI entry point:
 

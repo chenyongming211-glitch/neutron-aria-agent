@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+import logging
 import optparse
 import socket
 import sys
@@ -20,8 +21,29 @@ from neutron_aria.agent.status_reporter import build_neutron_status_reporter
 from neutron_aria.agent.uds_client import LocalClient
 
 
+LOG = logging.getLogger(__name__)
+
+
 def _default_host(config):
     return config.host or socket.getfqdn() or socket.gethostname()
+
+
+def configure_logging():
+    agent_logger = logging.getLogger("neutron_aria")
+    has_stream_handler = False
+    for handler in agent_logger.handlers:
+        if getattr(handler, "_neutron_aria_stream", False):
+            has_stream_handler = True
+            break
+    if not has_stream_handler:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s %(message)s",
+        ))
+        handler._neutron_aria_stream = True
+        agent_logger.addHandler(handler)
+    agent_logger.setLevel(logging.INFO)
+    agent_logger.propagate = False
 
 
 def build_synchronizer(config, neutron_port_source=None, status_reporter=None):
@@ -140,7 +162,19 @@ def main(argv=None):
         return 0
 
     initialize_neutron_runtime(options.neutron_config_files)
+    configure_logging()
     host = _default_host(config)
+    LOG.info(
+        "agent_start host=%s managed_domains=%s full_resync_enabled=%s "
+        "rpc_events_enabled=%s port_source=%s ovs_bridge=%s socket_path=%s",
+        host,
+        ",".join(config.managed_domains),
+        config.full_resync_enabled,
+        config.rpc_events_enabled,
+        config.port_source,
+        config.ovs_bridge,
+        config.socket_path,
+    )
     status_reporter = build_neutron_status_reporter(host, config)
     event_merger = None
     rpc_connection = None

@@ -1,8 +1,13 @@
 from __future__ import absolute_import
 
+import logging
+
 from neutron_aria.agent.inventory import PortInventoryBuilder
 from neutron_aria.agent.status import AgentRuntimeStatus
 from neutron_aria.agent.uds_client import LocalApiError
+
+
+LOG = logging.getLogger(__name__)
 
 
 class GenerationStore(object):
@@ -67,6 +72,16 @@ class SnapshotSynchronizer(object):
             len(managed_ports),
         )
         heartbeat = self.report_status()
+        LOG.info(
+            "full_resync_complete host=%s generation=%s snapshot_ports=%s "
+            "managed_ports=%s projected_ports=%s heartbeat_ok=%s",
+            self.host,
+            snapshot["generation"],
+            len(snapshot["ports"]),
+            len(managed_ports),
+            len(self.projected_port_ids),
+            heartbeat is None or heartbeat.get("ok", False),
+        )
         return {
             "snapshot": snapshot,
             "response": response,
@@ -80,6 +95,13 @@ class SnapshotSynchronizer(object):
         except LocalApiError as exc:
             self.runtime_status.mark_degraded("local_api_degraded", exc)
             heartbeat = self.report_status()
+            LOG.warning(
+                "full_resync_degraded host=%s reason=%s error=%s heartbeat_ok=%s",
+                self.host,
+                self.runtime_status.reason,
+                self.runtime_status.last_error,
+                heartbeat is None or heartbeat.get("ok", False),
+            )
             return {
                 "snapshot": None,
                 "response": None,
@@ -89,6 +111,13 @@ class SnapshotSynchronizer(object):
         except Exception as exc:
             self.runtime_status.mark_degraded("resync_degraded", exc)
             heartbeat = self.report_status()
+            LOG.warning(
+                "full_resync_degraded host=%s reason=%s error=%s heartbeat_ok=%s",
+                self.host,
+                self.runtime_status.reason,
+                self.runtime_status.last_error,
+                heartbeat is None or heartbeat.get("ok", False),
+            )
             return {
                 "snapshot": None,
                 "response": None,
@@ -99,6 +128,12 @@ class SnapshotSynchronizer(object):
     def delete_port(self, port_id):
         response = self.local_client.delete_port(port_id)
         self.projected_port_ids.discard(port_id)
+        LOG.info(
+            "delete_port_complete host=%s port_id=%s projected_ports=%s",
+            self.host,
+            port_id,
+            len(self.projected_port_ids),
+        )
         return response
 
     def has_projected_port(self, port_id):
@@ -114,6 +149,23 @@ class SnapshotSynchronizer(object):
             return None
         try:
             agent_state = self.status_reporter.report(self.runtime_status)
+            LOG.info(
+                "heartbeat_reported host=%s ready=%s degraded=%s reason=%s "
+                "generation=%s snapshot_ports=%s managed_ports=%s",
+                self.host,
+                self.runtime_status.ready,
+                self.runtime_status.degraded,
+                self.runtime_status.reason,
+                self.runtime_status.last_generation,
+                self.runtime_status.last_snapshot_ports,
+                self.runtime_status.last_managed_ports,
+            )
             return {"ok": True, "agent_state": agent_state}
         except Exception as exc:
+            LOG.warning(
+                "heartbeat_report_failed host=%s reason=%s error=%s",
+                self.host,
+                self.runtime_status.reason,
+                exc,
+            )
             return {"ok": False, "error": str(exc)}
