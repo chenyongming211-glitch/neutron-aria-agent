@@ -18,6 +18,9 @@ ROLLBACK="${ROLLBACK:-true}"
 MIN_MANAGED_PORTS="${MIN_MANAGED_PORTS:-0}"
 EXPECTED_PORT_ID="${EXPECTED_PORT_ID:-}"
 EXPECTED_IFNAME="${EXPECTED_IFNAME:-}"
+ACL_FIXTURE_JSON="${ACL_FIXTURE_JSON:-}"
+ACL_FIXTURE_FILE="${ACL_FIXTURE_FILE:-}"
+CONTAINER_ACL_FIXTURE="${CONTAINER_ACL_FIXTURE:-/tmp/neutron-aria-acl-fixture.json}"
 
 die() {
     echo "ERROR: $*" >&2
@@ -119,6 +122,24 @@ prepare_full_resync_config() {
         sed -i 's/^rpc_events_enabled =.*/rpc_events_enabled = false/' '${SMOKE_CONFIG}' &&
         chmod 0644 '${SMOKE_CONFIG}'
     "
+    if [ -n "${ACL_FIXTURE_JSON}" ] || [ -n "${ACL_FIXTURE_FILE}" ]; then
+        if [ -n "${ACL_FIXTURE_FILE}" ]; then
+            [ -r "${ACL_FIXTURE_FILE}" ] || die "ACL_FIXTURE_FILE is not readable: ${ACL_FIXTURE_FILE}"
+            docker cp "${ACL_FIXTURE_FILE}" "${SERVICE_NAME}:${CONTAINER_ACL_FIXTURE}"
+        else
+            printf '%s' "${ACL_FIXTURE_JSON}" | docker exec -i -u root "${SERVICE_NAME}" \
+                sh -c "cat > '${CONTAINER_ACL_FIXTURE}'"
+        fi
+        docker exec -u root "${SERVICE_NAME}" sh -c "
+            grep -q '^\[acl\]' '${SMOKE_CONFIG}' || printf '\n[acl]\n' >> '${SMOKE_CONFIG}'
+            if grep -q '^fixture_path =' '${SMOKE_CONFIG}'; then
+                sed -i 's#^fixture_path =.*#fixture_path = ${CONTAINER_ACL_FIXTURE}#' '${SMOKE_CONFIG}'
+            else
+                printf 'fixture_path = ${CONTAINER_ACL_FIXTURE}\n' >> '${SMOKE_CONFIG}'
+            fi
+            chmod 0644 '${CONTAINER_ACL_FIXTURE}' '${SMOKE_CONFIG}'
+        "
+    fi
 }
 
 rollback_managed_ports() {

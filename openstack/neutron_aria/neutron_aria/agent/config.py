@@ -14,6 +14,7 @@ DEFAULT_PORT_SOURCE = "disabled"
 DEFAULT_EVENT_MERGE_INTERVAL = 0.2
 DEFAULT_EVENT_QUEUE_MAX_PORTS = 10000
 DEFAULT_EVENT_QUEUE_MAX_NETWORKS = 1000
+DEFAULT_ACL_FIXTURE_PATH = ""
 
 
 class AgentConfig(object):
@@ -35,6 +36,7 @@ class AgentConfig(object):
         event_merge_interval=DEFAULT_EVENT_MERGE_INTERVAL,
         event_queue_max_ports=DEFAULT_EVENT_QUEUE_MAX_PORTS,
         event_queue_max_networks=DEFAULT_EVENT_QUEUE_MAX_NETWORKS,
+        acl_fixture_path=DEFAULT_ACL_FIXTURE_PATH,
     ):
         self.host = host
         self.ovs_bridge = ovs_bridge
@@ -52,6 +54,7 @@ class AgentConfig(object):
         self.event_merge_interval = float(event_merge_interval)
         self.event_queue_max_ports = int(event_queue_max_ports)
         self.event_queue_max_networks = int(event_queue_max_networks)
+        self.acl_fixture_path = acl_fixture_path or DEFAULT_ACL_FIXTURE_PATH
 
 
 def _get(parser, section, option, default=None):
@@ -114,4 +117,5 @@ def load_config(path):
             "event_queue_max_networks",
             str(DEFAULT_EVENT_QUEUE_MAX_NETWORKS),
         ),
+        acl_fixture_path=_get(parser, "acl", "fixture_path", DEFAULT_ACL_FIXTURE_PATH),
     )

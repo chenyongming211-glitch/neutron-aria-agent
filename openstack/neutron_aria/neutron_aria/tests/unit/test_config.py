@@ -35,6 +35,9 @@ rpc_events_enabled = true
 event_merge_interval = 0.3
 event_queue_max_ports = 42
 event_queue_max_networks = 7
+
+[acl]
+fixture_path = /tmp/aria-acl-fixture.json
 """)
             os.close(fd)
             fd = None
@@ -54,6 +57,7 @@ event_queue_max_networks = 7
             self.assertEqual(0.3, config.event_merge_interval)
             self.assertEqual(42, config.event_queue_max_ports)
             self.assertEqual(7, config.event_queue_max_networks)
+            self.assertEqual("/tmp/aria-acl-fixture.json", config.acl_fixture_path)
             self.assertEqual("br-int", config.ovs_bridge)
             self.assertEqual("/run/aria/aria-agent.sock", config.socket_path)
             self.assertEqual(2.5, config.request_timeout)

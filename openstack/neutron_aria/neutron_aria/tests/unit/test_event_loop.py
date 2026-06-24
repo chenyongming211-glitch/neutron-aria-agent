@@ -2,6 +2,7 @@ from __future__ import absolute_import
 
 import unittest
 
+from neutron_aria.agent.effective_acl import EffectiveAclIndex
 from neutron_aria.agent.event_loop import SnapshotSynchronizer
 from neutron_aria.agent.neutron_client import StaticPortSource
 from neutron_aria.agent.ovsdb import OvsInterface
@@ -103,6 +104,53 @@ class EventLoopTestCase(unittest.TestCase):
             set(["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]),
             sync.projected_port_ids,
         )
+
+    def test_full_resync_includes_effective_acl_when_index_is_available(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        port_source = StaticPortSource([{
+            "id": port_id,
+            "network_id": "net-1",
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+        acl_index = EffectiveAclIndex(
+            policies=[{"id": "acl-policy", "default_action": "allow"}],
+            rules=[{
+                "id": "drop-icmp",
+                "policy_id": "acl-policy",
+                "direction": "ingress",
+                "priority": 100,
+                "action": "drop",
+                "ethertype": "IPv4",
+                "protocol": "icmp",
+                "src_cidr": "10.58.159.2/32",
+            }],
+            bindings=[{
+                "id": "acl-binding",
+                "policy_id": "acl-policy",
+                "target_type": "port",
+                "target_id": port_id,
+            }],
+        )
+        local_client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            acl_index=acl_index,
+        )
+
+        sync.full_resync()
+
+        port = local_client.snapshots[0]["ports"][0]
+        self.assertEqual("acl-policy", port["acl"]["policy_id"])
+        self.assertTrue(port["acl"]["enabled"])
+        self.assertEqual("drop-icmp", port["acl"]["rules"][0]["id"])
+        self.assertEqual(["10.58.159.2/32"], port["acl"]["rules"][0]["src_cidrs"])
 
     def test_full_resync_reports_ready_heartbeat(self):
         status_reporter = FakeStatusReporter()

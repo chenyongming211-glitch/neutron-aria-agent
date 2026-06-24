@@ -134,6 +134,94 @@ pub struct NeutronPortSnapshot {
     /// Per-feature domains owned by Neutron for this attached port.
     #[serde(default)]
     pub managed_domains: Vec<String>,
+    /// Optional effective Aria ACL payload compiled by neutron-aria-agent.
+    #[serde(default)]
+    pub acl: Option<NeutronAclSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[schema(example = json!({
+    "enabled": true,
+    "status": "ready",
+    "reason": "ready",
+    "effective_action": "enforce",
+    "policy_id": "acl-policy-1",
+    "policy_name": "allow-icmp",
+    "binding_id": "acl-binding-1",
+    "source": "port",
+    "default_action": "allow",
+    "stateful": true,
+    "revision": 7,
+    "rules": [
+        {
+            "id": "rule-1",
+            "direction": "ingress",
+            "priority": 100,
+            "action": "drop",
+            "ethertype": "IPv4",
+            "protocol": "icmp",
+            "src_cidrs": ["10.58.159.2/32"],
+            "dst_cidrs": [],
+            "src_port_min": null,
+            "src_port_max": null,
+            "dst_port_min": null,
+            "dst_port_max": null
+        }
+    ]
+}))]
+pub struct NeutronAclSnapshot {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub effective_action: String,
+    #[serde(default)]
+    pub policy_id: Option<String>,
+    #[serde(default)]
+    pub policy_name: Option<String>,
+    #[serde(default)]
+    pub binding_id: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub default_action: String,
+    #[serde(default)]
+    pub stateful: bool,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub rules: Vec<NeutronAclRuleSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NeutronAclRuleSnapshot {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub direction: Option<String>,
+    #[serde(default)]
+    pub priority: i64,
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub ethertype: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub src_cidrs: Vec<String>,
+    #[serde(default)]
+    pub dst_cidrs: Vec<String>,
+    #[serde(default)]
+    pub src_port_min: Option<u16>,
+    #[serde(default)]
+    pub src_port_max: Option<u16>,
+    #[serde(default)]
+    pub dst_port_min: Option<u16>,
+    #[serde(default)]
+    pub dst_port_max: Option<u16>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -1873,6 +1961,33 @@ mod tests {
                 network_backend: Some("openvswitch".to_string()),
                 ovs_iface_id: Some("e607e86b-9e5f-4c63-a5df-3dc8986a1b0f".to_string()),
                 managed_domains: vec!["acl".to_string(), "mirror".to_string()],
+                acl: Some(NeutronAclSnapshot {
+                    enabled: true,
+                    status: "ready".to_string(),
+                    reason: "ready".to_string(),
+                    effective_action: "enforce".to_string(),
+                    policy_id: Some("acl-policy-1".to_string()),
+                    policy_name: Some("smoke".to_string()),
+                    binding_id: Some("acl-binding-1".to_string()),
+                    source: Some("port".to_string()),
+                    default_action: "allow".to_string(),
+                    stateful: true,
+                    revision: 7,
+                    rules: vec![NeutronAclRuleSnapshot {
+                        id: Some("rule-1".to_string()),
+                        direction: Some("ingress".to_string()),
+                        priority: 100,
+                        action: Some("drop".to_string()),
+                        ethertype: Some("IPv4".to_string()),
+                        protocol: Some("icmp".to_string()),
+                        src_cidrs: vec!["10.58.159.2/32".to_string()],
+                        dst_cidrs: Vec::new(),
+                        src_port_min: None,
+                        src_port_max: None,
+                        dst_port_min: None,
+                        dst_port_max: None,
+                    }],
+                }),
             }],
         };
 
@@ -1906,5 +2021,6 @@ mod tests {
         assert_eq!(port.network_backend, None);
         assert_eq!(port.ovs_iface_id, None);
         assert!(port.managed_domains.is_empty());
+        assert_eq!(port.acl, None);
     }
 }

@@ -31,6 +31,7 @@ class SnapshotSynchronizer(object):
         ovs_bridge="br-int",
         runtime_status=None,
         status_reporter=None,
+        acl_index=None,
     ):
         self.host = host
         self.port_source = port_source
@@ -42,6 +43,7 @@ class SnapshotSynchronizer(object):
         self.runtime_status = runtime_status or AgentRuntimeStatus(host)
         self.status_reporter = status_reporter
         self.projected_port_ids = set()
+        self.acl_index = acl_index
 
     def check_capabilities(self):
         return self.local_client.capabilities(required_domains=self.managed_domains)
@@ -52,6 +54,7 @@ class SnapshotSynchronizer(object):
         builder = PortCandidateBuilder(
             self.host,
             managed_domains=self.managed_domains,
+            acl_index=self.acl_index,
         )
         snapshot = builder.build_snapshot(
             ports,

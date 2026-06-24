@@ -2,10 +2,12 @@ from __future__ import absolute_import
 
 import logging
 import optparse
+import json
 import socket
 import sys
 
 from neutron_aria.agent.config import load_config
+from neutron_aria.agent.effective_acl import EffectiveAclIndex
 from neutron_aria.agent.event_merge import EventMerger
 from neutron_aria.agent.event_loop import SnapshotSynchronizer
 from neutron_aria.agent.neutron_client import NeutronClientFactoryError
@@ -45,6 +47,20 @@ def configure_logging():
     agent_logger.propagate = False
 
 
+def build_acl_index(config):
+    path = getattr(config, "acl_fixture_path", None)
+    if not path:
+        return None
+    with open(path, "r") as stream:
+        payload = json.load(stream)
+    return EffectiveAclIndex(
+        policies=payload.get("policies") or [],
+        rules=payload.get("rules") or [],
+        address_sets=payload.get("address_sets") or [],
+        bindings=payload.get("bindings") or [],
+    )
+
+
 def build_synchronizer(config, neutron_port_source=None, status_reporter=None):
     host = _default_host(config)
     port_source = neutron_port_source
@@ -64,6 +80,7 @@ def build_synchronizer(config, neutron_port_source=None, status_reporter=None):
         managed_domains=config.managed_domains,
         ovs_bridge=config.ovs_bridge,
         status_reporter=status_reporter,
+        acl_index=build_acl_index(config),
     )
 
 
@@ -165,7 +182,8 @@ def main(argv=None):
     host = _default_host(config)
     LOG.info(
         "agent_start host=%s managed_domains=%s full_resync_enabled=%s "
-        "rpc_events_enabled=%s port_source=%s ovs_bridge=%s socket_path=%s",
+        "rpc_events_enabled=%s port_source=%s ovs_bridge=%s socket_path=%s "
+        "acl_fixture_enabled=%s",
         host,
         ",".join(config.managed_domains),
         config.full_resync_enabled,
@@ -173,6 +191,7 @@ def main(argv=None):
         config.port_source,
         config.ovs_bridge,
         config.socket_path,
+        bool(config.acl_fixture_path),
     )
     status_reporter = build_neutron_status_reporter(host, config)
     event_merger = None

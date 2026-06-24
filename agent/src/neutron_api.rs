@@ -6,15 +6,17 @@ use axum::{
     Json, Router,
 };
 use aria_api::{
-    ManagedNeutronPort, NeutronCapabilitiesResponse, NeutronDeleteResponse,
-    NeutronPortApplyResult, NeutronPortSnapshot, NeutronSnapshotRequest,
-    NeutronSnapshotResponse, NeutronStatusResponse,
+    action_from_string, direction_from_string, proto_from_string, ManagedNeutronPort,
+    NeutronAclRuleSnapshot, NeutronAclSnapshot, NeutronCapabilitiesResponse, NeutronDeleteResponse,
+    NeutronPortApplyResult, NeutronPortSnapshot, NeutronSnapshotRequest, NeutronSnapshotResponse,
+    NeutronStatusResponse,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
+use tracing::warn;
 
 use crate::control_plane::ControlPlane;
 use crate::tap_registry::TapRegistry;
@@ -40,6 +42,28 @@ struct SnapshotPlan {
     update: Vec<NeutronPortSnapshot>,
     detach: Vec<ManagedNeutronPort>,
     ignored: Vec<NeutronPortApplyResult>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AclGroupPlan {
+    name: String,
+    cidrs: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AclPolicyPlan {
+    src_group: String,
+    dst_group: String,
+    proto: u8,
+    action: u8,
+    direction: u8,
+    ports: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct AclApplyPlan {
+    groups: Vec<AclGroupPlan>,
+    policies: Vec<AclPolicyPlan>,
 }
 
 impl NeutronApiState {
@@ -103,6 +127,14 @@ async fn put_neutron_snapshot(
     let mut results = plan.ignored;
 
     for port in plan.detach {
+        if let Err(e) = purge_neutron_acl(&state, &port.ifname, &port.port_id).await {
+            warn!(
+                port_id = %port.port_id,
+                ifname = %port.ifname,
+                error = %e,
+                "failed to purge Neutron ACL before detach"
+            );
+        }
         match state.registry.detach(&port.ifname).await {
             Ok(()) => {
                 next_ports.remove(&port.port_id);
@@ -132,29 +164,8 @@ async fn put_neutron_snapshot(
 
     for port in plan.update {
         let managed = managed_port_from_snapshot(&port);
-        state
-            .control_plane
-            .mark_neutron_port_authority(
-                &managed.ifname,
-                &managed.port_id,
-                &managed.managed_domains,
-                snapshot.generation,
-            )
-            .await;
-        next_ports.insert(managed.port_id.clone(), managed.clone());
-        results.push(NeutronPortApplyResult {
-            port_id: managed.port_id,
-            ifname: managed.ifname,
-            action: "update".to_string(),
-            status: "ok".to_string(),
-            reason: None,
-        });
-    }
-
-    for port in plan.attach {
-        match state.registry.attach(&port.ifname).await {
+        match reconcile_neutron_acl(&state, &port).await {
             Ok(()) => {
-                let managed = managed_port_from_snapshot(&port);
                 state
                     .control_plane
                     .mark_neutron_port_authority(
@@ -168,10 +179,69 @@ async fn put_neutron_snapshot(
                 results.push(NeutronPortApplyResult {
                     port_id: managed.port_id,
                     ifname: managed.ifname,
-                    action: "attach".to_string(),
+                    action: "update".to_string(),
                     status: "ok".to_string(),
                     reason: None,
                 });
+            }
+            Err(e) => {
+                results.push(NeutronPortApplyResult {
+                    port_id: managed.port_id,
+                    ifname: managed.ifname,
+                    action: "update".to_string(),
+                    status: "error".to_string(),
+                    reason: Some(format!("acl_apply_failed:{}", e)),
+                });
+            }
+        }
+    }
+
+    for port in plan.attach {
+        match state.registry.attach(&port.ifname).await {
+            Ok(()) => {
+                let managed = managed_port_from_snapshot(&port);
+                match reconcile_neutron_acl(&state, &port).await {
+                    Ok(()) => {
+                        state
+                            .control_plane
+                            .mark_neutron_port_authority(
+                                &managed.ifname,
+                                &managed.port_id,
+                                &managed.managed_domains,
+                                snapshot.generation,
+                            )
+                            .await;
+                        next_ports.insert(managed.port_id.clone(), managed.clone());
+                        results.push(NeutronPortApplyResult {
+                            port_id: managed.port_id,
+                            ifname: managed.ifname,
+                            action: "attach".to_string(),
+                            status: "ok".to_string(),
+                            reason: None,
+                        });
+                    }
+                    Err(e) => {
+                        if let Err(detach_err) = state.registry.detach(&port.ifname).await {
+                            warn!(
+                                port_id = %port.port_id,
+                                ifname = %port.ifname,
+                                error = %detach_err,
+                                "failed to detach after Neutron ACL apply failure"
+                            );
+                        }
+                        state
+                            .control_plane
+                            .clear_neutron_port_authority(&port.ifname)
+                            .await;
+                        results.push(NeutronPortApplyResult {
+                            port_id: managed.port_id,
+                            ifname: managed.ifname,
+                            action: "attach".to_string(),
+                            status: "error".to_string(),
+                            reason: Some(format!("acl_apply_failed:{}", e)),
+                        });
+                    }
+                }
             }
             Err(e) => {
                 results.push(NeutronPortApplyResult {
@@ -220,6 +290,15 @@ async fn delete_neutron_port(
             }),
         );
     };
+
+    if let Err(e) = purge_neutron_acl(&state, &port.ifname, &port.port_id).await {
+        warn!(
+            port_id = %port.port_id,
+            ifname = %port.ifname,
+            error = %e,
+            "failed to purge Neutron ACL during port delete"
+        );
+    }
 
     match state.registry.detach(&port.ifname).await {
         Ok(()) => {
@@ -570,6 +649,311 @@ fn managed_port_from_snapshot(port: &NeutronPortSnapshot) -> ManagedNeutronPort 
     }
 }
 
+fn port_manages_acl(port: &NeutronPortSnapshot) -> bool {
+    normalize_managed_domains(&port.managed_domains)
+        .iter()
+        .any(|domain| domain == "acl")
+}
+
+fn neutron_acl_prefix(port_id: &str) -> String {
+    format!("neutron:{}:", port_id)
+}
+
+fn is_neutron_acl_group(port_id: &str, group_name: &str) -> bool {
+    group_name.starts_with(&neutron_acl_prefix(port_id))
+}
+
+fn acl_rule_id(rule: &NeutronAclRuleSnapshot, index: usize) -> String {
+    rule.id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| {
+            id.chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                        ch
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+        })
+        .unwrap_or_else(|| format!("rule{}", index))
+}
+
+fn normalize_default_action(action: &str) -> String {
+    let normalized = action.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        "allow".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn ensure_ipv4_cidrs(cidrs: &[String], rule_id: &str) -> Result<(), String> {
+    for cidr in cidrs {
+        if cidr.contains(':') {
+            return Err(format!("rule {} uses IPv6 CIDR {}; unsupported", rule_id, cidr));
+        }
+    }
+    Ok(())
+}
+
+fn acl_ports(rule: &NeutronAclRuleSnapshot, proto: u8, rule_id: &str) -> Result<Option<String>, String> {
+    if rule.src_port_min.is_some() || rule.src_port_max.is_some() {
+        return Err(format!(
+            "rule {} uses source port matching; unsupported by current datapath translator",
+            rule_id
+        ));
+    }
+
+    let min = rule.dst_port_min.or(rule.dst_port_max);
+    let max = rule.dst_port_max.or(rule.dst_port_min);
+    let (Some(min), Some(max)) = (min, max) else {
+        return Ok(None);
+    };
+
+    if proto != 6 && proto != 17 {
+        return Err(format!(
+            "rule {} uses L4 ports with protocol {}; only tcp/udp are supported",
+            rule_id, proto
+        ));
+    }
+    if min > max {
+        return Err(format!(
+            "rule {} has invalid destination port range {}-{}",
+            rule_id, min, max
+        ));
+    }
+    if min == max {
+        Ok(Some(min.to_string()))
+    } else {
+        Ok(Some(format!("{}-{}", min, max)))
+    }
+}
+
+fn cidr_group(
+    port_id: &str,
+    rule_id: &str,
+    side: &str,
+    cidrs: &[String],
+    groups: &mut Vec<AclGroupPlan>,
+) -> String {
+    if cidrs.is_empty() {
+        return "any".to_string();
+    }
+    let name = format!("{}{}:{}", neutron_acl_prefix(port_id), side, rule_id);
+    groups.push(AclGroupPlan {
+        name: name.clone(),
+        cidrs: cidrs.to_vec(),
+    });
+    name
+}
+
+fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclApplyPlan, String> {
+    if !acl.enabled
+        || !acl.status.eq_ignore_ascii_case("ready")
+        || !acl.effective_action.eq_ignore_ascii_case("enforce")
+    {
+        return Ok(AclApplyPlan::default());
+    }
+
+    let default_action = normalize_default_action(&acl.default_action);
+    if !matches!(default_action.as_str(), "allow" | "accept" | "pass") {
+        return Err(format!(
+            "default_action {} is unsupported in the minimal Neutron ACL translator",
+            acl.default_action
+        ));
+    }
+
+    let mut groups = Vec::new();
+    let mut policies = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (index, rule) in acl.rules.iter().enumerate() {
+        let rule_id = acl_rule_id(rule, index);
+        if rule
+            .ethertype
+            .as_deref()
+            .map(|ethertype| ethertype.eq_ignore_ascii_case("IPv6"))
+            .unwrap_or(false)
+        {
+            return Err(format!("rule {} uses IPv6 ethertype; unsupported", rule_id));
+        }
+        ensure_ipv4_cidrs(&rule.src_cidrs, &rule_id)?;
+        ensure_ipv4_cidrs(&rule.dst_cidrs, &rule_id)?;
+
+        let proto = proto_from_string(rule.protocol.as_deref().unwrap_or("any"))
+            .map_err(|e| format!("rule {} protocol: {}", rule_id, e))?;
+        let action = action_from_string(rule.action.as_deref().unwrap_or("allow"))
+            .map_err(|e| format!("rule {} action: {}", rule_id, e))?;
+        let direction = direction_from_string(rule.direction.as_deref().unwrap_or("ingress"))
+            .map_err(|e| format!("rule {} direction: {}", rule_id, e))?;
+        let ports = acl_ports(rule, proto, &rule_id)?;
+        let src_group = cidr_group(port_id, &rule_id, "src", &rule.src_cidrs, &mut groups);
+        let dst_group = cidr_group(port_id, &rule_id, "dst", &rule.dst_cidrs, &mut groups);
+
+        let directions: Vec<u8> = if direction == 2 {
+            vec![0, 1]
+        } else {
+            vec![direction]
+        };
+        for direction in directions {
+            let key = (
+                src_group.clone(),
+                dst_group.clone(),
+                proto,
+                direction,
+            );
+            if !seen.insert(key.clone()) {
+                return Err(format!(
+                    "duplicate effective ACL key src={} dst={} proto={} direction={}",
+                    key.0, key.1, key.2, key.3
+                ));
+            }
+            policies.push(AclPolicyPlan {
+                src_group: key.0,
+                dst_group: key.1,
+                proto,
+                action,
+                direction,
+                ports: ports.clone(),
+            });
+        }
+    }
+
+    Ok(AclApplyPlan { groups, policies })
+}
+
+async fn purge_neutron_acl(
+    state: &NeutronApiState,
+    ifname: &str,
+    port_id: &str,
+) -> Result<(), String> {
+    let (rules, groups_by_name) = match state.control_plane.list_policies(ifname).await {
+        Ok(result) => result,
+        Err(e) => return Err(e.to_string()),
+    };
+    let group_names_by_id: BTreeMap<u32, String> = groups_by_name
+        .values()
+        .map(|group| (group.id, group.name.clone()))
+        .collect();
+
+    for rule in rules {
+        let src_group = if rule.src_group_id == 0 {
+            "any".to_string()
+        } else {
+            group_names_by_id
+                .get(&rule.src_group_id)
+                .cloned()
+                .unwrap_or_else(|| format!("id:{}", rule.src_group_id))
+        };
+        let dst_group = if rule.dst_group_id == 0 {
+            "any".to_string()
+        } else {
+            group_names_by_id
+                .get(&rule.dst_group_id)
+                .cloned()
+                .unwrap_or_else(|| format!("id:{}", rule.dst_group_id))
+        };
+        if is_neutron_acl_group(port_id, &src_group) || is_neutron_acl_group(port_id, &dst_group) {
+            state
+                .control_plane
+                .delete_policy(ifname, &src_group, &dst_group, rule.proto, rule.direction)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    let groups = state
+        .control_plane
+        .list_groups(ifname)
+        .await
+        .map_err(|e| e.to_string())?;
+    for group in groups {
+        if is_neutron_acl_group(port_id, &group.name) {
+            state
+                .control_plane
+                .delete_group(ifname, &group.name)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn reconcile_neutron_acl(
+    state: &NeutronApiState,
+    port: &NeutronPortSnapshot,
+) -> Result<(), String> {
+    if !port_manages_acl(port) {
+        return Ok(());
+    }
+
+    purge_neutron_acl(state, &port.ifname, &port.port_id).await?;
+
+    let Some(acl) = &port.acl else {
+        state
+            .control_plane
+            .update_config(&port.ifname, None, None, Some(false), None, None, None, None)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    };
+
+    let plan = translate_neutron_acl(&port.port_id, acl)?;
+    if plan.policies.is_empty() {
+        state
+            .control_plane
+            .update_config(&port.ifname, None, None, Some(false), None, None, None, None)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    for group in &plan.groups {
+        for cidr in &group.cidrs {
+            if let Err(e) = state.control_plane.add_group(&port.ifname, &group.name, cidr).await {
+                let _ = purge_neutron_acl(state, &port.ifname, &port.port_id).await;
+                let _ = state
+                    .control_plane
+                    .update_config(&port.ifname, None, None, Some(false), None, None, None, None)
+                    .await;
+                return Err(e.to_string());
+            }
+        }
+    }
+
+    for policy in &plan.policies {
+        if let Err(e) = state
+            .control_plane
+            .add_policy(
+                &port.ifname,
+                &policy.src_group,
+                &policy.dst_group,
+                policy.proto,
+                policy.action,
+                policy.direction,
+                policy.ports.as_deref(),
+            )
+            .await
+        {
+            let _ = purge_neutron_acl(state, &port.ifname, &port.port_id).await;
+            let _ = state
+                .control_plane
+                .update_config(&port.ifname, None, None, Some(false), None, None, None, None)
+                .await;
+            return Err(e.to_string());
+        }
+    }
+
+    state
+        .control_plane
+        .update_config(&port.ifname, None, None, Some(true), None, None, None, None)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn build_snapshot_plan(
     current: &BTreeMap<String, ManagedNeutronPort>,
     snapshot: &NeutronSnapshotRequest,
@@ -682,6 +1066,7 @@ mod tests {
             network_backend: None,
             ovs_iface_id: None,
             managed_domains: Vec::new(),
+            acl: None,
         }
     }
 
@@ -898,5 +1283,79 @@ mod tests {
             plan.ignored[0].reason.as_deref(),
             Some("ovsdb_unavailable:permission denied")
         );
+    }
+
+    #[test]
+    fn neutron_acl_translator_builds_drop_icmp_policy() {
+        let acl = NeutronAclSnapshot {
+            enabled: true,
+            status: "ready".to_string(),
+            reason: "ready".to_string(),
+            effective_action: "enforce".to_string(),
+            policy_id: Some("acl-policy".to_string()),
+            policy_name: Some("smoke".to_string()),
+            binding_id: Some("acl-binding".to_string()),
+            source: Some("port".to_string()),
+            default_action: "allow".to_string(),
+            stateful: true,
+            revision: 1,
+            rules: vec![NeutronAclRuleSnapshot {
+                id: Some("drop-icmp".to_string()),
+                direction: Some("ingress".to_string()),
+                priority: 100,
+                action: Some("drop".to_string()),
+                ethertype: Some("IPv4".to_string()),
+                protocol: Some("icmp".to_string()),
+                src_cidrs: vec!["10.58.159.2/32".to_string()],
+                dst_cidrs: Vec::new(),
+                src_port_min: None,
+                src_port_max: None,
+                dst_port_min: None,
+                dst_port_max: None,
+            }],
+        };
+
+        let plan = translate_neutron_acl("port-1", &acl).expect("ACL should translate");
+
+        assert_eq!(
+            plan.groups,
+            vec![AclGroupPlan {
+                name: "neutron:port-1:src:drop-icmp".to_string(),
+                cidrs: vec!["10.58.159.2/32".to_string()],
+            }]
+        );
+        assert_eq!(
+            plan.policies,
+            vec![AclPolicyPlan {
+                src_group: "neutron:port-1:src:drop-icmp".to_string(),
+                dst_group: "any".to_string(),
+                proto: 1,
+                action: 1,
+                direction: 0,
+                ports: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn neutron_acl_translator_rejects_default_deny_until_owned_defaults_exist() {
+        let acl = NeutronAclSnapshot {
+            enabled: true,
+            status: "ready".to_string(),
+            reason: "ready".to_string(),
+            effective_action: "enforce".to_string(),
+            policy_id: Some("acl-policy".to_string()),
+            policy_name: None,
+            binding_id: None,
+            source: Some("port".to_string()),
+            default_action: "deny".to_string(),
+            stateful: true,
+            revision: 1,
+            rules: Vec::new(),
+        };
+
+        let error = translate_neutron_acl("port-1", &acl).expect_err("default deny is guarded");
+
+        assert!(error.contains("default_action deny is unsupported"));
     }
 }
