@@ -44,6 +44,22 @@ needs OVS and local Aria access:
 /var/log/kolla/neutron:/var/log/kolla/neutron
 ```
 
+## Log Path
+
+The container command uses `start-neutron-aria-agent`, which appends stdout and
+stderr to:
+
+```text
+/var/log/kolla/neutron/neutron-aria-agent.log
+```
+
+This is the product log location. The mounted host path should therefore expose
+the log as:
+
+```text
+/var/log/kolla/neutron/neutron-aria-agent.log
+```
+
 ## Safe Startup
 
 The default config is heartbeat-only:

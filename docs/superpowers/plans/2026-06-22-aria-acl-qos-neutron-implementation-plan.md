@@ -622,6 +622,7 @@ The `neutron-aria-agent` now has a product packaging skeleton and safer full-res
 
 - `deploy/kolla/neutron-aria-agent/Dockerfile` builds an image from the existing Neutron agent base image and installs the Python 2 compatible `neutron_aria` package.
 - `deploy/kolla/neutron-aria-agent/config.json` follows the onsite Kolla config-file pattern observed in `neutron_openvswitch_agent`.
+- `deploy/kolla/neutron-aria-agent/start-neutron-aria-agent.sh` is the product launcher and writes stdout/stderr to `/var/log/kolla/neutron/neutron-aria-agent.log`.
 - `deploy/kolla/config/neutron-aria-agent.ini` now defaults to heartbeat-only:
   - `full_resync_enabled = false`
   - `[neutron] port_source = disabled`
@@ -671,6 +672,7 @@ The implemented full-resync source is legacy `python-neutronclient` with OS_* cr
   - `rpc_events_enabled = false`
 - Observed result: all three containers can import `neutron_aria.agent.effective_acl` and `neutron_aria.agent.effective_qos`.
 - Observed result: all three hosts run `python -m neutron_aria.agent.main ... --heartbeat-only` as a temporary test process.
+- Observed result: temporary test process stdout/stderr is written to `/var/log/kolla/neutron/neutron-aria-agent.log`.
 - Observed result: `neutron agent-list` shows alive `Aria ACL agent` entries for `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net`.
 - Boundary: this proves package layout and heartbeat compatibility with the target legacy Neutron runtime. It does not enable RPC event consumption, full-resync, snapshot submission, or datapath apply.
 - `effective_acl.py` now computes per-port effective Aria ACL from product ACL policies, rules, address sets, and port/network bindings.
@@ -1083,6 +1085,7 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 - [x] Ensure it does not mount `/sys/fs/bpf` and does not require eBPF privileges.
 - [x] Default to heartbeat-only service mode until full-resync dependencies are present.
 - [x] Provide heartbeat smoke for `neutron agent-list` and `agent-show`.
+- [x] Write product logs to `/var/log/kolla/neutron/neutron-aria-agent.log`.
 
 ### 8.3 Aria-Agent Image
 

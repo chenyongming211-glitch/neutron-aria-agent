@@ -128,6 +128,7 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 - 三台容器内均可导入 `neutron_aria.agent.effective_acl` 与 `neutron_aria.agent.effective_qos`。
 - 三台 `--report-once` 均可成功向 Neutron 上报 heartbeat。
 - 三台均以 `python -m neutron_aria.agent.main ... --heartbeat-only` 启动临时常驻进程。
+- 三台临时进程 stdout/stderr 已切到 `/var/log/kolla/neutron/neutron-aria-agent.log`，文件存在且可看到启动记录。
 - 控制面查询 `neutron agent-list` 可见三个 `Aria ACL agent`，host 分别为 `ostack2.bj159.net`、`ostack3.bj159.net`、`ostack4.bj159.net`，alive 均为 `:-)`。
 
 边界说明：
