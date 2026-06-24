@@ -699,9 +699,11 @@ Required follow-up before production full-resync:
 - [x] Add a non-privileged container smoke asserting `neutron_aria_agent` is not
   privileged, runs as `neutron`, has `/run/aria` mounted, and has no
   `/run/openvswitch` mount.
-- [ ] Add an `aria-datapath` Kolla container smoke that proves UDS readiness,
-  `neutron_managed` mode, `auto_attach=false`, OVS/tap validation, attach,
-  and cleanup.
+- [x] Add an `aria-datapath` Kolla container smoke that proves UDS readiness,
+  container boundary, `auto_attach=false` baseline, and local OVS/tap
+  validation with a non-existent compute OVS port candidate.
+- [ ] Extend the `aria-datapath` smoke with real eligible VM tap attach and
+  cleanup once a dedicated test VM port is assigned.
 
 The implemented full-resync source is legacy `python-neutronclient` with OS_* credentials. This is adequate for the first Kolla service smoke and controlled lab testing. The RPC event path is intentionally not hard-coded yet; it must be matched against the onsite Neutron source or `/usr/lib/python2.7/site-packages/neutron` callback/topic implementation before enabling event merge in production.
 
@@ -1173,6 +1175,8 @@ service_plugins = router,network_ip_availability,mirror,aria_acl
 - Create: `deploy/kolla/aria-datapath/README.md`
 
 - [x] Add Kolla packaging skeleton for the `aria-datapath` service.
+- [x] Add non-destructive `aria-datapath` container smoke for UDS readiness,
+  required mounts, and local OVS validation.
 - [ ] Include existing `aria-agent` binary.
 - [ ] Include eBPF artifacts.
 - [ ] Mount `/sys/fs/bpf`.

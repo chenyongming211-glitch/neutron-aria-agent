@@ -49,3 +49,21 @@ With `auto_attach=false`, existing `tap*` interfaces remain untouched until
 Initial smoke can use `--privileged --net=host`. A later hardening pass should
 replace privileged mode with the smallest working capability set for the
 target kernel and container runtime.
+
+## Smoke
+
+After downloading CI artifacts into `release/`, run:
+
+```bash
+sudo deploy/kolla/smoke/aria_datapath_container_smoke.sh
+```
+
+The smoke builds an `aria-datapath:smoke` image from the current Kolla base,
+starts a privileged host-network container, verifies the required mounts and
+UDS endpoint, checks Neutron UDS capabilities/status, and submits a fake
+compute OVS port candidate. The expected result is `ovs_iface_id_not_found`,
+which proves local OVS validation is happening inside `aria-datapath`.
+
+The smoke is intentionally non-destructive. It does not create a test VM port
+or add an interface to `br-int`; real eligible-port attach/cleanup should be
+run as a separate live-environment gate with an explicit test VM port.
