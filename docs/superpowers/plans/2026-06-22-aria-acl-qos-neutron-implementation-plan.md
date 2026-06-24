@@ -404,11 +404,14 @@ Expected: all `aria-acl-*` command families are listed.
 ### 4.1 Agent Skeleton And Config
 
 **Files:**
+- Create: `openstack/neutron_aria/setup.py`
 - Create: `openstack/neutron_aria/neutron_aria/agent/main.py`
 - Create: `openstack/neutron_aria/neutron_aria/agent/config.py`
 - Create: `deploy/kolla/config/neutron-aria-agent.ini`
 
-- [ ] Load oslo config compatible with current Python 2 Neutron environment.
+- [x] Add Python package skeleton for `neutron_aria`.
+- [x] Add stdlib-only config loader and Kolla-style sample config.
+- [ ] Add oslo config wiring compatible with current Python 2 Neutron environment.
 - [ ] Read `host`, RabbitMQ credentials, Neutron config, OVS bridge name, OVSDB connection, and UDS socket path.
 - [ ] Register as Neutron agent type `Aria ACL agent`.
 - [ ] Heartbeat to Neutron agent table.
@@ -429,15 +432,17 @@ Expected: `neutron-aria-agent` shows alive on each enabled compute.
 - Create: `openstack/neutron_aria/neutron_aria/agent/ovsdb.py`
 - Test: `openstack/neutron_aria/neutron_aria/tests/unit/test_agent_inventory.py`
 
-- [ ] Pull ports where `binding:host_id == local_host`.
-- [ ] Query OVSDB interfaces on `br-int`.
-- [ ] Build `port_id -> tap_name -> ifindex` by matching OVS `external_ids:iface-id`.
-- [ ] Mark eligible VM ports only when:
+- [x] Add wrapper for pulling ports where `binding:host_id == local_host`.
+- [x] Query OVSDB interfaces through `ovs-vsctl --format=json`.
+- [x] Build `port_id -> tap_name -> ifindex` by matching OVS `external_ids:iface-id`.
+- [x] Mark eligible VM ports only when:
   - `binding:vif_type == ovs`
   - `binding:vnic_type in ["normal", "", None]`
   - `device_owner` is empty or starts with `compute:`
   - local tap exists
-- [ ] Mark `network:dhcp`, router, metadata, LinuxBridge, SR-IOV, missing tap, and unknown types as `not_applicable`, `unsupported`, or `unknown` with explicit reason.
+- [x] Mark `network:dhcp`, SR-IOV/direct, missing tap, and non-OVS types as ineligible with explicit reason.
+- [ ] Add live OVS bridge membership validation for direct `br-int` tap ports.
+- [ ] Add router, metadata, LinuxBridge, and unknown-port regression fixtures from the target environment.
 
 **Expected visible result:**
 
@@ -471,15 +476,21 @@ Expected: shows source `port`, `network`, or `none`.
 - Create: `openstack/neutron_aria/neutron_aria/agent/uds_client.py`
 - Create: `openstack/neutron_aria/neutron_aria/agent/event_loop.py`
 
-- [ ] Call `GET /api/v1/neutron/capabilities`.
-- [ ] Validate schema version, body size, timeout, and required domains.
-- [ ] Submit `PUT /api/v1/neutron/snapshot`.
-- [ ] Delete local runtime with `DELETE /api/v1/neutron/ports/{port_id}` when a port migrates away or is deleted.
-- [ ] Treat UDS failures as Aria runtime degraded, not as OVS connectivity failure.
+- [x] Call `GET /api/v1/neutron/capabilities`.
+- [x] Validate schema version, attach authority, full snapshot support, port delete support, response body size, timeout, and required domains.
+- [x] Submit `PUT /api/v1/neutron/snapshot`.
+- [x] Delete local runtime with `DELETE /api/v1/neutron/ports/{port_id}` when a port migrates away or is deleted.
+- [x] Add a `SnapshotSynchronizer.full_resync()` skeleton that performs capabilities -> inventory -> snapshot -> UDS submit.
+- [ ] Treat UDS failures as Aria runtime degraded in Neutron agent heartbeat/status.
+- [ ] Add retry/backoff and event merge before long-running service mode is enabled.
 
 **Expected visible result:**
 
 Agent logs show snapshot accepted with generation number.
+
+**Implementation checkpoint, 2026-06-24:**
+
+The first Python-side stdlib skeleton is implemented and covered by unit tests. It does not yet register a Neutron agent heartbeat or consume Neutron RPC notifications. It is sufficient to validate the local contract boundary: legacy Neutron port dictionaries plus OVS `external_ids:iface-id` are translated into the Rust `NeutronSnapshotRequest` shape and submitted over `/run/aria/aria-agent.sock`.
 
 ### 4.5 Runtime Status Reporting
 
@@ -1307,7 +1318,10 @@ allow_cross_host_target = false
 - [ ] DB CRUD and validators.
 - [ ] Binding conflict.
 - [ ] Port extension fields.
-- [ ] Agent port filtering.
+- [x] Agent base port filtering.
+- [x] OVS `external_ids:iface-id` parser.
+- [x] Python UDS client base contract.
+- [x] Python full-resync skeleton.
 - [ ] Effective ACL computation.
 - [ ] Effective QoS computation.
 - [x] Base Rust UDS schema serde.

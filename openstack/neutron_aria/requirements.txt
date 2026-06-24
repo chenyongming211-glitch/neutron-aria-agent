@@ -1,0 +1,2 @@
+# Keep the first agent skeleton stdlib-only so it can run in legacy OpenStack
+# images before oslo/neutron runtime wiring is added.

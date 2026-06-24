@@ -17,6 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test neutron-aria Python adapter
+        run: |
+          PYTHONPATH=openstack/neutron_aria \
+            python3 -m unittest discover \
+              -s openstack/neutron_aria/neutron_aria/tests/unit \
+              -p 'test_*.py'
+
       - name: Install Rust nightly (eBPF)
         uses: dtolnay/rust-toolchain@nightly
         with:

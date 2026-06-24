@@ -1,5 +1,7 @@
 # Build artifacts
 /target/
+__pycache__/
+*.py[cod]
 
 # macOS resource forks and metadata
 ._*
