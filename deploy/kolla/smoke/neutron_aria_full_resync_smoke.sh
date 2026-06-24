@@ -114,7 +114,8 @@ prepare_full_resync_config() {
         sed -i 's/^host =.*/host = ${HOST_FQDN}/' '${SMOKE_CONFIG}' &&
         sed -i 's/^full_resync_enabled =.*/full_resync_enabled = true/' '${SMOKE_CONFIG}' &&
         sed -i 's/^port_source =.*/port_source = neutronclient/' '${SMOKE_CONFIG}' &&
-        sed -i 's/^rpc_events_enabled =.*/rpc_events_enabled = false/' '${SMOKE_CONFIG}'
+        sed -i 's/^rpc_events_enabled =.*/rpc_events_enabled = false/' '${SMOKE_CONFIG}' &&
+        chmod 0644 '${SMOKE_CONFIG}'
     "
 }
 
