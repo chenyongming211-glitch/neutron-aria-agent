@@ -492,6 +492,33 @@ Agent logs show snapshot accepted with generation number.
 
 The first Python-side stdlib skeleton is implemented and covered by unit tests. It does not yet register a Neutron agent heartbeat or consume Neutron RPC notifications. It is sufficient to validate the local contract boundary: legacy Neutron port dictionaries plus OVS `external_ids:iface-id` are translated into the Rust `NeutronSnapshotRequest` shape and submitted over `/run/aria/aria-agent.sock`.
 
+**Real environment smoke, 2026-06-24:**
+
+- Host: `ostack2.bj159.net`.
+- Git commit: `f9e90ab`.
+- GitHub Actions run: `28072633145`.
+- Artifact: `firewall-binaries-f9e90abbe1a95b91190cb328b496b2e4fe170de8`.
+- Evidence retained on the host: `/tmp/aria-smoke-f9e90ab/python-snapshot-uds-smoke.txt`.
+- Discovery:
+  - Neutron ports visible through `adminrc`: 8.
+  - Ports bound to `ostack2` and included in snapshot: 5.
+  - Eligible compute OVS tap ports: 2.
+    - `86b83885-671f-474c-9556-8af98cf1cdc8` -> `tap86b83885-67`, ifindex `26`.
+    - `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f` -> `tape607e86b-9e`, ifindex `27`.
+  - Ineligible local DHCP ports: 3, all returned `not_applicable_device_owner:network:dhcp`.
+  - Remote-host ports ignored before snapshot: 3.
+- UDS result:
+  - `GET /api/v1/neutron/capabilities` returned `api_version=v1`, `attach_authority=neutron_snapshot`, `supports_full_snapshot=true`, and `supports_port_delete=true`.
+  - `GET /api/v1/neutron/status` before snapshot returned `generation=0`, `managed_ports=[]`, and `active_instances=[]`.
+  - `PUT /api/v1/neutron/snapshot` generation `2026062401` returned 3 ignored DHCP ports and 2 `attach ok` compute ports.
+  - Status after snapshot returned 2 managed ports with `managed_domains=["acl"]`.
+  - XDP was present on `tap86b83885-67` and `tape607e86b-9e` after attach.
+  - `DELETE /api/v1/neutron/ports/{port_id}` detached both ports successfully.
+  - Final cleanup left no `aria-agent` process, no smoke UDS socket, no XDP on the two tap ports, and no `/sys/fs/bpf/aria-smoke-f9e90ab` pins.
+- Environment note:
+  - In this product environment, `neutron` CLI is a shell function from `/root/adminrc` wrapping `docker exec openstack_client neutron`.
+  - Product `neutron-aria-agent` must use Neutron client/RPC wiring, not this shell function; CLI was only used for smoke data extraction.
+
 ### 4.5 Runtime Status Reporting
 
 **Files:**
