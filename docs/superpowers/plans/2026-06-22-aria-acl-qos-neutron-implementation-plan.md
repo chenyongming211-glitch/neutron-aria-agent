@@ -663,11 +663,14 @@ The implemented full-resync source is legacy `python-neutronclient` with OS_* cr
 
 **RPC skeleton deployment and ACL/QoS translator checkpoint, 2026-06-24:**
 
-- Latest `neutron-aria-agent` Python code, including RPC event merge skeleton files, was temporarily deployed into the three onsite `neutron_openvswitch_agent` containers under `/tmp/neutron_aria_agent_src`.
+- Commit `c4dbef0` was built by GitHub Actions run `28090615180` with result `success`.
+- The same `neutron-aria-agent` Python code, including RPC event merge skeleton files and ACL/QoS translator modules, was temporarily deployed into the three onsite `neutron_openvswitch_agent` containers under `/tmp/neutron_aria_agent_src`.
 - Runtime mode remained heartbeat-only:
   - `full_resync_enabled = false`
   - `port_source = disabled`
   - `rpc_events_enabled = false`
+- Observed result: all three containers can import `neutron_aria.agent.effective_acl` and `neutron_aria.agent.effective_qos`.
+- Observed result: all three hosts run `python -m neutron_aria.agent.main ... --heartbeat-only` as a temporary test process.
 - Observed result: `neutron agent-list` shows alive `Aria ACL agent` entries for `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net`.
 - Boundary: this proves package layout and heartbeat compatibility with the target legacy Neutron runtime. It does not enable RPC event consumption, full-resync, snapshot submission, or datapath apply.
 - `effective_acl.py` now computes per-port effective Aria ACL from product ACL policies, rules, address sets, and port/network bindings.

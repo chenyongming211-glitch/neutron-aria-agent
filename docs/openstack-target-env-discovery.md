@@ -114,6 +114,7 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 部署形态：
 
 - 临时测试部署，源码位于各节点 `neutron_openvswitch_agent` 容器内 `/tmp/neutron_aria_agent_src`。
+- 部署代码提交：`c4dbef0`，GitHub Actions run：`28090615180`，结果：`success`。
 - 进程命令保持 `--heartbeat-only`。
 - `/tmp/neutron-aria-agent.ini` 保持：
   - `full_resync_enabled = false`
@@ -124,7 +125,9 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 验证结果：
 
 - 三台容器内均存在最新 `neutron_aria/agent/event_merge.py` 与 `neutron_aria/agent/rpc.py`。
+- 三台容器内均可导入 `neutron_aria.agent.effective_acl` 与 `neutron_aria.agent.effective_qos`。
 - 三台 `--report-once` 均可成功向 Neutron 上报 heartbeat。
+- 三台均以 `python -m neutron_aria.agent.main ... --heartbeat-only` 启动临时常驻进程。
 - 控制面查询 `neutron agent-list` 可见三个 `Aria ACL agent`，host 分别为 `ostack2.bj159.net`、`ostack3.bj159.net`、`ostack4.bj159.net`，alive 均为 `:-)`。
 
 边界说明：
