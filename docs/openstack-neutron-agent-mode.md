@@ -1031,6 +1031,7 @@ Domain status 不表达是否 bypass、是否 unsupported、是否 ignored optio
 | `UDS_ERROR_CODES_HASH_MISMATCH` | api | Python 本地错误码集合与 Rust 返回摘要不一致 | reload contract；仍不一致则停止写路径 |
 | `UDS_CONNECT_TIMEOUT` | api | Python 连接 Unix socket 超过 `connect_timeout_ms` | agent degraded，重试 socket，禁止 fallback TCP |
 | `UDS_REQUEST_TIMEOUT` | api | UDS 请求超过 `request_timeout_ms` 未完成 | 当前 snapshot 未 accepted，触发 status check/full resync |
+| `UDS_MUTATION_DETACHED` | api | client timeout/disconnect after a mutating UDS request has started | Rust must continue or roll back the detached apply task; Python must status-check and converge by full resync |
 | `UDS_AUDIT_WRITE_FAILED` | api | 写入 UDS 审计日志失败 | 写路径 blocked 或 degraded，避免不可追踪 generation |
 | `SNAPSHOT_TOO_LARGE` | runtime | full snapshot 超过首阶段规模预算或 body 上限 | 拒绝或要求分批/port-scoped resync，进入 degraded |
 
@@ -1046,6 +1047,8 @@ Domain status 不表达是否 bypass、是否 unsupported、是否 ignored optio
 - 返回 domain status。
 
 删除 API 是优化路径。最终一致性仍依赖下一次 full snapshot。
+
+`PUT /api/v1/neutron/snapshot` 和 `DELETE /api/v1/neutron/ports/{port_id}` 都是 mutating UDS API。Rust 侧必须在 HTTP handler 收到请求后立即交给独立 apply task 执行；客户端 timeout、断连或进程退出不能取消已经开始的 datapath apply。Python 侧收到 `UDS_REQUEST_TIMEOUT` 时不能假设请求未生效，必须先 `GET /api/v1/neutron/status` 对齐 generation/managed_ports，再通过 full resync 收敛。
 
 ### 5.7 本机写入保护
 
