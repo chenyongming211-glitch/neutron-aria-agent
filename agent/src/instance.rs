@@ -457,6 +457,60 @@ impl FirewallInstance {
         self.store_persisted_live_ifaces_atomically(&state)
     }
 
+    pub fn cleanup_stale_shared_runtime_reservations(&self) -> Result<Vec<String>, String> {
+        if !self.shared_runtime {
+            return Ok(Vec::new());
+        }
+        if self.pin_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let path = self.persisted_live_ifaces_path();
+        let state = self.reconcile_persisted_live_ifaces()?;
+        if state.ifaces.is_empty() {
+            self.clear_runtime_metadata();
+            return Ok(Vec::new());
+        }
+
+        let state_root = self
+            .state_path
+            .parent()
+            .unwrap_or(self.state_path.as_path())
+            .to_path_buf();
+        let mut cleaned = Vec::new();
+        let mut errors = Vec::new();
+
+        for entry in state.ifaces {
+            let stale = FirewallInstance::new(
+                &entry.iface,
+                self.pin_path.clone(),
+                state_root.join(&entry.iface),
+                true,
+                self.trace_map_mode,
+            );
+            match stale.detach_with_cleanup(false) {
+                Ok(()) => cleaned.push(entry.iface),
+                Err(e) => errors.push(format!("{}:{}", entry.iface, e)),
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| {
+                format!(
+                    "remove stale persisted live ifaces {}: {}",
+                    path.display(),
+                    e
+                )
+            })?;
+        }
+        self.clear_runtime_metadata();
+        Ok(cleaned)
+    }
+
     fn reconcile_persisted_live_ifaces(&self) -> Result<PersistedLiveIfaces, String> {
         let path = self.persisted_live_ifaces_path();
         let state = self.load_persisted_live_ifaces()?;
@@ -703,12 +757,27 @@ impl FirewallInstance {
         let xdp_link_pin = self.xdp_link_pin_path();
         let preexisting_xdp_link = Path::new(&xdp_link_pin).exists();
         let expected_metadata = self.expected_runtime_metadata(ebpf_path)?;
-        let persisted_live_runtime = self.persisted_live_ifaces_active()?;
+        let mut persisted_live_runtime = self.persisted_live_ifaces_active()?;
         let pinned_live_runtime = if pin_path_preexisted {
             self.shared_runtime_has_pinned_live_links()?
         } else {
             false
         };
+        if !pin_path_preexisted
+            && !known_live_runtime
+            && !pinned_live_runtime
+            && persisted_live_runtime
+        {
+            let cleaned = self.cleanup_stale_shared_runtime_reservations()?;
+            if !cleaned.is_empty() {
+                info!(
+                    instance = %self.iface,
+                    cleaned_ifaces = ?cleaned,
+                    "cleared stale shared runtime reservations before rebuilding missing pin directory"
+                );
+            }
+            persisted_live_runtime = false;
+        }
         let live_runtime = known_live_runtime || pinned_live_runtime || persisted_live_runtime;
 
         if !pin_path_preexisted {
