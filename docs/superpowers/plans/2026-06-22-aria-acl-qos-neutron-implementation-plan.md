@@ -2136,6 +2136,40 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
 - [ ] Tap recreate smoke: deleted/recreated tap with the same Neutron port ID is
   reclaimed or reattached by full resync.
 
+**Live smoke record, 2026-06-25:**
+
+- Deployed `aria-datapath:5613d26` to `ostack2`, `ostack3`, and `ostack4`.
+  All three nodes reported `authority_state=ready`, `wal_status=commit_written`,
+  `pending_generation=null`, `wal_replay_failures=0`, and no managed ports after
+  smoke rollback.
+- `neutron agent-list` showed all three `Aria ACL agent` entries alive.
+- Baseline ACL full-resync on `ostack2` used VM port
+  `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f` / `tape607e86b-9e` and VM IP
+  `10.58.159.27`. The test attached 4 local OVS tap ports, wrote an ICMP drop
+  ACL for source `10.58.159.2/32`, confirmed ping was blocked, then rollback
+  detached all managed ports and ping recovered.
+- Process-level datapath fault injection was run with:
+  `ARIA_FAULT_POINT=neutron.acl.after_policy_write`,
+  `ARIA_FAULT_ACTION=sigkill`, and
+  `ARIA_FAULT_ONCE_FILE=/run/aria/fault-after-policy.once`.
+  The first run killed `aria-datapath` after ACL policy write and before WAL
+  commit. The Neutron agent saw a UDS transport error; the restarted datapath
+  reported `wal_status=intent_without_commit`,
+  `authority_state=wal_intent_without_commit`, `pending_generation=21`, no
+  managed ports, and active instance `tape607e86b-9e`.
+- The second full-resync reused generation 21, skipped the one-shot fault via
+  the marker, converged to `authority_state=ready`,
+  `wal_status=commit_written`, applied the ACL, verified ping block, and
+  rollback returned the node to no managed ports.
+
+Remaining crash gates:
+
+- Repeat the same one-shot process-level test for `neutron.acl.after_purge`,
+  `neutron.acl.after_group_write`, and `neutron.acl.before_enable`.
+- Add delete detach cut-point smoke with a real managed port.
+- Add VM migration and tap recreate smoke after a controlled migration test VM
+  is available.
+
 **Visible result after completion:**
 
 ```text
