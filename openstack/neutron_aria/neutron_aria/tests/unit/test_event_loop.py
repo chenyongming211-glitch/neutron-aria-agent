@@ -182,6 +182,42 @@ class FixedStatusLocalClient(FakeLocalClient):
         return self.fixed_status
 
 
+class SameGenerationMissingManagedClient(FakeLocalClient):
+    def __init__(self, generation, desired_hash):
+        FakeLocalClient.__init__(self)
+        self.generation = generation
+        self.desired_hash = desired_hash
+
+    def status(self):
+        if self.snapshots:
+            snapshot = self.snapshots[-1]
+            port_ids = [
+                port["port_id"] for port in snapshot["ports"]
+                if port.get("eligible") or port.get("managed_domains")
+            ]
+            return {
+                "generation": snapshot["generation"],
+                "accepted_generation": snapshot["generation"],
+                "applied_generation": snapshot["generation"],
+                "desired_hash": snapshot.get("desired_hash"),
+                "applied_desired_hash": snapshot.get("desired_hash"),
+                "managed_ports": [
+                    {"port_id": port_id, "ifname": "tap%s" % port_id[:11]}
+                    for port_id in port_ids
+                ],
+                "active_instances": ["tap%s" % port_id[:11] for port_id in port_ids],
+            }
+        return {
+            "generation": self.generation,
+            "accepted_generation": self.generation,
+            "applied_generation": self.generation,
+            "desired_hash": self.desired_hash,
+            "applied_desired_hash": self.desired_hash,
+            "managed_ports": [],
+            "active_instances": [],
+        }
+
+
 class FakeStatusReporter(object):
     def __init__(self):
         self.statuses = []
@@ -290,6 +326,57 @@ class EventLoopTestCase(unittest.TestCase):
 
         self.assertEqual(4, result["snapshot"]["generation"])
         self.assertEqual(4, local_client.snapshots[0]["generation"])
+
+    def test_full_resync_bumps_generation_when_remote_same_hash_not_converged(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            port_source = StaticPortSource([{
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "device_owner": "compute:nova",
+                "binding:host_id": "ostack2",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+            }])
+            state_store = SnapshotStateStore(state_dir)
+            first_client = StatusAfterApplyLocalClient()
+            first = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                first_client,
+                managed_domains=["acl"],
+                state_store=state_store,
+            )
+            first_result = first.full_resync()
+
+            second_client = SameGenerationMissingManagedClient(
+                first_result["snapshot"]["generation"],
+                first_result["snapshot"]["desired_hash"],
+            )
+            second = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                second_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+            )
+            second_result = second.full_resync()
+
+            self.assertGreater(
+                second_result["snapshot"]["generation"],
+                first_result["snapshot"]["generation"],
+            )
+            self.assertEqual(
+                second_result["snapshot"]["generation"],
+                second_client.snapshots[0]["generation"],
+            )
+            self.assertEqual(
+                first_result["snapshot"]["desired_hash"],
+                second_result["snapshot"]["desired_hash"],
+            )
+        finally:
+            shutil.rmtree(state_dir)
 
     def test_pending_generation_survives_restart_after_degraded_resync(self):
         state_dir = tempfile.mkdtemp()

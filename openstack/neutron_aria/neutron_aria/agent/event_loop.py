@@ -72,7 +72,8 @@ class SnapshotSynchronizer(object):
             ports,
             generation=0,
         )
-        generation_floor = self._remote_generation_floor()
+        remote_status = self._remote_status()
+        generation_floor = self._generation_floor_from_status(remote_status)
         prepared = self.state_store.prepare_snapshot(
             snapshot,
             minimum_generation=generation_floor,
@@ -80,6 +81,27 @@ class SnapshotSynchronizer(object):
         snapshot["generation"] = prepared["generation"]
         snapshot["desired_hash"] = prepared["desired_hash"]
         projected_port_ids = self._projected_port_ids(snapshot)
+        if (
+            remote_status is not None and
+            snapshot["generation"] <= generation_floor and
+            not self._status_converged(snapshot, projected_port_ids, remote_status)
+        ):
+            prepared = self.state_store.prepare_snapshot(
+                snapshot,
+                minimum_generation=generation_floor + 1,
+            )
+            snapshot["generation"] = prepared["generation"]
+            snapshot["desired_hash"] = prepared["desired_hash"]
+            LOG.warning(
+                "snapshot_generation_bumped_for_non_converged_remote "
+                "host=%s generation=%s generation_floor=%s projected_ports=%s "
+                "remote_managed_ports=%s",
+                self.host,
+                snapshot["generation"],
+                generation_floor,
+                len(projected_port_ids),
+                len(remote_status.get("managed_ports") or []),
+            )
         try:
             response = self._maybe_recover_pending_before_submit(
                 snapshot,
@@ -431,15 +453,22 @@ class SnapshotSynchronizer(object):
             "port delete timed out and status did not converge: %s" % last_error
         )
 
-    def _remote_generation_floor(self):
+    def _remote_status(self):
         try:
-            status = self.local_client.status()
+            return self.local_client.status()
         except LocalApiError as exc:
             LOG.warning(
                 "remote_generation_floor_unavailable host=%s error=%s",
                 self.host,
                 exc,
             )
+            return None
+
+    def _remote_generation_floor(self):
+        return self._generation_floor_from_status(self._remote_status())
+
+    def _generation_floor_from_status(self, status):
+        if status is None:
             return 0
 
         generations = []
