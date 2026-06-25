@@ -243,18 +243,34 @@ check_uds_contract() {
     status="$(curl_uds "http://localhost/api/v1/neutron/status")"
     echo "${status}"
     json_check initial_status "${status}"
+    current_generation="$(
+        JSON_PAYLOAD="${status}" "${PYTHON_BIN}" - <<'PY'
+from __future__ import print_function
+
+import json
+import os
+
+payload = json.loads(os.environ["JSON_PAYLOAD"])
+print(max(
+    int(payload.get("generation") or 0),
+    int(payload.get("accepted_generation") or 0),
+    int(payload.get("applied_generation") or 0),
+))
+PY
+    )"
 
     fake_port_id="00000000-0000-4000-8000-000000000001"
     snapshot="$(
-        "${PYTHON_BIN}" - "${fake_port_id}" <<'PY'
+        "${PYTHON_BIN}" - "${fake_port_id}" "${current_generation}" <<'PY'
 from __future__ import print_function
 
 import json
 import sys
 
 port_id = sys.argv[1]
+generation = int(sys.argv[2]) + 1
 print(json.dumps({
-    "generation": 1,
+    "generation": generation,
     "host": "aria-datapath-smoke",
     "ports": [{
         "port_id": port_id,
