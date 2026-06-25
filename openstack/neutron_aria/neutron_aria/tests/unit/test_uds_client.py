@@ -1,9 +1,11 @@
 from __future__ import absolute_import
 
 import json
+import socket
 import unittest
 
 from neutron_aria.agent.uds_client import LocalApiContractError
+from neutron_aria.agent.uds_client import LocalApiTimeoutError
 from neutron_aria.agent.uds_client import LocalClient
 
 
@@ -37,6 +39,11 @@ class FakeConnection(object):
 
     def close(self):
         self.closed = True
+
+
+class TimeoutConnection(FakeConnection):
+    def getresponse(self):
+        raise socket.timeout("timed out")
 
 
 class UdsClientTestCase(unittest.TestCase):
@@ -108,6 +115,19 @@ class UdsClientTestCase(unittest.TestCase):
         self.assertEqual(
             "/api/v1/neutron/ports/port%2Fwith%2Fslash",
             FakeConnection.requests[0]["path"],
+        )
+
+    def test_socket_timeout_is_typed_transport_error(self):
+        client = LocalClient(
+            "/tmp/aria-agent.sock",
+            timeout=1.0,
+            connection_factory=TimeoutConnection,
+        )
+
+        self.assertRaises(
+            LocalApiTimeoutError,
+            client.put_snapshot,
+            {"generation": 12, "host": "ostack2", "ports": []},
         )
 
 

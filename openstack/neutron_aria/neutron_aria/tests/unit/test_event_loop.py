@@ -7,6 +7,7 @@ from neutron_aria.agent.event_loop import SnapshotSynchronizer
 from neutron_aria.agent.neutron_client import StaticPortSource
 from neutron_aria.agent.ovsdb import OvsInterface
 from neutron_aria.agent.status_reporter import StatusReportError
+from neutron_aria.agent.uds_client import LocalApiTimeoutError
 from neutron_aria.agent.uds_client import LocalApiTransportError
 
 
@@ -40,10 +41,72 @@ class FakeLocalClient(object):
         self.deleted_ports.append(port_id)
         return {"port_id": port_id, "status": "ok"}
 
+    def status(self):
+        return {"generation": 0, "managed_ports": [], "active_instances": []}
+
 
 class FailingLocalClient(FakeLocalClient):
     def capabilities(self, required_domains=None):
         raise LocalApiTransportError("socket unavailable")
+
+
+class TimeoutThenConvergedLocalClient(FakeLocalClient):
+    def put_snapshot(self, snapshot):
+        self.snapshots.append(snapshot)
+        raise LocalApiTimeoutError("timed out")
+
+    def status(self):
+        port_ids = [
+            port["port_id"] for port in self.snapshots[-1]["ports"]
+            if port.get("eligible") or port.get("managed_domains")
+        ]
+        return {
+            "generation": self.snapshots[-1]["generation"],
+            "managed_ports": [
+                {"port_id": port_id, "ifname": "tap%s" % port_id[:11]}
+                for port_id in port_ids
+            ],
+            "active_instances": ["tap%s" % port_id[:11] for port_id in port_ids],
+        }
+
+
+class TimeoutNotConvergedLocalClient(FakeLocalClient):
+    def put_snapshot(self, snapshot):
+        self.snapshots.append(snapshot)
+        raise LocalApiTimeoutError("timed out")
+
+    def status(self):
+        return {
+            "generation": 0,
+            "managed_ports": [],
+            "active_instances": [],
+        }
+
+
+class DeleteTimeoutThenConvergedLocalClient(FakeLocalClient):
+    def delete_port(self, port_id):
+        self.deleted_ports.append(port_id)
+        raise LocalApiTimeoutError("timed out")
+
+    def status(self):
+        return {
+            "generation": 1,
+            "managed_ports": [],
+            "active_instances": [],
+        }
+
+
+class DeleteTimeoutNotConvergedLocalClient(FakeLocalClient):
+    def delete_port(self, port_id):
+        self.deleted_ports.append(port_id)
+        raise LocalApiTimeoutError("timed out")
+
+    def status(self):
+        return {
+            "generation": 1,
+            "managed_ports": [{"port_id": self.deleted_ports[-1]}],
+            "active_instances": [],
+        }
 
 
 class FakeStatusReporter(object):
@@ -171,6 +234,61 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertFalse(status_reporter.statuses[0]["degraded"])
         self.assertEqual("ready", status_reporter.statuses[0]["reason"])
 
+    def test_full_resync_recovers_when_timed_out_snapshot_converged(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        port_source = StaticPortSource([{
+            "id": port_id,
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+        local_client = TimeoutThenConvergedLocalClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            timeout_convergence_attempts=1,
+            timeout_convergence_interval=0,
+        )
+
+        result = sync.full_resync()
+
+        self.assertTrue(result["response"]["recovered_after_timeout"])
+        self.assertTrue(result["status"]["ready"])
+        self.assertFalse(result["status"]["degraded"])
+        self.assertEqual(1, result["status"]["last_managed_ports"])
+        self.assertEqual(set([port_id]), sync.projected_port_ids)
+
+    def test_safe_full_resync_degrades_when_timed_out_snapshot_not_converged(self):
+        port_source = StaticPortSource([{
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            TimeoutNotConvergedLocalClient(),
+            managed_domains=["acl"],
+            timeout_convergence_attempts=1,
+            timeout_convergence_interval=0,
+        )
+
+        result = sync.safe_full_resync()
+
+        self.assertEqual(None, result["snapshot"])
+        self.assertEqual(None, result["response"])
+        self.assertFalse(result["status"]["ready"])
+        self.assertTrue(result["status"]["degraded"])
+        self.assertEqual("local_api_degraded", result["status"]["reason"])
+        self.assertIn("status did not converge", result["status"]["last_error"])
+
     def test_safe_full_resync_marks_local_api_degraded(self):
         sync = SnapshotSynchronizer(
             "ostack2",
@@ -236,6 +354,41 @@ class EventLoopTestCase(unittest.TestCase):
         sync.delete_port("port-1")
 
         self.assertEqual(["port-1"], local_client.deleted_ports)
+
+    def test_delete_port_recovers_when_timed_out_delete_converged(self):
+        local_client = DeleteTimeoutThenConvergedLocalClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            timeout_convergence_attempts=1,
+            timeout_convergence_interval=0,
+        )
+        sync.projected_port_ids.add("port-1")
+
+        response = sync.delete_port("port-1")
+
+        self.assertTrue(response["recovered_after_timeout"])
+        self.assertEqual("deleted", response["status"])
+        self.assertEqual(["port-1"], local_client.deleted_ports)
+        self.assertFalse(sync.has_projected_port("port-1"))
+
+    def test_delete_port_keeps_timeout_when_delete_not_converged(self):
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            DeleteTimeoutNotConvergedLocalClient(),
+            timeout_convergence_attempts=1,
+            timeout_convergence_interval=0,
+        )
+
+        self.assertRaises(
+            LocalApiTimeoutError,
+            sync.delete_port,
+            "port-1",
+        )
 
 
 if __name__ == "__main__":

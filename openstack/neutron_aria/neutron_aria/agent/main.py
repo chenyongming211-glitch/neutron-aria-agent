@@ -81,6 +81,8 @@ def build_synchronizer(config, neutron_port_source=None, status_reporter=None):
         ovs_bridge=config.ovs_bridge,
         status_reporter=status_reporter,
         acl_index=build_acl_index(config),
+        timeout_convergence_attempts=config.timeout_convergence_attempts,
+        timeout_convergence_interval=config.timeout_convergence_interval,
     )
 
 

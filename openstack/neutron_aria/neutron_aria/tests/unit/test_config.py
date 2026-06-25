@@ -27,6 +27,8 @@ bridge = br-int
 [aria]
 socket_path = /run/aria/aria-agent.sock
 request_timeout = 2.5
+timeout_convergence_attempts = 4
+timeout_convergence_interval = 0.4
 
 [neutron]
 port_source = neutronclient
@@ -61,6 +63,8 @@ fixture_path = /tmp/aria-acl-fixture.json
             self.assertEqual("br-int", config.ovs_bridge)
             self.assertEqual("/run/aria/aria-agent.sock", config.socket_path)
             self.assertEqual(2.5, config.request_timeout)
+            self.assertEqual(4, config.timeout_convergence_attempts)
+            self.assertEqual(0.4, config.timeout_convergence_interval)
         finally:
             if fd is not None:
                 os.close(fd)

@@ -15,6 +15,8 @@ DEFAULT_EVENT_MERGE_INTERVAL = 0.2
 DEFAULT_EVENT_QUEUE_MAX_PORTS = 10000
 DEFAULT_EVENT_QUEUE_MAX_NETWORKS = 1000
 DEFAULT_ACL_FIXTURE_PATH = ""
+DEFAULT_TIMEOUT_CONVERGENCE_ATTEMPTS = 5
+DEFAULT_TIMEOUT_CONVERGENCE_INTERVAL = 1.0
 
 
 class AgentConfig(object):
@@ -25,6 +27,8 @@ class AgentConfig(object):
         socket_path=DEFAULT_SOCKET_PATH,
         managed_domains=None,
         request_timeout=3.0,
+        timeout_convergence_attempts=DEFAULT_TIMEOUT_CONVERGENCE_ATTEMPTS,
+        timeout_convergence_interval=DEFAULT_TIMEOUT_CONVERGENCE_INTERVAL,
         resync_interval=60,
         report_interval=DEFAULT_REPORT_INTERVAL,
         full_resync_enabled=False,
@@ -43,6 +47,8 @@ class AgentConfig(object):
         self.socket_path = socket_path
         self.managed_domains = list(managed_domains or DEFAULT_MANAGED_DOMAINS)
         self.request_timeout = float(request_timeout)
+        self.timeout_convergence_attempts = int(timeout_convergence_attempts)
+        self.timeout_convergence_interval = float(timeout_convergence_interval)
         self.resync_interval = int(resync_interval)
         self.report_interval = int(report_interval)
         self.full_resync_enabled = bool(full_resync_enabled)
@@ -85,6 +91,18 @@ def load_config(path):
         socket_path=_get(parser, "aria", "socket_path", DEFAULT_SOCKET_PATH),
         managed_domains=_split_domains(_get(parser, "agent", "managed_domains", "acl")),
         request_timeout=_get(parser, "aria", "request_timeout", "3.0"),
+        timeout_convergence_attempts=_get(
+            parser,
+            "aria",
+            "timeout_convergence_attempts",
+            str(DEFAULT_TIMEOUT_CONVERGENCE_ATTEMPTS),
+        ),
+        timeout_convergence_interval=_get(
+            parser,
+            "aria",
+            "timeout_convergence_interval",
+            str(DEFAULT_TIMEOUT_CONVERGENCE_INTERVAL),
+        ),
         resync_interval=_get(parser, "agent", "resync_interval", "60"),
         report_interval=_get(parser, "agent", "report_interval", str(DEFAULT_REPORT_INTERVAL)),
         full_resync_enabled=_parse_bool(

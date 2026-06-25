@@ -1,10 +1,12 @@
 from __future__ import absolute_import
 
 import logging
+import time
 
 from neutron_aria.agent.inventory import PortCandidateBuilder
 from neutron_aria.agent.status import AgentRuntimeStatus
 from neutron_aria.agent.uds_client import LocalApiError
+from neutron_aria.agent.uds_client import LocalApiTimeoutError
 
 
 LOG = logging.getLogger(__name__)
@@ -32,6 +34,9 @@ class SnapshotSynchronizer(object):
         runtime_status=None,
         status_reporter=None,
         acl_index=None,
+        timeout_convergence_attempts=5,
+        timeout_convergence_interval=1.0,
+        sleeper=None,
     ):
         self.host = host
         self.port_source = port_source
@@ -44,6 +49,9 @@ class SnapshotSynchronizer(object):
         self.status_reporter = status_reporter
         self.projected_port_ids = set()
         self.acl_index = acl_index
+        self.timeout_convergence_attempts = max(1, int(timeout_convergence_attempts))
+        self.timeout_convergence_interval = max(0.0, float(timeout_convergence_interval))
+        self.sleeper = sleeper or time.sleep
 
     def check_capabilities(self):
         return self.local_client.capabilities(required_domains=self.managed_domains)
@@ -60,16 +68,17 @@ class SnapshotSynchronizer(object):
             ports,
             generation=self.generation_store.next(),
         )
-        response = self.local_client.put_snapshot(snapshot)
-        self.projected_port_ids = set(
-            port.get("port_id") for port in snapshot["ports"]
-            if port.get("port_id") and (port.get("eligible") or port.get("managed_domains"))
-        )
-        managed_ports = response.get("active_instances") or []
+        projected_port_ids = self._projected_port_ids(snapshot)
+        try:
+            response = self.local_client.put_snapshot(snapshot)
+        except LocalApiTimeoutError as exc:
+            response = self._recover_snapshot_timeout(snapshot, projected_port_ids, exc)
+        self.projected_port_ids = projected_port_ids
+        managed_ports = self._response_managed_count(response)
         self.runtime_status.mark_ready(
             snapshot["generation"],
             len(snapshot["ports"]),
-            len(managed_ports),
+            managed_ports,
         )
         heartbeat = self.report_status()
         LOG.info(
@@ -78,7 +87,7 @@ class SnapshotSynchronizer(object):
             self.host,
             snapshot["generation"],
             len(snapshot["ports"]),
-            len(managed_ports),
+            managed_ports,
             len(self.projected_port_ids),
             heartbeat is None or heartbeat.get("ok", False),
         )
@@ -126,7 +135,10 @@ class SnapshotSynchronizer(object):
             }
 
     def delete_port(self, port_id):
-        response = self.local_client.delete_port(port_id)
+        try:
+            response = self.local_client.delete_port(port_id)
+        except LocalApiTimeoutError as exc:
+            response = self._recover_delete_timeout(port_id, exc)
         self.projected_port_ids.discard(port_id)
         LOG.info(
             "delete_port_complete host=%s port_id=%s projected_ports=%s",
@@ -143,6 +155,156 @@ class SnapshotSynchronizer(object):
         if hasattr(self.port_source, "list_ports_for_host"):
             return self.port_source.list_ports_for_host()
         return self.port_source.get_ports()
+
+    def _projected_port_ids(self, snapshot):
+        return set(
+            port.get("port_id") for port in snapshot["ports"]
+            if port.get("port_id") and (port.get("eligible") or port.get("managed_domains"))
+        )
+
+    def _response_managed_count(self, response):
+        if response.get("managed_ports") is not None:
+            return len(response.get("managed_ports") or [])
+        return len(response.get("active_instances") or [])
+
+    def _recover_snapshot_timeout(self, snapshot, projected_port_ids, timeout_error):
+        last_error = timeout_error
+        for attempt in range(1, self.timeout_convergence_attempts + 1):
+            try:
+                status = self.local_client.status()
+            except LocalApiError as exc:
+                last_error = exc
+                LOG.warning(
+                    "snapshot_timeout_status_check_failed host=%s generation=%s "
+                    "attempt=%s attempts=%s error=%s",
+                    self.host,
+                    snapshot["generation"],
+                    attempt,
+                    self.timeout_convergence_attempts,
+                    exc,
+                )
+            else:
+                if self._status_converged(snapshot, projected_port_ids, status):
+                    LOG.warning(
+                        "snapshot_timeout_converged host=%s generation=%s "
+                        "attempt=%s projected_ports=%s managed_ports=%s",
+                        self.host,
+                        snapshot["generation"],
+                        attempt,
+                        len(projected_port_ids),
+                        len(status.get("managed_ports") or []),
+                    )
+                    return {
+                        "generation": snapshot["generation"],
+                        "results": [],
+                        "active_instances": status.get("active_instances") or [],
+                        "managed_ports": status.get("managed_ports") or [],
+                        "recovered_after_timeout": True,
+                    }
+                last_error = LocalApiTimeoutError(
+                    "status did not converge for generation %s" % snapshot["generation"]
+                )
+                LOG.warning(
+                    "snapshot_timeout_not_converged host=%s generation=%s "
+                    "attempt=%s attempts=%s projected_ports=%s managed_ports=%s "
+                    "status_generation=%s",
+                    self.host,
+                    snapshot["generation"],
+                    attempt,
+                    self.timeout_convergence_attempts,
+                    len(projected_port_ids),
+                    len(status.get("managed_ports") or []),
+                    status.get("generation"),
+                )
+
+            if attempt < self.timeout_convergence_attempts:
+                self.sleeper(self.timeout_convergence_interval)
+
+        raise LocalApiTimeoutError(
+            "snapshot submit timed out and status did not converge: %s" % last_error
+        )
+
+    def _recover_delete_timeout(self, port_id, timeout_error):
+        last_error = timeout_error
+        for attempt in range(1, self.timeout_convergence_attempts + 1):
+            try:
+                status = self.local_client.status()
+            except LocalApiError as exc:
+                last_error = exc
+                LOG.warning(
+                    "delete_timeout_status_check_failed host=%s port_id=%s "
+                    "attempt=%s attempts=%s error=%s",
+                    self.host,
+                    port_id,
+                    attempt,
+                    self.timeout_convergence_attempts,
+                    exc,
+                )
+            else:
+                if self._delete_status_converged(port_id, status):
+                    LOG.warning(
+                        "delete_timeout_converged host=%s port_id=%s "
+                        "attempt=%s managed_ports=%s",
+                        self.host,
+                        port_id,
+                        attempt,
+                        len(status.get("managed_ports") or []),
+                    )
+                    return {
+                        "port_id": port_id,
+                        "status": "deleted",
+                        "detached": True,
+                        "recovered_after_timeout": True,
+                    }
+                last_error = LocalApiTimeoutError(
+                    "delete status did not converge for port %s" % port_id
+                )
+                LOG.warning(
+                    "delete_timeout_not_converged host=%s port_id=%s "
+                    "attempt=%s attempts=%s managed_ports=%s",
+                    self.host,
+                    port_id,
+                    attempt,
+                    self.timeout_convergence_attempts,
+                    len(status.get("managed_ports") or []),
+                )
+
+            if attempt < self.timeout_convergence_attempts:
+                self.sleeper(self.timeout_convergence_interval)
+
+        raise LocalApiTimeoutError(
+            "port delete timed out and status did not converge: %s" % last_error
+        )
+
+    def _status_converged(self, snapshot, projected_port_ids, status):
+        try:
+            status_generation = int(status.get("generation") or 0)
+        except (TypeError, ValueError):
+            return False
+        if status_generation < int(snapshot["generation"]):
+            return False
+
+        if not projected_port_ids:
+            return True
+
+        managed = status.get("managed_ports")
+        if managed is None:
+            return False
+        managed_port_ids = set(
+            port.get("port_id") for port in managed
+            if port.get("port_id")
+        )
+        return projected_port_ids.issubset(managed_port_ids)
+
+    def _delete_status_converged(self, port_id, status):
+        managed = status.get("managed_ports")
+        if managed is None:
+            return False
+        managed_port_ids = set(
+            port.get("port_id") for port in managed
+            if port.get("port_id")
+        )
+        return port_id not in managed_port_ids
 
     def report_status(self):
         if self.status_reporter is None:

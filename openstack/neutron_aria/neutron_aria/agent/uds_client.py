@@ -27,6 +27,10 @@ class LocalApiTransportError(LocalApiError):
     pass
 
 
+class LocalApiTimeoutError(LocalApiTransportError):
+    pass
+
+
 class LocalApiResponseError(LocalApiError):
     def __init__(self, status, reason, body):
         LocalApiError.__init__(self, "local API returned %s %s" % (status, reason))
@@ -110,6 +114,8 @@ class LocalClient(object):
             return decoded
         except LocalApiError:
             raise
+        except socket.timeout as exc:
+            raise LocalApiTimeoutError(str(exc) or "timed out")
         except Exception as exc:
             raise LocalApiTransportError(str(exc))
         finally:
