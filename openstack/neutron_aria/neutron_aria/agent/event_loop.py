@@ -50,7 +50,7 @@ class SnapshotSynchronizer(object):
         self.ovs_bridge = ovs_bridge
         self.runtime_status = runtime_status or AgentRuntimeStatus(host)
         self.status_reporter = status_reporter
-        self.projected_port_ids = set()
+        self.projected_port_ids = set(self.state_store.last_projected_port_ids())
         self.acl_index = acl_index
         self.timeout_convergence_attempts = max(1, int(timeout_convergence_attempts))
         self.timeout_convergence_interval = max(0.0, float(timeout_convergence_interval))
@@ -61,6 +61,7 @@ class SnapshotSynchronizer(object):
 
     def full_resync(self):
         self.check_capabilities()
+        self.recover_pending_state()
         ports = self._list_ports()
         builder = PortCandidateBuilder(
             self.host,
@@ -89,8 +90,9 @@ class SnapshotSynchronizer(object):
         except LocalApiTimeoutError as exc:
             response = self._recover_snapshot_timeout(snapshot, projected_port_ids, exc)
         self._raise_if_response_failed(response)
+        apply_status = self._status_after_apply(snapshot, projected_port_ids, response)
         self.projected_port_ids = projected_port_ids
-        managed_ports = self._response_managed_count(response)
+        managed_ports = self._response_managed_count(response, apply_status)
         self.state_store.commit_snapshot(
             snapshot["generation"],
             snapshot.get("desired_hash"),
@@ -102,6 +104,8 @@ class SnapshotSynchronizer(object):
             len(snapshot["ports"]),
             managed_ports,
             desired_hash=snapshot.get("desired_hash"),
+            managed_ports_detail=self._managed_ports_from_status(apply_status),
+            port_statuses=self._port_statuses_from_status(apply_status),
         )
         heartbeat = self.report_status()
         LOG.info(
@@ -157,19 +161,98 @@ class SnapshotSynchronizer(object):
                 "heartbeat": heartbeat,
             }
 
-    def delete_port(self, port_id):
+    def delete_port(self, port_id, reason=None):
+        self.state_store.prepare_delete(port_id, reason=reason)
         try:
             response = self.local_client.delete_port(port_id)
         except LocalApiTimeoutError as exc:
             response = self._recover_delete_timeout(port_id, exc)
         self.projected_port_ids.discard(port_id)
+        self.state_store.commit_delete(port_id)
         LOG.info(
-            "delete_port_complete host=%s port_id=%s projected_ports=%s",
+            "delete_port_complete host=%s port_id=%s reason=%s projected_ports=%s",
             self.host,
             port_id,
+            reason,
             len(self.projected_port_ids),
         )
         return response
+
+    def recover_pending_state(self):
+        recovered = []
+        snapshot = self.state_store.pending_snapshot()
+        if snapshot:
+            status = self.local_client.status()
+            if self._pending_snapshot_hash_mismatch(snapshot, status):
+                raise LocalApiError(
+                    "pending snapshot hash mismatch: generation=%s desired_hash=%s" %
+                    (snapshot["generation"], snapshot["desired_hash"])
+                )
+            if self._pending_snapshot_converged(snapshot, status):
+                managed_ports = len(status.get("managed_ports") or [])
+                self.state_store.commit_snapshot(
+                    snapshot["generation"],
+                    snapshot["desired_hash"],
+                    snapshot_ports=snapshot.get("snapshot_ports") or 0,
+                    managed_ports=managed_ports,
+                )
+                self.projected_port_ids = set(snapshot.get("projected_port_ids") or [])
+                self.runtime_status.mark_ready(
+                    snapshot["generation"],
+                    snapshot.get("snapshot_ports") or 0,
+                    managed_ports,
+                    desired_hash=snapshot["desired_hash"],
+                    managed_ports_detail=self._managed_ports_from_status(status),
+                    port_statuses=self._port_statuses_from_status(status),
+                )
+                recovered.append("snapshot")
+                LOG.warning(
+                    "pending_snapshot_recovered host=%s generation=%s "
+                    "projected_ports=%s managed_ports=%s",
+                    self.host,
+                    snapshot["generation"],
+                    len(self.projected_port_ids),
+                    managed_ports,
+                )
+            else:
+                self.runtime_status.mark_degraded(
+                    "pending_snapshot_unresolved",
+                    "generation %s has not converged" % snapshot["generation"],
+                )
+                LOG.warning(
+                    "pending_snapshot_unresolved host=%s generation=%s "
+                    "projected_ports=%s",
+                    self.host,
+                    snapshot["generation"],
+                    len(snapshot.get("projected_port_ids") or []),
+                )
+
+        pending_delete = self.state_store.pending_delete()
+        if pending_delete:
+            status = self.local_client.status()
+            if self._delete_status_converged(pending_delete["port_id"], status):
+                self.projected_port_ids.discard(pending_delete["port_id"])
+                self.state_store.commit_delete(pending_delete["port_id"])
+                recovered.append("delete")
+                LOG.warning(
+                    "pending_delete_recovered host=%s port_id=%s reason=%s",
+                    self.host,
+                    pending_delete["port_id"],
+                    pending_delete.get("reason"),
+                )
+            else:
+                self.runtime_status.mark_degraded(
+                    "pending_delete_unresolved",
+                    "port %s still appears managed" % pending_delete["port_id"],
+                )
+                LOG.warning(
+                    "pending_delete_unresolved host=%s port_id=%s reason=%s",
+                    self.host,
+                    pending_delete["port_id"],
+                    pending_delete.get("reason"),
+                )
+
+        return {"recovered": recovered}
 
     def has_projected_port(self, port_id):
         return port_id in self.projected_port_ids
@@ -185,10 +268,22 @@ class SnapshotSynchronizer(object):
             if port.get("port_id") and (port.get("eligible") or port.get("managed_domains"))
         )
 
-    def _response_managed_count(self, response):
+    def _response_managed_count(self, response, status=None):
+        if status and status.get("managed_ports") is not None:
+            return len(status.get("managed_ports") or [])
         if response.get("managed_ports") is not None:
             return len(response.get("managed_ports") or [])
         return len(response.get("active_instances") or [])
+
+    def _managed_ports_from_status(self, status):
+        if not status:
+            return []
+        return list(status.get("managed_ports") or [])
+
+    def _port_statuses_from_status(self, status):
+        if not status:
+            return []
+        return list(status.get("port_statuses") or [])
 
     def _raise_if_response_failed(self, response):
         errors = [
@@ -221,6 +316,7 @@ class SnapshotSynchronizer(object):
             "results": [],
             "active_instances": status.get("active_instances") or [],
             "managed_ports": status.get("managed_ports") or [],
+            "port_statuses": status.get("port_statuses") or [],
             "recovered_before_submit": True,
         }
 
@@ -257,6 +353,7 @@ class SnapshotSynchronizer(object):
                         "results": [],
                         "active_instances": status.get("active_instances") or [],
                         "managed_ports": status.get("managed_ports") or [],
+                        "port_statuses": status.get("port_statuses") or [],
                         "recovered_after_timeout": True,
                     }
                 last_error = LocalApiTimeoutError(
@@ -352,6 +449,58 @@ class SnapshotSynchronizer(object):
             except (TypeError, ValueError):
                 generations.append(0)
         return max(generations or [0])
+
+    def _status_after_apply(self, snapshot, projected_port_ids, response):
+        try:
+            status = self.local_client.status()
+        except LocalApiError as exc:
+            LOG.warning(
+                "post_apply_status_unavailable host=%s generation=%s error=%s",
+                self.host,
+                snapshot["generation"],
+                exc,
+            )
+            return None
+        if self._status_converged(snapshot, projected_port_ids, status):
+            return status
+        LOG.warning(
+            "post_apply_status_not_converged host=%s generation=%s "
+            "response_status=%s status_generation=%s",
+            self.host,
+            snapshot["generation"],
+            response.get("status"),
+            status.get("generation"),
+        )
+        return None
+
+    def _pending_snapshot_converged(self, pending, status):
+        snapshot = {
+            "generation": pending["generation"],
+            "desired_hash": pending["desired_hash"],
+        }
+        return self._status_converged(
+            snapshot,
+            set(pending.get("projected_port_ids") or []),
+            status,
+        )
+
+    def _pending_snapshot_hash_mismatch(self, pending, status):
+        try:
+            status_generation = int(
+                status.get("applied_generation") or status.get("generation") or 0
+            )
+        except (TypeError, ValueError):
+            return False
+        status_hash = (
+            status.get("applied_desired_hash") or
+            status.get("desired_hash")
+        )
+        return bool(
+            status_generation >= int(pending["generation"]) and
+            status_hash and
+            pending.get("desired_hash") and
+            status_hash != pending.get("desired_hash")
+        )
 
     def _status_converged(self, snapshot, projected_port_ids, status):
         try:

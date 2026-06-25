@@ -18,9 +18,19 @@ class AgentRuntimeStatus(object):
         self.last_desired_hash = None
         self.last_snapshot_ports = 0
         self.last_managed_ports = 0
+        self.last_managed_ports_detail = []
+        self.last_port_statuses = []
         self.updated_at = None
 
-    def mark_ready(self, generation, snapshot_ports, managed_ports, desired_hash=None):
+    def mark_ready(
+        self,
+        generation,
+        snapshot_ports,
+        managed_ports,
+        desired_hash=None,
+        managed_ports_detail=None,
+        port_statuses=None,
+    ):
         self.ready = True
         self.degraded = False
         self.reason = "ready"
@@ -29,6 +39,8 @@ class AgentRuntimeStatus(object):
         self.last_desired_hash = desired_hash
         self.last_snapshot_ports = snapshot_ports
         self.last_managed_ports = managed_ports
+        self.last_managed_ports_detail = list(managed_ports_detail or [])
+        self.last_port_statuses = list(port_statuses or [])
         self.updated_at = time.time()
 
     def mark_degraded(self, reason, error):
@@ -50,6 +62,8 @@ class AgentRuntimeStatus(object):
             "last_desired_hash": self.last_desired_hash,
             "last_snapshot_ports": self.last_snapshot_ports,
             "last_managed_ports": self.last_managed_ports,
+            "last_managed_ports_detail": list(self.last_managed_ports_detail),
+            "last_port_statuses": list(self.last_port_statuses),
             "updated_at": self.updated_at,
         }
 

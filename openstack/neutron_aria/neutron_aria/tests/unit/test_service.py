@@ -27,6 +27,7 @@ class FakeSynchronizer(object):
         self.heartbeat_calls = 0
         self.projected_port_ids = set()
         self.delete_calls = []
+        self.delete_reasons = []
         self.host = "ostack2.bj159.net"
 
     def safe_full_resync(self):
@@ -54,8 +55,9 @@ class FakeSynchronizer(object):
     def has_projected_port(self, port_id):
         return port_id in self.projected_port_ids
 
-    def delete_port(self, port_id):
+    def delete_port(self, port_id, reason=None):
         self.delete_calls.append(port_id)
+        self.delete_reasons.append(reason)
         self.projected_port_ids.discard(port_id)
         return {"deleted": port_id}
 
@@ -277,6 +279,7 @@ class AgentServiceTestCase(unittest.TestCase):
 
         self.assertEqual(1, sync.resync_calls)
         self.assertEqual(["p1"], sync.delete_calls)
+        self.assertEqual(["migration_source_cleanup"], sync.delete_reasons)
         self.assertEqual(None, result["snapshot"])
 
     def test_port_delete_deletes_only_known_local_port(self):
@@ -301,6 +304,7 @@ class AgentServiceTestCase(unittest.TestCase):
         result = service.run_once()
 
         self.assertEqual(["p1"], sync.delete_calls)
+        self.assertEqual(["port_delete_event"], sync.delete_reasons)
         self.assertEqual(None, result["snapshot"])
 
     def test_network_update_triggers_full_resync(self):

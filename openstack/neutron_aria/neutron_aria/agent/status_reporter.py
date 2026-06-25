@@ -60,6 +60,8 @@ class NeutronStatusReporter(object):
             "last_generation": payload.get("last_generation"),
             "last_snapshot_ports": payload.get("last_snapshot_ports"),
             "last_managed_ports": payload.get("last_managed_ports"),
+            "last_managed_ports_detail": payload.get("last_managed_ports_detail") or [],
+            "last_port_statuses": payload.get("last_port_statuses") or [],
             "updated_at": payload.get("updated_at"),
         })
 

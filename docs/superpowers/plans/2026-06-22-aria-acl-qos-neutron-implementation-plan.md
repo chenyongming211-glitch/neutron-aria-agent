@@ -1993,7 +1993,7 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
 - [ ] Track per-port/per-domain result for every requested port, including
   ignored/unsupported/not-applicable ports, in the durable status model.
 - [x] Write WAL commit with final classified runtime/status state.
-- [ ] Add final status hash to WAL commit records.
+- [x] Add final status hash to WAL commit records.
 - [x] Advance applied generation only after the in-memory apply reports no
   per-port errors.
 - [x] Update in-memory status from the current classified state.
@@ -2031,7 +2031,7 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
   - accepted/applied/classified generation.
   - per-domain status summary.
   - per-port status summary.
-- [ ] Extend WAL commit with final status hash.
+- [x] Extend WAL commit with final status hash.
 - [x] On startup, replay WAL before opening UDS write paths.
 - [x] Intent without commit triggers startup recovery classification,
   best-effort attach/ACL scrub/detach where enough port information exists, and
@@ -2043,6 +2043,48 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
   belong to the committed Neutron WAL port set.
 - [ ] Deep pinned map/content mismatch scrub beyond attach-path validation.
 - [ ] WAL compact keeps a durable snapshot plus enough audit trail for recovery.
+
+**Required Python agent local transaction tasks:**
+
+- [x] `neutron-aria-agent` writes local durable `prepare_snapshot` before
+  submitting a UDS snapshot.
+- [x] `neutron-aria-agent` writes local durable `commit_snapshot` only after
+  UDS convergence or a successful UDS response.
+- [x] Pending snapshot state records `generation`, `desired_hash`,
+  `snapshot_ports`, and projected Neutron port IDs.
+- [x] Agent restart checks pending snapshot against UDS status before
+  resubmitting.
+- [x] If pending snapshot already converged, local state is committed and the
+  same desired generation is reused.
+- [x] If pending snapshot hash conflicts with UDS status, resync is blocked and
+  the agent reports degraded instead of overwriting runtime state.
+- [x] Delete and migration-source cleanup write local durable pending delete
+  state before calling UDS delete.
+- [x] Delete pending state is committed only after UDS delete succeeds or UDS
+  status proves the port is no longer managed.
+- [x] Agent restart can recover a pending delete when UDS status no longer
+  contains the port.
+- [x] Agent heartbeat/configurations carry latest managed port details and
+  per-port/per-domain runtime statuses from UDS status.
+- [ ] Neutron Server plugin consumes the reported per-port/per-domain statuses
+  and writes `aria_acl_port_statuses`.
+- [ ] Delete/migration pending state is also reflected in future
+  `aria_acl_port_statuses` as `pending` or `degraded` when unresolved.
+
+**Required Neutron Server transaction tasks:**
+
+- [ ] `aria_acl_policy`, `aria_acl_rule`, `aria_acl_address_set`, and
+  `aria_acl_binding` CRUD update object data and `revision_number` inside the
+  same DB transaction.
+- [ ] RPC/notification is emitted only after DB commit.
+- [ ] If notification delivery fails, periodic full resync remains the durable
+  recovery path; no committed DB state may depend only on an in-memory event.
+- [ ] Agent-side revision cache is extended from port-only revision handling to
+  ACL policy/rule/address-set/binding revisions once the server objects exist.
+- [ ] Revision gap, missing object, stale object, or event queue overflow marks
+  agent degraded and schedules full resync.
+- [ ] Full resync success clears the degraded reason and updates the latest
+  revision watermark.
 
 **Required tests:**
 
@@ -2057,12 +2099,28 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
 - [ ] Snapshot crash after intent but before apply recovers as degraded/blocked.
 - [ ] Snapshot crash after partial apply but before commit recovers by scrub or
   full resync.
+- [x] Python agent restart recovers a converged pending snapshot before
+  resubmit.
+- [x] Python agent restart blocks a pending snapshot hash mismatch.
+- [x] Python agent records and commits local pending delete state.
+- [x] Python agent preserves pending delete state when UDS delete timeout does
+  not converge.
+- [x] Python agent restart recovers pending delete when UDS status no longer
+  contains the port.
+- [x] Python agent carries UDS per-port/per-domain status in heartbeat payload.
 - [ ] Commit without status rebuilds status.
 - [x] Pinned runtime attach/reclaim failure is visible in status.
 - [ ] Deep pinned map/content mismatch is visible in status.
 - [ ] WAL append failure does not advance accepted generation.
 - [ ] WAL commit failure does not report ready.
 - [ ] Restart after successful snapshot preserves committed managed ports.
+- [ ] Process-level crash injection: kill `aria-datapath` after WAL intent,
+  after attach, after partial ACL map write, after delete detach, and before
+  WAL commit.
+- [ ] VM migration smoke: old host cleanup and new host full-resync both
+  converge without stale managed pins.
+- [ ] Tap recreate smoke: deleted/recreated tap with the same Neutron port ID is
+  reclaimed or reattached by full resync.
 
 **Visible result after completion:**
 
@@ -2098,6 +2156,9 @@ executor and cleanup path exist.
 - [x] Python same desired-state generation reuse.
 - [x] Python pending generation restart reuse.
 - [x] Python snapshot response errors keep pending state and degrade.
+- [x] Python pending snapshot restart convergence and hash-mismatch blocking.
+- [x] Python durable pending delete for port delete and migration-source cleanup.
+- [x] Python per-port/per-domain status propagation from UDS status to heartbeat.
 - [x] Effective ACL computation.
 - [x] Effective QoS computation.
 - [x] Base Rust UDS schema serde.

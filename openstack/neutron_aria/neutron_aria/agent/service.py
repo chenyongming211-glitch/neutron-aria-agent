@@ -251,7 +251,10 @@ class AgentService(object):
             if binding_host and binding_host != self.synchronizer.host:
                 if self.synchronizer.has_projected_port(port_id):
                     try:
-                        self.synchronizer.delete_port(port_id)
+                        self.synchronizer.delete_port(
+                            port_id,
+                            reason="migration_source_cleanup",
+                        )
                     except Exception as exc:
                         self.synchronizer.runtime_status.mark_degraded(
                             DELETE_PORT_DEGRADED_REASON,
@@ -289,7 +292,7 @@ class AgentService(object):
             if not self.synchronizer.has_projected_port(port_id):
                 continue
             try:
-                self.synchronizer.delete_port(port_id)
+                self.synchronizer.delete_port(port_id, reason="port_delete_event")
             except Exception as exc:
                 errors.append("%s:%s" % (port_id, exc))
         return errors

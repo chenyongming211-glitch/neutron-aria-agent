@@ -140,6 +140,48 @@ class DeleteTimeoutNotConvergedLocalClient(FakeLocalClient):
         }
 
 
+class StatusAfterApplyLocalClient(FakeLocalClient):
+    def status(self):
+        if not self.snapshots:
+            return {"generation": 0, "managed_ports": [], "active_instances": []}
+        snapshot = self.snapshots[-1]
+        port_ids = [
+            port["port_id"] for port in snapshot["ports"]
+            if port.get("eligible") or port.get("managed_domains")
+        ]
+        managed_ports = [
+            {"port_id": port_id, "ifname": "tap%s" % port_id[:11]}
+            for port_id in port_ids
+        ]
+        return {
+            "generation": snapshot["generation"],
+            "accepted_generation": snapshot["generation"],
+            "applied_generation": snapshot["generation"],
+            "desired_hash": snapshot.get("desired_hash"),
+            "applied_desired_hash": snapshot.get("desired_hash"),
+            "managed_ports": managed_ports,
+            "port_statuses": [{
+                "port_id": port_id,
+                "ifname": "tap%s" % port_id[:11],
+                "generation": snapshot["generation"],
+                "desired_hash": snapshot.get("desired_hash"),
+                "status": "ready",
+                "managed_domains": ["acl"],
+                "domains": [{"domain": "acl", "status": "ready"}],
+            } for port_id in port_ids],
+            "active_instances": [port["ifname"] for port in managed_ports],
+        }
+
+
+class FixedStatusLocalClient(FakeLocalClient):
+    def __init__(self, status):
+        FakeLocalClient.__init__(self)
+        self.fixed_status = status
+
+    def status(self):
+        return self.fixed_status
+
+
 class FakeStatusReporter(object):
     def __init__(self):
         self.statuses = []
@@ -290,6 +332,118 @@ class EventLoopTestCase(unittest.TestCase):
         finally:
             shutil.rmtree(state_dir)
 
+    def test_pending_snapshot_recovered_on_restart_before_resubmit(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            port_source = StaticPortSource([{
+                "id": port_id,
+                "device_owner": "compute:nova",
+                "binding:host_id": "ostack2",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+            }])
+            first_client = TimeoutNotConvergedLocalClient()
+            first = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                first_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+                timeout_convergence_attempts=1,
+                timeout_convergence_interval=0,
+            )
+            first.safe_full_resync()
+            pending = SnapshotStateStore(state_dir).pending_snapshot()
+            status = {
+                "generation": pending["generation"],
+                "accepted_generation": pending["generation"],
+                "applied_generation": pending["generation"],
+                "desired_hash": pending["desired_hash"],
+                "applied_desired_hash": pending["desired_hash"],
+                "managed_ports": [{"port_id": port_id, "ifname": "tapaaaaaaaa-aa"}],
+                "port_statuses": [{
+                    "port_id": port_id,
+                    "ifname": "tapaaaaaaaa-aa",
+                    "generation": pending["generation"],
+                    "desired_hash": pending["desired_hash"],
+                    "status": "ready",
+                    "managed_domains": ["acl"],
+                    "domains": [{"domain": "acl", "status": "ready"}],
+                }],
+                "active_instances": ["tapaaaaaaaa-aa"],
+            }
+            second_client = FixedStatusLocalClient(status)
+            second = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                second_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+            )
+
+            result = second.full_resync()
+            state = SnapshotStateStore(state_dir).to_dict()
+
+            self.assertEqual([], second_client.snapshots)
+            self.assertTrue(result["response"]["recovered_before_submit"])
+            self.assertEqual(None, state["pending_generation"])
+            self.assertEqual(pending["generation"], state["last_generation"])
+            self.assertEqual([port_id], state["last_projected_port_ids"])
+            self.assertEqual("ready", result["status"]["last_port_statuses"][0]["status"])
+        finally:
+            shutil.rmtree(state_dir)
+
+    def test_pending_snapshot_hash_mismatch_blocks_restart_resync(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            port_source = StaticPortSource([{
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "device_owner": "compute:nova",
+                "binding:host_id": "ostack2",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+            }])
+            first_client = TimeoutNotConvergedLocalClient()
+            first = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                first_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+                timeout_convergence_attempts=1,
+                timeout_convergence_interval=0,
+            )
+            first.safe_full_resync()
+            pending = SnapshotStateStore(state_dir).pending_snapshot()
+            second_client = FixedStatusLocalClient({
+                "generation": pending["generation"],
+                "applied_generation": pending["generation"],
+                "desired_hash": "different",
+                "applied_desired_hash": "different",
+                "managed_ports": [],
+                "active_instances": [],
+            })
+            second = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                second_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+            )
+
+            result = second.safe_full_resync()
+
+            self.assertTrue(result["status"]["degraded"])
+            self.assertIn("hash mismatch", result["status"]["last_error"])
+            self.assertEqual([], second_client.snapshots)
+        finally:
+            shutil.rmtree(state_dir)
+
     def test_response_port_errors_keep_pending_state_and_degrade(self):
         state_dir = tempfile.mkdtemp()
         try:
@@ -316,6 +470,32 @@ class EventLoopTestCase(unittest.TestCase):
             self.assertEqual(None, state["last_desired_hash"])
         finally:
             shutil.rmtree(state_dir)
+
+    def test_full_resync_carries_port_statuses_from_datapath_status(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([{
+                "id": port_id,
+                "device_owner": "compute:nova",
+                "binding:host_id": "ostack2",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+            }]),
+            FakeOvsReader(),
+            StatusAfterApplyLocalClient(),
+            managed_domains=["acl"],
+        )
+
+        result = sync.full_resync()
+
+        self.assertEqual(1, result["status"]["last_managed_ports"])
+        self.assertEqual(port_id, result["status"]["last_managed_ports_detail"][0]["port_id"])
+        self.assertEqual(port_id, result["status"]["last_port_statuses"][0]["port_id"])
+        self.assertEqual(
+            "ready",
+            result["status"]["last_port_statuses"][0]["domains"][0]["status"],
+        )
 
     def test_full_resync_includes_effective_acl_when_index_is_available(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -492,17 +672,25 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertIn("rabbit down", result["heartbeat"]["error"])
 
     def test_delete_port_delegates_to_local_client(self):
+        state_dir = tempfile.mkdtemp()
         local_client = FakeLocalClient()
-        sync = SnapshotSynchronizer(
-            "ostack2",
-            StaticPortSource([]),
-            FakeOvsReader(),
-            local_client,
-        )
+        try:
+            sync = SnapshotSynchronizer(
+                "ostack2",
+                StaticPortSource([]),
+                FakeOvsReader(),
+                local_client,
+                state_store=SnapshotStateStore(state_dir),
+            )
 
-        sync.delete_port("port-1")
+            sync.delete_port("port-1", reason="migration_source_cleanup")
+            state = SnapshotStateStore(state_dir).to_dict()
 
-        self.assertEqual(["port-1"], local_client.deleted_ports)
+            self.assertEqual(["port-1"], local_client.deleted_ports)
+            self.assertEqual(None, state["pending_delete_port_id"])
+            self.assertEqual("port-1", state["last_deleted_port_id"])
+        finally:
+            shutil.rmtree(state_dir)
 
     def test_delete_port_recovers_when_timed_out_delete_converged(self):
         local_client = DeleteTimeoutThenConvergedLocalClient()
@@ -524,20 +712,64 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertFalse(sync.has_projected_port("port-1"))
 
     def test_delete_port_keeps_timeout_when_delete_not_converged(self):
-        sync = SnapshotSynchronizer(
-            "ostack2",
-            StaticPortSource([]),
-            FakeOvsReader(),
-            DeleteTimeoutNotConvergedLocalClient(),
-            timeout_convergence_attempts=1,
-            timeout_convergence_interval=0,
-        )
+        state_dir = tempfile.mkdtemp()
+        try:
+            sync = SnapshotSynchronizer(
+                "ostack2",
+                StaticPortSource([]),
+                FakeOvsReader(),
+                DeleteTimeoutNotConvergedLocalClient(),
+                state_store=SnapshotStateStore(state_dir),
+                timeout_convergence_attempts=1,
+                timeout_convergence_interval=0,
+            )
 
-        self.assertRaises(
-            LocalApiTimeoutError,
-            sync.delete_port,
-            "port-1",
-        )
+            self.assertRaises(
+                LocalApiTimeoutError,
+                sync.delete_port,
+                "port-1",
+            )
+            pending = SnapshotStateStore(state_dir).pending_delete()
+
+            self.assertEqual("port-1", pending["port_id"])
+        finally:
+            shutil.rmtree(state_dir)
+
+    def test_pending_delete_recovered_on_restart(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            store = SnapshotStateStore(state_dir)
+            prepared = store.prepare_snapshot({
+                "host": "ostack2",
+                "ports": [{
+                    "port_id": "port-1",
+                    "ifname": "tap-port-1",
+                    "eligible": True,
+                    "managed_domains": ["acl"],
+                }],
+            })
+            store.commit_snapshot(prepared["generation"], prepared["desired_hash"])
+            store.prepare_delete("port-1", reason="port_delete_event")
+            sync = SnapshotSynchronizer(
+                "ostack2",
+                StaticPortSource([]),
+                FakeOvsReader(),
+                FixedStatusLocalClient({
+                    "generation": 1,
+                    "managed_ports": [],
+                    "active_instances": [],
+                }),
+                state_store=SnapshotStateStore(state_dir),
+            )
+
+            recovered = sync.recover_pending_state()
+            state = SnapshotStateStore(state_dir)
+
+            self.assertEqual(["delete"], recovered["recovered"])
+            self.assertEqual(None, state.pending_delete())
+            self.assertFalse(sync.has_projected_port("port-1"))
+        finally:
+            shutil.rmtree(state_dir)
 
 
 if __name__ == "__main__":

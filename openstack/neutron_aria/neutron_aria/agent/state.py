@@ -49,6 +49,16 @@ def _int_value(value, default=0):
         return default
 
 
+def _projected_port_ids(snapshot):
+    ports = snapshot.get("ports") or []
+    return sorted([
+        port.get("port_id") for port in ports
+        if port.get("port_id") and (
+            port.get("eligible") or port.get("managed_domains")
+        )
+    ])
+
+
 class SnapshotStateStore(object):
     """Durable local transaction state for neutron-aria-agent snapshots."""
 
@@ -70,6 +80,8 @@ class SnapshotStateStore(object):
         )
         self._state["pending_generation"] = generation
         self._state["pending_desired_hash"] = desired_hash
+        self._state["pending_snapshot_ports"] = len(snapshot.get("ports") or [])
+        self._state["pending_projected_port_ids"] = _projected_port_ids(snapshot)
         self._state["pending_since"] = _now()
         self._state["updated_at"] = _now()
         self._write()
@@ -85,6 +97,9 @@ class SnapshotStateStore(object):
         self._state["last_desired_hash"] = desired_hash
         self._state["last_snapshot_ports"] = int(snapshot_ports or 0)
         self._state["last_managed_ports"] = int(managed_ports or 0)
+        self._state["last_projected_port_ids"] = list(
+            self._state.get("pending_projected_port_ids") or []
+        )
         self._state["last_committed_at"] = _now()
         if (
             _int_value(self._state.get("pending_generation")) == generation and
@@ -92,9 +107,65 @@ class SnapshotStateStore(object):
         ):
             self._state["pending_generation"] = None
             self._state["pending_desired_hash"] = None
+            self._state["pending_snapshot_ports"] = 0
+            self._state["pending_projected_port_ids"] = []
             self._state["pending_since"] = None
         self._state["updated_at"] = _now()
         self._write()
+
+    def prepare_delete(self, port_id, reason=None):
+        self._state["pending_delete_port_id"] = port_id
+        self._state["pending_delete_reason"] = reason
+        self._state["pending_delete_since"] = _now()
+        self._state["updated_at"] = _now()
+        self._write()
+        return {
+            "port_id": port_id,
+            "reason": reason,
+        }
+
+    def commit_delete(self, port_id):
+        if self._state.get("pending_delete_port_id") == port_id:
+            self._state["pending_delete_port_id"] = None
+            self._state["pending_delete_reason"] = None
+            self._state["pending_delete_since"] = None
+        projected = [
+            projected for projected in self._state.get("last_projected_port_ids") or []
+            if projected != port_id
+        ]
+        self._state["last_projected_port_ids"] = projected
+        self._state["last_deleted_port_id"] = port_id
+        self._state["last_delete_committed_at"] = _now()
+        self._state["updated_at"] = _now()
+        self._write()
+
+    def pending_snapshot(self):
+        generation = _int_value(self._state.get("pending_generation"))
+        desired_hash = self._state.get("pending_desired_hash")
+        if not generation or not desired_hash:
+            return None
+        return {
+            "generation": generation,
+            "desired_hash": desired_hash,
+            "snapshot_ports": _int_value(self._state.get("pending_snapshot_ports")),
+            "projected_port_ids": list(
+                self._state.get("pending_projected_port_ids") or []
+            ),
+            "pending_since": self._state.get("pending_since"),
+        }
+
+    def pending_delete(self):
+        port_id = self._state.get("pending_delete_port_id")
+        if not port_id:
+            return None
+        return {
+            "port_id": port_id,
+            "reason": self._state.get("pending_delete_reason"),
+            "pending_since": self._state.get("pending_delete_since"),
+        }
+
+    def last_projected_port_ids(self):
+        return list(self._state.get("last_projected_port_ids") or [])
 
     def to_dict(self):
         return copy.deepcopy(self._state)
@@ -106,7 +177,7 @@ class SnapshotStateStore(object):
         if (
             pending_generation and
             pending_hash == desired_hash and
-            pending_generation > minimum_generation
+            pending_generation >= minimum_generation
         ):
             return pending_generation
 
@@ -115,7 +186,7 @@ class SnapshotStateStore(object):
         if (
             last_generation and
             last_hash == desired_hash and
-            last_generation > minimum_generation
+            last_generation >= minimum_generation
         ):
             return last_generation
 
@@ -134,10 +205,18 @@ class SnapshotStateStore(object):
         payload.setdefault("last_desired_hash", None)
         payload.setdefault("pending_generation", None)
         payload.setdefault("pending_desired_hash", None)
+        payload.setdefault("pending_snapshot_ports", 0)
+        payload.setdefault("pending_projected_port_ids", [])
         payload.setdefault("pending_since", None)
         payload.setdefault("last_snapshot_ports", 0)
         payload.setdefault("last_managed_ports", 0)
+        payload.setdefault("last_projected_port_ids", [])
         payload.setdefault("last_committed_at", None)
+        payload.setdefault("pending_delete_port_id", None)
+        payload.setdefault("pending_delete_reason", None)
+        payload.setdefault("pending_delete_since", None)
+        payload.setdefault("last_deleted_port_id", None)
+        payload.setdefault("last_delete_committed_at", None)
         payload.setdefault("updated_at", None)
         return payload
 
@@ -182,10 +261,18 @@ class InMemorySnapshotStateStore(SnapshotStateStore):
         payload.setdefault("last_desired_hash", None)
         payload.setdefault("pending_generation", None)
         payload.setdefault("pending_desired_hash", None)
+        payload.setdefault("pending_snapshot_ports", 0)
+        payload.setdefault("pending_projected_port_ids", [])
         payload.setdefault("pending_since", None)
         payload.setdefault("last_snapshot_ports", 0)
         payload.setdefault("last_managed_ports", 0)
+        payload.setdefault("last_projected_port_ids", [])
         payload.setdefault("last_committed_at", None)
+        payload.setdefault("pending_delete_port_id", None)
+        payload.setdefault("pending_delete_reason", None)
+        payload.setdefault("pending_delete_since", None)
+        payload.setdefault("last_deleted_port_id", None)
+        payload.setdefault("last_delete_committed_at", None)
         payload.setdefault("updated_at", None)
         return payload
 

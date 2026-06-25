@@ -57,6 +57,21 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
         self.assertEqual(1, first["generation"])
         self.assertEqual(1, second["generation"])
 
+    def test_pending_snapshot_records_projected_ports_and_commit_clears_pending(self):
+        store = SnapshotStateStore(self.state_dir)
+        prepared = store.prepare_snapshot(self._snapshot("p1"))
+
+        pending = SnapshotStateStore(self.state_dir).pending_snapshot()
+        self.assertEqual(prepared["generation"], pending["generation"])
+        self.assertEqual(["p1"], pending["projected_port_ids"])
+        self.assertEqual(1, pending["snapshot_ports"])
+
+        store.commit_snapshot(prepared["generation"], prepared["desired_hash"])
+        committed = SnapshotStateStore(self.state_dir)
+
+        self.assertEqual(None, committed.pending_snapshot())
+        self.assertEqual(["p1"], committed.last_projected_port_ids())
+
     def test_new_desired_state_advances_after_pending_generation(self):
         store = SnapshotStateStore(self.state_dir)
         first = store.prepare_snapshot(self._snapshot("p1"))
@@ -80,6 +95,37 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
         self.assertEqual(1, first["generation"])
         self.assertEqual(4, second["generation"])
         self.assertFalse(second["reused_pending"])
+
+    def test_prepare_reuses_committed_generation_equal_to_remote_floor(self):
+        store = SnapshotStateStore(self.state_dir)
+        first = store.prepare_snapshot(self._snapshot("p1"))
+        store.commit_snapshot(first["generation"], first["desired_hash"])
+
+        second = store.prepare_snapshot(
+            self._snapshot("p1"),
+            minimum_generation=first["generation"],
+        )
+
+        self.assertEqual(first["generation"], second["generation"])
+
+    def test_prepare_and_commit_delete_are_durable(self):
+        store = SnapshotStateStore(self.state_dir)
+        prepared = store.prepare_snapshot(self._snapshot("p1"))
+        store.commit_snapshot(prepared["generation"], prepared["desired_hash"])
+
+        store.prepare_delete("p1", reason="migration_source_cleanup")
+        restarted = SnapshotStateStore(self.state_dir)
+        pending = restarted.pending_delete()
+
+        self.assertEqual("p1", pending["port_id"])
+        self.assertEqual("migration_source_cleanup", pending["reason"])
+
+        restarted.commit_delete("p1")
+        committed = SnapshotStateStore(self.state_dir)
+
+        self.assertEqual(None, committed.pending_delete())
+        self.assertEqual([], committed.last_projected_port_ids())
+        self.assertEqual("p1", committed.to_dict()["last_deleted_port_id"])
 
 
 if __name__ == "__main__":

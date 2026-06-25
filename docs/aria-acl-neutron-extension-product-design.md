@@ -1179,6 +1179,78 @@ effective_acl_by_port
 
 full resync 可以拉取本 host 全量 port，但进入 `effective_acl_by_port` 的只能是 eligible VM ports。Neutron 服务端口必须保留在 inventory/status 中用于解释 `not_applicable`，不能进入 ACL snapshot。
 
+### 9.2.1 neutron-aria-agent 本地事务恢复
+
+`neutron-aria-agent` 不能只依赖 Rust `aria-datapath` 的 WAL。Python agent 自己也必须持久化“已准备提交给 UDS、但尚未确认收敛”的本地事务状态，避免 agent 重启、VM 迁移、port delete 事件丢失时出现静默不一致。
+
+本地事务状态必须包含：
+
+```text
+pending snapshot:
+  generation
+  desired_hash
+  snapshot_ports
+  projected_port_ids
+  pending_since
+
+pending delete:
+  port_id
+  reason = port_delete_event | migration_source_cleanup | operator_cleanup
+  pending_since
+
+last committed:
+  last_generation
+  last_desired_hash
+  last_projected_port_ids
+  last_deleted_port_id
+  last_committed_at
+```
+
+启动或 full resync 前的恢复规则：
+
+```text
+if pending snapshot exists:
+    read /api/v1/neutron/status
+    if applied_generation >= pending_generation
+       and applied_desired_hash == pending_desired_hash
+       and managed_ports covers pending projected_port_ids:
+           commit local snapshot state
+           reuse the same generation for the same desired state
+    elif applied_generation >= pending_generation
+         and applied_desired_hash != pending_desired_hash:
+           block resync, mark agent degraded, require operator/full-resync audit
+    else:
+           mark pending_snapshot_unresolved
+           continue full resync with the pending generation when desired_hash matches
+
+if pending delete exists:
+    read /api/v1/neutron/status
+    if port_id no longer appears in managed_ports:
+        commit local delete state
+    else:
+        mark pending_delete_unresolved
+        continue full resync so authoritative inventory can clean old host state
+```
+
+迁移场景必须按两个独立事务处理：
+
+```text
+old host:
+  receives port.update with binding:host_id != local_host
+  if port is locally projected:
+      prepare_delete(reason=migration_source_cleanup)
+      call UDS DELETE /ports/{port_id}
+      commit only after delete success or status convergence
+
+new host:
+  receives full resync or local binding event
+  prepare_snapshot
+  apply eligible tap
+  commit only after UDS status converges
+```
+
+`neutron-aria-agent` heartbeat/configurations 必须携带最近一次 UDS status 中的 `managed_ports` 和 `port_statuses`。后续 `neutron-server` 插件落地后，这些状态要写入 `aria_acl_port_statuses`，并按 `last_reported_at` 做 stale 判断；不能只靠 agent-level ready/degraded 表示每个 port 的 ACL 生效状态。
+
 ### 9.3 Port 过滤
 
 agent 只处理满足条件的 port：
