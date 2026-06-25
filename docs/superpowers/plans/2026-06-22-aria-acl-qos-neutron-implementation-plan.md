@@ -1618,6 +1618,166 @@ matching Neutron Server source tree.
 
 ---
 
+## 9.9 Pause Checkpoint And Transaction-First Optimization
+
+**Pause checkpoint, 2026-06-25:**
+
+Current implemented and validated state:
+
+- Latest pushed commit: `aa19d73 neutron: abstract ACL source for agent`.
+- CI status: green; Python adapter tests pass and Rust/eBPF build is skipped
+  when no Rust files changed.
+- `aria-datapath` has the base Neutron UDS routes:
+  - `GET /api/v1/neutron/capabilities`.
+  - `GET /api/v1/neutron/status`.
+  - `PUT /api/v1/neutron/snapshot`.
+  - `DELETE /api/v1/neutron/ports/{port_id}`.
+- Mutating UDS handlers are cancel-safe at the HTTP handler boundary: client
+  timeout or disconnect no longer cancels an apply task that has already
+  started.
+- `neutron-aria-agent` can run as an independent Kolla-style container, report
+  heartbeat, read Neutron ports through legacy `python-neutronclient`, build a
+  per-host snapshot, and submit it to local UDS.
+- UDS timeout convergence is implemented in Python for snapshot and port delete:
+  a timed-out mutation is treated as successful only after `GET /status` proves
+  the desired state converged.
+- ACL fixture smoke on `ostack2.bj159.net` proved:
+  - full resync discovers the real OVS VM tap.
+  - ACL fixture translates into datapath groups/policies.
+  - ICMP can be blocked and rollback restores traffic.
+  - a low request timeout can still converge through status polling.
+- ACL source abstraction is in place:
+  - `disabled` for product-safe default.
+  - `fixture` for lab and smoke payloads.
+  - `neutron` placeholder that intentionally fails until the Neutron Server
+    `aria-acl` API/DB extension exists.
+
+Development is paused at this checkpoint before adding more northbound feature
+surface. The next implementation pass must prioritize transaction semantics,
+atomicity, idempotency, and crash recovery before adding more ACL/QoS/Mirror
+business APIs.
+
+### 9.9.1 Transaction Boundary Definitions
+
+The project uses different transaction boundaries at each layer. They must not
+be blurred:
+
+| Layer | Transaction boundary | Source of truth | Commit point |
+| --- | --- | --- | --- |
+| Neutron Server | One API/DB write transaction for policy/rule/address-set/binding/status update | Neutron DB | DB commit succeeds and revision is advanced |
+| `neutron-aria-agent` | One host-local desired-state generation produced from a full resync or merged event batch | Neutron DB/API view plus local generation state | Snapshot is submitted and status convergence is classified |
+| `aria-datapath` | One UDS snapshot generation for one host | Latest accepted Neutron snapshot and local WAL/state | WAL commit and runtime status are durable/consistent |
+
+Atomicity is not allowed to mean "silently half-ready". If an enhancement
+domain cannot be applied, the system must choose an explicit classified state:
+
+- `ready`: desired state is applied and status is durable.
+- `degraded`: original OVS forwarding is preserved, enhancement may be bypassed
+  or partially unavailable, and the reason is visible.
+- `blocked`: consistency cannot be proven; generation must not be advanced as
+  accepted.
+- `not_requested` / `unsupported` / `not_applicable`: no hidden failure.
+
+For ACL/QoS product behavior, original VM forwarding must stay safe on
+degraded enhancement paths. A domain may degrade to bypass, but it must never be
+reported as ready before its runtime state, status, and durable metadata agree.
+
+### 9.9.2 Mandatory Idempotency Rules
+
+These rules are mandatory before promoting more feature work:
+
+- Replaying the same `local_generation` must be idempotent and return current
+  status without duplicating groups, policies, qdisc, maps, refs, or authority
+  markers.
+- Receiving an older generation must be rejected or treated as no-op without
+  deleting newer runtime state.
+- Repeating `DELETE /api/v1/neutron/ports/{port_id}` for a missing or already
+  detached port must be a successful no-op.
+- Python UDS retry must resend the same desired generation, not synthesize a new
+  generation for the same desired state while recovery is unknown.
+- Neutron RPC events are hints only. Lost, duplicated, or reordered events must
+  converge through full resync.
+- Datapath apply must be desired-state reconciliation, not unbounded append-only
+  mutation.
+- Runtime object keys must be scoped by authority, domain, project/object when
+  that metadata exists, port id, and generation where needed; human-readable
+  names are not sufficient uniqueness keys.
+- Local admin and Neutron-managed persistent state must use separate authority
+  namespaces and separate WAL entries.
+- Temporary troubleshooting features, such as trace-only sessions, must not
+  modify Neutron generation or Neutron WAL state.
+
+### 9.9.3 Atomic Apply Sequence
+
+The optimized implementation order for `aria-datapath` snapshot apply is:
+
+1. Parse request and enforce body size, schema version, peer authority, host,
+   mode, and supported domains.
+2. Acquire one host-local apply lock; no concurrent snapshot/delete writes.
+3. Load current runtime state, pinned state, and WAL summary.
+4. Preflight all affected ports and domains without changing datapath:
+   - tap exists.
+   - ifindex matches current interface.
+   - OVS `iface-id` matches port id.
+   - managed domain ownership is compatible.
+   - unsupported ports are classified.
+5. Build a deterministic desired state and a deterministic diff.
+6. Write WAL intent with generation, affected ports, domains, object revisions,
+   and the planned diff hash.
+7. Apply runtime changes with compensating cleanup for partial failures:
+   - attach/detach runtime.
+   - group/address-set reconciliation.
+   - ACL policy reconciliation.
+   - QoS reconciliation when enabled.
+   - mirror reconciliation only in second phase.
+8. Collect per-port and per-domain status, including degraded/bypass reasons.
+9. Write WAL commit only if the runtime and status can be explained.
+10. Advance accepted/classified generation only after WAL commit.
+11. Publish status atomically from committed state.
+
+If any step before WAL commit fails, the implementation must keep the previous
+accepted/classified generation visible. The failed attempt can be exposed as
+degraded/blocked diagnostics, but it cannot be mistaken for a committed ready
+state.
+
+### 9.9.4 Recovery And Replay Rules
+
+Restart recovery must handle the following cases:
+
+- No intent and no commit: load committed state and continue.
+- Intent without commit: treat previous apply as incomplete, scrub or reconcile
+  affected objects, do not advance accepted generation, and require full resync.
+- Partial runtime apply without commit: status must be degraded or blocked until
+  reconciliation proves state is safe.
+- Commit without status write: rebuild status from committed WAL/state and only
+  then expose the committed generation.
+- Pinned map/link mismatch: classify as degraded/blocked and force reconcile;
+  do not silently assume maps are correct.
+- Python timeout with later datapath success: status convergence may recover the
+  operation.
+- Python timeout without status convergence: mark local API degraded and retry
+  through backoff/full resync.
+
+### 9.9.5 Optimized Development Order
+
+The next development order is changed to transaction-first:
+
+1. Freeze the UDS status contract for generation, per-port status, per-domain
+   status, WAL status, and authority state.
+2. Implement idempotent Rust snapshot/delete reconciliation with explicit
+   generation comparison and repeated-request tests.
+3. Implement WAL intent/commit/replay and startup recovery tests.
+4. Make Python `neutron-aria-agent` persist and reuse host-local generation
+   state, including retry and restart behavior.
+5. Add contract tests for timeout convergence, duplicate snapshot replay,
+   duplicate delete, older generation, crash/restart, and partial apply.
+6. Only after those gates pass, continue to Neutron Server `aria-acl` API/DB/CLI
+   work when the matching source tree is available.
+7. QoS and Mirror remain behind their phase gates until the same transaction
+   rules are proven for ACL.
+
+---
+
 ## 10. Chapter Nine: Test Matrix And Acceptance
 
 ### 10.1 Unit Tests
@@ -1639,6 +1799,12 @@ matching Neutron Server source tree.
 - [x] Base Rust UDS schema serde.
 - [x] TCP OpenAPI does not expose Neutron UDS paths.
 - [ ] Snapshot apply status.
+- [ ] Same generation snapshot replay is idempotent.
+- [ ] Older generation snapshot is reject/no-op without deleting newer state.
+- [ ] Duplicate port delete is idempotent.
+- [ ] WAL intent without commit recovery.
+- [ ] WAL commit without status recovery.
+- [ ] Partial runtime apply without commit recovery.
 - [ ] Local write gate.
 - [ ] Aria Mirror session/rule validators.
 - [ ] Aria Mirror source/target host validation.
@@ -1654,6 +1820,8 @@ matching Neutron Server source tree.
 - [ ] Full resync after agent restart.
 - [ ] Port migration source cleanup and destination apply.
 - [ ] VM reboot/tap recreate recovery.
+- [ ] Datapath restart after snapshot preserves or reconciles committed state.
+- [ ] Python agent restart reuses generation state and converges by full resync.
 - [ ] Second phase: `neutron ext-show aria-mirror`.
 - [ ] Second phase: `neutron aria-mirror-session-*` CRUD.
 - [ ] Second phase: `neutron aria-mirror-status-show`.
