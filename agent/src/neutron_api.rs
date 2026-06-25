@@ -460,6 +460,7 @@ impl NeutronRuntimeState {
             authority_state: self.authority_state.clone(),
             ports: self.ports.clone(),
             port_statuses: self.port_statuses.clone(),
+            status_hash: None,
         }
     }
 }
