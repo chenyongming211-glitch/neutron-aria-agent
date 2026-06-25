@@ -1,5 +1,6 @@
 use aria_api::{ManagedNeutronPort, NeutronPortStatus};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -44,6 +45,55 @@ pub(crate) struct NeutronWalState {
     pub(crate) ports: BTreeMap<String, ManagedNeutronPort>,
     #[serde(default)]
     pub(crate) port_statuses: BTreeMap<String, NeutronPortStatus>,
+    #[serde(default)]
+    pub(crate) status_hash: Option<String>,
+}
+
+#[derive(Serialize)]
+struct NeutronWalStatusHashPayload<'a> {
+    accepted_generation: u64,
+    applied_generation: u64,
+    pending_generation: Option<u64>,
+    desired_hash: &'a Option<String>,
+    applied_desired_hash: &'a Option<String>,
+    authority_state: &'a str,
+    ports: &'a BTreeMap<String, ManagedNeutronPort>,
+    port_statuses: &'a BTreeMap<String, NeutronPortStatus>,
+}
+
+impl NeutronWalState {
+    fn compute_status_hash(&self) -> Result<String, String> {
+        let payload = NeutronWalStatusHashPayload {
+            accepted_generation: self.accepted_generation,
+            applied_generation: self.applied_generation,
+            pending_generation: self.pending_generation,
+            desired_hash: &self.desired_hash,
+            applied_desired_hash: &self.applied_desired_hash,
+            authority_state: &self.authority_state,
+            ports: &self.ports,
+            port_statuses: &self.port_statuses,
+        };
+        let bytes = serde_json::to_vec(&payload)
+            .map_err(|e| format!("serialize Neutron WAL status hash payload: {}", e))?;
+        let digest = Sha256::digest(bytes);
+        Ok(digest
+            .iter()
+            .map(|byte| format!("{:02x}", byte))
+            .collect::<Vec<_>>()
+            .join(""))
+    }
+
+    fn with_status_hash(mut self) -> Result<Self, String> {
+        self.status_hash = Some(self.compute_status_hash()?);
+        Ok(self)
+    }
+
+    fn status_hash_valid(&self) -> Result<bool, String> {
+        let Some(expected) = self.status_hash.as_ref() else {
+            return Ok(true);
+        };
+        Ok(expected == &self.compute_status_hash()?)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -162,6 +212,19 @@ impl NeutronWal {
                 }
                 NeutronWalEntry::SnapshotCommit { state }
                 | NeutronWalEntry::DeleteCommit { state } => {
+                    match state.status_hash_valid() {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            replay.failures += 1;
+                            pending_intent = None;
+                            continue;
+                        }
+                        Err(_) => {
+                            replay.failures += 1;
+                            pending_intent = None;
+                            continue;
+                        }
+                    }
                     replay.state = state;
                     pending_intent = None;
                 }
@@ -201,7 +264,9 @@ impl NeutronWal {
     }
 
     pub(crate) fn append_snapshot_commit(&self, state: NeutronWalState) -> Result<(), String> {
-        self.append(&NeutronWalEntry::SnapshotCommit { state })
+        self.append(&NeutronWalEntry::SnapshotCommit {
+            state: state.with_status_hash()?,
+        })
     }
 
     pub(crate) fn append_delete_intent(
@@ -220,7 +285,9 @@ impl NeutronWal {
     }
 
     pub(crate) fn append_delete_commit(&self, state: NeutronWalState) -> Result<(), String> {
-        self.append(&NeutronWalEntry::DeleteCommit { state })
+        self.append(&NeutronWalEntry::DeleteCommit {
+            state: state.with_status_hash()?,
+        })
     }
 
     fn append(&self, entry: &NeutronWalEntry) -> Result<(), String> {
@@ -320,6 +387,7 @@ mod tests {
         assert_eq!("replayed", replay.status);
         assert_eq!(7, replay.state.applied_generation);
         assert_eq!(Some("hash-7".to_string()), replay.state.applied_desired_hash);
+        assert!(replay.state.status_hash.is_some());
         assert!(replay.state.ports.contains_key("p1"));
         let _ = fs::remove_dir_all(root);
     }
@@ -442,6 +510,49 @@ mod tests {
         let raw = fs::read_to_string(root.join(WAL_FILE)).unwrap();
 
         assert!(raw.contains(r#""affected_domains":["acl","mirror","qos"]"#));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commit_records_status_hash() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        wal.append_snapshot_commit(NeutronWalState {
+            accepted_generation: 30,
+            applied_generation: 30,
+            authority_state: "ready".to_string(),
+            ..NeutronWalState::default()
+        })
+        .unwrap();
+
+        let raw = fs::read_to_string(root.join(WAL_FILE)).unwrap();
+
+        assert!(raw.contains(r#""status_hash":"#));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_rejects_commit_with_mismatched_status_hash() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        wal.append_snapshot_commit(NeutronWalState {
+            accepted_generation: 31,
+            applied_generation: 31,
+            authority_state: "ready".to_string(),
+            ..NeutronWalState::default()
+        })
+        .unwrap();
+        let path = root.join(WAL_FILE);
+        let raw = fs::read_to_string(&path).unwrap();
+        let tampered = raw.replace(r#""applied_generation":31"#, r#""applied_generation":32"#);
+        assert_ne!(raw, tampered);
+        fs::write(&path, tampered).unwrap();
+
+        let replay = wal.replay();
+
+        assert_eq!("replayed_with_errors", replay.status);
+        assert_eq!(1, replay.failures);
+        assert_eq!(0, replay.state.applied_generation);
         let _ = fs::remove_dir_all(root);
     }
 }
