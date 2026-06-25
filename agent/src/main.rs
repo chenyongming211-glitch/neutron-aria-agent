@@ -60,6 +60,8 @@ struct Config {
     listen_addr: String,
     #[serde(default = "default_neutron_socket_path")]
     neutron_socket_path: String,
+    #[serde(default = "default_neutron_socket_mode")]
+    neutron_socket_mode: u32,
     #[serde(default = "default_ovs_bridge")]
     ovs_bridge: String,
     #[serde(default = "default_log_format")]
@@ -126,6 +128,10 @@ fn default_neutron_socket_path() -> String {
     "/run/aria/aria-agent.sock".to_string()
 }
 
+fn default_neutron_socket_mode() -> u32 {
+    0o660
+}
+
 fn default_ovs_bridge() -> String {
     "br-int".to_string()
 }
@@ -156,6 +162,7 @@ impl Default for Config {
             max_port_policies: default_max_port_policies(),
             listen_addr: default_listen_addr(),
             neutron_socket_path: default_neutron_socket_path(),
+            neutron_socket_mode: default_neutron_socket_mode(),
             ovs_bridge: default_ovs_bridge(),
             log_format: default_log_format(),
             log_filter: default_log_filter(),
@@ -317,7 +324,14 @@ fn load_config(path: &PathBuf) -> Config {
     Config::default()
 }
 
-async fn bind_neutron_socket(path: &str) -> Result<tokio::net::UnixListener, String> {
+async fn bind_neutron_socket(path: &str, mode: u32) -> Result<tokio::net::UnixListener, String> {
+    if mode & !0o777 != 0 {
+        return Err(format!(
+            "invalid neutron socket mode {:o}; expected permission bits <= 0777",
+            mode
+        ));
+    }
+
     let socket_path = Path::new(path);
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -345,7 +359,7 @@ async fn bind_neutron_socket(path: &str) -> Result<tokio::net::UnixListener, Str
 
     let listener = tokio::net::UnixListener::bind(socket_path)
         .map_err(|e| format!("failed to bind neutron socket {}: {}", path, e))?;
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(mode))
         .map_err(|e| format!("failed to chmod neutron socket {}: {}", path, e))?;
     Ok(listener)
 }
@@ -413,6 +427,7 @@ async fn main() {
         max_port_policies = config.max_port_policies,
         listen_addr = %config.listen_addr,
         neutron_socket_path = %config.neutron_socket_path,
+        neutron_socket_mode = format_args!("{:o}", config.neutron_socket_mode),
         ovs_bridge = %config.ovs_bridge,
         log_format = %config.log_format,
         log_filter = %config.log_filter,
@@ -502,7 +517,7 @@ async fn main() {
 
     let neutron_socket_path = config.neutron_socket_path.clone();
     let neutron_listener = if config.neutron_socket_enabled() {
-        match bind_neutron_socket(&neutron_socket_path).await {
+        match bind_neutron_socket(&neutron_socket_path, config.neutron_socket_mode).await {
             Ok(listener) => Some(listener),
             Err(e) => {
                 error!(error = %e, "failed to bind Neutron UDS API");
@@ -630,6 +645,20 @@ mod tests {
         assert!(!config.requested_auto_attach());
         assert!(!config.effective_auto_attach());
         assert!(config.neutron_socket_enabled());
+        assert_eq!(config.neutron_socket_mode, 0o660);
+    }
+
+    #[test]
+    fn startup_config_accepts_neutron_socket_mode() {
+        let config: Config = toml::from_str(
+            r#"
+mode = "neutron_managed"
+neutron_socket_mode = 438
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.neutron_socket_mode, 0o666);
     }
 
     #[test]
