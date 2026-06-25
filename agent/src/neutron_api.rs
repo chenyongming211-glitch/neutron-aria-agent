@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{error, warn};
 
 use crate::control_plane::ControlPlane;
-use crate::neutron_wal::{NeutronWal, NeutronWalState};
+use crate::neutron_wal::{NeutronWal, NeutronWalState, PendingNeutronIntent};
 use crate::tap_registry::TapRegistry;
 
 #[derive(Clone)]
@@ -30,6 +30,7 @@ pub(crate) struct NeutronApiState {
     runtime: Arc<RwLock<NeutronRuntimeState>>,
     apply_lock: Arc<Mutex<()>>,
     wal: Arc<NeutronWal>,
+    pending_recovery: Option<PendingNeutronIntent>,
 }
 
 #[derive(Clone, Default)]
@@ -90,10 +91,32 @@ struct DomainReconcileResult {
     reason: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IntentPortRecovery {
+    managed_domains: Vec<String>,
+    domains: Vec<NeutronDomainStatus>,
+    status: String,
+    reason: Option<String>,
+    ok: bool,
+}
+
+impl IntentPortRecovery {
+    fn blocked(port: &ManagedNeutronPort, domains: Vec<NeutronDomainStatus>, reason: String) -> Self {
+        Self {
+            managed_domains: normalize_managed_domains(&port.managed_domains),
+            domains,
+            status: "blocked".to_string(),
+            reason: Some(reason),
+            ok: false,
+        }
+    }
+}
+
 impl NeutronApiState {
     fn new(registry: Arc<TapRegistry>, control_plane: Arc<ControlPlane>, ovs_bridge: String) -> Self {
         let wal = Arc::new(NeutronWal::new(&registry.base_state_path));
         let replay = wal.replay();
+        let pending_recovery = replay.pending_intent.clone();
         let runtime = NeutronRuntimeState::from_wal_state(replay.state, replay.status, replay.failures);
         Self {
             registry,
@@ -102,6 +125,7 @@ impl NeutronApiState {
             runtime: Arc::new(RwLock::new(runtime)),
             apply_lock: Arc::new(Mutex::new(())),
             wal,
+            pending_recovery,
         }
     }
 
@@ -122,6 +146,203 @@ impl NeutronApiState {
                     generation,
                 )
                 .await;
+        }
+    }
+
+    async fn recover_incomplete_wal_intent(&self) {
+        let Some(intent) = self.pending_recovery.clone() else {
+            return;
+        };
+        let _guard = self.apply_lock.lock().await;
+        let current_ports = {
+            let runtime = self.runtime.read().await;
+            runtime.ports.clone()
+        };
+        let affected_ports = affected_ports_for_intent(&intent, &current_ports);
+        if affected_ports.is_empty() {
+            let mut next_runtime = {
+                let runtime = self.runtime.read().await;
+                runtime.clone()
+            };
+            next_runtime.pending_generation = Some(intent.generation);
+            next_runtime.desired_hash = intent.desired_hash;
+            next_runtime.authority_state = "blocked_recovery_required".to_string();
+            next_runtime.wal_status = "intent_recovery_blocked".to_string();
+            if let Err(e) = self.wal.append_snapshot_commit(next_runtime.to_wal_state()) {
+                warn!(error = %e, "failed to commit empty Neutron WAL recovery state");
+            } else {
+                let mut runtime = self.runtime.write().await;
+                *runtime = next_runtime;
+            }
+            return;
+        }
+
+        let mut next_runtime = {
+            let runtime = self.runtime.read().await;
+            runtime.clone()
+        };
+        let mut recovery_failed = false;
+
+        for port in affected_ports {
+            let committed_before_intent = current_ports.contains_key(&port.port_id);
+            let recovery = self
+                .recover_intent_port(&intent, &port, committed_before_intent)
+                .await;
+            if !recovery.ok {
+                recovery_failed = true;
+            }
+            if intent.kind == "delete" && recovery.ok {
+                next_runtime.ports.remove(&port.port_id);
+            }
+            next_runtime.port_statuses.insert(
+                port.port_id.clone(),
+                port_runtime_status(
+                    &port.port_id,
+                    &port.ifname,
+                    intent.generation,
+                    intent.desired_hash.clone(),
+                    recovery.managed_domains.clone(),
+                    recovery.status.as_str(),
+                    recovery.reason.clone(),
+                    recovery.domains,
+                ),
+            );
+        }
+
+        next_runtime.pending_generation = Some(intent.generation);
+        next_runtime.desired_hash = intent.desired_hash.clone();
+        next_runtime.authority_state = if recovery_failed {
+            "blocked_recovery_required".to_string()
+        } else {
+            "recovered_pending_full_resync".to_string()
+        };
+        next_runtime.wal_status = if recovery_failed {
+            "intent_recovery_blocked".to_string()
+        } else {
+            "intent_recovered".to_string()
+        };
+
+        if let Err(e) = self.wal.append_snapshot_commit(next_runtime.to_wal_state()) {
+            let mut runtime = self.runtime.write().await;
+            runtime.pending_generation = Some(intent.generation);
+            runtime.desired_hash = intent.desired_hash;
+            runtime.authority_state = "wal_recovery_commit_failed".to_string();
+            runtime.wal_status = "commit_failed".to_string();
+            warn!(error = %e, "failed to commit Neutron WAL recovery state");
+            return;
+        }
+
+        let mut runtime = self.runtime.write().await;
+        *runtime = next_runtime;
+    }
+
+    async fn recover_intent_port(
+        &self,
+        intent: &PendingNeutronIntent,
+        port: &ManagedNeutronPort,
+        committed_before_intent: bool,
+    ) -> IntentPortRecovery {
+        let domains = recovery_domains_for_port(intent, port);
+        let mut statuses = Vec::new();
+        let mut errors = Vec::new();
+        let mut attached_for_recovery = false;
+
+        if domains.iter().any(|domain| domain.as_str() != "attach") && port.ifname.is_empty() {
+            let reason = "missing_ifname_for_recovery".to_string();
+            for domain in domains {
+                statuses.push(domain_status(&domain, "blocked", Some(reason.clone())));
+            }
+            return IntentPortRecovery::blocked(port, statuses, reason);
+        }
+
+        if !port.ifname.is_empty()
+            && domains
+                .iter()
+                .any(|domain| matches!(domain.as_str(), "attach" | "acl"))
+        {
+            match self.registry.attach(&port.ifname).await {
+                Ok(()) => {
+                    attached_for_recovery = true;
+                    statuses.push(domain_status(
+                        "attach",
+                        "recovered",
+                        Some("attached_for_recovery".to_string()),
+                    ));
+                }
+                Err(e) => {
+                    let reason = format!("attach_recovery_failed:{}", e);
+                    statuses.push(domain_status("attach", "blocked", Some(reason.clone())));
+                    errors.push(reason);
+                }
+            }
+        }
+
+        for domain in domains.iter().filter(|domain| domain.as_str() != "attach") {
+            match domain.as_str() {
+                "acl" if errors.is_empty() => {
+                    match purge_neutron_acl(self, &port.ifname, &port.port_id).await {
+                        Ok(()) => statuses.push(domain_status(
+                            domain,
+                            "recovered",
+                            Some("acl_scrubbed_after_incomplete_wal_intent".to_string()),
+                        )),
+                        Err(e) => {
+                            let reason = format!("acl_recovery_failed:{}", e);
+                            statuses.push(domain_status(domain, "blocked", Some(reason.clone())));
+                            errors.push(reason);
+                        }
+                    }
+                }
+                "acl" => statuses.push(domain_status(
+                    domain,
+                    "blocked",
+                    Some("blocked_by_attach_recovery".to_string()),
+                )),
+                "qos" | "mirror" => statuses.push(domain_status(
+                    domain,
+                    "recovered",
+                    Some(format!("{}_no_runtime_executor", domain)),
+                )),
+                _ => statuses.push(domain_status(
+                    domain,
+                    "recovered",
+                    Some("no_neutron_recovery_action".to_string()),
+                )),
+            }
+        }
+
+        let should_detach = intent.kind == "delete" || !committed_before_intent;
+        if attached_for_recovery && should_detach {
+            match self.registry.detach(&port.ifname).await {
+                Ok(()) => {
+                    self.control_plane
+                        .clear_neutron_port_authority(&port.ifname)
+                        .await;
+                }
+                Err(e) => {
+                    let reason = format!("detach_recovery_failed:{}", e);
+                    statuses.push(domain_status("attach", "blocked", Some(reason.clone())));
+                    errors.push(reason);
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            IntentPortRecovery {
+                managed_domains: domains,
+                domains: statuses,
+                status: "recovered".to_string(),
+                reason: Some("wal_intent_recovered_pending_full_resync".to_string()),
+                ok: true,
+            }
+        } else {
+            IntentPortRecovery {
+                managed_domains: domains,
+                domains: statuses,
+                status: "blocked".to_string(),
+                reason: Some(errors.join(";")),
+                ok: false,
+            }
         }
     }
 }
@@ -164,6 +385,7 @@ pub(crate) fn build_router(
     let state = NeutronApiState::new(registry, control_plane, ovs_bridge);
     let restore_state = state.clone();
     tokio::spawn(async move {
+        restore_state.recover_incomplete_wal_intent().await;
         restore_state.restore_neutron_authorities().await;
     });
     Router::new()
@@ -305,23 +527,22 @@ async fn apply_neutron_snapshot(
         return Ok(response);
     }
 
+    let current_ports = state.runtime.read().await.ports.clone();
+    let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
+    let plan = build_snapshot_plan(&current_ports, &snapshot, &local_inventory);
+    let affected_ports = affected_ports_for_plan(&plan);
     let requested_port_ids = snapshot
         .ports
         .iter()
         .map(|port| port.port_id.clone())
         .collect();
-    let requested_domains: Vec<String> = snapshot
-        .ports
-        .iter()
-        .flat_map(|port| normalize_managed_domains(&port.managed_domains))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let requested_domains = affected_domains_for_ports(&affected_ports);
     if let Err(e) = state.wal.append_snapshot_intent(
         snapshot.generation,
         requested_hash.clone(),
         requested_port_ids,
         requested_domains,
+        affected_ports,
     ) {
         return Err(SnapshotApplyError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -338,10 +559,6 @@ async fn apply_neutron_snapshot(
         runtime.authority_state = "applying".to_string();
         runtime.wal_status = "intent_written".to_string();
     }
-
-    let current_ports = state.runtime.read().await.ports.clone();
-    let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
-    let plan = build_snapshot_plan(&current_ports, &snapshot, &local_inventory);
 
     let mut next_ports = current_ports;
     let mut next_statuses = BTreeMap::new();
@@ -838,7 +1055,12 @@ async fn apply_delete_neutron_port(
     let generation = state.runtime.read().await.accepted_generation;
     if let Err(e) = state
         .wal
-        .append_delete_intent(port_id.clone(), generation, port.managed_domains.clone())
+        .append_delete_intent(
+            port_id.clone(),
+            generation,
+            affected_domains_for_ports(std::slice::from_ref(&port)),
+            port.clone(),
+        )
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1222,6 +1444,75 @@ fn normalize_managed_domains(domains: &[String]) -> Vec<String> {
     ControlPlane::normalize_neutron_managed_domains(domains)
         .into_iter()
         .collect()
+}
+
+fn affected_domains_for_ports(ports: &[ManagedNeutronPort]) -> Vec<String> {
+    let mut domains = BTreeSet::new();
+    if !ports.is_empty() {
+        domains.insert("attach".to_string());
+    }
+    for port in ports {
+        domains.extend(normalize_managed_domains(&port.managed_domains));
+    }
+    domains.into_iter().collect()
+}
+
+fn affected_ports_for_plan(plan: &SnapshotPlan) -> Vec<ManagedNeutronPort> {
+    let mut ports = BTreeMap::new();
+    for port in &plan.detach {
+        ports.insert(port.port_id.clone(), port.clone());
+    }
+    for port in &plan.update {
+        let managed = managed_port_from_snapshot(port);
+        ports.insert(managed.port_id.clone(), managed);
+    }
+    for port in &plan.attach {
+        let managed = managed_port_from_snapshot(port);
+        ports.insert(managed.port_id.clone(), managed);
+    }
+    ports.into_values().collect()
+}
+
+fn affected_ports_for_intent(
+    intent: &PendingNeutronIntent,
+    current_ports: &BTreeMap<String, ManagedNeutronPort>,
+) -> Vec<ManagedNeutronPort> {
+    let mut ports = BTreeMap::new();
+    for port in &intent.affected_ports {
+        ports.insert(port.port_id.clone(), port.clone());
+    }
+    for port_id in &intent.port_ids {
+        if ports.contains_key(port_id) {
+            continue;
+        }
+        if let Some(port) = current_ports.get(port_id) {
+            ports.insert(port_id.clone(), port.clone());
+        } else {
+            ports.insert(
+                port_id.clone(),
+                ManagedNeutronPort {
+                    port_id: port_id.clone(),
+                    ifname: String::new(),
+                    ifindex: None,
+                    managed_domains: intent.affected_domains.clone(),
+                },
+            );
+        }
+    }
+    ports.into_values().collect()
+}
+
+fn recovery_domains_for_port(
+    intent: &PendingNeutronIntent,
+    port: &ManagedNeutronPort,
+) -> Vec<String> {
+    let mut domains = BTreeSet::new();
+    if !port.ifname.is_empty() {
+        domains.insert("attach".to_string());
+    }
+    domains.extend(normalize_managed_domains(&port.managed_domains));
+    domains.extend(normalize_managed_domains(&intent.affected_domains));
+    domains.into_iter().collect()
 }
 
 fn managed_port_from_snapshot(port: &NeutronPortSnapshot) -> ManagedNeutronPort {
@@ -1881,6 +2172,54 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn affected_domains_include_attach_and_feature_domains() {
+        let ports = vec![ManagedNeutronPort {
+            port_id: "vm-port".to_string(),
+            ifname: "tap-vm".to_string(),
+            ifindex: None,
+            managed_domains: vec!["acl".to_string(), "qos".to_string(), "mirror".to_string()],
+        }];
+
+        assert_eq!(
+            affected_domains_for_ports(&ports),
+            vec![
+                "acl".to_string(),
+                "attach".to_string(),
+                "mirror".to_string(),
+                "qos".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_intent_ports_fall_back_to_committed_runtime() {
+        let intent = PendingNeutronIntent {
+            kind: "snapshot".to_string(),
+            generation: 17,
+            desired_hash: Some("hash-17".to_string()),
+            port_ids: vec!["vm-port".to_string()],
+            affected_domains: vec!["acl".to_string()],
+            affected_ports: Vec::new(),
+        };
+        let mut current = BTreeMap::new();
+        current.insert(
+            "vm-port".to_string(),
+            ManagedNeutronPort {
+                port_id: "vm-port".to_string(),
+                ifname: "tap-vm".to_string(),
+                ifindex: Some(17),
+                managed_domains: vec!["acl".to_string()],
+            },
+        );
+
+        let ports = affected_ports_for_intent(&intent, &current);
+
+        assert_eq!(1, ports.len());
+        assert_eq!("tap-vm", ports[0].ifname);
+        assert_eq!(Some(17), ports[0].ifindex);
     }
 
     #[test]

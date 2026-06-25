@@ -13,6 +13,17 @@ pub(crate) struct NeutronWalReplay {
     pub(crate) status: String,
     pub(crate) replayed: u64,
     pub(crate) failures: u64,
+    pub(crate) pending_intent: Option<PendingNeutronIntent>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PendingNeutronIntent {
+    pub(crate) kind: String,
+    pub(crate) generation: u64,
+    pub(crate) desired_hash: Option<String>,
+    pub(crate) port_ids: Vec<String>,
+    pub(crate) affected_domains: Vec<String>,
+    pub(crate) affected_ports: Vec<ManagedNeutronPort>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -41,9 +52,12 @@ enum NeutronWalEntry {
     SnapshotIntent {
         generation: u64,
         desired_hash: Option<String>,
+        #[serde(default)]
         port_ids: Vec<String>,
         #[serde(default)]
         affected_domains: Vec<String>,
+        #[serde(default)]
+        affected_ports: Vec<ManagedNeutronPort>,
     },
     SnapshotCommit {
         state: NeutronWalState,
@@ -53,6 +67,8 @@ enum NeutronWalEntry {
         generation: u64,
         #[serde(default)]
         affected_domains: Vec<String>,
+        #[serde(default)]
+        port: Option<ManagedNeutronPort>,
     },
     DeleteCommit {
         state: NeutronWalState,
@@ -80,13 +96,14 @@ impl NeutronWal {
             status: "empty".to_string(),
             replayed: 0,
             failures: 0,
+            pending_intent: None,
         };
 
         let Ok(file) = File::open(&self.path) else {
             return replay;
         };
 
-        let mut pending_intent: Option<(u64, Option<String>)> = None;
+        let mut pending_intent: Option<PendingNeutronIntent> = None;
         for line in BufReader::new(file).lines() {
             let Ok(line) = line else {
                 replay.failures += 1;
@@ -108,12 +125,40 @@ impl NeutronWal {
                 NeutronWalEntry::SnapshotIntent {
                     generation,
                     desired_hash,
-                    ..
+                    mut port_ids,
+                    affected_domains,
+                    affected_ports,
                 } => {
-                    pending_intent = Some((generation, desired_hash));
+                    if port_ids.is_empty() {
+                        port_ids = affected_ports
+                            .iter()
+                            .map(|port| port.port_id.clone())
+                            .collect();
+                    }
+                    pending_intent = Some(PendingNeutronIntent {
+                        kind: "snapshot".to_string(),
+                        generation,
+                        desired_hash,
+                        port_ids,
+                        affected_domains,
+                        affected_ports,
+                    });
                 }
-                NeutronWalEntry::DeleteIntent { generation, .. } => {
-                    pending_intent = Some((generation, None));
+                NeutronWalEntry::DeleteIntent {
+                    port_id,
+                    generation,
+                    affected_domains,
+                    port,
+                } => {
+                    let affected_ports = port.into_iter().collect();
+                    pending_intent = Some(PendingNeutronIntent {
+                        kind: "delete".to_string(),
+                        generation,
+                        desired_hash: None,
+                        port_ids: vec![port_id],
+                        affected_domains,
+                        affected_ports,
+                    });
                 }
                 NeutronWalEntry::SnapshotCommit { state }
                 | NeutronWalEntry::DeleteCommit { state } => {
@@ -123,11 +168,12 @@ impl NeutronWal {
             }
         }
 
-        if let Some((generation, desired_hash)) = pending_intent {
-            replay.state.pending_generation = Some(generation);
-            replay.state.desired_hash = desired_hash;
+        if let Some(intent) = pending_intent {
+            replay.state.pending_generation = Some(intent.generation);
+            replay.state.desired_hash = intent.desired_hash.clone();
             replay.state.authority_state = "wal_intent_without_commit".to_string();
             replay.status = "intent_without_commit".to_string();
+            replay.pending_intent = Some(intent);
         } else if replay.failures > 0 {
             replay.status = "replayed_with_errors".to_string();
         } else if replay.replayed > 0 {
@@ -143,12 +189,14 @@ impl NeutronWal {
         desired_hash: Option<String>,
         port_ids: Vec<String>,
         affected_domains: Vec<String>,
+        affected_ports: Vec<ManagedNeutronPort>,
     ) -> Result<(), String> {
         self.append(&NeutronWalEntry::SnapshotIntent {
             generation,
             desired_hash,
             port_ids,
             affected_domains,
+            affected_ports,
         })
     }
 
@@ -161,11 +209,13 @@ impl NeutronWal {
         port_id: String,
         generation: u64,
         affected_domains: Vec<String>,
+        port: ManagedNeutronPort,
     ) -> Result<(), String> {
         self.append(&NeutronWalEntry::DeleteIntent {
             port_id,
             generation,
             affected_domains,
+            port: Some(port),
         })
     }
 
@@ -250,6 +300,7 @@ mod tests {
             Some("hash-7".to_string()),
             vec!["p1".to_string()],
             vec!["acl".to_string()],
+            vec![managed("p1", "tap-p1")],
         )
         .unwrap();
         let mut ports = BTreeMap::new();
@@ -282,6 +333,7 @@ mod tests {
             Some("hash-8".to_string()),
             vec!["p1".to_string()],
             vec!["acl".to_string(), "qos".to_string()],
+            vec![managed("p1", "tap-p1")],
         )
         .unwrap();
 
@@ -290,6 +342,15 @@ mod tests {
         assert_eq!("intent_without_commit", replay.status);
         assert_eq!(Some(8), replay.state.pending_generation);
         assert_eq!("wal_intent_without_commit", replay.state.authority_state);
+        let intent = replay.pending_intent.expect("pending intent should replay");
+        assert_eq!("snapshot", intent.kind);
+        assert_eq!(8, intent.generation);
+        assert_eq!(vec!["p1".to_string()], intent.port_ids);
+        assert_eq!(
+            vec!["acl".to_string(), "qos".to_string()],
+            intent.affected_domains
+        );
+        assert_eq!(vec![managed("p1", "tap-p1")], intent.affected_ports);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -302,6 +363,7 @@ mod tests {
             Some("hash-9".to_string()),
             vec!["p1".to_string()],
             vec!["acl".to_string(), "mirror".to_string(), "qos".to_string()],
+            vec![managed("p1", "tap-p1")],
         )
         .unwrap();
 

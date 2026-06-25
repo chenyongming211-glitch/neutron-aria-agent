@@ -1659,7 +1659,7 @@ pass:
 | --- | --- | --- | --- |
 | Neutron Server | Not started in this repository | Product design only | API/DB transaction, revision checks, RPC event emission, status DB update |
 | `neutron-aria-agent` | Partial | full resync, heartbeat, ACL source abstraction, UDS timeout convergence, degraded reporting, durable local generation/desired-hash state, same desired-state generation reuse, pending generation restart reuse, response error classification | event revision ordering, full desired-state journal with source revisions, bounded unresolved-generation policy, production restart smoke |
-| Rust `aria-agent` / `aria-datapath` | Partial | neutron-managed attach boundary, UDS routes, cancel-safe mutation task, ACL fixture apply, delete cleanup, `desired_hash` UDS field, accepted/applied/pending generation status, same-generation replay/no-op, same-generation hash conflict, stale generation classification, per-port/domain status surface, QoS/Mirror payload fields in the UDS snapshot contract, domain-aware apply classification, host-level Neutron WAL intent/commit/replay, affected domains in WAL intent records, fsync-backed WAL append, committed-state replay, WAL status reporting | real QoS apply backend, real Mirror apply backend, crash injection tests, pinned runtime reconciliation, startup scrub/reconcile for intent-without-commit, WAL compaction, durable status snapshot separate from WAL |
+| Rust `aria-agent` / `aria-datapath` | Partial | neutron-managed attach boundary, UDS routes, cancel-safe mutation task, ACL fixture apply, delete cleanup, `desired_hash` UDS field, accepted/applied/pending generation status, same-generation replay/no-op, same-generation hash conflict, stale generation classification, per-port/domain status surface, QoS/Mirror payload fields in the UDS snapshot contract, domain-aware apply classification, host-level Neutron WAL intent/commit/replay, affected ports/domains in WAL intent records, startup recovery classification and best-effort ACL scrub for intent-without-commit, fsync-backed WAL append, committed-state replay, WAL status reporting | real QoS apply backend, real Mirror apply backend, crash injection tests, pinned runtime reconciliation, deep scrub/reconcile for pinned/runtime mismatch, WAL compaction, durable status snapshot separate from WAL |
 
 So the answer is: the full transaction model is **not complete yet**. The
 current code proves the basic control path and several safety foundations, but
@@ -1904,12 +1904,13 @@ cancel-safe mutation tasks, ACL fixture apply, cleanup smoke, `desired_hash`
 contract field, accepted/applied/pending generation status, same-generation
 no-op, hash-conflict rejection, stale generation classification,
 per-port/per-domain status surface, host-level Neutron WAL intent/commit/replay,
-fsync-backed WAL append, affected domains in WAL intent records, QoS/Mirror
-snapshot payload fields, and domain-aware apply classification exist.
+fsync-backed WAL append, affected ports/domains in WAL intent records,
+intent-without-commit startup recovery classification, best-effort ACL scrub,
+QoS/Mirror snapshot payload fields, and domain-aware apply classification exist.
 QoS/Mirror are not yet runtime executors: a snapshot that requests those domains
 is classified as blocked/error rather than falsely ready. Crash injection tests,
 pinned runtime reconciliation, WAL compaction, and startup scrub/reconcile for
-incomplete intent records are not complete.
+deep pinned/runtime mismatch cases are not complete.
 
 **Files to create or modify:**
 
@@ -2021,7 +2022,7 @@ incomplete intent records are not complete.
   - generation.
   - desired hash.
   - affected ports.
-- [x] Extend WAL intent with affected domains.
+- [x] Extend WAL intent with affected ports and domains.
   - planned diff hash.
   - authority.
   - source revisions when available.
@@ -2031,8 +2032,9 @@ incomplete intent records are not complete.
   - per-port status summary.
 - [ ] Extend WAL commit with final status hash.
 - [x] On startup, replay WAL before opening UDS write paths.
-- [ ] Intent without commit triggers scrub/reconcile and degraded status.
-  **First pass exposes `wal_intent_without_commit` status without scrub.**
+- [x] Intent without commit triggers startup recovery classification,
+  best-effort attach/ACL scrub/detach where enough port information exists, and
+  durable recovered/blocked status without advancing applied generation.
 - [x] Commit without status rebuilds status from committed state.
 - [ ] Pinned link/map mismatch triggers degraded/blocked until reconcile.
 - [ ] WAL compact keeps a durable snapshot plus enough audit trail for recovery.
@@ -2098,10 +2100,11 @@ executor and cleanup path exist.
 - [ ] Same generation snapshot replay is idempotent.
 - [ ] Older generation snapshot is reject/no-op without deleting newer state.
 - [ ] Duplicate port delete is idempotent.
-- [ ] WAL intent without commit recovery.
+- [x] WAL intent without commit recovery classification.
 - [x] WAL intent without commit is replayed as `wal_intent_without_commit`.
 - [x] WAL commit without separate status file rebuilds status from committed WAL state.
-- [ ] WAL intent without commit scrub/reconcile.
+- [x] WAL intent without commit best-effort ACL scrub when affected port details exist.
+- [ ] WAL intent without commit deep pinned/runtime scrub.
 - [ ] Partial runtime apply without commit recovery.
 - [ ] Local write gate.
 - [ ] Aria Mirror session/rule validators.
