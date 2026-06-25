@@ -583,7 +583,7 @@ async fn apply_neutron_snapshot(
                 )],
                 Vec::new(),
             ))
-        } else if snapshot.generation > 0 && snapshot.generation == runtime.applied_generation {
+        } else if snapshot_generation_fully_applied(&runtime, snapshot.generation) {
             if hashes_match(&requested_hash, &runtime.applied_desired_hash) {
                 Some(neutron_snapshot_response(
                     snapshot.generation,
@@ -937,6 +937,13 @@ fn hashes_match(left: &Option<String>, right: &Option<String>) -> bool {
         (None, None) => true,
         _ => false,
     }
+}
+
+fn snapshot_generation_fully_applied(runtime: &NeutronRuntimeState, generation: u64) -> bool {
+    generation > 0
+        && generation == runtime.applied_generation
+        && runtime.pending_generation.is_none()
+        && runtime.authority_state == "ready"
 }
 
 fn transaction_result(
@@ -2312,6 +2319,35 @@ mod tests {
             vec!["acl", "attach", "qos"]
         );
         assert!(statuses.iter().all(|status| status.status == "blocked"));
+    }
+
+    #[test]
+    fn snapshot_generation_noop_requires_ready_without_pending() {
+        let ready = NeutronRuntimeState {
+            applied_generation: 42,
+            pending_generation: None,
+            authority_state: "ready".to_string(),
+            ..Default::default()
+        };
+        assert!(snapshot_generation_fully_applied(&ready, 42));
+
+        let partial = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            pending_generation: Some(42),
+            authority_state: "partial".to_string(),
+            ..Default::default()
+        };
+        assert!(!snapshot_generation_fully_applied(&partial, 42));
+
+        let blocked = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            pending_generation: None,
+            authority_state: "blocked_recovery_required".to_string(),
+            ..Default::default()
+        };
+        assert!(!snapshot_generation_fully_applied(&blocked, 42));
     }
 
     #[test]
