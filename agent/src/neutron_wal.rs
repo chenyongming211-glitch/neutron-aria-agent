@@ -355,6 +355,78 @@ mod tests {
     }
 
     #[test]
+    fn replay_delete_intent_without_commit_preserves_committed_state() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let mut ports = BTreeMap::new();
+        ports.insert("p1".to_string(), managed("p1", "tap-p1"));
+        wal.append_snapshot_commit(NeutronWalState {
+            accepted_generation: 11,
+            applied_generation: 11,
+            applied_desired_hash: Some("hash-11".to_string()),
+            authority_state: "ready".to_string(),
+            ports,
+            ..NeutronWalState::default()
+        })
+        .unwrap();
+        wal.append_delete_intent(
+            "p1".to_string(),
+            12,
+            vec!["attach".to_string(), "acl".to_string()],
+            managed("p1", "tap-p1"),
+        )
+        .unwrap();
+
+        let replay = wal.replay();
+
+        assert_eq!("intent_without_commit", replay.status);
+        assert_eq!(11, replay.state.applied_generation);
+        assert_eq!(Some(12), replay.state.pending_generation);
+        assert!(replay.state.ports.contains_key("p1"));
+        let intent = replay.pending_intent.expect("delete intent should replay");
+        assert_eq!("delete", intent.kind);
+        assert_eq!(12, intent.generation);
+        assert_eq!(vec!["p1".to_string()], intent.port_ids);
+        assert_eq!(vec![managed("p1", "tap-p1")], intent.affected_ports);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_snapshot_intent_without_commit_preserves_previous_commit() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        wal.append_snapshot_commit(NeutronWalState {
+            accepted_generation: 20,
+            applied_generation: 20,
+            applied_desired_hash: Some("hash-20".to_string()),
+            authority_state: "ready".to_string(),
+            ..NeutronWalState::default()
+        })
+        .unwrap();
+        wal.append_snapshot_intent(
+            21,
+            Some("hash-21".to_string()),
+            vec!["p2".to_string()],
+            vec!["attach".to_string(), "acl".to_string()],
+            vec![managed("p2", "tap-p2")],
+        )
+        .unwrap();
+
+        let replay = wal.replay();
+
+        assert_eq!("intent_without_commit", replay.status);
+        assert_eq!(20, replay.state.applied_generation);
+        assert_eq!(Some(21), replay.state.pending_generation);
+        assert_eq!(Some("hash-21".to_string()), replay.state.desired_hash);
+        assert!(replay.state.ports.is_empty());
+        let intent = replay.pending_intent.expect("snapshot intent should replay");
+        assert_eq!("snapshot", intent.kind);
+        assert_eq!(vec!["attach".to_string(), "acl".to_string()], intent.affected_domains);
+        assert_eq!(vec![managed("p2", "tap-p2")], intent.affected_ports);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn snapshot_intent_records_affected_domains() {
         let root = temp_state_path();
         let wal = NeutronWal::new(&root);
