@@ -21,6 +21,7 @@ EXPECTED_IFNAME="${EXPECTED_IFNAME:-}"
 ACL_FIXTURE_JSON="${ACL_FIXTURE_JSON:-}"
 ACL_FIXTURE_FILE="${ACL_FIXTURE_FILE:-}"
 CONTAINER_ACL_FIXTURE="${CONTAINER_ACL_FIXTURE:-/tmp/neutron-aria-acl-fixture.json}"
+REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE:-}"
 
 die() {
     echo "ERROR: $*" >&2
@@ -122,6 +123,21 @@ prepare_full_resync_config() {
         sed -i 's/^rpc_events_enabled =.*/rpc_events_enabled = false/' '${SMOKE_CONFIG}' &&
         chmod 0644 '${SMOKE_CONFIG}'
     "
+    if [ -n "${REQUEST_TIMEOUT_OVERRIDE}" ]; then
+        case "${REQUEST_TIMEOUT_OVERRIDE}" in
+            *[!0-9.]*)
+                die "REQUEST_TIMEOUT_OVERRIDE must be a numeric seconds value"
+                ;;
+        esac
+        docker exec -u root "${SERVICE_NAME}" sh -c "
+            if grep -q '^request_timeout =' '${SMOKE_CONFIG}'; then
+                sed -i 's/^request_timeout =.*/request_timeout = ${REQUEST_TIMEOUT_OVERRIDE}/' '${SMOKE_CONFIG}'
+            else
+                printf '\n[aria]\nrequest_timeout = ${REQUEST_TIMEOUT_OVERRIDE}\n' >> '${SMOKE_CONFIG}'
+            fi
+            chmod 0644 '${SMOKE_CONFIG}'
+        "
+    fi
     if [ -n "${ACL_FIXTURE_JSON}" ] || [ -n "${ACL_FIXTURE_FILE}" ]; then
         if [ -n "${ACL_FIXTURE_FILE}" ]; then
             [ -r "${ACL_FIXTURE_FILE}" ] || die "ACL_FIXTURE_FILE is not readable: ${ACL_FIXTURE_FILE}"

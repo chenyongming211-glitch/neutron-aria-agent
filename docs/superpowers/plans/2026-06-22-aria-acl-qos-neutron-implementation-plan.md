@@ -1591,6 +1591,33 @@ allow_cross_host_target = false
 
 ---
 
+## 9.8 Pre-Neutron-Server Work Boundary
+
+**Implementation checkpoint, 2026-06-25:**
+
+The work that does not require the product Neutron Server source continues in
+the `neutron-aria-agent` and smoke layers:
+
+- `neutron-aria-agent` now uses an ACL source abstraction instead of reading the
+  fixture JSON directly in `main.py`.
+- `AclSource` currently supports:
+  - `disabled`: no ACL enhancement input.
+  - `fixture`: lab and smoke JSON payloads.
+  - `neutron`: explicit placeholder that fails fast until the `aria-acl`
+    Neutron API/DB extension exists.
+- Existing fixture smoke remains compatible: if `[acl] fixture_path` is set and
+  `[acl] source` is omitted, the agent selects `fixture` automatically.
+- `neutron_aria_full_resync_smoke.sh` accepts `REQUEST_TIMEOUT_OVERRIDE` so UDS
+  timeout convergence can be regression-tested without editing the running
+  container by hand.
+
+This checkpoint deliberately does not implement the real product northbound
+objects. `aria-acl` policy/rule/address-set/binding CRUD, DB migrations,
+extension alias, service plugin, and legacy CLI commands still require the
+matching Neutron Server source tree.
+
+---
+
 ## 10. Chapter Nine: Test Matrix And Acceptance
 
 ### 10.1 Unit Tests
@@ -1606,6 +1633,7 @@ allow_cross_host_target = false
 - [x] Python UDS client base contract.
 - [x] Python full-resync skeleton.
 - [x] Python local API degraded status model.
+- [x] Python ACL source abstraction.
 - [x] Effective ACL computation.
 - [x] Effective QoS computation.
 - [x] Base Rust UDS schema serde.
@@ -1640,6 +1668,8 @@ allow_cross_host_target = false
 - [ ] Not-applicable DHCP/router/metadata behavior.
 - [ ] QoS bandwidth limit behavior.
 - [ ] Rollback behavior.
+- [x] One-host ACL allow/deny smoke through fixture source.
+- [x] UDS mutation timeout recovery smoke with low request timeout.
 - [ ] Second phase: same-host VM tap mirror behavior.
 - [ ] Second phase: physical capture NIC to local analyzer VM in a lab.
 

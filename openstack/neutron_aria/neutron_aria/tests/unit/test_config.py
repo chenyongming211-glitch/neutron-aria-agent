@@ -59,12 +59,28 @@ fixture_path = /tmp/aria-acl-fixture.json
             self.assertEqual(0.3, config.event_merge_interval)
             self.assertEqual(42, config.event_queue_max_ports)
             self.assertEqual(7, config.event_queue_max_networks)
+            self.assertEqual("fixture", config.acl_source)
             self.assertEqual("/tmp/aria-acl-fixture.json", config.acl_fixture_path)
             self.assertEqual("br-int", config.ovs_bridge)
             self.assertEqual("/run/aria/aria-agent.sock", config.socket_path)
             self.assertEqual(2.5, config.request_timeout)
             self.assertEqual(4, config.timeout_convergence_attempts)
             self.assertEqual(0.4, config.timeout_convergence_interval)
+        finally:
+            if fd is not None:
+                os.close(fd)
+            os.unlink(path)
+
+    def test_defaults_acl_source_to_disabled_without_fixture(self):
+        fd, path = tempfile.mkstemp()
+        try:
+            os.close(fd)
+            fd = None
+
+            config = load_config(path)
+
+            self.assertEqual("disabled", config.acl_source)
+            self.assertEqual("", config.acl_fixture_path)
         finally:
             if fd is not None:
                 os.close(fd)

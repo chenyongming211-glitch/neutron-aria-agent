@@ -49,6 +49,15 @@ def _rule_priority(rule):
 
 
 class EffectiveAclIndex(object):
+    @classmethod
+    def from_payload(cls, payload):
+        return cls(
+            policies=payload.get("policies") or [],
+            rules=payload.get("rules") or [],
+            address_sets=payload.get("address_sets") or [],
+            bindings=payload.get("bindings") or [],
+        )
+
     def __init__(
         self,
         policies=None,
