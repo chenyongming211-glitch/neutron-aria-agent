@@ -1652,6 +1652,19 @@ Current implemented and validated state:
   - `neutron` placeholder that intentionally fails until the Neutron Server
     `aria-acl` API/DB extension exists.
 
+Transaction completion status at this pause point:
+
+| Component | Transaction status | Already done | Not done yet |
+| --- | --- | --- | --- |
+| Neutron Server | Not started in this repository | Product design only | API/DB transaction, revision checks, RPC event emission, status DB update |
+| `neutron-aria-agent` | Partial | full resync, heartbeat, ACL source abstraction, UDS timeout convergence, degraded reporting | persistent generation state, retry same generation, event revision ordering, durable local desired-state journal, restart recovery |
+| Rust `aria-agent` / `aria-datapath` | Partial | neutron-managed attach boundary, UDS routes, cancel-safe mutation task, ACL fixture apply, delete cleanup, basic status | WAL intent/commit, generation compare, same-generation replay, older-generation reject/no-op, per-port/domain status, crash recovery, pinned runtime reconciliation |
+
+So the answer is: the full transaction model is **not complete yet**. The
+current code proves the basic control path and several safety foundations, but
+it must not be described as fully atomic or fully durable until the remaining
+items in this section are implemented and tested.
+
 Development is paused at this checkpoint before adding more northbound feature
 surface. The next implementation pass must prioritize transaction semantics,
 atomicity, idempotency, and crash recovery before adding more ACL/QoS/Mirror
@@ -1775,6 +1788,234 @@ The next development order is changed to transaction-first:
    work when the matching source tree is available.
 7. QoS and Mirror remain behind their phase gates until the same transaction
    rules are proven for ACL.
+
+### 9.9.6 `neutron-aria-agent` Transaction Development Plan
+
+`neutron-aria-agent` does not write datapath maps directly, but it still needs a
+transaction model because it converts Neutron's control-plane state into a
+host-local desired snapshot. Its correctness target is: one input view produces
+one deterministic local generation, and retries/restarts do not invent a
+different desired state while the previous state is unresolved.
+
+**Current status:** partial. Timeout convergence exists, but generation
+persistence and event/retry transaction state are not complete.
+
+**Files to create or modify:**
+
+- Create: `openstack/neutron_aria/neutron_aria/agent/state.py`
+- Create: `openstack/neutron_aria/neutron_aria/agent/generation.py`
+- Modify: `openstack/neutron_aria/neutron_aria/agent/event_loop.py`
+- Modify: `openstack/neutron_aria/neutron_aria/agent/service.py`
+- Modify: `openstack/neutron_aria/neutron_aria/agent/event_merge.py`
+- Modify: `openstack/neutron_aria/neutron_aria/agent/config.py`
+- Modify: `deploy/kolla/config/neutron-aria-agent.ini`
+- Test: `openstack/neutron_aria/neutron_aria/tests/unit/test_state.py`
+- Test: `openstack/neutron_aria/neutron_aria/tests/unit/test_generation.py`
+- Test: `openstack/neutron_aria/neutron_aria/tests/unit/test_event_loop.py`
+
+**Required implementation tasks:**
+
+- [ ] Add local state directory, default
+  `/var/lib/neutron-aria-agent/state`.
+- [ ] Persist a host-local generation counter.
+- [ ] Persist `last_submitted_generation`, desired-state hash, and submit
+  timestamp before sending UDS snapshot.
+- [ ] Use a deterministic desired-state hash covering:
+  - host.
+  - port ids.
+  - managed domains.
+  - ACL/QoS/Mirror effective payloads when enabled.
+  - source revision numbers where available.
+- [ ] If the same desired-state hash is retried, reuse the same generation.
+- [ ] Generate a new generation only when the desired-state hash changes or the
+  previous generation is classified as failed and a full resync recomputes the
+  state.
+- [ ] Persist `last_converged_generation` only after UDS status proves
+  convergence.
+- [ ] On process restart, load pending state and check UDS status before
+  submitting a new generation.
+- [ ] If status already converged, mark ready without resubmitting.
+- [ ] If status did not converge, resubmit the same generation before creating a
+  new one.
+- [ ] Treat RPC events as dirty hints; never apply an event payload directly as
+  authoritative state.
+- [ ] Merge duplicated events by port/network id.
+- [ ] Drop stale RPC events when object `revision_number` is older than the
+  latest seen revision.
+- [ ] Escalate to full resync when event ordering cannot be proven.
+- [ ] Keep delete handling idempotent:
+  - if the port is known local, call UDS delete.
+  - if delete times out, status-check that port disappeared.
+  - if the port is already absent, treat as success.
+- [ ] Report transaction fields through heartbeat configurations:
+  - `last_submitted_generation`.
+  - `last_converged_generation`.
+  - `pending_generation`.
+  - `desired_hash`.
+  - `last_convergence_error`.
+- [ ] Add bounded backoff for repeated unresolved generations.
+- [ ] Add startup smoke proving restart does not create duplicate generations.
+
+**Required tests:**
+
+- [ ] Same desired state after timeout resubmits the same generation.
+- [ ] Different desired state increments generation.
+- [ ] Restart with pending generation checks status before submit.
+- [ ] Restart with converged generation reports ready.
+- [ ] Duplicate RPC events produce one full resync.
+- [ ] Older revision event does not overwrite newer dirty state.
+- [ ] Lost event triggers full resync.
+- [ ] Delete timeout converged by status is success.
+- [ ] Delete timeout not converged is degraded and retried.
+
+**Visible result after completion:**
+
+```text
+neutron-aria-agent logs show one stable generation for one desired state.
+Restarting neutron-aria-agent does not create duplicate datapath writes.
+Heartbeat exposes submitted/converged/pending generation fields.
+```
+
+### 9.9.7 Rust `aria-agent` / `aria-datapath` Transaction Development Plan
+
+The privileged Rust side is the most important transaction boundary. It owns
+local runtime, eBPF maps, pinned links/maps, WAL, and per-port/domain status.
+Its correctness target is: a snapshot is either classified and recoverable, or
+kept out of accepted generation. It must never report ready for a state that
+cannot be reconstructed after restart.
+
+**Current status:** partial. UDS routes, neutron-managed attach boundary,
+cancel-safe mutation tasks, ACL fixture apply, and cleanup smoke exist. Durable
+WAL transaction and full idempotent replay are not complete.
+
+**Files to create or modify:**
+
+- Modify: `api/src/lib.rs`
+- Modify: `agent/src/neutron_api.rs`
+- Modify: `agent/src/control_plane.rs`
+- Modify: `agent/src/tap_registry.rs`
+- Modify: `agent/src/system_manager.rs`
+- Modify: `agent/src/main.rs`
+- Create or extend: `core/src/neutron_state.rs`
+- Create or extend: `core/src/neutron_wal.rs`
+- Create or extend: `core/src/neutron_reconcile.rs`
+- Create or extend: `core/src/neutron_status.rs`
+- Test: `agent` neutron snapshot/delete/status tests.
+- Test: `core` WAL replay and recovery tests.
+
+**Required UDS contract changes:**
+
+- [ ] Extend snapshot request with stable identifiers:
+  - `schema_version`.
+  - `local_generation`.
+  - `desired_hash`.
+  - optional `source_revision`.
+  - `integration_mode`.
+- [ ] Extend status response with:
+  - `accepted_generation`.
+  - `applied_generation`.
+  - `last_classified_generation`.
+  - `last_feature_ready_generation_by_domain`.
+  - `pending_generation`.
+  - `wal_status`.
+  - `authority_state`.
+  - per-port status list.
+  - per-domain status list.
+- [ ] Add stable error codes for:
+  - old generation.
+  - duplicate generation hash mismatch.
+  - WAL append failure.
+  - WAL commit failure.
+  - preflight failed.
+  - partial apply.
+  - pinned runtime mismatch.
+  - unsupported domain.
+- [ ] Add response body size and contract version metadata to capabilities.
+
+**Required apply engine tasks:**
+
+- [ ] Compare incoming generation with current accepted/applied generation.
+- [ ] Same generation and same desired hash: return current status without
+  rewriting runtime.
+- [ ] Same generation but different desired hash: reject as conflict.
+- [ ] Older generation: reject or no-op without deleting newer state.
+- [ ] Newer generation: proceed through atomic apply sequence.
+- [ ] Acquire a single writer lock across snapshot and delete.
+- [ ] Preflight every affected port before mutating runtime.
+- [ ] Build deterministic diff:
+  - ports to attach.
+  - ports to update.
+  - ports to detach.
+  - ACL groups/policies to add/update/delete.
+  - QoS entries when phase is enabled.
+  - mirror entries only in second phase.
+- [ ] Write WAL intent before runtime mutation.
+- [ ] Apply runtime diff with cleanup hooks.
+- [ ] Track per-port/per-domain result for every requested port, including
+  ignored/unsupported/not-applicable ports.
+- [ ] Write WAL commit with final status hash.
+- [ ] Advance accepted/classified generation only after commit.
+- [ ] Update in-memory status from committed state.
+
+**Required delete semantics:**
+
+- [ ] Delete of unknown port returns success `not_found` and does not change
+  generation.
+- [ ] Delete of known port writes WAL intent before detach.
+- [ ] Detach runtime and remove managed authority for that port.
+- [ ] Clean ACL/QoS/Mirror scoped runtime entries owned by that port/domain.
+- [ ] Write WAL commit after cleanup is classified.
+- [ ] Repeating the same delete is a success no-op.
+- [ ] Delete must not remove local/admin state outside Neutron authority.
+
+**Required WAL and recovery tasks:**
+
+- [ ] Store WAL under product state path, not `/tmp`.
+- [ ] Use separate WAL namespace/file for Neutron-managed state and local
+  override state.
+- [ ] WAL intent records:
+  - generation.
+  - desired hash.
+  - affected ports.
+  - affected domains.
+  - planned diff hash.
+  - authority.
+  - source revisions when available.
+- [ ] WAL commit records:
+  - accepted/applied/classified generation.
+  - final status hash.
+  - per-domain status summary.
+  - per-port status summary.
+- [ ] On startup, replay WAL before opening UDS write paths.
+- [ ] Intent without commit triggers scrub/reconcile and degraded status.
+- [ ] Commit without status rebuilds status from committed state.
+- [ ] Pinned link/map mismatch triggers degraded/blocked until reconcile.
+- [ ] WAL compact keeps a durable snapshot plus enough audit trail for recovery.
+
+**Required tests:**
+
+- [ ] Same generation replay does not duplicate groups/policies/maps.
+- [ ] Same generation with different hash is rejected.
+- [ ] Older generation does not delete newer state.
+- [ ] Duplicate delete returns success.
+- [ ] Snapshot crash after intent but before apply recovers as degraded/blocked.
+- [ ] Snapshot crash after partial apply but before commit recovers by scrub or
+  full resync.
+- [ ] Commit without status rebuilds status.
+- [ ] Pinned runtime mismatch is visible in status.
+- [ ] WAL append failure does not advance accepted generation.
+- [ ] WAL commit failure does not report ready.
+- [ ] Restart after successful snapshot preserves committed managed ports.
+
+**Visible result after completion:**
+
+```text
+GET /api/v1/neutron/status shows accepted/applied/classified generation,
+per-port status, per-domain status, WAL status, and authority state.
+Replaying the same snapshot is safe.
+Restarting aria-datapath keeps or reconciles committed state.
+No half-applied ACL/QoS state is reported as ready.
+```
 
 ---
 
