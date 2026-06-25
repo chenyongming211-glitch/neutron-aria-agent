@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::control_plane::ControlPlane;
 use crate::tap_registry::TapRegistry;
@@ -118,6 +118,28 @@ async fn put_neutron_snapshot(
     State(state): State<NeutronApiState>,
     Json(snapshot): Json<NeutronSnapshotRequest>,
 ) -> impl IntoResponse {
+    // Keep mutating snapshot apply alive even if the UDS client times out or disconnects.
+    let handle = tokio::spawn(apply_neutron_snapshot(state, snapshot));
+    match handle.await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => {
+            error!(error = %e, "Neutron snapshot apply task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "snapshot_apply_task_failed",
+                    "details": e.to_string(),
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn apply_neutron_snapshot(
+    state: NeutronApiState,
+    snapshot: NeutronSnapshotRequest,
+) -> NeutronSnapshotResponse {
     let _guard = state.apply_lock.lock().await;
     let current_ports = state.runtime.read().await.ports.clone();
     let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
@@ -261,17 +283,43 @@ async fn put_neutron_snapshot(
         runtime.ports = next_ports;
     }
 
-    Json(NeutronSnapshotResponse {
+    NeutronSnapshotResponse {
         generation: snapshot.generation,
         results,
         active_instances: state.registry.list().await,
-    })
+    }
 }
 
 async fn delete_neutron_port(
     State(state): State<NeutronApiState>,
     Path(port_id): Path<String>,
 ) -> impl IntoResponse {
+    let error_port_id = port_id.clone();
+    // Keep mutating delete alive even if the UDS client times out or disconnects.
+    let handle = tokio::spawn(apply_delete_neutron_port(state, port_id));
+    match handle.await {
+        Ok((status, response)) => (status, Json(response)).into_response(),
+        Err(e) => {
+            error!(error = %e, "Neutron port delete task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(NeutronDeleteResponse {
+                    port_id: error_port_id,
+                    ifname: None,
+                    detached: false,
+                    status: "error".to_string(),
+                    error: Some(format!("delete_task_failed:{}", e)),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn apply_delete_neutron_port(
+    state: NeutronApiState,
+    port_id: String,
+) -> (StatusCode, NeutronDeleteResponse) {
     let _guard = state.apply_lock.lock().await;
     let port = {
         let runtime = state.runtime.read().await;
@@ -281,13 +329,13 @@ async fn delete_neutron_port(
     let Some(port) = port else {
         return (
             StatusCode::OK,
-            Json(NeutronDeleteResponse {
+            NeutronDeleteResponse {
                 port_id,
                 ifname: None,
                 detached: false,
                 status: "not_found".to_string(),
                 error: None,
-            }),
+            },
         );
     };
 
@@ -312,24 +360,24 @@ async fn delete_neutron_port(
                 .await;
             (
                 StatusCode::OK,
-                Json(NeutronDeleteResponse {
+                NeutronDeleteResponse {
                     port_id: port.port_id,
                     ifname: Some(port.ifname),
                     detached: true,
                     status: "ok".to_string(),
                     error: None,
-                }),
+                },
             )
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(NeutronDeleteResponse {
+            NeutronDeleteResponse {
                 port_id: port.port_id,
                 ifname: Some(port.ifname),
                 detached: false,
                 status: "error".to_string(),
                 error: Some(e),
-            }),
+            },
         ),
     }
 }
