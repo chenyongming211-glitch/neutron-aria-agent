@@ -2108,7 +2108,7 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
 - [ ] Snapshot crash after intent but before apply recovers as degraded/blocked.
 - [ ] Snapshot crash after partial apply but before commit recovers by scrub or
   full resync.
-- [ ] ACL fault-injection smoke proves `after_purge`,
+- [x] ACL fault-injection smoke proves `after_purge`,
   `after_group_write`, `after_policy_write`, and `before_enable` leave the port
   in bypass rather than enforcing partial ACL state.
 - [x] Python agent restart recovers a converged pending snapshot before
@@ -2161,11 +2161,17 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
   the marker, converged to `authority_state=ready`,
   `wal_status=commit_written`, applied the ACL, verified ping block, and
   rollback returned the node to no managed ports.
+- Added and ran `neutron_aria_acl_fault_injection_smoke.sh` on `ostack2`.
+  The automated smoke loop covered `neutron.acl.after_purge`,
+  `neutron.acl.after_group_write`, `neutron.acl.after_policy_write`, and
+  `neutron.acl.before_enable`. For each point, the first run failed with the
+  expected UDS transport error and left `wal_status=intent_without_commit`,
+  `authority_state=wal_intent_without_commit`, no managed ports, and reachable
+  VM traffic; the second run recovered, verified ACL block, and rollback
+  returned `managed_ports=[]`.
 
 Remaining crash gates:
 
-- Repeat the same one-shot process-level test for `neutron.acl.after_purge`,
-  `neutron.acl.after_group_write`, and `neutron.acl.before_enable`.
 - Add delete detach cut-point smoke with a real managed port.
 - Add VM migration and tap recreate smoke after a controlled migration test VM
   is available.
