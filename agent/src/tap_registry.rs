@@ -1,11 +1,19 @@
 use crate::control_plane::{ControlPlane, MANAGED_SHARED_PIN_NAMESPACE};
 use crate::instance::FirewallInstance;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeReconcileResult {
+    pub ifname: String,
+    pub action: String,
+    pub status: String,
+    pub reason: Option<String>,
+}
 
 pub struct TapRegistry {
     instances: RwLock<HashMap<String, FirewallInstance>>,
@@ -76,6 +84,123 @@ impl TapRegistry {
                 info!(path = %shared_pin_path.display(), "removed shared managed pin directory");
             }
         }
+    }
+
+    fn managed_link_pin_ifaces(&self) -> Result<BTreeSet<String>, String> {
+        let shared_pin_path = self.base_pin_path.join(MANAGED_SHARED_PIN_NAMESPACE);
+        let mut ifaces = BTreeSet::new();
+        if !shared_pin_path.exists() {
+            return Ok(ifaces);
+        }
+        let entries = std::fs::read_dir(&shared_pin_path)
+            .map_err(|e| format!("read managed pin dir {}: {}", shared_pin_path.display(), e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("read managed pin entry: {}", e))?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            for suffix in ["_xdp_link", "_tc_egress_link", "_tc_ingress_link"] {
+                if let Some(ifname) = name.strip_suffix(suffix) {
+                    if !ifname.is_empty() {
+                        ifaces.insert(ifname.to_string());
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(ifaces)
+    }
+
+    fn remove_orphaned_managed_link_pins(&self, ifname: &str) -> Result<(), String> {
+        let shared_pin_path = self.base_pin_path.join(MANAGED_SHARED_PIN_NAMESPACE);
+        let mut errors = Vec::new();
+        for suffix in ["xdp", "tc_egress", "tc_ingress"] {
+            let path = shared_pin_path.join(format!("{}_{}_link", ifname, suffix));
+            if !path.exists() {
+                continue;
+            }
+            if let Err(e) = std::fs::remove_file(&path) {
+                errors.push(format!("remove {}: {}", path.display(), e));
+            }
+        }
+
+        let instance = FirewallInstance::new(
+            ifname,
+            PathBuf::from(self.control_plane.managed_pin_path()),
+            self.base_state_path.join(ifname),
+            true,
+            self.control_plane.trace_map_mode(),
+        );
+        if let Err(e) = instance.release_persisted_live_iface() {
+            errors.push(format!("release persisted live iface: {}", e));
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    /// Reconcile actual pinned managed runtime against Neutron WAL committed ports.
+    ///
+    /// This claims/rebuilds committed interfaces through the normal attach path,
+    /// then removes pinned link orphans that are not present in the committed set.
+    pub async fn reconcile_neutron_runtime(
+        &self,
+        committed_ifaces: &[String],
+    ) -> Vec<RuntimeReconcileResult> {
+        let committed: BTreeSet<String> = committed_ifaces
+            .iter()
+            .filter(|ifname| !ifname.trim().is_empty())
+            .cloned()
+            .collect();
+        let pinned_ifaces = match self.managed_link_pin_ifaces() {
+            Ok(ifaces) => ifaces,
+            Err(e) => {
+                return vec![RuntimeReconcileResult {
+                    ifname: String::new(),
+                    action: "inventory".to_string(),
+                    status: "blocked".to_string(),
+                    reason: Some(e),
+                }];
+            }
+        };
+
+        let mut results = Vec::new();
+        for ifname in &committed {
+            match self.attach(ifname).await {
+                Ok(()) => results.push(RuntimeReconcileResult {
+                    ifname: ifname.clone(),
+                    action: "claim_committed".to_string(),
+                    status: "ready".to_string(),
+                    reason: Some("runtime_reconciled".to_string()),
+                }),
+                Err(e) => results.push(RuntimeReconcileResult {
+                    ifname: ifname.clone(),
+                    action: "claim_committed".to_string(),
+                    status: "blocked".to_string(),
+                    reason: Some(format!("runtime_reconcile_failed:{}", e)),
+                }),
+            }
+        }
+
+        for ifname in pinned_ifaces.difference(&committed) {
+            match self.remove_orphaned_managed_link_pins(ifname) {
+                Ok(()) => results.push(RuntimeReconcileResult {
+                    ifname: ifname.clone(),
+                    action: "cleanup_orphan".to_string(),
+                    status: "cleaned".to_string(),
+                    reason: Some("orphaned_pinned_links_removed".to_string()),
+                }),
+                Err(e) => results.push(RuntimeReconcileResult {
+                    ifname: ifname.clone(),
+                    action: "cleanup_orphan".to_string(),
+                    status: "blocked".to_string(),
+                    reason: Some(format!("orphan_cleanup_failed:{}", e)),
+                }),
+            }
+        }
+
+        results
     }
 
     /// Attach XDP firewall to a tap interface. Idempotent: skips if already attached.

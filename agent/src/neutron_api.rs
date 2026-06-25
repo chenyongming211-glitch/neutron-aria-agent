@@ -149,6 +149,93 @@ impl NeutronApiState {
         }
     }
 
+    async fn reconcile_committed_runtime(&self) {
+        let _guard = self.apply_lock.lock().await;
+        let (ports, generation, desired_hash) = {
+            let runtime = self.runtime.read().await;
+            (
+                runtime.ports.values().cloned().collect::<Vec<_>>(),
+                runtime.applied_generation,
+                runtime.applied_desired_hash.clone(),
+            )
+        };
+        let committed_ifaces: Vec<String> = ports.iter().map(|port| port.ifname.clone()).collect();
+        let results = self
+            .registry
+            .reconcile_neutron_runtime(&committed_ifaces)
+            .await;
+        if results.is_empty() {
+            return;
+        }
+
+        let mut next_runtime = {
+            let runtime = self.runtime.read().await;
+            runtime.clone()
+        };
+        let mut degraded = results.iter().any(|result| result.status == "blocked");
+        for port in &ports {
+            let Some(result) = results.iter().find(|result| {
+                result.ifname == port.ifname && result.action == "claim_committed"
+            }) else {
+                continue;
+            };
+            next_runtime.port_statuses.insert(
+                port.port_id.clone(),
+                port_runtime_status(
+                    &port.port_id,
+                    &port.ifname,
+                    generation,
+                    desired_hash.clone(),
+                    port.managed_domains.clone(),
+                    if result.status == "ready" {
+                        "ready"
+                    } else {
+                        "blocked"
+                    },
+                    result.reason.clone(),
+                    runtime_domain_statuses_for(
+                        &port.managed_domains,
+                        if result.status == "ready" {
+                            "ready"
+                        } else {
+                            "blocked"
+                        },
+                        result.reason.clone(),
+                    ),
+                ),
+            );
+        }
+        for result in results
+            .iter()
+            .filter(|result| result.action == "cleanup_orphan")
+        {
+            if result.status == "blocked" {
+                degraded = true;
+            }
+        }
+
+        if degraded {
+            next_runtime.authority_state = "runtime_degraded".to_string();
+            next_runtime.wal_status = "runtime_reconcile_degraded".to_string();
+        } else if next_runtime.pending_generation.is_none() {
+            next_runtime.authority_state = "ready".to_string();
+            next_runtime.wal_status = "runtime_reconciled".to_string();
+        } else if next_runtime.wal_status != "intent_recovered" {
+            next_runtime.wal_status = "runtime_reconciled".to_string();
+        }
+
+        if let Err(e) = self.wal.append_snapshot_commit(next_runtime.to_wal_state()) {
+            let mut runtime = self.runtime.write().await;
+            runtime.authority_state = "wal_runtime_reconcile_commit_failed".to_string();
+            runtime.wal_status = "commit_failed".to_string();
+            warn!(error = %e, "failed to commit Neutron runtime reconciliation state");
+            return;
+        }
+
+        let mut runtime = self.runtime.write().await;
+        *runtime = next_runtime;
+    }
+
     async fn recover_incomplete_wal_intent(&self) {
         let Some(intent) = self.pending_recovery.clone() else {
             return;
@@ -386,6 +473,7 @@ pub(crate) fn build_router(
     let restore_state = state.clone();
     tokio::spawn(async move {
         restore_state.recover_incomplete_wal_intent().await;
+        restore_state.reconcile_committed_runtime().await;
         restore_state.restore_neutron_authorities().await;
     });
     Router::new()
@@ -923,6 +1011,20 @@ fn domain_statuses_for(
     reason: Option<String>,
 ) -> Vec<NeutronDomainStatus> {
     normalize_managed_domains(managed_domains)
+        .into_iter()
+        .map(|domain| domain_status(&domain, status, reason.clone()))
+        .collect()
+}
+
+fn runtime_domain_statuses_for(
+    managed_domains: &[String],
+    status: &str,
+    reason: Option<String>,
+) -> Vec<NeutronDomainStatus> {
+    let mut domains = BTreeSet::new();
+    domains.insert("attach".to_string());
+    domains.extend(normalize_managed_domains(managed_domains));
+    domains
         .into_iter()
         .map(|domain| domain_status(&domain, status, reason.clone()))
         .collect()
@@ -2192,6 +2294,24 @@ mod tests {
                 "qos".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn runtime_domain_statuses_include_attach_domain() {
+        let statuses = runtime_domain_statuses_for(
+            &["acl".to_string(), "qos".to_string()],
+            "blocked",
+            Some("runtime_reconcile_failed".to_string()),
+        );
+
+        assert_eq!(
+            statuses
+                .iter()
+                .map(|status| status.domain.as_str())
+                .collect::<Vec<_>>(),
+            vec!["acl", "attach", "qos"]
+        );
+        assert!(statuses.iter().all(|status| status.status == "blocked"));
     }
 
     #[test]
