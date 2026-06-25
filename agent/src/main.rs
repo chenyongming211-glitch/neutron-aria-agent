@@ -19,6 +19,7 @@ mod kernel_drop_manager;
 mod kernel_drop_support;
 mod netlink;
 mod neutron_api;
+mod neutron_wal;
 mod openapi;
 mod service_chain;
 mod ssl_manager;

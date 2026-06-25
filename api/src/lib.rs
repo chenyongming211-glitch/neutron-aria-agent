@@ -365,9 +365,12 @@ pub struct NeutronStatusResponse {
     /// Desired hash for the latest fully applied generation.
     #[serde(default)]
     pub applied_desired_hash: Option<String>,
-    /// In-memory transaction state until WAL is added.
+    /// Neutron snapshot WAL replay/apply state.
     #[serde(default)]
     pub wal_status: String,
+    /// Number of Neutron WAL replay records that failed to parse or apply.
+    #[serde(default)]
+    pub wal_replay_failures: u64,
     /// Overall Neutron authority state.
     #[serde(default)]
     pub authority_state: String,

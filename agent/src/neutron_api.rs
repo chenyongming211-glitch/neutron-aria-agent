@@ -19,6 +19,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{error, warn};
 
 use crate::control_plane::ControlPlane;
+use crate::neutron_wal::{NeutronWal, NeutronWalState};
 use crate::tap_registry::TapRegistry;
 
 #[derive(Clone)]
@@ -28,9 +29,10 @@ pub(crate) struct NeutronApiState {
     ovs_bridge: String,
     runtime: Arc<RwLock<NeutronRuntimeState>>,
     apply_lock: Arc<Mutex<()>>,
+    wal: Arc<NeutronWal>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct NeutronRuntimeState {
     accepted_generation: u64,
     applied_generation: u64,
@@ -40,6 +42,8 @@ struct NeutronRuntimeState {
     authority_state: String,
     ports: BTreeMap<String, ManagedNeutronPort>,
     port_statuses: BTreeMap<String, NeutronPortStatus>,
+    wal_status: String,
+    wal_replay_failures: u64,
 }
 
 #[derive(Debug)]
@@ -81,12 +85,66 @@ struct AclApplyPlan {
 
 impl NeutronApiState {
     fn new(registry: Arc<TapRegistry>, control_plane: Arc<ControlPlane>, ovs_bridge: String) -> Self {
+        let wal = Arc::new(NeutronWal::new(&registry.base_state_path));
+        let replay = wal.replay();
+        let runtime = NeutronRuntimeState::from_wal_state(replay.state, replay.status, replay.failures);
         Self {
             registry,
             control_plane,
             ovs_bridge,
-            runtime: Arc::new(RwLock::new(NeutronRuntimeState::default())),
+            runtime: Arc::new(RwLock::new(runtime)),
             apply_lock: Arc::new(Mutex::new(())),
+            wal,
+        }
+    }
+
+    async fn restore_neutron_authorities(&self) {
+        let (ports, generation) = {
+            let runtime = self.runtime.read().await;
+            (
+                runtime.ports.values().cloned().collect::<Vec<_>>(),
+                runtime.applied_generation,
+            )
+        };
+        for port in ports {
+            self.control_plane
+                .mark_neutron_port_authority(
+                    &port.ifname,
+                    &port.port_id,
+                    &port.managed_domains,
+                    generation,
+                )
+                .await;
+        }
+    }
+}
+
+impl NeutronRuntimeState {
+    fn from_wal_state(state: NeutronWalState, wal_status: String, wal_replay_failures: u64) -> Self {
+        Self {
+            accepted_generation: state.accepted_generation,
+            applied_generation: state.applied_generation,
+            pending_generation: state.pending_generation,
+            desired_hash: state.desired_hash,
+            applied_desired_hash: state.applied_desired_hash,
+            authority_state: state.authority_state,
+            ports: state.ports,
+            port_statuses: state.port_statuses,
+            wal_status,
+            wal_replay_failures,
+        }
+    }
+
+    fn to_wal_state(&self) -> NeutronWalState {
+        NeutronWalState {
+            accepted_generation: self.accepted_generation,
+            applied_generation: self.applied_generation,
+            pending_generation: self.pending_generation,
+            desired_hash: self.desired_hash.clone(),
+            applied_desired_hash: self.applied_desired_hash.clone(),
+            authority_state: self.authority_state.clone(),
+            ports: self.ports.clone(),
+            port_statuses: self.port_statuses.clone(),
         }
     }
 }
@@ -96,6 +154,11 @@ pub(crate) fn build_router(
     control_plane: Arc<ControlPlane>,
     ovs_bridge: String,
 ) -> Router {
+    let state = NeutronApiState::new(registry, control_plane, ovs_bridge);
+    let restore_state = state.clone();
+    tokio::spawn(async move {
+        restore_state.restore_neutron_authorities().await;
+    });
     Router::new()
         .route(
             "/api/v1/neutron/capabilities",
@@ -107,7 +170,7 @@ pub(crate) fn build_router(
             "/api/v1/neutron/ports/{port_id}",
             delete(delete_neutron_port),
         )
-        .with_state(NeutronApiState::new(registry, control_plane, ovs_bridge))
+        .with_state(state)
 }
 
 async fn get_neutron_capabilities() -> impl IntoResponse {
@@ -123,6 +186,8 @@ async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoRe
     let pending_generation = runtime.pending_generation;
     let desired_hash = runtime.desired_hash.clone();
     let applied_desired_hash = runtime.applied_desired_hash.clone();
+    let wal_status = runtime.wal_status.clone();
+    let wal_replay_failures = runtime.wal_replay_failures;
     let authority_state = if runtime.authority_state.is_empty() {
         "idle".to_string()
     } else {
@@ -138,7 +203,8 @@ async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoRe
         pending_generation,
         desired_hash,
         applied_desired_hash,
-        wal_status: "memory_only".to_string(),
+        wal_status,
+        wal_replay_failures,
         authority_state,
         managed_ports,
         port_statuses,
@@ -232,12 +298,30 @@ async fn apply_neutron_snapshot(
         return Ok(response);
     }
 
+    let requested_port_ids = snapshot
+        .ports
+        .iter()
+        .map(|port| port.port_id.clone())
+        .collect();
+    if let Err(e) = state.wal.append_snapshot_intent(
+        snapshot.generation,
+        requested_hash.clone(),
+        requested_port_ids,
+    ) {
+        return Err(SnapshotApplyError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "wal_intent_failed",
+            details: e,
+        });
+    }
+
     {
         let mut runtime = state.runtime.write().await;
         runtime.accepted_generation = snapshot.generation;
         runtime.pending_generation = Some(snapshot.generation);
         runtime.desired_hash = requested_hash.clone();
         runtime.authority_state = "applying".to_string();
+        runtime.wal_status = "intent_written".to_string();
     }
 
     let current_ports = state.runtime.read().await.ports.clone();
@@ -462,21 +546,41 @@ async fn apply_neutron_snapshot(
     }
 
     let has_error = results.iter().any(|result| result.status == "error");
+    let previous_applied_generation = state.runtime.read().await.applied_generation;
+    let mut next_runtime = {
+        let runtime = state.runtime.read().await;
+        runtime.clone()
+    };
+    next_runtime.accepted_generation = snapshot.generation;
+    next_runtime.desired_hash = requested_hash.clone();
+    next_runtime.ports = next_ports;
+    next_runtime.port_statuses = next_statuses;
+    next_runtime.wal_status = "commit_written".to_string();
+    if has_error {
+        next_runtime.pending_generation = Some(snapshot.generation);
+        next_runtime.authority_state = "partial".to_string();
+    } else {
+        next_runtime.applied_generation = snapshot.generation;
+        next_runtime.applied_desired_hash = requested_hash.clone();
+        next_runtime.pending_generation = None;
+        next_runtime.authority_state = "ready".to_string();
+    }
+
+    if let Err(e) = state.wal.append_snapshot_commit(next_runtime.to_wal_state()) {
+        let mut runtime = state.runtime.write().await;
+        runtime.pending_generation = Some(snapshot.generation);
+        runtime.authority_state = "wal_commit_failed".to_string();
+        runtime.wal_status = "commit_failed".to_string();
+        return Err(SnapshotApplyError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "wal_commit_failed",
+            details: e,
+        });
+    }
+
     {
         let mut runtime = state.runtime.write().await;
-        runtime.accepted_generation = snapshot.generation;
-        runtime.desired_hash = requested_hash.clone();
-        runtime.ports = next_ports;
-        runtime.port_statuses = next_statuses;
-        if has_error {
-            runtime.pending_generation = Some(snapshot.generation);
-            runtime.authority_state = "partial".to_string();
-        } else {
-            runtime.applied_generation = snapshot.generation;
-            runtime.applied_desired_hash = requested_hash.clone();
-            runtime.pending_generation = None;
-            runtime.authority_state = "ready".to_string();
-        }
+        *runtime = next_runtime;
     }
 
     Ok(neutron_snapshot_response(
@@ -484,7 +588,7 @@ async fn apply_neutron_snapshot(
         requested_hash,
         snapshot.generation,
         if has_error {
-            state.runtime.read().await.applied_generation
+            previous_applied_generation
         } else {
             snapshot.generation
         },
@@ -616,6 +720,23 @@ async fn apply_delete_neutron_port(
         );
     };
 
+    let generation = state.runtime.read().await.accepted_generation;
+    if let Err(e) = state
+        .wal
+        .append_delete_intent(port_id.clone(), generation)
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            NeutronDeleteResponse {
+                port_id: port.port_id,
+                ifname: Some(port.ifname),
+                detached: false,
+                status: "error".to_string(),
+                error: Some(format!("wal_intent_failed:{}", e)),
+            },
+        );
+    }
+
     if let Err(e) = purge_neutron_acl(&state, &port.ifname, &port.port_id).await {
         warn!(
             port_id = %port.port_id,
@@ -627,10 +748,32 @@ async fn apply_delete_neutron_port(
 
     match state.registry.detach(&port.ifname).await {
         Ok(()) => {
+            let mut next_runtime = {
+                let runtime = state.runtime.read().await;
+                runtime.clone()
+            };
+            next_runtime.ports.remove(&port_id);
+            next_runtime.port_statuses.remove(&port_id);
+            next_runtime.wal_status = "commit_written".to_string();
+            if let Err(e) = state.wal.append_delete_commit(next_runtime.to_wal_state()) {
+                let mut runtime = state.runtime.write().await;
+                runtime.pending_generation = Some(generation);
+                runtime.authority_state = "wal_commit_failed".to_string();
+                runtime.wal_status = "commit_failed".to_string();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    NeutronDeleteResponse {
+                        port_id: port.port_id,
+                        ifname: Some(port.ifname),
+                        detached: true,
+                        status: "error".to_string(),
+                        error: Some(format!("wal_commit_failed:{}", e)),
+                    },
+                );
+            }
             {
                 let mut runtime = state.runtime.write().await;
-                runtime.ports.remove(&port_id);
-                runtime.port_statuses.remove(&port_id);
+                *runtime = next_runtime;
             }
             state
                 .control_plane
