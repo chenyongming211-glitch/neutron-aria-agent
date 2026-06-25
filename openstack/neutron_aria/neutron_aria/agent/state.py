@@ -57,14 +57,17 @@ class SnapshotStateStore(object):
         self.path = os.path.join(self.state_dir, filename)
         self._state = self._load()
 
-    def prepare_snapshot(self, snapshot):
+    def prepare_snapshot(self, snapshot, minimum_generation=0):
+        minimum_generation = _int_value(minimum_generation)
         desired_hash = desired_snapshot_hash(snapshot)
         pending_generation = _int_value(self._state.get("pending_generation"))
         pending_hash = self._state.get("pending_desired_hash")
+        generation = self._select_generation(desired_hash, minimum_generation)
         reused_pending = bool(
-            pending_generation and pending_hash == desired_hash
+            pending_generation and
+            pending_hash == desired_hash and
+            pending_generation == generation
         )
-        generation = self._select_generation(desired_hash)
         self._state["pending_generation"] = generation
         self._state["pending_desired_hash"] = desired_hash
         self._state["pending_since"] = _now()
@@ -96,18 +99,27 @@ class SnapshotStateStore(object):
     def to_dict(self):
         return copy.deepcopy(self._state)
 
-    def _select_generation(self, desired_hash):
+    def _select_generation(self, desired_hash, minimum_generation=0):
+        minimum_generation = _int_value(minimum_generation)
         pending_generation = _int_value(self._state.get("pending_generation"))
         pending_hash = self._state.get("pending_desired_hash")
-        if pending_generation and pending_hash == desired_hash:
+        if (
+            pending_generation and
+            pending_hash == desired_hash and
+            pending_generation > minimum_generation
+        ):
             return pending_generation
 
         last_generation = _int_value(self._state.get("last_generation"))
         last_hash = self._state.get("last_desired_hash")
-        if last_generation and last_hash == desired_hash:
+        if (
+            last_generation and
+            last_hash == desired_hash and
+            last_generation > minimum_generation
+        ):
             return last_generation
 
-        return max(last_generation, pending_generation) + 1
+        return max(last_generation, pending_generation, minimum_generation) + 1
 
     def _load(self):
         try:

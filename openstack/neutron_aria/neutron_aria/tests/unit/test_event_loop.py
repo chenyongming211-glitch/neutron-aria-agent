@@ -48,6 +48,17 @@ class FakeLocalClient(object):
         return {"generation": 0, "managed_ports": [], "active_instances": []}
 
 
+class AdvancedGenerationLocalClient(FakeLocalClient):
+    def status(self):
+        return {
+            "generation": 3,
+            "accepted_generation": 3,
+            "applied_generation": 3,
+            "managed_ports": [],
+            "active_instances": [],
+        }
+
+
 class FailingLocalClient(FakeLocalClient):
     def capabilities(self, required_domains=None):
         raise LocalApiTransportError("socket unavailable")
@@ -215,6 +226,28 @@ class EventLoopTestCase(unittest.TestCase):
             first["snapshot"]["desired_hash"],
             second["snapshot"]["desired_hash"],
         )
+
+    def test_full_resync_advances_beyond_remote_generation_floor(self):
+        port_source = StaticPortSource([{
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+        local_client = AdvancedGenerationLocalClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+        )
+
+        result = sync.full_resync()
+
+        self.assertEqual(4, result["snapshot"]["generation"])
+        self.assertEqual(4, local_client.snapshots[0]["generation"])
 
     def test_pending_generation_survives_restart_after_degraded_resync(self):
         state_dir = tempfile.mkdtemp()

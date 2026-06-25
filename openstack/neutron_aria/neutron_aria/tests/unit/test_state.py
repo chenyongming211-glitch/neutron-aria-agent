@@ -69,6 +69,18 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
             "snapshot-state.json",
         )))
 
+    def test_prepare_advances_beyond_remote_generation_floor(self):
+        store = SnapshotStateStore(self.state_dir)
+        first = store.prepare_snapshot(self._snapshot("p1"))
+        second = store.prepare_snapshot(
+            self._snapshot("p1"),
+            minimum_generation=3,
+        )
+
+        self.assertEqual(1, first["generation"])
+        self.assertEqual(4, second["generation"])
+        self.assertFalse(second["reused_pending"])
+
 
 if __name__ == "__main__":
     unittest.main()

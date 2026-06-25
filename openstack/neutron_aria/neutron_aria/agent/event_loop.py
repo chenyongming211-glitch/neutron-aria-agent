@@ -71,7 +71,11 @@ class SnapshotSynchronizer(object):
             ports,
             generation=0,
         )
-        prepared = self.state_store.prepare_snapshot(snapshot)
+        generation_floor = self._remote_generation_floor()
+        prepared = self.state_store.prepare_snapshot(
+            snapshot,
+            minimum_generation=generation_floor,
+        )
         snapshot["generation"] = prepared["generation"]
         snapshot["desired_hash"] = prepared["desired_hash"]
         projected_port_ids = self._projected_port_ids(snapshot)
@@ -329,6 +333,25 @@ class SnapshotSynchronizer(object):
         raise LocalApiTimeoutError(
             "port delete timed out and status did not converge: %s" % last_error
         )
+
+    def _remote_generation_floor(self):
+        try:
+            status = self.local_client.status()
+        except LocalApiError as exc:
+            LOG.warning(
+                "remote_generation_floor_unavailable host=%s error=%s",
+                self.host,
+                exc,
+            )
+            return 0
+
+        generations = []
+        for key in ("accepted_generation", "applied_generation", "generation"):
+            try:
+                generations.append(int(status.get(key) or 0))
+            except (TypeError, ValueError):
+                generations.append(0)
+        return max(generations or [0])
 
     def _status_converged(self, snapshot, projected_port_ids, status):
         try:
