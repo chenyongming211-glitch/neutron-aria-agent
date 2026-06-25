@@ -250,12 +250,21 @@ PY
 
 wait_for_datapath_socket() {
     for _ in $(seq 1 30); do
-        if docker exec "${SERVICE_NAME}" test -S "${SOCKET_PATH}" 2>/dev/null; then
+        if docker_exec_env python - "${SOCKET_PATH}" >/dev/null 2>&1 <<'PY'
+from __future__ import print_function
+
+import sys
+
+from neutron_aria.agent.uds_client import LocalClient
+
+LocalClient(sys.argv[1], timeout=2.0).status()
+PY
+        then
             return 0
         fi
         sleep 1
     done
-    die "timed out waiting for ${SOCKET_PATH}"
+    die "timed out waiting for ${SOCKET_PATH} status"
 }
 
 check_datapath_status() {
