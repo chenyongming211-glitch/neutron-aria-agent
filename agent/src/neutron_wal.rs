@@ -42,6 +42,8 @@ enum NeutronWalEntry {
         generation: u64,
         desired_hash: Option<String>,
         port_ids: Vec<String>,
+        #[serde(default)]
+        affected_domains: Vec<String>,
     },
     SnapshotCommit {
         state: NeutronWalState,
@@ -49,6 +51,8 @@ enum NeutronWalEntry {
     DeleteIntent {
         port_id: String,
         generation: u64,
+        #[serde(default)]
+        affected_domains: Vec<String>,
     },
     DeleteCommit {
         state: NeutronWalState,
@@ -138,11 +142,13 @@ impl NeutronWal {
         generation: u64,
         desired_hash: Option<String>,
         port_ids: Vec<String>,
+        affected_domains: Vec<String>,
     ) -> Result<(), String> {
         self.append(&NeutronWalEntry::SnapshotIntent {
             generation,
             desired_hash,
             port_ids,
+            affected_domains,
         })
     }
 
@@ -154,10 +160,12 @@ impl NeutronWal {
         &self,
         port_id: String,
         generation: u64,
+        affected_domains: Vec<String>,
     ) -> Result<(), String> {
         self.append(&NeutronWalEntry::DeleteIntent {
             port_id,
             generation,
+            affected_domains,
         })
     }
 
@@ -237,8 +245,13 @@ mod tests {
     fn replay_restores_last_committed_state() {
         let root = temp_state_path();
         let wal = NeutronWal::new(&root);
-        wal.append_snapshot_intent(7, Some("hash-7".to_string()), vec!["p1".to_string()])
-            .unwrap();
+        wal.append_snapshot_intent(
+            7,
+            Some("hash-7".to_string()),
+            vec!["p1".to_string()],
+            vec!["acl".to_string()],
+        )
+        .unwrap();
         let mut ports = BTreeMap::new();
         ports.insert("p1".to_string(), managed("p1", "tap-p1"));
         wal.append_snapshot_commit(NeutronWalState {
@@ -264,14 +277,37 @@ mod tests {
     fn replay_reports_intent_without_commit() {
         let root = temp_state_path();
         let wal = NeutronWal::new(&root);
-        wal.append_snapshot_intent(8, Some("hash-8".to_string()), vec!["p1".to_string()])
-            .unwrap();
+        wal.append_snapshot_intent(
+            8,
+            Some("hash-8".to_string()),
+            vec!["p1".to_string()],
+            vec!["acl".to_string(), "qos".to_string()],
+        )
+        .unwrap();
 
         let replay = wal.replay();
 
         assert_eq!("intent_without_commit", replay.status);
         assert_eq!(Some(8), replay.state.pending_generation);
         assert_eq!("wal_intent_without_commit", replay.state.authority_state);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn snapshot_intent_records_affected_domains() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        wal.append_snapshot_intent(
+            9,
+            Some("hash-9".to_string()),
+            vec!["p1".to_string()],
+            vec!["acl".to_string(), "mirror".to_string(), "qos".to_string()],
+        )
+        .unwrap();
+
+        let raw = fs::read_to_string(root.join(WAL_FILE)).unwrap();
+
+        assert!(raw.contains(r#""affected_domains":["acl","mirror","qos"]"#));
         let _ = fs::remove_dir_all(root);
     }
 }

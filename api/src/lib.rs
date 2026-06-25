@@ -144,6 +144,12 @@ pub struct NeutronPortSnapshot {
     /// Optional effective Aria ACL payload compiled by neutron-aria-agent.
     #[serde(default)]
     pub acl: Option<NeutronAclSnapshot>,
+    /// Optional effective Aria QoS payload compiled by neutron-aria-agent.
+    #[serde(default)]
+    pub qos: Option<serde_json::Value>,
+    /// Optional effective Aria mirror payload compiled by neutron-aria-agent.
+    #[serde(default)]
+    pub mirror: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -2075,6 +2081,11 @@ mod tests {
                         dst_port_max: None,
                     }],
                 }),
+                qos: None,
+                mirror: Some(serde_json::json!({
+                    "enabled": true,
+                    "mode": "global_l2"
+                })),
             }],
         };
 
@@ -2112,5 +2123,7 @@ mod tests {
         assert_eq!(port.ovs_iface_id, None);
         assert!(port.managed_domains.is_empty());
         assert_eq!(port.acl, None);
+        assert_eq!(port.qos, None);
+        assert_eq!(port.mirror, None);
     }
 }

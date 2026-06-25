@@ -83,6 +83,13 @@ struct AclApplyPlan {
     policies: Vec<AclPolicyPlan>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DomainReconcileResult {
+    domains: Vec<NeutronDomainStatus>,
+    ok: bool,
+    reason: Option<String>,
+}
+
 impl NeutronApiState {
     fn new(registry: Arc<TapRegistry>, control_plane: Arc<ControlPlane>, ovs_bridge: String) -> Self {
         let wal = Arc::new(NeutronWal::new(&registry.base_state_path));
@@ -303,10 +310,18 @@ async fn apply_neutron_snapshot(
         .iter()
         .map(|port| port.port_id.clone())
         .collect();
+    let requested_domains: Vec<String> = snapshot
+        .ports
+        .iter()
+        .flat_map(|port| normalize_managed_domains(&port.managed_domains))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     if let Err(e) = state.wal.append_snapshot_intent(
         snapshot.generation,
         requested_hash.clone(),
         requested_port_ids,
+        requested_domains,
     ) {
         return Err(SnapshotApplyError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -354,6 +369,7 @@ async fn apply_neutron_snapshot(
                         port.managed_domains.clone(),
                         "detached",
                         None,
+                        domain_statuses_for(&port.managed_domains, "detached", None),
                     ),
                 );
                 state
@@ -379,6 +395,7 @@ async fn apply_neutron_snapshot(
                         port.managed_domains.clone(),
                         "error",
                         Some(e.clone()),
+                        domain_statuses_for(&port.managed_domains, "error", Some(e.clone())),
                     ),
                 );
                 results.push(NeutronPortApplyResult {
@@ -394,59 +411,59 @@ async fn apply_neutron_snapshot(
 
     for port in plan.update {
         let managed = managed_port_from_snapshot(&port);
-        match reconcile_neutron_acl(&state, &port).await {
-            Ok(()) => {
-                state
-                    .control_plane
-                    .mark_neutron_port_authority(
-                        &managed.ifname,
-                        &managed.port_id,
-                        &managed.managed_domains,
-                        snapshot.generation,
-                    )
-                    .await;
-                next_ports.insert(managed.port_id.clone(), managed.clone());
-                next_statuses.insert(
-                    managed.port_id.clone(),
-                    port_runtime_status(
-                        &managed.port_id,
-                        &managed.ifname,
-                        snapshot.generation,
-                        requested_hash.clone(),
-                        managed.managed_domains.clone(),
-                        "ready",
-                        None,
-                    ),
-                );
-                results.push(NeutronPortApplyResult {
-                    port_id: managed.port_id,
-                    ifname: managed.ifname,
-                    action: "update".to_string(),
-                    status: "ok".to_string(),
-                    reason: None,
-                });
-            }
-            Err(e) => {
-                next_statuses.insert(
-                    managed.port_id.clone(),
-                    port_runtime_status(
-                        &managed.port_id,
-                        &managed.ifname,
-                        snapshot.generation,
-                        requested_hash.clone(),
-                        managed.managed_domains.clone(),
-                        "error",
-                        Some(e.clone()),
-                    ),
-                );
-                results.push(NeutronPortApplyResult {
-                    port_id: managed.port_id,
-                    ifname: managed.ifname,
-                    action: "update".to_string(),
-                    status: "error".to_string(),
-                    reason: Some(format!("acl_apply_failed:{}", e)),
-                });
-            }
+        let domain_result = reconcile_neutron_domains(&state, &port).await;
+        if domain_result.ok {
+            state
+                .control_plane
+                .mark_neutron_port_authority(
+                    &managed.ifname,
+                    &managed.port_id,
+                    &managed.managed_domains,
+                    snapshot.generation,
+                )
+                .await;
+            next_ports.insert(managed.port_id.clone(), managed.clone());
+            next_statuses.insert(
+                managed.port_id.clone(),
+                port_runtime_status(
+                    &managed.port_id,
+                    &managed.ifname,
+                    snapshot.generation,
+                    requested_hash.clone(),
+                    managed.managed_domains.clone(),
+                    "ready",
+                    None,
+                    domain_result.domains,
+                ),
+            );
+            results.push(NeutronPortApplyResult {
+                port_id: managed.port_id,
+                ifname: managed.ifname,
+                action: "update".to_string(),
+                status: "ok".to_string(),
+                reason: None,
+            });
+        } else {
+            next_statuses.insert(
+                managed.port_id.clone(),
+                port_runtime_status(
+                    &managed.port_id,
+                    &managed.ifname,
+                    snapshot.generation,
+                    requested_hash.clone(),
+                    managed.managed_domains.clone(),
+                    "error",
+                    domain_result.reason.clone(),
+                    domain_result.domains,
+                ),
+            );
+            results.push(NeutronPortApplyResult {
+                port_id: managed.port_id,
+                ifname: managed.ifname,
+                action: "update".to_string(),
+                status: "error".to_string(),
+                reason: domain_result.reason,
+            });
         }
     }
 
@@ -454,71 +471,81 @@ async fn apply_neutron_snapshot(
         match state.registry.attach(&port.ifname).await {
             Ok(()) => {
                 let managed = managed_port_from_snapshot(&port);
-                match reconcile_neutron_acl(&state, &port).await {
-                    Ok(()) => {
-                        state
-                            .control_plane
-                            .mark_neutron_port_authority(
-                                &managed.ifname,
-                                &managed.port_id,
-                                &managed.managed_domains,
-                                snapshot.generation,
-                            )
-                            .await;
-                        next_ports.insert(managed.port_id.clone(), managed.clone());
-                        next_statuses.insert(
-                            managed.port_id.clone(),
-                            port_runtime_status(
-                                &managed.port_id,
-                                &managed.ifname,
-                                snapshot.generation,
-                                requested_hash.clone(),
-                                managed.managed_domains.clone(),
-                                "ready",
-                                None,
-                            ),
+                let domain_result = reconcile_neutron_domains(&state, &port).await;
+                if domain_result.ok {
+                    state
+                        .control_plane
+                        .mark_neutron_port_authority(
+                            &managed.ifname,
+                            &managed.port_id,
+                            &managed.managed_domains,
+                            snapshot.generation,
+                        )
+                        .await;
+                    next_ports.insert(managed.port_id.clone(), managed.clone());
+                    next_statuses.insert(
+                        managed.port_id.clone(),
+                        port_runtime_status(
+                            &managed.port_id,
+                            &managed.ifname,
+                            snapshot.generation,
+                            requested_hash.clone(),
+                            managed.managed_domains.clone(),
+                            "ready",
+                            None,
+                            domain_result.domains,
+                        ),
+                    );
+                    results.push(NeutronPortApplyResult {
+                        port_id: managed.port_id,
+                        ifname: managed.ifname,
+                        action: "attach".to_string(),
+                        status: "ok".to_string(),
+                        reason: None,
+                    });
+                } else {
+                    if let Err(purge_err) =
+                        purge_neutron_acl(&state, &port.ifname, &port.port_id).await
+                    {
+                        warn!(
+                            port_id = %port.port_id,
+                            ifname = %port.ifname,
+                            error = %purge_err,
+                            "failed to purge Neutron ACL after domain apply failure"
                         );
-                        results.push(NeutronPortApplyResult {
-                            port_id: managed.port_id,
-                            ifname: managed.ifname,
-                            action: "attach".to_string(),
-                            status: "ok".to_string(),
-                            reason: None,
-                        });
                     }
-                    Err(e) => {
-                        if let Err(detach_err) = state.registry.detach(&port.ifname).await {
-                            warn!(
-                                port_id = %port.port_id,
-                                ifname = %port.ifname,
-                                error = %detach_err,
-                                "failed to detach after Neutron ACL apply failure"
-                            );
-                        }
-                        state
-                            .control_plane
-                            .clear_neutron_port_authority(&port.ifname)
-                            .await;
-                        next_statuses.insert(
-                            managed.port_id.clone(),
-                            port_runtime_status(
-                                &managed.port_id,
-                                &managed.ifname,
-                                snapshot.generation,
-                                requested_hash.clone(),
-                                managed.managed_domains.clone(),
-                                "error",
-                                Some(e.to_string()),
-                            ),
+                    if let Err(detach_err) = state.registry.detach(&port.ifname).await {
+                        warn!(
+                            port_id = %port.port_id,
+                            ifname = %port.ifname,
+                            error = %detach_err,
+                            "failed to detach after Neutron domain apply failure"
                         );
-                        results.push(NeutronPortApplyResult {
-                            port_id: managed.port_id,
-                            ifname: managed.ifname,
-                            action: "attach".to_string(),
-                            status: "error".to_string(),
-                            reason: Some(format!("acl_apply_failed:{}", e)),
-                        });
                     }
+                    state
+                        .control_plane
+                        .clear_neutron_port_authority(&port.ifname)
+                        .await;
+                    next_statuses.insert(
+                        managed.port_id.clone(),
+                        port_runtime_status(
+                            &managed.port_id,
+                            &managed.ifname,
+                            snapshot.generation,
+                            requested_hash.clone(),
+                            managed.managed_domains.clone(),
+                            "error",
+                            domain_result.reason.clone(),
+                            domain_result.domains,
+                        ),
+                    );
+                    results.push(NeutronPortApplyResult {
+                        port_id: managed.port_id,
+                        ifname: managed.ifname,
+                        action: "attach".to_string(),
+                        status: "error".to_string(),
+                        reason: domain_result.reason,
+                    });
                 }
             }
             Err(e) => {
@@ -532,6 +559,7 @@ async fn apply_neutron_snapshot(
                         port.managed_domains.clone(),
                         "error",
                         Some(e.clone()),
+                        domain_statuses_for(&port.managed_domains, "error", Some(e.clone())),
                     ),
                 );
                 results.push(NeutronPortApplyResult {
@@ -650,15 +678,8 @@ fn port_runtime_status(
     managed_domains: Vec<String>,
     status: &str,
     reason: Option<String>,
+    domains: Vec<NeutronDomainStatus>,
 ) -> NeutronPortStatus {
-    let domains = normalize_managed_domains(&managed_domains)
-        .into_iter()
-        .map(|domain| NeutronDomainStatus {
-            domain,
-            status: status.to_string(),
-            reason: reason.clone(),
-        })
-        .collect();
     NeutronPortStatus {
         port_id: port_id.to_string(),
         ifname: ifname.to_string(),
@@ -668,6 +689,100 @@ fn port_runtime_status(
         reason,
         managed_domains,
         domains,
+    }
+}
+
+fn domain_status(domain: &str, status: &str, reason: Option<String>) -> NeutronDomainStatus {
+    NeutronDomainStatus {
+        domain: domain.to_string(),
+        status: status.to_string(),
+        reason,
+    }
+}
+
+fn domain_statuses_for(
+    managed_domains: &[String],
+    status: &str,
+    reason: Option<String>,
+) -> Vec<NeutronDomainStatus> {
+    normalize_managed_domains(managed_domains)
+        .into_iter()
+        .map(|domain| domain_status(&domain, status, reason.clone()))
+        .collect()
+}
+
+fn blocked_by_unimplemented_domains(domains: &[String]) -> String {
+    format!("blocked_by_unimplemented_domains:{}", domains.join(","))
+}
+
+fn unimplemented_domain_reason(domain: &str) -> String {
+    format!("{}_transaction_not_implemented", domain)
+}
+
+async fn reconcile_neutron_domains(
+    state: &NeutronApiState,
+    port: &NeutronPortSnapshot,
+) -> DomainReconcileResult {
+    let domains = normalize_managed_domains(&port.managed_domains);
+    if domains.is_empty() {
+        return DomainReconcileResult {
+            domains: Vec::new(),
+            ok: true,
+            reason: None,
+        };
+    }
+
+    let unimplemented: Vec<String> = domains
+        .iter()
+        .filter(|domain| !matches!(domain.as_str(), "attach" | "acl"))
+        .cloned()
+        .collect();
+    if !unimplemented.is_empty() {
+        let blocked_reason = blocked_by_unimplemented_domains(&unimplemented);
+        let statuses = domains
+            .iter()
+            .map(|domain| match domain.as_str() {
+                "attach" => domain_status(domain, "ready", None),
+                "acl" => domain_status(domain, "blocked", Some(blocked_reason.clone())),
+                _ => domain_status(domain, "error", Some(unimplemented_domain_reason(domain))),
+            })
+            .collect();
+        return DomainReconcileResult {
+            domains: statuses,
+            ok: false,
+            reason: Some(blocked_reason),
+        };
+    }
+
+    let mut statuses = Vec::new();
+    let mut errors = Vec::new();
+    for domain in domains {
+        match domain.as_str() {
+            "attach" => statuses.push(domain_status(&domain, "ready", None)),
+            "acl" => match reconcile_neutron_acl(state, port).await {
+                Ok(()) => statuses.push(domain_status(&domain, "ready", None)),
+                Err(e) => {
+                    let reason = format!("acl_apply_failed:{}", e);
+                    statuses.push(domain_status(&domain, "error", Some(reason.clone())));
+                    errors.push(reason);
+                }
+            },
+            _ => {
+                let reason = unimplemented_domain_reason(&domain);
+                statuses.push(domain_status(&domain, "error", Some(reason.clone())));
+                errors.push(reason);
+            }
+        }
+    }
+
+    DomainReconcileResult {
+        domains: statuses,
+        ok: errors.is_empty(),
+        reason: if errors.is_empty() {
+            None
+        } else {
+            Some(errors.join(";"))
+        },
     }
 }
 
@@ -723,7 +838,7 @@ async fn apply_delete_neutron_port(
     let generation = state.runtime.read().await.accepted_generation;
     if let Err(e) = state
         .wal
-        .append_delete_intent(port_id.clone(), generation)
+        .append_delete_intent(port_id.clone(), generation, port.managed_domains.clone())
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1562,6 +1677,8 @@ mod tests {
             ovs_iface_id: None,
             managed_domains: Vec::new(),
             acl: None,
+            qos: None,
+            mirror: None,
         }
     }
 
@@ -1729,6 +1846,40 @@ mod tests {
         assert_eq!(
             normalize_managed_domains(&plan.update[0].managed_domains),
             vec!["acl".to_string(), "qos".to_string()]
+        );
+    }
+
+    #[test]
+    fn domain_statuses_track_each_managed_domain() {
+        let domains = domain_statuses_for(
+            &[
+                "acl".to_string(),
+                "qos".to_string(),
+                "mirror".to_string(),
+            ],
+            "error",
+            Some("apply_failed".to_string()),
+        );
+
+        assert_eq!(
+            domains,
+            vec![
+                NeutronDomainStatus {
+                    domain: "acl".to_string(),
+                    status: "error".to_string(),
+                    reason: Some("apply_failed".to_string()),
+                },
+                NeutronDomainStatus {
+                    domain: "mirror".to_string(),
+                    status: "error".to_string(),
+                    reason: Some("apply_failed".to_string()),
+                },
+                NeutronDomainStatus {
+                    domain: "qos".to_string(),
+                    status: "error".to_string(),
+                    reason: Some("apply_failed".to_string()),
+                },
+            ]
         );
     }
 

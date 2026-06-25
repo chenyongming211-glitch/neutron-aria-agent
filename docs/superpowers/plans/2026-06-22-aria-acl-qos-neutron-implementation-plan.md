@@ -1659,7 +1659,7 @@ pass:
 | --- | --- | --- | --- |
 | Neutron Server | Not started in this repository | Product design only | API/DB transaction, revision checks, RPC event emission, status DB update |
 | `neutron-aria-agent` | Partial | full resync, heartbeat, ACL source abstraction, UDS timeout convergence, degraded reporting, durable local generation/desired-hash state, same desired-state generation reuse, pending generation restart reuse, response error classification | event revision ordering, full desired-state journal with source revisions, bounded unresolved-generation policy, production restart smoke |
-| Rust `aria-agent` / `aria-datapath` | Partial | neutron-managed attach boundary, UDS routes, cancel-safe mutation task, ACL fixture apply, delete cleanup, `desired_hash` UDS field, accepted/applied/pending generation status, same-generation replay/no-op, same-generation hash conflict, stale generation classification, per-port/domain status surface, host-level Neutron WAL intent/commit/replay, fsync-backed WAL append, committed-state replay, WAL status reporting | crash injection tests, pinned runtime reconciliation, startup scrub/reconcile for intent-without-commit, WAL compaction, durable status snapshot separate from WAL |
+| Rust `aria-agent` / `aria-datapath` | Partial | neutron-managed attach boundary, UDS routes, cancel-safe mutation task, ACL fixture apply, delete cleanup, `desired_hash` UDS field, accepted/applied/pending generation status, same-generation replay/no-op, same-generation hash conflict, stale generation classification, per-port/domain status surface, QoS/Mirror payload fields in the UDS snapshot contract, domain-aware apply classification, host-level Neutron WAL intent/commit/replay, affected domains in WAL intent records, fsync-backed WAL append, committed-state replay, WAL status reporting | real QoS apply backend, real Mirror apply backend, crash injection tests, pinned runtime reconciliation, startup scrub/reconcile for intent-without-commit, WAL compaction, durable status snapshot separate from WAL |
 
 So the answer is: the full transaction model is **not complete yet**. The
 current code proves the basic control path and several safety foundations, but
@@ -1695,6 +1695,11 @@ domain cannot be applied, the system must choose an explicit classified state:
 For ACL/QoS product behavior, original VM forwarding must stay safe on
 degraded enhancement paths. A domain may degrade to bypass, but it must never be
 reported as ready before its runtime state, status, and durable metadata agree.
+This is not ACL-only: if `managed_domains` contains `qos` or `mirror`, those
+domains must be included in the same generation, desired hash, WAL record, and
+per-domain status model. Until the QoS or Mirror executor is implemented, the
+domain must be reported as `error` or `blocked`; it must not be silently treated
+as ready just because attach or ACL succeeded.
 
 ### 9.9.2 Mandatory Idempotency Rules
 
@@ -1744,6 +1749,11 @@ The optimized implementation order for `aria-datapath` snapshot apply is:
    - ACL policy reconciliation.
    - QoS reconciliation when enabled.
    - mirror reconciliation only in second phase.
+   Domain preflight must reject or block the whole affected port before any
+   mutating domain apply when the requested domain set contains an unimplemented
+   transactional domain. For example, `managed_domains=["acl","qos"]` must not
+   write ACL state and then report the port as partially failed simply because
+   QoS is not implemented yet.
 8. Collect per-port and per-domain status, including degraded/bypass reasons.
 9. Write WAL commit only if the runtime and status can be explained.
 10. Advance accepted/classified generation only after WAL commit.
@@ -1894,9 +1904,12 @@ cancel-safe mutation tasks, ACL fixture apply, cleanup smoke, `desired_hash`
 contract field, accepted/applied/pending generation status, same-generation
 no-op, hash-conflict rejection, stale generation classification,
 per-port/per-domain status surface, host-level Neutron WAL intent/commit/replay,
-and fsync-backed WAL append exist. Crash injection tests, pinned runtime
-reconciliation, WAL compaction, and startup scrub/reconcile for incomplete
-intent records are not complete.
+fsync-backed WAL append, affected domains in WAL intent records, QoS/Mirror
+snapshot payload fields, and domain-aware apply classification exist.
+QoS/Mirror are not yet runtime executors: a snapshot that requests those domains
+is classified as blocked/error rather than falsely ready. Crash injection tests,
+pinned runtime reconciliation, WAL compaction, and startup scrub/reconcile for
+incomplete intent records are not complete.
 
 **Files to create or modify:**
 
@@ -1919,6 +1932,11 @@ intent records are not complete.
   - `schema_version`.
   - `generation` as the host-local generation.
   - `desired_hash`.
+- [x] Extend per-port snapshot payload with domain-specific effective payload
+  slots:
+  - `acl` for Aria ACL effective policy.
+  - `qos` for Aria QoS effective policy when the QoS phase is enabled.
+  - `mirror` for Aria Mirror effective session/rule projection in phase two.
 - [ ] Extend snapshot request with optional future identifiers:
   - optional `source_revision`.
   - `integration_mode`.
@@ -1955,6 +1973,9 @@ intent records are not complete.
 - [x] Newer generation: proceed through the current in-memory apply sequence.
 - [x] Acquire a single writer lock across snapshot and delete.
 - [ ] Preflight every affected port before mutating runtime.
+- [x] Preflight requested Neutron-managed domains before mutating ACL/QoS/Mirror
+  state. **Current code allows attach and ACL; QoS/Mirror are classified as
+  unimplemented transactional domains until their executors exist.**
 - [ ] Build deterministic diff:
   - ports to attach.
   - ports to update.
@@ -1965,6 +1986,8 @@ intent records are not complete.
 - [x] Write WAL intent before runtime mutation.
 - [x] Apply runtime diff with cleanup hooks.
 - [x] Track per-port/per-domain result for applied ready/error ports.
+- [x] Block ACL mutation when the same port snapshot also requests an
+  unimplemented QoS/Mirror transaction domain.
 - [ ] Track per-port/per-domain result for every requested port, including
   ignored/unsupported/not-applicable ports, in the durable status model.
 - [x] Write WAL commit with final classified runtime/status state.
@@ -1981,6 +2004,8 @@ intent records are not complete.
 - [x] Delete of known port writes WAL intent before detach.
 - [ ] Detach runtime and remove managed authority for that port.
 - [ ] Clean ACL/QoS/Mirror scoped runtime entries owned by that port/domain.
+  **Current code purges ACL-owned state. QoS/Mirror cleanup remains tied to the
+  future QoS/Mirror executors.**
 - [x] Write WAL commit after cleanup is classified.
 - [x] Repeating the same delete is a success no-op.
 - [x] Delete must not remove local/admin state outside Neutron authority.
@@ -1996,7 +2021,7 @@ intent records are not complete.
   - generation.
   - desired hash.
   - affected ports.
-- [ ] Extend WAL intent with affected domains.
+- [x] Extend WAL intent with affected domains.
   - planned diff hash.
   - authority.
   - source revisions when available.
@@ -2038,7 +2063,9 @@ GET /api/v1/neutron/status shows accepted/applied/classified generation,
 per-port status, per-domain status, WAL status, and authority state.
 Replaying the same snapshot is safe.
 Restarting aria-datapath keeps or reconciles committed state.
-No half-applied ACL/QoS state is reported as ready.
+No half-applied ACL/QoS/Mirror state is reported as ready.
+No requested QoS/Mirror domain is reported as ready before the corresponding
+executor and cleanup path exist.
 ```
 
 ---
