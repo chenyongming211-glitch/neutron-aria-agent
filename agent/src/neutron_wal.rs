@@ -358,6 +358,19 @@ mod tests {
         }
     }
 
+    fn port_status(port_id: &str, ifname: &str, generation: u64) -> NeutronPortStatus {
+        NeutronPortStatus {
+            port_id: port_id.to_string(),
+            ifname: ifname.to_string(),
+            generation,
+            desired_hash: Some(format!("hash-{}", generation)),
+            status: "ready".to_string(),
+            reason: None,
+            managed_domains: vec!["acl".to_string()],
+            domains: Vec::new(),
+        }
+    }
+
     #[test]
     fn replay_restores_last_committed_state() {
         let root = temp_state_path();
@@ -495,6 +508,67 @@ mod tests {
     }
 
     #[test]
+    fn replay_snapshot_intent_after_domain_half_apply_preserves_committed_runtime() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let mut ports = BTreeMap::new();
+        ports.insert("p1".to_string(), managed("p1", "tap-p1"));
+        let mut port_statuses = BTreeMap::new();
+        port_statuses.insert("p1".to_string(), port_status("p1", "tap-p1", 40));
+        wal.append_snapshot_commit(NeutronWalState {
+            accepted_generation: 40,
+            applied_generation: 40,
+            applied_desired_hash: Some("hash-40".to_string()),
+            authority_state: "ready".to_string(),
+            ports,
+            port_statuses,
+            ..NeutronWalState::default()
+        })
+        .unwrap();
+        wal.append_snapshot_intent(
+            41,
+            Some("hash-41".to_string()),
+            vec!["p1".to_string()],
+            vec![
+                "acl".to_string(),
+                "attach".to_string(),
+                "mirror".to_string(),
+                "qos".to_string(),
+            ],
+            vec![managed("p1", "tap-p1")],
+        )
+        .unwrap();
+
+        let replay = wal.replay();
+
+        assert_eq!("intent_without_commit", replay.status);
+        assert_eq!(40, replay.state.applied_generation);
+        assert_eq!(Some(41), replay.state.pending_generation);
+        assert_eq!("wal_intent_without_commit", replay.state.authority_state);
+        assert!(replay.state.ports.contains_key("p1"));
+        assert_eq!(
+            Some("ready"),
+            replay
+                .state
+                .port_statuses
+                .get("p1")
+                .map(|status| status.status.as_str())
+        );
+        let intent = replay.pending_intent.expect("snapshot intent should replay");
+        assert_eq!("snapshot", intent.kind);
+        assert_eq!(
+            vec![
+                "acl".to_string(),
+                "attach".to_string(),
+                "mirror".to_string(),
+                "qos".to_string(),
+            ],
+            intent.affected_domains
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn snapshot_intent_records_affected_domains() {
         let root = temp_state_path();
         let wal = NeutronWal::new(&root);
@@ -532,6 +606,25 @@ mod tests {
     }
 
     #[test]
+    fn delete_commit_records_status_hash() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        wal.append_delete_commit(NeutronWalState {
+            accepted_generation: 31,
+            applied_generation: 31,
+            authority_state: "ready".to_string(),
+            ..NeutronWalState::default()
+        })
+        .unwrap();
+
+        let raw = fs::read_to_string(root.join(WAL_FILE)).unwrap();
+
+        assert!(raw.contains(r#""type":"delete_commit""#));
+        assert!(raw.contains(r#""status_hash":"#));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn replay_rejects_commit_with_mismatched_status_hash() {
         let root = temp_state_path();
         let wal = NeutronWal::new(&root);
@@ -553,6 +646,42 @@ mod tests {
         assert_eq!("replayed_with_errors", replay.status);
         assert_eq!(1, replay.failures);
         assert_eq!(0, replay.state.applied_generation);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_skips_tampered_latest_commit_and_keeps_previous_good_commit() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        wal.append_snapshot_commit(NeutronWalState {
+            accepted_generation: 50,
+            applied_generation: 50,
+            applied_desired_hash: Some("hash-50".to_string()),
+            authority_state: "ready".to_string(),
+            ..NeutronWalState::default()
+        })
+        .unwrap();
+        wal.append_snapshot_commit(NeutronWalState {
+            accepted_generation: 51,
+            applied_generation: 51,
+            applied_desired_hash: Some("hash-51".to_string()),
+            authority_state: "ready".to_string(),
+            ..NeutronWalState::default()
+        })
+        .unwrap();
+        let path = root.join(WAL_FILE);
+        let raw = fs::read_to_string(&path).unwrap();
+        let mut lines = raw.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+        let last = lines.last_mut().expect("second commit should exist");
+        *last = last.replace(r#""applied_generation":51"#, r#""applied_generation":52"#);
+        fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let replay = wal.replay();
+
+        assert_eq!("replayed_with_errors", replay.status);
+        assert_eq!(1, replay.failures);
+        assert_eq!(50, replay.state.applied_generation);
+        assert_eq!(Some("hash-50".to_string()), replay.state.applied_desired_hash);
         let _ = fs::remove_dir_all(root);
     }
 }
