@@ -64,10 +64,17 @@ pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &[
     ]
 }))]
 pub struct NeutronSnapshotRequest {
+    /// Optional schema version for future UDS contract changes.
+    #[serde(default)]
+    pub schema_version: Option<u32>,
     /// Monotonic generation assigned by neutron-aria-agent.
     #[serde(default)]
     #[schema(example = 101)]
     pub generation: u64,
+    /// Stable hash of desired state excluding generation.
+    #[serde(default)]
+    #[schema(example = "sha256:...")]
+    pub desired_hash: Option<String>,
     /// Neutron host that produced the snapshot.
     #[serde(default)]
     #[schema(example = "ostack2.bj159.net")]
@@ -249,6 +256,45 @@ pub struct ManagedNeutronPort {
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[schema(example = json!({
+    "domain": "acl",
+    "status": "ready",
+    "reason": null
+}))]
+pub struct NeutronDomainStatus {
+    pub domain: String,
+    pub status: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[schema(example = json!({
+    "port_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f",
+    "ifname": "tape607e86b-9e",
+    "generation": 101,
+    "desired_hash": "sha256:...",
+    "status": "ready",
+    "reason": null,
+    "managed_domains": ["acl"],
+    "domains": [{"domain": "acl", "status": "ready", "reason": null}]
+}))]
+pub struct NeutronPortStatus {
+    pub port_id: String,
+    pub ifname: String,
+    pub generation: u64,
+    #[serde(default)]
+    pub desired_hash: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub managed_domains: Vec<String>,
+    #[serde(default)]
+    pub domains: Vec<NeutronDomainStatus>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[schema(example = json!({
     "api_version": "v1",
     "attach_authority": "neutron_snapshot",
     "supports_full_snapshot": true,
@@ -304,8 +350,32 @@ pub struct NeutronStatusResponse {
     /// Latest generation accepted by the UDS runtime.
     #[schema(example = 101)]
     pub generation: u64,
+    /// Latest generation accepted by the single-writer apply engine.
+    #[serde(default)]
+    pub accepted_generation: u64,
+    /// Latest generation fully applied and reported as ready.
+    #[serde(default)]
+    pub applied_generation: u64,
+    /// Generation currently being applied or left pending after a partial error.
+    #[serde(default)]
+    pub pending_generation: Option<u64>,
+    /// Desired hash for the latest accepted generation.
+    #[serde(default)]
+    pub desired_hash: Option<String>,
+    /// Desired hash for the latest fully applied generation.
+    #[serde(default)]
+    pub applied_desired_hash: Option<String>,
+    /// In-memory transaction state until WAL is added.
+    #[serde(default)]
+    pub wal_status: String,
+    /// Overall Neutron authority state.
+    #[serde(default)]
+    pub authority_state: String,
     /// Ports currently attached through the Neutron snapshot authority.
     pub managed_ports: Vec<ManagedNeutronPort>,
+    /// Per-port transaction status.
+    #[serde(default)]
+    pub port_statuses: Vec<NeutronPortStatus>,
     /// All active aria-agent instances, including those outside Neutron authority.
     pub active_instances: Vec<String>,
 }
@@ -328,6 +398,18 @@ pub struct NeutronSnapshotResponse {
     /// Snapshot generation returned after apply.
     #[schema(example = 101)]
     pub generation: u64,
+    /// Desired hash accepted for this snapshot, when supplied by neutron-aria-agent.
+    #[serde(default)]
+    pub desired_hash: Option<String>,
+    /// Latest generation accepted by the local apply engine.
+    #[serde(default)]
+    pub accepted_generation: u64,
+    /// Latest generation fully applied by the local apply engine.
+    #[serde(default)]
+    pub applied_generation: u64,
+    /// Response status: ok, noop, stale, or partial.
+    #[serde(default)]
+    pub status: String,
     /// Per-port apply results.
     pub results: Vec<NeutronPortApplyResult>,
     /// All active aria-agent instances after apply.
@@ -1947,7 +2029,9 @@ mod tests {
     #[test]
     fn neutron_contract_snapshot_roundtrip_preserves_managed_domains() {
         let snapshot = NeutronSnapshotRequest {
+            schema_version: Some(1),
             generation: 42,
+            desired_hash: Some("hash-42".to_string()),
             host: Some("ostack2.bj159.net".to_string()),
             ports: vec![NeutronPortSnapshot {
                 port_id: "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f".to_string(),
@@ -1996,6 +2080,7 @@ mod tests {
             serde_json::from_str(&encoded).expect("snapshot should deserialize");
 
         assert_eq!(decoded, snapshot);
+        assert_eq!(decoded.desired_hash.as_deref(), Some("hash-42"));
         assert_eq!(decoded.ports[0].managed_domains, vec!["acl", "mirror"]);
     }
 
@@ -2006,6 +2091,8 @@ mod tests {
                 .expect("minimal snapshot should deserialize");
 
         assert_eq!(decoded.generation, 0);
+        assert_eq!(decoded.schema_version, None);
+        assert_eq!(decoded.desired_hash, None);
         assert_eq!(decoded.host, None);
         assert_eq!(decoded.ports.len(), 1);
 

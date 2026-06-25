@@ -20,6 +20,7 @@ report_interval = 15
 full_resync_enabled = true
 resync_backoff_initial = 7
 resync_backoff_max = 77
+state_dir = /tmp/neutron-aria-state
 
 [ovs]
 bridge = br-int
@@ -53,6 +54,7 @@ fixture_path = /tmp/aria-acl-fixture.json
             self.assertTrue(config.full_resync_enabled)
             self.assertEqual(7, config.resync_backoff_initial)
             self.assertEqual(77, config.resync_backoff_max)
+            self.assertEqual("/tmp/neutron-aria-state", config.state_dir)
             self.assertEqual("neutronclient", config.port_source)
             self.assertEqual(50, config.port_page_size)
             self.assertTrue(config.rpc_events_enabled)

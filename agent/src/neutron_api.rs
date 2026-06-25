@@ -8,8 +8,8 @@ use axum::{
 use aria_api::{
     action_from_string, direction_from_string, proto_from_string, ManagedNeutronPort,
     NeutronAclRuleSnapshot, NeutronAclSnapshot, NeutronCapabilitiesResponse, NeutronDeleteResponse,
-    NeutronPortApplyResult, NeutronPortSnapshot, NeutronSnapshotRequest, NeutronSnapshotResponse,
-    NeutronStatusResponse,
+    NeutronDomainStatus, NeutronPortApplyResult, NeutronPortSnapshot, NeutronPortStatus,
+    NeutronSnapshotRequest, NeutronSnapshotResponse, NeutronStatusResponse,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,8 +32,21 @@ pub(crate) struct NeutronApiState {
 
 #[derive(Default)]
 struct NeutronRuntimeState {
-    generation: u64,
+    accepted_generation: u64,
+    applied_generation: u64,
+    pending_generation: Option<u64>,
+    desired_hash: Option<String>,
+    applied_desired_hash: Option<String>,
+    authority_state: String,
     ports: BTreeMap<String, ManagedNeutronPort>,
+    port_statuses: BTreeMap<String, NeutronPortStatus>,
+}
+
+#[derive(Debug)]
+struct SnapshotApplyError {
+    status: StatusCode,
+    code: &'static str,
+    details: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,12 +117,31 @@ async fn get_neutron_capabilities() -> impl IntoResponse {
 async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoResponse {
     let runtime = state.runtime.read().await;
     let managed_ports = runtime.ports.values().cloned().collect();
-    let generation = runtime.generation;
+    let generation = runtime.applied_generation;
+    let accepted_generation = runtime.accepted_generation;
+    let applied_generation = runtime.applied_generation;
+    let pending_generation = runtime.pending_generation;
+    let desired_hash = runtime.desired_hash.clone();
+    let applied_desired_hash = runtime.applied_desired_hash.clone();
+    let authority_state = if runtime.authority_state.is_empty() {
+        "idle".to_string()
+    } else {
+        runtime.authority_state.clone()
+    };
+    let port_statuses = runtime.port_statuses.values().cloned().collect();
     drop(runtime);
 
     Json(NeutronStatusResponse {
         generation,
+        accepted_generation,
+        applied_generation,
+        pending_generation,
+        desired_hash,
+        applied_desired_hash,
+        wal_status: "memory_only".to_string(),
+        authority_state,
         managed_ports,
+        port_statuses,
         active_instances: state.registry.list().await,
     })
 }
@@ -121,7 +153,15 @@ async fn put_neutron_snapshot(
     // Keep mutating snapshot apply alive even if the UDS client times out or disconnects.
     let handle = tokio::spawn(apply_neutron_snapshot(state, snapshot));
     match handle.await {
-        Ok(response) => Json(response).into_response(),
+        Ok(Ok(response)) => Json(response).into_response(),
+        Ok(Err(error)) => (
+            error.status,
+            Json(serde_json::json!({
+                "error": error.code,
+                "details": error.details,
+            })),
+        )
+            .into_response(),
         Err(e) => {
             error!(error = %e, "Neutron snapshot apply task failed");
             (
@@ -139,13 +179,73 @@ async fn put_neutron_snapshot(
 async fn apply_neutron_snapshot(
     state: NeutronApiState,
     snapshot: NeutronSnapshotRequest,
-) -> NeutronSnapshotResponse {
+) -> Result<NeutronSnapshotResponse, SnapshotApplyError> {
     let _guard = state.apply_lock.lock().await;
+    let requested_hash = snapshot.desired_hash.clone();
+    let early_response = {
+        let runtime = state.runtime.read().await;
+        if snapshot.generation > 0 && snapshot.generation < runtime.applied_generation {
+            Some(neutron_snapshot_response(
+                snapshot.generation,
+                requested_hash.clone(),
+                runtime.accepted_generation,
+                runtime.applied_generation,
+                "stale",
+                vec![transaction_result(
+                    "snapshot",
+                    "",
+                    "ignore",
+                    "ignored",
+                    Some("stale_generation"),
+                )],
+                Vec::new(),
+            ))
+        } else if snapshot.generation > 0 && snapshot.generation == runtime.applied_generation {
+            if hashes_match(&requested_hash, &runtime.applied_desired_hash) {
+                Some(neutron_snapshot_response(
+                    snapshot.generation,
+                    requested_hash.clone(),
+                    runtime.accepted_generation,
+                    runtime.applied_generation,
+                    "noop",
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            } else if requested_hash.is_some() && runtime.applied_desired_hash.is_some() {
+                return Err(SnapshotApplyError {
+                    status: StatusCode::CONFLICT,
+                    code: "generation_hash_conflict",
+                    details: format!(
+                        "generation {} already applied with a different desired_hash",
+                        snapshot.generation
+                    ),
+                });
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(mut response) = early_response {
+        response.active_instances = state.registry.list().await;
+        return Ok(response);
+    }
+
+    {
+        let mut runtime = state.runtime.write().await;
+        runtime.accepted_generation = snapshot.generation;
+        runtime.pending_generation = Some(snapshot.generation);
+        runtime.desired_hash = requested_hash.clone();
+        runtime.authority_state = "applying".to_string();
+    }
+
     let current_ports = state.runtime.read().await.ports.clone();
     let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
     let plan = build_snapshot_plan(&current_ports, &snapshot, &local_inventory);
 
     let mut next_ports = current_ports;
+    let mut next_statuses = BTreeMap::new();
     let mut results = plan.ignored;
 
     for port in plan.detach {
@@ -160,6 +260,18 @@ async fn apply_neutron_snapshot(
         match state.registry.detach(&port.ifname).await {
             Ok(()) => {
                 next_ports.remove(&port.port_id);
+                next_statuses.insert(
+                    port.port_id.clone(),
+                    port_runtime_status(
+                        &port.port_id,
+                        &port.ifname,
+                        snapshot.generation,
+                        requested_hash.clone(),
+                        port.managed_domains.clone(),
+                        "detached",
+                        None,
+                    ),
+                );
                 state
                     .control_plane
                     .clear_neutron_port_authority(&port.ifname)
@@ -173,6 +285,18 @@ async fn apply_neutron_snapshot(
                 });
             }
             Err(e) => {
+                next_statuses.insert(
+                    port.port_id.clone(),
+                    port_runtime_status(
+                        &port.port_id,
+                        &port.ifname,
+                        snapshot.generation,
+                        requested_hash.clone(),
+                        port.managed_domains.clone(),
+                        "error",
+                        Some(e.clone()),
+                    ),
+                );
                 results.push(NeutronPortApplyResult {
                     port_id: port.port_id,
                     ifname: port.ifname,
@@ -198,6 +322,18 @@ async fn apply_neutron_snapshot(
                     )
                     .await;
                 next_ports.insert(managed.port_id.clone(), managed.clone());
+                next_statuses.insert(
+                    managed.port_id.clone(),
+                    port_runtime_status(
+                        &managed.port_id,
+                        &managed.ifname,
+                        snapshot.generation,
+                        requested_hash.clone(),
+                        managed.managed_domains.clone(),
+                        "ready",
+                        None,
+                    ),
+                );
                 results.push(NeutronPortApplyResult {
                     port_id: managed.port_id,
                     ifname: managed.ifname,
@@ -207,6 +343,18 @@ async fn apply_neutron_snapshot(
                 });
             }
             Err(e) => {
+                next_statuses.insert(
+                    managed.port_id.clone(),
+                    port_runtime_status(
+                        &managed.port_id,
+                        &managed.ifname,
+                        snapshot.generation,
+                        requested_hash.clone(),
+                        managed.managed_domains.clone(),
+                        "error",
+                        Some(e.clone()),
+                    ),
+                );
                 results.push(NeutronPortApplyResult {
                     port_id: managed.port_id,
                     ifname: managed.ifname,
@@ -234,6 +382,18 @@ async fn apply_neutron_snapshot(
                             )
                             .await;
                         next_ports.insert(managed.port_id.clone(), managed.clone());
+                        next_statuses.insert(
+                            managed.port_id.clone(),
+                            port_runtime_status(
+                                &managed.port_id,
+                                &managed.ifname,
+                                snapshot.generation,
+                                requested_hash.clone(),
+                                managed.managed_domains.clone(),
+                                "ready",
+                                None,
+                            ),
+                        );
                         results.push(NeutronPortApplyResult {
                             port_id: managed.port_id,
                             ifname: managed.ifname,
@@ -255,6 +415,18 @@ async fn apply_neutron_snapshot(
                             .control_plane
                             .clear_neutron_port_authority(&port.ifname)
                             .await;
+                        next_statuses.insert(
+                            managed.port_id.clone(),
+                            port_runtime_status(
+                                &managed.port_id,
+                                &managed.ifname,
+                                snapshot.generation,
+                                requested_hash.clone(),
+                                managed.managed_domains.clone(),
+                                "error",
+                                Some(e.to_string()),
+                            ),
+                        );
                         results.push(NeutronPortApplyResult {
                             port_id: managed.port_id,
                             ifname: managed.ifname,
@@ -266,6 +438,18 @@ async fn apply_neutron_snapshot(
                 }
             }
             Err(e) => {
+                next_statuses.insert(
+                    port.port_id.clone(),
+                    port_runtime_status(
+                        &port.port_id,
+                        &port.ifname,
+                        snapshot.generation,
+                        requested_hash.clone(),
+                        port.managed_domains.clone(),
+                        "error",
+                        Some(e.clone()),
+                    ),
+                );
                 results.push(NeutronPortApplyResult {
                     port_id: port.port_id,
                     ifname: port.ifname,
@@ -277,16 +461,109 @@ async fn apply_neutron_snapshot(
         }
     }
 
+    let has_error = results.iter().any(|result| result.status == "error");
     {
         let mut runtime = state.runtime.write().await;
-        runtime.generation = snapshot.generation;
+        runtime.accepted_generation = snapshot.generation;
+        runtime.desired_hash = requested_hash.clone();
         runtime.ports = next_ports;
+        runtime.port_statuses = next_statuses;
+        if has_error {
+            runtime.pending_generation = Some(snapshot.generation);
+            runtime.authority_state = "partial".to_string();
+        } else {
+            runtime.applied_generation = snapshot.generation;
+            runtime.applied_desired_hash = requested_hash.clone();
+            runtime.pending_generation = None;
+            runtime.authority_state = "ready".to_string();
+        }
     }
 
-    NeutronSnapshotResponse {
-        generation: snapshot.generation,
+    Ok(neutron_snapshot_response(
+        snapshot.generation,
+        requested_hash,
+        snapshot.generation,
+        if has_error {
+            state.runtime.read().await.applied_generation
+        } else {
+            snapshot.generation
+        },
+        if has_error { "partial" } else { "ok" },
         results,
-        active_instances: state.registry.list().await,
+        state.registry.list().await,
+    ))
+}
+
+fn hashes_match(left: &Option<String>, right: &Option<String>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn transaction_result(
+    port_id: &str,
+    ifname: &str,
+    action: &str,
+    status: &str,
+    reason: Option<&str>,
+) -> NeutronPortApplyResult {
+    NeutronPortApplyResult {
+        port_id: port_id.to_string(),
+        ifname: ifname.to_string(),
+        action: action.to_string(),
+        status: status.to_string(),
+        reason: reason.map(ToOwned::to_owned),
+    }
+}
+
+fn neutron_snapshot_response(
+    generation: u64,
+    desired_hash: Option<String>,
+    accepted_generation: u64,
+    applied_generation: u64,
+    status: &str,
+    results: Vec<NeutronPortApplyResult>,
+    active_instances: Vec<String>,
+) -> NeutronSnapshotResponse {
+    NeutronSnapshotResponse {
+        generation,
+        desired_hash,
+        accepted_generation,
+        applied_generation,
+        status: status.to_string(),
+        results,
+        active_instances,
+    }
+}
+
+fn port_runtime_status(
+    port_id: &str,
+    ifname: &str,
+    generation: u64,
+    desired_hash: Option<String>,
+    managed_domains: Vec<String>,
+    status: &str,
+    reason: Option<String>,
+) -> NeutronPortStatus {
+    let domains = normalize_managed_domains(&managed_domains)
+        .into_iter()
+        .map(|domain| NeutronDomainStatus {
+            domain,
+            status: status.to_string(),
+            reason: reason.clone(),
+        })
+        .collect();
+    NeutronPortStatus {
+        port_id: port_id.to_string(),
+        ifname: ifname.to_string(),
+        generation,
+        desired_hash,
+        status: status.to_string(),
+        reason,
+        managed_domains,
+        domains,
     }
 }
 
@@ -353,6 +630,7 @@ async fn apply_delete_neutron_port(
             {
                 let mut runtime = state.runtime.write().await;
                 runtime.ports.remove(&port_id);
+                runtime.port_statuses.remove(&port_id);
             }
             state
                 .control_plane
@@ -1180,7 +1458,9 @@ mod tests {
         let current = BTreeMap::new();
         let local = inventory(vec![iface("tap111", "vm-port", Some(11), Some("br-int"))]);
         let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
             generation: 1,
+            desired_hash: None,
             host: None,
             ports: vec![
                 port("vm-port", "tap111", true),
@@ -1212,7 +1492,9 @@ mod tests {
         current.insert("kept-port".to_string(), managed("kept-port", "tap-kept"));
         let local = inventory(vec![iface("tap-kept", "kept-port", Some(12), Some("br-int"))]);
         let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
             generation: 2,
+            desired_hash: None,
             host: None,
             ports: vec![port("kept-port", "tap-kept", true)],
         };
@@ -1234,7 +1516,9 @@ mod tests {
         current.insert("vm-port".to_string(), managed("vm-port", "tap-old"));
         let local = inventory(vec![iface("tap-new", "vm-port", Some(13), Some("br-int"))]);
         let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
             generation: 3,
+            desired_hash: None,
             host: None,
             ports: vec![port("vm-port", "tap-new", true)],
         };
@@ -1254,7 +1538,9 @@ mod tests {
         current.insert("dhcp-port".to_string(), managed("dhcp-port", "tap-dhcp"));
         let local = inventory(vec![iface("tap-dhcp", "dhcp-port", Some(14), Some("br-int"))]);
         let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
             generation: 4,
+            desired_hash: None,
             host: None,
             ports: vec![NeutronPortSnapshot {
                 disposition: Some("device_owner network:dhcp".to_string()),
@@ -1282,7 +1568,9 @@ mod tests {
         );
         let local = inventory(vec![iface("tap-vm", "vm-port", Some(15), Some("br-int"))]);
         let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
             generation: 5,
+            desired_hash: None,
             host: None,
             ports: vec![NeutronPortSnapshot {
                 managed_domains: vec!["acl".to_string(), "qos".to_string()],
@@ -1314,7 +1602,9 @@ mod tests {
         candidate.disposition = Some("pending_local_validation".to_string());
         candidate.managed_domains = vec!["acl".to_string()];
         let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
             generation: 6,
+            desired_hash: None,
             host: None,
             ports: vec![candidate],
         };
@@ -1342,7 +1632,9 @@ mod tests {
             by_name: BTreeMap::new(),
         };
         let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
             generation: 7,
+            desired_hash: None,
             host: None,
             ports: vec![port("vm-port", "", true)],
         };

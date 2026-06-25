@@ -18,6 +18,7 @@ DEFAULT_ACL_SOURCE = ""
 DEFAULT_ACL_FIXTURE_PATH = ""
 DEFAULT_TIMEOUT_CONVERGENCE_ATTEMPTS = 15
 DEFAULT_TIMEOUT_CONVERGENCE_INTERVAL = 1.0
+DEFAULT_STATE_DIR = "/var/lib/neutron-aria-agent/state"
 
 
 class AgentConfig(object):
@@ -43,6 +44,7 @@ class AgentConfig(object):
         event_queue_max_networks=DEFAULT_EVENT_QUEUE_MAX_NETWORKS,
         acl_source=DEFAULT_ACL_SOURCE,
         acl_fixture_path=DEFAULT_ACL_FIXTURE_PATH,
+        state_dir=DEFAULT_STATE_DIR,
     ):
         self.host = host
         self.ovs_bridge = ovs_bridge
@@ -64,6 +66,7 @@ class AgentConfig(object):
         self.event_queue_max_networks = int(event_queue_max_networks)
         self.acl_source = self._normalize_acl_source(acl_source, acl_fixture_path)
         self.acl_fixture_path = acl_fixture_path or DEFAULT_ACL_FIXTURE_PATH
+        self.state_dir = state_dir or DEFAULT_STATE_DIR
 
     def _normalize_acl_source(self, acl_source, acl_fixture_path):
         source = (acl_source or "").strip()
@@ -148,4 +151,5 @@ def load_config(path):
         ),
         acl_source=_get(parser, "acl", "source", DEFAULT_ACL_SOURCE),
         acl_fixture_path=_get(parser, "acl", "fixture_path", DEFAULT_ACL_FIXTURE_PATH),
+        state_dir=_get(parser, "agent", "state_dir", DEFAULT_STATE_DIR),
     )

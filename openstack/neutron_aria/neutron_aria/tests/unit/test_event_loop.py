@@ -1,11 +1,14 @@
 from __future__ import absolute_import
 
+import shutil
+import tempfile
 import unittest
 
 from neutron_aria.agent.effective_acl import EffectiveAclIndex
 from neutron_aria.agent.event_loop import SnapshotSynchronizer
 from neutron_aria.agent.neutron_client import StaticPortSource
 from neutron_aria.agent.ovsdb import OvsInterface
+from neutron_aria.agent.state import SnapshotStateStore
 from neutron_aria.agent.status_reporter import StatusReportError
 from neutron_aria.agent.uds_client import LocalApiTimeoutError
 from neutron_aria.agent.uds_client import LocalApiTransportError
@@ -56,6 +59,8 @@ class TimeoutThenConvergedLocalClient(FakeLocalClient):
         raise LocalApiTimeoutError("timed out")
 
     def status(self):
+        if not self.snapshots:
+            return {"generation": 0, "managed_ports": [], "active_instances": []}
         port_ids = [
             port["port_id"] for port in self.snapshots[-1]["ports"]
             if port.get("eligible") or port.get("managed_domains")
@@ -80,6 +85,21 @@ class TimeoutNotConvergedLocalClient(FakeLocalClient):
             "generation": 0,
             "managed_ports": [],
             "active_instances": [],
+        }
+
+
+class ResponseErrorLocalClient(FakeLocalClient):
+    def put_snapshot(self, snapshot):
+        self.snapshots.append(snapshot)
+        return {
+            "generation": snapshot["generation"],
+            "results": [{
+                "port_id": "p1",
+                "ifname": "tap-p1",
+                "action": "attach",
+                "status": "error",
+                "reason": "boom",
+            }],
         }
 
 
@@ -156,6 +176,7 @@ class EventLoopTestCase(unittest.TestCase):
 
         self.assertEqual([["acl"]], local_client.capability_calls)
         self.assertEqual(1, result["snapshot"]["generation"])
+        self.assertTrue(result["snapshot"]["desired_hash"])
         self.assertTrue(result["status"]["ready"])
         self.assertFalse(result["status"]["degraded"])
         self.assertEqual(1, len(local_client.snapshots))
@@ -167,6 +188,101 @@ class EventLoopTestCase(unittest.TestCase):
             set(["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]),
             sync.projected_port_ids,
         )
+
+    def test_full_resync_reuses_generation_for_same_desired_state(self):
+        port_source = StaticPortSource([{
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+        local_client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+        )
+
+        first = sync.full_resync()
+        second = sync.full_resync()
+
+        self.assertEqual(1, first["snapshot"]["generation"])
+        self.assertEqual(1, second["snapshot"]["generation"])
+        self.assertEqual(
+            first["snapshot"]["desired_hash"],
+            second["snapshot"]["desired_hash"],
+        )
+
+    def test_pending_generation_survives_restart_after_degraded_resync(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            port_source = StaticPortSource([{
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "device_owner": "compute:nova",
+                "binding:host_id": "ostack2",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+            }])
+            first_client = TimeoutNotConvergedLocalClient()
+            first = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                first_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+                timeout_convergence_attempts=1,
+                timeout_convergence_interval=0,
+            )
+
+            result = first.safe_full_resync()
+            self.assertTrue(result["status"]["degraded"])
+            self.assertEqual(1, first_client.snapshots[0]["generation"])
+
+            second_client = FakeLocalClient()
+            second = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                second_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+            )
+            second.full_resync()
+
+            self.assertEqual(1, second_client.snapshots[0]["generation"])
+        finally:
+            shutil.rmtree(state_dir)
+
+    def test_response_port_errors_keep_pending_state_and_degrade(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            sync = SnapshotSynchronizer(
+                "ostack2",
+                StaticPortSource([{
+                    "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "device_owner": "compute:nova",
+                    "binding:host_id": "ostack2",
+                    "binding:vif_type": "ovs",
+                    "binding:vnic_type": "normal",
+                }]),
+                FakeOvsReader(),
+                ResponseErrorLocalClient(),
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+            )
+
+            result = sync.safe_full_resync()
+            state = SnapshotStateStore(state_dir).to_dict()
+
+            self.assertTrue(result["status"]["degraded"])
+            self.assertEqual(1, state["pending_generation"])
+            self.assertEqual(None, state["last_desired_hash"])
+        finally:
+            shutil.rmtree(state_dir)
 
     def test_full_resync_includes_effective_acl_when_index_is_available(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

@@ -4,6 +4,7 @@ import logging
 import time
 
 from neutron_aria.agent.inventory import PortCandidateBuilder
+from neutron_aria.agent.state import InMemorySnapshotStateStore
 from neutron_aria.agent.status import AgentRuntimeStatus
 from neutron_aria.agent.uds_client import LocalApiError
 from neutron_aria.agent.uds_client import LocalApiTimeoutError
@@ -30,6 +31,7 @@ class SnapshotSynchronizer(object):
         local_client,
         managed_domains=None,
         generation_store=None,
+        state_store=None,
         ovs_bridge="br-int",
         runtime_status=None,
         status_reporter=None,
@@ -44,6 +46,7 @@ class SnapshotSynchronizer(object):
         self.local_client = local_client
         self.managed_domains = list(managed_domains or ["acl"])
         self.generation_store = generation_store or GenerationStore()
+        self.state_store = state_store or InMemorySnapshotStateStore()
         self.ovs_bridge = ovs_bridge
         self.runtime_status = runtime_status or AgentRuntimeStatus(host)
         self.status_reporter = status_reporter
@@ -66,19 +69,35 @@ class SnapshotSynchronizer(object):
         )
         snapshot = builder.build_snapshot(
             ports,
-            generation=self.generation_store.next(),
+            generation=0,
         )
+        prepared = self.state_store.prepare_snapshot(snapshot)
+        snapshot["generation"] = prepared["generation"]
+        snapshot["desired_hash"] = prepared["desired_hash"]
         projected_port_ids = self._projected_port_ids(snapshot)
         try:
-            response = self.local_client.put_snapshot(snapshot)
+            response = self._maybe_recover_pending_before_submit(
+                snapshot,
+                projected_port_ids,
+            )
+            if response is None:
+                response = self.local_client.put_snapshot(snapshot)
         except LocalApiTimeoutError as exc:
             response = self._recover_snapshot_timeout(snapshot, projected_port_ids, exc)
+        self._raise_if_response_failed(response)
         self.projected_port_ids = projected_port_ids
         managed_ports = self._response_managed_count(response)
+        self.state_store.commit_snapshot(
+            snapshot["generation"],
+            snapshot.get("desired_hash"),
+            snapshot_ports=len(snapshot["ports"]),
+            managed_ports=managed_ports,
+        )
         self.runtime_status.mark_ready(
             snapshot["generation"],
             len(snapshot["ports"]),
             managed_ports,
+            desired_hash=snapshot.get("desired_hash"),
         )
         heartbeat = self.report_status()
         LOG.info(
@@ -167,6 +186,40 @@ class SnapshotSynchronizer(object):
             return len(response.get("managed_ports") or [])
         return len(response.get("active_instances") or [])
 
+    def _raise_if_response_failed(self, response):
+        errors = [
+            result for result in response.get("results") or []
+            if result.get("status") == "error"
+        ]
+        if errors:
+            raise LocalApiError(
+                "snapshot apply returned port errors: %s" % errors
+            )
+
+    def _maybe_recover_pending_before_submit(self, snapshot, projected_port_ids):
+        try:
+            status = self.local_client.status()
+        except LocalApiError:
+            return None
+        if not self._status_converged(snapshot, projected_port_ids, status):
+            return None
+        LOG.warning(
+            "snapshot_pending_already_converged host=%s generation=%s "
+            "projected_ports=%s managed_ports=%s",
+            self.host,
+            snapshot["generation"],
+            len(projected_port_ids),
+            len(status.get("managed_ports") or []),
+        )
+        return {
+            "generation": snapshot["generation"],
+            "desired_hash": snapshot.get("desired_hash"),
+            "results": [],
+            "active_instances": status.get("active_instances") or [],
+            "managed_ports": status.get("managed_ports") or [],
+            "recovered_before_submit": True,
+        }
+
     def _recover_snapshot_timeout(self, snapshot, projected_port_ids, timeout_error):
         last_error = timeout_error
         for attempt in range(1, self.timeout_convergence_attempts + 1):
@@ -196,6 +249,7 @@ class SnapshotSynchronizer(object):
                     )
                     return {
                         "generation": snapshot["generation"],
+                        "desired_hash": snapshot.get("desired_hash"),
                         "results": [],
                         "active_instances": status.get("active_instances") or [],
                         "managed_ports": status.get("managed_ports") or [],
@@ -278,10 +332,18 @@ class SnapshotSynchronizer(object):
 
     def _status_converged(self, snapshot, projected_port_ids, status):
         try:
-            status_generation = int(status.get("generation") or 0)
+            status_generation = int(
+                status.get("applied_generation") or status.get("generation") or 0
+            )
         except (TypeError, ValueError):
             return False
         if status_generation < int(snapshot["generation"]):
+            return False
+        status_hash = (
+            status.get("applied_desired_hash") or
+            status.get("desired_hash")
+        )
+        if status_hash and snapshot.get("desired_hash") and status_hash != snapshot.get("desired_hash"):
             return False
 
         if not projected_port_ids:

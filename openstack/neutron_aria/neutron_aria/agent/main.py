@@ -17,6 +17,7 @@ from neutron_aria.agent.rpc import AriaAgentRpcCallback
 from neutron_aria.agent.rpc import build_rpc_connection
 from neutron_aria.agent.rpc import start_rpc_consumers
 from neutron_aria.agent.service import AgentService
+from neutron_aria.agent.state import SnapshotStateStore
 from neutron_aria.agent.status_reporter import build_neutron_status_reporter
 from neutron_aria.agent.uds_client import LocalClient
 
@@ -66,6 +67,7 @@ def build_synchronizer(config, neutron_port_source=None, status_reporter=None):
         ovs_bridge=config.ovs_bridge,
         status_reporter=status_reporter,
         acl_index=build_acl_index(config),
+        state_store=SnapshotStateStore(config.state_dir),
         timeout_convergence_attempts=config.timeout_convergence_attempts,
         timeout_convergence_interval=config.timeout_convergence_interval,
     )
@@ -170,7 +172,7 @@ def main(argv=None):
     LOG.info(
         "agent_start host=%s managed_domains=%s full_resync_enabled=%s "
         "rpc_events_enabled=%s port_source=%s ovs_bridge=%s socket_path=%s "
-        "acl_source=%s acl_fixture_enabled=%s",
+        "acl_source=%s acl_fixture_enabled=%s state_dir=%s",
         host,
         ",".join(config.managed_domains),
         config.full_resync_enabled,
@@ -180,6 +182,7 @@ def main(argv=None):
         config.socket_path,
         config.acl_source,
         bool(config.acl_fixture_path),
+        config.state_dir,
     )
     status_reporter = build_neutron_status_reporter(host, config)
     event_merger = None

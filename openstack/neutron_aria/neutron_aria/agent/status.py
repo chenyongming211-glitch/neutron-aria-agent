@@ -15,16 +15,18 @@ class AgentRuntimeStatus(object):
         self.reason = "not_synced"
         self.last_error = None
         self.last_generation = 0
+        self.last_desired_hash = None
         self.last_snapshot_ports = 0
         self.last_managed_ports = 0
         self.updated_at = None
 
-    def mark_ready(self, generation, snapshot_ports, managed_ports):
+    def mark_ready(self, generation, snapshot_ports, managed_ports, desired_hash=None):
         self.ready = True
         self.degraded = False
         self.reason = "ready"
         self.last_error = None
         self.last_generation = generation
+        self.last_desired_hash = desired_hash
         self.last_snapshot_ports = snapshot_ports
         self.last_managed_ports = managed_ports
         self.updated_at = time.time()
@@ -45,6 +47,7 @@ class AgentRuntimeStatus(object):
             "reason": self.reason,
             "last_error": self.last_error,
             "last_generation": self.last_generation,
+            "last_desired_hash": self.last_desired_hash,
             "last_snapshot_ports": self.last_snapshot_ports,
             "last_managed_ports": self.last_managed_ports,
             "updated_at": self.updated_at,
