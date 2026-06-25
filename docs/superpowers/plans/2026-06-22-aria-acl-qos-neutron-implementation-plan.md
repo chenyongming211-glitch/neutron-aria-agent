@@ -1994,6 +1994,8 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
   snapshot after intent, port after attach, ACL after disable/purge/group
   write/policy write/before enable/after enable, snapshot before/after commit,
   and delete after intent/ACL purge/detach-before-commit.
+- [x] Add one-shot fault marker support so `sigkill`/abort smoke can trigger a
+  datapath crash once and then allow restart replay/full-resync to complete.
 - [x] Track per-port/per-domain result for applied ready/error ports.
 - [x] Block ACL mutation when the same port snapshot also requests an
   unimplemented QoS/Mirror transaction domain.
@@ -2127,6 +2129,8 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
 - [ ] Process-level crash injection: kill `aria-datapath` after WAL intent,
   after attach, after partial ACL map write, after delete detach, and before
   WAL commit.
+  `sigkill` cut points must use a one-shot marker under `/run/aria` so the
+  restarted container can recover instead of re-triggering the same fault.
 - [ ] VM migration smoke: old host cleanup and new host full-resync both
   converge without stale managed pins.
 - [ ] Tap recreate smoke: deleted/recreated tap with the same Neutron port ID is

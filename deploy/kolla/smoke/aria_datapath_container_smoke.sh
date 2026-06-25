@@ -24,6 +24,12 @@ UDS_READY_RETRIES="${UDS_READY_RETRIES:-20}"
 UDS_READY_INTERVAL="${UDS_READY_INTERVAL:-1}"
 REQUIRE_NO_ACTIVE_INSTANCES="${REQUIRE_NO_ACTIVE_INSTANCES:-true}"
 PYTHON_BIN="${PYTHON_BIN:-}"
+FAULT_INJECTION_ENABLED="${FAULT_INJECTION_ENABLED:-}"
+FAULT_POINT="${FAULT_POINT:-}"
+FAULT_ACTION="${FAULT_ACTION:-}"
+FAULT_AFTER_HITS="${FAULT_AFTER_HITS:-}"
+FAULT_SLEEP_MS="${FAULT_SLEEP_MS:-}"
+FAULT_ONCE_FILE="${FAULT_ONCE_FILE:-}"
 
 die() {
     echo "ERROR: $*" >&2
@@ -169,6 +175,25 @@ start_container() {
         -v /sys/fs/bpf:/sys/fs/bpf:shared
         -v "${STATE_DIR}:/var/lib/aria-agent:rw"
     )
+
+    if [ -n "${FAULT_INJECTION_ENABLED}" ]; then
+        docker_run_args+=(-e "ARIA_ENABLE_FAULT_INJECTION=${FAULT_INJECTION_ENABLED}")
+    fi
+    if [ -n "${FAULT_POINT}" ]; then
+        docker_run_args+=(-e "ARIA_FAULT_POINT=${FAULT_POINT}")
+    fi
+    if [ -n "${FAULT_ACTION}" ]; then
+        docker_run_args+=(-e "ARIA_FAULT_ACTION=${FAULT_ACTION}")
+    fi
+    if [ -n "${FAULT_AFTER_HITS}" ]; then
+        docker_run_args+=(-e "ARIA_FAULT_AFTER_HITS=${FAULT_AFTER_HITS}")
+    fi
+    if [ -n "${FAULT_SLEEP_MS}" ]; then
+        docker_run_args+=(-e "ARIA_FAULT_SLEEP_MS=${FAULT_SLEEP_MS}")
+    fi
+    if [ -n "${FAULT_ONCE_FILE}" ]; then
+        docker_run_args+=(-e "ARIA_FAULT_ONCE_FILE=${FAULT_ONCE_FILE}")
+    fi
 
     if [ -f /sys/kernel/btf/vmlinux ]; then
         docker_run_args+=(-v /sys/kernel/btf/vmlinux:/sys/kernel/btf/vmlinux:ro)

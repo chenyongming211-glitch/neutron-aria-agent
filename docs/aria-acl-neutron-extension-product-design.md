@@ -1515,6 +1515,8 @@ neutron.delete.after_detach_before_commit
 
 fault injection 默认关闭，只能通过 datapath 本机测试配置或环境变量显式打开，不能暴露成租户 API 或 Neutron northbound API。
 
+进程级 kill 类测试必须配置一次性 marker，例如 `ARIA_FAULT_ONCE_FILE=/run/aria/fault.once`。触发点在执行故障动作前先原子创建 marker，容器重启后如果 marker 已存在就跳过同一故障点。这样可以稳定验证“第一次 apply 中途崩溃、重启后 replay/full-resync 恢复”，不会因为同一个环境变量在 `--restart unless-stopped` 容器里反复触发而形成重启循环。
+
 ### 10.3 本机写入保护
 
 OpenStack mode 下，本机 API 必须拒绝对 Neutron-managed port 的 ACL 写入：

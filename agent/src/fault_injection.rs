@@ -1,4 +1,7 @@
 use std::env;
+use std::fs;
+use std::io::{self, Write};
+use std::path::Path;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -20,6 +23,7 @@ struct FaultConfig {
     point: String,
     after_hits: u64,
     action: FaultAction,
+    once_file: Option<String>,
 }
 
 impl FaultConfig {
@@ -56,11 +60,15 @@ impl FaultConfig {
             }
             _ => FaultAction::ReturnError,
         };
+        let once_file = env::var("ARIA_FAULT_ONCE_FILE")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
 
         Some(Self {
             point,
             after_hits,
             action,
+            once_file,
         })
     }
 
@@ -80,6 +88,17 @@ pub(crate) async fn check(point: &str) -> Result<(), String> {
     let hit = MATCHED_HITS.fetch_add(1, Ordering::SeqCst) + 1;
     if hit < config.after_hits {
         return Ok(());
+    }
+    if let Some(path) = config.once_file.as_deref() {
+        match mark_once(path, point, hit) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(format!("fault once marker write failed at {}: {}", path, e));
+            }
+        }
     }
 
     warn!(
@@ -106,6 +125,38 @@ pub(crate) async fn check(point: &str) -> Result<(), String> {
     }
 }
 
+fn mark_once(path: &str, point: &str, hit: u64) -> io::Result<bool> {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(Path::new(path))
+    {
+        Ok(mut file) => {
+            writeln!(file, "point={} hit={}", point, hit)?;
+            file.sync_all()?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+fn temp_once_path(name: &str) -> String {
+    let suffix = MATCHED_HITS.fetch_add(1, Ordering::SeqCst);
+    env::temp_dir()
+        .join(format!("aria-fault-injection-{}-{}", name, suffix))
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(test)]
+fn remove_file_if_exists(path: &str) {
+    if Path::new(path).exists() {
+        let _ = fs::remove_file(path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +167,7 @@ mod tests {
             point: "neutron.acl.after_purge".to_string(),
             after_hits: 1,
             action: FaultAction::ReturnError,
+            once_file: None,
         };
         assert!(exact.matches("neutron.acl.after_purge"));
         assert!(!exact.matches("neutron.acl.after_group_write"));
@@ -124,8 +176,24 @@ mod tests {
             point: "*".to_string(),
             after_hits: 1,
             action: FaultAction::ReturnError,
+            once_file: None,
         };
         assert!(wildcard.matches("neutron.acl.after_purge"));
         assert!(wildcard.matches("neutron.snapshot.before_commit"));
+    }
+
+    #[test]
+    fn mark_once_creates_marker_only_once() {
+        let path = temp_once_path("marker");
+        remove_file_if_exists(&path);
+
+        assert!(mark_once(&path, "neutron.acl.after_policy_write", 1).unwrap());
+        assert!(!mark_once(&path, "neutron.acl.after_policy_write", 2).unwrap());
+
+        let marker = fs::read_to_string(&path).unwrap();
+        assert!(marker.contains("point=neutron.acl.after_policy_write"));
+        assert!(marker.contains("hit=1"));
+
+        remove_file_if_exists(&path);
     }
 }

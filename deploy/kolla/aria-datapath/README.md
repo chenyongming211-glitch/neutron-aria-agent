@@ -67,3 +67,19 @@ which proves local OVS validation is happening inside `aria-datapath`.
 The smoke is intentionally non-destructive. It does not create a test VM port
 or add an interface to `br-int`; real eligible-port attach/cleanup should be
 run as a separate live-environment gate with an explicit test VM port.
+
+For deterministic datapath crash testing, the same smoke entrypoint can pass
+fault-injection environment variables into the container:
+
+```bash
+sudo FAULT_INJECTION_ENABLED=1 \
+  FAULT_POINT=neutron.acl.after_policy_write \
+  FAULT_ACTION=sigkill \
+  FAULT_ONCE_FILE=/run/aria/fault-after-policy.once \
+  deploy/kolla/smoke/aria_datapath_container_smoke.sh
+```
+
+Fault injection is disabled by default and is intended only for CI or live
+smoke validation. `FAULT_ONCE_FILE` should be used for crash actions so a
+restarted `--restart unless-stopped` container can recover instead of
+re-triggering the same fault point forever.
