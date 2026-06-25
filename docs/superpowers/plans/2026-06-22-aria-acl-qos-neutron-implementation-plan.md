@@ -1987,6 +1987,13 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
   - mirror entries only in second phase.
 - [x] Write WAL intent before runtime mutation.
 - [x] Apply runtime diff with cleanup hooks.
+- [x] ACL apply uses gate-first semantics: disable ACL/bypass before purging or
+  writing Neutron-owned ACL maps, then enable ACL only after all groups,
+  policies, and conntrack cleanup succeed.
+- [x] Add deterministic Rust fault-injection hooks for transaction cut points:
+  snapshot after intent, port after attach, ACL after disable/purge/group
+  write/policy write/before enable/after enable, snapshot before/after commit,
+  and delete after intent/ACL purge/detach-before-commit.
 - [x] Track per-port/per-domain result for applied ready/error ports.
 - [x] Block ACL mutation when the same port snapshot also requests an
   unimplemented QoS/Mirror transaction domain.
@@ -2004,7 +2011,7 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
 - [x] Delete of unknown port returns success `not_found` and does not change
   generation.
 - [x] Delete of known port writes WAL intent before detach.
-- [ ] Detach runtime and remove managed authority for that port.
+- [x] Detach runtime and remove managed authority for that port.
 - [ ] Clean ACL/QoS/Mirror scoped runtime entries owned by that port/domain.
   **Current code purges ACL-owned state. QoS/Mirror cleanup remains tied to the
   future QoS/Mirror executors.**
@@ -2099,6 +2106,9 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
 - [ ] Snapshot crash after intent but before apply recovers as degraded/blocked.
 - [ ] Snapshot crash after partial apply but before commit recovers by scrub or
   full resync.
+- [ ] ACL fault-injection smoke proves `after_purge`,
+  `after_group_write`, `after_policy_write`, and `before_enable` leave the port
+  in bypass rather than enforcing partial ACL state.
 - [x] Python agent restart recovers a converged pending snapshot before
   resubmit.
 - [x] Python agent restart blocks a pending snapshot hash mismatch.

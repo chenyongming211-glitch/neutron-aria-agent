@@ -19,6 +19,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{error, warn};
 
 use crate::control_plane::ControlPlane;
+use crate::fault_injection;
 use crate::neutron_wal::{NeutronWal, NeutronWalState, PendingNeutronIntent};
 use crate::tap_registry::TapRegistry;
 
@@ -648,6 +649,13 @@ async fn apply_neutron_snapshot(
         runtime.authority_state = "applying".to_string();
         runtime.wal_status = "intent_written".to_string();
     }
+    if let Err(e) = fault_injection::check("neutron.snapshot.after_intent").await {
+        return Err(SnapshotApplyError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "fault_injection",
+            details: e,
+        });
+    }
 
     let mut next_ports = current_ports;
     let mut next_statuses = BTreeMap::new();
@@ -776,6 +784,24 @@ async fn apply_neutron_snapshot(
     for port in plan.attach {
         match state.registry.attach(&port.ifname).await {
             Ok(()) => {
+                if let Err(e) = fault_injection::check("neutron.port.after_attach").await {
+                    if let Err(detach_err) = state.registry.detach(&port.ifname).await {
+                        warn!(
+                            port_id = %port.port_id,
+                            ifname = %port.ifname,
+                            error = %detach_err,
+                            "failed to detach after fault injection at port attach"
+                        );
+                    }
+                    results.push(NeutronPortApplyResult {
+                        port_id: port.port_id,
+                        ifname: port.ifname,
+                        action: "attach".to_string(),
+                        status: "error".to_string(),
+                        reason: Some(e),
+                    });
+                    continue;
+                }
                 let managed = managed_port_from_snapshot(&port);
                 let domain_result = reconcile_neutron_domains(&state, &port).await;
                 if domain_result.ok {
@@ -900,6 +926,13 @@ async fn apply_neutron_snapshot(
         next_runtime.authority_state = "ready".to_string();
     }
 
+    if let Err(e) = fault_injection::check("neutron.snapshot.before_commit").await {
+        return Err(SnapshotApplyError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "fault_injection",
+            details: e,
+        });
+    }
     if let Err(e) = state.wal.append_snapshot_commit(next_runtime.to_wal_state()) {
         let mut runtime = state.runtime.write().await;
         runtime.pending_generation = Some(snapshot.generation);
@@ -908,6 +941,13 @@ async fn apply_neutron_snapshot(
         return Err(SnapshotApplyError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "wal_commit_failed",
+            details: e,
+        });
+    }
+    if let Err(e) = fault_injection::check("neutron.snapshot.after_commit").await {
+        return Err(SnapshotApplyError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "fault_injection",
             details: e,
         });
     }
@@ -1183,6 +1223,18 @@ async fn apply_delete_neutron_port(
             },
         );
     }
+    if let Err(e) = fault_injection::check("neutron.delete.after_intent").await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            NeutronDeleteResponse {
+                port_id: port.port_id,
+                ifname: Some(port.ifname),
+                detached: false,
+                status: "error".to_string(),
+                error: Some(e),
+            },
+        );
+    }
 
     if let Err(e) = purge_neutron_acl(&state, &port.ifname, &port.port_id).await {
         warn!(
@@ -1190,6 +1242,18 @@ async fn apply_delete_neutron_port(
             ifname = %port.ifname,
             error = %e,
             "failed to purge Neutron ACL during port delete"
+        );
+    }
+    if let Err(e) = fault_injection::check("neutron.delete.after_acl_purge").await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            NeutronDeleteResponse {
+                port_id: port.port_id,
+                ifname: Some(port.ifname),
+                detached: false,
+                status: "error".to_string(),
+                error: Some(e),
+            },
         );
     }
 
@@ -1202,6 +1266,20 @@ async fn apply_delete_neutron_port(
             next_runtime.ports.remove(&port_id);
             next_runtime.port_statuses.remove(&port_id);
             next_runtime.wal_status = "commit_written".to_string();
+            if let Err(e) =
+                fault_injection::check("neutron.delete.after_detach_before_commit").await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    NeutronDeleteResponse {
+                        port_id: port.port_id,
+                        ifname: Some(port.ifname),
+                        detached: true,
+                        status: "error".to_string(),
+                        error: Some(e),
+                    },
+                );
+            }
             if let Err(e) = state.wal.append_delete_commit(next_runtime.to_wal_state()) {
                 let mut runtime = state.runtime.write().await;
                 runtime.pending_generation = Some(generation);
@@ -1898,26 +1976,24 @@ async fn reconcile_neutron_acl(
         return Ok(());
     }
 
+    state
+        .control_plane
+        .update_config(&port.ifname, None, None, Some(false), None, None, None, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    fault_injection::check("neutron.acl.after_disable").await?;
+
     purge_neutron_acl(state, &port.ifname, &port.port_id).await?;
+    fault_injection::check("neutron.acl.after_purge").await?;
 
     let Some(acl) = &port.acl else {
         flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id).await?;
-        state
-            .control_plane
-            .update_config(&port.ifname, None, None, Some(false), None, None, None, None)
-            .await
-            .map_err(|e| e.to_string())?;
         return Ok(());
     };
 
     let plan = translate_neutron_acl(&port.port_id, acl)?;
     if plan.policies.is_empty() {
         flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id).await?;
-        state
-            .control_plane
-            .update_config(&port.ifname, None, None, Some(false), None, None, None, None)
-            .await
-            .map_err(|e| e.to_string())?;
         return Ok(());
     }
 
@@ -1931,6 +2007,7 @@ async fn reconcile_neutron_acl(
                     .await;
                 return Err(e.to_string());
             }
+            fault_injection::check("neutron.acl.after_group_write").await?;
         }
     }
 
@@ -1955,14 +2032,17 @@ async fn reconcile_neutron_acl(
                 .await;
             return Err(e.to_string());
         }
+        fault_injection::check("neutron.acl.after_policy_write").await?;
     }
 
     flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id).await?;
+    fault_injection::check("neutron.acl.before_enable").await?;
     state
         .control_plane
         .update_config(&port.ifname, None, None, Some(true), None, None, None, None)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    fault_injection::check("neutron.acl.after_enable_before_commit").await
 }
 
 fn build_snapshot_plan(

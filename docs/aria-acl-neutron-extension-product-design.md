@@ -1478,6 +1478,43 @@ effective_action = bypass
 不影响 OVS L2 forwarding
 ```
 
+#### 10.2.1 ACL gate-first apply 与崩溃安全
+
+Neutron-managed ACL 的数据面 apply 必须避免暴露“半写入”的 eBPF map 状态。对一个被 Neutron 接管的 VM tap port，ACL apply 顺序固定为：
+
+```text
+1. WAL snapshot intent 已经写入
+2. 将该 port 的 ACL runtime gate 设置为 disabled / bypass
+3. 清理旧的 Neutron-owned ACL groups / policies
+4. 写入本次翻译后的 ACL address groups
+5. 写入本次翻译后的 ACL policies
+6. 按需 flush 该 port 的 conntrack
+7. 将该 port 的 ACL runtime gate 设置为 enabled
+8. 写入 WAL commit 和最终 per-port / per-domain status
+```
+
+如果 Rust 进程在步骤 2 到步骤 7 之间退出，该 port 必须保持 `bypass`，不能执行半套 ACL。下一次 full resync 可以重放同一个 desired state 或更高 generation，但只有 ACL gate 重新 enabled 且 WAL commit/status 持久化后，才能报告该 domain 为 `ready`。
+
+崩溃验证必须使用确定性的 fault-injection 点，而不是随机 kill 进程。测试专用 fault point 包括：
+
+```text
+neutron.snapshot.after_intent
+neutron.port.after_attach
+neutron.acl.after_disable
+neutron.acl.after_purge
+neutron.acl.after_group_write
+neutron.acl.after_policy_write
+neutron.acl.before_enable
+neutron.acl.after_enable_before_commit
+neutron.snapshot.before_commit
+neutron.snapshot.after_commit
+neutron.delete.after_intent
+neutron.delete.after_acl_purge
+neutron.delete.after_detach_before_commit
+```
+
+fault injection 默认关闭，只能通过 datapath 本机测试配置或环境变量显式打开，不能暴露成租户 API 或 Neutron northbound API。
+
 ### 10.3 本机写入保护
 
 OpenStack mode 下，本机 API 必须拒绝对 Neutron-managed port 的 ACL 写入：
