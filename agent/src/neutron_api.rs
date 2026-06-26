@@ -2129,7 +2129,7 @@ fn build_snapshot_plan(
     if inventory.is_authoritative() {
         for (port_id, managed) in current {
             match desired.get(port_id) {
-                Some(port) if port.ifname == managed.ifname => {}
+                Some(port) if managed_binding_matches(managed, port) => {}
                 _ => detach.push(managed.clone()),
             }
         }
@@ -2139,7 +2139,7 @@ fn build_snapshot_plan(
     let mut update = Vec::new();
     for (port_id, port) in desired {
         match current.get(&port_id) {
-            Some(managed) if managed.ifname == port.ifname => {
+            Some(managed) if managed_binding_matches(managed, &port) => {
                 update.push(port);
             }
             _ if desired_ids.contains(&port_id) => {
@@ -2157,6 +2157,16 @@ fn build_snapshot_plan(
     }
 }
 
+fn managed_binding_matches(managed: &ManagedNeutronPort, port: &NeutronPortSnapshot) -> bool {
+    if managed.ifname != port.ifname {
+        return false;
+    }
+    match (managed.ifindex, port.ifindex) {
+        (Some(managed_ifindex), Some(port_ifindex)) => managed_ifindex == port_ifindex,
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2167,6 +2177,13 @@ mod tests {
             ifname: ifname.to_string(),
             ifindex: None,
             managed_domains: Vec::new(),
+        }
+    }
+
+    fn managed_with_ifindex(port_id: &str, ifname: &str, ifindex: u32) -> ManagedNeutronPort {
+        ManagedNeutronPort {
+            ifindex: Some(ifindex),
+            ..managed(port_id, ifname)
         }
     }
 
@@ -2295,6 +2312,35 @@ mod tests {
         assert_eq!(plan.detach, vec![managed("vm-port", "tap-old")]);
         assert_eq!(plan.attach.len(), 1);
         assert_eq!(plan.attach[0].ifname, "tap-new");
+        assert!(plan.update.is_empty());
+        assert!(plan.ignored.is_empty());
+    }
+
+    #[test]
+    fn neutron_snapshot_plan_reattaches_when_ifindex_changes() {
+        let mut current = BTreeMap::new();
+        current.insert(
+            "vm-port".to_string(),
+            managed_with_ifindex("vm-port", "tap-vm", 52),
+        );
+        let local = inventory(vec![iface("tap-vm", "vm-port", Some(53), Some("br-int"))]);
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 4,
+            desired_hash: None,
+            host: None,
+            ports: vec![port("vm-port", "tap-vm", true)],
+        };
+
+        let plan = build_snapshot_plan(&current, &snapshot, &local);
+
+        assert_eq!(
+            plan.detach,
+            vec![managed_with_ifindex("vm-port", "tap-vm", 52)]
+        );
+        assert_eq!(plan.attach.len(), 1);
+        assert_eq!(plan.attach[0].ifname, "tap-vm");
+        assert_eq!(plan.attach[0].ifindex, Some(53));
         assert!(plan.update.is_empty());
         assert!(plan.ignored.is_empty());
     }
