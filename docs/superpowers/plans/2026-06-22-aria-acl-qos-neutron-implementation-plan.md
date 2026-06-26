@@ -2133,9 +2133,9 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
 - [x] Delete detach process-level crash injection: kill `aria-datapath` after
   port detach and before WAL commit, then prove retry/full-resync cleanup
   converges without breaking baseline VM connectivity.
-- [ ] VM migration smoke: old host cleanup and new host full-resync both
+- [x] VM migration smoke: old host cleanup and new host full-resync both
   converge without stale managed pins.
-- [ ] Tap recreate smoke: deleted/recreated tap with the same Neutron port ID is
+- [x] Tap recreate smoke: deleted/recreated tap with the same Neutron port ID is
   reclaimed or reattached by full resync.
 
 **Live smoke record, 2026-06-25:**
@@ -2188,10 +2188,41 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
   `authority_state=ready`, `pending_generation=null`,
   `wal_replay_failures=0`, and `managed_ports=[]`.
 
-Remaining crash gates:
+**Live smoke record, 2026-06-26:**
 
-- Add VM migration and tap recreate smoke after a controlled migration test VM
-  is available.
+- Added and ran `neutron_aria_tap_recreate_smoke.sh` with test VM
+  `de981869-29c2-4465-8804-e293fed53184`, port
+  `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f`, tap `tape607e86b-9e`, and VM IP
+  `10.58.159.27`.
+- The first tap recreate run exposed a Python control-plane transaction gap:
+  same `generation` / `desired_hash` full-resync was incorrectly treated as
+  already converged and skipped the UDS PUT. This prevented the datapath from
+  revalidating a recreated tap. The fix limits the
+  `recovered_before_submit` short-circuit to genuinely reused pending
+  snapshots; normal full-resync always submits to datapath for authoritative
+  runtime validation.
+- The second tap recreate run exposed a Rust datapath plan gap: same ifname with
+  changed ifindex was treated as an `update`, so status moved to the new ifindex
+  but XDP was not reattached. The fix treats same-port/same-ifname/different
+  ifindex as binding drift and plans `detach + attach`.
+- Final tap recreate smoke passed on `ostack2.bj159.net`: baseline attach used
+  ifindex `53`, hard reboot recreated the tap as ifindex `54`, full-resync
+  reused generation `53`, reattached the port, confirmed XDP, kept VM
+  connectivity, and rollback returned `managed_ports=[]`.
+- Added and ran `neutron_aria_vm_migration_smoke.sh` in both directions:
+  `ostack2.bj159.net -> ostack3.bj159.net` and
+  `ostack3.bj159.net -> ostack2.bj159.net`.
+- Migration source phase attaches the source tap, triggers Nova live migration,
+  waits for server and Neutron port binding to move, waits for source tap
+  absence, then full-resyncs the old host and requires the target port to be
+  absent from `managed_ports`.
+- Migration destination phase full-resyncs the new host, requires the target
+  port to become managed with the local ifindex, verifies XDP attachment and VM
+  reachability, then rolls back.
+- Final state after the bidirectional migration smoke: VM and Neutron port are
+  back on `ostack2.bj159.net`; `ostack2` and `ostack3` both report
+  `authority_state=ready`, `pending_generation=null`, `wal_replay_failures=0`,
+  and `managed_ports=[]`.
 
 **Visible result after completion:**
 
@@ -2257,8 +2288,8 @@ executor and cleanup path exist.
 - [ ] `neutron port-show` shows `aria_acl_*`.
 - [x] `neutron agent-list` shows Aria agent alive.
 - [ ] Full resync after agent restart.
-- [ ] Port migration source cleanup and destination apply.
-- [ ] VM reboot/tap recreate recovery.
+- [x] Port migration source cleanup and destination apply.
+- [x] VM reboot/tap recreate recovery.
 - [ ] Datapath restart after snapshot preserves or reconciles committed state.
 - [ ] Python agent restart reuses generation state and converges by full resync.
 - [ ] Second phase: `neutron ext-show aria-mirror`.
@@ -2278,6 +2309,8 @@ executor and cleanup path exist.
 - [x] One-host ACL allow/deny smoke through fixture source.
 - [x] UDS mutation timeout recovery smoke with low request timeout.
 - [x] Delete detach crash recovery smoke with one-shot datapath `sigkill`.
+- [x] VM reboot/tap recreate recovery smoke.
+- [x] VM migration source cleanup and destination apply smoke.
 - [ ] Second phase: same-host VM tap mirror behavior.
 - [ ] Second phase: physical capture NIC to local analyzer VM in a lab.
 
