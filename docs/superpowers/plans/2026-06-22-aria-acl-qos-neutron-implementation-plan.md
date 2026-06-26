@@ -2127,10 +2127,12 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
 - [ ] WAL commit failure does not report ready.
 - [ ] Restart after successful snapshot preserves committed managed ports.
 - [ ] Process-level crash injection: kill `aria-datapath` after WAL intent,
-  after attach, after partial ACL map write, after delete detach, and before
-  WAL commit.
+  after attach, after partial ACL map write, and before WAL commit.
   `sigkill` cut points must use a one-shot marker under `/run/aria` so the
   restarted container can recover instead of re-triggering the same fault.
+- [x] Delete detach process-level crash injection: kill `aria-datapath` after
+  port detach and before WAL commit, then prove retry/full-resync cleanup
+  converges without breaking baseline VM connectivity.
 - [ ] VM migration smoke: old host cleanup and new host full-resync both
   converge without stale managed pins.
 - [ ] Tap recreate smoke: deleted/recreated tap with the same Neutron port ID is
@@ -2169,10 +2171,25 @@ startup scrub/reconcile for deep pinned/runtime mismatch cases are not complete.
   `authority_state=wal_intent_without_commit`, no managed ports, and reachable
   VM traffic; the second run recovered, verified ACL block, and rollback
   returned `managed_ports=[]`.
+- Added and ran `neutron_aria_delete_fault_injection_smoke.sh` on `ostack2`.
+  The automated smoke uses the real VM port
+  `e607e86b-9e5f-4c63-a5df-3dc8986a1b0f` / `tape607e86b-9e`, applies an ACL
+  snapshot without rollback, triggers
+  `neutron.delete.after_detach_before_commit` with one-shot `sigkill`, verifies
+  the fault marker, and requires the VM to remain reachable after the
+  interrupted delete.
+- The delete fault gate accepts two valid recovery branches:
+  `wal_status=intent_without_commit` with
+  `authority_state=wal_intent_without_commit`, or `wal_status=intent_recovered`
+  with `authority_state=recovered_pending_full_resync` and a recovered target
+  port status. In both cases, retrying delete must be idempotent and remove the
+  target port from the managed set.
+- Final cleanup restarts `aria-datapath` without fault injection and requires
+  `authority_state=ready`, `pending_generation=null`,
+  `wal_replay_failures=0`, and `managed_ports=[]`.
 
 Remaining crash gates:
 
-- Add delete detach cut-point smoke with a real managed port.
 - Add VM migration and tap recreate smoke after a controlled migration test VM
   is available.
 
@@ -2260,6 +2277,7 @@ executor and cleanup path exist.
 - [ ] Rollback behavior.
 - [x] One-host ACL allow/deny smoke through fixture source.
 - [x] UDS mutation timeout recovery smoke with low request timeout.
+- [x] Delete detach crash recovery smoke with one-shot datapath `sigkill`.
 - [ ] Second phase: same-host VM tap mirror behavior.
 - [ ] Second phase: physical capture NIC to local analyzer VM in a lab.
 
