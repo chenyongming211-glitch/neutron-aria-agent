@@ -11,6 +11,7 @@ HOST_FQDN="${HOST_FQDN:-$(hostname -f)}"
 ADMINRC="${ADMINRC:-/root/adminrc}"
 STOP_EMBEDDED_SMOKE="${STOP_EMBEDDED_SMOKE:-true}"
 BUILD_IMAGE="${BUILD_IMAGE:-true}"
+DOCKER_BUILD_NO_CACHE="${DOCKER_BUILD_NO_CACHE:-false}"
 MOUNT_RUN_ARIA="${MOUNT_RUN_ARIA:-false}"
 RUN_ARIA_DIR="${RUN_ARIA_DIR:-/run/aria}"
 PRIVILEGED="${PRIVILEGED:-false}"
@@ -24,7 +25,12 @@ if [ "${BUILD_IMAGE}" = "true" ]; then
         BASE_IMAGE="$(docker inspect "${BASE_CONTAINER}" --format '{{.Config.Image}}')"
     fi
     echo "Using base image: ${BASE_IMAGE}"
+    docker_build_args=()
+    if [ "${DOCKER_BUILD_NO_CACHE}" = "true" ]; then
+        docker_build_args+=(--no-cache)
+    fi
     docker build \
+        "${docker_build_args[@]}" \
         --build-arg BASE_IMAGE="${BASE_IMAGE}" \
         -f "${REPO_ROOT}/deploy/kolla/neutron-aria-agent/Dockerfile" \
         -t "${IMAGE}" \
