@@ -567,6 +567,7 @@ async fn apply_neutron_snapshot(
 ) -> Result<NeutronSnapshotResponse, SnapshotApplyError> {
     let _guard = state.apply_lock.lock().await;
     let requested_hash = snapshot.desired_hash.clone();
+    let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
     let early_response = {
         let runtime = state.runtime.read().await;
         if snapshot.generation > 0 && snapshot.generation < runtime.applied_generation {
@@ -587,15 +588,19 @@ async fn apply_neutron_snapshot(
             ))
         } else if snapshot_generation_fully_applied(&runtime, snapshot.generation) {
             if hashes_match(&requested_hash, &runtime.applied_desired_hash) {
-                Some(neutron_snapshot_response(
-                    snapshot.generation,
-                    requested_hash.clone(),
-                    runtime.accepted_generation,
-                    runtime.applied_generation,
-                    "noop",
-                    Vec::new(),
-                    Vec::new(),
-                ))
+                if snapshot_has_runtime_drift(&runtime.ports, &snapshot, &local_inventory) {
+                    None
+                } else {
+                    Some(neutron_snapshot_response(
+                        snapshot.generation,
+                        requested_hash.clone(),
+                        runtime.accepted_generation,
+                        runtime.applied_generation,
+                        "noop",
+                        Vec::new(),
+                        Vec::new(),
+                    ))
+                }
             } else if requested_hash.is_some() && runtime.applied_desired_hash.is_some() {
                 return Err(SnapshotApplyError {
                     status: StatusCode::CONFLICT,
@@ -618,7 +623,6 @@ async fn apply_neutron_snapshot(
     }
 
     let current_ports = state.runtime.read().await.ports.clone();
-    let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
     let plan = build_snapshot_plan(&current_ports, &snapshot, &local_inventory);
     let affected_ports = affected_ports_for_plan(&plan);
     let requested_port_ids = snapshot
@@ -978,6 +982,28 @@ fn hashes_match(left: &Option<String>, right: &Option<String>) -> bool {
         (None, None) => true,
         _ => false,
     }
+}
+
+fn snapshot_has_runtime_drift(
+    current: &BTreeMap<String, ManagedNeutronPort>,
+    snapshot: &NeutronSnapshotRequest,
+    inventory: &LocalInterfaceInventory,
+) -> bool {
+    let plan = build_snapshot_plan(current, snapshot, inventory);
+    if !plan.attach.is_empty() || !plan.detach.is_empty() {
+        return true;
+    }
+    plan.update.iter().any(|port| {
+        current
+            .get(&port.port_id)
+            .map(|managed| {
+                managed.ifname != port.ifname
+                    || managed.ifindex != port.ifindex
+                    || normalize_managed_domains(&managed.managed_domains)
+                        != normalize_managed_domains(&port.managed_domains)
+            })
+            .unwrap_or(true)
+    })
 }
 
 fn snapshot_generation_fully_applied(runtime: &NeutronRuntimeState, generation: u64) -> bool {
@@ -2429,6 +2455,36 @@ mod tests {
             ..Default::default()
         };
         assert!(!snapshot_generation_fully_applied(&blocked, 42));
+    }
+
+    #[test]
+    fn same_generation_noop_detects_tap_ifindex_drift() {
+        let mut current = BTreeMap::new();
+        current.insert(
+            "vm-port".to_string(),
+            ManagedNeutronPort {
+                port_id: "vm-port".to_string(),
+                ifname: "tap-vm".to_string(),
+                ifindex: Some(50),
+                managed_domains: vec!["acl".to_string()],
+            },
+        );
+        let local = inventory(vec![iface("tap-vm", "vm-port", Some(51), Some("br-int"))]);
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 42,
+            desired_hash: Some("hash-42".to_string()),
+            host: None,
+            ports: vec![NeutronPortSnapshot {
+                managed_domains: vec!["acl".to_string()],
+                ..port("vm-port", "", true)
+            }],
+        };
+
+        assert!(snapshot_has_runtime_drift(&current, &snapshot, &local));
+
+        current.get_mut("vm-port").unwrap().ifindex = Some(51);
+        assert!(!snapshot_has_runtime_drift(&current, &snapshot, &local));
     }
 
     #[test]
