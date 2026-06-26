@@ -378,6 +378,48 @@ class EventLoopTestCase(unittest.TestCase):
         finally:
             shutil.rmtree(state_dir)
 
+    def test_full_resync_resubmits_same_generation_when_remote_converged(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            port_source = StaticPortSource([{
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "device_owner": "compute:nova",
+                "binding:host_id": "ostack2",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+            }])
+            first_client = StatusAfterApplyLocalClient()
+            first = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                first_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+            )
+            first_result = first.full_resync()
+            converged_status = first_client.status()
+
+            second_client = FixedStatusLocalClient(converged_status)
+            second = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                second_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+            )
+            second_result = second.full_resync()
+
+            self.assertEqual(
+                first_result["snapshot"]["generation"],
+                second_result["snapshot"]["generation"],
+            )
+            self.assertEqual(1, len(second_client.snapshots))
+            self.assertFalse(second_result["response"].get("recovered_before_submit"))
+        finally:
+            shutil.rmtree(state_dir)
+
     def test_pending_generation_survives_restart_after_degraded_resync(self):
         state_dir = tempfile.mkdtemp()
         try:
@@ -419,7 +461,7 @@ class EventLoopTestCase(unittest.TestCase):
         finally:
             shutil.rmtree(state_dir)
 
-    def test_pending_snapshot_recovered_on_restart_before_resubmit(self):
+    def test_pending_snapshot_recovered_on_restart_then_resubmits(self):
         state_dir = tempfile.mkdtemp()
         try:
             port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -474,8 +516,8 @@ class EventLoopTestCase(unittest.TestCase):
             result = second.full_resync()
             state = SnapshotStateStore(state_dir).to_dict()
 
-            self.assertEqual([], second_client.snapshots)
-            self.assertTrue(result["response"]["recovered_before_submit"])
+            self.assertEqual(1, len(second_client.snapshots))
+            self.assertFalse(result["response"].get("recovered_before_submit"))
             self.assertEqual(None, state["pending_generation"])
             self.assertEqual(pending["generation"], state["last_generation"])
             self.assertEqual([port_id], state["last_projected_port_ids"])

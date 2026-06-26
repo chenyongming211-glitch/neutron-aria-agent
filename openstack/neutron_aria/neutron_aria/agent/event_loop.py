@@ -103,10 +103,12 @@ class SnapshotSynchronizer(object):
                 len(remote_status.get("managed_ports") or []),
             )
         try:
-            response = self._maybe_recover_pending_before_submit(
-                snapshot,
-                projected_port_ids,
-            )
+            response = None
+            if prepared.get("reused_pending"):
+                response = self._maybe_recover_pending_before_submit(
+                    snapshot,
+                    projected_port_ids,
+                )
             if response is None:
                 response = self.local_client.put_snapshot(snapshot)
         except LocalApiTimeoutError as exc:
