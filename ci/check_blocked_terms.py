@@ -10,6 +10,7 @@ RULES = [
     (bytes.fromhex("716178"), True),
     (bytes.fromhex("7169616e78696e"), True),
     (bytes.fromhex("e9bd90e5ae89e4bfa1"), False),
+    (bytes.fromhex("63736d70"), True),
 ]
 
 
