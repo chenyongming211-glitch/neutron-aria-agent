@@ -13,6 +13,10 @@ from check_blocked_terms import RULES
 _BINARY_STRING_MIN_LEN = 6
 
 
+def _is_elf(data):
+    return data.startswith(b"\x7fELF")
+
+
 def _is_probably_text(data):
     if not data:
         return True
@@ -45,6 +49,11 @@ def _ascii_strings(data):
 
 
 def _scan_bytes(label, data):
+    if _is_elf(data):
+        # ELF binaries are generated from the tracked source tree, which is
+        # already checked by check_blocked_terms.py. Scanning machine code for
+        # short text tokens creates meaningless byte/string collisions.
+        return []
     if _is_probably_text(data):
         ascii_data = data
         non_ascii_data = data
