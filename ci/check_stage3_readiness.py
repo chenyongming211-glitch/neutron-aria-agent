@@ -10,6 +10,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 
 REQUIRED_FILES = [
     ".github/workflows/build.yml",
+    "ci/check_payload_terms.py",
     "ci/check_stage2_acceptance_evidence.py",
     "ci/check_n05_discovery_evidence.py",
     "ci/check_uds_hardening_evidence.py",
@@ -31,8 +32,10 @@ MARKERS = {
         "check_n05_discovery_evidence.py",
         "check_uds_hardening_evidence.py",
         "check_stage3_readiness.py",
+        "check_payload_terms.py",
         "--require-rust --rust-toolchain stable",
         "workflow_dispatch",
+        "Check Rust binary release payload policy",
     ],
     "docs/openstack-neutron-aria-details/README.md": [
         "08-stage3-acl-production-hardening.md",

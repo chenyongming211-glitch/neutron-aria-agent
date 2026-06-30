@@ -126,7 +126,12 @@ python3 ci/check_uds_hardening_evidence.py \
 python3 ci/check_stage2_acceptance_evidence.py
 python3 ci/check_stage3_readiness.py
 bash deploy/kolla/package/build_stage2_acl_bundle.sh
+python3 ci/check_payload_terms.py dist/kolla/neutron-aria-stage2-acl-kolla-bundle.tgz
 ```
+
+GitHub branch and manual CI builds may compile Rust/eBPF to prove build health,
+but they must not retain binary artifacts. Tag releases may upload binaries only
+after `ci/check_payload_terms.py` accepts the generated payloads.
 
 On the target Kolla environment, the release bundle gate must pass:
 

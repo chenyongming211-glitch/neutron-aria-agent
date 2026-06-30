@@ -52,6 +52,10 @@ jobs:
       - name: Build Neutron stage-two ACL Kolla bundle
         run: RELEASE_VERSION="${GITHUB_REF_NAME:-stage2-acl-dev}" bash deploy/kolla/package/build_stage2_acl_bundle.sh
 
+      - name: Check Neutron stage-two ACL Kolla bundle payload policy
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python3 ci/check_payload_terms.py dist/kolla/neutron-aria-stage2-acl-kolla-bundle.tgz
+
       - name: Upload Neutron stage-two ACL Kolla bundle
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
@@ -70,6 +74,10 @@ jobs:
             SAVE_IMAGE=true \
             IMAGE_TAR="${image_tar}" \
             bash deploy/kolla/package/build_neutron_aria_agent_image.sh
+
+      - name: Check optional Neutron Aria agent image payload policy
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && vars.KOLLA_NEUTRON_AGENT_BASE_IMAGE != '' }}
+        run: python3 ci/check_payload_terms.py dist/kolla/neutron-aria-agent-*-stage2-acl-image.tar
 
       - name: Upload optional Neutron Aria agent image tar
         if: ${{ startsWith(github.ref, 'refs/tags/v') && vars.KOLLA_NEUTRON_AGENT_BASE_IMAGE != '' }}
@@ -232,6 +240,10 @@ jobs:
             IMAGE_TAR="${image_tar}" \
             bash deploy/kolla/package/build_aria_datapath_image.sh
 
+      - name: Check optional Aria datapath image payload policy
+        if: startsWith(github.ref, 'refs/tags/v') && steps.rust_changes.outputs.rust_required == 'true' && vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != ''
+        run: python3 ci/check_payload_terms.py dist/kolla/aria-datapath-*-stage2-acl-image.tar
+
       - name: Upload optional Aria datapath image tar
         if: startsWith(github.ref, 'refs/tags/v') && steps.rust_changes.outputs.rust_required == 'true' && vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != ''
         uses: actions/upload-artifact@v4
@@ -247,6 +259,10 @@ jobs:
           zip -r ../firewall-binaries-x86_64.zip .
           cd ..
           ls -lh firewall-binaries-x86_64.zip
+
+      - name: Check Rust binary release payload policy
+        if: startsWith(github.ref, 'refs/tags/v') && steps.rust_changes.outputs.rust_required == 'true'
+        run: python3 ci/check_payload_terms.py release firewall-binaries-x86_64.zip
 
       - name: Upload artifacts
         if: startsWith(github.ref, 'refs/tags/v') && steps.rust_changes.outputs.rust_required == 'true'
