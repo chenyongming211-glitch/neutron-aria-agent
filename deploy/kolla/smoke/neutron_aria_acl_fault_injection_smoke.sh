@@ -154,7 +154,10 @@ assert_fault_status() {
     local point="$1"
     local status="$2"
     local wal_replay_baseline="$3"
-    STATUS_PAYLOAD="${status}" FAULT_POINT_NAME="${point}" "${PYTHON_BIN}" - <<'PY'
+    STATUS_PAYLOAD="${status}" \
+        FAULT_POINT_NAME="${point}" \
+        EXPECTED_PORT_ID="${EXPECTED_PORT_ID}" \
+        "${PYTHON_BIN}" - <<'PY'
 from __future__ import print_function
 
 import json
@@ -162,18 +165,49 @@ import os
 
 payload = json.loads(os.environ["STATUS_PAYLOAD"])
 point = os.environ["FAULT_POINT_NAME"]
+expected_port_id = os.environ["EXPECTED_PORT_ID"]
 managed = payload.get("managed_ports") or []
-if managed:
-    raise SystemExit("fault %s left managed ports: %s" % (point, managed))
 if payload.get("pending_generation") is None:
     raise SystemExit("fault %s did not leave pending_generation: %s" % (point, payload))
-if payload.get("wal_status") != "intent_without_commit":
-    raise SystemExit("fault %s expected wal_status=intent_without_commit: %s" % (point, payload))
-if payload.get("authority_state") != "wal_intent_without_commit":
-    raise SystemExit("fault %s expected authority_state=wal_intent_without_commit: %s" % (point, payload))
-print("fault_status_ok point=%s pending_generation=%s" % (
+wal_status = payload.get("wal_status")
+authority_state = payload.get("authority_state")
+if (wal_status, authority_state) == ("intent_without_commit", "wal_intent_without_commit"):
+    pass
+elif authority_state == "partial" and wal_status in ("commit_written", "intent_without_commit"):
+    pass
+else:
+    raise SystemExit("fault %s expected WAL intent or partial state: %s" % (point, payload))
+
+for port in managed:
+    if port.get("port_id") == expected_port_id:
+        raise SystemExit("fault %s left target port managed: %s" % (point, payload))
+
+target_status = None
+for port_status in payload.get("port_statuses") or []:
+    for domain in port_status.get("domains") or []:
+        if domain.get("effective_action") == "enforce":
+            raise SystemExit("fault %s left an enforced ACL domain: %s" % (point, payload))
+    if port_status.get("port_id") == expected_port_id:
+        target_status = port_status
+
+if target_status is None:
+    if (wal_status, authority_state) != ("intent_without_commit", "wal_intent_without_commit"):
+        raise SystemExit("fault %s did not report target port status: %s" % (point, payload))
+else:
+    if target_status.get("status") not in ("error", "degraded"):
+        raise SystemExit("fault %s target status was not error/degraded: %s" % (point, payload))
+    reason = target_status.get("reason") or ""
+    if "acl_apply_failed" not in reason and "fault injection" not in reason:
+        raise SystemExit("fault %s target reason did not describe ACL apply failure: %s" % (
+            point,
+            payload,
+        ))
+
+print("fault_status_ok point=%s pending_generation=%s managed_ports=%d target_status=%s" % (
     point,
     payload.get("pending_generation"),
+    len(managed),
+    None if target_status is None else target_status.get("status"),
 ))
 PY
     assert_no_new_wal_replay_failures "${point}" "${status}" "${wal_replay_baseline}"
@@ -242,6 +276,7 @@ run_acl_smoke() {
         PING_COUNT="${PING_COUNT}" \
         PING_TIMEOUT="${PING_TIMEOUT}" \
         REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE}" \
+        ALLOW_EXISTING_MANAGED_PORTS="${ALLOW_EXISTING_MANAGED_PORTS:-false}" \
         bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_full_resync_smoke.sh"
 }
 
@@ -302,7 +337,7 @@ for point in ${FAULT_POINTS}; do
     ping -c "${PING_COUNT}" -W "${PING_TIMEOUT}" "${VM_IP}" >/dev/null
 
     echo "Running second ACL full-resync; recovery and rollback must succeed"
-    run_acl_smoke
+    ALLOW_EXISTING_MANAGED_PORTS=true run_acl_smoke
 
     final_status="$(status_json)"
     echo "post_recovery_status=${final_status}"

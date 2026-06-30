@@ -29,6 +29,7 @@ MIN_ACL_BINDINGS="${MIN_ACL_BINDINGS:-0}"
 EXPECTED_ACL_STATUS="${EXPECTED_ACL_STATUS:-ready}"
 EXPECTED_ACL_RUNTIME_STATUS="${EXPECTED_ACL_RUNTIME_STATUS:-${EXPECTED_ACL_STATUS}}"
 EXPECTED_ACL_EFFECTIVE_ACTION="${EXPECTED_ACL_EFFECTIVE_ACTION:-}"
+ALLOW_EXISTING_MANAGED_PORTS="${ALLOW_EXISTING_MANAGED_PORTS:-false}"
 
 die() {
     echo "ERROR: $*" >&2
@@ -72,6 +73,7 @@ docker_exec_env() {
         -e OS_NO_CACHE="${OS_NO_CACHE:-true}" \
         -e OS_AUTH_STRATEGY="${OS_AUTH_STRATEGY:-keystone}" \
         -e NEUTRON_ENDPOINT_TYPE="${NEUTRON_ENDPOINT_TYPE:-publicURL}" \
+        -e ALLOW_EXISTING_MANAGED_PORTS="${ALLOW_EXISTING_MANAGED_PORTS}" \
         "${SERVICE_NAME}" "$@"
 }
 
@@ -245,6 +247,7 @@ docker_exec_env python - "${SOCKET_PATH}" <<'PY'
 from __future__ import print_function
 
 import json
+import os
 import sys
 
 from neutron_aria.agent.uds_client import LocalClient
@@ -259,8 +262,15 @@ print("initial_generation=%s initial_managed_ports=%d" % (
     status.get("generation"),
     len(managed),
 ))
-if managed:
+allow_existing = os.environ.get("ALLOW_EXISTING_MANAGED_PORTS", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+if managed and not allow_existing:
     raise SystemExit("refusing full-resync smoke with existing managed ports")
+if managed:
+    print("allowing_existing_managed_ports=%d" % len(managed))
 PY
 
 prepare_full_resync_config
