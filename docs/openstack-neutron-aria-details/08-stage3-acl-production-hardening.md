@@ -96,6 +96,7 @@ python3 ci/check_n05_discovery_evidence.py
 python3 ci/check_uds_hardening_evidence.py --require-hardened ...
 python3 ci/check_stage2_acceptance_evidence.py
 python3 ci/check_stage3_readiness.py
+python3 ci/check_smoke_python_blocks.py
 bash deploy/kolla/package/build_stage2_acl_bundle.sh
 ```
 

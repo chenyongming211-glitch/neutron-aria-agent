@@ -300,7 +300,7 @@ from neutron_aria.agent.uds_client import LocalClient
 
 socket_path, port_id = sys.argv[1:3]
 try:
-response = LocalClient(socket_path, timeout=3.0).delete_port(port_id)
+    response = LocalClient(socket_path, timeout=3.0).delete_port(port_id)
 except Exception as exc:
     print("delete_error=%s: %s" % (exc.__class__.__name__, exc), file=sys.stderr)
     raise SystemExit(1)
