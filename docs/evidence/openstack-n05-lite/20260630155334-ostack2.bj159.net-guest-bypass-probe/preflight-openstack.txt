@@ -1,0 +1,21 @@
+## net
++---------------------------+--------------------------------------+
+| Field                     | Value                                |
++---------------------------+--------------------------------------+
+| admin_state_up            | True                                 |
+| created_at                | 2026-06-03 03:35:30                  |
+| default_net               | False                                |
+| external_network_id       | 0                                    |
+| id                        | 23eb9d08-ec8b-4610-a1ff-61492134b6d2 |
+| mtu                       | 0                                    |
+| name                      | flat_mgt                             |
+| provider:network_type     | flat                                 |
+| provider:physical_network | physnet2                             |
+| provider:segmentation_id  |                                      |
+| router:external           | False                                |
+| shared                    | True                                 |
+| status                    | ACTIVE                               |
+| subnets                   | f96445e4-5e64-4d27-bb9c-60f92b087e11 |
+| tenant_id                 | 4ab07915da65403db282a4e210321ae1     |
++---------------------------+--------------------------------------+
+## existing aria resources

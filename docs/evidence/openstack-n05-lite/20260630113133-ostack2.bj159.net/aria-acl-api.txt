@@ -1,0 +1,5 @@
+aria_acl_policies=0
+aria_acl_rules=0
+aria_acl_bindings=0
+aria_acl_port_statuses=6
+aria_acl_port_statuses_first_keys=binding_id,effective_action,effective_policy_id,generation,host,last_reported_at,port_id,reason,runtime_status,stale,status,updated_at

@@ -127,6 +127,19 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
         self.assertEqual([], committed.last_projected_port_ids())
         self.assertEqual("p1", committed.to_dict()["last_deleted_port_id"])
 
+    def test_commit_delete_for_different_port_preserves_pending_delete(self):
+        store = SnapshotStateStore(self.state_dir)
+        prepared = store.prepare_snapshot(self._snapshot("p1"))
+        store.commit_snapshot(prepared["generation"], prepared["desired_hash"])
+        store.prepare_delete("p1", reason="port_delete_event")
+
+        store.commit_delete("p2")
+        reloaded = SnapshotStateStore(self.state_dir)
+
+        self.assertEqual("p1", reloaded.pending_delete()["port_id"])
+        self.assertEqual(["p1"], reloaded.last_projected_port_ids())
+        self.assertEqual("p2", reloaded.to_dict()["last_deleted_port_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

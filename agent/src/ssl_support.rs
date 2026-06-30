@@ -256,9 +256,11 @@ pub fn attach_uprobe_if_needed(
         .map_err(|e| format!("{} take_link: {:?}", prog_name, e))?;
 
     if aya::features().bpf_perf_link() {
-        let fd_link: aya::programs::links::FdLink = link
-            .try_into()
-            .map_err(|e: aya::programs::links::LinkError| format!("{} FdLink: {:?}", prog_name, e))?;
+        let fd_link: aya::programs::links::FdLink =
+            link.try_into()
+                .map_err(|e: aya::programs::links::LinkError| {
+                    format!("{} FdLink: {:?}", prog_name, e)
+                })?;
         fd_link
             .pin(&link_pin)
             .map_err(|e| format!("{} pin link: {:?}", prog_name, e))?;

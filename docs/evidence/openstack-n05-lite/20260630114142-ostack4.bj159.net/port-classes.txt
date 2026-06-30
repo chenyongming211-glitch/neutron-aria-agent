@@ -1,0 +1,3 @@
+host=ostack4.bj159.net host_ports=0 compute_ports=0
+vnic_type_counts=
+unsupported_vnic_types=baremetal,direct,direct-physical,macvtap,virtio-forwarder

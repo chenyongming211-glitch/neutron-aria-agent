@@ -1,0 +1,8 @@
+[neutron-aria-uds-hardened-rollout] Recording pre-rollout evidence
+[neutron-aria-uds-hardened-rollout] Writing hardened datapath config
+[neutron-aria-uds-hardened-rollout] Replacing aria_datapath with aria-datapath:peercred-test-202606301305
+[neutron-aria-uds-hardened-rollout] Probing UDS from neutron_aria_agent as neutron user
+[neutron-aria-uds-hardened-rollout] Running hardening evidence smoke with REQUIRE_HARDENED=true
+[neutron-aria-uds-hardened-rollout] Hardened rollout smoke passed
+[neutron-aria-uds-hardened-rollout] Restoring original aria datapath container and config
+[neutron-aria-uds-hardened-rollout] Result rc=0; evidence=/var/tmp/neutron-aria-uds-hardened-rollout/20260630133210-ostack3.bj159.net

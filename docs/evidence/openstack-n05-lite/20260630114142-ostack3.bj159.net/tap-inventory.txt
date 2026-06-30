@@ -1,0 +1,75 @@
+## ip link tap/qvo/qvb/veth
+16: vxlantap: <BROADCAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/ether 66:f5:76:54:d6:a0 brd ff:ff:ff:ff:ff:ff
+
+## OVS interface external_ids
+name                : bond0
+ofport              : 1
+external_ids        : {}
+
+name                : bond1
+ofport              : 1
+external_ids        : {}
+
+name                : int-br-dummy
+ofport              : 4
+external_ids        : {}
+
+name                : br-mgt
+ofport              : 65534
+external_ids        : {NM.connection.uuid="3d944912-1a48-427e-be94-0139441424b1"}
+
+name                : int-br-eth1
+ofport              : 1
+external_ids        : {}
+
+name                : phy-br-eth1
+ofport              : 2
+external_ids        : {}
+
+name                : tap92113331-9c
+ofport              : 7
+external_ids        : {attached-mac="fa:16:3e:e3:4d:35", iface-id="92113331-9cfc-4e24-8732-f95f3fcba0f4", iface-status=active}
+
+name                : tapd7950f48-f8
+ofport              : 6
+external_ids        : {attached-mac="fa:16:3e:d5:7c:01", iface-id="d7950f48-f860-4790-b848-fb2955a539b7", iface-status=active}
+
+name                : br-mirror
+ofport              : 65534
+external_ids        : {}
+
+name                : phy-br-mgt
+ofport              : 2
+external_ids        : {}
+
+name                : tap3485b315-e1
+ofport              : 5
+external_ids        : {attached-mac="fa:16:3e:c2:02:76", iface-id="3485b315-e152-42b8-aa55-75dff9d4266c", iface-status=active}
+
+name                : int-br-mgt
+ofport              : 2
+external_ids        : {}
+
+name                : br-eth1
+ofport              : 65534
+external_ids        : {NM.connection.uuid="f3fec324-d549-4461-aa37-33272d35cae7"}
+
+name                : phy-br-mirror
+ofport              : 1
+external_ids        : {}
+
+name                : br-int
+ofport              : 65534
+external_ids        : {}
+
+name                : phy-br-dummy
+ofport              : 1
+external_ids        : {}
+
+name                : br-dummy
+ofport              : 65534
+external_ids        : {}
+
+name                : int-br-mirror
+ofport              : 3
+external_ids        : {}

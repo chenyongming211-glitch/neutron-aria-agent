@@ -292,9 +292,8 @@ impl NeutronWal {
 
     fn append(&self, entry: &NeutronWalEntry) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!("create Neutron WAL directory {}: {}", parent.display(), e)
-            })?;
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("create Neutron WAL directory {}: {}", parent.display(), e))?;
         }
 
         let file = OpenOptions::new()
@@ -399,7 +398,10 @@ mod tests {
 
         assert_eq!("replayed", replay.status);
         assert_eq!(7, replay.state.applied_generation);
-        assert_eq!(Some("hash-7".to_string()), replay.state.applied_desired_hash);
+        assert_eq!(
+            Some("hash-7".to_string()),
+            replay.state.applied_desired_hash
+        );
         assert!(replay.state.status_hash.is_some());
         assert!(replay.state.ports.contains_key("p1"));
         let _ = fs::remove_dir_all(root);
@@ -468,6 +470,10 @@ mod tests {
         assert_eq!("delete", intent.kind);
         assert_eq!(12, intent.generation);
         assert_eq!(vec!["p1".to_string()], intent.port_ids);
+        assert_eq!(
+            vec!["attach".to_string(), "acl".to_string()],
+            intent.affected_domains
+        );
         assert_eq!(vec![managed("p1", "tap-p1")], intent.affected_ports);
         let _ = fs::remove_dir_all(root);
     }
@@ -500,9 +506,14 @@ mod tests {
         assert_eq!(Some(21), replay.state.pending_generation);
         assert_eq!(Some("hash-21".to_string()), replay.state.desired_hash);
         assert!(replay.state.ports.is_empty());
-        let intent = replay.pending_intent.expect("snapshot intent should replay");
+        let intent = replay
+            .pending_intent
+            .expect("snapshot intent should replay");
         assert_eq!("snapshot", intent.kind);
-        assert_eq!(vec!["attach".to_string(), "acl".to_string()], intent.affected_domains);
+        assert_eq!(
+            vec!["attach".to_string(), "acl".to_string()],
+            intent.affected_domains
+        );
         assert_eq!(vec![managed("p2", "tap-p2")], intent.affected_ports);
         let _ = fs::remove_dir_all(root);
     }
@@ -554,7 +565,9 @@ mod tests {
                 .get("p1")
                 .map(|status| status.status.as_str())
         );
-        let intent = replay.pending_intent.expect("snapshot intent should replay");
+        let intent = replay
+            .pending_intent
+            .expect("snapshot intent should replay");
         assert_eq!("snapshot", intent.kind);
         assert_eq!(
             vec![
@@ -681,7 +694,10 @@ mod tests {
         assert_eq!("replayed_with_errors", replay.status);
         assert_eq!(1, replay.failures);
         assert_eq!(50, replay.state.applied_generation);
-        assert_eq!(Some("hash-50".to_string()), replay.state.applied_desired_hash);
+        assert_eq!(
+            Some("hash-50".to_string()),
+            replay.state.applied_desired_hash
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

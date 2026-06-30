@@ -5,6 +5,7 @@ import socket
 import unittest
 
 from neutron_aria.agent.uds_client import LocalApiContractError
+from neutron_aria.agent.uds_client import LocalApiResponseError
 from neutron_aria.agent.uds_client import LocalApiTimeoutError
 from neutron_aria.agent.uds_client import LocalClient
 
@@ -16,6 +17,8 @@ class FakeResponse(object):
         self.body = body
 
     def read(self, _size):
+        if isinstance(self.body, str):
+            return self.body
         return json.dumps(self.body)
 
 
@@ -56,35 +59,124 @@ class UdsClientTestCase(unittest.TestCase):
             connection_factory=FakeConnection,
         )
 
-    def test_capabilities_validates_required_domains(self):
-        FakeConnection.responses.append(FakeResponse(200, "OK", {
+    def _capabilities(self, **overrides):
+        body = {
             "api_version": "v1",
+            "contract_version": "2026-06-v0.9",
+            "schema_version_min": 1,
+            "schema_version_max": 1,
             "attach_authority": "neutron_snapshot",
             "supports_full_snapshot": True,
             "supports_port_delete": True,
             "supported_domains": ["attach", "acl", "qos"],
-        }))
+            "mandatory_domains": [],
+            "body_max_bytes": 1048576,
+            "timeout_ms": 3000,
+            "error_codes_hash": "v0.9-neutron-errors-2",
+            "peer_auth_policy": "filesystem_permissions_then_peercred",
+            "capability_hash": "v0.9-neutron-capabilities-1",
+        }
+        body.update(overrides)
+        return body
+
+    def test_capabilities_validates_required_domains(self):
+        FakeConnection.responses.append(FakeResponse(200, "OK", self._capabilities()))
 
         body = self.client.capabilities(required_domains=["acl"])
 
         self.assertEqual("v1", body["api_version"])
+        self.assertEqual("2026-06-v0.9", body["contract_version"])
         self.assertEqual("GET", FakeConnection.requests[0]["method"])
         self.assertEqual("/api/v1/neutron/capabilities", FakeConnection.requests[0]["path"])
 
     def test_capabilities_rejects_missing_domain(self):
-        FakeConnection.responses.append(FakeResponse(200, "OK", {
-            "api_version": "v1",
-            "attach_authority": "neutron_snapshot",
-            "supports_full_snapshot": True,
-            "supports_port_delete": True,
-            "supported_domains": ["attach"],
-        }))
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities(supported_domains=["attach"]))
+        )
 
         self.assertRaises(
             LocalApiContractError,
             self.client.capabilities,
             required_domains=["acl"],
         )
+
+    def test_capabilities_accepts_legacy_response_without_target_fields(self):
+        FakeConnection.responses.append(FakeResponse(200, "OK", {
+            "api_version": "v1",
+            "attach_authority": "neutron_snapshot",
+            "supports_full_snapshot": True,
+            "supports_port_delete": True,
+            "supported_domains": ["attach", "acl"],
+        }))
+
+        body = self.client.capabilities(required_domains=["acl"])
+
+        self.assertEqual("v1", body["api_version"])
+
+    def test_capabilities_rejects_contract_version_mismatch(self):
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities(contract_version="other"))
+        )
+
+        self.assertRaises(LocalApiContractError, self.client.capabilities)
+
+    def test_capabilities_rejects_schema_range_mismatch(self):
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities(schema_version_min=2, schema_version_max=3))
+        )
+
+        self.assertRaises(LocalApiContractError, self.client.capabilities)
+
+    def test_capabilities_rejects_invalid_body_limit(self):
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities(body_max_bytes="not-an-int"))
+        )
+
+        self.assertRaises(LocalApiContractError, self.client.capabilities)
+
+    def test_capabilities_tightens_request_body_limit(self):
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities(body_max_bytes=128))
+        )
+
+        self.client.capabilities(required_domains=["acl"])
+
+        self.assertEqual(128, self.client.max_request_bytes)
+
+    def test_capabilities_rejects_invalid_timeout(self):
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities(timeout_ms="not-an-int"))
+        )
+
+        self.assertRaises(LocalApiContractError, self.client.capabilities)
+
+    def test_capabilities_tightens_timeout(self):
+        client = LocalClient(
+            "/tmp/aria-agent.sock",
+            timeout=5.0,
+            connection_factory=FakeConnection,
+        )
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities(timeout_ms=2500))
+        )
+
+        client.capabilities(required_domains=["acl"])
+
+        self.assertEqual(2.5, client.timeout)
+
+    def test_capabilities_rejects_error_hash_mismatch(self):
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities(error_codes_hash="other"))
+        )
+
+        self.assertRaises(LocalApiContractError, self.client.capabilities)
+
+    def test_capabilities_rejects_capability_hash_mismatch(self):
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities(capability_hash="other"))
+        )
+
+        self.assertRaises(LocalApiContractError, self.client.capabilities)
 
     def test_put_snapshot_serializes_json_body(self):
         FakeConnection.responses.append(FakeResponse(200, "OK", {
@@ -100,6 +192,44 @@ class UdsClientTestCase(unittest.TestCase):
         self.assertEqual("/api/v1/neutron/snapshot", request["path"])
         self.assertEqual("application/json", request["headers"]["Content-Type"])
         self.assertEqual(12, json.loads(request["body"])["generation"])
+
+    def test_put_snapshot_rejects_oversized_json_body_before_send(self):
+        client = LocalClient(
+            "/tmp/aria-agent.sock",
+            timeout=1.0,
+            max_request_bytes=16,
+            connection_factory=FakeConnection,
+        )
+
+        self.assertRaises(
+            LocalApiContractError,
+            client.put_snapshot,
+            {"generation": 12, "host": "ostack2", "ports": []},
+        )
+        self.assertEqual([], FakeConnection.requests)
+
+    def test_put_snapshot_maps_plain_text_413_to_body_too_large_error(self):
+        FakeConnection.responses.append(
+            FakeResponse(413, "Payload Too Large", "request entity too large")
+        )
+
+        with self.assertRaises(LocalApiResponseError) as ctx:
+            self.client.put_snapshot({"generation": 12, "host": "ostack2", "ports": []})
+
+        self.assertEqual(413, ctx.exception.status)
+        self.assertEqual("UDS_BODY_TOO_LARGE", ctx.exception.body["error"])
+        self.assertEqual("request entity too large", ctx.exception.body["details"])
+
+    def test_plain_text_http_error_is_response_error(self):
+        FakeConnection.responses.append(
+            FakeResponse(500, "Internal Server Error", "internal failure")
+        )
+
+        with self.assertRaises(LocalApiResponseError) as ctx:
+            self.client.status()
+
+        self.assertEqual(500, ctx.exception.status)
+        self.assertEqual("internal failure", ctx.exception.body["error"])
 
     def test_delete_port_url_quotes_port_id(self):
         FakeConnection.responses.append(FakeResponse(200, "OK", {

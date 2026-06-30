@@ -1,0 +1,24 @@
+# UDS Hardening Evidence
+
+Host: `ostack3.bj159.net`
+
+Generated at: `2026-06-30T04:31:28Z`
+
+This smoke records the UDS hardening gate for stage-two ACL MVP.
+It does not enable QoS, Mirror, RabbitMQ event consumption, or tenant features.
+
+| Fact | Expected | Command | Actual | Evidence | Disposition |
+| --- | --- | --- | --- | --- | --- |
+| Container peer identities | Record uid/gid/group inputs for peercred allow-list | `collect_identity` | exit=0 | `peer-identities.txt` | pass |
+| UDS directory and socket permissions | Record host and container view of /run/aria and socket permissions | `collect_permissions` | exit=0 | `socket-permissions.txt` | pass |
+| World-writable socket check | Socket and parent directory have no other-user permission bits | `check_socket_not_world_writable` | exit=4 | `world-writable-check.txt` | degraded |
+| Peercred allow-list candidates | Record candidate uid/gid values before enabling enforcement | `collect_peercred_allow_list` | exit=0 | `peercred-allow-list.txt` | pass |
+| Audit log path | Audit log path is known; required only when hardened mode is enforced | `collect_audit_log_path` | exit=2 | `audit-log.txt` | not_applicable |
+| Hardened enforcement gate | When REQUIRE_HARDENED=true, socket and audit requirements must pass | `check_hardened_required` | exit=2 | `hardened-required.txt` | not_applicable |
+
+## Result
+
+- pass: 3
+- non-pass: 3
+- fail: 0
+- require_hardened: false

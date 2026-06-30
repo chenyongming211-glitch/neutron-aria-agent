@@ -1,0 +1,5 @@
+## /run/aria
+/run/aria root UNKNOWN 770 directory
+
+## /run/aria/aria-agent.sock
+/run/aria/aria-agent.sock root root 666 socket

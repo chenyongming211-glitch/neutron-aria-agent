@@ -1,0 +1,3 @@
+Baseline VM connectivity	VM is reachable before rollback smoke	ping_vm	exit=0	baseline-ping.txt	pass
+Initial datapath status	UDS status is readable and has no managed ports before rollback drill	status_no_managed_ports	exit=0	initial-status.txt	pass
+ACL rollback drill	ACL blocks test traffic, UDS rollback deletes managed port, and ping recovers	acl_rollback_drill	exit=1	acl-rollback-drill.log	fail

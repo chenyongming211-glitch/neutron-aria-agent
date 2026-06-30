@@ -16,9 +16,17 @@ DEFAULT_EVENT_QUEUE_MAX_PORTS = 10000
 DEFAULT_EVENT_QUEUE_MAX_NETWORKS = 1000
 DEFAULT_ACL_SOURCE = ""
 DEFAULT_ACL_FIXTURE_PATH = ""
+DEFAULT_REQUEST_TIMEOUT = 3.0
 DEFAULT_TIMEOUT_CONVERGENCE_ATTEMPTS = 15
 DEFAULT_TIMEOUT_CONVERGENCE_INTERVAL = 1.0
 DEFAULT_STATE_DIR = "/var/lib/neutron-aria-agent/state"
+SUPPORTED_MANAGED_DOMAINS = ("acl", "qos", "mirror")
+SUPPORTED_ACL_SOURCES = ("disabled", "fixture", "neutron")
+SUPPORTED_PORT_SOURCES = ("disabled", "neutronclient")
+
+
+class ConfigError(Exception):
+    pass
 
 
 class AgentConfig(object):
@@ -28,7 +36,7 @@ class AgentConfig(object):
         ovs_bridge=DEFAULT_OVS_BRIDGE,
         socket_path=DEFAULT_SOCKET_PATH,
         managed_domains=None,
-        request_timeout=3.0,
+        request_timeout=DEFAULT_REQUEST_TIMEOUT,
         timeout_convergence_attempts=DEFAULT_TIMEOUT_CONVERGENCE_ATTEMPTS,
         timeout_convergence_interval=DEFAULT_TIMEOUT_CONVERGENCE_INTERVAL,
         resync_interval=60,
@@ -83,10 +91,26 @@ def _get(parser, section, option, default=None):
     return default
 
 
+def _get_first(parser, section, options, default=None):
+    for option in options:
+        value = _get(parser, section, option)
+        if value is not None:
+            return value
+    return default
+
+
 def _split_domains(value):
     if not value:
         return list(DEFAULT_MANAGED_DOMAINS)
-    return [part.strip() for part in value.split(",") if part.strip()]
+    domains = []
+    seen = set()
+    for part in value.split(","):
+        domain = part.strip().lower()
+        if not domain or domain in seen:
+            continue
+        domains.append(domain)
+        seen.add(domain)
+    return domains
 
 
 def _parse_bool(value, default=False):
@@ -95,16 +119,64 @@ def _parse_bool(value, default=False):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _has_option_anywhere(parser, option):
+    if option in parser.defaults():
+        return True
+    for section in parser.sections():
+        if parser.has_option(section, option):
+            return True
+    return False
+
+
+def _validate_loaded_config(parser, config):
+    if _has_option_anywhere(parser, "integration_mode"):
+        raise ConfigError(
+            "integration_mode belongs in Neutron snapshot bodies, not neutron-aria-agent.ini"
+        )
+
+    if not config.managed_domains:
+        raise ConfigError("managed_domains must not be empty")
+    unknown_domains = [
+        domain for domain in config.managed_domains if domain not in SUPPORTED_MANAGED_DOMAINS
+    ]
+    if unknown_domains:
+        raise ConfigError("unsupported managed_domains: %s" % ",".join(unknown_domains))
+
+    if config.acl_source not in SUPPORTED_ACL_SOURCES:
+        raise ConfigError("unsupported acl.source: %s" % config.acl_source)
+    if config.acl_source == "fixture" and not config.acl_fixture_path:
+        raise ConfigError("acl.source=fixture requires [acl] fixture_path")
+
+    if config.port_source not in SUPPORTED_PORT_SOURCES:
+        raise ConfigError("unsupported neutron.port_source: %s" % config.port_source)
+    if config.full_resync_enabled and config.port_source == "disabled":
+        raise ConfigError(
+            "full_resync_enabled=true requires [neutron] port_source=neutronclient"
+        )
+    if config.request_timeout <= 0:
+        raise ConfigError("aria.request_timeout must be positive")
+    if config.request_timeout > DEFAULT_REQUEST_TIMEOUT:
+        raise ConfigError(
+            "aria.request_timeout must not exceed stage-one UDS timeout %.1fs"
+            % DEFAULT_REQUEST_TIMEOUT
+        )
+
+
 def load_config(path):
     parser_class = getattr(configparser, "SafeConfigParser", configparser.ConfigParser)
     parser = parser_class()
     parser.read(path)
-    return AgentConfig(
+    config = AgentConfig(
         host=_get(parser, "agent", "host"),
-        ovs_bridge=_get(parser, "ovs", "bridge", DEFAULT_OVS_BRIDGE),
+        ovs_bridge=_get_first(
+            parser,
+            "ovs",
+            ("integration_bridge", "bridge"),
+            DEFAULT_OVS_BRIDGE,
+        ),
         socket_path=_get(parser, "aria", "socket_path", DEFAULT_SOCKET_PATH),
         managed_domains=_split_domains(_get(parser, "agent", "managed_domains", "acl")),
-        request_timeout=_get(parser, "aria", "request_timeout", "3.0"),
+        request_timeout=_get(parser, "aria", "request_timeout", str(DEFAULT_REQUEST_TIMEOUT)),
         timeout_convergence_attempts=_get(
             parser,
             "aria",
@@ -153,3 +225,5 @@ def load_config(path):
         acl_fixture_path=_get(parser, "acl", "fixture_path", DEFAULT_ACL_FIXTURE_PATH),
         state_dir=_get(parser, "agent", "state_dir", DEFAULT_STATE_DIR),
     )
+    _validate_loaded_config(parser, config)
+    return config

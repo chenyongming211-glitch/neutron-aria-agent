@@ -1,15 +1,18 @@
+use aria_api::{
+    ManagedNeutronPort, NEUTRON_UDS_BODY_MAX_BYTES, NEUTRON_UDS_SCHEMA_VERSION_MAX,
+    NEUTRON_UDS_SCHEMA_VERSION_MIN, NeutronAclRuleSnapshot, NeutronAclSnapshot,
+    NeutronCapabilitiesResponse, NeutronDeleteResponse, NeutronDomainStatus,
+    NeutronPortApplyResult, NeutronPortSnapshot, NeutronPortStatus, NeutronSnapshotRequest,
+    NeutronSnapshotResponse, NeutronStatusResponse, action_from_string, direction_from_string,
+    proto_from_string,
+};
 use axum::{
+    Json, Router,
+    extract::DefaultBodyLimit,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, put},
-    Json, Router,
-};
-use aria_api::{
-    action_from_string, direction_from_string, proto_from_string, ManagedNeutronPort,
-    NeutronAclRuleSnapshot, NeutronAclSnapshot, NeutronCapabilitiesResponse, NeutronDeleteResponse,
-    NeutronDomainStatus, NeutronPortApplyResult, NeutronPortSnapshot, NeutronPortStatus,
-    NeutronSnapshotRequest, NeutronSnapshotResponse, NeutronStatusResponse,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -102,7 +105,11 @@ struct IntentPortRecovery {
 }
 
 impl IntentPortRecovery {
-    fn blocked(port: &ManagedNeutronPort, domains: Vec<NeutronDomainStatus>, reason: String) -> Self {
+    fn blocked(
+        port: &ManagedNeutronPort,
+        domains: Vec<NeutronDomainStatus>,
+        reason: String,
+    ) -> Self {
         Self {
             managed_domains: normalize_managed_domains(&port.managed_domains),
             domains,
@@ -114,11 +121,16 @@ impl IntentPortRecovery {
 }
 
 impl NeutronApiState {
-    fn new(registry: Arc<TapRegistry>, control_plane: Arc<ControlPlane>, ovs_bridge: String) -> Self {
+    fn new(
+        registry: Arc<TapRegistry>,
+        control_plane: Arc<ControlPlane>,
+        ovs_bridge: String,
+    ) -> Self {
         let wal = Arc::new(NeutronWal::new(&registry.base_state_path));
         let replay = wal.replay();
         let pending_recovery = replay.pending_intent.clone();
-        let runtime = NeutronRuntimeState::from_wal_state(replay.state, replay.status, replay.failures);
+        let runtime =
+            NeutronRuntimeState::from_wal_state(replay.state, replay.status, replay.failures);
         Self {
             registry,
             control_plane,
@@ -175,9 +187,10 @@ impl NeutronApiState {
         };
         let mut degraded = results.iter().any(|result| result.status == "blocked");
         for port in &ports {
-            let Some(result) = results.iter().find(|result| {
-                result.ifname == port.ifname && result.action == "claim_committed"
-            }) else {
+            let Some(result) = results
+                .iter()
+                .find(|result| result.ifname == port.ifname && result.action == "claim_committed")
+            else {
                 continue;
             };
             next_runtime.port_statuses.insert(
@@ -436,7 +449,11 @@ impl NeutronApiState {
 }
 
 impl NeutronRuntimeState {
-    fn from_wal_state(state: NeutronWalState, wal_status: String, wal_replay_failures: u64) -> Self {
+    fn from_wal_state(
+        state: NeutronWalState,
+        wal_status: String,
+        wal_replay_failures: u64,
+    ) -> Self {
         Self {
             accepted_generation: state.accepted_generation,
             applied_generation: state.applied_generation,
@@ -489,6 +506,7 @@ pub(crate) fn build_router(
             "/api/v1/neutron/ports/{port_id}",
             delete(delete_neutron_port),
         )
+        .layer(DefaultBodyLimit::max(NEUTRON_UDS_BODY_MAX_BYTES as usize))
         .with_state(state)
 }
 
@@ -566,6 +584,18 @@ async fn apply_neutron_snapshot(
     snapshot: NeutronSnapshotRequest,
 ) -> Result<NeutronSnapshotResponse, SnapshotApplyError> {
     let _guard = state.apply_lock.lock().await;
+    if !snapshot_schema_supported(snapshot.schema_version) {
+        return Err(SnapshotApplyError {
+            status: StatusCode::BAD_REQUEST,
+            code: "UDS_SCHEMA_MISMATCH",
+            details: format!(
+                "unsupported schema_version {:?}; supported range is {}-{}",
+                snapshot.schema_version,
+                NEUTRON_UDS_SCHEMA_VERSION_MIN,
+                NEUTRON_UDS_SCHEMA_VERSION_MAX
+            ),
+        });
+    }
     let requested_hash = snapshot.desired_hash.clone();
     let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
     let early_response = {
@@ -937,7 +967,10 @@ async fn apply_neutron_snapshot(
             details: e,
         });
     }
-    if let Err(e) = state.wal.append_snapshot_commit(next_runtime.to_wal_state()) {
+    if let Err(e) = state
+        .wal
+        .append_snapshot_commit(next_runtime.to_wal_state())
+    {
         let mut runtime = state.runtime.write().await;
         runtime.pending_generation = Some(snapshot.generation);
         runtime.authority_state = "wal_commit_failed".to_string();
@@ -981,6 +1014,15 @@ fn hashes_match(left: &Option<String>, right: &Option<String>) -> bool {
         (Some(left), Some(right)) => left == right,
         (None, None) => true,
         _ => false,
+    }
+}
+
+fn snapshot_schema_supported(schema_version: Option<u32>) -> bool {
+    match schema_version {
+        None => true,
+        Some(version) => {
+            version >= NEUTRON_UDS_SCHEMA_VERSION_MIN && version <= NEUTRON_UDS_SCHEMA_VERSION_MAX
+        }
     }
 }
 
@@ -1229,15 +1271,12 @@ async fn apply_delete_neutron_port(
     };
 
     let generation = state.runtime.read().await.accepted_generation;
-    if let Err(e) = state
-        .wal
-        .append_delete_intent(
-            port_id.clone(),
-            generation,
-            affected_domains_for_ports(std::slice::from_ref(&port)),
-            port.clone(),
-        )
-    {
+    if let Err(e) = state.wal.append_delete_intent(
+        port_id.clone(),
+        generation,
+        affected_domains_for_ports(std::slice::from_ref(&port)),
+        port.clone(),
+    ) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             NeutronDeleteResponse {
@@ -1475,15 +1514,11 @@ impl LocalInterfaceInventory {
             let interface = LocalOvsInterface {
                 name: name.to_string(),
                 ifindex: read_ifindex(name),
-                bridge: bridge_ports
-                    .contains(name)
-                    .then(|| ovs_bridge.to_string()),
+                bridge: bridge_ports.contains(name).then(|| ovs_bridge.to_string()),
                 iface_id: iface_id.clone(),
             };
             if let Some(iface_id) = iface_id {
-                inventory
-                    .by_iface_id
-                    .insert(iface_id, interface.clone());
+                inventory.by_iface_id.insert(iface_id, interface.clone());
             }
             inventory.by_name.insert(name.to_string(), interface);
         }
@@ -1584,7 +1619,10 @@ fn resolve_local_neutron_port(
     if !is_ovs_vif(port.vif_type.as_deref()) {
         return ineligible_port(
             port,
-            format!("unsupported_vif_type:{}", port.vif_type.as_deref().unwrap_or("")),
+            format!(
+                "unsupported_vif_type:{}",
+                port.vif_type.as_deref().unwrap_or("")
+            ),
         );
     }
     if !is_normal_vnic(port.vnic_type.as_deref()) {
@@ -1794,13 +1832,20 @@ fn neutron_acl_to_datapath_directions(direction: u8) -> Vec<u8> {
 fn ensure_ipv4_cidrs(cidrs: &[String], rule_id: &str) -> Result<(), String> {
     for cidr in cidrs {
         if cidr.contains(':') {
-            return Err(format!("rule {} uses IPv6 CIDR {}; unsupported", rule_id, cidr));
+            return Err(format!(
+                "rule {} uses IPv6 CIDR {}; unsupported",
+                rule_id, cidr
+            ));
         }
     }
     Ok(())
 }
 
-fn acl_ports(rule: &NeutronAclRuleSnapshot, proto: u8, rule_id: &str) -> Result<Option<String>, String> {
+fn acl_ports(
+    rule: &NeutronAclRuleSnapshot,
+    proto: u8,
+    rule_id: &str,
+) -> Result<Option<String>, String> {
     if rule.src_port_min.is_some() || rule.src_port_max.is_some() {
         return Err(format!(
             "rule {} uses source port matching; unsupported by current datapath translator",
@@ -2004,7 +2049,16 @@ async fn reconcile_neutron_acl(
 
     state
         .control_plane
-        .update_config(&port.ifname, None, None, Some(false), None, None, None, None)
+        .update_config(
+            &port.ifname,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .map_err(|e| e.to_string())?;
     fault_injection::check("neutron.acl.after_disable").await?;
@@ -2025,11 +2079,24 @@ async fn reconcile_neutron_acl(
 
     for group in &plan.groups {
         for cidr in &group.cidrs {
-            if let Err(e) = state.control_plane.add_group(&port.ifname, &group.name, cidr).await {
+            if let Err(e) = state
+                .control_plane
+                .add_group(&port.ifname, &group.name, cidr)
+                .await
+            {
                 let _ = purge_neutron_acl(state, &port.ifname, &port.port_id).await;
                 let _ = state
                     .control_plane
-                    .update_config(&port.ifname, None, None, Some(false), None, None, None, None)
+                    .update_config(
+                        &port.ifname,
+                        None,
+                        None,
+                        Some(false),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
                     .await;
                 return Err(e.to_string());
             }
@@ -2054,7 +2121,16 @@ async fn reconcile_neutron_acl(
             let _ = purge_neutron_acl(state, &port.ifname, &port.port_id).await;
             let _ = state
                 .control_plane
-                .update_config(&port.ifname, None, None, Some(false), None, None, None, None)
+                .update_config(
+                    &port.ifname,
+                    None,
+                    None,
+                    Some(false),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .await;
             return Err(e.to_string());
         }
@@ -2274,7 +2350,12 @@ mod tests {
         let mut current = BTreeMap::new();
         current.insert("old-port".to_string(), managed("old-port", "tap-old"));
         current.insert("kept-port".to_string(), managed("kept-port", "tap-kept"));
-        let local = inventory(vec![iface("tap-kept", "kept-port", Some(12), Some("br-int"))]);
+        let local = inventory(vec![iface(
+            "tap-kept",
+            "kept-port",
+            Some(12),
+            Some("br-int"),
+        )]);
         let snapshot = NeutronSnapshotRequest {
             schema_version: None,
             generation: 2,
@@ -2349,7 +2430,12 @@ mod tests {
     fn neutron_snapshot_plan_detaches_previously_managed_ineligible_port() {
         let mut current = BTreeMap::new();
         current.insert("dhcp-port".to_string(), managed("dhcp-port", "tap-dhcp"));
-        let local = inventory(vec![iface("tap-dhcp", "dhcp-port", Some(14), Some("br-int"))]);
+        let local = inventory(vec![iface(
+            "tap-dhcp",
+            "dhcp-port",
+            Some(14),
+            Some("br-int"),
+        )]);
         let snapshot = NeutronSnapshotRequest {
             schema_version: None,
             generation: 4,
@@ -2366,7 +2452,10 @@ mod tests {
         assert_eq!(plan.detach, vec![managed("dhcp-port", "tap-dhcp")]);
         assert!(plan.attach.is_empty());
         assert!(plan.update.is_empty());
-        assert_eq!(plan.ignored[0].reason.as_deref(), Some("device_owner network:dhcp"));
+        assert_eq!(
+            plan.ignored[0].reason.as_deref(),
+            Some("device_owner network:dhcp")
+        );
     }
 
     #[test]
@@ -2405,11 +2494,7 @@ mod tests {
     #[test]
     fn domain_statuses_track_each_managed_domain() {
         let domains = domain_statuses_for(
-            &[
-                "acl".to_string(),
-                "qos".to_string(),
-                "mirror".to_string(),
-            ],
+            &["acl".to_string(), "qos".to_string(), "mirror".to_string()],
             "error",
             Some("apply_failed".to_string()),
         );
@@ -2501,6 +2586,20 @@ mod tests {
             ..Default::default()
         };
         assert!(!snapshot_generation_fully_applied(&blocked, 42));
+    }
+
+    #[test]
+    fn snapshot_schema_supports_absent_or_in_range_only() {
+        assert!(snapshot_schema_supported(None));
+        assert!(snapshot_schema_supported(Some(
+            NEUTRON_UDS_SCHEMA_VERSION_MIN
+        )));
+        assert!(snapshot_schema_supported(Some(
+            NEUTRON_UDS_SCHEMA_VERSION_MAX
+        )));
+        assert!(!snapshot_schema_supported(Some(
+            NEUTRON_UDS_SCHEMA_VERSION_MAX + 1
+        )));
     }
 
     #[test]

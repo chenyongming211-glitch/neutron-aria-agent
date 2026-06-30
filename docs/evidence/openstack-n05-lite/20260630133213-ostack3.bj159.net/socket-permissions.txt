@@ -1,0 +1,8 @@
+## host permissions
+/run/aria root UNKNOWN 0 42435 770 directory
+/run/aria/aria-agent.sock root UNKNOWN 0 42435 660 socket
+
+## inside neutron_aria_agent
+/run/aria root neutron 0 42435 770 directory
+/run/aria/aria-agent.sock root neutron 0 42435 660 socket
+neutron user can read/write socket path

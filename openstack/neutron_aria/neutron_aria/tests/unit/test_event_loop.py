@@ -114,6 +114,17 @@ class ResponseErrorLocalClient(FakeLocalClient):
         }
 
 
+class RotatingAclSource(object):
+    def __init__(self, indexes):
+        self.indexes = list(indexes)
+        self.calls = 0
+
+    def load_index(self):
+        index = self.indexes[min(self.calls, len(self.indexes) - 1)]
+        self.calls += 1
+        return index
+
+
 class DeleteTimeoutThenConvergedLocalClient(FakeLocalClient):
     def delete_port(self, port_id):
         self.deleted_ports.append(port_id)
@@ -625,6 +636,15 @@ class EventLoopTestCase(unittest.TestCase):
             "ready",
             result["status"]["last_port_statuses"][0]["domains"][0]["status"],
         )
+        self.assertEqual(
+            result["snapshot"]["generation"],
+            result["status"]["accepted_generation"],
+        )
+        self.assertEqual(
+            result["snapshot"]["generation"],
+            result["status"]["applied_generation"],
+        )
+        self.assertEqual(0, result["status"]["generation_lag"])
 
     def test_full_resync_includes_effective_acl_when_index_is_available(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -672,6 +692,53 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertTrue(port["acl"]["enabled"])
         self.assertEqual("drop-icmp", port["acl"]["rules"][0]["id"])
         self.assertEqual(["10.58.159.2/32"], port["acl"]["rules"][0]["src_cidrs"])
+
+    def test_full_resync_reloads_acl_source_each_time(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        port_source = StaticPortSource([{
+            "id": port_id,
+            "network_id": "net-1",
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+        acl_source = RotatingAclSource([
+            EffectiveAclIndex(
+                policies=[{"id": "policy-v1", "default_action": "allow"}],
+                bindings=[{
+                    "id": "binding-v1",
+                    "policy_id": "policy-v1",
+                    "target_type": "port",
+                    "target_id": port_id,
+                }],
+            ),
+            EffectiveAclIndex(
+                policies=[{"id": "policy-v2", "default_action": "deny"}],
+                bindings=[{
+                    "id": "binding-v2",
+                    "policy_id": "policy-v2",
+                    "target_type": "port",
+                    "target_id": port_id,
+                }],
+            ),
+        ])
+        local_client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            acl_source=acl_source,
+        )
+
+        sync.full_resync()
+        sync.full_resync()
+
+        self.assertEqual(2, acl_source.calls)
+        self.assertEqual("policy-v1", local_client.snapshots[0]["ports"][0]["acl"]["policy_id"])
+        self.assertEqual("policy-v2", local_client.snapshots[1]["ports"][0]["acl"]["policy_id"])
 
     def test_full_resync_reports_ready_heartbeat(self):
         status_reporter = FakeStatusReporter()

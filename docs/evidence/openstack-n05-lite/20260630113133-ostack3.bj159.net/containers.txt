@@ -1,0 +1,70 @@
+NAMES                                                          IMAGE                                                                 STATUS
+neutron_aria_agent                                             neutron-aria-agent:0b20bbd                                            Up 13 hours
+aria_datapath                                                  aria-datapath:59c6dd1                                                 Up 4 days
+ceph-1f0b2982-5efb-11f1-9c9a-b4055dfa274d-osd.6                <registry>/ceph14:v0.9.2                         Up 2 weeks
+ceph-1f0b2982-5efb-11f1-9c9a-b4055dfa274d-osd.5                <registry>/ceph14:v0.9.2                         Up 2 weeks
+ceph-1f0b2982-5efb-11f1-9c9a-b4055dfa274d-osd.4                <registry>/ceph14:v0.9.2                         Up 2 weeks
+ceph-1f0b2982-5efb-11f1-9c9a-b4055dfa274d-osd.3                <registry>/ceph14:v0.9.2                         Up 2 weeks
+export_service                                                 <registry>/export-service:2.0.6sp2               Up 3 weeks
+situational                                                    <registry>/cloudsec-vis:2.0.6sp2                 Up 3 weeks (healthy)
+frontend                                                       <registry>/fe:2.0.6sp2                           Up 3 weeks (healthy)
+skymirror_server                                               <registry>/skymirror-server:2.0.6sp2             Up 3 weeks (healthy)
+vsftpd                                                         <registry>/vsftpd:2.0.6sp2                       Up 3 weeks (healthy)
+netconf                                                        <registry>/netconf:2.0.6sp2                      Up 3 weeks (healthy)
+nginx                                                          <registry>/platform-nginx:2.0.6sp2                   Up 3 weeks (healthy)
+proxy                                                          <registry>/proxy:2.0.6sp2                        Up 3 weeks (healthy)
+lms                                                            <registry>/lms:2.0.6sp2                          Up 10 hours (healthy)
+platform                                                           <registry>/platform:2.0.6sp2                         Up 3 weeks (healthy)
+cmp                                                            <registry>/cmp:2.0.6sp2                          Up 3 weeks (healthy)
+elk_archive                                                    <registry>/elk-base:2.0.6sp2                     Up 3 weeks (healthy)
+elk_hawk                                                       <registry>/elk-base:2.0.6sp2                     Up 3 weeks (healthy)
+elk_pipe                                                       <registry>/elk-base:2.0.6sp2                     Up 3 weeks (healthy)
+elk_preprocess                                                 <registry>/elk-base:2.0.6sp2                     Up 3 weeks (healthy)
+elk_syslogd                                                    <registry>/elk-base:2.0.6sp2                     Up 3 weeks (healthy)
+elk_nginx                                                      <registry>/elk-nginx:2.0.6sp2                    Up 3 weeks (healthy)
+elk_es                                                         <registry>/elk-base:2.0.6sp2                     Up 3 weeks (healthy)
+elk_redis                                                      <registry>/elk-redis:2.0.6sp2                    Up 3 weeks (healthy)
+vmautodrift_agent                                              <registry>/openstack-vmautodrift:2.0.6sp2        Up 3 weeks (healthy)
+vmautodrift_server                                             <registry>/openstack-vmautodrift:2.0.6sp2        Up 3 weeks (healthy)
+cinder_backup                                                  <registry>/openstack-cinder-backup:2.0.6sp2      Up 3 weeks (healthy)
+cinder_volume                                                  690bf5e51f04                                                          Up 18 hours (healthy)
+cinder_scheduler                                               <registry>/openstack-cinder-scheduler:2.0.6sp2   Up 3 weeks (healthy)
+cinder_api                                                     <registry>/openstack-cinder-api:2.0.6sp2         Up 3 weeks (healthy)
+neutron_metadata_agent                                         <registry>/neutron-metadata-agent:2.0.6sp2       Up 3 weeks (healthy)
+neutron_sriov_agent                                            <registry>/neutron-sriov-agent:2.0.6sp2          Up 3 weeks (healthy)
+neutron_dhcp_agent                                             <registry>/neutron-dhcp-agent:2.0.6sp2           Up 3 weeks (healthy)
+neutron_linuxbridge_agent                                      <registry>/neutron-linuxbridge-agent:2.0.6sp2    Up 3 weeks (healthy)
+neutron_openvswitch_agent                                      <registry>/neutron-openvswitch-agent:2.0.6sp2    Up 3 weeks (healthy)
+neutron_server                                                 <registry>/neutron-server:2.0.6sp2               Up 13 hours (healthy)
+nova_compute                                                   371a713217ad                                                          Up 18 hours (healthy)
+nova_consoleauth                                               <registry>/openstack-nova-consoleauth:2.0.6sp2   Up 3 weeks (healthy)
+nova_novncproxy                                                <registry>/openstack-nova-novncproxy:2.0.6sp2    Up 3 weeks (healthy)
+nova_conductor                                                 <registry>/openstack-nova-conductor:2.0.6sp2     Up 3 weeks (healthy)
+nova_scheduler                                                 <registry>/openstack-nova-scheduler:2.0.6sp2     Up 3 weeks (healthy)
+nova_api                                                       <registry>/openstack-nova-api:2.0.6sp2           Up 3 weeks (healthy)
+nova_libvirtd                                                  <registry>/openstack-nova-libvirtd:2.0.6sp2      Up 3 weeks (healthy)
+glance_registry                                                <registry>/openstack-glance:2.0.6sp2             Up 3 weeks (healthy)
+glance_api                                                     <registry>/openstack-glance:2.0.6sp2             Up 3 weeks (healthy)
+keystone_nginx                                                 <registry>/openstack-keystone:2.0.6sp2           Up 3 weeks (healthy)
+keystone_uwsgi                                                 <registry>/openstack-keystone:2.0.6sp2           Up 3 weeks (healthy)
+openstack_client                                               <registry>/openstack-glance:2.0.6sp2             Up 3 weeks (healthy)
+ceph-1f0b2982-5efb-11f1-9c9a-b4055dfa274d-mon.ostack3          <registry>/ceph14:v0.9.2                         Up 3 weeks
+ceph-1f0b2982-5efb-11f1-9c9a-b4055dfa274d-mgr.ostack3.nqltyk   <registry>/ceph14:v0.9.2                         Up 3 weeks
+ceph-1f0b2982-5efb-11f1-9c9a-b4055dfa274d-crash.ostack3        <registry>/ceph14:v0.9.2                         Up 3 weeks
+haproxy                                                        <registry>/haproxy:2.0.6sp2                      Up 3 weeks (healthy)
+rabbitmq                                                       <registry>/rabbitmq:2.0.6sp2                     Up 3 weeks (healthy)
+etcd                                                           <registry>/etcd:2.0.6sp2                         Up 3 weeks (healthy)
+memcached                                                      <registry>/memcached:2.0.6sp2                    Up 3 weeks (healthy)
+keepalived                                                     <registry>/keepalived:2.0.6sp2                   Up 3 weeks (healthy)
+
+## inspect neutron_server
+name=/neutron_server image=<registry>/neutron-server:2.0.6sp2 user=neutron mounts=/data/docker/volumes/69a2f17bc08d6fb1589fb69effff3553c385316b3d73e001795e24be02f21fd3/_data:/sys/fs/cgroup:;/etc/kolla/neutron-server:/var/lib/kolla/config_files:ro;/data/docker/volumes/kolla_logs/_data:/var/log/kolla:rw;/etc/localtime:/etc/localtime:ro;
+
+## inspect neutron_openvswitch_agent
+name=/neutron_openvswitch_agent image=<registry>/neutron-openvswitch-agent:2.0.6sp2 user=neutron mounts=/etc/localtime:/etc/localtime:ro;/data/docker/volumes/kolla_logs/_data:/var/log/kolla:rw;/data/docker/volumes/e3845a72273375039f4c4fcf686770271e5b1712a971392c4ad4ee0aafedd3ff/_data:/sys/fs/cgroup:;/etc/kolla/neutron-openvswitch-agent:/var/lib/kolla/config_files:ro;/run/openvswitch:/run/openvswitch:shared;/lib/modules:/lib/modules:ro;
+
+## inspect neutron_aria_agent
+name=/neutron_aria_agent image=neutron-aria-agent:0b20bbd user=neutron mounts=/etc/localtime:/etc/localtime:ro;/data/docker/volumes/kolla_logs/_data:/var/log/kolla:rw;/data/docker/volumes/7ce4c0c97737c11b1254bee8502c0a7e0395b1f8827a5f2bd3532fb808c74aa4/_data:/sys/fs/cgroup:;/run/aria:/run/aria:rw;/etc/kolla/neutron-aria-agent:/var/lib/kolla/config_files:ro;
+
+## inspect openstack_client
+name=/openstack_client image=<registry>/openstack-glance:2.0.6sp2 user=glance mounts=/etc/kolla/.adminrc:/etc/kolla/.adminrc:ro;/usr/local/bin/openstack-client-pause:/usr/local/bin/pause:rw;/etc/localtime:/etc/localtime:ro;/data/docker/volumes/kolla_logs/_data:/var/log/kolla:rw;/data/docker/volumes/ac6830d764514a98803bc0390ea5bc8677368ac3b444a6127483335866c8d17b/_data:/sys/fs/cgroup:;

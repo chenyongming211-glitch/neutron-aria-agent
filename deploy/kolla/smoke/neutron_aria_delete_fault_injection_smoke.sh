@@ -14,7 +14,7 @@ FAULT_ACTION="${FAULT_ACTION:-sigkill}"
 FAULT_AFTER_HITS="${FAULT_AFTER_HITS:-1}"
 DELETE_FAULT_POINTS="${DELETE_FAULT_POINTS:-neutron.delete.after_detach_before_commit}"
 WAIT_SECONDS="${WAIT_SECONDS:-45}"
-REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE:-20.0}"
+REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE:-3.0}"
 REQUIRE_NO_ACTIVE_INSTANCES="${REQUIRE_NO_ACTIVE_INSTANCES:-false}"
 EXEC_USER="${EXEC_USER:-neutron}"
 VM_IP="${VM_IP:-}"
@@ -112,7 +112,7 @@ import sys
 
 from neutron_aria.agent.uds_client import LocalClient
 
-client = LocalClient(sys.argv[1], timeout=10.0)
+client = LocalClient(sys.argv[1], timeout=3.0)
 status = client.status()
 for port in status.get("managed_ports") or []:
     port_id = port.get("port_id")
@@ -300,7 +300,7 @@ from neutron_aria.agent.uds_client import LocalClient
 
 socket_path, port_id = sys.argv[1:3]
 try:
-    response = LocalClient(socket_path, timeout=10.0).delete_port(port_id)
+response = LocalClient(socket_path, timeout=3.0).delete_port(port_id)
 except Exception as exc:
     print("delete_error=%s: %s" % (exc.__class__.__name__, exc), file=sys.stderr)
     raise SystemExit(1)

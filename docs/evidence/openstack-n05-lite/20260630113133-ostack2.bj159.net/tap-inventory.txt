@@ -1,0 +1,100 @@
+## ip link tap/qvo/qvb/veth
+16: vxlantap: <BROADCAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/ether fe:49:2f:39:f9:db brd ff:ff:ff:ff:ff:ff
+26: tap86b83885-67: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq master ovs-system state UNKNOWN mode DEFAULT group default qlen 1000\    link/ether fe:16:3e:aa:b0:f5 brd ff:ff:ff:ff:ff:ff
+48: tap39adf570-1a: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq master ovs-system state UNKNOWN mode DEFAULT group default qlen 1000\    link/ether fe:16:3e:b3:1e:f5 brd ff:ff:ff:ff:ff:ff
+49: tapaa4ddb4a-5b: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq master ovs-system state UNKNOWN mode DEFAULT group default qlen 1000\    link/ether fe:16:3e:c0:c3:18 brd ff:ff:ff:ff:ff:ff
+55: tape607e86b-9e: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq master ovs-system state UNKNOWN mode DEFAULT group default qlen 1000\    link/ether fe:16:3e:56:eb:01 brd ff:ff:ff:ff:ff:ff
+57: tapd53ce06c-c9: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq master ovs-system state UNKNOWN mode DEFAULT group default qlen 1000\    link/ether fe:16:3e:b5:22:39 brd ff:ff:ff:ff:ff:ff
+
+## OVS interface external_ids
+name                : phy-br-mirror
+ofport              : 1
+external_ids        : {}
+
+name                : br-mirror
+ofport              : 65534
+external_ids        : {}
+
+name                : int-br-dummy
+ofport              : 4
+external_ids        : {}
+
+name                : tapc84708de-7e
+ofport              : 6
+external_ids        : {attached-mac="fa:16:3e:a0:d5:3c", iface-id="c84708de-7ed6-482b-a2cb-d864269659d4", iface-status=active}
+
+name                : br-eth1
+ofport              : 65534
+external_ids        : {NM.connection.uuid="725c8d3f-f8c4-43f2-af59-e70a210be92a"}
+
+name                : tap39adf570-1a
+ofport              : 10
+external_ids        : {attached-mac="fa:16:3e:b3:1e:f5", iface-id="39adf570-1acb-4e81-9215-96744a6bf627", iface-status=active, vm-id="68fa335c-8c4d-451c-9685-ca9f21de79cc"}
+
+name                : int-br-mirror
+ofport              : 3
+external_ids        : {}
+
+name                : phy-br-mgt
+ofport              : 2
+external_ids        : {}
+
+name                : tapaa4ddb4a-5b
+ofport              : 11
+external_ids        : {attached-mac="fa:16:3e:c0:c3:18", iface-id="aa4ddb4a-5b73-4e94-bb21-e9a4f9614045", iface-status=active, vm-id="68fa335c-8c4d-451c-9685-ca9f21de79cc"}
+
+name                : tape607e86b-9e
+ofport              : 17
+external_ids        : {attached-mac="fa:16:3e:56:eb:01", iface-id="e607e86b-9e5f-4c63-a5df-3dc8986a1b0f", iface-status=active, vm-id="de981869-29c2-4465-8804-e293fed53184"}
+
+name                : int-br-eth1
+ofport              : 1
+external_ids        : {}
+
+name                : tap2b915b95-66
+ofport              : 5
+external_ids        : {attached-mac="fa:16:3e:d8:86:a7", iface-id="2b915b95-660f-46b9-a8e2-9b297b19833e", iface-status=active}
+
+name                : br-int
+ofport              : 65534
+external_ids        : {}
+
+name                : bond0
+ofport              : 1
+external_ids        : {}
+
+name                : tap86b83885-67
+ofport              : 8
+external_ids        : {attached-mac="fa:16:3e:aa:b0:f5", iface-id="86b83885-671f-474c-9556-8af98cf1cdc8", iface-status=active, vm-id="926cfdd9-edad-45fa-b358-73af82abc8d3"}
+
+name                : br-mgt
+ofport              : 65534
+external_ids        : {NM.connection.uuid="5247852a-8f82-4a45-a125-5394186d0b5d"}
+
+name                : int-br-mgt
+ofport              : 2
+external_ids        : {}
+
+name                : bond1
+ofport              : 1
+external_ids        : {}
+
+name                : phy-br-dummy
+ofport              : 1
+external_ids        : {}
+
+name                : phy-br-eth1
+ofport              : 2
+external_ids        : {}
+
+name                : br-dummy
+ofport              : 65534
+external_ids        : {}
+
+name                : tap0da68b40-16
+ofport              : 7
+external_ids        : {attached-mac="fa:16:3e:31:b1:4d", iface-id="0da68b40-1625-440a-89ef-1db963ce2c2b", iface-status=active}
+
+name                : tapd53ce06c-c9
+ofport              : 19
+external_ids        : {attached-mac="fa:16:3e:b5:22:39", iface-id="d53ce06c-c90e-4371-b8e4-4912f90a91d3", iface-status=active, vm-id="6a58105e-6fc4-4aa6-9ada-bd3f06ca891d"}

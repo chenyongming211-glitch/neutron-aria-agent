@@ -264,7 +264,11 @@ impl TraceManager {
                         consumer_failures: state.consumer_failures,
                         consumer_restarts: state.consumer_restarts,
                         last_error: state.last_error.clone(),
-                        active_consumers: state.tasks.iter().filter(|task| !task.is_finished()).count(),
+                        active_consumers: state
+                            .tasks
+                            .iter()
+                            .filter(|task| !task.is_finished())
+                            .count(),
                     },
                 )
             })
@@ -278,7 +282,8 @@ impl TraceManager {
 
         let mut runtime_states = self.runtime_states.lock().await;
         let state = runtime_states.entry(pin_path.to_string()).or_default();
-        let needs_restart = state.tasks.is_empty() || state.tasks.iter().any(|task| task.is_finished());
+        let needs_restart =
+            state.tasks.is_empty() || state.tasks.iter().any(|task| task.is_finished());
         if !needs_restart {
             return Ok(());
         }
@@ -291,14 +296,16 @@ impl TraceManager {
         let handles = match self.backend {
             TraceBackendKind::LegacyMap => Vec::new(),
             TraceBackendKind::RingBuf => vec![self.spawn_ringbuf_consumer(pin_path.to_string())],
-            TraceBackendKind::PerfEventArray => match self.spawn_perf_consumers(pin_path.to_string()) {
-                Ok(handles) => handles,
-                Err(error) => {
-                    state.consumer_failures += 1;
-                    state.last_error = Some(error.clone());
-                    return Err(error);
+            TraceBackendKind::PerfEventArray => {
+                match self.spawn_perf_consumers(pin_path.to_string()) {
+                    Ok(handles) => handles,
+                    Err(error) => {
+                        state.consumer_failures += 1;
+                        state.last_error = Some(error.clone());
+                        return Err(error);
+                    }
                 }
-            },
+            }
         };
 
         state.last_error = None;

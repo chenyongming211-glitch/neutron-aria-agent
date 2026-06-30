@@ -1,5 +1,9 @@
 # Build artifacts
 /target/
+/ebpf/target/
+/dist/
+/release/
+/.downloads/
 __pycache__/
 *.py[cod]
 

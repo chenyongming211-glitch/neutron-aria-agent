@@ -5,6 +5,16 @@ from neutron_aria.agent.status import ARIA_AGENT_TYPE
 
 ARIA_AGENT_BINARY = "neutron-aria-agent"
 ARIA_AGENT_TOPIC = "N/A"
+ARIA_ACL_PORT_STATUS_FIELDS = set([
+    "port_id",
+    "host",
+    "effective_policy_id",
+    "binding_id",
+    "status",
+    "reason",
+    "effective_action",
+    "generation",
+])
 
 
 class StatusReportError(Exception):
@@ -58,10 +68,16 @@ class NeutronStatusReporter(object):
             "reason": payload.get("reason"),
             "last_error": payload.get("last_error"),
             "last_generation": payload.get("last_generation"),
+            "last_submitted_generation": payload.get("last_submitted_generation"),
+            "accepted_generation": payload.get("accepted_generation"),
+            "applied_generation": payload.get("applied_generation"),
+            "generation_lag": payload.get("generation_lag"),
             "last_snapshot_ports": payload.get("last_snapshot_ports"),
             "last_managed_ports": payload.get("last_managed_ports"),
             "last_managed_ports_detail": payload.get("last_managed_ports_detail") or [],
             "last_port_statuses": payload.get("last_port_statuses") or [],
+            "domain_counts": payload.get("domain_counts") or [],
+            "degraded_reasons": payload.get("degraded_reasons") or [],
             "updated_at": payload.get("updated_at"),
         })
 
@@ -75,11 +91,96 @@ class NeutronStatusReporter(object):
         }
 
 
+class AriaAclPortStatusReporter(object):
+    """Write per-port runtime status to the aria_acl service plugin/API."""
+
+    def __init__(self, aria_acl_api, context=None, host=None):
+        self.aria_acl_api = aria_acl_api
+        self.context = context
+        self.host = host
+
+    def report(self, runtime_status):
+        reported = []
+        for status in runtime_status.last_port_statuses:
+            payload = self._port_status_payload(runtime_status, status)
+            self._report_one(payload)
+            reported.append(payload)
+        return {"reported_port_statuses": len(reported), "port_statuses": reported}
+
+    def _port_status_payload(self, runtime_status, status):
+        source = dict(status)
+        payload = {}
+        for key in ARIA_ACL_PORT_STATUS_FIELDS:
+            if key in source:
+                payload[key] = source[key]
+        if "effective_policy_id" not in payload and source.get("policy_id"):
+            payload["effective_policy_id"] = source.get("policy_id")
+        payload.setdefault("host", self.host or runtime_status.host)
+        payload.setdefault("generation", runtime_status.last_generation)
+        acl_domain = self._acl_domain_status(source)
+        if acl_domain:
+            self._setdefault_present(payload, "status", acl_domain.get("status"))
+            self._setdefault_present(
+                payload,
+                "effective_action",
+                acl_domain.get("effective_action"),
+            )
+            self._setdefault_present(payload, "reason", acl_domain.get("reason"))
+        payload.setdefault("status", runtime_status.reason)
+        if (
+            payload.get("status") == "ready" and
+            not payload.get("effective_action")
+        ):
+            payload["effective_action"] = "enforce"
+        if runtime_status.last_error and not payload.get("reason"):
+            payload["reason"] = runtime_status.last_error
+        return payload
+
+    def _acl_domain_status(self, payload):
+        for domain_status in payload.get("domains") or []:
+            if domain_status.get("domain") == "acl":
+                return domain_status
+        return None
+
+    def _setdefault_present(self, payload, key, value):
+        if value is not None and key not in payload:
+            payload[key] = value
+
+    def _report_one(self, payload):
+        body = {"aria_acl_port_status": payload}
+        method = getattr(self.aria_acl_api, "report_aria_acl_port_status", None)
+        if method is None:
+            raise StatusReportError("aria_acl API does not expose report_aria_acl_port_status")
+        try:
+            return method(self.context, body)
+        except TypeError:
+            return method(payload)
+
+
+class CompositeStatusReporter(object):
+    def __init__(self, *reporters):
+        self.reporters = [reporter for reporter in reporters if reporter is not None]
+
+    def report(self, runtime_status):
+        results = []
+        for reporter in self.reporters:
+            results.append(reporter.report(runtime_status))
+        if len(results) == 1:
+            return results[0]
+        return {"results": results}
+
+
 def report_state_topic(topics):
     return getattr(topics, "REPORTS", getattr(topics, "PLUGIN", "q-plugin"))
 
 
-def build_neutron_status_reporter(host, config, report_state_api=None, context=None):
+def build_neutron_status_reporter(
+    host,
+    config,
+    report_state_api=None,
+    context=None,
+    aria_acl_api=None,
+):
     """Build a real Neutron report_state reporter inside a Neutron runtime.
 
     Unit tests and smoke scripts can inject report_state_api/context directly.
@@ -109,9 +210,23 @@ def build_neutron_status_reporter(host, config, report_state_api=None, context=N
         "ovs_bridge": config.ovs_bridge,
         "socket_path": config.socket_path,
     }
-    return NeutronStatusReporter(
+    heartbeat_reporter = NeutronStatusReporter(
         report_state_api=report_state_api,
         context=context,
         host=host,
         configurations=configurations,
+    )
+    if getattr(config, "acl_source", None) != "neutron":
+        return heartbeat_reporter
+
+    if aria_acl_api is None:
+        try:
+            from neutron_aria.agent.neutron_client import build_aria_acl_client_from_env
+            aria_acl_api = build_aria_acl_client_from_env()
+        except Exception as exc:
+            raise StatusReportError("aria_acl port-status API unavailable: %s" % exc)
+
+    return CompositeStatusReporter(
+        heartbeat_reporter,
+        AriaAclPortStatusReporter(aria_acl_api, context=context, host=host),
     )

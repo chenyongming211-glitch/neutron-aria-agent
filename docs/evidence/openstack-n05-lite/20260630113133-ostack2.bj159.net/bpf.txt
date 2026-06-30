@@ -1,0 +1,5 @@
+## BTF
+-r--r--r-- 1 root root 4255724 Jun 15 11:18 /sys/kernel/btf/vmlinux
+
+## bpffs
+bpf /sys/fs/bpf bpf rw,nosuid,nodev,noexec,relatime,mode=700 0 0

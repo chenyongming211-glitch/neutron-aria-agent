@@ -1,0 +1,3 @@
+audit_log_path=/data/docker/volumes/kolla_logs/_data/aria-datapath/neutron-uds-audit.log
+/data/docker/volumes/kolla_logs/_data/aria-datapath/neutron-uds-audit.log root root 0 0 644 regular file
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":2136090,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782796374788}

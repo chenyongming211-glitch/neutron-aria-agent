@@ -1,0 +1,29 @@
+# guest command: set -x; ip -6 addr show dev eth0; ip -6 route show; ip -6 neigh show || true; ping6 -c 1 -W 2 -I eth0 ff02::1 || true; ip -6 neigh show || true
+Warning: Permanently added '10.58.159.40' (ED25519) to the list of known hosts.
++ ip -6 addr show dev eth0
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qlen 1000
+    inet6 fe80::f816:3eff:fe86:a3f1/64 scope link
+       valid_lft forever preferred_lft forever
++ ip -6 route show
+fe80::/64 dev eth0  metric 256
+multicast ff00::/8 dev eth0  metric 256
++ ip -6 neigh show
++ ping6 -c 1 -W 2 -I eth0 ff02::1
+ping6: Warning: source address might be selected on device other than: eth0
+PING ff02::1(ff02::1) from :: eth0: 56 data bytes
+64 bytes from fe80::f816:3eff:fe86:a3f1: icmp_seq=1 ttl=64 time=0.026 ms
+
+--- ff02::1 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 0.026/0.026/0.026/0.000 ms
++ ip -6 neigh show
+fe80::f816:3eff:feb3:1ef5 dev eth0 lladdr fa:16:3e:b3:1e:f5 ref 1 used 0/0/0 probes 0 DELAY
+fe80::f816:3eff:fea0:d53c dev eth0 lladdr fa:16:3e:a0:d5:3c ref 1 used 0/0/0 probes 0 DELAY
+fe80::5c1b:1db0:4930:a3a7 dev eth0 lladdr b4:05:5d:fa:27:4d ref 1 used 0/0/0 probes 0 DELAY
+fe80::3925:3e5a:6064:b4cf dev eth0 lladdr 6c:92:bf:f3:20:71 ref 1 used 0/0/0 probes 0 DELAY
+fe80::f816:3eff:feb5:2239 dev eth0 lladdr fa:16:3e:b5:22:39 ref 1 used 0/0/0 probes 0 DELAY
+fe80::20c:29ff:fe0b:1917 dev eth0 lladdr 00:0c:29:0b:19:17 ref 1 used 0/0/0 probes 0 DELAY
+fe80::f816:3eff:fed5:7c01 dev eth0 lladdr fa:16:3e:d5:7c:01 ref 1 used 0/0/0 probes 0 DELAY
+fe80::f816:3eff:fe56:eb01 dev eth0 lladdr fa:16:3e:56:eb:01 ref 1 used 0/0/0 probes 0 DELAY
+fe80::79f4:dcb4:bd1b:fc04 dev eth0 lladdr b4:05:5d:fc:c4:e9 ref 1 used 0/0/0 probes 0 DELAY
+# exit=0

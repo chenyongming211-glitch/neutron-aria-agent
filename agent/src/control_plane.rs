@@ -15,10 +15,10 @@ use aria_core::ebpf_ops::TraceMapMode;
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
 use aria_core::wal::{WalClient, WalEntry};
 
+mod observability;
+mod ssl;
 mod tcprt;
 mod trace;
-mod ssl;
-mod observability;
 
 const WAL_COMPACT_THRESHOLD: u64 = 1000;
 pub const MANAGED_SHARED_PIN_NAMESPACE: &str = "global-v2";
@@ -174,10 +174,7 @@ pub enum ControlPlaneError {
     ValidationError(String),
     KernelError(String),
     InstanceNotReady(String),
-    LocalWriteBlocked {
-        instance: String,
-        domain: String,
-    },
+    LocalWriteBlocked { instance: String, domain: String },
 }
 
 impl std::fmt::Display for ControlPlaneError {
@@ -217,15 +214,9 @@ impl ControlPlane {
         state: &InstanceState,
     ) -> Result<String, ControlPlaneError> {
         if instance == "system" {
-            state
-                .state
-                .attached_iface
-                .clone()
-                .ok_or_else(|| {
-                    ControlPlaneError::InstanceNotReady(
-                        "system interface is not attached".to_string(),
-                    )
-                })
+            state.state.attached_iface.clone().ok_or_else(|| {
+                ControlPlaneError::InstanceNotReady("system interface is not attached".to_string())
+            })
         } else {
             Ok(instance.to_string())
         }
@@ -493,8 +484,8 @@ impl ControlPlane {
             | "aria_acl" => Some("acl".to_string()),
             "aria_qos" => Some("qos".to_string()),
             "aria_mirror" => Some("mirror".to_string()),
-            "acl" | "qos" | "mirror" | "config" | "conntrack" | "tcprt" | "trace"
-            | "drops" | "ssl" => Some(normalized),
+            "acl" | "qos" | "mirror" | "config" | "conntrack" | "tcprt" | "trace" | "drops"
+            | "ssl" => Some(normalized),
             _ => Some(normalized),
         }
     }
@@ -541,10 +532,7 @@ impl ControlPlane {
         }
     }
 
-    pub async fn get_neutron_port_authority(
-        &self,
-        instance: &str,
-    ) -> Option<NeutronPortAuthority> {
+    pub async fn get_neutron_port_authority(&self, instance: &str) -> Option<NeutronPortAuthority> {
         self.neutron_authorities.read().await.get(instance).cloned()
     }
 
@@ -573,7 +561,11 @@ impl ControlPlane {
         instance: &str,
         group_name: &str,
     ) -> Result<(), ControlPlaneError> {
-        if group_name.trim().to_ascii_lowercase().starts_with("neutron:") {
+        if group_name
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("neutron:")
+        {
             let authorities = self.neutron_authorities.read().await;
             if authorities.contains_key(instance) {
                 return Err(ControlPlaneError::LocalWriteBlocked {
@@ -792,7 +784,11 @@ impl ControlPlane {
             let state = instance.read().await;
             state.pin_path.clone()
         };
-        if let Err(e) = self.trace_manager.register_tap(&trace_pin_path, tap_id).await {
+        if let Err(e) = self
+            .trace_manager
+            .register_tap(&trace_pin_path, tap_id)
+            .await
+        {
             warn!(
                 instance = %name,
                 tap_id,
@@ -985,7 +981,9 @@ impl ControlPlane {
                 }
             }
             if tap_id != aria_core::common::TAP_ID_UNASSIGNED {
-                self.trace_manager.unregister_tap(&state.pin_path, tap_id).await;
+                self.trace_manager
+                    .unregister_tap(&state.pin_path, tap_id)
+                    .await;
                 if let Err(e) =
                     aria_core::ebpf_ops::scrub_managed_runtime_state(state.map_runtime())
                 {
@@ -998,7 +996,9 @@ impl ControlPlane {
                     );
                 }
             } else if name == "system" {
-                self.trace_manager.unregister_tap(&state.pin_path, tap_id).await;
+                self.trace_manager
+                    .unregister_tap(&state.pin_path, tap_id)
+                    .await;
             } else if name != "system" {
                 if let Some(ifindex) = ifindex {
                     if let Err(e) = aria_core::ebpf_ops::clear_iface_ctx(&state.pin_path, ifindex) {
@@ -1340,10 +1340,9 @@ impl ControlPlane {
             .await;
 
         // Clear stale GROUP_STATS entries so the deleted group no longer appears in API responses.
-        if let Err(e) = aria_core::monitoring::clear_group_stats_for_id(
-            state.map_runtime(),
-            group.id,
-        ) {
+        if let Err(e) =
+            aria_core::monitoring::clear_group_stats_for_id(state.map_runtime(), group.id)
+        {
             warn!(error = %e, group_id = group.id, "failed to clear group stats after group delete");
         }
         Ok(())
@@ -2673,37 +2672,38 @@ mod tests {
     async fn domain_authority_blocks_only_selected_domains() {
         let cp = test_control_plane();
         let managed_domains = vec!["acl".to_string(), "mirror".to_string()];
-        cp.mark_neutron_port_authority(
-            "tap-vm",
-            "port-vm",
-            &managed_domains,
-            7,
-        )
-        .await;
+        cp.mark_neutron_port_authority("tap-vm", "port-vm", &managed_domains, 7)
+            .await;
 
-        assert!(cp
-            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Acl)
-            .await
-            .is_err());
-        assert!(cp
-            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Mirror)
-            .await
-            .is_err());
-        assert!(cp
-            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Qos)
-            .await
-            .is_ok());
-        assert!(cp
-            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Trace)
-            .await
-            .is_ok());
-        assert!(cp
-            .ensure_local_group_write_allowed("tap-vm", "neutron:acl-source")
-            .await
-            .is_err());
-        assert!(cp
-            .ensure_local_group_write_allowed("tap-vm", "local-qos-group")
-            .await
-            .is_ok());
+        assert!(
+            cp.ensure_local_write_allowed("tap-vm", LocalWriteDomain::Acl)
+                .await
+                .is_err()
+        );
+        assert!(
+            cp.ensure_local_write_allowed("tap-vm", LocalWriteDomain::Mirror)
+                .await
+                .is_err()
+        );
+        assert!(
+            cp.ensure_local_write_allowed("tap-vm", LocalWriteDomain::Qos)
+                .await
+                .is_ok()
+        );
+        assert!(
+            cp.ensure_local_write_allowed("tap-vm", LocalWriteDomain::Trace)
+                .await
+                .is_ok()
+        );
+        assert!(
+            cp.ensure_local_group_write_allowed("tap-vm", "neutron:acl-source")
+                .await
+                .is_err()
+        );
+        assert!(
+            cp.ensure_local_group_write_allowed("tap-vm", "local-qos-group")
+                .await
+                .is_ok()
+        );
     }
 }

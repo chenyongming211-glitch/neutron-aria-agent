@@ -1,0 +1,35 @@
+- {Field: 'OS-DCF:diskConfig', Value: MANUAL}
+- {Field: 'OS-EXT-AZ:availability_zone', Value: nova}
+- {Field: 'OS-EXT-SRV-ATTR:host', Value: ostack2.bj159.net}
+- {Field: 'OS-EXT-SRV-ATTR:hypervisor_hostname', Value: ostack2.bj159.net}
+- {Field: 'OS-EXT-SRV-ATTR:instance_name', Value: instance-00000003}
+- {Field: 'OS-EXT-STS:power_state', Value: 1}
+- {Field: 'OS-EXT-STS:task_state', Value: null}
+- {Field: 'OS-EXT-STS:vm_state', Value: active}
+- {Field: 'OS-SRV-USG:launched_at', Value: '2026-06-10T07:39:52.000000'}
+- {Field: 'OS-SRV-USG:terminated_at', Value: null}
+- {Field: accessIPv4, Value: ''}
+- {Field: accessIPv6, Value: ''}
+- {Field: addresses, Value: flat_mgt=10.58.159.26}
+- {Field: config_drive, Value: ''}
+- {Field: created, Value: '2026-06-10T07:39:42Z'}
+- {Field: deleted, Value: ''}
+- {Field: flavor, Value: 'AUTO_4Vcpu_8192Mem_120Disk_0Ephemeral_0swap_1.000000rxtx_factor_disk0type_-1vif_extra_specs:hw_vif_multiqueue_size_novaaggregate_instance_extra_specs:department
+    (6dd5a799-5970-497f-a68f-5376564c94e4)'}
+- {Field: hostId, Value: 128d3303591397840f10fdb6c6b17f8af76bcf16e88773a40d374de5}
+- {Field: id, Value: 926cfdd9-edad-45fa-b358-73af82abc8d3}
+- {Field: image, Value: waf-20250613-8.1.6.86485 (f56d0c01-5d73-4e93-a321-7d39af079899)}
+- {Field: key_name, Value: null}
+- {Field: name, Value: wp-test}
+- Field: os-extended-volumes:volumes_attached
+  Value: []
+- {Field: progress, Value: 0}
+- {Field: project_id, Value: 7653968c93ff4a2ca138e6577cb5a9ba}
+- {Field: properties, Value: disk_type='disk0'}
+- {Field: reclaim, Value: ''}
+- Field: security_groups
+  Value:
+  - {name: default}
+- {Field: status, Value: ACTIVE}
+- {Field: updated, Value: '2026-06-10T07:39:52Z'}
+- {Field: user_id, Value: 51a674b16dce4222ad80fff79f972e4e}

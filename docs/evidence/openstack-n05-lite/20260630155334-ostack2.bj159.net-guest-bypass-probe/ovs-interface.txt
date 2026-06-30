@@ -1,0 +1,36 @@
+_uuid               : 69b1b19e-ed7e-4906-82c4-d01678da49a1
+admin_state         : up
+bfd                 : {}
+bfd_status          : {}
+cfm_fault           : []
+cfm_fault_status    : []
+cfm_flap_count      : []
+cfm_health          : []
+cfm_mpid            : []
+cfm_remote_mpids    : []
+cfm_remote_opstate  : []
+duplex              : full
+error               : []
+external_ids        : {attached-mac="fa:16:3e:86:a3:f1", iface-id="504835d3-2df3-4901-a8fe-ebb2213bf0ec", iface-status=active, vm-id="5ef9bf26-2569-4b35-b779-125fb6dc9127"}
+ifindex             : 68
+ingress_policing_burst: 0
+ingress_policing_kpkts_burst: 0
+ingress_policing_kpkts_rate: 0
+ingress_policing_rate: 0
+lacp_current        : []
+link_resets         : 1
+link_speed          : 10000000
+link_state          : up
+lldp                : {}
+mac                 : []
+mac_in_use          : "fe:16:3e:86:a3:f1"
+mtu                 : 1500
+mtu_request         : []
+name                : tap504835d3-2d
+ofport              : 30
+ofport_request      : []
+options             : {}
+other_config        : {}
+statistics          : {collisions=0, rx_bytes=2542, rx_crc_err=0, rx_dropped=0, rx_errors=0, rx_frame_err=0, rx_missed_errors=0, rx_multicast_packets=0, rx_over_err=0, rx_packets=27, tx_bytes=4229, tx_dropped=0, tx_errors=0, tx_packets=43, upcall_errors=0, upcall_packets=10}
+status              : {driver_name=tun, driver_version="1.6", firmware_version=""}
+type                : ""

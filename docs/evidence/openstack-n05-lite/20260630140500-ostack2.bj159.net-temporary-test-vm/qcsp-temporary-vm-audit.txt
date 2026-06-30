@@ -1,0 +1,302 @@
+# QCSP temporary VM audit
+Tue Jun 30 05:57:24 UTC 2026
+## nova show
++--------------------------------------+---------------------------------------------------------------+
+| Property                             | Value                                                         |
++--------------------------------------+---------------------------------------------------------------+
+| OS-DCF:diskConfig                    | MANUAL                                                        |
+| OS-EXT-AZ:availability_zone          | nova                                                          |
+| OS-EXT-SRV-ATTR:host                 | ostack2.bj159.net                                             |
+| OS-EXT-SRV-ATTR:hypervisor_hostname  | ostack2.bj159.net                                             |
+| OS-EXT-SRV-ATTR:instance_name        | instance-0000000f                                             |
+| OS-EXT-STS:power_state               | 1                                                             |
+| OS-EXT-STS:task_state                | -                                                             |
+| OS-EXT-STS:vm_state                  | active                                                        |
+| OS-SRV-USG:launched_at               | 2026-06-30T05:53:45.000000                                    |
+| OS-SRV-USG:terminated_at             | -                                                             |
+| accessIPv4                           |                                                               |
+| accessIPv6                           |                                                               |
+| config_drive                         | True                                                          |
+| created                              | 2026-06-30T05:53:36Z                                          |
+| deleted                              |                                                               |
+| flat_mgt network                     | 10.58.159.30                                                  |
+| flavor                               | 4Vcpu_4096Mem_50Disk_disk0type (10)                           |
+| hostId                               | b4c9f394b77f53820cfc52d27f41ee333c5149117db0bbeea1b23bb1      |
+| id                                   | 3abb5f37-e8fe-4362-9437-7a05606d1952                          |
+| image                                | qcsp-20241205-v1.2.0.9 (1cbd32bb-ee21-45d9-baff-6b70061c10c1) |
+| key_name                             | aria-stage2-n05-guest-20260630-1345                           |
+| metadata                             | {"disk_type": "disk0"}                                        |
+| name                                 | aria-stage2-n05-guest-20260630-1345                           |
+| os-extended-volumes:volumes_attached | []                                                            |
+| progress                             | 0                                                             |
+| reclaim                              |                                                               |
+| security_groups                      | default                                                       |
+| status                               | ACTIVE                                                        |
+| tenant_id                            | 4ab07915da65403db282a4e210321ae1                              |
+| updated                              | 2026-06-30T05:53:45Z                                          |
+| user_id                              | fccc2c97665d4a8b9036f3bac4d71088                              |
++--------------------------------------+---------------------------------------------------------------+
+## neutron port-show
++---------------------+--------------------------------------------------------------------------------------------------------------+
+| Field               | Value                                                                                                        |
++---------------------+--------------------------------------------------------------------------------------------------------------+
+| admin_state_up      | True                                                                                                         |
+| binding:host_id     | ostack2.bj159.net                                                                                            |
+| binding:profile     | {}                                                                                                           |
+| binding:vif_details | {"port_filter": false, "ovs_hybrid_plug": false}                                                             |
+| binding:vif_type    | ovs                                                                                                          |
+| binding:vnic_type   | normal                                                                                                       |
+| device_id           | 3abb5f37-e8fe-4362-9437-7a05606d1952                                                                         |
+| device_owner        | compute:nova                                                                                                 |
+| dns_assignment      | {"hostname": "host-10-58-159-30", "ip_address": "10.58.159.30", "fqdn": "host-10-58-159-30.openstacklocal."} |
+| dns_name            |                                                                                                              |
+| extra_dhcp_opts     |                                                                                                              |
+| fixed_ips           | {"subnet_id": "f96445e4-5e64-4d27-bb9c-60f92b087e11", "ip_address": "10.58.159.30"}                          |
+| id                  | 5e1f1973-3df0-4cd3-9644-f11ef089cd64                                                                         |
+| mac_address         | fa:16:3e:5c:ee:39                                                                                            |
+| name                |                                                                                                              |
+| network_id          | 23eb9d08-ec8b-4610-a1ff-61492134b6d2                                                                         |
+| status              | ACTIVE                                                                                                       |
+| tenant_id           | 4ab07915da65403db282a4e210321ae1                                                                             |
++---------------------+--------------------------------------------------------------------------------------------------------------+
+## virsh domiflist
+ Interface        Type     Source   Model    MAC
+----------------------------------------------------------------
+ tap5e1f1973-3d   bridge   br-int   virtio   fa:16:3e:5c:ee:39
+
+## tap/ovs interface
+58: tap5e1f1973-3d: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel master ovs-system state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether fe:16:3e:5c:ee:39 brd ff:ff:ff:ff:ff:ff promiscuity 1 minmtu 68 maxmtu 65521
+    tun type tap pi off vnet_hdr on persist off
+    openvswitch_slave addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535
+_uuid               : e89d9ac6-439b-439a-94ed-f97e8fdc4f6d
+admin_state         : up
+bfd                 : {}
+bfd_status          : {}
+cfm_fault           : []
+cfm_fault_status    : []
+cfm_flap_count      : []
+cfm_health          : []
+cfm_mpid            : []
+cfm_remote_mpids    : []
+cfm_remote_opstate  : []
+duplex              : full
+error               : []
+external_ids        : {attached-mac="fa:16:3e:5c:ee:39", iface-id="5e1f1973-3df0-4cd3-9644-f11ef089cd64", iface-status=active, vm-id="3abb5f37-e8fe-4362-9437-7a05606d1952"}
+ifindex             : 58
+ingress_policing_burst: 0
+ingress_policing_kpkts_burst: 0
+ingress_policing_kpkts_rate: 0
+ingress_policing_rate: 0
+lacp_current        : []
+link_resets         : 1
+link_speed          : 10000000
+link_state          : up
+lldp                : {}
+mac                 : []
+mac_in_use          : "fe:16:3e:5c:ee:39"
+mtu                 : 1500
+mtu_request         : []
+name                : tap5e1f1973-3d
+ofport              : 20
+ofport_request      : []
+options             : {}
+other_config        : {}
+statistics          : {collisions=0, rx_bytes=4942, rx_crc_err=0, rx_dropped=0, rx_errors=0, rx_frame_err=0, rx_missed_errors=0, rx_multicast_packets=0, rx_over_err=0, rx_packets=51, tx_bytes=10112, tx_dropped=0, tx_errors=0, tx_packets=126, upcall_errors=0, upcall_packets=18}
+status              : {driver_name=tun, driver_version="1.6", firmware_version=""}
+type                : ""
+## host ping
+PING 10.58.159.30 (10.58.159.30) 56(84) bytes of data.
+64 bytes from 10.58.159.30: icmp_seq=1 ttl=64 time=0.712 ms
+64 bytes from 10.58.159.30: icmp_seq=2 ttl=64 time=0.164 ms
+64 bytes from 10.58.159.30: icmp_seq=3 ttl=64 time=0.150 ms
+
+--- 10.58.159.30 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2068ms
+rtt min/avg/max/mdev = 0.150/0.342/0.712/0.261 ms
+## qga
+
+## ssh checks
+port22=closed
+user=root
+ssh: connect to host 10.58.159.30 port 22: Connection refused
+rc=255
+user=cloud-user
+ssh: connect to host 10.58.159.30 port 22: Connection refused
+rc=255
+user=centos
+ssh: connect to host 10.58.159.30 port 22: Connection refused
+rc=255
+user=rocky
+ssh: connect to host 10.58.159.30 port 22: Connection refused
+rc=255
+user=ubuntu
+ssh: connect to host 10.58.159.30 port 22: Connection refused
+rc=255
+user=admin
+ssh: connect to host 10.58.159.30 port 22: Connection refused
+rc=255
+## console tail
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 15s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 15s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (2min 16s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (2min 16s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (2min 17s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (2min 17s / 5min 3s)
+M[K[[0m[0;31m*     [0m] A start job is running for Raise ne?rk interfaces (2min 18s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (2min 18s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (2min 19s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (2min 19s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (2min 20s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 20s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 21s / 5min 3s)
+M[K[     [0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 21s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 22s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 22s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (2min 23s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (2min 23s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (2min 24s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (2min 24s / 5min 3s)
+M[K[[0m[0;31m*     [0m] A start job is running for Raise ne?rk interfaces (2min 25s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (2min 25s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (2min 26s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (2min 26s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (2min 27s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 27s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 28s / 5min 3s)
+M[K[     [0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 28s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 29s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 29s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (2min 30s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (2min 30s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (2min 31s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (2min 31s / 5min 3s)
+M[K[[0m[0;31m*     [0m] A start job is running for Raise ne?rk interfaces (2min 32s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (2min 32s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (2min 33s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (2min 33s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (2min 34s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 34s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 35s / 5min 3s)
+M[K[     [0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 35s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 36s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 36s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (2min 37s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (2min 37s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (2min 38s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (2min 38s / 5min 3s)
+M[K[[0m[0;31m*     [0m] A start job is running for Raise ne?rk interfaces (2min 39s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (2min 39s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (2min 40s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (2min 40s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (2min 41s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 41s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 42s / 5min 3s)
+M[K[     [0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 42s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 43s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 43s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (2min 44s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (2min 44s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (2min 45s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (2min 45s / 5min 3s)
+M[K[[0m[0;31m*     [0m] A start job is running for Raise ne?rk interfaces (2min 46s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (2min 46s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (2min 47s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (2min 47s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (2min 48s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 48s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 49s / 5min 3s)
+M[K[     [0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 49s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 50s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 50s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (2min 51s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (2min 51s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (2min 52s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (2min 52s / 5min 3s)
+M[K[[0m[0;31m*     [0m] A start job is running for Raise ne?rk interfaces (2min 53s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (2min 53s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (2min 54s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (2min 54s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (2min 55s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 55s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 56s / 5min 3s)
+M[K[     [0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 56s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 57s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (2min 57s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (2min 58s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (2min 58s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (2min 59s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (2min 59s / 5min 3s)
+M[K[[0m[0;31m*     [0m] A start job is running for Raise network interfaces (3min / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise network interfaces (3min / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?ork interfaces (3min 1s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?ork interfaces (3min 1s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?ork interfaces (3min 2s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?ork interfaces (3min 2s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?ork interfaces (3min 3s / 5min 3s)
+M[K[     [0;31m*[0m] A start job is running for Raise ne?ork interfaces (3min 3s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?ork interfaces (3min 4s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?ork interfaces (3min 4s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?ork interfaces (3min 5s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?ork interfaces (3min 5s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?ork interfaces (3min 6s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?ork interfaces (3min 6s / 5min 3s)
+M[K[[0m[0;31m*     [0m] A start job is running for Raise ne?ork interfaces (3min 7s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?ork interfaces (3min 7s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?ork interfaces (3min 8s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?ork interfaces (3min 8s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?ork interfaces (3min 9s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?ork interfaces (3min 9s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 10s / 5min 3s)
+M[K[     [0;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 10s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 11s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 11s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (3min 12s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (3min 12s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (3min 13s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (3min 13s / 5min 3s)
+M[K[[0m[0;31m*     [0m] A start job is running for Raise ne?rk interfaces (3min 14s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (3min 14s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (3min 15s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (3min 15s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (3min 16s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 16s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 17s / 5min 3s)
+M[K[     [0;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 17s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 18s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 18s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (3min 19s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (3min 19s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (3min 20s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (3min 20s / 5min 3s)
+M[K[[0m[0;31m*     [0m] A start job is running for Raise ne?rk interfaces (3min 21s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (3min 21s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (3min 22s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (3min 22s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (3min 23s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 23s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 24s / 5min 3s)
+M[K[     [0;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 24s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 25s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 25s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (3min 26s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (3min 26s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (3min 27s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (3min 27s / 5min 3s)
+M[K[[0m[0;31m*     [0m] A start job is running for Raise ne?rk interfaces (3min 28s / 5min 3s)
+M[K[[0;1;31m*[0m[0;31m*    [0m] A start job is running for Raise ne?rk interfaces (3min 28s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (3min 29s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (3min 29s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (3min 30s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 30s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 31s / 5min 3s)
+M[K[     [0;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 31s / 5min 3s)
+M[K[    [0;31m*[0;1;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 32s / 5min 3s)
+M[K[   [0;31m*[0;1;31m*[0m[0;31m*[0m] A start job is running for Raise ne?rk interfaces (3min 32s / 5min 3s)
+M[K[  [0;31m*[0;1;31m*[0m[0;31m* [0m] A start job is running for Raise ne?rk interfaces (3min 33s / 5min 3s)
+M[K[ [0;31m*[0;1;31m*[0m[0;31m*  [0m] A start job is running for Raise ne?rk interfaces (3min 33s / 5min 3s)
+M[K[[0;31m*[0;1;31m*[0m[0;31m*   [0m] A start job is running for Raise ne?rk interfaces (3min 34s / 5min 3s)
+
+## cleanup qcsp temporary VM
+Request to delete server aria-stage2-n05-guest-20260630-1345 has been accepted.
+deleted=true

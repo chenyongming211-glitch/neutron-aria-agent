@@ -12,6 +12,8 @@ from neutron_aria.agent.acl_source import NeutronAclSource
 from neutron_aria.agent.acl_source import build_acl_index
 from neutron_aria.agent.acl_source import build_acl_source
 from neutron_aria.agent.config import AgentConfig
+from neutron_aria.agent.neutron_client import AriaAclRestClient
+from neutron_aria.agent.neutron_client import NeutronClientFactoryError
 
 
 class AclSourceTestCase(unittest.TestCase):
@@ -72,11 +74,328 @@ class AclSourceTestCase(unittest.TestCase):
                 os.close(fd)
             os.unlink(path)
 
-    def test_neutron_source_is_explicitly_not_ready_without_server_extension(self):
-        source = build_acl_source(AgentConfig(acl_source="neutron"))
+    def test_fixture_source_rejects_invalid_collection_shape(self):
+        fd, path = tempfile.mkstemp()
+        try:
+            os.write(fd, b'{"policies": {"id": "policy-1"}}')
+            os.close(fd)
+            fd = None
 
-        self.assertIsInstance(source, NeutronAclSource)
+            self.assertRaises(
+                AclSourceError,
+                build_acl_index,
+                AgentConfig(acl_fixture_path=path),
+            )
+        finally:
+            if fd is not None:
+                os.close(fd)
+            os.unlink(path)
+
+    def test_neutron_source_requires_aria_acl_capable_client(self):
+        self.assertRaises(
+            AclSourceError,
+            build_acl_source,
+            AgentConfig(acl_source="neutron"),
+        )
+
+    def test_neutron_source_loads_effective_payload(self):
+        class FakeAriaAclClient(object):
+            def get_aria_acl_effective_payload(self):
+                return {
+                    "policies": [{"id": "policy-1", "default_action": "allow"}],
+                    "rules": [{
+                        "id": "rule-1",
+                        "policy_id": "policy-1",
+                        "direction": "ingress",
+                        "priority": 100,
+                        "action": "drop",
+                        "protocol": "icmp",
+                        "src_cidr": "10.58.159.2/32",
+                    }],
+                    "bindings": [{
+                        "id": "binding-1",
+                        "policy_id": "policy-1",
+                        "target_type": "port",
+                        "target_id": "port-1",
+                    }],
+                }
+
+        source = build_acl_source(
+            AgentConfig(acl_source="neutron"),
+            neutron_client=FakeAriaAclClient(),
+        )
+        index = source.load_index()
+        result = index.effective_for_port({"id": "port-1"}, {"eligible": True})
+
+        self.assertTrue(result["enabled"])
+        self.assertEqual("policy-1", result["policy_id"])
+        self.assertEqual("rule-1", result["rules"][0]["id"])
+
+    def test_neutron_source_rejects_invalid_effective_payload_shape(self):
+        class FakeAriaAclClient(object):
+            def get_aria_acl_effective_payload(self):
+                return {"policies": [{"id": "policy-1"}], "rules": ["bad-rule"]}
+
+        source = build_acl_source(
+            AgentConfig(acl_source="neutron"),
+            neutron_client=FakeAriaAclClient(),
+        )
+
         self.assertRaises(AclSourceError, source.load_index)
+
+    def test_neutron_source_wraps_effective_payload_client_errors(self):
+        class FakeAriaAclClient(object):
+            def get_aria_acl_effective_payload(self):
+                raise RuntimeError("neutron api unavailable")
+
+        source = build_acl_source(
+            AgentConfig(acl_source="neutron"),
+            neutron_client=FakeAriaAclClient(),
+        )
+
+        with self.assertRaises(AclSourceError) as raised:
+            source.load_index()
+        self.assertIn("neutron acl source failed", str(raised.exception))
+        self.assertIn("neutron api unavailable", str(raised.exception))
+
+    def test_neutron_source_supports_legacy_list_methods(self):
+        class FakeNeutronClient(object):
+            def list_aria_acl_policies(self):
+                return {"aria_acl_policies": [{"id": "policy-1"}]}
+
+            def list_aria_acl_rules(self):
+                return {"aria_acl_rules": []}
+
+            def list_aria_acl_address_sets(self):
+                return {"aria_acl_address_sets": []}
+
+            def list_aria_acl_bindings(self):
+                return {
+                    "aria_acl_bindings": [{
+                        "id": "binding-1",
+                        "policy_id": "policy-1",
+                        "target_type": "network",
+                        "target_id": "net-1",
+                    }]
+                }
+
+        source = build_acl_source(
+            AgentConfig(acl_source="neutron"),
+            neutron_client=FakeNeutronClient(),
+        )
+        result = source.load_index().effective_for_port(
+            {"id": "port-1", "network_id": "net-1"},
+            {"eligible": True},
+        )
+
+        self.assertTrue(result["enabled"])
+        self.assertEqual("network", result["source"])
+
+    def test_neutron_source_rejects_invalid_list_method_shape(self):
+        class FakeNeutronClient(object):
+            def list_aria_acl_policies(self):
+                return {"aria_acl_policies": {"id": "policy-1"}}
+
+            def list_aria_acl_rules(self):
+                return {"aria_acl_rules": []}
+
+            def list_aria_acl_address_sets(self):
+                return {"aria_acl_address_sets": []}
+
+            def list_aria_acl_bindings(self):
+                return {"aria_acl_bindings": []}
+
+        source = build_acl_source(
+            AgentConfig(acl_source="neutron"),
+            neutron_client=FakeNeutronClient(),
+        )
+
+        self.assertRaises(AclSourceError, source.load_index)
+
+    def test_neutron_source_wraps_list_method_client_errors(self):
+        class FakeNeutronClient(object):
+            def list_aria_acl_policies(self):
+                raise RuntimeError("aria_acl API timeout")
+
+        source = build_acl_source(
+            AgentConfig(acl_source="neutron"),
+            neutron_client=FakeNeutronClient(),
+        )
+
+        with self.assertRaises(AclSourceError) as raised:
+            source.load_index()
+        self.assertIn("neutron acl source failed", str(raised.exception))
+        self.assertIn("aria_acl API timeout", str(raised.exception))
+
+    def test_neutron_source_rejects_missing_list_collection_key(self):
+        class FakeNeutronClient(object):
+            def list_aria_acl_policies(self):
+                return {"policies": [{"id": "policy-1"}]}
+
+            def list_aria_acl_rules(self):
+                return {"aria_acl_rules": []}
+
+            def list_aria_acl_address_sets(self):
+                return {"aria_acl_address_sets": []}
+
+            def list_aria_acl_bindings(self):
+                return {"aria_acl_bindings": []}
+
+        source = build_acl_source(
+            AgentConfig(acl_source="neutron"),
+            neutron_client=FakeNeutronClient(),
+        )
+
+        self.assertRaises(AclSourceError, source.load_index)
+
+    def test_aria_acl_rest_client_uses_extension_paths(self):
+        class FakeNeutronClient(object):
+            def __init__(self):
+                self.paths = []
+
+            def get(self, path):
+                self.paths.append(path)
+                payloads = {
+                    "/aria-acl-policies": {"aria_acl_policies": [{"id": "policy-1"}]},
+                    "/aria-acl-rules": {"aria_acl_rules": []},
+                    "/aria-acl-address-sets": {"aria_acl_address_sets": []},
+                    "/aria-acl-bindings": {
+                        "aria_acl_bindings": [{
+                            "id": "binding-1",
+                            "policy_id": "policy-1",
+                            "target_type": "network",
+                            "target_id": "net-1",
+                        }]
+                    },
+                }
+                return payloads[path]
+
+        client = FakeNeutronClient()
+        source = NeutronAclSource(AriaAclRestClient(client))
+        result = source.load_index().effective_for_port(
+            {"id": "port-1", "network_id": "net-1"},
+            {"eligible": True},
+        )
+
+        self.assertEqual([
+            "/aria-acl-policies",
+            "/aria-acl-rules",
+            "/aria-acl-address-sets",
+            "/aria-acl-bindings",
+        ], client.paths)
+        self.assertTrue(result["enabled"])
+        self.assertEqual("network", result["source"])
+
+    def test_aria_acl_rest_client_follows_paginated_extension_lists(self):
+        class FakeNeutronClient(object):
+            def __init__(self):
+                self.calls = []
+
+            def get(self, path, params=None):
+                params = dict(params or {})
+                self.calls.append((path, params))
+                if path == "/aria-acl-policies" and not params.get("marker"):
+                    return {
+                        "aria_acl_policies": [{"id": "policy-1"}],
+                        "aria_acl_policies_links": [{"rel": "next"}],
+                    }
+                if path == "/aria-acl-policies" and params.get("marker") == "policy-1":
+                    return {
+                        "aria_acl_policies": [{"id": "policy-2"}],
+                        "aria_acl_policies_links": [],
+                    }
+                return {"aria_acl_policies": []}
+
+        client = FakeNeutronClient()
+        result = AriaAclRestClient(client, page_size=1).list_aria_acl_policies()
+
+        self.assertEqual(
+            {"aria_acl_policies": [{"id": "policy-1"}, {"id": "policy-2"}]},
+            result,
+        )
+        self.assertEqual(2, len(client.calls))
+        self.assertEqual({"limit": 1}, client.calls[0][1])
+        self.assertEqual({"limit": 1, "marker": "policy-1"}, client.calls[1][1])
+
+    def test_aria_acl_rest_client_rejects_missing_collection_key(self):
+        class FakeNeutronClient(object):
+            def get(self, path):
+                return {"policies": [{"id": "policy-1"}]}
+
+        self.assertRaises(
+            NeutronClientFactoryError,
+            AriaAclRestClient(FakeNeutronClient()).list_aria_acl_policies,
+        )
+
+    def test_aria_acl_rest_client_rejects_repeated_pagination_marker(self):
+        class FakeNeutronClient(object):
+            def get(self, path, params=None):
+                return {
+                    "aria_acl_policies": [{"id": "policy-1"}],
+                    "aria_acl_policies_links": [{"rel": "next"}],
+                }
+
+        self.assertRaises(
+            NeutronClientFactoryError,
+            AriaAclRestClient(FakeNeutronClient(), page_size=1).list_aria_acl_policies,
+        )
+
+    def test_aria_acl_rest_client_requires_params_support_for_pagination(self):
+        class FakeNeutronClient(object):
+            def get(self, path):
+                return {"aria_acl_policies": []}
+
+        self.assertRaises(
+            NeutronClientFactoryError,
+            AriaAclRestClient(FakeNeutronClient(), page_size=1).list_aria_acl_policies,
+        )
+
+    def test_aria_acl_rest_client_reports_port_status(self):
+        class FakeNeutronClient(object):
+            def __init__(self):
+                self.posts = []
+
+            def post(self, path, body=None):
+                self.posts.append((path, body))
+                return {"ok": True}
+
+        client = FakeNeutronClient()
+        result = AriaAclRestClient(client).report_aria_acl_port_status({
+            "port_id": "port-1",
+            "host": "ostack2",
+            "status": "ready",
+        })
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("/aria-acl-port-statuses", client.posts[0][0])
+        self.assertEqual(
+            "port-1",
+            client.posts[0][1]["aria_acl_port_status"]["port_id"],
+        )
+
+    def test_aria_acl_rest_client_lists_port_statuses(self):
+        class FakeNeutronClient(object):
+            def __init__(self):
+                self.paths = []
+
+            def get(self, path):
+                self.paths.append(path)
+                return {
+                    "aria_acl_port_statuses": [{
+                        "port_id": "port-1",
+                        "host": "ostack2",
+                        "status": "ready",
+                    }]
+                }
+
+        client = FakeNeutronClient()
+        result = AriaAclRestClient(client).list_aria_acl_port_statuses()
+
+        self.assertEqual(["/aria-acl-port-statuses"], client.paths)
+        self.assertEqual(
+            "port-1",
+            result["aria_acl_port_statuses"][0]["port_id"],
+        )
 
     def test_unknown_source_fails_fast(self):
         self.assertRaises(

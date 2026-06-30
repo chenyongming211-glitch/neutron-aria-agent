@@ -1,0 +1,26 @@
++-------------------------+-----------------------------------------------+
+| alias                   | name                                          |
++-------------------------+-----------------------------------------------+
+| network-ip-availability | Network IP Availability                       |
+| ext-gw-mode             | Neutron L3 Configurable external gateway mode |
+| binding                 | Port Binding                                  |
+| agent                   | agent                                         |
+| subnet_allocation       | Subnet Allocation                             |
+| l3_agent_scheduler      | L3 Agent Scheduler                            |
+| external-net            | Neutron external network                      |
+| flavors                 | Neutron Service Flavors                       |
+| net-mtu                 | Network MTU                                   |
+| dns-integration         | DNS Integration                               |
+| quotas                  | Quota management support                      |
+| l3-ha                   | HA Router extension                           |
+| provider                | Provider Network                              |
+| multi-provider          | Multi Provider Network                        |
+| extraroute              | Neutron Extra Route                           |
+| aria-acl                | Aria ACL                                      |
+| extra_dhcp_opt          | Neutron Extra DHCP opts                       |
+| dhcp_agent_scheduler    | DHCP Agent Scheduler                          |
+| mirror                  | mirror                                        |
+| rbac-policies           | RBAC Policies                                 |
+| router                  | Neutron L3 Router                             |
+| dvr                     | Distributed Virtual Router                    |
++-------------------------+-----------------------------------------------+

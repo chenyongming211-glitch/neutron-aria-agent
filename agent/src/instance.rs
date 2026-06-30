@@ -1,4 +1,4 @@
-use aria_core::ebpf_ops::{critical_network_map_names, NETWORK_MAP_NAMES, TraceMapMode};
+use aria_core::ebpf_ops::{NETWORK_MAP_NAMES, TraceMapMode, critical_network_map_names};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};

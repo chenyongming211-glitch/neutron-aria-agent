@@ -1,0 +1,22 @@
+Stopping aria_datapath
+aria_datapath
+Checking VM connectivity while aria_datapath is stopped
+PING 10.58.159.26 (10.58.159.26) 56(84) bytes of data.
+64 bytes from 10.58.159.26: icmp_seq=1 ttl=64 time=0.164 ms
+64 bytes from 10.58.159.26: icmp_seq=2 ttl=64 time=0.207 ms
+
+--- 10.58.159.26 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1022ms
+rtt min/avg/max/mdev = 0.164/0.185/0.207/0.025 ms
+Restarting aria_datapath
+aria_datapath
+Checking VM connectivity after aria_datapath restart
+PING 10.58.159.26 (10.58.159.26) 56(84) bytes of data.
+64 bytes from 10.58.159.26: icmp_seq=1 ttl=64 time=0.182 ms
+64 bytes from 10.58.159.26: icmp_seq=2 ttl=64 time=0.158 ms
+
+--- 10.58.159.26 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1010ms
+rtt min/avg/max/mdev = 0.158/0.170/0.182/0.012 ms
+Checking datapath status after aria_datapath restart
+{"accepted_generation": 81, "active_instances": [], "applied_desired_hash": "e99e0005f172e322cecfbbf97dc5f0de9e21a816f94d0996a8ddb7adbcbdd0a3", "applied_generation": 81, "authority_state": "ready", "desired_hash": "e99e0005f172e322cecfbbf97dc5f0de9e21a816f94d0996a8ddb7adbcbdd0a3", "generation": 81, "managed_ports": [], "pending_generation": null, "port_statuses": [], "wal_replay_failures": 0, "wal_status": "replayed"}

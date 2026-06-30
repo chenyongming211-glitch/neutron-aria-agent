@@ -67,6 +67,125 @@ class NeutronFullResyncClient(object):
         return self.port_source.list_ports_for_host()
 
 
+class AriaAclRestClient(object):
+    """REST adapter for the aria_acl Neutron extension.
+
+    python-neutronclient will not know product-specific aria_acl methods until a
+    matching client extension is installed. The agent only needs read access, so
+    this adapter uses the client's generic GET path and exposes the list methods
+    consumed by NeutronAclSource.
+    """
+
+    COLLECTIONS = {
+        "aria_acl_policies": "/aria-acl-policies",
+        "aria_acl_rules": "/aria-acl-rules",
+        "aria_acl_address_sets": "/aria-acl-address-sets",
+        "aria_acl_bindings": "/aria-acl-bindings",
+        "aria_acl_port_statuses": "/aria-acl-port-statuses",
+    }
+
+    def __init__(self, neutron_client, page_size=None):
+        self.neutron_client = neutron_client
+        self.page_size = page_size
+
+    def list_aria_acl_policies(self):
+        return self._list("aria_acl_policies")
+
+    def list_aria_acl_rules(self):
+        return self._list("aria_acl_rules")
+
+    def list_aria_acl_address_sets(self):
+        return self._list("aria_acl_address_sets")
+
+    def list_aria_acl_bindings(self):
+        return self._list("aria_acl_bindings")
+
+    def list_aria_acl_port_statuses(self):
+        return self._list("aria_acl_port_statuses")
+
+    def report_aria_acl_port_status(self, port_status):
+        post = getattr(self.neutron_client, "post", None)
+        if post is None:
+            raise NeutronClientFactoryError(
+                "neutronclient does not expose generic POST for /aria-acl-port-statuses"
+            )
+        body = {"aria_acl_port_status": port_status}
+        try:
+            return post(self.COLLECTIONS["aria_acl_port_statuses"], body=body)
+        except TypeError:
+            return post(self.COLLECTIONS["aria_acl_port_statuses"], body)
+
+    def _list(self, collection):
+        values = []
+        marker = None
+        seen_markers = set()
+
+        while True:
+            payload = self._get_collection(collection, marker=marker)
+            if not isinstance(payload, dict):
+                return {collection: payload or []}
+
+            if collection not in payload:
+                raise NeutronClientFactoryError(
+                    "aria_acl response for %s missing collection %s"
+                    % (self.COLLECTIONS[collection], collection)
+                )
+            batch = payload[collection]
+            if not isinstance(batch, list):
+                raise NeutronClientFactoryError(
+                    "aria_acl response for %s collection %s must be a list"
+                    % (self.COLLECTIONS[collection], collection)
+                )
+            values.extend(batch)
+            if not self._has_next_link(payload.get("%s_links" % collection, [])):
+                break
+            if not batch:
+                break
+            next_marker = batch[-1].get("id")
+            if not next_marker:
+                break
+            if next_marker in seen_markers:
+                raise NeutronClientFactoryError(
+                    "aria_acl response for %s repeated pagination marker %s"
+                    % (self.COLLECTIONS[collection], next_marker)
+                )
+            seen_markers.add(next_marker)
+            marker = next_marker
+
+        return {collection: values}
+
+    def _get_collection(self, collection, marker=None):
+        path = self.COLLECTIONS[collection]
+        get = getattr(self.neutron_client, "get", None)
+        if get is None:
+            raise NeutronClientFactoryError(
+                "neutronclient does not expose generic GET for %s" % path
+            )
+        params = {}
+        if self.page_size:
+            params["limit"] = self.page_size
+        if marker:
+            params["marker"] = marker
+        if not params:
+            try:
+                return get(path)
+            except TypeError:
+                return get(path, params={})
+        try:
+            return get(path, params=params)
+        except TypeError as exc:
+            raise NeutronClientFactoryError(
+                "neutronclient generic GET for %s does not support pagination params: %s"
+                % (path, exc)
+            )
+
+    def _has_next_link(self, links):
+        for link in links or []:
+            if link.get("rel") == "next":
+                return True
+        return False
+
+
 class StaticPortSource(object):
     def __init__(self, ports):
         self.ports = list(ports)
@@ -144,6 +263,10 @@ def build_neutronclient_from_env(env=None):
     except Exception as exc:
         raise NeutronClientFactoryError("python-neutronclient unavailable: %s" % exc)
     return neutron_client.Client(**neutron_client_kwargs_from_env(env=env))
+
+
+def build_aria_acl_client_from_env(env=None):
+    return AriaAclRestClient(build_neutronclient_from_env(env=env))
 
 
 def build_port_source(config, host, env=None):

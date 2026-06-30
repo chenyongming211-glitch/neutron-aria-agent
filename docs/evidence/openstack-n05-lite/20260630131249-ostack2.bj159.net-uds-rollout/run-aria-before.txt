@@ -1,0 +1,2 @@
+/run/aria root UNKNOWN 0 42435 770 directory
+/run/aria/aria-agent.sock root root 0 0 666 socket

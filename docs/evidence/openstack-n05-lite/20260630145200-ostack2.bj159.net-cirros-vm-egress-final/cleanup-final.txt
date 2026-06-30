@@ -1,0 +1,6 @@
+## cleanup final
+Request to delete server fe29ab91-eedf-48c8-8636-ab489acd4fed has been accepted.
+server_not_active=true
+image_deleted=true
+rm: cannot remove '/tmp/aria-stage2-cirros-0.6.3-x86_64-disk.raw': Operation not permitted
+rm: cannot remove '/tmp/aria-stage2-cirros-0.6.3-x86_64-disk.img': Operation not permitted

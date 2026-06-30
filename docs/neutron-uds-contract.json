@@ -1,0 +1,76 @@
+{
+  "contract_version": "2026-06-v0.9",
+  "api_version": "v1",
+  "schema_version_min": 1,
+  "schema_version_max": 1,
+  "attach_authority": "neutron_snapshot",
+  "supports_full_snapshot": true,
+  "supports_port_delete": true,
+  "supported_domains": [
+    "attach",
+    "acl",
+    "qos",
+    "mirror",
+    "config",
+    "conntrack",
+    "tcprt",
+    "trace",
+    "drops",
+    "ssl"
+  ],
+  "mandatory_domains": [],
+  "body_max_bytes": 1048576,
+  "timeout_ms": 3000,
+  "error_codes_hash": "v0.9-neutron-errors-2",
+  "error_codes": [
+    {
+      "code": "UDS_SCHEMA_MISMATCH",
+      "owner": "rust_snapshot_apply",
+      "phase": "implemented"
+    },
+    {
+      "code": "UDS_BODY_TOO_LARGE",
+      "owner": "python_client_http_413_mapping",
+      "phase": "implemented"
+    },
+    {
+      "code": "generation_hash_conflict",
+      "owner": "rust_snapshot_apply",
+      "phase": "implemented"
+    },
+    {
+      "code": "stale_generation",
+      "owner": "rust_snapshot_apply",
+      "phase": "implemented"
+    }
+  ],
+  "peer_auth_policy": "filesystem_permissions_then_peercred",
+  "capability_hash": "v0.9-neutron-capabilities-1",
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/v1/neutron/capabilities"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/neutron/status"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/neutron/snapshot"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/neutron/ports/{port_id}"
+    }
+  ],
+  "phase_status": {
+    "capabilities_metadata": "implemented",
+    "python_client_validation": "implemented",
+    "uds_body_limit": "implemented",
+    "tcp_openapi_exclusion_test": "implemented",
+    "peercred_enforcement": "implemented_config_gated",
+    "peercred_audit": "implemented_connection_level",
+    "socket_group_alignment": "implemented"
+  }
+}

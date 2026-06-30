@@ -28,6 +28,10 @@
 
 - [用户手册](docs/user-manual.md)
 - [OpenStack Neutron Agent Mode 方案](docs/openstack-neutron-agent-mode.md)
+- [OpenStack Neutron Aria 设计决策总账](docs/openstack-neutron-aria-design-decisions.md)
+- [OpenStack Neutron Aria 细化方案目录](docs/openstack-neutron-aria-details/README.md)
+- [Neutron managed domains 短合同](docs/neutron-managed-domains-contract.md)
+- [OpenStack 部署启用 Runbook](docs/openstack-deployment-runbook.md)
 
 ## 回归脚本
 

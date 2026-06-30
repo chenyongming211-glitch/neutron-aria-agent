@@ -68,6 +68,47 @@ The smoke is intentionally non-destructive. It does not create a test VM port
 or add an interface to `br-int`; real eligible-port attach/cleanup should be
 run as a separate live-environment gate with an explicit test VM port.
 
+## Product Image Build
+
+Build the deployable datapath image from CI/release Rust artifacts:
+
+```bash
+sudo BASE_IMAGE=<registry>/neutron-openvswitch-agent:<tag> \
+  IMAGE_TAG=<registry>/aria-datapath:<repo-version>-stage2-acl \
+  ARTIFACT_DIR=release \
+  SAVE_IMAGE=true \
+  REPO_ROOT=$(pwd) \
+  deploy/kolla/package/build_aria_datapath_image.sh
+```
+
+The artifact directory must contain:
+
+```text
+aria-agent
+libebpf_firewall.so
+libebpf_firewall_perf.so
+```
+
+This image carries the UDS peer credential enforcement/audit hooks. Before
+turning on enforcement, record the current site identity and socket state:
+
+```bash
+sudo EVIDENCE_ROOT=/var/tmp/neutron-aria-uds-hardening \
+  REQUIRE_HARDENED=false \
+  REPO_ROOT=$(pwd) \
+  deploy/kolla/smoke/neutron_aria_uds_hardening_smoke.sh
+```
+
+After deploying the peercred-enabled image, tightening the socket from `0666`,
+and configuring `neutron_peercred_enforce=true` with the recorded uid/gid
+allow-list, run:
+
+```bash
+sudo REQUIRE_HARDENED=true \
+  REPO_ROOT=$(pwd) \
+  deploy/kolla/smoke/neutron_aria_uds_hardening_smoke.sh
+```
+
 For deterministic datapath crash testing, the same smoke entrypoint can pass
 fault-injection environment variables into the container:
 

@@ -14,7 +14,7 @@ ROLLBACK="${ROLLBACK:-true}"
 ALLOW_VM_MIGRATE="${ALLOW_VM_MIGRATE:-false}"
 DEST_HOST="${DEST_HOST:-}"
 MIGRATION_WAIT_SECONDS="${MIGRATION_WAIT_SECONDS:-600}"
-REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE:-20.0}"
+REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE:-3.0}"
 PING_COUNT="${PING_COUNT:-2}"
 PING_TIMEOUT="${PING_TIMEOUT:-1}"
 BLOCK_MIGRATE="${BLOCK_MIGRATE:-false}"
@@ -153,7 +153,7 @@ import sys
 
 from neutron_aria.agent.uds_client import LocalClient
 
-client = LocalClient(sys.argv[1], timeout=10.0)
+client = LocalClient(sys.argv[1], timeout=3.0)
 status = client.status()
 for port in status.get("managed_ports") or []:
     port_id = port.get("port_id")

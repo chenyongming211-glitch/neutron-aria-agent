@@ -1,0 +1,33 @@
+# Final Cleanup Verification
+Tue Jun 30 06:57:02 UTC 2026
+## active servers
+| ID                                   | Name          | Tenant ID                        | Status | Task State | Power State | Networks                                      |
+## deleted audit records
+| ID                                   | Name                                            | Tenant ID                        | Status       | Task State | Power State | Networks              |
+| fc9407c2-6bdd-44e8-bb7c-c617affca4d0 | aria-stage2-n05-cirros-egress-20260630-1449     | 4ab07915da65403db282a4e210321ae1 | DELETED      | -          | NOSTATE     |                       |
+| fe29ab91-eedf-48c8-8636-ab489acd4fed | aria-stage2-n05-cirros-egress-20260630-1452     | 4ab07915da65403db282a4e210321ae1 | DELETED      | -          | NOSTATE     |                       |
+| 784b0728-b0a5-45c9-a83b-dbe11e5226d2 | aria-stage2-n05-cirros-raw-egress-20260630-1444 | 4ab07915da65403db282a4e210321ae1 | DELETED      | -          | NOSTATE     |                       |
+## keypairs
+| Name | Fingerprint |
+## images
+| ID                                   | Name                           |
+## temp files
+ls: cannot access '/tmp/aria-stage2-cirros*': No such file or directory
+ls: cannot access '/tmp/aria-stage2-n05-cirros*': No such file or directory
+ls: cannot access /tmp/aria-stage2-cirros*: No such file or directory
+ls: cannot access /tmp/aria-stage2-n05-cirros*: No such file or directory
+## uds status
+{
+  "accepted_generation": 85,
+  "active_instances": [],
+  "applied_desired_hash": "e2c3d464ecb8d8671f7cec09709a32b685ce0f90be52cbc4d008fa9d237153fa",
+  "applied_generation": 85,
+  "authority_state": "ready",
+  "desired_hash": "e2c3d464ecb8d8671f7cec09709a32b685ce0f90be52cbc4d008fa9d237153fa",
+  "generation": 85,
+  "managed_ports": [],
+  "pending_generation": null,
+  "port_statuses": [],
+  "wal_replay_failures": 0,
+  "wal_status": "commit_written"
+}

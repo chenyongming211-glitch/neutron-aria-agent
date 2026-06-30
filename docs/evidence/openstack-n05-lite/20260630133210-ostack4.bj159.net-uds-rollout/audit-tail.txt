@@ -1,0 +1,1 @@
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":2882793,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782797533282}

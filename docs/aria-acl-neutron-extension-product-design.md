@@ -149,7 +149,7 @@ Aria ACL 与 Neutron Security Group 的边界必须硬隔离：
 - 租户或平台管理员只通过 Neutron API 创建、修改、删除 ACL 对象。
 - `neutron-aria-agent` 只消费 Neutron 状态，不提供租户 API。
 - `aria-agent` 只接收本机声明式 snapshot，不访问 Neutron DB，不消费 Neutron RPC。
-- 本机 `ariactl` 对 Neutron-managed port 的 ACL/QoS 写操作必须被拒绝。
+- 本机 `ariactl` 对 Neutron-managed port 中已列入 `managed_domains` 的 ACL/QoS/Mirror 等 domain 写操作必须被拒绝；未列入 `managed_domains` 的本机 domain 仍可按本机模式使用。
 
 ### 3.3 OVS 转发保护
 
@@ -1519,28 +1519,32 @@ fault injection 默认关闭，只能通过 datapath 本机测试配置或环境
 
 ### 10.3 本机写入保护
 
-OpenStack mode 下，本机 API 必须拒绝对 Neutron-managed port 的 ACL 写入：
+OpenStack mode 下，本机 API 必须按 `managed_domains` 拒绝对 Neutron-managed domain 的持久写入。这不是另一套控制权模型，而是当前代码已经采用的 domain authority 路径：
 
 ```text
-LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_PORT
+NeutronPortSnapshot.managed_domains
+  -> mark_neutron_port_authority()
+  -> ensure_local_write_allowed()
+  -> LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN
 ```
 
-拒绝范围：
+拒绝范围按 domain 判断：
 
-- group add/update/delete
-- policy add/update/delete
-- ACL rule add/update/delete
-- QoS add/update/delete
-- config set acl/qos
+- `managed_domains` 包含 `acl` 时：拒绝本机 group/policy/ACL rule 对该 instance 的持久写入。
+- `managed_domains` 包含 `qos` 时：拒绝本机 QoS add/update/delete。
+- `managed_domains` 包含 `mirror` 时：拒绝本机 mirror add/update/delete。
+- config set 中影响已被 Neutron 纳管 domain 的开关必须被拒绝。
+- `neutron:` 前缀或其它 Neutron-reserved group/address-set 不能被本机修改或删除。
 
 只允许：
 
 - status
 - metrics
 - diagnose/read-only
+- 未列入 `managed_domains` 的本机 domain 写入，例如仅 `managed_domains=["acl"]` 时，本机 QoS/Mirror 仍按本机模式处理
 - break-glass 模式下的显式管理员操作
 
-break-glass 必须单独设计，不进入默认产品路径。
+拒绝响应必须使用稳定错误码 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`，并返回 409 或等价本机 API response。break-glass 必须单独设计，不进入默认产品路径；重新接管时默认 Neutron wins。
 
 ## 11. RBAC 与权限
 
@@ -1723,19 +1727,30 @@ external_ids:iface-status=active
 示例配置：
 
 ```ini
-[DEFAULT]
+[agent]
 host = ostack2.bj159.net
 agent_type = Aria ACL agent
 report_interval = 30
-full_resync_interval = 300
+resync_interval = 300
+full_resync_enabled = false
+managed_domains = acl
+
+[ovs]
+integration_bridge = br-int
 
 [aria]
 socket_path = /run/aria/aria-agent.sock
-integration_bridge = br-int
-integration_mode = coexist
-enable_acl = true
-enable_qos = true
+
+[neutron]
+port_source = disabled
+rpc_events_enabled = false
+
+[acl]
+source = neutron
 ```
+
+`integration_mode=coexist` 只属于 snapshot body，不属于
+`neutron-aria-agent.ini`。
 
 三节点部署注意：
 
@@ -2153,7 +2168,7 @@ ACL domain 使用结构化状态：
 
 | DomainStatus | effective_action | 场景 |
 | --- | --- | --- |
-| `ready` | `enabled` | policy 编译和 apply 成功 |
+| `ready` | `enforce` | policy 编译和 apply 成功 |
 | `not_requested` | `bypass` | port 没有 ACL binding |
 | `degraded` | `bypass` | policy/rule/address-set 错误 |
 | `degraded` | `bypass` | conntrack 不可用但 stateful=true |
@@ -2873,27 +2888,27 @@ extensions = mirror,qos
 ### 20.4 neutron-aria-agent.ini
 
 ```ini
-[DEFAULT]
+[agent]
 host = ostack2.bj159.net
 debug = false
 report_interval = 30
-full_resync_interval = 300
+resync_interval = 300
+full_resync_enabled = false
+managed_domains = acl
 
 [aria]
 socket_path = /run/aria/aria-agent.sock
-contract_file = /etc/neutron-aria-agent/neutron-uds-contract.json
-integration_mode = coexist
-enable_acl = true
-enable_qos = true
 
 [ovs]
 integration_bridge = br-int
 ovsdb_connection = unix:/run/openvswitch/db.sock
 
+[neutron]
+port_source = disabled
+rpc_events_enabled = false
+
 [acl]
-enforcement_enabled = true
-unsupported_port_action = skip
-default_unbound_action = bypass
+source = neutron
 
 [qos]
 enabled = true
@@ -2906,6 +2921,10 @@ enabled = true
 use_native_qos_model = true
 status_table = aria_qos_port_statuses
 ```
+
+`integration_mode=coexist` 由 `neutron-aria-agent` 写入 snapshot body；
+ini 中不得配置该字段。`neutron-uds-contract.json` 是 CI/package 校验产物，
+不作为阶段一 runtime ini 字段。
 
 ### 20.5 policy.yaml
 

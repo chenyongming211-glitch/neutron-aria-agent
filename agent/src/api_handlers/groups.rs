@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 
-use super::common::{err_response, AppState};
+use super::common::{AppState, err_response};
 use aria_api::{
     AddGroupRequest, AddGroupResponse, GroupEntry, GroupWithStatsEntry, GroupsResponse,
     GroupsWithStatsResponse, MessageResponse,
@@ -69,7 +69,10 @@ pub async fn add_group(
     Path(instance): Path<String>,
     Json(req): Json<AddGroupRequest>,
 ) -> impl IntoResponse {
-    if let Err(e) = cp.ensure_local_group_write_allowed(&instance, &req.name).await {
+    if let Err(e) = cp
+        .ensure_local_group_write_allowed(&instance, &req.name)
+        .await
+    {
         return Err(err_response(e));
     }
 

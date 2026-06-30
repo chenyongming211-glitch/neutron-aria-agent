@@ -1,0 +1,2 @@
+run_aria_mode=770
+socket_mode=660

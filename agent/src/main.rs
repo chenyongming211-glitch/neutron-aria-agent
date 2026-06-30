@@ -1,14 +1,20 @@
+use axum::serve::ListenerExt;
 use clap::Parser;
 use serde::Deserialize;
+use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::signal::unix::{signal, SignalKind};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
-use tracing_subscriber::fmt::writer::MakeWriter;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::writer::MakeWriter;
 
 mod api_handlers;
 mod api_routes;
@@ -63,6 +69,14 @@ struct Config {
     neutron_socket_path: String,
     #[serde(default = "default_neutron_socket_mode")]
     neutron_socket_mode: u32,
+    #[serde(default = "default_neutron_peercred_enforce")]
+    neutron_peercred_enforce: bool,
+    #[serde(default)]
+    neutron_peercred_allowed_uids: Vec<u32>,
+    #[serde(default)]
+    neutron_peercred_allowed_gids: Vec<u32>,
+    #[serde(default = "default_neutron_audit_log_path")]
+    neutron_audit_log_path: String,
     #[serde(default = "default_ovs_bridge")]
     ovs_bridge: String,
     #[serde(default = "default_log_format")]
@@ -133,6 +147,14 @@ fn default_neutron_socket_mode() -> u32 {
     0o660
 }
 
+fn default_neutron_peercred_enforce() -> bool {
+    false
+}
+
+fn default_neutron_audit_log_path() -> String {
+    "/var/log/aria-agent/neutron-uds-audit.log".to_string()
+}
+
 fn default_ovs_bridge() -> String {
     "br-int".to_string()
 }
@@ -164,6 +186,10 @@ impl Default for Config {
             listen_addr: default_listen_addr(),
             neutron_socket_path: default_neutron_socket_path(),
             neutron_socket_mode: default_neutron_socket_mode(),
+            neutron_peercred_enforce: default_neutron_peercred_enforce(),
+            neutron_peercred_allowed_uids: Vec::new(),
+            neutron_peercred_allowed_gids: Vec::new(),
+            neutron_audit_log_path: default_neutron_audit_log_path(),
             ovs_bridge: default_ovs_bridge(),
             log_format: default_log_format(),
             log_filter: default_log_filter(),
@@ -174,7 +200,8 @@ impl Default for Config {
 
 impl Config {
     fn requested_auto_attach(&self) -> bool {
-        self.auto_attach.unwrap_or(self.mode == AgentMode::Standalone)
+        self.auto_attach
+            .unwrap_or(self.mode == AgentMode::Standalone)
     }
 
     fn effective_auto_attach(&self) -> bool {
@@ -253,11 +280,7 @@ fn build_log_writer(config: &Config) -> DualMakeWriter {
         return DualMakeWriter { file: None };
     }
 
-    let file = match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
+    let file = match OpenOptions::new().create(true).append(true).open(&log_path) {
         Ok(file) => file,
         Err(e) => {
             eprintln!(
@@ -332,6 +355,12 @@ async fn bind_neutron_socket(path: &str, mode: u32) -> Result<tokio::net::UnixLi
             mode
         ));
     }
+    if mode & 0o007 != 0 {
+        return Err(format!(
+            "invalid neutron socket mode {:o}; other-user permissions are not allowed",
+            mode
+        ));
+    }
 
     let socket_path = Path::new(path);
     if let Some(parent) = socket_path.parent() {
@@ -362,7 +391,266 @@ async fn bind_neutron_socket(path: &str, mode: u32) -> Result<tokio::net::UnixLi
         .map_err(|e| format!("failed to bind neutron socket {}: {}", path, e))?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(mode))
         .map_err(|e| format!("failed to chmod neutron socket {}: {}", path, e))?;
+    align_neutron_socket_group(socket_path)?;
     Ok(listener)
+}
+
+fn align_neutron_socket_group(socket_path: &Path) -> Result<(), String> {
+    let Some(parent) = socket_path.parent() else {
+        return Ok(());
+    };
+    let parent_gid = std::fs::metadata(parent)
+        .map_err(|e| {
+            format!(
+                "failed to stat neutron socket directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?
+        .gid();
+    let socket_gid = std::fs::metadata(socket_path)
+        .map_err(|e| {
+            format!(
+                "failed to stat neutron socket {}: {}",
+                socket_path.display(),
+                e
+            )
+        })?
+        .gid();
+    if socket_gid == parent_gid {
+        return Ok(());
+    }
+
+    let c_path = CString::new(socket_path.as_os_str().as_bytes()).map_err(|_| {
+        format!(
+            "failed to chgrp neutron socket {}; path contains NUL",
+            socket_path.display()
+        )
+    })?;
+    let rc = unsafe {
+        libc::chown(
+            c_path.as_ptr(),
+            -1i32 as libc::uid_t,
+            parent_gid as libc::gid_t,
+        )
+    };
+    if rc != 0 {
+        return Err(format!(
+            "failed to chgrp neutron socket {} to gid {}: {}",
+            socket_path.display(),
+            parent_gid,
+            io::Error::last_os_error()
+        ));
+    }
+    info!(
+        socket_path = %socket_path.display(),
+        socket_gid = parent_gid,
+        "aligned Neutron UDS socket group with parent directory"
+    );
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UnixPeerCred {
+    pid: i32,
+    uid: u32,
+    gid: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PeerAuthDecision {
+    allowed: bool,
+    reason: &'static str,
+}
+
+#[derive(Clone, Debug)]
+struct NeutronPeerAuth {
+    enforce: bool,
+    allowed_uids: Vec<u32>,
+    allowed_gids: Vec<u32>,
+    audit_log_path: Option<PathBuf>,
+}
+
+impl NeutronPeerAuth {
+    fn from_config(config: &Config) -> Result<Self, String> {
+        if config.neutron_socket_enabled()
+            && config.neutron_peercred_enforce
+            && config.neutron_peercred_allowed_uids.is_empty()
+            && config.neutron_peercred_allowed_gids.is_empty()
+        {
+            return Err(
+                "neutron_peercred_enforce=true requires neutron_peercred_allowed_uids or neutron_peercred_allowed_gids"
+                    .to_string(),
+            );
+        }
+
+        let audit_log_path = config.neutron_audit_log_path.trim();
+        let audit_log_path = if audit_log_path.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(audit_log_path))
+        };
+
+        Ok(Self {
+            enforce: config.neutron_peercred_enforce,
+            allowed_uids: config.neutron_peercred_allowed_uids.clone(),
+            allowed_gids: config.neutron_peercred_allowed_gids.clone(),
+            audit_log_path,
+        })
+    }
+
+    fn authorize(&self, cred: Option<UnixPeerCred>) -> PeerAuthDecision {
+        if !self.enforce {
+            return PeerAuthDecision {
+                allowed: true,
+                reason: "peercred_audit_only",
+            };
+        }
+
+        let Some(cred) = cred else {
+            return PeerAuthDecision {
+                allowed: false,
+                reason: "UDS_PEERCRED_UNAVAILABLE",
+            };
+        };
+
+        if self.allowed_uids.contains(&cred.uid) || self.allowed_gids.contains(&cred.gid) {
+            PeerAuthDecision {
+                allowed: true,
+                reason: "peercred_allow_list_match",
+            }
+        } else {
+            PeerAuthDecision {
+                allowed: false,
+                reason: "UDS_PEER_UNAUTHORIZED",
+            }
+        }
+    }
+
+    fn audit_and_enforce(&self, stream: &mut tokio::net::UnixStream) {
+        let (cred, credential_error) = match read_peercred(stream) {
+            Ok(cred) => (Some(cred), None),
+            Err(e) => (None, Some(e)),
+        };
+        let decision = self.authorize(cred);
+        self.write_audit(cred, decision, credential_error.as_deref());
+
+        match (decision.allowed, cred) {
+            (true, Some(cred)) => info!(
+                peer_pid = cred.pid,
+                peer_uid = cred.uid,
+                peer_gid = cred.gid,
+                peer_auth_reason = decision.reason,
+                "accepted Neutron UDS peer"
+            ),
+            (true, None) => info!(
+                peer_auth_reason = decision.reason,
+                credential_error = credential_error.as_deref().unwrap_or("unknown"),
+                "accepted Neutron UDS peer without credentials"
+            ),
+            (false, Some(cred)) => warn!(
+                peer_pid = cred.pid,
+                peer_uid = cred.uid,
+                peer_gid = cred.gid,
+                peer_auth_reason = decision.reason,
+                "rejected Neutron UDS peer"
+            ),
+            (false, None) => warn!(
+                peer_auth_reason = decision.reason,
+                credential_error = credential_error.as_deref().unwrap_or("unknown"),
+                "rejected Neutron UDS peer without credentials"
+            ),
+        }
+
+        if !decision.allowed {
+            // Deny before request parsing. Route-level JSON errors can be added later
+            // if operators need them, but the v0.9 gate is connection hardening.
+            let rc = unsafe { libc::shutdown(stream.as_raw_fd(), libc::SHUT_RDWR) };
+            if rc != 0 {
+                warn!(
+                    error = %io::Error::last_os_error(),
+                    "failed to shutdown unauthorized Neutron UDS peer"
+                );
+            }
+        }
+    }
+
+    fn write_audit(
+        &self,
+        cred: Option<UnixPeerCred>,
+        decision: PeerAuthDecision,
+        credential_error: Option<&str>,
+    ) {
+        let Some(path) = &self.audit_log_path else {
+            return;
+        };
+
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                warn!(path = %path.display(), error = %e, "failed to create Neutron UDS audit directory");
+                return;
+            }
+        }
+
+        let ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or_default();
+        let line = serde_json::json!({
+            "ts_ms": ts_ms,
+            "event": "neutron_uds_peer_auth",
+            "enforce": self.enforce,
+            "result": if decision.allowed { "allowed" } else { "denied" },
+            "reason": decision.reason,
+            "peer_pid": cred.map(|value| value.pid),
+            "peer_uid": cred.map(|value| value.uid),
+            "peer_gid": cred.map(|value| value.gid),
+            "credential_error": credential_error,
+        });
+
+        match OpenOptions::new().create(true).append(true).open(path) {
+            Ok(mut file) => {
+                if let Err(e) = writeln!(file, "{}", line) {
+                    warn!(path = %path.display(), error = %e, "failed to write Neutron UDS audit line");
+                }
+            }
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "failed to open Neutron UDS audit log")
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_peercred(stream: &tokio::net::UnixStream) -> Result<UnixPeerCred, String> {
+    let mut cred = std::mem::MaybeUninit::<libc::ucred>::uninit();
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            cred.as_mut_ptr() as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(format!(
+            "getsockopt(SO_PEERCRED) failed: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let cred = unsafe { cred.assume_init() };
+    Ok(UnixPeerCred {
+        pid: cred.pid,
+        uid: cred.uid,
+        gid: cred.gid,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_peercred(_stream: &tokio::net::UnixStream) -> Result<UnixPeerCred, String> {
+    Err("SO_PEERCRED is not supported on this platform".to_string())
 }
 
 #[tokio::main]
@@ -387,15 +675,23 @@ async fn main() {
             "auto_attach=true is ignored in neutron_managed mode; snapshot authority is required"
         );
     }
+    let neutron_peer_auth = match NeutronPeerAuth::from_config(&config) {
+        Ok(policy) => policy,
+        Err(e) => {
+            error!(error = %e, "invalid Neutron UDS peer authentication config");
+            std::process::exit(1);
+        }
+    };
 
-    let trace_backend_preference =
-        match ebpf_binary::TraceBackendPreference::parse(&config.trace_backend) {
-            Ok(preference) => preference,
-            Err(e) => {
-                error!(trace_backend = %config.trace_backend, error = %e, "invalid trace backend preference");
-                std::process::exit(1);
-            }
-        };
+    let trace_backend_preference = match ebpf_binary::TraceBackendPreference::parse(
+        &config.trace_backend,
+    ) {
+        Ok(preference) => preference,
+        Err(e) => {
+            error!(trace_backend = %config.trace_backend, error = %e, "invalid trace backend preference");
+            std::process::exit(1);
+        }
+    };
 
     let resolved_ebpf = match ebpf_binary::resolve_ebpf_binary(
         &config.ebpf_path,
@@ -429,6 +725,10 @@ async fn main() {
         listen_addr = %config.listen_addr,
         neutron_socket_path = %config.neutron_socket_path,
         neutron_socket_mode = format_args!("{:o}", config.neutron_socket_mode),
+        neutron_peercred_enforce = config.neutron_peercred_enforce,
+        neutron_peercred_allowed_uids = ?config.neutron_peercred_allowed_uids,
+        neutron_peercred_allowed_gids = ?config.neutron_peercred_allowed_gids,
+        neutron_audit_log_path = %config.neutron_audit_log_path,
         ovs_bridge = %config.ovs_bridge,
         log_format = %config.log_format,
         log_filter = %config.log_filter,
@@ -584,8 +884,12 @@ async fn main() {
             control_plane.clone(),
             config.ovs_bridge.clone(),
         );
+        let neutron_peer_auth = neutron_peer_auth.clone();
         tokio::spawn(async move {
             info!(socket_path = %neutron_socket_path, "Neutron UDS API server listening");
+            let listener = listener.tap_io(move |stream: &mut tokio::net::UnixStream| {
+                neutron_peer_auth.audit_and_enforce(stream);
+            });
             if let Err(e) = axum::serve(listener, router).await {
                 error!(error = %e, "Neutron UDS API server stopped with error");
             }
@@ -647,19 +951,127 @@ mod tests {
         assert!(!config.effective_auto_attach());
         assert!(config.neutron_socket_enabled());
         assert_eq!(config.neutron_socket_mode, 0o660);
+        assert!(!config.neutron_peercred_enforce);
     }
 
     #[test]
-    fn startup_config_accepts_neutron_socket_mode() {
+    fn startup_config_accepts_neutron_socket_and_peercred_settings() {
         let config: Config = toml::from_str(
             r#"
 mode = "neutron_managed"
-neutron_socket_mode = 438
+neutron_socket_mode = 432
+neutron_peercred_enforce = true
+neutron_peercred_allowed_uids = [0, 4242]
+neutron_peercred_allowed_gids = [4243]
+neutron_audit_log_path = "/tmp/aria-neutron-uds-audit.log"
 "#,
         )
         .unwrap();
 
-        assert_eq!(config.neutron_socket_mode, 0o666);
+        assert_eq!(config.neutron_socket_mode, 0o660);
+        assert!(config.neutron_peercred_enforce);
+        assert_eq!(config.neutron_peercred_allowed_uids, vec![0, 4242]);
+        assert_eq!(config.neutron_peercred_allowed_gids, vec![4243]);
+        assert_eq!(
+            config.neutron_audit_log_path,
+            "/tmp/aria-neutron-uds-audit.log"
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_socket_group_tracks_parent_directory() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "aria-agent-neutron-socket-{}-{}",
+            std::process::id(),
+            suffix
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("aria-agent.sock");
+
+        let listener = bind_neutron_socket(socket.to_str().unwrap(), 0o660)
+            .await
+            .unwrap();
+
+        let socket_meta = std::fs::metadata(&socket).unwrap();
+        let parent_meta = std::fs::metadata(&dir).unwrap();
+        assert!(socket_meta.file_type().is_socket());
+        assert_eq!(socket_meta.permissions().mode() & 0o777, 0o660);
+        assert_eq!(socket_meta.gid(), parent_meta.gid());
+
+        drop(listener);
+        std::fs::remove_file(&socket).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn peercred_policy_requires_allow_list_when_enforced() {
+        let config: Config = toml::from_str(
+            r#"
+mode = "neutron_managed"
+neutron_peercred_enforce = true
+"#,
+        )
+        .unwrap();
+
+        let error = NeutronPeerAuth::from_config(&config).unwrap_err();
+        assert!(error.contains("requires neutron_peercred_allowed_uids"));
+    }
+
+    #[test]
+    fn peercred_policy_allows_configured_uid_or_gid() {
+        let config: Config = toml::from_str(
+            r#"
+mode = "neutron_managed"
+neutron_peercred_enforce = true
+neutron_peercred_allowed_uids = [1001]
+neutron_peercred_allowed_gids = [1002]
+"#,
+        )
+        .unwrap();
+        let policy = NeutronPeerAuth::from_config(&config).unwrap();
+
+        assert!(
+            policy
+                .authorize(Some(UnixPeerCred {
+                    pid: 10,
+                    uid: 1001,
+                    gid: 1,
+                }))
+                .allowed
+        );
+        assert!(
+            policy
+                .authorize(Some(UnixPeerCred {
+                    pid: 11,
+                    uid: 1,
+                    gid: 1002,
+                }))
+                .allowed
+        );
+        let denied = policy.authorize(Some(UnixPeerCred {
+            pid: 12,
+            uid: 1,
+            gid: 2,
+        }));
+        assert!(!denied.allowed);
+        assert_eq!(denied.reason, "UDS_PEER_UNAUTHORIZED");
+
+        let missing = policy.authorize(None);
+        assert!(!missing.allowed);
+        assert_eq!(missing.reason, "UDS_PEERCRED_UNAVAILABLE");
+    }
+
+    #[test]
+    fn peercred_policy_audit_only_allows_without_credentials() {
+        let policy = NeutronPeerAuth::from_config(&Config::default()).unwrap();
+        let decision = policy.authorize(None);
+
+        assert!(decision.allowed);
+        assert_eq!(decision.reason, "peercred_audit_only");
     }
 
     #[test]

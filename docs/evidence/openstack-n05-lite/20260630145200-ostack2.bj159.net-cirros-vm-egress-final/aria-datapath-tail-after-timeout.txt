@@ -1,0 +1,4 @@
+Running command: 'start-aria-datapath'
+Running command: 'start-aria-datapath'
+Running command: 'start-aria-datapath'
+Running command: 'start-aria-datapath'

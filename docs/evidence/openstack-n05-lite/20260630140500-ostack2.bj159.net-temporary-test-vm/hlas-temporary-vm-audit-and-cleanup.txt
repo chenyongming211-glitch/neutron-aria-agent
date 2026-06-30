@@ -1,0 +1,329 @@
+# HLAS temporary VM audit
+Tue Jun 30 06:07:06 UTC 2026
+## nova show
++--------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Property                             | Value                                                                                                                                                                                                   |
++--------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| OS-DCF:diskConfig                    | MANUAL                                                                                                                                                                                                  |
+| OS-EXT-AZ:availability_zone          | nova                                                                                                                                                                                                    |
+| OS-EXT-SRV-ATTR:host                 | ostack2.bj159.net                                                                                                                                                                                       |
+| OS-EXT-SRV-ATTR:hypervisor_hostname  | ostack2.bj159.net                                                                                                                                                                                       |
+| OS-EXT-SRV-ATTR:instance_name        | instance-00000012                                                                                                                                                                                       |
+| OS-EXT-STS:power_state               | 1                                                                                                                                                                                                       |
+| OS-EXT-STS:task_state                | -                                                                                                                                                                                                       |
+| OS-EXT-STS:vm_state                  | active                                                                                                                                                                                                  |
+| OS-SRV-USG:launched_at               | 2026-06-30T06:00:30.000000                                                                                                                                                                              |
+| OS-SRV-USG:terminated_at             | -                                                                                                                                                                                                       |
+| accessIPv4                           |                                                                                                                                                                                                         |
+| accessIPv6                           |                                                                                                                                                                                                         |
+| config_drive                         | True                                                                                                                                                                                                    |
+| created                              | 2026-06-30T06:00:21Z                                                                                                                                                                                    |
+| deleted                              |                                                                                                                                                                                                         |
+| flat_mgt network                     | 10.58.159.31                                                                                                                                                                                            |
+| flavor                               | AUTO_4Vcpu_8192Mem_120Disk_0Ephemeral_0swap_1.000000rxtx_factor_disk0type_-1vif_extra_specs:hw_vif_multiqueue_size_novaaggregate_instance_extra_specs:department (6dd5a799-5970-497f-a68f-5376564c94e4) |
+| hostId                               | b4c9f394b77f53820cfc52d27f41ee333c5149117db0bbeea1b23bb1                                                                                                                                                |
+| id                                   | 0b9a12be-a598-4ba6-bf32-c41c15ee5816                                                                                                                                                                    |
+| image                                | hlas-20251025-v6.332p2 (0ddf280c-02e5-4466-9cc3-5de0720f6490)                                                                                                                                           |
+| key_name                             | aria-stage2-n05-guest-20260630-1345                                                                                                                                                                     |
+| metadata                             | {"disk_type": "disk0"}                                                                                                                                                                                  |
+| name                                 | aria-stage2-n05-hlas-guest-20260630-1405                                                                                                                                                                |
+| os-extended-volumes:volumes_attached | []                                                                                                                                                                                                      |
+| progress                             | 0                                                                                                                                                                                                       |
+| reclaim                              |                                                                                                                                                                                                         |
+| security_groups                      | default                                                                                                                                                                                                 |
+| status                               | ACTIVE                                                                                                                                                                                                  |
+| tenant_id                            | 4ab07915da65403db282a4e210321ae1                                                                                                                                                                        |
+| updated                              | 2026-06-30T06:00:30Z                                                                                                                                                                                    |
+| user_id                              | fccc2c97665d4a8b9036f3bac4d71088                                                                                                                                                                        |
++--------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+## neutron port-show
++---------------------+--------------------------------------------------------------------------------------------------------------+
+| Field               | Value                                                                                                        |
++---------------------+--------------------------------------------------------------------------------------------------------------+
+| admin_state_up      | True                                                                                                         |
+| binding:host_id     | ostack2.bj159.net                                                                                            |
+| binding:profile     | {}                                                                                                           |
+| binding:vif_details | {"port_filter": false, "ovs_hybrid_plug": false}                                                             |
+| binding:vif_type    | ovs                                                                                                          |
+| binding:vnic_type   | normal                                                                                                       |
+| device_id           | 0b9a12be-a598-4ba6-bf32-c41c15ee5816                                                                         |
+| device_owner        | compute:nova                                                                                                 |
+| dns_assignment      | {"hostname": "host-10-58-159-31", "ip_address": "10.58.159.31", "fqdn": "host-10-58-159-31.openstacklocal."} |
+| dns_name            |                                                                                                              |
+| extra_dhcp_opts     |                                                                                                              |
+| fixed_ips           | {"subnet_id": "f96445e4-5e64-4d27-bb9c-60f92b087e11", "ip_address": "10.58.159.31"}                          |
+| id                  | 8dcf87ae-c8ad-4052-b541-ddec55832c56                                                                         |
+| mac_address         | fa:16:3e:39:2e:ef                                                                                            |
+| name                |                                                                                                              |
+| network_id          | 23eb9d08-ec8b-4610-a1ff-61492134b6d2                                                                         |
+| status              | ACTIVE                                                                                                       |
+| tenant_id           | 4ab07915da65403db282a4e210321ae1                                                                             |
++---------------------+--------------------------------------------------------------------------------------------------------------+
+## virsh domiflist
+ Interface        Type     Source   Model    MAC
+----------------------------------------------------------------
+ tap8dcf87ae-c8   bridge   br-int   virtio   fa:16:3e:39:2e:ef
+
+## tap/ovs interface
+59: tap8dcf87ae-c8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq master ovs-system state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether fe:16:3e:39:2e:ef brd ff:ff:ff:ff:ff:ff promiscuity 1 minmtu 68 maxmtu 65521
+    tun type tap pi off vnet_hdr on multi_queue numqueues 4 numdisabled 0 persist off
+    openvswitch_slave addrgenmode eui64 numtxqueues 256 numrxqueues 256 gso_max_size 65536 gso_max_segs 65535
+_uuid               : 77233d07-c8bc-4433-b3f1-7bedc5d8cebe
+admin_state         : up
+bfd                 : {}
+bfd_status          : {}
+cfm_fault           : []
+cfm_fault_status    : []
+cfm_flap_count      : []
+cfm_health          : []
+cfm_mpid            : []
+cfm_remote_mpids    : []
+cfm_remote_opstate  : []
+duplex              : full
+error               : []
+external_ids        : {attached-mac="fa:16:3e:39:2e:ef", iface-id="8dcf87ae-c8ad-4052-b541-ddec55832c56", iface-status=active, vm-id="0b9a12be-a598-4ba6-bf32-c41c15ee5816"}
+ifindex             : 59
+ingress_policing_burst: 0
+ingress_policing_kpkts_burst: 0
+ingress_policing_kpkts_rate: 0
+ingress_policing_rate: 0
+lacp_current        : []
+link_resets         : 1
+link_speed          : 10000000
+link_state          : up
+lldp                : {}
+mac                 : []
+mac_in_use          : "fe:16:3e:39:2e:ef"
+mtu                 : 1500
+mtu_request         : []
+name                : tap8dcf87ae-c8
+ofport              : 21
+ofport_request      : []
+options             : {}
+other_config        : {}
+statistics          : {collisions=0, rx_bytes=10208, rx_crc_err=0, rx_dropped=0, rx_errors=0, rx_frame_err=0, rx_missed_errors=0, rx_multicast_packets=0, rx_over_err=0, rx_packets=109, tx_bytes=20916, tx_dropped=0, tx_errors=0, tx_packets=310, upcall_errors=0, upcall_packets=30}
+status              : {driver_name=tun, driver_version="1.6", firmware_version=""}
+type                : ""
+## host ping
+PING 10.58.159.31 (10.58.159.31) 56(84) bytes of data.
+64 bytes from 10.58.159.31: icmp_seq=1 ttl=64 time=0.785 ms
+64 bytes from 10.58.159.31: icmp_seq=2 ttl=64 time=0.151 ms
+64 bytes from 10.58.159.31: icmp_seq=3 ttl=64 time=0.113 ms
+
+--- 10.58.159.31 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2087ms
+rtt min/avg/max/mdev = 0.113/0.349/0.785/0.308 ms
+## qga
+
+## ssh checks
+port22=closed
+user=aria
+ssh: connect to host 10.58.159.31 port 22: Connection refused
+rc=255
+user=root
+ssh: connect to host 10.58.159.31 port 22: Connection refused
+rc=255
+user=cloud-user
+ssh: connect to host 10.58.159.31 port 22: Connection refused
+rc=255
+user=centos
+ssh: connect to host 10.58.159.31 port 22: Connection refused
+rc=255
+user=rocky
+ssh: connect to host 10.58.159.31 port 22: Connection refused
+rc=255
+user=ubuntu
+ssh: connect to host 10.58.159.31 port 22: Connection refused
+rc=255
+user=admin
+ssh: connect to host 10.58.159.31 port 22: Connection refused
+rc=255
+## console tail
+[  131.777659] resizefs[787]:   1 physical volume(s) resized or updated / 0 physical volume(s) not resized
+[  131.777675] resizefs[787]: [36mINFO[0m[0126]lvm_pv.go:69 Resize PV /dev/sda4 success
+[  131.802441] resizefs[787]: [37mDEBU[0m[0126]lvm.go:86 $ /sbin/vgs --reportformat json --nosuffix --units G -o vg_name,vg_size,vg_free centos
+[  131.802494] resizefs[787]:   {
+[  131.802502] resizefs[787]:       "report": [
+[  131.802508] resizefs[787]:           {
+[  131.802514] resizefs[787]:               "vg": [
+[  131.802521] resizefs[787]:                   {"vg_name":"centos", "vg_size":"119.73", "vg_free":"21.47"}
+[  131.802528] resizefs[787]:               ]
+[  131.802535] resizefs[787]:           }
+[  131.802541] resizefs[787]:       ]
+[  131.802547] resizefs[787]:   }
+[  131.802640] resizefs[787]: [36mINFO[0m[0126]lvm_lv.go:79 Found volume group: centos(size:119.73 free:21.47)
+[  131.908856] resizefs[787]: [37mDEBU[0m[0126]lvm_lv.go:88 $ /usr/sbin/lvresize -l +100%FREE /dev/centos/root
+[  131.908916] resizefs[787]:   Size of logical volume centos/root changed from <91.51 GiB (23426 extents) to <111.51 GiB (28546 extents).
+[  131.908928] resizefs[787]:   Logical volume centos/root successfully resized.
+[  131.908949] resizefs[787]: [36mINFO[0m[0126]lvm_lv.go:94 Resize logical volume success, going to resize underlay filesystem
+[  133.445019] resizefs[787]: [37mDEBU[0m[0128]common.go:95 $ /usr/sbin/resize2fs /dev/centos/root
+[  133.445087] resizefs[787]: resize2fs 1.46.5 (30-Dec-2021)
+[  133.445105] resizefs[787]: Filesystem at /dev/centos/root is mounted on /; on-line resizing required
+[  133.445114] resizefs[787]: old_desc_blocks = 12, new_desc_blocks = 14
+[  133.445123] resizefs[787]: The filesystem on /dev/centos/root is now 29231104 (4k) blocks long.
+[  133.445156] resizefs[787]:
+[  133.445284] resizefs[787]: [36mINFO[0m[0128]common.go:101 Resize filesystem /dev/centos/root success
+[[0;32m  OK  [0m] Finished [0;1;39mAuto Resize Filesystem[0m.
+         Starting [0;1;39mNetwork Manager[0m...
+[[0;32m  OK  [0m] Started [0;1;39mNetwork Manager[0m.
+[[0;32m  OK  [0m] Reached target [0;1;39mNetwork[0m.
+         Starting [0;1;39mNetwork Manager Wait Online[0m...
+         Starting [0;1;39mGSSAPI Proxy Daemon[0m...
+         Starting [0;1;39mPM2 process manager[0m...
+         Starting [0;1;39mDynamic System Tuning Daemon[0m...
+         Starting [0;1;39mHostname Service[0m...
+[[0;32m  OK  [0m] Started [0;1;39mHostname Service[0m.
+[[0;32m  OK  [0m] Started [0;1;39mGSSAPI Proxy Daemon[0m.
+[[0;32m  OK  [0m] Reached target [0;1;39mNFS client services[0m.
+[[0;32m  OK  [0m] Reached target [0;1;39mPreparation for Remote File Systems[0m.
+[[0;32m  OK  [0m] Reached target [0;1;39mRemote File Systems[0m.
+         Starting [0;1;39mLSB: initscript[0m...
+[[0;32m  OK  [0m] Started [0;1;39mLSB: initscript[0m.
+[[0;32m  OK  [0m] Listening on [0;1;39mLoad/Save RF ?itch Status /dev/rfkill Watch[0m.
+         Starting [0;1;39mNetwork Manager Script Dispatcher Service[0m...
+[[0;32m  OK  [0m] Started [0;1;39mNetwork Manager Script Dispatcher Service[0m.
+[[0;32m  OK  [0m] Started [0;1;39mDynamic System Tuning Daemon[0m.
+[[0;32m  OK  [0m] Started [0;1;39mPM2 process manager[0m.
+[[0;32m  OK  [0m] Finished [0;1;39mNetwork Manager Wait Online[0m.
+         Starting [0;1;39mInitial cloud-ini? (metadata service crawler)[0m...
+[  136.294316] cloud-init[1265]: Cloud-init v. 23.1.1-11.el9.0.1 running 'init' at Tue, 30 Jun 2026 06:02:49 +0000. Up 136.27 seconds.
+[  136.315960] cloud-init[1265]: ci-info: ++++++++++++++++++++++++++++++++++++++++Net device info++++++++++++++++++++++++++++++++++++++++
+[  136.316005] cloud-init[1265]: ci-info: +--------+------+------------------------------+-----------------+--------+-------------------+
+[  136.316015] cloud-init[1265]: ci-info: | Device |  Up  |           Address            |       Mask      | Scope  |     Hw-Address    |
+[  136.316022] cloud-init[1265]: ci-info: +--------+------+------------------------------+-----------------+--------+-------------------+
+[  136.316029] cloud-init[1265]: ci-info: |  eth0  | True |         10.58.159.31         | 255.255.255.128 | global | fa:16:3e:39:2e:ef |
+[  136.316050] cloud-init[1265]: ci-info: |  eth0  | True | fe80::f816:3eff:fe39:2eef/64 |        .        |  link  | fa:16:3e:39:2e:ef |
+[  136.316070] cloud-init[1265]: ci-info: |   lo   | True |          127.0.0.1           |    255.0.0.0    |  host  |         .         |
+[  136.316079] cloud-init[1265]: ci-info: |   lo   | True |           ::1/128            |        .        |  host  |         .         |
+[  136.316087] cloud-init[1265]: ci-info: +--------+------+------------------------------+-----------------+--------+-------------------+
+[  136.316094] cloud-init[1265]: ci-info: ++++++++++++++++++++++++++++++++Route IPv4 info+++++++++++++++++++++++++++++++++
+[  136.316102] cloud-init[1265]: ci-info: +-------+-----------------+--------------+-----------------+-----------+-------+
+[  136.324526] cloud-init[1265]: ci-info: | Route |   Destination   |   Gateway    |     Genmask     | Interface | Flags |
+[  136.324638] cloud-init[1265]: ci-info: +-------+-----------------+--------------+-----------------+-----------+-------+
+[  136.325244] cloud-init[1265]: ci-info: |   0   |   10.58.159.0   |   0.0.0.0    | 255.255.255.128 |    eth0   |   U   |
+[  136.325280] cloud-init[1265]: ci-info: |   1   | 169.254.169.254 | 10.58.159.24 | 255.255.255.255 |    eth0   |  UGH  |
+[  136.327398] cloud-init[1265]: ci-info: +-------+-----------------+--------------+-----------------+-----------+-------+
+[  136.327415] cloud-init[1265]: ci-info: +++++++++++++++++++Route IPv6 info+++++++++++++++++++
+[  136.327425] cloud-init[1265]: ci-info: +-------+-------------+---------+-----------+-------+
+[  136.327443] cloud-init[1265]: ci-info: | Route | Destination | Gateway | Interface | Flags |
+[  136.327457] cloud-init[1265]: ci-info: +-------+-------------+---------+-----------+-------+
+[  136.333737] cloud-init[1265]: ci-info: |   1   |  fe80::/64  |    ::   |    eth0   |   U   |
+[  136.335751] cloud-init[1265]: ci-info: |   3   |    local    |    ::   |    eth0   |   U   |
+[  136.335796] cloud-init[1265]: ci-info: |   4   |  multicast  |    ::   |    eth0   |   U   |
+[  136.337875] cloud-init[1265]: ci-info: +-------+-------------+---------+-----------+-------+
+[  136.417592] cloud-init[1265]: 2026-06-30 06:02:49,508 - util.py[WARNING]: Running interface command ['nmcli', 'connection', 'up', 'filename', '/etc/NetworkManager/system-connections/cloud-init-eth0.nmconnection'] failed
+[  136.455745] cloud-init[1265]: 2026-06-30 06:02:49,546 - schema.py[WARNING]: Invalid cloud-config provided: Please run 'sudo cloud-init schema --system' to see the schema errors.
+[[0;32m  OK  [0m] Stopped [0;1;39mNetwork Manager Wait Online[0m.
+         Stopping [0;1;39mNetwork Manager Wait Online[0m...
+         Stopping [0;1;39mNetwork Manager[0m...
+[[0;32m  OK  [0m] Stopped [0;1;39mNetwork Manager[0m.
+         Starting [0;1;39mNetwork Manager[0m...
+[[0;32m  OK  [0m] Started [0;1;39mNetwork Manager[0m.
+         Starting [0;1;39mNetwork Manager Wait Online[0m...
+[[0;32m  OK  [0m] Finished [0;1;39mInitial cloud-ini?ob (metadata service crawler)[0m.
+[[0;32m  OK  [0m] Reached target [0;1;39mCloud-config availability[0m.
+         Starting [0;1;39mPermit User Sessions[0m...
+[[0;32m  OK  [0m] Finished [0;1;39mPermit User Sessions[0m.
+[[0;32m  OK  [0m] Started [0;1;39mDeferred execution scheduler[0m.
+[[0;32m  OK  [0m] Started [0;1;39mCommand Scheduler[0m.
+[[0;32m  OK  [0m] Finished [0;1;39mNetwork Manager Wait Online[0m.
+[[0;32m  OK  [0m] Reached target [0;1;39mNetwork is Online[0m.
+         Starting [0;1;39mApply the settings specified in cloud-config[0m...
+         Starting [0;1;39mCrash recovery kernel arming[0m...
+[[0;32m  OK  [0m] Started [0;1;39mnetmgr daemon[0m.
+         Starting [0;1;39m/etc/rc.d/rc.local Compatibility[0m...
+         Starting [0;1;39mNotify NFS peers of a restart[0m...
+         Starting [0;1;39mLSB: start and stop Net-SNMP daemon[0m...
+[[0;32m  OK  [0m] Started [0;1;39mNotify NFS peers of a restart[0m.
+[  138.104485] cloud-init[1430]: Cloud-init v. 23.1.1-11.el9.0.1 running 'modules:config' at Tue, 30 Jun 2026 06:02:51 +0000. Up 138.06 seconds.
+[[0;32m  OK  [0m] Started [0;1;39mLSB: start and stop Net-SNMP daemon[0m.
+         Starting [0;1;39mSYSV: OpenSSH server daemon[0m...
+[[0;32m  OK  [0m] Finished [0;1;39mApply the settings specified in cloud-config[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: OpenSSH server daemon[0m.
+         Starting [0;1;39mLSB: initscript[0m...
+         Starting [0;1;39mSYSV: pm2 is a node js  system.[0m...
+[[0;32m  OK  [0m] Created slice [0;1;39mUser Slice of UID 1000[0m.
+         Starting [0;1;39mUser Runtime Directory /run/user/1000[0m...
+[[0;32m  OK  [0m] Created slice [0;1;39mUser Slice of UID 1002[0m.
+         Starting [0;1;39mUser Runtime Directory /run/user/1002[0m...
+[[0;32m  OK  [0m] Finished [0;1;39mUser Runtime Directory /run/user/1000[0m.
+         Starting [0;1;39mUser Manager for UID 1000[0m...
+[[0;32m  OK  [0m] Finished [0;1;39mUser Runtime Directory /run/user/1002[0m.
+         Starting [0;1;39mUser Manager for UID 1002[0m...
+[  138.954180] Warning: Deprecated Driver is detected: nft_compat will not be maintained in a future major release and may be disabled
+[[0;32m  OK  [0m] Created slice [0;1;39mUser Slice of UID 1001[0m.
+         Starting [0;1;39mUser Runtime Directory /run/user/1001[0m...
+[[0;32m  OK  [0m] Finished [0;1;39mUser Runtime Directory /run/user/1001[0m.
+         Starting [0;1;39mUser Manager for UID 1001[0m...
+[[0;32m  OK  [0m] Started [0;1;39mUser Manager for UID 1002[0m.
+[[0;32m  OK  [0m] Started [0;1;39mUser Manager for UID 1001[0m.
+[[0;32m  OK  [0m] Started [0;1;39mUser Manager for UID 1000[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c1 of User hlas[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c2 of User elasticsearch[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c3 of User mongodb[0m.
+[[0;32m  OK  [0m] Started [0;1;39mLSB: initscript[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c4 of User hlas[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: pm2 is a node js  system.[0m.
+         Starting [0;1;39mSYSV: executeTar ?al database storage system.[0m...
+         Starting [0;1;39mSYSV: forward is ?al database storage system.[0m...
+         Starting [0;1;39mSYSV: jdbc is a n?al database storage system.[0m...
+         Starting [0;1;39mSYSV: MongoDB is ?al database storage system.[0m...
+         Starting [0;1;39mSYSV: MongoDB is ?al database storage system.[0m...
+         Starting [0;1;39mSYSV: MongoDB is ?al database storage system.[0m...
+         Starting [0;1;39mSYSV: scanagent i?al database storage system.[0m...
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: forward is a?onal database storage system.[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: jdbc is a no?onal database storage system.[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: MongoDB is a?onal database storage system.[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: executeTar i?onal database storage system.[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c5 of User mongodb[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: scanagent is?onal database storage system.[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c6 of User hlas[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: MongoDB is a?onal database storage system.[0m.
+[[0;1;31mFAILED[0m] Failed to start [0;1;39mSYSV: Mong?onal database storage system.[0m.
+See 'systemctl status mongodb.service' for details.
+         Starting [0;1;39mSYSV: Neo4j is a ?re database storage system.[0m...
+[[0;32m  OK  [0m] Started [0;1;39mSession c7 of User hlas[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: Neo4j is a p?ture database storage system.[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c8 of User elasticsearch[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c9 of User hlas[0m.
+[[0;32m  OK  [0m] Started [0;1;39m/etc/rc.d/rc.local Compatibility[0m.
+         Starting [0;1;39mExecute cloud user/final scripts[0m...
+         Starting [0;1;39mHold until boot process finishes up[0m...
+         Starting [0;1;39mTerminate Plymouth Boot Screen[0m...
+[  149.479709] cloud-init[4963]: Cloud-init v. 23.1.1-11.el9.0.1 running 'modules:final' at Tue, 30 Jun 2026 06:03:02 +0000. Up 149.39 seconds.
+[  149.695125] cloud-init[4963]:   Cannot use /dev/vda4: device not found
+[  149.695787] cloud-init[4963]:   0 physical volume(s) resized or updated / 0 physical volume(s) not resized
+[  149.736079] cloud-init[4963]:   New size (28546 extents) matches existing size (28546 extents).
+[  149.750873] cloud-init[4963]: xfs_growfs: /dev/mapper/centos-root is not a mounted XFS filesystem
+[  149.752714] cloud-init[4963]: 2026-06-30 06:03:02,843 - cc_scripts_user.py[WARNING]: Failed to run module scripts-user (scripts in /var/lib/cloud/instance/scripts)
+[  149.754281] cloud-init[4963]: 2026-06-30 06:03:02,845 - util.py[WARNING]: Running module scripts-user (<module 'cloudinit.config.cc_scripts_user' from '/usr/lib/python3.9/site-packages/cloudinit/config/cc_scripts_user.py'>) failed
+<14>Jun 30 14:03:02 cloud-init: #############################################################
+<14>Jun 30 14:03:02 cloud-init: -----BEGIN SSH HOST KEY FINGERPRINTS-----
+<14>Jun 30 14:03:02 cloud-init: 256 SHA256:IVc3YASaqExqPW2PTOpXDEfvwAvRmyOiPU0bh3QZrrc root@1290f590a0f0 (ECDSA)
+<14>Jun 30 14:03:02 cloud-init: 256 SHA256:BwQtY/ClB4zZYFSDDTT9naoYzYsThiytryFeZTqseQA root@1290f590a0f0 (ED25519)
+<14>Jun 30 14:03:02 cloud-init: 3072 SHA256:Jeh6fqgScPqkwoYh/9htx9dQbVwyH/aHpY3WQgn/UkU root@1290f590a0f0 (RSA)
+<14>Jun 30 14:03:02 cloud-init: -----END SSH HOST KEY FINGERPRINTS-----
+<14>Jun 30 14:03:02 cloud-init: #############################################################
+-----BEGIN SSH HOST KEY KEYS-----
+ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBB+npXOtByefnjou1p4Fsb2ldKYllPMLpfYa3NduBog95xJYeaSfZ5/Gm8qAh3fn1uPjkjS4a2zbd3qo90wwVFk= root@1290f590a0f0
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGW65/+0oFjnXW1MjYD8/N/pstlq1gd8s6mt4gC2/lKO root@1290f590a0f0
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDS5/RMlx8m2NI7mbcgOAHmDjVTcXR1jUC/cxQnJqkfk3bNll5A8UbWLKwsV+Eyrt6Aw9r6j7KgF5aP+cyb0Eedr1YTFicOsEQqFl4qE7OcKP8W8EM1cFp8wfoAzm9hMxfxxudsBTgAPEuJWWn7b15yrpDQZBovtVWtdo297fApZ6LK1Ewj9ZR6CGc3D2NOZI7hOlwcUXTCjDnkzwXuBLP6X1t/HuLApyP+pL/rcTxfJSngruodgdKmh9ZghfHbLpDdEKgsHP0vx0gyNKlxTVzQMp6E5iyYg6yQiwPZ/lbYQYKfX2C0e+pkGDVVgzdAsrnIgLwqIYXFohHDVWo6i2ytQQpyZix5qjpq0NyN99DAex19KGhDCuShaZZ0knFLb/WQNcLgVJYFBK2Z95OdWHEQcbszzhDmHTl8ii0/ACLoJf9T+CBfSo4jzUkPVtkSHewi52Haibt+GMI44PJ86bWZ0PGcka/xGhyAN9NwGzLS1Gy4ImIsId7Lvs4lTb36uxU= root@1290f590a0f0
+-----END SSH HOST KEY KEYS-----
+[  149.834109] cloud-init[4963]: Cloud-init v. 23.1.1-11.el9.0.1 finished at Tue, 30 Jun 2026 06:03:02 +0000. Datasource DataSourceNone.  Up 149.82 seconds
+[  149.838151] cloud-init[4963]: 2026-06-30 06:03:02,928 - cc_final_message.py[WARNING]: Used fallback datasource
+[[0;1;31mFAILED[0m] Failed to start [0;1;39mExecute cloud user/final scripts[0m.
+
+Rocky Linux 9.1 (Blue Onyx)
+Kernel 5.14.0-162.6.1.el9_1.x86_64 on an x86_64
+
+Activate the web console with: systemctl enable --now cockpit.socket
+
+LAS login:
+## cleanup temporary HLAS VM
+Request to delete server aria-stage2-n05-hlas-guest-20260630-1405 has been accepted.
+server_deleted=true
+## cleanup keypair and temp files
+| Name | Fingerprint |
+ls: cannot access '/tmp/aria-stage2-n05-guest-20260630-1345.rsa': No such file or directory
+ls: cannot access '/tmp/aria-stage2-n05-guest-20260630-1345.pub': No such file or directory

@@ -17,6 +17,16 @@ docker build \
   .
 ```
 
+The stage-two ACL bundle also includes a wrapper that validates imports and can
+save the image as a tar artifact:
+
+```bash
+sudo BASE_IMAGE=<registry>/neutron-openvswitch-agent:<tag> \
+  IMAGE_TAG=<registry>/neutron-aria-agent:<tag> \
+  SAVE_IMAGE=true \
+  deploy/kolla/package/build_neutron_aria_agent_image.sh
+```
+
 For a host-local smoke using the currently deployed OVS agent image as the base:
 
 ```bash
@@ -45,6 +55,42 @@ sudo deploy/kolla/smoke/neutron_aria_full_resync_smoke.sh
 The full-resync smoke checks `/run/aria`, UDS capabilities, legacy
 neutronclient credentials, one candidate snapshot submission, and UDS rollback.
 It refuses to continue if the local UDS already has managed ports.
+
+## Stage-Two ACL Install Gate
+
+After the `aria_acl` Neutron plugin is ready for the old onsite Neutron server,
+use the stage-two gate instead of hand-copying files into containers:
+
+```bash
+sudo deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh install
+```
+
+The gate performs this fixed sequence:
+
+```text
+plugin install -> DB migration upgrade/check -> agent egg install ->
+DB/REST CRUD smoke -> NeutronAclSource/full-resync smoke -> health check
+```
+
+For a repeat validation without reinstalling:
+
+```bash
+sudo deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh smoke
+```
+
+Rollback restores the backed-up agent egg and neutron-server config/package:
+
+```bash
+sudo deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh rollback
+```
+
+Rollback does not drop `aria_acl` DB tables by default. To explicitly drop the
+stage-two ACL tables in a disposable test environment:
+
+```bash
+sudo ROLLBACK_DB_ON_ROLLBACK=true \
+  deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh rollback
+```
 
 Local tap/OVS validation is performed by the privileged `aria-datapath`
 container behind the UDS socket, not by this container.

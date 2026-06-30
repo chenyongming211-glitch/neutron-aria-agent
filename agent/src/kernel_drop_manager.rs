@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use aria_core::common::{KernelDropConfig, KernelDropFilterValue, KERNEL_DROP_FLAG_HAS_REASON};
+use aria_core::common::{KERNEL_DROP_FLAG_HAS_REASON, KernelDropConfig, KernelDropFilterValue};
 use aria_core::wal;
 use aya::maps::{HashMap as BpfHashMap, Map, MapData};
 use serde::{Deserialize, Serialize};
@@ -11,10 +11,10 @@ use tracing::{info, warn};
 
 use crate::control_plane::MANAGED_SHARED_PIN_NAMESPACE;
 use crate::kernel_drop_support::{
-    load_tracepoint_program, replace_pinned_map, replace_pinned_program,
-    replace_pinned_tracepoint_link, resolve_kernel_drop_config, KERNEL_DROP_LINK_NAME,
-    KERNEL_DROP_MAP_NAMES, KERNEL_DROP_PROGRAM_NAME, KERNEL_DROP_TRACEPOINT_CATEGORY,
-    KERNEL_DROP_TRACEPOINT_NAME,
+    KERNEL_DROP_LINK_NAME, KERNEL_DROP_MAP_NAMES, KERNEL_DROP_PROGRAM_NAME,
+    KERNEL_DROP_TRACEPOINT_CATEGORY, KERNEL_DROP_TRACEPOINT_NAME, load_tracepoint_program,
+    replace_pinned_map, replace_pinned_program, replace_pinned_tracepoint_link,
+    resolve_kernel_drop_config,
 };
 
 pub const KERNEL_DROP_PIN_NAMESPACE: &str = "kernel-drops-global";
@@ -254,7 +254,10 @@ impl KernelDropManager {
         if kallsyms.is_empty() {
             warn!("failed to load /proc/kallsyms; kernel drop location hints will be unavailable");
         } else {
-            info!(symbols = kallsyms.len(), "loaded kernel symbol table for drop location hints");
+            info!(
+                symbols = kallsyms.len(),
+                "loaded kernel symbol table for drop location hints"
+            );
         }
         Self {
             ebpf_path: ebpf_path.to_string(),

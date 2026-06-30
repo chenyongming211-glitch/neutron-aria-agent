@@ -100,11 +100,13 @@ eBPF datapath               XDP / TC
 
 本轮优化统一落地为以下约束，后续开发和评审按这些约束验收。阶段 gate 只看这些约束是否被测试、CI、smoke 或文档证据证明。
 
+日常开发先读短版合同 [Neutron Managed Domains Contract](neutron-managed-domains-contract.md)；上线启用和回滚步骤见 [OpenStack Deployment Runbook](openstack-deployment-runbook.md)。本文保留完整设计背景、阶段 gate 和详细验收。
+
 | 分类 | 约束 |
 | --- | --- |
 | 范围边界 | 第一阶段新增功能模块白名单固定为 ACL enhancement 和 QoS；其它能力只能作为支撑能力或保留代码出现，不能作为功能模块、feature flag、status domain、smoke 或 PR gate |
 | 范围边界 | 当前阶段固定为 OVS enhancement mode；不支持 OVN；不做 Neutron Security Group projection、remote group 展开、anti-spoof 或 port security enforcement |
-| 范围边界 | ACL 输入源固定为 operator-admin 管理的 Neutron port/network tags 加本机只读 mapping；不新增 tenant northbound，不消费 Security Group、remote group、port security 或 allowed address pairs |
+| 范围边界 | ACL 正式输入源固定为独立 `aria_acl` Neutron service plugin/API/DB；`fixture` 只用于 CI/smoke；历史 tag + 本机 mapping 仅允许作为 lab/bootstrap/迁移辅助，不作为生产控制面契约；不消费 Security Group、remote group、port security 或 allowed address pairs |
 | 范围边界 | Trace、Drops、SSL、Diagnose、Service Chain 等既有能力保留为 admin/operator-only，不进入 `neutron-aria-agent` schema |
 | Snapshot 语义 | Snapshot request 必须有 `runtime_foundations`；`feature_flags` 只允许表达 `acl/qos` |
 | Snapshot 语义 | response/status domain 顺序固定为 `runtime -> groups -> conntrack -> monitoring -> acl -> qos` |
@@ -117,6 +119,7 @@ eBPF datapath               XDP / TC
 | UDS 契约 | `neutron-uds-contract.json` 必须包含 contract version、body 上限、timeout、error code hash 和 peer auth policy |
 | UDS 契约 | Python UDS client 必须实现 `get_capabilities()`，启动、重连、datapath restart 和 capability hash 变化都走同一握手路径 |
 | 安全 | Unix socket 除文件权限外必须有 peer credential 校验和 audit log，且配置来源明确 |
+| 控制权 | Neutron 通过 `managed_domains` 声明每个 port/instance 的 domain authority；本机 `ariactl` 对 Neutron-managed domain 的持久写入必须在 Rust/API 层返回 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`，未被列入 `managed_domains` 的 domain 继续允许本机写入 |
 | 可观测性 | 告警必须配套 runbook；accepted generation lag、ACL degraded with bypass action、WAL blocked、full resync loop、socket permission denied 都必须可报警 |
 | N0.5 | N0.5-lite 是 schema freeze gate；完整 N0.5 是 N3 feature gate；PR-6A/PR-6B 是 deployment smoke gate，三类 gate 不得混用 |
 | N0.5 | 发现结果必须写入 `docs/openstack-target-env-discovery.md`，没有命令、期望、实际和证据不得计为完成 |
@@ -135,7 +138,7 @@ eBPF datapath               XDP / TC
 | --- | --- |
 | 总体模式 | OVS enhancement mode；OVS 继续负责原有 L2 转发 |
 | ACL | ACL enhancement domain；未启用时 `DomainStatus=not_requested,effective_action=bypass`；配置错误或 apply 失败时 `DomainStatus=degraded,effective_action=bypass` |
-| ACL 输入源 | operator-admin 管理的 Neutron port/network tags + 本机只读映射配置；不新增 tenant API，不消费 Security Group、remote group、port security 或 allowed address pairs |
+| ACL 输入源 | 正式产品路径为 `aria_acl` Neutron service plugin/API/DB；`neutron-aria-agent` 从 Neutron 读取 effective ACL 并下发 snapshot；`fixture` 只用于 CI/smoke；tag + 本机 mapping 只保留为 lab/bootstrap/迁移辅助，不作为生产主路径；不消费 Security Group、remote group、port security 或 allowed address pairs |
 | Security Group | 不做 projection，不展开 remote group，不承担 Neutron SG enforcement |
 | anti-spoof / port security | 当前阶段不实现；只记录为未来独立阶段候选 |
 | N3 | 只做 ACL enhancement 最小闭环：默认 bypass、显式策略生效、失败不影响 OVS |
@@ -181,7 +184,7 @@ Discovery gate、feature gate 和 deployment smoke gate 不能互相替代。moc
 | 维度 | 合法值 | 用途 |
 | --- | --- | --- |
 | `DomainStatus` | `ready`、`degraded`、`blocked`、`not_requested` | 表达 domain 本次请求或当前承诺的执行结果 |
-| `effective_action` | `enabled`、`bypass`、`unchanged`、`cleanup`、`no_op` | 表达 datapath 对业务流量或本机状态采取的动作 |
+| `effective_action` | `enforce`、`bypass`、`unchanged`、`cleanup`、`no_op` | 表达 datapath 对业务流量或本机状态采取的动作 |
 | `support_disposition` | `supported`、`unsupported`、`unknown`、`not_applicable` | 表达 port 类型、feature、optional field 或规则能力是否受支持 |
 | `AgentHealth` | `alive`、`degraded`、`down` | 表达 Neutron agent 进程/heartbeat 状态 |
 | `RuntimeAttachmentState` | `observed_tap`、`unmanaged_bypass`、`neutron_bound_pending`、`managed_ready`、`managed_degraded` | 表达 tap/ifindex/eBPF attach 与 Neutron ownership 的关系 |
@@ -205,7 +208,7 @@ Discovery gate、feature gate 和 deployment smoke gate 不能互相替代。moc
 
 为避免回流到 Neutron Security Group 语义，当前阶段统一使用：
 
-- `explicit_acl_group`：operator-admin 在 ACL enhancement mapping 中定义的显式地址组。
+- `explicit_acl_group`：operator-admin 在 `aria_acl` policy/rule/address-set 中定义的显式地址组。
 - `address_set`：Rust 编译后的本机地址集合。
 - `groups` domain：Aria 编译中间层 domain，服务 ACL/QoS/统计归因。
 
@@ -300,7 +303,7 @@ OpenStack 模式必须处理和现有 OVS 转发的边界：
 
 - 向 Neutron 注册本 host 上的 Aria agent。
 - 维持 agent heartbeat。
-- 消费 Neutron port、QoS 和显式 ACL enhancement mapping，生成 ACL/QoS 相关 snapshot。
+- 消费 Neutron port、QoS 和 `aria_acl` 显式 ACL enhancement 对象，生成 ACL/QoS 相关 snapshot。
 - 在启动、重连、事件丢失、generation 不一致时执行 full resync。
 - 只处理绑定到本 host 的 Neutron ports。
 - 把 Neutron 对象翻译成本机 snapshot。
@@ -485,6 +488,15 @@ Neutron 是 source of truth：
 
 OpenStack 模式必须把“Neutron 权威配置”和“本机管理员排障能力”分开。
 
+Neutron 权威配置由 snapshot 中的 `managed_domains` 声明，当前代码路径是：
+
+```text
+NeutronPortSnapshot.managed_domains
+  -> mark_neutron_port_authority()
+  -> ensure_local_write_allowed()
+  -> LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN
+```
+
 Neutron 权威配置包括：
 
 - Neutron ports 对应的 group/address-set。
@@ -492,7 +504,7 @@ Neutron 权威配置包括：
 - QoS。
 - 这些对象对应的 runtime status、generation 和 WAL 持久化状态。
 
-这些状态只能由 `neutron-aria-agent` 通过 snapshot API 修改。本机 `ariactl` 或现有管理 API 不允许对 Neutron-managed port 直接写这些状态。
+这些状态只能由 `neutron-aria-agent` 通过 snapshot API 修改。本机 `ariactl` 或现有管理 API 不允许直接写入该 port/instance 的 Neutron-managed domain；未列入 `managed_domains` 的 domain 仍按本机模式处理。
 
 本机管理员能力分成两类：
 
@@ -500,12 +512,12 @@ Neutron 权威配置包括：
 | --- | --- | --- | --- |
 | 只读观测 | stats、metrics、diagnose、tcprt query | 作为既有本机管理员入口允许；不新增 Neutron 功能 | 否 |
 | 临时排障 | trace start/stop/flush、drop stats flush | 作为既有本机管理员入口允许；不进入 Neutron schema | 否 |
-| Neutron 权威配置写入 | group、policy、qos、ACL enable | 禁止本机手动写 Neutron-managed port | 是，只能由 snapshot 写 |
+| Neutron 权威配置写入 | group、policy、qos、ACL enable | 禁止本机手动写已列入 `managed_domains` 的 domain | 是，只能由 snapshot 写 |
 | 非 Neutron 持久配置 | service chain、host-global ssl、手动 config toggle | OpenStack 模式默认不作为落地范围 | 不得混入 Neutron WAL 命名空间 |
 
 因此，管理员可以在 compute node 上使用 trace 做临时排障；trace filter 不应被视为 Neutron desired state，也不应通过 WAL 持久化。`aria-datapath` 重启后，trace 需要重新开启。
 
-相反，如果管理员用本机命令手动改 ACL/QoS 配置，这会和 Neutron snapshot 形成双写冲突。OpenStack 模式应在代码层拒绝这类写入，返回明确错误，例如 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_PORT`。Mirror/TCPrt 既有 Rust 本机能力不删除，但不属于 Neutron snapshot 管理范围；如果未来要对 Neutron-managed tap 启用，必须另起独立设计或 break-glass 流程。
+相反，如果管理员用本机命令手动改已被 Neutron 纳管的 ACL/QoS 配置，这会和 Neutron snapshot 形成双写冲突。OpenStack 模式必须在 Rust/API 层按 domain 拒绝这类写入，返回明确错误 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`。Mirror、TCPrt、Trace 等既有本机能力不删除；只要对应 domain 没有出现在该 port/instance 的 `managed_domains` 中，本机 `ariactl` 仍可写入或排障。若未来把 mirror 等 domain 纳入 Neutron snapshot，同一套 `managed_domains` 仲裁继续适用，不另起控制权模型。
 
 ### 4.6 Authority 状态机与重新接管
 
@@ -515,15 +527,15 @@ OpenStack mode 不能只用“通信是否成功”判断是否允许本机写�
 
 | 状态 | 触发条件 | 权威来源 | 本机持久配置写入 | Datapath 行为 |
 | --- | --- | --- | --- | --- |
-| `openstack_managed` | 收到并成功接受 Neutron snapshot | Neutron | 拒绝 | 执行最新 `last_classified_generation` |
-| `openstack_degraded` | Neutron RPC、socket 或 status 暂时异常，但本机仍有托管标记 | Neutron | 拒绝 | 继续执行最后一次成功 snapshot |
+| `openstack_managed` | 收到并成功接受 Neutron snapshot | Neutron | 拒绝已列入 `managed_domains` 的 domain | 执行最新 `last_classified_generation` |
+| `openstack_degraded` | Neutron RPC、socket 或 status 暂时异常，但本机仍有托管标记 | Neutron | 拒绝已列入 `managed_domains` 的 domain | 继续执行最后一次成功 snapshot |
 | `local_break_glass` | 管理员显式执行本机接管命令 | Local admin | 允许，写 local override WAL | 暂停 Neutron apply |
 | `local_standalone` | 非 OpenStack 部署或管理员显式脱离 OpenStack | Local admin | 允许，写 local WAL | 按本机配置运行 |
 | `rejoin_pending` | break-glass 后 Neutron 通信恢复 | Neutron pending | 拒绝新的本机持久写入 | 等待重新接管决策 |
 
 默认规则：
 
-- `openstack_managed` 和 `openstack_degraded` 都不能本机改 ACL/QoS/group。
+- `openstack_managed` 和 `openstack_degraded` 都不能本机修改已列入 `managed_domains` 的 ACL/QoS/Mirror/group；未列入的 domain 保持本机可写。
 - Neutron 通信失败时，datapath 继续使用 `last_classified_generation`，不能自动开放本机写入口。
 - 只有管理员显式进入 `local_break_glass` 或 `local_standalone`，本机配置命令才可以写入并持久化。
 - `local_break_glass` 必须有本机审计记录，包含操作者、时间、原因、影响 ports。
@@ -555,7 +567,7 @@ OpenStack 多租户边界必须由 Neutron 对象关系驱动，不能由 `aria-
 - 不能只用 policy name、display name 或短 ID 做 key。
 - 数据包本身不携带 project_id，实际 enforcement 仍按 ingress/egress port identity 和编译后的 per-port policy 执行。
 - 不因为 project_id 不同就自动丢包；跨租户共享网络、路由、floating IP、provider/admin policy 是否允许，由 Neutron 对象关系和显式 ACL enhancement policy 决定。
-- 所有跨 project 引用都必须来自 Neutron 明确授权的对象关系或 operator-admin 显式配置，例如 shared network、RBAC shared QoS policy 或 ACL enhancement mapping。
+- 所有跨 project 引用都必须来自 Neutron 明确授权的对象关系或 operator-admin 显式配置，例如 shared network、RBAC shared QoS policy 或 `aria_acl` binding / shared ACL policy。
 - 未经 Neutron 表达的跨 project QoS 引用必须拒绝或标记 degraded。
 
 多租户对象命名建议：
@@ -625,12 +637,11 @@ Neutron snapshot API 不进入现有 TCP OpenAPI paths，但仍必须有稳定�
 - 本机 UDS contract 的版本跟随 `schema_version` 和 capability handshake；Rust/Python 版本不匹配时返回 typed error，而不是 fallback 到 TCP 或 best-effort apply。
 - CI 必须生成或校验 `neutron-uds-contract.json`，内容包含 UDS paths、schema refs、capabilities response、错误码和兼容规则；该 artifact 不代表 TCP OpenAPI 暴露面。
 - `neutron-uds-contract.json` 必须额外包含：
-  - `contract_version`：UDS contract 自身版本，第一版固定为 `"1"`。
-  - `body_max_bytes`：第一阶段固定为 `10485760`，对应 10 MiB body 上限。
-  - `request_timeout_ms`：Python client 默认请求超时，第一版固定为 `5000`。
-  - `connect_timeout_ms`：Python client 默认连接超时，第一版固定为 `1000`。
+  - `contract_version`：UDS contract 自身版本，第一版固定为 `"2026-06-v0.9"`。
+  - `body_max_bytes`：第一阶段固定为 `1048576`，对应 1 MiB body 上限。
+  - `timeout_ms`：Python client 推荐请求超时，第一版固定为 `3000`。
   - `error_codes_hash`：稳定错误码集合的摘要，用于发现 Python/Rust 错误码漂移。
-  - `peer_auth_policy`：允许的 Unix peer credential 策略，至少包含 `require_peercred`、`allowed_group` 和 `audit_required`。
+  - `peer_auth_policy`：允许的 Unix peer credential 策略，第一阶段固定为 `filesystem_permissions_then_peercred`。
 - `agent/src/openapi.rs` 只注册 Neutron DTO components 和 TCP path 排除测试；UDS paths 由 `neutron-uds-contract.json` 固化，Python agent 测试必须读取该 contract 或等价 fixture 做请求/响应校验。
 - 日志必须记录 peer uid/gid、请求路径、schema_version、local_generation、accepted/applied 结果和 error_code。
 
@@ -640,9 +651,9 @@ Neutron snapshot API 不进入现有 TCP OpenAPI paths，但仍必须有稳定�
 | --- | --- | --- | --- |
 | DTO schema | `api/src/lib.rs` | OpenAPI components、UDS contract schema refs | serde roundtrip、component name stability |
 | TCP path 排除 | `agent/src/openapi.rs` | TCP OpenAPI paths | Neutron UDS paths 不出现在 TCP OpenAPI paths |
-| UDS path 列表 | `agent/src/neutron_contract.rs` | `neutron-uds-contract.json` | snapshot/status/capabilities/delete 四个 path 全量存在 |
-| 错误码集合 | `api/src/lib.rs` / `agent/src/neutron_contract.rs` | `error_codes_hash` | Python/Rust hash 一致，不一致停止写路径 |
-| capabilities response | `agent/src/api_handlers/neutron.rs` | `GET /api/v1/neutron/capabilities` | contract version、schema range、body/timeout、peer auth policy 与 artifact 一致 |
+| UDS path 列表 | `docs/neutron-uds-contract.json` + `ci/check_neutron_stage1.py` | `neutron-uds-contract.json` | snapshot/status/capabilities/delete 四个 path 全量存在 |
+| 错误码集合 | `api/src/lib.rs` / `docs/neutron-uds-contract.json` | `error_codes_hash` | Python/Rust hash 一致，不一致停止写路径 |
+| capabilities response | `api/src/lib.rs` / `agent/src/neutron_api.rs` | `GET /api/v1/neutron/capabilities` | contract version、schema range、body/timeout、peer auth policy 与 artifact 一致 |
 | Python 校验入口 | `neutron-aria-agent/neutron_aria_agent/local_client.py` | client startup/reconnect 检查 | request/response 校验、capability hash 变化触发 full resync |
 
 #### 5.1.2 Capability Handshake Contract
@@ -657,45 +668,25 @@ GET /api/v1/neutron/capabilities
 
 ```json
 {
-  "contract_version": "1",
-  "schema_version_min": "1",
-  "schema_version_max": "1",
-  "datapath_version": "0.9.0-neutron-agent",
-  "ebpf_artifact_version": "policy-map-v1",
-  "body_max_bytes": 10485760,
-  "request_timeout_ms": 5000,
-  "connect_timeout_ms": 1000,
-  "agent_mode": "openstack",
+  "api_version": "v1",
+  "contract_version": "2026-06-v0.9",
+  "schema_version_min": 1,
+  "schema_version_max": 1,
+  "attach_authority": "neutron_snapshot",
+  "supports_full_snapshot": true,
+  "supports_port_delete": true,
+  "body_max_bytes": 1048576,
+  "timeout_ms": 3000,
   "supported_domains": [
-    "runtime",
-    "groups",
-    "conntrack",
-    "monitoring",
+    "attach",
     "acl",
-    "qos"
+    "qos",
+    "mirror"
   ],
-  "mandatory_domains": ["runtime", "groups", "conntrack", "monitoring"],
-  "enhancement_domains": ["acl", "qos"],
-  "mandatory_fields": [
-    "schema_version",
-    "local_generation",
-    "host",
-    "integration_mode",
-    "tenant_model",
-    "ports"
-  ],
-  "optional_fields": [
-    "runtime_foundations.monitoring.prometheus",
-    "diagnostics"
-  ],
-  "unsupported_features": [],
-  "error_codes_hash": "sha256:...",
-  "peer_auth_policy": {
-    "require_peercred": true,
-    "allowed_group": "neutron-aria",
-    "audit_required": true
-  },
-  "capability_hash": "sha256:..."
+  "mandatory_domains": [],
+  "error_codes_hash": "v0.9-neutron-errors-2",
+  "peer_auth_policy": "filesystem_permissions_then_peercred",
+  "capability_hash": "v0.9-neutron-capabilities-1"
 }
 ```
 
@@ -705,7 +696,7 @@ GET /api/v1/neutron/capabilities
 - Python 侧要求的 mandatory domain 或 required field 如果不在 Rust capability 中，Rust 返回 `UDS_CAPABILITY_MISMATCH`，不接受该 snapshot。
 - enhancement domain 不支持时，Python 侧可以不下发该 feature；如果已下发但 Rust 不支持，相关 domain 必须返回 `DomainStatus=degraded,effective_action=bypass,support_disposition=unsupported`，并在 status 中暴露 `unsupported_features`。
 - optional field 未识别时不能改变 datapath 行为，必须进入 status 的 `ignored_optional_fields` 或等价字段。
-- `body_max_bytes`、`request_timeout_ms`、`connect_timeout_ms` 是 Python client 的默认运行参数来源；Python 不得另行写死更宽松的默认值。
+- `body_max_bytes`、`timeout_ms` 是 Python client 的默认运行参数来源；Python 不得另行写死更宽松的默认值。
 - `error_codes_hash` 变化时，Python 侧必须重新加载 contract；如果本地 contract 与 Rust 返回不一致，返回 `UDS_CONTRACT_DRIFT` 并停止写路径。
 - `peer_auth_policy.require_peercred = true` 时，Rust 无法读取 peer credential 必须返回 `UDS_PEERCRED_UNAVAILABLE`，不能降级为只看文件权限。
 - `capability_hash` 变化后，Python 侧必须触发 full resync；不能继续增量提交基于旧 capability 的 port-scoped snapshot。
@@ -719,9 +710,8 @@ GET /api/v1/neutron/capabilities
 | `schema_version_min/max` | snapshot DTO schema 范围不兼容 | 停止提交 snapshot，等待版本对齐 | 拒绝 snapshot | `UDS_SCHEMA_MISMATCH` |
 | `capability_hash` | Rust runtime/domain 能力变化 | 重新握手并 full resync | status 回显新 hash | 无错误；若继续旧增量则 `UDS_CAPABILITY_MISMATCH` |
 | `error_codes_hash` | 错误码集合漂移 | reload contract；仍不一致则停止写路径 | capabilities 回显当前 hash | `UDS_ERROR_CODES_HASH_MISMATCH` |
-| `body_max_bytes` | body 上限变化 | 使用较严格上限；超限先本地拒绝 | 超限时拒绝请求 | `UDS_BODY_TOO_LARGE` 或 `SNAPSHOT_TOO_LARGE` |
-| `request_timeout_ms` | 请求超时策略变化 | 更新 client timeout；超时进入 degraded | 不推进 generation | `UDS_REQUEST_TIMEOUT` |
-| `connect_timeout_ms` | socket 连接超时策略变化 | 更新 connect timeout；超时进入 degraded | 不适用 | `UDS_CONNECT_TIMEOUT` |
+| `body_max_bytes` | body 上限变化 | 使用较严格上限；超限先本地拒绝 | 超限时拒绝请求 | `UDS_BODY_TOO_LARGE` |
+| `timeout_ms` | 请求超时策略变化 | 更新 client timeout；超时进入 degraded/status reconcile | 不推进 generation | `UDS_REQUEST_TIMEOUT` |
 | `peer_auth_policy` | 本机调用身份策略变化 | 校验本地运行身份和 group | 拒绝不合规 peer | `UDS_PEER_UNAUTHORIZED` |
 
 ### 5.2 Snapshot 请求结构
@@ -838,7 +828,7 @@ GET /api/v1/neutron/capabilities
 - `runtime_foundations.conntrack.required = true` 表示 Aria ACL 状态化、fast-path 或 flow 统计依赖 conntrack。Conntrack 不是 Neutron ACL mapping 输入，但状态化 ACL enhancement 必须把 conntrack ready 作为 feature ready 前提。
 - `runtime_foundations.monitoring.required = true` 表示本 host 承诺输出 ACL/QoS/flow/group 统计；如果 monitoring 失败，转发不一定中断，但 Aria observability status 不得 ready。
 - `feature_flags` 只表达 `acl/qos`；不能把 `group/conntrack/monitoring/wal/netlink/pinned` 做成租户 feature，也不能把 Mirror/TCPrt 放进 Neutron feature flags。
-- 没有功能需求的 port 可以保持 `DomainStatus=not_requested,effective_action=bypass`；有 ACL 增强需求但 conntrack、mapping、schema、compile 或 apply 未 ready 的 port 必须 `DomainStatus=degraded,effective_action=bypass`，不能中断业务。
+- 没有功能需求的 port 可以保持 `DomainStatus=not_requested,effective_action=bypass`；有 ACL 增强需求但 conntrack、`aria_acl` 输入、schema、compile 或 apply 未 ready 的 port 必须 `DomainStatus=degraded,effective_action=bypass`，不能中断业务。
 
 多租户字段约束：
 
@@ -872,7 +862,7 @@ GET /api/v1/neutron/capabilities
   "domains": {
     "runtime": {
       "status": "ready",
-      "effective_action": "enabled",
+      "effective_action": "enforce",
       "support_disposition": "supported",
       "applied": 1,
       "removed": 0,
@@ -881,7 +871,7 @@ GET /api/v1/neutron/capabilities
     },
     "groups": {
       "status": "ready",
-      "effective_action": "enabled",
+      "effective_action": "enforce",
       "support_disposition": "supported",
       "applied": 4,
       "removed": 1,
@@ -890,7 +880,7 @@ GET /api/v1/neutron/capabilities
     },
     "conntrack": {
       "status": "ready",
-      "effective_action": "enabled",
+      "effective_action": "enforce",
       "support_disposition": "supported",
       "applied": 1,
       "removed": 0,
@@ -899,7 +889,7 @@ GET /api/v1/neutron/capabilities
     },
     "monitoring": {
       "status": "ready",
-      "effective_action": "enabled",
+      "effective_action": "enforce",
       "support_disposition": "supported",
       "applied": 1,
       "removed": 0,
@@ -908,7 +898,7 @@ GET /api/v1/neutron/capabilities
     },
     "acl": {
       "status": "ready",
-      "effective_action": "enabled",
+      "effective_action": "enforce",
       "support_disposition": "supported",
       "applied": 12,
       "removed": 3,
@@ -917,7 +907,7 @@ GET /api/v1/neutron/capabilities
     },
     "qos": {
       "status": "degraded",
-      "effective_action": "enabled",
+      "effective_action": "enforce",
       "support_disposition": "supported",
       "applied": 1,
       "removed": 0,
@@ -944,10 +934,10 @@ Domain status 不表达是否 bypass、是否 unsupported、是否 ignored optio
 | 场景 | `DomainStatus` | `effective_action` | `support_disposition` | generation 影响 |
 | --- | --- | --- | --- | --- |
 | 无 ACL enhancement 输入 | `not_requested` | `bypass` | `not_applicable` | 可推进 `accepted_generation` 和 `last_classified_generation`；不更新 `last_feature_ready_generation_by_domain.acl` |
-| ACL tag 指向不存在 mapping | `degraded` | `bypass` | `supported` | 可推进 `accepted_generation` 和 `last_classified_generation`；不更新 `last_feature_ready_generation_by_domain.acl` |
+| `aria_acl` binding 指向不存在或不可访问的 policy | `degraded` | `bypass` | `supported` | 可推进 `accepted_generation` 和 `last_classified_generation`；不更新 `last_feature_ready_generation_by_domain.acl` |
 | trunk/SR-IOV/direct port 未支持 | `degraded` 或 `not_requested` | `bypass` 或 `no_op` | `unsupported` | 不得假 ready；是否推进 accepted 取决于该 port 是否被请求 enhancement |
 | WAL append/commit 失败 | `blocked` | `unchanged` 或 `bypass` | `supported` | 不推进 `accepted_generation`；保留 `last_classified_generation` 对应动作 |
-| QoS shaping 不可用但 policing 已应用 | `degraded` | `enabled` | `supported` | 可推进 `last_classified_generation`；不更新 `last_feature_ready_generation_by_domain.qos` |
+| QoS shaping 不可用但 policing 已应用 | `degraded` | `enforce` | `supported` | 可推进 `last_classified_generation`；不更新 `last_feature_ready_generation_by_domain.qos` |
 
 ### 5.4 Aria Ready 与 OVS 转发边界
 
@@ -979,10 +969,10 @@ Domain status 不表达是否 bypass、是否 unsupported、是否 ignored optio
 | 场景 | port runtime | ACL domain | agent heartbeat | 告警 | OVS 转发 |
 | --- | --- | --- | --- | --- | --- |
 | port 不属于本 host | `RuntimeAttachmentState=unmanaged_bypass` 或 cleanup | `not_requested` | `alive` | 无 | 不受 Aria 影响 |
-| port 属于本 host，但无 ACL enhancement tag | `RuntimeAttachmentState=neutron_bound_pending` 或 `managed_ready`，`effective_action=bypass` | `not_requested` | `alive` | 无 | 保持原 OVS 转发 |
-| port 有 ACL enhancement tag，但映射配置没有对应 policy | `effective_action=bypass` | `degraded: ACL_MAPPING_NOT_FOUND` | `degraded` | `AriaAclBypassDegradedPorts` | 保持原 OVS 转发 |
+| port 属于本 host，但无 `aria_acl` binding | `RuntimeAttachmentState=neutron_bound_pending` 或 `managed_ready`，`effective_action=bypass` | `not_requested` | `alive` | 无 | 保持原 OVS 转发 |
+| port 有 `aria_acl` binding，但 policy 不存在或不可访问 | `effective_action=bypass` | `degraded: ACL_POLICY_NOT_FOUND` 或 `ACL_INPUT_INVALID` | `degraded` | `AriaAclBypassDegradedPorts` | 保持原 OVS 转发 |
 | ACL policy 输入 schema 错误 | `effective_action=bypass` | `degraded: ACL_INPUT_INVALID` | `degraded` | `AriaAclBypassDegradedPorts` | 保持原 OVS 转发 |
-| ACL policy 已 accepted 且 apply 成功 | `effective_action=enabled` | `ready` | `alive` | 无 | OVS 转发叠加 Aria 增强行为 |
+| ACL policy 已 accepted 且 apply 成功 | `effective_action=enforce` | `ready` | `alive` | 无 | OVS 转发叠加 Aria 增强行为 |
 | ACL apply 失败 | `effective_action=bypass` | `degraded: ACL_APPLY_FAILED` | `degraded` | `AriaAclBypassDegradedPorts` | 保持原 OVS 转发 |
 | 状态化 ACL 需要 conntrack，但 conntrack 不可用 | `effective_action=bypass` | `degraded: CONNTRACK_REQUIRED_UNAVAILABLE` | `degraded` | `AriaAclBypassDegradedPorts` | 保持原 OVS 转发 |
 | QoS 失败 | QoS domain `DomainStatus=degraded` 或 `blocked`，`effective_action` 按 domain 决定 | ACL 不受影响 | 默认 `alive`，除非该失败破坏 snapshot/WAL/contract 一致性 | domain 告警 | OVS 基础转发不受影响 |
@@ -1012,14 +1002,14 @@ Domain status 不表达是否 bypass、是否 unsupported、是否 ignored optio
 | `CONNTRACK_APPLY_FAILED` | conntrack | conntrack 开关或 CT config 写入失败 | 状态化 ACL 和 flow 观测 degraded；相关 ACL 必须 `effective_action=bypass` |
 | `CONNTRACK_REQUIRED_UNAVAILABLE` | acl | ACL enhancement 请求状态化语义但 conntrack 不可用 | ACL `DomainStatus=degraded,effective_action=bypass`，不启用 ACL feature flag |
 | `MONITORING_APPLY_FAILED` | monitoring | monitoring 开关或 stats runtime 初始化失败 | observability degraded，承诺统计时不能报统计 ready |
-| `ACL_MAPPING_NOT_FOUND` | acl | port/network tag 指向的 ACL policy mapping 不存在 | `DomainStatus=degraded,effective_action=bypass`，不启用 feature flag |
-| `ACL_INPUT_INVALID` | acl | ACL mapping 文件或 policy schema 不合法 | `DomainStatus=degraded,effective_action=bypass`，拒绝相关 policy ready |
+| `ACL_POLICY_NOT_FOUND` | acl | `aria_acl` binding 指向的 policy 不存在或不可访问 | `DomainStatus=degraded,effective_action=bypass`，不启用 feature flag |
+| `ACL_INPUT_INVALID` | acl | `aria_acl` policy/rule/address-set schema 不合法 | `DomainStatus=degraded,effective_action=bypass`，拒绝相关 policy ready |
 | `ACL_COMPILE_FAILED` | acl | ACL 规则编译失败 | 拒绝相关 port ACL |
 | `QOS_SHAPING_FALLBACK` | qos | shaping 不可用，降级 policing | degraded，不阻塞 ACL |
 | `QOS_APPLY_FAILED` | qos | QoS map 写入失败 | qos blocked，不阻塞 ACL |
 | `WAL_APPEND_FAILED` | runtime | WAL append 失败 | 尝试 compact 降级修复，失败则 runtime blocked |
 | `PINNED_RUNTIME_MISSING` | runtime | pinned map/link 不完整 | 触发 runtime repair 或 full resync |
-| `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_PORT` | runtime | 本机命令试图修改 Neutron-managed policy | 拒绝写入，提示通过 Neutron 修改 |
+| `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN` | runtime | 本机命令试图修改 Neutron-managed domain | 拒绝写入，提示通过 Neutron 修改 |
 | `REJOIN_REQUIRES_LOCAL_OVERRIDE_DISCARD` | runtime | break-glass 后重新接管前存在 local override | 进入 rejoin pending，等待管理员确认 |
 | `UDS_PEER_UNAUTHORIZED` | api | Unix socket peer uid/gid 不在允许范围 | 拒绝请求，记录 peer credential 和路径 |
 | `UDS_PEERCRED_UNAVAILABLE` | api | 无法读取 Unix socket peer credential | 拒绝写路径，status 可返回 degraded |
@@ -1029,11 +1019,10 @@ Domain status 不表达是否 bypass、是否 unsupported、是否 ignored optio
 | `UDS_CONTRACT_DRIFT` | api | Python 使用的 `neutron-uds-contract.json` 与 Rust artifact 不一致 | 拒绝写路径，要求版本对齐后重试 |
 | `UDS_CONTRACT_VERSION_UNSUPPORTED` | api | Python contract version 与 Rust capabilities 不兼容 | 停止写路径，agent degraded，要求升级或回滚 |
 | `UDS_ERROR_CODES_HASH_MISMATCH` | api | Python 本地错误码集合与 Rust 返回摘要不一致 | reload contract；仍不一致则停止写路径 |
-| `UDS_CONNECT_TIMEOUT` | api | Python 连接 Unix socket 超过 `connect_timeout_ms` | agent degraded，重试 socket，禁止 fallback TCP |
-| `UDS_REQUEST_TIMEOUT` | api | UDS 请求超过 `request_timeout_ms` 未完成 | 当前 snapshot 未 accepted，触发 status check/full resync |
+| `UDS_CONNECT_TIMEOUT` | api | Python 连接 Unix socket 超过 `timeout_ms` | agent degraded，重试 socket，禁止 fallback TCP |
+| `UDS_REQUEST_TIMEOUT` | api | UDS 请求超过 `timeout_ms` 未完成 | 当前 snapshot 未 accepted，触发 status check/full resync |
 | `UDS_MUTATION_DETACHED` | api | client timeout/disconnect after a mutating UDS request has started | Rust must continue or roll back the detached apply task; Python must status-check and converge by full resync |
 | `UDS_AUDIT_WRITE_FAILED` | api | 写入 UDS 审计日志失败 | 写路径 blocked 或 degraded，避免不可追踪 generation |
-| `SNAPSHOT_TOO_LARGE` | runtime | full snapshot 超过首阶段规模预算或 body 上限 | 拒绝或要求分批/port-scoped resync，进入 degraded |
 
 ### 5.6 DELETE 语义
 
@@ -1052,31 +1041,33 @@ Domain status 不表达是否 bypass、是否 unsupported、是否 ignored optio
 
 ### 5.7 本机写入保护
 
-当 datapath 进入 OpenStack mode 后，现有本机管理 API 必须识别 Neutron-managed port 或 Neutron-managed instance。
+当 datapath 进入 OpenStack mode 后，现有本机管理 API 必须识别 Neutron-managed port 或 Neutron-managed instance，并按 `managed_domains` 做 domain 级写入仲裁。
 
 OpenStack mode 包括 `openstack_managed` 和 `openstack_degraded`。通信失败只会进入 degraded，不能自动切到本机可写模式。
 
-必须拒绝的本机写入：
+对已经出现在该 port/instance `managed_domains` 中的 domain，必须拒绝的本机写入：
 
-- group add/delete。
-- policy add/delete。
-- QoS add/delete。
-- config set 中影响 ACL/QoS 的开关。
+- Neutron-reserved group/address-set add/delete/update。
+- policy add/delete/batch。
+- QoS add/delete，前提是 `qos` 已被列入 `managed_domains`。
+- mirror add/delete，前提是 `mirror` 已被列入 `managed_domains`。
+- config set 中影响被 Neutron 纳管 domain 的开关。
 - 任何会改变 Neutron-managed port datapath policy 的操作。
 
 允许的本机操作：
 
 - health、status、stats、metrics。
 - diagnose。
-- trace start/stop/list/flush。
+- trace start/stop/list/flush，除非未来显式把 `trace` 列入 `managed_domains`。
 - drops list/flush。
 - tcprt query/list。
+- 未列入 `managed_domains` 的本机持久 domain 写入，例如仅 `managed_domains=["acl"]` 时，本机 QoS/Mirror 写入仍按本机模式处理。
 
 拒绝策略：
 
 - 返回 `409 Conflict` 或等价错误。
-- 错误码使用 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_PORT`。
-- 错误信息必须提示“该端口由 Neutron 管理，请通过 Neutron 修改配置”。
+- 错误码使用 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`。
+- 错误信息必须提示“该端口/实例的该 domain 由 Neutron 管理，请通过 Neutron 修改配置”。
 - 只读和临时排障操作不能写入 Neutron WAL，也不能改变 `last_classified_generation`。
 
 本机持久写入只允许在 `local_break_glass` 或 `local_standalone` 状态下执行。`local_break_glass` 写入必须进入 local override WAL。重新接管时默认丢弃 local override，并由 Neutron full snapshot 重建托管 domains。
@@ -1184,8 +1175,8 @@ Neutron 事件可能短时间内大量到达。`neutron-aria-agent` 应合并事
 建议放在独立模块，避免污染现有逐条 CRUD handler：
 
 ```text
-agent/src/api_handlers/neutron.rs
-agent/src/control_plane/neutron_snapshot.rs
+agent/src/neutron_api.rs
+agent/src/neutron_api.rs
 ```
 
 ### 7.3 Apply Engine
@@ -1381,11 +1372,11 @@ Pinned Maps / pinned links 是必选支撑能力：
 
 ### 8.1 Group / Address-set
 
-Group 是 Aria ACL/QoS 的必选编译中间层。当前阶段只从显式 ACL enhancement mapping、QoS 规则和必要的 port 归属关系生成 group/address-set，不从 Neutron Security Group 或 remote group 自动投影。
+Group 是 Aria ACL/QoS 的必选编译中间层。当前阶段只从 `aria_acl` Neutron service plugin 产生的显式 ACL enhancement 对象、QoS 规则和必要的 port 归属关系生成 group/address-set，不从 Neutron Security Group 或 remote group 自动投影。历史 tag + 本机 mapping 只能作为 lab/bootstrap/迁移辅助输入，不作为生产主路径。
 
 来源：
 
-- 显式 ACL enhancement mapping 中的 CIDR / address-set。
+- `aria_acl` policy/rule/address-set 中的 CIDR / address-set。
 - 显式 ACL enhancement group。
 - QoS match 所需 port/group 归属。
 
@@ -1402,13 +1393,13 @@ Group 是 Aria ACL/QoS 的必选编译中间层。当前阶段只从显式 ACL e
 
 当前阶段只接受显式 ACL enhancement 输入；如果没有显式输入，该 port 保持 bypass：
 
-第一版显式输入源固定为：
+正式产品显式输入源固定为：
 
-1. operator-admin 在 Neutron port 或 network 上设置的 tag，例如 `aria:acl=<policy-id>`。
-2. `neutron-aria-agent` 本机只读映射配置，把 `<policy-id>` 映射到 ACL enhancement policy。
+1. `aria_acl` Neutron service plugin/API/DB 中的 `aria_acl_policy`、`aria_acl_rule`、`aria_acl_address_set` 和 `aria_acl_binding`。
+2. `neutron-aria-agent` 通过 Neutron 读取本 host port 的 effective ACL，编译为 snapshot 中的 per-port ACL enhancement payload。
 3. policy 内部只表达 Aria 传统 ACL 维度：src/dst `explicit_acl_group` 或 CIDR、protocol、direction、port range、allow/drop action。
 
-这不是新的 tenant northbound。普通租户不能直接调用 Aria，也不能通过 Neutron Security Group 间接生成 Aria ACL。后续如果要改成正式 Neutron vendor extension，必须保持同样的语义：显式 ACL enhancement policy，而不是 Security Group projection。
+这是独立的 Neutron northbound，但不是 Security Group projection。普通租户不能直接调用 Aria，也不能通过 Neutron Security Group 间接生成 Aria ACL。`fixture` 输入仅用于 CI/smoke；历史 tag + 本机 mapping 只允许作为 lab/bootstrap/迁移辅助，并且不能成为生产控制面契约。
 
 Aria 执行语义：
 
@@ -1424,8 +1415,8 @@ Aria 执行语义：
 
 第一阶段必须支持：
 
-- operator-admin tag -> policy-id 解析。
-- 本机只读 ACL policy mapping。
+- `aria_acl` policy/rule/address-set/binding 的最小 CRUD/read path。
+- `NeutronAclSource` 从 Neutron 生成 effective ACL index。
 - IPv4 ingress / egress。
 - TCP / UDP / ICMP。
 - remote CIDR。
@@ -1435,7 +1426,7 @@ Aria 执行语义：
 - Security Group projection。
 - remote group 展开。
 - anti-spoof / port security enforcement。
-- Neutron 以外的自定义 ACL northbound。
+- 本地 `ariactl` 直接创建 OpenStack 托管 ACL northbound。
 - 全局策略中心。
 
 ### 8.3 QoS
@@ -1495,7 +1486,7 @@ Aria 执行语义：
 - 不影响 Neutron port binding、ACL、QoS apply 成败。
 - 只读观测和临时排障能力可以由本机管理员使用。
 - 临时排障状态不进入 WAL，不参与 generation。
-- 任何会改变 Neutron-managed port policy 的本机写操作必须被拒绝。
+- 任何会改变 Neutron-managed domain policy 的本机持久写操作必须被拒绝；未列入 `managed_domains` 的 domain 不受该拒绝规则影响。
 - 如果未来要把 Mirror 或 TCPrt 接入 Neutron，需要另起独立设计，重新定义 northbound 输入、权限、status domain、smoke 和回滚策略。
 
 ## 9. 数据流
@@ -1669,7 +1660,7 @@ Mirror 和 TCPrt 不进入当前 Neutron snapshot 更新路径：
 - 本阶段不监听 Neutron 里的 Mirror/TCPrt 事件。
 - 本阶段不生成 `mirror` 或 `tcprt` snapshot domain。
 - 本阶段不把 Mirror/TCPrt 状态写入 Neutron agent heartbeat 或 feature smoke。
-- 本机管理员只读观测和临时排障能力可以保留，但不能改变 Neutron-managed port 的持久 policy。
+- 本机管理员只读观测和临时排障能力可以保留，但不能改变 Neutron-managed domain 的持久 policy。
 - 如果未来要接入 Mirror/TCPrt，必须新增独立 northbound 输入、权限模型、domain status、smoke 和回滚策略。
 
 ### 9.9 Agent Restart
@@ -1773,13 +1764,13 @@ WAL 与 eBPF apply 的一致性要求：
 
 #### 9.10.5 ACL Enhancement 输入语义场景
 
-当前阶段文档、代码命名和验收统一使用 `ACL enhancement`。输入只来自 operator-admin 管理的 Neutron port/network tag 与本机只读 ACL policy mapping，不来自 Neutron Security Group projection。
+当前阶段文档、代码命名和验收统一使用 `ACL enhancement`。生产输入只来自独立 `aria_acl` Neutron service plugin/API/DB，不来自 Neutron Security Group projection。历史 tag + 本机只读 ACL policy mapping 只允许作为 lab/bootstrap/迁移辅助，不作为生产验收主线。
 
 | 输入 | Aria 处理 |
 | --- | --- |
 | 无 ACL enhancement 输入 | 默认 bypass，不改变 OVS 转发 |
-| port/network 无 `aria:acl=<policy-id>` tag | 默认 bypass，不改变 OVS 转发 |
-| tag 指向不存在的 mapping | `DomainStatus=degraded,effective_action=bypass`，错误码 `ACL_MAPPING_NOT_FOUND` |
+| port/network 无 `aria_acl` binding | 默认 bypass，不改变 OVS 转发 |
+| binding 指向不存在或不可访问的 `aria_acl` policy | `DomainStatus=degraded,effective_action=bypass`，错误码 `ACL_POLICY_NOT_FOUND` 或 `ACL_INPUT_INVALID` |
 | 显式 ACL enhancement policy | 编译成 per-port ACL enhancement；失败时 `DomainStatus=degraded,effective_action=bypass` |
 | 显式 remote CIDR | 可作为 ACL match 条件 |
 | `explicit_acl_group` | 可展开成本 host `address_set`；不是 Neutron Security Group remote group |
@@ -1821,7 +1812,7 @@ QoS 的失败不应扩大为 ACL 失败，但生产验收必须能看到 QoS dom
 | --- | --- |
 | 本机已有 mirror/tcprt 配置文件 | 不被 `neutron-aria-agent` 读取，不生成 Neutron snapshot 字段 |
 | 本机管理员查询 TCPrt 观测结果 | 允许只读，不改变 Neutron generation |
-| 本机管理员尝试对 Neutron-managed port 写入 mirror/tcprt 持久配置 | 拒绝或要求显式 break-glass，不写入 Neutron WAL |
+| 本机管理员尝试对 Neutron-managed domain 写入持久配置 | 拒绝或要求显式 break-glass，不写入 Neutron WAL；未纳管 domain 仍按本机模式处理 |
 | 未来需要 Mirror/TCPrt 对接 Neutron | 新增独立方案，重新定义 northbound 输入、权限、status domain、smoke 和回滚策略 |
 
 Mirror/TCPrt 代码保留是为了避免破坏 standalone/local legacy 能力，不代表它们进入 `v0.9-neutron-agent` 第一阶段交付。
@@ -1919,7 +1910,7 @@ WAL 修复不能扩大权限。即使 WAL 损坏，OpenStack-managed port 仍不
 | 操作 | 允许性 | 规则 |
 | --- | --- | --- |
 | 本机 `ariactl trace start` | 允许 | 临时排障，不写 WAL，不改变 generation |
-| 本机 `ariactl policy/qos` 改 Neutron port | 禁止 | 返回 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_PORT` |
+| 本机 `ariactl policy/qos` 改 Neutron-managed domain | 禁止 | 返回 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`；仅 `managed_domains=["acl"]` 时本机 QoS 仍允许 |
 | 管理员 break-glass | 允许但显式 | 进入 `local_break_glass`，写 `local-override.wal`，暂停 Neutron apply |
 | break-glass 后恢复 Neutron | 不自动 merge | 进入 `rejoin_pending`，默认 Neutron wins |
 | 手动清理 stale pinned map | 谨慎允许 | 必须先让 datapath stopped/degraded，并通过 repair/full resync 重建 |
@@ -1945,7 +1936,7 @@ WAL 修复不能扩大权限。即使 WAL 损坏，OpenStack-managed port 仍不
 需要两类 OpenStack 集成点：
 
 1. Agent 注册与 RPC 消费。
-2. Aria enhancement 的 operator-admin ACL enhancement mapping 输入。
+2. Aria enhancement 的 `aria_acl` Neutron service plugin/API/DB 输入。
 
 第一阶段不要把 `neutron-aria-agent` 宣称为完整 port binding owner，除非已经实现完整 L2 lifecycle。
 
@@ -2127,7 +2118,7 @@ neutron-aria-agent container
 
 ```ini
 [aria]
-local_api = unix:///run/aria/aria-agent.sock
+socket_path = /run/aria/aria-agent.sock
 ```
 
 无编排环境的容器启动约束：
@@ -2188,22 +2179,31 @@ pin_path = "/sys/fs/bpf/aria"
 `neutron-aria-agent` 侧建议配置：
 
 ```ini
-[DEFAULT]
+[agent]
 host = compute-01
 resync_interval = 60
-integration_mode = coexist
+full_resync_enabled = false
+managed_domains = acl
+
+[ovs]
+integration_bridge = br-int
 
 [aria]
-local_api = unix:///run/aria/aria-agent.sock
-contract_file = /etc/neutron-aria-agent/neutron-uds-contract.json
-enable_acl = true
-enable_qos = true
-acl_source = neutron-tag
-acl_tag_prefix = aria:acl=
-acl_policy_mapping_file = /etc/neutron-aria-agent/acl-policies.yaml
+socket_path = /run/aria/aria-agent.sock
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = false
+
+[acl]
+source = neutron
+# fixture is CI/smoke only; tag-mapping is legacy lab/bootstrap only.
+# fixture_path = /etc/neutron-aria-agent/acl-fixture.json
 ```
 
-`contract_file` 是从 CI artifact 或包内 fixture 安装的只读 contract。Python agent 启动后必须先调用 `GET /api/v1/neutron/capabilities`，再用返回的 `contract_version`、`body_max_bytes`、timeout、`error_codes_hash` 和 `peer_auth_policy` 校验本地 contract。`acl_policy_mapping_file` 是 operator-admin 管理的只读文件，普通租户不可写。第一版不读取 Neutron Security Group，不依赖 TaaS，不依赖 port/network tag 或 vendor extension，也不从本地 CLI/API 创建 OpenStack 托管 ACL/QoS。
+`integration_mode=coexist` 是 snapshot body 字段，由 `neutron-aria-agent`
+写入 `PUT /api/v1/neutron/snapshot`，不得出现在 ini 配置中。`neutron-uds-contract.json`
+是 CI/package 校验产物，不作为阶段一 runtime ini 字段。Python agent 启动后必须先调用 `GET /api/v1/neutron/capabilities`，再用返回的 `contract_version`、`body_max_bytes`、timeout、`error_codes_hash` 和 `peer_auth_policy` 校验本地 contract。生产配置必须使用 `[acl] source = neutron`，由 `aria_acl` Neutron service plugin/API/DB 提供 ACL 输入；`fixture` 只用于 CI/smoke，历史 tag + 本机 mapping 只允许作为 lab/bootstrap/迁移辅助。第一版不读取 Neutron Security Group，不依赖 TaaS，不从本地 CLI/API 创建 OpenStack 托管 ACL/QoS。
 
 具体 Neutron 配置文件、agent heartbeat 和 OVS `br-int` attach 事实必须按目标 OpenStack 版本验证，不能只写文档不做 smoke。
 
@@ -2240,7 +2240,7 @@ Datapath Neutron snapshot API 必须是本机接口：
 - 不进入 Neutron tenant API。
 - 不进入 `neutron-aria-agent` snapshot schema。
 - 不作为当前阶段 heartbeat、status domain 或 smoke 验收项。
-- 对 Neutron-managed port 的持久写入仍必须被 gate 拒绝或要求显式 break-glass。
+- 对 Neutron-managed domain 的持久写入仍必须被 gate 拒绝或要求显式 break-glass。
 - 不参与 Neutron object sync。
 - 不影响 port apply。
 - SSL 是 host-global，默认不得作为租户功能暴露。
@@ -2411,7 +2411,7 @@ Datapath Neutron snapshot API 必须是本机接口：
 - status response。
 - Unix socket router 的 request/response/error code 符合 Local Unix API Contract。
 - Unix socket router 的 capabilities response 符合 5.1.2。
-- full snapshot body 超过预算时返回 `UDS_BODY_TOO_LARGE` 或 `SNAPSHOT_TOO_LARGE`。
+- full snapshot body 超过预算时返回 `UDS_BODY_TOO_LARGE`；后续如需分片或 port-scoped resync，必须另开设计。
 - peer credential 校验失败时拒绝写路径请求并记录 audit log。
 - 只配置 `listen_unix_socket` 但未启用 `agent_mode = "openstack"` 时不会启动 Neutron router。
 
@@ -2448,7 +2448,7 @@ N6 scale test 和 GitHub Actions 中的轻量性能回归必须至少覆盖下�
 | 项目 | 首阶段预算 | 验收方式 |
 | --- | --- | --- |
 | 管理规模 | 单 host 1000 个 Neutron VM ports、10000 条 ACL rules、2000 个 group/address-set entries | mock scale test + 目标环境抽样 |
-| full snapshot body | JSON body 不超过 10 MiB；超过返回 `SNAPSHOT_TOO_LARGE` 或拆分 port-scoped resync | UDS client/body size 测试 |
+| full snapshot body | JSON body 不超过 1 MiB；超过返回 `UDS_BODY_TOO_LARGE` 或等待后续 port-scoped resync 设计 | UDS client/body size 测试 |
 | full resync apply | mock scale p95 <= 5s，目标环境 smoke p99 <= 10s | CI mock perf + DevStack/目标环境 smoke |
 | port-scoped snapshot | 单 port 更新 p95 <= 500ms | Python event merge + UDS apply 测试 |
 | event merge window | 默认 1s，backlog 时最大 5s；超过则触发 full resync | Python event loop 测试 |
@@ -2792,7 +2792,7 @@ N0.5 分成两层：
 | 既有 Mirror/TCPrt 被重新拉回 Neutron scope | 中 | Rust 代码保留，但不进入 `neutron-aria-agent`、snapshot、feature flag、status domain、smoke 或 PR gate |
 | 其它本地观测能力被误扩成 Neutron 功能 | 中 | 保留代码，但不进入 `neutron-aria-agent` 暴露面 |
 | Neutron adapter 与 Rust datapath 状态漂移 | 高 | generation、full resync、status API 必须同时实现 |
-| 本机 CLI 写入和 Neutron snapshot 双写 | 高 | Neutron-managed port 的本机配置写操作必须拒绝 |
+| 本机 CLI 写入和 Neutron snapshot 双写 | 高 | Neutron-managed domain 的本机配置写操作必须拒绝；未纳管 domain 继续按本机模式处理 |
 | 临时排障状态被错误持久化 | 中 | trace/drops flush 等临时操作不进入 WAL，不改变 generation |
 | 通信失败被误判为退出 OpenStack mode | 高 | degraded 仍保持 Neutron 权威，本机持久写入继续拒绝 |
 | break-glass 本机配置和 Neutron 重新接管冲突 | 高 | rejoin 默认 Neutron wins，local override 必须先归档或丢弃 |
@@ -2830,15 +2830,14 @@ N0.5 分成两层：
 | --- | --- | --- |
 | `api/src/lib.rs` | REST 请求/响应 DTO、OpenAPI schema 类型 | 增加 Neutron snapshot/status/capabilities/delete 的稳定 schema |
 | `agent/src/api_routes.rs` | 现有 TCP REST router | 保持现有管理 API；新增独立 Neutron Unix socket router |
-| `agent/src/api_handlers/mod.rs` | handler module 与 re-export | 增加 `neutron` handler re-export |
-| `agent/src/api_handlers/` | 各功能 REST handler | 新增 `neutron.rs`，只处理 snapshot/status/capabilities/delete |
 | `agent/src/openapi.rs` | OpenAPI paths/components 注册 | 只注册 Neutron DTO components，不暴露 UDS paths 到 TCP OpenAPI |
-| `agent/src/neutron_contract.rs` | 待新增 UDS contract 生成器 | 生成或校验 `neutron-uds-contract.json`，固化 UDS paths、schema refs、错误码和 capabilities response |
+| `agent/src/neutron_api.rs` | Neutron UDS router、snapshot/delete/status/capabilities handler | 处理 snapshot/status/capabilities/delete，并保持 UDS-only |
+| `docs/neutron-uds-contract.json` + `ci/check_neutron_stage1.py` | 阶段一 UDS contract artifact 与 drift check | 校验 UDS paths、schema range、错误码和 capabilities response |
 | `agent/src/main.rs` | 配置、启动 TCP listener、后台任务 | 新增 `listen_unix_socket` 配置与 Unix socket listener |
 | `agent/src/control_plane.rs` | runtime state、apply、WAL、实例管理 | 增加 Neutron apply 入口与 status 聚合 |
 | `agent/src/control_plane/` | 分域控制面扩展 | 新增 `neutron_snapshot.rs`，承载 snapshot apply 编排 |
 | `core/src/state.rs` | 持久化状态、group/rule/qos/mirror model | 增加 Neutron metadata、generation、port ownership 索引 |
-| `core/src/wal.rs` | WAL entry、replay、compact | 增加 Neutron snapshot/delete/status WAL entry |
+| `agent/src/neutron_wal.rs` | WAL entry、replay、compact | 增加 Neutron snapshot/delete/status WAL entry |
 | `agent/src/tap_registry.rs` | Netlink 发现 tap，attach/detach runtime | 复用，不在 N1 重写；N2/N3 通过 status 对账 |
 | `config/aria-agent.toml` | `aria-agent` 默认配置 | 增加 Unix socket 示例配置 |
 | `.github/workflows/build.yml` | GitHub Actions 编译、测试和产物 | 增加 Rust tests/schema contract、Python agent 检查、UDS contract artifact 和容器镜像构建 |
@@ -2849,8 +2848,8 @@ N0.5 分成两层：
 | 能力层 | 现有源码 | OpenStack 第一阶段处理 |
 | --- | --- | --- |
 | 基础运行能力 | `agent/src/netlink.rs`、`agent/src/tap_registry.rs`、`core/src/ebpf_ops/attach.rs`、`core/src/ebpf_ops/runtime.rs`、`core/src/ebpf_ops/inventory.rs`、`core/src/ebpf_ops/replay.rs` | 保留并接入 OpenStack tap 状态机；Netlink 可先 attach inert/bypass runtime |
-| 持久化基础 | `core/src/state.rs`、`core/src/wal.rs` | 增加 `neutron-state.wal`、generation、domain status、local override WAL 隔离 |
-| 身份与选择器基础 | `agent/src/api_handlers/groups.rs`、`core/src/state.rs` | group/address-set 由 Neutron snapshot 投影，本机托管写入被 gate 拒绝 |
+| 持久化基础 | `core/src/state.rs`、`agent/src/neutron_wal.rs` | 增加 `neutron-state.wal`、generation、domain status、local override WAL 隔离 |
+| 身份与选择器基础 | `agent/src/api_handlers/groups.rs`、`core/src/state.rs` | group/address-set 由 Neutron snapshot 投影，Neutron-managed domain 的本机托管写入被 gate 拒绝 |
 | 有状态基础 | `agent/src/api_handlers/conntrack.rs`、`core/src/ct_ops.rs`、`core/src/ct_contract_ops.rs`、`ebpf/src/conntrack.rs`、`ebpf/src/ct_contract.rs` | 作为 ACL 状态化、连接跟踪、fast-path 和 flow 观测基础，不作为 tenant feature |
 | 观测基础 | `core/src/monitoring.rs`、`agent/src/api_handlers/stats.rs`、`agent/src/api_handlers/metrics.rs`、`ebpf/src/stats.rs` | 作为 rule/flow/group/QoS 统计基础，失败进入 observability degraded |
 | 第一阶段功能模块：ACL | `agent/src/api_handlers/policies.rs`、`core/src/ebpf_ops/policy.rs`、`ebpf/src/policy.rs` | enhancement domain；失败时 `DomainStatus=degraded,effective_action=bypass`，不影响 OVS 转发 |
@@ -2907,7 +2906,9 @@ neutron-aria-agent/
 
 - `api/src/lib.rs`
 - `agent/src/openapi.rs`
-- `agent/src/neutron_contract.rs`
+- `agent/src/neutron_api.rs`
+- `docs/neutron-uds-contract.json`
+- `ci/check_neutron_stage1.py`
 
 新增类型：
 
@@ -2959,8 +2960,7 @@ neutron-aria-agent/
 
 - `agent/src/main.rs`
 - `agent/src/api_routes.rs`
-- `agent/src/api_handlers/mod.rs`
-- `agent/src/api_handlers/neutron.rs`
+- `agent/src/neutron_api.rs`
 - `config/aria-agent.toml`
 
 实现要求：
@@ -2995,17 +2995,16 @@ neutron-aria-agent/
 
 #### Commit N1-C：Rust snapshot apply 编排骨架
 
-新增文件：
+新增或修改文件：
 
-- `agent/src/api_handlers/neutron.rs`
-- `agent/src/control_plane/neutron_snapshot.rs`
+- `agent/src/neutron_api.rs`
+- `agent/src/neutron_api.rs`
 
 修改文件：
 
-- `agent/src/api_handlers/mod.rs`
 - `agent/src/control_plane.rs`
 - `core/src/state.rs`
-- `core/src/wal.rs`
+- `agent/src/neutron_wal.rs`
 
 实现要求：
 
@@ -3040,7 +3039,7 @@ neutron-aria-agent/
   - `neutron_scoped_objects`
   - `neutron_project_domain_status`
   - `neutron_scoped_refcounts`
-- `core/src/wal.rs` 增加 WAL entry：
+- `agent/src/neutron_wal.rs` 增加 WAL entry：
   - `NeutronSnapshotApplied`
   - `NeutronPortDeleted`
   - `NeutronStatusUpdated`
@@ -3075,9 +3074,9 @@ neutron-aria-agent/
 
 实现要求：
 
-- 对 Neutron-managed instance 或 Neutron-managed port，拒绝本机配置写入。
+- 对 Neutron-managed instance 或 Neutron-managed port 中已列入 `managed_domains` 的 domain，拒绝本机持久配置写入。
 - `openstack_degraded` 仍视为 Neutron-managed，继续拒绝本机配置写入。
-- 拒绝范围包括 group、policy、qos、ACL/QoS config toggle。
+- 拒绝范围包括 Neutron-reserved group、policy、qos、mirror 以及影响被纳管 domain 的 config toggle。
 - 允许本机只读与临时排障操作，包括 stats、metrics、diagnose、trace、drops flush、tcprt query。
 - trace start/stop/flush 不写 WAL，不更新 Neutron generation。
 - 增加 authority state：
@@ -3090,14 +3089,14 @@ neutron-aria-agent/
 - `local_break_glass` 写入 local override WAL，不写 Neutron WAL。
 - Neutron 通信恢复时，如果存在 local override，进入 `rejoin_pending`。
 - 重新接管默认 `Neutron wins`，必须先归档或丢弃 local override，再 full snapshot。
-- 拒绝错误码统一为 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_PORT`。
+- 拒绝错误码统一为 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`。
 - 错误必须提示通过 Neutron 修改配置。
 
 验收：
 
 - `ariactl trace start` 在 Neutron-managed tap 上可用。
-- `ariactl policy add` 在 Neutron-managed tap 上被拒绝。
-- `ariactl qos add` 在 Neutron-managed tap 上被拒绝。
+- `managed_domains=["acl"]` 时，`ariactl policy add` 被拒绝，`ariactl qos add` 仍允许。
+- `managed_domains=["acl","qos"]` 时，`ariactl policy add` 和 `ariactl qos add` 都被拒绝。
 - 上述被拒绝操作不写 WAL。
 - trace start/stop/flush 不写 WAL，datapath 重启后 trace filter 不恢复。
 - Neutron 通信失败时，本机 policy 写入仍被拒绝。
@@ -3110,8 +3109,8 @@ neutron-aria-agent/
 修改文件：
 
 - `api/src/lib.rs`
-- `agent/src/api_handlers/neutron.rs`
-- `agent/src/control_plane/neutron_snapshot.rs`
+- `agent/src/neutron_api.rs`
+- `agent/src/neutron_api.rs`
 - `agent/src/control_plane.rs`
 
 实现要求：
@@ -3168,9 +3167,9 @@ neutron-aria-agent/
 - 配置项至少包含：
   - `host`
   - `resync_interval`
-  - `local_api = unix:///run/aria/aria-agent.sock`
-  - `enable_acl`
-  - `enable_qos`
+  - `[aria] socket_path = /run/aria/aria-agent.sock`
+  - `[agent] managed_domains = acl`
+  - `[acl] source = neutron`
 - generation 格式固定为 `{host}-{counter:012d}`。
 
 验收：
@@ -3195,7 +3194,7 @@ neutron-aria-agent/
   - `get_capabilities()`
   - `delete_port(port_id)`
 - `get_capabilities()` 必须在 agent startup、UDS reconnect、`aria-datapath` restart 和 capability hash 变化后调用。
-- local client 必须从 capability/contract 读取 `body_max_bytes`、`request_timeout_ms` 和 `connect_timeout_ms`，不能在 Python 侧写死更宽松默认值。
+- local client 必须从 capability/contract 读取 `body_max_bytes` 和 `timeout_ms`，不能在 Python 侧写死更宽松默认值。
 - 连接失败返回 typed error，供 `status.py` 转成 agent degraded。
 
 验收：
@@ -3477,7 +3476,9 @@ rg -n "[ \t]+$" docs/openstack-neutron-agent-mode.md README.md
 
 - `api/src/lib.rs`
 - `agent/src/openapi.rs`
-- `agent/src/neutron_contract.rs`
+- `agent/src/neutron_api.rs`
+- `docs/neutron-uds-contract.json`
+- `ci/check_neutron_stage1.py`
 
 新增或修改内容：
 
@@ -3500,7 +3501,7 @@ rg -n "[ \t]+$" docs/openstack-neutron-agent-mode.md README.md
 - OpenAPI components 包含所有 Neutron DTO。
 - OpenAPI paths 不包含 `/api/v1/neutron/snapshot`、`/api/v1/neutron/status`、`/api/v1/neutron/capabilities`、`/api/v1/neutron/ports/{port_id}`，因为这些 API 只属于 UDS router。
 - `neutron-uds-contract.json` 包含 snapshot/status/capabilities/delete 四个 UDS paths、schema refs、错误码和 capability response。
-- `neutron-uds-contract.json` 包含 `contract_version`、`body_max_bytes`、`request_timeout_ms`、`connect_timeout_ms`、`error_codes_hash` 和 `peer_auth_policy`。
+- `neutron-uds-contract.json` 包含 `contract_version`、`body_max_bytes`、`timeout_ms`、`error_codes_hash` 和 `peer_auth_policy`。
 - CI 中的 contract drift test 能发现 DTO、错误码或 UDS path 漂移。
 - CI 中的 contract drift test 能发现 contract 元字段、capability response 和 error code hash 漂移。
 - DTO serde 测试覆盖：
@@ -3529,8 +3530,7 @@ rg -n "[ \t]+$" docs/openstack-neutron-agent-mode.md README.md
 
 - `agent/src/main.rs`
 - `agent/src/api_routes.rs`
-- `agent/src/api_handlers/mod.rs`
-- `agent/src/api_handlers/neutron.rs`
+- `agent/src/neutron_api.rs`
 - `config/aria-agent.toml`
 
 实现要求：
@@ -3567,10 +3567,10 @@ rg -n "[ \t]+$" docs/openstack-neutron-agent-mode.md README.md
 
 修改范围：
 
-- `agent/src/control_plane/neutron_snapshot.rs`
+- `agent/src/neutron_api.rs`
 - `agent/src/control_plane.rs`
 - `core/src/state.rs`
-- `core/src/wal.rs`
+- `agent/src/neutron_wal.rs`
 
 实现要求：
 
@@ -3618,13 +3618,13 @@ rg -n "[ \t]+$" docs/openstack-neutron-agent-mode.md README.md
 - `agent/src/api_handlers/config.rs`
 - `agent/src/control_plane.rs`
 - `core/src/state.rs`
-- `core/src/wal.rs`
+- `agent/src/neutron_wal.rs`
 
 拒绝范围：
 
 - group add/delete。
 - policy add/delete。
-- qos add/delete。
+- qos add/delete，前提是 `qos` 已被列入 `managed_domains`。
 - ACL/QoS config toggle。
 
 允许范围：
@@ -3637,7 +3637,7 @@ rg -n "[ \t]+$" docs/openstack-neutron-agent-mode.md README.md
 
 硬验收 checklist：
 
-- `openstack_managed` 和 `openstack_degraded` 下本机持久写入返回 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_PORT`。
+- `openstack_managed` 和 `openstack_degraded` 下，针对已列入 `managed_domains` 的本机持久写入返回 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`。
 - trace 不写 WAL，不更新 Neutron generation。
 - break-glass 写入 local override WAL。
 - Neutron 恢复后存在 local override 时进入 `rejoin_pending`。
@@ -3679,12 +3679,12 @@ python -m pytest tests/test_generation.py tests/test_local_client.py -q
 
 - 不需要 OpenStack 环境即可测试。
 - socket 不存在时返回 typed error，供 heartbeat 上报 degraded。
-- `local_api` 只接受 Unix socket URL，拒绝 TCP/HTTP fallback。
+- `[aria] socket_path` 只接受 Unix socket path，拒绝 TCP/HTTP fallback。
 - `get_capabilities()` 在 startup/reconnect 后先执行，能识别 contract drift、schema mismatch 和 capability mismatch。
 - Python client 使用 contract/capabilities 中的 body 上限和 timeout，超过限制时返回 typed error。
 - generation counter 可从本地 state file 恢复。
 - Python 单元测试不依赖真实 Neutron 或 oslo messaging。
-- 配置包含 `acl_source`、`acl_tag_prefix`、`acl_policy_mapping_file`，以及 `enable_acl`、`enable_qos`。
+- 配置包含 `[acl] source = neutron`、可选 `[acl] fixture_path`；生产路径不得要求 `acl_tag_prefix` 或 `acl_policy_mapping_file`。
 
 #### Work Package 6：Neutron 投影与 Translator
 
@@ -3712,7 +3712,7 @@ python -m pytest tests/test_generation.py tests/test_local_client.py -q
 - shared QoS 只作用于绑定 port。
 - snapshot 不包含 trace/drops/ssl/diagnose/service chain。
 - snapshot 不包含 mirror/tcprt。
-- ACL 输入只来自 `aria:acl=<policy-id>` tag 和本机只读 mapping，不消费 Security Group。
+- ACL 输入只来自 `aria_acl` Neutron service plugin/API/DB；fixture 仅用于 CI/smoke，历史 tag + 本机只读 mapping 仅用于 lab/bootstrap/迁移辅助；不消费 Security Group。
 
 #### Work Package 7：主循环、Heartbeat 与事件合并
 
@@ -3786,7 +3786,7 @@ python -m pytest tests/test_generation.py tests/test_local_client.py -q
 - 删除容器不丢失 WAL/state。
 - `docs/openstack-target-env-discovery.md` 完整 N0.5 项已补齐证据。
 - 默认 bypass smoke 证明 Aria degraded 不影响原 OVS 转发。
-- 显式 ACL enhancement tag + mapping smoke 覆盖 ready 和 mapping missing degraded 两条路径。
+- 显式 `aria_acl` binding smoke 覆盖 ready、policy missing/input invalid degraded 两条路径；fixture smoke 只验证 CI/本地 datapath，不替代产品路径。
 - GitHub Actions 有 Python test job 和 container packaging job。
 
 ### 16.8 开发启动检查清单
@@ -3884,7 +3884,9 @@ WAL 默认：
 
 - `api/src/lib.rs`
 - `agent/src/openapi.rs`
-- `agent/src/neutron_contract.rs`
+- `agent/src/neutron_api.rs`
+- `docs/neutron-uds-contract.json`
+- `ci/check_neutron_stage1.py`
 
 默认实现顺序：
 
@@ -3956,8 +3958,7 @@ WAL 默认：
 
 - `agent/src/main.rs`
 - `agent/src/api_routes.rs`
-- `agent/src/api_handlers/mod.rs`
-- `agent/src/api_handlers/neutron.rs`
+- `agent/src/neutron_api.rs`
 - `config/aria-agent.toml`
 
 默认实现顺序：
@@ -3998,10 +3999,10 @@ WAL 默认：
 
 文件范围：
 
-- `agent/src/control_plane/neutron_snapshot.rs`
+- `agent/src/neutron_api.rs`
 - `agent/src/control_plane.rs`
 - `core/src/state.rs`
-- `core/src/wal.rs`
+- `agent/src/neutron_wal.rs`
 
 默认实现顺序：
 
@@ -4064,7 +4065,7 @@ WAL 默认：
 - `agent/src/api_handlers/config.rs`
 - `agent/src/control_plane.rs`
 - `core/src/state.rs`
-- `core/src/wal.rs`
+- `agent/src/neutron_wal.rs`
 
 默认实现顺序：
 
@@ -4078,7 +4079,7 @@ WAL 默认：
    - `add_qos`
    - `delete_qos`
    - `update_config`
-4. `openstack_managed` 和 `openstack_degraded` 下返回 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_PORT`。
+4. `openstack_managed` 和 `openstack_degraded` 下，针对已列入 `managed_domains` 的 domain 返回 `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`。
 5. 错误 HTTP 状态使用 `409 Conflict`。
 6. trace、drops、stats、health、metrics、tcprt query 不加持久写 gate。
 7. break-glass 状态允许本机持久写入，但 WAL source 必须是 local override。
@@ -4090,7 +4091,7 @@ WAL 默认：
 默认错误文案：
 
 ```text
-LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_PORT: this port is managed by Neutron; update policy through Neutron
+LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN: this domain is managed by Neutron; update it through Neutron
 ```
 
 停止条件：
@@ -4124,13 +4125,13 @@ LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_PORT: this port is managed by Neutron; u
 5. `config.py` 定义默认配置：
    - `host`
    - `resync_interval`
-   - `local_api`
-   - `enable_acl`
-   - `enable_qos`
+   - `[aria] socket_path`
+   - `[agent] managed_domains`
+   - `[acl] source`
 6. `models.py` 用 dataclass 表达 snapshot/status 基本模型。
 7. `generation.py` 实现 `{host}-{counter:012d}`。
 8. generation counter 持久化到 Python agent 本地 state file。
-9. `local_client.py` 只接受 `unix://` 或 `unix:///` 形式。
+9. `local_client.py` 只连接 Unix socket path。
 10. `local_client.py` 拒绝 `http://`、`https://`、裸 host:port 和空地址。
 11. `local_client.py` 实现 `get_capabilities()`，并在 startup/reconnect 后先执行 capability handshake。
 12. `local_client.py` 从 contract/capabilities 读取 body 上限和 timeout，超过 `body_max_bytes` 时返回 typed error。

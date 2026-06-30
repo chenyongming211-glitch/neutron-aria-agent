@@ -13,7 +13,7 @@ STATE_FILE="${STATE_FILE:-${STATE_DIR}/snapshot-state.json}"
 EXEC_USER="${EXEC_USER:-neutron}"
 ROLLBACK="${ROLLBACK:-true}"
 MIN_MANAGED_PORTS="${MIN_MANAGED_PORTS:-0}"
-REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE:-10.0}"
+REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE:-3.0}"
 
 die() {
     echo "ERROR: $*" >&2
@@ -93,7 +93,7 @@ import sys
 
 from neutron_aria.agent.uds_client import LocalClient
 
-client = LocalClient(sys.argv[1], timeout=10.0)
+client = LocalClient(sys.argv[1], timeout=3.0)
 status = client.status()
 for port in status.get("managed_ports") or []:
     port_id = port.get("port_id")
@@ -129,7 +129,7 @@ import sys
 
 from neutron_aria.agent.uds_client import LocalClient
 
-client = LocalClient(sys.argv[1], timeout=10.0)
+client = LocalClient(sys.argv[1], timeout=3.0)
 print(len(client.status().get("managed_ports") or []))
 PY
 }
@@ -142,7 +142,7 @@ import sys
 
 from neutron_aria.agent.uds_client import LocalClient
 
-client = LocalClient(sys.argv[1], timeout=10.0)
+client = LocalClient(sys.argv[1], timeout=3.0)
 for port in client.status().get("managed_ports") or []:
     if port.get("port_id"):
         print(port.get("port_id"))
@@ -162,7 +162,7 @@ import time
 from neutron_aria.agent.uds_client import LocalClient
 
 socket_path, state_file = sys.argv[1:3]
-client = LocalClient(socket_path, timeout=10.0)
+client = LocalClient(socket_path, timeout=3.0)
 status = client.status()
 try:
     with open(state_file, "r") as fh:
@@ -253,7 +253,7 @@ with open(tmp, "w") as fh:
     fh.flush()
     os.fsync(fh.fileno())
 os.rename(tmp, state_file)
-response = LocalClient(socket_path, timeout=10.0).delete_port(port_id)
+response = LocalClient(socket_path, timeout=3.0).delete_port(port_id)
 print("injected_pending_delete port_id=%s response=%s" % (
     port_id,
     json.dumps(response, sort_keys=True),
@@ -297,7 +297,7 @@ sync = SnapshotSynchronizer(
     host,
     EmptyPortSource(),
     None,
-    LocalClient(socket_path, timeout=10.0),
+    LocalClient(socket_path, timeout=3.0),
     state_store=SnapshotStateStore(state_dir),
 )
 response = sync.delete_port(port_id, reason="migration_source_cleanup")

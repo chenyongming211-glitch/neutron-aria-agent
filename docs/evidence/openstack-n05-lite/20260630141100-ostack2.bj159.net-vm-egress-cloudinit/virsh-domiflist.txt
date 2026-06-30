@@ -1,0 +1,3 @@
+ Interface        Type     Source   Model    MAC
+----------------------------------------------------------------
+ tap5b7611c1-6e   bridge   br-int   virtio   fa:16:3e:db:5d:bb

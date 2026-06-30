@@ -1,0 +1,5 @@
+images
+keypairs
+servers
+host_tmp
+container_tmp

@@ -1,0 +1,34 @@
++--------------------------------------+--------------------------------------------------------------------------------------------+
+| Property                             | Value                                                                                      |
++--------------------------------------+--------------------------------------------------------------------------------------------+
+| OS-DCF:diskConfig                    | MANUAL                                                                                     |
+| OS-EXT-AZ:availability_zone          |                                                                                            |
+| OS-EXT-SRV-ATTR:host                 | -                                                                                          |
+| OS-EXT-SRV-ATTR:hypervisor_hostname  | -                                                                                          |
+| OS-EXT-SRV-ATTR:instance_name        | instance-0000002d                                                                          |
+| OS-EXT-STS:power_state               | 0                                                                                          |
+| OS-EXT-STS:task_state                | scheduling                                                                                 |
+| OS-EXT-STS:vm_state                  | building                                                                                   |
+| OS-SRV-USG:launched_at               | -                                                                                          |
+| OS-SRV-USG:terminated_at             | -                                                                                          |
+| accessIPv4                           |                                                                                            |
+| accessIPv6                           |                                                                                            |
+| config_drive                         | True                                                                                       |
+| created                              | 2026-06-30T07:54:41Z                                                                       |
+| deleted                              |                                                                                            |
+| flavor                               | m1.small (2)                                                                               |
+| hostId                               |                                                                                            |
+| id                                   | 5ef9bf26-2569-4b35-b779-125fb6dc9127                                                       |
+| image                                | aria-n05-cirros-raw-0.6.3-guestprobe-20260630155334 (8e1ec767-863d-4f25-989e-f9ea27459141) |
+| key_name                             | aria-n05-guestprobe-20260630155334                                                         |
+| metadata                             | {"disk_type": "disk0"}                                                                     |
+| name                                 | aria-n05-guestprobe-20260630155334                                                         |
+| os-extended-volumes:volumes_attached | []                                                                                         |
+| progress                             | 0                                                                                          |
+| reclaim                              |                                                                                            |
+| security_groups                      | default                                                                                    |
+| status                               | BUILD                                                                                      |
+| tenant_id                            | 4ab07915da65403db282a4e210321ae1                                                           |
+| updated                              | 2026-06-30T07:54:41Z                                                                       |
+| user_id                              | fccc2c97665d4a8b9036f3bac4d71088                                                           |
++--------------------------------------+--------------------------------------------------------------------------------------------+

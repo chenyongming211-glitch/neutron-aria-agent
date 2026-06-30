@@ -21,7 +21,11 @@ EXPECTED_IFNAME="${EXPECTED_IFNAME:-}"
 ACL_FIXTURE_JSON="${ACL_FIXTURE_JSON:-}"
 ACL_FIXTURE_FILE="${ACL_FIXTURE_FILE:-}"
 CONTAINER_ACL_FIXTURE="${CONTAINER_ACL_FIXTURE:-/tmp/neutron-aria-acl-fixture.json}"
+ACL_SOURCE="${ACL_SOURCE:-}"
 REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE:-}"
+MIN_ACL_POLICIES="${MIN_ACL_POLICIES:-0}"
+MIN_ACL_RULES="${MIN_ACL_RULES:-0}"
+MIN_ACL_BINDINGS="${MIN_ACL_BINDINGS:-0}"
 
 die() {
     echo "ERROR: $*" >&2
@@ -115,6 +119,9 @@ fix_uds_permissions() {
 }
 
 prepare_full_resync_config() {
+    if [ "${ACL_SOURCE}" = "neutron" ] && { [ -n "${ACL_FIXTURE_JSON}" ] || [ -n "${ACL_FIXTURE_FILE}" ]; }; then
+        die "ACL_SOURCE=neutron cannot be combined with ACL_FIXTURE_JSON/ACL_FIXTURE_FILE"
+    fi
     docker exec -u root "${SERVICE_NAME}" sh -c "
         cp /etc/neutron-aria-agent/neutron-aria-agent.ini '${SMOKE_CONFIG}' &&
         sed -i 's/^host =.*/host = ${HOST_FQDN}/' '${SMOKE_CONFIG}' &&
@@ -134,6 +141,17 @@ prepare_full_resync_config() {
                 sed -i 's/^request_timeout =.*/request_timeout = ${REQUEST_TIMEOUT_OVERRIDE}/' '${SMOKE_CONFIG}'
             else
                 printf '\n[aria]\nrequest_timeout = ${REQUEST_TIMEOUT_OVERRIDE}\n' >> '${SMOKE_CONFIG}'
+            fi
+            chmod 0644 '${SMOKE_CONFIG}'
+        "
+    fi
+    if [ -n "${ACL_SOURCE}" ]; then
+        docker exec -u root "${SERVICE_NAME}" sh -c "
+            grep -q '^\[acl\]' '${SMOKE_CONFIG}' || printf '\n[acl]\n' >> '${SMOKE_CONFIG}'
+            if grep -q '^source =' '${SMOKE_CONFIG}'; then
+                sed -i 's#^source =.*#source = ${ACL_SOURCE}#' '${SMOKE_CONFIG}'
+            else
+                printf 'source = ${ACL_SOURCE}\n' >> '${SMOKE_CONFIG}'
             fi
             chmod 0644 '${SMOKE_CONFIG}'
         "
@@ -262,6 +280,44 @@ compute_ports = [
 print("neutron_ports_for_host=%d compute_ports=%d" % (len(ports), len(compute_ports)))
 PY
 
+if [ "${ACL_SOURCE}" = "neutron" ]; then
+    echo "Checking aria_acl Neutron source"
+    docker_exec_env python - "${SMOKE_CONFIG}" "${MIN_ACL_POLICIES}" "${MIN_ACL_RULES}" "${MIN_ACL_BINDINGS}" <<'PY'
+from __future__ import print_function
+
+import sys
+
+from neutron_aria.agent.acl_source import build_acl_index
+from neutron_aria.agent.config import load_config
+
+config = load_config(sys.argv[1])
+min_policies = int(sys.argv[2])
+min_rules = int(sys.argv[3])
+min_bindings = int(sys.argv[4])
+index = build_acl_index(config)
+policy_count = len(index.policies)
+binding_count = sum(len(bindings) for bindings in index.bindings_by_target.values())
+rule_count = sum(len(rules) for rules in index.rules_by_policy.values())
+print("aria_acl_source policies=%d rules=%d bindings=%d" % (
+    policy_count,
+    rule_count,
+    binding_count,
+))
+if policy_count < min_policies:
+    raise SystemExit("aria_acl policy count %d is below MIN_ACL_POLICIES=%d" % (
+        policy_count, min_policies,
+    ))
+if rule_count < min_rules:
+    raise SystemExit("aria_acl rule count %d is below MIN_ACL_RULES=%d" % (
+        rule_count, min_rules,
+    ))
+if binding_count < min_bindings:
+    raise SystemExit("aria_acl binding count %d is below MIN_ACL_BINDINGS=%d" % (
+        binding_count, min_bindings,
+    ))
+PY
+fi
+
 ROLLBACK_ARMED=true
 
 echo "Submitting one full-resync snapshot"
@@ -316,6 +372,97 @@ managed_count="$(echo "${managed_count}" | awk -F= '/^MANAGED_COUNT=/{print $2}'
 managed_count="${managed_count:-0}"
 if [ "${managed_count}" -lt "${MIN_MANAGED_PORTS}" ]; then
     die "managed port count ${managed_count} is below MIN_MANAGED_PORTS=${MIN_MANAGED_PORTS}"
+fi
+
+if [ "${ACL_SOURCE}" = "neutron" ]; then
+    echo "Checking aria_acl port-status reportback"
+    docker_exec_env python - "${SOCKET_PATH}" "${HOST_FQDN}" <<'PY'
+from __future__ import print_function
+
+import sys
+
+from neutron_aria.agent.neutron_client import build_aria_acl_client_from_env
+from neutron_aria.agent.uds_client import LocalClient
+
+socket_path = sys.argv[1]
+host = sys.argv[2]
+runtime = LocalClient(socket_path, timeout=3.0).status()
+managed = runtime.get("managed_ports") or []
+port_ids = sorted([
+    port.get("port_id") for port in managed
+    if port.get("port_id")
+])
+generation = runtime.get("applied_generation") or runtime.get("generation")
+
+api = build_aria_acl_client_from_env()
+payload = api.list_aria_acl_port_statuses()
+statuses = payload.get("aria_acl_port_statuses") or []
+by_port = {}
+for status in statuses:
+    if status.get("host") == host and status.get("port_id"):
+        by_port[status.get("port_id")] = status
+
+missing = [port_id for port_id in port_ids if port_id not in by_port]
+if missing:
+    raise SystemExit(
+        "aria_acl port status missing for host=%s ports=%s" % (
+            host,
+            ",".join(missing),
+        )
+    )
+
+stale = []
+not_ready = []
+missing_projection = []
+for port_id in port_ids:
+    status = by_port[port_id]
+    if generation is not None and str(status.get("generation")) != str(generation):
+        stale.append("%s:%s" % (port_id, status.get("generation")))
+    if status.get("status") != "ready":
+        not_ready.append("%s:%s" % (port_id, status.get("status")))
+    if status.get("runtime_status") != "ready":
+        missing_projection.append("%s:runtime_status=%s" % (
+            port_id,
+            status.get("runtime_status"),
+        ))
+    if status.get("stale") not in (False, "False", "false", 0, "0"):
+        missing_projection.append("%s:stale=%s" % (
+            port_id,
+            status.get("stale"),
+        ))
+    if not status.get("last_reported_at"):
+        missing_projection.append("%s:last_reported_at=missing" % port_id)
+
+if stale:
+    raise SystemExit(
+        "aria_acl port status generation mismatch for host=%s expected=%s rows=%s" % (
+            host,
+            generation,
+            ",".join(stale),
+        )
+    )
+if not_ready:
+    raise SystemExit(
+        "aria_acl port status not ready for host=%s rows=%s" % (
+            host,
+            ",".join(not_ready),
+        )
+    )
+if missing_projection:
+    raise SystemExit(
+        "aria_acl port status projection invalid for host=%s rows=%s" % (
+            host,
+            ",".join(missing_projection),
+        )
+    )
+
+print("aria_acl_port_statuses host=%s managed=%d reported=%d generation=%s" % (
+    host,
+    len(port_ids),
+    len([status for status in statuses if status.get("host") == host]),
+    generation,
+))
+PY
 fi
 
 if [ "${ROLLBACK}" = "true" ]; then

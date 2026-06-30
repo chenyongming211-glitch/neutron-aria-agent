@@ -1,0 +1,35 @@
++--------------------------------------+--------------------------------------------------------------------------------+
+| Property                             | Value                                                                          |
++--------------------------------------+--------------------------------------------------------------------------------+
+| OS-DCF:diskConfig                    | MANUAL                                                                         |
+| OS-EXT-AZ:availability_zone          | nova                                                                           |
+| OS-EXT-SRV-ATTR:host                 | ostack2.bj159.net                                                              |
+| OS-EXT-SRV-ATTR:hypervisor_hostname  | ostack2.bj159.net                                                              |
+| OS-EXT-SRV-ATTR:instance_name        | instance-0000001e                                                              |
+| OS-EXT-STS:power_state               | 1                                                                              |
+| OS-EXT-STS:task_state                | -                                                                              |
+| OS-EXT-STS:vm_state                  | active                                                                         |
+| OS-SRV-USG:launched_at               | 2026-06-30T06:52:24.000000                                                     |
+| OS-SRV-USG:terminated_at             | -                                                                              |
+| accessIPv4                           |                                                                                |
+| accessIPv6                           |                                                                                |
+| config_drive                         | True                                                                           |
+| created                              | 2026-06-30T06:52:15Z                                                           |
+| deleted                              |                                                                                |
+| flat_mgt network                     | 10.58.159.35                                                                   |
+| flavor                               | m1.small (2)                                                                   |
+| hostId                               | b4c9f394b77f53820cfc52d27f41ee333c5149117db0bbeea1b23bb1                       |
+| id                                   | fe29ab91-eedf-48c8-8636-ab489acd4fed                                           |
+| image                                | aria-n05-cirros-raw-0.6.3-20260630-1452 (1c09374a-3785-4a17-87c4-98bfae57f1b3) |
+| key_name                             | aria-stage2-n05-cirros-20260630-1452                                           |
+| metadata                             | {"disk_type": "disk0"}                                                         |
+| name                                 | aria-stage2-n05-cirros-egress-20260630-1452                                    |
+| os-extended-volumes:volumes_attached | []                                                                             |
+| progress                             | 0                                                                              |
+| reclaim                              |                                                                                |
+| security_groups                      | default                                                                        |
+| status                               | ACTIVE                                                                         |
+| tenant_id                            | 4ab07915da65403db282a4e210321ae1                                               |
+| updated                              | 2026-06-30T06:52:24Z                                                           |
+| user_id                              | fccc2c97665d4a8b9036f3bac4d71088                                               |
++--------------------------------------+--------------------------------------------------------------------------------+

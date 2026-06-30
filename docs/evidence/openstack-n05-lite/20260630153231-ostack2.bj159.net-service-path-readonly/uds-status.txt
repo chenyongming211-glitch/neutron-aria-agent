@@ -1,0 +1,4 @@
+## aria status
+{"generation":85,"accepted_generation":85,"applied_generation":85,"pending_generation":null,"desired_hash":"e2c3d464ecb8d8671f7cec09709a32b685ce0f90be52cbc4d008fa9d237153fa","applied_desired_hash":"e2c3d464ecb8d8671f7cec09709a32b685ce0f90be52cbc4d008fa9d237153fa","wal_status":"commit_written","wal_replay_failures":0,"authority_state":"ready","managed_ports":[],"port_statuses":[],"active_instances":[]}
+## aria capabilities
+{"api_version":"v1","attach_authority":"neutron_snapshot","supports_full_snapshot":true,"supports_port_delete":true,"supported_domains":["attach","acl","qos","mirror","config","conntrack","tcprt","trace","drops","ssl"]}

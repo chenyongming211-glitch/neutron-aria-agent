@@ -4,10 +4,17 @@ import os
 import tempfile
 import unittest
 
+from neutron_aria.agent.config import ConfigError
 from neutron_aria.agent.config import load_config
 
 
 class ConfigTestCase(unittest.TestCase):
+    def _write_config(self, body):
+        fd, path = tempfile.mkstemp()
+        os.write(fd, body.encode("utf-8"))
+        os.close(fd)
+        return path
+
     def test_loads_service_loop_options(self):
         fd, path = tempfile.mkstemp()
         try:
@@ -86,6 +93,113 @@ fixture_path = /tmp/aria-acl-fixture.json
         finally:
             if fd is not None:
                 os.close(fd)
+            os.unlink(path)
+
+    def test_loads_target_ovs_integration_bridge_key(self):
+        path = self._write_config("""
+[ovs]
+integration_bridge = br-int-target
+""")
+        try:
+            config = load_config(path)
+
+            self.assertEqual("br-int-target", config.ovs_bridge)
+        finally:
+            os.unlink(path)
+
+    def test_normalizes_and_deduplicates_managed_domains(self):
+        path = self._write_config("""
+[agent]
+managed_domains = ACL, qos, acl
+""")
+        try:
+            config = load_config(path)
+
+            self.assertEqual(["acl", "qos"], config.managed_domains)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_unknown_managed_domain(self):
+        path = self._write_config("""
+[agent]
+managed_domains = acl,ssl
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_integration_mode_in_ini(self):
+        path = self._write_config("""
+[aria]
+integration_mode = coexist
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_integration_mode_in_default_section(self):
+        path = self._write_config("""
+[DEFAULT]
+integration_mode = coexist
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_fixture_acl_source_without_path(self):
+        path = self._write_config("""
+[acl]
+source = fixture
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_full_resync_with_disabled_port_source(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = disabled
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_unknown_acl_source(self):
+        path = self._write_config("""
+[acl]
+source = other
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_non_positive_request_timeout(self):
+        path = self._write_config("""
+[aria]
+request_timeout = 0
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_request_timeout_above_stage_one_contract(self):
+        path = self._write_config("""
+[aria]
+request_timeout = 5
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
+        finally:
             os.unlink(path)
 
 

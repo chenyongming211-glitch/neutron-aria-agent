@@ -1,0 +1,15 @@
+## DHCP ports
+## Router/service ports
+## All local 10.58.159 sample
+| 0da68b40-1625-440a-89ef-1db963ce2c2b |      | fa:16:3e:31:b1:4d | {"subnet_id": "7600ce49-e602-490f-b80d-44ec0a31ee25", "ip_address": "10.58.159.130"}  |
+| 39adf570-1acb-4e81-9215-96744a6bf627 |      | fa:16:3e:b3:1e:f5 | {"subnet_id": "f96445e4-5e64-4d27-bb9c-60f92b087e11", "ip_address": "10.58.159.28"}   |
+| 5b7611c1-6ef5-4a88-b5d5-9bfca69aba4f |      | fa:16:3e:db:5d:bb | {"subnet_id": "f96445e4-5e64-4d27-bb9c-60f92b087e11", "ip_address": "10.58.159.32"}   |
+| 5e1f1973-3df0-4cd3-9644-f11ef089cd64 |      | fa:16:3e:5c:ee:39 | {"subnet_id": "f96445e4-5e64-4d27-bb9c-60f92b087e11", "ip_address": "10.58.159.30"}   |
+| 86b83885-671f-474c-9556-8af98cf1cdc8 |      | fa:16:3e:aa:b0:f5 | {"subnet_id": "f96445e4-5e64-4d27-bb9c-60f92b087e11", "ip_address": "10.58.159.26"}   |
+| 8dcf87ae-c8ad-4052-b541-ddec55832c56 |      | fa:16:3e:39:2e:ef | {"subnet_id": "f96445e4-5e64-4d27-bb9c-60f92b087e11", "ip_address": "10.58.159.31"}   |
+| 92113331-9cfc-4e24-8732-f95f3fcba0f4 |      | fa:16:3e:e3:4d:35 | {"subnet_id": "7600ce49-e602-490f-b80d-44ec0a31ee25", "ip_address": "10.58.159.131"}  |
+| aa4ddb4a-5b73-4e94-bb21-e9a4f9614045 |      | fa:16:3e:c0:c3:18 | {"subnet_id": "7600ce49-e602-490f-b80d-44ec0a31ee25", "ip_address": "10.58.159.132"}  |
+| c84708de-7ed6-482b-a2cb-d864269659d4 |      | fa:16:3e:a0:d5:3c | {"subnet_id": "f96445e4-5e64-4d27-bb9c-60f92b087e11", "ip_address": "10.58.159.24"}   |
+| d53ce06c-c90e-4371-b8e4-4912f90a91d3 |      | fa:16:3e:b5:22:39 | {"subnet_id": "f96445e4-5e64-4d27-bb9c-60f92b087e11", "ip_address": "10.58.159.29"}   |
+| d7950f48-f860-4790-b848-fb2955a539b7 |      | fa:16:3e:d5:7c:01 | {"subnet_id": "f96445e4-5e64-4d27-bb9c-60f92b087e11", "ip_address": "10.58.159.25"}   |
+| e607e86b-9e5f-4c63-a5df-3dc8986a1b0f |      | fa:16:3e:56:eb:01 | {"subnet_id": "f96445e4-5e64-4d27-bb9c-60f92b087e11", "ip_address": "10.58.159.27"}   |

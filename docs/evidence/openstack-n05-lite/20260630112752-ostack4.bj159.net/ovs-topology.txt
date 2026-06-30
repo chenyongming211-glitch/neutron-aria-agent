@@ -1,0 +1,79 @@
+ovs-vsctl (Open vSwitch) 3.3.5
+DB Schema 8.5.1
+
+d7bd2b3d-ecc7-4740-bab4-b918841c52e4
+    Bridge br-mirror
+        Port br-mirror
+            Interface br-mirror
+                type: internal
+        Port phy-br-mirror
+            Interface phy-br-mirror
+                type: patch
+                options: {peer=int-br-mirror}
+    Bridge br-int
+        fail_mode: secure
+        datapath_type: system
+        Port int-br-mirror
+            Interface int-br-mirror
+                type: patch
+                options: {peer=phy-br-mirror}
+        Port br-int
+            Interface br-int
+                type: internal
+        Port int-br-dummy
+            Interface int-br-dummy
+                type: patch
+                options: {peer=phy-br-dummy}
+        Port int-br-mgt
+            Interface int-br-mgt
+                type: patch
+                options: {peer=phy-br-mgt}
+        Port int-br-eth1
+            Interface int-br-eth1
+                type: patch
+                options: {peer=phy-br-eth1}
+    Bridge br-dummy
+        Port br-dummy
+            Interface br-dummy
+                type: internal
+        Port phy-br-dummy
+            Interface phy-br-dummy
+                type: patch
+                options: {peer=int-br-dummy}
+    Bridge br-eth1
+        Port bond1
+            tag: 4095
+            Interface bond1
+        Port phy-br-eth1
+            Interface phy-br-eth1
+                type: patch
+                options: {peer=int-br-eth1}
+        Port br-eth1
+            tag: 1059
+            Interface br-eth1
+                type: internal
+    Bridge br-mgt
+        Port phy-br-mgt
+            Interface phy-br-mgt
+                type: patch
+                options: {peer=int-br-mgt}
+        Port br-mgt
+            Interface br-mgt
+                type: internal
+        Port bond0
+            tag: 0
+            Interface bond0
+    ovs_version: "3.3.5"
+
+## bridges
+br-dummy
+br-eth1
+br-int
+br-mgt
+br-mirror
+
+## br-int ports
+int-br-dummy
+int-br-eth1
+int-br-mgt
+int-br-mirror

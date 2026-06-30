@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 
-use super::common::{err_response, AppState};
+use super::common::{AppState, err_response};
 use crate::control_plane::{ControlPlaneError, LocalWriteDomain};
 use aria_api::*;
 
@@ -241,11 +241,18 @@ pub async fn list_policies_with_stats(
                         .unwrap_or_else(|| format!("id:{}", id))
                 };
 
-                let mut stats_map: HashMap<(u32, u32, u8, u8), aria_core::monitoring::RuleStatsEntry> =
-                    stats
-                        .into_iter()
-                        .map(|s| ((s.key.src_id, s.key.dst_id, s.key.proto, s.key.direction), s))
-                        .collect();
+                let mut stats_map: HashMap<
+                    (u32, u32, u8, u8),
+                    aria_core::monitoring::RuleStatsEntry,
+                > = stats
+                    .into_iter()
+                    .map(|s| {
+                        (
+                            (s.key.src_id, s.key.dst_id, s.key.proto, s.key.direction),
+                            s,
+                        )
+                    })
+                    .collect();
 
                 let policies = rules
                     .into_iter()
@@ -264,10 +271,7 @@ pub async fn list_policies_with_stats(
                             bitmap_idx: r.bitmap_idx,
                             packets: stat.as_ref().map(|s| s.packets).unwrap_or(0),
                             bytes: stat.as_ref().map(|s| s.bytes).unwrap_or(0),
-                            dropped_packets: stat
-                                .as_ref()
-                                .map(|s| s.dropped_packets)
-                                .unwrap_or(0),
+                            dropped_packets: stat.as_ref().map(|s| s.dropped_packets).unwrap_or(0),
                             dropped_bytes: stat.as_ref().map(|s| s.dropped_bytes).unwrap_or(0),
                         }
                     })

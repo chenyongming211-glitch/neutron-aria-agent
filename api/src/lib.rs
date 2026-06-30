@@ -29,6 +29,14 @@ impl fmt::Display for ApiError {
 // --- Neutron UDS Contract ---
 
 pub const NEUTRON_UDS_API_VERSION: &str = "v1";
+pub const NEUTRON_UDS_CONTRACT_VERSION: &str = "2026-06-v0.9";
+pub const NEUTRON_UDS_SCHEMA_VERSION_MIN: u32 = 1;
+pub const NEUTRON_UDS_SCHEMA_VERSION_MAX: u32 = 1;
+pub const NEUTRON_UDS_BODY_MAX_BYTES: u64 = 1_048_576;
+pub const NEUTRON_UDS_TIMEOUT_MS: u64 = 3_000;
+pub const NEUTRON_UDS_ERROR_CODES_HASH: &str = "v0.9-neutron-errors-2";
+pub const NEUTRON_UDS_PEER_AUTH_POLICY: &str = "filesystem_permissions_then_peercred";
+pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-1";
 pub const NEUTRON_ATTACH_AUTHORITY: &str = "neutron_snapshot";
 pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &[
     "attach",
@@ -311,6 +319,18 @@ pub struct NeutronCapabilitiesResponse {
     /// Local UDS API version.
     #[schema(example = "v1")]
     pub api_version: String,
+    /// Version of the generated/recorded UDS contract.
+    #[serde(default)]
+    #[schema(example = "2026-06-v0.9")]
+    pub contract_version: String,
+    /// Minimum accepted snapshot schema version.
+    #[serde(default)]
+    #[schema(example = 1)]
+    pub schema_version_min: u32,
+    /// Maximum accepted snapshot schema version.
+    #[serde(default)]
+    #[schema(example = 1)]
+    pub schema_version_max: u32,
     /// Authority model for attach/detach operations.
     #[schema(example = "neutron_snapshot")]
     pub attach_authority: String,
@@ -322,12 +342,38 @@ pub struct NeutronCapabilitiesResponse {
     pub supports_port_delete: bool,
     /// Domains accepted in NeutronPortSnapshot.managed_domains.
     pub supported_domains: Vec<String>,
+    /// Domains required by this local deployment profile.
+    #[serde(default)]
+    pub mandatory_domains: Vec<String>,
+    /// Maximum request body accepted by the local UDS API.
+    #[serde(default)]
+    #[schema(example = 1048576)]
+    pub body_max_bytes: u64,
+    /// Recommended client timeout for mutating requests.
+    #[serde(default)]
+    #[schema(example = 3000)]
+    pub timeout_ms: u64,
+    /// Stable hash/version for UDS error code vocabulary.
+    #[serde(default)]
+    #[schema(example = "v0.9-neutron-errors-2")]
+    pub error_codes_hash: String,
+    /// Expected local Unix peer authentication policy.
+    #[serde(default)]
+    #[schema(example = "filesystem_permissions_then_peercred")]
+    pub peer_auth_policy: String,
+    /// Stable hash/version for capability drift detection.
+    #[serde(default)]
+    #[schema(example = "v0.9-neutron-capabilities-1")]
+    pub capability_hash: String,
 }
 
 impl NeutronCapabilitiesResponse {
     pub fn current() -> Self {
         Self {
             api_version: NEUTRON_UDS_API_VERSION.to_string(),
+            contract_version: NEUTRON_UDS_CONTRACT_VERSION.to_string(),
+            schema_version_min: NEUTRON_UDS_SCHEMA_VERSION_MIN,
+            schema_version_max: NEUTRON_UDS_SCHEMA_VERSION_MAX,
             attach_authority: NEUTRON_ATTACH_AUTHORITY.to_string(),
             supports_full_snapshot: true,
             supports_port_delete: true,
@@ -335,6 +381,12 @@ impl NeutronCapabilitiesResponse {
                 .iter()
                 .map(|domain| (*domain).to_string())
                 .collect(),
+            mandatory_domains: Vec::new(),
+            body_max_bytes: NEUTRON_UDS_BODY_MAX_BYTES,
+            timeout_ms: NEUTRON_UDS_TIMEOUT_MS,
+            error_codes_hash: NEUTRON_UDS_ERROR_CODES_HASH.to_string(),
+            peer_auth_policy: NEUTRON_UDS_PEER_AUTH_POLICY.to_string(),
+            capability_hash: NEUTRON_UDS_CAPABILITY_HASH.to_string(),
         }
     }
 }
@@ -2029,10 +2081,34 @@ mod tests {
             .collect();
 
         assert_eq!(capabilities.api_version, NEUTRON_UDS_API_VERSION);
+        assert_eq!(capabilities.contract_version, NEUTRON_UDS_CONTRACT_VERSION);
+        assert_eq!(
+            capabilities.schema_version_min,
+            NEUTRON_UDS_SCHEMA_VERSION_MIN
+        );
+        assert_eq!(
+            capabilities.schema_version_max,
+            NEUTRON_UDS_SCHEMA_VERSION_MAX
+        );
         assert_eq!(capabilities.attach_authority, NEUTRON_ATTACH_AUTHORITY);
         assert!(capabilities.supports_full_snapshot);
         assert!(capabilities.supports_port_delete);
         assert_eq!(capabilities.supported_domains, expected_domains);
+        assert!(capabilities.mandatory_domains.is_empty());
+        assert_eq!(capabilities.body_max_bytes, NEUTRON_UDS_BODY_MAX_BYTES);
+        assert_eq!(capabilities.timeout_ms, NEUTRON_UDS_TIMEOUT_MS);
+        assert_eq!(
+            capabilities.error_codes_hash,
+            NEUTRON_UDS_ERROR_CODES_HASH
+        );
+        assert_eq!(
+            capabilities.peer_auth_policy,
+            NEUTRON_UDS_PEER_AUTH_POLICY
+        );
+        assert_eq!(
+            capabilities.capability_hash,
+            NEUTRON_UDS_CAPABILITY_HASH
+        );
     }
 
     #[test]

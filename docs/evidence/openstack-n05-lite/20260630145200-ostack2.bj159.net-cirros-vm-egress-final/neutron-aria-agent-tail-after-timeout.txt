@@ -1,0 +1,1 @@
+Running command: 'start-neutron-aria-agent --config-file /etc/neutron-aria-agent/neutron-aria-agent.ini --neutron-config-file /etc/neutron/neutron.conf --neutron-config-file /etc/neutron/plugins/ml2/openvswitch_agent.ini'

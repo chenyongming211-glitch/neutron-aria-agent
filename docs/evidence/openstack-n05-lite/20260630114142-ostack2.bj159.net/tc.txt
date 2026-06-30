@@ -1,0 +1,3 @@
+
+## tc qdisc for tap86b83885-67
+deploy/kolla/smoke/neutron_aria_n05_discovery_smoke.sh: line 244: tc: command not found

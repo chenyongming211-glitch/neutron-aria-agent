@@ -1,0 +1,1 @@
+host=ostack3.bj159.net ports=3 compute_ports=0

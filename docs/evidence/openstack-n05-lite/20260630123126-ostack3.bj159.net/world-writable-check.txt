@@ -1,0 +1,3 @@
+run_aria_mode=770
+socket_mode=666
+/run/aria/aria-agent.sock has other-user permission bits

@@ -1,0 +1,2 @@
+# /bin/qemu-img convert -f qcow2 -O raw /tmp/aria-n05-cirros-source-20260630155334.qcow2 /tmp/aria-n05-cirros-20260630155334.raw
+# exit=0

@@ -1,0 +1,63 @@
+## ip link tap/qvo/qvb/veth
+14: vxlantap: <BROADCAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/ether 96:58:57:9e:e9:08 brd ff:ff:ff:ff:ff:ff
+
+## OVS interface external_ids
+name                : bond1
+ofport              : 1
+external_ids        : {}
+
+name                : bond0
+ofport              : 1
+external_ids        : {}
+
+name                : phy-br-mgt
+ofport              : 2
+external_ids        : {}
+
+name                : br-int
+ofport              : 65534
+external_ids        : {}
+
+name                : int-br-eth1
+ofport              : 1
+external_ids        : {}
+
+name                : int-br-mirror
+ofport              : 3
+external_ids        : {}
+
+name                : br-mgt
+ofport              : 65534
+external_ids        : {NM.connection.uuid="ec152a56-18ff-4ec0-ac60-3408fc071aa9"}
+
+name                : phy-br-dummy
+ofport              : 1
+external_ids        : {}
+
+name                : br-dummy
+ofport              : 65534
+external_ids        : {}
+
+name                : phy-br-mirror
+ofport              : 1
+external_ids        : {}
+
+name                : br-eth1
+ofport              : 65534
+external_ids        : {NM.connection.uuid="888dd0bc-fd5e-4585-b1df-6685d06f6b02"}
+
+name                : phy-br-eth1
+ofport              : 2
+external_ids        : {}
+
+name                : int-br-dummy
+ofport              : 4
+external_ids        : {}
+
+name                : int-br-mgt
+ofport              : 2
+external_ids        : {}
+
+name                : br-mirror
+ofport              : 65534
+external_ids        : {}

@@ -68,9 +68,25 @@ if name == "capabilities":
     assert payload.get("api_version") == "v1", payload
     assert payload.get("attach_authority") == "neutron_snapshot", payload
     assert payload.get("supports_full_snapshot") is True, payload
+    assert payload.get("supports_port_delete") is True, payload
     domains = set(payload.get("supported_domains") or [])
     for domain in ("attach", "acl", "qos", "mirror"):
         assert domain in domains, payload
+    if "contract_version" in payload:
+        assert payload.get("contract_version") == "2026-06-v0.9", payload
+    if "schema_version_min" in payload or "schema_version_max" in payload:
+        assert int(payload.get("schema_version_min") or 0) <= 1, payload
+        assert int(payload.get("schema_version_max") or 0) >= 1, payload
+    if "body_max_bytes" in payload:
+        assert int(payload.get("body_max_bytes") or 0) == 1048576, payload
+    if "timeout_ms" in payload:
+        assert int(payload.get("timeout_ms") or 0) == 3000, payload
+    if "error_codes_hash" in payload:
+        assert payload.get("error_codes_hash") == "v0.9-neutron-errors-2", payload
+    if "peer_auth_policy" in payload:
+        assert payload.get("peer_auth_policy"), payload
+    if "capability_hash" in payload:
+        assert payload.get("capability_hash") == "v0.9-neutron-capabilities-1", payload
 elif name == "initial_status":
     assert payload.get("managed_ports") == [], payload
     if os.environ.get("REQUIRE_NO_ACTIVE_INSTANCES") == "true":

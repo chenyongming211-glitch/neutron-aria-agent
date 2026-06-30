@@ -1,0 +1,2 @@
+# docker cp /tmp/aria-n05-cirros-20260630155334.raw openstack_client:/tmp/aria-n05-cirros-20260630155334.raw
+# exit=0

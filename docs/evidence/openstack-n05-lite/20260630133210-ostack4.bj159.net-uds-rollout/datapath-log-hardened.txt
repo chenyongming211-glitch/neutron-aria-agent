@@ -1,0 +1,27 @@
++ sudo -E kolla_set_configs
+INFO:__main__:Loading config file at /var/lib/kolla/config_files/config.json
+INFO:__main__:Validating config file
+INFO:__main__:Kolla config strategy set to: COPY_ALWAYS
+INFO:__main__:Copying service configuration files
+INFO:__main__:Copying /var/lib/kolla/config_files/aria-agent-openstack.toml to /etc/aria-agent/config.toml
+INFO:__main__:Setting permission for /etc/aria-agent/config.toml
+INFO:__main__:Writing out command to execute
+INFO:__main__:Setting permission for /var/log/kolla/aria-datapath
+INFO:__main__:Setting permission for /var/log/kolla/aria-datapath/aria-datapath.log
+INFO:__main__:Setting permission for /var/log/kolla/aria-datapath/aria-datapath.log-20260626.gz
+INFO:__main__:Setting permission for /var/log/kolla/aria-datapath/aria-datapath.log-20260627.gz
+INFO:__main__:Setting permission for /var/log/kolla/aria-datapath/aria-datapath.log-20260628.gz
+INFO:__main__:Setting permission for /var/log/kolla/aria-datapath/aria-datapath.log-20260629.gz
+INFO:__main__:Setting permission for /var/log/kolla/aria-datapath/aria-datapath.log-20260630.gz
+++ cat /run_command
++ CMD=start-aria-datapath
++ ARGS=
++ sudo kolla_copy_cacerts
++ [[ ! -n '' ]]
++ . kolla_extend_start
+++ mkdir -p /var/log/kolla/neutron
+++ chmod 755 /var/log/kolla/neutron
+++ . /usr/local/bin/kolla_neutron_extend_start
++ echo 'Running command: '\''start-aria-datapath'\'''
+Running command: 'start-aria-datapath'
++ exec start-aria-datapath

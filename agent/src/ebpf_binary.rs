@@ -174,12 +174,10 @@ fn explicit_backend_from_path(path: &Path) -> Option<TraceBackendKind> {
 }
 
 fn sibling_variant_path(path: &Path, suffix: &str) -> Result<PathBuf, String> {
-    let stem = path.file_stem().and_then(|value| value.to_str()).ok_or_else(|| {
-        format!(
-            "cannot derive eBPF variant path from '{}'",
-            path.display()
-        )
-    })?;
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("cannot derive eBPF variant path from '{}'", path.display()))?;
 
     let mut filename = format!("{}{}", stem, suffix);
     if let Some(ext) = path.extension().and_then(|value| value.to_str()) {

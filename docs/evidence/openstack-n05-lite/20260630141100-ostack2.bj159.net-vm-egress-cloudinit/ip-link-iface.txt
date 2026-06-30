@@ -1,0 +1,4 @@
+60: tap5b7611c1-6e: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq master ovs-system state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether fe:16:3e:db:5d:bb brd ff:ff:ff:ff:ff:ff promiscuity 1 minmtu 68 maxmtu 65521
+    tun type tap pi off vnet_hdr on multi_queue numqueues 4 numdisabled 0 persist off
+    openvswitch_slave addrgenmode eui64 numtxqueues 256 numrxqueues 256 gso_max_size 65536 gso_max_segs 65535

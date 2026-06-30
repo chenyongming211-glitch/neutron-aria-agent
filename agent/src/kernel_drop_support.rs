@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use aria_core::common::{
-    KernelDropConfig, KERNEL_DROP_FLAG_HAS_LOCATION, KERNEL_DROP_FLAG_HAS_PROTOCOL,
-    KERNEL_DROP_FLAG_HAS_REASON,
+    KERNEL_DROP_FLAG_HAS_LOCATION, KERNEL_DROP_FLAG_HAS_PROTOCOL, KERNEL_DROP_FLAG_HAS_REASON,
+    KernelDropConfig,
 };
 use regex::Regex;
 
@@ -155,9 +155,11 @@ pub fn attach_tracepoint_if_needed(
         .take_link(link_id)
         .map_err(|e| format!("{} take_link: {:?}", prog_name, e))?;
     if aya::features().bpf_perf_link() {
-        let fd_link: aya::programs::links::FdLink = link
-            .try_into()
-            .map_err(|e: aya::programs::links::LinkError| format!("{} FdLink: {:?}", prog_name, e))?;
+        let fd_link: aya::programs::links::FdLink =
+            link.try_into()
+                .map_err(|e: aya::programs::links::LinkError| {
+                    format!("{} FdLink: {:?}", prog_name, e)
+                })?;
         fd_link
             .pin(&link_pin)
             .map_err(|e| format!("{} pin link: {:?}", prog_name, e))?;
@@ -199,9 +201,11 @@ pub fn replace_pinned_tracepoint_link(
         .take_link(link_id)
         .map_err(|e| format!("{} take_link: {:?}", prog_name, e))?;
     if aya::features().bpf_perf_link() {
-        let fd_link: aya::programs::links::FdLink = link
-            .try_into()
-            .map_err(|e: aya::programs::links::LinkError| format!("{} FdLink: {:?}", prog_name, e))?;
+        let fd_link: aya::programs::links::FdLink =
+            link.try_into()
+                .map_err(|e: aya::programs::links::LinkError| {
+                    format!("{} FdLink: {:?}", prog_name, e)
+                })?;
         fd_link
             .pin(&link_pin)
             .map_err(|e| format!("{} pin link: {:?}", prog_name, e))?;
@@ -211,7 +215,8 @@ pub fn replace_pinned_tracepoint_link(
     }
 }
 
-pub fn resolve_kernel_drop_config() -> Result<(KernelDropConfig, std::collections::HashMap<u16, String>), String> {
+pub fn resolve_kernel_drop_config()
+-> Result<(KernelDropConfig, std::collections::HashMap<u16, String>), String> {
     let trace_format = parse_tracepoint_format()?;
     let btf = BtfBlob::load(Path::new(KERNEL_BTF_PATH))?;
 
@@ -414,10 +419,14 @@ impl BtfBlob {
         let mut index = vec![0usize]; // index[0] = void placeholder
         let mut offset = 0usize;
         while offset + 12 <= self.types.len() {
-            let Ok(info) = read_u32(&self.types, offset + 4) else { break };
+            let Ok(info) = read_u32(&self.types, offset + 4) else {
+                break;
+            };
             let kind = (info >> 24) & 0x1f;
             let vlen = (info & 0xffff) as usize;
-            let Ok(rs) = record_size(kind, vlen) else { break };
+            let Ok(rs) = record_size(kind, vlen) else {
+                break;
+            };
             if offset + rs > self.types.len() {
                 break;
             }
@@ -433,8 +442,12 @@ impl BtfBlob {
         let mut offset = 0usize;
         let mut found: Option<usize> = None;
         while offset + 12 <= self.types.len() {
-            let Ok(name_off) = read_u32(&self.types, offset) else { break };
-            let Ok(info) = read_u32(&self.types, offset + 4) else { break };
+            let Ok(name_off) = read_u32(&self.types, offset) else {
+                break;
+            };
+            let Ok(info) = read_u32(&self.types, offset + 4) else {
+                break;
+            };
             let k = (info >> 24) & 0x1f;
             let vlen = (info & 0xffff) as usize;
             let Ok(rs) = record_size(k, vlen) else { break };
@@ -539,13 +552,17 @@ impl BtfBlob {
                 return None;
             }
             let off = type_offsets[idx];
-            let Ok(info) = read_u32(&self.types, off + 4) else { return None };
+            let Ok(info) = read_u32(&self.types, off + 4) else {
+                return None;
+            };
             let kind = (info >> 24) & 0x1f;
             match kind {
                 BTF_KIND_STRUCT | BTF_KIND_UNION => return Some(off),
                 BTF_KIND_TYPEDEF | BTF_KIND_VOLATILE | BTF_KIND_CONST | BTF_KIND_RESTRICT => {
                     // size_or_type field holds the wrapped type_id
-                    let Ok(next_id) = read_u32(&self.types, off + 8) else { return None };
+                    let Ok(next_id) = read_u32(&self.types, off + 8) else {
+                        return None;
+                    };
                     current_id = next_id;
                 }
                 _ => return None,

@@ -1,0 +1,24 @@
+## status before
+{"accepted_generation": 84, "active_instances": [], "applied_desired_hash": "7e2174377bbe51875a0328abcf0c522800569e4865e29d5efc3b01ae7f55b59d", "applied_generation": 84, "authority_state": "ready", "desired_hash": "7e2174377bbe51875a0328abcf0c522800569e4865e29d5efc3b01ae7f55b59d", "generation": 84, "managed_ports": [], "pending_generation": null, "port_statuses": [], "wal_replay_failures": 0, "wal_status": "replayed"}
+## run smoke
+Pre-check: VM 10.58.159.35 must be reachable before ACL is applied
+dropped privs to tcpdump
+tcpdump: verbose output suppressed, use -v or -vv for full protocol decode
+listening on any, link-type LINUX_SLL (Linux cooked v1), capture size 262144 bytes
+1 packet captured
+95 packets received by filter
+0 packets dropped by kernel
+Applying ACL full-resync fixture port=74edc260-dccd-4953-9915-9b0149729ffe ifname=tap74edc260-dc src=10.58.159.35/32 dst=10.58.159.2/32 direction=egress protocol=icmp
+Checking UDS capabilities and initial status
+capabilities={"api_version": "v1", "attach_authority": "neutron_snapshot", "supported_domains": ["attach", "acl", "qos", "mirror", "config", "conntrack", "tcprt", "trace", "drops", "ssl"], "supports_full_snapshot": true, "supports_port_delete": true}
+initial_generation=84 initial_managed_ports=0
+Checking neutronclient port source for ostack2.bj159.net
+neutron_ports_for_host=12 compute_ports=9
+Submitting one full-resync snapshot
+Traceback (most recent call last):
+  File "/usr/bin/neutron-aria-agent", line 9, in <module>
+    load_entry_point('neutron-aria==0.1.0', 'console_scripts', 'neutron-aria-agent')()
+  File "/usr/lib/python2.7/site-packages/neutron_aria-0.1.0-py2.7.egg/neutron_aria/agent/main.py", line 185, in main
+  File "/usr/lib/python2.7/site-packages/neutron_aria-0.1.0-py2.7.egg/neutron_aria/agent/event_loop.py", line 118, in full_resync
+  File "/usr/lib/python2.7/site-packages/neutron_aria-0.1.0-py2.7.egg/neutron_aria/agent/event_loop.py", line 439, in _recover_snapshot_timeout
+neutron_aria.agent.uds_client.LocalApiTimeoutError: snapshot submit timed out and status did not converge: status did not converge for generation 85

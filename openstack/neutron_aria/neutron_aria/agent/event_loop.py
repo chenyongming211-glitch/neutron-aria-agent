@@ -36,6 +36,7 @@ class SnapshotSynchronizer(object):
         runtime_status=None,
         status_reporter=None,
         acl_index=None,
+        acl_source=None,
         timeout_convergence_attempts=5,
         timeout_convergence_interval=1.0,
         sleeper=None,
@@ -52,6 +53,7 @@ class SnapshotSynchronizer(object):
         self.status_reporter = status_reporter
         self.projected_port_ids = set(self.state_store.last_projected_port_ids())
         self.acl_index = acl_index
+        self.acl_source = acl_source
         self.timeout_convergence_attempts = max(1, int(timeout_convergence_attempts))
         self.timeout_convergence_interval = max(0.0, float(timeout_convergence_interval))
         self.sleeper = sleeper or time.sleep
@@ -63,10 +65,11 @@ class SnapshotSynchronizer(object):
         self.check_capabilities()
         self.recover_pending_state()
         ports = self._list_ports()
+        acl_index = self._load_acl_index()
         builder = PortCandidateBuilder(
             self.host,
             managed_domains=self.managed_domains,
-            acl_index=self.acl_index,
+            acl_index=acl_index,
         )
         snapshot = builder.build_snapshot(
             ports,
@@ -130,6 +133,16 @@ class SnapshotSynchronizer(object):
             desired_hash=snapshot.get("desired_hash"),
             managed_ports_detail=self._managed_ports_from_status(apply_status),
             port_statuses=self._port_statuses_from_status(apply_status),
+            accepted_generation=self._status_generation(
+                apply_status,
+                "accepted_generation",
+                snapshot["generation"],
+            ),
+            applied_generation=self._status_generation(
+                apply_status,
+                "applied_generation",
+                snapshot["generation"],
+            ),
         )
         heartbeat = self.report_status()
         LOG.info(
@@ -148,6 +161,11 @@ class SnapshotSynchronizer(object):
             "status": self.runtime_status.to_dict(),
             "heartbeat": heartbeat,
         }
+
+    def _load_acl_index(self):
+        if self.acl_source is not None:
+            self.acl_index = self.acl_source.load_index()
+        return self.acl_index
 
     def safe_full_resync(self):
         try:
@@ -228,6 +246,16 @@ class SnapshotSynchronizer(object):
                     desired_hash=snapshot["desired_hash"],
                     managed_ports_detail=self._managed_ports_from_status(status),
                     port_statuses=self._port_statuses_from_status(status),
+                    accepted_generation=self._status_generation(
+                        status,
+                        "accepted_generation",
+                        snapshot["generation"],
+                    ),
+                    applied_generation=self._status_generation(
+                        status,
+                        "applied_generation",
+                        snapshot["generation"],
+                    ),
                 )
                 recovered.append("snapshot")
                 LOG.warning(
@@ -308,6 +336,14 @@ class SnapshotSynchronizer(object):
         if not status:
             return []
         return list(status.get("port_statuses") or [])
+
+    def _status_generation(self, status, key, default):
+        if not status:
+            return default
+        try:
+            return int(status.get(key) or status.get("generation") or default)
+        except (TypeError, ValueError):
+            return default
 
     def _raise_if_response_failed(self, response):
         errors = [

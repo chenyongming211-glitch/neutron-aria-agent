@@ -1,0 +1,15 @@
+
+## neutron_openvswitch_agent /etc/neutron/plugins/ml2
+/etc/neutron/plugins/ml2/ml2_conf.ini:# the neutron.ml2.type_drivers namespace.
+/etc/neutron/plugins/ml2/ml2_conf.ini:# type_drivers = local,flat,vlan,gre,vxlan,geneve
+/etc/neutron/plugins/ml2/ml2_conf.ini:# Example: type_drivers = flat,vlan,gre,vxlan,geneve
+/etc/neutron/plugins/ml2/ml2_conf.ini:# tenant_network_types = local
+/etc/neutron/plugins/ml2/ml2_conf.ini:# Example: tenant_network_types = vlan,gre,vxlan,geneve
+/etc/neutron/plugins/ml2/ml2_conf.ini:# to be loaded from the neutron.ml2.mechanism_drivers namespace.
+/etc/neutron/plugins/ml2/ml2_conf.ini:# mechanism_drivers =
+/etc/neutron/plugins/ml2/ml2_conf.ini:# Example: mechanism_drivers = openvswitch,mlnx
+/etc/neutron/plugins/ml2/ml2_conf.ini:# Example: mechanism_drivers = arista
+/etc/neutron/plugins/ml2/ml2_conf.ini:# Example: mechanism_drivers = openvswitch,cisco_nexus,logger
+/etc/neutron/plugins/ml2/ml2_conf.ini:# Example: mechanism_drivers = openvswitch,brocade
+/etc/neutron/plugins/ml2/ml2_conf.ini:# Example: mechanism_drivers = linuxbridge,brocade
+/etc/neutron/plugins/ml2/ml2_conf.ini:# network type values configured in type_drivers config option.

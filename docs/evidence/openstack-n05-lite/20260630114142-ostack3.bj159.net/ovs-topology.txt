@@ -1,0 +1,94 @@
+ovs-vsctl (Open vSwitch) 3.3.5
+DB Schema 8.5.1
+
+e0332085-aa1f-47d2-92fa-2691e34096a0
+    Bridge br-eth1
+        Port bond1
+            tag: 4095
+            Interface bond1
+        Port br-eth1
+            tag: 1059
+            Interface br-eth1
+                type: internal
+        Port phy-br-eth1
+            Interface phy-br-eth1
+                type: patch
+                options: {peer=int-br-eth1}
+    Bridge br-mgt
+        Port bond0
+            tag: 0
+            Interface bond0
+        Port phy-br-mgt
+            Interface phy-br-mgt
+                type: patch
+                options: {peer=int-br-mgt}
+        Port br-mgt
+            Interface br-mgt
+                type: internal
+    Bridge br-mirror
+        Port phy-br-mirror
+            Interface phy-br-mirror
+                type: patch
+                options: {peer=int-br-mirror}
+        Port br-mirror
+            Interface br-mirror
+                type: internal
+    Bridge br-dummy
+        Port br-dummy
+            Interface br-dummy
+                type: internal
+        Port phy-br-dummy
+            Interface phy-br-dummy
+                type: patch
+                options: {peer=int-br-dummy}
+    Bridge br-int
+        fail_mode: secure
+        datapath_type: system
+        Port int-br-eth1
+            Interface int-br-eth1
+                type: patch
+                options: {peer=phy-br-eth1}
+        Port tap92113331-9c
+            tag: 3
+            Interface tap92113331-9c
+                type: internal
+        Port br-int
+            Interface br-int
+                type: internal
+        Port int-br-mgt
+            Interface int-br-mgt
+                type: patch
+                options: {peer=phy-br-mgt}
+        Port tap3485b315-e1
+            tag: 1
+            Interface tap3485b315-e1
+                type: internal
+        Port tapd7950f48-f8
+            tag: 2
+            Interface tapd7950f48-f8
+                type: internal
+        Port int-br-mirror
+            Interface int-br-mirror
+                type: patch
+                options: {peer=phy-br-mirror}
+        Port int-br-dummy
+            Interface int-br-dummy
+                type: patch
+                options: {peer=phy-br-dummy}
+    ovs_version: "3.3.5"
+
+## bridges
+br-dummy
+br-eth1
+br-int
+br-mgt
+br-mirror
+
+## br-int ports
+int-br-dummy
+int-br-eth1
+int-br-mgt
+int-br-mirror
+tap3485b315-e1
+tap92113331-9c
+tapd7950f48-f8

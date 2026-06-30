@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 
-use super::common::{err_response, AppState};
+use super::common::{AppState, err_response};
 use crate::control_plane::{ControlPlaneError, LocalWriteDomain};
 use aria_api::*;
 
@@ -105,7 +105,7 @@ pub async fn add_qos(
             return Err(err_response(ControlPlaneError::ValidationError(format!(
                 "Invalid mode '{}': must be 'policing' or 'shaping'",
                 other
-            ))))
+            ))));
         }
     };
 
@@ -248,20 +248,11 @@ pub async fn list_qos_with_stats(
                             } else {
                                 "policing".to_string()
                             },
-                            passed_packets: stat
-                                .as_ref()
-                                .map(|s| s.passed_packets)
-                                .unwrap_or(0),
+                            passed_packets: stat.as_ref().map(|s| s.passed_packets).unwrap_or(0),
                             passed_bytes: stat.as_ref().map(|s| s.passed_bytes).unwrap_or(0),
-                            dropped_packets: stat
-                                .as_ref()
-                                .map(|s| s.dropped_packets)
-                                .unwrap_or(0),
+                            dropped_packets: stat.as_ref().map(|s| s.dropped_packets).unwrap_or(0),
                             dropped_bytes: stat.as_ref().map(|s| s.dropped_bytes).unwrap_or(0),
-                            shaped_packets: stat
-                                .as_ref()
-                                .map(|s| s.shaped_packets)
-                                .unwrap_or(0),
+                            shaped_packets: stat.as_ref().map(|s| s.shaped_packets).unwrap_or(0),
                             shaped_bytes: stat.as_ref().map(|s| s.shaped_bytes).unwrap_or(0),
                         }
                     })

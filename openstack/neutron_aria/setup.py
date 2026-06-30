@@ -11,5 +11,11 @@ setup(
         "console_scripts": [
             "neutron-aria-agent=neutron_aria.agent.main:main",
         ],
+        "neutron.service_plugins": [
+            "aria_acl=neutron_aria.services.aria_acl.plugin:AriaAclPlugin",
+        ],
+        "neutron.api_extensions": [
+            "aria_acl=neutron_aria.extensions.aria_acl:Aria_acl",
+        ],
     },
 )

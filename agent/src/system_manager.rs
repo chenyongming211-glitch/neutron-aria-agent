@@ -5,9 +5,8 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use aria_core::ebpf_ops::{
-    cleanup_root_qdisc, critical_network_map_names, detach_tc_egress, ensure_fq_qdisc,
-    replay_state, scrub_standalone_runtime_state, FqQdiscState, NETWORK_MAP_NAMES,
-    TraceMapMode,
+    FqQdiscState, NETWORK_MAP_NAMES, TraceMapMode, cleanup_root_qdisc, critical_network_map_names,
+    detach_tc_egress, ensure_fq_qdisc, replay_state, scrub_standalone_runtime_state,
 };
 
 const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
@@ -194,7 +193,10 @@ pub async fn system_start(
 
     if let Err(e) = scrub_standalone_runtime_state(pin_path) {
         cleanup_failed_start(iface, pin_path, state_path);
-        return Err(format!("failed to scrub standalone runtime state before replay: {}", e));
+        return Err(format!(
+            "failed to scrub standalone runtime state before replay: {}",
+            e
+        ));
     }
 
     // Replay state

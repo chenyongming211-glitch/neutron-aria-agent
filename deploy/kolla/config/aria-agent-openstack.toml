@@ -12,10 +12,15 @@ max_port_policies = 16384
 
 listen_addr = "127.0.0.1:8080"
 neutron_socket_path = "/run/aria/aria-agent.sock"
-# Decimal 438 is octal 0666. This keeps the datapath container privileged while
-# allowing the non-privileged neutron-aria-agent container to reach the UDS.
-# Production deployments can tighten this to 432 (0660) after sharing a group.
-neutron_socket_mode = 438
+# Decimal 432 is octal 0660. The neutron-aria-agent container must share the
+# neutron-aria group instead of relying on a world-writable control socket.
+neutron_socket_mode = 432
+# Peer credential enforcement is a production hardening gate. Keep audit-only
+# in the safe default bundle until N0.5 records the final container uid/gid.
+neutron_peercred_enforce = false
+neutron_peercred_allowed_uids = []
+neutron_peercred_allowed_gids = []
+neutron_audit_log_path = "/var/log/kolla/aria-datapath/neutron-uds-audit.log"
 ovs_bridge = "br-int"
 
 log_format = "text"

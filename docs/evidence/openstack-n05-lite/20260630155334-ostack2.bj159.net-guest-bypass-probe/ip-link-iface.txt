@@ -1,0 +1,2 @@
+68: tap504835d3-2d: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel master ovs-system state UNKNOWN mode DEFAULT group default qlen 1000
+    link/ether fe:16:3e:86:a3:f1 brd ff:ff:ff:ff:ff:ff

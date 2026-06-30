@@ -4,8 +4,12 @@ import unittest
 
 from neutron_aria.agent.status import AgentRuntimeStatus
 from neutron_aria.agent.status import ARIA_AGENT_TYPE
+from neutron_aria.agent.config import AgentConfig
+from neutron_aria.agent.status_reporter import AriaAclPortStatusReporter
+from neutron_aria.agent.status_reporter import CompositeStatusReporter
 from neutron_aria.agent.status_reporter import NeutronStatusReporter
 from neutron_aria.agent.status_reporter import StatusReportError
+from neutron_aria.agent.status_reporter import build_neutron_status_reporter
 from neutron_aria.agent.status_reporter import report_state_topic
 
 
@@ -20,6 +24,15 @@ class FakeReportStateApi(object):
 class FailingReportStateApi(object):
     def report_state(self, context, agent_state, use_call=False):
         raise RuntimeError("message bus unavailable")
+
+
+class FakeAriaAclApi(object):
+    def __init__(self):
+        self.statuses = []
+
+    def report_aria_acl_port_status(self, context, body):
+        self.statuses.append((context, body))
+        return body
 
 
 class StatusReporterTestCase(unittest.TestCase):
@@ -68,10 +81,67 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertFalse(agent_state["configurations"]["degraded"])
         self.assertEqual("ready", agent_state["configurations"]["reason"])
         self.assertEqual(12, agent_state["configurations"]["last_generation"])
+        self.assertEqual(12, agent_state["configurations"]["last_submitted_generation"])
+        self.assertEqual(12, agent_state["configurations"]["accepted_generation"])
+        self.assertEqual(12, agent_state["configurations"]["applied_generation"])
+        self.assertEqual(0, agent_state["configurations"]["generation_lag"])
         self.assertEqual(5, agent_state["configurations"]["last_snapshot_ports"])
         self.assertEqual(2, agent_state["configurations"]["last_managed_ports"])
         self.assertEqual(["acl"], agent_state["configurations"]["managed_domains"])
         self.assertEqual("br-int", agent_state["configurations"]["ovs_bridge"])
+
+    def test_report_projects_domain_counts_and_degraded_reasons(self):
+        api = FakeReportStateApi()
+        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status.mark_ready(
+            generation=12,
+            snapshot_ports=2,
+            managed_ports=2,
+            port_statuses=[{
+                "port_id": "port-1",
+                "status": "ready",
+                "domains": [{"domain": "acl", "status": "ready"}],
+            }, {
+                "port_id": "port-2",
+                "status": "degraded",
+                "reason": "acl_apply_failed",
+                "domains": [{
+                    "domain": "acl",
+                    "status": "degraded",
+                    "reason": "acl_apply_failed",
+                }],
+            }],
+            accepted_generation=12,
+            applied_generation=11,
+        )
+        reporter = NeutronStatusReporter(api, context="ctx", host="ostack2")
+
+        agent_state = reporter.report(runtime_status)
+        configurations = agent_state["configurations"]
+
+        self.assertEqual(1, configurations["generation_lag"])
+        self.assertIn(
+            {
+                "domain": "acl",
+                "status": "ready",
+                "effective_action": "enforce",
+                "count": 1,
+            },
+            configurations["domain_counts"],
+        )
+        self.assertIn(
+            {
+                "domain": "acl",
+                "status": "degraded",
+                "effective_action": "bypass",
+                "count": 1,
+            },
+            configurations["domain_counts"],
+        )
+        self.assertEqual(
+            [{"reason": "acl_apply_failed", "count": 1}],
+            configurations["degraded_reasons"],
+        )
 
     def test_second_report_clears_start_flag(self):
         api = FakeReportStateApi()
@@ -109,6 +179,123 @@ class StatusReporterTestCase(unittest.TestCase):
 
         with self.assertRaises(StatusReportError):
             reporter.report(runtime_status)
+
+    def test_port_status_reporter_writes_aria_acl_status_rows(self):
+        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status.mark_ready(
+            generation=12,
+            snapshot_ports=1,
+            managed_ports=1,
+            port_statuses=[{
+                "port_id": "port-1",
+                "policy_id": "policy-1",
+                "binding_id": "binding-1",
+                "status": "ready",
+                "domains": [{
+                    "domain": "acl",
+                    "status": "ready",
+                    "effective_action": "enforce",
+                    "reason": "ready",
+                }],
+            }],
+        )
+        api = FakeAriaAclApi()
+        reporter = AriaAclPortStatusReporter(api, context="ctx", host="ostack2")
+
+        result = reporter.report(runtime_status)
+
+        self.assertEqual(1, result["reported_port_statuses"])
+        self.assertEqual("ctx", api.statuses[0][0])
+        payload = api.statuses[0][1]["aria_acl_port_status"]
+        self.assertEqual("port-1", payload["port_id"])
+        self.assertEqual("ostack2", payload["host"])
+        self.assertEqual(12, payload["generation"])
+        self.assertEqual("ready", payload["status"])
+        self.assertEqual("policy-1", payload["effective_policy_id"])
+        self.assertNotIn("policy_id", payload)
+        self.assertEqual("binding-1", payload["binding_id"])
+        self.assertEqual("enforce", payload["effective_action"])
+        self.assertEqual("ready", payload["reason"])
+        self.assertNotIn("domains", payload)
+        self.assertNotIn("desired_hash", payload)
+        self.assertNotIn("ifname", payload)
+        self.assertNotIn("managed_domains", payload)
+
+    def test_port_status_reporter_projects_ready_acl_to_enforce(self):
+        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status.mark_ready(
+            generation=12,
+            snapshot_ports=1,
+            managed_ports=1,
+            port_statuses=[{
+                "port_id": "port-1",
+                "ifname": "tap-port-1",
+                "desired_hash": "sha256:abc",
+                "managed_domains": ["acl"],
+                "domains": [{
+                    "domain": "acl",
+                    "status": "ready",
+                    "reason": None,
+                }],
+            }],
+        )
+        api = FakeAriaAclApi()
+        reporter = AriaAclPortStatusReporter(api, context="ctx", host="ostack2")
+
+        reporter.report(runtime_status)
+
+        payload = api.statuses[0][1]["aria_acl_port_status"]
+        self.assertEqual("ready", payload["status"])
+        self.assertEqual("enforce", payload["effective_action"])
+        self.assertEqual("port-1", payload["port_id"])
+        self.assertNotIn("ifname", payload)
+        self.assertNotIn("desired_hash", payload)
+        self.assertNotIn("managed_domains", payload)
+        self.assertNotIn("domains", payload)
+
+    def test_composite_reporter_preserves_heartbeat_and_port_status(self):
+        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status.mark_ready(
+            generation=3,
+            snapshot_ports=1,
+            managed_ports=1,
+            port_statuses=[{"port_id": "port-1", "status": "ready"}],
+        )
+        report_state = FakeReportStateApi()
+        aria_acl_api = FakeAriaAclApi()
+        reporter = CompositeStatusReporter(
+            NeutronStatusReporter(report_state, context="ctx", host="ostack2"),
+            AriaAclPortStatusReporter(aria_acl_api, context="ctx", host="ostack2"),
+        )
+
+        result = reporter.report(runtime_status)
+
+        self.assertEqual(2, len(result["results"]))
+        self.assertEqual(1, len(report_state.calls))
+        self.assertEqual(1, len(aria_acl_api.statuses))
+
+    def test_build_reporter_adds_port_status_reporter_for_neutron_acl_source(self):
+        report_state = FakeReportStateApi()
+        aria_acl_api = FakeAriaAclApi()
+        reporter = build_neutron_status_reporter(
+            "ostack2",
+            AgentConfig(acl_source="neutron"),
+            report_state_api=report_state,
+            context="ctx",
+            aria_acl_api=aria_acl_api,
+        )
+        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status.mark_ready(
+            generation=4,
+            snapshot_ports=1,
+            managed_ports=1,
+            port_statuses=[{"port_id": "port-1", "status": "ready"}],
+        )
+
+        reporter.report(runtime_status)
+
+        self.assertEqual(1, len(report_state.calls))
+        self.assertEqual(1, len(aria_acl_api.statuses))
 
 
 if __name__ == "__main__":

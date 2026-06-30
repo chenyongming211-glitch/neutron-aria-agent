@@ -15,6 +15,12 @@ except ImportError:
 
 
 NEUTRON_API_VERSION = "v1"
+NEUTRON_CONTRACT_VERSION = "2026-06-v0.9"
+NEUTRON_SCHEMA_VERSION = 1
+NEUTRON_BODY_MAX_BYTES = 1048576
+NEUTRON_TIMEOUT_MS = 3000
+NEUTRON_ERROR_CODES_HASH = "v0.9-neutron-errors-2"
+NEUTRON_CAPABILITY_HASH = "v0.9-neutron-capabilities-1"
 NEUTRON_ATTACH_AUTHORITY = "neutron_snapshot"
 DEFAULT_SOCKET_PATH = "/run/aria/aria-agent.sock"
 
@@ -43,6 +49,21 @@ class LocalApiContractError(LocalApiError):
     pass
 
 
+def _optional_int(value, field):
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise LocalApiContractError("invalid %s %r" % (field, value))
+
+
+def _plain_error_body(status, reason, raw):
+    if status == 413:
+        return {"error": "UDS_BODY_TOO_LARGE", "details": raw}
+    return {"error": raw or reason}
+
+
 class UnixHTTPConnection(http_client.HTTPConnection):
     def __init__(self, socket_path, timeout=None):
         http_client.HTTPConnection.__init__(self, "localhost", timeout=timeout)
@@ -60,13 +81,15 @@ class LocalClient(object):
     def __init__(
         self,
         socket_path=DEFAULT_SOCKET_PATH,
-        timeout=3.0,
+        timeout=NEUTRON_TIMEOUT_MS / 1000.0,
         max_response_bytes=1048576,
+        max_request_bytes=NEUTRON_BODY_MAX_BYTES,
         connection_factory=None,
     ):
         self.socket_path = socket_path
         self.timeout = timeout
         self.max_response_bytes = max_response_bytes
+        self.max_request_bytes = max_request_bytes
         self.connection_factory = connection_factory
 
     def capabilities(self, required_domains=None):
@@ -94,6 +117,12 @@ class LocalClient(object):
         payload = None
         if body is not None:
             payload = json.dumps(body, sort_keys=True)
+            payload_len = len(payload.encode("utf-8"))
+            if payload_len > self.max_request_bytes:
+                raise LocalApiContractError(
+                    "request body too large: %s > %s"
+                    % (payload_len, self.max_request_bytes)
+                )
             headers["Content-Type"] = "application/json"
 
         conn = self._connection()
@@ -108,7 +137,12 @@ class LocalClient(object):
             else:
                 if not isinstance(raw, str):
                     raw = raw.decode("utf-8")
-                decoded = json.loads(raw)
+                try:
+                    decoded = json.loads(raw)
+                except ValueError:
+                    if response.status < 400:
+                        raise
+                    decoded = _plain_error_body(response.status, response.reason, raw)
             if response.status >= 400:
                 raise LocalApiResponseError(response.status, response.reason, decoded)
             return decoded
@@ -140,3 +174,50 @@ class LocalClient(object):
         missing = [domain for domain in required_domains if domain not in supported]
         if missing:
             raise LocalApiContractError("unsupported managed domains: %s" % ",".join(missing))
+
+        contract_version = body.get("contract_version")
+        if contract_version is not None and contract_version != NEUTRON_CONTRACT_VERSION:
+            raise LocalApiContractError(
+                "unsupported contract_version %r" % contract_version
+            )
+
+        schema_min = body.get("schema_version_min")
+        schema_max = body.get("schema_version_max")
+        if schema_min is not None or schema_max is not None:
+            schema_min = _optional_int(schema_min, "schema_version_min") or 0
+            schema_max = _optional_int(schema_max, "schema_version_max") or 0
+            if schema_min > NEUTRON_SCHEMA_VERSION or schema_max < NEUTRON_SCHEMA_VERSION:
+                raise LocalApiContractError(
+                    "unsupported schema version range %s-%s" % (schema_min, schema_max)
+                )
+
+        body_max_bytes = body.get("body_max_bytes")
+        body_max_bytes = _optional_int(body_max_bytes, "body_max_bytes")
+        if body_max_bytes is not None and body_max_bytes <= 0:
+            raise LocalApiContractError("invalid body_max_bytes %r" % body.get("body_max_bytes"))
+        if body_max_bytes is not None:
+            self.max_request_bytes = min(self.max_request_bytes, body_max_bytes)
+
+        timeout_ms = body.get("timeout_ms")
+        timeout_ms = _optional_int(timeout_ms, "timeout_ms")
+        if timeout_ms is not None and timeout_ms <= 0:
+            raise LocalApiContractError("invalid timeout_ms %r" % body.get("timeout_ms"))
+        if timeout_ms is not None:
+            timeout = timeout_ms / 1000.0
+            self.timeout = min(self.timeout, timeout) if self.timeout is not None else timeout
+
+        error_codes_hash = body.get("error_codes_hash")
+        if error_codes_hash is not None and error_codes_hash != NEUTRON_ERROR_CODES_HASH:
+            raise LocalApiContractError(
+                "unsupported error_codes_hash %r" % error_codes_hash
+            )
+
+        peer_auth_policy = body.get("peer_auth_policy")
+        if peer_auth_policy is not None and not str(peer_auth_policy).strip():
+            raise LocalApiContractError("empty peer_auth_policy")
+
+        capability_hash = body.get("capability_hash")
+        if capability_hash is not None and capability_hash != NEUTRON_CAPABILITY_HASH:
+            raise LocalApiContractError(
+                "unsupported capability_hash %r" % capability_hash
+            )

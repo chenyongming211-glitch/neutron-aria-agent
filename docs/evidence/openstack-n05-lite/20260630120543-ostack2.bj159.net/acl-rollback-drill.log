@@ -1,0 +1,28 @@
+Pre-check: VM 10.58.159.26 must be reachable before ACL is applied
+Applying ACL full-resync fixture port=86b83885-671f-474c-9556-8af98cf1cdc8 ifname=tap86b83885-67 src=<any> dst=10.58.159.2/32 direction=egress protocol=icmp
+Checking UDS capabilities and initial status
+capabilities={"api_version": "v1", "attach_authority": "neutron_snapshot", "supported_domains": ["attach", "acl", "qos", "mirror", "config", "conntrack", "tcprt", "trace", "drops", "ssl"], "supports_full_snapshot": true, "supports_port_delete": true}
+initial_generation=81 initial_managed_ports=0
+Checking neutronclient port source for ostack2.bj159.net
+neutron_ports_for_host=8 compute_ports=5
+Submitting one full-resync snapshot
+snapshot generation 82 submitted
+Checking post-snapshot status
+{"accepted_generation": 82, "active_instances": ["tap39adf570-1a", "tap86b83885-67", "tapaa4ddb4a-5b", "tapd53ce06c-c9", "tape607e86b-9e"], "applied_desired_hash": "7e2174377bbe51875a0328abcf0c522800569e4865e29d5efc3b01ae7f55b59d", "applied_generation": 82, "authority_state": "ready", "desired_hash": "7e2174377bbe51875a0328abcf0c522800569e4865e29d5efc3b01ae7f55b59d", "generation": 82, "managed_ports": [{"ifindex": 48, "ifname": "tap39adf570-1a", "managed_domains": ["acl"], "port_id": "39adf570-1acb-4e81-9215-96744a6bf627"}, {"ifindex": 26, "ifname": "tap86b83885-67", "managed_domains": ["acl"], "port_id": "86b83885-671f-474c-9556-8af98cf1cdc8"}, {"ifindex": 49, "ifname": "tapaa4ddb4a-5b", "managed_domains": ["acl"], "port_id": "aa4ddb4a-5b73-4e94-bb21-e9a4f9614045"}, {"ifindex": 57, "ifname": "tapd53ce06c-c9", "managed_domains": ["acl"], "port_id": "d53ce06c-c90e-4371-b8e4-4912f90a91d3"}, {"ifindex": 55, "ifname": "tape607e86b-9e", "managed_domains": ["acl"], "port_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f"}], "pending_generation": null, "port_statuses": [{"desired_hash": "7e2174377bbe51875a0328abcf0c522800569e4865e29d5efc3b01ae7f55b59d", "domains": [{"domain": "acl", "reason": null, "status": "ready"}], "generation": 82, "ifname": "tap39adf570-1a", "managed_domains": ["acl"], "port_id": "39adf570-1acb-4e81-9215-96744a6bf627", "reason": null, "status": "ready"}, {"desired_hash": "7e2174377bbe51875a0328abcf0c522800569e4865e29d5efc3b01ae7f55b59d", "domains": [{"domain": "acl", "reason": null, "status": "ready"}], "generation": 82, "ifname": "tap86b83885-67", "managed_domains": ["acl"], "port_id": "86b83885-671f-474c-9556-8af98cf1cdc8", "reason": null, "status": "ready"}, {"desired_hash": "7e2174377bbe51875a0328abcf0c522800569e4865e29d5efc3b01ae7f55b59d", "domains": [{"domain": "acl", "reason": null, "status": "ready"}], "generation": 82, "ifname": "tapaa4ddb4a-5b", "managed_domains": ["acl"], "port_id": "aa4ddb4a-5b73-4e94-bb21-e9a4f9614045", "reason": null, "status": "ready"}, {"desired_hash": "7e2174377bbe51875a0328abcf0c522800569e4865e29d5efc3b01ae7f55b59d", "domains": [{"domain": "acl", "reason": null, "status": "ready"}], "generation": 82, "ifname": "tapd53ce06c-c9", "managed_domains": ["acl"], "port_id": "d53ce06c-c90e-4371-b8e4-4912f90a91d3", "reason": null, "status": "ready"}, {"desired_hash": "7e2174377bbe51875a0328abcf0c522800569e4865e29d5efc3b01ae7f55b59d", "domains": [{"domain": "acl", "reason": null, "status": "ready"}], "generation": 82, "ifname": "tape607e86b-9e", "managed_domains": ["acl"], "port_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f", "reason": null, "status": "ready"}], "wal_replay_failures": 0, "wal_status": "commit_written"}
+MANAGED_COUNT=5
+EXPECTED_PORT_FOUND port_id=86b83885-671f-474c-9556-8af98cf1cdc8 ifname=tap86b83885-67 ifindex=26 domains=acl
+NAMES                IMAGE                        STATUS
+neutron_aria_agent   neutron-aria-agent:0b20bbd   Up 6 minutes
+neutron-aria-agent full-resync smoke passed on ostack2.bj159.net
+Checking datapath ACL policy state
+acl_groups=[{"cidrs": ["10.58.159.2/32"], "id": 3, "name": "neutron:86b83885-671f-474c-9556-8af98cf1cdc8:dst:drop-smoke-icmp"}]
+acl_policies=[{"action": "drop", "bitmap_idx": null, "direction": "ingress", "dst_group": "neutron:86b83885-671f-474c-9556-8af98cf1cdc8:dst:drop-smoke-icmp", "dst_group_id": 3, "ports": null, "proto": "icmp", "src_group": "any", "src_group_id": 0}]
+Checking that ACL blocks icmp traffic
+ERROR: ACL did not block ping to 10.58.159.26
+Cleaning up ACL smoke managed port
+rollback_delete port_id=39adf570-1acb-4e81-9215-96744a6bf627 status=ok detached=True
+rollback_delete port_id=86b83885-671f-474c-9556-8af98cf1cdc8 status=ok detached=True
+rollback_delete port_id=aa4ddb4a-5b73-4e94-bb21-e9a4f9614045 status=ok detached=True
+rollback_delete port_id=d53ce06c-c90e-4371-b8e4-4912f90a91d3 status=ok detached=True
+rollback_delete port_id=e607e86b-9e5f-4c63-a5df-3dc8986a1b0f status=ok detached=True
+rollback_remaining_managed_ports=0

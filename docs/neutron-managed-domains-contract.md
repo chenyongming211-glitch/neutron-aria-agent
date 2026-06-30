@@ -1,0 +1,200 @@
+# Neutron Managed Domains Contract
+
+Status: normative short contract for the v0.9 OpenStack integration.
+
+This file is the day-to-day entry point for developers. The full rationale stays
+in `openstack-neutron-agent-mode.md`; the `aria_acl` API/DB details stay in
+`aria-acl-neutron-extension-product-design.md`.
+
+If this short contract and `openstack-neutron-agent-mode.md` disagree, the
+normative constraints in `openstack-neutron-agent-mode.md` section 1.5 win. This
+file must then be updated to match the main design.
+
+Large design decisions and known documentation debt are tracked in
+`openstack-neutron-aria-design-decisions.md`.
+
+One fixed product principle: do not overengineer v0.9. Every new feature, field,
+abstraction, or workflow must map to a first-stage gate, smoke, production risk,
+or explicitly approved later-stage plan.
+
+## Current Implementation Status
+
+| Area | Status | Notes |
+| --- | --- | --- |
+| Rust Neutron UDS snapshot/status/delete routes | partial | Snapshot apply, WAL, generation, desired hash, delete, and local write gate exist. |
+| `managed_domains` local write gate | implemented | Uses `NeutronPortSnapshot.managed_domains`, `mark_neutron_port_authority()`, and `ensure_local_write_allowed()`. |
+| Python `neutron-aria-agent` full resync skeleton | partial | Can build local snapshots and submit them over UDS. |
+| ACL fixture source | implemented | CI/smoke only. |
+| ACL Neutron source | partial | `NeutronAclSource` can consume an `aria_acl` effective payload, legacy list methods, or the aria_acl REST adapter; production auth/session execution against target Neutron remains. |
+| `aria_acl` Neutron service plugin/API/DB | partial | Minimal stdlib-only repository/plugin contract, API extension descriptor, persistent DB contract, Alembic table creation, CRUD/revision behavior, and RBAC contract exist; `neutron-db-manage` and server startup validation remain target-environment gates. |
+| Rich domain status | planned | Current `NeutronDomainStatus` is still `domain/status/reason`; target also includes `effective_action` and `support_disposition`. |
+| UDS contract JSON | implemented | `docs/neutron-uds-contract.json` is checked by `ci/check_neutron_stage1.py`. |
+| UDS peer credential enforcement/audit | implemented, rollout-gated | Socket mode validation, socket group alignment, and connection-level `SO_PEERCRED` audit/enforcement hooks exist. `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net` have reversible hardened proofs; persistent multi-host rollout remains a production gate. |
+| Unified `neutron-aria-agent.ini` target layout | partial | Target layout, packaged safe defaults, config validation, and documentation checks exist; production enablement still depends on N0.5/runbook gates. |
+
+## INI Contract Convergence
+
+Status: stage-one contract recorded and partially enforced by config validation,
+packaged safe defaults, and `ci/check_neutron_stage1.py`.
+
+The design already separates local process mode from snapshot integration mode:
+
+| Concept | Owner | Where It Belongs |
+| --- | --- | --- |
+| `agent_mode` / `mode = neutron_managed` | local `aria-agent` / `aria-datapath` config | local datapath config only |
+| `integration_mode = coexist` | `neutron-aria-agent` snapshot writer | `PUT /api/v1/neutron/snapshot` body only |
+| `managed_domains` | `neutron-aria-agent` config and snapshot ports | agent config plus per-port snapshot field |
+
+Therefore, `integration_mode = coexist` must be removed from
+`neutron-aria-agent.ini` and local `aria-agent` config examples. If a local
+equivalent is needed, the local datapath side uses `agent_mode = "openstack"` or
+`mode = "neutron_managed"` as documented by the deployment target.
+
+The target `neutron-aria-agent.ini` documentation should converge to one layout:
+
+```ini
+[agent]
+host = compute-01
+agent_type = Aria ACL agent
+report_interval = 30
+resync_interval = 300
+full_resync_enabled = false
+managed_domains = acl
+
+[ovs]
+integration_bridge = br-int
+
+[aria]
+socket_path = /run/aria/aria-agent.sock
+request_timeout = 3.0
+
+[neutron]
+port_source = disabled
+rpc_events_enabled = false
+
+[acl]
+source = disabled
+# fixture_path is CI/smoke only.
+# fixture_path = /etc/neutron-aria-agent/acl-fixture.json
+```
+
+Maintained documentation tasks:
+
+- Keep `resync_interval` as the target ini key unless a later code PR renames it
+  with an explicit compatibility alias.
+- Keep deploy/kolla examples as implementation evidence, but document any
+  temporary mismatch as transitional rather than a second normative contract.
+
+## ACL Input Source
+
+Production ACL input source:
+
+```text
+aria_acl Neutron service plugin/API/DB
+  -> neutron-aria-agent NeutronAclSource
+  -> effective ACL index
+  -> Neutron snapshot
+  -> aria-datapath
+```
+
+Non-production sources:
+
+| Source | Allowed Use |
+| --- | --- |
+| `fixture` | CI, local smoke, pre-Neutron-server datapath validation. |
+| tag + local mapping | Legacy lab/bootstrap/migration helper only; not a production control-plane contract. |
+
+The product path does not consume Neutron Security Group, remote group, port
+security, or allowed address pairs.
+
+## Authority Model
+
+Attach authority and feature/domain authority are separate:
+
+| Concept | Field / Mechanism | Meaning |
+| --- | --- | --- |
+| Tap attach authority | `neutron_managed` / Neutron snapshot | Which control plane may attach or detach VM tap runtime. |
+| Feature write authority | `ports[].managed_domains` | Which feature domains are owned by Neutron for that port/instance. |
+
+Current code path:
+
+```text
+NeutronPortSnapshot.managed_domains
+  -> mark_neutron_port_authority()
+  -> ensure_local_write_allowed()
+  -> LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN
+```
+
+Rules:
+
+| Scenario | Required Behavior |
+| --- | --- |
+| `managed_domains=["acl"]` | Local ACL writes are rejected; local QoS/Mirror writes remain allowed. |
+| `managed_domains=["acl","qos"]` | Local ACL and QoS writes are rejected. |
+| `managed_domains=["acl","qos","mirror"]` | Local ACL, QoS, and Mirror writes are rejected. |
+| Domain not listed in `managed_domains` | Local `ariactl` writes remain allowed, subject to normal local validation. |
+| Read-only/status/stats/diagnose | Allowed for Neutron-attached ports. |
+| Trace/drops/tcprt troubleshooting | Allowed unless the domain is explicitly added to `managed_domains` later. |
+
+Rejected local writes must return HTTP 409 or an equivalent local API response
+with:
+
+```text
+LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN
+```
+
+## Status Contract
+
+Target domain status fields:
+
+| Field | Meaning |
+| --- | --- |
+| `DomainStatus` | `ready`, `degraded`, `blocked`, or `not_requested`. |
+| `effective_action` | `enforce`, `bypass`, `unchanged`, `cleanup`, or `no_op`. |
+| `support_disposition` | `supported`, `unsupported`, `unknown`, or `not_applicable`. |
+
+Important rules:
+
+- `bypass` is an `effective_action`, not a `DomainStatus`.
+- ACL not ready must use `effective_action=bypass` and must not block OVS L2 forwarding.
+- ACL ready must use `effective_action=enforce`.
+- `accepted_generation` means the snapshot passed schema/authority/WAL checks; it does not by itself mean every feature domain is ready.
+
+## UDS Minimum Contract
+
+The Neutron UDS API is local only:
+
+```text
+GET    /api/v1/neutron/capabilities
+GET    /api/v1/neutron/status
+PUT    /api/v1/neutron/snapshot
+DELETE /api/v1/neutron/ports/{port_id}
+```
+
+Production hardening requires:
+
+- generated `neutron-uds-contract.json`;
+- contract version and schema version range;
+- body size limit;
+- stable error code hash;
+- peer auth policy;
+- Unix socket permissions and peer credential audit.
+
+Stage-one contract artifact:
+
+```text
+docs/neutron-uds-contract.json
+```
+
+## Gate Scenarios
+
+Minimum tests:
+
+| Test | Expected Result |
+| --- | --- |
+| Snapshot with `managed_domains=["acl"]`, then local `policy add` | Rejected with `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`. |
+| Snapshot with `managed_domains=["acl"]`, then local `qos add` | Allowed. |
+| Snapshot with `managed_domains=["acl","qos"]`, then local `qos add` | Rejected with `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`. |
+| Snapshot with ACL apply failure | ACL domain degraded, `effective_action=bypass`, OVS forwarding unaffected. |
+| Neutron communication failure after accepted snapshot | Remains Neutron-managed/degraded; local writes for managed domains stay blocked. |
+| Break-glass, if enabled | Explicit only; writes local override WAL; rejoin defaults to Neutron wins. |

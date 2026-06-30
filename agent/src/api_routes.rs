@@ -1,7 +1,7 @@
 #[allow(unused_imports)]
 use axum::{
-    routing::{delete, get, post, put},
     Router,
+    routing::{delete, get, post, put},
 };
 use std::sync::Arc;
 use utoipa::OpenApi;

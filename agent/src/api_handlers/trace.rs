@@ -1,16 +1,16 @@
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 
 use super::{
-    common::{err_response, AppState},
     TopQuery,
+    common::{AppState, err_response},
 };
 use crate::control_plane::{ControlPlaneError, LocalWriteDomain};
-use aria_api::{proto_from_string, proto_to_string, MessageResponse};
+use aria_api::{MessageResponse, proto_from_string, proto_to_string};
 
 #[utoipa::path(
     post,

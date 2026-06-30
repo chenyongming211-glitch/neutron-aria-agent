@@ -1,0 +1,7 @@
+PING 10.58.159.26 (10.58.159.26) 56(84) bytes of data.
+64 bytes from 10.58.159.26: icmp_seq=1 ttl=64 time=0.758 ms
+64 bytes from 10.58.159.26: icmp_seq=2 ttl=64 time=0.180 ms
+
+--- 10.58.159.26 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1040ms
+rtt min/avg/max/mdev = 0.180/0.469/0.758/0.289 ms

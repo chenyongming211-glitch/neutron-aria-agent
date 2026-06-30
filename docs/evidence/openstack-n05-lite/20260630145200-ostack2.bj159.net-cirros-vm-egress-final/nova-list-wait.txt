@@ -1,0 +1,3 @@
+| fe29ab91-eedf-48c8-8636-ab489acd4fed | aria-stage2-n05-cirros-egress-20260630-1452 | BUILD  | spawning   | NOSTATE     |          |
+| fe29ab91-eedf-48c8-8636-ab489acd4fed | aria-stage2-n05-cirros-egress-20260630-1452 | BUILD  | spawning   | NOSTATE     | flat_mgt=10.58.159.35 |
+| fe29ab91-eedf-48c8-8636-ab489acd4fed | aria-stage2-n05-cirros-egress-20260630-1452 | ACTIVE | -          | Running     | flat_mgt=10.58.159.35 |

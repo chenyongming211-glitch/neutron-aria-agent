@@ -4,8 +4,8 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::ssl_support::{
-    attach_uprobe_if_needed, find_libssl, is_ssl_pin_name, load_uprobe_program, pin_map_if_needed,
-    pin_program_if_needed, SSL_LINK_NAMES, SSL_MAP_NAMES, SSL_PROGRAM_NAMES, SSL_UPROBE_SPECS,
+    SSL_LINK_NAMES, SSL_MAP_NAMES, SSL_PROGRAM_NAMES, SSL_UPROBE_SPECS, attach_uprobe_if_needed,
+    find_libssl, is_ssl_pin_name, load_uprobe_program, pin_map_if_needed, pin_program_if_needed,
 };
 
 struct SslManagerState {

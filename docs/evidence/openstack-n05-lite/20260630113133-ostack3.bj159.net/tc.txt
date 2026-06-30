@@ -1,0 +1,3 @@
+
+No tap interface found; showing global qdisc sample
+deploy/kolla/smoke/neutron_aria_n05_discovery_smoke.sh: line 247: tc: command not found

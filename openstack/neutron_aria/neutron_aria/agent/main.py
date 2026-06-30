@@ -5,7 +5,7 @@ import optparse
 import socket
 import sys
 
-from neutron_aria.agent.acl_source import build_acl_index
+from neutron_aria.agent.acl_source import build_acl_source
 from neutron_aria.agent.config import load_config
 from neutron_aria.agent.event_merge import EventMerger
 from neutron_aria.agent.event_loop import SnapshotSynchronizer
@@ -47,7 +47,13 @@ def configure_logging():
     agent_logger.propagate = False
 
 
-def build_synchronizer(config, neutron_port_source=None, status_reporter=None):
+def build_synchronizer(
+    config,
+    neutron_port_source=None,
+    status_reporter=None,
+    neutron_acl_client=None,
+    local_client=None,
+):
     host = _default_host(config)
     port_source = neutron_port_source
     if port_source is None:
@@ -62,11 +68,14 @@ def build_synchronizer(config, neutron_port_source=None, status_reporter=None):
         host=host,
         port_source=port_source,
         ovs_reader=None,
-        local_client=LocalClient(config.socket_path, timeout=config.request_timeout),
+        local_client=local_client or LocalClient(
+            config.socket_path,
+            timeout=config.request_timeout,
+        ),
         managed_domains=config.managed_domains,
         ovs_bridge=config.ovs_bridge,
         status_reporter=status_reporter,
-        acl_index=build_acl_index(config),
+        acl_source=build_acl_source(config, neutron_client=neutron_acl_client),
         state_store=SnapshotStateStore(config.state_dir),
         timeout_convergence_attempts=config.timeout_convergence_attempts,
         timeout_convergence_interval=config.timeout_convergence_interval,
@@ -88,6 +97,13 @@ def initialize_neutron_runtime(config_files=None):
     except Exception:
         pass
     return True
+
+
+def build_once_status_reporter(config, neutron_config_files=None):
+    if config.acl_source != "neutron":
+        return None
+    initialize_neutron_runtime(neutron_config_files)
+    return build_neutron_status_reporter(_default_host(config), config)
 
 
 def main(argv=None):
@@ -162,7 +178,13 @@ def main(argv=None):
         config.rpc_events_enabled = False
 
     if options.once:
-        result = build_synchronizer(config).full_resync()
+        result = build_synchronizer(
+            config,
+            status_reporter=build_once_status_reporter(
+                config,
+                options.neutron_config_files,
+            ),
+        ).full_resync()
         print("snapshot generation %s submitted" % result["snapshot"]["generation"])
         return 0
 

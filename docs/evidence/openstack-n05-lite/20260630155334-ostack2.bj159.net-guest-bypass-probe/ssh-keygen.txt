@@ -1,0 +1,17 @@
+Generating public/private rsa key pair.
+Your identification has been saved in /tmp/aria-n05-guestprobe-20260630155334.rsa
+Your public key has been saved in /tmp/aria-n05-guestprobe-20260630155334.rsa.pub
+The key fingerprint is:
+SHA256:YbUwqnJuFg28VmHkVVTihcu9gjp8vmq+i4PJ2sg1OP8 aria-n05-guestprobe-20260630155334
+The key's randomart image is:
++---[RSA 2048]----+
+|     .+ +o=oo    |
+|   . o + =.+     |
+|    o + o.oo     |
+|     * . .o .    |
+|  . * . S.   .   |
+|  .= .  . . .    |
+| + =+. .   .     |
+|.oBoo.= .        |
+|oo..oE=Bo.       |
++----[SHA256]-----+

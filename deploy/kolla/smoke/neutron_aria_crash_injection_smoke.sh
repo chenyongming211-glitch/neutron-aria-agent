@@ -14,7 +14,7 @@ EXEC_USER="${EXEC_USER:-neutron}"
 ROLLBACK="${ROLLBACK:-true}"
 MIN_MANAGED_PORTS="${MIN_MANAGED_PORTS:-0}"
 RESTART_DATAPATH="${RESTART_DATAPATH:-true}"
-REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE:-10.0}"
+REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE:-3.0}"
 
 die() {
     echo "ERROR: $*" >&2
@@ -94,7 +94,7 @@ import sys
 
 from neutron_aria.agent.uds_client import LocalClient
 
-client = LocalClient(sys.argv[1], timeout=10.0)
+client = LocalClient(sys.argv[1], timeout=3.0)
 status = client.status()
 for port in status.get("managed_ports") or []:
     port_id = port.get("port_id")
@@ -130,7 +130,7 @@ import sys
 
 from neutron_aria.agent.uds_client import LocalClient
 
-print(len(LocalClient(sys.argv[1], timeout=10.0).status().get("managed_ports") or []))
+print(len(LocalClient(sys.argv[1], timeout=3.0).status().get("managed_ports") or []))
 PY
 }
 
@@ -142,7 +142,7 @@ import sys
 
 from neutron_aria.agent.uds_client import LocalClient
 
-for port in LocalClient(sys.argv[1], timeout=10.0).status().get("managed_ports") or []:
+for port in LocalClient(sys.argv[1], timeout=3.0).status().get("managed_ports") or []:
     if port.get("port_id"):
         print(port.get("port_id"))
         break
@@ -217,7 +217,7 @@ with open(tmp, "w") as fh:
     fh.flush()
     os.fsync(fh.fileno())
 os.rename(tmp, state_file)
-response = LocalClient(socket_path, timeout=10.0).delete_port(port_id)
+response = LocalClient(socket_path, timeout=3.0).delete_port(port_id)
 print("datapath_delete_done_then_sigkill port_id=%s response=%s" % (
     port_id,
     json.dumps(response, sort_keys=True),
@@ -276,7 +276,7 @@ import sys
 
 from neutron_aria.agent.uds_client import LocalClient
 
-status = LocalClient(sys.argv[1], timeout=10.0).status()
+status = LocalClient(sys.argv[1], timeout=3.0).status()
 print("datapath_status=%s" % json.dumps(status, sort_keys=True))
 if status.get("status") == "blocked":
     raise SystemExit("datapath status is blocked")

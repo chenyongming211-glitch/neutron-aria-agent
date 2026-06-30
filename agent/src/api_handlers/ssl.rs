@@ -1,16 +1,18 @@
 use axum::{
+    Json,
     extract::{Path, Query, State},
     response::IntoResponse,
-    Json,
 };
 
 use super::{
-    common::{err_response, AppState},
     TopQuery,
+    common::{AppState, err_response},
 };
 use crate::control_plane::LocalWriteDomain;
 
-fn map_ssl_connections(entries: Vec<aria_core::ssl_ops::SslConnEntry>) -> aria_api::SslListResponse {
+fn map_ssl_connections(
+    entries: Vec<aria_core::ssl_ops::SslConnEntry>,
+) -> aria_api::SslListResponse {
     let connections = entries
         .into_iter()
         .map(|e| aria_api::SslConnEntry {

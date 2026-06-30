@@ -1,0 +1,114 @@
+ovs-vsctl (Open vSwitch) 3.3.5
+DB Schema 8.5.1
+
+9dad7979-4af5-4765-a97a-c03f95654216
+    Bridge br-eth1
+        Port br-eth1
+            tag: 1059
+            Interface br-eth1
+                type: internal
+        Port bond1
+            tag: 4095
+            Interface bond1
+        Port phy-br-eth1
+            Interface phy-br-eth1
+                type: patch
+                options: {peer=int-br-eth1}
+    Bridge br-int
+        fail_mode: secure
+        datapath_type: system
+        Port tapaa4ddb4a-5b
+            tag: 3
+            Interface tapaa4ddb4a-5b
+        Port tape607e86b-9e
+            tag: 2
+            Interface tape607e86b-9e
+        Port tap86b83885-67
+            tag: 2
+            Interface tap86b83885-67
+        Port int-br-mgt
+            Interface int-br-mgt
+                type: patch
+                options: {peer=phy-br-mgt}
+        Port tapd53ce06c-c9
+            tag: 2
+            Interface tapd53ce06c-c9
+        Port tap2b915b95-66
+            tag: 1
+            Interface tap2b915b95-66
+                type: internal
+        Port int-br-eth1
+            Interface int-br-eth1
+                type: patch
+                options: {peer=phy-br-eth1}
+        Port int-br-mirror
+            Interface int-br-mirror
+                type: patch
+                options: {peer=phy-br-mirror}
+        Port br-int
+            Interface br-int
+                type: internal
+        Port int-br-dummy
+            Interface int-br-dummy
+                type: patch
+                options: {peer=phy-br-dummy}
+        Port tap0da68b40-16
+            tag: 3
+            Interface tap0da68b40-16
+                type: internal
+        Port tapc84708de-7e
+            tag: 2
+            Interface tapc84708de-7e
+                type: internal
+        Port tap39adf570-1a
+            tag: 2
+            Interface tap39adf570-1a
+    Bridge br-mgt
+        Port bond0
+            tag: 0
+            Interface bond0
+        Port br-mgt
+            Interface br-mgt
+                type: internal
+        Port phy-br-mgt
+            Interface phy-br-mgt
+                type: patch
+                options: {peer=int-br-mgt}
+    Bridge br-mirror
+        Port phy-br-mirror
+            Interface phy-br-mirror
+                type: patch
+                options: {peer=int-br-mirror}
+        Port br-mirror
+            Interface br-mirror
+                type: internal
+    Bridge br-dummy
+        Port br-dummy
+            Interface br-dummy
+                type: internal
+        Port phy-br-dummy
+            Interface phy-br-dummy
+                type: patch
+                options: {peer=int-br-dummy}
+    ovs_version: "3.3.5"
+
+## bridges
+br-dummy
+br-eth1
+br-int
+br-mgt
+br-mirror
+
+## br-int ports
+int-br-dummy
+int-br-eth1
+int-br-mgt
+int-br-mirror
+tap0da68b40-16
+tap2b915b95-66
+tap39adf570-1a
+tap86b83885-67
+tapaa4ddb4a-5b
+tapc84708de-7e
+tapd53ce06c-c9
+tape607e86b-9e

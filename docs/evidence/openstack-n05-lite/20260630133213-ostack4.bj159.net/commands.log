@@ -1,0 +1,35 @@
+## Container peer identities
+expected: Record uid/gid/group inputs for peercred allow-list
+command: collect_identity
+
+exit=0 disposition=pass output=/var/tmp/neutron-aria-uds-hardening/20260630133213-ostack4.bj159.net/peer-identities.txt
+
+## UDS directory and socket permissions
+expected: Record host and container view of /run/aria and socket permissions
+command: collect_permissions
+
+exit=0 disposition=pass output=/var/tmp/neutron-aria-uds-hardening/20260630133213-ostack4.bj159.net/socket-permissions.txt
+
+## World-writable socket check
+expected: Socket and parent directory have no other-user permission bits
+command: check_socket_not_world_writable
+
+exit=0 disposition=pass output=/var/tmp/neutron-aria-uds-hardening/20260630133213-ostack4.bj159.net/world-writable-check.txt
+
+## Peercred allow-list candidates
+expected: Record candidate uid/gid values before enabling enforcement
+command: collect_peercred_allow_list
+
+exit=0 disposition=pass output=/var/tmp/neutron-aria-uds-hardening/20260630133213-ostack4.bj159.net/peercred-allow-list.txt
+
+## Audit log path
+expected: Audit log path is known; required only when hardened mode is enforced
+command: collect_audit_log_path
+
+exit=0 disposition=pass output=/var/tmp/neutron-aria-uds-hardening/20260630133213-ostack4.bj159.net/audit-log.txt
+
+## Hardened enforcement gate
+expected: When REQUIRE_HARDENED=true, socket and audit requirements must pass
+command: check_hardened_required
+
+exit=0 disposition=pass output=/var/tmp/neutron-aria-uds-hardening/20260630133213-ostack4.bj159.net/hardened-required.txt

@@ -15,11 +15,17 @@ class AgentRuntimeStatus(object):
         self.reason = "not_synced"
         self.last_error = None
         self.last_generation = 0
+        self.last_submitted_generation = 0
+        self.accepted_generation = 0
+        self.applied_generation = 0
+        self.generation_lag = 0
         self.last_desired_hash = None
         self.last_snapshot_ports = 0
         self.last_managed_ports = 0
         self.last_managed_ports_detail = []
         self.last_port_statuses = []
+        self.domain_counts = []
+        self.degraded_reasons = []
         self.updated_at = None
 
     def mark_ready(
@@ -30,17 +36,25 @@ class AgentRuntimeStatus(object):
         desired_hash=None,
         managed_ports_detail=None,
         port_statuses=None,
+        accepted_generation=None,
+        applied_generation=None,
     ):
         self.ready = True
         self.degraded = False
         self.reason = "ready"
         self.last_error = None
         self.last_generation = generation
+        self.last_submitted_generation = generation
+        self.accepted_generation = self._int_or_default(accepted_generation, generation)
+        self.applied_generation = self._int_or_default(applied_generation, generation)
+        self.generation_lag = max(0, int(generation) - int(self.applied_generation))
         self.last_desired_hash = desired_hash
         self.last_snapshot_ports = snapshot_ports
         self.last_managed_ports = managed_ports
         self.last_managed_ports_detail = list(managed_ports_detail or [])
         self.last_port_statuses = list(port_statuses or [])
+        self.domain_counts = self._domain_counts(self.last_port_statuses)
+        self.degraded_reasons = self._degraded_reasons(self.last_port_statuses)
         self.updated_at = time.time()
 
     def mark_degraded(self, reason, error):
@@ -48,6 +62,12 @@ class AgentRuntimeStatus(object):
         self.degraded = True
         self.reason = reason
         self.last_error = str(error)
+        self.generation_lag = max(
+            0,
+            int(self.last_submitted_generation or self.last_generation or 0) -
+            int(self.applied_generation or 0),
+        )
+        self.degraded_reasons = [{"reason": reason, "count": 1}]
         self.updated_at = time.time()
 
     def to_dict(self):
@@ -59,11 +79,17 @@ class AgentRuntimeStatus(object):
             "reason": self.reason,
             "last_error": self.last_error,
             "last_generation": self.last_generation,
+            "last_submitted_generation": self.last_submitted_generation,
+            "accepted_generation": self.accepted_generation,
+            "applied_generation": self.applied_generation,
+            "generation_lag": self.generation_lag,
             "last_desired_hash": self.last_desired_hash,
             "last_snapshot_ports": self.last_snapshot_ports,
             "last_managed_ports": self.last_managed_ports,
             "last_managed_ports_detail": list(self.last_managed_ports_detail),
             "last_port_statuses": list(self.last_port_statuses),
+            "domain_counts": list(self.domain_counts),
+            "degraded_reasons": list(self.degraded_reasons),
             "updated_at": self.updated_at,
         }
 
@@ -72,3 +98,64 @@ class AgentRuntimeStatus(object):
         payload["binary"] = "neutron-aria-agent"
         payload["topic"] = "N/A"
         return payload
+
+    def _int_or_default(self, value, default):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return int(default or 0)
+
+    def _domain_counts(self, port_statuses):
+        counts = {}
+        for port_status in port_statuses or []:
+            domains = port_status.get("domains") or [{
+                "domain": "acl",
+                "status": port_status.get("status") or "unknown",
+                "effective_action": port_status.get("effective_action"),
+            }]
+            for domain_status in domains:
+                domain = domain_status.get("domain") or "unknown"
+                status = domain_status.get("status") or port_status.get("status") or "unknown"
+                effective_action = (
+                    domain_status.get("effective_action") or
+                    port_status.get("effective_action") or
+                    self._default_effective_action(status)
+                )
+                key = (domain, status, effective_action)
+                counts[key] = counts.get(key, 0) + 1
+        result = []
+        for domain, status, effective_action in sorted(counts):
+            result.append({
+                "domain": domain,
+                "status": status,
+                "effective_action": effective_action,
+                "count": counts[(domain, status, effective_action)],
+            })
+        return result
+
+    def _degraded_reasons(self, port_statuses):
+        counts = {}
+        for port_status in port_statuses or []:
+            domains = port_status.get("domains") or []
+            if not domains:
+                status = port_status.get("status")
+                reason = port_status.get("reason")
+                if status and status != "ready" and reason:
+                    counts[reason] = counts.get(reason, 0) + 1
+                continue
+            for domain_status in domains:
+                status = domain_status.get("status") or port_status.get("status")
+                reason = domain_status.get("reason") or port_status.get("reason")
+                if status and status != "ready" and reason:
+                    counts[reason] = counts.get(reason, 0) + 1
+        return [
+            {"reason": reason, "count": counts[reason]}
+            for reason in sorted(counts)
+        ]
+
+    def _default_effective_action(self, status):
+        if status == "ready":
+            return "enforce"
+        if status in ("blocked", "degraded", "error", "not_requested"):
+            return "bypass"
+        return "unknown"

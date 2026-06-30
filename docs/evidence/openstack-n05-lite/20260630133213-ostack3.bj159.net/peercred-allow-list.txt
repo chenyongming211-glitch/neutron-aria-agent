@@ -1,0 +1,11 @@
+## recommended peercred allow-list inputs
+neutron_aria_agent_config_user=neutron
+neutron_aria_agent_neutron_uid=42435
+neutron_aria_agent_neutron_gid=42435
+neutron_aria_agent_neutron_groups=42435 42400
+aria_datapath_config_user=root
+aria_datapath_root_uid=0
+aria_datapath_root_gid=0
+
+Set neutron_peercred_allowed_uids/gids only after confirming which process opens the UDS.
+For the current Python agent path, the expected peer is the neutron_aria_agent process user.

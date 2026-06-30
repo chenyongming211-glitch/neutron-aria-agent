@@ -1,0 +1,220 @@
+[    4.757096] resizefs[787]:   {
+[    4.757105] resizefs[787]:       "report": [
+[    4.757111] resizefs[787]:           {
+[    4.757117] resizefs[787]:               "lv": [
+[    4.757124] resizefs[787]:                   {"vg_name":"centos", "lv_dm_path":"/dev/mapper/centos-root", "lv_name":"root", "lv_size":"98.26", "lv_attr":"-wi-ao----", "lv_path":"/dev/centos/root"}
+[    4.757132] resizefs[787]:               ]
+[    4.757137] resizefs[787]:           }
+[    4.757144] resizefs[787]:       ]
+[    4.757150] resizefs[787]:   }
+[    4.757168] resizefs[787]: [36mINFO[0m[0000]common.go:60 Search LV /dev/mapper/centos-root(centos)
+[    4.757202] resizefs[787]: [36mINFO[0m[0000]common.go:62 /dev/mapper/centos-root is a LVM partition
+[    4.757231] resizefs[787]: [36mINFO[0m[0000]resizefs.go:55 Going to resize filesystem /dev/centos/root type:ext4
+[    4.810567] resizefs[787]: [37mDEBU[0m[0000]lvm_pv.go:82 $ /usr/sbin/pvs --reportformat json --nosuffix --units G -S vg_name=centos
+[    4.810629] resizefs[787]:   {
+[    4.810640] resizefs[787]:       "report": [
+[    4.810650] resizefs[787]:           {
+[    4.810661] resizefs[787]:               "pv": [
+[    4.810673] resizefs[787]:                   {"pv_name":"/dev/sda4", "vg_name":"centos", "pv_fmt":"lvm2", "pv_attr":"a--", "pv_size":"98.26", "pv_free":"0"}
+[    4.810683] resizefs[787]:               ]
+[    4.810694] resizefs[787]:           }
+[    4.810732] resizefs[787]:       ]
+[    4.810740] resizefs[787]:   }
+[    4.810917] resizefs[787]: [36mINFO[0m[0000]lvm_pv.go:114 PV &{Name:/dev/sda4 Group:centos Format:lvm2 Attr:a-- Size:98.26 Free:0}
+[    4.994195] resizefs[787]: [36mINFO[0m[0000]grow.go:17 $ /bin/growpart --dry-run /dev/sda 4
+[    4.994254] resizefs[787]: CHANGE: partition=4 start=17805312 old: size=191907840 end=209713151 new: size=233852895 end=251658206
+[    4.994281] resizefs[787]: [33mWARN[0m[0000]grow.go:25 DETECTED SIZE CHANGE FROM 191907840 ====> 233852895
+[    4.994293] resizefs[787]: [33mWARN[0m[0000]lvm_pv.go:128 PV /dev/sda4 select for grow
+[    4.994303] resizefs[787]: [36mINFO[0m[0000]lvm_pv.go:42 Do resize for /dev/sda4
+[[0;32m  OK  [0m] Started [0;1;39mNTP client/server[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: nginx is a n?onal database storage system.[0m.
+         Starting [0;1;39mLSB: Simple Netwo?rotocol (lwmiclient) Daemon[0m...
+[[0;32m  OK  [0m] Started [0;1;39mAuthorization Manager[0m.
+[[0;32m  OK  [0m] Finished [0;1;39mRotate log files[0m.
+[    6.637123] cloud-init[925]: Cloud-init v. 23.1.1-11.el9.0.1 running 'init-local' at Tue, 30 Jun 2026 06:12:52 +0000. Up 6.61 seconds.
+[[0;32m  OK  [0m] Finished [0;1;39mInitial cloud-init job (pre-networking)[0m.
+[[0;32m  OK  [0m] Reached target [0;1;39mPreparation for Network[0m.
+[[0;32m  OK  [0m] Started [0;1;39mLSB: Simple Networ? Protocol (lwmiclient) Daemon[0m.
+[  132.040602] resizefs[787]: [36mINFO[0m[0127]grow.go:61 $ /bin/growpart /dev/sda 4
+[  132.040655] resizefs[787]: CHANGED: partition=4 start=17805312 old: size=191907840 end=209713151 new: size=233852895 end=251658206
+[  132.040681] resizefs[787]: [33mWARN[0m[0127]grow.go:69 DISK grow success. /dev/sda: CHANGED: partition=4 start=17805312 old: size=191907840 end=209713151 new: size=233852895 end=251658206
+[  132.074327] resizefs[787]: [37mDEBU[0m[0127]lvm_pv.go:55 $ /usr/sbin/pvresize -t /dev/sda4
+[  132.074404] resizefs[787]:   TEST MODE: Metadata will NOT be updated and volumes will not be (de)activated.
+[  132.074416] resizefs[787]:   Physical volume "/dev/sda4" changed
+[  132.074423] resizefs[787]:   1 physical volume(s) resized or updated / 0 physical volume(s) not resized
+[  132.112945] resizefs[787]: [33mWARN[0m[0127]lvm_pv.go:63 $ /usr/sbin/pvresize /dev/sda4
+[  132.112993] resizefs[787]:   Physical volume "/dev/sda4" changed
+[  132.113010] resizefs[787]:   1 physical volume(s) resized or updated / 0 physical volume(s) not resized
+[  132.113092] resizefs[787]: [36mINFO[0m[0127]lvm_pv.go:69 Resize PV /dev/sda4 success
+[  132.142851] resizefs[787]: [37mDEBU[0m[0127]lvm.go:86 $ /sbin/vgs --reportformat json --nosuffix --units G -o vg_name,vg_size,vg_free centos
+[  132.142908] resizefs[787]:   {
+[  132.142919] resizefs[787]:       "report": [
+[  132.142931] resizefs[787]:           {
+[  132.142941] resizefs[787]:               "vg": [
+[  132.142951] resizefs[787]:                   {"vg_name":"centos", "vg_size":"119.73", "vg_free":"21.47"}
+[  132.142985] resizefs[787]:               ]
+[  132.143102] resizefs[787]:           }
+[  132.143198] resizefs[787]:       ]
+[  132.143316] resizefs[787]:   }
+[  132.143594] resizefs[787]: [36mINFO[0m[0127]lvm_lv.go:79 Found volume group: centos(size:119.73 free:21.47)
+[  132.250651] resizefs[787]: [37mDEBU[0m[0127]lvm_lv.go:88 $ /usr/sbin/lvresize -l +100%FREE /dev/centos/root
+[  132.250729] resizefs[787]:   Size of logical volume centos/root changed from <91.51 GiB (23426 extents) to <111.51 GiB (28546 extents).
+[  132.250753] resizefs[787]:   Logical volume centos/root successfully resized.
+[  132.250765] resizefs[787]: [36mINFO[0m[0127]lvm_lv.go:94 Resize logical volume success, going to resize underlay filesystem
+[  133.542864] resizefs[787]: [37mDEBU[0m[0128]common.go:95 $ /usr/sbin/resize2fs /dev/centos/root
+[  133.542915] resizefs[787]: resize2fs 1.46.5 (30-Dec-2021)
+[  133.542926] resizefs[787]: Filesystem at /dev/centos/root is mounted on /; on-line resizing required
+[  133.542935] resizefs[787]: old_desc_blocks = 12, new_desc_blocks = 14
+[  133.542945] resizefs[787]: The filesystem on /dev/centos/root is now 29231104 (4k) blocks long.
+[  133.542954] resizefs[787]:
+[  133.542964] resizefs[787]: [36mINFO[0m[0128]common.go:101 Resize filesystem /dev/centos/root success
+[[0;32m  OK  [0m] Finished [0;1;39mAuto Resize Filesystem[0m.
+         Starting [0;1;39mNetwork Manager[0m...
+[[0;32m  OK  [0m] Started [0;1;39mNetwork Manager[0m.
+[[0;32m  OK  [0m] Reached target [0;1;39mNetwork[0m.
+         Starting [0;1;39mNetwork Manager Wait Online[0m...
+         Starting [0;1;39mGSSAPI Proxy Daemon[0m...
+         Starting [0;1;39mPM2 process manager[0m...
+         Starting [0;1;39mDynamic System Tuning Daemon[0m...
+         Starting [0;1;39mHostname Service[0m...
+[[0;32m  OK  [0m] Started [0;1;39mGSSAPI Proxy Daemon[0m.
+[[0;32m  OK  [0m] Reached target [0;1;39mNFS client services[0m.
+[[0;32m  OK  [0m] Reached target [0;1;39mPreparation for Remote File Systems[0m.
+[[0;32m  OK  [0m] Reached target [0;1;39mRemote File Systems[0m.
+         Starting [0;1;39mLSB: initscript[0m...
+[[0;32m  OK  [0m] Started [0;1;39mLSB: initscript[0m.
+[[0;32m  OK  [0m] Started [0;1;39mHostname Service[0m.
+[[0;32m  OK  [0m] Listening on [0;1;39mLoad/Save RF ?itch Status /dev/rfkill Watch[0m.
+         Starting [0;1;39mNetwork Manager Script Dispatcher Service[0m...
+[[0;32m  OK  [0m] Started [0;1;39mNetwork Manager Script Dispatcher Service[0m.
+[[0;32m  OK  [0m] Started [0;1;39mDynamic System Tuning Daemon[0m.
+[[0;32m  OK  [0m] Started [0;1;39mPM2 process manager[0m.
+[[0;32m  OK  [0m] Finished [0;1;39mNetwork Manager Wait Online[0m.
+         Starting [0;1;39mInitial cloud-ini? (metadata service crawler)[0m...
+[  136.474072] cloud-init[1267]: Cloud-init v. 23.1.1-11.el9.0.1 running 'init' at Tue, 30 Jun 2026 06:15:02 +0000. Up 136.45 seconds.
+[  136.498442] cloud-init[1267]: ci-info: ++++++++++++++++++++++++++++++++++++++++Net device info++++++++++++++++++++++++++++++++++++++++
+[  136.498514] cloud-init[1267]: ci-info: +--------+------+------------------------------+-----------------+--------+-------------------+
+[  136.498529] cloud-init[1267]: ci-info: | Device |  Up  |           Address            |       Mask      | Scope  |     Hw-Address    |
+[  136.498537] cloud-init[1267]: ci-info: +--------+------+------------------------------+-----------------+--------+-------------------+
+[  136.498545] cloud-init[1267]: ci-info: |  eth0  | True |         10.58.159.32         | 255.255.255.128 | global | fa:16:3e:db:5d:bb |
+[  136.498553] cloud-init[1267]: ci-info: |  eth0  | True | fe80::f816:3eff:fedb:5dbb/64 |        .        |  link  | fa:16:3e:db:5d:bb |
+[  136.498585] cloud-init[1267]: ci-info: |   lo   | True |          127.0.0.1           |    255.0.0.0    |  host  |         .         |
+[  136.499059] cloud-init[1267]: ci-info: |   lo   | True |           ::1/128            |        .        |  host  |         .         |
+[  136.499597] cloud-init[1267]: ci-info: +--------+------+------------------------------+-----------------+--------+-------------------+
+[  136.500001] cloud-init[1267]: ci-info: ++++++++++++++++++++++++++++++++Route IPv4 info+++++++++++++++++++++++++++++++++
+[  136.500021] cloud-init[1267]: ci-info: +-------+-----------------+--------------+-----------------+-----------+-------+
+[  136.500032] cloud-init[1267]: ci-info: | Route |   Destination   |   Gateway    |     Genmask     | Interface | Flags |
+[  136.500039] cloud-init[1267]: ci-info: +-------+-----------------+--------------+-----------------+-----------+-------+
+[  136.500046] cloud-init[1267]: ci-info: |   0   |   10.58.159.0   |   0.0.0.0    | 255.255.255.128 |    eth0   |   U   |
+[  136.500054] cloud-init[1267]: ci-info: |   1   | 169.254.169.254 | 10.58.159.24 | 255.255.255.255 |    eth0   |  UGH  |
+[  136.500061] cloud-init[1267]: ci-info: +-------+-----------------+--------------+-----------------+-----------+-------+
+[  136.500068] cloud-init[1267]: ci-info: +++++++++++++++++++Route IPv6 info+++++++++++++++++++
+[  136.500075] cloud-init[1267]: ci-info: +-------+-------------+---------+-----------+-------+
+[  136.500082] cloud-init[1267]: ci-info: | Route | Destination | Gateway | Interface | Flags |
+[  136.500090] cloud-init[1267]: ci-info: +-------+-------------+---------+-----------+-------+
+[  136.500110] cloud-init[1267]: ci-info: |   1   |  fe80::/64  |    ::   |    eth0   |   U   |
+[  136.500212] cloud-init[1267]: ci-info: |   3   |    local    |    ::   |    eth0   |   U   |
+[  136.500308] cloud-init[1267]: ci-info: |   4   |  multicast  |    ::   |    eth0   |   U   |
+[  136.500420] cloud-init[1267]: ci-info: +-------+-------------+---------+-----------+-------+
+[  136.601633] cloud-init[1267]: 2026-06-30 06:15:02,670 - util.py[WARNING]: Running interface command ['nmcli', 'connection', 'up', 'filename', '/etc/NetworkManager/system-connections/cloud-init-eth0.nmconnection'] failed
+[  136.634472] cloud-init[1267]: 2026-06-30 06:15:02,703 - schema.py[WARNING]: Invalid cloud-config provided: Please run 'sudo cloud-init schema --system' to see the schema errors.
+[[0;32m  OK  [0m] Stopped [0;1;39mNetwork Manager Wait Online[0m.
+         Stopping [0;1;39mNetwork Manager Wait Online[0m...
+         Stopping [0;1;39mNetwork Manager[0m...
+[[0;32m  OK  [0m] Stopped [0;1;39mNetwork Manager[0m.
+         Starting [0;1;39mNetwork Manager[0m...
+[[0;32m  OK  [0m] Started [0;1;39mNetwork Manager[0m.
+         Starting [0;1;39mNetwork Manager Wait Online[0m...
+[[0;32m  OK  [0m] Finished [0;1;39mInitial cloud-ini?ob (metadata service crawler)[0m.
+[[0;32m  OK  [0m] Reached target [0;1;39mCloud-config availability[0m.
+         Starting [0;1;39mPermit User Sessions[0m...
+[[0;32m  OK  [0m] Finished [0;1;39mPermit User Sessions[0m.
+[[0;32m  OK  [0m] Started [0;1;39mDeferred execution scheduler[0m.
+[[0;32m  OK  [0m] Started [0;1;39mCommand Scheduler[0m.
+[[0;32m  OK  [0m] Finished [0;1;39mNetwork Manager Wait Online[0m.
+[[0;32m  OK  [0m] Reached target [0;1;39mNetwork is Online[0m.
+         Starting [0;1;39mApply the settings specified in cloud-config[0m...
+         Starting [0;1;39mCrash recovery kernel arming[0m...
+[[0;32m  OK  [0m] Started [0;1;39mnetmgr daemon[0m.
+         Starting [0;1;39m/etc/rc.d/rc.local Compatibility[0m...
+         Starting [0;1;39mNotify NFS peers of a restart[0m...
+         Starting [0;1;39mLSB: start and stop Net-SNMP daemon[0m...
+[[0;32m  OK  [0m] Started [0;1;39mNotify NFS peers of a restart[0m.
+[  138.139514] cloud-init[1413]: Cloud-init v. 23.1.1-11.el9.0.1 running 'modules:config' at Tue, 30 Jun 2026 06:15:04 +0000. Up 138.09 seconds.
+[[0;32m  OK  [0m] Started [0;1;39mLSB: start and stop Net-SNMP daemon[0m.
+         Starting [0;1;39mSYSV: OpenSSH server daemon[0m...
+[[0;32m  OK  [0m] Finished [0;1;39mApply the settings specified in cloud-config[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: OpenSSH server daemon[0m.
+         Starting [0;1;39mLSB: initscript[0m...
+         Starting [0;1;39mSYSV: pm2 is a node js  system.[0m...
+[  138.891003] Warning: Deprecated Driver is detected: nft_compat will not be maintained in a future major release and may be disabled
+[[0;32m  OK  [0m] Created slice [0;1;39mUser Slice of UID 1000[0m.
+         Starting [0;1;39mUser Runtime Directory /run/user/1000[0m...
+[[0;32m  OK  [0m] Finished [0;1;39mUser Runtime Directory /run/user/1000[0m.
+         Starting [0;1;39mUser Manager for UID 1000[0m...
+[[0;32m  OK  [0m] Created slice [0;1;39mUser Slice of UID 1002[0m.
+         Starting [0;1;39mUser Runtime Directory /run/user/1002[0m...
+[[0;32m  OK  [0m] Finished [0;1;39mUser Runtime Directory /run/user/1002[0m.
+         Starting [0;1;39mUser Manager for UID 1002[0m...
+[[0;32m  OK  [0m] Created slice [0;1;39mUser Slice of UID 1001[0m.
+         Starting [0;1;39mUser Runtime Directory /run/user/1001[0m...
+[[0;32m  OK  [0m] Finished [0;1;39mUser Runtime Directory /run/user/1001[0m.
+         Starting [0;1;39mUser Manager for UID 1001[0m...
+[[0;32m  OK  [0m] Started [0;1;39mUser Manager for UID 1000[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c1 of User hlas[0m.
+[[0;32m  OK  [0m] Started [0;1;39mUser Manager for UID 1002[0m.
+[[0;32m  OK  [0m] Started [0;1;39mUser Manager for UID 1001[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c2 of User elasticsearch[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c3 of User mongodb[0m.
+[[0;32m  OK  [0m] Started [0;1;39mLSB: initscript[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c4 of User hlas[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: pm2 is a node js  system.[0m.
+         Starting [0;1;39mSYSV: executeTar ?al database storage system.[0m...
+         Starting [0;1;39mSYSV: forward is ?al database storage system.[0m...
+         Starting [0;1;39mSYSV: jdbc is a n?al database storage system.[0m...
+         Starting [0;1;39mSYSV: MongoDB is ?al database storage system.[0m...
+         Starting [0;1;39mSYSV: MongoDB is ?al database storage system.[0m...
+         Starting [0;1;39mSYSV: MongoDB is ?al database storage system.[0m...
+         Starting [0;1;39mSYSV: scanagent i?al database storage system.[0m...
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: forward is a?onal database storage system.[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: jdbc is a no?onal database storage system.[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: MongoDB is a?onal database storage system.[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: executeTar i?onal database storage system.[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c5 of User mongodb[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: scanagent is?onal database storage system.[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c6 of User hlas[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSYSV: MongoDB is a?onal database storage system.[0m.
+[[0;32m  OK  [0m] Started [0;1;39mSession c7 of User hlas[0m.
+[[0;32m  OK  [0m] Started [0;1;39m/etc/rc.d/rc.local Compatibility[0m.
+         Starting [0;1;39mExecute cloud user/final scripts[0m...
+         Starting [0;1;39mHold until boot process finishes up[0m...
+         Starting [0;1;39mTerminate Plymouth Boot Screen[0m...
+[  142.697568] cloud-init[2626]: Cloud-init v. 23.1.1-11.el9.0.1 running 'modules:final' at Tue, 30 Jun 2026 06:15:08 +0000. Up 142.64 seconds.
+[  142.859390] cloud-init[2626]:   Cannot use /dev/vda4: device not found
+[  142.862688] cloud-init[2626]:   0 physical volume(s) resized or updated / 0 physical volume(s) not resized
+[  142.895653] cloud-init[2626]:   New size (28546 extents) matches existing size (28546 extents).
+[  142.914558] cloud-init[2626]: xfs_growfs: /dev/mapper/centos-root is not a mounted XFS filesystem
+[  142.916286] cloud-init[2626]: 2026-06-30 06:15:08,985 - cc_scripts_user.py[WARNING]: Failed to run module scripts-user (scripts in /var/lib/cloud/instance/scripts)
+[  142.917524] cloud-init[2626]: 2026-06-30 06:15:08,985 - util.py[WARNING]: Running module scripts-user (<module 'cloudinit.config.cc_scripts_user' from '/usr/lib/python3.9/site-packages/cloudinit/config/cc_scripts_user.py'>) failed
+<14>Jun 30 14:15:09 cloud-init: #############################################################
+<14>Jun 30 14:15:09 cloud-init: -----BEGIN SSH HOST KEY FINGERPRINTS-----
+<14>Jun 30 14:15:09 cloud-init: 256 SHA256:IVc3YASaqExqPW2PTOpXDEfvwAvRmyOiPU0bh3QZrrc root@1290f590a0f0 (ECDSA)
+<14>Jun 30 14:15:09 cloud-init: 256 SHA256:BwQtY/ClB4zZYFSDDTT9naoYzYsThiytryFeZTqseQA root@1290f590a0f0 (ED25519)
+<14>Jun 30 14:15:09 cloud-init: 3072 SHA256:Jeh6fqgScPqkwoYh/9htx9dQbVwyH/aHpY3WQgn/UkU root@1290f590a0f0 (RSA)
+<14>Jun 30 14:15:09 cloud-init: -----END SSH HOST KEY FINGERPRINTS-----
+<14>Jun 30 14:15:09 cloud-init: #############################################################
+-----BEGIN SSH HOST KEY KEYS-----
+ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBB+npXOtByefnjou1p4Fsb2ldKYllPMLpfYa3NduBog95xJYeaSfZ5/Gm8qAh3fn1uPjkjS4a2zbd3qo90wwVFk= root@1290f590a0f0
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGW65/+0oFjnXW1MjYD8/N/pstlq1gd8s6mt4gC2/lKO root@1290f590a0f0
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDS5/RMlx8m2NI7mbcgOAHmDjVTcXR1jUC/cxQnJqkfk3bNll5A8UbWLKwsV+Eyrt6Aw9r6j7KgF5aP+cyb0Eedr1YTFicOsEQqFl4qE7OcKP8W8EM1cFp8wfoAzm9hMxfxxudsBTgAPEuJWWn7b15yrpDQZBovtVWtdo297fApZ6LK1Ewj9ZR6CGc3D2NOZI7hOlwcUXTCjDnkzwXuBLP6X1t/HuLApyP+pL/rcTxfJSngruodgdKmh9ZghfHbLpDdEKgsHP0vx0gyNKlxTVzQMp6E5iyYg6yQiwPZ/lbYQYKfX2C0e+pkGDVVgzdAsrnIgLwqIYXFohHDVWo6i2ytQQpyZix5qjpq0NyN99DAex19KGhDCuShaZZ0knFLb/WQNcLgVJYFBK2Z95OdWHEQcbszzhDmHTl8ii0/ACLoJf9T+CBfSo4jzUkPVtkSHewi52Haibt+GMI44PJ86bWZ0PGcka/xGhyAN9NwGzLS1Gy4ImIsId7Lvs4lTb36uxU= root@1290f590a0f0
+-----END SSH HOST KEY KEYS-----
+[  143.005674] cloud-init[2626]: Cloud-init v. 23.1.1-11.el9.0.1 finished at Tue, 30 Jun 2026 06:15:09 +0000. Datasource DataSourceNone.  Up 142.99 seconds
+[  143.007473] cloud-init[2626]: 2026-06-30 06:15:09,075 - cc_final_message.py[WARNING]: Used fallback datasource
+[[0;1;31mFAILED[0m] Failed to start [0;1;39mExecute cloud user/final scripts[0m.
+
+Rocky Linux 9.1 (Blue Onyx)
+Kernel 5.14.0-162.6.1.el9_1.x86_64 on an x86_64
+
+Activate the web console with: systemctl enable --now cockpit.socket
+
+LAS login:

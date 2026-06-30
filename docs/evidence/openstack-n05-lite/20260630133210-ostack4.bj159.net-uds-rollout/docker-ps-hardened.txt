@@ -1,0 +1,2 @@
+CONTAINER ID   IMAGE                                      COMMAND                  CREATED         STATUS        PORTS     NAMES
+5e40ecba5b2f   aria-datapath:peercred-test-202606301305   "dumb-init --single-…"   2 seconds ago   Up 1 second             aria_datapath

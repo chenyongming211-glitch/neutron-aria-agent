@@ -3,6 +3,8 @@ set -euo pipefail
 
 EXPECTED_HOSTS="${EXPECTED_HOSTS:-ostack2.bj159.net ostack3.bj159.net ostack4.bj159.net}"
 ADMINRC="${ADMINRC:-/root/adminrc}"
+REQUIRE_HEARTBEAT_SUMMARY_FIELDS="${REQUIRE_HEARTBEAT_SUMMARY_FIELDS:-false}"
+HEARTBEAT_SUMMARY_TIMEOUT="${HEARTBEAT_SUMMARY_TIMEOUT:-45}"
 
 if [ -r "${ADMINRC}" ]; then
     # Source OpenStack credentials when the script is run on a host shell.
@@ -29,6 +31,19 @@ fi
 echo "Checking neutron-aria-agent heartbeat..."
 neutron agent-list | grep -i "Aria ACL agent"
 
+summary_fields_present() {
+    local details="$1"
+    for field in \
+        last_submitted_generation \
+        accepted_generation \
+        applied_generation \
+        generation_lag \
+        domain_counts \
+        degraded_reasons; do
+        echo "${details}" | grep "${field}" >/dev/null || return 1
+    done
+}
+
 for host in ${EXPECTED_HOSTS}; do
     line="$(neutron agent-list | grep "Aria ACL agent" | grep " ${host} " || true)"
     if [ -z "${line}" ]; then
@@ -38,7 +53,22 @@ for host in ${EXPECTED_HOSTS}; do
     echo "${line}" | grep ":-)" >/dev/null
     agent_id="$(echo "${line}" | awk '{print $2}')"
     echo "Inspecting ${host} (${agent_id})"
-    neutron agent-show "${agent_id}" -f json | grep "neutron-aria-agent" >/dev/null
+    details="$(neutron agent-show "${agent_id}" -f json)"
+    echo "${details}" | grep "neutron-aria-agent" >/dev/null
+
+    if [ "${REQUIRE_HEARTBEAT_SUMMARY_FIELDS}" = "true" ]; then
+        deadline=$((SECONDS + HEARTBEAT_SUMMARY_TIMEOUT))
+        while ! summary_fields_present "${details}"; do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+                echo "missing neutron-aria-agent heartbeat summary fields on ${host}" >&2
+                echo "${details}" >&2
+                exit 1
+            fi
+            sleep 3
+            details="$(neutron agent-show "${agent_id}" -f json)"
+        done
+        echo "heartbeat_summary_fields=ok host=${host}"
+    fi
 done
 
 echo "neutron-aria-agent heartbeat smoke passed"

@@ -1,0 +1,11 @@
+===instance-00000003
+error: argument unsupported: QEMU guest agent is not configured
+
+===instance-00000006
+error: argument unsupported: QEMU guest agent is not configured
+
+===instance-00000009
+error: argument unsupported: QEMU guest agent is not configured
+
+===instance-0000000c
+error: argument unsupported: QEMU guest agent is not configured

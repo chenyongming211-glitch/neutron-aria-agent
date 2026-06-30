@@ -10,10 +10,12 @@ VM_IP="${VM_IP:-}"
 EXPECTED_PORT_ID="${EXPECTED_PORT_ID:-}"
 EXPECTED_IFNAME="${EXPECTED_IFNAME:-}"
 BLOCK_SRC_CIDR="${BLOCK_SRC_CIDR:-}"
+BLOCK_DST_CIDR="${BLOCK_DST_CIDR:-}"
 ACL_DIRECTION="${ACL_DIRECTION:-ingress}"
 ACL_PROTOCOL="${ACL_PROTOCOL:-icmp}"
 PING_COUNT="${PING_COUNT:-2}"
 PING_TIMEOUT="${PING_TIMEOUT:-1}"
+TRAFFIC_CHECK_CMD="${TRAFFIC_CHECK_CMD:-}"
 
 die() {
     echo "ERROR: $*" >&2
@@ -46,15 +48,31 @@ route_source_cidr() {
 build_acl_fixture() {
     local port_id="$1"
     local source_cidr="$2"
-    local direction="$3"
-    local protocol="$4"
-    "${PYTHON_BIN}" - "${port_id}" "${source_cidr}" "${direction}" "${protocol}" <<'PY'
+    local dest_cidr="$3"
+    local direction="$4"
+    local protocol="$5"
+    "${PYTHON_BIN}" - "${port_id}" "${source_cidr}" "${dest_cidr}" "${direction}" "${protocol}" <<'PY'
 from __future__ import print_function
 
 import json
 import sys
 
-port_id, source_cidr, direction, protocol = sys.argv[1:5]
+port_id, source_cidr, dest_cidr, direction, protocol = sys.argv[1:6]
+rule = {
+    "id": "drop-smoke-%s" % protocol,
+    "policy_id": "acl-smoke-policy",
+    "direction": direction,
+    "priority": 100,
+    "action": "drop",
+    "ethertype": "IPv4",
+    "protocol": protocol,
+    "enabled": True,
+    "revision_number": 1,
+}
+if source_cidr:
+    rule["src_cidr"] = source_cidr
+if dest_cidr:
+    rule["dst_cidr"] = dest_cidr
 print(json.dumps({
     "policies": [{
         "id": "acl-smoke-policy",
@@ -63,18 +81,7 @@ print(json.dumps({
         "stateful": True,
         "revision_number": 1,
     }],
-    "rules": [{
-        "id": "drop-smoke-%s" % protocol,
-        "policy_id": "acl-smoke-policy",
-        "direction": direction,
-        "priority": 100,
-        "action": "drop",
-        "ethertype": "IPv4",
-        "protocol": protocol,
-        "src_cidr": source_cidr,
-        "enabled": True,
-        "revision_number": 1,
-    }],
+    "rules": [rule],
     "address_sets": [],
     "bindings": [{
         "id": "acl-smoke-binding",
@@ -113,6 +120,14 @@ print("rollback_remaining_managed_ports=%d" % len(remaining))
 if remaining:
     raise SystemExit(1)
 PY
+}
+
+traffic_check() {
+    if [ -n "${TRAFFIC_CHECK_CMD}" ]; then
+        bash -c "${TRAFFIC_CHECK_CMD}"
+    else
+        ping -c "${PING_COUNT}" -W "${PING_TIMEOUT}" "${VM_IP}"
+    fi
 }
 
 show_acl_state() {
@@ -164,16 +179,34 @@ fi
 [ -n "${EXPECTED_PORT_ID}" ] || die "EXPECTED_PORT_ID is required"
 [ -n "${EXPECTED_IFNAME}" ] || die "EXPECTED_IFNAME is required"
 
-if [ -z "${BLOCK_SRC_CIDR}" ]; then
+case "${ACL_DIRECTION}" in
+    ingress)
+        if [ -z "${BLOCK_SRC_CIDR}" ]; then
+            BLOCK_SRC_CIDR="$(route_source_cidr)" || die "failed to infer source IP for ${VM_IP}; set BLOCK_SRC_CIDR"
+        fi
+        ;;
+    egress)
+        if [ -z "${BLOCK_SRC_CIDR}" ] && [ -z "${BLOCK_DST_CIDR}" ]; then
+            BLOCK_DST_CIDR="$(route_source_cidr)" || die "failed to infer local destination IP for ${VM_IP}; set BLOCK_DST_CIDR"
+        fi
+        ;;
+    *)
+        if [ -z "${BLOCK_SRC_CIDR}" ] && [ -z "${BLOCK_DST_CIDR}" ]; then
+            BLOCK_SRC_CIDR="$(route_source_cidr)" || die "failed to infer source IP for ${VM_IP}; set BLOCK_SRC_CIDR or BLOCK_DST_CIDR"
+        fi
+        ;;
+esac
+
+if [ -z "${BLOCK_SRC_CIDR}" ] && [ -z "${BLOCK_DST_CIDR}" ]; then
     BLOCK_SRC_CIDR="$(route_source_cidr)" || die "failed to infer source IP for ${VM_IP}; set BLOCK_SRC_CIDR"
 fi
 
 echo "Pre-check: VM ${VM_IP} must be reachable before ACL is applied"
-ping -c "${PING_COUNT}" -W "${PING_TIMEOUT}" "${VM_IP}" >/dev/null
+traffic_check >/dev/null
 
-acl_fixture_json="$(build_acl_fixture "${EXPECTED_PORT_ID}" "${BLOCK_SRC_CIDR}" "${ACL_DIRECTION}" "${ACL_PROTOCOL}")"
+acl_fixture_json="$(build_acl_fixture "${EXPECTED_PORT_ID}" "${BLOCK_SRC_CIDR}" "${BLOCK_DST_CIDR}" "${ACL_DIRECTION}" "${ACL_PROTOCOL}")"
 
-echo "Applying ACL full-resync fixture port=${EXPECTED_PORT_ID} ifname=${EXPECTED_IFNAME} src=${BLOCK_SRC_CIDR} direction=${ACL_DIRECTION} protocol=${ACL_PROTOCOL}"
+echo "Applying ACL full-resync fixture port=${EXPECTED_PORT_ID} ifname=${EXPECTED_IFNAME} src=${BLOCK_SRC_CIDR:-<any>} dst=${BLOCK_DST_CIDR:-<any>} direction=${ACL_DIRECTION} protocol=${ACL_PROTOCOL}"
 ACL_FIXTURE_JSON="${acl_fixture_json}" \
     ROLLBACK=false \
     MIN_MANAGED_PORTS=1 \
@@ -187,7 +220,7 @@ echo "Checking datapath ACL policy state"
 show_acl_state
 
 echo "Checking that ACL blocks ${ACL_PROTOCOL} traffic"
-if ping -c "${PING_COUNT}" -W "${PING_TIMEOUT}" "${VM_IP}" >/dev/null; then
+if traffic_check >/dev/null; then
     die "ACL did not block ping to ${VM_IP}"
 fi
 
@@ -196,6 +229,6 @@ rollback_managed_ports
 ROLLBACK_ARMED=false
 
 echo "Post-check: VM ${VM_IP} must recover after rollback"
-ping -c "${PING_COUNT}" -W "${PING_TIMEOUT}" "${VM_IP}" >/dev/null
+traffic_check >/dev/null
 
 echo "neutron-aria-agent ACL full-resync smoke passed for ${EXPECTED_PORT_ID}"
