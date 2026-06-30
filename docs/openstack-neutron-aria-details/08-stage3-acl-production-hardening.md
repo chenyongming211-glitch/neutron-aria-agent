@@ -81,7 +81,7 @@ remaining `pending` gate.
 
 | Scenario | Required Result |
 | --- | --- |
-| No `aria_acl` binding | Port remains bypass/not_requested; no local ACL authority is claimed. |
+| No `aria_acl` binding | When the ACL domain is Neutron-managed, the port may remain locally claimed for `acl` write arbitration, but the effective ACL status must be `not_requested` with `effective_action=bypass`; OVS forwarding remains baseline. |
 | Binding references missing policy | Domain status is degraded/bypass; OVS forwarding remains baseline. |
 | ACL compile/apply failure | Domain status is degraded/bypass; no false ready. |
 | UDS timeout | Python remains pending/degraded and reconciles through status/full-resync. |

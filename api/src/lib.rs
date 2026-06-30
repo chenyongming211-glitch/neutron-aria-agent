@@ -272,13 +272,16 @@ pub struct ManagedNeutronPort {
 #[schema(example = json!({
     "domain": "acl",
     "status": "ready",
-    "reason": null
+    "reason": null,
+    "effective_action": "enforce"
 }))]
 pub struct NeutronDomainStatus {
     pub domain: String,
     pub status: String,
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default)]
+    pub effective_action: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -290,7 +293,12 @@ pub struct NeutronDomainStatus {
     "status": "ready",
     "reason": null,
     "managed_domains": ["acl"],
-    "domains": [{"domain": "acl", "status": "ready", "reason": null}]
+    "domains": [{
+        "domain": "acl",
+        "status": "ready",
+        "reason": null,
+        "effective_action": "enforce"
+    }]
 }))]
 pub struct NeutronPortStatus {
     pub port_id: String,

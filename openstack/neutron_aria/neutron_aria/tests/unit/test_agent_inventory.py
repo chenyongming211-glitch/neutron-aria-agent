@@ -188,6 +188,22 @@ class AgentInventoryTestCase(unittest.TestCase):
         self.assertFalse(sriov_entry["eligible"])
         self.assertEqual("unsupported_vif_type:hw_veb", sriov_entry["disposition"])
 
+    def test_candidate_snapshot_claims_acl_domain_but_bypasses_without_binding(self):
+        builder = PortCandidateBuilder(
+            "ostack2",
+            managed_domains=["acl"],
+            acl_index=EffectiveAclIndex(),
+        )
+
+        snapshot = builder.build_snapshot([neutron_port(VM_PORT)], generation=11)
+        vm_entry = snapshot["ports"][0]
+
+        self.assertTrue(vm_entry["eligible"])
+        self.assertEqual(["acl"], vm_entry["managed_domains"])
+        self.assertEqual("not_requested", vm_entry["acl"]["status"])
+        self.assertEqual("bypass", vm_entry["acl"]["effective_action"])
+        self.assertEqual("no_enabled_binding", vm_entry["acl"]["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

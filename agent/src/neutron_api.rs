@@ -770,6 +770,8 @@ async fn apply_neutron_snapshot(
                     snapshot.generation,
                 )
                 .await;
+            let (port_status, port_reason) =
+                successful_port_status(&domain_result.domains);
             next_ports.insert(managed.port_id.clone(), managed.clone());
             next_statuses.insert(
                 managed.port_id.clone(),
@@ -779,8 +781,8 @@ async fn apply_neutron_snapshot(
                     snapshot.generation,
                     requested_hash.clone(),
                     managed.managed_domains.clone(),
-                    "ready",
-                    None,
+                    &port_status,
+                    port_reason,
                     domain_result.domains,
                 ),
             );
@@ -848,6 +850,8 @@ async fn apply_neutron_snapshot(
                             snapshot.generation,
                         )
                         .await;
+                    let (port_status, port_reason) =
+                        successful_port_status(&domain_result.domains);
                     next_ports.insert(managed.port_id.clone(), managed.clone());
                     next_statuses.insert(
                         managed.port_id.clone(),
@@ -857,8 +861,8 @@ async fn apply_neutron_snapshot(
                             snapshot.generation,
                             requested_hash.clone(),
                             managed.managed_domains.clone(),
-                            "ready",
-                            None,
+                            &port_status,
+                            port_reason,
                             domain_result.domains,
                         ),
                     );
@@ -1114,11 +1118,59 @@ fn port_runtime_status(
 }
 
 fn domain_status(domain: &str, status: &str, reason: Option<String>) -> NeutronDomainStatus {
+    domain_status_with_action(domain, status, reason, None)
+}
+
+fn domain_status_with_action(
+    domain: &str,
+    status: &str,
+    reason: Option<String>,
+    effective_action: Option<String>,
+) -> NeutronDomainStatus {
     NeutronDomainStatus {
         domain: domain.to_string(),
         status: status.to_string(),
         reason,
+        effective_action,
     }
+}
+
+fn acl_domain_status_for(port: &NeutronPortSnapshot) -> NeutronDomainStatus {
+    let Some(acl) = &port.acl else {
+        return domain_status("acl", "ready", None);
+    };
+    let status = if acl.status.trim().is_empty() {
+        "ready"
+    } else {
+        acl.status.trim()
+    };
+    let reason = if acl.reason.trim().is_empty() || acl.reason.eq_ignore_ascii_case("ready") {
+        None
+    } else {
+        Some(acl.reason.clone())
+    };
+    let effective_action = if acl.effective_action.trim().is_empty() {
+        if acl.enabled && status.eq_ignore_ascii_case("ready") {
+            "enforce".to_string()
+        } else {
+            "bypass".to_string()
+        }
+    } else {
+        acl.effective_action.clone()
+    };
+    domain_status_with_action("acl", status, reason, Some(effective_action))
+}
+
+fn successful_port_status(domains: &[NeutronDomainStatus]) -> (String, Option<String>) {
+    for status in ["error", "blocked", "degraded", "unsupported", "not_requested"] {
+        if let Some(domain) = domains
+            .iter()
+            .find(|domain| domain.status.eq_ignore_ascii_case(status))
+        {
+            return (domain.status.clone(), domain.reason.clone());
+        }
+    }
+    ("ready".to_string(), None)
 }
 
 fn domain_statuses_for(
@@ -1195,7 +1247,7 @@ async fn reconcile_neutron_domains(
         match domain.as_str() {
             "attach" => statuses.push(domain_status(&domain, "ready", None)),
             "acl" => match reconcile_neutron_acl(state, port).await {
-                Ok(()) => statuses.push(domain_status(&domain, "ready", None)),
+                Ok(()) => statuses.push(acl_domain_status_for(port)),
                 Err(e) => {
                     let reason = format!("acl_apply_failed:{}", e);
                     statuses.push(domain_status(&domain, "error", Some(reason.clone())));
@@ -2506,19 +2558,52 @@ mod tests {
                     domain: "acl".to_string(),
                     status: "error".to_string(),
                     reason: Some("apply_failed".to_string()),
+                    effective_action: None,
                 },
                 NeutronDomainStatus {
                     domain: "mirror".to_string(),
                     status: "error".to_string(),
                     reason: Some("apply_failed".to_string()),
+                    effective_action: None,
                 },
                 NeutronDomainStatus {
                     domain: "qos".to_string(),
                     status: "error".to_string(),
                     reason: Some("apply_failed".to_string()),
+                    effective_action: None,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn acl_domain_status_reflects_not_requested_bypass() {
+        let mut snapshot = port("vm-port", "tap-vm", true);
+        snapshot.managed_domains = vec!["acl".to_string()];
+        snapshot.acl = Some(NeutronAclSnapshot {
+            enabled: false,
+            status: "not_requested".to_string(),
+            reason: "no_enabled_binding".to_string(),
+            effective_action: "bypass".to_string(),
+            policy_id: None,
+            policy_name: None,
+            binding_id: None,
+            source: Some("none".to_string()),
+            default_action: "allow".to_string(),
+            stateful: true,
+            revision: 0,
+            rules: Vec::new(),
+        });
+
+        let status = acl_domain_status_for(&snapshot);
+        let (port_status, reason) = successful_port_status(&[status.clone()]);
+
+        assert_eq!(status.domain, "acl");
+        assert_eq!(status.status, "not_requested");
+        assert_eq!(status.reason.as_deref(), Some("no_enabled_binding"));
+        assert_eq!(status.effective_action.as_deref(), Some("bypass"));
+        assert_eq!(port_status, "not_requested");
+        assert_eq!(reason.as_deref(), Some("no_enabled_binding"));
     }
 
     #[test]
