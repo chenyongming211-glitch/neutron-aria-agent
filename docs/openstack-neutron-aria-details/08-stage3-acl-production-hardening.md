@@ -66,6 +66,17 @@ Existing scripts are the stage-three starting point:
 | VM migration | `deploy/kolla/smoke/neutron_aria_vm_migration_smoke.sh` |
 | Rollback/connectivity | `deploy/kolla/smoke/neutron_aria_rollback_connectivity_smoke.sh` |
 
+The active N3 evidence summary is:
+
+```text
+docs/evidence/openstack-n05-lite/2026-06-30-stage3-n3-summary.md
+```
+
+`python ci/check_stage3_n3_evidence.py` validates the evidence schema during
+normal CI. Stage-three closure must additionally pass
+`python ci/check_stage3_n3_evidence.py --require-complete`, which rejects any
+remaining `pending` gate.
+
 ## N3 Fault Gate Semantics
 
 | Scenario | Required Result |
@@ -96,6 +107,7 @@ python3 ci/check_n05_discovery_evidence.py
 python3 ci/check_uds_hardening_evidence.py --require-hardened ...
 python3 ci/check_stage2_acceptance_evidence.py
 python3 ci/check_stage3_readiness.py
+python3 ci/check_stage3_n3_evidence.py
 python3 ci/check_smoke_python_blocks.py
 bash deploy/kolla/package/build_stage2_acl_bundle.sh
 ```
@@ -121,5 +133,6 @@ Stage three is ready to close only when:
 - Persistent UDS hardening has a passed rollout record, or the release is
   explicitly marked audit-only for UDS peer auth.
 - ACL N3 fault and lifecycle gates have pass/degraded/unsupported evidence.
+- `python ci/check_stage3_n3_evidence.py --require-complete` passes.
 - QoS/Mirror remain out of this stage unless a separate approved goal opens
   them.

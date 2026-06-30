@@ -62,6 +62,7 @@ jobs:
       - name: Test Neutron stage-three readiness plan
         run: |
           python3 ci/check_stage3_readiness.py
+          python3 ci/check_stage3_n3_evidence.py
           python3 ci/check_smoke_python_blocks.py
 
       - name: Build Neutron stage-two ACL Kolla bundle
