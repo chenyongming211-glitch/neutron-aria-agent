@@ -397,7 +397,10 @@ class SnapshotSynchronizer(object):
                     exc,
                 )
             else:
-                if self._status_converged(snapshot, projected_port_ids, status):
+                if (
+                    self._status_converged(snapshot, projected_port_ids, status) or
+                    self._status_transaction_committed(snapshot, status)
+                ):
                     LOG.warning(
                         "snapshot_timeout_converged host=%s generation=%s "
                         "attempt=%s projected_ports=%s managed_ports=%s",
@@ -528,7 +531,10 @@ class SnapshotSynchronizer(object):
                 exc,
             )
             return None
-        if self._status_converged(snapshot, projected_port_ids, status):
+        if (
+            self._status_converged(snapshot, projected_port_ids, status) or
+            self._status_transaction_committed(snapshot, status)
+        ):
             return status
         LOG.warning(
             "post_apply_status_not_converged host=%s generation=%s "
@@ -596,6 +602,24 @@ class SnapshotSynchronizer(object):
             if port.get("port_id")
         )
         return projected_port_ids.issubset(managed_port_ids)
+
+    def _status_transaction_committed(self, snapshot, status):
+        try:
+            status_generation = int(
+                status.get("applied_generation") or status.get("generation") or 0
+            )
+        except (TypeError, ValueError):
+            return False
+        if status_generation < int(snapshot["generation"]):
+            return False
+        expected_hash = snapshot.get("desired_hash")
+        if not expected_hash:
+            return False
+        status_hash = (
+            status.get("applied_desired_hash") or
+            status.get("desired_hash")
+        )
+        return bool(status_hash and status_hash == expected_hash)
 
     def _delete_status_converged(self, port_id, status):
         managed = status.get("managed_ports")

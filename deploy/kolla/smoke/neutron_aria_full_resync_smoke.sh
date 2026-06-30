@@ -26,6 +26,9 @@ REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE:-}"
 MIN_ACL_POLICIES="${MIN_ACL_POLICIES:-0}"
 MIN_ACL_RULES="${MIN_ACL_RULES:-0}"
 MIN_ACL_BINDINGS="${MIN_ACL_BINDINGS:-0}"
+EXPECTED_ACL_STATUS="${EXPECTED_ACL_STATUS:-ready}"
+EXPECTED_ACL_RUNTIME_STATUS="${EXPECTED_ACL_RUNTIME_STATUS:-${EXPECTED_ACL_STATUS}}"
+EXPECTED_ACL_EFFECTIVE_ACTION="${EXPECTED_ACL_EFFECTIVE_ACTION:-}"
 
 die() {
     echo "ERROR: $*" >&2
@@ -376,7 +379,12 @@ fi
 
 if [ "${ACL_SOURCE}" = "neutron" ]; then
     echo "Checking aria_acl port-status reportback"
-    docker_exec_env python - "${SOCKET_PATH}" "${HOST_FQDN}" <<'PY'
+    docker_exec_env python - \
+        "${SOCKET_PATH}" \
+        "${HOST_FQDN}" \
+        "${EXPECTED_ACL_STATUS}" \
+        "${EXPECTED_ACL_RUNTIME_STATUS}" \
+        "${EXPECTED_ACL_EFFECTIVE_ACTION}" <<'PY'
 from __future__ import print_function
 
 import sys
@@ -386,6 +394,9 @@ from neutron_aria.agent.uds_client import LocalClient
 
 socket_path = sys.argv[1]
 host = sys.argv[2]
+expected_status = sys.argv[3]
+expected_runtime_status = sys.argv[4]
+expected_effective_action = sys.argv[5]
 runtime = LocalClient(socket_path, timeout=3.0).status()
 managed = runtime.get("managed_ports") or []
 port_ids = sorted([
@@ -418,12 +429,21 @@ for port_id in port_ids:
     status = by_port[port_id]
     if generation is not None and str(status.get("generation")) != str(generation):
         stale.append("%s:%s" % (port_id, status.get("generation")))
-    if status.get("status") != "ready":
+    if status.get("status") != expected_status:
         not_ready.append("%s:%s" % (port_id, status.get("status")))
-    if status.get("runtime_status") != "ready":
+    runtime_status = status.get("runtime_status", status.get("status"))
+    if expected_runtime_status and runtime_status != expected_runtime_status:
         missing_projection.append("%s:runtime_status=%s" % (
             port_id,
-            status.get("runtime_status"),
+            runtime_status,
+        ))
+    if (
+        expected_effective_action and
+        status.get("effective_action") != expected_effective_action
+    ):
+        missing_projection.append("%s:effective_action=%s" % (
+            port_id,
+            status.get("effective_action"),
         ))
     if status.get("stale") not in (False, "False", "false", 0, "0"):
         missing_projection.append("%s:stale=%s" % (
@@ -443,7 +463,8 @@ if stale:
     )
 if not_ready:
     raise SystemExit(
-        "aria_acl port status not ready for host=%s rows=%s" % (
+        "aria_acl port status did not match expected status=%s for host=%s rows=%s" % (
+            expected_status,
             host,
             ",".join(not_ready),
         )

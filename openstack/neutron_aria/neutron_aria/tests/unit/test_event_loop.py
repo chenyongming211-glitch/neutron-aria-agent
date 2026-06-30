@@ -86,6 +86,35 @@ class TimeoutThenConvergedLocalClient(FakeLocalClient):
         }
 
 
+class TimeoutThenCommittedWithPartialManagedClient(FakeLocalClient):
+    def put_snapshot(self, snapshot):
+        self.snapshots.append(snapshot)
+        raise LocalApiTimeoutError("timed out")
+
+    def status(self):
+        if not self.snapshots:
+            return {"generation": 0, "managed_ports": [], "active_instances": []}
+        snapshot = self.snapshots[-1]
+        managed_port_id = snapshot["ports"][0]["port_id"]
+        return {
+            "generation": snapshot["generation"],
+            "accepted_generation": snapshot["generation"],
+            "applied_generation": snapshot["generation"],
+            "desired_hash": snapshot.get("desired_hash"),
+            "applied_desired_hash": snapshot.get("desired_hash"),
+            "managed_ports": [{
+                "port_id": managed_port_id,
+                "ifname": "tap%s" % managed_port_id[:11],
+            }],
+            "port_statuses": [{
+                "port_id": managed_port_id,
+                "status": "ready",
+                "domains": [{"domain": "acl", "status": "ready"}],
+            }],
+            "active_instances": ["tap%s" % managed_port_id[:11]],
+        }
+
+
 class TimeoutNotConvergedLocalClient(FakeLocalClient):
     def put_snapshot(self, snapshot):
         self.snapshots.append(snapshot)
@@ -786,6 +815,39 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertFalse(result["status"]["degraded"])
         self.assertEqual(1, result["status"]["last_managed_ports"])
         self.assertEqual(set([port_id]), sync.projected_port_ids)
+
+    def test_timeout_recovery_accepts_committed_hash_with_partial_managed_ports(self):
+        port_ids = [
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        ]
+        port_source = StaticPortSource([{
+            "id": port_id,
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        } for port_id in port_ids])
+        local_client = TimeoutThenCommittedWithPartialManagedClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            timeout_convergence_attempts=1,
+            timeout_convergence_interval=0,
+        )
+
+        result = sync.full_resync()
+
+        self.assertTrue(result["response"]["recovered_after_timeout"])
+        self.assertTrue(result["status"]["ready"])
+        self.assertFalse(result["status"]["degraded"])
+        self.assertEqual(2, result["status"]["last_snapshot_ports"])
+        self.assertEqual(1, result["status"]["last_managed_ports"])
+        self.assertEqual(1, len(result["status"]["last_port_statuses"]))
+        self.assertEqual(set(port_ids), sync.projected_port_ids)
 
     def test_safe_full_resync_degrades_when_timed_out_snapshot_not_converged(self):
         port_source = StaticPortSource([{
