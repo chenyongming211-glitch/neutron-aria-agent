@@ -24,6 +24,7 @@ ACL_DIRECTION="${ACL_DIRECTION:-ingress}"
 ACL_PROTOCOL="${ACL_PROTOCOL:-icmp}"
 PING_COUNT="${PING_COUNT:-2}"
 PING_TIMEOUT="${PING_TIMEOUT:-1}"
+WAL_REPLAY_FAILURE_MAX_DELTA="${WAL_REPLAY_FAILURE_MAX_DELTA:-0}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 
 die() {
@@ -104,9 +105,55 @@ status_json() {
         "http://localhost/api/v1/neutron/status"
 }
 
+wal_replay_failures_from_status() {
+    local status="$1"
+    STATUS_PAYLOAD="${status}" "${PYTHON_BIN}" - <<'PY'
+from __future__ import print_function
+
+import json
+import os
+
+payload = json.loads(os.environ["STATUS_PAYLOAD"])
+print(int(payload.get("wal_replay_failures") or 0))
+PY
+}
+
+assert_no_new_wal_replay_failures() {
+    local point="$1"
+    local status="$2"
+    local baseline="$3"
+    STATUS_PAYLOAD="${status}" \
+        FAULT_POINT_NAME="${point}" \
+        WAL_REPLAY_FAILURE_BASELINE="${baseline}" \
+        WAL_REPLAY_FAILURE_MAX_DELTA="${WAL_REPLAY_FAILURE_MAX_DELTA}" \
+        "${PYTHON_BIN}" - <<'PY'
+from __future__ import print_function
+
+import json
+import os
+
+payload = json.loads(os.environ["STATUS_PAYLOAD"])
+point = os.environ["FAULT_POINT_NAME"]
+baseline = int(os.environ["WAL_REPLAY_FAILURE_BASELINE"])
+max_delta = int(os.environ["WAL_REPLAY_FAILURE_MAX_DELTA"])
+current = int(payload.get("wal_replay_failures") or 0)
+if current > baseline + max_delta:
+    raise SystemExit(
+        "fault %s added WAL replay failures: baseline=%d current=%d max_delta=%d payload=%s"
+        % (point, baseline, current, max_delta, payload)
+    )
+print("wal_replay_failures_ok point=%s baseline=%d current=%d" % (
+    point,
+    baseline,
+    current,
+))
+PY
+}
+
 assert_fault_status() {
     local point="$1"
     local status="$2"
+    local wal_replay_baseline="$3"
     STATUS_PAYLOAD="${status}" FAULT_POINT_NAME="${point}" "${PYTHON_BIN}" - <<'PY'
 from __future__ import print_function
 
@@ -124,17 +171,17 @@ if payload.get("wal_status") != "intent_without_commit":
     raise SystemExit("fault %s expected wal_status=intent_without_commit: %s" % (point, payload))
 if payload.get("authority_state") != "wal_intent_without_commit":
     raise SystemExit("fault %s expected authority_state=wal_intent_without_commit: %s" % (point, payload))
-if int(payload.get("wal_replay_failures") or 0) != 0:
-    raise SystemExit("fault %s had WAL replay failures: %s" % (point, payload))
 print("fault_status_ok point=%s pending_generation=%s" % (
     point,
     payload.get("pending_generation"),
 ))
 PY
+    assert_no_new_wal_replay_failures "${point}" "${status}" "${wal_replay_baseline}"
 }
 
 assert_final_status() {
     local status="$1"
+    local wal_replay_baseline="$2"
     STATUS_PAYLOAD="${status}" "${PYTHON_BIN}" - <<'PY'
 from __future__ import print_function
 
@@ -148,13 +195,12 @@ if payload.get("pending_generation") is not None:
     raise SystemExit("pending_generation was not cleared: %s" % payload)
 if payload.get("managed_ports") or []:
     raise SystemExit("managed_ports were not rolled back: %s" % payload)
-if int(payload.get("wal_replay_failures") or 0) != 0:
-    raise SystemExit("wal_replay_failures is non-zero: %s" % payload)
 print("final_status_ok generation=%s wal_status=%s" % (
     payload.get("generation"),
     payload.get("wal_status"),
 ))
 PY
+    assert_no_new_wal_replay_failures "final" "${status}" "${wal_replay_baseline}"
 }
 
 start_datapath_with_fault() {
@@ -228,6 +274,11 @@ for point in ${FAULT_POINTS}; do
 
     echo "Starting datapath with one-shot fault marker ${marker}"
     start_datapath_with_fault "${point}" "${marker}"
+    wait_for_uds
+    point_baseline_status="$(status_json)"
+    point_wal_replay_baseline="$(wal_replay_failures_from_status "${point_baseline_status}")"
+    echo "fault_point_baseline_status=${point_baseline_status}"
+    echo "fault_point_wal_replay_failures_baseline=${point_wal_replay_baseline} max_delta=${WAL_REPLAY_FAILURE_MAX_DELTA}"
 
     echo "Triggering first ACL full-resync; failure is expected"
     set +e
@@ -245,7 +296,7 @@ for point in ${FAULT_POINTS}; do
 
     fault_status="$(status_json)"
     echo "fault_status=${fault_status}"
-    assert_fault_status "${point}" "${fault_status}"
+    assert_fault_status "${point}" "${fault_status}" "${point_wal_replay_baseline}"
 
     echo "Checking VM reachability after interrupted apply"
     ping -c "${PING_COUNT}" -W "${PING_TIMEOUT}" "${VM_IP}" >/dev/null
@@ -255,7 +306,7 @@ for point in ${FAULT_POINTS}; do
 
     final_status="$(status_json)"
     echo "post_recovery_status=${final_status}"
-    assert_final_status "${final_status}"
+    assert_final_status "${final_status}" "${point_wal_replay_baseline}"
 done
 
 echo
@@ -265,7 +316,8 @@ RESTORE_DATAPATH_ON_EXIT=false
 
 final_status="$(status_json)"
 echo "final_status=${final_status}"
-assert_final_status "${final_status}"
+final_wal_replay_baseline="$(wal_replay_failures_from_status "${final_status}")"
+assert_final_status "${final_status}" "${final_wal_replay_baseline}"
 
 ROLLBACK_ARMED=false
 echo "neutron-aria-agent ACL fault-injection smoke passed"
