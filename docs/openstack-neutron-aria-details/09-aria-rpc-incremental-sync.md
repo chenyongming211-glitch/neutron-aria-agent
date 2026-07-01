@@ -40,7 +40,7 @@ Target end state:
 | --- | --- | --- | --- |
 | P0 safe default | `port_source=disabled`, `full_resync_enabled=false`, `rpc_events_enabled=false` | Heartbeat only | shipped |
 | P1 MVP production | `port_source=neutronclient`, `full_resync_enabled=true`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync | stage-two accepted |
-| P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | package smoke passed on 10.58.159; real fanout A/B passed on `ostack2.bj159.net`; multi-host foreign filtering passed on `ostack2/3/4` |
+| P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | package smoke passed on 10.58.159; real fanout A/B passed on `ostack2.bj159.net`; multi-host foreign filtering passed on `ostack2/3/4`; source-host cleanup passed on `ostack2` |
 | P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | **this plan** |
 
 Code anchors today:
@@ -157,6 +157,10 @@ Current evidence:
   `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net`. It proves
   foreign-host `port.update` events are consumed but do not trigger local
   full-resync or local managed-port mutation in P2 mode.
+- `../evidence/openstack-n05-lite/20260701-rpc-source-cleanup-smoke/summary.md`
+  records the source-host cleanup branch on `ostack2.bj159.net`. It proves a
+  projected local port receiving a foreign-host `port.update` is deleted with
+  `migration_source_cleanup` without triggering another full-resync.
 
 ## P3: Incremental RPC (Target Optimization)
 
