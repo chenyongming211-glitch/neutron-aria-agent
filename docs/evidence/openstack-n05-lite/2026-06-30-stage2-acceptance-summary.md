@@ -58,9 +58,9 @@ Latest local results:
 - Target metadata content still returns HTTP 500 because the Neutron metadata
   namespace proxy cannot connect to its backend Unix socket. This is target
   environment degraded state, not an Aria ACL block.
-- Persistent UDS hardening rollout is not left enabled on the three hosts. The
-  reversible proof passed and restored the baseline; persistent rollout belongs
-  to release/operations.
+- Persistent UDS hardening rollout was a stage-two release/operations follow-up;
+  it is now closed by stage-three evidence in
+  `docs/evidence/openstack-n05-lite/20260701-stage3-uds-persistent-rollout/summary.md`.
 - Local `check_neutron_stage1.py` skipped Rust execution because `cargo` was not
   installed. CI or a Rust-enabled environment should still run the locked Rust
   command before a formal tag release.

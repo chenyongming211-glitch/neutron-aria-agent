@@ -21,7 +21,8 @@ or explicitly approved later-stage plan.
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Rust Neutron UDS snapshot/status/delete routes | partial | Snapshot apply, WAL, generation, desired hash, delete, and local write gate exist. |
+| Stage-one contract | closed | Closure evidence is `docs/evidence/openstack-n05-lite/20260701-stage1-closure-summary.md`. |
+| Rust Neutron UDS snapshot/status/delete routes | implemented for stage one | Snapshot apply, WAL, generation, desired hash, delete, capabilities/status, and local write gate exist for the stage-one contract. |
 | `managed_domains` local write gate | implemented | Uses `NeutronPortSnapshot.managed_domains`, `mark_neutron_port_authority()`, and `ensure_local_write_allowed()`. |
 | Python `neutron-aria-agent` full resync skeleton | partial | Can build local snapshots and submit them over UDS. |
 | ACL fixture source | implemented | CI/smoke only. |
@@ -29,13 +30,14 @@ or explicitly approved later-stage plan.
 | `aria_acl` Neutron service plugin/API/DB | partial | Minimal stdlib-only repository/plugin contract, API extension descriptor, persistent DB contract, Alembic table creation, CRUD/revision behavior, and RBAC contract exist; `neutron-db-manage` and server startup validation remain target-environment gates. |
 | Rich domain status | planned | Current `NeutronDomainStatus` is still `domain/status/reason`; target also includes `effective_action` and `support_disposition`. |
 | UDS contract JSON | implemented | `docs/neutron-uds-contract.json` is checked by `ci/check_neutron_stage1.py`. |
-| UDS peer credential enforcement/audit | implemented, rollout-gated | Socket mode validation, socket group alignment, and connection-level `SO_PEERCRED` audit/enforcement hooks exist. `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net` have reversible hardened proofs; persistent multi-host rollout remains a production gate. |
+| UDS peer credential enforcement/audit | implemented and rolled out | Socket mode validation, socket group alignment, and connection-level `SO_PEERCRED` audit/enforcement hooks exist. `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net` have persistent hardened rollout evidence with `REQUIRE_HARDENED=true`. |
 | Unified `neutron-aria-agent.ini` target layout | partial | Target layout, packaged safe defaults, config validation, and documentation checks exist; production enablement still depends on N0.5/runbook gates. |
 
 ## INI Contract Convergence
 
-Status: stage-one contract recorded and partially enforced by config validation,
-packaged safe defaults, and `ci/check_neutron_stage1.py`.
+Status: stage-one contract recorded, enforced by config validation, packaged
+safe defaults, and `ci/check_neutron_stage1.py`; closure evidence is
+`docs/evidence/openstack-n05-lite/20260701-stage1-closure-summary.md`.
 
 The design already separates local process mode from snapshot integration mode:
 

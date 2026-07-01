@@ -90,6 +90,12 @@ or an explicitly approved later phase.
 
 ## Stage-One Verification
 
+Status: closed. Closure evidence is recorded in:
+
+```text
+docs/evidence/openstack-n05-lite/20260701-stage1-closure-summary.md
+```
+
 Use this focused check while implementing 01, 04, and 07:
 
 ```text
@@ -113,8 +119,8 @@ Stage-one implementation status:
 | 04 UDS contract | `docs/neutron-uds-contract.json`, Rust capabilities fields, Python client validation, UDS body/timeout limits, socket mode validation, config-gated `SO_PEERCRED` peer enforcement/audit hooks, exact smoke capability checks, and contract phase-status checks. |
 | 07 Transaction/WAL | Python state/event-loop tests cover generation, pending snapshot/delete, timeout recovery; Rust WAL and `domain_authority` tests cover intent/commit/replay/hash plus managed-domain local write gating and are wired into the locked stage-one Rust check. The local stage-one script also statically verifies required Rust WAL/OpenAPI/recovery/gate source terms exist when `cargo` is unavailable. |
 | 02/03 ACL production path | `aria_acl` has a stdlib-only repository/plugin contract, API extension descriptor, minimal persistent DB repository with minimum CRUD, minimal Alembic table creation, and `NeutronAclSource` can consume the effective payload/list contract through either injected methods or the aria_acl REST adapter. `ci/check_neutron_stage2_acl.py` guards the no-Security-Group/no-tag-mapping boundary plus the Neutron ACL source -> datapath snapshot path. |
-| Local verification | `python ci/check_neutron_stage1.py` currently runs 159 Python tests and `bash -n` over smoke shell scripts, then skips Rust only when `cargo` is unavailable. |
-| Remaining verification | Rust-side tests require `cargo`; run the `--require-rust --rust-toolchain stable` command in CI or a Rust-enabled environment. |
+| Local verification | `python ci/check_neutron_stage1.py` currently runs 161 Python tests and `bash -n` over smoke shell scripts, then skips Rust only when `cargo` is unavailable. |
+| Rust verification | Closed by GitHub Actions run `28442974505` on commit `e476b2d1463988a84dc525f58bf01e46d0121146`; it ran `check_neutron_stage1.py --require-rust --rust-toolchain stable`, Rust tests, eBPF build, static userspace build, static agent build, and binary verification. No Rust/binary-trigger paths changed after that commit. |
 
 ## Stage-Two ACL MVP Field Evidence
 
