@@ -40,7 +40,7 @@ Target end state:
 | --- | --- | --- | --- |
 | P0 safe default | `port_source=disabled`, `full_resync_enabled=false`, `rpc_events_enabled=false` | Heartbeat only | shipped |
 | P1 MVP production | `port_source=neutronclient`, `full_resync_enabled=true`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync | stage-two accepted |
-| P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | skeleton in code; stage-three S3-5 |
+| P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | package smoke passed on 10.58.159; real fanout A/B pending |
 | P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | **this plan** |
 
 Code anchors today:
@@ -140,6 +140,12 @@ Exit criteria:
   real RabbitMQ fanout testing.
 - Fanout delete/update on foreign hosts does not mutate local managed ports.
 - RPC loss is recovered by periodic or manual full-resync without false ready.
+
+Current evidence:
+
+- `../evidence/openstack-n05-lite/20260701-rpc-event-package-smoke/summary.md`
+  records package-level P2 preflight success on all three 10.58.159 target
+  hosts. It did not subscribe to RabbitMQ or mutate datapath state.
 
 ## P3: Incremental RPC (Target Optimization)
 
