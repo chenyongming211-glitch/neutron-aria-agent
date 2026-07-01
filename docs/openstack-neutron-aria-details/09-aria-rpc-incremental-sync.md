@@ -40,7 +40,7 @@ Target end state:
 | --- | --- | --- | --- |
 | P0 safe default | `port_source=disabled`, `full_resync_enabled=false`, `rpc_events_enabled=false` | Heartbeat only | shipped |
 | P1 MVP production | `port_source=neutronclient`, `full_resync_enabled=true`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync | stage-two accepted |
-| P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | package smoke passed on 10.58.159; real fanout A/B pending |
+| P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | package smoke passed on 10.58.159; real fanout A/B passed on `ostack2.bj159.net`; multi-host fanout/filtering pending |
 | P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | **this plan** |
 
 Code anchors today:
@@ -135,7 +135,9 @@ Behavior:
 
 Exit criteria:
 
-- RPC on/off A/B shows faster rule convergence than polling-only.
+- RPC on/off A/B shows the real fanout path reaches the event merger and
+  triggers full-resync when enabled, while the disabled path ignores the same
+  fanout.
 - `neutron_aria_rpc_event_smoke.sh` passes as a package-level preflight before
   real RabbitMQ fanout testing.
 - Fanout delete/update on foreign hosts does not mutate local managed ports.
@@ -146,6 +148,10 @@ Current evidence:
 - `../evidence/openstack-n05-lite/20260701-rpc-event-package-smoke/summary.md`
   records package-level P2 preflight success on all three 10.58.159 target
   hosts. It did not subscribe to RabbitMQ or mutate datapath state.
+- `../evidence/openstack-n05-lite/20260701-rpc-fanout-ab-smoke/summary.md`
+  records real RabbitMQ fanout A/B success on `ostack2.bj159.net`. It proves
+  P2 fanout-triggered full-resync on one host, not P3 port-scoped incremental
+  apply or multi-host rollout readiness.
 
 ## P3: Incremental RPC (Target Optimization)
 

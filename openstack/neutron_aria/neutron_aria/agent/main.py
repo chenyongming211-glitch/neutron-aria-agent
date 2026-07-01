@@ -100,6 +100,18 @@ def initialize_neutron_runtime(config_files=None):
     return True
 
 
+def enable_eventlet_for_rpc():
+    try:
+        import eventlet
+    except ImportError as exc:
+        raise RuntimeError(
+            "rpc_events_enabled=true requires eventlet in the Neutron agent image: %s"
+            % exc
+        )
+    eventlet.monkey_patch()
+    return True
+
+
 def build_once_status_reporter(config, neutron_config_files=None):
     if config.acl_source != "neutron":
         return None
@@ -178,6 +190,8 @@ def main(argv=None):
     if options.disable_rpc_events:
         config.rpc_events_enabled = False
     validate_config(config)
+    if config.rpc_events_enabled:
+        enable_eventlet_for_rpc()
 
     if options.once:
         result = build_synchronizer(

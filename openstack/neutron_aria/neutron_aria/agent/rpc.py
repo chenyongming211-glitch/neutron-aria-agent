@@ -1,6 +1,14 @@
 from __future__ import absolute_import
 
 
+def _rpc_target():
+    try:
+        import oslo_messaging
+    except Exception:
+        return None
+    return oslo_messaging.Target(version="1.4")
+
+
 def _port_value(port, key, default=None):
     if not port:
         return default
@@ -19,6 +27,8 @@ def rpc_topic_details(topics):
 
 class AriaAgentRpcCallback(object):
     """Neutron agent RPC callbacks that feed the event merger only."""
+
+    target = _rpc_target()
 
     def __init__(self, event_merger, local_host=None):
         self.event_merger = event_merger

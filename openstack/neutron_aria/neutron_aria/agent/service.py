@@ -14,6 +14,7 @@ EVENTS_WITHOUT_RESYNC_ERROR = (
     "received Neutron RPC events but full resync is disabled; no local writes submitted"
 )
 DELETE_PORT_DEGRADED_REASON = "delete_port_degraded"
+EVENT_IDLE_POLL_INTERVAL = 1.0
 
 
 class AgentService(object):
@@ -132,6 +133,8 @@ class AgentService(object):
         delay = next_deadline - now
         if delay <= 0:
             return 0
+        if self.event_merger is not None and event_deadline is None:
+            delay = min(delay, EVENT_IDLE_POLL_INTERVAL)
         return max(0.1, delay)
 
     def run_forever(self):

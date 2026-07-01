@@ -26,6 +26,11 @@ class RpcCallbackTestCase(unittest.TestCase):
             rpc_topic_details(FakeTopics),
         )
 
+    def test_rpc_callback_declares_legacy_endpoint_target_when_available(self):
+        target = getattr(AriaAgentRpcCallback, "target", None)
+        if target is not None:
+            self.assertEqual("1.4", target.version)
+
     def test_port_update_records_binding_host_and_revision(self):
         merger = EventMerger()
         callback = AriaAgentRpcCallback(merger, local_host="ostack2.bj159.net")

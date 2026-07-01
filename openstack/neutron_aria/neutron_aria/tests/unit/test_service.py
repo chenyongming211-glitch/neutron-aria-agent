@@ -5,6 +5,7 @@ import unittest
 from neutron_aria.agent.service import AgentService
 from neutron_aria.agent.service import HEARTBEAT_ONLY_REASON
 from neutron_aria.agent.service import EVENTS_WITHOUT_RESYNC_REASON
+from neutron_aria.agent.service import EVENT_IDLE_POLL_INTERVAL
 from neutron_aria.agent.event_merge import EventMerger
 from neutron_aria.agent.status import AgentRuntimeStatus
 
@@ -328,6 +329,23 @@ class AgentServiceTestCase(unittest.TestCase):
 
         self.assertEqual(2, sync.resync_calls)
         self.assertEqual(["net1"], result["events"]["dirty_networks"])
+
+    def test_rpc_event_loop_caps_idle_sleep_to_poll_for_new_events(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=3600,
+            resync_interval=3600,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            clock=clock,
+        )
+        service.initialize()
+
+        self.assertEqual(EVENT_IDLE_POLL_INTERVAL, service.sleep_interval())
 
 
 if __name__ == "__main__":
