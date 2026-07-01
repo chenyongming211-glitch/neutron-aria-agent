@@ -28,6 +28,19 @@ Normative order:
 | `integration_mode` ownership | fixed | `integration_mode=coexist` is a snapshot field written by `neutron-aria-agent`, not an ini setting. |
 | `effective_action` vocabulary | fixed | Use `enforce` for active ACL enforcement, not `enabled`. |
 
+## Deferred Decisions (Post-Stage-Three)
+
+These are recorded target directions, not v0.9 MVP commitments. Detail lives in
+`openstack-neutron-aria-details/09-aria-rpc-incremental-sync.md`.
+
+| Decision | Status | Notes |
+| --- | --- | --- |
+| Sync model phases | planned | P1 REST periodic full-resync (current MVP); P2 RPC-triggered full-resync; P3 incremental RPC with port-scoped apply. |
+| Full-resync retention | planned | Incremental RPC optimizes latency; full-resync remains startup/recovery/capability-drift authority. |
+| OVS comparison | planned | Borrow OVS RPC notification semantics, not OVS incremental OVSDB ownership; Aria keeps snapshot/WAL/generation model. |
+| Port-scoped snapshot | planned | Required for P3; parent design already references port-scoped apply; UDS contract and WAL tests must be extended first. |
+| `aria_acl` object RPC | open | ACL object changes may still require resync until dedicated RPC or revision subscription exists. |
+
 ## Design Areas To Optimize Before Detailed Implementation
 
 | Area | Why It Matters | Current Plan |
@@ -105,6 +118,8 @@ treated as reasons to reopen the architecture unless a hard blocker is found.
 | Extend runtime status DTOs to rich per-domain status. | API evolution |
 | Fill N0.5 target environment evidence. | validation |
 | Finalize Kolla packaging and smoke runbook. | delivery |
+| P2 RPC-triggered full-resync enablement. | post-stage-three |
+| P3 incremental RPC and port-scoped apply. | post-stage-three |
 
 ## Next Refinement Pass
 
@@ -118,7 +133,12 @@ First-pass implementation design packages are tracked in
 5. `05-domain-status-heartbeat.md`
 6. `06-deployment-n05-runbook.md`
 7. `07-transaction-wal.md`
+8. `08-stage3-acl-production-hardening.md`
+9. `09-aria-rpc-incremental-sync.md`
 
 QoS remains in v0.9 scope, but its dedicated detail pass should start after the
 INI, UDS/transaction, ACL production path, and target QoS runtime capability
 questions are stable.
+
+Incremental RPC (plan 09) starts after stage-three closes P2
+(RPC-triggered full-resync) and must not reopen v0.9 architecture boundaries.

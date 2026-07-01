@@ -2,8 +2,13 @@
 
 Status: active stage-three entry plan.
 
-This plan starts after stage two acceptance. It turns the working ACL
-production input loop into a production-ready, auditable, release-gated path.
+This document is the active stage-three entry plan. It starts after stage two
+acceptance. It turns the working ACL production input loop into a
+production-ready, auditable, release-gated path.
+
+Post-stage-three incremental RPC design is recorded separately in
+`09-aria-rpc-incremental-sync.md`. Stage three intentionally stops at
+RPC-triggered full-resync and does not implement port-scoped delta apply.
 
 ## Goal
 

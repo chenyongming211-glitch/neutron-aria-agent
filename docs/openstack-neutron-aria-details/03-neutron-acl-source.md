@@ -47,7 +47,8 @@ For each eligible port:
 
 - Full resync is the first production path.
 - Incremental event handling may trigger full resync until a safe port-scoped
-  cache exists.
+  cache exists. The post-stage-three target is documented in
+  `09-aria-rpc-incremental-sync.md`.
 - Keep revision fields in the effective ACL index so future incremental logic can
   detect stale updates.
 

@@ -33,6 +33,7 @@ or an explicitly approved later phase.
 | `06-deployment-n05-runbook.md` | Detail deployment enablement, N0.5 evidence, smoke, and rollback. |
 | `07-transaction-wal.md` | Detail snapshot apply transaction, WAL intent/commit, replay, timeout, and idempotency. |
 | `08-stage3-acl-production-hardening.md` | Detail Stage-Three ACL Production Hardening, release/CI, persistent UDS rollout, and N3 fault/lifecycle gates. |
+| `09-aria-rpc-incremental-sync.md` | Record post-stage-three RPC evolution: P2 RPC-triggered full-resync and P3 incremental RPC with port-scoped apply. |
 
 ## Refinement Order
 
@@ -45,6 +46,8 @@ or an explicitly approved later phase.
 6. Deployment/N0.5 runbook, because it turns design into safe field enablement.
 7. Stage-three ACL production hardening, because stage two is accepted and the
    next risk is release/CI plus N3 operational behavior.
+8. Aria RPC incremental sync, after stage three closes P2 and before opening
+   port-scoped delta apply implementation.
 
 ## Dependency Map
 
@@ -72,6 +75,12 @@ or an explicitly approved later phase.
   -> release/CI gate
   -> persistent UDS rollout
   -> ACL N3 fault and lifecycle gates
+
+09 Aria RPC incremental sync
+  -> 03 revision cache and effective read
+  -> 05 incremental failure reporting
+  -> 07 port-scoped WAL/generation semantics
+  -> 08 P2 RPC-triggered resync entry criteria
 ```
 
 ## Gate Mapping
@@ -87,6 +96,7 @@ or an explicitly approved later phase.
 | G6 full resync | 01, 03, 05, 07 | Neutron port source, resync, heartbeat, and generation status are stable. |
 | G7 rollback | 06, 07 | Disabling integration preserves OVS forwarding and safe recovery semantics. |
 | S3 production hardening | 08 | CI/release, persistent UDS rollout, ACL N3 fault, and lifecycle gates are ready. |
+| P2/P3 RPC sync evolution | 09 | RPC-triggered resync and incremental port-scoped apply are designed and gated separately from stage three. |
 
 ## Stage-One Verification
 
@@ -223,6 +233,18 @@ Use this check as the local stage-three guard:
 ```text
 python ci/check_stage3_readiness.py
 ```
+
+## Post-Stage-Three: Aria RPC And Incremental Sync
+
+Stage three stops at RPC-triggered full-resync (P2). The target optimization to
+incremental RPC and port-scoped apply (P3) is recorded in:
+
+```text
+docs/openstack-neutron-aria-details/09-aria-rpc-incremental-sync.md
+```
+
+Do not start P3 implementation until stage three entry criteria in plan 09 are
+met.
 
 ## Out Of Scope For This Pass
 
