@@ -317,6 +317,38 @@ Minimum production smoke:
 | UDS hardening evidence-only smoke | `neutron_aria_uds_hardening_smoke.sh` records uid/gid allow-list candidates and current socket/audit disposition without mutating the host. |
 | UDS hardened enforcement smoke | With `REQUIRE_HARDENED=true`, socket has no other-user bits, audit log exists, and peercred enforcement uses the recorded uid/gid allow-list. |
 
+## OVS Restart Handling
+
+Aria does not own OVS data-plane health. During planned OVS maintenance, do not
+judge ACL readiness only from immediate VM ping results. Split the check into
+two channels:
+
+| Channel | Required Evidence |
+| --- | --- |
+| Aria ACL attach | tap exists or is correctly reported missing; ifindex is not stale; XDP is attached or reattached; ACL maps/policy are still consistent; UDS generation is applied; rollback leaves `managed_ports=[]`. |
+| OVS forwarding | VM ping or service traffic recovers according to the OVS maintenance procedure. This is operational evidence, not proof that ACL attach failed. |
+
+For `ovs-vswitchd` restart:
+
+1. Before restart, record UDS status, target tap details, XDP attachment, and
+   baseline VM reachability.
+2. Apply ACL managed state through full-resync and verify the target port is
+   `ready/effective_action=enforce` when a policy is expected to enforce.
+3. Restart `ovs-vswitchd.service`.
+4. If the tap still exists with the same ifindex and XDP attachment, keep Aria
+   ACL state as attach-healthy. Record VM ping separately as OVS forwarding
+   evidence.
+5. If the tap exists but XDP is missing, run idempotent reattach/full-resync and
+   require ACL status to return to ready.
+6. If the tap is missing or ifindex changed, treat the event as tap recreate:
+   do not report stale ready; wait for full-resync to bind the current tap.
+7. Always run rollback/delete cleanup and verify `managed_ports=[]`,
+   `pending_generation=null`, and no WAL replay failure increase beyond the
+   recorded baseline.
+
+Do not add OpenFlow/ofport inspection to Aria runtime as a product dependency.
+Those checks can remain smoke/runbook diagnostics for OVS recovery only.
+
 ## Rollback
 
 Safe rollback order:

@@ -86,10 +86,18 @@ not expected to be intentionally blocked by ACL policy.
 
 `degraded`.
 
-The OVS restart lifecycle gate exposed a real convergence gap. The datapath
-still reported ACL managed state before cleanup, the tap and XDP attachment
-remained present after `ovs-vswitchd` restart, but VM connectivity dropped
-immediately after the restart. Cleanup restored zero managed state and VM
-connectivity, so the environment recovered, but this gate is not a pass until
-the restart order, recovery check, or full-resync reconciliation behavior is
-made explicit and repeatable.
+This evidence is degraded for the current N3 matrix because the temporary probe
+used immediate VM ping as the decisive check. After the follow-up design review,
+the target contract is more precise: Aria owns ACL attach health, not OVS
+forwarding health. In this run, the tap and XDP attachment remained present
+after `ovs-vswitchd` restart, while VM connectivity dropped during the OVS
+restart window. Cleanup restored zero managed state and VM connectivity.
+
+The next probe must split the result into two channels:
+
+- ACL attach: tap identity, XDP attachment, ACL maps/policy, generation, WAL,
+  and rollback.
+- OVS forwarding: VM ping/traffic recovery during OVS maintenance.
+
+This row should remain `degraded` until an ACL-focused `ovs-restart` smoke
+proves attach health and rollback independently from immediate OVS forwarding.

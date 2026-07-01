@@ -12,7 +12,7 @@ operations without overloading one string field.
 | Field | Values | Meaning |
 | --- | --- | --- |
 | `domain` | `attach`, `acl`, `qos`, later explicit domains | Feature/runtime domain. |
-| `status` | `ready`, `degraded`, `blocked`, `not_requested` | Domain execution result. |
+| `status` | `ready`, `degraded`, `blocked`, `not_requested`, `detached` | Domain execution result. |
 | `effective_action` | `enforce`, `bypass`, `unchanged`, `cleanup`, `no_op` | Datapath action. |
 | `support_disposition` | `supported`, `unsupported`, `unknown`, `not_applicable` | Capability/support classification. |
 | `reason` | stable error code or null | Why status is not ready. |
@@ -25,6 +25,9 @@ operations without overloading one string field.
 - ACL ready uses `effective_action=enforce`.
 - ACL missing input uses `status=not_requested,effective_action=bypass`.
 - ACL invalid/apply failed uses `status=degraded,effective_action=bypass`.
+- Missing local attach target uses `status=detached` or
+  `status=degraded,reason=interface_missing`; it must not be reported as ACL
+  ready.
 - WAL/schema/capability uncertainty may use `blocked`.
 
 ## Heartbeat Projection
@@ -170,6 +173,8 @@ Runtime status write/read responsibility:
 | ACL ready | `status=ready,effective_action=enforce,support_disposition=supported`. |
 | ACL not bound | `status=not_requested,effective_action=bypass`. |
 | ACL invalid input | `status=degraded,effective_action=bypass,reason=<stable code>`. |
+| Tap missing for a Neutron-managed local port | `status=detached` or `status=degraded,reason=interface_missing`; no ACL ready. |
+| OVS forwarding interrupted while tap/XDP/map state is healthy | ACL status remains based on attach health; do not mark ACL degraded solely from VM ping failure during OVS restart. |
 | Capability unsupported | `status=degraded` or `blocked`, `support_disposition=unsupported`. |
 | WAL/recovery uncertainty | `status=blocked` or `degraded`, never ready. |
 | Agent cannot reach UDS | Agent alive may be true, domain readiness degraded/unknown. |

@@ -91,10 +91,35 @@ remaining `pending` gate.
 
 | Scenario | Required Result |
 | --- | --- |
-| OVS agent / ovs-vswitchd / ovsdb-server restart | Aria reports degraded or recovers; no silent ready with stale tap identity. |
+| OVS agent / ovs-vswitchd / ovsdb-server restart | Aria does not own OVS forwarding health. If the tap still exists, Aria validates tap identity, XDP attachment, ACL maps, generation, and rollback. If the tap is missing or recreated, Aria follows the tap lifecycle rules below. |
 | Tap recreate | Old ifindex is not trusted after recreate; full-resync or status recovery repairs projection. |
 | VM migration / rebind | Old host removes local managed state; new host applies only after authoritative binding matches. |
 | Same-host VM traffic | If target environment exposes two local VMs, visibility and direction are recorded; otherwise mark `not_applicable`. |
+
+### OVS Restart Boundary
+
+OVS restart handling is deliberately scoped to Aria's attachment boundary. Aria
+must not become an OVS data-plane health checker and must not mark ACL degraded
+only because end-to-end VM ping fails while OVS is restarting.
+
+| Condition after OVS restart | Aria behavior | Status expectation | Smoke evidence |
+| --- | --- | --- | --- |
+| tap exists, same ifindex, XDP still attached | Keep ACL runtime state, verify maps/generation, allow rollback/delete. | ACL may remain `ready/effective_action=enforce` if policy state is valid. | `ip -d link`, UDS status, ACL policy/map evidence, rollback evidence. |
+| tap exists, same ifindex, XDP missing | Idempotently reattach XDP and recheck maps. | `degraded` only until reattach succeeds, then `ready`. | attach/retry log, UDS status before/after. |
+| tap exists, ifindex changed | Treat as tap recreate; do not trust stale runtime state. | `degraded` or detached until full-resync rebinds new ifindex. | old/new ifindex, full-resync generation, reattach evidence. |
+| tap missing | There is no local attach target; clear stale runtime projection and preserve desired snapshot intent for the next resync. | `detached` or `degraded` with reason such as `interface_missing`; do not report ACL ready. | missing link evidence, zero stale XDP state, recovery after tap returns. |
+| OVS forwarding temporarily fails but tap/XDP remain healthy | Do not reinterpret this as ACL failure. | ACL attach status remains based on tap/XDP/map health. | Record VM ping separately as OVS forwarding evidence, not ACL disposition. |
+
+An `ovs-restart` smoke should therefore have two result channels:
+
+- ACL attach result: tap identity, XDP attachment, ACL maps, generation, WAL, and
+  rollback.
+- OVS forwarding observation: VM ping or flow recovery during the OVS
+  maintenance window.
+
+Only the first channel decides whether Aria ACL lifecycle passed. The second
+channel is operational evidence for OVS recovery and should not force Aria to
+inspect OpenFlow/ofport state.
 
 ## CI Contract
 

@@ -1730,7 +1730,7 @@ Mirror 和 TCPrt 不进入当前 Neutron snapshot 更新路径：
 | 场景 | 处置 |
 | --- | --- |
 | OVS agent 重启 | 不把 OVS agent restart 视为 Neutron authority 变化；依靠 Netlink 和 full resync 校准接口 |
-| ovs-vswitchd / ovsdb-server 重启 | tap 可能短暂消失或 ifindex 改变，按 tap recreate 处理 |
+| ovs-vswitchd / ovsdb-server 重启 | 先按 attach boundary 分类：tap 仍存在且 ifindex/XDP/map 健康时 ACL 可保持 ready；tap 消失或 ifindex 改变时才按 tap recreate 处理 |
 | tap 命名模式与预期不同 | N0.5 必须发现目标环境命名；不匹配时不得 attach，返回 `DomainStatus=degraded` |
 | trunk port / VLAN subport | 第一阶段默认只支持目标环境验证过的 port 形态；未验证 subport 标记 `support_disposition=unsupported` 或 `DomainStatus=degraded` |
 | SR-IOV / direct / macvtap port | 第一阶段默认不支持 eBPF attach，必须明确 `support_disposition=unsupported`，不允许假 ready |
@@ -2394,7 +2394,10 @@ Datapath Neutron snapshot API 必须是本机接口：
 - VM reboot/tap recreate 后旧 ifindex cleanup 幂等。
 - 新 ifindex 出现后能重新 attach 并恢复 status。
 - tap 先出现但没有 Neutron binding 时可以 attach inert runtime，但不得启用 ACL/QoS，也不得标记 Aria ready。
-- OVS agent、ovs-vswitchd 或 ovsdb-server 重启导致 tap 消失或 ifindex 改变时进入 degraded，不崩溃。
+- OVS agent、ovs-vswitchd 或 ovsdb-server 重启时不把 OVS forwarding
+  短暂中断归因给 ACL；tap 存在且 ifindex/XDP/map 健康时 ACL attach
+  可保持 ready，tap 消失或 ifindex 改变时进入 detached/degraded 并等待
+  full-resync 修复。
 - unknown binding_host 或 binding_host 不匹配时拒绝 apply。
 - BTF 缺失、bpffs 未挂载、pinned map schema mismatch 进入 degraded。
 - WAL append 失败时不推进 accepted generation。
