@@ -7,6 +7,7 @@ import sys
 
 from neutron_aria.agent.acl_source import build_acl_source
 from neutron_aria.agent.config import load_config
+from neutron_aria.agent.config import validate_config
 from neutron_aria.agent.event_merge import EventMerger
 from neutron_aria.agent.event_loop import SnapshotSynchronizer
 from neutron_aria.agent.neutron_client import NeutronClientFactoryError
@@ -176,6 +177,7 @@ def main(argv=None):
         config.rpc_events_enabled = True
     if options.disable_rpc_events:
         config.rpc_events_enabled = False
+    validate_config(config)
 
     if options.once:
         result = build_synchronizer(

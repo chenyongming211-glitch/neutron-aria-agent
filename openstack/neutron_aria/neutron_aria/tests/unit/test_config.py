@@ -172,6 +172,34 @@ port_source = disabled
         finally:
             os.unlink(path)
 
+    def test_rejects_rpc_events_without_full_resync(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = false
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = true
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_rpc_events_without_neutronclient_port_source(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = disabled
+rpc_events_enabled = true
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
+        finally:
+            os.unlink(path)
+
     def test_rejects_unknown_acl_source(self):
         path = self._write_config("""
 [acl]

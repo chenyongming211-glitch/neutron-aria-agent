@@ -128,12 +128,7 @@ def _has_option_anywhere(parser, option):
     return False
 
 
-def _validate_loaded_config(parser, config):
-    if _has_option_anywhere(parser, "integration_mode"):
-        raise ConfigError(
-            "integration_mode belongs in Neutron snapshot bodies, not neutron-aria-agent.ini"
-        )
-
+def validate_config(config):
     if not config.managed_domains:
         raise ConfigError("managed_domains must not be empty")
     unknown_domains = [
@@ -153,6 +148,15 @@ def _validate_loaded_config(parser, config):
         raise ConfigError(
             "full_resync_enabled=true requires [neutron] port_source=neutronclient"
         )
+    if config.rpc_events_enabled:
+        if not config.full_resync_enabled:
+            raise ConfigError(
+                "rpc_events_enabled=true requires [agent] full_resync_enabled=true"
+            )
+        if config.port_source != "neutronclient":
+            raise ConfigError(
+                "rpc_events_enabled=true requires [neutron] port_source=neutronclient"
+            )
     if config.request_timeout <= 0:
         raise ConfigError("aria.request_timeout must be positive")
     if config.request_timeout > DEFAULT_REQUEST_TIMEOUT:
@@ -160,6 +164,14 @@ def _validate_loaded_config(parser, config):
             "aria.request_timeout must not exceed stage-one UDS timeout %.1fs"
             % DEFAULT_REQUEST_TIMEOUT
         )
+
+
+def _validate_loaded_config(parser, config):
+    if _has_option_anywhere(parser, "integration_mode"):
+        raise ConfigError(
+            "integration_mode belongs in Neutron snapshot bodies, not neutron-aria-agent.ini"
+        )
+    validate_config(config)
 
 
 def load_config(path):

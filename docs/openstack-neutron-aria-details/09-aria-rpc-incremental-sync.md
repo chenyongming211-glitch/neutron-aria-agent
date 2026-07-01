@@ -40,7 +40,7 @@ Target end state:
 | --- | --- | --- | --- |
 | P0 safe default | `port_source=disabled`, `full_resync_enabled=false`, `rpc_events_enabled=false` | Heartbeat only | shipped |
 | P1 MVP production | `port_source=neutronclient`, `full_resync_enabled=true`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync | stage-two accepted |
-| P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC event -> event merge -> **full-resync** | skeleton in code; stage-three S3-5 |
+| P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | skeleton in code; stage-three S3-5 |
 | P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | **this plan** |
 
 Code anchors today:
@@ -48,8 +48,10 @@ Code anchors today:
 - REST port read: `neutron_client.NeutronPortSource.list_ports_for_host()`
 - RPC callbacks: `agent/rpc.py` (`port.update`, `port.delete`, `network.update`)
 - Event batching: `agent/event_merge.py`
-- Current RPC effect: `AgentService._handle_event_batch()` triggers
-  `safe_full_resync()` when resync is enabled.
+- Current RPC effect: `AgentService._process_event_batch()` triggers
+  `safe_full_resync()` for local port updates and network updates when resync
+  is enabled; known projected `port.delete` events use the existing UDS delete
+  path and the same durable local delete state.
 
 ## Comparison With OVS Agent
 
@@ -114,14 +116,22 @@ rpc_events_enabled = true
 event_merge_interval = 0.2
 ```
 
+Config rules:
+
+- `rpc_events_enabled=true` requires `full_resync_enabled=true`.
+- `rpc_events_enabled=true` requires `port_source=neutronclient`.
+
 Behavior:
 
 1. Consume the same first-stage RPC set as legacy OVS agent:
    `port.update`, `port.delete`, `network.update`.
 2. Merge events in `event_merge_interval`.
 3. Filter by local projected state and `binding:host_id`.
-4. Trigger `safe_full_resync()`; do not apply unsafe partial deltas.
-5. Keep periodic `resync_interval` as backup.
+4. For local `port.update` and `network.update`, trigger `safe_full_resync()`;
+   do not apply unsafe partial deltas.
+5. For known projected `port.delete`, call the idempotent UDS delete path and
+   persist the pending delete state. Unknown deletes do not mutate local state.
+6. Keep periodic `resync_interval` as backup.
 
 Exit criteria:
 

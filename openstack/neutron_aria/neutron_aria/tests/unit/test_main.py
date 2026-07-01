@@ -1,10 +1,12 @@
 from __future__ import absolute_import
 
+import os
 import shutil
 import tempfile
 import unittest
 
 from neutron_aria.agent.config import AgentConfig
+from neutron_aria.agent.config import ConfigError
 from neutron_aria.agent import main as agent_main
 from neutron_aria.agent.status_reporter import CompositeStatusReporter
 from neutron_aria.agent.main import build_synchronizer
@@ -62,11 +64,34 @@ class FakeAriaAclClient(object):
 
 
 class MainBuildSynchronizerTestCase(unittest.TestCase):
+    def _write_config(self, body):
+        fd, path = tempfile.mkstemp()
+        os.write(fd, body.encode("utf-8"))
+        os.close(fd)
+        return path
+
     def test_once_status_reporter_disabled_for_non_neutron_acl_source(self):
         self.assertEqual(
             None,
             agent_main.build_once_status_reporter(AgentConfig(acl_source="disabled")),
         )
+
+    def test_cli_rpc_enable_respects_runtime_config_gate(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = false
+
+[neutron]
+port_source = neutronclient
+""")
+        try:
+            self.assertRaises(
+                ConfigError,
+                agent_main.main,
+                ["-c", path, "--enable-rpc-events", "--report-once"],
+            )
+        finally:
+            os.unlink(path)
 
     def test_once_status_reporter_enabled_for_neutron_acl_source(self):
         calls = []
