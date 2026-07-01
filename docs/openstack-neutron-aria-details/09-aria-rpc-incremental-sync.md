@@ -1,8 +1,9 @@
 # 09. Aria RPC And Incremental Sync Detail Plan
 
-Status: planned post-stage-three evolution. This document records the target
-sync model and the phased path from the current MVP to incremental RPC. It is a
-design record, not an implementation claim.
+Status: P2 RPC-triggered full-resync is implemented with field evidence and an
+operator enablement/rollback contract. P3 port-scoped incremental RPC remains a
+planned optimization. This document records the phased path from polling-only
+MVP to incremental RPC; it is not a claim that P3 is implemented.
 
 Normative parents:
 
@@ -162,6 +163,69 @@ Current evidence:
   projected local port receiving a foreign-host `port.update` is deleted with
   `migration_source_cleanup` without triggering another full-resync.
 
+### P2 Operational Enablement Contract
+
+P2 is an operational switch for RPC-triggered full-resync. It is not P3 and it
+must not introduce port-scoped incremental apply.
+
+Safe default:
+
+- Keep `[neutron] rpc_events_enabled = false` in packaged defaults.
+- Keep `[agent] full_resync_enabled = true` and periodic polling available
+  before turning on RPC events.
+- Do not disable polling when RPC is enabled; RPC is a latency improvement and
+  polling remains the recovery path.
+
+Production entry criteria for enabling `rpc_events_enabled=true` on a host:
+
+1. P1 full-resync with `port_source=neutronclient` and `acl.source=neutron` is
+   accepted on that host.
+2. Stage-three ACL N3 fault/lifecycle gates are accepted or explicitly waived
+   for the target host.
+3. The deployed package includes the P2 RPC fixes and passes
+   `neutron_aria_rpc_event_smoke.sh`.
+4. Real RabbitMQ fanout A/B, multi-host foreign-host filtering, and source-host
+   cleanup smokes have pass evidence for the target environment.
+5. The container has the same effective `neutron.conf` messaging settings and
+   host naming convention as the onsite OVS agent.
+6. UDS status, rollback, and full-resync recovery are already accepted; a
+   failed RPC event path must be recoverable by polling-only full-resync.
+
+Enablement flow:
+
+1. Enable one compute host first; do not flip the whole cluster at once.
+2. Back up the active `neutron-aria-agent.ini`.
+3. Set only `[neutron] rpc_events_enabled = true`.
+4. Restart only the `neutron_aria_agent` service/container so the config is
+   loaded. Do not restart OVS, OVS agent, Neutron server, or datapath for this
+   switch.
+5. Verify logs show RPC event mode enabled, heartbeat/status remains healthy,
+   and a bounded test fanout reaches `event_batch_drained`.
+6. Keep the host in a bounded canary window and watch for unexpected
+   `managed_ports` growth, extra full-resync loops, or degraded reasons.
+
+Polling-only rollback:
+
+1. Set `[neutron] rpc_events_enabled = false`.
+2. Restart only `neutron_aria_agent`.
+3. Verify logs show RPC event mode disabled.
+4. Confirm periodic/manual full-resync still works and UDS rollback/delete can
+   clear any test-managed ports.
+
+Failure disposition:
+
+| Failure | Required action |
+| --- | --- |
+| RPC consumer import/start failure | Roll back to `rpc_events_enabled=false`; keep polling-only P1. |
+| RabbitMQ instability or missed events | Roll back to polling-only; rely on periodic full-resync. |
+| Foreign-host event mutates local state | Roll back immediately, run UDS cleanup/rollback, and keep P2 closed until fixed. |
+| Source-host cleanup leaves stale managed ports | Roll back, run cleanup smoke, and do not enable P2 on more hosts. |
+| Repeated full-resync loop after one event | Roll back to polling-only and inspect event merge/log evidence. |
+
+P2 acceptance is a production operations gate. It closes when the runbook can
+enable and roll back RPC events without changing ACL semantics, OVS forwarding,
+or the polling/full-resync recovery model.
+
 ## P3: Incremental RPC (Target Optimization)
 
 ### Principles
@@ -281,6 +345,7 @@ Container requirements for P2/P3:
 | --- | --- | --- |
 | P2-1 | Enable RPC-triggered resync in runbook and smoke | rule change converges faster than polling-only on test host |
 | P2-2 | Foreign-host fanout filtering tests | no cross-host managed port mutation |
+| P2-3 | Production canary switch and polling-only rollback runbook | `rpc_events_enabled=true` can be enabled and disabled per host without OVS/datapath restart |
 | P3-1 | Projected port store + network index | unit tests for host/network filtering |
 | P3-2 | Port-scoped snapshot builder in Python | unit tests + UDS contract tests |
 | P3-3 | Rust scoped snapshot apply | WAL/generation tests; no false ready |

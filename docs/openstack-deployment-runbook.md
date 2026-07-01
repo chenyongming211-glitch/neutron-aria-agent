@@ -313,9 +313,84 @@ Minimum production smoke:
 | ACL policy missing/invalid | ACL domain `degraded`, `effective_action=bypass`; OVS forwarding unaffected. |
 | Local `ariactl policy add` on ACL-managed instance | Rejected with `LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN`. |
 | Local `ariactl qos add` when only ACL is managed | Allowed. |
+| RPC P2 package smoke | `neutron_aria_rpc_event_smoke.sh` passes before any live RabbitMQ canary. |
+| RPC P2 live fanout smokes | A/B, foreign-host filtering, and source-host cleanup pass before production enablement. |
 | Datapath restart | WAL/status recovers or full resync repairs; no unmanaged tap takeover. |
 | UDS hardening evidence-only smoke | `neutron_aria_uds_hardening_smoke.sh` records uid/gid allow-list candidates and current socket/audit disposition without mutating the host. |
 | UDS hardened enforcement smoke | With `REQUIRE_HARDENED=true`, socket has no other-user bits, audit log exists, and peercred enforcement uses the recorded uid/gid allow-list. |
+
+## RPC P2 Canary Enablement
+
+`rpc_events_enabled=true` is allowed only after production ACL source,
+full-resync, rollback, and N3 fault/lifecycle gates have passed or have an
+explicit written waiver. It is a latency switch over the existing P1
+full-resync path, not an incremental apply feature.
+
+Keep the packaged default as polling-only:
+
+```ini
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = false
+
+[acl]
+source = neutron
+```
+
+Before enabling RPC events on a production host, require all of the following:
+
+| Gate | Required proof |
+| --- | --- |
+| package preflight | `deploy/kolla/smoke/neutron_aria_rpc_event_smoke.sh` passes on the installed package. |
+| live fanout A/B | `rpc_events_enabled=false` ignores the test fanout and `true` consumes it. |
+| multi-host locality | Foreign-host fanout on `ostack2/3/4` does not mutate local managed ports. |
+| source cleanup | A previously projected local port moved to another host is deleted locally with `migration_source_cleanup`. |
+| recovery baseline | Polling full-resync, UDS status, and rollback/delete cleanup are already passing. |
+
+Enable one host first:
+
+```bash
+sudo cp /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini \
+  /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini.pre-rpc-p2
+
+sudo sed -i 's/^rpc_events_enabled *=.*/rpc_events_enabled = true/' \
+  /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini
+
+sudo docker restart neutron_aria_agent
+```
+
+If the container name differs, restart only the `neutron-aria-agent`
+service/container used on that host. Do not restart OVS, OVS agent,
+neutron-server, or `aria-datapath` for this switch.
+
+Post-enable checks:
+
+- `neutron-aria-agent` starts cleanly with RPC event mode enabled.
+- Heartbeat remains active and no unexpected degraded reason appears.
+- A bounded test fanout reaches `event_batch_drained`.
+- `managed_ports` does not grow for foreign-host events.
+- Periodic or manual full-resync remains available as the recovery path.
+
+Rollback to polling-only:
+
+```bash
+sudo sed -i 's/^rpc_events_enabled *=.*/rpc_events_enabled = false/' \
+  /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini
+
+sudo docker restart neutron_aria_agent
+```
+
+After rollback, verify the agent starts with RPC events disabled, no new event
+batches are drained, and a normal full-resync/UDS rollback smoke can still
+clear any test-managed ports.
+
+Keep P2 closed on additional hosts if any live fanout causes cross-host local
+mutation, stale managed ports after source cleanup, repeated full-resync loops,
+or RabbitMQ consumer startup failure. The safe fallback is polling-only P1, not
+disabling ACL or touching OVS.
 
 ## OVS Restart Handling
 
@@ -390,12 +465,15 @@ the N3 `ovs-restart` gate.
 
 Safe rollback order:
 
-1. Set `full_resync_enabled=false` in `neutron-aria-agent`.
-2. Set `[acl] source=disabled` or remove ACL bindings in Neutron.
-3. Allow one full resync/delete cycle to clear Neutron-managed datapath state.
-4. Stop `neutron-aria-agent`.
-5. Keep OVS agent and OVS forwarding untouched.
-6. Stop or restart `aria-datapath` only after confirming OVS connectivity remains healthy.
+1. If RPC P2 is enabled, set `[neutron] rpc_events_enabled=false` and restart
+   only `neutron-aria-agent` to return to polling-only.
+2. Set `full_resync_enabled=false` in `neutron-aria-agent` when rolling back
+   production snapshot submission.
+3. Set `[acl] source=disabled` or remove ACL bindings in Neutron.
+4. Allow one full resync/delete cycle to clear Neutron-managed datapath state.
+5. Stop `neutron-aria-agent`.
+6. Keep OVS agent and OVS forwarding untouched.
+7. Stop or restart `aria-datapath` only after confirming OVS connectivity remains healthy.
 
 Never use socket deletion as the primary rollback method. A missing socket should
 produce degraded status and trigger recovery/full resync, not silently switch to

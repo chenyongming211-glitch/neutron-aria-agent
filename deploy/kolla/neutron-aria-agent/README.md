@@ -185,6 +185,21 @@ This smoke does not subscribe to RabbitMQ and does not touch tap datapath. It
 validates the installed package's P2 config gate, event merge behavior,
 foreign-host filtering, and known-port delete cleanup.
 
+P2 production enablement is per host:
+
+1. Keep packaged defaults at `rpc_events_enabled = false`.
+2. Confirm P1 full-resync and rollback are accepted on the host.
+3. Confirm real fanout A/B, foreign-host filtering, and source-host cleanup
+   evidence exists for the target environment.
+4. Flip only `[neutron] rpc_events_enabled = true`.
+5. Restart only `neutron_aria_agent` to load the setting.
+6. Verify heartbeat, `event_batch_drained`, and managed-port locality.
+
+Rollback is also per host: set `rpc_events_enabled = false` and restart only
+`neutron_aria_agent`. Keep polling/full-resync enabled so ACL recovery remains
+available. Do not restart OVS, OVS agent, neutron-server, or `aria-datapath`
+for this switch.
+
 ## Full Resync Gate
 
 Do not enable full resync until all of these are true:
