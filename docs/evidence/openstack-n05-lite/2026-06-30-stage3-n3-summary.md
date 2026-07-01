@@ -16,7 +16,7 @@ Scope:
 | Gate | Category | Disposition | Evidence | Notes | Next Action |
 | --- | --- | --- | --- | --- | --- |
 | S3-1 release-ci | release | pass | GitHub Actions workflow dispatch `28438231005` on commit `082f002`; artifacts `firewall-binaries-x86_64` and `neutron-aria-stage2-acl-kolla-bundle-082f002a953c6bd74978732ec668fb8c0985ee37` were uploaded after payload policy passed. | Rust/eBPF, `ariactl`, and `aria-agent` compiled in CI; release creation stayed tag-only. | none |
-| S3-2 uds-rollout | operations | pending | `docs/evidence/openstack-n05-lite/2026-06-30-uds-hardening-summary.md` covers reversible three-host proof. | Persistent hardened rollout has not been left enabled on target hosts. | Run `deploy/kolla/smoke/neutron_aria_uds_hardened_rollout_smoke.sh` as a controlled rollout or mark audit-only with explicit release approval. |
+| S3-2 uds-rollout | operations | pass | `docs/evidence/openstack-n05-lite/20260701-stage3-uds-persistent-rollout/summary.md` | Persistent UDS hardening is enabled on all three target hosts. `REQUIRE_HARDENED=true` smoke passed for `ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net`; active sockets are non-world-writable with peercred enforcement and allowed audit records. The rollout did not restart OVS, OVS agent, or `neutron_aria_agent`. | none |
 | S3-3 no-binding | fault | pass | `docs/evidence/openstack-n05-lite/20260630-stage3-no-binding-probe/summary.md` | Rerun on `ostack2.bj159.net` with the CI datapath artifact and Python timeout/reportback fix returned `agent_rc=0`, submitted snapshot generation 107, reported all five managed ACL domains as `not_requested` with `effective_action=bypass`, refreshed Neutron `aria_acl_port_statuses`, and rolled back to zero managed ports. | none |
 | S3-3 missing-policy | fault | pass | `docs/evidence/openstack-n05-lite/20260630-stage3-missing-policy-probe/summary.md` | Direct fault injection inserted five temporary `aria_acl_bindings` rows that referenced a non-existent policy. Full-resync submitted generation 109, each managed ACL domain reported `degraded` with `effective_action=bypass` and `reason=policy_missing_or_disabled`, Neutron `aria_acl_port_statuses` refreshed to generation 109, a VM ping succeeded while degraded, and cleanup removed all temporary bindings and managed ports. | none |
 | S3-3 apply-failure | fault | pass | `docs/evidence/openstack-n05-lite/20260630-stage3-apply-failure-probe/summary.md` | Representative one-shot ACL apply failure at `neutron.acl.after_policy_write` returned target port `error` without `effective_action=enforce`, preserved forwarding while partial, did not increase `wal_replay_failures`, recovered on the second full-resync, blocked ICMP while ACL was ready, rolled back to zero managed ports, and restored the hardened UDS config. | none |
@@ -37,8 +37,7 @@ python ci/check_stage3_n3_evidence.py --require-complete
 Current expected result:
 
 - Plain schema gate: pass.
-- `--require-complete`: fail until the pending N3 fault/lifecycle rows are
-  replaced with `pass`, `degraded`, `unsupported`, or `not_applicable`.
+- `--require-complete`: pass when this matrix remains free of `pending` rows.
 
 ## Guardrails
 

@@ -1,0 +1,22 @@
+audit_log_path=/var/log/kolla/aria-datapath/neutron-uds-audit.log
+/var/log/kolla/aria-datapath/neutron-uds-audit.log root root 0 0 644 regular file
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3271401,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882443046}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3271401,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882443129}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3271401,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882446132}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3271401,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882447134}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3271401,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882448136}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3271401,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882449137}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3271401,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882449138}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3272013,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882449339}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3272115,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882449551}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3272474,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882453287}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3273755,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882474689}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3273755,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882474690}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3273755,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882475121}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3273755,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882475321}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3273755,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882475446}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3273755,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882475538}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3273755,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882475846}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3273899,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882475998}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3274245,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882479354}
+{"credential_error":null,"enforce":true,"event":"neutron_uds_peer_auth","peer_gid":42435,"peer_pid":3301371,"peer_uid":42435,"reason":"peercred_allow_list_match","result":"allowed","ts_ms":1782882898854}
