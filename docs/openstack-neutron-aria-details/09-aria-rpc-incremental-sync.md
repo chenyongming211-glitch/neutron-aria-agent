@@ -136,6 +136,8 @@ Behavior:
 Exit criteria:
 
 - RPC on/off A/B shows faster rule convergence than polling-only.
+- `neutron_aria_rpc_event_smoke.sh` passes as a package-level preflight before
+  real RabbitMQ fanout testing.
 - Fanout delete/update on foreign hosts does not mutate local managed ports.
 - RPC loss is recovered by periodic or manual full-resync without false ready.
 
@@ -282,7 +284,8 @@ Minimum tests before declaring P3 ready:
 
 Suggested smokes to add or extend:
 
-- `neutron_aria_rpc_incremental_smoke.sh` (new)
+- `neutron_aria_rpc_event_smoke.sh` for P2 package-level event path preflight.
+- `neutron_aria_rpc_incremental_smoke.sh` for P3 real incremental behavior.
 - extend `neutron_aria_acl_neutron_source_smoke.sh` with real port binding + traffic
 - reuse `neutron_aria_vm_migration_smoke.sh`, `neutron_aria_tap_recreate_smoke.sh`
 

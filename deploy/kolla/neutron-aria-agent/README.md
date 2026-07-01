@@ -175,6 +175,16 @@ When `[neutron] rpc_events_enabled = true`, the container command must keep
 passing the same `neutron.conf` and `openvswitch_agent.ini` used by the OVS
 agent so oslo.messaging and host naming match the existing deployment.
 
+Before a real RabbitMQ fanout test, run the package-level event path smoke:
+
+```bash
+sudo deploy/kolla/smoke/neutron_aria_rpc_event_smoke.sh
+```
+
+This smoke does not subscribe to RabbitMQ and does not touch tap datapath. It
+validates the installed package's P2 config gate, event merge behavior,
+foreign-host filtering, and known-port delete cleanup.
+
 ## Full Resync Gate
 
 Do not enable full resync until all of these are true:
