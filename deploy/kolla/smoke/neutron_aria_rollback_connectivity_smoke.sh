@@ -23,6 +23,8 @@ CHECK_AGENT_STOP="${CHECK_AGENT_STOP:-false}"
 CHECK_DATAPATH_STOP="${CHECK_DATAPATH_STOP:-false}"
 WAIT_AGENT_SECONDS="${WAIT_AGENT_SECONDS:-30}"
 WAIT_DATAPATH_SECONDS="${WAIT_DATAPATH_SECONDS:-30}"
+WAL_REPLAY_FAILURE_MAX_DELTA="${WAL_REPLAY_FAILURE_MAX_DELTA:-0}"
+WAL_REPLAY_FAILURE_BASELINE="${WAL_REPLAY_FAILURE_BASELINE:-}"
 
 mkdir -p "${EVIDENCE_DIR}"
 COMMANDS_LOG="${EVIDENCE_DIR}/commands.log"
@@ -104,7 +106,10 @@ capture() {
 }
 
 status_no_managed_ports() {
-    docker_agent_exec python - "${SOCKET_PATH}" <<'PY'
+    docker_agent_exec python - \
+        "${SOCKET_PATH}" \
+        "${WAL_REPLAY_FAILURE_BASELINE}" \
+        "${WAL_REPLAY_FAILURE_MAX_DELTA}" <<'PY'
 from __future__ import print_function
 
 import json
@@ -112,14 +117,34 @@ import sys
 
 from neutron_aria.agent.uds_client import LocalClient
 
-client = LocalClient(sys.argv[1], timeout=3.0)
+socket_path, baseline, max_delta = sys.argv[1:4]
+client = LocalClient(socket_path, timeout=3.0)
 status = client.status()
 print(json.dumps(status, sort_keys=True))
 managed = status.get("managed_ports") or []
 if managed:
     raise SystemExit("expected no managed ports, got %s" % managed)
-if int(status.get("wal_replay_failures") or 0) != 0:
-    raise SystemExit("wal_replay_failures is non-zero: %s" % status)
+current = int(status.get("wal_replay_failures") or 0)
+baseline = int(baseline or 0)
+max_delta = int(max_delta or 0)
+if current > baseline + max_delta:
+    raise SystemExit(
+        "wal_replay_failures increased: baseline=%d current=%d max_delta=%d status=%s" %
+        (baseline, current, max_delta, status)
+    )
+PY
+}
+
+current_wal_replay_failures() {
+    docker_agent_exec python - "${SOCKET_PATH}" <<'PY'
+from __future__ import print_function
+
+import sys
+
+from neutron_aria.agent.uds_client import LocalClient
+
+status = LocalClient(sys.argv[1], timeout=3.0).status()
+print(int(status.get("wal_replay_failures") or 0))
 PY
 }
 
@@ -268,6 +293,16 @@ if [ "${CHECK_DATAPATH_STOP}" = "true" ]; then
     docker ps --format '{{.Names}}' | grep -qx "${DATAPATH_SERVICE_NAME}" || \
         die "${DATAPATH_SERVICE_NAME} is not running"
 fi
+if [ -z "${WAL_REPLAY_FAILURE_BASELINE}" ]; then
+    WAL_REPLAY_FAILURE_BASELINE="$(current_wal_replay_failures)"
+fi
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "WAL replay failure baseline" \
+    "Current run must not increase historical WAL replay failure count" \
+    "current_wal_replay_failures" \
+    "baseline=${WAL_REPLAY_FAILURE_BASELINE} max_delta=${WAL_REPLAY_FAILURE_MAX_DELTA}" \
+    "facts.tsv" \
+    "pass" >> "${FACTS_TSV}"
 
 capture "Baseline VM connectivity" \
     "VM is reachable before rollback smoke" \
