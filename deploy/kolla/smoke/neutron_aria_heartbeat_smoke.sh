@@ -4,6 +4,7 @@ set -euo pipefail
 EXPECTED_HOSTS="${EXPECTED_HOSTS:-ostack2.bj159.net ostack3.bj159.net ostack4.bj159.net}"
 ADMINRC="${ADMINRC:-/root/adminrc}"
 REQUIRE_HEARTBEAT_SUMMARY_FIELDS="${REQUIRE_HEARTBEAT_SUMMARY_FIELDS:-false}"
+REQUIRE_P3_PROJECTION_FIELDS="${REQUIRE_P3_PROJECTION_FIELDS:-false}"
 HEARTBEAT_SUMMARY_TIMEOUT="${HEARTBEAT_SUMMARY_TIMEOUT:-45}"
 
 if [ -r "${ADMINRC}" ]; then
@@ -44,6 +45,17 @@ summary_fields_present() {
     done
 }
 
+p3_projection_fields_present() {
+    local details="$1"
+    for field in \
+        projection_index \
+        last_event_decision_counts \
+        last_event_decisions \
+        last_event_decision_updated_at; do
+        echo "${details}" | grep "${field}" >/dev/null || return 1
+    done
+}
+
 for host in ${EXPECTED_HOSTS}; do
     line="$(neutron agent-list | grep "Aria ACL agent" | grep " ${host} " || true)"
     if [ -z "${line}" ]; then
@@ -68,6 +80,20 @@ for host in ${EXPECTED_HOSTS}; do
             details="$(neutron agent-show "${agent_id}" -f json)"
         done
         echo "heartbeat_summary_fields=ok host=${host}"
+    fi
+
+    if [ "${REQUIRE_P3_PROJECTION_FIELDS}" = "true" ]; then
+        deadline=$((SECONDS + HEARTBEAT_SUMMARY_TIMEOUT))
+        while ! p3_projection_fields_present "${details}"; do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+                echo "missing neutron-aria-agent P3 projection heartbeat fields on ${host}" >&2
+                echo "${details}" >&2
+                exit 1
+            fi
+            sleep 3
+            details="$(neutron agent-show "${agent_id}" -f json)"
+        done
+        echo "p3_projection_fields=ok host=${host}"
     fi
 done
 
