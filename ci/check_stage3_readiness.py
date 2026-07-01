@@ -22,6 +22,7 @@ REQUIRED_FILES = [
     "deploy/kolla/smoke/neutron_aria_acl_fault_injection_smoke.sh",
     "deploy/kolla/smoke/neutron_aria_crash_injection_smoke.sh",
     "deploy/kolla/smoke/neutron_aria_delete_fault_injection_smoke.sh",
+    "deploy/kolla/smoke/neutron_aria_ovs_restart_smoke.sh",
     "deploy/kolla/smoke/neutron_aria_tap_recreate_smoke.sh",
     "deploy/kolla/smoke/neutron_aria_vm_migration_smoke.sh",
     "deploy/kolla/smoke/neutron_aria_uds_hardened_rollout_smoke.sh",

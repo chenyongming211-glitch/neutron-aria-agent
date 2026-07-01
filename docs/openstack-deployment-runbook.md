@@ -348,6 +348,43 @@ For `ovs-vswitchd` restart:
 
 Do not add OpenFlow/ofport inspection to Aria runtime as a product dependency.
 Those checks can remain smoke/runbook diagnostics for OVS recovery only.
+Aria runtime and Aria smoke scripts must not restart OVS or OVS agent. OVS
+restart is an operator maintenance action outside Aria's authority.
+
+Use the ACL-focused OVS restart smoke for N3 evidence in one of two modes:
+
+```bash
+sudo REPO_ROOT=$(pwd) \
+  WAIT_FOR_EXTERNAL_OVS_RESTART=true \
+  VM_IP=<reachable-vm-ip> \
+  EXPECTED_PORT_ID=<neutron-port-id> \
+  EXPECTED_IFNAME=<tap-ifname> \
+  deploy/kolla/smoke/neutron_aria_ovs_restart_smoke.sh
+```
+
+Start this smoke before a planned external OVS maintenance action. The smoke
+waits for the externally triggered restart marker to change, then passes or
+fails on the Aria ACL attach channel.
+
+In an isolated test environment only, the same smoke can trigger the service
+restart itself:
+
+```bash
+sudo REPO_ROOT=$(pwd) \
+  TEST_TRIGGER_OVS_RESTART=true \
+  VM_IP=<reachable-vm-ip> \
+  EXPECTED_PORT_ID=<neutron-port-id> \
+  EXPECTED_IFNAME=<tap-ifname> \
+  deploy/kolla/smoke/neutron_aria_ovs_restart_smoke.sh
+```
+
+`TEST_TRIGGER_OVS_RESTART=true` is a test harness action, not product behavior.
+Production Aria runtime must never trigger OVS or OVS agent restart. The smoke
+records VM ping as OVS forwarding observation and does not treat immediate OVS
+restart packet loss as ACL failure. Running it with neither
+`WAIT_FOR_EXTERNAL_OVS_RESTART=true` nor `TEST_TRIGGER_OVS_RESTART=true`
+performs only a non-restart ACL attach observation and is not enough to close
+the N3 `ovs-restart` gate.
 
 ## Rollback
 

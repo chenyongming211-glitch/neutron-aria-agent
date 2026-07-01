@@ -62,6 +62,7 @@ Existing scripts are the stage-three starting point:
 | ACL fault injection | `deploy/kolla/smoke/neutron_aria_acl_fault_injection_smoke.sh` |
 | Crash recovery | `deploy/kolla/smoke/neutron_aria_crash_injection_smoke.sh` |
 | Delete recovery | `deploy/kolla/smoke/neutron_aria_delete_fault_injection_smoke.sh` |
+| OVS restart | `deploy/kolla/smoke/neutron_aria_ovs_restart_smoke.sh` |
 | Tap recreate | `deploy/kolla/smoke/neutron_aria_tap_recreate_smoke.sh` |
 | VM migration | `deploy/kolla/smoke/neutron_aria_vm_migration_smoke.sh` |
 | Rollback/connectivity | `deploy/kolla/smoke/neutron_aria_rollback_connectivity_smoke.sh` |
@@ -119,7 +120,11 @@ An `ovs-restart` smoke should therefore have two result channels:
 
 Only the first channel decides whether Aria ACL lifecycle passed. The second
 channel is operational evidence for OVS recovery and should not force Aria to
-inspect OpenFlow/ofport state.
+inspect OpenFlow/ofport state. Aria runtime and smoke scripts must not restart
+OVS or OVS agent; the `ovs-restart` smoke may only observe an externally
+scheduled maintenance action. In an isolated test environment, the smoke may
+trigger `ovs-vswitchd` restart only through an explicit test harness flag; this
+must not be implemented in Aria runtime or production automation.
 
 ## CI Contract
 
