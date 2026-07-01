@@ -234,6 +234,10 @@ class AgentServiceTestCase(unittest.TestCase):
         self.assertEqual(2, sync.resync_calls)
         self.assertEqual(2, result["snapshot"]["generation"])
         self.assertEqual(["p1", "p2"], result["events"]["port_updates"])
+        self.assertEqual(
+            ["full_resync", "full_resync"],
+            [decision["action"] for decision in result["events"]["decisions"]],
+        )
 
     def test_remote_port_update_for_unknown_port_is_ignored_after_merge(self):
         clock = FakeClock()
@@ -257,6 +261,7 @@ class AgentServiceTestCase(unittest.TestCase):
         self.assertEqual(1, sync.resync_calls)
         self.assertEqual([], sync.delete_calls)
         self.assertEqual(None, result["snapshot"])
+        self.assertEqual("ignore", result["events"]["decisions"][0]["action"])
 
     def test_remote_port_update_for_known_port_deletes_local_state(self):
         clock = FakeClock()
@@ -282,6 +287,7 @@ class AgentServiceTestCase(unittest.TestCase):
         self.assertEqual(["p1"], sync.delete_calls)
         self.assertEqual(["migration_source_cleanup"], sync.delete_reasons)
         self.assertEqual(None, result["snapshot"])
+        self.assertEqual("delete_local", result["events"]["decisions"][0]["action"])
 
     def test_port_delete_deletes_only_known_local_port(self):
         clock = FakeClock()
@@ -307,6 +313,10 @@ class AgentServiceTestCase(unittest.TestCase):
         self.assertEqual(["p1"], sync.delete_calls)
         self.assertEqual(["port_delete_event"], sync.delete_reasons)
         self.assertEqual(None, result["snapshot"])
+        self.assertEqual(
+            ["delete_local", "ignore"],
+            [decision["action"] for decision in result["events"]["decisions"]],
+        )
 
     def test_network_update_triggers_full_resync(self):
         clock = FakeClock()
@@ -329,6 +339,7 @@ class AgentServiceTestCase(unittest.TestCase):
 
         self.assertEqual(2, sync.resync_calls)
         self.assertEqual(["net1"], result["events"]["dirty_networks"])
+        self.assertEqual("full_resync", result["events"]["decisions"][0]["action"])
 
     def test_rpc_event_loop_caps_idle_sleep_to_poll_for_new_events(self):
         clock = FakeClock()

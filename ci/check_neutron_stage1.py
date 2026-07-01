@@ -214,6 +214,7 @@ def check_packaged_ini_contract():
         "full_resync_enabled": False,
         "port_source": "disabled",
         "rpc_events_enabled": False,
+        "incremental_rpc_enabled": False,
     }
     for name, value in expected.items():
         actual = getattr(config, name)

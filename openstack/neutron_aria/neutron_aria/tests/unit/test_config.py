@@ -42,6 +42,7 @@ timeout_convergence_interval = 0.4
 port_source = neutronclient
 port_page_size = 50
 rpc_events_enabled = true
+incremental_rpc_enabled = false
 event_merge_interval = 0.3
 event_queue_max_ports = 42
 event_queue_max_networks = 7
@@ -65,6 +66,7 @@ fixture_path = /tmp/aria-acl-fixture.json
             self.assertEqual("neutronclient", config.port_source)
             self.assertEqual(50, config.port_page_size)
             self.assertTrue(config.rpc_events_enabled)
+            self.assertFalse(config.incremental_rpc_enabled)
             self.assertEqual(0.3, config.event_merge_interval)
             self.assertEqual(42, config.event_queue_max_ports)
             self.assertEqual(7, config.event_queue_max_networks)
@@ -194,6 +196,21 @@ full_resync_enabled = true
 [neutron]
 port_source = disabled
 rpc_events_enabled = true
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_incremental_rpc_until_p3_gate_is_accepted(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = true
+incremental_rpc_enabled = true
 """)
         try:
             self.assertRaises(ConfigError, load_config, path)

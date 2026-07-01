@@ -330,6 +330,9 @@ Rules:
 
 - `incremental_rpc_enabled=true` requires `rpc_events_enabled=true` and
   `full_resync_enabled=true`.
+- Current v0.9 config validation rejects `incremental_rpc_enabled=true` until
+  the P3 entry gate is explicitly accepted. P3-1 may add inactive read-only
+  indexes and decision tests, but production behavior remains P2.
 - If incremental path fails validation, fall back to full-resync when
   `incremental_fallback_full_resync=true`.
 
@@ -346,7 +349,7 @@ Container requirements for P2/P3:
 | P2-1 | Enable RPC-triggered resync in runbook and smoke | rule change converges faster than polling-only on test host |
 | P2-2 | Foreign-host fanout filtering tests | no cross-host managed port mutation |
 | P2-3 | Production canary switch and polling-only rollback runbook | `rpc_events_enabled=true` can be enabled and disabled per host without OVS/datapath restart |
-| P3-1 | Projected port store + network index | unit tests for host/network filtering |
+| P3-1 | Projected port store + network index | inactive/read-only unit tests for host/network/revision filtering; no port-scoped apply |
 | P3-2 | Port-scoped snapshot builder in Python | unit tests + UDS contract tests |
 | P3-3 | Rust scoped snapshot apply | WAL/generation tests; no false ready |
 | P3-4 | Incremental ACL apply failure semantics | degraded/bypass without OVS loss |
@@ -377,7 +380,7 @@ Suggested smokes to add or extend:
 
 ## Entry Criteria For Starting P3
 
-Do not start P3 implementation until all are true:
+Do not start P3 port-scoped apply implementation until all are true:
 
 1. Stage-two ACL MVP and stage-three N3 fault/lifecycle gates are accepted or
    explicitly waived with written disposition.
@@ -386,6 +389,20 @@ Do not start P3 implementation until all are true:
    subset is available for incremental failure reporting.
 4. UDS contract documents port-scoped snapshot limits and errors.
 5. `EffectiveAclIndex` revision compare is covered by unit tests.
+
+Allowed before the full P3 entry gate:
+
+- Add `incremental_rpc_enabled=false` as an explicit blocked config gate.
+- Build an in-memory `ProjectedStateIndex` from accepted full-resync results.
+- Unit test local/foreign host decisions, revision relation, network locality,
+  delete cleanup, and conservative full-resync fallback.
+
+Still forbidden before the full P3 entry gate:
+
+- Enabling `incremental_rpc_enabled=true` in runtime config.
+- Sending port-scoped snapshots over UDS.
+- Changing Rust datapath snapshot apply semantics.
+- Removing periodic/full-resync recovery.
 
 ## Open Questions
 

@@ -135,6 +135,15 @@ expect_config_error(
     ),
     "rpc_events_enabled must require neutronclient port source",
 )
+expect_config_error(
+    AgentConfig(
+        full_resync_enabled=True,
+        port_source="neutronclient",
+        rpc_events_enabled=True,
+        incremental_rpc_enabled=True,
+    ),
+    "incremental_rpc_enabled must remain disabled until P3 gate",
+)
 
 clock, sync, merger, service = new_service()
 merger.record_port_update("p-local", binding_host="local-host")
@@ -142,6 +151,7 @@ clock.advance(0.2)
 result = service.run_once()
 assert_equal(2, sync.resync_calls, "local port update must trigger full resync")
 assert_equal(["p-local"], result["events"]["port_updates"], "local port update recorded")
+assert_equal("full_resync", result["events"]["decisions"][0]["action"], "local decision")
 
 clock, sync, merger, service = new_service()
 merger.record_network_update("net-local")
@@ -157,6 +167,7 @@ result = service.run_once()
 assert_equal(1, sync.resync_calls, "foreign unknown port update must not resync")
 assert_equal([], sync.delete_calls, "foreign unknown port update must not delete")
 assert_equal(None, result["snapshot"], "foreign unknown port update must be heartbeat only")
+assert_equal("ignore", result["events"]["decisions"][0]["action"], "foreign decision")
 
 clock, sync, merger, service = new_service()
 sync.projected_port_ids.add("p-moved")

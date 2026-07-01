@@ -58,6 +58,8 @@ full_resync_enabled = false
 
 [neutron]
 port_source = disabled
+rpc_events_enabled = false
+incremental_rpc_enabled = false
 
 [aria]
 socket_path = /run/aria/aria-agent.sock
@@ -335,6 +337,7 @@ full_resync_enabled = true
 [neutron]
 port_source = neutronclient
 rpc_events_enabled = false
+incremental_rpc_enabled = false
 
 [acl]
 source = neutron

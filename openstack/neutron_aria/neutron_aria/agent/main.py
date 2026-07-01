@@ -209,12 +209,14 @@ def main(argv=None):
     host = _default_host(config)
     LOG.info(
         "agent_start host=%s managed_domains=%s full_resync_enabled=%s "
-        "rpc_events_enabled=%s port_source=%s ovs_bridge=%s socket_path=%s "
-        "acl_source=%s acl_fixture_enabled=%s state_dir=%s",
+        "rpc_events_enabled=%s incremental_rpc_enabled=%s port_source=%s "
+        "ovs_bridge=%s socket_path=%s acl_source=%s acl_fixture_enabled=%s "
+        "state_dir=%s",
         host,
         ",".join(config.managed_domains),
         config.full_resync_enabled,
         config.rpc_events_enabled,
+        config.incremental_rpc_enabled,
         config.port_source,
         config.ovs_bridge,
         config.socket_path,

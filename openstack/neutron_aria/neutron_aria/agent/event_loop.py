@@ -4,6 +4,7 @@ import logging
 import time
 
 from neutron_aria.agent.inventory import PortCandidateBuilder
+from neutron_aria.agent.projection import ProjectedStateIndex
 from neutron_aria.agent.state import InMemorySnapshotStateStore
 from neutron_aria.agent.status import AgentRuntimeStatus
 from neutron_aria.agent.uds_client import LocalApiError
@@ -37,6 +38,7 @@ class SnapshotSynchronizer(object):
         status_reporter=None,
         acl_index=None,
         acl_source=None,
+        projection_index=None,
         timeout_convergence_attempts=5,
         timeout_convergence_interval=1.0,
         sleeper=None,
@@ -52,6 +54,8 @@ class SnapshotSynchronizer(object):
         self.runtime_status = runtime_status or AgentRuntimeStatus(host)
         self.status_reporter = status_reporter
         self.projected_port_ids = set(self.state_store.last_projected_port_ids())
+        self.projection_index = projection_index or ProjectedStateIndex()
+        self.projection_index.replace_projected_ids(self.projected_port_ids)
         self.acl_index = acl_index
         self.acl_source = acl_source
         self.timeout_convergence_attempts = max(1, int(timeout_convergence_attempts))
@@ -119,6 +123,11 @@ class SnapshotSynchronizer(object):
         self._raise_if_response_failed(response)
         apply_status = self._status_after_apply(snapshot, projected_port_ids, response)
         self.projected_port_ids = projected_port_ids
+        self.projection_index.replace_from_resync(
+            ports,
+            snapshot,
+            generation=snapshot["generation"],
+        )
         managed_ports = self._response_managed_count(response, apply_status)
         self.state_store.commit_snapshot(
             snapshot["generation"],
@@ -210,6 +219,7 @@ class SnapshotSynchronizer(object):
         except LocalApiTimeoutError as exc:
             response = self._recover_delete_timeout(port_id, exc)
         self.projected_port_ids.discard(port_id)
+        self.projection_index.remove(port_id)
         self.state_store.commit_delete(port_id)
         LOG.info(
             "delete_port_complete host=%s port_id=%s reason=%s projected_ports=%s",
@@ -239,6 +249,10 @@ class SnapshotSynchronizer(object):
                     managed_ports=managed_ports,
                 )
                 self.projected_port_ids = set(snapshot.get("projected_port_ids") or [])
+                self.projection_index.replace_projected_ids(
+                    self.projected_port_ids,
+                    generation=snapshot["generation"],
+                )
                 self.runtime_status.mark_ready(
                     snapshot["generation"],
                     snapshot.get("snapshot_ports") or 0,
@@ -284,6 +298,7 @@ class SnapshotSynchronizer(object):
             status = self.local_client.status()
             if self._delete_status_converged(pending_delete["port_id"], status):
                 self.projected_port_ids.discard(pending_delete["port_id"])
+                self.projection_index.remove(pending_delete["port_id"])
                 self.state_store.commit_delete(pending_delete["port_id"])
                 recovered.append("delete")
                 LOG.warning(
@@ -308,6 +323,26 @@ class SnapshotSynchronizer(object):
 
     def has_projected_port(self, port_id):
         return port_id in self.projected_port_ids
+
+    def decide_port_update(self, port_id, binding_host=None, revision_number=None):
+        return self.projection_index.decide_port_update(
+            port_id,
+            self.host,
+            binding_host=binding_host,
+            revision_number=revision_number,
+        )
+
+    def decide_port_delete(self, port_id):
+        return self.projection_index.decide_port_delete(port_id)
+
+    def decide_network_update(self, network_id):
+        return self.projection_index.decide_network_update(
+            network_id,
+            conservative=True,
+        )
+
+    def projected_ports_for_network(self, network_id):
+        return self.projection_index.ports_for_network(network_id)
 
     def _list_ports(self):
         if hasattr(self.port_source, "list_ports_for_host"):

@@ -2194,6 +2194,7 @@ socket_path = /run/aria/aria-agent.sock
 [neutron]
 port_source = neutronclient
 rpc_events_enabled = false
+incremental_rpc_enabled = false
 
 [acl]
 source = neutron
@@ -3273,6 +3274,7 @@ neutron-aria-agent/
 - event merge：
   - 第一版 RPC event wiring 对照目标环境旧版 OVS agent，只订阅 `PORT UPDATE`、`PORT DELETE`、`NETWORK UPDATE`。
   - `rpc_events_enabled` 默认关闭；未显式开启时只做 heartbeat/full-resync，不消费 RabbitMQ 事件。
+  - `incremental_rpc_enabled` 在 v0.9 必须保持 false；P3 port-scoped apply 入口未验收前配置校验拒绝开启。
   - merge window 默认 `0.2s`，允许配置在 100ms-500ms 之间调优。
   - port update 按 port_id 合并。
   - port update 带 `binding:host_id` / `revision_number` 时保留最新 revision 或最后 binding 结果。
@@ -3739,6 +3741,7 @@ python -m pytest tests/test_generation.py tests/test_local_client.py -q
 - full resync 后提交 full snapshot。
 - RPC event 第一版只消费目标环境已确认的旧版 Neutron topic：`q-agent-notifier` 下的 `port.update`、`port.delete`、`network.update`。
 - 默认 `rpc_events_enabled=false`；只有 full-resync、port source、UDS snapshot 都配置完成后才开启。
+- 默认 `incremental_rpc_enabled=false`；P3 port-scoped apply 入口未验收前不得开启。
 - port update 按 port_id 合并。
 - port migration/rebind event 按 `source_revision` 去重，保留最新 `binding_host`。
 - 本 host 失去 port binding 时，如果该 port 存在于本机 projected state，调用本地 delete；如果不是本机已知 port，忽略该 fanout event。
@@ -4226,6 +4229,7 @@ python -m pytest -q
 9. local client 下发 full snapshot。
 10. status 模块把 datapath domain status 转成 agent alive/degraded。
 11. `rpc_events_enabled=false` 作为默认安全边界，未开启时不消费 RabbitMQ 事件。
+11a. `incremental_rpc_enabled=false` 作为 P3 安全边界，P3 entry gate 未闭合前不能启用 port-scoped apply。
 12. 开启后接入旧版 Neutron `q-agent-notifier` topic，只订阅 `port.update`、`port.delete`、`network.update`。
 13. event loop 合并 burst events，merge window 默认 `0.2s`。
 14. port update 按 `port_id` 合并，只保留最高 `source_revision/revision_number` 或最后 binding 结果。

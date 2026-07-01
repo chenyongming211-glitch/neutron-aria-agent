@@ -366,6 +366,7 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
   - `full_resync_enabled = false`
   - `port_source = disabled`
   - `rpc_events_enabled = false`
+  - `incremental_rpc_enabled = false`
   - `event_merge_interval = 0.2`
 
 验证结果：
@@ -382,6 +383,7 @@ N0.5-lite 是 PR-1A schema freeze gate。没有完成本节，不允许冻结 di
 
 - 这是 RPC/event-merge 代码的 heartbeat-only 部署确认，不代表已经打开 RabbitMQ event consumer。
 - `rpc_events_enabled=false` 时，不会消费 Neutron event，不会提交 snapshot，不会触碰 tap datapath。
+- `incremental_rpc_enabled=false` 时，不会执行 P3 port-scoped apply。
 - 进入真实 event smoke 前，必须先把 `full_resync_enabled=true`、`port_source=neutronclient`、UDS socket、OVS mount 和回滚流程补齐。
 
 ### 6.3 2026-06-24 Independent Kolla Container Smoke
@@ -396,6 +398,7 @@ Deployment shape:
   - `full_resync_enabled = false`
   - `port_source = disabled`
   - `rpc_events_enabled = false`
+  - `incremental_rpc_enabled = false`
 - Logs are written to `/var/log/kolla/neutron/neutron-aria-agent.log`.
 
 Validation result:

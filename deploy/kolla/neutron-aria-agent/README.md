@@ -150,6 +150,7 @@ full_resync_enabled = false
 [neutron]
 port_source = disabled
 rpc_events_enabled = false
+incremental_rpc_enabled = false
 ```
 
 This should make `neutron agent-list` show:
@@ -199,6 +200,9 @@ Rollback is also per host: set `rpc_events_enabled = false` and restart only
 `neutron_aria_agent`. Keep polling/full-resync enabled so ACL recovery remains
 available. Do not restart OVS, OVS agent, neutron-server, or `aria-datapath`
 for this switch.
+
+Keep `incremental_rpc_enabled = false`. P3 port-scoped apply requires a later
+entry gate and is intentionally rejected by current config validation.
 
 ## Full Resync Gate
 

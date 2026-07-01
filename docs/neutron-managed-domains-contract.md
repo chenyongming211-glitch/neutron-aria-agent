@@ -73,6 +73,7 @@ request_timeout = 3.0
 [neutron]
 port_source = disabled
 rpc_events_enabled = false
+incremental_rpc_enabled = false
 
 [acl]
 source = disabled

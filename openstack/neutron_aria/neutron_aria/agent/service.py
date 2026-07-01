@@ -3,6 +3,10 @@ from __future__ import absolute_import
 import logging
 import time
 
+from neutron_aria.agent.projection import ACTION_DELETE_LOCAL
+from neutron_aria.agent.projection import ACTION_FULL_RESYNC
+from neutron_aria.agent.projection import ACTION_IGNORE
+
 
 LOG = logging.getLogger(__name__)
 
@@ -233,7 +237,12 @@ class AgentService(object):
                 "events": batch_dict,
             }
 
-        delete_errors = self._delete_known_ports(batch.deleted_ports)
+        batch_dict["decisions"] = []
+
+        delete_errors = self._delete_known_ports(
+            batch.deleted_ports,
+            decisions=batch_dict["decisions"],
+        )
         if delete_errors:
             self.synchronizer.runtime_status.mark_degraded(
                 DELETE_PORT_DEGRADED_REASON,
@@ -250,31 +259,40 @@ class AgentService(object):
 
         port_updates_requiring_resync = {}
         for port_id, event in batch.port_updates.items():
-            binding_host = event.get("binding_host")
-            if binding_host and binding_host != self.synchronizer.host:
-                if self.synchronizer.has_projected_port(port_id):
-                    try:
-                        self.synchronizer.delete_port(
-                            port_id,
-                            reason="migration_source_cleanup",
-                        )
-                    except Exception as exc:
-                        self.synchronizer.runtime_status.mark_degraded(
-                            DELETE_PORT_DEGRADED_REASON,
-                            "%s:%s" % (port_id, exc),
-                        )
-                        heartbeat = self.synchronizer.report_status()
-                        return {
-                            "snapshot": None,
-                            "response": None,
-                            "status": self.synchronizer.runtime_status.to_dict(),
-                            "heartbeat": heartbeat,
-                            "events": batch_dict,
-                        }
+            decision = self._decide_port_update(port_id, event)
+            batch_dict["decisions"].append(decision)
+            if decision.get("action") == ACTION_DELETE_LOCAL:
+                try:
+                    self.synchronizer.delete_port(
+                        port_id,
+                        reason=decision.get("delete_reason") or "migration_source_cleanup",
+                    )
+                except Exception as exc:
+                    self.synchronizer.runtime_status.mark_degraded(
+                        DELETE_PORT_DEGRADED_REASON,
+                        "%s:%s" % (port_id, exc),
+                    )
+                    heartbeat = self.synchronizer.report_status()
+                    return {
+                        "snapshot": None,
+                        "response": None,
+                        "status": self.synchronizer.runtime_status.to_dict(),
+                        "heartbeat": heartbeat,
+                        "events": batch_dict,
+                    }
+                continue
+            if decision.get("action") == ACTION_IGNORE:
                 continue
             port_updates_requiring_resync[port_id] = event
 
-        if batch.full_resync or batch.dirty_networks or port_updates_requiring_resync:
+        network_updates_requiring_resync = []
+        for network_id in batch.dirty_networks:
+            decision = self._decide_network_update(network_id)
+            batch_dict["decisions"].append(decision)
+            if decision.get("action") == ACTION_FULL_RESYNC:
+                network_updates_requiring_resync.append(network_id)
+
+        if batch.full_resync or network_updates_requiring_resync or port_updates_requiring_resync:
             result = self.synchronizer.safe_full_resync()
             result["events"] = batch_dict
             result["resync_attempted"] = True
@@ -289,13 +307,76 @@ class AgentService(object):
             "events": batch_dict,
         }
 
-    def _delete_known_ports(self, port_ids):
+    def _delete_known_ports(self, port_ids, decisions=None):
         errors = []
         for port_id in port_ids:
-            if not self.synchronizer.has_projected_port(port_id):
+            decision = self._decide_port_delete(port_id)
+            if decisions is not None:
+                decisions.append(decision)
+            if decision.get("action") == ACTION_IGNORE:
                 continue
             try:
-                self.synchronizer.delete_port(port_id, reason="port_delete_event")
+                self.synchronizer.delete_port(
+                    port_id,
+                    reason=decision.get("delete_reason") or "port_delete_event",
+                )
             except Exception as exc:
                 errors.append("%s:%s" % (port_id, exc))
         return errors
+
+    def _decide_port_update(self, port_id, event):
+        if hasattr(self.synchronizer, "decide_port_update"):
+            return self._decision_to_dict(self.synchronizer.decide_port_update(
+                port_id,
+                binding_host=event.get("binding_host"),
+                revision_number=event.get("revision_number"),
+            ))
+        binding_host = event.get("binding_host")
+        if binding_host and binding_host != self.synchronizer.host:
+            if self.synchronizer.has_projected_port(port_id):
+                return {
+                    "action": ACTION_DELETE_LOCAL,
+                    "reason": "foreign_host_update_for_projected_port",
+                    "port_id": port_id,
+                    "delete_reason": "migration_source_cleanup",
+                }
+            return {
+                "action": ACTION_IGNORE,
+                "reason": "foreign_host_update_for_unknown_port",
+                "port_id": port_id,
+            }
+        return {
+            "action": ACTION_FULL_RESYNC,
+            "reason": "local_port_update",
+            "port_id": port_id,
+        }
+
+    def _decide_port_delete(self, port_id):
+        if hasattr(self.synchronizer, "decide_port_delete"):
+            return self._decision_to_dict(self.synchronizer.decide_port_delete(port_id))
+        if self.synchronizer.has_projected_port(port_id):
+            return {
+                "action": ACTION_DELETE_LOCAL,
+                "reason": "local_port_delete",
+                "port_id": port_id,
+                "delete_reason": "port_delete_event",
+            }
+        return {
+            "action": ACTION_IGNORE,
+            "reason": "unknown_port_delete",
+            "port_id": port_id,
+        }
+
+    def _decide_network_update(self, network_id):
+        if hasattr(self.synchronizer, "decide_network_update"):
+            return self._decision_to_dict(self.synchronizer.decide_network_update(network_id))
+        return {
+            "action": ACTION_FULL_RESYNC,
+            "reason": "network_update",
+            "network_id": network_id,
+        }
+
+    def _decision_to_dict(self, decision):
+        if hasattr(decision, "to_dict"):
+            return decision.to_dict()
+        return dict(decision or {})

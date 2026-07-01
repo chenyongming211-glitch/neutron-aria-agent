@@ -281,6 +281,8 @@ class EventLoopTestCase(unittest.TestCase):
     def test_full_resync_builds_and_submits_snapshot(self):
         port_source = StaticPortSource([{
             "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "network_id": "net-a",
+            "revision_number": 8,
             "device_owner": "compute:nova",
             "binding:host_id": "ostack2",
             "binding:vif_type": "ovs",
@@ -317,6 +319,17 @@ class EventLoopTestCase(unittest.TestCase):
             set(["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]),
             sync.projected_port_ids,
         )
+        self.assertEqual(
+            ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+            sync.projected_ports_for_network("net-a"),
+        )
+        decision = sync.decide_port_update(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            binding_host="ostack2",
+            revision_number=9,
+        ).to_dict()
+        self.assertEqual("full_resync", decision["action"])
+        self.assertEqual("newer", decision["revision_status"])
 
     def test_full_resync_reuses_generation_for_same_desired_state(self):
         port_source = StaticPortSource([{
