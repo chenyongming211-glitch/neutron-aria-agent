@@ -40,6 +40,9 @@ operations without overloading one string field.
 - last submitted generation;
 - accepted/applied generation observed from datapath;
 - degraded reasons summarized by stable error code.
+- P3-1 projection observability: compact projected-port/network index counts
+  and the last RPC decision summary. These fields are debug/operations signals,
+  not proof that port-scoped incremental apply is enabled.
 
 Product `aria_acl_port_statuses` should store per-port runtime summary, not user
 desired state.
@@ -155,6 +158,9 @@ Runtime status write/read responsibility:
 | `applied_generation` | Latest generation datapath reports as applied/classified. |
 | `domain_counts` | Count by domain/status/effective action. |
 | `degraded_reasons` | Bounded stable reason counts. |
+| `projection_index` | Bounded P3-1 debug summary: projected port count, indexed network count, ports with network metadata, and ports with revision metadata. |
+| `last_event_decision_counts` | Bounded count by RPC decision action/reason for the last processed event batch. |
+| `last_event_decisions` | Bounded debug sample of the last processed event decisions. It is not a durable audit log. |
 
 ### Compatibility Rules
 
@@ -188,6 +194,7 @@ Runtime status write/read responsibility:
 | Older datapath status without rich fields | Python decodes safely with defaults. |
 | Unknown enum value | Classified as degraded/unknown, not ready. |
 | Generation lag | Heartbeat exposes submitted vs accepted/applied gap. |
+| P3-1 event decision observability | Heartbeat exposes projection index summary and last event decision counts without enabling incremental apply. |
 | UDS unavailable | Agent health and domain readiness are reported separately. |
 | Product port status read | Runtime summary does not mutate desired ACL state. |
 
@@ -197,6 +204,7 @@ Runtime status write/read responsibility:
 - Do not build UI-specific wording into the datapath DTO.
 - Do not mark a whole agent unhealthy only because one domain is degraded.
 - Do not invent per-rule runtime status unless a product gate requires it.
+- Do not turn decision observability into a durable event journal.
 
 ## Acceptance
 

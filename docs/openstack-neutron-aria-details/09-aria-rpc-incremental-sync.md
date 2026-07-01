@@ -396,6 +396,8 @@ Allowed before the full P3 entry gate:
 - Build an in-memory `ProjectedStateIndex` from accepted full-resync results.
 - Unit test local/foreign host decisions, revision relation, network locality,
   delete cleanup, and conservative full-resync fallback.
+- Publish compact heartbeat/debug summaries for projection index size and the
+  last RPC decision batch.
 
 Still forbidden before the full P3 entry gate:
 

@@ -152,6 +152,11 @@ result = service.run_once()
 assert_equal(2, sync.resync_calls, "local port update must trigger full resync")
 assert_equal(["p-local"], result["events"]["port_updates"], "local port update recorded")
 assert_equal("full_resync", result["events"]["decisions"][0]["action"], "local decision")
+assert_equal(
+    [{"action": "full_resync", "reason": "local_port_update", "count": 1}],
+    result["status"]["last_event_decision_counts"],
+    "local decision summary",
+)
 
 clock, sync, merger, service = new_service()
 merger.record_network_update("net-local")
@@ -168,6 +173,7 @@ assert_equal(1, sync.resync_calls, "foreign unknown port update must not resync"
 assert_equal([], sync.delete_calls, "foreign unknown port update must not delete")
 assert_equal(None, result["snapshot"], "foreign unknown port update must be heartbeat only")
 assert_equal("ignore", result["events"]["decisions"][0]["action"], "foreign decision")
+assert_equal("ignore", result["status"]["last_event_decisions"][0]["action"], "foreign summary")
 
 clock, sync, merger, service = new_service()
 sync.projected_port_ids.add("p-moved")

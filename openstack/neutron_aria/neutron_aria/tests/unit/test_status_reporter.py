@@ -55,6 +55,17 @@ class StatusReporterTestCase(unittest.TestCase):
         api = FakeReportStateApi()
         runtime_status = AgentRuntimeStatus("ostack2")
         runtime_status.mark_ready(generation=12, snapshot_ports=5, managed_ports=2)
+        runtime_status.update_projection_summary({
+            "projected_ports": 2,
+            "indexed_networks": 1,
+            "ports_with_network": 2,
+            "ports_with_revision": 1,
+        })
+        runtime_status.record_event_decisions([{
+            "action": "full_resync",
+            "reason": "local_port_update",
+            "port_id": "p1",
+        }])
         reporter = NeutronStatusReporter(
             api,
             context="ctx",
@@ -87,6 +98,19 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertEqual(0, agent_state["configurations"]["generation_lag"])
         self.assertEqual(5, agent_state["configurations"]["last_snapshot_ports"])
         self.assertEqual(2, agent_state["configurations"]["last_managed_ports"])
+        self.assertEqual(
+            {
+                "projected_ports": 2,
+                "indexed_networks": 1,
+                "ports_with_network": 2,
+                "ports_with_revision": 1,
+            },
+            agent_state["configurations"]["projection_index"],
+        )
+        self.assertEqual(
+            [{"action": "full_resync", "reason": "local_port_update", "count": 1}],
+            agent_state["configurations"]["last_event_decision_counts"],
+        )
         self.assertEqual(["acl"], agent_state["configurations"]["managed_domains"])
         self.assertEqual("br-int", agent_state["configurations"]["ovs_bridge"])
 

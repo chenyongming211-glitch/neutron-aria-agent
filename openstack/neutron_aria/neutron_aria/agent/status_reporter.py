@@ -78,6 +78,10 @@ class NeutronStatusReporter(object):
             "last_port_statuses": payload.get("last_port_statuses") or [],
             "domain_counts": payload.get("domain_counts") or [],
             "degraded_reasons": payload.get("degraded_reasons") or [],
+            "projection_index": payload.get("projection_index") or {},
+            "last_event_decision_counts": payload.get("last_event_decision_counts") or [],
+            "last_event_decisions": payload.get("last_event_decisions") or [],
+            "last_event_decision_updated_at": payload.get("last_event_decision_updated_at"),
             "updated_at": payload.get("updated_at"),
         })
 

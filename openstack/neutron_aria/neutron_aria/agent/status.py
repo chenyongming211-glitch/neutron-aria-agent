@@ -26,6 +26,15 @@ class AgentRuntimeStatus(object):
         self.last_port_statuses = []
         self.domain_counts = []
         self.degraded_reasons = []
+        self.projection_index = {
+            "projected_ports": 0,
+            "indexed_networks": 0,
+            "ports_with_network": 0,
+            "ports_with_revision": 0,
+        }
+        self.last_event_decision_counts = []
+        self.last_event_decisions = []
+        self.last_event_decision_updated_at = None
         self.updated_at = None
 
     def mark_ready(
@@ -70,6 +79,39 @@ class AgentRuntimeStatus(object):
         self.degraded_reasons = [{"reason": reason, "count": 1}]
         self.updated_at = time.time()
 
+    def update_projection_summary(self, summary):
+        payload = dict(summary or {})
+        self.projection_index = {
+            "projected_ports": self._int_or_default(payload.get("projected_ports"), 0),
+            "indexed_networks": self._int_or_default(payload.get("indexed_networks"), 0),
+            "ports_with_network": self._int_or_default(payload.get("ports_with_network"), 0),
+            "ports_with_revision": self._int_or_default(payload.get("ports_with_revision"), 0),
+        }
+        self.updated_at = time.time()
+
+    def record_event_decisions(self, decisions, limit=16):
+        counts = {}
+        sample = []
+        for decision in decisions or []:
+            payload = dict(decision or {})
+            action = payload.get("action") or "unknown"
+            reason = payload.get("reason") or "unknown"
+            key = (action, reason)
+            counts[key] = counts.get(key, 0) + 1
+            if len(sample) < int(limit or 0):
+                sample.append(payload)
+        self.last_event_decision_counts = [
+            {
+                "action": action,
+                "reason": reason,
+                "count": counts[(action, reason)],
+            }
+            for action, reason in sorted(counts)
+        ]
+        self.last_event_decisions = sample
+        self.last_event_decision_updated_at = time.time() if decisions else None
+        self.updated_at = time.time()
+
     def to_dict(self):
         return {
             "agent_type": self.agent_type,
@@ -90,6 +132,10 @@ class AgentRuntimeStatus(object):
             "last_port_statuses": list(self.last_port_statuses),
             "domain_counts": list(self.domain_counts),
             "degraded_reasons": list(self.degraded_reasons),
+            "projection_index": dict(self.projection_index),
+            "last_event_decision_counts": list(self.last_event_decision_counts),
+            "last_event_decisions": list(self.last_event_decisions),
+            "last_event_decision_updated_at": self.last_event_decision_updated_at,
             "updated_at": self.updated_at,
         }
 

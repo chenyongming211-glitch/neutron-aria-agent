@@ -56,6 +56,7 @@ class SnapshotSynchronizer(object):
         self.projected_port_ids = set(self.state_store.last_projected_port_ids())
         self.projection_index = projection_index or ProjectedStateIndex()
         self.projection_index.replace_projected_ids(self.projected_port_ids)
+        self.runtime_status.update_projection_summary(self.projection_summary())
         self.acl_index = acl_index
         self.acl_source = acl_source
         self.timeout_convergence_attempts = max(1, int(timeout_convergence_attempts))
@@ -153,6 +154,7 @@ class SnapshotSynchronizer(object):
                 snapshot["generation"],
             ),
         )
+        self.runtime_status.update_projection_summary(self.projection_summary())
         heartbeat = self.report_status()
         LOG.info(
             "full_resync_complete host=%s generation=%s snapshot_ports=%s "
@@ -220,6 +222,7 @@ class SnapshotSynchronizer(object):
             response = self._recover_delete_timeout(port_id, exc)
         self.projected_port_ids.discard(port_id)
         self.projection_index.remove(port_id)
+        self.runtime_status.update_projection_summary(self.projection_summary())
         self.state_store.commit_delete(port_id)
         LOG.info(
             "delete_port_complete host=%s port_id=%s reason=%s projected_ports=%s",
@@ -271,6 +274,7 @@ class SnapshotSynchronizer(object):
                         snapshot["generation"],
                     ),
                 )
+                self.runtime_status.update_projection_summary(self.projection_summary())
                 recovered.append("snapshot")
                 LOG.warning(
                     "pending_snapshot_recovered host=%s generation=%s "
@@ -299,6 +303,7 @@ class SnapshotSynchronizer(object):
             if self._delete_status_converged(pending_delete["port_id"], status):
                 self.projected_port_ids.discard(pending_delete["port_id"])
                 self.projection_index.remove(pending_delete["port_id"])
+                self.runtime_status.update_projection_summary(self.projection_summary())
                 self.state_store.commit_delete(pending_delete["port_id"])
                 recovered.append("delete")
                 LOG.warning(
@@ -343,6 +348,9 @@ class SnapshotSynchronizer(object):
 
     def projected_ports_for_network(self, network_id):
         return self.projection_index.ports_for_network(network_id)
+
+    def projection_summary(self):
+        return self.projection_index.summary()
 
     def _list_ports(self):
         if hasattr(self.port_source, "list_ports_for_host"):

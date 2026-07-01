@@ -262,6 +262,21 @@ class ProjectedStateIndex(object):
             },
         }
 
+    def summary(self):
+        ports_with_revision = 0
+        ports_with_network = 0
+        for record in self._ports.values():
+            if record.revision_number is not None:
+                ports_with_revision += 1
+            if record.network_id:
+                ports_with_network += 1
+        return {
+            "projected_ports": len(self._ports),
+            "indexed_networks": len(self._network_ports),
+            "ports_with_network": ports_with_network,
+            "ports_with_revision": ports_with_revision,
+        }
+
     def _replace_records(self, records):
         self._ports = dict(records)
         self._rebuild_network_index()

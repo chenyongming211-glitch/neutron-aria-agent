@@ -211,6 +211,7 @@ class AgentService(object):
         if not batch.has_changes():
             return None
         batch_dict = batch.to_dict()
+        batch_dict["decisions"] = []
         LOG.info(
             "event_batch_drained host=%s port_updates=%s deleted_ports=%s "
             "dirty_networks=%s full_resync=%s overflowed=%s reasons=%s",
@@ -224,6 +225,7 @@ class AgentService(object):
         )
 
         if not self.full_resync_enabled:
+            self._record_event_observability(batch_dict["decisions"])
             self.synchronizer.runtime_status.mark_degraded(
                 EVENTS_WITHOUT_RESYNC_REASON,
                 EVENTS_WITHOUT_RESYNC_ERROR,
@@ -236,8 +238,6 @@ class AgentService(object):
                 "heartbeat": heartbeat,
                 "events": batch_dict,
             }
-
-        batch_dict["decisions"] = []
 
         delete_errors = self._delete_known_ports(
             batch.deleted_ports,
@@ -291,6 +291,8 @@ class AgentService(object):
             batch_dict["decisions"].append(decision)
             if decision.get("action") == ACTION_FULL_RESYNC:
                 network_updates_requiring_resync.append(network_id)
+
+        self._record_event_observability(batch_dict["decisions"])
 
         if batch.full_resync or network_updates_requiring_resync or port_updates_requiring_resync:
             result = self.synchronizer.safe_full_resync()
@@ -380,3 +382,13 @@ class AgentService(object):
         if hasattr(decision, "to_dict"):
             return decision.to_dict()
         return dict(decision or {})
+
+    def _record_event_observability(self, decisions):
+        runtime_status = getattr(self.synchronizer, "runtime_status", None)
+        if runtime_status is None:
+            return
+        projection_summary = getattr(self.synchronizer, "projection_summary", None)
+        if projection_summary is not None:
+            runtime_status.update_projection_summary(projection_summary())
+        if hasattr(runtime_status, "record_event_decisions"):
+            runtime_status.record_event_decisions(decisions)

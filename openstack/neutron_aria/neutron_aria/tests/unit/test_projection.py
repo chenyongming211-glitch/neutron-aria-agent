@@ -55,6 +55,15 @@ class ProjectedStateIndexTestCase(unittest.TestCase):
         self.assertEqual([], index.ports_for_network("net-c"))
         self.assertEqual(7, index.port("p1").revision_number)
         self.assertEqual(11, index.port("p1").generation)
+        self.assertEqual(
+            {
+                "projected_ports": 2,
+                "indexed_networks": 2,
+                "ports_with_network": 2,
+                "ports_with_revision": 2,
+            },
+            index.summary(),
+        )
 
     def test_local_port_update_records_revision_relation_but_uses_full_resync(self):
         index = self._index()

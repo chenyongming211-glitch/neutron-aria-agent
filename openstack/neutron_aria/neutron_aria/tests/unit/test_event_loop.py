@@ -323,6 +323,15 @@ class EventLoopTestCase(unittest.TestCase):
             ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
             sync.projected_ports_for_network("net-a"),
         )
+        self.assertEqual(
+            {
+                "projected_ports": 1,
+                "indexed_networks": 1,
+                "ports_with_network": 1,
+                "ports_with_revision": 1,
+            },
+            result["status"]["projection_index"],
+        )
         decision = sync.decide_port_update(
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             binding_host="ostack2",

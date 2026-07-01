@@ -238,6 +238,10 @@ class AgentServiceTestCase(unittest.TestCase):
             ["full_resync", "full_resync"],
             [decision["action"] for decision in result["events"]["decisions"]],
         )
+        self.assertEqual(
+            [{"action": "full_resync", "reason": "local_port_update", "count": 2}],
+            result["status"]["last_event_decision_counts"],
+        )
 
     def test_remote_port_update_for_unknown_port_is_ignored_after_merge(self):
         clock = FakeClock()
@@ -262,6 +266,10 @@ class AgentServiceTestCase(unittest.TestCase):
         self.assertEqual([], sync.delete_calls)
         self.assertEqual(None, result["snapshot"])
         self.assertEqual("ignore", result["events"]["decisions"][0]["action"])
+        self.assertEqual(
+            "foreign_host_update_for_unknown_port",
+            result["status"]["last_event_decisions"][0]["reason"],
+        )
 
     def test_remote_port_update_for_known_port_deletes_local_state(self):
         clock = FakeClock()
@@ -288,6 +296,10 @@ class AgentServiceTestCase(unittest.TestCase):
         self.assertEqual(["migration_source_cleanup"], sync.delete_reasons)
         self.assertEqual(None, result["snapshot"])
         self.assertEqual("delete_local", result["events"]["decisions"][0]["action"])
+        self.assertEqual(
+            [{"action": "delete_local", "reason": "foreign_host_update_for_projected_port", "count": 1}],
+            result["status"]["last_event_decision_counts"],
+        )
 
     def test_port_delete_deletes_only_known_local_port(self):
         clock = FakeClock()
@@ -317,6 +329,7 @@ class AgentServiceTestCase(unittest.TestCase):
             ["delete_local", "ignore"],
             [decision["action"] for decision in result["events"]["decisions"]],
         )
+        self.assertEqual(2, len(result["status"]["last_event_decision_counts"]))
 
     def test_network_update_triggers_full_resync(self):
         clock = FakeClock()
