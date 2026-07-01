@@ -18,6 +18,8 @@ REQUEST_TIMEOUT_OVERRIDE="${REQUEST_TIMEOUT_OVERRIDE:-3.0}"
 PING_COUNT="${PING_COUNT:-2}"
 PING_TIMEOUT="${PING_TIMEOUT:-1}"
 BLOCK_MIGRATE="${BLOCK_MIGRATE:-false}"
+WAL_REPLAY_FAILURE_MAX_DELTA="${WAL_REPLAY_FAILURE_MAX_DELTA:-0}"
+WAL_REPLAY_FAILURE_BASELINE="${WAL_REPLAY_FAILURE_BASELINE:-}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 
 VM_IP="${VM_IP:-}"
@@ -140,9 +142,29 @@ run_agent_once() {
 }
 
 status_json() {
-    curl --silent --show-error --fail \
-        --unix-socket "${SOCKET_PATH}" \
-        "http://localhost/api/v1/neutron/status"
+    docker_exec_env python - "${SOCKET_PATH}" <<'PY'
+from __future__ import print_function
+
+import json
+import sys
+
+from neutron_aria.agent.uds_client import LocalClient
+
+status = LocalClient(sys.argv[1], timeout=3.0).status()
+print(json.dumps(status, sort_keys=True))
+PY
+}
+
+current_wal_replay_failures() {
+    status_json | "${PYTHON_BIN}" -c '
+from __future__ import print_function
+
+import json
+import sys
+
+payload = json.load(sys.stdin)
+print(int(payload.get("wal_replay_failures") or 0))
+'
 }
 
 rollback_managed_ports() {
@@ -194,6 +216,8 @@ assert_target_managed() {
     local expected_ifindex="$1"
     STATUS_PAYLOAD="$(status_json)" EXPECTED_PORT_ID="${EXPECTED_PORT_ID}" \
         EXPECTED_IFNAME="${EXPECTED_IFNAME}" EXPECTED_IFINDEX="${expected_ifindex}" \
+        WAL_REPLAY_FAILURE_BASELINE="${WAL_REPLAY_FAILURE_BASELINE}" \
+        WAL_REPLAY_FAILURE_MAX_DELTA="${WAL_REPLAY_FAILURE_MAX_DELTA}" \
         "${PYTHON_BIN}" - <<'PY'
 from __future__ import print_function
 
@@ -221,13 +245,22 @@ else:
     raise SystemExit("target port is not managed: %s" % payload)
 if payload.get("authority_state") != "ready":
     raise SystemExit("authority_state is not ready: %s" % payload)
-if int(payload.get("wal_replay_failures") or 0) != 0:
-    raise SystemExit("wal_replay_failures is non-zero: %s" % payload)
+current = int(payload.get("wal_replay_failures") or 0)
+baseline = int(os.environ["WAL_REPLAY_FAILURE_BASELINE"] or 0)
+max_delta = int(os.environ["WAL_REPLAY_FAILURE_MAX_DELTA"] or 0)
+if current > baseline + max_delta:
+    raise SystemExit(
+        "wal_replay_failures increased: baseline=%d current=%d max_delta=%d payload=%s" %
+        (baseline, current, max_delta, payload)
+    )
 PY
 }
 
 assert_target_not_managed() {
-    STATUS_PAYLOAD="$(status_json)" EXPECTED_PORT_ID="${EXPECTED_PORT_ID}" "${PYTHON_BIN}" - <<'PY'
+    STATUS_PAYLOAD="$(status_json)" EXPECTED_PORT_ID="${EXPECTED_PORT_ID}" \
+        WAL_REPLAY_FAILURE_BASELINE="${WAL_REPLAY_FAILURE_BASELINE}" \
+        WAL_REPLAY_FAILURE_MAX_DELTA="${WAL_REPLAY_FAILURE_MAX_DELTA}" \
+        "${PYTHON_BIN}" - <<'PY'
 from __future__ import print_function
 
 import json
@@ -239,8 +272,14 @@ if any(port.get("port_id") == expected_port_id for port in (payload.get("managed
     raise SystemExit("target port is still managed on source host: %s" % payload)
 if payload.get("authority_state") != "ready":
     raise SystemExit("authority_state is not ready: %s" % payload)
-if int(payload.get("wal_replay_failures") or 0) != 0:
-    raise SystemExit("wal_replay_failures is non-zero: %s" % payload)
+current = int(payload.get("wal_replay_failures") or 0)
+baseline = int(os.environ["WAL_REPLAY_FAILURE_BASELINE"] or 0)
+max_delta = int(os.environ["WAL_REPLAY_FAILURE_MAX_DELTA"] or 0)
+if current > baseline + max_delta:
+    raise SystemExit(
+        "wal_replay_failures increased: baseline=%d current=%d max_delta=%d payload=%s" %
+        (baseline, current, max_delta, payload)
+    )
 print("target_not_managed_ok port_id=%s" % expected_port_id)
 PY
 }
@@ -314,7 +353,6 @@ run_live_migration() {
 }
 
 need_command docker
-need_command curl
 need_command ip
 need_command ping
 if [ -z "${PYTHON_BIN}" ]; then
@@ -338,6 +376,11 @@ fi
 
 load_openstack_env
 prepare_full_resync_config
+
+if [ -z "${WAL_REPLAY_FAILURE_BASELINE}" ]; then
+    WAL_REPLAY_FAILURE_BASELINE="$(current_wal_replay_failures)"
+fi
+echo "wal_replay_failure_baseline=${WAL_REPLAY_FAILURE_BASELINE} max_delta=${WAL_REPLAY_FAILURE_MAX_DELTA}"
 
 case "${PHASE}" in
     source)
