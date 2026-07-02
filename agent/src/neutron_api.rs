@@ -67,6 +67,12 @@ struct SnapshotPlan {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum ApplyScope {
+    FullHost,
+    SinglePort(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct AclGroupPlan {
     name: String,
     cidrs: Vec<String>,
@@ -2204,10 +2210,27 @@ fn build_snapshot_plan(
     snapshot: &NeutronSnapshotRequest,
     inventory: &LocalInterfaceInventory,
 ) -> SnapshotPlan {
+    build_snapshot_plan_for_scope(current, snapshot, inventory, ApplyScope::FullHost)
+}
+
+fn build_snapshot_plan_for_scope(
+    current: &BTreeMap<String, ManagedNeutronPort>,
+    snapshot: &NeutronSnapshotRequest,
+    inventory: &LocalInterfaceInventory,
+    scope: ApplyScope,
+) -> SnapshotPlan {
     let mut desired = BTreeMap::new();
     let mut ignored = Vec::new();
+    let mut scoped_target_seen = false;
 
     for port in &snapshot.ports {
+        if let ApplyScope::SinglePort(target_port_id) = &scope {
+            if &port.port_id != target_port_id {
+                continue;
+            }
+            scoped_target_seen = true;
+        }
+
         if port.port_id.trim().is_empty() {
             ignored.push(NeutronPortApplyResult {
                 port_id: port.port_id.clone(),
@@ -2251,15 +2274,27 @@ fn build_snapshot_plan(
         desired.insert(resolved_port.port_id.clone(), resolved_port);
     }
 
-    let desired_ids: BTreeSet<String> = desired.keys().cloned().collect();
     let mut detach = Vec::new();
 
     if inventory.is_authoritative() {
-        for (port_id, managed) in current {
-            match desired.get(port_id) {
-                Some(port) if managed_binding_matches(managed, port) => {}
-                _ => detach.push(managed.clone()),
+        match &scope {
+            ApplyScope::FullHost => {
+                for (port_id, managed) in current {
+                    match desired.get(port_id) {
+                        Some(port) if managed_binding_matches(managed, port) => {}
+                        _ => detach.push(managed.clone()),
+                    }
+                }
             }
+            ApplyScope::SinglePort(target_port_id) if scoped_target_seen => {
+                if let Some(managed) = current.get(target_port_id) {
+                    match desired.get(target_port_id) {
+                        Some(port) if managed_binding_matches(managed, port) => {}
+                        _ => detach.push(managed.clone()),
+                    }
+                }
+            }
+            ApplyScope::SinglePort(_) => {}
         }
     }
 
@@ -2270,10 +2305,7 @@ fn build_snapshot_plan(
             Some(managed) if managed_binding_matches(managed, &port) => {
                 update.push(port);
             }
-            _ if desired_ids.contains(&port_id) => {
-                attach.push(port);
-            }
-            _ => {}
+            _ => attach.push(port),
         }
     }
 
@@ -2541,6 +2573,187 @@ mod tests {
             normalize_managed_domains(&plan.update[0].managed_domains),
             vec!["acl".to_string(), "qos".to_string()]
         );
+    }
+
+    #[test]
+    fn neutron_snapshot_plan_scoped_updates_target_only() {
+        let mut current = BTreeMap::new();
+        current.insert(
+            "target-port".to_string(),
+            ManagedNeutronPort {
+                managed_domains: vec!["acl".to_string()],
+                ..managed("target-port", "tap-target")
+            },
+        );
+        current.insert(
+            "other-port".to_string(),
+            ManagedNeutronPort {
+                managed_domains: vec!["acl".to_string()],
+                ..managed("other-port", "tap-other")
+            },
+        );
+        let local = inventory(vec![
+            iface("tap-target", "target-port", Some(21), Some("br-int")),
+            iface("tap-other", "other-port", Some(22), Some("br-int")),
+        ]);
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 8,
+            desired_hash: None,
+            host: None,
+            ports: vec![NeutronPortSnapshot {
+                managed_domains: vec!["acl".to_string(), "qos".to_string()],
+                ..port("target-port", "tap-target", true)
+            }],
+        };
+
+        let plan = build_snapshot_plan_for_scope(
+            &current,
+            &snapshot,
+            &local,
+            ApplyScope::SinglePort("target-port".to_string()),
+        );
+
+        assert!(plan.attach.is_empty());
+        assert!(plan.detach.is_empty());
+        assert_eq!(plan.update.len(), 1);
+        assert_eq!(plan.update[0].port_id, "target-port");
+        assert_eq!(
+            normalize_managed_domains(&plan.update[0].managed_domains),
+            vec!["acl".to_string(), "qos".to_string()]
+        );
+        assert!(plan.ignored.is_empty());
+    }
+
+    #[test]
+    fn neutron_snapshot_plan_scoped_attaches_target_without_detaching_unrelated_ports() {
+        let mut current = BTreeMap::new();
+        current.insert("other-port".to_string(), managed("other-port", "tap-other"));
+        let local = inventory(vec![
+            iface("tap-target", "target-port", Some(23), Some("br-int")),
+            iface("tap-other", "other-port", Some(24), Some("br-int")),
+        ]);
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 9,
+            desired_hash: None,
+            host: None,
+            ports: vec![port("target-port", "tap-target", true)],
+        };
+
+        let plan = build_snapshot_plan_for_scope(
+            &current,
+            &snapshot,
+            &local,
+            ApplyScope::SinglePort("target-port".to_string()),
+        );
+
+        assert_eq!(plan.attach.len(), 1);
+        assert_eq!(plan.attach[0].port_id, "target-port");
+        assert_eq!(plan.attach[0].ifindex, Some(23));
+        assert!(plan.update.is_empty());
+        assert!(plan.detach.is_empty());
+        assert!(plan.ignored.is_empty());
+    }
+
+    #[test]
+    fn neutron_snapshot_plan_scoped_detaches_changed_target_binding_only() {
+        let mut current = BTreeMap::new();
+        current.insert("target-port".to_string(), managed("target-port", "tap-old"));
+        current.insert("other-port".to_string(), managed("other-port", "tap-other"));
+        let local = inventory(vec![
+            iface("tap-new", "target-port", Some(25), Some("br-int")),
+            iface("tap-other", "other-port", Some(26), Some("br-int")),
+        ]);
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 10,
+            desired_hash: None,
+            host: None,
+            ports: vec![port("target-port", "tap-new", true)],
+        };
+
+        let plan = build_snapshot_plan_for_scope(
+            &current,
+            &snapshot,
+            &local,
+            ApplyScope::SinglePort("target-port".to_string()),
+        );
+
+        assert_eq!(plan.detach, vec![managed("target-port", "tap-old")]);
+        assert_eq!(plan.attach.len(), 1);
+        assert_eq!(plan.attach[0].port_id, "target-port");
+        assert_eq!(plan.attach[0].ifname, "tap-new");
+        assert!(plan.update.is_empty());
+        assert!(plan.ignored.is_empty());
+    }
+
+    #[test]
+    fn neutron_snapshot_plan_scoped_detaches_ineligible_target_only() {
+        let mut current = BTreeMap::new();
+        current.insert("target-port".to_string(), managed("target-port", "tap-target"));
+        current.insert("other-port".to_string(), managed("other-port", "tap-other"));
+        let local = inventory(vec![
+            iface("tap-target", "target-port", Some(27), Some("br-int")),
+            iface("tap-other", "other-port", Some(28), Some("br-int")),
+        ]);
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 11,
+            desired_hash: None,
+            host: None,
+            ports: vec![NeutronPortSnapshot {
+                disposition: Some("not_applicable_device_owner:network:dhcp".to_string()),
+                ..port("target-port", "tap-target", false)
+            }],
+        };
+
+        let plan = build_snapshot_plan_for_scope(
+            &current,
+            &snapshot,
+            &local,
+            ApplyScope::SinglePort("target-port".to_string()),
+        );
+
+        assert_eq!(plan.detach, vec![managed("target-port", "tap-target")]);
+        assert!(plan.attach.is_empty());
+        assert!(plan.update.is_empty());
+        assert_eq!(plan.ignored.len(), 1);
+        assert_eq!(plan.ignored[0].port_id, "target-port");
+        assert_eq!(
+            plan.ignored[0].reason.as_deref(),
+            Some("not_applicable_device_owner:network:dhcp")
+        );
+    }
+
+    #[test]
+    fn neutron_snapshot_plan_scoped_ignores_non_target_body_without_mutation() {
+        let mut current = BTreeMap::new();
+        current.insert("target-port".to_string(), managed("target-port", "tap-target"));
+        current.insert("other-port".to_string(), managed("other-port", "tap-other"));
+        let local = inventory(vec![
+            iface("tap-target", "target-port", Some(29), Some("br-int")),
+            iface("tap-other", "other-port", Some(30), Some("br-int")),
+        ]);
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 12,
+            desired_hash: None,
+            host: None,
+            ports: vec![port("other-port", "tap-other", true)],
+        };
+
+        let plan = build_snapshot_plan_for_scope(
+            &current,
+            &snapshot,
+            &local,
+            ApplyScope::SinglePort("target-port".to_string()),
+        );
+
+        assert!(plan.attach.is_empty());
+        assert!(plan.update.is_empty());
+        assert!(plan.detach.is_empty());
+        assert!(plan.ignored.is_empty());
     }
 
     #[test]

@@ -1,7 +1,8 @@
 # 10. Rust Scoped Snapshot Apply Minimum Design
 
-Status: P3-3 implementation design package. This is a planned boundary, not a
-runtime implementation claim.
+Status: P3-3 implementation design package. The Rust single-port planner scope
+and pure planner unit tests are implemented; the UDS route and runtime scoped
+apply remain planned.
 
 ## Goal
 
@@ -21,8 +22,9 @@ OVS forwarding ownership.
 | Port delete route | implemented | `DELETE /api/v1/neutron/ports/{port_id}` cleans one Neutron-managed port. |
 | WAL generation semantics | implemented for full snapshot/delete | Intent/commit, stale generation, hash conflict, timeout recovery, and replay have stage-one coverage. |
 | Python port-scoped builder | implemented as dry-run only | `PortScopedSnapshotBuilder` and `SnapshotSynchronizer.dry_run_port_scoped_snapshot()` construct previews without UDS submit. |
+| Rust scoped planner | implemented planner-only | `ApplyScope::SinglePort` and `build_snapshot_plan_for_scope()` have pure tests that prove unrelated ports are not mutated. |
 | Port-scoped UDS route | planned only | Recorded in `docs/neutron-uds-contract.json` under `p3_port_scoped_snapshot`; not listed in current runtime `routes`. |
-| Rust port-scoped apply | not implemented | No Rust route, no Rust scoped planner, no capability advertisement. |
+| Rust port-scoped apply | not implemented | No Rust route, no scoped submit path, no capability advertisement. |
 
 ## Non-Negotiable Guardrails
 
@@ -133,7 +135,7 @@ Scoped apply must not turn unrelated ports stale or invisible.
 ## Implementation Sequence
 
 1. Add pure Rust planner tests for `ApplyScope::SinglePort` without adding the
-   route.
+   route. **Done for planner-only scope.**
 2. Add scoped WAL/status unit tests around affected ports and unrelated status
    preservation.
 3. Add the UDS route only after planner and WAL/status tests pass.

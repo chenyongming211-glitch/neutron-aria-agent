@@ -492,6 +492,7 @@ def check_rust_stage_one_tests_present():
 def check_p3_rust_scoped_plan_boundary():
     print("==> checking P3 Rust scoped-apply design boundary")
     plan = _read_repo_text(P3_RUST_SCOPED_PLAN_PATH)
+    neutron_api_source = _read_repo_text(RUST_NEUTRON_API_PATH)
     required_markers = [
         "Status: P3-3 implementation design package",
         "SinglePort",
@@ -522,6 +523,23 @@ def check_p3_rust_scoped_plan_boundary():
         if marker not in _read_repo_text(path):
             raise SystemExit(
                 "ERROR: %s must link P3 Rust scoped-apply plan %s" % (path, marker)
+            )
+
+    required_source_terms = [
+        "enum ApplyScope",
+        "ApplyScope::FullHost",
+        "ApplyScope::SinglePort",
+        "fn build_snapshot_plan_for_scope(",
+        "fn neutron_snapshot_plan_scoped_updates_target_only(",
+        "fn neutron_snapshot_plan_scoped_attaches_target_without_detaching_unrelated_ports(",
+        "fn neutron_snapshot_plan_scoped_detaches_changed_target_binding_only(",
+        "fn neutron_snapshot_plan_scoped_detaches_ineligible_target_only(",
+        "fn neutron_snapshot_plan_scoped_ignores_non_target_body_without_mutation(",
+    ]
+    for term in required_source_terms:
+        if term not in neutron_api_source:
+            raise SystemExit(
+                "ERROR: P3 Rust scoped planner source missing %s" % term
             )
 
 
