@@ -1,0 +1,41 @@
+
+## container neutron_server QoS code paths
+
+present /usr/lib/python2.7/site-packages/neutron/extensions/qos.py
+
+present /usr/lib/python2.7/site-packages/neutron/services/qos/qos_plugin.py
+
+present /usr/lib/python2.7/site-packages/neutron/plugins/ml2/extensions/qos.py
+
+present /usr/lib/python2.7/site-packages/neutron/agent/l2/extensions/qos.py
+
+
+
+## container neutron_openvswitch_agent QoS code paths
+
+present /usr/lib/python2.7/site-packages/neutron/extensions/qos.py
+
+present /usr/lib/python2.7/site-packages/neutron/services/qos/qos_plugin.py
+
+present /usr/lib/python2.7/site-packages/neutron/plugins/ml2/extensions/qos.py
+
+present /usr/lib/python2.7/site-packages/neutron/agent/l2/extensions/qos.py
+
+
+
+## container neutron_aria_agent QoS code paths
+
+present /usr/lib/python2.7/site-packages/neutron/extensions/qos.py
+
+present /usr/lib/python2.7/site-packages/neutron/services/qos/qos_plugin.py
+
+present /usr/lib/python2.7/site-packages/neutron/plugins/ml2/extensions/qos.py
+
+present /usr/lib/python2.7/site-packages/neutron/agent/l2/extensions/qos.py
+
+
+
+## aria agent local QoS translator
+
+neutron_aria.agent.effective_qos=present
+

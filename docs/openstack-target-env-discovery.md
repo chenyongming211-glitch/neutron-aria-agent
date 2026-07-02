@@ -560,3 +560,35 @@ Boundary: this proves the explicit test-only revisionless P3 path can run in
 the legacy lab. Production P3 remains revision-aware; old Neutron defaults to
 P2 full-resync fallback unless a controlled test explicitly enables
 `revisionless_incremental_mode=experimental`.
+
+## 2026-07-02 QoS Q0 Refresh Update
+
+Evidence:
+`docs/evidence/openstack-n05-lite/20260702-qos-q0-refresh/summary.md`.
+
+Accepted Q0 facts:
+
+- Neutron QoS extension is still not visible through `neutron ext-list` or
+  `openstack extension list --network`.
+- Active `neutron_server` config does not enable the native `qos` service
+  plugin.
+- OVS agent config still uses `extensions = mirror`; standard OVS QoS agent
+  execution is not enabled.
+- Host shells on `ostack2.bj159.net`, `ostack3.bj159.net`, and
+  `ostack4.bj159.net` do not have `tc`.
+- The relevant Kolla containers do have `/usr/sbin/tc`.
+- On `ostack2.bj159.net`, container-side `tc qdisc show dev tap86b83885-67`
+  succeeds against a live VM tap. On `ostack3/4`, no VM tap was present during
+  Q0, but container-side global qdisc output was readable.
+
+Disposition:
+
+- The old shorthand "the target has no `tc`" should now be read as "host shell
+  lacks `tc`; container runtime has read-only qdisc visibility."
+- QoS remains `unsupported/deferred` for tenant-facing product behavior because
+  the Neutron QoS API is not exposed and no qdisc write/rollback smoke has been
+  accepted.
+- A future QoS Q4 decision may choose container-`tc` shaping only after a
+  bounded write/rollback proof on a test tap. Until then, use
+  `degraded/no_op`, eBPF policing, or unsupported according to the QoS detail
+  plan.

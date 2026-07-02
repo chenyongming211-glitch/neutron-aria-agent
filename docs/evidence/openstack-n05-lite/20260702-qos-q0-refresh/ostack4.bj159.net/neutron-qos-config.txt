@@ -1,0 +1,35 @@
+
+## host kolla qos-related config
+
+83:service_plugins =router,network_ip_availability,mirror
+
+167:extensions = mirror
+
+83:service_plugins =router,network_ip_availability,mirror
+
+167:extensions = mirror
+
+
+
+## container neutron_server qos-related config
+
+container neutron_server not running
+
+
+
+## container neutron_openvswitch_agent qos-related config
+
+83:service_plugins =router,network_ip_availability,mirror
+
+167:extensions = mirror
+
+
+
+## container neutron_aria_agent qos-related config
+
+83:service_plugins =router,network_ip_availability,mirror
+
+167:extensions = mirror
+
+
+

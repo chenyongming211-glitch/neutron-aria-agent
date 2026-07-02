@@ -126,8 +126,11 @@ Enable in this order:
    ```
 
    The 2026-06-30 G4 discovery evidence is accepted with zero `fail` across
-   `ostack2/3/4`. QoS, Trunk, and `tc` are explicitly `unsupported` in the
-   target environment. UDS peercred enforcement/audit is a config-gated
+   `ostack2/3/4`. QoS and Trunk are explicitly `unsupported` in the target
+   environment. Q0 refreshed the `tc` detail: host shells lack `tc`, but the
+   relevant Kolla containers include `tc` and can read qdisc; shaping still
+   needs a separate write/rollback smoke before it can be claimed. UDS peercred
+   enforcement/audit is a config-gated
    hardening check in `ci/check_neutron_stage1.py`; production enablement must
    set `neutron_peercred_enforce=true` and a recorded uid/gid allow-list before
    declaring peer auth enforced on site.

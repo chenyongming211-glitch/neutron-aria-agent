@@ -1,0 +1,61 @@
+
+## host tc binary
+
+command_v_tc_rc=1
+
+bash: line 53: tc: command not found
+
+tc_version_rc=127
+
+
+
+first_tap=none
+
+## host global qdisc sample
+
+bash: line 65: tc: command not found
+
+tc_global_qdisc_rc=127
+
+
+
+## host all tap qdisc sample
+
+
+
+## container neutron_openvswitch_agent tc binary
+
+/usr/sbin/tc
+
+command_v_tc_rc=0
+
+tc utility, iproute2-ss170501
+
+tc_version_rc=0
+
+
+
+## container neutron_aria_agent tc binary
+
+/usr/sbin/tc
+
+command_v_tc_rc=0
+
+tc utility, iproute2-ss170501
+
+tc_version_rc=0
+
+
+
+## container aria_datapath tc binary
+
+/usr/sbin/tc
+
+command_v_tc_rc=0
+
+tc utility, iproute2-ss170501
+
+tc_version_rc=0
+
+
+

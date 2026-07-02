@@ -1,0 +1,93 @@
+
+## host tc binary
+
+command_v_tc_rc=1
+
+bash: line 53: tc: command not found
+
+tc_version_rc=127
+
+
+
+first_tap=tap86b83885-67
+
+## host tc qdisc for tap86b83885-67
+
+bash: line 60: tc: command not found
+
+tc_qdisc_rc=127
+
+## host ip -d link for tap86b83885-67
+
+26: tap86b83885-67: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq master ovs-system state UNKNOWN mode DEFAULT group default qlen 1000
+
+    link/ether fe:16:3e:aa:b0:f5 brd ff:ff:ff:ff:ff:ff promiscuity 1 minmtu 68 maxmtu 65521 
+
+    tun type tap pi off vnet_hdr on multi_queue numqueues 4 numdisabled 0 persist off 
+
+    openvswitch_slave addrgenmode eui64 numtxqueues 256 numrxqueues 256 gso_max_size 65536 gso_max_segs 65535 
+
+ip_link_rc=0
+
+
+
+## host all tap qdisc sample
+
+### tap86b83885-67
+
+bash: line 72: tc: command not found
+
+### tape607e86b-9e
+
+bash: line 72: tc: command not found
+
+### tapd53ce06c-c9
+
+bash: line 72: tc: command not found
+
+### tap39adf570-1a
+
+bash: line 72: tc: command not found
+
+### tapaa4ddb4a-5b
+
+bash: line 72: tc: command not found
+
+
+
+## container neutron_openvswitch_agent tc binary
+
+/usr/sbin/tc
+
+command_v_tc_rc=0
+
+tc utility, iproute2-ss170501
+
+tc_version_rc=0
+
+
+
+## container neutron_aria_agent tc binary
+
+/usr/sbin/tc
+
+command_v_tc_rc=0
+
+tc utility, iproute2-ss170501
+
+tc_version_rc=0
+
+
+
+## container aria_datapath tc binary
+
+/usr/sbin/tc
+
+command_v_tc_rc=0
+
+tc utility, iproute2-ss170501
+
+tc_version_rc=0
+
+
+

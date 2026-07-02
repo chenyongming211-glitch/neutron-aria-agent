@@ -52,7 +52,7 @@ requires a separate revision-aware rollout decision.
 | OVS comparison | fixed | Borrow OVS RPC notification semantics, not OVS incremental OVSDB ownership; Aria keeps snapshot/WAL/generation model. |
 | Port-scoped snapshot | accepted gated | P3 UDS route, Python submitter, failure fallback, smoke, and runbook default-off contract are accepted. Production rollout remains revision-aware and separate. |
 | `aria_acl` object RPC | open | ACL object changes may still require resync until dedicated RPC or revision subscription exists. |
-| QoS next phase | entry assessment | Start with capability discovery and degraded/unsupported semantics because target evidence currently lacks Neutron QoS extension and `tc`. |
+| QoS next phase | Q0 refreshed | Target evidence lacks Neutron QoS extension. Host shells lack `tc`, but Kolla containers have `tc` and can read qdisc; shaping still requires a future write/rollback decision. |
 
 ## Design Areas To Optimize Before Detailed Implementation
 
@@ -133,7 +133,7 @@ treated as reasons to reopen the architecture unless a hard blocker is found.
 | Finalize Kolla packaging and smoke runbook. | delivery |
 | P2 RPC-triggered full-resync enablement. | accepted gated |
 | P3 incremental RPC and port-scoped apply. | accepted gated / production default-off |
-| QoS capability refresh and next-phase decision. | validation / design |
+| QoS status/authority gates and next-phase datapath decision. | validation / design |
 
 ## Next Refinement Pass
 
@@ -154,6 +154,8 @@ First-pass implementation design packages are tracked in
 
 P3 acceptance is summarized in
 `docs/evidence/openstack-n05-lite/20260702-p3-acceptance-summary/summary.md`.
-QoS remains in v0.9 scope, but its next-phase pass starts as an entry
-assessment only: refresh Neutron QoS and `tc` capability evidence, then choose
-`shaping`, `policing-only`, or `unsupported/deferred` before implementation.
+QoS remains in v0.9 scope, but its next-phase pass starts with status and
+authority gates only. Q0 evidence is refreshed: Neutron QoS is still absent;
+container `tc` read-only visibility exists; shaping remains unaccepted until a
+bounded write/rollback proof chooses `shaping`, `policing-only`, or
+`unsupported/deferred`.

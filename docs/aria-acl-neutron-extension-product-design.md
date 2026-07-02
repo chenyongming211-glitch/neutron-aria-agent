@@ -59,7 +59,7 @@ tap interface on br-int
 - 当前没有 `qbr/qvo/qvb` hybrid 安全组端口链路。
 - Neutron 仍然是网络配置唯一入口，Aria 不暴露独立租户 northbound。
 - 宿主机已挂载 bpffs，`/sys/fs/bpf` 可用；`/sys/kernel/btf/vmlinux` 可读。
-- 三台宿主机当前均缺少 `tc` 命令，QoS shaping 依赖必须单独补齐或降级为 eBPF policing。
+- 2026-07-02 Q0 刷新确认：三台宿主机 shell 当前均缺少 `tc` 命令，但 `neutron_openvswitch_agent`、`neutron_aria_agent`、`aria_datapath` 容器内存在 `/usr/sbin/tc`；`ostack2` 容器侧可以只读查看 VM tap qdisc。QoS shaping 仍未验收，必须先完成受控 qdisc 写入/回滚 smoke，或降级为 eBPF policing / unsupported。
 
 ### 2.1 真实环境探测摘要
 
@@ -81,7 +81,7 @@ tap interface on br-int
 | tap 形态 | `ostack2` 有 VM tap `tap86b83885-67` 直接挂在 `br-int`，带 `iface-id` 和 `vm-id`；`ostack3` 当前只有 DHCP 类 OVS internal tap；`ostack4` 当前 `br-int` 无 Neutron port | 端口发现路径成立，但 agent 必须按 host 和 port 类型过滤；无 eligible port 的节点应保持 idle/ready |
 | QoS 代码 | 镜像中存在 Neutron QoS plugin/extension 代码，但未启用 | QoS 可复用现有模型，但需要启用 API/DB/extension，并接入 Aria 执行 |
 | bpffs/BTF | 三台 `/sys/fs/bpf` 均已挂载，`/sys/kernel/btf/vmlinux` 均可读 | Aria datapath 基础条件较好 |
-| `tc` | 三台宿主机均未找到 `tc` 命令 | QoS shaping 不能直接承诺；第一版 QoS 应优先 eBPF policing，或在产品镜像/宿主机补齐 iproute-tc 后再打开 shaping |
+| `tc` | 宿主机 shell 未找到 `tc`；相关 Kolla 容器内存在 `tc`，且 `ostack2` 容器侧可读 VM tap qdisc | QoS shaping 不能直接承诺；第一版 QoS 应优先做 status/authority gate，再通过受控 qdisc 写入/回滚 smoke 决定 container-`tc` shaping、eBPF policing 或 unsupported |
 | SR-IOV | 三台均运行 SR-IOV agent，物理网卡存在 `sriov_totalvfs`，但 `physical_device_mappings` 为空且 `sriov_numvfs=0` | 当前环境未实际分配 SR-IOV VF；方案仍应把 SR-IOV direct port 标记 unsupported，不纳入第一阶段接管 |
 | LinuxBridge | 三台均运行 LinuxBridge agent，但 `enable_vxlan=false`、安全组关闭，现场未发现 `qbr/qvb/qvo` 主路径 | 第一阶段仍不接管 LinuxBridge；service/bridge 端口必须跳过 |
 
@@ -1759,7 +1759,7 @@ source = neutron
 - `ostack2`、`ostack3`、`ostack4` 已验证 root 级只读信息。
 - 三台 OVS agent 配置一致：`integration_bridge=br-int`、`extensions=mirror`、`enable_security_group=False`。
 - 三台均已挂载 bpffs 且 BTF 可读。
-- 三台宿主机当前均缺少 `tc` 命令，QoS shaping 不能作为第一阶段默认承诺。
+- 2026-07-02 Q0 刷新确认：宿主机 shell 缺少 `tc`，但相关 Kolla 容器内存在 `tc` 且可只读查看 qdisc；QoS shaping 不能作为第一阶段默认承诺，必须另做写入/回滚 smoke。
 - `ostack2` 当前存在 eligible VM OVS tap；`ostack3` 当前只有 DHCP 类 OVS internal port；`ostack4` 当前没有 br-int Neutron port。
 - 上线前必须给 `aria-datapath` 容器足够权限读取 OVSDB/访问 tap，不依赖 SSH 受限命令。
 - 三台 compute 的 agent 配置、镜像 tag 和 socket 权限必须一致。
@@ -2261,7 +2261,7 @@ QoS 不应该放进 `aria_acl` plugin。
 | ML2 QoS extension driver | 代码存在，配置未启用 |
 | OVS agent QoS extension | 代码存在，配置未启用 |
 | 当前 OVS agent extensions | `mirror` |
-| 宿主机 `tc` | 三台宿主机均未找到 `tc` 命令 |
+| `tc` | 宿主机 shell 未找到 `tc`；相关 Kolla 容器内存在 `tc`，且已验证容器侧只读 qdisc 可见 |
 | `qhqos` 定制扩展 | 代码和 Legacy CLI 命令存在，但服务端未启用 |
 
 因此 QoS 路线不是“重新开发 QoS API”，而是“启用已有 Neutron QoS API/DB，并新增 Aria 执行路径”。
@@ -2641,7 +2641,7 @@ QoS enforcement:
 | br-int tap `iface-id` | 已确认，部署后复测 | 已确认 DHCP internal，创建 VM 后复测 VM tap | 当前无 port，创建 VM 后复测 |
 | SR-IOV port skip | 必须 | 必须 | 必须 |
 | LinuxBridge port skip | 必须 | 必须 | 必须 |
-| QoS `tc` 依赖 | 当前缺失；如启用 shaping 则必须补齐 | 当前缺失；如启用 shaping 则必须补齐 | 当前缺失；如启用 shaping 则必须补齐 |
+| QoS `tc` 依赖 | 宿主机缺失；容器内 tc 可读 qdisc；如启用 shaping 必须补写入/回滚 smoke | 宿主机缺失；容器内 tc 可读全局 qdisc；如启用 shaping 必须补有 VM tap 的写入/回滚 smoke | 宿主机缺失；容器内 tc 可读全局 qdisc；如启用 shaping 必须补有 VM tap 的写入/回滚 smoke |
 
 ## 18. 灰度与回滚
 

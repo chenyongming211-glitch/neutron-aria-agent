@@ -114,7 +114,7 @@ or an explicitly approved later phase.
 | G7 rollback | 06, 07 | Disabling integration preserves OVS forwarding and safe recovery semantics. |
 | S3 production hardening | 08 | CI/release, persistent UDS rollout, ACL N3 fault, and lifecycle gates are ready. |
 | P2/P3 RPC sync evolution | 09, 10 | RPC-triggered resync and incremental port-scoped apply are accepted behind config gates; packaged defaults keep incremental runtime disabled. |
-| QoS next-phase entry | 11 | QoS remains deferred until refreshed target evidence decides shaping, policing-only, or unsupported/degraded behavior. |
+| QoS next-phase entry | 11 | Q0 evidence is refreshed; QoS remains deferred until Q1/Q2 status and authority gates are accepted and Q4 decides shaping, policing-only, or unsupported/degraded behavior. |
 
 ## Stage-One Verification
 
@@ -232,10 +232,11 @@ The next QoS document is:
 docs/openstack-neutron-aria-details/11-qos-next-phase.md
 ```
 
-It is an entry plan only. Current target evidence shows no visible Neutron QoS
-extension and no host `tc`, so implementation must start by refreshing
-capability evidence and choosing one disposition: `shaping`, `policing-only`,
-or `unsupported/deferred`.
+It is an entry plan only. The 2026-07-02 Q0 refresh shows no visible Neutron QoS
+extension and no host-shell `tc`, but Kolla containers do include `tc` and can
+read qdisc from the shared network namespace. Implementation must still choose
+one disposition before datapath work: `shaping`, `policing-only`, or
+`unsupported/deferred`.
 
 ## Stage-Three ACL Production Hardening
 
@@ -292,9 +293,10 @@ plus the operator runbook.
 
 QoS is the next reasonable planning target, but not an immediate shaping
 implementation. The target environment currently lacks visible Neutron QoS
-extension support and lacks `tc`, so QoS remains deferred until refreshed
-capability evidence decides between shaping, policing-only, or
-unsupported/degraded behavior.
+extension support. Q0 refreshed the `tc` detail: host shells lack `tc`, while
+Kolla containers have read-only qdisc visibility. QoS remains deferred until
+Q1/Q2 status/authority gates and a Q4 datapath decision choose between shaping,
+policing-only, or unsupported/degraded behavior.
 
 Start here:
 
