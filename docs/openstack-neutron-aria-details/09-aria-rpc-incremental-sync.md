@@ -356,7 +356,7 @@ Container requirements for P2/P3:
 | P2-3 | Production canary switch and polling-only rollback runbook | `rpc_events_enabled=true` can be enabled and disabled per host without OVS/datapath restart |
 | P3-1 | Projected port store + network index | inactive/read-only unit tests for host/network/revision filtering; no port-scoped apply |
 | P3-2 | Port-scoped snapshot builder in Python | pure builder and synchronizer dry-run unit tests + UDS contract tests; no service-loop submitter and no UDS submitter |
-| P3-3 | Rust scoped snapshot apply | `ApplyScope::SinglePort` planner tests, internal scoped WAL/status boundary tests, shared runtime apply body extraction, and shared preflight/idempotency checks implemented; UDS route, runtime submit path, and capability advertisement remain planned |
+| P3-3 | Rust scoped snapshot apply | `ApplyScope::SinglePort` planner tests, internal scoped WAL/status boundary tests, shared runtime apply body extraction, shared preflight/idempotency checks, and the capability-disabled UDS route are implemented; Python has a capability-gated helper, while service-loop submission, capability advertisement, and runtime enablement remain disabled |
 | P3-4 | Incremental ACL apply failure semantics | degraded/bypass without OVS loss |
 | P3-5 | RPC on/off + incremental on/off smokes | evidence under `docs/evidence/openstack-n05-lite/` |
 | P3-6 | Runbook and ini contract update (`01-ini-contract.md`) | config validation + docs |
@@ -383,9 +383,9 @@ Suggested smokes to add or extend:
 - extend `neutron_aria_acl_neutron_source_smoke.sh` with real port binding + traffic
 - reuse `neutron_aria_vm_migration_smoke.sh`, `neutron_aria_tap_recreate_smoke.sh`
 
-## Entry Criteria For Starting P3
+## Entry Criteria For P3 Runtime Enablement
 
-Do not start P3 port-scoped apply implementation until all are true:
+Do not enable P3 runtime port-scoped apply until all are true:
 
 1. Stage-two ACL MVP and stage-three N3 fault/lifecycle gates are accepted or
    explicitly waived with written disposition.
@@ -406,10 +406,10 @@ Current entry-gate evidence:
 - Item 5 is covered by `EffectiveAclIndex.compare_revision_for_port()` unit
   tests for newer/same/older/unknown relations.
 
-This evidence allows P3 design work to continue, but it does not by itself
-allow enabling `incremental_rpc_enabled=true`.
+This evidence allows P3 gated implementation and test-surface work to continue,
+but it does not by itself allow enabling `incremental_rpc_enabled=true`.
 
-Allowed before the full P3 entry gate:
+Allowed before the P3 runtime enablement gate:
 
 - Add `incremental_rpc_enabled=false` as an explicit blocked config gate.
 - Add a Python UDS client helper that refuses port-scoped submit unless the
@@ -428,7 +428,7 @@ Field evidence:
   records the accepted three-node heartbeat/debug gate for the read-only P3-1
   projection index and last event decision summaries.
 
-Still forbidden before the full P3 entry gate:
+Still forbidden before the P3 runtime enablement gate:
 
 - Enabling `incremental_rpc_enabled=true` in runtime config.
 - Sending port-scoped snapshots from service-loop code, or from any Python path
