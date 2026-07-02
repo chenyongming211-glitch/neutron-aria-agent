@@ -16,6 +16,7 @@ use axum::{
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -70,6 +71,50 @@ struct SnapshotPlan {
 enum ApplyScope {
     FullHost,
     SinglePort(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SnapshotScopeError {
+    SinglePortBodyCount { actual: usize },
+    SinglePortBodyMismatch { expected: String, actual: String },
+    ScopeWidened { target: String, actual: String },
+}
+
+impl SnapshotScopeError {
+    fn code(&self) -> &'static str {
+        "PORT_SCOPE_MISMATCH"
+    }
+}
+
+impl fmt::Display for SnapshotScopeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SinglePortBodyCount { actual } => write!(
+                f,
+                "single-port snapshot requires exactly one body port, got {}",
+                actual
+            ),
+            Self::SinglePortBodyMismatch { expected, actual } => write!(
+                f,
+                "single-port snapshot path/body mismatch: expected {}, got {}",
+                expected, actual
+            ),
+            Self::ScopeWidened { target, actual } => write!(
+                f,
+                "single-port snapshot plan widened scope: target {}, affected {}",
+                target, actual
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotApplyTransaction {
+    scope: ApplyScope,
+    plan: SnapshotPlan,
+    requested_port_ids: Vec<String>,
+    affected_domains: Vec<String>,
+    affected_ports: Vec<ManagedNeutronPort>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -659,20 +704,19 @@ async fn apply_neutron_snapshot(
     }
 
     let current_ports = state.runtime.read().await.ports.clone();
-    let plan = build_snapshot_plan(&current_ports, &snapshot, &local_inventory);
-    let affected_ports = affected_ports_for_plan(&plan);
-    let requested_port_ids = snapshot
-        .ports
-        .iter()
-        .map(|port| port.port_id.clone())
-        .collect();
-    let requested_domains = affected_domains_for_ports(&affected_ports);
+    let transaction = build_snapshot_apply_transaction(
+        &current_ports,
+        &snapshot,
+        &local_inventory,
+        ApplyScope::FullHost,
+    )
+    .map_err(snapshot_scope_apply_error)?;
     if let Err(e) = state.wal.append_snapshot_intent(
         snapshot.generation,
         requested_hash.clone(),
-        requested_port_ids,
-        requested_domains,
-        affected_ports,
+        transaction.requested_port_ids.clone(),
+        transaction.affected_domains.clone(),
+        transaction.affected_ports.clone(),
     ) {
         return Err(SnapshotApplyError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -698,10 +742,21 @@ async fn apply_neutron_snapshot(
     }
 
     let mut next_ports = current_ports;
-    let mut next_statuses = BTreeMap::new();
-    let mut results = plan.ignored;
+    let SnapshotApplyTransaction { scope, plan, .. } = transaction;
+    let SnapshotPlan {
+        attach,
+        update,
+        detach,
+        ignored,
+    } = plan;
+    let runtime_before_apply = {
+        let runtime = state.runtime.read().await;
+        runtime.clone()
+    };
+    let mut next_statuses = port_status_seed_for_scope(&runtime_before_apply, &scope);
+    let mut results = ignored;
 
-    for port in plan.detach {
+    for port in detach {
         if let Err(e) = purge_neutron_acl(&state, &port.ifname, &port.port_id).await {
             warn!(
                 port_id = %port.port_id,
@@ -763,7 +818,7 @@ async fn apply_neutron_snapshot(
         }
     }
 
-    for port in plan.update {
+    for port in update {
         let managed = managed_port_from_snapshot(&port);
         let domain_result = reconcile_neutron_domains(&state, &port).await;
         if domain_result.ok {
@@ -823,7 +878,7 @@ async fn apply_neutron_snapshot(
         }
     }
 
-    for port in plan.attach {
+    for port in attach {
         match state.registry.attach(&port.ifname).await {
             Ok(()) => {
                 if let Err(e) = fault_injection::check("neutron.port.after_attach").await {
@@ -950,25 +1005,15 @@ async fn apply_neutron_snapshot(
     }
 
     let has_error = results.iter().any(|result| result.status == "error");
-    let previous_applied_generation = state.runtime.read().await.applied_generation;
-    let mut next_runtime = {
-        let runtime = state.runtime.read().await;
-        runtime.clone()
-    };
-    next_runtime.accepted_generation = snapshot.generation;
-    next_runtime.desired_hash = requested_hash.clone();
-    next_runtime.ports = next_ports;
-    next_runtime.port_statuses = next_statuses;
-    next_runtime.wal_status = "commit_written".to_string();
-    if has_error {
-        next_runtime.pending_generation = Some(snapshot.generation);
-        next_runtime.authority_state = "partial".to_string();
-    } else {
-        next_runtime.applied_generation = snapshot.generation;
-        next_runtime.applied_desired_hash = requested_hash.clone();
-        next_runtime.pending_generation = None;
-        next_runtime.authority_state = "ready".to_string();
-    }
+    let previous_applied_generation = runtime_before_apply.applied_generation;
+    let next_runtime = build_snapshot_commit_runtime(
+        &runtime_before_apply,
+        snapshot.generation,
+        requested_hash.clone(),
+        next_ports,
+        next_statuses,
+        has_error,
+    );
 
     if let Err(e) = fault_injection::check("neutron.snapshot.before_commit").await {
         return Err(SnapshotApplyError {
@@ -1036,6 +1081,14 @@ fn snapshot_schema_supported(schema_version: Option<u32>) -> bool {
     }
 }
 
+fn snapshot_scope_apply_error(error: SnapshotScopeError) -> SnapshotApplyError {
+    SnapshotApplyError {
+        status: StatusCode::BAD_REQUEST,
+        code: error.code(),
+        details: error.to_string(),
+    }
+}
+
 fn snapshot_has_runtime_drift(
     current: &BTreeMap<String, ManagedNeutronPort>,
     snapshot: &NeutronSnapshotRequest,
@@ -1056,6 +1109,124 @@ fn snapshot_has_runtime_drift(
             })
             .unwrap_or(true)
     })
+}
+
+fn validate_snapshot_scope(
+    scope: &ApplyScope,
+    snapshot: &NeutronSnapshotRequest,
+) -> Result<(), SnapshotScopeError> {
+    match scope {
+        ApplyScope::FullHost => Ok(()),
+        ApplyScope::SinglePort(target_port_id) => {
+            if snapshot.ports.len() != 1 {
+                return Err(SnapshotScopeError::SinglePortBodyCount {
+                    actual: snapshot.ports.len(),
+                });
+            }
+            let actual_port_id = &snapshot.ports[0].port_id;
+            if actual_port_id != target_port_id {
+                return Err(SnapshotScopeError::SinglePortBodyMismatch {
+                    expected: target_port_id.clone(),
+                    actual: actual_port_id.clone(),
+                });
+            }
+            Ok(())
+        }
+    }
+}
+
+fn requested_port_ids_for_scope(
+    scope: &ApplyScope,
+    snapshot: &NeutronSnapshotRequest,
+) -> Vec<String> {
+    match scope {
+        ApplyScope::FullHost => snapshot
+            .ports
+            .iter()
+            .map(|port| port.port_id.clone())
+            .collect(),
+        ApplyScope::SinglePort(target_port_id) => vec![target_port_id.clone()],
+    }
+}
+
+fn build_snapshot_transaction_from_plan(
+    scope: ApplyScope,
+    snapshot: &NeutronSnapshotRequest,
+    plan: SnapshotPlan,
+) -> Result<SnapshotApplyTransaction, SnapshotScopeError> {
+    validate_snapshot_scope(&scope, snapshot)?;
+    let affected_ports = affected_ports_for_plan(&plan);
+    if let ApplyScope::SinglePort(target_port_id) = &scope {
+        for port in &affected_ports {
+            if &port.port_id != target_port_id {
+                return Err(SnapshotScopeError::ScopeWidened {
+                    target: target_port_id.clone(),
+                    actual: port.port_id.clone(),
+                });
+            }
+        }
+    }
+    let requested_port_ids = requested_port_ids_for_scope(&scope, snapshot);
+    let affected_domains = affected_domains_for_ports(&affected_ports);
+    Ok(SnapshotApplyTransaction {
+        scope,
+        plan,
+        requested_port_ids,
+        affected_domains,
+        affected_ports,
+    })
+}
+
+fn build_snapshot_apply_transaction(
+    current: &BTreeMap<String, ManagedNeutronPort>,
+    snapshot: &NeutronSnapshotRequest,
+    inventory: &LocalInterfaceInventory,
+    scope: ApplyScope,
+) -> Result<SnapshotApplyTransaction, SnapshotScopeError> {
+    validate_snapshot_scope(&scope, snapshot)?;
+    let plan = build_snapshot_plan_for_scope(current, snapshot, inventory, scope.clone());
+    build_snapshot_transaction_from_plan(scope, snapshot, plan)
+}
+
+fn port_status_seed_for_scope(
+    runtime: &NeutronRuntimeState,
+    scope: &ApplyScope,
+) -> BTreeMap<String, NeutronPortStatus> {
+    match scope {
+        ApplyScope::FullHost => BTreeMap::new(),
+        ApplyScope::SinglePort(target_port_id) => runtime
+            .port_statuses
+            .iter()
+            .filter(|(port_id, _)| *port_id != target_port_id)
+            .map(|(port_id, status)| (port_id.clone(), status.clone()))
+            .collect(),
+    }
+}
+
+fn build_snapshot_commit_runtime(
+    previous: &NeutronRuntimeState,
+    generation: u64,
+    requested_hash: Option<String>,
+    next_ports: BTreeMap<String, ManagedNeutronPort>,
+    next_statuses: BTreeMap<String, NeutronPortStatus>,
+    has_error: bool,
+) -> NeutronRuntimeState {
+    let mut next_runtime = previous.clone();
+    next_runtime.accepted_generation = generation;
+    next_runtime.desired_hash = requested_hash.clone();
+    next_runtime.ports = next_ports;
+    next_runtime.port_statuses = next_statuses;
+    next_runtime.wal_status = "commit_written".to_string();
+    if has_error {
+        next_runtime.pending_generation = Some(generation);
+        next_runtime.authority_state = "partial".to_string();
+    } else {
+        next_runtime.applied_generation = generation;
+        next_runtime.applied_desired_hash = requested_hash;
+        next_runtime.pending_generation = None;
+        next_runtime.authority_state = "ready".to_string();
+    }
+    next_runtime
 }
 
 fn snapshot_generation_fully_applied(runtime: &NeutronRuntimeState, generation: u64) -> bool {
@@ -2366,6 +2537,24 @@ mod tests {
         }
     }
 
+    fn ready_status(port_id: &str, ifname: &str, generation: u64) -> NeutronPortStatus {
+        port_runtime_status(
+            port_id,
+            ifname,
+            generation,
+            Some(format!("hash-{}", generation)),
+            vec!["acl".to_string()],
+            "ready",
+            None,
+            vec![domain_status_with_action(
+                "acl",
+                "ready",
+                None,
+                Some("enforce".to_string()),
+            )],
+        )
+    }
+
     fn iface(
         name: &str,
         port_id: &str,
@@ -2754,6 +2943,336 @@ mod tests {
         assert!(plan.update.is_empty());
         assert!(plan.detach.is_empty());
         assert!(plan.ignored.is_empty());
+    }
+
+    #[test]
+    fn neutron_snapshot_transaction_scoped_records_only_target_intent() {
+        let mut current = BTreeMap::new();
+        current.insert(
+            "target-port".to_string(),
+            ManagedNeutronPort {
+                managed_domains: vec!["acl".to_string()],
+                ..managed("target-port", "tap-target")
+            },
+        );
+        current.insert(
+            "other-port".to_string(),
+            ManagedNeutronPort {
+                managed_domains: vec!["acl".to_string()],
+                ..managed("other-port", "tap-other")
+            },
+        );
+        let local = inventory(vec![
+            iface("tap-target", "target-port", Some(31), Some("br-int")),
+            iface("tap-other", "other-port", Some(32), Some("br-int")),
+        ]);
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 13,
+            desired_hash: Some("scoped-hash".to_string()),
+            host: None,
+            ports: vec![NeutronPortSnapshot {
+                managed_domains: vec!["acl".to_string()],
+                ..port("target-port", "tap-target", true)
+            }],
+        };
+
+        let transaction = build_snapshot_apply_transaction(
+            &current,
+            &snapshot,
+            &local,
+            ApplyScope::SinglePort("target-port".to_string()),
+        )
+        .expect("scoped transaction should be valid");
+
+        assert_eq!(transaction.requested_port_ids, vec!["target-port"]);
+        assert_eq!(
+            transaction
+                .affected_ports
+                .iter()
+                .map(|port| port.port_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["target-port"]
+        );
+        assert_eq!(
+            transaction.affected_domains,
+            vec!["acl".to_string(), "attach".to_string()]
+        );
+        assert_eq!(transaction.plan.update.len(), 1);
+        assert!(transaction.plan.attach.is_empty());
+        assert!(transaction.plan.detach.is_empty());
+    }
+
+    #[test]
+    fn neutron_snapshot_transaction_scoped_rejects_zero_ports_before_wal() {
+        let current = BTreeMap::new();
+        let local = inventory(Vec::new());
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 14,
+            desired_hash: None,
+            host: None,
+            ports: Vec::new(),
+        };
+
+        let error = build_snapshot_apply_transaction(
+            &current,
+            &snapshot,
+            &local,
+            ApplyScope::SinglePort("target-port".to_string()),
+        )
+        .expect_err("empty scoped body must be rejected");
+
+        assert_eq!(
+            error,
+            SnapshotScopeError::SinglePortBodyCount { actual: 0 }
+        );
+        assert_eq!(error.code(), "PORT_SCOPE_MISMATCH");
+    }
+
+    #[test]
+    fn neutron_snapshot_transaction_scoped_rejects_multiple_ports_before_wal() {
+        let current = BTreeMap::new();
+        let local = inventory(Vec::new());
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 15,
+            desired_hash: None,
+            host: None,
+            ports: vec![
+                port("target-port", "tap-target", true),
+                port("other-port", "tap-other", true),
+            ],
+        };
+
+        let error = build_snapshot_apply_transaction(
+            &current,
+            &snapshot,
+            &local,
+            ApplyScope::SinglePort("target-port".to_string()),
+        )
+        .expect_err("multi-port scoped body must be rejected");
+
+        assert_eq!(
+            error,
+            SnapshotScopeError::SinglePortBodyCount { actual: 2 }
+        );
+    }
+
+    #[test]
+    fn neutron_snapshot_transaction_scoped_rejects_path_body_mismatch_before_wal() {
+        let current = BTreeMap::new();
+        let local = inventory(Vec::new());
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 16,
+            desired_hash: None,
+            host: None,
+            ports: vec![port("other-port", "tap-other", true)],
+        };
+
+        let error = build_snapshot_apply_transaction(
+            &current,
+            &snapshot,
+            &local,
+            ApplyScope::SinglePort("target-port".to_string()),
+        )
+        .expect_err("path/body mismatch must be rejected");
+
+        assert_eq!(
+            error,
+            SnapshotScopeError::SinglePortBodyMismatch {
+                expected: "target-port".to_string(),
+                actual: "other-port".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn neutron_snapshot_transaction_scoped_rejects_scope_widening_before_wal() {
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 17,
+            desired_hash: None,
+            host: None,
+            ports: vec![port("target-port", "tap-target", true)],
+        };
+        let plan = SnapshotPlan {
+            attach: vec![NeutronPortSnapshot {
+                ifindex: Some(33),
+                managed_domains: vec!["acl".to_string()],
+                ..port("other-port", "tap-other", true)
+            }],
+            update: Vec::new(),
+            detach: Vec::new(),
+            ignored: Vec::new(),
+        };
+
+        let error = build_snapshot_transaction_from_plan(
+            ApplyScope::SinglePort("target-port".to_string()),
+            &snapshot,
+            plan,
+        )
+        .expect_err("widened scoped plan must be rejected");
+
+        assert_eq!(
+            error,
+            SnapshotScopeError::ScopeWidened {
+                target: "target-port".to_string(),
+                actual: "other-port".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn neutron_snapshot_transaction_full_host_preserves_existing_wal_intent_shape() {
+        let mut current = BTreeMap::new();
+        current.insert(
+            "removed-port".to_string(),
+            ManagedNeutronPort {
+                managed_domains: vec!["acl".to_string()],
+                ..managed("removed-port", "tap-removed")
+            },
+        );
+        let local = inventory(vec![iface("tap-kept", "kept-port", Some(34), Some("br-int"))]);
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 18,
+            desired_hash: None,
+            host: None,
+            ports: vec![NeutronPortSnapshot {
+                managed_domains: vec!["acl".to_string()],
+                ..port("kept-port", "tap-kept", true)
+            }],
+        };
+
+        let transaction =
+            build_snapshot_apply_transaction(&current, &snapshot, &local, ApplyScope::FullHost)
+                .expect("full-host transaction should be valid");
+
+        assert_eq!(transaction.requested_port_ids, vec!["kept-port"]);
+        assert_eq!(
+            transaction
+                .affected_ports
+                .iter()
+                .map(|port| port.port_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["kept-port", "removed-port"]
+        );
+        assert_eq!(
+            transaction.affected_domains,
+            vec!["acl".to_string(), "attach".to_string()]
+        );
+    }
+
+    #[test]
+    fn neutron_snapshot_transaction_scoped_success_preserves_unrelated_statuses() {
+        let mut previous_ports = BTreeMap::new();
+        previous_ports.insert(
+            "target-port".to_string(),
+            ManagedNeutronPort {
+                managed_domains: vec!["acl".to_string()],
+                ..managed("target-port", "tap-target")
+            },
+        );
+        previous_ports.insert(
+            "other-port".to_string(),
+            ManagedNeutronPort {
+                managed_domains: vec!["acl".to_string()],
+                ..managed("other-port", "tap-other")
+            },
+        );
+        let mut previous_statuses = BTreeMap::new();
+        previous_statuses.insert(
+            "target-port".to_string(),
+            ready_status("target-port", "tap-target", 20),
+        );
+        previous_statuses.insert(
+            "other-port".to_string(),
+            ready_status("other-port", "tap-other", 20),
+        );
+        let previous = NeutronRuntimeState {
+            accepted_generation: 20,
+            applied_generation: 20,
+            applied_desired_hash: Some("hash-20".to_string()),
+            authority_state: "ready".to_string(),
+            ports: previous_ports.clone(),
+            port_statuses: previous_statuses,
+            ..Default::default()
+        };
+        let mut next_statuses =
+            port_status_seed_for_scope(&previous, &ApplyScope::SinglePort("target-port".into()));
+        next_statuses.insert(
+            "target-port".to_string(),
+            port_runtime_status(
+                "target-port",
+                "tap-target",
+                21,
+                Some("hash-21".to_string()),
+                vec!["acl".to_string()],
+                "ready",
+                None,
+                vec![domain_status_with_action(
+                    "acl",
+                    "ready",
+                    None,
+                    Some("enforce".to_string()),
+                )],
+            ),
+        );
+
+        let next = build_snapshot_commit_runtime(
+            &previous,
+            21,
+            Some("hash-21".to_string()),
+            previous_ports,
+            next_statuses,
+            false,
+        );
+
+        assert_eq!(next.accepted_generation, 21);
+        assert_eq!(next.applied_generation, 21);
+        assert_eq!(next.pending_generation, None);
+        assert_eq!(next.authority_state, "ready");
+        assert_eq!(
+            next.port_statuses
+                .get("target-port")
+                .map(|status| status.generation),
+            Some(21)
+        );
+        assert_eq!(
+            next.port_statuses
+                .get("other-port")
+                .map(|status| (status.generation, status.desired_hash.clone())),
+            Some((20, Some("hash-20".to_string())))
+        );
+    }
+
+    #[test]
+    fn neutron_snapshot_transaction_scoped_failure_keeps_pending_generation() {
+        let previous = NeutronRuntimeState {
+            accepted_generation: 30,
+            applied_generation: 30,
+            applied_desired_hash: Some("hash-30".to_string()),
+            authority_state: "ready".to_string(),
+            ..Default::default()
+        };
+
+        let next = build_snapshot_commit_runtime(
+            &previous,
+            31,
+            Some("hash-31".to_string()),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            true,
+        );
+
+        assert_eq!(next.accepted_generation, 31);
+        assert_eq!(next.applied_generation, 30);
+        assert_eq!(next.pending_generation, Some(31));
+        assert_eq!(next.desired_hash, Some("hash-31".to_string()));
+        assert_eq!(next.applied_desired_hash, Some("hash-30".to_string()));
+        assert_eq!(next.authority_state, "partial");
     }
 
     #[test]

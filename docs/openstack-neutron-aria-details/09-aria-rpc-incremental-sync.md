@@ -296,8 +296,9 @@ Rust/datapath requirements:
   `07-transaction-wal.md`.
 - Preserve attach/acl domain split and bypass semantics.
 - The Rust P3-3 minimum design and test boundary is recorded in
-  `10-rust-scoped-apply.md`. Do not add the scoped UDS route before that
-  planner/WAL/status boundary is covered by tests.
+  `10-rust-scoped-apply.md`. The planner and internal WAL/status boundary now
+  have tests; do not add the scoped UDS route until the runtime scoped apply
+  path is covered as well.
 
 ### Read Path Options
 
@@ -354,7 +355,7 @@ Container requirements for P2/P3:
 | P2-3 | Production canary switch and polling-only rollback runbook | `rpc_events_enabled=true` can be enabled and disabled per host without OVS/datapath restart |
 | P3-1 | Projected port store + network index | inactive/read-only unit tests for host/network/revision filtering; no port-scoped apply |
 | P3-2 | Port-scoped snapshot builder in Python | pure builder and synchronizer dry-run unit tests + UDS contract tests; no service-loop submitter and no UDS submitter |
-| P3-3 | Rust scoped snapshot apply | planner-only `ApplyScope::SinglePort` tests implemented; UDS route, WAL submit path, and capability advertisement remain planned |
+| P3-3 | Rust scoped snapshot apply | `ApplyScope::SinglePort` planner tests plus internal scoped WAL/status boundary tests implemented; UDS route, runtime submit path, and capability advertisement remain planned |
 | P3-4 | Incremental ACL apply failure semantics | degraded/bypass without OVS loss |
 | P3-5 | RPC on/off + incremental on/off smokes | evidence under `docs/evidence/openstack-n05-lite/` |
 | P3-6 | Runbook and ini contract update (`01-ini-contract.md`) | config validation + docs |
