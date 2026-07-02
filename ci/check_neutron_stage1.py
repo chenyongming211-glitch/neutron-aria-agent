@@ -139,6 +139,7 @@ def check_uds_contract_artifact():
         "schema_version_max": uds_client.NEUTRON_SCHEMA_VERSION,
         "attach_authority": uds_client.NEUTRON_ATTACH_AUTHORITY,
         "supports_full_snapshot": True,
+        "supports_port_scoped_snapshot": True,
         "supports_port_delete": True,
         "body_max_bytes": uds_client.NEUTRON_BODY_MAX_BYTES,
         "timeout_ms": uds_client.NEUTRON_TIMEOUT_MS,
@@ -195,11 +196,11 @@ def check_uds_contract_artifact():
 
     p3_scoped = contract.get("p3_port_scoped_snapshot") or {}
     expected_p3_scoped = {
-        "phase": "rust_route_implemented_capability_disabled",
-        "runtime_enabled": False,
+        "phase": "runtime_enablement_config_gated",
+        "runtime_enabled": True,
         "route_enabled": True,
-        "capability_advertised": False,
-        "python_submitter_enabled": False,
+        "capability_advertised": True,
+        "python_submitter_enabled": True,
         "incremental_rpc_enabled_default": False,
         "method": "PUT",
         "path": "/api/v1/neutron/ports/{port_id}/snapshot",
@@ -229,14 +230,15 @@ def check_uds_contract_artifact():
     ):
         if code not in planned_errors:
             raise SystemExit("ERROR: p3 port-scoped planned errors missing %s" % code)
-    forbidden = set(p3_scoped.get("forbidden_until_implemented") or [])
+    guardrails = set(p3_scoped.get("runtime_guardrails") or [])
     for guardrail in (
-        "do not advertise supports_port_scoped_snapshot=true",
-        "do not enable incremental_rpc_enabled=true",
+        "keep incremental_rpc_enabled=false in packaged defaults",
+        "require rpc_events_enabled=true, full_resync_enabled=true, and port_source=neutronclient before incremental enablement",
+        "only single local newer-revision port.update events may use scoped apply",
+        "multi-port batches, delete events, network updates, overflow, unknown revision, and scoped submit failures fall back to full resync",
         "do not remove full-resync recovery",
-        "do not call this route from Python until capability and config gates are accepted",
     ):
-        if guardrail not in forbidden:
+        if guardrail not in guardrails:
             raise SystemExit("ERROR: p3 port-scoped guardrail missing %r" % guardrail)
 
     phase_status = contract.get("phase_status") or {}
@@ -392,10 +394,12 @@ def check_rust_uds_contract_source():
         raise SystemExit("ERROR: Neutron snapshot schema mismatch must return UDS_SCHEMA_MISMATCH")
     if "UDS_BODY_TOO_LARGE" not in python_uds_source:
         raise SystemExit("ERROR: Python UDS client must map HTTP 413 to UDS_BODY_TOO_LARGE")
-    if "supports_port_scoped_snapshot" in api_source:
-        raise SystemExit(
-            "ERROR: Rust capabilities must not advertise supports_port_scoped_snapshot yet"
-        )
+    for term in (
+        "pub supports_port_scoped_snapshot: bool",
+        "supports_port_scoped_snapshot: true",
+    ):
+        if term not in api_source:
+            raise SystemExit("ERROR: Rust capabilities missing P3 scoped term %s" % term)
     for term in (
         "def put_port_snapshot(",
         "local API does not advertise supports_port_scoped_snapshot",
@@ -403,6 +407,35 @@ def check_rust_uds_contract_source():
     ):
         if term not in python_uds_source:
             raise SystemExit("ERROR: Python UDS client missing P3 gate term %s" % term)
+    service_source = _read_repo_text(os.path.join(
+        "openstack",
+        "neutron_aria",
+        "neutron_aria",
+        "agent",
+        "service.py",
+    ))
+    config_source = _read_repo_text(os.path.join(
+        "openstack",
+        "neutron_aria",
+        "neutron_aria",
+        "agent",
+        "config.py",
+    ))
+    for term in (
+        "incremental_rpc_enabled",
+        "apply_port_scoped_snapshot",
+        "ACTION_PORT_SCOPED_APPLY",
+        "_single_port_incremental_allowed",
+    ):
+        if term not in service_source:
+            raise SystemExit("ERROR: service loop missing P3 runtime term %s" % term)
+    for term in (
+        "incremental_rpc_enabled=true requires [neutron] rpc_events_enabled=true",
+        "incremental_rpc_enabled=true requires [agent] full_resync_enabled=true",
+        "incremental_rpc_enabled=true requires [neutron] port_source=neutronclient",
+    ):
+        if term not in config_source:
+            raise SystemExit("ERROR: config missing P3 runtime gate term %s" % term)
     for test_name in (
         "test_put_port_snapshot_requires_scoped_capability_before_put",
         "test_put_port_snapshot_serializes_when_scoped_capability_is_advertised",
@@ -526,9 +559,9 @@ def check_p3_rust_scoped_plan_boundary():
     required_markers = [
         "Status: P3-3 implementation design package",
         "SinglePort",
-        "Port-scoped UDS route is implemented for Rust-side testing",
-        "Do not advertise `supports_port_scoped_snapshot=true`",
-        "Do not enable `incremental_rpc_enabled=true`",
+        "Port-scoped UDS route is implemented and advertised",
+        "Keep `incremental_rpc_enabled=false` in packaged defaults",
+        "`incremental_rpc_enabled=true` requires `rpc_events_enabled=true`",
         "requested_port_ids=[port_id]",
         "preserve unrelated `runtime.ports` and `runtime.port_statuses`",
         "scoped planner updates target only",

@@ -3,9 +3,10 @@
 Status: P3-3 implementation design package. The Rust single-port planner scope,
 pure planner tests, internal scoped WAL/status transaction boundary tests, and
 the shared runtime apply body extraction, shared preflight/idempotency checks,
-and port-scoped UDS route are implemented for Rust-side testing. Capability
-advertisement, Python submitter support, and the production incremental call
-chain remain disabled.
+and port-scoped UDS route are implemented. The scoped UDS capability is now
+advertised, and Python service-loop submission is available only behind the
+explicit `incremental_rpc_enabled=true` config gate. Packaged defaults keep the
+incremental runtime disabled.
 
 ## Goal
 
@@ -24,25 +25,26 @@ OVS forwarding ownership.
 | Full-host snapshot route | implemented | `PUT /api/v1/neutron/snapshot` applies host-authoritative snapshots. |
 | Port delete route | implemented | `DELETE /api/v1/neutron/ports/{port_id}` cleans one Neutron-managed port. |
 | WAL generation semantics | implemented for full snapshot/delete | Intent/commit, stale generation, hash conflict, timeout recovery, and replay have stage-one coverage. |
-| Python port-scoped builder | implemented as dry-run only | `PortScopedSnapshotBuilder` and `SnapshotSynchronizer.dry_run_port_scoped_snapshot()` construct previews without UDS submit. |
+| Python port-scoped builder | implemented | `PortScopedSnapshotBuilder` constructs previews and the synchronizer can submit a single-port snapshot behind the incremental config gate. |
 | Rust scoped planner | implemented planner-only | `ApplyScope::SinglePort` and `build_snapshot_plan_for_scope()` have pure tests that prove unrelated ports are not mutated. |
 | Rust scoped WAL/status boundary | implemented internally | `SnapshotApplyTransaction`, scope validation, affected-port checks, status seeding, and commit-runtime helpers have unit tests; no external scoped route uses them yet. |
 | Rust shared runtime apply body | implemented internally | `apply_snapshot_runtime_transaction()` is the common detach/update/attach/domain reconcile body used by full-host snapshots and covered by a no-eBPF scoped error test. |
 | Rust shared preflight/idempotency | implemented internally | `validate_snapshot_preflight()` and `snapshot_early_response_for_scope()` share schema, scope, stale, noop, and hash-conflict handling for full-host and future single-port snapshots. |
-| Port-scoped UDS route | implemented, capability-disabled | `PUT /api/v1/neutron/ports/{port_id}/snapshot` reuses the shared snapshot apply path with `ApplyScope::SinglePort`; it is listed in `docs/neutron-uds-contract.json` but not advertised as a supported capability. |
-| Python UDS client port-scoped helper | implemented, capability-gated | `LocalClient.put_port_snapshot()` refuses to submit unless `supports_port_scoped_snapshot=true` is advertised, validates single-port path/body scope before send, and is not called by the service loop. |
-| Rust external port-scoped apply | testable internally | The route can be exercised by Rust tests and direct UDS probes, but no production service-loop path calls it. |
+| Port-scoped UDS route | implemented, advertised | `PUT /api/v1/neutron/ports/{port_id}/snapshot` reuses the shared snapshot apply path with `ApplyScope::SinglePort` and advertises `supports_port_scoped_snapshot=true`. |
+| Python UDS client port-scoped helper | implemented, capability-gated | `LocalClient.put_port_snapshot()` refuses to submit unless `supports_port_scoped_snapshot=true` is advertised and validates single-port path/body scope before send. |
+| Python service-loop submitter | implemented, config-gated | `incremental_rpc_enabled=true` allows exactly one safe local newer-revision `port.update` event to use scoped apply; multi-port, network, overflow, ambiguous, or failed paths fall back to full resync. |
+| Rust external port-scoped apply | implemented | The route is covered by Rust tests and direct UDS probes; production packaging still defaults the Python incremental runtime to disabled. |
 
 ## Non-Negotiable Guardrails
 
-- Port-scoped UDS route is implemented for Rust-side testing. Python may only
-  expose a capability-gated helper; do not call it from the service loop until
-  the capability and config gates are accepted together.
-- Do not advertise `supports_port_scoped_snapshot=true` until route, planner,
-  WAL, status, Python client, and rollback tests pass in the same enablement
-  window.
-- Do not enable `incremental_rpc_enabled=true` in packaged config during this
-  design package.
+- Port-scoped UDS route is implemented and advertised. Python service-loop
+  submission remains controlled by `incremental_rpc_enabled=true`.
+- Keep `incremental_rpc_enabled=false` in packaged defaults.
+- `incremental_rpc_enabled=true` requires `rpc_events_enabled=true`,
+  `full_resync_enabled=true`, and `port_source=neutronclient`.
+- Only one local newer-revision `port.update` event may use scoped apply in
+  this phase. Multi-port batches, delete events, network events, overflow,
+  unknown revision, and scoped submit failures fall back to full resync.
 - Do not remove periodic/full-resync recovery. Scoped apply is an optimization,
   not the authority source of last resort.
 - Do not implement batch/network scoped apply in P3-3. Single-port apply is the
@@ -154,16 +156,13 @@ Scoped apply must not turn unrelated ports stale or invisible.
    SinglePort use the same schema, scope, stale generation, noop, and hash
    conflict checks. **Done internally, no route exposure.**
 5. Add the UDS route only after planner, WAL/status, runtime body, and
-   preflight/idempotency tests pass. **Done as a Rust-side testable route,
-   capability-disabled.**
-6. Flip the contract to `rust_route_implemented_capability_disabled` when the
-   route lands, while
-   keeping capability advertisement and Python submission disabled. **Done.**
+   preflight/idempotency tests pass. **Done.**
+6. Flip the contract to `runtime_enablement_config_gated` when the route and
+   Python submitter are both protected by config/runtime gates. **Done.**
 7. Add Python UDS client support as a helper that refuses to submit until Rust
-   advertises `supports_port_scoped_snapshot=true`. **Done, not wired into the
-   service loop.**
-8. Only then consider service-loop submission behind
-   `incremental_rpc_enabled=true`.
+   advertises `supports_port_scoped_snapshot=true`. **Done.**
+8. Add the service-loop submitter behind `incremental_rpc_enabled=true` for
+   single local newer-revision port updates only. **Done.**
 
 ## Minimum Test Boundary
 
@@ -193,7 +192,8 @@ Python tests before service-loop submitter:
 | Test | Expected Result |
 | --- | --- |
 | UDS client requires scoped capability | no port-scoped submit when capability is absent. **Done.** |
-| config gate blocks incremental | `incremental_rpc_enabled=true` remains rejected until accepted gate. |
+| config gate allows incremental only with dependencies | `incremental_rpc_enabled=true` requires RPC events, full resync, and `port_source=neutronclient`; packaged defaults remain disabled. |
+| service-loop single-port submitter | one safe local newer-revision `port.update` submits scoped apply; multi-port and unsafe paths fall back to full resync. |
 | dry-run can fall back | unsafe decision or missing target returns full-resync fallback reason. |
 
 Smoke tests before production enablement:
@@ -203,15 +203,16 @@ Smoke tests before production enablement:
 - forced index loss falls back to full resync;
 - rollback to polling-only keeps OVS connectivity and full-resync recovery.
 
-## Acceptance For Starting Rust Code
+## Acceptance For Runtime Testing
 
-Before opening the Rust implementation PR, all of these must be true:
+Before enabling `incremental_rpc_enabled=true` on a test host, all of these must
+be true:
 
 - this plan is linked from plan 09 and the detail README;
 - `docs/neutron-uds-contract.json` marks the route
-  `rust_route_implemented_capability_disabled`;
-- `ci/check_neutron_stage1.py` requires the route to exist while still requiring
-  `capability_advertised=false`, `python_submitter_enabled=false`, and
+  `runtime_enablement_config_gated`;
+- `ci/check_neutron_stage1.py` requires the route, advertised capability,
+  Python submitter, config dependency gates, and
   `incremental_rpc_enabled_default=false`;
 - Python P3-2 dry-run tests pass;
 - stage-one, stage-two, and stage-three checks pass.

@@ -30,6 +30,7 @@ class FakeLocalClient(object):
     def __init__(self):
         self.capability_calls = []
         self.snapshots = []
+        self.port_snapshots = []
         self.deleted_ports = []
 
     def capabilities(self, required_domains=None):
@@ -38,6 +39,14 @@ class FakeLocalClient(object):
 
     def put_snapshot(self, snapshot):
         self.snapshots.append(snapshot)
+        return {"generation": snapshot["generation"], "results": []}
+
+    def put_port_snapshot(self, port_id, snapshot, required_domains=None):
+        self.port_snapshots.append({
+            "port_id": port_id,
+            "snapshot": snapshot,
+            "required_domains": list(required_domains or []),
+        })
         return {"generation": snapshot["generation"], "results": []}
 
     def delete_port(self, port_id):
@@ -883,6 +892,55 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertEqual("port_not_available_for_host", unavailable["skipped_reason"])
         self.assertEqual(None, unavailable["snapshot"])
         self.assertEqual([], local_client.deleted_ports)
+
+    def test_apply_port_scoped_snapshot_submits_and_preserves_projection(self):
+        port1 = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        port2 = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        neutron_ports = [{
+            "id": port1,
+            "network_id": "net-1",
+            "revision_number": 7,
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }, {
+            "id": port2,
+            "network_id": "net-2",
+            "revision_number": 3,
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }]
+        port_source = StaticPortSource(neutron_ports)
+        local_client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+        )
+        sync.full_resync()
+        neutron_ports[0]["revision_number"] = 8
+
+        result = sync.apply_port_scoped_snapshot(
+            port1,
+            binding_host="ostack2",
+            revision_number=8,
+        )
+
+        self.assertTrue(result["submitted"])
+        self.assertEqual(1, len(local_client.port_snapshots))
+        submitted = local_client.port_snapshots[0]["snapshot"]
+        self.assertEqual(2, submitted["generation"])
+        self.assertEqual([port1], [port["port_id"] for port in submitted["ports"]])
+        self.assertEqual(set([port1, port2]), sync.projected_port_ids)
+        self.assertEqual([port1, port2], sync.state_store.last_projected_port_ids())
+        self.assertEqual(8, sync.projection_index.port(port1).revision_number)
+        self.assertEqual(3, sync.projection_index.port(port2).revision_number)
+        self.assertEqual(2, result["status"]["last_generation"])
 
     def test_full_resync_reloads_acl_source_each_time(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

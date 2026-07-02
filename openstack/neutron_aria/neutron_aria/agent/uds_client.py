@@ -20,7 +20,7 @@ NEUTRON_SCHEMA_VERSION = 1
 NEUTRON_BODY_MAX_BYTES = 1048576
 NEUTRON_TIMEOUT_MS = 3000
 NEUTRON_ERROR_CODES_HASH = "v0.9-neutron-errors-2"
-NEUTRON_CAPABILITY_HASH = "v0.9-neutron-capabilities-1"
+NEUTRON_CAPABILITY_HASH = "v0.9-neutron-capabilities-2"
 NEUTRON_ATTACH_AUTHORITY = "neutron_snapshot"
 DEFAULT_SOCKET_PATH = "/run/aria/aria-agent.sock"
 

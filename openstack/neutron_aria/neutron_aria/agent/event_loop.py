@@ -396,6 +396,106 @@ class SnapshotSynchronizer(object):
         result["skipped_reason"] = None
         return result
 
+    def apply_port_scoped_snapshot(
+        self,
+        port_id,
+        binding_host=None,
+        revision_number=None,
+    ):
+        preview = self.dry_run_port_scoped_snapshot(
+            port_id,
+            binding_host=binding_host,
+            revision_number=revision_number,
+        )
+        if preview.get("skipped_reason"):
+            return preview
+
+        snapshot = preview["snapshot"]
+        remote_status = self._remote_status()
+        generation_floor = self._generation_floor_from_status(remote_status)
+        prepared = self.state_store.prepare_scoped_snapshot(
+            snapshot,
+            minimum_generation=generation_floor,
+        )
+        snapshot["generation"] = prepared["generation"]
+        snapshot["desired_hash"] = prepared["desired_hash"]
+        projected_port_ids = set(
+            self.state_store.pending_snapshot().get("projected_port_ids") or
+            self.projected_port_ids
+        )
+        try:
+            response = None
+            if prepared.get("reused_pending"):
+                response = self._maybe_recover_pending_before_submit(
+                    snapshot,
+                    projected_port_ids,
+                )
+            if response is None:
+                response = self.local_client.put_port_snapshot(
+                    port_id,
+                    snapshot,
+                    required_domains=self.managed_domains,
+                )
+        except LocalApiTimeoutError as exc:
+            response = self._recover_snapshot_timeout(snapshot, projected_port_ids, exc)
+
+        self._raise_if_response_failed(response)
+        apply_status = self._status_after_apply(snapshot, projected_port_ids, response)
+        managed_ports = self._response_managed_count(response, apply_status)
+        self.state_store.commit_scoped_snapshot(
+            snapshot["generation"],
+            snapshot.get("desired_hash"),
+            managed_ports=managed_ports,
+        )
+        snapshot_port = snapshot["ports"][0] if snapshot.get("ports") else {}
+        neutron_port = self._find_port_by_id(self._list_ports(), port_id) or {}
+        self.projection_index.update_from_scoped_port(
+            neutron_port,
+            snapshot_port,
+            generation=snapshot["generation"],
+        )
+        self.projected_port_ids = set(self.projection_index.port_ids())
+        self.runtime_status.mark_ready(
+            snapshot["generation"],
+            getattr(self.runtime_status, "last_snapshot_ports", 0) or
+            len(self.projected_port_ids),
+            managed_ports,
+            desired_hash=snapshot.get("desired_hash"),
+            managed_ports_detail=self._managed_ports_from_status(apply_status),
+            port_statuses=self._port_statuses_from_status(apply_status),
+            accepted_generation=self._status_generation(
+                apply_status,
+                "accepted_generation",
+                snapshot["generation"],
+            ),
+            applied_generation=self._status_generation(
+                apply_status,
+                "applied_generation",
+                snapshot["generation"],
+            ),
+        )
+        self.runtime_status.update_projection_summary(self.projection_summary())
+        heartbeat = self.report_status()
+        LOG.info(
+            "port_scoped_snapshot_complete host=%s port_id=%s generation=%s "
+            "managed_ports=%s projected_ports=%s heartbeat_ok=%s",
+            self.host,
+            port_id,
+            snapshot["generation"],
+            managed_ports,
+            len(self.projected_port_ids),
+            heartbeat is None or heartbeat.get("ok", False),
+        )
+        return {
+            "submitted": True,
+            "decision": preview.get("decision"),
+            "skipped_reason": None,
+            "snapshot": snapshot,
+            "response": response,
+            "status": self.runtime_status.to_dict(),
+            "heartbeat": heartbeat,
+        }
+
     def projected_ports_for_network(self, network_id):
         return self.projection_index.ports_for_network(network_id)
 
@@ -406,6 +506,12 @@ class SnapshotSynchronizer(object):
         if hasattr(self.port_source, "list_ports_for_host"):
             return self.port_source.list_ports_for_host()
         return self.port_source.get_ports()
+
+    def _find_port_by_id(self, ports, port_id):
+        for port in ports or []:
+            if (port.get("id") or port.get("port_id")) == port_id:
+                return port
+        return None
 
     def _projected_port_ids(self, snapshot):
         return set(

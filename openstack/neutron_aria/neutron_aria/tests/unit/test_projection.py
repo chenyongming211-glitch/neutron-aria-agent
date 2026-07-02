@@ -65,6 +65,48 @@ class ProjectedStateIndexTestCase(unittest.TestCase):
             index.summary(),
         )
 
+    def test_scoped_update_refreshes_one_port_without_dropping_others(self):
+        index = self._index()
+
+        index.update_from_scoped_port(
+            {
+                "id": "p1",
+                "network_id": "net-c",
+                "binding:host_id": "ostack2",
+                "revision_number": 8,
+            },
+            {
+                "port_id": "p1",
+                "eligible": True,
+                "managed_domains": ["acl"],
+            },
+            generation=12,
+        )
+
+        self.assertEqual(["p1", "p2"], index.port_ids())
+        self.assertEqual([], index.ports_for_network("net-a"))
+        self.assertEqual(["p1"], index.ports_for_network("net-c"))
+        self.assertEqual(8, index.port("p1").revision_number)
+        self.assertEqual(12, index.port("p1").generation)
+        self.assertEqual(3, index.port("p2").revision_number)
+
+    def test_scoped_update_removes_ineligible_target_only(self):
+        index = self._index()
+
+        index.update_from_scoped_port(
+            {"id": "p1", "network_id": "net-a"},
+            {
+                "port_id": "p1",
+                "eligible": False,
+                "managed_domains": [],
+            },
+            generation=12,
+        )
+
+        self.assertEqual(["p2"], index.port_ids())
+        self.assertEqual([], index.ports_for_network("net-a"))
+        self.assertEqual(["p2"], index.ports_for_network("net-b"))
+
     def test_local_port_update_records_revision_relation_but_uses_full_resync(self):
         index = self._index()
 

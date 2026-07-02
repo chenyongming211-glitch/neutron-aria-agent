@@ -36,7 +36,7 @@ pub const NEUTRON_UDS_BODY_MAX_BYTES: u64 = 1_048_576;
 pub const NEUTRON_UDS_TIMEOUT_MS: u64 = 3_000;
 pub const NEUTRON_UDS_ERROR_CODES_HASH: &str = "v0.9-neutron-errors-2";
 pub const NEUTRON_UDS_PEER_AUTH_POLICY: &str = "filesystem_permissions_then_peercred";
-pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-1";
+pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-2";
 pub const NEUTRON_ATTACH_AUTHORITY: &str = "neutron_snapshot";
 pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &[
     "attach",
@@ -320,6 +320,7 @@ pub struct NeutronPortStatus {
     "api_version": "v1",
     "attach_authority": "neutron_snapshot",
     "supports_full_snapshot": true,
+    "supports_port_scoped_snapshot": true,
     "supports_port_delete": true,
     "supported_domains": ["attach", "acl", "qos", "mirror"]
 }))]
@@ -345,6 +346,10 @@ pub struct NeutronCapabilitiesResponse {
     /// Whether PUT snapshot is authoritative for the full host set.
     #[schema(example = true)]
     pub supports_full_snapshot: bool,
+    /// Whether PUT /ports/{port_id}/snapshot is supported.
+    #[serde(default)]
+    #[schema(example = true)]
+    pub supports_port_scoped_snapshot: bool,
     /// Whether DELETE /ports/{port_id} is supported.
     #[schema(example = true)]
     pub supports_port_delete: bool,
@@ -371,7 +376,7 @@ pub struct NeutronCapabilitiesResponse {
     pub peer_auth_policy: String,
     /// Stable hash/version for capability drift detection.
     #[serde(default)]
-    #[schema(example = "v0.9-neutron-capabilities-1")]
+    #[schema(example = "v0.9-neutron-capabilities-2")]
     pub capability_hash: String,
 }
 
@@ -384,6 +389,7 @@ impl NeutronCapabilitiesResponse {
             schema_version_max: NEUTRON_UDS_SCHEMA_VERSION_MAX,
             attach_authority: NEUTRON_ATTACH_AUTHORITY.to_string(),
             supports_full_snapshot: true,
+            supports_port_scoped_snapshot: true,
             supports_port_delete: true,
             supported_domains: NEUTRON_SUPPORTED_DOMAINS
                 .iter()
@@ -2100,6 +2106,7 @@ mod tests {
         );
         assert_eq!(capabilities.attach_authority, NEUTRON_ATTACH_AUTHORITY);
         assert!(capabilities.supports_full_snapshot);
+        assert!(capabilities.supports_port_scoped_snapshot);
         assert!(capabilities.supports_port_delete);
         assert_eq!(capabilities.supported_domains, expected_domains);
         assert!(capabilities.mandatory_domains.is_empty());

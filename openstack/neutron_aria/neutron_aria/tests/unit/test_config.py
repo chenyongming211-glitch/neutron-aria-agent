@@ -202,7 +202,7 @@ rpc_events_enabled = true
         finally:
             os.unlink(path)
 
-    def test_rejects_incremental_rpc_until_p3_gate_is_accepted(self):
+    def test_allows_incremental_rpc_when_p3_dependencies_are_enabled(self):
         path = self._write_config("""
 [agent]
 full_resync_enabled = true
@@ -210,6 +210,23 @@ full_resync_enabled = true
 [neutron]
 port_source = neutronclient
 rpc_events_enabled = true
+incremental_rpc_enabled = true
+""")
+        try:
+            config = load_config(path)
+
+            self.assertTrue(config.incremental_rpc_enabled)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_incremental_rpc_without_rpc_events(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = false
 incremental_rpc_enabled = true
 """)
         try:

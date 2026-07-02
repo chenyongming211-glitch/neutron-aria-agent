@@ -87,7 +87,7 @@ or an explicitly approved later phase.
   -> 10 Rust scoped apply test boundary
 
 10 Rust scoped apply
-  -> 04 capability-disabled port-scoped UDS route
+  -> 04 advertised, config-gated port-scoped UDS route
   -> 07 scoped WAL/generation semantics
   -> 09 P3-3 implementation package
 ```
@@ -105,7 +105,7 @@ or an explicitly approved later phase.
 | G6 full resync | 01, 03, 05, 07 | Neutron port source, resync, heartbeat, and generation status are stable. |
 | G7 rollback | 06, 07 | Disabling integration preserves OVS forwarding and safe recovery semantics. |
 | S3 production hardening | 08 | CI/release, persistent UDS rollout, ACL N3 fault, and lifecycle gates are ready. |
-| P2/P3 RPC sync evolution | 09, 10 | RPC-triggered resync and incremental port-scoped apply are designed and gated separately from stage three; the P3-3 Rust route and Python client helper are implemented for gated testing, while capability advertisement, service-loop submission, and runtime enablement remain disabled. |
+| P2/P3 RPC sync evolution | 09, 10 | RPC-triggered resync and incremental port-scoped apply are designed and gated separately from stage three; the P3-3 Rust route, advertised capability, Python client helper, and config-gated single-port submitter are implemented while packaged defaults keep incremental runtime disabled. |
 
 ## Stage-One Verification
 
@@ -253,10 +253,10 @@ docs/openstack-neutron-aria-details/09-aria-rpc-incremental-sync.md
 docs/openstack-neutron-aria-details/10-rust-scoped-apply.md
 ```
 
-Do not enable P3 runtime behavior until the P3 gates in plan 09 are met. The
-Rust port-scoped UDS route exists only as a capability-disabled test surface;
-do not advertise the capability, wire service-loop submission, or enable
-`incremental_rpc_enabled=true` until plan 10's production gates are accepted.
+Do not enable P3 runtime behavior in packaged defaults until the P3 gates in
+plan 09 are met. The Rust port-scoped UDS route and Python single-port
+submitter are available for controlled testing behind `incremental_rpc_enabled=true`;
+production rollout still requires plan 10's smoke and rollback gates.
 
 ## Out Of Scope For This Pass
 

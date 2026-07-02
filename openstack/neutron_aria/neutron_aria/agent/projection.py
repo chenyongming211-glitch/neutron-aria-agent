@@ -4,6 +4,7 @@ from neutron_aria.agent.inventory import port_get
 
 
 ACTION_FULL_RESYNC = "full_resync"
+ACTION_PORT_SCOPED_APPLY = "port_scoped_apply"
 ACTION_DELETE_LOCAL = "delete_local"
 ACTION_IGNORE = "ignore"
 
@@ -152,6 +153,26 @@ class ProjectedStateIndex(object):
                 managed_domains=snapshot_port.get("managed_domains") or [],
             )
         self._replace_records(records)
+
+    def update_from_scoped_port(self, neutron_port, snapshot_port, generation=None):
+        port_id = (
+            (snapshot_port or {}).get("port_id") or
+            _port_id(neutron_port or {})
+        )
+        if not port_id:
+            return
+        if (snapshot_port or {}).get("eligible") or (snapshot_port or {}).get("managed_domains"):
+            self._ports[port_id] = ProjectedPort(
+                port_id=port_id,
+                network_id=_network_id(neutron_port or {}),
+                binding_host=_binding_host(neutron_port or {}),
+                revision_number=_revision(neutron_port or {}),
+                generation=generation,
+                managed_domains=(snapshot_port or {}).get("managed_domains") or [],
+            )
+        else:
+            self._ports.pop(port_id, None)
+        self._rebuild_network_index()
 
     def replace_projected_ids(self, port_ids, generation=None):
         records = {}

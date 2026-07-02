@@ -109,7 +109,7 @@ function-by-function design until the config PR is opened.
 | `[aria]` | `request_timeout` | Client timeout; timeout recovery is defined in `07-transaction-wal.md`. |
 | `[neutron]` | `port_source` | `disabled` by default; production target `neutronclient` after N0.5 gates. |
 | `[neutron]` | `rpc_events_enabled` | Event path gate; safe default `false`. |
-| `[neutron]` | `incremental_rpc_enabled` | P3 port-scoped apply gate; v0.9 safe default `false` and config validation rejects `true` until the P3 entry gate is accepted. |
+| `[neutron]` | `incremental_rpc_enabled` | P3 port-scoped apply gate; safe default `false`. When set to `true`, config validation requires RPC events, full resync, and `port_source=neutronclient`. |
 | `[acl]` | `source` | `disabled`, `fixture`, or `neutron`; production target `neutron`. |
 | `[acl]` | `fixture_path` | CI/smoke only. |
 
@@ -125,7 +125,8 @@ agent writes `integration_mode=coexist` into snapshot bodies only.
    `fixture`.
 5. Validate `port_source`; do not construct a Neutron port reader when it is
    `disabled`.
-6. Validate `incremental_rpc_enabled=false` until the P3 entry gate is accepted.
+6. Validate `incremental_rpc_enabled=true` only when `rpc_events_enabled=true`,
+   `full_resync_enabled=true`, and `port_source=neutronclient`.
 7. Build the UDS client from `[aria]`.
 8. Build ACL source selection from `[acl]`.
 9. Log an effective config summary without secrets or Keystone credentials.
@@ -151,7 +152,7 @@ agent writes `integration_mode=coexist` into snapshot bodies only.
 | Unknown section | Warn only unless it shadows a target setting. |
 | Unknown domain in `managed_domains` | Hard config error. |
 | Empty `managed_domains` | Hard config error. |
-| `incremental_rpc_enabled=true` before P3 entry gate | Hard config error; keep P2 on RPC-triggered full-resync only. |
+| `incremental_rpc_enabled=true` without RPC/full-resync/neutronclient dependencies | Hard config error; keep P2 on RPC-triggered full-resync only. |
 | `acl.source=fixture` without `fixture_path` | Hard config error for CI/smoke mode. |
 | `integration_mode` appears in ini | Warn or hard-fail during convergence; docs must not show it. |
 | `full_resync_enabled=true` while `port_source=disabled` | Hard config error or explicit degraded startup; do not silently claim production resync. |

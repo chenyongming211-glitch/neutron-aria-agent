@@ -83,10 +83,12 @@ if name == "capabilities":
         assert int(payload.get("timeout_ms") or 0) == 3000, payload
     if "error_codes_hash" in payload:
         assert payload.get("error_codes_hash") == "v0.9-neutron-errors-2", payload
+    if "supports_port_scoped_snapshot" in payload:
+        assert payload.get("supports_port_scoped_snapshot") is True, payload
     if "peer_auth_policy" in payload:
         assert payload.get("peer_auth_policy"), payload
     if "capability_hash" in payload:
-        assert payload.get("capability_hash") == "v0.9-neutron-capabilities-1", payload
+        assert payload.get("capability_hash") == "v0.9-neutron-capabilities-2", payload
 elif name == "initial_status":
     assert payload.get("managed_ports") == [], payload
     if os.environ.get("REQUIRE_NO_ACTIVE_INSTANCES") == "true":

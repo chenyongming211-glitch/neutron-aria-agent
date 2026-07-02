@@ -59,6 +59,19 @@ def _projected_port_ids(snapshot):
     ])
 
 
+def _scoped_projected_port_ids(snapshot, current_projected_port_ids):
+    projected = set(current_projected_port_ids or [])
+    for port in snapshot.get("ports") or []:
+        port_id = port.get("port_id")
+        if not port_id:
+            continue
+        if port.get("eligible") or port.get("managed_domains"):
+            projected.add(port_id)
+        else:
+            projected.discard(port_id)
+    return sorted(projected)
+
+
 class SnapshotStateStore(object):
     """Durable local transaction state for neutron-aria-agent snapshots."""
 
@@ -91,6 +104,37 @@ class SnapshotStateStore(object):
             "reused_pending": reused_pending,
         }
 
+    def prepare_scoped_snapshot(self, snapshot, minimum_generation=0):
+        minimum_generation = _int_value(minimum_generation)
+        desired_hash = desired_snapshot_hash(snapshot)
+        pending_generation = _int_value(self._state.get("pending_generation"))
+        pending_hash = self._state.get("pending_desired_hash")
+        generation = self._select_generation(desired_hash, minimum_generation)
+        reused_pending = bool(
+            pending_generation and
+            pending_hash == desired_hash and
+            pending_generation == generation
+        )
+        projected_port_ids = _scoped_projected_port_ids(
+            snapshot,
+            self._state.get("last_projected_port_ids") or [],
+        )
+        self._state["pending_generation"] = generation
+        self._state["pending_desired_hash"] = desired_hash
+        self._state["pending_snapshot_ports"] = (
+            _int_value(self._state.get("last_snapshot_ports")) or
+            len(projected_port_ids)
+        )
+        self._state["pending_projected_port_ids"] = projected_port_ids
+        self._state["pending_since"] = _now()
+        self._state["updated_at"] = _now()
+        self._write()
+        return {
+            "generation": generation,
+            "desired_hash": desired_hash,
+            "reused_pending": reused_pending,
+        }
+
     def commit_snapshot(self, generation, desired_hash, snapshot_ports=0, managed_ports=0):
         generation = _int_value(generation)
         self._state["last_generation"] = generation
@@ -99,6 +143,32 @@ class SnapshotStateStore(object):
         self._state["last_managed_ports"] = int(managed_ports or 0)
         self._state["last_projected_port_ids"] = list(
             self._state.get("pending_projected_port_ids") or []
+        )
+        self._state["last_committed_at"] = _now()
+        if (
+            _int_value(self._state.get("pending_generation")) == generation and
+            self._state.get("pending_desired_hash") == desired_hash
+        ):
+            self._state["pending_generation"] = None
+            self._state["pending_desired_hash"] = None
+            self._state["pending_snapshot_ports"] = 0
+            self._state["pending_projected_port_ids"] = []
+            self._state["pending_since"] = None
+        self._state["updated_at"] = _now()
+        self._write()
+
+    def commit_scoped_snapshot(self, generation, desired_hash, managed_ports=0):
+        generation = _int_value(generation)
+        self._state["last_generation"] = generation
+        self._state["last_desired_hash"] = desired_hash
+        self._state["last_snapshot_ports"] = (
+            _int_value(self._state.get("pending_snapshot_ports")) or
+            _int_value(self._state.get("last_snapshot_ports"))
+        )
+        self._state["last_managed_ports"] = int(managed_ports or 0)
+        self._state["last_projected_port_ids"] = list(
+            self._state.get("pending_projected_port_ids") or
+            self._state.get("last_projected_port_ids") or []
         )
         self._state["last_committed_at"] = _now()
         if (

@@ -160,10 +160,18 @@ def validate_config(config):
                 "rpc_events_enabled=true requires [neutron] port_source=neutronclient"
             )
     if config.incremental_rpc_enabled:
-        raise ConfigError(
-            "incremental_rpc_enabled=true is reserved for P3 and must remain false "
-            "until the P3 entry gate is accepted"
-        )
+        if not config.rpc_events_enabled:
+            raise ConfigError(
+                "incremental_rpc_enabled=true requires [neutron] rpc_events_enabled=true"
+            )
+        if not config.full_resync_enabled:
+            raise ConfigError(
+                "incremental_rpc_enabled=true requires [agent] full_resync_enabled=true"
+            )
+        if config.port_source != "neutronclient":
+            raise ConfigError(
+                "incremental_rpc_enabled=true requires [neutron] port_source=neutronclient"
+            )
     if config.request_timeout <= 0:
         raise ConfigError("aria.request_timeout must be positive")
     if config.request_timeout > DEFAULT_REQUEST_TIMEOUT:

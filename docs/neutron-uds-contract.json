@@ -5,6 +5,7 @@
   "schema_version_max": 1,
   "attach_authority": "neutron_snapshot",
   "supports_full_snapshot": true,
+  "supports_port_scoped_snapshot": true,
   "supports_port_delete": true,
   "supported_domains": [
     "attach",
@@ -45,13 +46,13 @@
     }
   ],
   "p3_port_scoped_snapshot": {
-    "phase": "rust_route_implemented_capability_disabled",
-    "runtime_enabled": false,
+    "phase": "runtime_enablement_config_gated",
+    "runtime_enabled": true,
     "route_enabled": true,
-    "capability_advertised": false,
-    "python_submitter_enabled": false,
+    "capability_advertised": true,
+    "python_submitter_enabled": true,
     "incremental_rpc_enabled_default": false,
-    "enablement_gate": "incremental_rpc_enabled=true after P3 entry gate acceptance",
+    "enablement_gate": "incremental_rpc_enabled=true with rpc_events_enabled=true, full_resync_enabled=true, and port_source=neutronclient",
     "method": "PUT",
     "path": "/api/v1/neutron/ports/{port_id}/snapshot",
     "body_scope": "single_port",
@@ -59,7 +60,7 @@
     "timeout_ms": 3000,
     "domains_rule": "only domains present in the port managed_domains list may be mutated",
     "generation_rule": "host generation must remain monotonic and use the same stale generation/hash conflict semantics as full snapshot",
-    "fallback_rule": "on missing index, stale contract, body limit, or unsafe revision relation, Python falls back to full resync while incremental_rpc_enabled remains false",
+    "fallback_rule": "on missing index, stale contract, body limit, unsafe revision relation, multi-port batch, delete event, network update, or scoped submit failure, Python falls back to full resync while keeping polling recovery enabled",
     "planned_error_codes": [
       "UDS_SCHEMA_MISMATCH",
       "UDS_BODY_TOO_LARGE",
@@ -69,15 +70,16 @@
       "PORT_IFACE_NOT_FOUND",
       "UDS_CONTRACT_DRIFT"
     ],
-    "forbidden_until_implemented": [
-      "do not advertise supports_port_scoped_snapshot=true",
-      "do not enable incremental_rpc_enabled=true",
-      "do not remove full-resync recovery",
-      "do not call this route from Python until capability and config gates are accepted"
+    "runtime_guardrails": [
+      "keep incremental_rpc_enabled=false in packaged defaults",
+      "require rpc_events_enabled=true, full_resync_enabled=true, and port_source=neutronclient before incremental enablement",
+      "only single local newer-revision port.update events may use scoped apply",
+      "multi-port batches, delete events, network updates, overflow, unknown revision, and scoped submit failures fall back to full resync",
+      "do not remove full-resync recovery"
     ]
   },
   "peer_auth_policy": "filesystem_permissions_then_peercred",
-  "capability_hash": "v0.9-neutron-capabilities-1",
+  "capability_hash": "v0.9-neutron-capabilities-2",
   "routes": [
     {
       "method": "GET",

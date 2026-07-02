@@ -3,9 +3,12 @@ from __future__ import absolute_import
 import logging
 import time
 
+from neutron_aria.agent.effective_acl import REVISION_NEWER
+from neutron_aria.agent.projection import ACTION_PORT_SCOPED_APPLY
 from neutron_aria.agent.projection import ACTION_DELETE_LOCAL
 from neutron_aria.agent.projection import ACTION_FULL_RESYNC
 from neutron_aria.agent.projection import ACTION_IGNORE
+from neutron_aria.agent.projection import REASON_LOCAL_PORT_UPDATE
 
 
 LOG = logging.getLogger(__name__)
@@ -34,11 +37,13 @@ class AgentService(object):
         resync_backoff_max=300,
         event_merger=None,
         event_merge_interval=0.2,
+        incremental_rpc_enabled=False,
         clock=None,
         sleeper=None,
     ):
         self.synchronizer = synchronizer
         self.full_resync_enabled = bool(full_resync_enabled)
+        self.incremental_rpc_enabled = bool(incremental_rpc_enabled)
         self.report_interval = max(1, int(report_interval))
         self.resync_interval = max(1, int(resync_interval))
         self.resync_backoff_initial = max(1, int(resync_backoff_initial))
@@ -60,12 +65,13 @@ class AgentService(object):
         self.initialized = True
         LOG.info(
             "service_initialize host=%s full_resync_enabled=%s report_interval=%s "
-            "resync_interval=%s event_merge_enabled=%s",
+            "resync_interval=%s event_merge_enabled=%s incremental_rpc_enabled=%s",
             getattr(self.synchronizer, "host", ""),
             self.full_resync_enabled,
             self.report_interval,
             self.resync_interval,
             self.event_merger is not None,
+            self.incremental_rpc_enabled,
         )
         if self.full_resync_enabled:
             result = self.synchronizer.safe_full_resync()
@@ -258,6 +264,7 @@ class AgentService(object):
             }
 
         port_updates_requiring_resync = {}
+        single_port_incremental_allowed = self._single_port_incremental_allowed(batch)
         for port_id, event in batch.port_updates.items():
             decision = self._decide_port_update(port_id, event)
             batch_dict["decisions"].append(decision)
@@ -283,6 +290,18 @@ class AgentService(object):
                 continue
             if decision.get("action") == ACTION_IGNORE:
                 continue
+            if self._can_incremental_port_update(decision, single_port_incremental_allowed):
+                result = self._apply_incremental_port_update(
+                    port_id,
+                    event,
+                    decision,
+                    batch_dict,
+                )
+                if result is not None:
+                    self._record_event_observability(batch_dict["decisions"])
+                    result["events"] = batch_dict
+                    result["incremental_attempted"] = True
+                    return result
             port_updates_requiring_resync[port_id] = event
 
         network_updates_requiring_resync = []
@@ -308,6 +327,62 @@ class AgentService(object):
             "heartbeat": heartbeat,
             "events": batch_dict,
         }
+
+    def _single_port_incremental_allowed(self, batch):
+        return bool(
+            self.incremental_rpc_enabled and
+            not batch.full_resync and
+            not batch.overflowed and
+            len(batch.port_updates) == 1 and
+            not batch.deleted_ports and
+            not batch.dirty_networks
+        )
+
+    def _can_incremental_port_update(self, decision, single_port_incremental_allowed):
+        return bool(
+            single_port_incremental_allowed and
+            decision.get("action") == ACTION_FULL_RESYNC and
+            decision.get("reason") == REASON_LOCAL_PORT_UPDATE and
+            hasattr(self.synchronizer, "apply_port_scoped_snapshot")
+        )
+
+    def _apply_incremental_port_update(self, port_id, event, decision, batch_dict):
+        if (
+            decision.get("revision_status") and
+            decision.get("revision_status") != REVISION_NEWER
+        ):
+            decision["incremental_action"] = "fallback_full_resync"
+            decision["incremental_reason"] = "revision_not_newer"
+            return None
+        try:
+            result = self.synchronizer.apply_port_scoped_snapshot(
+                port_id,
+                binding_host=event.get("binding_host"),
+                revision_number=event.get("revision_number"),
+            )
+        except Exception as exc:
+            LOG.warning(
+                "port_scoped_apply_fallback host=%s port_id=%s error=%s",
+                getattr(self.synchronizer, "host", ""),
+                port_id,
+                exc,
+            )
+            decision["incremental_action"] = "fallback_full_resync"
+            decision["incremental_error"] = str(exc)
+            return None
+
+        if result.get("submitted"):
+            decision["action"] = ACTION_PORT_SCOPED_APPLY
+            decision["incremental_action"] = ACTION_PORT_SCOPED_APPLY
+            decision["generation"] = (result.get("snapshot") or {}).get("generation")
+            batch_dict["incremental_submitted"] = True
+            return result
+
+        decision["incremental_action"] = "fallback_full_resync"
+        decision["incremental_reason"] = (
+            result.get("skipped_reason") or "port_scoped_not_submitted"
+        )
+        return None
 
     def _delete_known_ports(self, port_ids, decisions=None):
         errors = []

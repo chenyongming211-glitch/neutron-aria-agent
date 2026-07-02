@@ -42,7 +42,7 @@ Target end state:
 | P0 safe default | `port_source=disabled`, `full_resync_enabled=false`, `rpc_events_enabled=false` | Heartbeat only | shipped |
 | P1 MVP production | `port_source=neutronclient`, `full_resync_enabled=true`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync | stage-two accepted |
 | P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | package smoke passed on 10.58.159; real fanout A/B passed on `ostack2.bj159.net`; multi-host foreign filtering passed on `ostack2/3/4`; source-host cleanup passed on `ostack2` |
-| P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | planned; P3-1 read-only projection/decision heartbeat field gate passed on `ostack2/3/4`; P3-2 Python port-scoped snapshot builder and synchronizer dry-run are pure construction only |
+| P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | config-gated implementation in progress; P3-1 projection heartbeat, P3-2 builder/dry-run, P3-3 Rust route/capability, and Python single-port submitter are implemented; packaged default remains disabled pending field smoke |
 
 Code anchors today:
 
@@ -333,12 +333,13 @@ incremental_fallback_full_resync = true
 
 Rules:
 
-- `incremental_rpc_enabled=true` requires `rpc_events_enabled=true` and
-  `full_resync_enabled=true`.
-- Current v0.9 config validation rejects `incremental_rpc_enabled=true` until
-  the P3 entry gate is explicitly accepted. P3-1 may add inactive read-only
-  indexes and decision tests, but production behavior remains P2.
-- If incremental path fails validation, fall back to full-resync when
+- `incremental_rpc_enabled=true` requires `rpc_events_enabled=true`,
+  `full_resync_enabled=true`, and `port_source=neutronclient`.
+- Packaged defaults keep `incremental_rpc_enabled=false`. Test environments may
+  enable it after P2/stage-three evidence is accepted; production rollout still
+  requires P3 incremental smoke evidence and rollback readiness.
+- If incremental path fails validation, or the event batch includes deletes,
+  multiple ports, network updates, or overflow, fall back to full-resync when
   `incremental_fallback_full_resync=true`.
 
 Container requirements for P2/P3:
@@ -355,8 +356,8 @@ Container requirements for P2/P3:
 | P2-2 | Foreign-host fanout filtering tests | no cross-host managed port mutation |
 | P2-3 | Production canary switch and polling-only rollback runbook | `rpc_events_enabled=true` can be enabled and disabled per host without OVS/datapath restart |
 | P3-1 | Projected port store + network index | inactive/read-only unit tests for host/network/revision filtering; no port-scoped apply |
-| P3-2 | Port-scoped snapshot builder in Python | pure builder and synchronizer dry-run unit tests + UDS contract tests; no service-loop submitter and no UDS submitter |
-| P3-3 | Rust scoped snapshot apply | `ApplyScope::SinglePort` planner tests, internal scoped WAL/status boundary tests, shared runtime apply body extraction, shared preflight/idempotency checks, and the capability-disabled UDS route are implemented; Python has a capability-gated helper, while service-loop submission, capability advertisement, and runtime enablement remain disabled |
+| P3-2 | Port-scoped snapshot builder in Python | pure builder, synchronizer dry-run, and scoped state/projection preservation tests |
+| P3-3 | Rust scoped snapshot apply | `ApplyScope::SinglePort` planner tests, internal scoped WAL/status boundary tests, shared runtime apply body extraction, shared preflight/idempotency checks, advertised UDS capability, and Python config-gated single-port submitter are implemented; packaged runtime default remains disabled |
 | P3-4 | Incremental ACL apply failure semantics | degraded/bypass without OVS loss |
 | P3-5 | RPC on/off + incremental on/off smokes | evidence under `docs/evidence/openstack-n05-lite/` |
 | P3-6 | Runbook and ini contract update (`01-ini-contract.md`) | config validation + docs |
@@ -385,7 +386,7 @@ Suggested smokes to add or extend:
 
 ## Entry Criteria For P3 Runtime Enablement
 
-Do not enable P3 runtime port-scoped apply until all are true:
+Do not enable P3 runtime port-scoped apply outside a test host until all are true:
 
 1. Stage-two ACL MVP and stage-three N3 fault/lifecycle gates are accepted or
    explicitly waived with written disposition.
@@ -400,23 +401,23 @@ Current entry-gate evidence:
 - Items 1-3 are covered by stage-two/stage-three closure, RPC P2 field
   evidence, and the accepted heartbeat/status subset.
 - Item 4 is covered by `docs/neutron-uds-contract.json`
-  `p3_port_scoped_snapshot`. The Rust UDS route is implemented for scoped
-  apply testing, but the capability is not advertised, the Python submitter is
-  disabled, and runtime incremental submission must not be enabled yet.
+  `p3_port_scoped_snapshot`. The Rust UDS route is implemented and advertised,
+  and the Python submitter is config-gated.
 - Item 5 is covered by `EffectiveAclIndex.compare_revision_for_port()` unit
   tests for newer/same/older/unknown relations.
 
-This evidence allows P3 gated implementation and test-surface work to continue,
-but it does not by itself allow enabling `incremental_rpc_enabled=true`.
+This evidence allows P3 runtime testing on a controlled host. Production rollout
+still requires P3 incremental smoke evidence and rollback readiness.
 
-Allowed before the P3 runtime enablement gate:
+Allowed before production P3 runtime enablement:
 
-- Add `incremental_rpc_enabled=false` as an explicit blocked config gate.
+- Keep `incremental_rpc_enabled=false` as the packaged default.
 - Add a Python UDS client helper that refuses port-scoped submit unless the
   local capability advertises `supports_port_scoped_snapshot=true`.
 - Build an in-memory `ProjectedStateIndex` from accepted full-resync results.
 - Build pure Python port-scoped candidate snapshots for unit testing only.
-- Wire RPC port-update decisions to the pure builder in dry-run unit tests only.
+- Wire one safe local newer-revision RPC port-update decision to the scoped
+  submitter behind `incremental_rpc_enabled=true`.
 - Unit test local/foreign host decisions, revision relation, network locality,
   delete cleanup, and conservative full-resync fallback.
 - Publish compact heartbeat/debug summaries for projection index size and the
@@ -428,12 +429,11 @@ Field evidence:
   records the accepted three-node heartbeat/debug gate for the read-only P3-1
   projection index and last event decision summaries.
 
-Still forbidden before the P3 runtime enablement gate:
+Still forbidden before production P3 runtime enablement:
 
-- Enabling `incremental_rpc_enabled=true` in runtime config.
-- Sending port-scoped snapshots from service-loop code, or from any Python path
-  without advertised capability and config gates.
-- Advertising `supports_port_scoped_snapshot=true`.
+- Enabling `incremental_rpc_enabled=true` in packaged defaults.
+- Sending port-scoped snapshots from any Python path without advertised
+  capability and config gates.
 - Removing periodic/full-resync recovery.
 - Changing Rust datapath snapshot apply semantics outside the shared
   `ApplyScope::FullHost` / `ApplyScope::SinglePort` path defined in

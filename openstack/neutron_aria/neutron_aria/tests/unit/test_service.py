@@ -29,6 +29,7 @@ class FakeSynchronizer(object):
         self.projected_port_ids = set()
         self.delete_calls = []
         self.delete_reasons = []
+        self.scoped_calls = []
         self.host = "ostack2.bj159.net"
 
     def safe_full_resync(self):
@@ -61,6 +62,27 @@ class FakeSynchronizer(object):
         self.delete_reasons.append(reason)
         self.projected_port_ids.discard(port_id)
         return {"deleted": port_id}
+
+    def apply_port_scoped_snapshot(self, port_id, binding_host=None, revision_number=None):
+        self.scoped_calls.append({
+            "port_id": port_id,
+            "binding_host": binding_host,
+            "revision_number": revision_number,
+        })
+        generation = self.resync_calls + len(self.scoped_calls)
+        self.runtime_status.mark_ready(
+            generation=generation,
+            snapshot_ports=2,
+            managed_ports=2,
+        )
+        heartbeat = self.report_status()
+        return {
+            "submitted": True,
+            "snapshot": {"generation": generation, "ports": [{"port_id": port_id}]},
+            "response": {},
+            "status": self.runtime_status.to_dict(),
+            "heartbeat": heartbeat,
+        }
 
 
 class DegradedSynchronizer(FakeSynchronizer):
@@ -242,6 +264,90 @@ class AgentServiceTestCase(unittest.TestCase):
             [{"action": "full_resync", "reason": "local_port_update", "count": 2}],
             result["status"]["last_event_decision_counts"],
         )
+
+    def test_incremental_rpc_single_local_port_update_uses_port_scoped_apply(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            incremental_rpc_enabled=True,
+            clock=clock,
+        )
+        service.initialize()
+
+        merger.record_port_update(
+            "p1",
+            binding_host="ostack2.bj159.net",
+            revision_number=8,
+        )
+        clock.advance(0.2)
+        result = service.run_once()
+
+        self.assertEqual(1, sync.resync_calls)
+        self.assertEqual(1, len(sync.scoped_calls))
+        self.assertEqual("p1", sync.scoped_calls[0]["port_id"])
+        self.assertTrue(result["events"]["incremental_submitted"])
+        self.assertEqual(
+            "port_scoped_apply",
+            result["events"]["decisions"][0]["action"],
+        )
+        self.assertEqual(2, result["snapshot"]["generation"])
+
+    def test_incremental_rpc_multi_port_update_falls_back_to_full_resync(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            incremental_rpc_enabled=True,
+            clock=clock,
+        )
+        service.initialize()
+
+        merger.record_port_update("p1", binding_host="ostack2.bj159.net")
+        merger.record_port_update("p2", binding_host="ostack2.bj159.net")
+        clock.advance(0.2)
+        result = service.run_once()
+
+        self.assertEqual([], sync.scoped_calls)
+        self.assertEqual(2, sync.resync_calls)
+        self.assertEqual(2, result["snapshot"]["generation"])
+
+    def test_incremental_rpc_update_with_delete_falls_back_to_full_resync(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            incremental_rpc_enabled=True,
+            clock=clock,
+        )
+        service.initialize()
+
+        merger.record_port_update("p1", binding_host="ostack2.bj159.net")
+        merger.record_port_delete("p2")
+        clock.advance(0.2)
+        result = service.run_once()
+
+        self.assertEqual([], sync.scoped_calls)
+        self.assertEqual(2, sync.resync_calls)
+        self.assertEqual(2, result["snapshot"]["generation"])
 
     def test_remote_port_update_for_unknown_port_is_ignored_after_merge(self):
         clock = FakeClock()

@@ -72,6 +72,29 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
         self.assertEqual(None, committed.pending_snapshot())
         self.assertEqual(["p1"], committed.last_projected_port_ids())
 
+    def test_scoped_snapshot_preserves_existing_projected_ports(self):
+        store = SnapshotStateStore(self.state_dir)
+        prepared = store.prepare_snapshot({
+            "generation": 1,
+            "host": "ostack2",
+            "ports": [
+                self._snapshot("p1")["ports"][0],
+                self._snapshot("p2")["ports"][0],
+            ],
+        })
+        store.commit_snapshot(prepared["generation"], prepared["desired_hash"])
+
+        scoped = store.prepare_scoped_snapshot(self._snapshot("p1"))
+        pending = SnapshotStateStore(self.state_dir).pending_snapshot()
+
+        self.assertEqual(["p1", "p2"], pending["projected_port_ids"])
+        store.commit_scoped_snapshot(scoped["generation"], scoped["desired_hash"])
+        committed = SnapshotStateStore(self.state_dir)
+
+        self.assertEqual(None, committed.pending_snapshot())
+        self.assertEqual(["p1", "p2"], committed.last_projected_port_ids())
+        self.assertEqual(scoped["generation"], committed.to_dict()["last_generation"])
+
     def test_new_desired_state_advances_after_pending_generation(self):
         store = SnapshotStateStore(self.state_dir)
         first = store.prepare_snapshot(self._snapshot("p1"))

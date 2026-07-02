@@ -245,6 +245,7 @@ def main(argv=None):
         resync_backoff_max=config.resync_backoff_max,
         event_merger=event_merger,
         event_merge_interval=config.event_merge_interval,
+        incremental_rpc_enabled=config.incremental_rpc_enabled,
     )
     if options.report_once:
         result = service.initialize()

@@ -686,7 +686,7 @@ GET /api/v1/neutron/capabilities
   "mandatory_domains": [],
   "error_codes_hash": "v0.9-neutron-errors-2",
   "peer_auth_policy": "filesystem_permissions_then_peercred",
-  "capability_hash": "v0.9-neutron-capabilities-1"
+  "capability_hash": "v0.9-neutron-capabilities-2"
 }
 ```
 

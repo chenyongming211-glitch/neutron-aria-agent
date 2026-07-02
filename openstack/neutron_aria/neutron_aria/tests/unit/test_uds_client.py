@@ -74,7 +74,7 @@ class UdsClientTestCase(unittest.TestCase):
             "timeout_ms": 3000,
             "error_codes_hash": "v0.9-neutron-errors-2",
             "peer_auth_policy": "filesystem_permissions_then_peercred",
-            "capability_hash": "v0.9-neutron-capabilities-1",
+            "capability_hash": "v0.9-neutron-capabilities-2",
         }
         body.update(overrides)
         return body
