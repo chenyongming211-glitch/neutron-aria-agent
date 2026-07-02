@@ -186,6 +186,24 @@ for port in ports:
 PY
 }
 
+first_managed_port_id() {
+    docker exec -i -u "${EXEC_USER}" "${SERVICE_NAME}" python - "${SOCKET_PATH}" <<'PY'
+from __future__ import print_function
+
+import sys
+
+from neutron_aria.agent.uds_client import LocalClient
+
+client = LocalClient(sys.argv[1], timeout=3.0)
+status = client.status()
+for port in status.get("managed_ports") or []:
+    port_id = port.get("port_id")
+    if port_id:
+        print(port_id)
+        break
+PY
+}
+
 port_revision_number() {
     local port_id="$1"
     docker_exec_agent_env python - "${port_id}" <<'PY'
@@ -211,6 +229,9 @@ trigger_port_update() {
     local label="$1"
     local port_id="${TARGET_PORT_ID}"
 
+    if [ -z "${port_id}" ] && [ "${INCREMENTAL_RPC_ENABLED}" = "true" ]; then
+        port_id="$(first_managed_port_id || true)"
+    fi
     if [ -z "${port_id}" ]; then
         port_id="$(first_bound_port_id)"
     fi
