@@ -298,10 +298,10 @@ class AgentService(object):
                     batch_dict,
                 )
                 if result is not None:
-                    self._record_event_observability(batch_dict["decisions"])
-                    result["events"] = batch_dict
-                    result["incremental_attempted"] = True
-                    return result
+                    return self._finalize_incremental_result(
+                        result,
+                        batch_dict,
+                    )
             port_updates_requiring_resync[port_id] = event
 
         network_updates_requiring_resync = []
@@ -383,6 +383,14 @@ class AgentService(object):
             result.get("skipped_reason") or "port_scoped_not_submitted"
         )
         return None
+
+    def _finalize_incremental_result(self, result, batch_dict):
+        self._record_event_observability(batch_dict["decisions"])
+        result["events"] = batch_dict
+        result["incremental_attempted"] = True
+        result["status"] = self.synchronizer.runtime_status.to_dict()
+        result["heartbeat"] = self.synchronizer.report_status()
+        return result
 
     def _delete_known_ports(self, port_ids, decisions=None):
         errors = []

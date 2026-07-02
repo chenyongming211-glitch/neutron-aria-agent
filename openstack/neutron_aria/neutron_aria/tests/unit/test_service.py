@@ -298,6 +298,14 @@ class AgentServiceTestCase(unittest.TestCase):
             result["events"]["decisions"][0]["action"],
         )
         self.assertEqual(2, result["snapshot"]["generation"])
+        self.assertEqual(
+            [{"action": "port_scoped_apply", "reason": "local_port_update", "count": 1}],
+            result["status"]["last_event_decision_counts"],
+        )
+        self.assertEqual(
+            "port_scoped_apply",
+            result["heartbeat"]["status"]["last_event_decisions"][0]["action"],
+        )
 
     def test_incremental_rpc_multi_port_update_falls_back_to_full_resync(self):
         clock = FakeClock()
