@@ -347,6 +347,13 @@ Container requirements for P2/P3:
 - Same `neutron.conf` / messaging config as OVS agent.
 - Same host FQDN semantics as `binding:host_id`.
 - RabbitMQ reachable from `neutron_aria_agent` container.
+- Neutron API credentials must be injected into the long-running
+  `neutron_aria_agent` process when `[neutron] port_source=neutronclient` or
+  `[acl] source=neutron` is enabled. Temporary smokes may source `adminrc`, but
+  production containers need an explicit env/secret path.
+- P3 port-scoped apply requires Neutron port reads or RPC events to expose a
+  trustworthy `revision_number`. If the target Neutron returns no port revision,
+  keep `incremental_rpc_enabled=false` and use P2 RPC-triggered full-resync.
 
 ## Work Packages
 
@@ -428,6 +435,11 @@ Field evidence:
 - `docs/evidence/openstack-n05-lite/20260702-p3-projection-heartbeat-3node/summary.md`
   records the accepted three-node heartbeat/debug gate for the read-only P3-1
   projection index and last event decision summaries.
+- `docs/evidence/openstack-n05-lite/20260702-p3-incremental-revision-gate/summary.md`
+  records the controlled ostack2 P3 fanout attempt. Real RabbitMQ fanout,
+  Neutron port reads, full-resync apply, and rollback worked, but the target
+  Neutron returned `revision_number=None` for bound ports, so the port-scoped
+  runtime gate remains not accepted for this environment.
 
 Still forbidden before production P3 runtime enablement:
 

@@ -318,6 +318,7 @@ Minimum production smoke:
 | RPC P2 package smoke | `neutron_aria_rpc_event_smoke.sh` passes before any live RabbitMQ canary. |
 | RPC P2 live fanout smokes | A/B, foreign-host filtering, and source-host cleanup pass before production enablement. |
 | P3-1 projection heartbeat smoke | `neutron_aria_heartbeat_smoke.sh` passes with `REQUIRE_P3_PROJECTION_FIELDS=true` on all target hosts; `incremental_rpc_enabled` remains `false`. |
+| P3 runtime prerequisites | Long-running `neutron_aria_agent` has Neutron API credentials for `port_source=neutronclient` / `acl.source=neutron`, and target Neutron returns a trustworthy port `revision_number`; otherwise stay on P2 full-resync fallback. |
 | Datapath restart | WAL/status recovers or full resync repairs; no unmanaged tap takeover. |
 | UDS hardening evidence-only smoke | `neutron_aria_uds_hardening_smoke.sh` records uid/gid allow-list candidates and current socket/audit disposition without mutating the host. |
 | UDS hardened enforcement smoke | With `REQUIRE_HARDENED=true`, socket has no other-user bits, audit log exists, and peercred enforcement uses the recorded uid/gid allow-list. |

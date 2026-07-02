@@ -10,6 +10,8 @@ AGENT_TIMEOUT="${AGENT_TIMEOUT:-35}"
 STARTUP_WAIT="${STARTUP_WAIT:-8}"
 WORK_DIR="${WORK_DIR:-/tmp/neutron-aria-rpc-fanout-agent-$(date +%Y%m%d%H%M%S)}"
 TARGET_PORT_ID="${TARGET_PORT_ID:-}"
+INCREMENTAL_RPC_ENABLED="${INCREMENTAL_RPC_ENABLED:-false}"
+ALLOW_REVISIONLESS_INCREMENTAL_FALLBACK="${ALLOW_REVISIONLESS_INCREMENTAL_FALLBACK:-false}"
 
 die() {
     echo "ERROR: $*" >&2
@@ -98,11 +100,16 @@ write_temp_config() {
     local mode="$1"
     local cfg="/tmp/neutron-aria-rpc-fanout-${mode}.ini"
     local state_dir="/tmp/neutron-aria-rpc-fanout-state-${mode}"
+    local incremental_mode="false"
+    if [ "${mode}" = "true" ]; then
+        incremental_mode="${INCREMENTAL_RPC_ENABLED}"
+    fi
     docker exec -i -u root "${SERVICE_NAME}" python - \
         "${cfg}" \
         "${HOST_FQDN}" \
         "${mode}" \
-        "${state_dir}" <<'PY'
+        "${state_dir}" \
+        "${incremental_mode}" <<'PY'
 from __future__ import print_function
 
 import os
@@ -113,7 +120,7 @@ try:
 except ImportError:
     import configparser
 
-cfg, host, mode, state_dir = sys.argv[1:5]
+cfg, host, mode, state_dir, incremental_mode = sys.argv[1:6]
 src = "/etc/neutron-aria-agent/neutron-aria-agent.ini"
 
 parser_class = getattr(configparser, "SafeConfigParser", configparser.ConfigParser)
@@ -131,6 +138,7 @@ parser.set("agent", "report_interval", "3600")
 parser.set("agent", "state_dir", state_dir)
 parser.set("neutron", "port_source", "neutronclient")
 parser.set("neutron", "rpc_events_enabled", mode)
+parser.set("neutron", "incremental_rpc_enabled", incremental_mode)
 parser.set("neutron", "event_merge_interval", "0.2")
 parser.set("acl", "source", "disabled")
 
@@ -145,8 +153,51 @@ PY
 }
 
 first_bound_port_id() {
-    neutron_cli port-list -- --binding:host_id="${HOST_FQDN}" |
+    local port_id
+    port_id="$(neutron_cli port-list -- --binding:host_id="${HOST_FQDN}" |
         awk -F"|" '/[0-9a-f-]{36}/ {gsub(/ /, "", $2); print $2; exit}'
+    )"
+    if [ -n "${port_id}" ]; then
+        echo "${port_id}"
+        return
+    fi
+    docker_exec_agent_env python - "${HOST_FQDN}" <<'PY'
+from __future__ import print_function
+
+import sys
+
+from neutron_aria.agent.neutron_client import build_neutronclient_from_env
+
+host = sys.argv[1]
+client = build_neutronclient_from_env()
+ports = client.list_ports(**{"binding:host_id": host}).get("ports", [])
+for port in ports:
+    port_id = port.get("id")
+    if port_id:
+        print(port_id)
+        break
+PY
+}
+
+port_revision_number() {
+    local port_id="$1"
+    docker_exec_agent_env python - "${port_id}" <<'PY'
+from __future__ import print_function
+
+import sys
+
+from neutron_aria.agent.neutron_client import build_neutronclient_from_env
+
+port_id = sys.argv[1]
+client = build_neutronclient_from_env()
+try:
+    port = client.show_port(port_id).get("port", {})
+except Exception:
+    ports = client.list_ports(id=port_id).get("ports", [])
+    port = ports[0] if ports else {}
+revision = port.get("revision_number")
+print("" if revision is None else revision)
+PY
 }
 
 trigger_port_update() {
@@ -159,6 +210,12 @@ trigger_port_update() {
     [ -n "${port_id}" ] || die "no port bound to ${HOST_FQDN} for RPC fanout smoke"
 
     echo "target_port_${label}=${port_id}"
+    revision="$(port_revision_number "${port_id}")"
+    if [ -n "${revision}" ]; then
+        echo "target_port_revision_${label}=${revision}"
+    else
+        echo "target_port_revision_${label}=none"
+    fi
     docker_exec_agent_env python - \
         "${HOST_FQDN}" \
         "${port_id}" \
@@ -245,6 +302,17 @@ run_agent_case() {
             die "enabled case did not process an event batch"
         grep -q "port_updates=1" "${log}" || \
             die "enabled case did not process the port update"
+        if [ "${INCREMENTAL_RPC_ENABLED}" = "true" ]; then
+            if grep -q "target_port_revision_${label}=none" "${trigger_log}" &&
+                [ "${ALLOW_REVISIONLESS_INCREMENTAL_FALLBACK}" != "true" ]; then
+                die "incremental enabled case cannot validate port-scoped apply: target port has no revision_number"
+            fi
+            grep -q "port_scoped_snapshot_complete" "${log}" || \
+                die "incremental enabled case did not submit a port-scoped snapshot"
+            if grep -q "port_scoped_apply_fallback" "${log}"; then
+                die "incremental enabled case fell back from port-scoped apply"
+            fi
+        fi
     fi
 }
 
@@ -257,9 +325,9 @@ docker ps --format '{{.Names}}' | grep -qx "${SERVICE_NAME}" || \
 docker exec "${SERVICE_NAME}" test -S "${SOCKET_PATH}" || \
     die "${SOCKET_PATH} is not visible in ${SERVICE_NAME}"
 
-echo "work=${WORK_DIR} host=${HOST_FQDN}"
+echo "work=${WORK_DIR} host=${HOST_FQDN} incremental_rpc_enabled=${INCREMENTAL_RPC_ENABLED}"
 rollback_managed_ports | tee "${WORK_DIR}/pre-rollback.log"
 run_agent_case disabled false
 run_agent_case enabled true
 
-echo "rpc_fanout_agent_ab=pass work=${WORK_DIR}"
+echo "rpc_fanout_agent_ab=pass incremental_rpc_enabled=${INCREMENTAL_RPC_ENABLED} work=${WORK_DIR}"

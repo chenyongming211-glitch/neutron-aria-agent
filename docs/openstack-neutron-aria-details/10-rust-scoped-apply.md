@@ -199,9 +199,19 @@ Python tests before service-loop submitter:
 Smoke tests before production enablement:
 
 - existing P2 fanout/foreign-host/source-cleanup smokes still pass;
-- new P3 incremental smoke proves one-port ACL update changes only that port;
+- P3 incremental smoke proves one-port ACL update changes only that port in an
+  environment where Neutron exposes a trustworthy port `revision_number`;
 - forced index loss falls back to full resync;
 - rollback to polling-only keeps OVS connectivity and full-resync recovery.
+
+Field note:
+
+- The controlled 10.58.159 ostack2 smoke on 2026-07-02 confirmed real fanout,
+  full-resync apply, UDS rollback, and the advertised Rust port-scoped route.
+  The same smoke could not accept runtime port-scoped apply because the target
+  Neutron returned `revision_number=None` for bound ports. That environment must
+  stay on P2 full-resync fallback until a revision source is available or a
+  separate, reviewed stale-event guard is designed.
 
 ## Acceptance For Runtime Testing
 
