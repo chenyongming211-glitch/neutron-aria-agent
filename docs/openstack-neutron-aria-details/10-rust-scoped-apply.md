@@ -30,12 +30,14 @@ OVS forwarding ownership.
 | Rust shared runtime apply body | implemented internally | `apply_snapshot_runtime_transaction()` is the common detach/update/attach/domain reconcile body used by full-host snapshots and covered by a no-eBPF scoped error test. |
 | Rust shared preflight/idempotency | implemented internally | `validate_snapshot_preflight()` and `snapshot_early_response_for_scope()` share schema, scope, stale, noop, and hash-conflict handling for full-host and future single-port snapshots. |
 | Port-scoped UDS route | implemented, capability-disabled | `PUT /api/v1/neutron/ports/{port_id}/snapshot` reuses the shared snapshot apply path with `ApplyScope::SinglePort`; it is listed in `docs/neutron-uds-contract.json` but not advertised as a supported capability. |
-| Rust external port-scoped apply | testable internally | The route can be exercised by Rust tests and direct UDS probes, but no Python submitter or production service-loop path calls it. |
+| Python UDS client port-scoped helper | implemented, capability-gated | `LocalClient.put_port_snapshot()` refuses to submit unless `supports_port_scoped_snapshot=true` is advertised, validates single-port path/body scope before send, and is not called by the service loop. |
+| Rust external port-scoped apply | testable internally | The route can be exercised by Rust tests and direct UDS probes, but no production service-loop path calls it. |
 
 ## Non-Negotiable Guardrails
 
-- Port-scoped UDS route is implemented for Rust-side testing, but do not call it
-  from Python until the capability and config gates are accepted together.
+- Port-scoped UDS route is implemented for Rust-side testing. Python may only
+  expose a capability-gated helper; do not call it from the service loop until
+  the capability and config gates are accepted together.
 - Do not advertise `supports_port_scoped_snapshot=true` until route, planner,
   WAL, status, Python client, and rollback tests pass in the same enablement
   window.
@@ -157,8 +159,9 @@ Scoped apply must not turn unrelated ports stale or invisible.
 6. Flip the contract to `rust_route_implemented_capability_disabled` when the
    route lands, while
    keeping capability advertisement and Python submission disabled. **Done.**
-7. Add Python UDS client support only after Rust advertises
-   `supports_port_scoped_snapshot=true`.
+7. Add Python UDS client support as a helper that refuses to submit until Rust
+   advertises `supports_port_scoped_snapshot=true`. **Done, not wired into the
+   service loop.**
 8. Only then consider service-loop submission behind
    `incremental_rpc_enabled=true`.
 
@@ -189,7 +192,7 @@ Python tests before service-loop submitter:
 
 | Test | Expected Result |
 | --- | --- |
-| UDS client requires scoped capability | no port-scoped submit when capability is absent. |
+| UDS client requires scoped capability | no port-scoped submit when capability is absent. **Done.** |
 | config gate blocks incremental | `incremental_rpc_enabled=true` remains rejected until accepted gate. |
 | dry-run can fall back | unsafe decision or missing target returns full-resync fallback reason. |
 

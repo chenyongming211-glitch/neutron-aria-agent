@@ -54,6 +54,9 @@ KOLLA_DATAPATH_CONFIG_PATH = os.path.join(
 PYTHON_UDS_CLIENT_PATH = os.path.join(
     "openstack", "neutron_aria", "neutron_aria", "agent", "uds_client.py"
 )
+PYTHON_UDS_CLIENT_TEST_PATH = os.path.join(
+    "openstack", "neutron_aria", "neutron_aria", "tests", "unit", "test_uds_client.py"
+)
 DOC_INI_CONTRACT_PATHS = [
     "README.md",
     os.path.join("docs", "openstack-neutron-agent-mode.md"),
@@ -351,6 +354,7 @@ def check_rust_uds_contract_source():
     api_source = _read_repo_text(RUST_API_PATH)
     neutron_api_source = _read_repo_text(RUST_NEUTRON_API_PATH)
     python_uds_source = _read_repo_text(PYTHON_UDS_CLIENT_PATH)
+    python_uds_test_source = _read_repo_text(PYTHON_UDS_CLIENT_TEST_PATH)
     with open(os.path.join(ROOT, UDS_CONTRACT_PATH), "r", encoding="utf-8") as handle:
         contract = json.load(handle)
 
@@ -388,6 +392,24 @@ def check_rust_uds_contract_source():
         raise SystemExit("ERROR: Neutron snapshot schema mismatch must return UDS_SCHEMA_MISMATCH")
     if "UDS_BODY_TOO_LARGE" not in python_uds_source:
         raise SystemExit("ERROR: Python UDS client must map HTTP 413 to UDS_BODY_TOO_LARGE")
+    if "supports_port_scoped_snapshot" in api_source:
+        raise SystemExit(
+            "ERROR: Rust capabilities must not advertise supports_port_scoped_snapshot yet"
+        )
+    for term in (
+        "def put_port_snapshot(",
+        "local API does not advertise supports_port_scoped_snapshot",
+        "def _validate_port_snapshot_request(",
+    ):
+        if term not in python_uds_source:
+            raise SystemExit("ERROR: Python UDS client missing P3 gate term %s" % term)
+    for test_name in (
+        "test_put_port_snapshot_requires_scoped_capability_before_put",
+        "test_put_port_snapshot_serializes_when_scoped_capability_is_advertised",
+        "test_put_port_snapshot_rejects_path_body_mismatch_before_send",
+    ):
+        if test_name not in python_uds_test_source:
+            raise SystemExit("ERROR: Python UDS client missing P3 gate test %s" % test_name)
     if "generation_hash_conflict" not in neutron_api_source:
         raise SystemExit("ERROR: Neutron snapshot hash conflict must return generation_hash_conflict")
     if "stale_generation" not in neutron_api_source:

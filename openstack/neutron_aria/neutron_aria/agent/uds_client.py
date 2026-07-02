@@ -103,6 +103,20 @@ class LocalClient(object):
     def put_snapshot(self, snapshot):
         return self._request("PUT", "/api/v1/neutron/snapshot", snapshot)
 
+    def put_port_snapshot(self, port_id, snapshot, required_domains=None):
+        self._validate_port_snapshot_request(port_id, snapshot)
+        capabilities = self.capabilities(required_domains=required_domains or [])
+        if not capabilities.get("supports_port_scoped_snapshot"):
+            raise LocalApiContractError(
+                "local API does not advertise supports_port_scoped_snapshot"
+            )
+        encoded = urlquote(port_id, safe="")
+        return self._request(
+            "PUT",
+            "/api/v1/neutron/ports/%s/snapshot" % encoded,
+            snapshot,
+        )
+
     def delete_port(self, port_id):
         encoded = urlquote(port_id, safe="")
         return self._request("DELETE", "/api/v1/neutron/ports/%s" % encoded)
@@ -220,4 +234,19 @@ class LocalClient(object):
         if capability_hash is not None and capability_hash != NEUTRON_CAPABILITY_HASH:
             raise LocalApiContractError(
                 "unsupported capability_hash %r" % capability_hash
+            )
+
+    def _validate_port_snapshot_request(self, port_id, snapshot):
+        if not isinstance(snapshot, dict):
+            raise LocalApiContractError("port-scoped snapshot body must be an object")
+        ports = snapshot.get("ports")
+        if not isinstance(ports, list) or len(ports) != 1:
+            raise LocalApiContractError(
+                "port-scoped snapshot requires exactly one body port"
+            )
+        actual_port_id = ports[0].get("port_id") if isinstance(ports[0], dict) else None
+        if actual_port_id != port_id:
+            raise LocalApiContractError(
+                "port-scoped snapshot path/body mismatch: expected %s, got %s"
+                % (port_id, actual_port_id)
             )

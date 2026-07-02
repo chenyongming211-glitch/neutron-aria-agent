@@ -412,6 +412,8 @@ allow enabling `incremental_rpc_enabled=true`.
 Allowed before the full P3 entry gate:
 
 - Add `incremental_rpc_enabled=false` as an explicit blocked config gate.
+- Add a Python UDS client helper that refuses port-scoped submit unless the
+  local capability advertises `supports_port_scoped_snapshot=true`.
 - Build an in-memory `ProjectedStateIndex` from accepted full-resync results.
 - Build pure Python port-scoped candidate snapshots for unit testing only.
 - Wire RPC port-update decisions to the pure builder in dry-run unit tests only.
@@ -429,7 +431,8 @@ Field evidence:
 Still forbidden before the full P3 entry gate:
 
 - Enabling `incremental_rpc_enabled=true` in runtime config.
-- Sending port-scoped snapshots over UDS from Python/service-loop code.
+- Sending port-scoped snapshots from service-loop code, or from any Python path
+  without advertised capability and config gates.
 - Advertising `supports_port_scoped_snapshot=true`.
 - Removing periodic/full-resync recovery.
 - Changing Rust datapath snapshot apply semantics outside the shared

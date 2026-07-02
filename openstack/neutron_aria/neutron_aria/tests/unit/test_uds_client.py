@@ -220,6 +220,79 @@ class UdsClientTestCase(unittest.TestCase):
         self.assertEqual("UDS_BODY_TOO_LARGE", ctx.exception.body["error"])
         self.assertEqual("request entity too large", ctx.exception.body["details"])
 
+    def test_put_port_snapshot_requires_scoped_capability_before_put(self):
+        FakeConnection.responses.append(FakeResponse(200, "OK", self._capabilities()))
+
+        with self.assertRaises(LocalApiContractError) as ctx:
+            self.client.put_port_snapshot(
+                "target-port",
+                {
+                    "generation": 12,
+                    "host": "ostack2",
+                    "ports": [{"port_id": "target-port", "ifname": "tap1"}],
+                },
+                required_domains=["acl"],
+            )
+
+        self.assertIn("supports_port_scoped_snapshot", str(ctx.exception))
+        self.assertEqual(1, len(FakeConnection.requests))
+        self.assertEqual("GET", FakeConnection.requests[0]["method"])
+        self.assertEqual(
+            "/api/v1/neutron/capabilities",
+            FakeConnection.requests[0]["path"],
+        )
+
+    def test_put_port_snapshot_serializes_when_scoped_capability_is_advertised(self):
+        FakeConnection.responses.append(
+            FakeResponse(
+                200,
+                "OK",
+                self._capabilities(supports_port_scoped_snapshot=True),
+            )
+        )
+        FakeConnection.responses.append(FakeResponse(200, "OK", {
+            "generation": 13,
+            "results": [],
+            "active_instances": [],
+        }))
+
+        response = self.client.put_port_snapshot(
+            "port/with/slash",
+            {
+                "generation": 13,
+                "host": "ostack2",
+                "ports": [{"port_id": "port/with/slash", "ifname": "tap1"}],
+            },
+            required_domains=["acl"],
+        )
+
+        self.assertEqual(13, response["generation"])
+        self.assertEqual(2, len(FakeConnection.requests))
+        request = FakeConnection.requests[1]
+        self.assertEqual("PUT", request["method"])
+        self.assertEqual(
+            "/api/v1/neutron/ports/port%2Fwith%2Fslash/snapshot",
+            request["path"],
+        )
+        self.assertEqual("application/json", request["headers"]["Content-Type"])
+        self.assertEqual(
+            "port/with/slash",
+            json.loads(request["body"])["ports"][0]["port_id"],
+        )
+
+    def test_put_port_snapshot_rejects_path_body_mismatch_before_send(self):
+        with self.assertRaises(LocalApiContractError):
+            self.client.put_port_snapshot(
+                "target-port",
+                {
+                    "generation": 14,
+                    "host": "ostack2",
+                    "ports": [{"port_id": "other-port", "ifname": "tap1"}],
+                },
+            )
+
+        self.assertEqual([], FakeConnection.requests)
+
     def test_plain_text_http_error_is_response_error(self):
         FakeConnection.responses.append(
             FakeResponse(500, "Internal Server Error", "internal failure")
