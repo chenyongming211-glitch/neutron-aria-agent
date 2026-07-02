@@ -23,6 +23,8 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "neutron_wal"],
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_plan"],
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_transaction"],
+    ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_preflight"],
+    ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_early_response"],
     ["test", "--locked", "-p", "aria-agent", "domain_authority"],
     ["test", "--locked", "-p", "aria-agent", "peercred_policy"],
     ["test", "--locked", "-p", "aria-agent", "openapi_does_not_expose_neutron_uds_paths"],
@@ -538,6 +540,9 @@ def check_p3_rust_scoped_plan_boundary():
         "fn build_snapshot_transaction_from_plan(",
         "fn port_status_seed_for_scope(",
         "fn build_snapshot_commit_runtime(",
+        "fn validate_snapshot_preflight(",
+        "fn snapshot_early_response_for_scope(",
+        "fn snapshot_has_runtime_drift_for_scope(",
         "async fn apply_snapshot_runtime_transaction(",
         "fn neutron_snapshot_plan_scoped_updates_target_only(",
         "fn neutron_snapshot_plan_scoped_attaches_target_without_detaching_unrelated_ports(",
@@ -553,6 +558,11 @@ def check_p3_rust_scoped_plan_boundary():
         "fn neutron_snapshot_transaction_scoped_success_preserves_unrelated_statuses(",
         "fn neutron_snapshot_transaction_scoped_failure_keeps_pending_generation(",
         "async fn neutron_snapshot_transaction_runtime_scoped_error_uses_shared_apply_body(",
+        "fn neutron_snapshot_preflight_scoped_rejects_mismatch_before_idempotency(",
+        "fn neutron_snapshot_preflight_schema_error_wins_before_scope_error(",
+        "fn neutron_snapshot_early_response_scoped_stale_generation(",
+        "fn neutron_snapshot_early_response_scoped_noop_ignores_unrelated_host_drift(",
+        "fn neutron_snapshot_early_response_scoped_hash_conflict(",
     ]
     for term in required_source_terms:
         if term not in neutron_api_source:

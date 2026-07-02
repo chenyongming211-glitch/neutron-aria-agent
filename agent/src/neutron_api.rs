@@ -642,68 +642,19 @@ async fn apply_neutron_snapshot(
     snapshot: NeutronSnapshotRequest,
 ) -> Result<NeutronSnapshotResponse, SnapshotApplyError> {
     let _guard = state.apply_lock.lock().await;
-    if !snapshot_schema_supported(snapshot.schema_version) {
-        return Err(SnapshotApplyError {
-            status: StatusCode::BAD_REQUEST,
-            code: "UDS_SCHEMA_MISMATCH",
-            details: format!(
-                "unsupported schema_version {:?}; supported range is {}-{}",
-                snapshot.schema_version,
-                NEUTRON_UDS_SCHEMA_VERSION_MIN,
-                NEUTRON_UDS_SCHEMA_VERSION_MAX
-            ),
-        });
-    }
+    let scope = ApplyScope::FullHost;
+    validate_snapshot_preflight(&scope, &snapshot)?;
     let requested_hash = snapshot.desired_hash.clone();
     let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
     let early_response = {
         let runtime = state.runtime.read().await;
-        if snapshot.generation > 0 && snapshot.generation < runtime.applied_generation {
-            Some(neutron_snapshot_response(
-                snapshot.generation,
-                requested_hash.clone(),
-                runtime.accepted_generation,
-                runtime.applied_generation,
-                "stale",
-                vec![transaction_result(
-                    "snapshot",
-                    "",
-                    "ignore",
-                    "ignored",
-                    Some("stale_generation"),
-                )],
-                Vec::new(),
-            ))
-        } else if snapshot_generation_fully_applied(&runtime, snapshot.generation) {
-            if hashes_match(&requested_hash, &runtime.applied_desired_hash) {
-                if snapshot_has_runtime_drift(&runtime.ports, &snapshot, &local_inventory) {
-                    None
-                } else {
-                    Some(neutron_snapshot_response(
-                        snapshot.generation,
-                        requested_hash.clone(),
-                        runtime.accepted_generation,
-                        runtime.applied_generation,
-                        "noop",
-                        Vec::new(),
-                        Vec::new(),
-                    ))
-                }
-            } else if requested_hash.is_some() && runtime.applied_desired_hash.is_some() {
-                return Err(SnapshotApplyError {
-                    status: StatusCode::CONFLICT,
-                    code: "generation_hash_conflict",
-                    details: format!(
-                        "generation {} already applied with a different desired_hash",
-                        snapshot.generation
-                    ),
-                });
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        snapshot_early_response_for_scope(
+            &scope,
+            &runtime,
+            &snapshot,
+            &local_inventory,
+            &requested_hash,
+        )?
     };
     if let Some(mut response) = early_response {
         response.active_instances = state.registry.list().await;
@@ -715,7 +666,7 @@ async fn apply_neutron_snapshot(
         &current_ports,
         &snapshot,
         &local_inventory,
-        ApplyScope::FullHost,
+        scope,
     )
     .map_err(snapshot_scope_apply_error)?;
     if let Err(e) = state.wal.append_snapshot_intent(
@@ -1125,12 +1076,42 @@ fn snapshot_scope_apply_error(error: SnapshotScopeError) -> SnapshotApplyError {
     }
 }
 
+fn snapshot_schema_apply_error(schema_version: Option<u32>) -> SnapshotApplyError {
+    SnapshotApplyError {
+        status: StatusCode::BAD_REQUEST,
+        code: "UDS_SCHEMA_MISMATCH",
+        details: format!(
+            "unsupported schema_version {:?}; supported range is {}-{}",
+            schema_version, NEUTRON_UDS_SCHEMA_VERSION_MIN, NEUTRON_UDS_SCHEMA_VERSION_MAX
+        ),
+    }
+}
+
+fn validate_snapshot_preflight(
+    scope: &ApplyScope,
+    snapshot: &NeutronSnapshotRequest,
+) -> Result<(), SnapshotApplyError> {
+    if !snapshot_schema_supported(snapshot.schema_version) {
+        return Err(snapshot_schema_apply_error(snapshot.schema_version));
+    }
+    validate_snapshot_scope(scope, snapshot).map_err(snapshot_scope_apply_error)
+}
+
 fn snapshot_has_runtime_drift(
     current: &BTreeMap<String, ManagedNeutronPort>,
     snapshot: &NeutronSnapshotRequest,
     inventory: &LocalInterfaceInventory,
 ) -> bool {
-    let plan = build_snapshot_plan(current, snapshot, inventory);
+    snapshot_has_runtime_drift_for_scope(current, snapshot, inventory, ApplyScope::FullHost)
+}
+
+fn snapshot_has_runtime_drift_for_scope(
+    current: &BTreeMap<String, ManagedNeutronPort>,
+    snapshot: &NeutronSnapshotRequest,
+    inventory: &LocalInterfaceInventory,
+    scope: ApplyScope,
+) -> bool {
+    let plan = build_snapshot_plan_for_scope(current, snapshot, inventory, scope);
     if !plan.attach.is_empty() || !plan.detach.is_empty() {
         return true;
     }
@@ -1145,6 +1126,69 @@ fn snapshot_has_runtime_drift(
             })
             .unwrap_or(true)
     })
+}
+
+fn snapshot_early_response_for_scope(
+    scope: &ApplyScope,
+    runtime: &NeutronRuntimeState,
+    snapshot: &NeutronSnapshotRequest,
+    inventory: &LocalInterfaceInventory,
+    requested_hash: &Option<String>,
+) -> Result<Option<NeutronSnapshotResponse>, SnapshotApplyError> {
+    if snapshot.generation > 0 && snapshot.generation < runtime.applied_generation {
+        return Ok(Some(neutron_snapshot_response(
+            snapshot.generation,
+            requested_hash.clone(),
+            runtime.accepted_generation,
+            runtime.applied_generation,
+            "stale",
+            vec![transaction_result(
+                "snapshot",
+                "",
+                "ignore",
+                "ignored",
+                Some("stale_generation"),
+            )],
+            Vec::new(),
+        )));
+    }
+
+    if !snapshot_generation_fully_applied(runtime, snapshot.generation) {
+        return Ok(None);
+    }
+
+    if hashes_match(requested_hash, &runtime.applied_desired_hash) {
+        if snapshot_has_runtime_drift_for_scope(
+            &runtime.ports,
+            snapshot,
+            inventory,
+            scope.clone(),
+        ) {
+            return Ok(None);
+        }
+        return Ok(Some(neutron_snapshot_response(
+            snapshot.generation,
+            requested_hash.clone(),
+            runtime.accepted_generation,
+            runtime.applied_generation,
+            "noop",
+            Vec::new(),
+            Vec::new(),
+        )));
+    }
+
+    if requested_hash.is_some() && runtime.applied_desired_hash.is_some() {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "generation_hash_conflict",
+            details: format!(
+                "generation {} already applied with a different desired_hash",
+                snapshot.generation
+            ),
+        });
+    }
+
+    Ok(None)
 }
 
 fn validate_snapshot_scope(
@@ -3437,6 +3481,167 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_snapshot_preflight_scoped_rejects_mismatch_before_idempotency() {
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 50,
+            desired_hash: Some("hash-50".to_string()),
+            host: None,
+            ports: vec![port("other-port", "tap-other", true)],
+        };
+
+        let error = validate_snapshot_preflight(
+            &ApplyScope::SinglePort("target-port".to_string()),
+            &snapshot,
+        )
+        .expect_err("scoped path/body mismatch must fail preflight");
+
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "PORT_SCOPE_MISMATCH");
+        assert!(error.details.contains("expected target-port"));
+    }
+
+    #[test]
+    fn neutron_snapshot_preflight_schema_error_wins_before_scope_error() {
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: Some(NEUTRON_UDS_SCHEMA_VERSION_MAX + 1),
+            generation: 51,
+            desired_hash: Some("hash-51".to_string()),
+            host: None,
+            ports: Vec::new(),
+        };
+
+        let error = validate_snapshot_preflight(
+            &ApplyScope::SinglePort("target-port".to_string()),
+            &snapshot,
+        )
+        .expect_err("unsupported schema should fail first");
+
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "UDS_SCHEMA_MISMATCH");
+    }
+
+    #[test]
+    fn neutron_snapshot_early_response_scoped_stale_generation() {
+        let runtime = NeutronRuntimeState {
+            accepted_generation: 60,
+            applied_generation: 60,
+            applied_desired_hash: Some("hash-60".to_string()),
+            authority_state: "ready".to_string(),
+            ..Default::default()
+        };
+        let local = inventory(Vec::new());
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 59,
+            desired_hash: Some("hash-59".to_string()),
+            host: None,
+            ports: vec![port("target-port", "tap-target", true)],
+        };
+
+        let response = snapshot_early_response_for_scope(
+            &ApplyScope::SinglePort("target-port".to_string()),
+            &runtime,
+            &snapshot,
+            &local,
+            &snapshot.desired_hash,
+        )
+        .expect("stale generation should classify, not error")
+        .expect("stale generation should return an early response");
+
+        assert_eq!(response.status, "stale");
+        assert_eq!(response.applied_generation, 60);
+        assert_eq!(response.results[0].reason.as_deref(), Some("stale_generation"));
+    }
+
+    #[test]
+    fn neutron_snapshot_early_response_scoped_noop_ignores_unrelated_host_drift() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "target-port".to_string(),
+            managed_with_ifindex("target-port", "tap-target", 61),
+        );
+        ports.insert(
+            "other-port".to_string(),
+            managed_with_ifindex("other-port", "tap-other", 62),
+        );
+        let runtime = NeutronRuntimeState {
+            accepted_generation: 61,
+            applied_generation: 61,
+            applied_desired_hash: Some("hash-61".to_string()),
+            authority_state: "ready".to_string(),
+            ports,
+            ..Default::default()
+        };
+        let local = inventory(vec![iface(
+            "tap-target",
+            "target-port",
+            Some(61),
+            Some("br-int"),
+        )]);
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 61,
+            desired_hash: Some("hash-61".to_string()),
+            host: None,
+            ports: vec![port("target-port", "tap-target", true)],
+        };
+
+        let full_host_response = snapshot_early_response_for_scope(
+            &ApplyScope::FullHost,
+            &runtime,
+            &snapshot,
+            &local,
+            &snapshot.desired_hash,
+        )
+        .expect("full-host idempotency should not error");
+        let scoped_response = snapshot_early_response_for_scope(
+            &ApplyScope::SinglePort("target-port".to_string()),
+            &runtime,
+            &snapshot,
+            &local,
+            &snapshot.desired_hash,
+        )
+        .expect("scoped idempotency should not error")
+        .expect("scoped target has no drift");
+
+        assert!(full_host_response.is_none());
+        assert_eq!(scoped_response.status, "noop");
+        assert_eq!(scoped_response.applied_generation, 61);
+    }
+
+    #[test]
+    fn neutron_snapshot_early_response_scoped_hash_conflict() {
+        let runtime = NeutronRuntimeState {
+            accepted_generation: 70,
+            applied_generation: 70,
+            applied_desired_hash: Some("hash-old".to_string()),
+            authority_state: "ready".to_string(),
+            ..Default::default()
+        };
+        let local = inventory(Vec::new());
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 70,
+            desired_hash: Some("hash-new".to_string()),
+            host: None,
+            ports: vec![port("target-port", "tap-target", true)],
+        };
+
+        let error = snapshot_early_response_for_scope(
+            &ApplyScope::SinglePort("target-port".to_string()),
+            &runtime,
+            &snapshot,
+            &local,
+            &snapshot.desired_hash,
+        )
+        .expect_err("same generation with a different hash must conflict");
+
+        assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(error.code, "generation_hash_conflict");
     }
 
     #[test]

@@ -2,8 +2,9 @@
 
 Status: P3-3 implementation design package. The Rust single-port planner scope,
 pure planner tests, internal scoped WAL/status transaction boundary tests, and
-the shared runtime apply body extraction are implemented; the UDS route and
-external runtime scoped apply remain planned.
+the shared runtime apply body extraction, and shared preflight/idempotency
+checks are implemented; the UDS route and external runtime scoped apply remain
+planned.
 
 ## Goal
 
@@ -26,6 +27,7 @@ OVS forwarding ownership.
 | Rust scoped planner | implemented planner-only | `ApplyScope::SinglePort` and `build_snapshot_plan_for_scope()` have pure tests that prove unrelated ports are not mutated. |
 | Rust scoped WAL/status boundary | implemented internally | `SnapshotApplyTransaction`, scope validation, affected-port checks, status seeding, and commit-runtime helpers have unit tests; no external scoped route uses them yet. |
 | Rust shared runtime apply body | implemented internally | `apply_snapshot_runtime_transaction()` is the common detach/update/attach/domain reconcile body used by full-host snapshots and covered by a no-eBPF scoped error test. |
+| Rust shared preflight/idempotency | implemented internally | `validate_snapshot_preflight()` and `snapshot_early_response_for_scope()` share schema, scope, stale, noop, and hash-conflict handling for full-host and future single-port snapshots. |
 | Port-scoped UDS route | planned only | Recorded in `docs/neutron-uds-contract.json` under `p3_port_scoped_snapshot`; not listed in current runtime `routes`. |
 | Rust external port-scoped apply | not implemented | No Rust route, no scoped submit path, no capability advertisement. |
 
@@ -144,12 +146,16 @@ Scoped apply must not turn unrelated ports stale or invisible.
 3. Extract the shared runtime apply body so full-host and future SinglePort use
    the same detach/update/attach/domain reconcile path. **Done internally, no
    route exposure.**
-4. Add the UDS route only after planner, WAL/status, and runtime body tests pass.
-5. Flip the contract from `planned_contract_only` only in the same PR that adds
+4. Extract shared preflight/idempotency logic so full-host and future
+   SinglePort use the same schema, scope, stale generation, noop, and hash
+   conflict checks. **Done internally, no route exposure.**
+5. Add the UDS route only after planner, WAL/status, runtime body, and
+   preflight/idempotency tests pass.
+6. Flip the contract from `planned_contract_only` only in the same PR that adds
    the route and capability tests.
-6. Add Python UDS client support only after Rust advertises
+7. Add Python UDS client support only after Rust advertises
    `supports_port_scoped_snapshot=true`.
-7. Only then consider service-loop submission behind
+8. Only then consider service-loop submission behind
    `incremental_rpc_enabled=true`.
 
 ## Minimum Test Boundary
