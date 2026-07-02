@@ -35,6 +35,7 @@ or an explicitly approved later phase.
 | `08-stage3-acl-production-hardening.md` | Detail Stage-Three ACL Production Hardening, release/CI, persistent UDS rollout, and N3 fault/lifecycle gates. |
 | `09-aria-rpc-incremental-sync.md` | Record post-stage-three RPC evolution: P2 RPC-triggered full-resync and P3 incremental RPC with port-scoped apply. |
 | `10-rust-scoped-apply.md` | Detail the P3-3 Rust single-port scoped apply minimum design and test boundary before touching datapath logic. |
+| `11-qos-next-phase.md` | Record the QoS next-phase entry assessment after ACL/P3 closure; starts with capability discovery and degraded/unsupported semantics. |
 
 ## Refinement Order
 
@@ -47,10 +48,12 @@ or an explicitly approved later phase.
 6. Deployment/N0.5 runbook, because it turns design into safe field enablement.
 7. Stage-three ACL production hardening, because stage two is accepted and the
    next risk is release/CI plus N3 operational behavior.
-8. Aria RPC incremental sync, after stage three closes P2 and before opening
-   port-scoped delta apply implementation.
-9. Rust scoped apply minimum design, before changing Rust datapath apply logic
-   or adding the port-scoped UDS route.
+8. Aria RPC incremental sync, recording P2 and the accepted config-gated P3
+   follow-up after stage three.
+9. Rust scoped apply, recording the accepted P3 scoped route/apply boundary and
+   test contract.
+10. QoS next-phase entry assessment, only after ACL/P3 closure and target
+    capability evidence are clear.
 
 ## Dependency Map
 
@@ -90,6 +93,11 @@ or an explicitly approved later phase.
   -> 04 advertised, config-gated port-scoped UDS route
   -> 07 scoped WAL/generation semantics
   -> 09 P3-3 implementation package
+
+11 QoS next phase
+  -> N0.5 capability refresh for Neutron QoS and tc/qdisc
+  -> managed_domains qos authority gate
+  -> degraded/unsupported QoS status before any shaping claim
 ```
 
 ## Gate Mapping
@@ -105,7 +113,8 @@ or an explicitly approved later phase.
 | G6 full resync | 01, 03, 05, 07 | Neutron port source, resync, heartbeat, and generation status are stable. |
 | G7 rollback | 06, 07 | Disabling integration preserves OVS forwarding and safe recovery semantics. |
 | S3 production hardening | 08 | CI/release, persistent UDS rollout, ACL N3 fault, and lifecycle gates are ready. |
-| P2/P3 RPC sync evolution | 09, 10 | RPC-triggered resync and incremental port-scoped apply are designed and gated separately from stage three; the P3-3 Rust route, advertised capability, Python client helper, and config-gated single-port submitter are implemented while packaged defaults keep incremental runtime disabled. |
+| P2/P3 RPC sync evolution | 09, 10 | RPC-triggered resync and incremental port-scoped apply are accepted behind config gates; packaged defaults keep incremental runtime disabled. |
+| QoS next-phase entry | 11 | QoS remains deferred until refreshed target evidence decides shaping, policing-only, or unsupported/degraded behavior. |
 
 ## Stage-One Verification
 
@@ -214,20 +223,19 @@ applicable until an IPv6 network exists.
 
 ## QoS Detail Timing
 
-QoS remains in the v0.9 first-stage scope. This first refinement pass does not
-split a dedicated QoS detail plan because the highest-risk blockers are the ACL
-production path, UDS/transaction safety, and `managed_domains` authority model.
+QoS remains in the v0.9 first-stage scope. ACL and P3 are now closed enough to
+open a QoS entry assessment, but not enough to implement shaping blindly.
 
-QoS detail should be opened after:
+The next QoS document is:
 
-- the target INI contract is frozen;
-- UDS and transaction semantics are stable;
-- ACL production input path has a clear implementation plan;
-- the target environment confirms `tc` or an equivalent QoS capability.
+```text
+docs/openstack-neutron-aria-details/11-qos-next-phase.md
+```
 
-Until then, QoS behavior follows the main design: reuse Neutron QoS policy/rule,
-gate local writes only when `qos` is in `managed_domains`, and degrade shaping to
-policing or unsupported when runtime capability is missing.
+It is an entry plan only. Current target evidence shows no visible Neutron QoS
+extension and no host `tc`, so implementation must start by refreshing
+capability evidence and choosing one disposition: `shaping`, `policing-only`,
+or `unsupported/deferred`.
 
 ## Stage-Three ACL Production Hardening
 
@@ -245,8 +253,8 @@ python ci/check_stage3_readiness.py
 
 ## Post-Stage-Three: Aria RPC And Incremental Sync
 
-Stage three stops at RPC-triggered full-resync (P2). The target optimization to
-incremental RPC and port-scoped apply (P3) is recorded in:
+Stage three stopped at RPC-triggered full-resync (P2). The follow-up
+incremental RPC and port-scoped apply work (P3) is recorded in:
 
 ```text
 docs/openstack-neutron-aria-details/09-aria-rpc-incremental-sync.md
@@ -270,15 +278,34 @@ docs/evidence/openstack-n05-lite/20260702-p3-5-incremental-smoke/summary.md
 
 It accepts package RPC event smoke, P2 full-resync A/B, controlled
 revisionless experimental port-scoped apply, default revisionless fallback, and
-rollback to zero managed ports on the old Neutron test host. P3-6 records the
-default-off production contract and rollback levels in plan 09 plus the
-operator runbook.
+rollback to zero managed ports on the old Neutron test host. The P3 acceptance
+summary is recorded in:
+
+```text
+docs/evidence/openstack-n05-lite/20260702-p3-acceptance-summary/summary.md
+```
+
+P3-6 records the default-off production contract and rollback levels in plan 09
+plus the operator runbook.
+
+## QoS Next Phase
+
+QoS is the next reasonable planning target, but not an immediate shaping
+implementation. The target environment currently lacks visible Neutron QoS
+extension support and lacks `tc`, so QoS remains deferred until refreshed
+capability evidence decides between shaping, policing-only, or
+unsupported/degraded behavior.
+
+Start here:
+
+```text
+docs/openstack-neutron-aria-details/11-qos-next-phase.md
+```
 
 ## Out Of Scope For This Pass
 
-- No code changes beyond the minimum needed to make the 01/04/07 contracts
-  enforceable and testable.
-- No new tenant features beyond ACL/QoS first-stage scope.
+- No unapproved tenant features beyond ACL and the QoS entry assessment.
+- No QoS shaping implementation before target capability evidence exists.
 - No Security Group projection.
 - No OVS L2 replacement.
 - No full object-level multi-writer authority model unless the domain-level

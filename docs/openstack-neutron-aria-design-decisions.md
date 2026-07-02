@@ -36,20 +36,23 @@ Product roadmap note:
 | `integration_mode` ownership | fixed | `integration_mode=coexist` is a snapshot field written by `neutron-aria-agent`, not an ini setting. |
 | `effective_action` vocabulary | fixed | Use `enforce` for active ACL enforcement, not `enabled`. |
 
-## Deferred Decisions (Post-Stage-Three)
+## Post-Stage-Three Decisions
 
-These are recorded target directions, not v0.9 MVP commitments. Detail lives in
-`openstack-neutron-aria-details/09-aria-rpc-incremental-sync.md` and the Rust
-P3-3 boundary lives in
-`openstack-neutron-aria-details/10-rust-scoped-apply.md`.
+These are recorded target directions and accepted gates after the ACL MVP.
+Detail lives in `openstack-neutron-aria-details/09-aria-rpc-incremental-sync.md`
+and the Rust P3 boundary lives in
+`openstack-neutron-aria-details/10-rust-scoped-apply.md`. P3 is accepted for
+controlled test-host use with packaged defaults disabled; production P3 still
+requires a separate revision-aware rollout decision.
 
 | Decision | Status | Notes |
 | --- | --- | --- |
-| Sync model phases | planned | P1 REST periodic full-resync (current MVP); P2 RPC-triggered full-resync; P3 incremental RPC with port-scoped apply. |
-| Full-resync retention | planned | Incremental RPC optimizes latency; full-resync remains startup/recovery/capability-drift authority. |
-| OVS comparison | planned | Borrow OVS RPC notification semantics, not OVS incremental OVSDB ownership; Aria keeps snapshot/WAL/generation model. |
-| Port-scoped snapshot | planned | Required for P3; parent design already references port-scoped apply; UDS planned contract, Python pure builder, synchronizer dry-run, and Rust scoped apply test boundary are recorded, while service-loop submitter, UDS submitter, Rust route, and Rust apply implementation remain future work. |
+| Sync model phases | accepted gated | P1 REST periodic full-resync is accepted; P2 RPC-triggered full-resync is field-proven; P3 incremental RPC is config-gated and test-host proven with defaults disabled. |
+| Full-resync retention | fixed | Incremental RPC optimizes latency; full-resync remains startup/recovery/capability-drift authority. |
+| OVS comparison | fixed | Borrow OVS RPC notification semantics, not OVS incremental OVSDB ownership; Aria keeps snapshot/WAL/generation model. |
+| Port-scoped snapshot | accepted gated | P3 UDS route, Python submitter, failure fallback, smoke, and runbook default-off contract are accepted. Production rollout remains revision-aware and separate. |
 | `aria_acl` object RPC | open | ACL object changes may still require resync until dedicated RPC or revision subscription exists. |
+| QoS next phase | entry assessment | Start with capability discovery and degraded/unsupported semantics because target evidence currently lacks Neutron QoS extension and `tc`. |
 
 ## Design Areas To Optimize Before Detailed Implementation
 
@@ -128,8 +131,9 @@ treated as reasons to reopen the architecture unless a hard blocker is found.
 | Extend runtime status DTOs to rich per-domain status. | API evolution |
 | Fill N0.5 target environment evidence. | validation |
 | Finalize Kolla packaging and smoke runbook. | delivery |
-| P2 RPC-triggered full-resync enablement. | post-stage-three |
-| P3 incremental RPC and port-scoped apply. | post-stage-three |
+| P2 RPC-triggered full-resync enablement. | accepted gated |
+| P3 incremental RPC and port-scoped apply. | accepted gated / production default-off |
+| QoS capability refresh and next-phase decision. | validation / design |
 
 ## Next Refinement Pass
 
@@ -146,12 +150,10 @@ First-pass implementation design packages are tracked in
 8. `08-stage3-acl-production-hardening.md`
 9. `09-aria-rpc-incremental-sync.md`
 10. `10-rust-scoped-apply.md`
+11. `11-qos-next-phase.md`
 
-QoS remains in v0.9 scope, but its dedicated detail pass should start after the
-INI, UDS/transaction, ACL production path, and target QoS runtime capability
-questions are stable.
-
-Incremental RPC (plan 09) starts after stage-three closes P2
-(RPC-triggered full-resync) and must not reopen v0.9 architecture boundaries.
-Rust scoped apply (plan 10) must start with planner/WAL/status tests before any
-port-scoped route or capability advertisement is added.
+P3 acceptance is summarized in
+`docs/evidence/openstack-n05-lite/20260702-p3-acceptance-summary/summary.md`.
+QoS remains in v0.9 scope, but its next-phase pass starts as an entry
+assessment only: refresh Neutron QoS and `tc` capability evidence, then choose
+`shaping`, `policing-only`, or `unsupported/deferred` before implementation.

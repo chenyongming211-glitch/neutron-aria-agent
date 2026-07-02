@@ -563,6 +563,10 @@ Field evidence:
   A/B passed, controlled revisionless experimental port-scoped apply passed,
   default revisionless behavior stayed on full-resync fallback, and final UDS
   state had `managed_ports=0` with no pending generation.
+- `docs/evidence/openstack-n05-lite/20260702-p3-acceptance-summary/summary.md`
+  closes P3 as accepted for controlled test-host use with packaged defaults
+  disabled. It summarizes P3-1 through P3-6 and records the boundary that
+  production P3 remains revision-aware.
 
 Follow-up decision recorded on 2026-07-02:
 
@@ -596,11 +600,12 @@ Still forbidden before production P3 runtime enablement:
 
 ## Relationship To Current Stage Three
 
-Stage three (`08-stage3-acl-production-hardening.md`) intentionally stops at
+Stage three (`08-stage3-acl-production-hardening.md`) intentionally stopped at
 P2 behavior:
 
 - RPC may trigger full-resync.
-- Port-scoped delta apply is explicitly deferred.
+- Port-scoped delta apply was deferred out of the stage-three acceptance gate.
 
-This document is the approved place to reopen incremental RPC design after
-stage three without revisiting the v0.9 architecture boundaries.
+This document records the approved follow-up P3 work after stage three. P3 is
+accepted for controlled test-host use with packaged defaults disabled, without
+revisiting the v0.9 architecture boundaries.
