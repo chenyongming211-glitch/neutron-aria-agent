@@ -7,6 +7,10 @@ from neutron_aria.agent.effective_acl import ACL_NOT_REQUESTED
 from neutron_aria.agent.effective_acl import ACL_READY
 from neutron_aria.agent.effective_acl import ACL_UNSUPPORTED
 from neutron_aria.agent.effective_acl import EffectiveAclIndex
+from neutron_aria.agent.effective_acl import REVISION_NEWER
+from neutron_aria.agent.effective_acl import REVISION_OLDER
+from neutron_aria.agent.effective_acl import REVISION_SAME
+from neutron_aria.agent.effective_acl import REVISION_UNKNOWN
 
 
 PORT_ID = "port-1"
@@ -107,6 +111,69 @@ class EffectiveAclTestCase(unittest.TestCase):
         self.assertEqual(["10.10.20.0/24", "10.10.21.15/32"], result["rules"][0]["dst_cidrs"])
         self.assertEqual(3306, result["rules"][0]["dst_port_min"])
         self.assertEqual(7, result["revision"])
+
+    def test_revision_compare_uses_effective_acl_revision(self):
+        index = EffectiveAclIndex(
+            policies=[{"id": "policy-1", "revision_number": 2}],
+            address_sets=[{
+                "id": "aset-1",
+                "revision_number": 7,
+                "members": ["10.10.20.0/24"],
+            }],
+            rules=[{
+                "id": "rule-1",
+                "policy_id": "policy-1",
+                "direction": "egress",
+                "priority": 100,
+                "action": "deny",
+                "dst_address_set_id": "aset-1",
+                "revision_number": 5,
+            }],
+            bindings=[{
+                "id": "binding-1",
+                "policy_id": "policy-1",
+                "target_type": "port",
+                "target_id": PORT_ID,
+                "revision_number": 4,
+            }],
+        )
+
+        newer = index.compare_revision_for_port(port(), 6, snapshot())
+        same = index.compare_revision_for_port(port(), 7, snapshot())
+        older = index.compare_revision_for_port(port(), 8, snapshot())
+
+        self.assertEqual(REVISION_NEWER, newer["status"])
+        self.assertEqual(7, newer["current_revision"])
+        self.assertEqual(6, newer["projected_revision"])
+        self.assertEqual(REVISION_SAME, same["status"])
+        self.assertEqual(REVISION_OLDER, older["status"])
+
+    def test_revision_compare_is_unknown_when_no_effective_revision_exists(self):
+        index = EffectiveAclIndex()
+
+        result = index.compare_revision_for_port(port(), 1, snapshot())
+
+        self.assertEqual(REVISION_UNKNOWN, result["status"])
+        self.assertEqual(None, result["current_revision"])
+        self.assertEqual(1, result["projected_revision"])
+
+    def test_revision_compare_is_unknown_when_projected_revision_is_invalid(self):
+        index = EffectiveAclIndex(
+            policies=[{"id": "policy-1", "revision_number": 2}],
+            bindings=[{
+                "id": "binding-1",
+                "policy_id": "policy-1",
+                "target_type": "port",
+                "target_id": PORT_ID,
+                "revision_number": 4,
+            }],
+        )
+
+        result = index.compare_revision_for_port(port(), "bad", snapshot())
+
+        self.assertEqual(REVISION_UNKNOWN, result["status"])
+        self.assertEqual(4, result["current_revision"])
+        self.assertEqual(None, result["projected_revision"])
 
     def test_invalid_priority_degrades_policy_without_crashing(self):
         index = EffectiveAclIndex(

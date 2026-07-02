@@ -20,6 +20,20 @@ DELETE /api/v1/neutron/ports/{port_id}
 
 These routes must not be exposed through the TCP OpenAPI router.
 
+P3 port-scoped snapshot is documented in `docs/neutron-uds-contract.json` as a
+planned contract only:
+
+```text
+PUT /api/v1/neutron/ports/{port_id}/snapshot
+```
+
+It is not listed in the current implemented `routes`, must not be advertised as
+runtime-supported, and remains blocked while `incremental_rpc_enabled=false`.
+The planned contract uses the current 1 MiB request body cap and 3000 ms UDS
+timeout until measurement proves a different limit is needed. Unsafe revision,
+contract, body-size, or local-interface conditions must fall back to full
+resync rather than trying a best-effort scoped apply.
+
 ## Capabilities Contract
 
 Target fields:
@@ -114,6 +128,7 @@ function-call level until the UDS contract PR is opened.
 | --- | --- | --- |
 | Minimum current contract | `api_version`, `attach_authority`, `supports_full_snapshot`, `supports_port_delete`, `supported_domains` | Existing handshake needed before Python sends production snapshots. |
 | v0.9 target contract | Current fields plus `contract_version`, `schema_version_min/max`, `body_max_bytes`, `timeout_ms`, `error_codes_hash`, `peer_auth_policy`, `capability_hash` | Drift detection, bounded requests, and security posture. |
+| P3 planned port-scoped contract | `p3_port_scoped_snapshot` planned route, body/timeout limits, error list, and forbidden-before-implementation guardrails | Entry-gate documentation for incremental RPC without enabling runtime behavior. |
 | Later extension | Optional route-level capability detail | Only add if domain-level capability proves insufficient. |
 
 ### Capability Handshake Flow

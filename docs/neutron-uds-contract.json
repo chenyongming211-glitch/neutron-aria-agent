@@ -44,6 +44,33 @@
       "phase": "implemented"
     }
   ],
+  "p3_port_scoped_snapshot": {
+    "phase": "planned_contract_only",
+    "runtime_enabled": false,
+    "enablement_gate": "incremental_rpc_enabled=true after P3 entry gate acceptance",
+    "method": "PUT",
+    "path": "/api/v1/neutron/ports/{port_id}/snapshot",
+    "body_scope": "single_port",
+    "body_max_bytes": 1048576,
+    "timeout_ms": 3000,
+    "domains_rule": "only domains present in the port managed_domains list may be mutated",
+    "generation_rule": "host generation must remain monotonic and use the same stale generation/hash conflict semantics as full snapshot",
+    "fallback_rule": "on missing index, stale contract, body limit, or unsafe revision relation, Python falls back to full resync while incremental_rpc_enabled remains false",
+    "planned_error_codes": [
+      "UDS_SCHEMA_MISMATCH",
+      "UDS_BODY_TOO_LARGE",
+      "generation_hash_conflict",
+      "stale_generation",
+      "PORT_IFACE_NOT_FOUND",
+      "UDS_CONTRACT_DRIFT"
+    ],
+    "forbidden_until_implemented": [
+      "do not advertise supports_port_scoped_snapshot=true",
+      "do not add this path to current routes",
+      "do not enable incremental_rpc_enabled=true",
+      "do not remove full-resync recovery"
+    ]
+  },
   "peer_auth_policy": "filesystem_permissions_then_peercred",
   "capability_hash": "v0.9-neutron-capabilities-1",
   "routes": [

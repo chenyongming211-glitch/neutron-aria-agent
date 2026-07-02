@@ -182,6 +182,49 @@ def check_uds_contract_artifact():
         if errors[code].get("phase") != "implemented":
             raise SystemExit("ERROR: contract error %s must be implemented" % code)
 
+    p3_scoped = contract.get("p3_port_scoped_snapshot") or {}
+    expected_p3_scoped = {
+        "phase": "planned_contract_only",
+        "runtime_enabled": False,
+        "method": "PUT",
+        "path": "/api/v1/neutron/ports/{port_id}/snapshot",
+        "body_scope": "single_port",
+        "body_max_bytes": uds_client.NEUTRON_BODY_MAX_BYTES,
+        "timeout_ms": uds_client.NEUTRON_TIMEOUT_MS,
+    }
+    for key, value in expected_p3_scoped.items():
+        if p3_scoped.get(key) != value:
+            raise SystemExit(
+                "ERROR: p3_port_scoped_snapshot %s expected %r, got %r"
+                % (key, value, p3_scoped.get(key))
+            )
+    if "incremental_rpc_enabled=true" not in p3_scoped.get("enablement_gate", ""):
+        raise SystemExit("ERROR: p3 port-scoped contract must name incremental gate")
+    if "full resync" not in p3_scoped.get("fallback_rule", ""):
+        raise SystemExit("ERROR: p3 port-scoped contract must keep full-resync fallback")
+    if ("PUT", p3_scoped.get("path")) in routes:
+        raise SystemExit("ERROR: planned P3 port-scoped route must not be in current routes")
+    planned_errors = set(p3_scoped.get("planned_error_codes") or [])
+    for code in (
+        "UDS_SCHEMA_MISMATCH",
+        "UDS_BODY_TOO_LARGE",
+        "generation_hash_conflict",
+        "stale_generation",
+        "PORT_IFACE_NOT_FOUND",
+        "UDS_CONTRACT_DRIFT",
+    ):
+        if code not in planned_errors:
+            raise SystemExit("ERROR: p3 port-scoped planned errors missing %s" % code)
+    forbidden = set(p3_scoped.get("forbidden_until_implemented") or [])
+    for guardrail in (
+        "do not advertise supports_port_scoped_snapshot=true",
+        "do not add this path to current routes",
+        "do not enable incremental_rpc_enabled=true",
+        "do not remove full-resync recovery",
+    ):
+        if guardrail not in forbidden:
+            raise SystemExit("ERROR: p3 port-scoped guardrail missing %r" % guardrail)
+
     phase_status = contract.get("phase_status") or {}
     expected_phase_status = {
         "capabilities_metadata": "implemented",

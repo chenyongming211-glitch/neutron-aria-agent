@@ -6,6 +6,11 @@ ACL_READY = "ready"
 ACL_DEGRADED = "degraded"
 ACL_UNSUPPORTED = "unsupported"
 
+REVISION_NEWER = "newer"
+REVISION_SAME = "same"
+REVISION_OLDER = "older"
+REVISION_UNKNOWN = "unknown"
+
 
 def _get(obj, key, default=None):
     if obj is None:
@@ -19,6 +24,15 @@ def _revision(obj):
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _optional_revision(value):
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _enabled(obj):
@@ -137,6 +151,31 @@ class EffectiveAclIndex(object):
             "rules": compiled_rules["rules"],
         }
         return result
+
+    def revision_for_port(self, neutron_port, snapshot_port=None):
+        effective = self.effective_for_port(neutron_port, snapshot_port)
+        return _optional_revision(effective.get("revision"))
+
+    def compare_revision_for_port(self, neutron_port, projected_revision, snapshot_port=None):
+        current_revision = self.revision_for_port(neutron_port, snapshot_port)
+        projected_revision = _optional_revision(projected_revision)
+        if current_revision is None or projected_revision is None:
+            return {
+                "status": REVISION_UNKNOWN,
+                "current_revision": current_revision,
+                "projected_revision": projected_revision,
+            }
+        if current_revision > projected_revision:
+            status = REVISION_NEWER
+        elif current_revision == projected_revision:
+            status = REVISION_SAME
+        else:
+            status = REVISION_OLDER
+        return {
+            "status": status,
+            "current_revision": current_revision,
+            "projected_revision": projected_revision,
+        }
 
     def _select_binding(self, neutron_port):
         port_id = neutron_port.get("id") or neutron_port.get("port_id")

@@ -390,6 +390,20 @@ Do not start P3 port-scoped apply implementation until all are true:
 4. UDS contract documents port-scoped snapshot limits and errors.
 5. `EffectiveAclIndex` revision compare is covered by unit tests.
 
+Current entry-gate evidence:
+
+- Items 1-3 are covered by stage-two/stage-three closure, RPC P2 field
+  evidence, and the accepted heartbeat/status subset.
+- Item 4 is covered by `docs/neutron-uds-contract.json`
+  `p3_port_scoped_snapshot`. This is a planned contract only; the route is not
+  in current implemented `routes` and must not be advertised as runtime
+  supported.
+- Item 5 is covered by `EffectiveAclIndex.compare_revision_for_port()` unit
+  tests for newer/same/older/unknown relations.
+
+This evidence allows P3 design work to continue, but it does not by itself
+allow enabling `incremental_rpc_enabled=true`.
+
 Allowed before the full P3 entry gate:
 
 - Add `incremental_rpc_enabled=false` as an explicit blocked config gate.
