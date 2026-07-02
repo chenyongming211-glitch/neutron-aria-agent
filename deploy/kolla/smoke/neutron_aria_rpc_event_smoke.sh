@@ -64,6 +64,7 @@ class FakeSynchronizer(object):
         self.projected_port_ids = set()
         self.delete_calls = []
         self.delete_reasons = []
+        self.scoped_calls = []
 
     def safe_full_resync(self):
         self.resync_calls += 1
@@ -96,8 +97,29 @@ class FakeSynchronizer(object):
         self.projected_port_ids.discard(port_id)
         return {"deleted": port_id}
 
+    def apply_port_scoped_snapshot(self, port_id, binding_host=None, revision_number=None):
+        self.scoped_calls.append({
+            "port_id": port_id,
+            "binding_host": binding_host,
+            "revision_number": revision_number,
+        })
+        generation = self.resync_calls + len(self.scoped_calls)
+        self.runtime_status.mark_ready(
+            generation=generation,
+            snapshot_ports=1,
+            managed_ports=1,
+        )
+        heartbeat = self.report_status()
+        return {
+            "submitted": True,
+            "snapshot": {"generation": generation, "ports": [{"port_id": port_id}]},
+            "response": {},
+            "status": self.runtime_status.to_dict(),
+            "heartbeat": heartbeat,
+        }
 
-def new_service():
+
+def new_service(incremental_rpc_enabled=False):
     clock = FakeClock()
     sync = FakeSynchronizer()
     merger = EventMerger(clock=clock)
@@ -108,6 +130,7 @@ def new_service():
         resync_interval=60,
         event_merger=merger,
         event_merge_interval=0.2,
+        incremental_rpc_enabled=incremental_rpc_enabled,
         clock=clock,
     )
     service.initialize()
@@ -118,6 +141,7 @@ validate_config(AgentConfig(
     full_resync_enabled=True,
     port_source="neutronclient",
     rpc_events_enabled=True,
+    incremental_rpc_enabled=True,
 ))
 expect_config_error(
     AgentConfig(
@@ -139,10 +163,10 @@ expect_config_error(
     AgentConfig(
         full_resync_enabled=True,
         port_source="neutronclient",
-        rpc_events_enabled=True,
+        rpc_events_enabled=False,
         incremental_rpc_enabled=True,
     ),
-    "incremental_rpc_enabled must remain disabled until P3 gate",
+    "incremental_rpc_enabled must require rpc_events_enabled",
 )
 
 clock, sync, merger, service = new_service()
@@ -157,6 +181,29 @@ assert_equal(
     result["status"]["last_event_decision_counts"],
     "local decision summary",
 )
+
+clock, sync, merger, service = new_service(incremental_rpc_enabled=True)
+merger.record_port_update("p-scoped", binding_host="local-host", revision_number=9)
+clock.advance(0.2)
+result = service.run_once()
+assert_equal(1, sync.resync_calls, "incremental local port update must not full resync")
+assert_equal(1, len(sync.scoped_calls), "incremental local port update must use scoped apply")
+assert_equal("p-scoped", sync.scoped_calls[0]["port_id"], "scoped port id")
+assert_equal("port_scoped_apply", result["events"]["decisions"][0]["action"], "scoped decision")
+assert_equal(True, result["events"]["incremental_submitted"], "scoped submit marker")
+assert_equal(
+    [{"action": "port_scoped_apply", "reason": "local_port_update", "count": 1}],
+    result["status"]["last_event_decision_counts"],
+    "scoped decision summary",
+)
+
+clock, sync, merger, service = new_service(incremental_rpc_enabled=True)
+merger.record_port_update("p-local-1", binding_host="local-host")
+merger.record_port_update("p-local-2", binding_host="local-host")
+clock.advance(0.2)
+result = service.run_once()
+assert_equal([], sync.scoped_calls, "multi-port incremental batch must not use scoped apply")
+assert_equal(2, sync.resync_calls, "multi-port incremental batch must fall back full resync")
 
 clock, sync, merger, service = new_service()
 merger.record_network_update("net-local")
