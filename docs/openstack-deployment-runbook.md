@@ -408,6 +408,114 @@ mutation, stale managed ports after source cleanup, repeated full-resync loops,
 or RabbitMQ consumer startup failure. The safe fallback is polling-only P1, not
 disabling ACL or touching OVS.
 
+## P3 Controlled Incremental Test
+
+P3 port-scoped apply is implemented but remains default-off. Treat it as a
+controlled test mode until a separate production rollout decision accepts a
+revision-aware environment.
+
+Do not change packaged defaults:
+
+```ini
+[neutron]
+rpc_events_enabled = false
+incremental_rpc_enabled = false
+revisionless_incremental_mode = disabled
+```
+
+Prerequisites before enabling P3 on a test host:
+
+| Gate | Required proof |
+| --- | --- |
+| P1 ACL full-resync | `port_source=neutronclient`, `acl.source=neutron`, and `full_resync_enabled=true` already pass on the host. |
+| P2 RPC canary | RPC package smoke and live fanout A/B pass with `incremental_rpc_enabled=false`. |
+| P3 failure semantics | Scoped UDS failure and unsafe candidate paths fall back to full-resync; invalid ACL remains degraded/bypass. |
+| P3 smoke evidence | `docs/evidence/openstack-n05-lite/20260702-p3-5-incremental-smoke/summary.md` or newer evidence exists. |
+| Revision policy | Production test requires trustworthy port `revision_number`; old Neutron may use `revisionless_incremental_mode=experimental` only as a lab valve. |
+
+Enable a revision-aware P3 test host:
+
+```bash
+sudo cp /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini \
+  /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini.pre-p3
+
+sudo sed -i 's/^rpc_events_enabled *=.*/rpc_events_enabled = true/' \
+  /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini
+sudo sed -i 's/^incremental_rpc_enabled *=.*/incremental_rpc_enabled = true/' \
+  /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini
+sudo sed -i 's/^revisionless_incremental_mode *=.*/revisionless_incremental_mode = disabled/' \
+  /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini
+
+sudo docker restart neutron_aria_agent
+```
+
+For the current old Neutron lab only, when the target port has no
+`revision_number`, replace the last setting with:
+
+```bash
+sudo sed -i 's/^revisionless_incremental_mode *=.*/revisionless_incremental_mode = experimental/' \
+  /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini
+```
+
+This is a test-only switch. It proves the implementation path can run in that
+lab; it does not replace revision-aware production acceptance.
+
+Recommended P3 smoke:
+
+```bash
+sudo REPO_ROOT=$(pwd) \
+  INCREMENTAL_RPC_ENABLED=true \
+  REVISIONLESS_INCREMENTAL_MODE=disabled \
+  deploy/kolla/smoke/neutron_aria_rpc_fanout_smoke.sh
+```
+
+For the old Neutron lab valve only:
+
+```bash
+sudo REPO_ROOT=$(pwd) \
+  INCREMENTAL_RPC_ENABLED=true \
+  REVISIONLESS_INCREMENTAL_MODE=experimental \
+  deploy/kolla/smoke/neutron_aria_rpc_fanout_smoke.sh
+```
+
+Expected P3 test result:
+
+- disabled case ignores the test fanout;
+- enabled case processes exactly one local port update;
+- revision-aware or explicit experimental test emits
+  `port_scoped_snapshot_complete`;
+- default revisionless mode emits no scoped completion and falls back to
+  full-resync;
+- rollback leaves `managed_ports=0` and no pending generation.
+
+P3 rollback to P2:
+
+```bash
+sudo sed -i 's/^incremental_rpc_enabled *=.*/incremental_rpc_enabled = false/' \
+  /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini
+sudo sed -i 's/^revisionless_incremental_mode *=.*/revisionless_incremental_mode = disabled/' \
+  /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini
+
+sudo docker restart neutron_aria_agent
+```
+
+P3 rollback to polling-only:
+
+```bash
+sudo sed -i 's/^incremental_rpc_enabled *=.*/incremental_rpc_enabled = false/' \
+  /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini
+sudo sed -i 's/^revisionless_incremental_mode *=.*/revisionless_incremental_mode = disabled/' \
+  /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini
+sudo sed -i 's/^rpc_events_enabled *=.*/rpc_events_enabled = false/' \
+  /etc/kolla/neutron-aria-agent/neutron-aria-agent.ini
+
+sudo docker restart neutron_aria_agent
+```
+
+Do not restart OVS, OVS agent, neutron-server, or `aria-datapath` for P3 flag
+rollback. Escalate to the broader ACL rollback flow only when datapath managed
+state itself must be cleared.
+
 ## OVS Restart Handling
 
 Aria does not own OVS data-plane health. During planned OVS maintenance, do not
@@ -481,15 +589,18 @@ the N3 `ovs-restart` gate.
 
 Safe rollback order:
 
-1. If RPC P2 is enabled, set `[neutron] rpc_events_enabled=false` and restart
+1. If P3 is enabled, set `[neutron] incremental_rpc_enabled=false` and
+   `revisionless_incremental_mode=disabled`, then restart only
+   `neutron-aria-agent` to return to P2 full-resync behavior.
+2. If RPC P2 is enabled, set `[neutron] rpc_events_enabled=false` and restart
    only `neutron-aria-agent` to return to polling-only.
-2. Set `full_resync_enabled=false` in `neutron-aria-agent` when rolling back
+3. Set `full_resync_enabled=false` in `neutron-aria-agent` when rolling back
    production snapshot submission.
-3. Set `[acl] source=disabled` or remove ACL bindings in Neutron.
-4. Allow one full resync/delete cycle to clear Neutron-managed datapath state.
-5. Stop `neutron-aria-agent`.
-6. Keep OVS agent and OVS forwarding untouched.
-7. Stop or restart `aria-datapath` only after confirming OVS connectivity remains healthy.
+4. Set `[acl] source=disabled` or remove ACL bindings in Neutron.
+5. Allow one full resync/delete cycle to clear Neutron-managed datapath state.
+6. Stop `neutron-aria-agent`.
+7. Keep OVS agent and OVS forwarding untouched.
+8. Stop or restart `aria-datapath` only after confirming OVS connectivity remains healthy.
 
 Never use socket deletion as the primary rollback method. A missing socket should
 produce degraded status and trigger recovery/full resync, not silently switch to

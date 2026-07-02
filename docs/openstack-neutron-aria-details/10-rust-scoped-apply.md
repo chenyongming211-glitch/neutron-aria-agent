@@ -237,12 +237,12 @@ Smoke tests before production enablement:
 
 Field note:
 
-- The controlled 10.58.159 ostack2 smoke on 2026-07-02 confirmed real fanout,
-  full-resync apply, UDS rollback, and the advertised Rust port-scoped route.
-  The same smoke could not accept runtime port-scoped apply because the target
-  Neutron returned `revision_number=None` for bound ports. That environment must
-  stay on P2 full-resync fallback until a revision source is available or a
-  separate, reviewed stale-event guard is designed.
+- The controlled 10.58.159 ostack2 smokes on 2026-07-02 confirmed real fanout,
+  full-resync apply, UDS rollback, the advertised Rust port-scoped route, P3
+  experimental port-scoped apply, and default revisionless full-resync fallback.
+  Because the target Neutron returns `revision_number=None` for bound ports,
+  `revisionless_incremental_mode=experimental` remains a lab-only valve. The
+  production P3 path remains revision-aware and default-off.
 
 ## Acceptance For Runtime Testing
 
@@ -256,6 +256,8 @@ be true:
   Python submitter, config dependency gates, and
   `incremental_rpc_enabled_default=false`;
 - Python P3-2 dry-run tests pass;
+- P3-4 failure semantics, P3-5 smoke evidence, and P3-6 default-off runbook
+  contract are accepted;
 - stage-one, stage-two, and stage-three checks pass.
 
 ## Non-Goals

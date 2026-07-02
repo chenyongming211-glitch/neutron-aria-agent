@@ -40,6 +40,9 @@ Minimum facts:
 7. Enable `full_resync_enabled=true` only after N0.5 and domain-authority smoke pass.
 8. Enable `rpc_events_enabled=true` only as a per-host P2 canary after P1
    polling full-resync, rollback, and N3 lifecycle gates are accepted.
+9. Enable `incremental_rpc_enabled=true` only as a controlled P3 test after P2
+   evidence, P3 failure semantics, and P3 smoke evidence are accepted. Keep
+   packaged defaults disabled.
 
 ## Smoke Groups
 
@@ -51,6 +54,7 @@ Minimum facts:
 | ACL fixture smoke | Validate datapath ACL path before Neutron server plugin exists. |
 | production ACL smoke | Validate `aria_acl` plugin -> agent -> datapath. |
 | RPC P2 smoke | Validate package preflight, real fanout A/B, foreign-host filtering, and source-host cleanup before enabling events beyond a canary. |
+| RPC P3 smoke | Validate explicit incremental on/off, revisionless default fallback, controlled revisionless lab mode, and rollback to zero managed ports. |
 | crash/restart smoke | Validate WAL and timeout recovery. |
 | rollback smoke | Validate disabling agent/ACL does not break OVS forwarding. |
 
@@ -95,6 +99,7 @@ runbook review is opened.
 | G6 full resync | `port_source=neutronclient`, `full_resync_enabled=true` | Resync and heartbeat stable. |
 | G7 rollback | rollback smoke | OVS connectivity preserved. |
 | P2 RPC events | P2 package + live fanout smokes | Per-host `rpc_events_enabled=true` can be enabled and rolled back to polling-only without OVS/datapath restart. |
+| P3 incremental events | P3-5 smoke + P3-6 runbook contract | Per-host `incremental_rpc_enabled=true` can be tested and rolled back to P2 or polling-only without OVS/datapath restart; packaged defaults remain disabled. |
 
 UDS peer-auth gates follow the Phase A-D sequence in
 `04-uds-contract-security.md`. Production mutating routes must not be declared
@@ -175,6 +180,7 @@ Each N0.5 entry should record:
 | RPC P2 live fanout A/B | `neutron_aria_rpc_fanout_smoke.sh` | Disabled path ignores test fanout; enabled path consumes fanout and triggers the P2 full-resync path. |
 | RPC P2 foreign-host filtering | `neutron_aria_rpc_foreign_host_smoke.sh` | Cross-host fanout is consumed but does not mutate local managed ports. |
 | RPC P2 source cleanup | `neutron_aria_rpc_source_cleanup_smoke.sh` | Projected local port moved to a foreign host is locally deleted with `migration_source_cleanup`. |
+| RPC P3 incremental on/off | `neutron_aria_rpc_fanout_smoke.sh` | With explicit incremental test settings, a safe local port update reaches port-scoped apply; with default revisionless mode, old Neutron falls back to full-resync; rollback leaves zero managed ports. |
 
 For VM->external direction, do not use host-initiated ping echo-reply as the
 proof. The guest must initiate traffic through SSH, QEMU guest agent, or a
@@ -197,6 +203,12 @@ RPC P2 rollback is narrower than product rollback: set
 polling/full-resync enabled. Do not disable ACL, stop datapath, or touch OVS
 for an RPC event-path rollback unless a separate ACL/datapath failure requires
 the broader rollback flow above.
+
+RPC P3 rollback is narrower than P2 rollback: set
+`incremental_rpc_enabled=false` and
+`revisionless_incremental_mode=disabled`, restart only
+`neutron-aria-agent`, and keep P2 full-resync recovery available. Set
+`rpc_events_enabled=false` only when rolling back all RPC event consumption.
 
 ### Error And Disposition Semantics
 
@@ -225,6 +237,8 @@ the broader rollback flow above.
 | Production ACL smoke | Effective ACL reaches datapath and reports status. |
 | RPC P2 enablement smoke | Package, A/B, foreign-host, and source-cleanup smokes pass before production canary. |
 | RPC P2 rollback | Disabling `rpc_events_enabled` returns the host to polling-only without changing ACL semantics. |
+| RPC P3 controlled smoke | Explicit incremental test reaches scoped apply only for safe local events; default revisionless mode falls back to full-resync. |
+| RPC P3 rollback | Disabling `incremental_rpc_enabled` and resetting `revisionless_incremental_mode=disabled` returns the host to P2 without changing ACL semantics. |
 | Recovery smoke | WAL/timeout recovery does not widen permissions. |
 | Rollback smoke | OVS forwarding continues after UDS rollback and after stopping/restarting `neutron_aria_agent`. |
 

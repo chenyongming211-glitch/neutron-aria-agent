@@ -163,6 +163,25 @@ agent writes `integration_mode=coexist` into snapshot bodies only.
 | `integration_mode` appears in ini | Warn or hard-fail during convergence; docs must not show it. |
 | `full_resync_enabled=true` while `port_source=disabled` | Hard config error or explicit degraded startup; do not silently claim production resync. |
 
+### P3 Default-Off Switch Levels
+
+`rpc_events_enabled`, `incremental_rpc_enabled`, and
+`revisionless_incremental_mode` are independent-looking fields, but the allowed
+runtime levels are intentionally narrow:
+
+| Level | Settings | Allowed Use |
+| --- | --- | --- |
+| Safe default | `rpc_events_enabled=false`, `incremental_rpc_enabled=false`, `revisionless_incremental_mode=disabled` | Packaged default and polling-only recovery. |
+| P2 event canary | `rpc_events_enabled=true`, `incremental_rpc_enabled=false`, `revisionless_incremental_mode=disabled` | RPC-triggered full-resync only. |
+| P3 revision-aware test | `rpc_events_enabled=true`, `incremental_rpc_enabled=true`, `revisionless_incremental_mode=disabled` | Controlled test host with trustworthy port revision. |
+| P3 legacy lab test | `rpc_events_enabled=true`, `incremental_rpc_enabled=true`, `revisionless_incremental_mode=experimental` | Controlled old-Neutron lab only; never packaged default. |
+
+Rollback from P3 to P2 changes only `incremental_rpc_enabled=false` and
+`revisionless_incremental_mode=disabled`. Rollback from P2 to polling-only then
+sets `rpc_events_enabled=false`. Both rollbacks restart only
+`neutron-aria-agent`; OVS, OVS agent, neutron-server, and datapath are not part
+of config flag rollback.
+
 ### Test Matrix
 
 | Test | Expected Result |

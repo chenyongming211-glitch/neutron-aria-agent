@@ -1,9 +1,10 @@
 # 09. Aria RPC And Incremental Sync Detail Plan
 
 Status: P2 RPC-triggered full-resync is implemented with field evidence and an
-operator enablement/rollback contract. P3 port-scoped incremental RPC remains a
-planned optimization. This document records the phased path from polling-only
-MVP to incremental RPC; it is not a claim that P3 is implemented.
+operator enablement/rollback contract. P3 port-scoped incremental RPC is
+implemented behind explicit config gates and has controlled test-host evidence.
+Packaged defaults keep P3 disabled; production P3 remains revision-aware and
+must retain full-resync rollback.
 
 Normative parents:
 
@@ -42,7 +43,7 @@ Target end state:
 | P0 safe default | `port_source=disabled`, `full_resync_enabled=false`, `rpc_events_enabled=false` | Heartbeat only | shipped |
 | P1 MVP production | `port_source=neutronclient`, `full_resync_enabled=true`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync | stage-two accepted |
 | P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | package smoke passed on 10.58.159; real fanout A/B passed on `ostack2.bj159.net`; multi-host foreign filtering passed on `ostack2/3/4`; source-host cleanup passed on `ostack2` |
-| P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | config-gated implementation in progress; P3-1 projection heartbeat, P3-2 builder/dry-run, P3-3 Rust route/capability, and Python single-port submitter are implemented; packaged default remains disabled. Production P3 requires trustworthy revision data; old Neutron without `revision_number` stays on P2 fallback unless a controlled test explicitly enables revisionless experimental mode. |
+| P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | config-gated implementation and controlled test-host evidence are accepted through P3-6; packaged default remains disabled. Production P3 requires trustworthy revision data; old Neutron without `revision_number` stays on P2 fallback unless a controlled test explicitly enables revisionless experimental mode. |
 
 Code anchors today:
 
@@ -322,15 +323,13 @@ Do not require plugin RPC to ship P3 if targeted REST read is sufficient.
 | P3 | add `incremental_rpc_enabled=true`, keep `resync_interval` backup |
 | P3 legacy test only | optionally add `revisionless_incremental_mode=experimental` on a controlled host with no Neutron port revision |
 
-Proposed new ini keys (names may change at implementation PR):
+Implemented ini keys:
 
 ```ini
 [neutron]
 rpc_events_enabled = true
 incremental_rpc_enabled = false
 revisionless_incremental_mode = disabled
-incremental_max_ports_per_batch = 16
-incremental_fallback_full_resync = true
 ```
 
 Rules:
@@ -339,13 +338,14 @@ Rules:
   `full_resync_enabled=true`, and `port_source=neutronclient`.
 - Packaged defaults keep `incremental_rpc_enabled=false`. Test environments may
   enable it after P2/stage-three evidence is accepted; production rollout still
-  requires P3 incremental smoke evidence and rollback readiness.
+  requires a separate revision-aware rollout decision.
 - Packaged defaults keep `revisionless_incremental_mode=disabled`. The only
   allowed non-default value is `experimental`, and only when
   `incremental_rpc_enabled=true` on a controlled test host.
-- If incremental path fails validation, or the event batch includes deletes,
-  multiple ports, network updates, or overflow, fall back to full-resync when
-  `incremental_fallback_full_resync=true`.
+- If the incremental path fails validation, or the event batch includes deletes,
+  multiple ports, network updates, overflow, capability drift, or stale/missing
+  revision evidence, fall back to full-resync. Full-resync fallback is not a
+  separate optional feature flag for v0.9.
 
 Container requirements for P2/P3:
 
@@ -398,7 +398,7 @@ Controlled test behavior:
 | P3-3 | Rust scoped snapshot apply | `ApplyScope::SinglePort` planner tests, internal scoped WAL/status boundary tests, shared runtime apply body extraction, shared preflight/idempotency checks, advertised UDS capability, and Python config-gated single-port submitter are implemented; packaged runtime default remains disabled |
 | P3-4 | Incremental ACL apply failure semantics | degraded/bypass without OVS loss |
 | P3-5 | RPC on/off + incremental on/off smokes | accepted for the old Neutron test host; evidence under `docs/evidence/openstack-n05-lite/20260702-p3-5-incremental-smoke/` |
-| P3-6 | Runbook and ini contract update (`01-ini-contract.md`) | config validation + docs |
+| P3-6 | Runbook and ini contract update (`01-ini-contract.md`) | default-off production contract, controlled test enablement, and rollback docs accepted |
 
 ## P3-4 Failure Semantics
 
@@ -429,6 +429,55 @@ Current local/package evidence:
 - Event-loop tests cover UDS port error without false ready/projection advance.
 - Event-loop tests cover invalid ACL preservation as degraded/bypass.
 - The package smoke embeds the same service-level failure cases.
+
+## P3-6 Default-Off And Rollback Contract
+
+P3-6 closes the operator contract for port-scoped incremental apply. It does not
+add a new datapath feature. The contract is: P3 may be tested explicitly, but it
+must not become the packaged or production default until a revision-aware
+rollout decision is made.
+
+Runtime modes:
+
+| Mode | Allowed scope | Required settings | Expected behavior |
+| --- | --- | --- | --- |
+| Packaged safe default | All installs | `rpc_events_enabled=false`, `incremental_rpc_enabled=false`, `revisionless_incremental_mode=disabled` | No RPC subscription; no scoped apply. |
+| P1 production ACL | Accepted ACL hosts | `full_resync_enabled=true`, `port_source=neutronclient`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync only. |
+| P2 canary | One host at a time after P1/N3 gates | P1 plus `rpc_events_enabled=true`, `incremental_rpc_enabled=false` | RPC event triggers full-resync; no scoped apply. |
+| P3 revision-aware test | Controlled test host with trustworthy port revision | P2 plus `incremental_rpc_enabled=true`, `revisionless_incremental_mode=disabled` | Single safe local newer-revision port update may use scoped apply. |
+| P3 legacy lab test | Controlled old-Neutron test host only | P2 plus `incremental_rpc_enabled=true`, `revisionless_incremental_mode=experimental` | Single safe local revisionless port update may use scoped apply for evidence only. |
+
+Forbidden defaults:
+
+- Do not ship `incremental_rpc_enabled=true` in packaged defaults.
+- Do not ship `revisionless_incremental_mode=experimental` in packaged
+  defaults.
+- Do not use revisionless experimental mode as production acceptance.
+- Do not disable periodic/full-resync recovery when enabling P2 or P3.
+- Do not restart OVS, OVS agent, neutron-server, or datapath merely to change
+  P2/P3 event flags; restart only `neutron_aria_agent` so it reloads config.
+
+Rollback levels:
+
+| From | Action | Result |
+| --- | --- | --- |
+| P3 test -> P2 | Set `incremental_rpc_enabled=false` and `revisionless_incremental_mode=disabled`; restart only `neutron_aria_agent`. | RPC can still trigger full-resync, but no scoped apply is submitted. |
+| P2 -> polling-only | Set `rpc_events_enabled=false`; restart only `neutron_aria_agent`. | Agent returns to periodic REST full-resync. |
+| Any event path -> ACL rollback | Follow the deployment runbook rollback flow only if ACL/datapath state itself must be cleared. | UDS delete/full-resync clears managed state; OVS remains untouched. |
+
+Rollback triggers:
+
+- `port_scoped_apply_fallback` repeats for normal local updates.
+- Port-scoped apply occurs for a foreign-host event.
+- `managed_ports` remains nonzero after the smoke rollback step.
+- Neutron no longer exposes trustworthy port revision and the host is not an
+  explicit legacy lab test.
+- RabbitMQ consumer startup or fanout behavior becomes unstable.
+- Domain status reports false ready, stale pending generation, or unexpected
+  ACL blocking for degraded/bypass input.
+
+P3-6 acceptance is the documentation and config contract above plus the P3-5
+field evidence. It is not permission to turn on P3 globally.
 
 ## Verification And Gates
 
@@ -474,8 +523,10 @@ Current entry-gate evidence:
 - Item 5 is covered by `EffectiveAclIndex.compare_revision_for_port()` unit
   tests for newer/same/older/unknown relations.
 
-This evidence allows P3 runtime testing on a controlled host. Production rollout
-still requires P3 incremental smoke evidence and rollback readiness.
+This evidence allows P3 runtime testing on a controlled host. P3-5/P3-6 accept
+incremental smoke and rollback readiness for the current old-Neutron test
+environment. Production rollout still requires a separate revision-aware
+rollout decision and must keep packaged defaults disabled.
 
 Allowed before production P3 runtime enablement:
 
