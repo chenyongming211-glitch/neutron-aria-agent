@@ -11,12 +11,20 @@ Normative order:
 3. `aria-acl-neutron-extension-product-design.md` owns `aria_acl` API/DB details.
 4. `openstack-deployment-runbook.md` owns enablement and rollback procedure.
 
+Product roadmap note:
+
+- `openstack-ebpf-platform-roadmap.md` records the latest positioning for Aria
+  as an OpenStack-aware eBPF datapath enhancement platform. It is directional
+  and must not expand v0.9 commitments unless the normative contracts above are
+  updated with gates and implementation evidence.
+
 ## Fixed Decisions
 
 | Decision | Status | Notes |
 | --- | --- | --- |
 | No overengineering | fixed | Do not build beyond the v0.9 OpenStack scope. Every new field, feature, abstraction, and workflow must map to a first-stage gate, smoke, production risk, or explicitly approved later-stage plan. |
 | OpenStack integration shape | fixed | Use OVS enhancement mode. OVS keeps L2 forwarding; Aria adds node-side ACL/QoS enhancement. |
+| eBPF platform positioning | fixed | Aria may evolve into an OpenStack-aware eBPF security and observability platform, but the current product commitment remains ACL-first. |
 | Runtime communication | fixed | `neutron-aria-agent` talks to `aria-datapath` through local UDS, not TCP OpenAPI. |
 | Deployment shape | fixed | Keep `neutron-aria-agent` and `aria-datapath` as separate runtime responsibilities; do not make OVS agent own datapath lifecycle. |
 | ACL production northbound | fixed | Production ACL input is `aria_acl` Neutron service plugin/API/DB. |
