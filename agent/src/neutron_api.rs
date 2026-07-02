@@ -117,6 +117,13 @@ struct SnapshotApplyTransaction {
     affected_ports: Vec<ManagedNeutronPort>,
 }
 
+struct SnapshotRuntimeApplyOutcome {
+    next_runtime: NeutronRuntimeState,
+    previous_applied_generation: u64,
+    results: Vec<NeutronPortApplyResult>,
+    has_error: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AclGroupPlan {
     name: String,
@@ -741,279 +748,25 @@ async fn apply_neutron_snapshot(
         });
     }
 
-    let mut next_ports = current_ports;
-    let SnapshotApplyTransaction { scope, plan, .. } = transaction;
-    let SnapshotPlan {
-        attach,
-        update,
-        detach,
-        ignored,
-    } = plan;
     let runtime_before_apply = {
         let runtime = state.runtime.read().await;
         runtime.clone()
     };
-    let mut next_statuses = port_status_seed_for_scope(&runtime_before_apply, &scope);
-    let mut results = ignored;
-
-    for port in detach {
-        if let Err(e) = purge_neutron_acl(&state, &port.ifname, &port.port_id).await {
-            warn!(
-                port_id = %port.port_id,
-                ifname = %port.ifname,
-                error = %e,
-                "failed to purge Neutron ACL before detach"
-            );
-        }
-        match state.registry.detach(&port.ifname).await {
-            Ok(()) => {
-                next_ports.remove(&port.port_id);
-                next_statuses.insert(
-                    port.port_id.clone(),
-                    port_runtime_status(
-                        &port.port_id,
-                        &port.ifname,
-                        snapshot.generation,
-                        requested_hash.clone(),
-                        port.managed_domains.clone(),
-                        "detached",
-                        None,
-                        domain_statuses_for(&port.managed_domains, "detached", None),
-                    ),
-                );
-                state
-                    .control_plane
-                    .clear_neutron_port_authority(&port.ifname)
-                    .await;
-                results.push(NeutronPortApplyResult {
-                    port_id: port.port_id,
-                    ifname: port.ifname,
-                    action: "detach".to_string(),
-                    status: "ok".to_string(),
-                    reason: None,
-                });
-            }
-            Err(e) => {
-                next_statuses.insert(
-                    port.port_id.clone(),
-                    port_runtime_status(
-                        &port.port_id,
-                        &port.ifname,
-                        snapshot.generation,
-                        requested_hash.clone(),
-                        port.managed_domains.clone(),
-                        "error",
-                        Some(e.clone()),
-                        domain_statuses_for(&port.managed_domains, "error", Some(e.clone())),
-                    ),
-                );
-                results.push(NeutronPortApplyResult {
-                    port_id: port.port_id,
-                    ifname: port.ifname,
-                    action: "detach".to_string(),
-                    status: "error".to_string(),
-                    reason: Some(e),
-                });
-            }
-        }
-    }
-
-    for port in update {
-        let managed = managed_port_from_snapshot(&port);
-        let domain_result = reconcile_neutron_domains(&state, &port).await;
-        if domain_result.ok {
-            state
-                .control_plane
-                .mark_neutron_port_authority(
-                    &managed.ifname,
-                    &managed.port_id,
-                    &managed.managed_domains,
-                    snapshot.generation,
-                )
-                .await;
-            let (port_status, port_reason) =
-                successful_port_status(&domain_result.domains);
-            next_ports.insert(managed.port_id.clone(), managed.clone());
-            next_statuses.insert(
-                managed.port_id.clone(),
-                port_runtime_status(
-                    &managed.port_id,
-                    &managed.ifname,
-                    snapshot.generation,
-                    requested_hash.clone(),
-                    managed.managed_domains.clone(),
-                    &port_status,
-                    port_reason,
-                    domain_result.domains,
-                ),
-            );
-            results.push(NeutronPortApplyResult {
-                port_id: managed.port_id,
-                ifname: managed.ifname,
-                action: "update".to_string(),
-                status: "ok".to_string(),
-                reason: None,
-            });
-        } else {
-            next_statuses.insert(
-                managed.port_id.clone(),
-                port_runtime_status(
-                    &managed.port_id,
-                    &managed.ifname,
-                    snapshot.generation,
-                    requested_hash.clone(),
-                    managed.managed_domains.clone(),
-                    "error",
-                    domain_result.reason.clone(),
-                    domain_result.domains,
-                ),
-            );
-            results.push(NeutronPortApplyResult {
-                port_id: managed.port_id,
-                ifname: managed.ifname,
-                action: "update".to_string(),
-                status: "error".to_string(),
-                reason: domain_result.reason,
-            });
-        }
-    }
-
-    for port in attach {
-        match state.registry.attach(&port.ifname).await {
-            Ok(()) => {
-                if let Err(e) = fault_injection::check("neutron.port.after_attach").await {
-                    if let Err(detach_err) = state.registry.detach(&port.ifname).await {
-                        warn!(
-                            port_id = %port.port_id,
-                            ifname = %port.ifname,
-                            error = %detach_err,
-                            "failed to detach after fault injection at port attach"
-                        );
-                    }
-                    results.push(NeutronPortApplyResult {
-                        port_id: port.port_id,
-                        ifname: port.ifname,
-                        action: "attach".to_string(),
-                        status: "error".to_string(),
-                        reason: Some(e),
-                    });
-                    continue;
-                }
-                let managed = managed_port_from_snapshot(&port);
-                let domain_result = reconcile_neutron_domains(&state, &port).await;
-                if domain_result.ok {
-                    state
-                        .control_plane
-                        .mark_neutron_port_authority(
-                            &managed.ifname,
-                            &managed.port_id,
-                            &managed.managed_domains,
-                            snapshot.generation,
-                        )
-                        .await;
-                    let (port_status, port_reason) =
-                        successful_port_status(&domain_result.domains);
-                    next_ports.insert(managed.port_id.clone(), managed.clone());
-                    next_statuses.insert(
-                        managed.port_id.clone(),
-                        port_runtime_status(
-                            &managed.port_id,
-                            &managed.ifname,
-                            snapshot.generation,
-                            requested_hash.clone(),
-                            managed.managed_domains.clone(),
-                            &port_status,
-                            port_reason,
-                            domain_result.domains,
-                        ),
-                    );
-                    results.push(NeutronPortApplyResult {
-                        port_id: managed.port_id,
-                        ifname: managed.ifname,
-                        action: "attach".to_string(),
-                        status: "ok".to_string(),
-                        reason: None,
-                    });
-                } else {
-                    if let Err(purge_err) =
-                        purge_neutron_acl(&state, &port.ifname, &port.port_id).await
-                    {
-                        warn!(
-                            port_id = %port.port_id,
-                            ifname = %port.ifname,
-                            error = %purge_err,
-                            "failed to purge Neutron ACL after domain apply failure"
-                        );
-                    }
-                    if let Err(detach_err) = state.registry.detach(&port.ifname).await {
-                        warn!(
-                            port_id = %port.port_id,
-                            ifname = %port.ifname,
-                            error = %detach_err,
-                            "failed to detach after Neutron domain apply failure"
-                        );
-                    }
-                    state
-                        .control_plane
-                        .clear_neutron_port_authority(&port.ifname)
-                        .await;
-                    next_statuses.insert(
-                        managed.port_id.clone(),
-                        port_runtime_status(
-                            &managed.port_id,
-                            &managed.ifname,
-                            snapshot.generation,
-                            requested_hash.clone(),
-                            managed.managed_domains.clone(),
-                            "error",
-                            domain_result.reason.clone(),
-                            domain_result.domains,
-                        ),
-                    );
-                    results.push(NeutronPortApplyResult {
-                        port_id: managed.port_id,
-                        ifname: managed.ifname,
-                        action: "attach".to_string(),
-                        status: "error".to_string(),
-                        reason: domain_result.reason,
-                    });
-                }
-            }
-            Err(e) => {
-                next_statuses.insert(
-                    port.port_id.clone(),
-                    port_runtime_status(
-                        &port.port_id,
-                        &port.ifname,
-                        snapshot.generation,
-                        requested_hash.clone(),
-                        port.managed_domains.clone(),
-                        "error",
-                        Some(e.clone()),
-                        domain_statuses_for(&port.managed_domains, "error", Some(e.clone())),
-                    ),
-                );
-                results.push(NeutronPortApplyResult {
-                    port_id: port.port_id,
-                    ifname: port.ifname,
-                    action: "attach".to_string(),
-                    status: "error".to_string(),
-                    reason: Some(e),
-                });
-            }
-        }
-    }
-
-    let has_error = results.iter().any(|result| result.status == "error");
-    let previous_applied_generation = runtime_before_apply.applied_generation;
-    let next_runtime = build_snapshot_commit_runtime(
-        &runtime_before_apply,
+    let outcome = apply_snapshot_runtime_transaction(
+        &state,
         snapshot.generation,
         requested_hash.clone(),
-        next_ports,
-        next_statuses,
+        current_ports,
+        runtime_before_apply,
+        transaction,
+    )
+    .await;
+    let SnapshotRuntimeApplyOutcome {
+        next_runtime,
+        previous_applied_generation,
+        results,
         has_error,
-    );
+    } = outcome;
 
     if let Err(e) = fault_injection::check("neutron.snapshot.before_commit").await {
         return Err(SnapshotApplyError {
@@ -1062,6 +815,289 @@ async fn apply_neutron_snapshot(
         results,
         state.registry.list().await,
     ))
+}
+
+async fn apply_snapshot_runtime_transaction(
+    state: &NeutronApiState,
+    generation: u64,
+    requested_hash: Option<String>,
+    current_ports: BTreeMap<String, ManagedNeutronPort>,
+    runtime_before_apply: NeutronRuntimeState,
+    transaction: SnapshotApplyTransaction,
+) -> SnapshotRuntimeApplyOutcome {
+    let mut next_ports = current_ports;
+    let SnapshotApplyTransaction { scope, plan, .. } = transaction;
+    let SnapshotPlan {
+        attach,
+        update,
+        detach,
+        ignored,
+    } = plan;
+    let mut next_statuses = port_status_seed_for_scope(&runtime_before_apply, &scope);
+    let mut results = ignored;
+
+    for port in detach {
+        if let Err(e) = purge_neutron_acl(state, &port.ifname, &port.port_id).await {
+            warn!(
+                port_id = %port.port_id,
+                ifname = %port.ifname,
+                error = %e,
+                "failed to purge Neutron ACL before detach"
+            );
+        }
+        match state.registry.detach(&port.ifname).await {
+            Ok(()) => {
+                next_ports.remove(&port.port_id);
+                next_statuses.insert(
+                    port.port_id.clone(),
+                    port_runtime_status(
+                        &port.port_id,
+                        &port.ifname,
+                        generation,
+                        requested_hash.clone(),
+                        port.managed_domains.clone(),
+                        "detached",
+                        None,
+                        domain_statuses_for(&port.managed_domains, "detached", None),
+                    ),
+                );
+                state
+                    .control_plane
+                    .clear_neutron_port_authority(&port.ifname)
+                    .await;
+                results.push(NeutronPortApplyResult {
+                    port_id: port.port_id,
+                    ifname: port.ifname,
+                    action: "detach".to_string(),
+                    status: "ok".to_string(),
+                    reason: None,
+                });
+            }
+            Err(e) => {
+                next_statuses.insert(
+                    port.port_id.clone(),
+                    port_runtime_status(
+                        &port.port_id,
+                        &port.ifname,
+                        generation,
+                        requested_hash.clone(),
+                        port.managed_domains.clone(),
+                        "error",
+                        Some(e.clone()),
+                        domain_statuses_for(&port.managed_domains, "error", Some(e.clone())),
+                    ),
+                );
+                results.push(NeutronPortApplyResult {
+                    port_id: port.port_id,
+                    ifname: port.ifname,
+                    action: "detach".to_string(),
+                    status: "error".to_string(),
+                    reason: Some(e),
+                });
+            }
+        }
+    }
+
+    for port in update {
+        let managed = managed_port_from_snapshot(&port);
+        let domain_result = reconcile_neutron_domains(state, &port).await;
+        if domain_result.ok {
+            state
+                .control_plane
+                .mark_neutron_port_authority(
+                    &managed.ifname,
+                    &managed.port_id,
+                    &managed.managed_domains,
+                    generation,
+                )
+                .await;
+            let (port_status, port_reason) = successful_port_status(&domain_result.domains);
+            next_ports.insert(managed.port_id.clone(), managed.clone());
+            next_statuses.insert(
+                managed.port_id.clone(),
+                port_runtime_status(
+                    &managed.port_id,
+                    &managed.ifname,
+                    generation,
+                    requested_hash.clone(),
+                    managed.managed_domains.clone(),
+                    &port_status,
+                    port_reason,
+                    domain_result.domains,
+                ),
+            );
+            results.push(NeutronPortApplyResult {
+                port_id: managed.port_id,
+                ifname: managed.ifname,
+                action: "update".to_string(),
+                status: "ok".to_string(),
+                reason: None,
+            });
+        } else {
+            next_statuses.insert(
+                managed.port_id.clone(),
+                port_runtime_status(
+                    &managed.port_id,
+                    &managed.ifname,
+                    generation,
+                    requested_hash.clone(),
+                    managed.managed_domains.clone(),
+                    "error",
+                    domain_result.reason.clone(),
+                    domain_result.domains,
+                ),
+            );
+            results.push(NeutronPortApplyResult {
+                port_id: managed.port_id,
+                ifname: managed.ifname,
+                action: "update".to_string(),
+                status: "error".to_string(),
+                reason: domain_result.reason,
+            });
+        }
+    }
+
+    for port in attach {
+        match state.registry.attach(&port.ifname).await {
+            Ok(()) => {
+                if let Err(e) = fault_injection::check("neutron.port.after_attach").await {
+                    if let Err(detach_err) = state.registry.detach(&port.ifname).await {
+                        warn!(
+                            port_id = %port.port_id,
+                            ifname = %port.ifname,
+                            error = %detach_err,
+                            "failed to detach after fault injection at port attach"
+                        );
+                    }
+                    results.push(NeutronPortApplyResult {
+                        port_id: port.port_id,
+                        ifname: port.ifname,
+                        action: "attach".to_string(),
+                        status: "error".to_string(),
+                        reason: Some(e),
+                    });
+                    continue;
+                }
+                let managed = managed_port_from_snapshot(&port);
+                let domain_result = reconcile_neutron_domains(state, &port).await;
+                if domain_result.ok {
+                    state
+                        .control_plane
+                        .mark_neutron_port_authority(
+                            &managed.ifname,
+                            &managed.port_id,
+                            &managed.managed_domains,
+                            generation,
+                        )
+                        .await;
+                    let (port_status, port_reason) = successful_port_status(&domain_result.domains);
+                    next_ports.insert(managed.port_id.clone(), managed.clone());
+                    next_statuses.insert(
+                        managed.port_id.clone(),
+                        port_runtime_status(
+                            &managed.port_id,
+                            &managed.ifname,
+                            generation,
+                            requested_hash.clone(),
+                            managed.managed_domains.clone(),
+                            &port_status,
+                            port_reason,
+                            domain_result.domains,
+                        ),
+                    );
+                    results.push(NeutronPortApplyResult {
+                        port_id: managed.port_id,
+                        ifname: managed.ifname,
+                        action: "attach".to_string(),
+                        status: "ok".to_string(),
+                        reason: None,
+                    });
+                } else {
+                    if let Err(purge_err) =
+                        purge_neutron_acl(state, &port.ifname, &port.port_id).await
+                    {
+                        warn!(
+                            port_id = %port.port_id,
+                            ifname = %port.ifname,
+                            error = %purge_err,
+                            "failed to purge Neutron ACL after domain apply failure"
+                        );
+                    }
+                    if let Err(detach_err) = state.registry.detach(&port.ifname).await {
+                        warn!(
+                            port_id = %port.port_id,
+                            ifname = %port.ifname,
+                            error = %detach_err,
+                            "failed to detach after Neutron domain apply failure"
+                        );
+                    }
+                    state
+                        .control_plane
+                        .clear_neutron_port_authority(&port.ifname)
+                        .await;
+                    next_statuses.insert(
+                        managed.port_id.clone(),
+                        port_runtime_status(
+                            &managed.port_id,
+                            &managed.ifname,
+                            generation,
+                            requested_hash.clone(),
+                            managed.managed_domains.clone(),
+                            "error",
+                            domain_result.reason.clone(),
+                            domain_result.domains,
+                        ),
+                    );
+                    results.push(NeutronPortApplyResult {
+                        port_id: managed.port_id,
+                        ifname: managed.ifname,
+                        action: "attach".to_string(),
+                        status: "error".to_string(),
+                        reason: domain_result.reason,
+                    });
+                }
+            }
+            Err(e) => {
+                next_statuses.insert(
+                    port.port_id.clone(),
+                    port_runtime_status(
+                        &port.port_id,
+                        &port.ifname,
+                        generation,
+                        requested_hash.clone(),
+                        port.managed_domains.clone(),
+                        "error",
+                        Some(e.clone()),
+                        domain_statuses_for(&port.managed_domains, "error", Some(e.clone())),
+                    ),
+                );
+                results.push(NeutronPortApplyResult {
+                    port_id: port.port_id,
+                    ifname: port.ifname,
+                    action: "attach".to_string(),
+                    status: "error".to_string(),
+                    reason: Some(e),
+                });
+            }
+        }
+    }
+
+    let has_error = results.iter().any(|result| result.status == "error");
+    let previous_applied_generation = runtime_before_apply.applied_generation;
+    let next_runtime = build_snapshot_commit_runtime(
+        &runtime_before_apply,
+        generation,
+        requested_hash,
+        next_ports,
+        next_statuses,
+        has_error,
+    );
+    SnapshotRuntimeApplyOutcome {
+        next_runtime,
+        previous_applied_generation,
+        results,
+        has_error,
+    }
 }
 
 fn hashes_match(left: &Option<String>, right: &Option<String>) -> bool {
@@ -2501,6 +2537,11 @@ fn managed_binding_matches(managed: &ManagedNeutronPort, port: &NeutronPortSnaps
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ebpf_binary::TraceBackendKind;
+    use crate::kernel_drop_manager::KernelDropManager;
+    use crate::ssl_manager::SslManager;
+    use crate::trace_backend::TraceManager;
+    use std::sync::Arc;
 
     fn managed(port_id: &str, ifname: &str) -> ManagedNeutronPort {
         ManagedNeutronPort {
@@ -2535,6 +2576,47 @@ mod tests {
             qos: None,
             mirror: None,
         }
+    }
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("aria-neutron-{}-{}", name, nanos));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn test_neutron_state(root: &std::path::Path) -> NeutronApiState {
+        let ebpf_path = root.join("libebpf_firewall.so").to_string_lossy().to_string();
+        let pin_path = root.join("pin").to_string_lossy().to_string();
+        let state_path = root.join("state").to_string_lossy().to_string();
+        let ssl_manager = Arc::new(SslManager::new(&ebpf_path, &pin_path));
+        let kernel_drop_manager = Arc::new(KernelDropManager::new(
+            &ebpf_path,
+            &pin_path,
+            &state_path,
+        ));
+        let trace_manager = Arc::new(TraceManager::new(TraceBackendKind::LegacyMap));
+        let control_plane = Arc::new(ControlPlane::new(
+            &ebpf_path,
+            &pin_path,
+            &state_path,
+            ssl_manager,
+            kernel_drop_manager,
+            trace_manager,
+        ));
+        let registry = Arc::new(TapRegistry::new(
+            &ebpf_path,
+            &pin_path,
+            &state_path,
+            "^tap",
+            4096,
+            control_plane.clone(),
+        ));
+        NeutronApiState::new(registry, control_plane, "br-int".to_string())
     }
 
     fn ready_status(port_id: &str, ifname: &str, generation: u64) -> NeutronPortStatus {
@@ -3273,6 +3355,88 @@ mod tests {
         assert_eq!(next.desired_hash, Some("hash-31".to_string()));
         assert_eq!(next.applied_desired_hash, Some("hash-30".to_string()));
         assert_eq!(next.authority_state, "partial");
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_transaction_runtime_scoped_error_uses_shared_apply_body() {
+        let root = temp_root("runtime-scoped");
+        let state = test_neutron_state(&root);
+        let mut current_ports = BTreeMap::new();
+        current_ports.insert(
+            "other-port".to_string(),
+            ManagedNeutronPort {
+                managed_domains: vec!["acl".to_string()],
+                ..managed("other-port", "tap-other")
+            },
+        );
+        let mut previous_statuses = BTreeMap::new();
+        previous_statuses.insert(
+            "other-port".to_string(),
+            ready_status("other-port", "tap-other", 40),
+        );
+        let previous = NeutronRuntimeState {
+            accepted_generation: 40,
+            applied_generation: 40,
+            applied_desired_hash: Some("hash-40".to_string()),
+            authority_state: "ready".to_string(),
+            ports: current_ports.clone(),
+            port_statuses: previous_statuses,
+            ..Default::default()
+        };
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 41,
+            desired_hash: Some("hash-41".to_string()),
+            host: None,
+            ports: vec![port("target-port", "tap-target", true)],
+        };
+        let plan = SnapshotPlan {
+            attach: Vec::new(),
+            update: Vec::new(),
+            detach: Vec::new(),
+            ignored: vec![NeutronPortApplyResult {
+                port_id: "target-port".to_string(),
+                ifname: "tap-target".to_string(),
+                action: "update".to_string(),
+                status: "error".to_string(),
+                reason: Some("tap_missing".to_string()),
+            }],
+        };
+        let transaction = build_snapshot_transaction_from_plan(
+            ApplyScope::SinglePort("target-port".to_string()),
+            &snapshot,
+            plan,
+        )
+        .expect("scoped transaction should stay within target port");
+
+        let outcome = apply_snapshot_runtime_transaction(
+            &state,
+            41,
+            Some("hash-41".to_string()),
+            current_ports,
+            previous,
+            transaction,
+        )
+        .await;
+
+        assert!(outcome.has_error);
+        assert_eq!(outcome.previous_applied_generation, 40);
+        assert_eq!(outcome.results.len(), 1);
+        assert_eq!(outcome.results[0].port_id, "target-port");
+        assert_eq!(outcome.next_runtime.accepted_generation, 41);
+        assert_eq!(outcome.next_runtime.applied_generation, 40);
+        assert_eq!(outcome.next_runtime.pending_generation, Some(41));
+        assert_eq!(outcome.next_runtime.authority_state, "partial");
+        assert_eq!(
+            outcome
+                .next_runtime
+                .port_statuses
+                .get("other-port")
+                .map(|status| (status.generation, status.desired_hash.clone())),
+            Some((40, Some("hash-40".to_string())))
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
