@@ -471,6 +471,12 @@ Field evidence:
   Neutron port reads, full-resync apply, and rollback worked, but the target
   Neutron returned `revision_number=None` for bound ports, so the port-scoped
   runtime gate remains not accepted for this environment.
+- `docs/evidence/openstack-n05-lite/20260702-p3-revisionless-experimental-fanout/summary.md`
+  records the controlled legacy-mode follow-up. With
+  `revisionless_incremental_mode=experimental`, a projected local port update
+  reached `port_scoped_snapshot_complete` and rollback left
+  `managed_ports=0`. This is test-host evidence only, not production P3
+  acceptance.
 
 Follow-up decision recorded on 2026-07-02:
 

@@ -536,3 +536,27 @@ Boundary: this proves read-only P3-1 projection/decision observability only.
 `incremental_rpc_enabled` remains `false`; no port-scoped snapshot apply,
 Rust datapath incremental path, OVS restart, OVS-agent restart, Neutron-server
 restart, or `aria-datapath` restart was performed.
+
+## 2026-07-02 P3 Revisionless Experimental Update
+
+`ostack2.bj159.net` has controlled legacy-mode evidence for P3 port-scoped
+apply when the old Neutron API returns no port `revision_number`.
+
+- Current `neutron_aria` egg was installed into the running
+  `neutron_aria_agent` container.
+- Only `neutron_aria_agent` was restarted to load the Python egg.
+- `neutron_aria_rpc_event_smoke.sh` passed.
+- `neutron_aria_rpc_fanout_smoke.sh` passed with
+  `INCREMENTAL_RPC_ENABLED=true` and
+  `REVISIONLESS_INCREMENTAL_MODE=experimental`.
+- The enabled leg selected a currently projected local managed port, consumed
+  a real RabbitMQ `port.update`, and reached `port_scoped_snapshot_complete`.
+- Rollback left `managed_ports=0`.
+
+Evidence:
+`docs/evidence/openstack-n05-lite/20260702-p3-revisionless-experimental-fanout/summary.md`.
+
+Boundary: this proves the explicit test-only revisionless P3 path can run in
+the legacy lab. Production P3 remains revision-aware; old Neutron defaults to
+P2 full-resync fallback unless a controlled test explicitly enables
+`revisionless_incremental_mode=experimental`.
