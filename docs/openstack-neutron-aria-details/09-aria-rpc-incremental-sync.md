@@ -42,7 +42,7 @@ Target end state:
 | P0 safe default | `port_source=disabled`, `full_resync_enabled=false`, `rpc_events_enabled=false` | Heartbeat only | shipped |
 | P1 MVP production | `port_source=neutronclient`, `full_resync_enabled=true`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync | stage-two accepted |
 | P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | package smoke passed on 10.58.159; real fanout A/B passed on `ostack2.bj159.net`; multi-host foreign filtering passed on `ostack2/3/4`; source-host cleanup passed on `ostack2` |
-| P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | **this plan** |
+| P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | planned; P3-1 read-only projection/decision heartbeat field gate passed on `ostack2/3/4` |
 
 Code anchors today:
 
@@ -398,6 +398,12 @@ Allowed before the full P3 entry gate:
   delete cleanup, and conservative full-resync fallback.
 - Publish compact heartbeat/debug summaries for projection index size and the
   last RPC decision batch.
+
+Field evidence:
+
+- `docs/evidence/openstack-n05-lite/20260702-p3-projection-heartbeat-3node/summary.md`
+  records the accepted three-node heartbeat/debug gate for the read-only P3-1
+  projection index and last event decision summaries.
 
 Still forbidden before the full P3 entry gate:
 

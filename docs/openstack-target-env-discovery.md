@@ -515,3 +515,24 @@ HTTP 200 from `/api/v1/neutron/status`, and peercred audit recorded
 `peercred_allow_list_match`. The rollout smoke restored each original
 `aria_datapath` container and config after evidence collection. Persistent
 three-host rollout is still pending.
+
+## 2026-07-02 P3-1 Projection Heartbeat Update
+
+`ostack2.bj159.net`, `ostack3.bj159.net`, and `ostack4.bj159.net` now have
+accepted P3-1 heartbeat/debug observability evidence:
+
+- Current `neutron_aria` egg was installed into each running
+  `neutron_aria_agent` container.
+- Only `neutron_aria_agent` was restarted on each host.
+- `neutron_aria_rpc_event_smoke.sh` passed on all three hosts.
+- `neutron_aria_heartbeat_smoke.sh` passed with
+  `REQUIRE_HEARTBEAT_SUMMARY_FIELDS=true` and
+  `REQUIRE_P3_PROJECTION_FIELDS=true` for all three hosts.
+
+Evidence:
+`docs/evidence/openstack-n05-lite/20260702-p3-projection-heartbeat-3node/summary.md`.
+
+Boundary: this proves read-only P3-1 projection/decision observability only.
+`incremental_rpc_enabled` remains `false`; no port-scoped snapshot apply,
+Rust datapath incremental path, OVS restart, OVS-agent restart, Neutron-server
+restart, or `aria-datapath` restart was performed.
