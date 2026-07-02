@@ -42,7 +42,7 @@ Target end state:
 | P0 safe default | `port_source=disabled`, `full_resync_enabled=false`, `rpc_events_enabled=false` | Heartbeat only | shipped |
 | P1 MVP production | `port_source=neutronclient`, `full_resync_enabled=true`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync | stage-two accepted |
 | P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | package smoke passed on 10.58.159; real fanout A/B passed on `ostack2.bj159.net`; multi-host foreign filtering passed on `ostack2/3/4`; source-host cleanup passed on `ostack2` |
-| P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | planned; P3-1 read-only projection/decision heartbeat field gate passed on `ostack2/3/4` |
+| P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | planned; P3-1 read-only projection/decision heartbeat field gate passed on `ostack2/3/4`; P3-2 Python port-scoped snapshot builder is pure construction only |
 
 Code anchors today:
 
@@ -350,7 +350,7 @@ Container requirements for P2/P3:
 | P2-2 | Foreign-host fanout filtering tests | no cross-host managed port mutation |
 | P2-3 | Production canary switch and polling-only rollback runbook | `rpc_events_enabled=true` can be enabled and disabled per host without OVS/datapath restart |
 | P3-1 | Projected port store + network index | inactive/read-only unit tests for host/network/revision filtering; no port-scoped apply |
-| P3-2 | Port-scoped snapshot builder in Python | unit tests + UDS contract tests |
+| P3-2 | Port-scoped snapshot builder in Python | pure builder unit tests + UDS contract tests; no UDS submitter |
 | P3-3 | Rust scoped snapshot apply | WAL/generation tests; no false ready |
 | P3-4 | Incremental ACL apply failure semantics | degraded/bypass without OVS loss |
 | P3-5 | RPC on/off + incremental on/off smokes | evidence under `docs/evidence/openstack-n05-lite/` |
@@ -408,6 +408,7 @@ Allowed before the full P3 entry gate:
 
 - Add `incremental_rpc_enabled=false` as an explicit blocked config gate.
 - Build an in-memory `ProjectedStateIndex` from accepted full-resync results.
+- Build pure Python port-scoped candidate snapshots for unit testing only.
 - Unit test local/foreign host decisions, revision relation, network locality,
   delete cleanup, and conservative full-resync fallback.
 - Publish compact heartbeat/debug summaries for projection index size and the

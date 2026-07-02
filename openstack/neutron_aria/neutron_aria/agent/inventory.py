@@ -292,3 +292,39 @@ class PortCandidateBuilder(object):
                 snapshot_port,
             )
         return snapshot_port
+
+
+class PortScopedSnapshotBuilder(object):
+    """Build one-port candidate snapshots for future P3 incremental apply.
+
+    This builder is intentionally pure construction. It does not submit UDS
+    requests, does not compute WAL hashes, and must not change full-resync
+    runtime behavior while incremental RPC remains disabled.
+    """
+
+    def __init__(self, host, managed_domains=None, acl_index=None, qos_index=None):
+        self.host = host
+        self.candidate_builder = PortCandidateBuilder(
+            host,
+            managed_domains=managed_domains,
+            acl_index=acl_index,
+            qos_index=qos_index,
+        )
+
+    def build_port_snapshot(self, neutron_ports, port_id, generation):
+        snapshot = self.candidate_builder.build_snapshot(
+            neutron_ports,
+            generation=generation,
+        )
+        return {
+            "generation": snapshot["generation"],
+            "host": snapshot["host"],
+            "scope": {
+                "type": "port",
+                "port_id": port_id,
+            },
+            "ports": [
+                port for port in snapshot["ports"]
+                if port.get("port_id") == port_id
+            ],
+        }

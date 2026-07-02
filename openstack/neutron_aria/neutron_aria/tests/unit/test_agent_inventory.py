@@ -7,6 +7,7 @@ from neutron_aria.agent.inventory import OVS_BRIDGE_MISMATCH
 from neutron_aria.agent.inventory import PENDING_LOCAL_VALIDATION
 from neutron_aria.agent.inventory import PortCandidateBuilder
 from neutron_aria.agent.inventory import PortInventoryBuilder
+from neutron_aria.agent.inventory import PortScopedSnapshotBuilder
 from neutron_aria.agent.inventory import TAP_NOT_FOUND
 from neutron_aria.agent.ovsdb import OvsInterface
 from neutron_aria.agent.effective_acl import EffectiveAclIndex
@@ -203,6 +204,93 @@ class AgentInventoryTestCase(unittest.TestCase):
         self.assertEqual("not_requested", vm_entry["acl"]["status"])
         self.assertEqual("bypass", vm_entry["acl"]["effective_action"])
         self.assertEqual("no_enabled_binding", vm_entry["acl"]["reason"])
+
+    def test_port_scoped_snapshot_builds_single_local_port_candidate(self):
+        vm_port = neutron_port(VM_PORT)
+        vm_port["network_id"] = "net-1"
+        other_port = neutron_port(MISSING_TAP_PORT)
+        other_port["network_id"] = "net-1"
+        acl_index = EffectiveAclIndex(
+            policies=[
+                {
+                    "id": "acl-port",
+                    "default_action": "allow",
+                    "revision_number": 5,
+                },
+            ],
+            bindings=[
+                {
+                    "id": "acl-binding",
+                    "policy_id": "acl-port",
+                    "target_type": "port",
+                    "target_id": VM_PORT,
+                    "revision_number": 6,
+                },
+            ],
+        )
+        builder = PortScopedSnapshotBuilder(
+            "ostack2",
+            managed_domains=["acl"],
+            acl_index=acl_index,
+        )
+
+        snapshot = builder.build_port_snapshot(
+            [vm_port, other_port, neutron_port(REMOTE_PORT, host="ostack3")],
+            VM_PORT,
+            generation=12,
+        )
+
+        self.assertEqual(12, snapshot["generation"])
+        self.assertEqual("ostack2", snapshot["host"])
+        self.assertEqual({"type": "port", "port_id": VM_PORT}, snapshot["scope"])
+        self.assertEqual(1, len(snapshot["ports"]))
+
+        vm_entry = snapshot["ports"][0]
+        self.assertEqual(VM_PORT, vm_entry["port_id"])
+        self.assertTrue(vm_entry["eligible"])
+        self.assertEqual(PENDING_LOCAL_VALIDATION, vm_entry["disposition"])
+        self.assertEqual(["acl"], vm_entry["managed_domains"])
+        self.assertEqual("acl-port", vm_entry["acl"]["policy_id"])
+        self.assertEqual("enforce", vm_entry["acl"]["effective_action"])
+
+    def test_port_scoped_snapshot_returns_empty_for_foreign_or_missing_port(self):
+        builder = PortScopedSnapshotBuilder("ostack2", managed_domains=["acl"])
+
+        foreign_snapshot = builder.build_port_snapshot(
+            [neutron_port(REMOTE_PORT, host="ostack3")],
+            REMOTE_PORT,
+            generation=13,
+        )
+        missing_snapshot = builder.build_port_snapshot(
+            [neutron_port(VM_PORT)],
+            REMOTE_PORT,
+            generation=14,
+        )
+
+        self.assertEqual({"type": "port", "port_id": REMOTE_PORT}, foreign_snapshot["scope"])
+        self.assertEqual([], foreign_snapshot["ports"])
+        self.assertEqual([], missing_snapshot["ports"])
+
+    def test_port_scoped_snapshot_preserves_ineligible_target_disposition(self):
+        builder = PortScopedSnapshotBuilder(
+            "ostack2",
+            managed_domains=["acl"],
+            acl_index=EffectiveAclIndex(),
+        )
+
+        snapshot = builder.build_port_snapshot(
+            [neutron_port(DHCP_PORT, owner="network:dhcp")],
+            DHCP_PORT,
+            generation=15,
+        )
+        port = snapshot["ports"][0]
+
+        self.assertEqual(DHCP_PORT, port["port_id"])
+        self.assertFalse(port["eligible"])
+        self.assertEqual("not_applicable_device_owner:network:dhcp", port["disposition"])
+        self.assertEqual([], port["managed_domains"])
+        self.assertEqual("unsupported", port["acl"]["status"])
+        self.assertEqual("bypass", port["acl"]["effective_action"])
 
 
 if __name__ == "__main__":
