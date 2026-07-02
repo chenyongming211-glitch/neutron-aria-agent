@@ -744,6 +744,146 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertEqual("drop-icmp", port["acl"]["rules"][0]["id"])
         self.assertEqual(["10.58.159.2/32"], port["acl"]["rules"][0]["src_cidrs"])
 
+    def test_dry_run_port_update_builds_scoped_snapshot_without_submit(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        neutron_port = {
+            "id": port_id,
+            "network_id": "net-1",
+            "revision_number": 7,
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }
+        port_source = StaticPortSource([neutron_port])
+        acl_index = EffectiveAclIndex(
+            policies=[{
+                "id": "acl-policy",
+                "default_action": "allow",
+                "revision_number": 10,
+            }],
+            bindings=[{
+                "id": "acl-binding",
+                "policy_id": "acl-policy",
+                "target_type": "port",
+                "target_id": port_id,
+                "revision_number": 11,
+            }],
+        )
+        local_client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            acl_index=acl_index,
+        )
+        sync.full_resync()
+        neutron_port["revision_number"] = 8
+
+        preview = sync.dry_run_port_scoped_snapshot(
+            port_id,
+            binding_host="ostack2",
+            revision_number=8,
+        )
+
+        self.assertFalse(preview["submitted"])
+        self.assertEqual(None, preview["skipped_reason"])
+        self.assertEqual("full_resync", preview["decision"]["action"])
+        self.assertEqual("local_port_update", preview["decision"]["reason"])
+        self.assertEqual("newer", preview["decision"]["revision_status"])
+        self.assertEqual(2, preview["snapshot"]["generation"])
+        self.assertEqual({"type": "port", "port_id": port_id}, preview["snapshot"]["scope"])
+        self.assertEqual(1, len(preview["snapshot"]["ports"]))
+        self.assertEqual("acl-policy", preview["snapshot"]["ports"][0]["acl"]["policy_id"])
+        self.assertEqual(1, len(local_client.snapshots))
+        self.assertEqual([], local_client.deleted_ports)
+
+    def test_dry_run_port_update_skips_when_revision_is_not_newer(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        port_source = StaticPortSource([{
+            "id": port_id,
+            "network_id": "net-1",
+            "revision_number": 7,
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+        local_client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+        )
+        sync.full_resync()
+
+        same = sync.dry_run_port_scoped_snapshot(
+            port_id,
+            binding_host="ostack2",
+            revision_number=7,
+        )
+        older = sync.dry_run_port_scoped_snapshot(
+            port_id,
+            binding_host="ostack2",
+            revision_number=6,
+        )
+
+        self.assertEqual("revision_not_newer", same["skipped_reason"])
+        self.assertEqual("same", same["decision"]["revision_status"])
+        self.assertEqual(None, same["snapshot"])
+        self.assertEqual("revision_not_newer", older["skipped_reason"])
+        self.assertEqual("older", older["decision"]["revision_status"])
+        self.assertEqual(None, older["snapshot"])
+        self.assertEqual(1, len(local_client.snapshots))
+
+    def test_dry_run_port_update_skips_foreign_or_unavailable_port(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        neutron_port = {
+            "id": port_id,
+            "network_id": "net-1",
+            "revision_number": 7,
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }
+        port_source = StaticPortSource([neutron_port])
+        local_client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+        )
+        sync.full_resync()
+
+        foreign = sync.dry_run_port_scoped_snapshot(
+            port_id,
+            binding_host="ostack3",
+            revision_number=8,
+        )
+        neutron_port["binding:host_id"] = "ostack3"
+        unavailable = sync.dry_run_port_scoped_snapshot(
+            port_id,
+            binding_host="ostack2",
+            revision_number=8,
+        )
+
+        self.assertEqual(
+            "decision_not_port_scoped_candidate",
+            foreign["skipped_reason"],
+        )
+        self.assertEqual("delete_local", foreign["decision"]["action"])
+        self.assertEqual(None, foreign["snapshot"])
+        self.assertEqual("port_not_available_for_host", unavailable["skipped_reason"])
+        self.assertEqual(None, unavailable["snapshot"])
+        self.assertEqual([], local_client.deleted_ports)
+
     def test_full_resync_reloads_acl_source_each_time(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         port_source = StaticPortSource([{

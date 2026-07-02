@@ -3,8 +3,12 @@ from __future__ import absolute_import
 import logging
 import time
 
+from neutron_aria.agent.effective_acl import REVISION_NEWER
 from neutron_aria.agent.inventory import PortCandidateBuilder
+from neutron_aria.agent.inventory import PortScopedSnapshotBuilder
+from neutron_aria.agent.projection import ACTION_FULL_RESYNC
 from neutron_aria.agent.projection import ProjectedStateIndex
+from neutron_aria.agent.projection import REASON_LOCAL_PORT_UPDATE
 from neutron_aria.agent.state import InMemorySnapshotStateStore
 from neutron_aria.agent.status import AgentRuntimeStatus
 from neutron_aria.agent.uds_client import LocalApiError
@@ -346,6 +350,52 @@ class SnapshotSynchronizer(object):
             conservative=True,
         )
 
+    def dry_run_port_scoped_snapshot(
+        self,
+        port_id,
+        binding_host=None,
+        revision_number=None,
+    ):
+        decision = self.decide_port_update(
+            port_id,
+            binding_host=binding_host,
+            revision_number=revision_number,
+        ).to_dict()
+        result = {
+            "submitted": False,
+            "decision": decision,
+            "snapshot": None,
+        }
+        if (
+            decision.get("action") != ACTION_FULL_RESYNC or
+            decision.get("reason") != REASON_LOCAL_PORT_UPDATE
+        ):
+            result["skipped_reason"] = "decision_not_port_scoped_candidate"
+            return result
+        if decision.get("revision_status") != REVISION_NEWER:
+            result["skipped_reason"] = "revision_not_newer"
+            return result
+
+        ports = self._list_ports()
+        acl_index = self._load_acl_index()
+        builder = PortScopedSnapshotBuilder(
+            self.host,
+            managed_domains=self.managed_domains,
+            acl_index=acl_index,
+        )
+        snapshot = builder.build_port_snapshot(
+            ports,
+            port_id,
+            generation=self._next_preview_generation(),
+        )
+        if not snapshot.get("ports"):
+            result["skipped_reason"] = "port_not_available_for_host"
+            return result
+
+        result["snapshot"] = snapshot
+        result["skipped_reason"] = None
+        return result
+
     def projected_ports_for_network(self, network_id):
         return self.projection_index.ports_for_network(network_id)
 
@@ -362,6 +412,25 @@ class SnapshotSynchronizer(object):
             port.get("port_id") for port in snapshot["ports"]
             if port.get("port_id") and (port.get("eligible") or port.get("managed_domains"))
         )
+
+    def _next_preview_generation(self):
+        values = [
+            getattr(self.runtime_status, "last_generation", 0),
+            getattr(self.runtime_status, "last_submitted_generation", 0),
+        ]
+        if hasattr(self.state_store, "to_dict"):
+            state = self.state_store.to_dict()
+            values.extend([
+                state.get("last_generation"),
+                state.get("pending_generation"),
+            ])
+        generations = []
+        for value in values:
+            try:
+                generations.append(int(value or 0))
+            except (TypeError, ValueError):
+                generations.append(0)
+        return max(generations or [0]) + 1
 
     def _response_managed_count(self, response, status=None):
         if status and status.get("managed_ports") is not None:

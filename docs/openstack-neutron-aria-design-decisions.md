@@ -38,7 +38,7 @@ These are recorded target directions, not v0.9 MVP commitments. Detail lives in
 | Sync model phases | planned | P1 REST periodic full-resync (current MVP); P2 RPC-triggered full-resync; P3 incremental RPC with port-scoped apply. |
 | Full-resync retention | planned | Incremental RPC optimizes latency; full-resync remains startup/recovery/capability-drift authority. |
 | OVS comparison | planned | Borrow OVS RPC notification semantics, not OVS incremental OVSDB ownership; Aria keeps snapshot/WAL/generation model. |
-| Port-scoped snapshot | planned | Required for P3; parent design already references port-scoped apply; UDS planned contract and Python pure builder are recorded, while UDS submitter, Rust scoped apply, and WAL tests remain future work. |
+| Port-scoped snapshot | planned | Required for P3; parent design already references port-scoped apply; UDS planned contract, Python pure builder, and synchronizer dry-run are recorded, while service-loop submitter, UDS submitter, Rust scoped apply, and WAL tests remain future work. |
 | `aria_acl` object RPC | open | ACL object changes may still require resync until dedicated RPC or revision subscription exists. |
 
 ## Design Areas To Optimize Before Detailed Implementation
