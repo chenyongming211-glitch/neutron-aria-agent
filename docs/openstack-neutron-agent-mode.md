@@ -2195,6 +2195,7 @@ socket_path = /run/aria/aria-agent.sock
 port_source = neutronclient
 rpc_events_enabled = false
 incremental_rpc_enabled = false
+revisionless_incremental_mode = disabled
 
 [acl]
 source = neutron

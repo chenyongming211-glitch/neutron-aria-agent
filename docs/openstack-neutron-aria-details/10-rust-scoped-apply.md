@@ -6,7 +6,9 @@ the shared runtime apply body extraction, shared preflight/idempotency checks,
 and port-scoped UDS route are implemented. The scoped UDS capability is now
 advertised, and Python service-loop submission is available only behind the
 explicit `incremental_rpc_enabled=true` config gate. Packaged defaults keep the
-incremental runtime disabled.
+incremental runtime disabled. Legacy-Neutron `revisionless_incremental_mode`
+is a Python-side controlled test gate only; it does not change Rust scoped
+apply semantics.
 
 ## Goal
 
@@ -45,6 +47,10 @@ OVS forwarding ownership.
 - Only one local newer-revision `port.update` event may use scoped apply in
   this phase. Multi-port batches, delete events, network events, overflow,
   unknown revision, and scoped submit failures fall back to full resync.
+- Old Neutron with no `revision_number` may use
+  `revisionless_incremental_mode=experimental` only on controlled test hosts;
+  this is not a production Rust datapath mode and does not relax scoped UDS
+  validation.
 - Do not remove periodic/full-resync recovery. Scoped apply is an optimization,
   not the authority source of last resort.
 - Do not implement batch/network scoped apply in P3-3. Single-port apply is the

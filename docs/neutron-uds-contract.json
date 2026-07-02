@@ -52,6 +52,8 @@
     "capability_advertised": true,
     "python_submitter_enabled": true,
     "incremental_rpc_enabled_default": false,
+    "revisionless_incremental_mode_default": "disabled",
+    "revisionless_incremental_mode_scope": "experimental test-host only; production P3 remains revision-aware",
     "enablement_gate": "incremental_rpc_enabled=true with rpc_events_enabled=true, full_resync_enabled=true, and port_source=neutronclient",
     "method": "PUT",
     "path": "/api/v1/neutron/ports/{port_id}/snapshot",
@@ -72,6 +74,7 @@
     ],
     "runtime_guardrails": [
       "keep incremental_rpc_enabled=false in packaged defaults",
+      "keep revisionless_incremental_mode=disabled in packaged defaults",
       "require rpc_events_enabled=true, full_resync_enabled=true, and port_source=neutronclient before incremental enablement",
       "only single local newer-revision port.update events may use scoped apply",
       "multi-port batches, delete events, network updates, overflow, unknown revision, and scoped submit failures fall back to full resync",

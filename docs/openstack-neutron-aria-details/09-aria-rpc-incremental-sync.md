@@ -42,7 +42,7 @@ Target end state:
 | P0 safe default | `port_source=disabled`, `full_resync_enabled=false`, `rpc_events_enabled=false` | Heartbeat only | shipped |
 | P1 MVP production | `port_source=neutronclient`, `full_resync_enabled=true`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync | stage-two accepted |
 | P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | package smoke passed on 10.58.159; real fanout A/B passed on `ostack2.bj159.net`; multi-host foreign filtering passed on `ostack2/3/4`; source-host cleanup passed on `ostack2` |
-| P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | config-gated implementation in progress; P3-1 projection heartbeat, P3-2 builder/dry-run, P3-3 Rust route/capability, and Python single-port submitter are implemented; packaged default remains disabled pending field smoke |
+| P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | config-gated implementation in progress; P3-1 projection heartbeat, P3-2 builder/dry-run, P3-3 Rust route/capability, and Python single-port submitter are implemented; packaged default remains disabled. Production P3 requires trustworthy revision data; old Neutron without `revision_number` stays on P2 fallback unless a controlled test explicitly enables revisionless experimental mode. |
 
 Code anchors today:
 
@@ -319,7 +319,8 @@ Do not require plugin RPC to ship P3 if targeted REST read is sufficient.
 | --- | --- |
 | P1 MVP | `port_source=neutronclient`, `full_resync_enabled=true`, `rpc_events_enabled=false` |
 | P2 | add `rpc_events_enabled=true` |
-| P3 | add `incremental_rpc_enabled=true` (new), keep `resync_interval` backup |
+| P3 | add `incremental_rpc_enabled=true`, keep `resync_interval` backup |
+| P3 legacy test only | optionally add `revisionless_incremental_mode=experimental` on a controlled host with no Neutron port revision |
 
 Proposed new ini keys (names may change at implementation PR):
 
@@ -327,6 +328,7 @@ Proposed new ini keys (names may change at implementation PR):
 [neutron]
 rpc_events_enabled = true
 incremental_rpc_enabled = false
+revisionless_incremental_mode = disabled
 incremental_max_ports_per_batch = 16
 incremental_fallback_full_resync = true
 ```
@@ -338,6 +340,9 @@ Rules:
 - Packaged defaults keep `incremental_rpc_enabled=false`. Test environments may
   enable it after P2/stage-three evidence is accepted; production rollout still
   requires P3 incremental smoke evidence and rollback readiness.
+- Packaged defaults keep `revisionless_incremental_mode=disabled`. The only
+  allowed non-default value is `experimental`, and only when
+  `incremental_rpc_enabled=true` on a controlled test host.
 - If incremental path fails validation, or the event batch includes deletes,
   multiple ports, network updates, or overflow, fall back to full-resync when
   `incremental_fallback_full_resync=true`.
@@ -354,6 +359,32 @@ Container requirements for P2/P3:
 - P3 port-scoped apply requires Neutron port reads or RPC events to expose a
   trustworthy `revision_number`. If the target Neutron returns no port revision,
   keep `incremental_rpc_enabled=false` and use P2 RPC-triggered full-resync.
+
+### Revisionless Legacy Neutron Rule
+
+Some old Neutron deployments expose no `revision_number` for bound ports. The
+normative P3 production path does not treat that as safe for scoped apply:
+without a revision, the agent cannot prove an RPC event is newer than the last
+projected desired state.
+
+Default behavior:
+
+- Keep `incremental_rpc_enabled=false` for production.
+- If P2 RPC is enabled, a port update without revision triggers full-resync
+  fallback, not port-scoped apply.
+- Periodic full-resync remains the authoritative repair path.
+
+Controlled test behavior:
+
+- A test host may set `revisionless_incremental_mode=experimental` together
+  with `incremental_rpc_enabled=true`.
+- The mode is allowed only for single local `port.update` batches after normal
+  locality, capability, and scoped UDS gates pass.
+- Same/older revision decisions still fall back to full-resync.
+- Any multi-port, delete, network, overflow, capability drift, or validation
+  ambiguity falls back to full-resync.
+- This mode is for legacy-environment evidence only; it does not close the
+  production P3 gate.
 
 ## Work Packages
 
@@ -441,9 +472,19 @@ Field evidence:
   Neutron returned `revision_number=None` for bound ports, so the port-scoped
   runtime gate remains not accepted for this environment.
 
+Follow-up decision recorded on 2026-07-02:
+
+- Official P3 remains revision-aware.
+- 10.58.159 old Neutron may use
+  `revisionless_incremental_mode=experimental` for a scoped-route test only.
+- Passing that test proves the implementation path can run in the legacy lab;
+  it does not replace revision-aware production acceptance.
+
 Still forbidden before production P3 runtime enablement:
 
 - Enabling `incremental_rpc_enabled=true` in packaged defaults.
+- Enabling `revisionless_incremental_mode=experimental` in packaged defaults or
+  production rollout.
 - Sending port-scoped snapshots from any Python path without advertised
   capability and config gates.
 - Removing periodic/full-resync recovery.

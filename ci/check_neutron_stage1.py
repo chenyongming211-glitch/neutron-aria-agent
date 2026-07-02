@@ -202,6 +202,7 @@ def check_uds_contract_artifact():
         "capability_advertised": True,
         "python_submitter_enabled": True,
         "incremental_rpc_enabled_default": False,
+        "revisionless_incremental_mode_default": "disabled",
         "method": "PUT",
         "path": "/api/v1/neutron/ports/{port_id}/snapshot",
         "body_scope": "single_port",
@@ -233,6 +234,7 @@ def check_uds_contract_artifact():
     guardrails = set(p3_scoped.get("runtime_guardrails") or [])
     for guardrail in (
         "keep incremental_rpc_enabled=false in packaged defaults",
+        "keep revisionless_incremental_mode=disabled in packaged defaults",
         "require rpc_events_enabled=true, full_resync_enabled=true, and port_source=neutronclient before incremental enablement",
         "only single local newer-revision port.update events may use scoped apply",
         "multi-port batches, delete events, network updates, overflow, unknown revision, and scoped submit failures fall back to full resync",
@@ -426,6 +428,8 @@ def check_rust_uds_contract_source():
         "apply_port_scoped_snapshot",
         "ACTION_PORT_SCOPED_APPLY",
         "_single_port_incremental_allowed",
+        "revisionless_incremental_mode",
+        "_revision_allows_incremental",
     ):
         if term not in service_source:
             raise SystemExit("ERROR: service loop missing P3 runtime term %s" % term)
@@ -433,6 +437,7 @@ def check_rust_uds_contract_source():
         "incremental_rpc_enabled=true requires [neutron] rpc_events_enabled=true",
         "incremental_rpc_enabled=true requires [agent] full_resync_enabled=true",
         "incremental_rpc_enabled=true requires [neutron] port_source=neutronclient",
+        "revisionless_incremental_mode requires [neutron] incremental_rpc_enabled=true",
     ):
         if term not in config_source:
             raise SystemExit("ERROR: config missing P3 runtime gate term %s" % term)

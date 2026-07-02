@@ -43,6 +43,7 @@ port_source = neutronclient
 port_page_size = 50
 rpc_events_enabled = true
 incremental_rpc_enabled = false
+revisionless_incremental_mode = disabled
 event_merge_interval = 0.3
 event_queue_max_ports = 42
 event_queue_max_networks = 7
@@ -67,6 +68,7 @@ fixture_path = /tmp/aria-acl-fixture.json
             self.assertEqual(50, config.port_page_size)
             self.assertTrue(config.rpc_events_enabled)
             self.assertFalse(config.incremental_rpc_enabled)
+            self.assertEqual("disabled", config.revisionless_incremental_mode)
             self.assertEqual(0.3, config.event_merge_interval)
             self.assertEqual(42, config.event_queue_max_ports)
             self.assertEqual(7, config.event_queue_max_networks)
@@ -216,6 +218,57 @@ incremental_rpc_enabled = true
             config = load_config(path)
 
             self.assertTrue(config.incremental_rpc_enabled)
+        finally:
+            os.unlink(path)
+
+    def test_allows_revisionless_incremental_experimental_when_incremental_enabled(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = true
+incremental_rpc_enabled = true
+revisionless_incremental_mode = experimental
+""")
+        try:
+            config = load_config(path)
+
+            self.assertTrue(config.incremental_rpc_enabled)
+            self.assertEqual("experimental", config.revisionless_incremental_mode)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_revisionless_incremental_without_incremental_rpc(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = true
+incremental_rpc_enabled = false
+revisionless_incremental_mode = experimental
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
+        finally:
+            os.unlink(path)
+
+    def test_rejects_unknown_revisionless_incremental_mode(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = true
+incremental_rpc_enabled = true
+revisionless_incremental_mode = optimistic
+""")
+        try:
+            self.assertRaises(ConfigError, load_config, path)
         finally:
             os.unlink(path)
 

@@ -209,7 +209,8 @@ def main(argv=None):
     host = _default_host(config)
     LOG.info(
         "agent_start host=%s managed_domains=%s full_resync_enabled=%s "
-        "rpc_events_enabled=%s incremental_rpc_enabled=%s port_source=%s "
+        "rpc_events_enabled=%s incremental_rpc_enabled=%s "
+        "revisionless_incremental_mode=%s port_source=%s "
         "ovs_bridge=%s socket_path=%s acl_source=%s acl_fixture_enabled=%s "
         "state_dir=%s",
         host,
@@ -217,6 +218,7 @@ def main(argv=None):
         config.full_resync_enabled,
         config.rpc_events_enabled,
         config.incremental_rpc_enabled,
+        config.revisionless_incremental_mode,
         config.port_source,
         config.ovs_bridge,
         config.socket_path,
@@ -246,6 +248,7 @@ def main(argv=None):
         event_merger=event_merger,
         event_merge_interval=config.event_merge_interval,
         incremental_rpc_enabled=config.incremental_rpc_enabled,
+        revisionless_incremental_mode=config.revisionless_incremental_mode,
     )
     if options.report_once:
         result = service.initialize()

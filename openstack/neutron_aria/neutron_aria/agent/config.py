@@ -14,6 +14,7 @@ DEFAULT_PORT_SOURCE = "disabled"
 DEFAULT_EVENT_MERGE_INTERVAL = 0.2
 DEFAULT_EVENT_QUEUE_MAX_PORTS = 10000
 DEFAULT_EVENT_QUEUE_MAX_NETWORKS = 1000
+DEFAULT_REVISIONLESS_INCREMENTAL_MODE = "disabled"
 DEFAULT_ACL_SOURCE = ""
 DEFAULT_ACL_FIXTURE_PATH = ""
 DEFAULT_REQUEST_TIMEOUT = 3.0
@@ -23,6 +24,7 @@ DEFAULT_STATE_DIR = "/var/lib/neutron-aria-agent/state"
 SUPPORTED_MANAGED_DOMAINS = ("acl", "qos", "mirror")
 SUPPORTED_ACL_SOURCES = ("disabled", "fixture", "neutron")
 SUPPORTED_PORT_SOURCES = ("disabled", "neutronclient")
+SUPPORTED_REVISIONLESS_INCREMENTAL_MODES = ("disabled", "experimental")
 
 
 class ConfigError(Exception):
@@ -48,6 +50,7 @@ class AgentConfig(object):
         resync_backoff_max=300,
         rpc_events_enabled=False,
         incremental_rpc_enabled=False,
+        revisionless_incremental_mode=DEFAULT_REVISIONLESS_INCREMENTAL_MODE,
         event_merge_interval=DEFAULT_EVENT_MERGE_INTERVAL,
         event_queue_max_ports=DEFAULT_EVENT_QUEUE_MAX_PORTS,
         event_queue_max_networks=DEFAULT_EVENT_QUEUE_MAX_NETWORKS,
@@ -71,6 +74,9 @@ class AgentConfig(object):
         self.resync_backoff_max = int(resync_backoff_max)
         self.rpc_events_enabled = bool(rpc_events_enabled)
         self.incremental_rpc_enabled = bool(incremental_rpc_enabled)
+        self.revisionless_incremental_mode = (
+            revisionless_incremental_mode or DEFAULT_REVISIONLESS_INCREMENTAL_MODE
+        ).strip().lower()
         self.event_merge_interval = float(event_merge_interval)
         self.event_queue_max_ports = int(event_queue_max_ports)
         self.event_queue_max_networks = int(event_queue_max_networks)
@@ -146,6 +152,11 @@ def validate_config(config):
 
     if config.port_source not in SUPPORTED_PORT_SOURCES:
         raise ConfigError("unsupported neutron.port_source: %s" % config.port_source)
+    if config.revisionless_incremental_mode not in SUPPORTED_REVISIONLESS_INCREMENTAL_MODES:
+        raise ConfigError(
+            "unsupported neutron.revisionless_incremental_mode: %s"
+            % config.revisionless_incremental_mode
+        )
     if config.full_resync_enabled and config.port_source == "disabled":
         raise ConfigError(
             "full_resync_enabled=true requires [neutron] port_source=neutronclient"
@@ -172,6 +183,13 @@ def validate_config(config):
             raise ConfigError(
                 "incremental_rpc_enabled=true requires [neutron] port_source=neutronclient"
             )
+    if (
+        config.revisionless_incremental_mode != DEFAULT_REVISIONLESS_INCREMENTAL_MODE and
+        not config.incremental_rpc_enabled
+    ):
+        raise ConfigError(
+            "revisionless_incremental_mode requires [neutron] incremental_rpc_enabled=true"
+        )
     if config.request_timeout <= 0:
         raise ConfigError("aria.request_timeout must be positive")
     if config.request_timeout > DEFAULT_REQUEST_TIMEOUT:
@@ -233,6 +251,12 @@ def load_config(path):
         incremental_rpc_enabled=_parse_bool(
             _get(parser, "neutron", "incremental_rpc_enabled", "false"),
             default=False,
+        ),
+        revisionless_incremental_mode=_get(
+            parser,
+            "neutron",
+            "revisionless_incremental_mode",
+            DEFAULT_REVISIONLESS_INCREMENTAL_MODE,
         ),
         event_merge_interval=_get(
             parser,

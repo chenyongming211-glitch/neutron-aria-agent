@@ -4,6 +4,7 @@ import logging
 import time
 
 from neutron_aria.agent.effective_acl import REVISION_NEWER
+from neutron_aria.agent.effective_acl import REVISION_UNKNOWN
 from neutron_aria.agent.projection import ACTION_PORT_SCOPED_APPLY
 from neutron_aria.agent.projection import ACTION_DELETE_LOCAL
 from neutron_aria.agent.projection import ACTION_FULL_RESYNC
@@ -22,6 +23,8 @@ EVENTS_WITHOUT_RESYNC_ERROR = (
 )
 DELETE_PORT_DEGRADED_REASON = "delete_port_degraded"
 EVENT_IDLE_POLL_INTERVAL = 1.0
+REVISIONLESS_INCREMENTAL_DISABLED = "disabled"
+REVISIONLESS_INCREMENTAL_EXPERIMENTAL = "experimental"
 
 
 class AgentService(object):
@@ -38,12 +41,16 @@ class AgentService(object):
         event_merger=None,
         event_merge_interval=0.2,
         incremental_rpc_enabled=False,
+        revisionless_incremental_mode=REVISIONLESS_INCREMENTAL_DISABLED,
         clock=None,
         sleeper=None,
     ):
         self.synchronizer = synchronizer
         self.full_resync_enabled = bool(full_resync_enabled)
         self.incremental_rpc_enabled = bool(incremental_rpc_enabled)
+        self.revisionless_incremental_mode = (
+            revisionless_incremental_mode or REVISIONLESS_INCREMENTAL_DISABLED
+        ).strip().lower()
         self.report_interval = max(1, int(report_interval))
         self.resync_interval = max(1, int(resync_interval))
         self.resync_backoff_initial = max(1, int(resync_backoff_initial))
@@ -65,13 +72,15 @@ class AgentService(object):
         self.initialized = True
         LOG.info(
             "service_initialize host=%s full_resync_enabled=%s report_interval=%s "
-            "resync_interval=%s event_merge_enabled=%s incremental_rpc_enabled=%s",
+            "resync_interval=%s event_merge_enabled=%s incremental_rpc_enabled=%s "
+            "revisionless_incremental_mode=%s",
             getattr(self.synchronizer, "host", ""),
             self.full_resync_enabled,
             self.report_interval,
             self.resync_interval,
             self.event_merger is not None,
             self.incremental_rpc_enabled,
+            self.revisionless_incremental_mode,
         )
         if self.full_resync_enabled:
             result = self.synchronizer.safe_full_resync()
@@ -347,18 +356,19 @@ class AgentService(object):
         )
 
     def _apply_incremental_port_update(self, port_id, event, decision, batch_dict):
-        if (
-            decision.get("revision_status") and
-            decision.get("revision_status") != REVISION_NEWER
-        ):
+        if not self._revision_allows_incremental(decision):
             decision["incremental_action"] = "fallback_full_resync"
-            decision["incremental_reason"] = "revision_not_newer"
             return None
+        allow_revisionless = (
+            decision.get("incremental_revisionless_mode") ==
+            REVISIONLESS_INCREMENTAL_EXPERIMENTAL
+        )
         try:
             result = self.synchronizer.apply_port_scoped_snapshot(
                 port_id,
                 binding_host=event.get("binding_host"),
                 revision_number=event.get("revision_number"),
+                allow_revisionless=allow_revisionless,
             )
         except Exception as exc:
             LOG.warning(
@@ -383,6 +393,26 @@ class AgentService(object):
             result.get("skipped_reason") or "port_scoped_not_submitted"
         )
         return None
+
+    def _revision_allows_incremental(self, decision):
+        revision_status = decision.get("revision_status")
+        if revision_status == REVISION_NEWER:
+            return True
+        if (
+            revision_status == REVISION_UNKNOWN and
+            self.revisionless_incremental_mode == REVISIONLESS_INCREMENTAL_EXPERIMENTAL
+        ):
+            decision["incremental_revisionless_mode"] = (
+                REVISIONLESS_INCREMENTAL_EXPERIMENTAL
+            )
+            return True
+        if revision_status == REVISION_UNKNOWN:
+            decision["incremental_reason"] = "revision_unknown"
+        elif revision_status:
+            decision["incremental_reason"] = "revision_not_newer"
+        else:
+            decision["incremental_reason"] = "revision_missing"
+        return False
 
     def _finalize_incremental_result(self, result, batch_dict):
         self._record_event_observability(batch_dict["decisions"])
@@ -434,6 +464,7 @@ class AgentService(object):
             "action": ACTION_FULL_RESYNC,
             "reason": "local_port_update",
             "port_id": port_id,
+            "revision_status": "unknown_projected_revision",
         }
 
     def _decide_port_delete(self, port_id):

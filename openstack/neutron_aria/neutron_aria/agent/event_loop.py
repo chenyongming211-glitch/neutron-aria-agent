@@ -4,6 +4,7 @@ import logging
 import time
 
 from neutron_aria.agent.effective_acl import REVISION_NEWER
+from neutron_aria.agent.effective_acl import REVISION_UNKNOWN
 from neutron_aria.agent.inventory import PortCandidateBuilder
 from neutron_aria.agent.inventory import PortScopedSnapshotBuilder
 from neutron_aria.agent.projection import ACTION_FULL_RESYNC
@@ -355,6 +356,7 @@ class SnapshotSynchronizer(object):
         port_id,
         binding_host=None,
         revision_number=None,
+        allow_revisionless=False,
     ):
         decision = self.decide_port_update(
             port_id,
@@ -373,8 +375,13 @@ class SnapshotSynchronizer(object):
             result["skipped_reason"] = "decision_not_port_scoped_candidate"
             return result
         if decision.get("revision_status") != REVISION_NEWER:
-            result["skipped_reason"] = "revision_not_newer"
-            return result
+            if not (
+                allow_revisionless and
+                decision.get("revision_status") == REVISION_UNKNOWN
+            ):
+                result["skipped_reason"] = "revision_not_newer"
+                return result
+            result["revisionless_incremental_mode"] = "experimental"
 
         ports = self._list_ports()
         acl_index = self._load_acl_index()
@@ -401,11 +408,13 @@ class SnapshotSynchronizer(object):
         port_id,
         binding_host=None,
         revision_number=None,
+        allow_revisionless=False,
     ):
         preview = self.dry_run_port_scoped_snapshot(
             port_id,
             binding_host=binding_host,
             revision_number=revision_number,
+            allow_revisionless=allow_revisionless,
         )
         if preview.get("skipped_reason"):
             return preview

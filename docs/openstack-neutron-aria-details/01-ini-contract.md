@@ -32,6 +32,7 @@ request_timeout = 3.0
 port_source = disabled
 rpc_events_enabled = false
 incremental_rpc_enabled = false
+revisionless_incremental_mode = disabled
 
 [acl]
 source = disabled
@@ -110,6 +111,7 @@ function-by-function design until the config PR is opened.
 | `[neutron]` | `port_source` | `disabled` by default; production target `neutronclient` after N0.5 gates. |
 | `[neutron]` | `rpc_events_enabled` | Event path gate; safe default `false`. |
 | `[neutron]` | `incremental_rpc_enabled` | P3 port-scoped apply gate; safe default `false`. When set to `true`, config validation requires RPC events, full resync, and `port_source=neutronclient`. |
+| `[neutron]` | `revisionless_incremental_mode` | Safe default `disabled`. `experimental` is allowed only on controlled test hosts when old Neutron has no trustworthy `revision_number`; production P3 still requires revision-aware events or reads. |
 | `[acl]` | `source` | `disabled`, `fixture`, or `neutron`; production target `neutron`. |
 | `[acl]` | `fixture_path` | CI/smoke only. |
 
@@ -127,9 +129,11 @@ agent writes `integration_mode=coexist` into snapshot bodies only.
    `disabled`.
 6. Validate `incremental_rpc_enabled=true` only when `rpc_events_enabled=true`,
    `full_resync_enabled=true`, and `port_source=neutronclient`.
-7. Build the UDS client from `[aria]`.
-8. Build ACL source selection from `[acl]`.
-9. Log an effective config summary without secrets or Keystone credentials.
+7. Validate `revisionless_incremental_mode=experimental` only when
+   `incremental_rpc_enabled=true`; keep it disabled by default.
+8. Build the UDS client from `[aria]`.
+9. Build ACL source selection from `[acl]`.
+10. Log an effective config summary without secrets or Keystone credentials.
 
 ### Migration Rules
 
@@ -153,6 +157,8 @@ agent writes `integration_mode=coexist` into snapshot bodies only.
 | Unknown domain in `managed_domains` | Hard config error. |
 | Empty `managed_domains` | Hard config error. |
 | `incremental_rpc_enabled=true` without RPC/full-resync/neutronclient dependencies | Hard config error; keep P2 on RPC-triggered full-resync only. |
+| `revisionless_incremental_mode=experimental` without `incremental_rpc_enabled=true` | Hard config error; the mode is a test-only extension of P3, not a standalone sync path. |
+| `revisionless_incremental_mode=experimental` in production defaults | Forbidden; old Neutron without revision remains on P2 full-resync fallback unless a controlled test explicitly enables it. |
 | `acl.source=fixture` without `fixture_path` | Hard config error for CI/smoke mode. |
 | `integration_mode` appears in ini | Warn or hard-fail during convergence; docs must not show it. |
 | `full_resync_enabled=true` while `port_source=disabled` | Hard config error or explicit degraded startup; do not silently claim production resync. |
@@ -168,6 +174,9 @@ agent writes `integration_mode=coexist` into snapshot bodies only.
 | `acl.source=fixture` without path | Config load fails. |
 | `integration_mode` in ini | Test documents warning/failure behavior and no docs examples include it. |
 | `full_resync_enabled=true` + `port_source=disabled` | Startup is rejected or explicitly degraded. |
+| `revisionless_incremental_mode=experimental` + no `incremental_rpc_enabled` | Config load fails. |
+| P3 incremental with unknown revision and default mode | Falls back to full-resync. |
+| P3 incremental with unknown revision and explicit experimental mode | May submit a single-port scoped snapshot on a controlled test host. |
 
 ## Acceptance
 
@@ -182,3 +191,5 @@ agent writes `integration_mode=coexist` into snapshot bodies only.
 - Do not change runtime code in this pass.
 - Do not invent new config fields unless they already map to code or an approved
   gate.
+- Do not use revisionless P3 as the production design. It is a controlled
+  legacy-environment test valve; the normative P3 path remains revision-aware.

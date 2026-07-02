@@ -849,6 +849,44 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertEqual(None, older["snapshot"])
         self.assertEqual(1, len(local_client.snapshots))
 
+    def test_dry_run_port_update_requires_explicit_allow_for_unknown_revision(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        port_source = StaticPortSource([{
+            "id": port_id,
+            "network_id": "net-1",
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+        local_client = FakeLocalClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+        )
+        sync.full_resync()
+
+        default = sync.dry_run_port_scoped_snapshot(
+            port_id,
+            binding_host="ostack2",
+        )
+        allowed = sync.dry_run_port_scoped_snapshot(
+            port_id,
+            binding_host="ostack2",
+            allow_revisionless=True,
+        )
+
+        self.assertEqual("revision_not_newer", default["skipped_reason"])
+        self.assertEqual("unknown", default["decision"]["revision_status"])
+        self.assertEqual(None, default["snapshot"])
+        self.assertEqual(None, allowed["skipped_reason"])
+        self.assertEqual("experimental", allowed["revisionless_incremental_mode"])
+        self.assertEqual(1, len(allowed["snapshot"]["ports"]))
+        self.assertEqual(1, len(local_client.snapshots))
+
     def test_dry_run_port_update_skips_foreign_or_unavailable_port(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         neutron_port = {

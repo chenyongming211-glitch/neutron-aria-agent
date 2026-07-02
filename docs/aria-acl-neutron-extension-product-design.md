@@ -1745,6 +1745,7 @@ socket_path = /run/aria/aria-agent.sock
 port_source = disabled
 rpc_events_enabled = false
 incremental_rpc_enabled = false
+revisionless_incremental_mode = disabled
 
 [acl]
 source = neutron
@@ -2908,6 +2909,7 @@ ovsdb_connection = unix:/run/openvswitch/db.sock
 port_source = disabled
 rpc_events_enabled = false
 incremental_rpc_enabled = false
+revisionless_incremental_mode = disabled
 
 [acl]
 source = neutron

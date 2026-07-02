@@ -74,6 +74,7 @@ request_timeout = 3.0
 port_source = disabled
 rpc_events_enabled = false
 incremental_rpc_enabled = false
+revisionless_incremental_mode = disabled
 
 [acl]
 source = disabled
@@ -87,6 +88,16 @@ Maintained documentation tasks:
   with an explicit compatibility alias.
 - Keep deploy/kolla examples as implementation evidence, but document any
   temporary mismatch as transitional rather than a second normative contract.
+
+Revisionless P3 rule:
+
+- Production P3 port-scoped apply remains revision-aware.
+- Old Neutron environments that return no trustworthy port `revision_number`
+  stay on P2 RPC-triggered full-resync by default.
+- `revisionless_incremental_mode=experimental` may be used only on controlled
+  test hosts, with `incremental_rpc_enabled=true`, to validate the datapath
+  scoped route in legacy environments. It must not be packaged or rolled out as
+  a production default.
 
 ## ACL Input Source
 

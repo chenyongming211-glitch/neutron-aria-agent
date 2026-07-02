@@ -65,6 +65,7 @@ class FakeSynchronizer(object):
         self.delete_calls = []
         self.delete_reasons = []
         self.scoped_calls = []
+        self.forced_revision_status = None
 
     def safe_full_resync(self):
         self.resync_calls += 1
@@ -91,17 +92,48 @@ class FakeSynchronizer(object):
     def has_projected_port(self, port_id):
         return port_id in self.projected_port_ids
 
+    def decide_port_update(self, port_id, binding_host=None, revision_number=None):
+        if binding_host and binding_host != self.host:
+            if self.has_projected_port(port_id):
+                return {
+                    "action": "delete_local",
+                    "reason": "foreign_host_update_for_projected_port",
+                    "port_id": port_id,
+                    "delete_reason": "migration_source_cleanup",
+                }
+            return {
+                "action": "ignore",
+                "reason": "foreign_host_update_for_unknown_port",
+                "port_id": port_id,
+            }
+        revision_status = self.forced_revision_status
+        if revision_status is None:
+            revision_status = "newer" if revision_number is not None else "unknown"
+        return {
+            "action": "full_resync",
+            "reason": "local_port_update",
+            "port_id": port_id,
+            "revision_status": revision_status,
+        }
+
     def delete_port(self, port_id, reason=None):
         self.delete_calls.append(port_id)
         self.delete_reasons.append(reason)
         self.projected_port_ids.discard(port_id)
         return {"deleted": port_id}
 
-    def apply_port_scoped_snapshot(self, port_id, binding_host=None, revision_number=None):
+    def apply_port_scoped_snapshot(
+        self,
+        port_id,
+        binding_host=None,
+        revision_number=None,
+        allow_revisionless=False,
+    ):
         self.scoped_calls.append({
             "port_id": port_id,
             "binding_host": binding_host,
             "revision_number": revision_number,
+            "allow_revisionless": allow_revisionless,
         })
         generation = self.resync_calls + len(self.scoped_calls)
         self.runtime_status.mark_ready(
@@ -119,7 +151,7 @@ class FakeSynchronizer(object):
         }
 
 
-def new_service(incremental_rpc_enabled=False):
+def new_service(incremental_rpc_enabled=False, revisionless_incremental_mode="disabled"):
     clock = FakeClock()
     sync = FakeSynchronizer()
     merger = EventMerger(clock=clock)
@@ -131,6 +163,7 @@ def new_service(incremental_rpc_enabled=False):
         event_merger=merger,
         event_merge_interval=0.2,
         incremental_rpc_enabled=incremental_rpc_enabled,
+        revisionless_incremental_mode=revisionless_incremental_mode,
         clock=clock,
     )
     service.initialize()
@@ -142,6 +175,13 @@ validate_config(AgentConfig(
     port_source="neutronclient",
     rpc_events_enabled=True,
     incremental_rpc_enabled=True,
+))
+validate_config(AgentConfig(
+    full_resync_enabled=True,
+    port_source="neutronclient",
+    rpc_events_enabled=True,
+    incremental_rpc_enabled=True,
+    revisionless_incremental_mode="experimental",
 ))
 expect_config_error(
     AgentConfig(
@@ -168,6 +208,16 @@ expect_config_error(
     ),
     "incremental_rpc_enabled must require rpc_events_enabled",
 )
+expect_config_error(
+    AgentConfig(
+        full_resync_enabled=True,
+        port_source="neutronclient",
+        rpc_events_enabled=True,
+        incremental_rpc_enabled=False,
+        revisionless_incremental_mode="experimental",
+    ),
+    "revisionless_incremental_mode must require incremental_rpc_enabled",
+)
 
 clock, sync, merger, service = new_service()
 merger.record_port_update("p-local", binding_host="local-host")
@@ -189,12 +239,48 @@ result = service.run_once()
 assert_equal(1, sync.resync_calls, "incremental local port update must not full resync")
 assert_equal(1, len(sync.scoped_calls), "incremental local port update must use scoped apply")
 assert_equal("p-scoped", sync.scoped_calls[0]["port_id"], "scoped port id")
+assert_equal(False, sync.scoped_calls[0]["allow_revisionless"], "scoped revision guard")
 assert_equal("port_scoped_apply", result["events"]["decisions"][0]["action"], "scoped decision")
 assert_equal(True, result["events"]["incremental_submitted"], "scoped submit marker")
 assert_equal(
     [{"action": "port_scoped_apply", "reason": "local_port_update", "count": 1}],
     result["status"]["last_event_decision_counts"],
     "scoped decision summary",
+)
+
+clock, sync, merger, service = new_service(incremental_rpc_enabled=True)
+merger.record_port_update("p-revisionless", binding_host="local-host")
+clock.advance(0.2)
+result = service.run_once()
+assert_equal([], sync.scoped_calls, "unknown revision must fall back by default")
+assert_equal(2, sync.resync_calls, "unknown revision default must full resync")
+assert_equal(
+    "revision_unknown",
+    result["events"]["decisions"][0]["incremental_reason"],
+    "unknown revision default reason",
+)
+
+clock, sync, merger, service = new_service(
+    incremental_rpc_enabled=True,
+    revisionless_incremental_mode="experimental",
+)
+merger.record_port_update("p-revisionless", binding_host="local-host")
+clock.advance(0.2)
+result = service.run_once()
+assert_equal(
+    1,
+    len(sync.scoped_calls),
+    "unknown revision experimental mode must use scoped apply",
+)
+assert_equal(
+    True,
+    sync.scoped_calls[0]["allow_revisionless"],
+    "revisionless experimental allow marker",
+)
+assert_equal(
+    "experimental",
+    result["events"]["decisions"][0]["incremental_revisionless_mode"],
+    "revisionless experimental marker",
 )
 
 clock, sync, merger, service = new_service(incremental_rpc_enabled=True)

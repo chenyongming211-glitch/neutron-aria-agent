@@ -11,6 +11,7 @@ STARTUP_WAIT="${STARTUP_WAIT:-8}"
 WORK_DIR="${WORK_DIR:-/tmp/neutron-aria-rpc-fanout-agent-$(date +%Y%m%d%H%M%S)}"
 TARGET_PORT_ID="${TARGET_PORT_ID:-}"
 INCREMENTAL_RPC_ENABLED="${INCREMENTAL_RPC_ENABLED:-false}"
+REVISIONLESS_INCREMENTAL_MODE="${REVISIONLESS_INCREMENTAL_MODE:-disabled}"
 ALLOW_REVISIONLESS_INCREMENTAL_FALLBACK="${ALLOW_REVISIONLESS_INCREMENTAL_FALLBACK:-false}"
 
 die() {
@@ -101,15 +102,20 @@ write_temp_config() {
     local cfg="/tmp/neutron-aria-rpc-fanout-${mode}.ini"
     local state_dir="/tmp/neutron-aria-rpc-fanout-state-${mode}"
     local incremental_mode="false"
+    local revisionless_mode="disabled"
     if [ "${mode}" = "true" ]; then
         incremental_mode="${INCREMENTAL_RPC_ENABLED}"
+        if [ "${incremental_mode}" = "true" ]; then
+            revisionless_mode="${REVISIONLESS_INCREMENTAL_MODE}"
+        fi
     fi
     docker exec -i -u root "${SERVICE_NAME}" python - \
         "${cfg}" \
         "${HOST_FQDN}" \
         "${mode}" \
         "${state_dir}" \
-        "${incremental_mode}" <<'PY'
+        "${incremental_mode}" \
+        "${revisionless_mode}" <<'PY'
 from __future__ import print_function
 
 import os
@@ -120,7 +126,7 @@ try:
 except ImportError:
     import configparser
 
-cfg, host, mode, state_dir, incremental_mode = sys.argv[1:6]
+cfg, host, mode, state_dir, incremental_mode, revisionless_mode = sys.argv[1:7]
 src = "/etc/neutron-aria-agent/neutron-aria-agent.ini"
 
 parser_class = getattr(configparser, "SafeConfigParser", configparser.ConfigParser)
@@ -139,6 +145,7 @@ parser.set("agent", "state_dir", state_dir)
 parser.set("neutron", "port_source", "neutronclient")
 parser.set("neutron", "rpc_events_enabled", mode)
 parser.set("neutron", "incremental_rpc_enabled", incremental_mode)
+parser.set("neutron", "revisionless_incremental_mode", revisionless_mode)
 parser.set("neutron", "event_merge_interval", "0.2")
 parser.set("acl", "source", "disabled")
 
@@ -304,8 +311,13 @@ run_agent_case() {
             die "enabled case did not process the port update"
         if [ "${INCREMENTAL_RPC_ENABLED}" = "true" ]; then
             if grep -q "target_port_revision_${label}=none" "${trigger_log}" &&
-                [ "${ALLOW_REVISIONLESS_INCREMENTAL_FALLBACK}" != "true" ]; then
-                die "incremental enabled case cannot validate port-scoped apply: target port has no revision_number"
+                [ "${REVISIONLESS_INCREMENTAL_MODE}" != "experimental" ]; then
+                if [ "${ALLOW_REVISIONLESS_INCREMENTAL_FALLBACK}" != "true" ]; then
+                    die "incremental enabled case cannot validate port-scoped apply: target port has no revision_number"
+                fi
+                grep -q "port_scoped_snapshot_complete" "${log}" &&
+                    die "revisionless fallback case unexpectedly submitted a port-scoped snapshot"
+                return
             fi
             grep -q "port_scoped_snapshot_complete" "${log}" || \
                 die "incremental enabled case did not submit a port-scoped snapshot"
@@ -326,8 +338,9 @@ docker exec "${SERVICE_NAME}" test -S "${SOCKET_PATH}" || \
     die "${SOCKET_PATH} is not visible in ${SERVICE_NAME}"
 
 echo "work=${WORK_DIR} host=${HOST_FQDN} incremental_rpc_enabled=${INCREMENTAL_RPC_ENABLED}"
+echo "revisionless_incremental_mode=${REVISIONLESS_INCREMENTAL_MODE}"
 rollback_managed_ports | tee "${WORK_DIR}/pre-rollback.log"
 run_agent_case disabled false
 run_agent_case enabled true
 
-echo "rpc_fanout_agent_ab=pass incremental_rpc_enabled=${INCREMENTAL_RPC_ENABLED} work=${WORK_DIR}"
+echo "rpc_fanout_agent_ab=pass incremental_rpc_enabled=${INCREMENTAL_RPC_ENABLED} revisionless_incremental_mode=${REVISIONLESS_INCREMENTAL_MODE} work=${WORK_DIR}"
