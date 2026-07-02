@@ -338,7 +338,7 @@ run_agent_case() {
                 fi
                 grep -q "port_scoped_snapshot_complete" "${log}" &&
                     die "revisionless fallback case unexpectedly submitted a port-scoped snapshot"
-                return
+                return 0
             fi
             grep -q "port_scoped_snapshot_complete" "${log}" || \
                 die "incremental enabled case did not submit a port-scoped snapshot"

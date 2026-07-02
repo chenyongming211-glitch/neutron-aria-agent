@@ -262,6 +262,17 @@ Old Neutron environments without trustworthy `revision_number` stay on P2
 full-resync fallback by default; `revisionless_incremental_mode=experimental`
 is test-host only.
 
+The 2026-07-02 P3-5 smoke evidence is recorded in:
+
+```text
+docs/evidence/openstack-n05-lite/20260702-p3-5-incremental-smoke/summary.md
+```
+
+It accepts package RPC event smoke, P2 full-resync A/B, controlled
+revisionless experimental port-scoped apply, default revisionless fallback, and
+rollback to zero managed ports on the old Neutron test host. P3-6
+runbook/default-off documentation remains before production rollout.
+
 ## Out Of Scope For This Pass
 
 - No code changes beyond the minimum needed to make the 01/04/07 contracts

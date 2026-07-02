@@ -397,7 +397,7 @@ Controlled test behavior:
 | P3-2 | Port-scoped snapshot builder in Python | pure builder, synchronizer dry-run, and scoped state/projection preservation tests |
 | P3-3 | Rust scoped snapshot apply | `ApplyScope::SinglePort` planner tests, internal scoped WAL/status boundary tests, shared runtime apply body extraction, shared preflight/idempotency checks, advertised UDS capability, and Python config-gated single-port submitter are implemented; packaged runtime default remains disabled |
 | P3-4 | Incremental ACL apply failure semantics | degraded/bypass without OVS loss |
-| P3-5 | RPC on/off + incremental on/off smokes | evidence under `docs/evidence/openstack-n05-lite/` |
+| P3-5 | RPC on/off + incremental on/off smokes | accepted for the old Neutron test host; evidence under `docs/evidence/openstack-n05-lite/20260702-p3-5-incremental-smoke/` |
 | P3-6 | Runbook and ini contract update (`01-ini-contract.md`) | config validation + docs |
 
 ## P3-4 Failure Semantics
@@ -507,6 +507,11 @@ Field evidence:
   reached `port_scoped_snapshot_complete` and rollback left
   `managed_ports=0`. This is test-host evidence only, not production P3
   acceptance.
+- `docs/evidence/openstack-n05-lite/20260702-p3-5-incremental-smoke/summary.md`
+  records P3-5. Package RPC event smoke passed, P2 RPC-triggered full-resync
+  A/B passed, controlled revisionless experimental port-scoped apply passed,
+  default revisionless behavior stayed on full-resync fallback, and final UDS
+  state had `managed_ports=0` with no pending generation.
 
 Follow-up decision recorded on 2026-07-02:
 
