@@ -34,6 +34,10 @@ timeout until measurement proves a different limit is needed. Unsafe revision,
 contract, body-size, or local-interface conditions must fall back to full
 resync rather than trying a best-effort scoped apply.
 
+The Rust-side minimum implementation and test boundary for this planned route
+is recorded in `10-rust-scoped-apply.md`. Until that boundary is implemented
+and tested, the route must remain absent from current runtime `routes`.
+
 ## Capabilities Contract
 
 Target fields:

@@ -36,6 +36,9 @@ SMOKE_SYNTAX = sorted(
 )
 
 UDS_CONTRACT_PATH = os.path.join("docs", "neutron-uds-contract.json")
+P3_RUST_SCOPED_PLAN_PATH = os.path.join(
+    "docs", "openstack-neutron-aria-details", "10-rust-scoped-apply.md"
+)
 RUST_API_PATH = os.path.join("api", "src", "lib.rs")
 RUST_NEUTRON_API_PATH = os.path.join("agent", "src", "neutron_api.rs")
 RUST_NEUTRON_WAL_PATH = os.path.join("agent", "src", "neutron_wal.rs")
@@ -210,6 +213,7 @@ def check_uds_contract_artifact():
         "UDS_BODY_TOO_LARGE",
         "generation_hash_conflict",
         "stale_generation",
+        "PORT_SCOPE_MISMATCH",
         "PORT_IFACE_NOT_FOUND",
         "UDS_CONTRACT_DRIFT",
     ):
@@ -485,6 +489,42 @@ def check_rust_stage_one_tests_present():
             raise SystemExit("ERROR: OpenAPI exclusion test missing %s" % path)
 
 
+def check_p3_rust_scoped_plan_boundary():
+    print("==> checking P3 Rust scoped-apply design boundary")
+    plan = _read_repo_text(P3_RUST_SCOPED_PLAN_PATH)
+    required_markers = [
+        "Status: P3-3 implementation design package",
+        "SinglePort",
+        "Do not add `PUT /api/v1/neutron/ports/{port_id}/snapshot` to current UDS",
+        "Do not advertise `supports_port_scoped_snapshot=true`",
+        "Do not enable `incremental_rpc_enabled=true`",
+        "requested_port_ids=[port_id]",
+        "preserve unrelated `runtime.ports` and `runtime.port_statuses`",
+        "scoped planner updates target only",
+        "same generation different scoped hash",
+        "No batch scoped apply",
+    ]
+    for marker in required_markers:
+        if marker not in plan:
+            raise SystemExit(
+                "ERROR: P3 Rust scoped-apply plan missing marker %r" % marker
+            )
+
+    linked_docs = {
+        os.path.join("docs", "openstack-neutron-aria-details", "README.md"):
+            "10-rust-scoped-apply.md",
+        os.path.join("docs", "openstack-neutron-aria-details", "09-aria-rpc-incremental-sync.md"):
+            "10-rust-scoped-apply.md",
+        os.path.join("docs", "openstack-neutron-aria-design-decisions.md"):
+            "10-rust-scoped-apply.md",
+    }
+    for path, marker in linked_docs.items():
+        if marker not in _read_repo_text(path):
+            raise SystemExit(
+                "ERROR: %s must link P3 Rust scoped-apply plan %s" % (path, marker)
+            )
+
+
 def run_smoke_syntax():
     bash = shutil.which("bash")
     if not bash:
@@ -563,6 +603,7 @@ def main():
     check_uds_contract_artifact()
     check_rust_uds_contract_source()
     check_rust_stage_one_tests_present()
+    check_p3_rust_scoped_plan_boundary()
     check_smoke_timeout_contract()
     run_smoke_syntax()
     run_rust_tests(args.require_rust, args.rust_toolchain)

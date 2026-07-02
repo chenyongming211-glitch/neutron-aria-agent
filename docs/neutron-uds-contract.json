@@ -61,6 +61,7 @@
       "UDS_BODY_TOO_LARGE",
       "generation_hash_conflict",
       "stale_generation",
+      "PORT_SCOPE_MISMATCH",
       "PORT_IFACE_NOT_FOUND",
       "UDS_CONTRACT_DRIFT"
     ],

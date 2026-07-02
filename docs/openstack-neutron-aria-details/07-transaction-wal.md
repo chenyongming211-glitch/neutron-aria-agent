@@ -24,6 +24,10 @@ The transaction path covers:
 - retry and timeout recovery;
 - local write gate interaction with Neutron-managed state.
 
+P3 port-scoped snapshot apply reuses this transaction model with a bounded
+affected-port set. Its Rust minimum design and tests are recorded separately in
+`10-rust-scoped-apply.md` and must not remove full-resync recovery.
+
 ## Current State
 
 | Area | Status | Notes |

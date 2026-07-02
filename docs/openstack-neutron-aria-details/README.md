@@ -34,6 +34,7 @@ or an explicitly approved later phase.
 | `07-transaction-wal.md` | Detail snapshot apply transaction, WAL intent/commit, replay, timeout, and idempotency. |
 | `08-stage3-acl-production-hardening.md` | Detail Stage-Three ACL Production Hardening, release/CI, persistent UDS rollout, and N3 fault/lifecycle gates. |
 | `09-aria-rpc-incremental-sync.md` | Record post-stage-three RPC evolution: P2 RPC-triggered full-resync and P3 incremental RPC with port-scoped apply. |
+| `10-rust-scoped-apply.md` | Detail the P3-3 Rust single-port scoped apply minimum design and test boundary before touching datapath logic. |
 
 ## Refinement Order
 
@@ -48,6 +49,8 @@ or an explicitly approved later phase.
    next risk is release/CI plus N3 operational behavior.
 8. Aria RPC incremental sync, after stage three closes P2 and before opening
    port-scoped delta apply implementation.
+9. Rust scoped apply minimum design, before changing Rust datapath apply logic
+   or adding the port-scoped UDS route.
 
 ## Dependency Map
 
@@ -81,6 +84,12 @@ or an explicitly approved later phase.
   -> 05 incremental failure reporting
   -> 07 port-scoped WAL/generation semantics
   -> 08 P2 RPC-triggered resync entry criteria
+  -> 10 Rust scoped apply test boundary
+
+10 Rust scoped apply
+  -> 04 planned port-scoped UDS route
+  -> 07 scoped WAL/generation semantics
+  -> 09 P3-3 implementation package
 ```
 
 ## Gate Mapping
@@ -96,7 +105,7 @@ or an explicitly approved later phase.
 | G6 full resync | 01, 03, 05, 07 | Neutron port source, resync, heartbeat, and generation status are stable. |
 | G7 rollback | 06, 07 | Disabling integration preserves OVS forwarding and safe recovery semantics. |
 | S3 production hardening | 08 | CI/release, persistent UDS rollout, ACL N3 fault, and lifecycle gates are ready. |
-| P2/P3 RPC sync evolution | 09 | RPC-triggered resync and incremental port-scoped apply are designed and gated separately from stage three. |
+| P2/P3 RPC sync evolution | 09, 10 | RPC-triggered resync and incremental port-scoped apply are designed and gated separately from stage three; Rust scoped apply remains planned until P3-3 tests and route gates pass. |
 
 ## Stage-One Verification
 
@@ -241,10 +250,12 @@ incremental RPC and port-scoped apply (P3) is recorded in:
 
 ```text
 docs/openstack-neutron-aria-details/09-aria-rpc-incremental-sync.md
+docs/openstack-neutron-aria-details/10-rust-scoped-apply.md
 ```
 
 Do not start P3 implementation until stage three entry criteria in plan 09 are
-met.
+met. Do not add the Rust port-scoped UDS route until plan 10's planner,
+WAL/status, and contract tests are ready.
 
 ## Out Of Scope For This Pass
 

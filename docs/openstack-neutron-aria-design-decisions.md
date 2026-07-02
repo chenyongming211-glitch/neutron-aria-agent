@@ -31,14 +31,16 @@ Normative order:
 ## Deferred Decisions (Post-Stage-Three)
 
 These are recorded target directions, not v0.9 MVP commitments. Detail lives in
-`openstack-neutron-aria-details/09-aria-rpc-incremental-sync.md`.
+`openstack-neutron-aria-details/09-aria-rpc-incremental-sync.md` and the Rust
+P3-3 boundary lives in
+`openstack-neutron-aria-details/10-rust-scoped-apply.md`.
 
 | Decision | Status | Notes |
 | --- | --- | --- |
 | Sync model phases | planned | P1 REST periodic full-resync (current MVP); P2 RPC-triggered full-resync; P3 incremental RPC with port-scoped apply. |
 | Full-resync retention | planned | Incremental RPC optimizes latency; full-resync remains startup/recovery/capability-drift authority. |
 | OVS comparison | planned | Borrow OVS RPC notification semantics, not OVS incremental OVSDB ownership; Aria keeps snapshot/WAL/generation model. |
-| Port-scoped snapshot | planned | Required for P3; parent design already references port-scoped apply; UDS planned contract, Python pure builder, and synchronizer dry-run are recorded, while service-loop submitter, UDS submitter, Rust scoped apply, and WAL tests remain future work. |
+| Port-scoped snapshot | planned | Required for P3; parent design already references port-scoped apply; UDS planned contract, Python pure builder, synchronizer dry-run, and Rust scoped apply test boundary are recorded, while service-loop submitter, UDS submitter, Rust route, and Rust apply implementation remain future work. |
 | `aria_acl` object RPC | open | ACL object changes may still require resync until dedicated RPC or revision subscription exists. |
 
 ## Design Areas To Optimize Before Detailed Implementation
@@ -135,6 +137,7 @@ First-pass implementation design packages are tracked in
 7. `07-transaction-wal.md`
 8. `08-stage3-acl-production-hardening.md`
 9. `09-aria-rpc-incremental-sync.md`
+10. `10-rust-scoped-apply.md`
 
 QoS remains in v0.9 scope, but its dedicated detail pass should start after the
 INI, UDS/transaction, ACL production path, and target QoS runtime capability
@@ -142,3 +145,5 @@ questions are stable.
 
 Incremental RPC (plan 09) starts after stage-three closes P2
 (RPC-triggered full-resync) and must not reopen v0.9 architecture boundaries.
+Rust scoped apply (plan 10) must start with planner/WAL/status tests before any
+port-scoped route or capability advertisement is added.
