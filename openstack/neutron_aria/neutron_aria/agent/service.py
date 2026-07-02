@@ -378,6 +378,7 @@ class AgentService(object):
                 exc,
             )
             decision["incremental_action"] = "fallback_full_resync"
+            decision["incremental_reason"] = "port_scoped_apply_error"
             decision["incremental_error"] = str(exc)
             return None
 

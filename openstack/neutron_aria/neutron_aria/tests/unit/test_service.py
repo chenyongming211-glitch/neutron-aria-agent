@@ -32,6 +32,8 @@ class FakeSynchronizer(object):
         self.scoped_calls = []
         self.host = "ostack2.bj159.net"
         self.forced_revision_status = None
+        self.scoped_exception = None
+        self.scoped_result = None
 
     def safe_full_resync(self):
         self.resync_calls += 1
@@ -101,6 +103,10 @@ class FakeSynchronizer(object):
             "revision_number": revision_number,
             "allow_revisionless": allow_revisionless,
         })
+        if self.scoped_exception is not None:
+            raise self.scoped_exception
+        if self.scoped_result is not None:
+            return self.scoped_result
         generation = self.resync_calls + len(self.scoped_calls)
         self.runtime_status.mark_ready(
             generation=generation,
@@ -425,6 +431,75 @@ class AgentServiceTestCase(unittest.TestCase):
         self.assertEqual(2, sync.resync_calls)
         self.assertEqual("fallback_full_resync", decision["incremental_action"])
         self.assertEqual("revision_not_newer", decision["incremental_reason"])
+
+    def test_incremental_rpc_scoped_apply_exception_falls_back_to_full_resync(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        sync.scoped_exception = RuntimeError("uds boom")
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            incremental_rpc_enabled=True,
+            clock=clock,
+        )
+        service.initialize()
+
+        merger.record_port_update(
+            "p1",
+            binding_host="ostack2.bj159.net",
+            revision_number=8,
+        )
+        clock.advance(0.2)
+        result = service.run_once()
+
+        decision = result["events"]["decisions"][0]
+        self.assertEqual(1, len(sync.scoped_calls))
+        self.assertEqual(2, sync.resync_calls)
+        self.assertTrue(result["resync_attempted"])
+        self.assertEqual("fallback_full_resync", decision["incremental_action"])
+        self.assertEqual("port_scoped_apply_error", decision["incremental_reason"])
+        self.assertIn("uds boom", decision["incremental_error"])
+
+    def test_incremental_rpc_scoped_apply_skip_falls_back_to_full_resync(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        sync.scoped_result = {
+            "submitted": False,
+            "skipped_reason": "port_not_available_for_host",
+            "snapshot": None,
+        }
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            incremental_rpc_enabled=True,
+            clock=clock,
+        )
+        service.initialize()
+
+        merger.record_port_update(
+            "p1",
+            binding_host="ostack2.bj159.net",
+            revision_number=8,
+        )
+        clock.advance(0.2)
+        result = service.run_once()
+
+        decision = result["events"]["decisions"][0]
+        self.assertEqual(1, len(sync.scoped_calls))
+        self.assertEqual(2, sync.resync_calls)
+        self.assertTrue(result["resync_attempted"])
+        self.assertEqual("fallback_full_resync", decision["incremental_action"])
+        self.assertEqual("port_not_available_for_host", decision["incremental_reason"])
 
     def test_incremental_rpc_multi_port_update_falls_back_to_full_resync(self):
         clock = FakeClock()

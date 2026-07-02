@@ -149,6 +149,27 @@ Scoped apply must not turn unrelated ports stale or invisible.
 | scoped apply partially fails | `accepted_generation` may advance, `applied_generation` stays at previous value, `pending_generation` is set. |
 | full resync after scoped apply | full resync remains authoritative and may replace the scoped desired hash with a full-host desired hash at a newer generation. |
 
+## Python Failure Boundary
+
+The Python service loop remains responsible for deciding whether a scoped
+failure can be repaired by full-resync. Rust reports scoped apply outcome for
+the target port; Python classifies the event decision and either accepts the
+scoped result or falls back.
+
+Required Python behavior for P3-4:
+
+- scoped UDS exception or malformed response -> `fallback_full_resync` with
+  reason `port_scoped_apply_error`;
+- scoped candidate skip, including unavailable projected tap/port/binding ->
+  `fallback_full_resync` with the concrete skip reason;
+- invalid ACL input in the scoped snapshot -> submit is allowed only if ACL is
+  represented as `degraded` plus `effective_action=bypass`;
+- no scoped failure may advance the projection revision for the target port
+  unless the scoped apply response and status readback are accepted.
+
+This keeps the Rust scoped route focused on target-port apply semantics while
+Python preserves the product-level recovery contract from plan 09.
+
 ## Implementation Sequence
 
 1. Add pure Rust planner tests for `ApplyScope::SinglePort` without adding the
@@ -201,6 +222,10 @@ Python tests before service-loop submitter:
 | config gate allows incremental only with dependencies | `incremental_rpc_enabled=true` requires RPC events, full resync, and `port_source=neutronclient`; packaged defaults remain disabled. |
 | service-loop single-port submitter | one safe local newer-revision `port.update` submits scoped apply; multi-port and unsafe paths fall back to full resync. |
 | dry-run can fall back | unsafe decision or missing target returns full-resync fallback reason. |
+| scoped submit exception falls back | service records `port_scoped_apply_error` and attempts full-resync. **Done.** |
+| scoped skip falls back | service records the concrete skipped reason and attempts full-resync. **Done.** |
+| scoped port error has no false ready | UDS port error raises without advancing projection revision. **Done.** |
+| scoped ACL degraded/bypass preserved | invalid ACL is reported as degraded/bypass rather than false ready. **Done.** |
 
 Smoke tests before production enablement:
 

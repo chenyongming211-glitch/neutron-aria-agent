@@ -400,6 +400,36 @@ Controlled test behavior:
 | P3-5 | RPC on/off + incremental on/off smokes | evidence under `docs/evidence/openstack-n05-lite/` |
 | P3-6 | Runbook and ini contract update (`01-ini-contract.md`) | config validation + docs |
 
+## P3-4 Failure Semantics
+
+P3-4 is a failure-behavior gate, not a feature expansion. It covers only ACL
+incremental apply after P3-3 has already proven the scoped UDS route and Python
+submitter are config-gated.
+
+Required behavior:
+
+- If the scoped UDS call fails, times out, or returns an invalid response, the
+  service records `incremental_action=fallback_full_resync`,
+  `incremental_reason=port_scoped_apply_error`, includes the error in the
+  debug decision, and immediately attempts the normal safe full-resync path.
+- If the scoped candidate cannot be safely submitted because the projected port,
+  tap, or local binding is not usable, the service records
+  `incremental_action=fallback_full_resync` with the specific skipped reason,
+  such as `port_not_available_for_host`, and attempts full-resync.
+- If the ACL payload itself is missing or invalid, the scoped snapshot must keep
+  ACL in `degraded` with `effective_action=bypass`. It must not block OVS L2
+  forwarding and must not report a false `ready` status for that ACL domain.
+- A scoped failure must not mutate unrelated ports, must not expand QoS/Mirror
+  scope, and must not remove periodic/full-resync recovery.
+
+Current local/package evidence:
+
+- Unit tests cover scoped submit exception -> full-resync fallback.
+- Unit tests cover scoped dry-run skip -> full-resync fallback.
+- Event-loop tests cover UDS port error without false ready/projection advance.
+- Event-loop tests cover invalid ACL preservation as degraded/bypass.
+- The package smoke embeds the same service-level failure cases.
+
 ## Verification And Gates
 
 Minimum tests before declaring P3 ready:

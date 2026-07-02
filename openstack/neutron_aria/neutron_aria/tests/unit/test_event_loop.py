@@ -10,6 +10,7 @@ from neutron_aria.agent.neutron_client import StaticPortSource
 from neutron_aria.agent.ovsdb import OvsInterface
 from neutron_aria.agent.state import SnapshotStateStore
 from neutron_aria.agent.status_reporter import StatusReportError
+from neutron_aria.agent.uds_client import LocalApiError
 from neutron_aria.agent.uds_client import LocalApiTimeoutError
 from neutron_aria.agent.uds_client import LocalApiTransportError
 
@@ -149,6 +150,60 @@ class ResponseErrorLocalClient(FakeLocalClient):
                 "status": "error",
                 "reason": "boom",
             }],
+        }
+
+
+class ScopedResponseErrorLocalClient(FakeLocalClient):
+    def put_port_snapshot(self, port_id, snapshot, required_domains=None):
+        self.port_snapshots.append({
+            "port_id": port_id,
+            "snapshot": snapshot,
+            "required_domains": list(required_domains or []),
+        })
+        return {
+            "generation": snapshot["generation"],
+            "results": [{
+                "port_id": port_id,
+                "ifname": "tap%s" % port_id[:11],
+                "action": "update",
+                "status": "error",
+                "reason": "PORT_IFACE_NOT_FOUND",
+            }],
+        }
+
+
+class StatusFromPortSnapshotLocalClient(FakeLocalClient):
+    def status(self):
+        if not self.port_snapshots:
+            return {"generation": 0, "managed_ports": [], "active_instances": []}
+        snapshot = self.port_snapshots[-1]["snapshot"]
+        port = snapshot["ports"][0]
+        acl = port.get("acl") or {}
+        return {
+            "generation": snapshot["generation"],
+            "accepted_generation": snapshot["generation"],
+            "applied_generation": snapshot["generation"],
+            "desired_hash": snapshot.get("desired_hash"),
+            "applied_desired_hash": snapshot.get("desired_hash"),
+            "managed_ports": [{
+                "port_id": port["port_id"],
+                "ifname": "tap%s" % port["port_id"][:11],
+            }],
+            "port_statuses": [{
+                "port_id": port["port_id"],
+                "ifname": "tap%s" % port["port_id"][:11],
+                "generation": snapshot["generation"],
+                "desired_hash": snapshot.get("desired_hash"),
+                "status": acl.get("status") or "ready",
+                "managed_domains": port.get("managed_domains") or [],
+                "domains": [{
+                    "domain": "acl",
+                    "status": acl.get("status") or "ready",
+                    "reason": acl.get("reason"),
+                    "effective_action": acl.get("effective_action") or "enforce",
+                }],
+            }],
+            "active_instances": ["tap%s" % port["port_id"][:11]],
         }
 
 
@@ -979,6 +1034,109 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertEqual(8, sync.projection_index.port(port1).revision_number)
         self.assertEqual(3, sync.projection_index.port(port2).revision_number)
         self.assertEqual(2, result["status"]["last_generation"])
+
+    def test_apply_port_scoped_snapshot_raises_on_port_error_without_false_ready(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        neutron_ports = [{
+            "id": port_id,
+            "network_id": "net-1",
+            "revision_number": 7,
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }]
+        local_client = ScopedResponseErrorLocalClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource(neutron_ports),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+        )
+        sync.full_resync()
+        neutron_ports[0]["revision_number"] = 8
+
+        with self.assertRaises(LocalApiError) as ctx:
+            sync.apply_port_scoped_snapshot(
+                port_id,
+                binding_host="ostack2",
+                revision_number=8,
+            )
+
+        self.assertIn("PORT_IFACE_NOT_FOUND", str(ctx.exception))
+        self.assertEqual(1, len(local_client.port_snapshots))
+        self.assertEqual(1, sync.runtime_status.last_generation)
+        self.assertEqual(7, sync.projection_index.port(port_id).revision_number)
+        self.assertFalse(sync.runtime_status.degraded)
+        self.assertEqual("ready", sync.runtime_status.reason)
+
+    def test_apply_port_scoped_snapshot_preserves_acl_degraded_bypass_status(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        neutron_ports = [{
+            "id": port_id,
+            "network_id": "net-1",
+            "revision_number": 7,
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }]
+        acl_index = EffectiveAclIndex(
+            policies=[{
+                "id": "acl-policy",
+                "default_action": "allow",
+                "revision_number": 7,
+            }],
+            rules=[{
+                "id": "bad-rule",
+                "policy_id": "acl-policy",
+                "direction": "ingress",
+                "priority": "invalid",
+                "revision_number": 8,
+            }],
+            bindings=[{
+                "id": "acl-binding",
+                "policy_id": "acl-policy",
+                "target_type": "port",
+                "target_id": port_id,
+                "revision_number": 7,
+            }],
+        )
+        local_client = StatusFromPortSnapshotLocalClient()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource(neutron_ports),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            acl_index=acl_index,
+        )
+        sync.full_resync()
+        neutron_ports[0]["revision_number"] = 8
+
+        result = sync.apply_port_scoped_snapshot(
+            port_id,
+            binding_host="ostack2",
+            revision_number=8,
+        )
+
+        submitted = local_client.port_snapshots[0]["snapshot"]["ports"][0]
+        acl = submitted["acl"]
+        self.assertTrue(result["submitted"])
+        self.assertEqual("degraded", acl["status"])
+        self.assertEqual("bypass", acl["effective_action"])
+        self.assertIn("invalid_rule_priority:bad-rule", acl["reason"])
+        self.assertEqual(
+            [{"reason": "invalid_rule_priority:bad-rule", "count": 1}],
+            result["status"]["degraded_reasons"],
+        )
+        self.assertIn({
+            "domain": "acl",
+            "status": "degraded",
+            "effective_action": "bypass",
+            "count": 1,
+        }, result["status"]["domain_counts"])
 
     def test_full_resync_reloads_acl_source_each_time(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

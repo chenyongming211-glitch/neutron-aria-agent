@@ -66,6 +66,8 @@ class FakeSynchronizer(object):
         self.delete_reasons = []
         self.scoped_calls = []
         self.forced_revision_status = None
+        self.scoped_exception = None
+        self.scoped_result = None
 
     def safe_full_resync(self):
         self.resync_calls += 1
@@ -135,6 +137,10 @@ class FakeSynchronizer(object):
             "revision_number": revision_number,
             "allow_revisionless": allow_revisionless,
         })
+        if self.scoped_exception is not None:
+            raise self.scoped_exception
+        if self.scoped_result is not None:
+            return self.scoped_result
         generation = self.resync_calls + len(self.scoped_calls)
         self.runtime_status.mark_ready(
             generation=generation,
@@ -281,6 +287,37 @@ assert_equal(
     "experimental",
     result["events"]["decisions"][0]["incremental_revisionless_mode"],
     "revisionless experimental marker",
+)
+
+clock, sync, merger, service = new_service(incremental_rpc_enabled=True)
+sync.scoped_exception = RuntimeError("uds boom")
+merger.record_port_update("p-fail", binding_host="local-host", revision_number=9)
+clock.advance(0.2)
+result = service.run_once()
+assert_equal(1, len(sync.scoped_calls), "scoped failure must attempt scoped apply")
+assert_equal(2, sync.resync_calls, "scoped failure must full resync")
+assert_equal(True, result["resync_attempted"], "scoped failure resync marker")
+assert_equal(
+    "port_scoped_apply_error",
+    result["events"]["decisions"][0]["incremental_reason"],
+    "scoped failure reason",
+)
+
+clock, sync, merger, service = new_service(incremental_rpc_enabled=True)
+sync.scoped_result = {
+    "submitted": False,
+    "skipped_reason": "port_not_available_for_host",
+    "snapshot": None,
+}
+merger.record_port_update("p-skip", binding_host="local-host", revision_number=9)
+clock.advance(0.2)
+result = service.run_once()
+assert_equal(1, len(sync.scoped_calls), "scoped skip must attempt scoped apply")
+assert_equal(2, sync.resync_calls, "scoped skip must full resync")
+assert_equal(
+    "port_not_available_for_host",
+    result["events"]["decisions"][0]["incremental_reason"],
+    "scoped skip reason",
 )
 
 clock, sync, merger, service = new_service(incremental_rpc_enabled=True)

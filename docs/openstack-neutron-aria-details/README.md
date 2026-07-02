@@ -256,7 +256,8 @@ docs/openstack-neutron-aria-details/10-rust-scoped-apply.md
 Do not enable P3 runtime behavior in packaged defaults until the P3 gates in
 plan 09 are met. The Rust port-scoped UDS route and Python single-port
 submitter are available for controlled testing behind `incremental_rpc_enabled=true`;
-production rollout still requires plan 10's smoke and rollback gates.
+production rollout still requires plan 09's P3-4/P3-5/P3-6 failure, smoke, and
+rollback/runbook gates.
 Old Neutron environments without trustworthy `revision_number` stay on P2
 full-resync fallback by default; `revisionless_incremental_mode=experimental`
 is test-host only.
