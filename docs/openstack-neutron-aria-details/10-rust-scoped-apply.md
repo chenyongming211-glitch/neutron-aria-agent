@@ -2,9 +2,10 @@
 
 Status: P3-3 implementation design package. The Rust single-port planner scope,
 pure planner tests, internal scoped WAL/status transaction boundary tests, and
-the shared runtime apply body extraction, and shared preflight/idempotency
-checks are implemented; the UDS route and external runtime scoped apply remain
-planned.
+the shared runtime apply body extraction, shared preflight/idempotency checks,
+and port-scoped UDS route are implemented for Rust-side testing. Capability
+advertisement, Python submitter support, and the production incremental call
+chain remain disabled.
 
 ## Goal
 
@@ -28,15 +29,16 @@ OVS forwarding ownership.
 | Rust scoped WAL/status boundary | implemented internally | `SnapshotApplyTransaction`, scope validation, affected-port checks, status seeding, and commit-runtime helpers have unit tests; no external scoped route uses them yet. |
 | Rust shared runtime apply body | implemented internally | `apply_snapshot_runtime_transaction()` is the common detach/update/attach/domain reconcile body used by full-host snapshots and covered by a no-eBPF scoped error test. |
 | Rust shared preflight/idempotency | implemented internally | `validate_snapshot_preflight()` and `snapshot_early_response_for_scope()` share schema, scope, stale, noop, and hash-conflict handling for full-host and future single-port snapshots. |
-| Port-scoped UDS route | planned only | Recorded in `docs/neutron-uds-contract.json` under `p3_port_scoped_snapshot`; not listed in current runtime `routes`. |
-| Rust external port-scoped apply | not implemented | No Rust route, no scoped submit path, no capability advertisement. |
+| Port-scoped UDS route | implemented, capability-disabled | `PUT /api/v1/neutron/ports/{port_id}/snapshot` reuses the shared snapshot apply path with `ApplyScope::SinglePort`; it is listed in `docs/neutron-uds-contract.json` but not advertised as a supported capability. |
+| Rust external port-scoped apply | testable internally | The route can be exercised by Rust tests and direct UDS probes, but no Python submitter or production service-loop path calls it. |
 
 ## Non-Negotiable Guardrails
 
-- Do not add `PUT /api/v1/neutron/ports/{port_id}/snapshot` to current UDS
-  routes until the P3-3 Rust tests below pass.
-- Do not advertise `supports_port_scoped_snapshot=true` until the route,
-  planner, WAL, and status tests pass.
+- Port-scoped UDS route is implemented for Rust-side testing, but do not call it
+  from Python until the capability and config gates are accepted together.
+- Do not advertise `supports_port_scoped_snapshot=true` until route, planner,
+  WAL, status, Python client, and rollback tests pass in the same enablement
+  window.
 - Do not enable `incremental_rpc_enabled=true` in packaged config during this
   design package.
 - Do not remove periodic/full-resync recovery. Scoped apply is an optimization,
@@ -63,8 +65,8 @@ Validation rules:
 
 | Rule | Failure |
 | --- | --- |
-| body contains exactly one port | `UDS_SCHEMA_MISMATCH` or planned `PORT_SCOPE_MISMATCH` |
-| body port id equals path `port_id` | `UDS_SCHEMA_MISMATCH` or planned `PORT_SCOPE_MISMATCH` |
+| body contains exactly one port | `PORT_SCOPE_MISMATCH` |
+| body port id equals path `port_id` | `PORT_SCOPE_MISMATCH` |
 | schema version supported | `UDS_SCHEMA_MISMATCH` |
 | generation is not stale | `stale_generation` |
 | same generation has same desired hash | idempotent success |
@@ -150,9 +152,11 @@ Scoped apply must not turn unrelated ports stale or invisible.
    SinglePort use the same schema, scope, stale generation, noop, and hash
    conflict checks. **Done internally, no route exposure.**
 5. Add the UDS route only after planner, WAL/status, runtime body, and
-   preflight/idempotency tests pass.
-6. Flip the contract from `planned_contract_only` only in the same PR that adds
-   the route and capability tests.
+   preflight/idempotency tests pass. **Done as a Rust-side testable route,
+   capability-disabled.**
+6. Flip the contract to `rust_route_implemented_capability_disabled` when the
+   route lands, while
+   keeping capability advertisement and Python submission disabled. **Done.**
 7. Add Python UDS client support only after Rust advertises
    `supports_port_scoped_snapshot=true`.
 8. Only then consider service-loop submission behind
@@ -174,6 +178,9 @@ Rust unit tests before route exposure:
 | stale scoped generation | `stale_generation`, no runtime mutation. |
 | same generation same scoped hash | idempotent success. |
 | same generation different scoped hash | `generation_hash_conflict`. |
+| scoped UDS route path/body mismatch | route returns `PORT_SCOPE_MISMATCH` JSON and writes no WAL intent. |
+| scoped UDS route stale generation | route returns stale response without attach/update/detach. |
+| scoped UDS route hash conflict | route returns `generation_hash_conflict` JSON without attach/update/detach. |
 | scoped intent records only target | WAL requested/affected port ids contain no unrelated ports. |
 | scoped success preserves unrelated statuses | only target status generation changes. |
 | scoped target failure has no false ready | `applied_generation` is not advanced and target is degraded/error. |
@@ -198,9 +205,11 @@ Smoke tests before production enablement:
 Before opening the Rust implementation PR, all of these must be true:
 
 - this plan is linked from plan 09 and the detail README;
-- `docs/neutron-uds-contract.json` still marks the route planned-only;
-- `ci/check_neutron_stage1.py` still rejects the planned route if it appears in
-  current `routes`;
+- `docs/neutron-uds-contract.json` marks the route
+  `rust_route_implemented_capability_disabled`;
+- `ci/check_neutron_stage1.py` requires the route to exist while still requiring
+  `capability_advertised=false`, `python_submitter_enabled=false`, and
+  `incremental_rpc_enabled_default=false`;
 - Python P3-2 dry-run tests pass;
 - stage-one, stage-two, and stage-three checks pass.
 

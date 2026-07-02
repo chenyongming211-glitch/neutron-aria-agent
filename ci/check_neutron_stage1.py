@@ -25,6 +25,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_transaction"],
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_preflight"],
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_early_response"],
+    ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_port_route"],
     ["test", "--locked", "-p", "aria-agent", "domain_authority"],
     ["test", "--locked", "-p", "aria-agent", "peercred_policy"],
     ["test", "--locked", "-p", "aria-agent", "openapi_does_not_expose_neutron_uds_paths"],
@@ -164,6 +165,7 @@ def check_uds_contract_artifact():
         ("GET", "/api/v1/neutron/capabilities"),
         ("GET", "/api/v1/neutron/status"),
         ("PUT", "/api/v1/neutron/snapshot"),
+        ("PUT", "/api/v1/neutron/ports/{port_id}/snapshot"),
         ("DELETE", "/api/v1/neutron/ports/{port_id}"),
     }
     missing = sorted(required_routes - routes)
@@ -190,8 +192,12 @@ def check_uds_contract_artifact():
 
     p3_scoped = contract.get("p3_port_scoped_snapshot") or {}
     expected_p3_scoped = {
-        "phase": "planned_contract_only",
+        "phase": "rust_route_implemented_capability_disabled",
         "runtime_enabled": False,
+        "route_enabled": True,
+        "capability_advertised": False,
+        "python_submitter_enabled": False,
+        "incremental_rpc_enabled_default": False,
         "method": "PUT",
         "path": "/api/v1/neutron/ports/{port_id}/snapshot",
         "body_scope": "single_port",
@@ -208,8 +214,6 @@ def check_uds_contract_artifact():
         raise SystemExit("ERROR: p3 port-scoped contract must name incremental gate")
     if "full resync" not in p3_scoped.get("fallback_rule", ""):
         raise SystemExit("ERROR: p3 port-scoped contract must keep full-resync fallback")
-    if ("PUT", p3_scoped.get("path")) in routes:
-        raise SystemExit("ERROR: planned P3 port-scoped route must not be in current routes")
     planned_errors = set(p3_scoped.get("planned_error_codes") or [])
     for code in (
         "UDS_SCHEMA_MISMATCH",
@@ -225,9 +229,9 @@ def check_uds_contract_artifact():
     forbidden = set(p3_scoped.get("forbidden_until_implemented") or [])
     for guardrail in (
         "do not advertise supports_port_scoped_snapshot=true",
-        "do not add this path to current routes",
         "do not enable incremental_rpc_enabled=true",
         "do not remove full-resync recovery",
+        "do not call this route from Python until capability and config gates are accepted",
     ):
         if guardrail not in forbidden:
             raise SystemExit("ERROR: p3 port-scoped guardrail missing %r" % guardrail)
@@ -486,6 +490,7 @@ def check_rust_stage_one_tests_present():
         "~1api~1v1~1neutron~1capabilities",
         "~1api~1v1~1neutron~1status",
         "~1api~1v1~1neutron~1snapshot",
+        "~1api~1v1~1neutron~1ports~1{port_id}~1snapshot",
         "~1api~1v1~1neutron~1ports~1{port_id}",
     ):
         if path not in openapi_source:
@@ -499,7 +504,7 @@ def check_p3_rust_scoped_plan_boundary():
     required_markers = [
         "Status: P3-3 implementation design package",
         "SinglePort",
-        "Do not add `PUT /api/v1/neutron/ports/{port_id}/snapshot` to current UDS",
+        "Port-scoped UDS route is implemented for Rust-side testing",
         "Do not advertise `supports_port_scoped_snapshot=true`",
         "Do not enable `incremental_rpc_enabled=true`",
         "requested_port_ids=[port_id]",
@@ -543,6 +548,9 @@ def check_p3_rust_scoped_plan_boundary():
         "fn validate_snapshot_preflight(",
         "fn snapshot_early_response_for_scope(",
         "fn snapshot_has_runtime_drift_for_scope(",
+        ".route(\n            \"/api/v1/neutron/ports/{port_id}/snapshot\"",
+        "async fn put_neutron_port_snapshot(",
+        "async fn apply_neutron_snapshot_for_scope(",
         "async fn apply_snapshot_runtime_transaction(",
         "fn neutron_snapshot_plan_scoped_updates_target_only(",
         "fn neutron_snapshot_plan_scoped_attaches_target_without_detaching_unrelated_ports(",
@@ -563,6 +571,9 @@ def check_p3_rust_scoped_plan_boundary():
         "fn neutron_snapshot_early_response_scoped_stale_generation(",
         "fn neutron_snapshot_early_response_scoped_noop_ignores_unrelated_host_drift(",
         "fn neutron_snapshot_early_response_scoped_hash_conflict(",
+        "async fn neutron_snapshot_port_route_rejects_path_body_mismatch(",
+        "async fn neutron_snapshot_port_route_returns_stale_generation(",
+        "async fn neutron_snapshot_port_route_returns_hash_conflict(",
     ]
     for term in required_source_terms:
         if term not in neutron_api_source:

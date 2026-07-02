@@ -561,6 +561,10 @@ pub(crate) fn build_router(
         .route("/api/v1/neutron/status", get(get_neutron_status))
         .route("/api/v1/neutron/snapshot", put(put_neutron_snapshot))
         .route(
+            "/api/v1/neutron/ports/{port_id}/snapshot",
+            put(put_neutron_port_snapshot),
+        )
+        .route(
             "/api/v1/neutron/ports/{port_id}",
             delete(delete_neutron_port),
         )
@@ -637,12 +641,54 @@ async fn put_neutron_snapshot(
     }
 }
 
+async fn put_neutron_port_snapshot(
+    State(state): State<NeutronApiState>,
+    Path(port_id): Path<String>,
+    Json(snapshot): Json<NeutronSnapshotRequest>,
+) -> impl IntoResponse {
+    // Keep mutating scoped snapshot apply alive even if the UDS client times out or disconnects.
+    let handle = tokio::spawn(apply_neutron_snapshot_for_scope(
+        state,
+        snapshot,
+        ApplyScope::SinglePort(port_id),
+    ));
+    match handle.await {
+        Ok(Ok(response)) => Json(response).into_response(),
+        Ok(Err(error)) => (
+            error.status,
+            Json(serde_json::json!({
+                "error": error.code,
+                "details": error.details,
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            error!(error = %e, "Neutron scoped snapshot apply task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "snapshot_apply_task_failed",
+                    "details": e.to_string(),
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
 async fn apply_neutron_snapshot(
     state: NeutronApiState,
     snapshot: NeutronSnapshotRequest,
 ) -> Result<NeutronSnapshotResponse, SnapshotApplyError> {
+    apply_neutron_snapshot_for_scope(state, snapshot, ApplyScope::FullHost).await
+}
+
+async fn apply_neutron_snapshot_for_scope(
+    state: NeutronApiState,
+    snapshot: NeutronSnapshotRequest,
+    scope: ApplyScope,
+) -> Result<NeutronSnapshotResponse, SnapshotApplyError> {
     let _guard = state.apply_lock.lock().await;
-    let scope = ApplyScope::FullHost;
     validate_snapshot_preflight(&scope, &snapshot)?;
     let requested_hash = snapshot.desired_hash.clone();
     let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
@@ -2712,6 +2758,17 @@ mod tests {
         }
     }
 
+    async fn response_json_value(
+        response: axum::response::Response,
+    ) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), NEUTRON_UDS_BODY_MAX_BYTES as usize)
+            .await
+            .expect("response body should be readable");
+        let value = serde_json::from_slice(body.as_ref()).expect("response should be json");
+        (status, value)
+    }
+
     #[test]
     fn neutron_snapshot_plan_attaches_only_eligible_ports() {
         let current = BTreeMap::new();
@@ -3642,6 +3699,123 @@ mod tests {
 
         assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
         assert_eq!(error.code, "generation_hash_conflict");
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_port_route_rejects_path_body_mismatch() {
+        let root = temp_root("port-route-mismatch");
+        let state = test_neutron_state(&root);
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 80,
+            desired_hash: Some("hash-80".to_string()),
+            host: None,
+            ports: vec![port("other-port", "tap-other", true)],
+        };
+
+        let response = put_neutron_port_snapshot(
+            State(state),
+            Path("target-port".to_string()),
+            Json(snapshot),
+        )
+        .await
+        .into_response();
+        let (status, body) = response_json_value(response).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.get("error").and_then(|value| value.as_str()),
+            Some("PORT_SCOPE_MISMATCH")
+        );
+        assert!(
+            body.get("details")
+                .and_then(|value| value.as_str())
+                .map(|details| details.contains("expected target-port"))
+                .unwrap_or(false)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_port_route_returns_stale_generation() {
+        let root = temp_root("port-route-stale");
+        let state = test_neutron_state(&root);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.accepted_generation = 90;
+            runtime.applied_generation = 90;
+            runtime.applied_desired_hash = Some("hash-90".to_string());
+            runtime.authority_state = "ready".to_string();
+        }
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 89,
+            desired_hash: Some("hash-89".to_string()),
+            host: None,
+            ports: vec![port("target-port", "tap-target", true)],
+        };
+
+        let response = put_neutron_port_snapshot(
+            State(state),
+            Path("target-port".to_string()),
+            Json(snapshot),
+        )
+        .await
+        .into_response();
+        let (status, body) = response_json_value(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body.get("status").and_then(|value| value.as_str()),
+            Some("stale")
+        );
+        assert_eq!(
+            body.get("applied_generation")
+                .and_then(|value| value.as_u64()),
+            Some(90)
+        );
+        assert_eq!(
+            body.pointer("/results/0/reason")
+                .and_then(|value| value.as_str()),
+            Some("stale_generation")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_port_route_returns_hash_conflict() {
+        let root = temp_root("port-route-conflict");
+        let state = test_neutron_state(&root);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.accepted_generation = 100;
+            runtime.applied_generation = 100;
+            runtime.applied_desired_hash = Some("hash-old".to_string());
+            runtime.authority_state = "ready".to_string();
+        }
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 100,
+            desired_hash: Some("hash-new".to_string()),
+            host: None,
+            ports: vec![port("target-port", "tap-target", true)],
+        };
+
+        let response = put_neutron_port_snapshot(
+            State(state),
+            Path("target-port".to_string()),
+            Json(snapshot),
+        )
+        .await
+        .into_response();
+        let (status, body) = response_json_value(response).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body.get("error").and_then(|value| value.as_str()),
+            Some("generation_hash_conflict")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

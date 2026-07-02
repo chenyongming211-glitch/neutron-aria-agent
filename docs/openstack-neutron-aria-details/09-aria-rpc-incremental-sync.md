@@ -400,9 +400,9 @@ Current entry-gate evidence:
 - Items 1-3 are covered by stage-two/stage-three closure, RPC P2 field
   evidence, and the accepted heartbeat/status subset.
 - Item 4 is covered by `docs/neutron-uds-contract.json`
-  `p3_port_scoped_snapshot`. This is a planned contract only; the route is not
-  in current implemented `routes` and must not be advertised as runtime
-  supported.
+  `p3_port_scoped_snapshot`. The Rust UDS route is implemented for scoped
+  apply testing, but the capability is not advertised, the Python submitter is
+  disabled, and runtime incremental submission must not be enabled yet.
 - Item 5 is covered by `EffectiveAclIndex.compare_revision_for_port()` unit
   tests for newer/same/older/unknown relations.
 
@@ -429,11 +429,12 @@ Field evidence:
 Still forbidden before the full P3 entry gate:
 
 - Enabling `incremental_rpc_enabled=true` in runtime config.
-- Sending port-scoped snapshots over UDS.
-- Changing Rust datapath snapshot apply semantics.
+- Sending port-scoped snapshots over UDS from Python/service-loop code.
+- Advertising `supports_port_scoped_snapshot=true`.
 - Removing periodic/full-resync recovery.
-- Adding the Rust port-scoped route before the P3-3 planner/WAL/status tests
-  defined in `10-rust-scoped-apply.md`.
+- Changing Rust datapath snapshot apply semantics outside the shared
+  `ApplyScope::FullHost` / `ApplyScope::SinglePort` path defined in
+  `10-rust-scoped-apply.md`.
 
 ## Open Questions
 

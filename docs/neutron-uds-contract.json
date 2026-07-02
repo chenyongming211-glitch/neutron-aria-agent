@@ -45,8 +45,12 @@
     }
   ],
   "p3_port_scoped_snapshot": {
-    "phase": "planned_contract_only",
+    "phase": "rust_route_implemented_capability_disabled",
     "runtime_enabled": false,
+    "route_enabled": true,
+    "capability_advertised": false,
+    "python_submitter_enabled": false,
+    "incremental_rpc_enabled_default": false,
     "enablement_gate": "incremental_rpc_enabled=true after P3 entry gate acceptance",
     "method": "PUT",
     "path": "/api/v1/neutron/ports/{port_id}/snapshot",
@@ -67,9 +71,9 @@
     ],
     "forbidden_until_implemented": [
       "do not advertise supports_port_scoped_snapshot=true",
-      "do not add this path to current routes",
       "do not enable incremental_rpc_enabled=true",
-      "do not remove full-resync recovery"
+      "do not remove full-resync recovery",
+      "do not call this route from Python until capability and config gates are accepted"
     ]
   },
   "peer_auth_policy": "filesystem_permissions_then_peercred",
@@ -86,6 +90,10 @@
     {
       "method": "PUT",
       "path": "/api/v1/neutron/snapshot"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/neutron/ports/{port_id}/snapshot"
     },
     {
       "method": "DELETE",

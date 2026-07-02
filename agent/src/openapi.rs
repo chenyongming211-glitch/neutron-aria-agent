@@ -303,6 +303,10 @@ mod tests {
         assert!(doc.pointer("/paths/~1api~1v1~1neutron~1status").is_none());
         assert!(doc.pointer("/paths/~1api~1v1~1neutron~1snapshot").is_none());
         assert!(
+            doc.pointer("/paths/~1api~1v1~1neutron~1ports~1{port_id}~1snapshot")
+                .is_none()
+        );
+        assert!(
             doc.pointer("/paths/~1api~1v1~1neutron~1ports~1{port_id}")
                 .is_none()
         );
