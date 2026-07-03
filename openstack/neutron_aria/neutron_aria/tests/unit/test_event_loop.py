@@ -808,6 +808,51 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertEqual("drop-icmp", port["acl"]["rules"][0]["id"])
         self.assertEqual(["10.58.159.2/32"], port["acl"]["rules"][0]["src_cidrs"])
 
+    def test_full_resync_enriches_port_status_with_effective_acl_identity(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        acl_index = EffectiveAclIndex(
+            policies=[{"id": "acl-policy", "default_action": "allow"}],
+            rules=[{
+                "id": "drop-icmp",
+                "policy_id": "acl-policy",
+                "direction": "ingress",
+                "priority": 100,
+                "action": "drop",
+                "ethertype": "IPv4",
+                "protocol": "icmp",
+                "src_cidr": "10.58.159.2/32",
+            }],
+            bindings=[{
+                "id": "acl-binding",
+                "policy_id": "acl-policy",
+                "target_type": "port",
+                "target_id": port_id,
+            }],
+        )
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([{
+                "id": port_id,
+                "network_id": "net-1",
+                "device_owner": "compute:nova",
+                "binding:host_id": "ostack2",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+            }]),
+            FakeOvsReader(),
+            StatusAfterApplyLocalClient(),
+            managed_domains=["acl"],
+            acl_index=acl_index,
+        )
+
+        result = sync.full_resync()
+
+        port_status = result["status"]["last_port_statuses"][0]
+        self.assertEqual(port_id, port_status["port_id"])
+        self.assertEqual("ready", port_status["status"])
+        self.assertEqual("acl-policy", port_status["policy_id"])
+        self.assertEqual("acl-binding", port_status["binding_id"])
+
     def test_dry_run_port_update_builds_scoped_snapshot_without_submit(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         neutron_port = {

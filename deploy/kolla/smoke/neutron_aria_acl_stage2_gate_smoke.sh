@@ -11,7 +11,8 @@ usage() {
 Usage: $0 install|smoke|rollback
 
 install   Install neutron-server aria_acl package, run DB migration check,
-          install neutron-aria-agent egg, then run CRUD and ACL-source smokes.
+          install neutron-aria-agent and legacy neutron CLI packages, then run
+          CRUD and ACL-source smokes.
 smoke     Run non-mutating package smokes plus CRUD/source gates.
 rollback  Roll back agent egg and neutron-server plugin/config. DB downgrade is
           skipped unless ROLLBACK_DB_ON_ROLLBACK=true is set explicitly.
@@ -41,6 +42,9 @@ install() {
     RESTART_AGENT_AFTER_INSTALL="${RESTART_AGENT_AFTER_INSTALL:-true}" \
         bash "${REPO_ROOT}/deploy/kolla/package/install_neutron_aria_agent_egg.sh" install
 
+    log "Installing legacy neutron aria-acl CLI package"
+    bash "${REPO_ROOT}/deploy/kolla/package/install_neutronclient_aria_cli.sh" install
+
     smoke
 }
 
@@ -55,11 +59,27 @@ smoke() {
     log "Checking neutron-aria-agent package"
     bash "${REPO_ROOT}/deploy/kolla/package/install_neutron_aria_agent_egg.sh" smoke
 
+    log "Checking legacy neutron aria-acl CLI package"
+    bash "${REPO_ROOT}/deploy/kolla/package/install_neutronclient_aria_cli.sh" smoke
+
     log "Running aria_acl DB/REST CRUD smoke"
     bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_db_crud_smoke.sh"
 
+    log "Running aria_acl API/CLI consistency smoke"
+    bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_cli_consistency_smoke.sh"
+
     log "Running NeutronAclSource/full-resync smoke"
     bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_neutron_source_smoke.sh"
+
+    if [ "${RUN_LIVE_DOWNLINK_SMOKE:-false}" = "true" ]; then
+        log "Running live downlink ACL smoke"
+        bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_live_downlink_smoke.sh"
+    fi
+
+    if [ "${RUN_LIVE_EGRESS_SMOKE:-false}" = "true" ]; then
+        log "Running live egress ACL smoke"
+        bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_live_egress_smoke.sh"
+    fi
 
     log "Checking neutron-aria-agent heartbeat summary"
     EXPECTED_HOSTS="${HOST_FQDN:-$(hostname -f)}" \
@@ -77,6 +97,9 @@ rollback() {
     require_root_host
     log "Rolling back neutron-aria-agent package"
     bash "${REPO_ROOT}/deploy/kolla/package/install_neutron_aria_agent_egg.sh" rollback || true
+
+    log "Rolling back legacy neutron aria-acl CLI package"
+    bash "${REPO_ROOT}/deploy/kolla/package/install_neutronclient_aria_cli.sh" rollback || true
 
     log "Rolling back neutron-server aria_acl plugin/config"
     bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_plugin_load_smoke.sh" rollback

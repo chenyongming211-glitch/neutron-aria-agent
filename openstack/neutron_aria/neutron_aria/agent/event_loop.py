@@ -147,7 +147,7 @@ class SnapshotSynchronizer(object):
             managed_ports,
             desired_hash=snapshot.get("desired_hash"),
             managed_ports_detail=self._managed_ports_from_status(apply_status),
-            port_statuses=self._port_statuses_from_status(apply_status),
+            port_statuses=self._port_statuses_from_status(apply_status, snapshot),
             accepted_generation=self._status_generation(
                 apply_status,
                 "accepted_generation",
@@ -471,7 +471,7 @@ class SnapshotSynchronizer(object):
             managed_ports,
             desired_hash=snapshot.get("desired_hash"),
             managed_ports_detail=self._managed_ports_from_status(apply_status),
-            port_statuses=self._port_statuses_from_status(apply_status),
+            port_statuses=self._port_statuses_from_status(apply_status, snapshot),
             accepted_generation=self._status_generation(
                 apply_status,
                 "accepted_generation",
@@ -559,10 +559,51 @@ class SnapshotSynchronizer(object):
             return []
         return list(status.get("managed_ports") or [])
 
-    def _port_statuses_from_status(self, status):
+    def _port_statuses_from_status(self, status, snapshot=None):
         if not status:
             return []
-        return list(status.get("port_statuses") or [])
+        statuses = list(status.get("port_statuses") or [])
+        acl_metadata = self._acl_metadata_by_port(snapshot)
+        if not acl_metadata:
+            return statuses
+
+        enriched = []
+        for status_row in statuses:
+            payload = dict(status_row)
+            metadata = acl_metadata.get(payload.get("port_id"))
+            if metadata:
+                self._setdefault_nonempty(
+                    payload,
+                    "policy_id",
+                    metadata.get("policy_id"),
+                )
+                self._setdefault_nonempty(
+                    payload,
+                    "binding_id",
+                    metadata.get("binding_id"),
+                )
+            enriched.append(payload)
+        return enriched
+
+    def _acl_metadata_by_port(self, snapshot):
+        metadata = {}
+        for port in (snapshot or {}).get("ports") or []:
+            port_id = port.get("port_id")
+            acl = port.get("acl") or {}
+            if not port_id:
+                continue
+            policy_id = acl.get("policy_id")
+            binding_id = acl.get("binding_id")
+            if policy_id or binding_id:
+                metadata[port_id] = {
+                    "policy_id": policy_id,
+                    "binding_id": binding_id,
+                }
+        return metadata
+
+    def _setdefault_nonempty(self, payload, key, value):
+        if value and not payload.get(key):
+            payload[key] = value
 
     def _status_generation(self, status, key, default):
         if not status:

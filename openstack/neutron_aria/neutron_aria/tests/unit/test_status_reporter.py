@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+import json
 import unittest
 
 from neutron_aria.agent.status import AgentRuntimeStatus
@@ -166,6 +167,52 @@ class StatusReporterTestCase(unittest.TestCase):
             [{"reason": "acl_apply_failed", "count": 1}],
             configurations["degraded_reasons"],
         )
+
+    def test_report_compacts_large_heartbeat_configurations(self):
+        api = FakeReportStateApi()
+        runtime_status = AgentRuntimeStatus("ostack2")
+        managed_ports = []
+        port_statuses = []
+        for i in range(20):
+            port_id = "port-%02d-00000000-0000-0000-0000-000000000000" % i
+            managed_ports.append({
+                "port_id": port_id,
+                "ifname": "tap%02d" % i,
+                "managed_domains": ["acl"],
+                "ifindex": i,
+            })
+            port_statuses.append({
+                "port_id": port_id,
+                "ifname": "tap%02d" % i,
+                "desired_hash": "x" * 64,
+                "managed_domains": ["acl"],
+                "status": "not_requested",
+                "reason": "no_enabled_binding",
+                "domains": [{
+                    "domain": "acl",
+                    "status": "not_requested",
+                    "effective_action": "bypass",
+                    "reason": "no_enabled_binding",
+                }],
+            })
+        runtime_status.mark_ready(
+            generation=12,
+            snapshot_ports=20,
+            managed_ports=20,
+            managed_ports_detail=managed_ports,
+            port_statuses=port_statuses,
+        )
+        reporter = NeutronStatusReporter(api, context="ctx", host="ostack2")
+
+        agent_state = reporter.report(runtime_status)
+        configurations = agent_state["configurations"]
+
+        self.assertEqual(3, len(configurations["last_managed_ports_detail"]))
+        self.assertTrue(configurations["last_managed_ports_detail_truncated"])
+        self.assertEqual(3, len(configurations["last_port_statuses"]))
+        self.assertTrue(configurations["last_port_statuses_truncated"])
+        self.assertNotIn("desired_hash", configurations["last_port_statuses"][0])
+        self.assertLess(len(json.dumps(configurations, sort_keys=True)), 4000)
 
     def test_second_report_clears_start_flag(self):
         api = FakeReportStateApi()

@@ -1,0 +1,549 @@
+from __future__ import absolute_import
+from __future__ import print_function
+
+from neutronclient.common import extension
+
+
+def _bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    return str(value).lower() in ("1", "true", "yes", "on")
+
+
+class _AriaAclCommandMixin(object):
+    pagination_support = False
+    sorting_support = False
+    resource = None
+    collection = None
+    path = None
+    id_path = None
+    list_columns = []
+    allow_names = False
+
+    def _client(self, parsed_args):
+        neutron_client = self.get_client()
+        neutron_client.format = parsed_args.request_format
+        return neutron_client
+
+    def _add_enabled(self, parser):
+        parser.add_argument(
+            "--enabled",
+            choices=["true", "false"],
+            help="Whether this Aria ACL object is enabled.",
+        )
+
+    def _project_body(self, parsed_args):
+        body = {}
+        tenant_id = getattr(parsed_args, "tenant_id", None)
+        project_id = getattr(parsed_args, "project_id", None)
+        if project_id:
+            body["project_id"] = project_id
+        if tenant_id:
+            body["tenant_id"] = tenant_id
+        return body
+
+    def _add_project_arguments(self, parser):
+        parser.add_argument("--project-id", dest="project_id")
+
+    def _show_rows(self, data):
+        resource = data.get(self.resource) or {}
+        return zip(*sorted(resource.items()))
+
+
+class _AriaAclList(_AriaAclCommandMixin, extension.ClientExtensionList):
+    versions = []
+
+    def retrieve_list(self, parsed_args):
+        neutron_client = self._client(parsed_args)
+        return self.call_server(
+            neutron_client,
+            self.args2search_opts(parsed_args),
+            parsed_args,
+        ).get(self.collection, [])
+
+    def args2search_opts(self, parsed_args):
+        opts = {}
+        for field in ("policy_id", "target_type", "target_id", "port_id", "host"):
+            value = getattr(parsed_args, field, None)
+            if value:
+                opts[field] = value
+        return opts
+
+    def call_server(self, neutron_client, search_opts, parsed_args):
+        return neutron_client.list_ext(self.path, **search_opts)
+
+
+class _AriaAclShow(_AriaAclCommandMixin, extension.ClientExtensionShow):
+    versions = []
+
+    def execute(self, parsed_args):
+        data = self._client(parsed_args).show_ext(self.id_path, parsed_args.id)
+        self.format_output_data(data)
+        return self._show_rows(data)
+
+
+class _AriaAclDelete(_AriaAclCommandMixin, extension.ClientExtensionDelete):
+    versions = []
+
+    def execute(self, parsed_args):
+        self._client(parsed_args).delete_ext(self.id_path, parsed_args.id)
+        print("Deleted %s: %s" % (self.resource, parsed_args.id), file=self.app.stdout)
+
+
+class _AriaAclCreate(_AriaAclCommandMixin, extension.ClientExtensionCreate):
+    versions = []
+
+    def execute(self, parsed_args):
+        body = self.args2body(parsed_args)
+        data = self._client(parsed_args).create_ext(self.path, body)
+        self.format_output_data(data)
+        print("Created a new %s:" % self.resource, file=self.app.stdout)
+        return self._show_rows(data)
+
+
+class _AriaAclUpdate(_AriaAclCommandMixin, extension.ClientExtensionUpdate):
+    versions = []
+
+    def execute(self, parsed_args):
+        body = self.args2body(parsed_args)
+        self._client(parsed_args).update_ext(self.id_path, parsed_args.id, body)
+        print("Updated %s: %s" % (self.resource, parsed_args.id), file=self.app.stdout)
+
+
+class AriaAclPolicyList(_AriaAclList):
+    """List Aria ACL policies."""
+
+    shell_command = "aria-acl-policy-list"
+    resource = "aria_acl_policy"
+    collection = "aria_acl_policies"
+    resource_plural = "aria_acl_policies"
+    path = "/aria-acl-policies"
+    object_path = "/aria-acl-policies"
+    list_columns = ["id", "name", "default_action", "stateful", "enabled", "revision_number"]
+
+
+class AriaAclPolicyShow(_AriaAclShow):
+    """Show an Aria ACL policy."""
+
+    shell_command = "aria-acl-policy-show"
+    resource = "aria_acl_policy"
+    path = "/aria-acl-policies"
+    id_path = "/aria-acl-policies/%s"
+    resource_path = "/aria-acl-policies/%s"
+
+
+class AriaAclPolicyCreate(_AriaAclCreate):
+    """Create an Aria ACL policy."""
+
+    shell_command = "aria-acl-policy-create"
+    resource = "aria_acl_policy"
+    path = "/aria-acl-policies"
+    object_path = "/aria-acl-policies"
+
+    def add_known_arguments(self, parser):
+        self._add_project_arguments(parser)
+        parser.add_argument("--name", default="")
+        parser.add_argument("--default-action", choices=["allow", "deny"], default="allow")
+        parser.add_argument("--stateful", choices=["true", "false"], default=None)
+        self._add_enabled(parser)
+
+    def args2body(self, parsed_args):
+        body = self._project_body(parsed_args)
+        body.update({
+            "name": parsed_args.name,
+            "default_action": parsed_args.default_action,
+        })
+        if parsed_args.stateful is not None:
+            body["stateful"] = _bool(parsed_args.stateful)
+        if parsed_args.enabled is not None:
+            body["enabled"] = _bool(parsed_args.enabled)
+        return {self.resource: body}
+
+
+class AriaAclPolicyUpdate(_AriaAclUpdate):
+    """Update an Aria ACL policy."""
+
+    shell_command = "aria-acl-policy-update"
+    resource = "aria_acl_policy"
+    id_path = "/aria-acl-policies/%s"
+    resource_path = "/aria-acl-policies/%s"
+
+    def add_known_arguments(self, parser):
+        parser.add_argument("--name")
+        parser.add_argument("--default-action", choices=["allow", "deny"])
+        parser.add_argument("--stateful", choices=["true", "false"])
+        self._add_enabled(parser)
+
+    def args2body(self, parsed_args):
+        body = {}
+        for field in ("name", "default_action", "stateful", "enabled"):
+            value = getattr(parsed_args, field, None)
+            if value is not None:
+                body[field] = _bool(value) if field in ("stateful", "enabled") else value
+        return {self.resource: body}
+
+
+class AriaAclPolicyDelete(_AriaAclDelete):
+    """Delete an Aria ACL policy."""
+
+    shell_command = "aria-acl-policy-delete"
+    resource = "aria_acl_policy"
+    id_path = "/aria-acl-policies/%s"
+    resource_path = "/aria-acl-policies/%s"
+
+
+class AriaAclRuleList(_AriaAclList):
+    """List Aria ACL rules."""
+
+    shell_command = "aria-acl-rule-list"
+    resource = "aria_acl_rule"
+    collection = "aria_acl_rules"
+    resource_plural = "aria_acl_rules"
+    path = "/aria-acl-rules"
+    object_path = "/aria-acl-rules"
+    list_columns = ["id", "policy_id", "direction", "priority", "action", "protocol", "enabled"]
+
+    def add_known_arguments(self, parser):
+        parser.add_argument("--policy-id", dest="policy_id")
+        parser.add_argument("--policy", dest="policy_id")
+
+
+class AriaAclRuleShow(_AriaAclShow):
+    """Show an Aria ACL rule."""
+
+    shell_command = "aria-acl-rule-show"
+    resource = "aria_acl_rule"
+    path = "/aria-acl-rules"
+    id_path = "/aria-acl-rules/%s"
+    resource_path = "/aria-acl-rules/%s"
+
+
+class AriaAclRuleCreate(_AriaAclCreate):
+    """Create an Aria ACL rule."""
+
+    shell_command = "aria-acl-rule-create"
+    resource = "aria_acl_rule"
+    path = "/aria-acl-rules"
+    object_path = "/aria-acl-rules"
+
+    def add_known_arguments(self, parser):
+        self._add_project_arguments(parser)
+        parser.add_argument("--policy-id", "--policy", dest="policy_id", required=True)
+        parser.add_argument("--direction", choices=["ingress", "egress"], required=True)
+        parser.add_argument("--priority", type=int, required=True)
+        parser.add_argument("--action", choices=["allow", "deny", "drop"], required=True)
+        parser.add_argument("--protocol")
+        parser.add_argument("--src-cidr")
+        parser.add_argument("--dst-cidr")
+        parser.add_argument("--src-address-set-id")
+        parser.add_argument("--dst-address-set-id")
+        parser.add_argument("--src-port-min", type=int)
+        parser.add_argument("--src-port-max", type=int)
+        parser.add_argument("--dst-port-min", type=int)
+        parser.add_argument("--dst-port-max", type=int)
+        parser.add_argument("--dst-port", type=int)
+        parser.add_argument("--ethertype")
+        self._add_enabled(parser)
+
+    def args2body(self, parsed_args):
+        body = self._project_body(parsed_args)
+        body.update({
+            "policy_id": parsed_args.policy_id,
+            "direction": parsed_args.direction,
+            "priority": parsed_args.priority,
+            "action": parsed_args.action,
+        })
+        optional_fields = (
+            "protocol", "src_cidr", "dst_cidr", "src_address_set_id",
+            "dst_address_set_id", "src_port_min", "src_port_max",
+            "dst_port_min", "dst_port_max", "ethertype",
+        )
+        for field in optional_fields:
+            value = getattr(parsed_args, field, None)
+            if value is not None:
+                body[field] = value
+        if parsed_args.dst_port is not None:
+            body["dst_port_min"] = parsed_args.dst_port
+            body["dst_port_max"] = parsed_args.dst_port
+        if parsed_args.enabled is not None:
+            body["enabled"] = _bool(parsed_args.enabled)
+        return {self.resource: body}
+
+
+class AriaAclRuleUpdate(_AriaAclUpdate):
+    """Update an Aria ACL rule."""
+
+    shell_command = "aria-acl-rule-update"
+    resource = "aria_acl_rule"
+    id_path = "/aria-acl-rules/%s"
+    resource_path = "/aria-acl-rules/%s"
+
+    def add_known_arguments(self, parser):
+        parser.add_argument("--direction", choices=["ingress", "egress"])
+        parser.add_argument("--priority", type=int)
+        parser.add_argument("--action", choices=["allow", "deny", "drop"])
+        parser.add_argument("--protocol")
+        parser.add_argument("--src-cidr")
+        parser.add_argument("--dst-cidr")
+        parser.add_argument("--src-address-set-id")
+        parser.add_argument("--dst-address-set-id")
+        parser.add_argument("--src-port-min", type=int)
+        parser.add_argument("--src-port-max", type=int)
+        parser.add_argument("--dst-port-min", type=int)
+        parser.add_argument("--dst-port-max", type=int)
+        parser.add_argument("--dst-port", type=int)
+        parser.add_argument("--ethertype")
+        self._add_enabled(parser)
+
+    def args2body(self, parsed_args):
+        body = {}
+        for field in (
+            "direction", "priority", "action", "protocol", "src_cidr",
+            "dst_cidr", "src_address_set_id", "dst_address_set_id",
+            "src_port_min", "src_port_max", "dst_port_min", "dst_port_max",
+            "ethertype",
+        ):
+            value = getattr(parsed_args, field, None)
+            if value is not None:
+                body[field] = value
+        if parsed_args.dst_port is not None:
+            body["dst_port_min"] = parsed_args.dst_port
+            body["dst_port_max"] = parsed_args.dst_port
+        if parsed_args.enabled is not None:
+            body["enabled"] = _bool(parsed_args.enabled)
+        return {self.resource: body}
+
+
+class AriaAclRuleDelete(_AriaAclDelete):
+    """Delete an Aria ACL rule."""
+
+    shell_command = "aria-acl-rule-delete"
+    resource = "aria_acl_rule"
+    id_path = "/aria-acl-rules/%s"
+    resource_path = "/aria-acl-rules/%s"
+
+
+class AriaAclAddressSetList(_AriaAclList):
+    """List Aria ACL address sets."""
+
+    shell_command = "aria-acl-address-set-list"
+    resource = "aria_acl_address_set"
+    collection = "aria_acl_address_sets"
+    resource_plural = "aria_acl_address_sets"
+    path = "/aria-acl-address-sets"
+    object_path = "/aria-acl-address-sets"
+    list_columns = ["id", "name", "members", "enabled", "revision_number"]
+
+
+class AriaAclAddressSetShow(_AriaAclShow):
+    """Show an Aria ACL address set."""
+
+    shell_command = "aria-acl-address-set-show"
+    resource = "aria_acl_address_set"
+    path = "/aria-acl-address-sets"
+    id_path = "/aria-acl-address-sets/%s"
+    resource_path = "/aria-acl-address-sets/%s"
+
+
+class AriaAclAddressSetCreate(_AriaAclCreate):
+    """Create an Aria ACL address set."""
+
+    shell_command = "aria-acl-address-set-create"
+    resource = "aria_acl_address_set"
+    path = "/aria-acl-address-sets"
+    object_path = "/aria-acl-address-sets"
+
+    def add_known_arguments(self, parser):
+        self._add_project_arguments(parser)
+        parser.add_argument("--name", default="")
+        parser.add_argument("--member", dest="members", action="append", default=[])
+        self._add_enabled(parser)
+
+    def args2body(self, parsed_args):
+        body = self._project_body(parsed_args)
+        body.update({
+            "name": parsed_args.name,
+            "members": parsed_args.members or [],
+        })
+        if parsed_args.enabled is not None:
+            body["enabled"] = _bool(parsed_args.enabled)
+        return {self.resource: body}
+
+
+class AriaAclAddressSetUpdate(_AriaAclUpdate):
+    """Update an Aria ACL address set."""
+
+    shell_command = "aria-acl-address-set-update"
+    resource = "aria_acl_address_set"
+    id_path = "/aria-acl-address-sets/%s"
+    resource_path = "/aria-acl-address-sets/%s"
+
+    def add_known_arguments(self, parser):
+        parser.add_argument("--name")
+        parser.add_argument("--member", dest="members", action="append")
+        self._add_enabled(parser)
+
+    def args2body(self, parsed_args):
+        body = {}
+        if parsed_args.name is not None:
+            body["name"] = parsed_args.name
+        if parsed_args.members is not None:
+            body["members"] = parsed_args.members
+        if parsed_args.enabled is not None:
+            body["enabled"] = _bool(parsed_args.enabled)
+        return {self.resource: body}
+
+
+class AriaAclAddressSetDelete(_AriaAclDelete):
+    """Delete an Aria ACL address set."""
+
+    shell_command = "aria-acl-address-set-delete"
+    resource = "aria_acl_address_set"
+    id_path = "/aria-acl-address-sets/%s"
+    resource_path = "/aria-acl-address-sets/%s"
+
+
+class AriaAclBindingList(_AriaAclList):
+    """List Aria ACL bindings."""
+
+    shell_command = "aria-acl-binding-list"
+    resource = "aria_acl_binding"
+    collection = "aria_acl_bindings"
+    resource_plural = "aria_acl_bindings"
+    path = "/aria-acl-bindings"
+    object_path = "/aria-acl-bindings"
+    list_columns = ["id", "policy_id", "target_type", "target_id", "enabled", "revision_number"]
+
+    def add_known_arguments(self, parser):
+        parser.add_argument("--policy-id", "--policy", dest="policy_id")
+        parser.add_argument("--target-type", dest="target_type")
+        parser.add_argument("--target-id", dest="target_id")
+        parser.add_argument("--port", dest="target_id")
+        parser.add_argument("--network", dest="target_id")
+
+
+class AriaAclBindingShow(_AriaAclShow):
+    """Show an Aria ACL binding."""
+
+    shell_command = "aria-acl-binding-show"
+    resource = "aria_acl_binding"
+    path = "/aria-acl-bindings"
+    id_path = "/aria-acl-bindings/%s"
+    resource_path = "/aria-acl-bindings/%s"
+
+
+class AriaAclBindingCreate(_AriaAclCreate):
+    """Create an Aria ACL binding."""
+
+    shell_command = "aria-acl-binding-create"
+    resource = "aria_acl_binding"
+    path = "/aria-acl-bindings"
+    object_path = "/aria-acl-bindings"
+
+    def add_known_arguments(self, parser):
+        self._add_project_arguments(parser)
+        parser.add_argument("--policy-id", "--policy", dest="policy_id", required=True)
+        target = parser.add_mutually_exclusive_group(required=True)
+        target.add_argument("--port")
+        target.add_argument("--network")
+        self._add_enabled(parser)
+
+    def args2body(self, parsed_args):
+        body = self._project_body(parsed_args)
+        body["policy_id"] = parsed_args.policy_id
+        if parsed_args.port:
+            body["target_type"] = "port"
+            body["target_id"] = parsed_args.port
+        else:
+            body["target_type"] = "network"
+            body["target_id"] = parsed_args.network
+        if parsed_args.enabled is not None:
+            body["enabled"] = _bool(parsed_args.enabled)
+        return {self.resource: body}
+
+
+class AriaAclBindingUpdate(_AriaAclUpdate):
+    """Update an Aria ACL binding."""
+
+    shell_command = "aria-acl-binding-update"
+    resource = "aria_acl_binding"
+    id_path = "/aria-acl-bindings/%s"
+    resource_path = "/aria-acl-bindings/%s"
+
+    def add_known_arguments(self, parser):
+        self._add_enabled(parser)
+
+    def args2body(self, parsed_args):
+        body = {}
+        if parsed_args.enabled is not None:
+            body["enabled"] = _bool(parsed_args.enabled)
+        return {self.resource: body}
+
+
+class AriaAclBindingDelete(_AriaAclDelete):
+    """Delete an Aria ACL binding."""
+
+    shell_command = "aria-acl-binding-delete"
+    resource = "aria_acl_binding"
+    id_path = "/aria-acl-bindings/%s"
+    resource_path = "/aria-acl-bindings/%s"
+
+
+class AriaAclPortStatusList(_AriaAclList):
+    """List Aria ACL port runtime status rows."""
+
+    shell_command = "aria-acl-port-status-list"
+    resource = "aria_acl_port_status"
+    collection = "aria_acl_port_statuses"
+    resource_plural = "aria_acl_port_statuses"
+    path = "/aria-acl-port-statuses"
+    object_path = "/aria-acl-port-statuses"
+    list_columns = [
+        "port_id", "host", "status", "effective_action",
+        "effective_policy_id", "binding_id", "generation", "stale",
+    ]
+
+    def add_known_arguments(self, parser):
+        parser.add_argument("--port-id", "--port", dest="port_id")
+        parser.add_argument("--host")
+
+
+class AriaAclPortStatusShow(_AriaAclShow):
+    """Show an Aria ACL port runtime status row."""
+
+    shell_command = "aria-acl-port-status-show"
+    resource = "aria_acl_port_status"
+    path = "/aria-acl-port-statuses"
+    id_path = "/aria-acl-port-statuses/%s"
+    resource_path = "/aria-acl-port-statuses/%s"
+
+
+_CONCRETE_COMMANDS = (
+    AriaAclPolicyList,
+    AriaAclPolicyShow,
+    AriaAclPolicyCreate,
+    AriaAclPolicyUpdate,
+    AriaAclPolicyDelete,
+    AriaAclRuleList,
+    AriaAclRuleShow,
+    AriaAclRuleCreate,
+    AriaAclRuleUpdate,
+    AriaAclRuleDelete,
+    AriaAclAddressSetList,
+    AriaAclAddressSetShow,
+    AriaAclAddressSetCreate,
+    AriaAclAddressSetUpdate,
+    AriaAclAddressSetDelete,
+    AriaAclBindingList,
+    AriaAclBindingShow,
+    AriaAclBindingCreate,
+    AriaAclBindingUpdate,
+    AriaAclBindingDelete,
+    AriaAclPortStatusList,
+    AriaAclPortStatusShow,
+)
+
+for _command in _CONCRETE_COMMANDS:
+    _command.versions = ["2.0"]

@@ -5,6 +5,7 @@ from neutron_aria.agent.status import ARIA_AGENT_TYPE
 
 ARIA_AGENT_BINARY = "neutron-aria-agent"
 ARIA_AGENT_TOPIC = "N/A"
+HEARTBEAT_SAMPLE_LIMIT = 3
 ARIA_ACL_PORT_STATUS_FIELDS = set([
     "port_id",
     "host",
@@ -61,6 +62,15 @@ class NeutronStatusReporter(object):
 
     def build_agent_state(self, runtime_status):
         payload = runtime_status.heartbeat_payload()
+        managed_port_sample = self._compact_managed_ports(
+            payload.get("last_managed_ports_detail") or [],
+        )
+        port_status_sample = self._compact_port_statuses(
+            payload.get("last_port_statuses") or [],
+        )
+        event_decision_sample = self._compact_event_decisions(
+            payload.get("last_event_decisions") or [],
+        )
         configurations = dict(self.configurations)
         configurations.update({
             "ready": payload.get("ready"),
@@ -74,13 +84,25 @@ class NeutronStatusReporter(object):
             "generation_lag": payload.get("generation_lag"),
             "last_snapshot_ports": payload.get("last_snapshot_ports"),
             "last_managed_ports": payload.get("last_managed_ports"),
-            "last_managed_ports_detail": payload.get("last_managed_ports_detail") or [],
-            "last_port_statuses": payload.get("last_port_statuses") or [],
+            "last_managed_ports_detail": managed_port_sample,
+            "last_managed_ports_detail_truncated": (
+                len(payload.get("last_managed_ports_detail") or []) >
+                len(managed_port_sample)
+            ),
+            "last_port_statuses": port_status_sample,
+            "last_port_statuses_truncated": (
+                len(payload.get("last_port_statuses") or []) >
+                len(port_status_sample)
+            ),
             "domain_counts": payload.get("domain_counts") or [],
             "degraded_reasons": payload.get("degraded_reasons") or [],
             "projection_index": payload.get("projection_index") or {},
             "last_event_decision_counts": payload.get("last_event_decision_counts") or [],
-            "last_event_decisions": payload.get("last_event_decisions") or [],
+            "last_event_decisions": event_decision_sample,
+            "last_event_decisions_truncated": (
+                len(payload.get("last_event_decisions") or []) >
+                len(event_decision_sample)
+            ),
             "last_event_decision_updated_at": payload.get("last_event_decision_updated_at"),
             "updated_at": payload.get("updated_at"),
         })
@@ -93,6 +115,47 @@ class NeutronStatusReporter(object):
             "configurations": configurations,
             "start_flag": self.start_flag,
         }
+
+    def _compact_managed_ports(self, ports):
+        sample = []
+        for port in list(ports or [])[:HEARTBEAT_SAMPLE_LIMIT]:
+            sample.append({
+                "port_id": port.get("port_id"),
+                "ifname": port.get("ifname"),
+                "managed_domains": port.get("managed_domains") or [],
+            })
+        return sample
+
+    def _compact_port_statuses(self, statuses):
+        sample = []
+        for status in list(statuses or [])[:HEARTBEAT_SAMPLE_LIMIT]:
+            domains = []
+            for domain_status in status.get("domains") or []:
+                domains.append({
+                    "domain": domain_status.get("domain"),
+                    "status": domain_status.get("status"),
+                    "effective_action": domain_status.get("effective_action"),
+                    "reason": domain_status.get("reason"),
+                })
+            sample.append({
+                "port_id": status.get("port_id"),
+                "status": status.get("status"),
+                "effective_action": status.get("effective_action"),
+                "reason": status.get("reason"),
+                "domains": domains,
+            })
+        return sample
+
+    def _compact_event_decisions(self, decisions):
+        sample = []
+        for decision in list(decisions or [])[:HEARTBEAT_SAMPLE_LIMIT]:
+            sample.append({
+                "port_id": decision.get("port_id"),
+                "action": decision.get("action"),
+                "reason": decision.get("reason"),
+                "revision_status": decision.get("revision_status"),
+            })
+        return sample
 
 
 class AriaAclPortStatusReporter(object):

@@ -24,6 +24,7 @@ require_path() {
 
 for path in \
     "${REPO_ROOT}/openstack/neutron_aria" \
+    "${REPO_ROOT}/openstack/neutronclient_aria" \
     "${REPO_ROOT}/deploy/kolla/package" \
     "${REPO_ROOT}/deploy/kolla/smoke" \
     "${REPO_ROOT}/deploy/kolla/config/neutron-aria-agent.ini" \
@@ -45,6 +46,7 @@ mkdir -p \
     "${STAGING_DIR}/dist/kolla"
 
 cp -a "${REPO_ROOT}/openstack/neutron_aria" "${STAGING_DIR}/openstack/neutron_aria"
+cp -a "${REPO_ROOT}/openstack/neutronclient_aria" "${STAGING_DIR}/openstack/neutronclient_aria"
 cp -a "${REPO_ROOT}/deploy/kolla/package" "${STAGING_DIR}/deploy/kolla/package"
 cp -a "${REPO_ROOT}/deploy/kolla/smoke" "${STAGING_DIR}/deploy/kolla/smoke"
 cp -a "${REPO_ROOT}/deploy/kolla/config" "${STAGING_DIR}/deploy/kolla/config"
@@ -65,6 +67,7 @@ Package version:
 
 ```text
 neutron-aria==0.1.0
+neutronclient-aria==0.1.0
 ```
 
 Recommended image tag:
@@ -77,6 +80,14 @@ Recommended install gate:
 
 ```bash
 sudo REPO_ROOT=$(pwd) deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh install
+```
+
+The install gate also installs the legacy `neutron aria-acl-*` command
+extension into the `openstack_client` container. To validate only that client
+package:
+
+```bash
+sudo REPO_ROOT=$(pwd) deploy/kolla/package/install_neutronclient_aria_cli.sh smoke
 ```
 
 Run the install gate on every active neutron-server node behind the Neutron API
@@ -168,6 +179,45 @@ Repeat validation without reinstalling:
 sudo REPO_ROOT=$(pwd) deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh smoke
 ```
 
+Optional live downlink ACL validation on a known reachable VM tap:
+
+```bash
+sudo REPO_ROOT=$(pwd) \
+  VM_IP=<reachable-vm-ip> \
+  EXPECTED_PORT_ID=<neutron-port-id> \
+  EXPECTED_IFNAME=<tap-ifname> \
+  RUN_LIVE_DOWNLINK_SMOKE=true \
+  deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh smoke
+```
+
+Optional live guest-egress ACL validation on an existing SSH-reachable VM:
+
+```bash
+sudo REPO_ROOT=$(pwd) \
+  VM_IP=<guest-ip> \
+  EXPECTED_PORT_ID=<neutron-port-id> \
+  EXPECTED_IFNAME=<tap-ifname> \
+  EGRESS_TARGET_IP=<host-or-external-ip> \
+  GUEST_SSH_USER=cirros \
+  GUEST_SSH_PASSWORD=<guest-password> \
+  RUN_LIVE_EGRESS_SMOKE=true \
+  deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh smoke
+```
+
+If no suitable guest exists, the egress smoke can create a temporary CirrOS VM
+and remove it after rollback:
+
+```bash
+sudo REPO_ROOT=$(pwd) \
+  USE_TEMP_VM=true \
+  CIRROS_IMAGE_FILE=/var/tmp/cirros.raw \
+  CIRROS_IMAGE_DISK_FORMAT=raw \
+  NETWORK_ID=<neutron-network-id> \
+  BOOT_AZ=nova:$(hostname -f) \
+  RUN_LIVE_EGRESS_SMOKE=true \
+  deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh smoke
+```
+
 Rollback:
 
 ```bash
@@ -195,6 +245,8 @@ EOF
         echo "gate=deploy/kolla/smoke/neutron_aria_acl_stage2_gate_smoke.sh"
         echo "db_migration=deploy/kolla/smoke/neutron_aria_acl_db_migration_smoke.sh"
         echo "agent_installer=deploy/kolla/package/install_neutron_aria_agent_egg.sh"
+        echo "legacy_cli_installer=deploy/kolla/package/install_neutronclient_aria_cli.sh"
+        echo "legacy_cli_package=openstack/neutronclient_aria"
         echo "agent_image_builder=deploy/kolla/package/build_neutron_aria_agent_image.sh"
         echo "datapath_image_builder=deploy/kolla/package/build_aria_datapath_image.sh"
         echo "uds_hardened_rollout=deploy/kolla/smoke/neutron_aria_uds_hardened_rollout_smoke.sh"
