@@ -172,6 +172,29 @@ struct AclApplyPlan {
     policies: Vec<AclPolicyPlan>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AclGateUpdateMode {
+    DisableBeforeReplace,
+    KeepCurrentUntilEnable,
+}
+
+impl AclGateUpdateMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DisableBeforeReplace => "disable_before_replace",
+            Self::KeepCurrentUntilEnable => "keep_current_until_enable",
+        }
+    }
+}
+
+fn acl_gate_update_mode(plan: &AclApplyPlan) -> AclGateUpdateMode {
+    if plan.policies.is_empty() {
+        AclGateUpdateMode::DisableBeforeReplace
+    } else {
+        AclGateUpdateMode::KeepCurrentUntilEnable
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DomainReconcileResult {
     domains: Vec<NeutronDomainStatus>,
@@ -2885,24 +2908,6 @@ async fn reconcile_neutron_acl(
     }
 
     let profile_started = Instant::now();
-    let disable_started = Instant::now();
-    state
-        .control_plane
-        .update_config(
-            &port.ifname,
-            None,
-            None,
-            Some(false),
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let disable_ms = elapsed_ms(disable_started);
-    fault_injection::check("neutron.acl.after_disable").await?;
-
     let translate_started = Instant::now();
     let plan = match &port.acl {
         Some(acl) => translate_neutron_acl(&port.port_id, acl)?,
@@ -2912,6 +2917,29 @@ async fn reconcile_neutron_acl(
     let group_count = plan.groups.len();
     let group_cidr_count: usize = plan.groups.iter().map(|group| group.cidrs.len()).sum();
     let policy_count = plan.policies.len();
+    let gate_update_mode = acl_gate_update_mode(&plan);
+    let disable_ms = if gate_update_mode == AclGateUpdateMode::DisableBeforeReplace {
+        let disable_started = Instant::now();
+        state
+            .control_plane
+            .update_config(
+                &port.ifname,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let elapsed = elapsed_ms(disable_started);
+        fault_injection::check("neutron.acl.after_disable").await?;
+        elapsed
+    } else {
+        0
+    };
     let group_specs: Vec<OwnedAclGroupSpec> = plan
         .groups
         .iter()
@@ -2969,6 +2997,7 @@ async fn reconcile_neutron_acl(
             ifname = %port.ifname,
             status = "bypass",
             reason = effective_reason,
+            gate_update_mode = gate_update_mode.as_str(),
             group_count,
             group_cidr_count,
             policy_count,
@@ -3005,6 +3034,7 @@ async fn reconcile_neutron_acl(
         port_id = %port.port_id,
         ifname = %port.ifname,
         status = "enforced",
+        gate_update_mode = gate_update_mode.as_str(),
         group_count,
         group_cidr_count,
         policy_count,
@@ -4899,5 +4929,33 @@ mod tests {
         let error = translate_neutron_acl("port-1", &acl).expect_err("default deny is guarded");
 
         assert!(error.contains("default_action deny is unsupported"));
+    }
+
+    #[test]
+    fn neutron_acl_gate_mode_disables_only_for_empty_policy() {
+        assert_eq!(
+            acl_gate_update_mode(&AclApplyPlan::default()),
+            AclGateUpdateMode::DisableBeforeReplace
+        );
+
+        let plan = AclApplyPlan {
+            groups: vec![AclGroupPlan {
+                name: "neutron:port-1:src:drop-icmp".to_string(),
+                cidrs: vec!["10.58.159.2/32".to_string()],
+            }],
+            policies: vec![AclPolicyPlan {
+                src_group: "neutron:port-1:src:drop-icmp".to_string(),
+                dst_group: "any".to_string(),
+                proto: 1,
+                action: 1,
+                direction: 1,
+                ports: None,
+            }],
+        };
+
+        assert_eq!(
+            acl_gate_update_mode(&plan),
+            AclGateUpdateMode::KeepCurrentUntilEnable
+        );
     }
 }

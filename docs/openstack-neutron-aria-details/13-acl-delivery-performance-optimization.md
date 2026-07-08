@@ -192,6 +192,108 @@ This changes the immediate product guidance again:
   packets should observe either old ACL or new ACL, never a partially updated
   rule set during a large change.
 
+### 2.3 2026-07-08 1000-Rule Gate Update
+
+After rule/group diff apply, a 1000-rule gate was run on `ostack2` against the
+same CirrOS test VM port.
+
+Test target:
+
+| Field | Value |
+| --- | --- |
+| VM IP | `10.58.159.68` |
+| Neutron port | `ff0b04e9-c1b3-4779-ae63-7e6d2a966a50` |
+| tap | `tapff0b04e9-c1` |
+| policy size | 1000 ingress ICMP drop rules |
+
+First run before the gate-mode fix:
+
+| Scenario | Result |
+| --- | ---: |
+| Create 1000 rules through Neutron API | `33459 ms` |
+| Initial 1000-rule full-resync wall time | `2925 ms` |
+| Initial 1000-rule datapath profile | `total_ms=304` |
+| Add one rule full-resync wall time | `2956 ms` |
+| Add one rule datapath profile | `total_ms=371`, `group_add_count=2`, `policy_add_count=1` |
+| Delete one rule full-resync wall time | `4163 ms` |
+| Delete one rule datapath profile | `total_ms=835`, `group_delete_count=2`, `policy_delete_count=1` |
+| Active traffic bypass probe | failed: `marked_replies=152` |
+
+The failed active traffic probe exposed one remaining semantic issue:
+`reconcile_neutron_acl()` still disabled the whole ACL gate before every
+reconcile. With an existing drop policy active, deleting one unrelated rule
+temporarily allowed ICMP while the port gate was disabled.
+
+Fix:
+
+- Translate ACL first and decide the gate update mode from the desired policy
+  count.
+- Empty desired policy uses `gate_update_mode="disable_before_replace"` and
+  intentionally bypasses during cleanup/rollback.
+- Non-empty desired policy uses `gate_update_mode="keep_current_until_enable"`
+  and keeps the current ACL gate active while rule/group diff apply runs.
+- Log `gate_update_mode` and `disable_ms` in every `neutron_acl_apply_profile`.
+
+Second run after the gate-mode fix:
+
+| Scenario | Result |
+| --- | ---: |
+| Create 1000 rules through Neutron API | `32715 ms` |
+| Initial 1000-rule full-resync wall time | `3211 ms` |
+| Initial 1000-rule datapath profile | `total_ms=570`, `disable_ms=0` |
+| Add one rule full-resync wall time | `3071 ms` |
+| Add one rule datapath profile | `total_ms=238`, `group_add_count=2`, `policy_add_count=1`, `disable_ms=0` |
+| Delete one rule full-resync wall time | `2863 ms` |
+| Delete one rule datapath profile | `total_ms=296`, `group_delete_count=2`, `policy_delete_count=1`, `disable_ms=0` |
+| Active traffic bypass probe | passed: `marked_replies=0` from 1600 high-rate ICMP probes |
+| Cleanup 1000 rules | `total_ms=302`, intentional `disable_before_replace` cleanup |
+
+Representative post-fix logs:
+
+```text
+initial 1000:
+  gate_update_mode="keep_current_until_enable"
+  group_count=2000
+  policy_count=1000
+  group_add_count=2000
+  policy_add_count=1000
+  disable_ms=0
+  total_ms=570
+
+add one:
+  gate_update_mode="keep_current_until_enable"
+  group_count=2002
+  policy_count=1001
+  group_add_count=2
+  policy_add_count=1
+  disable_ms=0
+  total_ms=238
+
+delete one:
+  gate_update_mode="keep_current_until_enable"
+  group_count=2000
+  policy_count=1000
+  group_delete_count=2
+  group_cidr_delete_count=2
+  policy_delete_count=1
+  disable_ms=0
+  total_ms=296
+```
+
+Current conclusion:
+
+- The 1000-rule datapath apply and add/delete-one delta gate now meets the
+  current product performance target.
+- The observed full-resync wall time is about 3 seconds; this includes Python
+  agent inventory/source read, snapshot build, UDS submit, status convergence,
+  and command startup overhead.
+- Neutron API sequential creation of 1000 rules still takes about 33 seconds in
+  the test environment. This is API/control-plane object creation time, not
+  datapath apply time.
+- Shadow generation is still valuable for strict all-or-nothing visibility
+  during complex updates, but it is no longer required merely to avoid a whole
+  port ACL bypass during non-empty diff updates.
+
 ## 3. OVS-Inspired Design Principles
 
 Aria should borrow several ideas from OVS without copying the whole OVS agent:
