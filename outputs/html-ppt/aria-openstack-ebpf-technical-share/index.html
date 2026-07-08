@@ -12,7 +12,7 @@
     <section class="slide cover" data-title="封面">
       <p class="eyebrow">technical sharing</p>
       <h1>Aria OpenStack eBPF<br>数据面增强平台</h1>
-      <p class="subtitle">产品定位、架构边界、调用链、事务恢复、端口兼容和后续能力扩展</p>
+      <p class="subtitle">从 eBPF 能力到 OpenStack ACL 产品化闭环：能力、边界、架构、可靠性与扩展路线</p>
       <div class="cover-grid">
         <div><strong>入口</strong><span>Neutron API / DB / Legacy CLI</span></div>
         <div><strong>适配</strong><span>neutron-aria-agent</span></div>
@@ -81,18 +81,32 @@
       <footer></footer>
     </section>
 
+    <section class="slide" data-title="叙事主线">
+      <p class="eyebrow">storyline</p>
+      <h2>这不是“展示 eBPF 很强”，而是说明 eBPF 如何被收敛成一个可交付的 OpenStack 能力</h2>
+      <div class="flow-list storyline-list">
+        <div><b>1</b><span><strong>先讲能力。</strong>eBPF 能在内核数据面做安全、治理和观测，但能力越强越需要产品边界。</span></div>
+        <div><b>2</b><span><strong>再讲选择。</strong>Aria 只增强本机 OVS tap port；Neutron 仍是入口，OVS 仍负责基础转发。</span></div>
+        <div><b>3</b><span><strong>先立红线。</strong>任何 eBPF、agent、策略异常，都不能主动破坏原来的 OVS 业务转发。</span></div>
+        <div><b>4</b><span><strong>然后讲闭环。</strong>ACL 从 Neutron API 到 DB、agent、UDS、WAL、eBPF map，最终形成可回滚、可观测的执行链。</span></div>
+        <div><b>5</b><span><strong>最后讲扩展。</strong>QoS、Mirror、Observability、SR-IOV 按 domain 渐进接入，避免一次性过度开发。</span></div>
+      </div>
+      <div class="statement">听众要带走的主结论：Aria 不是炫技型 eBPF demo，而是有控制面、有边界、有故障语义的 OpenStack 数据面增强产品。</div>
+      <footer></footer>
+    </section>
+
     <section class="slide" data-title="目录">
       <p class="eyebrow">agenda</p>
-      <h2>这份分享按“eBPF 能力 -> 产品框架 -> 调用链 -> 边界 -> 扩展能力”展开</h2>
+      <h2>这份分享按“能力为什么有用 -> 产品怎么落地 -> 如何不影响 OVS -> ACL 如何闭环 -> 后续怎么扩”展开</h2>
       <div class="agenda-grid">
         <div class="agenda-item"><b>01</b><span>eBPF 能力地图与当前实现</span></div>
-        <div class="agenda-item"><b>02</b><span>产品定位与设计目标</span></div>
-        <div class="agenda-item"><b>03</b><span>总体逻辑架构与组件职责</span></div>
-        <div class="agenda-item"><b>04</b><span>eBPF Manager 产品框架</span></div>
-        <div class="agenda-item"><b>05</b><span>ACL 业务流程与 Security Group 边界</span></div>
-        <div class="agenda-item"><b>06</b><span>Port 字段、snapshot、权限托管</span></div>
-        <div class="agenda-item"><b>07</b><span>事务恢复、同步模型、部署形态</span></div>
-        <div class="agenda-item"><b>08</b><span>QoS、Mirror、Observability、端口兼容边界</span></div>
+        <div class="agenda-item"><b>02</b><span>产品定位：不替代 OVS，不绕过 Neutron</span></div>
+        <div class="agenda-item"><b>03</b><span>可靠性边界：Aria 异常不影响原转发</span></div>
+        <div class="agenda-item"><b>04</b><span>OpenStack 接入架构与两容器部署</span></div>
+        <div class="agenda-item"><b>05</b><span>ACL 下发闭环：API、snapshot、UDS、状态</span></div>
+        <div class="agenda-item"><b>06</b><span>事务、同步、managed_domains 写仲裁</span></div>
+        <div class="agenda-item"><b>07</b><span>QoS、Mirror、Observability 扩展路线</span></div>
+        <div class="agenda-item"><b>08</b><span>端口兼容边界与最终结论</span></div>
       </div>
       <footer></footer>
     </section>
@@ -141,6 +155,87 @@
       <footer></footer>
     </section>
 
+    <section class="slide" data-title="Fail-open 总原则">
+      <p class="eyebrow">fail-open contract</p>
+      <h2>最高原则：Aria ACL 是安全增强，不能成为 OVS 转发的单点依赖</h2>
+      <div class="two-col">
+        <div class="panel principle-panel">
+          <h3>最终目标</h3>
+          <p>不管 Aria 控制面、aria-datapath、eBPF attach、map apply、ACL 编译或状态回报发生什么故障，原有 OVS baseline forwarding 都不能被 Aria 主动打断。</p>
+          <p>最坏结果只能是 ACL enforcement 降级为 bypass，而不是业务流量中断。</p>
+        </div>
+        <div class="panel principle-panel">
+          <h3>产品语义</h3>
+          <ul>
+            <li><code>ready + enforce</code>：ACL 明确生效。</li>
+            <li><code>not_requested + bypass</code>：没有 ACL 绑定，不改变转发。</li>
+            <li><code>degraded + bypass</code>：ACL 异常，保护 OVS 原业务。</li>
+            <li><code>unsupported + bypass</code>：端口类型不支持，不接管。</li>
+          </ul>
+        </div>
+      </div>
+      <div class="statement">一句话：Aria 可以增强 OVS tap 流量，但不能让 OVS 转发依赖 Aria 正常运行。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="端口挂载与生效">
+      <p class="eyebrow">attach vs enforce</p>
+      <h2>要区分两个问题：eBPF 是否挂在 tap 上，以及 ACL 是否真正执行</h2>
+      <div class="matrix failure-matrix">
+        <div class="th">场景</div><div class="th">eBPF 是否可能挂载</div><div class="th">ACL 是否生效</div><div class="th">OVS 原转发</div>
+        <div class="td strong">非计算端口：DHCP / router / metadata</div><div class="td">不应挂载</div><div class="td"><span class="tag muted">not_applicable</span></div><div class="td ok">不影响</div>
+        <div class="td strong">SR-IOV direct / LinuxBridge / 非 OVS tap</div><div class="td">不应挂载</div><div class="td"><span class="tag amber">unsupported + bypass</span></div><div class="td ok">不影响</div>
+        <div class="td strong">普通 VM OVS tap，但没有 ACL binding</div><div class="td">当前实现可能挂载</div><div class="td"><span class="tag blue">not_requested + bypass</span></div><div class="td ok">不影响</div>
+        <div class="td strong">有 ACL binding，策略合法</div><div class="td">挂载</div><div class="td"><span class="tag green">ready + enforce</span></div><div class="td">只按 ACL 过滤该 port</div>
+        <div class="td strong">有 ACL binding，但策略缺失、规则非法或编译失败</div><div class="td">可能已挂载</div><div class="td"><span class="tag red">degraded + bypass</span></div><div class="td ok">不影响</div>
+      </div>
+      <div class="statement">当前 MVP 允许“eBPF 在场但 ACL bypass”。后续优化可以进一步做到“无任何 domain 需求的端口不 attach”。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="故障场景矩阵">
+      <p class="eyebrow">failure matrix</p>
+      <h2>不同组件挂掉时，ACL 生效性和 OVS 转发性要分开判断</h2>
+      <div class="matrix failure-matrix">
+        <div class="th">故障场景</div><div class="th">ACL 是否继续生效</div><div class="th">状态表达</div><div class="th">OVS 原转发</div>
+        <div class="td strong">neutron-aria-agent 挂了</div><div class="td">已下发旧 ACL 通常继续；新策略不同步</div><div class="td"><span class="tag amber">heartbeat stale</span></div><div class="td ok">不影响</div>
+        <div class="td strong">aria-agent / aria-datapath 挂了</div><div class="td">取决于 eBPF link/map 是否仍被内核持有；不能承诺一定继续</div><div class="td"><span class="tag red">datapath degraded</span></div><div class="td ok">不影响</div>
+        <div class="td strong">eBPF attach 失败</div><div class="td">不生效，或回滚到未挂载</div><div class="td"><span class="tag red">attach error</span></div><div class="td ok">不影响</div>
+        <div class="td strong">map 更新 / ACL apply 失败</div><div class="td">应停在旧 committed 状态或 bypass，不能半套生效</div><div class="td"><span class="tag red">degraded + bypass</span></div><div class="td ok">不影响</div>
+        <div class="td strong">OVS 自身挂了</div><div class="td">ACL 状态不能代表业务通断</div><div class="td"><span class="tag muted">OVS 维护事件</span></div><div class="td warn">由 OVS 自己恢复</div>
+      </div>
+      <div class="statement">汇报时要强调：ACL 是否生效是安全能力问题；OVS 是否转发是基础网络问题，Aria 不重启、不接管 OVS。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="如何做到不影响 OVS">
+      <p class="eyebrow">mechanism</p>
+      <h2>Fail-open 不是一句口号，而是控制面、事务层和 eBPF 热路径共同保证</h2>
+      <div class="flow-list mechanism-list">
+        <div><b>1</b><span><strong>控制面先判定有效性。</strong>没有 binding、策略缺失、端口不支持、规则非法时，生成 <code>bypass</code> 状态，而不是生成危险的 drop 规则。</span></div>
+        <div><b>2</b><span><strong>apply 前先关闭 ACL gate。</strong>端口更新时先 <code>acl_enabled=false</code>，清理旧 Neutron ACL，再写新 group/policy，最后才 enable。</span></div>
+        <div><b>3</b><span><strong>事务只提交收敛状态。</strong>WAL intent/commit、generation、desired_hash 保证失败不会被误报成 ready。</span></div>
+        <div><b>4</b><span><strong>eBPF 默认 PASS。</strong>XDP 默认 <code>XDP_PASS</code>，TC 默认 <code>TC_ACT_OK</code>；解析失败、map 缺失、内部异常都走放行。</span></div>
+        <div><b>5</b><span><strong>只在 ready/enforce 时 drop。</strong>只有 ACL gate 打开、规则明确命中 deny/drop 时，eBPF 才能丢包。</span></div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="最终硬约束">
+      <p class="eyebrow">hard rules</p>
+      <h2>后续开发必须守住这 6 条硬约束，避免“安全增强”变成“转发风险”</h2>
+      <div class="takeaways hard-rules">
+        <p><b>1.</b> Aria runtime 永远不主动重启 OVS、OVS agent、neutron-server。</p>
+        <p><b>2.</b> eBPF 入口默认放行；未知状态、解析失败、map miss 不允许默认 drop。</p>
+        <p><b>3.</b> ACL 只有 <code>ready + enforce</code> 且 per-port gate 打开时才能丢包。</p>
+        <p><b>4.</b> 任何 apply 失败必须进入 <code>degraded + bypass</code> 或保持上一代 committed 状态。</p>
+        <p><b>5.</b> 无支持能力的 port 必须显式 <code>unsupported/not_applicable + bypass</code>，不能静默接管。</p>
+        <p><b>6.</b> 监控必须区分 ACL enforcement 状态和 OVS forwarding 状态，不能混成一个 pass/fail。</p>
+      </div>
+      <div class="statement">这组约束就是最终产品原则：Aria 可以失效，业务转发不能因为 Aria 失效而中断。</div>
+      <footer></footer>
+    </section>
+
     <section class="slide" data-title="总体逻辑架构">
       <p class="eyebrow">logical architecture</p>
       <h2>总体逻辑架构：Neutron 逻辑策略转换成本机数据面目标状态</h2>
@@ -174,6 +269,36 @@ flowchart TB
         <div class="td strong">aria-datapath</div><div class="td">UDS API、tap/ifindex 校验、eBPF attach/map apply、WAL、rollback、runtime status。</div><div class="td">不访问 Neutron DB，不做租户级 northbound。</div>
         <div class="td strong">OVS / OVS agent</div><div class="td">br-int、隧道、二层交换、OpenStack port binding。</div><div class="td">不承载 Aria ACL 策略语义。</div>
       </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="两容器部署形态">
+      <p class="eyebrow">deployment shape</p>
+      <h2>部署形态：非特权适配层 + 本机特权数据面</h2>
+      <pre class="mermaid">
+flowchart LR
+  subgraph compute["计算节点"]
+    subgraph agent["neutron-aria-agent 容器"]
+      a1["非特权"]
+      a2["Neutron REST / RPC"]
+      a3["inventory / snapshot 生成"]
+      a4["只访问 UDS"]
+    end
+    subgraph data["aria-datapath 容器"]
+      d1["特权或最小能力集"]
+      d2["host network / 必要 host pid"]
+      d3["/sys/fs/bpf"]
+      d4["tap / ifindex 校验"]
+      d5["eBPF attach / map apply"]
+    end
+    uds["/run/aria/aria-agent.sock"]
+    ovs["OVS br-int + VM tap"]
+  end
+  agent --> uds
+  uds --> data
+  data --> ovs
+      </pre>
+      <div class="statement">生产环境不让 Python agent 直接接触 eBPF、bpffs 或 OVS 底层资源。</div>
       <footer></footer>
     </section>
 
@@ -262,36 +387,6 @@ flowchart TB
           <p>诊断模块不改变网络转发行为，也不作为当前 tenant networking API 主线。</p>
         </div>
       </div>
-      <footer></footer>
-    </section>
-
-    <section class="slide" data-title="两容器部署形态">
-      <p class="eyebrow">deployment shape</p>
-      <h2>部署形态：非特权适配层 + 本机特权数据面</h2>
-      <pre class="mermaid">
-flowchart LR
-  subgraph compute["计算节点"]
-    subgraph agent["neutron-aria-agent 容器"]
-      a1["非特权"]
-      a2["Neutron REST / RPC"]
-      a3["inventory / snapshot 生成"]
-      a4["只访问 UDS"]
-    end
-    subgraph data["aria-datapath 容器"]
-      d1["特权或最小能力集"]
-      d2["host network / 必要 host pid"]
-      d3["/sys/fs/bpf"]
-      d4["tap / ifindex 校验"]
-      d5["eBPF attach / map apply"]
-    end
-    uds["/run/aria/aria-agent.sock"]
-    ovs["OVS br-int + VM tap"]
-  end
-  agent --> uds
-  uds --> data
-  data --> ovs
-      </pre>
-      <div class="statement">生产环境不让 Python agent 直接接触 eBPF、bpffs 或 OVS 底层资源。</div>
       <footer></footer>
     </section>
 
@@ -577,6 +672,55 @@ flowchart LR
       <footer></footer>
     </section>
 
+    <section class="slide" data-title="典型部署与运行关系">
+      <p class="eyebrow">multi-node runtime</p>
+      <h2>多计算节点部署时，每个节点只负责本机 port</h2>
+      <div class="runtime-topology">
+        <section class="topology-card topology-control">
+          <h3>控制节点 / Neutron API 层</h3>
+          <div class="topology-control-grid">
+            <div class="topology-box primary">neutron-server<br><span>aria_acl service plugin</span></div>
+            <div class="topology-box">DB<br><span>aria_acl_* tables</span></div>
+            <div class="topology-box">message queue<br><span>RPC / notification</span></div>
+          </div>
+        </section>
+
+        <div class="topology-link-row">
+          <span>RPC / notification fanout</span>
+          <span>Neutron API / heartbeat</span>
+        </div>
+
+        <div class="topology-compute-row">
+          <section class="topology-card topology-compute">
+            <h3>计算节点 A</h3>
+            <div class="compute-stack">
+              <div class="topology-box primary">neutron-aria-agent</div>
+              <div class="topology-arrow">↓</div>
+              <div class="topology-box">aria-datapath</div>
+              <div class="topology-arrow">↓</div>
+              <div class="topology-box">VM tap ports</div>
+              <div class="topology-arrow">↓</div>
+              <div class="topology-box">OVS br-int</div>
+            </div>
+          </section>
+
+          <section class="topology-card topology-compute">
+            <h3>计算节点 B</h3>
+            <div class="compute-stack">
+              <div class="topology-box primary">neutron-aria-agent</div>
+              <div class="topology-arrow">↓</div>
+              <div class="topology-box">aria-datapath</div>
+              <div class="topology-arrow">↓</div>
+              <div class="topology-box">VM tap ports</div>
+              <div class="topology-arrow">↓</div>
+              <div class="topology-box">OVS br-int</div>
+            </div>
+          </section>
+        </div>
+      </div>
+      <footer></footer>
+    </section>
+
     <section class="slide" data-title="QoS 路线">
       <p class="eyebrow">aria-qos</p>
       <h2>QoS 不重造模型：产品入口叫 Aria QoS，底层复用 Neutron QoS 语义</h2>
@@ -740,136 +884,6 @@ cat /sys/class/net/&lt;if&gt;/phys_switch_id</pre>
       <footer></footer>
     </section>
 
-    <section class="slide" data-title="典型部署与运行关系">
-      <p class="eyebrow">multi-node runtime</p>
-      <h2>多计算节点部署时，每个节点只负责本机 port</h2>
-      <div class="runtime-topology">
-        <section class="topology-card topology-control">
-          <h3>控制节点 / Neutron API 层</h3>
-          <div class="topology-control-grid">
-            <div class="topology-box primary">neutron-server<br><span>aria_acl service plugin</span></div>
-            <div class="topology-box">DB<br><span>aria_acl_* tables</span></div>
-            <div class="topology-box">message queue<br><span>RPC / notification</span></div>
-          </div>
-        </section>
-
-        <div class="topology-link-row">
-          <span>RPC / notification fanout</span>
-          <span>Neutron API / heartbeat</span>
-        </div>
-
-        <div class="topology-compute-row">
-          <section class="topology-card topology-compute">
-            <h3>计算节点 A</h3>
-            <div class="compute-stack">
-              <div class="topology-box primary">neutron-aria-agent</div>
-              <div class="topology-arrow">↓</div>
-              <div class="topology-box">aria-datapath</div>
-              <div class="topology-arrow">↓</div>
-              <div class="topology-box">VM tap ports</div>
-              <div class="topology-arrow">↓</div>
-              <div class="topology-box">OVS br-int</div>
-            </div>
-          </section>
-
-          <section class="topology-card topology-compute">
-            <h3>计算节点 B</h3>
-            <div class="compute-stack">
-              <div class="topology-box primary">neutron-aria-agent</div>
-              <div class="topology-arrow">↓</div>
-              <div class="topology-box">aria-datapath</div>
-              <div class="topology-arrow">↓</div>
-              <div class="topology-box">VM tap ports</div>
-              <div class="topology-arrow">↓</div>
-              <div class="topology-box">OVS br-int</div>
-            </div>
-          </section>
-        </div>
-      </div>
-      <footer></footer>
-    </section>
-
-    <section class="slide" data-title="Fail-open 总原则">
-      <p class="eyebrow">fail-open contract</p>
-      <h2>最高原则：Aria ACL 是安全增强，不能成为 OVS 转发的单点依赖</h2>
-      <div class="two-col">
-        <div class="panel principle-panel">
-          <h3>最终目标</h3>
-          <p>不管 Aria 控制面、aria-datapath、eBPF attach、map apply、ACL 编译或状态回报发生什么故障，原有 OVS baseline forwarding 都不能被 Aria 主动打断。</p>
-          <p>最坏结果只能是 ACL enforcement 降级为 bypass，而不是业务流量中断。</p>
-        </div>
-        <div class="panel principle-panel">
-          <h3>产品语义</h3>
-          <ul>
-            <li><code>ready + enforce</code>：ACL 明确生效。</li>
-            <li><code>not_requested + bypass</code>：没有 ACL 绑定，不改变转发。</li>
-            <li><code>degraded + bypass</code>：ACL 异常，保护 OVS 原业务。</li>
-            <li><code>unsupported + bypass</code>：端口类型不支持，不接管。</li>
-          </ul>
-        </div>
-      </div>
-      <div class="statement">一句话：Aria 可以增强 OVS tap 流量，但不能让 OVS 转发依赖 Aria 正常运行。</div>
-      <footer></footer>
-    </section>
-
-    <section class="slide" data-title="端口挂载与生效">
-      <p class="eyebrow">attach vs enforce</p>
-      <h2>要区分两个问题：eBPF 是否挂在 tap 上，以及 ACL 是否真正执行</h2>
-      <div class="matrix failure-matrix">
-        <div class="th">场景</div><div class="th">eBPF 是否可能挂载</div><div class="th">ACL 是否生效</div><div class="th">OVS 原转发</div>
-        <div class="td strong">非计算端口：DHCP / router / metadata</div><div class="td">不应挂载</div><div class="td"><span class="tag muted">not_applicable</span></div><div class="td ok">不影响</div>
-        <div class="td strong">SR-IOV direct / LinuxBridge / 非 OVS tap</div><div class="td">不应挂载</div><div class="td"><span class="tag amber">unsupported + bypass</span></div><div class="td ok">不影响</div>
-        <div class="td strong">普通 VM OVS tap，但没有 ACL binding</div><div class="td">当前实现可能挂载</div><div class="td"><span class="tag blue">not_requested + bypass</span></div><div class="td ok">不影响</div>
-        <div class="td strong">有 ACL binding，策略合法</div><div class="td">挂载</div><div class="td"><span class="tag green">ready + enforce</span></div><div class="td">只按 ACL 过滤该 port</div>
-        <div class="td strong">有 ACL binding，但策略缺失、规则非法或编译失败</div><div class="td">可能已挂载</div><div class="td"><span class="tag red">degraded + bypass</span></div><div class="td ok">不影响</div>
-      </div>
-      <div class="statement">当前 MVP 允许“eBPF 在场但 ACL bypass”。后续优化可以进一步做到“无任何 domain 需求的端口不 attach”。</div>
-      <footer></footer>
-    </section>
-
-    <section class="slide" data-title="故障场景矩阵">
-      <p class="eyebrow">failure matrix</p>
-      <h2>不同组件挂掉时，ACL 生效性和 OVS 转发性要分开判断</h2>
-      <div class="matrix failure-matrix">
-        <div class="th">故障场景</div><div class="th">ACL 是否继续生效</div><div class="th">状态表达</div><div class="th">OVS 原转发</div>
-        <div class="td strong">neutron-aria-agent 挂了</div><div class="td">已下发旧 ACL 通常继续；新策略不同步</div><div class="td"><span class="tag amber">heartbeat stale</span></div><div class="td ok">不影响</div>
-        <div class="td strong">aria-agent / aria-datapath 挂了</div><div class="td">取决于 eBPF link/map 是否仍被内核持有；不能承诺一定继续</div><div class="td"><span class="tag red">datapath degraded</span></div><div class="td ok">不影响</div>
-        <div class="td strong">eBPF attach 失败</div><div class="td">不生效，或回滚到未挂载</div><div class="td"><span class="tag red">attach error</span></div><div class="td ok">不影响</div>
-        <div class="td strong">map 更新 / ACL apply 失败</div><div class="td">应停在旧 committed 状态或 bypass，不能半套生效</div><div class="td"><span class="tag red">degraded + bypass</span></div><div class="td ok">不影响</div>
-        <div class="td strong">OVS 自身挂了</div><div class="td">ACL 状态不能代表业务通断</div><div class="td"><span class="tag muted">OVS 维护事件</span></div><div class="td warn">由 OVS 自己恢复</div>
-      </div>
-      <div class="statement">汇报时要强调：ACL 是否生效是安全能力问题；OVS 是否转发是基础网络问题，Aria 不重启、不接管 OVS。</div>
-      <footer></footer>
-    </section>
-
-    <section class="slide" data-title="如何做到不影响 OVS">
-      <p class="eyebrow">mechanism</p>
-      <h2>Fail-open 不是一句口号，而是控制面、事务层和 eBPF 热路径共同保证</h2>
-      <div class="flow-list mechanism-list">
-        <div><b>1</b><span><strong>控制面先判定有效性。</strong>没有 binding、策略缺失、端口不支持、规则非法时，生成 <code>bypass</code> 状态，而不是生成危险的 drop 规则。</span></div>
-        <div><b>2</b><span><strong>apply 前先关闭 ACL gate。</strong>端口更新时先 <code>acl_enabled=false</code>，清理旧 Neutron ACL，再写新 group/policy，最后才 enable。</span></div>
-        <div><b>3</b><span><strong>事务只提交收敛状态。</strong>WAL intent/commit、generation、desired_hash 保证失败不会被误报成 ready。</span></div>
-        <div><b>4</b><span><strong>eBPF 默认 PASS。</strong>XDP 默认 <code>XDP_PASS</code>，TC 默认 <code>TC_ACT_OK</code>；解析失败、map 缺失、内部异常都走放行。</span></div>
-        <div><b>5</b><span><strong>只在 ready/enforce 时 drop。</strong>只有 ACL gate 打开、规则明确命中 deny/drop 时，eBPF 才能丢包。</span></div>
-      </div>
-      <footer></footer>
-    </section>
-
-    <section class="slide" data-title="最终硬约束">
-      <p class="eyebrow">hard rules</p>
-      <h2>后续开发必须守住这 6 条硬约束，避免“安全增强”变成“转发风险”</h2>
-      <div class="takeaways hard-rules">
-        <p><b>1.</b> Aria runtime 永远不主动重启 OVS、OVS agent、neutron-server。</p>
-        <p><b>2.</b> eBPF 入口默认放行；未知状态、解析失败、map miss 不允许默认 drop。</p>
-        <p><b>3.</b> ACL 只有 <code>ready + enforce</code> 且 per-port gate 打开时才能丢包。</p>
-        <p><b>4.</b> 任何 apply 失败必须进入 <code>degraded + bypass</code> 或保持上一代 committed 状态。</p>
-        <p><b>5.</b> 无支持能力的 port 必须显式 <code>unsupported/not_applicable + bypass</code>，不能静默接管。</p>
-        <p><b>6.</b> 监控必须区分 ACL enforcement 状态和 OVS forwarding 状态，不能混成一个 pass/fail。</p>
-      </div>
-      <div class="statement">这组约束就是最终产品原则：Aria 可以失效，业务转发不能因为 Aria 失效而中断。</div>
-      <footer></footer>
-    </section>
-
     <section class="slide" data-title="产品话术">
       <p class="eyebrow">product wording</p>
       <h2>对业务方可以这样讲</h2>
@@ -949,6 +963,11 @@ cat /sys/class/net/&lt;if&gt;/phys_switch_id</pre>
           "这一页汇报当前代码已经具备的能力。重点说清楚：<strong>ACL 是当前产品成熟主线</strong>，已经接入 Neutron、snapshot、UDS apply 和 port status。",
           "同时也要如实表达边界：QoS、Mirror、TCPRT、SSL/HTTP 这些代码能力已经存在，但还没有全部变成 OpenStack 产品闭环。这个说法比较稳，不会过度承诺。",
           "最后强调：后续扩展要按 domain 渐进产品化，不能因为 eBPF 能做很多事就一次性全做。"
+        ],
+        "叙事主线": [
+          "这一页是整场分享的导航。可以先说：前两页我们已经证明了 <strong>eBPF 能力足够强</strong>，也说明了我们的 agent 已经实现了不少能力。",
+          "但是这场分享的重点不是炫技，而是回答一个产品化问题：怎么把这些能力收敛到 <strong>OpenStack 可交付、可回滚、可观测</strong> 的体系里。",
+          "所以后面会先讲边界和红线，再讲架构和 ACL 闭环，最后才讲 QoS、Mirror、SR-IOV 这些扩展路线。"
         ],
         "Fail-open 总原则": [
           "这一页非常关键，要讲给运维和架构同事听。我们的原则是：<strong>Aria 可以失效，但不能因为 Aria 失效把 OVS 原业务转发打断</strong>。",
