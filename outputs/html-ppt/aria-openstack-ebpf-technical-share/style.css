@@ -490,6 +490,12 @@ footer {
   gap: 18px;
 }
 
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+}
+
 .domain {
   min-height: 170px;
   padding: 22px;
@@ -502,6 +508,54 @@ footer {
 
 .domain:nth-child(3) {
   border-top-color: var(--green);
+}
+
+.capability-grid .domain {
+  min-height: 226px;
+}
+
+.capability-grid .domain:nth-child(2) {
+  border-top-color: var(--green);
+}
+
+.capability-grid .domain:nth-child(3) {
+  border-top-color: var(--red);
+}
+
+.capability-grid .domain:nth-child(4) {
+  border-top-color: var(--amber);
+}
+
+.openstack-chain {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  margin-top: 24px;
+  padding: 18px 22px;
+  border: 1px solid rgba(47, 104, 216, 0.24);
+  border-left: 5px solid var(--blue);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(23, 32, 51, 0.06);
+}
+
+.openstack-chain b {
+  color: var(--ink);
+  font-size: 18px;
+}
+
+.openstack-chain code {
+  width: 100%;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.openstack-chain span {
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.45;
 }
 
 .takeaways {

@@ -24,40 +24,35 @@
 
     <section class="slide" data-title="eBPF 能力地图">
       <p class="eyebrow">ebpf capability map</p>
-      <h2>eBPF 的强大之处：把安全、治理和观测能力前移到内核数据面</h2>
-      <div class="domain-grid">
+      <h2>eBPF 能力地图：从网络数据面到系统级观测</h2>
+      <div class="capability-grid">
         <div class="domain">
-          <h3>网络数据面</h3>
-          <p>在 XDP、TC、socket 等 hook 点解析和处理流量，更早做转发、放行、丢弃和重定向决策。</p>
-          <span class="tag blue">XDP / TC / hook</span>
+          <h3>网络数据面能力</h3>
+          <p><strong>解决：</strong>XDP/TC 可做高速防火墙、ACL、QoS、LB，解决安全策略过滤、异常流量快速丢弃、端口限速和服务链转发问题。</p>
+          <span class="tag blue">ACL / QoS / LB / Service Chain</span>
         </div>
         <div class="domain">
-          <h3>流量治理</h3>
-          <p>实现 ACL、QoS、限速、镜像、重定向、服务链等能力，不重写 OVS，也不侵入业务应用。</p>
-          <span class="tag green">ACL / QoS / Mirror</span>
+          <h3>系统观测能力</h3>
+          <p><strong>解决：</strong>tracepoint/kprobe/uprobe/syscall 能定位系统哪里慢、包在哪里丢、哪个进程在读写文件或发起连接。</p>
+          <span class="tag green">drop / IO / syscall / process</span>
         </div>
         <div class="domain">
-          <h3>安全控制</h3>
-          <p>在端口和方向维度做 L3/L4 访问控制、黑白名单、异常流量丢弃和策略命中审计。</p>
-          <span class="tag red">policy enforcement</span>
+          <h3>安全审计能力</h3>
+          <p><strong>解决：</strong>通过 exec/open/connect/mount/ptrace 等事件，发现异常命令、敏感文件访问、横向移动、容器逃逸和非法连接。</p>
+          <span class="tag red">exec / open / connect / ptrace</span>
         </div>
         <div class="domain">
-          <h3>可观测性</h3>
-          <p>输出 rule hit、packets、bytes、drop reason、flow stats，把“是否转发”变成“为什么这样转发”。</p>
-          <span class="tag amber">counters / drops</span>
-        </div>
-        <div class="domain">
-          <h3>性能诊断</h3>
-          <p>观测 TCP RTT、重传、kernel drop、SSL/HTTP 关键事件，减少线上排障对抓包的依赖。</p>
-          <span class="tag blue">TCP / SSL / trace</span>
-        </div>
-        <div class="domain">
-          <h3>运行可靠性</h3>
-          <p>依靠 verifier、BPF map、pin、版本化和渐进 attach，支撑灰度、回滚、旁路和运行态审计。</p>
-          <span class="tag green">verifier / map / pin</span>
+          <h3>性能分析能力</h3>
+          <p><strong>解决：</strong>通过 CPU/off-CPU/IO/内存/锁/函数耗时分析，回答 CPU 忙、IO 慢、锁等待、fsync 慢和函数耗时根因。</p>
+          <span class="tag amber">CPU / off-CPU / IO / lock</span>
         </div>
       </div>
-      <div class="statement">一句话：eBPF 提供“可编程内核数据面”，真正的产品价值来自控制面、生命周期、状态反馈和故障边界设计。</div>
+      <div class="openstack-chain">
+        <b>OpenStack 最有价值的落点</b>
+        <code>port_id -> tap/qvo -> flow -> verdict -> drop reason</code>
+        <span>把“虚机访问失败”直接关联到端口、五元组、ACL verdict、rule_id 和 drop reason。</span>
+      </div>
+      <div class="statement">本产品第一阶段优先收敛网络数据面能力；系统观测、安全审计、性能分析作为后续扩展域，避免过度开发。</div>
       <footer></footer>
     </section>
 
@@ -955,9 +950,9 @@ cat /sys/class/net/&lt;if&gt;/phys_switch_id</pre>
           "最后自然过渡到下一页：先不急着看实现，先看 eBPF 本身到底强在哪里。"
         ],
         "eBPF 能力地图": [
-          "这一页先讲 <strong>eBPF 的能力地图</strong>。不要把 eBPF 简单理解成包过滤，它更像一个安全受限、可动态加载的内核扩展机制。",
-          "讲的时候抓住六类能力：网络数据面、流量治理、安全控制、可观测、性能诊断、运行可靠性。我们产品真正用到的是这些能力的组合，而不是某一个 hook 点。",
-          "过渡句：能力很强不代表产品自动成熟，接下来要看我们自己的 agent 已经把哪些能力落到了代码里。"
+          "这一页先把 <strong>eBPF 的能力边界</strong>讲清楚。它不是单纯的包过滤，而是一套可以进入内核关键路径的可编程机制。",
+          "这次不再只讲 hook 名词，而是讲它们 <strong>解决什么问题</strong>：XDP/TC 解决安全过滤和快速丢弃，tracepoint/kprobe 解决系统事件定位，exec/open/connect 解决安全审计，CPU/off-CPU/IO 解决性能瓶颈定位。",
+          "其中和 OpenStack 最相关的是网络数据面，因为它能把 port、tap/qvo、flow、verdict、drop reason 串起来。所以第一阶段先把网络数据面能力产品化，其他三类作为后续扩展。"
         ],
         "当前 agent 已实现能力": [
           "这一页汇报当前代码已经具备的能力。重点说清楚：<strong>ACL 是当前产品成熟主线</strong>，已经接入 Neutron、snapshot、UDS apply 和 port status。",
