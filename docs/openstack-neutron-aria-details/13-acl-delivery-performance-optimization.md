@@ -125,9 +125,72 @@ This changes the immediate product guidance:
 - 1000 rules per port is still the product target, but it still needs a
   dedicated gate because every ACL rule currently creates up to two CIDR groups
   and both source/destination LPM entries.
-- The next optimization layer remains rule/group-level diff apply and shadow
-  generation. Batch replace removes the worst WAL/fsync cost, but it still
-  rewrites the changed port's full owned ACL set.
+- This first optimization removed the worst WAL/fsync cost, but the first
+  implementation still rewrote the changed port's full owned ACL set. The next
+  implemented layer below fixes that with rule/group-level diff apply.
+
+### 2.2 2026-07-08 Rule/Group Diff Apply Update
+
+The second datapath optimization has also been implemented and smoke-tested on
+`ostack2` against the same test VM port.
+
+Implemented changes:
+
+- `replace_owned_acl()` now computes desired groups and policies by stable key.
+- Existing Neutron-owned ACL groups/policies are compared with desired state
+  before map mutation.
+- Unchanged groups, CIDRs, policies, and port sets are skipped.
+- Adding one ACL rule to a 200-rule policy writes only that rule's delta.
+- Deleting one ACL rule from a 200-rule policy removes only that rule's delta.
+- The log profile now includes `group_cidr_delete_count`, making delete-side
+  diff behavior visible.
+
+Same-host diff evidence:
+
+| Scenario | Expected map mutation | Observed profile |
+| --- | --- | --- |
+| Initial 200-rule apply | 400 group CIDR adds, 200 policy adds | `total_ms=282` |
+| Add 1 rule after 200 rules | 2 group CIDR adds, 1 policy add | `total_ms=215` |
+| Delete that 1 rule | 2 group CIDR deletes, 1 policy delete | `total_ms=131` |
+| Cleanup 200 rules | 400 group CIDR deletes, 200 policy deletes | `total_ms=134` |
+| Empty no-op after cleanup | no group/policy mutation | `total_ms=25` |
+
+Representative diff logs:
+
+```text
+neutron_acl_apply_profile
+  status="enforced"
+  group_count=402
+  policy_count=201
+  group_add_count=2
+  group_cidr_add_count=2
+  policy_add_count=1
+  replace_ms=90
+  compact_ms=86
+  total_ms=215
+
+neutron_acl_apply_profile
+  status="enforced"
+  group_count=400
+  policy_count=200
+  group_delete_count=2
+  group_cidr_delete_count=2
+  policy_delete_count=1
+  replace_ms=74
+  compact_ms=70
+  total_ms=131
+```
+
+This changes the immediate product guidance again:
+
+- Incremental add/delete of a single rule is now bounded by the delta, not by
+  the full 200-rule owned ACL set.
+- 1000-rule validation should now focus on API/agent snapshot build cost,
+  status convergence, map capacity, and active traffic behavior, not only Rust
+  per-rule write cost.
+- Shadow generation remains required for the strongest production semantics:
+  packets should observe either old ACL or new ACL, never a partially updated
+  rule set during a large change.
 
 ## 3. OVS-Inspired Design Principles
 
@@ -560,8 +623,8 @@ This avoids full payload scan for every small change.
 
 The original ACL reconcile was purge plus rebuild. The 2026-07-08 optimization
 replaced the slow per-group/per-policy control-plane path with a Neutron-owned
-batch replace path. That is a major improvement, but it is still not full
-rule/group-level diff apply.
+batch replace path. A follow-up optimization now implements rule/group-level
+diff apply inside the changed port's owned ACL set.
 
 ### 10.1 Current Behavior
 
@@ -572,79 +635,85 @@ translate new ACL
 replace_owned_acl(port)
   compute old owned ACL groups/policies
   compute desired owned ACL groups/policies
-  delete old owned map entries
-  add desired owned map entries
-  compact local state once
+  add only new group CIDRs
+  add or update only new/changed policies
+  delete only removed policies
+  delete only removed group CIDRs/groups
+  compact local state once when a mutation occurred
 ```
 
 This means that unchanged ports are skipped, and a changed port no longer pays
-hundreds of WAL fsyncs. However, adding one rule to a 200-rule policy can still
-rewrite that port's full owned ACL set.
+hundreds of WAL fsyncs. Adding or deleting one rule from a 200-rule policy now
+touches only the rule's source/destination groups and policy entry.
 
-### 10.2 Target Behavior
+### 10.2 Implemented Diff Shape
 
-Store the last applied ACL plan per port:
-
-```json
-{
-  "port_id": "...",
-  "ifname": "...",
-  "acl_plan_hash": "...",
-  "groups": [
-    {"name": "...", "cidrs": ["..."]}
-  ],
-  "policies": [
-    {"src_group": "...", "dst_group": "...", "proto": 1, "direction": 1}
-  ]
-}
-```
-
-Compute diff:
+The diff is computed from the local committed runtime state and the translated
+desired ACL plan:
 
 ```text
 groups_to_add
-groups_to_update
+group_cidrs_to_add
+group_cidrs_to_delete
 groups_to_delete
 policies_to_add
 policies_to_update
 policies_to_delete
+port_sets_to_delete
 ```
 
 Apply order:
 
 1. Add new groups.
-2. Add new policies that reference existing or newly added groups.
-3. Delete old policies no longer needed.
-4. Delete old groups no longer referenced.
-5. Commit new plan hash.
+2. Add new group CIDRs to source and destination LPM maps.
+3. Add or update new policies that reference existing or newly added groups.
+4. Delete old policies no longer needed.
+5. Delete old port sets no longer referenced.
+6. Delete old group CIDRs and groups no longer referenced.
+7. Compact local state once.
 
-This preserves traffic behavior during incremental changes and avoids dropping
-old rules before new rules exist.
+This avoids full owned ACL rewrite for small changes. It does not yet provide
+bundle-like atomic visibility; that remains the shadow generation workstream.
 
 ### 10.3 No-Op Detection
 
-If translated ACL plan hash equals last applied plan hash:
+If translated ACL content matches the current committed owned ACL state:
 
 ```text
 skip purge
 skip group writes
 skip policy writes
-update status only if needed
+skip compact
+update status only if needed by the caller
 ```
 
 This is critical for periodic full-resync, because most full-resync cycles
 should become no-op at datapath level.
 
-### 10.4 Required Tests
+### 10.4 Required And Observed Tests
 
 | Test | Expected |
 | --- | --- |
 | same ACL plan | no eBPF mutation |
-| add one rule to 100-rule policy | only one group/policy delta is written |
+| add one rule to 200-rule policy | only one policy and two group CIDR deltas are written |
 | delete one rule | only target policy/group is removed when unreferenced |
 | reorder rules without semantic change | no mutation if canonical plan hash is same |
 | failed add | old committed plan remains active |
 | failed delete | old committed plan remains active or status degraded without false ready |
+
+Observed on `ostack2`:
+
+```text
+add one rule:
+  group_add_count=2
+  group_cidr_add_count=2
+  policy_add_count=1
+
+delete one rule:
+  group_delete_count=2
+  group_cidr_delete_count=2
+  policy_delete_count=1
+```
 
 ## 11. Workstream F: Shadow Generation / Bundle-Like Commit
 
@@ -723,7 +792,8 @@ Cons:
 
 Recommendation:
 
-- Implement Option C immediately as part of diff apply planning.
+- Keep the current userspace staging and rule/group diff apply as the short-term
+  implementation.
 - Implement Option A or B only after ACL performance P1/P2 is stable and after
   map capacity impact is measured.
 
@@ -735,10 +805,11 @@ Performance optimization must be paired with backpressure.
 
 Use two limit profiles.
 
-The first profile is a temporary protection profile for the current
-implementation before duplicate-submit suppression, async accepted UDS,
-port-scoped incremental apply, and Rust ACL diff apply are complete. It is not
-the final product claim.
+The first profile was the temporary protection profile before duplicate-submit
+suppression, async accepted UDS, port-scoped incremental apply, and Rust ACL
+diff apply were completed. After the 2026-07-08 optimizations, it should be
+treated as a conservative starting limit until the 1000-rule gate is executed,
+not as the final product claim.
 
 | Scope | Default hard limit |
 | --- | ---: |

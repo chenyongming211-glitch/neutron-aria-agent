@@ -144,6 +144,7 @@ pub struct OwnedAclReconcileReport {
     pub group_delete_count: usize,
     pub group_add_count: usize,
     pub group_cidr_add_count: usize,
+    pub group_cidr_delete_count: usize,
     pub policy_delete_count: usize,
     pub policy_add_count: usize,
     pub port_set_delete_count: usize,
@@ -154,6 +155,27 @@ pub struct OwnedAclReconcileReport {
 struct OwnedAclPolicyRuntimeAdd {
     rule: RuleInfo,
     is_new_port_set: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct OwnedAclPolicyKey {
+    src_group: String,
+    dst_group: String,
+    proto: u8,
+    direction: u8,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OwnedAclPolicyValue {
+    action: u8,
+    ports: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ExistingOwnedAclPolicy {
+    key: OwnedAclPolicyKey,
+    value: OwnedAclPolicyValue,
+    rule: RuleInfo,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -313,6 +335,38 @@ impl ControlPlane {
         let src_group = Self::owned_acl_group_name_by_id(state, rule.src_group_id);
         let dst_group = Self::owned_acl_group_name_by_id(state, rule.dst_group_id);
         src_group.starts_with(prefix) || dst_group.starts_with(prefix)
+    }
+
+    fn owned_acl_policy_key_from_rule(state: &FirewallState, rule: &RuleInfo) -> OwnedAclPolicyKey {
+        OwnedAclPolicyKey {
+            src_group: Self::owned_acl_group_name_by_id(state, rule.src_group_id),
+            dst_group: Self::owned_acl_group_name_by_id(state, rule.dst_group_id),
+            proto: rule.proto,
+            direction: rule.direction,
+        }
+    }
+
+    fn owned_acl_policy_value_from_rule(rule: &RuleInfo) -> OwnedAclPolicyValue {
+        OwnedAclPolicyValue {
+            action: rule.action,
+            ports: rule.ports.clone(),
+        }
+    }
+
+    fn owned_acl_policy_key_from_spec(policy: &OwnedAclPolicySpec) -> OwnedAclPolicyKey {
+        OwnedAclPolicyKey {
+            src_group: policy.src_group.clone(),
+            dst_group: policy.dst_group.clone(),
+            proto: policy.proto,
+            direction: policy.direction,
+        }
+    }
+
+    fn owned_acl_policy_value_from_spec(policy: &OwnedAclPolicySpec) -> OwnedAclPolicyValue {
+        OwnedAclPolicyValue {
+            action: policy.action,
+            ports: policy.ports.clone(),
+        }
     }
 
     fn owned_acl_validate_group_specs(
@@ -1304,11 +1358,15 @@ impl ControlPlane {
         Self::check_xdp_ready(&state.pin_path)?;
 
         let old_state = state.state.clone();
-        let old_owned_rules: Vec<RuleInfo> = old_state
+        let old_owned_policies: Vec<ExistingOwnedAclPolicy> = old_state
             .rules
             .iter()
             .filter(|rule| Self::owned_acl_rule_matches_prefix(&old_state, rule, owner_prefix))
-            .cloned()
+            .map(|rule| ExistingOwnedAclPolicy {
+                key: Self::owned_acl_policy_key_from_rule(&old_state, rule),
+                value: Self::owned_acl_policy_value_from_rule(rule),
+                rule: rule.clone(),
+            })
             .collect();
         let old_owned_groups: Vec<GroupInfo> = old_state
             .groups
@@ -1316,46 +1374,102 @@ impl ControlPlane {
             .filter(|group| group.name.starts_with(owner_prefix))
             .cloned()
             .collect();
+        let old_groups_by_name: BTreeMap<String, GroupInfo> = old_owned_groups
+            .iter()
+            .map(|group| (group.name.clone(), group.clone()))
+            .collect();
+        let old_policies_by_key: BTreeMap<OwnedAclPolicyKey, ExistingOwnedAclPolicy> =
+            old_owned_policies
+                .iter()
+                .map(|policy| (policy.key.clone(), policy.clone()))
+                .collect();
 
-        let mut final_state = old_state.clone();
-        let mut released_port_sets = BTreeMap::<u32, String>::new();
-        for rule in &old_owned_rules {
-            let remove_result = final_state
-                .apply_remove_rule(
-                    rule.src_group_id,
-                    rule.dst_group_id,
-                    rule.proto,
-                    rule.direction,
-                )
-                .map_err(ControlPlaneError::ValidationError)?;
-            if let (Some(idx), Some(ports_normalized)) =
-                (remove_result.bitmap_idx, remove_result.port_set_released)
-            {
-                released_port_sets.insert(idx, ports_normalized);
-            }
-        }
-        for group in &old_owned_groups {
-            final_state.groups.remove(&group.name);
-        }
-
-        let mut normalized_groups = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut desired_groups = BTreeMap::<String, BTreeSet<String>>::new();
         for group in groups {
-            let entry = normalized_groups.entry(group.name.clone()).or_default();
+            let entry = desired_groups.entry(group.name.clone()).or_default();
             for cidr in &group.cidrs {
                 entry.insert(cidr.clone());
             }
         }
 
-        for (name, cidrs) in &normalized_groups {
+        let mut desired_policies = BTreeMap::<OwnedAclPolicyKey, OwnedAclPolicySpec>::new();
+        for policy in policies {
+            let key = Self::owned_acl_policy_key_from_spec(policy);
+            if desired_policies
+                .insert(key.clone(), policy.clone())
+                .is_some()
+            {
+                return Err(ControlPlaneError::ValidationError(format!(
+                    "duplicate owned ACL policy src={} dst={} proto={} direction={}",
+                    key.src_group, key.dst_group, key.proto, key.direction
+                )));
+            }
+        }
+
+        let mut final_state = old_state.clone();
+        let mut group_cidr_adds = Vec::<(String, u32, String)>::new();
+        let mut group_cidr_deletes = Vec::<(String, u32, String)>::new();
+        let mut group_deletes = Vec::<GroupInfo>::new();
+        for (name, cidrs) in &desired_groups {
+            let old_cidrs: BTreeSet<String> = old_groups_by_name
+                .get(name)
+                .map(|group| group.cidrs.iter().cloned().collect())
+                .unwrap_or_default();
             for cidr in cidrs {
-                final_state
+                let group_id = final_state
                     .add_group(name, cidr)
                     .map_err(ControlPlaneError::ValidationError)?;
+                if !old_cidrs.contains(cidr) {
+                    group_cidr_adds.push((name.clone(), group_id, cidr.clone()));
+                }
+            }
+        }
+        for old_group in &old_owned_groups {
+            match desired_groups.get(&old_group.name) {
+                Some(desired_cidrs) => {
+                    if let Some(group) = final_state.groups.get_mut(&old_group.name) {
+                        group.cidrs.retain(|cidr| {
+                            if desired_cidrs.contains(cidr) {
+                                true
+                            } else {
+                                group_cidr_deletes.push((
+                                    old_group.name.clone(),
+                                    old_group.id,
+                                    cidr.clone(),
+                                ));
+                                false
+                            }
+                        });
+                    }
+                }
+                None => {
+                    group_deletes.push(old_group.clone());
+                    for cidr in &old_group.cidrs {
+                        group_cidr_deletes.push((
+                            old_group.name.clone(),
+                            old_group.id,
+                            cidr.clone(),
+                        ));
+                    }
+                }
             }
         }
 
         let mut runtime_adds = Vec::<OwnedAclPolicyRuntimeAdd>::new();
-        for policy in policies {
+        let mut policy_deletes = Vec::<ExistingOwnedAclPolicy>::new();
+        let mut released_port_sets = BTreeMap::<u32, String>::new();
+        for (key, existing) in &old_policies_by_key {
+            if !desired_policies.contains_key(key) {
+                policy_deletes.push(existing.clone());
+            }
+        }
+        for (key, policy) in &desired_policies {
+            let desired_value = Self::owned_acl_policy_value_from_spec(policy);
+            if old_policies_by_key.get(key).map(|existing| &existing.value) == Some(&desired_value)
+            {
+                continue;
+            }
+
             let src_id = self.resolve_group_id(&final_state, &policy.src_group)?;
             let dst_id = self.resolve_group_id(&final_state, &policy.dst_group)?;
             let add_result = final_state
@@ -1368,6 +1482,9 @@ impl ControlPlane {
                     policy.direction,
                 )
                 .map_err(ControlPlaneError::ValidationError)?;
+            if let Some((idx, ports_normalized)) = add_result.old_port_set_released {
+                released_port_sets.insert(idx, ports_normalized);
+            }
             let rule = final_state
                 .rules
                 .iter()
@@ -1389,18 +1506,77 @@ impl ControlPlane {
                 is_new_port_set: add_result.is_new_port_set,
             });
         }
+        for existing in &policy_deletes {
+            let rule = &existing.rule;
+            let remove_result = final_state
+                .apply_remove_rule(
+                    rule.src_group_id,
+                    rule.dst_group_id,
+                    rule.proto,
+                    rule.direction,
+                )
+                .map_err(ControlPlaneError::ValidationError)?;
+            if let (Some(idx), Some(ports_normalized)) =
+                (remove_result.bitmap_idx, remove_result.port_set_released)
+            {
+                released_port_sets.insert(idx, ports_normalized);
+            }
+        }
+        for group in &group_deletes {
+            final_state.groups.remove(&group.name);
+        }
 
         let mut report = OwnedAclReconcileReport {
-            group_delete_count: old_owned_groups.len(),
-            group_add_count: normalized_groups.len(),
-            group_cidr_add_count: normalized_groups.values().map(|cidrs| cidrs.len()).sum(),
-            policy_delete_count: old_owned_rules.len(),
+            group_delete_count: group_deletes.len(),
+            group_add_count: desired_groups
+                .keys()
+                .filter(|name| !old_groups_by_name.contains_key(*name))
+                .count(),
+            group_cidr_add_count: group_cidr_adds.len(),
+            group_cidr_delete_count: group_cidr_deletes.len(),
+            policy_delete_count: policy_deletes.len(),
             policy_add_count: runtime_adds.len(),
             port_set_delete_count: released_port_sets.len(),
             compact_ms: 0,
         };
 
-        for rule in &old_owned_rules {
+        for (name, group_id, cidr) in &group_cidr_adds {
+            aria_core::ebpf_ops::add_network(
+                "src",
+                cidr,
+                *group_id,
+                state.map_runtime(),
+                &self.ebpf_path,
+            )
+            .map_err(|e| ControlPlaneError::KernelError(format!("src {}: {}", name, e)))?;
+            aria_core::ebpf_ops::add_network(
+                "dst",
+                cidr,
+                *group_id,
+                state.map_runtime(),
+                &self.ebpf_path,
+            )
+            .map_err(|e| ControlPlaneError::KernelError(format!("dst {}: {}", name, e)))?;
+        }
+
+        for add in &runtime_adds {
+            aria_core::ebpf_ops::add_policy(
+                add.rule.src_group_id,
+                add.rule.dst_group_id,
+                add.rule.proto,
+                add.rule.action,
+                add.rule.ports.as_deref(),
+                add.rule.bitmap_idx,
+                add.is_new_port_set,
+                add.rule.direction,
+                state.map_runtime(),
+                &self.ebpf_path,
+            )
+            .map_err(ControlPlaneError::KernelError)?;
+        }
+
+        for existing in &policy_deletes {
+            let rule = &existing.rule;
             aria_core::ebpf_ops::delete_policy(
                 rule.src_group_id,
                 rule.dst_group_id,
@@ -1422,66 +1598,53 @@ impl ControlPlane {
             .map_err(ControlPlaneError::KernelError)?;
         }
 
-        for group in &old_owned_groups {
-            for cidr in &group.cidrs {
-                aria_core::ebpf_ops::delete_network(
-                    "src",
-                    cidr,
-                    group.id,
-                    state.map_runtime(),
-                    &self.ebpf_path,
-                )
-                .map_err(|e| ControlPlaneError::KernelError(format!("src: {}", e)))?;
-                aria_core::ebpf_ops::delete_network(
-                    "dst",
-                    cidr,
-                    group.id,
-                    state.map_runtime(),
-                    &self.ebpf_path,
-                )
-                .map_err(|e| ControlPlaneError::KernelError(format!("dst: {}", e)))?;
-            }
-        }
-
-        for group in final_state
-            .groups
-            .values()
-            .filter(|group| group.name.starts_with(owner_prefix))
-        {
-            for cidr in &group.cidrs {
-                aria_core::ebpf_ops::add_network(
-                    "src",
-                    cidr,
-                    group.id,
-                    state.map_runtime(),
-                    &self.ebpf_path,
-                )
-                .map_err(|e| ControlPlaneError::KernelError(format!("src: {}", e)))?;
-                aria_core::ebpf_ops::add_network(
-                    "dst",
-                    cidr,
-                    group.id,
-                    state.map_runtime(),
-                    &self.ebpf_path,
-                )
-                .map_err(|e| ControlPlaneError::KernelError(format!("dst: {}", e)))?;
-            }
-        }
-
-        for add in &runtime_adds {
-            aria_core::ebpf_ops::add_policy(
-                add.rule.src_group_id,
-                add.rule.dst_group_id,
-                add.rule.proto,
-                add.rule.action,
-                add.rule.ports.as_deref(),
-                add.rule.bitmap_idx,
-                add.is_new_port_set,
-                add.rule.direction,
+        for (name, group_id, cidr) in &group_cidr_deletes {
+            aria_core::ebpf_ops::delete_network(
+                "src",
+                cidr,
+                *group_id,
                 state.map_runtime(),
                 &self.ebpf_path,
             )
-            .map_err(ControlPlaneError::KernelError)?;
+            .map_err(|e| ControlPlaneError::KernelError(format!("src {}: {}", name, e)))?;
+            aria_core::ebpf_ops::delete_network(
+                "dst",
+                cidr,
+                *group_id,
+                state.map_runtime(),
+                &self.ebpf_path,
+            )
+            .map_err(|e| ControlPlaneError::KernelError(format!("dst {}: {}", name, e)))?;
+        }
+
+        for existing in &policy_deletes {
+            let rule = &existing.rule;
+            if let Err(e) = aria_core::monitoring::clear_rule_stats_for_policy(
+                state.map_runtime(),
+                rule.src_group_id,
+                rule.dst_group_id,
+                rule.proto,
+                rule.direction,
+            ) {
+                warn!(error = %e, "failed to clear rule stats after owned ACL diff delete");
+            }
+        }
+        for group in &group_deletes {
+            if let Err(e) =
+                aria_core::monitoring::clear_group_stats_for_id(state.map_runtime(), group.id)
+            {
+                warn!(error = %e, group_id = group.id, "failed to clear group stats after owned ACL diff delete");
+            }
+        }
+
+        if runtime_adds.is_empty()
+            && policy_deletes.is_empty()
+            && group_cidr_adds.is_empty()
+            && group_cidr_deletes.is_empty()
+            && group_deletes.is_empty()
+            && released_port_sets.is_empty()
+        {
+            return Ok(report);
         }
 
         state.state = final_state;
