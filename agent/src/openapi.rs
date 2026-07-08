@@ -191,26 +191,21 @@ mod tests {
         assert!(doc.pointer("/paths/~1api~1v1~1system~1start").is_some());
         assert!(doc.pointer("/paths/~1api~1v1~1chains").is_some());
         assert!(doc.pointer("/paths/~1api~1v1~1chains~1{name}").is_some());
-        assert!(
-            doc.pointer("/paths/~1api~1v1~1{instance}~1config")
-                .is_some()
-        );
-        assert!(
-            doc.pointer("/paths/~1api~1v1~1{instance}~1conntrack")
-                .is_some()
-        );
-        assert!(
-            doc.pointer("/paths/~1api~1v1~1{instance}~1groups")
-                .is_some()
-        );
-        assert!(
-            doc.pointer("/paths/~1api~1v1~1{instance}~1mirror")
-                .is_some()
-        );
-        assert!(
-            doc.pointer("/paths/~1api~1v1~1{instance}~1policies")
-                .is_some()
-        );
+        assert!(doc
+            .pointer("/paths/~1api~1v1~1{instance}~1config")
+            .is_some());
+        assert!(doc
+            .pointer("/paths/~1api~1v1~1{instance}~1conntrack")
+            .is_some());
+        assert!(doc
+            .pointer("/paths/~1api~1v1~1{instance}~1groups")
+            .is_some());
+        assert!(doc
+            .pointer("/paths/~1api~1v1~1{instance}~1mirror")
+            .is_some());
+        assert!(doc
+            .pointer("/paths/~1api~1v1~1{instance}~1policies")
+            .is_some());
         assert!(doc.pointer("/paths/~1api~1v1~1{instance}~1qos").is_some());
         assert!(doc.pointer("/paths/~1api~1v1~1{instance}~1stats").is_some());
         assert!(doc.pointer("/paths/~1api~1v1~1{instance}~1tcprt").is_some());
@@ -218,34 +213,28 @@ mod tests {
         assert!(doc.pointer("/paths/~1api~1v1~1ssl").is_some());
         assert!(doc.pointer("/paths/~1api~1v1~1ssl~1config").is_some());
         assert!(doc.pointer("/paths/~1api~1v1~1{instance}~1trace").is_some());
-        assert!(
-            doc.pointer("/paths/~1api~1v1~1stats~1kernel_drops")
-                .is_some()
-        );
+        assert!(doc
+            .pointer("/paths/~1api~1v1~1stats~1kernel_drops")
+            .is_some());
 
         assert!(doc.pointer("/components/schemas/ApiError").is_some());
         assert!(doc.pointer("/components/schemas/HealthResponse").is_some());
-        assert!(
-            doc.pointer("/components/schemas/BatchAddPoliciesRequest")
-                .is_some()
-        );
+        assert!(doc
+            .pointer("/components/schemas/BatchAddPoliciesRequest")
+            .is_some());
         assert!(doc.pointer("/components/schemas/AddQosRequest").is_some());
-        assert!(
-            doc.pointer("/components/schemas/AddMirrorRequest")
-                .is_some()
-        );
-        assert!(
-            doc.pointer("/components/schemas/TcpRtBatchQueryRequest")
-                .is_some()
-        );
-        assert!(
-            doc.pointer("/components/schemas/TraceStartRequest")
-                .is_some()
-        );
-        assert!(
-            doc.pointer("/components/schemas/SslGlobalConfigResponse")
-                .is_some()
-        );
+        assert!(doc
+            .pointer("/components/schemas/AddMirrorRequest")
+            .is_some());
+        assert!(doc
+            .pointer("/components/schemas/TcpRtBatchQueryRequest")
+            .is_some());
+        assert!(doc
+            .pointer("/components/schemas/TraceStartRequest")
+            .is_some());
+        assert!(doc
+            .pointer("/components/schemas/SslGlobalConfigResponse")
+            .is_some());
 
         assert_eq!(
             doc.pointer("/paths/~1api~1v1~1health/get/operationId")
@@ -296,19 +285,16 @@ mod tests {
     fn openapi_does_not_expose_neutron_uds_paths() {
         let doc = serde_json::to_value(ApiDoc::openapi()).expect("openapi should serialize");
 
-        assert!(
-            doc.pointer("/paths/~1api~1v1~1neutron~1capabilities")
-                .is_none()
-        );
+        assert!(doc
+            .pointer("/paths/~1api~1v1~1neutron~1capabilities")
+            .is_none());
         assert!(doc.pointer("/paths/~1api~1v1~1neutron~1status").is_none());
         assert!(doc.pointer("/paths/~1api~1v1~1neutron~1snapshot").is_none());
-        assert!(
-            doc.pointer("/paths/~1api~1v1~1neutron~1ports~1{port_id}~1snapshot")
-                .is_none()
-        );
-        assert!(
-            doc.pointer("/paths/~1api~1v1~1neutron~1ports~1{port_id}")
-                .is_none()
-        );
+        assert!(doc
+            .pointer("/paths/~1api~1v1~1neutron~1ports~1{port_id}~1snapshot")
+            .is_none());
+        assert!(doc
+            .pointer("/paths/~1api~1v1~1neutron~1ports~1{port_id}")
+            .is_none());
     }
 }

@@ -19,10 +19,25 @@ async fn main() {
     let tap_filter = cli.tap.clone();
 
     let result: Result<(), String> = match cli.command {
-        Commands::System { action } => commands::system::handle_system_action(&client, has_tap, action).await,
-        Commands::Group { action } => commands::group::handle_action(&client, &instance, action).await,
-        Commands::Policy { action } => commands::policy::handle_action(&client, &instance, action).await,
-        Commands::Stats { rules, flows, top, qos, groups, mirror, tcprt, drops } => {
+        Commands::System { action } => {
+            commands::system::handle_system_action(&client, has_tap, action).await
+        }
+        Commands::Group { action } => {
+            commands::group::handle_action(&client, &instance, action).await
+        }
+        Commands::Policy { action } => {
+            commands::policy::handle_action(&client, &instance, action).await
+        }
+        Commands::Stats {
+            rules,
+            flows,
+            top,
+            qos,
+            groups,
+            mirror,
+            tcprt,
+            drops,
+        } => {
             commands::stats::handle(
                 &client,
                 &instance,
@@ -37,19 +52,31 @@ async fn main() {
                 drops,
             )
             .await
-        },
-        Commands::Conntrack { action } => commands::conntrack::handle_action(&client, &instance, action).await,
+        }
+        Commands::Conntrack { action } => {
+            commands::conntrack::handle_action(&client, &instance, action).await
+        }
         Commands::Qos { action } => commands::qos::handle_action(&client, &instance, action).await,
-        Commands::Mirror { action } => commands::mirror::handle_action(&client, &instance, action).await,
-        Commands::Tcprt { action } => commands::tcprt::handle_action(&client, &instance, action).await,
+        Commands::Mirror { action } => {
+            commands::mirror::handle_action(&client, &instance, action).await
+        }
+        Commands::Tcprt { action } => {
+            commands::tcprt::handle_action(&client, &instance, action).await
+        }
         Commands::Chain { action } => commands::chain::handle_action(&client, action).await,
-        Commands::Drops { action } => commands::drops::handle_action(&client, tap_filter.as_ref(), action).await,
+        Commands::Drops { action } => {
+            commands::drops::handle_action(&client, tap_filter.as_ref(), action).await
+        }
         Commands::Trace { action } => commands::trace::handle_action(&client, action).await,
-        Commands::Ssl { action } => commands::ssl::handle_action(&client, &instance, has_tap, action).await,
-        Commands::Config { action } => commands::config::handle_action(&client, &instance, has_tap, action).await,
+        Commands::Ssl { action } => {
+            commands::ssl::handle_action(&client, &instance, has_tap, action).await
+        }
+        Commands::Config { action } => {
+            commands::config::handle_action(&client, &instance, has_tap, action).await
+        }
         Commands::Diagnose { dst, dport, chain } => {
             commands::diagnose::handle(&client, &instance, &dst, dport, chain.as_deref()).await
-        },
+        }
         Commands::Instances => commands::system::handle_instances(&client).await,
         Commands::Health => commands::system::handle_health(&client).await,
     };

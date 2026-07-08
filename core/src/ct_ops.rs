@@ -1,5 +1,5 @@
+use crate::common::{CtConfig, CtKey4, CtKey6, CtValue, TapMapRuntime};
 use aya::maps::{HashMap, MapData};
-use crate::common::{CtKey4, CtKey6, CtValue, CtConfig, TapMapRuntime};
 use std::net::Ipv4Addr;
 
 pub struct CtEntry {
@@ -20,9 +20,9 @@ pub fn ct_list(runtime: TapMapRuntime<'_>) -> Result<Vec<CtEntry>, String> {
     // CT_TABLE_V4 — LruHashMap on kernel side
     let map_path = format!("{}/CT_TABLE_V4", pin_path);
     if let Ok(map_data) = MapData::from_pin(&map_path) {
-        if let Ok(map) = HashMap::<_, CtKey4, CtValue>::try_from(
-            aya::maps::Map::LruHashMap(map_data)
-        ) {
+        if let Ok(map) =
+            HashMap::<_, CtKey4, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        {
             for item in map.iter() {
                 if let Ok((key, val)) = item {
                     if key.tap_id != runtime.tap_id {
@@ -46,9 +46,9 @@ pub fn ct_list(runtime: TapMapRuntime<'_>) -> Result<Vec<CtEntry>, String> {
     // CT_TABLE_V6 — LruHashMap on kernel side
     let map_path = format!("{}/CT_TABLE_V6", pin_path);
     if let Ok(map_data) = MapData::from_pin(&map_path) {
-        if let Ok(map) = HashMap::<_, CtKey6, CtValue>::try_from(
-            aya::maps::Map::LruHashMap(map_data)
-        ) {
+        if let Ok(map) =
+            HashMap::<_, CtKey6, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        {
             for item in map.iter() {
                 if let Ok((key, val)) = item {
                     if key.tap_id != runtime.tap_id {
@@ -81,10 +81,11 @@ pub fn ct_flush(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
     // Flush CT_TABLE_V4
     let map_path = format!("{}/CT_TABLE_V4", pin_path);
     if let Ok(map_data) = MapData::from_pin(&map_path) {
-        if let Ok(mut map) = HashMap::<_, CtKey4, CtValue>::try_from(
-            aya::maps::Map::LruHashMap(map_data)
-        ) {
-            let keys: Vec<CtKey4> = map.iter()
+        if let Ok(mut map) =
+            HashMap::<_, CtKey4, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        {
+            let keys: Vec<CtKey4> = map
+                .iter()
                 .filter_map(|item| item.ok().map(|(k, _)| k))
                 .filter(|key| key.tap_id == runtime.tap_id)
                 .collect();
@@ -99,10 +100,11 @@ pub fn ct_flush(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
     // Flush CT_TABLE_V6
     let map_path = format!("{}/CT_TABLE_V6", pin_path);
     if let Ok(map_data) = MapData::from_pin(&map_path) {
-        if let Ok(mut map) = HashMap::<_, CtKey6, CtValue>::try_from(
-            aya::maps::Map::LruHashMap(map_data)
-        ) {
-            let keys: Vec<CtKey6> = map.iter()
+        if let Ok(mut map) =
+            HashMap::<_, CtKey6, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        {
+            let keys: Vec<CtKey6> = map
+                .iter()
                 .filter_map(|item| item.ok().map(|(k, _)| k))
                 .filter(|key| key.tap_id == runtime.tap_id)
                 .collect();
@@ -119,13 +121,13 @@ pub fn ct_flush(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
 
 fn scrub_ct_table_v4_strict(pin_path: &str, tap_id: u32) -> Result<u64, String> {
     let map_path = format!("{}/CT_TABLE_V4", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open CT_TABLE_V4: {:?}", e))?;
-    let mut map = HashMap::<_, CtKey4, CtValue>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert CT_TABLE_V4: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open CT_TABLE_V4: {:?}", e))?;
+    let mut map = HashMap::<_, CtKey4, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        .map_err(|e| format!("convert CT_TABLE_V4: {:?}", e))?;
 
-    let keys: Vec<CtKey4> = map.iter()
+    let keys: Vec<CtKey4> = map
+        .iter()
         .filter_map(|item| item.ok().map(|(k, _)| k))
         .filter(|key| key.tap_id == tap_id)
         .collect();
@@ -139,13 +141,13 @@ fn scrub_ct_table_v4_strict(pin_path: &str, tap_id: u32) -> Result<u64, String> 
 
 fn scrub_ct_table_v6_strict(pin_path: &str, tap_id: u32) -> Result<u64, String> {
     let map_path = format!("{}/CT_TABLE_V6", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open CT_TABLE_V6: {:?}", e))?;
-    let mut map = HashMap::<_, CtKey6, CtValue>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert CT_TABLE_V6: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open CT_TABLE_V6: {:?}", e))?;
+    let mut map = HashMap::<_, CtKey6, CtValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        .map_err(|e| format!("convert CT_TABLE_V6: {:?}", e))?;
 
-    let keys: Vec<CtKey6> = map.iter()
+    let keys: Vec<CtKey6> = map
+        .iter()
         .filter_map(|item| item.ok().map(|(k, _)| k))
         .filter(|key| key.tap_id == tap_id)
         .collect();
@@ -177,7 +179,8 @@ pub fn init_ct_config(bpf: &mut aya::Ebpf) -> Result<(), String> {
         icmp_ns: 30_000_000_000,             // 30s
     };
 
-    match bpf.map_mut("CT_CONFIG")
+    match bpf
+        .map_mut("CT_CONFIG")
         .ok_or_else(|| "CT_CONFIG not found".to_string())
         .and_then(|m| HashMap::<_, u32, CtConfig>::try_from(m).map_err(|e| format!("{:?}", e)))
     {

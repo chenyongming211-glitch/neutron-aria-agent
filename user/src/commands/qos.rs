@@ -54,7 +54,12 @@ pub(crate) async fn handle_action(
                 } else {
                     println!(
                         "{:<15} {:<10} {:<10} {:<15} {:<15} {:<10} {}",
-                        "Group", "GroupID", "Direction", "Rate (B/s)", "Burst (B)", "Mode",
+                        "Group",
+                        "GroupID",
+                        "Direction",
+                        "Rate (B/s)",
+                        "Burst (B)",
+                        "Mode",
                         "Priority"
                     );
                     for r in &resp.rules {

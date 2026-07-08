@@ -2162,6 +2162,113 @@ ACL domain=not_requested 或 degraded
 effective_action=bypass
 ```
 
+### 14.5 ACL 容量、性能与限额策略
+
+2026-07-07 在真实 CirrOS VM OVS tap port 上做了 ACL 功能与容量探测：
+
+| 测试项 | 结果 |
+| --- | --- |
+| 单条 downlink / ingress ACL | 通过。Neutron 创建 policy/rule/binding 后，datapath 出现 drop policy，host -> VM ICMP 被阻断；删除 ACL 后恢复。 |
+| 单条 guest egress ACL | 通过。VM 内主动发起的 ICMP 被 egress ACL 阻断；删除 ACL 后恢复。 |
+| 10 条规则 / 单 port | 通过，manual full-resync 约 3.0 秒。 |
+| 50 条规则 / 单 port | 通过，manual full-resync 约 6.8 秒。 |
+| 100 条规则 / 单 port | 通过，manual full-resync 约 11.7 秒。 |
+| 120 条规则 / 单 port | 长驻 service 模式可收敛，约 20.5 秒。 |
+| 200 条规则 / 单 port | 长驻 service 模式可最终收敛，但约 218.6 秒，不适合作为默认产品限额。 |
+
+这次探测说明：
+
+- eBPF map 的原始上限不是产品限额。当前 `POLICY_TABLE` / `RULE_STATS` 是 65536，IPv4 source/destination LPM trie 是 10000，但控制面 full-resync、状态回写、回滚和超时窗口会先成为瓶颈。
+- 当前 `aria_acl` Neutron plugin / repository 还没有 quota / limit 校验，创建大量 rule 时会进入普通 CRUD 和后续 full-resync，风险太靠后。
+- 在长驻 `neutron-aria-agent` 已运行时，手工再执行 `neutron-aria-agent --once --enable-full-resync` 会制造 competing generation，不应作为生产容量结论。正式 smoke 要避免双 writer。
+- datapath status 不能只看 generation ready，还要校验期望 policy/group 数和实际 apply 数，避免 partial apply 被误报为 ready。
+
+这里需要区分两个口径：
+
+- **当前实现保护限额**：在性能优化未完成前，为了避免线上 full-resync
+  反复 timeout 和 generation churn，先用较低限额保护环境。
+- **正式产品能力目标**：面向产品化交付，ACL 不能只支持百级规则；默认目标
+  应按单 policy / 单 port 至少 1000 条规则设计。
+
+当前实现保护限额：
+
+| 限额项 | 默认硬限制 | 告警阈值 | 说明 |
+| --- | ---: | ---: | --- |
+| 单个 ACL policy 的 rule 数 | 100 | 70 | 仅作为性能优化完成前的保护值，不作为最终产品能力。 |
+| 单个 port 的 effective ACL rule 数 | 100 | 70 | 仅作为性能优化完成前的保护值，不作为最终产品能力。 |
+| 单个 address-set 的 member 数 | 256 | 180 | address-set 展开会消耗 LPM trie，不能只按 rule 数估算。 |
+| 单 project ACL rule 总数 | 1000 | 700 | 防止单租户拖慢全局 full-resync。 |
+| 单 host effective datapath policy 总数 | 5000 | 3500 | 低于 eBPF map 原始上限，给 rollback、stats 和后续 QoS/Mirror 预留空间。 |
+
+正式产品目标限额：
+
+| 限额项 | 产品目标值 | 启用前置条件 |
+| --- | ---: | --- |
+| 单 policy rule 数 | 1000 | duplicate submit suppression、async accepted UDS、port-scoped incremental、Rust ACL diff apply 均通过验收。 |
+| 单 port effective rule 数 | 1000 | 单 port 1000 条初次 apply 和增量 add/delete smoke 通过，且无 generation churn。 |
+| 单 address-set member 数 | 2048 | LPM trie 容量、共享 address-set 编译和更新耗时有专项证据。 |
+| 单 project ACL rule 总数 | 10000 | Neutron Server quota 和 agent 防御校验都已落地。 |
+| 单 host effective datapath policy 总数 | 50000 | host 级容量压测、rollback、restart replay 全部通过；必要时扩大 eBPF map 上限。 |
+
+要达到 1000 条/port，不能只改配置。当前 eBPF map 原始上限里
+`POLICY_TABLE` 是 65536，但 IPv4 source/destination LPM trie 当前是 10000。
+如果多个 port 都使用大量独立 CIDR group，LPM trie 会先成为 host 级瓶颈。
+因此 1000 条目标需要同步完成：
+
+- Rust ACL diff apply，避免每次全量 purge + rebuild。
+- port-scoped incremental，避免单 port 变化触发 full-host snapshot。
+- async accepted UDS，避免 3 秒请求超时触发重复 generation。
+- pending generation 去重与 desired_hash 合并，避免重复 full snapshot 排队。
+- ACL group/address-set 编译优化，尽量复用共享 address-set，减少 per-rule
+  per-port 独立 CIDR group。
+- 按实测结果把 `SRC_IPV4_TRIE` / `DST_IPV4_TRIE` 从 10000 提升到
+  65536 或更高，或者改成更节省 map entry 的 group/member 编译模型。
+
+限额必须在三层同时落实：
+
+1. Neutron Server API/DB 层做权威校验：创建或更新 policy/rule/address-set/binding 时，在同一个 DB transaction 中计算新对象带来的 effective rule/member 增量，超过限制直接返回 4xx。
+2. `neutron-aria-agent` 做防御性校验：即使 Neutron Server 漏掉限制，agent 也要在生成 snapshot 前把超限 port 标记为 `degraded + bypass`，并在 status reason 中写明 `ACL_LIMIT_EXCEEDED`。
+3. `aria-datapath` 做数据面保护：UDS snapshot 超过本机能力或 map 容量时拒绝该 port/domain apply，保持上一版 committed 状态或进入 bypass，不能暴露半写入状态。
+
+建议新增配置项：
+
+```ini
+[aria_acl_quota]
+max_rules_per_policy = 1000
+max_effective_rules_per_port = 1000
+max_address_set_members = 2048
+max_rules_per_project = 10000
+max_effective_policies_per_host = 50000
+warn_ratio = 0.7
+```
+
+在性能优化未完成前，产品包可以通过部署配置临时降级为保护值：
+
+```ini
+[aria_acl_quota]
+max_rules_per_policy = 100
+max_effective_rules_per_port = 100
+max_address_set_members = 256
+max_rules_per_project = 1000
+max_effective_policies_per_host = 5000
+```
+
+验收口径：
+
+- 超过 `max_rules_per_policy` 时，`neutron aria-acl-rule-create` 返回明确错误，不创建半对象。
+- network binding 展开后超过 `max_effective_rules_per_port` 时，binding 创建或启用失败。
+- address-set 更新导致 effective entries 超限时，更新失败并保留旧 address-set。
+- agent 发现超限对象时，port status 为 `degraded/bypass`，业务转发不被中断。
+- rollback 后 datapath policy/group 数为 0，VM 基础连通性恢复。
+
+详细性能优化路线见
+`docs/openstack-neutron-aria-details/13-acl-delivery-performance-optimization.md`。
+该路线把当前 100 条/port 视为未优化实现的保护值；正式产品目标应按
+1000 条/port 设计。后续只有在 duplicate submit suppression、async
+accepted UDS、port-scoped incremental、Rust ACL diff apply 和影子
+generation/bundle-like commit 等优化通过验收后，才建议把生产默认值提高
+到 1000 条。
+
 ## 15. 错误处理与状态
 
 ### 15.1 Domain Status

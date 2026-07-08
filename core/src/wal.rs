@@ -23,17 +23,79 @@ pub fn last_wal_replay_failures() -> u64 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WalEntry {
-    AddGroup { name: String, cidr: String },
-    DeleteGroup { name: String },
-    AddRule { src_id: u32, dst_id: u32, proto: u8, action: u8, ports: Option<String>, direction: u8 },
-    RemoveRule { src_id: u32, dst_id: u32, proto: u8, direction: u8 },
-    AddQos { group_name: String, group_id: u32, direction: u8, rate_bps: u64, burst_bytes: u64, priority: u8, #[serde(default)] mode: u8 },
-    DeleteQos { group_id: u32, direction: u8 },
-    AddMirror { src_group_name: String, src_group_id: u32, dst_group_name: String, dst_group_id: u32, proto: u8, direction: u8, target_iface: String, target_ifindex: u32, is_global: bool },
-    DeleteMirror { src_group_id: u32, dst_group_id: u32, proto: u8, direction: u8, is_global: bool },
-    UpdateConfig { conntrack: Option<bool>, monitoring: Option<bool>, #[serde(default)] acl: Option<bool>, #[serde(default)] qos: Option<bool>, #[serde(default)] mirror: Option<bool>, #[serde(default)] tcprt: Option<bool>, #[serde(default)] ssl: Option<bool> },
-    SetMaxPortPolicies { max: u32 },
-    SetAttachedIface { iface: String },
+    AddGroup {
+        name: String,
+        cidr: String,
+    },
+    DeleteGroup {
+        name: String,
+    },
+    AddRule {
+        src_id: u32,
+        dst_id: u32,
+        proto: u8,
+        action: u8,
+        ports: Option<String>,
+        direction: u8,
+    },
+    RemoveRule {
+        src_id: u32,
+        dst_id: u32,
+        proto: u8,
+        direction: u8,
+    },
+    AddQos {
+        group_name: String,
+        group_id: u32,
+        direction: u8,
+        rate_bps: u64,
+        burst_bytes: u64,
+        priority: u8,
+        #[serde(default)]
+        mode: u8,
+    },
+    DeleteQos {
+        group_id: u32,
+        direction: u8,
+    },
+    AddMirror {
+        src_group_name: String,
+        src_group_id: u32,
+        dst_group_name: String,
+        dst_group_id: u32,
+        proto: u8,
+        direction: u8,
+        target_iface: String,
+        target_ifindex: u32,
+        is_global: bool,
+    },
+    DeleteMirror {
+        src_group_id: u32,
+        dst_group_id: u32,
+        proto: u8,
+        direction: u8,
+        is_global: bool,
+    },
+    UpdateConfig {
+        conntrack: Option<bool>,
+        monitoring: Option<bool>,
+        #[serde(default)]
+        acl: Option<bool>,
+        #[serde(default)]
+        qos: Option<bool>,
+        #[serde(default)]
+        mirror: Option<bool>,
+        #[serde(default)]
+        tcprt: Option<bool>,
+        #[serde(default)]
+        ssl: Option<bool>,
+    },
+    SetMaxPortPolicies {
+        max: u32,
+    },
+    SetAttachedIface {
+        iface: String,
+    },
     ClearAttachedIface,
 }
 
@@ -68,7 +130,8 @@ impl WalWriter {
         let entry_count = if wal_path.exists() {
             let f = File::open(&wal_path)
                 .map_err(|e| format!("Failed to open WAL for counting: {}", e))?;
-            BufReader::new(f).lines()
+            BufReader::new(f)
+                .lines()
                 .filter_map(|l| l.ok())
                 .filter(|l| !l.trim().is_empty() && serde_json::from_str::<WalEntry>(l).is_ok())
                 .count() as u64
@@ -93,18 +156,23 @@ impl WalWriter {
     fn append_buffered(&mut self, entry: &WalEntry) -> Result<(), String> {
         let line = serde_json::to_string(entry)
             .map_err(|e| format!("Failed to serialize WAL entry: {}", e))?;
-        self.file.write_all(line.as_bytes())
+        self.file
+            .write_all(line.as_bytes())
             .map_err(|e| format!("Failed to write WAL entry: {}", e))?;
-        self.file.write_all(b"\n")
+        self.file
+            .write_all(b"\n")
             .map_err(|e| format!("Failed to write WAL newline: {}", e))?;
         self.entry_count += 1;
         Ok(())
     }
 
     fn sync(&mut self) -> Result<(), String> {
-        self.file.flush()
+        self.file
+            .flush()
             .map_err(|e| format!("Failed to flush WAL: {}", e))?;
-        self.file.get_ref().sync_all()
+        self.file
+            .get_ref()
+            .sync_all()
             .map_err(|e| format!("Failed to fsync WAL: {}", e))
     }
 
@@ -130,7 +198,9 @@ impl WalWriter {
     /// Accepts pre-serialized JSON to avoid borrow conflicts when wal and state
     /// are fields of the same struct.
     pub fn compact(&mut self, state_json: &str) -> Result<(), String> {
-        let state_dir = self.wal_path.parent()
+        let state_dir = self
+            .wal_path
+            .parent()
             .ok_or_else(|| "WAL path has no parent directory".to_string())?;
         let state_file = state_dir.join("state.json");
         let tmp_file = state_dir.join("state.json.tmp");
@@ -227,7 +297,10 @@ impl WalClient {
     pub async fn compact(&self, state_json: String) -> Result<(), String> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.sender
-            .send(WalMessage::Compact { state_json, ack: ack_tx })
+            .send(WalMessage::Compact {
+                state_json,
+                ack: ack_tx,
+            })
             .await
             .map_err(|_| "WAL worker thread died".to_string())?;
         ack_rx
@@ -237,7 +310,12 @@ impl WalClient {
 
     pub async fn shutdown(&self) {
         let (ack_tx, ack_rx) = oneshot::channel();
-        if self.sender.send(WalMessage::Shutdown { ack: ack_tx }).await.is_ok() {
+        if self
+            .sender
+            .send(WalMessage::Shutdown { ack: ack_tx })
+            .await
+            .is_ok()
+        {
             let _ = ack_rx.await;
         }
     }
@@ -367,22 +445,46 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
         WalEntry::DeleteGroup { name } => {
             state.groups.remove(&name);
         }
-        WalEntry::AddRule { src_id, dst_id, proto, action, ports, direction } => {
+        WalEntry::AddRule {
+            src_id,
+            dst_id,
+            proto,
+            action,
+            ports,
+            direction,
+        } => {
             let ports_ref = ports.as_deref();
-            if let Err(e) = state.apply_add_rule(src_id, dst_id, proto, action, ports_ref, direction) {
+            if let Err(e) =
+                state.apply_add_rule(src_id, dst_id, proto, action, ports_ref, direction)
+            {
                 warn!(error = %e, src_id, dst_id, proto, direction, "WAL replay AddRule failed");
                 return false;
             }
         }
-        WalEntry::RemoveRule { src_id, dst_id, proto, direction } => {
+        WalEntry::RemoveRule {
+            src_id,
+            dst_id,
+            proto,
+            direction,
+        } => {
             if let Err(e) = state.apply_remove_rule(src_id, dst_id, proto, direction) {
                 warn!(error = %e, src_id, dst_id, proto, direction, "WAL replay RemoveRule failed");
                 return false;
             }
         }
-        WalEntry::AddQos { group_name, group_id, direction, rate_bps, burst_bytes, priority, mode } => {
+        WalEntry::AddQos {
+            group_name,
+            group_id,
+            direction,
+            rate_bps,
+            burst_bytes,
+            priority,
+            mode,
+        } => {
             use crate::state::QosRuleInfo;
-            state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
+            state
+                .qos_rules
+                .retain(|r| !(r.group_id == group_id && r.direction == direction));
             state.qos_rules.push(QosRuleInfo {
                 group_name,
                 group_id,
@@ -393,15 +495,38 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
                 mode,
             });
         }
-        WalEntry::DeleteQos { group_id, direction } => {
-            state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
+        WalEntry::DeleteQos {
+            group_id,
+            direction,
+        } => {
+            state
+                .qos_rules
+                .retain(|r| !(r.group_id == group_id && r.direction == direction));
         }
-        WalEntry::AddMirror { src_group_name, src_group_id, dst_group_name, dst_group_id, proto, direction, target_iface, target_ifindex, is_global } => {
+        WalEntry::AddMirror {
+            src_group_name,
+            src_group_id,
+            dst_group_name,
+            dst_group_id,
+            proto,
+            direction,
+            target_iface,
+            target_ifindex,
+            is_global,
+        } => {
             use crate::state::MirrorRuleInfo;
             if is_global {
-                state.mirror_rules.retain(|r| !(r.is_global && r.direction == direction));
+                state
+                    .mirror_rules
+                    .retain(|r| !(r.is_global && r.direction == direction));
             } else {
-                state.mirror_rules.retain(|r| !(r.src_group_id == src_group_id && r.dst_group_id == dst_group_id && r.proto == proto && r.direction == direction && !r.is_global));
+                state.mirror_rules.retain(|r| {
+                    !(r.src_group_id == src_group_id
+                        && r.dst_group_id == dst_group_id
+                        && r.proto == proto
+                        && r.direction == direction
+                        && !r.is_global)
+                });
             }
             state.mirror_rules.push(MirrorRuleInfo {
                 src_group_name,
@@ -415,14 +540,36 @@ pub fn apply_wal_entry(state: &mut FirewallState, entry: WalEntry) -> bool {
                 is_global,
             });
         }
-        WalEntry::DeleteMirror { src_group_id, dst_group_id, proto, direction, is_global } => {
+        WalEntry::DeleteMirror {
+            src_group_id,
+            dst_group_id,
+            proto,
+            direction,
+            is_global,
+        } => {
             if is_global {
-                state.mirror_rules.retain(|r| !(r.is_global && r.direction == direction));
+                state
+                    .mirror_rules
+                    .retain(|r| !(r.is_global && r.direction == direction));
             } else {
-                state.mirror_rules.retain(|r| !(r.src_group_id == src_group_id && r.dst_group_id == dst_group_id && r.proto == proto && r.direction == direction && !r.is_global));
+                state.mirror_rules.retain(|r| {
+                    !(r.src_group_id == src_group_id
+                        && r.dst_group_id == dst_group_id
+                        && r.proto == proto
+                        && r.direction == direction
+                        && !r.is_global)
+                });
             }
         }
-        WalEntry::UpdateConfig { conntrack, monitoring, acl, qos, mirror, tcprt, ssl } => {
+        WalEntry::UpdateConfig {
+            conntrack,
+            monitoring,
+            acl,
+            qos,
+            mirror,
+            tcprt,
+            ssl,
+        } => {
             if let Some(ct) = conntrack {
                 state.conntrack_enabled = ct;
             }
@@ -556,7 +703,8 @@ mod tests {
             wal.append(&WalEntry::AddGroup {
                 name: "db".to_string(),
                 cidr: "10.0.1.0/24".to_string(),
-            }).unwrap();
+            })
+            .unwrap();
             wal.append(&WalEntry::AddRule {
                 src_id: 1,
                 dst_id: 2,
@@ -564,7 +712,8 @@ mod tests {
                 action: 0,
                 ports: Some("80".to_string()),
                 direction: 0,
-            }).unwrap();
+            })
+            .unwrap();
             assert_eq!(wal.entry_count(), 2);
         }
 
@@ -594,11 +743,13 @@ mod tests {
         wal.append(&WalEntry::AddGroup {
             name: "db".to_string(),
             cidr: "10.0.1.0/24".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
         wal.append(&WalEntry::AddGroup {
             name: "cache".to_string(),
             cidr: "10.0.2.0/24".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(wal.entry_count(), 2);
 
         // Apply entries to state for compact
@@ -636,18 +787,26 @@ mod tests {
         let entry1 = serde_json::to_string(&WalEntry::AddGroup {
             name: "g1".to_string(),
             cidr: "10.0.0.0/24".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
         let entry2 = serde_json::to_string(&WalEntry::AddGroup {
             name: "g2".to_string(),
             cidr: "10.0.1.0/24".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
         writeln!(f, "{}", entry1).unwrap();
         writeln!(f, "{{corrupt json line}}").unwrap();
         writeln!(f, "{}", entry2).unwrap();
 
         let loaded = load_with_wal(&state_path);
-        assert!(loaded.groups.contains_key("g1"), "entry before corrupt line applied");
-        assert!(loaded.groups.contains_key("g2"), "entry after corrupt line applied");
+        assert!(
+            loaded.groups.contains_key("g1"),
+            "entry before corrupt line applied"
+        );
+        assert!(
+            loaded.groups.contains_key("g2"),
+            "entry after corrupt line applied"
+        );
 
         let _ = fs::remove_dir_all(&state_path);
     }
@@ -668,53 +827,88 @@ mod tests {
         let mut state = FirewallState::default();
 
         // AddGroup
-        apply_wal_entry(&mut state, WalEntry::AddGroup {
-            name: "web".to_string(),
-            cidr: "10.0.0.0/24".to_string(),
-        });
+        apply_wal_entry(
+            &mut state,
+            WalEntry::AddGroup {
+                name: "web".to_string(),
+                cidr: "10.0.0.0/24".to_string(),
+            },
+        );
         assert!(state.groups.contains_key("web"));
 
         // AddRule
-        apply_wal_entry(&mut state, WalEntry::AddRule {
-            src_id: 1, dst_id: 0, proto: 6, action: 0,
-            ports: Some("80,443".to_string()), direction: 0,
-        });
+        apply_wal_entry(
+            &mut state,
+            WalEntry::AddRule {
+                src_id: 1,
+                dst_id: 0,
+                proto: 6,
+                action: 0,
+                ports: Some("80,443".to_string()),
+                direction: 0,
+            },
+        );
         assert_eq!(state.rules.len(), 1);
 
         // RemoveRule
-        apply_wal_entry(&mut state, WalEntry::RemoveRule {
-            src_id: 1, dst_id: 0, proto: 6, direction: 0,
-        });
+        apply_wal_entry(
+            &mut state,
+            WalEntry::RemoveRule {
+                src_id: 1,
+                dst_id: 0,
+                proto: 6,
+                direction: 0,
+            },
+        );
         assert_eq!(state.rules.len(), 0);
 
         // DeleteGroup
-        apply_wal_entry(&mut state, WalEntry::DeleteGroup {
-            name: "web".to_string(),
-        });
+        apply_wal_entry(
+            &mut state,
+            WalEntry::DeleteGroup {
+                name: "web".to_string(),
+            },
+        );
         assert!(!state.groups.contains_key("web"));
 
         // AddQos
-        apply_wal_entry(&mut state, WalEntry::AddQos {
-            group_name: "default".to_string(),
-            group_id: 0,
-            direction: 0,
-            rate_bps: 1_000_000,
-            burst_bytes: 125_000,
-            priority: 1,
-            mode: 0,
-        });
+        apply_wal_entry(
+            &mut state,
+            WalEntry::AddQos {
+                group_name: "default".to_string(),
+                group_id: 0,
+                direction: 0,
+                rate_bps: 1_000_000,
+                burst_bytes: 125_000,
+                priority: 1,
+                mode: 0,
+            },
+        );
         assert_eq!(state.qos_rules.len(), 1);
 
         // DeleteQos
-        apply_wal_entry(&mut state, WalEntry::DeleteQos {
-            group_id: 0, direction: 0,
-        });
+        apply_wal_entry(
+            &mut state,
+            WalEntry::DeleteQos {
+                group_id: 0,
+                direction: 0,
+            },
+        );
         assert_eq!(state.qos_rules.len(), 0);
 
         // UpdateConfig
-        apply_wal_entry(&mut state, WalEntry::UpdateConfig {
-            conntrack: Some(false), monitoring: None, acl: None, qos: None, mirror: None, tcprt: None, ssl: None,
-        });
+        apply_wal_entry(
+            &mut state,
+            WalEntry::UpdateConfig {
+                conntrack: Some(false),
+                monitoring: None,
+                acl: None,
+                qos: None,
+                mirror: None,
+                tcprt: None,
+                ssl: None,
+            },
+        );
         assert!(!state.conntrack_enabled);
         assert!(state.monitoring_enabled);
 
@@ -723,9 +917,12 @@ mod tests {
         assert_eq!(state.max_port_policies, 100);
 
         // SetAttachedIface
-        apply_wal_entry(&mut state, WalEntry::SetAttachedIface {
-            iface: "eth0".to_string(),
-        });
+        apply_wal_entry(
+            &mut state,
+            WalEntry::SetAttachedIface {
+                iface: "eth0".to_string(),
+            },
+        );
         assert_eq!(state.attached_iface, Some("eth0".to_string()));
 
         // ClearAttachedIface
@@ -740,9 +937,21 @@ mod tests {
         // Write 3 entries
         {
             let mut wal = WalWriter::open(&state_path).unwrap();
-            wal.append(&WalEntry::AddGroup { name: "a".to_string(), cidr: "10.0.0.0/24".to_string() }).unwrap();
-            wal.append(&WalEntry::AddGroup { name: "b".to_string(), cidr: "10.0.1.0/24".to_string() }).unwrap();
-            wal.append(&WalEntry::AddGroup { name: "c".to_string(), cidr: "10.0.2.0/24".to_string() }).unwrap();
+            wal.append(&WalEntry::AddGroup {
+                name: "a".to_string(),
+                cidr: "10.0.0.0/24".to_string(),
+            })
+            .unwrap();
+            wal.append(&WalEntry::AddGroup {
+                name: "b".to_string(),
+                cidr: "10.0.1.0/24".to_string(),
+            })
+            .unwrap();
+            wal.append(&WalEntry::AddGroup {
+                name: "c".to_string(),
+                cidr: "10.0.2.0/24".to_string(),
+            })
+            .unwrap();
         }
 
         // Re-open and verify count resumes
@@ -760,11 +969,15 @@ mod tests {
         wal.append(WalEntry::AddGroup {
             name: "web".to_string(),
             cidr: "10.0.0.0/24".to_string(),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         wal.append(WalEntry::AddGroup {
             name: "db".to_string(),
             cidr: "10.0.1.0/24".to_string(),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         wal.shutdown().await;
 
         let loaded = load_with_wal(&state_path);
@@ -782,11 +995,15 @@ mod tests {
         wal.append(WalEntry::AddGroup {
             name: "web".to_string(),
             cidr: "10.0.0.0/24".to_string(),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let mut state = FirewallState::default();
         state.add_group("web", "10.0.0.0/24").unwrap();
-        wal.compact(serde_json::to_string_pretty(&state).unwrap()).await.unwrap();
+        wal.compact(serde_json::to_string_pretty(&state).unwrap())
+            .await
+            .unwrap();
         wal.shutdown().await;
 
         let wal_contents = fs::read_to_string(format!("{}/state.wal", state_path)).unwrap();

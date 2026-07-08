@@ -25,14 +25,17 @@ fn sum_per_cpu_contract(values: PerCpuValues<CtContractValue>) -> (u64, u64, u64
     (packets, bytes, last_seen)
 }
 
-pub fn get_ct_contract_stats(runtime: TapMapRuntime<'_>) -> Result<Vec<CtContractStatsEntry>, String> {
+pub fn get_ct_contract_stats(
+    runtime: TapMapRuntime<'_>,
+) -> Result<Vec<CtContractStatsEntry>, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/CT_CONTRACT_STATS", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open CT_CONTRACT_STATS: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open CT_CONTRACT_STATS: {:?}", e))?;
     let map = PerCpuHashMap::<_, CtContractKey, CtContractValue>::try_from(
-        aya::maps::Map::PerCpuHashMap(map_data)
-    ).map_err(|e| format!("convert CT_CONTRACT_STATS: {:?}", e))?;
+        aya::maps::Map::PerCpuHashMap(map_data),
+    )
+    .map_err(|e| format!("convert CT_CONTRACT_STATS: {:?}", e))?;
 
     let mut entries = Vec::new();
     for item in map.iter() {

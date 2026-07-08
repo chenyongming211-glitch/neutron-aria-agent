@@ -122,7 +122,10 @@ pub(crate) async fn handle(
                 if resp.groups.is_empty() {
                     println!("  No group statistics collected yet");
                 } else {
-                    println!("{:<15} {:<10} {:<15} {}", "Group", "Direction", "Packets", "Bytes");
+                    println!(
+                        "{:<15} {:<10} {:<15} {}",
+                        "Group", "Direction", "Packets", "Bytes"
+                    );
                     for e in &resp.groups {
                         println!(
                             "{:<15} {:<10} {:<15} {}",
@@ -262,13 +265,7 @@ pub(crate) async fn handle(
                     for f in &resp.flows {
                         println!(
                             "{:<40} {:<40} {:<8} {:<8} {:<8} {:<15} {}",
-                            f.src_ip,
-                            f.dst_ip,
-                            f.src_port,
-                            f.dst_port,
-                            f.proto,
-                            f.packets,
-                            f.bytes
+                            f.src_ip, f.dst_ip, f.src_port, f.dst_port, f.proto, f.packets, f.bytes
                         );
                     }
                 }

@@ -7,7 +7,9 @@ enum PolicyBatchInput {
     Bare(Vec<aria_api::AddPolicyRequest>),
 }
 
-fn parse_batch_add_policies(json_str: &str) -> Result<aria_api::BatchAddPoliciesRequest, serde_json::Error> {
+fn parse_batch_add_policies(
+    json_str: &str,
+) -> Result<aria_api::BatchAddPoliciesRequest, serde_json::Error> {
     match serde_json::from_str::<PolicyBatchInput>(json_str)? {
         PolicyBatchInput::Wrapped(req) => Ok(req),
         PolicyBatchInput::Bare(policies) => Ok(aria_api::BatchAddPoliciesRequest { policies }),

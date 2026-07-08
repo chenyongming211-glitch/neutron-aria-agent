@@ -5,8 +5,8 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use aria_core::ebpf_ops::{
-    FqQdiscState, NETWORK_MAP_NAMES, TraceMapMode, cleanup_root_qdisc, critical_network_map_names,
-    detach_tc_egress, ensure_fq_qdisc, replay_state, scrub_standalone_runtime_state,
+    cleanup_root_qdisc, critical_network_map_names, detach_tc_egress, ensure_fq_qdisc,
+    replay_state, scrub_standalone_runtime_state, FqQdiscState, TraceMapMode, NETWORK_MAP_NAMES,
 };
 
 const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";

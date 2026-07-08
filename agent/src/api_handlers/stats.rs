@@ -1,16 +1,16 @@
 use axum::{
-    Json,
     extract::{Path, Query, State},
     response::IntoResponse,
+    Json,
 };
 
 use super::{
+    common::{err_response, AppState},
     TopQuery,
-    common::{AppState, err_response},
 };
 use aria_api::{
-    FlowEntry, FlowStatsResponse, GroupStatsResponse, QosStatsResponse, RuleStatsResponse,
-    StatsOverview, direction_to_string, proto_to_string,
+    direction_to_string, proto_to_string, FlowEntry, FlowStatsResponse, GroupStatsResponse,
+    QosStatsResponse, RuleStatsResponse, StatsOverview,
 };
 
 #[utoipa::path(

@@ -1,12 +1,12 @@
 use axum::{
-    Json,
     extract::{Path, Query, State},
     response::IntoResponse,
+    Json,
 };
 
 use super::{
+    common::{err_response, AppState},
     TopQuery,
-    common::{AppState, err_response},
 };
 use crate::control_plane::LocalWriteDomain;
 

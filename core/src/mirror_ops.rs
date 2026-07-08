@@ -1,18 +1,21 @@
+use crate::common::{GlobalMirrorKey, MirrorConfig, MirrorKey, MirrorStatsValue, TapMapRuntime};
 use aya::maps::{HashMap, MapData, PerCpuHashMap};
-use crate::common::{
-    GlobalMirrorKey, MirrorConfig, MirrorKey, MirrorStatsValue, TapMapRuntime,
-};
 
 /// Resolve interface name to ifindex.
 pub fn resolve_ifindex(iface: &str) -> Result<u32, String> {
     let path = format!("/sys/class/net/{}/ifindex", iface);
     let contents = std::fs::read_to_string(&path)
         .map_err(|e| format!("Interface '{}' not found: {}", iface, e))?;
-    contents.trim().parse::<u32>()
+    contents
+        .trim()
+        .parse::<u32>()
         .map_err(|e| format!("Invalid ifindex for '{}': {}", iface, e))
 }
 
-fn ignore_missing_remove<E: std::fmt::Debug>(result: Result<(), E>, map_name: &str) -> Result<(), String> {
+fn ignore_missing_remove<E: std::fmt::Debug>(
+    result: Result<(), E>,
+    map_name: &str,
+) -> Result<(), String> {
     match result {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -45,9 +48,9 @@ fn has_mirror_rules(runtime: TapMapRuntime<'_>) -> bool {
     let pin_path = runtime.pin_path;
     let policy_path = format!("{}/MIRROR_POLICY", pin_path);
     if let Ok(map_data) = MapData::from_pin(&policy_path) {
-        if let Ok(map) = HashMap::<_, MirrorKey, MirrorConfig>::try_from(
-            aya::maps::Map::HashMap(map_data)
-        ) {
+        if let Ok(map) =
+            HashMap::<_, MirrorKey, MirrorConfig>::try_from(aya::maps::Map::HashMap(map_data))
+        {
             for item in map.iter() {
                 if let Ok((key, _)) = item {
                     if key.tap_id == runtime.tap_id {
@@ -60,9 +63,9 @@ fn has_mirror_rules(runtime: TapMapRuntime<'_>) -> bool {
 
     let global_path = format!("{}/MIRROR_GLOBAL", pin_path);
     if let Ok(map_data) = MapData::from_pin(&global_path) {
-        if let Ok(map) = HashMap::<_, GlobalMirrorKey, MirrorConfig>::try_from(
-            aya::maps::Map::HashMap(map_data)
-        ) {
+        if let Ok(map) =
+            HashMap::<_, GlobalMirrorKey, MirrorConfig>::try_from(aya::maps::Map::HashMap(map_data))
+        {
             for item in map.iter() {
                 if let Ok((key, _)) = item {
                     if key.tap_id == runtime.tap_id {
@@ -87,11 +90,11 @@ pub fn add_mirror_rule(
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/MIRROR_POLICY", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open MIRROR_POLICY: {:?}", e))?;
-    let mut map = HashMap::<_, MirrorKey, MirrorConfig>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert MIRROR_POLICY: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open MIRROR_POLICY: {:?}", e))?;
+    let mut map =
+        HashMap::<_, MirrorKey, MirrorConfig>::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| format!("convert MIRROR_POLICY: {:?}", e))?;
 
     let key = MirrorKey {
         tap_id: runtime.tap_id,
@@ -120,11 +123,11 @@ pub fn delete_mirror_rule(
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/MIRROR_POLICY", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open MIRROR_POLICY: {:?}", e))?;
-    let mut map = HashMap::<_, MirrorKey, MirrorConfig>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert MIRROR_POLICY: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open MIRROR_POLICY: {:?}", e))?;
+    let mut map =
+        HashMap::<_, MirrorKey, MirrorConfig>::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| format!("convert MIRROR_POLICY: {:?}", e))?;
 
     let key = MirrorKey {
         tap_id: runtime.tap_id,
@@ -150,11 +153,12 @@ pub fn clear_mirror_rule_stats(
     runtime: TapMapRuntime<'_>,
 ) -> Result<(), String> {
     let map_path = format!("{}/MIRROR_STATS", runtime.pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open MIRROR_STATS: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open MIRROR_STATS: {:?}", e))?;
     let mut map = PerCpuHashMap::<_, MirrorKey, MirrorStatsValue>::try_from(
-        aya::maps::Map::PerCpuHashMap(map_data)
-    ).map_err(|e| format!("convert MIRROR_STATS: {:?}", e))?;
+        aya::maps::Map::PerCpuHashMap(map_data),
+    )
+    .map_err(|e| format!("convert MIRROR_STATS: {:?}", e))?;
 
     let key = MirrorKey {
         tap_id: runtime.tap_id,
@@ -176,11 +180,11 @@ pub fn add_global_mirror(
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/MIRROR_GLOBAL", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open MIRROR_GLOBAL: {:?}", e))?;
-    let mut map = HashMap::<_, GlobalMirrorKey, MirrorConfig>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert MIRROR_GLOBAL: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open MIRROR_GLOBAL: {:?}", e))?;
+    let mut map =
+        HashMap::<_, GlobalMirrorKey, MirrorConfig>::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| format!("convert MIRROR_GLOBAL: {:?}", e))?;
 
     let key = GlobalMirrorKey {
         tap_id: runtime.tap_id,
@@ -203,11 +207,11 @@ pub fn delete_global_mirror(
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/MIRROR_GLOBAL", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open MIRROR_GLOBAL: {:?}", e))?;
-    let mut map = HashMap::<_, GlobalMirrorKey, MirrorConfig>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert MIRROR_GLOBAL: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open MIRROR_GLOBAL: {:?}", e))?;
+    let mut map =
+        HashMap::<_, GlobalMirrorKey, MirrorConfig>::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| format!("convert MIRROR_GLOBAL: {:?}", e))?;
 
     let key = GlobalMirrorKey {
         tap_id: runtime.tap_id,
@@ -222,16 +226,14 @@ pub fn delete_global_mirror(
     Ok(())
 }
 
-pub fn clear_global_mirror_stats(
-    direction: u8,
-    runtime: TapMapRuntime<'_>,
-) -> Result<(), String> {
+pub fn clear_global_mirror_stats(direction: u8, runtime: TapMapRuntime<'_>) -> Result<(), String> {
     let map_path = format!("{}/MIRROR_GLOBAL_STATS", runtime.pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open MIRROR_GLOBAL_STATS: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open MIRROR_GLOBAL_STATS: {:?}", e))?;
     let mut map = PerCpuHashMap::<_, GlobalMirrorKey, MirrorStatsValue>::try_from(
-        aya::maps::Map::PerCpuHashMap(map_data)
-    ).map_err(|e| format!("convert MIRROR_GLOBAL_STATS: {:?}", e))?;
+        aya::maps::Map::PerCpuHashMap(map_data),
+    )
+    .map_err(|e| format!("convert MIRROR_GLOBAL_STATS: {:?}", e))?;
 
     let key = GlobalMirrorKey {
         tap_id: runtime.tap_id,
@@ -242,14 +244,15 @@ pub fn clear_global_mirror_stats(
     ignore_missing_remove(map.remove(&key), "MIRROR_GLOBAL_STATS")
 }
 
-pub fn list_mirror_rules(runtime: TapMapRuntime<'_>) -> Result<Vec<(MirrorKey, MirrorConfig)>, String> {
+pub fn list_mirror_rules(
+    runtime: TapMapRuntime<'_>,
+) -> Result<Vec<(MirrorKey, MirrorConfig)>, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/MIRROR_POLICY", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open MIRROR_POLICY: {:?}", e))?;
-    let map = HashMap::<_, MirrorKey, MirrorConfig>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert MIRROR_POLICY: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open MIRROR_POLICY: {:?}", e))?;
+    let map = HashMap::<_, MirrorKey, MirrorConfig>::try_from(aya::maps::Map::HashMap(map_data))
+        .map_err(|e| format!("convert MIRROR_POLICY: {:?}", e))?;
 
     let mut entries = Vec::new();
     for item in map.iter() {
@@ -262,14 +265,16 @@ pub fn list_mirror_rules(runtime: TapMapRuntime<'_>) -> Result<Vec<(MirrorKey, M
     Ok(entries)
 }
 
-pub fn list_global_mirrors(runtime: TapMapRuntime<'_>) -> Result<Vec<(GlobalMirrorKey, MirrorConfig)>, String> {
+pub fn list_global_mirrors(
+    runtime: TapMapRuntime<'_>,
+) -> Result<Vec<(GlobalMirrorKey, MirrorConfig)>, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/MIRROR_GLOBAL", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open MIRROR_GLOBAL: {:?}", e))?;
-    let map = HashMap::<_, GlobalMirrorKey, MirrorConfig>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert MIRROR_GLOBAL: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open MIRROR_GLOBAL: {:?}", e))?;
+    let map =
+        HashMap::<_, GlobalMirrorKey, MirrorConfig>::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| format!("convert MIRROR_GLOBAL: {:?}", e))?;
 
     let mut entries = Vec::new();
     for item in map.iter() {
@@ -286,22 +291,34 @@ pub fn list_global_mirrors(runtime: TapMapRuntime<'_>) -> Result<Vec<(GlobalMirr
 pub fn replay_mirror_rules(
     bpf: &mut aya::Ebpf,
     tap_id: u32,
-    rules: &[(u32, u32, u8, u8, u32)],  // (src_id, dst_id, proto, direction, target_ifindex)
-    global_rules: &[(u8, u32)],          // (direction, target_ifindex)
+    rules: &[(u32, u32, u8, u8, u32)], // (src_id, dst_id, proto, direction, target_ifindex)
+    global_rules: &[(u8, u32)],        // (direction, target_ifindex)
 ) -> Vec<String> {
     let mut errors = Vec::new();
 
     // Replay per-rule mirrors
-    match bpf.map_mut("MIRROR_POLICY")
+    match bpf
+        .map_mut("MIRROR_POLICY")
         .ok_or_else(|| "MIRROR_POLICY not found".to_string())
-        .and_then(|m| HashMap::<_, MirrorKey, MirrorConfig>::try_from(m).map_err(|e| format!("{:?}", e)))
-    {
+        .and_then(|m| {
+            HashMap::<_, MirrorKey, MirrorConfig>::try_from(m).map_err(|e| format!("{:?}", e))
+        }) {
         Ok(mut map) => {
             for &(src_id, dst_id, proto, direction, target_ifindex) in rules {
-                let key = MirrorKey { tap_id, src_id, dst_id, proto, direction, pad: [0; 2] };
+                let key = MirrorKey {
+                    tap_id,
+                    src_id,
+                    dst_id,
+                    proto,
+                    direction,
+                    pad: [0; 2],
+                };
                 let config = MirrorConfig { target_ifindex };
                 if let Err(e) = map.insert(&key, &config, 0) {
-                    errors.push(format!("MIRROR_POLICY src={} dst={} dir={}: {:?}", src_id, dst_id, direction, e));
+                    errors.push(format!(
+                        "MIRROR_POLICY src={} dst={} dir={}: {:?}",
+                        src_id, dst_id, direction, e
+                    ));
                 }
             }
         }
@@ -309,13 +326,19 @@ pub fn replay_mirror_rules(
     }
 
     // Replay global mirrors
-    match bpf.map_mut("MIRROR_GLOBAL")
+    match bpf
+        .map_mut("MIRROR_GLOBAL")
         .ok_or_else(|| "MIRROR_GLOBAL not found".to_string())
-        .and_then(|m| HashMap::<_, GlobalMirrorKey, MirrorConfig>::try_from(m).map_err(|e| format!("{:?}", e)))
-    {
+        .and_then(|m| {
+            HashMap::<_, GlobalMirrorKey, MirrorConfig>::try_from(m).map_err(|e| format!("{:?}", e))
+        }) {
         Ok(mut map) => {
             for &(direction, target_ifindex) in global_rules {
-                let key = GlobalMirrorKey { tap_id, direction, pad: [0; 3] };
+                let key = GlobalMirrorKey {
+                    tap_id,
+                    direction,
+                    pad: [0; 3],
+                };
                 let config = MirrorConfig { target_ifindex };
                 if let Err(e) = map.insert(&key, &config, 0) {
                     errors.push(format!("MIRROR_GLOBAL dir={}: {:?}", direction, e));

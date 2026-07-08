@@ -1,7 +1,7 @@
-use aya::maps::{HashMap, MapData};
 use crate::common::{
     TapMapRuntime, TraceEvent, TraceEventKey, TraceEventV6, TraceFilter, TraceStreamEvent,
 };
+use aya::maps::{HashMap, MapData};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 #[derive(Clone, Debug)]
@@ -156,11 +156,10 @@ pub fn set_trace_filter(
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/TRACE_FILTER", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open TRACE_FILTER: {:?}", e))?;
-    let mut map = HashMap::<_, u32, TraceFilter>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert TRACE_FILTER: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open TRACE_FILTER: {:?}", e))?;
+    let mut map = HashMap::<_, u32, TraceFilter>::try_from(aya::maps::Map::HashMap(map_data))
+        .map_err(|e| format!("convert TRACE_FILTER: {:?}", e))?;
 
     let filter = TraceFilter {
         src_ip,
@@ -186,11 +185,10 @@ pub fn clear_trace_filter(runtime: TapMapRuntime<'_>) -> Result<(), String> {
 pub fn delete_trace_filter(runtime: TapMapRuntime<'_>) -> Result<bool, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/TRACE_FILTER", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open TRACE_FILTER: {:?}", e))?;
-    let mut map = HashMap::<_, u32, TraceFilter>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert TRACE_FILTER: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open TRACE_FILTER: {:?}", e))?;
+    let mut map = HashMap::<_, u32, TraceFilter>::try_from(aya::maps::Map::HashMap(map_data))
+        .map_err(|e| format!("convert TRACE_FILTER: {:?}", e))?;
 
     if map.get(&runtime.tap_id, 0).is_err() {
         return Ok(false);
@@ -205,14 +203,16 @@ pub fn scrub_trace_filter(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
     delete_trace_filter(runtime).map(|deleted| if deleted { 1 } else { 0 })
 }
 
-pub fn get_trace_events(runtime: TapMapRuntime<'_>, limit: usize) -> Result<Vec<TraceEventEntry>, String> {
+pub fn get_trace_events(
+    runtime: TapMapRuntime<'_>,
+    limit: usize,
+) -> Result<Vec<TraceEventEntry>, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/TRACE_LOG", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open TRACE_LOG: {:?}", e))?;
-    let map = HashMap::<_, TraceEventKey, TraceEvent>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert TRACE_LOG: {:?}", e))?;
+    let map_data = MapData::from_pin(&map_path).map_err(|e| format!("open TRACE_LOG: {:?}", e))?;
+    let map =
+        HashMap::<_, TraceEventKey, TraceEvent>::try_from(aya::maps::Map::LruHashMap(map_data))
+            .map_err(|e| format!("convert TRACE_LOG: {:?}", e))?;
 
     let mut entries = Vec::new();
     for item in map.iter() {
@@ -227,7 +227,7 @@ pub fn get_trace_events(runtime: TapMapRuntime<'_>, limit: usize) -> Result<Vec<
     let v6_map_path = format!("{}/TRACE_LOG_V6", pin_path);
     if let Ok(v6_map_data) = MapData::from_pin(&v6_map_path) {
         if let Ok(v6_map) = HashMap::<_, TraceEventKey, TraceEventV6>::try_from(
-            aya::maps::Map::LruHashMap(v6_map_data)
+            aya::maps::Map::LruHashMap(v6_map_data),
         ) {
             for item in v6_map.iter() {
                 if let Ok((key, event)) = item {
@@ -253,13 +253,13 @@ pub fn get_trace_events(runtime: TapMapRuntime<'_>, limit: usize) -> Result<Vec<
 pub fn flush_trace_log(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
     let pin_path = runtime.pin_path;
     let map_path = format!("{}/TRACE_LOG", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open TRACE_LOG: {:?}", e))?;
-    let mut map = HashMap::<_, TraceEventKey, TraceEvent>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert TRACE_LOG: {:?}", e))?;
+    let map_data = MapData::from_pin(&map_path).map_err(|e| format!("open TRACE_LOG: {:?}", e))?;
+    let mut map =
+        HashMap::<_, TraceEventKey, TraceEvent>::try_from(aya::maps::Map::LruHashMap(map_data))
+            .map_err(|e| format!("convert TRACE_LOG: {:?}", e))?;
 
-    let keys: Vec<TraceEventKey> = map.iter()
+    let keys: Vec<TraceEventKey> = map
+        .iter()
         .filter_map(|item| item.ok().map(|(key, _)| key))
         .filter(|key| key.tap_id == runtime.tap_id)
         .collect();
@@ -271,9 +271,10 @@ pub fn flush_trace_log(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
     let v6_map_path = format!("{}/TRACE_LOG_V6", pin_path);
     if let Ok(v6_map_data) = MapData::from_pin(&v6_map_path) {
         if let Ok(mut v6_map) = HashMap::<_, TraceEventKey, TraceEventV6>::try_from(
-            aya::maps::Map::LruHashMap(v6_map_data)
+            aya::maps::Map::LruHashMap(v6_map_data),
         ) {
-            let keys: Vec<TraceEventKey> = v6_map.iter()
+            let keys: Vec<TraceEventKey> = v6_map
+                .iter()
                 .filter_map(|item| item.ok().map(|(key, _)| key))
                 .filter(|key| key.tap_id == runtime.tap_id)
                 .collect();

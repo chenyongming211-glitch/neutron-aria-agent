@@ -1,9 +1,9 @@
+use fslock::LockFile;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use fslock::LockFile;
 use tracing::{info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +23,7 @@ pub struct RuleInfo {
     pub ports: Option<String>,
     pub bitmap_idx: Option<u32>,
     #[serde(default)]
-    pub direction: u8,              // 0=ingress, 1=egress
+    pub direction: u8, // 0=ingress, 1=egress
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,11 +157,14 @@ impl FirewallState {
         } else {
             let id = self.next_group_id;
             self.next_group_id += 1;
-            self.groups.insert(name.to_string(), GroupInfo {
-                id,
-                name: name.to_string(),
-                cidrs: vec![cidr.to_string()],
-            });
+            self.groups.insert(
+                name.to_string(),
+                GroupInfo {
+                    id,
+                    name: name.to_string(),
+                    cidrs: vec![cidr.to_string()],
+                },
+            );
             Ok(id)
         }
     }
@@ -252,7 +255,8 @@ impl FirewallState {
             // 旧规则有 bitmap → 减引用计数
             if let Some(old_idx) = existing.bitmap_idx {
                 if bitmap_idx != Some(old_idx) {
-                    let old_ports_normalized = self.port_sets
+                    let old_ports_normalized = self
+                        .port_sets
                         .iter()
                         .find(|(_, ps)| ps.bitmap_idx == old_idx)
                         .map(|(_, ps)| ps.ports_normalized.clone());
@@ -320,7 +324,8 @@ impl FirewallState {
         }) {
             let rule = self.rules.remove(pos);
             if let Some(idx) = rule.bitmap_idx {
-                let ports_normalized = self.port_sets
+                let ports_normalized = self
+                    .port_sets
                     .iter()
                     .find(|(_, ps)| ps.bitmap_idx == idx)
                     .map(|(_, ps)| ps.ports_normalized.clone());
@@ -430,9 +435,10 @@ impl StateManager {
     /// 获取操作级锁，覆盖 state + kernel maps 的整个操作
     pub fn acquire_ops_lock(&self) -> Result<LockFile, String> {
         let lock_path = self.state_file.with_file_name("ops.lock");
-        let mut lock = LockFile::open(&lock_path)
-            .map_err(|e| format!("Failed to open ops lock: {}", e))?;
-        lock.lock().map_err(|e| format!("Failed to acquire ops lock: {}", e))?;
+        let mut lock =
+            LockFile::open(&lock_path).map_err(|e| format!("Failed to open ops lock: {}", e))?;
+        lock.lock()
+            .map_err(|e| format!("Failed to acquire ops lock: {}", e))?;
         Ok(lock)
     }
 
@@ -441,9 +447,10 @@ impl StateManager {
         F: FnMut(&mut FirewallState) -> Result<(), String>,
     {
         let lock_path = self.state_file.with_extension("lock");
-        let mut lock = LockFile::open(&lock_path)
-            .map_err(|e| format!("Failed to open lock file: {}", e))?;
-        lock.lock().map_err(|e| format!("Failed to acquire lock: {}", e))?;
+        let mut lock =
+            LockFile::open(&lock_path).map_err(|e| format!("Failed to open lock file: {}", e))?;
+        lock.lock()
+            .map_err(|e| format!("Failed to acquire lock: {}", e))?;
 
         let mut state = if self.state_file.exists() {
             let mut file = File::open(&self.state_file)
@@ -477,7 +484,8 @@ impl StateManager {
 
         file.write_all(contents.as_bytes())
             .map_err(|e| format!("Failed to write state file: {}", e))?;
-        file.sync_all().map_err(|e| format!("Failed to sync state file: {}", e))?;
+        file.sync_all()
+            .map_err(|e| format!("Failed to sync state file: {}", e))?;
 
         Ok(())
     }
@@ -581,13 +589,26 @@ impl StateManager {
             old_port_set_released: None,
         };
         self.with_state(|state| {
-            result = state.apply_add_rule(src_group_id, dst_group_id, proto, action, ports, direction)?;
+            result = state.apply_add_rule(
+                src_group_id,
+                dst_group_id,
+                proto,
+                action,
+                ports,
+                direction,
+            )?;
             Ok(())
         })?;
         Ok(result)
     }
 
-    pub fn remove_rule(&self, src_group_id: u32, dst_group_id: u32, proto: u8, direction: u8) -> Result<RemoveRuleResult, String> {
+    pub fn remove_rule(
+        &self,
+        src_group_id: u32,
+        dst_group_id: u32,
+        proto: u8,
+        direction: u8,
+    ) -> Result<RemoveRuleResult, String> {
         let mut result = RemoveRuleResult {
             bitmap_idx: None,
             port_set_released: None,
@@ -622,9 +643,10 @@ impl StateManager {
 
     fn _load_readonly(&self) -> Result<FirewallState, String> {
         let lock_path = self.state_file.with_extension("lock");
-        let mut lock = LockFile::open(&lock_path)
-            .map_err(|e| format!("Failed to open lock file: {}", e))?;
-        lock.lock().map_err(|e| format!("Failed to acquire lock: {}", e))?;
+        let mut lock =
+            LockFile::open(&lock_path).map_err(|e| format!("Failed to open lock file: {}", e))?;
+        lock.lock()
+            .map_err(|e| format!("Failed to acquire lock: {}", e))?;
 
         let state = if self.state_file.exists() {
             let mut file = File::open(&self.state_file)
@@ -659,7 +681,9 @@ impl StateManager {
     ) -> Result<(), String> {
         self.with_state(|state| {
             // Remove existing rule with same group+direction
-            state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
+            state
+                .qos_rules
+                .retain(|r| !(r.group_id == group_id && r.direction == direction));
             state.qos_rules.push(QosRuleInfo {
                 group_name: group_name.to_string(),
                 group_id,
@@ -676,9 +700,14 @@ impl StateManager {
     pub fn remove_qos_rule(&self, group_id: u32, direction: u8) -> Result<(), String> {
         self.with_state(|state| {
             let before = state.qos_rules.len();
-            state.qos_rules.retain(|r| !(r.group_id == group_id && r.direction == direction));
+            state
+                .qos_rules
+                .retain(|r| !(r.group_id == group_id && r.direction == direction));
             if state.qos_rules.len() == before {
-                return Err(format!("QoS rule not found: group_id={}, direction={}", group_id, direction));
+                return Err(format!(
+                    "QoS rule not found: group_id={}, direction={}",
+                    group_id, direction
+                ));
             }
             Ok(())
         })
@@ -705,7 +734,13 @@ impl StateManager {
 
     pub fn get_config(&self) -> Result<(bool, bool, bool, bool, bool), String> {
         let state = self._load_readonly()?;
-        Ok((state.conntrack_enabled, state.monitoring_enabled, state.acl_enabled, state.qos_enabled, state.mirror_enabled))
+        Ok((
+            state.conntrack_enabled,
+            state.monitoring_enabled,
+            state.acl_enabled,
+            state.qos_enabled,
+            state.mirror_enabled,
+        ))
     }
 
     pub fn set_acl_enabled(&self, enabled: bool) -> Result<(), String> {
@@ -791,9 +826,7 @@ mod tests {
         assert_eq!(idx1, idx2, "相同端口集应复用同一 bitmap_idx");
 
         // 删除第一条规则，不应释放 port set（引用从 2→1）
-        let rm1 = mgr
-            .remove_rule(1, 2, 6, 0)
-            .expect("remove_rule 1");
+        let rm1 = mgr.remove_rule(1, 2, 6, 0).expect("remove_rule 1");
         assert_eq!(rm1.bitmap_idx, Some(idx1));
         assert!(
             rm1.port_set_released.is_none(),
@@ -801,9 +834,7 @@ mod tests {
         );
 
         // 删除第二条规则，引用归零，应回收 bitmap_idx 并报告释放的端口集
-        let rm2 = mgr
-            .remove_rule(3, 4, 6, 0)
-            .expect("remove_rule 2");
+        let rm2 = mgr.remove_rule(3, 4, 6, 0).expect("remove_rule 2");
         assert_eq!(rm2.bitmap_idx, Some(idx1));
         assert!(
             rm2.port_set_released.is_some(),
@@ -826,12 +857,20 @@ mod tests {
         let state_path = unique_state_path();
         let mgr = StateManager::new(&state_path);
 
-        assert_eq!(mgr.get_tap_id().unwrap(), 0, "default tap_id should be unassigned");
+        assert_eq!(
+            mgr.get_tap_id().unwrap(),
+            0,
+            "default tap_id should be unassigned"
+        );
 
         mgr.set_tap_id(42).expect("set tap_id");
         assert_eq!(mgr.get_tap_id().unwrap(), 42, "tap_id should be persisted");
 
         let reloaded = StateManager::new(&state_path);
-        assert_eq!(reloaded.get_tap_id().unwrap(), 42, "tap_id should survive reload");
+        assert_eq!(
+            reloaded.get_tap_id().unwrap(),
+            42,
+            "tap_id should survive reload"
+        );
     }
 }

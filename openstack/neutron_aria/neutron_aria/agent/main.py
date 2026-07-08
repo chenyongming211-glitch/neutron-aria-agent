@@ -7,6 +7,7 @@ import sys
 
 from neutron_aria.agent.acl_source import build_acl_source
 from neutron_aria.agent.config import load_config
+from neutron_aria.agent.config import sync_mode
 from neutron_aria.agent.config import validate_config
 from neutron_aria.agent.event_merge import EventMerger
 from neutron_aria.agent.event_loop import SnapshotSynchronizer
@@ -210,7 +211,7 @@ def main(argv=None):
     LOG.info(
         "agent_start host=%s managed_domains=%s full_resync_enabled=%s "
         "rpc_events_enabled=%s incremental_rpc_enabled=%s "
-        "revisionless_incremental_mode=%s port_source=%s "
+        "revisionless_incremental_mode=%s sync_mode=%s port_source=%s "
         "ovs_bridge=%s socket_path=%s acl_source=%s acl_fixture_enabled=%s "
         "state_dir=%s",
         host,
@@ -219,6 +220,7 @@ def main(argv=None):
         config.rpc_events_enabled,
         config.incremental_rpc_enabled,
         config.revisionless_incremental_mode,
+        sync_mode(config),
         config.port_source,
         config.ovs_bridge,
         config.socket_path,

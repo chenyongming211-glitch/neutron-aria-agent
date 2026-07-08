@@ -91,10 +91,7 @@ async fn handle_flow(
     run_tcprt_flow(client, dst, dport, chain).await
 }
 
-async fn handle_histogram(
-    client: &api_client::ApiClient,
-    instance: &str,
-) -> Result<(), String> {
+async fn handle_histogram(client: &api_client::ApiClient, instance: &str) -> Result<(), String> {
     match client.tcprt_histogram(instance).await {
         Ok(resp) => {
             if resp.total == 0 {
@@ -132,16 +129,16 @@ async fn handle_histogram(
     }
 }
 
-async fn handle_states(
-    client: &api_client::ApiClient,
-    instance: &str,
-) -> Result<(), String> {
+async fn handle_states(client: &api_client::ApiClient, instance: &str) -> Result<(), String> {
     match client.tcprt_states(instance).await {
         Ok(resp) => {
             if resp.total_flows == 0 {
                 println!("No TCP-RT flows found");
             } else {
-                println!("=== TCP State Distribution ({} flows) ===\n", resp.total_flows);
+                println!(
+                    "=== TCP State Distribution ({} flows) ===\n",
+                    resp.total_flows
+                );
                 println!("  {:<15} {:>8} {:>8}", "State", "Count", "Percent");
                 println!("  {:<15} {:>8} {:>8}", "───────────", "──────", "───────");
                 for s in &resp.states {
@@ -162,10 +159,7 @@ async fn handle_states(
     }
 }
 
-async fn handle_flush(
-    client: &api_client::ApiClient,
-    instance: &str,
-) -> Result<(), String> {
+async fn handle_flush(client: &api_client::ApiClient, instance: &str) -> Result<(), String> {
     match client.flush_tcprt(instance).await {
         Ok(resp) => {
             println!("Flushed {} TCP-RT entries", resp.flushed);
@@ -196,11 +190,7 @@ pub(crate) async fn handle_action(
     }
 }
 
-async fn run_tcprt_top(
-    client: &api_client::ApiClient,
-    by: &str,
-    top: usize,
-) -> Result<(), String> {
+async fn run_tcprt_top(client: &api_client::ApiClient, by: &str, top: usize) -> Result<(), String> {
     let all_instances = fetch_all_instance_flows(client).await?;
     if all_instances.is_empty() {
         println!("No active instances found");
@@ -367,7 +357,11 @@ fn run_tcprt_flow_coarse(
         .instances
         .iter()
         .find(|i| i.instance == "system" && i.avg_forward_platform_us > 0.0)
-        .or_else(|| resp.instances.iter().find(|i| i.avg_forward_platform_us > 0.0));
+        .or_else(|| {
+            resp.instances
+                .iter()
+                .find(|i| i.avg_forward_platform_us > 0.0)
+        });
 
     if let Some(inst) = dual_inst {
         let client_net = inst.avg_rtt_client_us;
@@ -475,8 +469,7 @@ async fn run_tcprt_flow_with_chain(
         dst, dport, chain_name, total_flows
     );
 
-    let mut tap_to_hop: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut tap_to_hop: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for (idx, hop) in chain.hops.iter().enumerate() {
         for tap in &hop.taps {
             tap_to_hop.insert(tap.tap.clone(), idx);

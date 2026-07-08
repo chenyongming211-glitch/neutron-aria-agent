@@ -294,6 +294,67 @@ Current conclusion:
   during complex updates, but it is no longer required merely to avoid a whole
   port ACL bypass during non-empty diff updates.
 
+### 2.4 Shadow Generation / Atomic Switch Update
+
+The next optimization layer is now being implemented in the Rust datapath and
+agent control plane.
+
+Purpose:
+
+- `keep_current_until_enable` prevents a whole-port ACL bypass during non-empty
+  updates.
+- Shadow generation prevents packets from observing a mixed old/new ACL rule
+  set during larger policy changes.
+
+Implementation model:
+
+```text
+current active ACL bank
+  |
+packets read ACL_SRC/DST_*_TRIE for active bank
+  |
+packets read POLICY_TABLE with PolicyKey.bank = active bank
+
+control plane update
+  |
+write complete desired ACL into inactive bank
+  |
+atomically flip TAP_CONFIG_MAP.acl_active_bank
+  |
+scrub previous inactive bank
+```
+
+Key design points:
+
+- `PolicyKey` now carries `bank` by reusing existing padding, so the key size
+  remains stable.
+- `TapConfig` now carries `acl_active_bank` by reusing existing padding, so
+  per-tap config size remains stable.
+- ACL has dedicated banked LPM maps:
+  - `ACL_SRC_IPV4_TRIE`
+  - `ACL_DST_IPV4_TRIE`
+  - `ACL_SRC_IPV6_TRIE`
+  - `ACL_DST_IPV6_TRIE`
+- QoS, Mirror, group stats, and general observability continue to use the
+  original shared group maps.
+- `replace_owned_acl()` stages the complete desired ACL view into the inactive
+  bank before switching, instead of mutating the active policy table directly.
+- Rollback/cleanup paths scrub only the old ACL bank, not QoS/Mirror/conntrack
+  maps.
+
+Expected packet visibility:
+
+| Update phase | Packet-visible ACL |
+| --- | --- |
+| Staging inactive bank | old active ACL |
+| `acl_active_bank` switch | old or new ACL, depending on exact packet timing |
+| After switch | new active ACL |
+| Old bank cleanup | new active ACL |
+
+This gives the product stronger semantics than the previous diff-only approach:
+for complex ACL changes, packets should see either the previous committed ACL
+or the next committed ACL, not a partially rewritten ACL bank.
+
 ## 3. OVS-Inspired Design Principles
 
 Aria should borrow several ideas from OVS without copying the whole OVS agent:

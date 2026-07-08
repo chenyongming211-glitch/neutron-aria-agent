@@ -11,10 +11,10 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::MakeWriter;
+use tracing_subscriber::EnvFilter;
 
 mod api_handlers;
 mod api_routes;

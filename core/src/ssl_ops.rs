@@ -1,5 +1,5 @@
+use crate::common::{SslConnValue, SslErrorEvent, SslHttpValue};
 use aya::maps::{HashMap, MapData};
-use crate::common::{SslConnValue, SslHttpValue, SslErrorEvent};
 use std::path::Path;
 
 const LATENCY_BUCKET_BOUNDARIES_US: [f64; 9] = [
@@ -63,11 +63,10 @@ pub fn get_ssl_metrics_summary(pin_path: &str) -> Result<Option<SslMetricsSummar
         return Ok(None);
     }
 
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open SSL_CONN_TABLE: {:?}", e))?;
-    let map = HashMap::<_, u64, SslConnValue>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert SSL_CONN_TABLE: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open SSL_CONN_TABLE: {:?}", e))?;
+    let map = HashMap::<_, u64, SslConnValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        .map_err(|e| format!("convert SSL_CONN_TABLE: {:?}", e))?;
 
     let mut summary = SslMetricsSummary::default();
     for item in map.iter() {
@@ -88,11 +87,10 @@ pub fn get_ssl_metrics_summary(pin_path: &str) -> Result<Option<SslMetricsSummar
 
 pub fn get_ssl_conns(pin_path: &str) -> Result<Vec<SslConnEntry>, String> {
     let map_path = format!("{}/SSL_CONN_TABLE", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open SSL_CONN_TABLE: {:?}", e))?;
-    let map = HashMap::<_, u64, SslConnValue>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert SSL_CONN_TABLE: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open SSL_CONN_TABLE: {:?}", e))?;
+    let map = HashMap::<_, u64, SslConnValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        .map_err(|e| format!("convert SSL_CONN_TABLE: {:?}", e))?;
 
     let mut entries = Vec::new();
     for item in map.iter() {
@@ -114,13 +112,13 @@ pub fn get_ssl_conns(pin_path: &str) -> Result<Vec<SslConnEntry>, String> {
 
 pub fn flush_ssl_conns(pin_path: &str) -> Result<u64, String> {
     let map_path = format!("{}/SSL_CONN_TABLE", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open SSL_CONN_TABLE: {:?}", e))?;
-    let mut map = HashMap::<_, u64, SslConnValue>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert SSL_CONN_TABLE: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open SSL_CONN_TABLE: {:?}", e))?;
+    let mut map = HashMap::<_, u64, SslConnValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        .map_err(|e| format!("convert SSL_CONN_TABLE: {:?}", e))?;
 
-    let keys: Vec<u64> = map.iter()
+    let keys: Vec<u64> = map
+        .iter()
         .filter_map(|item| item.ok().map(|(k, _)| k))
         .collect();
     let mut count = 0u64;
@@ -198,17 +196,18 @@ fn parse_http_request(data: &[u8; 256]) -> (String, String, String) {
 
 /// Best-effort aggregate over the live SSL HTTP event map. This is not a
 /// snapshot read: entries may be added or removed while iteration is in progress.
-pub fn get_ssl_http_metrics_summary(pin_path: &str) -> Result<Option<SslHttpMetricsSummary>, String> {
+pub fn get_ssl_http_metrics_summary(
+    pin_path: &str,
+) -> Result<Option<SslHttpMetricsSummary>, String> {
     let map_path = format!("{}/SSL_HTTP_TABLE", pin_path);
     if !Path::new(&map_path).exists() {
         return Ok(None);
     }
 
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open SSL_HTTP_TABLE: {:?}", e))?;
-    let map = HashMap::<_, u64, SslHttpValue>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert SSL_HTTP_TABLE: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open SSL_HTTP_TABLE: {:?}", e))?;
+    let map = HashMap::<_, u64, SslHttpValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        .map_err(|e| format!("convert SSL_HTTP_TABLE: {:?}", e))?;
 
     let mut summary = SslHttpMetricsSummary::default();
     for item in map.iter() {
@@ -236,11 +235,10 @@ pub fn get_ssl_http_metrics_summary(pin_path: &str) -> Result<Option<SslHttpMetr
 
 pub fn get_ssl_http_events(pin_path: &str) -> Result<Vec<SslHttpEntry>, String> {
     let map_path = format!("{}/SSL_HTTP_TABLE", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open SSL_HTTP_TABLE: {:?}", e))?;
-    let map = HashMap::<_, u64, SslHttpValue>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert SSL_HTTP_TABLE: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open SSL_HTTP_TABLE: {:?}", e))?;
+    let map = HashMap::<_, u64, SslHttpValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        .map_err(|e| format!("convert SSL_HTTP_TABLE: {:?}", e))?;
 
     let mut entries = Vec::new();
     for item in map.iter() {
@@ -266,13 +264,13 @@ pub fn get_ssl_http_events(pin_path: &str) -> Result<Vec<SslHttpEntry>, String> 
 
 pub fn flush_ssl_http_events(pin_path: &str) -> Result<u64, String> {
     let map_path = format!("{}/SSL_HTTP_TABLE", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open SSL_HTTP_TABLE: {:?}", e))?;
-    let mut map = HashMap::<_, u64, SslHttpValue>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert SSL_HTTP_TABLE: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open SSL_HTTP_TABLE: {:?}", e))?;
+    let mut map = HashMap::<_, u64, SslHttpValue>::try_from(aya::maps::Map::LruHashMap(map_data))
+        .map_err(|e| format!("convert SSL_HTTP_TABLE: {:?}", e))?;
 
-    let keys: Vec<u64> = map.iter()
+    let keys: Vec<u64> = map
+        .iter()
         .filter_map(|item| item.ok().map(|(k, _)| k))
         .collect();
     let mut count = 0u64;
@@ -295,11 +293,10 @@ pub fn get_ssl_global_config(pin_path: &str) -> Result<bool, String> {
         return Ok(false);
     }
 
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open SSL_GLOBAL_CONFIG: {:?}", e))?;
-    let map = HashMap::<_, u32, u8>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert SSL_GLOBAL_CONFIG: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open SSL_GLOBAL_CONFIG: {:?}", e))?;
+    let map = HashMap::<_, u32, u8>::try_from(aya::maps::Map::HashMap(map_data))
+        .map_err(|e| format!("convert SSL_GLOBAL_CONFIG: {:?}", e))?;
 
     match map.get(&0u32, 0) {
         Ok(v) => Ok(v != 0),
@@ -314,14 +311,15 @@ pub fn set_ssl_global_config(pin_path: &str, enabled: bool) -> Result<(), String
 
     // Map may not exist if the global SSL manager has not initialized yet.
     if !std::path::Path::new(&map_path).exists() {
-        return Err("SSL_GLOBAL_CONFIG map not found - initialize the global SSL manager first".to_string());
+        return Err(
+            "SSL_GLOBAL_CONFIG map not found - initialize the global SSL manager first".to_string(),
+        );
     }
 
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open SSL_GLOBAL_CONFIG: {:?}", e))?;
-    let mut map = HashMap::<_, u32, u8>::try_from(
-        aya::maps::Map::HashMap(map_data)
-    ).map_err(|e| format!("convert SSL_GLOBAL_CONFIG: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open SSL_GLOBAL_CONFIG: {:?}", e))?;
+    let mut map = HashMap::<_, u32, u8>::try_from(aya::maps::Map::HashMap(map_data))
+        .map_err(|e| format!("convert SSL_GLOBAL_CONFIG: {:?}", e))?;
 
     let value: u8 = if enabled { 1 } else { 0 };
     map.insert(&0u32, &value, 0)
@@ -350,11 +348,10 @@ pub fn get_ssl_errors(pin_path: &str) -> Result<Vec<SslErrorEntry>, String> {
         return Ok(Vec::new());
     }
 
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open SSL_ERROR_TABLE: {:?}", e))?;
-    let map = HashMap::<_, u64, SslErrorEvent>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert SSL_ERROR_TABLE: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open SSL_ERROR_TABLE: {:?}", e))?;
+    let map = HashMap::<_, u64, SslErrorEvent>::try_from(aya::maps::Map::LruHashMap(map_data))
+        .map_err(|e| format!("convert SSL_ERROR_TABLE: {:?}", e))?;
 
     let mut entries = Vec::new();
     for item in map.iter() {
@@ -363,7 +360,8 @@ pub fn get_ssl_errors(pin_path: &str) -> Result<Vec<SslErrorEntry>, String> {
                 0 => "read",
                 1 => "write",
                 _ => "unknown",
-            }.to_string();
+            }
+            .to_string();
 
             let error_hint = match val.error_hint {
                 0 => "none",
@@ -371,7 +369,8 @@ pub fn get_ssl_errors(pin_path: &str) -> Result<Vec<SslErrorEntry>, String> {
                 2 => "want_retry",
                 3 => "syscall_err",
                 _ => "unknown",
-            }.to_string();
+            }
+            .to_string();
 
             entries.push(SslErrorEntry {
                 seq,
@@ -396,13 +395,13 @@ pub fn flush_ssl_errors(pin_path: &str) -> Result<u64, String> {
         return Ok(0);
     }
 
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open SSL_ERROR_TABLE: {:?}", e))?;
-    let mut map = HashMap::<_, u64, SslErrorEvent>::try_from(
-        aya::maps::Map::LruHashMap(map_data)
-    ).map_err(|e| format!("convert SSL_ERROR_TABLE: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open SSL_ERROR_TABLE: {:?}", e))?;
+    let mut map = HashMap::<_, u64, SslErrorEvent>::try_from(aya::maps::Map::LruHashMap(map_data))
+        .map_err(|e| format!("convert SSL_ERROR_TABLE: {:?}", e))?;
 
-    let keys: Vec<u64> = map.iter()
+    let keys: Vec<u64> = map
+        .iter()
         .filter_map(|item| item.ok().map(|(k, _)| k))
         .collect();
     let mut count = 0u64;

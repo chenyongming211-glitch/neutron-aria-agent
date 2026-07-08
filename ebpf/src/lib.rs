@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![allow(dead_code)]
 
 use aya_ebpf::bindings::{__sk_buff, xdp_md};
 use aya_ebpf::helpers::bpf_ktime_get_ns;
@@ -26,16 +27,20 @@ mod tcprt;
 mod trace;
 
 use common::{
-    CtKey4, CtKey6, PipelineCtx, CT_CONTRACT_FAMILY_IPV4, CT_CONTRACT_FAMILY_IPV6,
-    CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_MISS,
-    DIR_EGRESS, DIR_INGRESS, DROP_QOS_EGRESS, DROP_QOS_INGRESS, FLAG_ACL_ON, FLAG_CT_HIT,
-    FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP,
-    TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL, TRACE_RESULT_DROP_ACL_DEFAULT,
-    TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_QOS, TRACE_RESULT_PASS, TRACE_TC_DROP,
-    TRACE_TC_EGRESS, TRACE_TC_INGRESS, TRACE_XDP_DROP, XDP_DROP, XDP_PASS,
+    acl_banked_tap_id, CtKey4, CtKey6, PipelineCtx, CT_CONTRACT_FAMILY_IPV4,
+    CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED,
+    CT_CONTRACT_REASON_CT_MISS, DIR_EGRESS, DIR_INGRESS, DROP_QOS_EGRESS, DROP_QOS_INGRESS,
+    FLAG_ACL_ON, FLAG_CT_HIT, FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_QOS_ON, FLAG_TCPRT_ON,
+    FLAG_TRACING, IPPROTO_TCP, TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL,
+    TRACE_RESULT_DROP_ACL_DEFAULT, TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_QOS,
+    TRACE_RESULT_PASS, TRACE_TC_DROP, TRACE_TC_EGRESS, TRACE_TC_INGRESS, TRACE_XDP_DROP, XDP_DROP,
+    XDP_PASS,
 };
 use conntrack::CtLookupResult;
-use maps::{DST_IPV4_TRIE, DST_IPV6_TRIE, SRC_IPV4_TRIE, SRC_IPV6_TRIE};
+use maps::{
+    ACL_DST_IPV4_TRIE, ACL_DST_IPV6_TRIE, ACL_SRC_IPV4_TRIE, ACL_SRC_IPV6_TRIE, DST_IPV4_TRIE,
+    DST_IPV6_TRIE, SRC_IPV4_TRIE, SRC_IPV6_TRIE,
+};
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -73,6 +78,7 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         (*pipe).flags = 0;
         (*pipe).ct_state = 0;
         (*pipe).drop_reason = 0;
+        (*pipe).matched_bank = 0;
         match try_xdp_firewall(&ctx, info_ptr, pipe) {
             Ok(ret) => ret,
             Err(_) => XDP_PASS,
@@ -113,8 +119,7 @@ unsafe fn try_xdp_firewall(
         }
 
         if (p.flags & FLAG_ACL_ON) != 0 {
-            p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, p.tap_id, info.src_ip_v6).unwrap_or(0);
-            p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, p.tap_id, info.dst_ip_v6).unwrap_or(0);
+            load_acl_packet_ids_v6(info, p);
             phase_policy_xdp(ctx, info, p);
             if p.action == XDP_DROP {
                 return Ok(p.action);
@@ -144,8 +149,7 @@ unsafe fn try_xdp_firewall(
     }
 
     if (p.flags & FLAG_ACL_ON) != 0 {
-        p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, p.tap_id, info.src_ip).unwrap_or(0);
-        p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, p.tap_id, info.dst_ip).unwrap_or(0);
+        load_acl_packet_ids_v4(info, p);
         phase_policy_xdp(ctx, info, p);
         if p.action == XDP_DROP {
             return Ok(p.action);
@@ -182,6 +186,7 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
         (*pipe).flags = 0;
         (*pipe).ct_state = 0;
         (*pipe).drop_reason = 0;
+        (*pipe).matched_bank = 0;
         match try_tc_egress(&ctx, info_ptr, pipe) {
             Ok(ret) => ret,
             Err(_) => TC_ACT_OK,
@@ -204,86 +209,62 @@ unsafe fn try_tc_egress(
     load_feature_flags_tc(p, info);
 
     if info.is_ipv6 {
-        let ct_key = CtKey6 {
-            tap_id: p.tap_id,
-            src_ip: info.src_ip_v6,
-            dst_ip: info.dst_ip_v6,
-            src_port: info.src_port,
-            dst_port: info.dst_port,
-            proto: info.proto,
-            pad: [0; 3],
-        };
+        return Ok(try_tc_egress_v6(ctx, info, p));
+    }
 
-        phase_ct_v6(info, p, &ct_key);
+    Ok(try_tc_egress_v4(ctx, info, p))
+}
 
-        if p.ct_state >= 2 {
-            phase_ct_fastpath_tc_v6(ctx, info, p, &ct_key);
-            return Ok(p.action as i32);
+#[inline(never)]
+unsafe fn try_tc_egress_v4(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx) -> i32 {
+    if (p.flags & FLAG_ACL_ON) != 0 {
+        load_acl_packet_ids_v4(info, p);
+        phase_policy_tc(ctx, info, p);
+        if p.action == TC_ACT_SHOT as u32 {
+            return TC_ACT_SHOT;
         }
+    }
 
-        p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, p.tap_id, info.src_ip_v6).unwrap_or(0);
-        p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, p.tap_id, info.dst_ip_v6).unwrap_or(0);
-
-        if (p.flags & FLAG_ACL_ON) != 0 {
-            phase_policy_tc(ctx, info, p);
-            if p.action == TC_ACT_SHOT as u32 {
-                return Ok(TC_ACT_SHOT);
-            }
-        }
-
-        phase_flow_tcprt_v6(info, p, &ct_key);
-
+    if need_tc_post_ids(p) {
+        load_packet_ids_v4(info, p);
         if (p.flags & FLAG_QOS_ON) != 0 {
             phase_qos_egress_tc(ctx, info, p);
             if p.action == TC_ACT_SHOT as u32 {
-                return Ok(TC_ACT_SHOT);
+                return TC_ACT_SHOT;
             }
         }
-
-        phase_post_accept_tc_v6(ctx, info, p, &ct_key);
-
-        return Ok(p.action as i32);
+        phase_post_accept_tc_egress(ctx, info, p);
+    } else {
+        phase_tc_pass(ctx, info, p, TRACE_TC_EGRESS);
     }
 
-    let ct_key = CtKey4 {
-        tap_id: p.tap_id,
-        src_ip: info.src_ip,
-        dst_ip: info.dst_ip,
-        src_port: info.src_port,
-        dst_port: info.dst_port,
-        proto: info.proto,
-        pad: [0; 3],
-    };
+    p.action as i32
+}
 
-    phase_ct_v4(info, p, &ct_key);
-
-    if p.ct_state >= 2 {
-        phase_ct_fastpath_tc_v4(ctx, info, p, &ct_key);
-        return Ok(p.action as i32);
-    }
-
-    p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, p.tap_id, info.src_ip).unwrap_or(0);
-    p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, p.tap_id, info.dst_ip).unwrap_or(0);
-
+#[inline(never)]
+unsafe fn try_tc_egress_v6(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx) -> i32 {
     if (p.flags & FLAG_ACL_ON) != 0 {
+        load_acl_packet_ids_v6(info, p);
         phase_policy_tc(ctx, info, p);
         if p.action == TC_ACT_SHOT as u32 {
-            return Ok(TC_ACT_SHOT);
+            return TC_ACT_SHOT;
         }
     }
 
-    phase_flow_tcprt_v4(info, p, &ct_key);
-
-    if (p.flags & FLAG_QOS_ON) != 0 {
-        phase_qos_egress_tc(ctx, info, p);
-        if p.action == TC_ACT_SHOT as u32 {
-            return Ok(TC_ACT_SHOT);
+    if need_tc_post_ids(p) {
+        load_packet_ids_v6(info, p);
+        if (p.flags & FLAG_QOS_ON) != 0 {
+            phase_qos_egress_tc(ctx, info, p);
+            if p.action == TC_ACT_SHOT as u32 {
+                return TC_ACT_SHOT;
+            }
         }
+        phase_post_accept_tc_egress(ctx, info, p);
+    } else {
+        phase_tc_pass(ctx, info, p, TRACE_TC_EGRESS);
     }
 
-    phase_post_accept_tc_v4(ctx, info, p, &ct_key);
-
-    Ok(p.action as i32)
+    p.action as i32
 }
 
 // --- TC Ingress ---
@@ -311,6 +292,7 @@ pub fn tc_ingress(ctx: TcContext) -> i32 {
         (*pipe).flags = 0;
         (*pipe).ct_state = 0;
         (*pipe).drop_reason = 0;
+        (*pipe).matched_bank = 0;
         match try_tc_ingress(&ctx, info_ptr, pipe) {
             Ok(ret) => ret,
             Err(_) => TC_ACT_OK,
@@ -333,46 +315,70 @@ unsafe fn try_tc_ingress(
     load_feature_flags_tc(p, info);
 
     if info.is_ipv6 {
-        let ct_key = CtKey6 {
-            tap_id: p.tap_id,
-            src_ip: info.src_ip_v6,
-            dst_ip: info.dst_ip_v6,
-            src_port: info.src_port,
-            dst_port: info.dst_port,
-            proto: info.proto,
-            pad: [0; 3],
-        };
+        return Ok(try_tc_ingress_v6(ctx, info, p));
+    }
 
-        phase_ct_v6(info, p, &ct_key);
+    Ok(try_tc_ingress_v4(ctx, info, p))
+}
 
-        if p.ct_state >= 2 {
-            phase_ct_fastpath_tc_ingress_v6(ctx, info, p, &ct_key);
-        } else {
-            phase_ct_miss_tc_ingress_v6(ctx, info, p);
+#[inline(never)]
+unsafe fn try_tc_ingress_v4(
+    ctx: &TcContext,
+    info: &parser::PacketInfo,
+    p: &mut PipelineCtx,
+) -> i32 {
+    if (p.flags & FLAG_ACL_ON) != 0 {
+        load_acl_packet_ids_v4(info, p);
+        phase_policy_tc(ctx, info, p);
+        if p.action == TC_ACT_SHOT as u32 {
+            return TC_ACT_SHOT;
         }
-
-        return Ok(p.action as i32);
     }
 
-    let ct_key = CtKey4 {
-        tap_id: p.tap_id,
-        src_ip: info.src_ip,
-        dst_ip: info.dst_ip,
-        src_port: info.src_port,
-        dst_port: info.dst_port,
-        proto: info.proto,
-        pad: [0; 3],
-    };
-
-    phase_ct_v4(info, p, &ct_key);
-
-    if p.ct_state >= 2 {
-        phase_ct_fastpath_tc_ingress_v4(ctx, info, p, &ct_key);
+    if need_tc_post_ids(p) {
+        load_packet_ids_v4(info, p);
+        if should_apply_ingress_qos(p) {
+            phase_qos_ingress_tc(ctx, info, p);
+            if p.action == TC_ACT_SHOT as u32 {
+                return TC_ACT_SHOT;
+            }
+        }
+        phase_post_accept_tc_ingress(ctx, info, p);
     } else {
-        phase_ct_miss_tc_ingress_v4(ctx, info, p);
+        phase_tc_pass(ctx, info, p, TRACE_TC_INGRESS);
     }
 
-    Ok(p.action as i32)
+    p.action as i32
+}
+
+#[inline(never)]
+unsafe fn try_tc_ingress_v6(
+    ctx: &TcContext,
+    info: &parser::PacketInfo,
+    p: &mut PipelineCtx,
+) -> i32 {
+    if (p.flags & FLAG_ACL_ON) != 0 {
+        load_acl_packet_ids_v6(info, p);
+        phase_policy_tc(ctx, info, p);
+        if p.action == TC_ACT_SHOT as u32 {
+            return TC_ACT_SHOT;
+        }
+    }
+
+    if need_tc_post_ids(p) {
+        load_packet_ids_v6(info, p);
+        if should_apply_ingress_qos(p) {
+            phase_qos_ingress_tc(ctx, info, p);
+            if p.action == TC_ACT_SHOT as u32 {
+                return TC_ACT_SHOT;
+            }
+        }
+        phase_post_accept_tc_ingress(ctx, info, p);
+    } else {
+        phase_tc_pass(ctx, info, p, TRACE_TC_INGRESS);
+    }
+
+    p.action as i32
 }
 
 // --- Helpers ---
@@ -472,6 +478,7 @@ unsafe fn set_matched(p: &mut PipelineCtx, m: &conntrack::MatchedPolicy) {
     p.matched_dst_id = m.dst_id;
     p.matched_proto = m.proto;
     p.matched_direction = m.direction;
+    p.matched_bank = m.bank;
 }
 
 #[inline(always)]
@@ -482,6 +489,7 @@ fn get_matched(p: &PipelineCtx) -> conntrack::MatchedPolicy {
         dst_id: p.matched_dst_id,
         proto: p.matched_proto,
         direction: p.matched_direction,
+        bank: p.matched_bank,
     }
 }
 
@@ -622,6 +630,11 @@ fn need_ingress_ids(p: &PipelineCtx) -> bool {
 }
 
 #[inline(always)]
+fn need_tc_post_ids(p: &PipelineCtx) -> bool {
+    (p.flags & (FLAG_QOS_ON | FLAG_MIRROR_ON)) != 0 || stats::monitoring_enabled(p.tap_id)
+}
+
+#[inline(always)]
 unsafe fn load_packet_ids_v4(info: &parser::PacketInfo, p: &mut PipelineCtx) {
     p.src_id = lookup_ipv4(&SRC_IPV4_TRIE, p.tap_id, info.src_ip).unwrap_or(0);
     p.dst_id = lookup_ipv4(&DST_IPV4_TRIE, p.tap_id, info.dst_ip).unwrap_or(0);
@@ -631,6 +644,24 @@ unsafe fn load_packet_ids_v4(info: &parser::PacketInfo, p: &mut PipelineCtx) {
 unsafe fn load_packet_ids_v6(info: &parser::PacketInfo, p: &mut PipelineCtx) {
     p.src_id = lookup_ipv6(&SRC_IPV6_TRIE, p.tap_id, info.src_ip_v6).unwrap_or(0);
     p.dst_id = lookup_ipv6(&DST_IPV6_TRIE, p.tap_id, info.dst_ip_v6).unwrap_or(0);
+}
+
+#[inline(always)]
+unsafe fn load_acl_packet_ids_v4(info: &parser::PacketInfo, p: &mut PipelineCtx) {
+    let bank = runtime::acl_active_bank(p.tap_id);
+    let lpm_tap_id = acl_banked_tap_id(p.tap_id, bank);
+    p.matched_bank = bank;
+    p.src_id = lookup_ipv4(&ACL_SRC_IPV4_TRIE, lpm_tap_id, info.src_ip).unwrap_or(0);
+    p.dst_id = lookup_ipv4(&ACL_DST_IPV4_TRIE, lpm_tap_id, info.dst_ip).unwrap_or(0);
+}
+
+#[inline(always)]
+unsafe fn load_acl_packet_ids_v6(info: &parser::PacketInfo, p: &mut PipelineCtx) {
+    let bank = runtime::acl_active_bank(p.tap_id);
+    let lpm_tap_id = acl_banked_tap_id(p.tap_id, bank);
+    p.matched_bank = bank;
+    p.src_id = lookup_ipv6(&ACL_SRC_IPV6_TRIE, lpm_tap_id, info.src_ip_v6).unwrap_or(0);
+    p.dst_id = lookup_ipv6(&ACL_DST_IPV6_TRIE, lpm_tap_id, info.dst_ip_v6).unwrap_or(0);
 }
 
 #[inline(always)]
@@ -666,11 +697,7 @@ unsafe fn record_tc_ingress_contract_fallback(p: &PipelineCtx, family: u8) {
 }
 
 #[inline(always)]
-unsafe fn phase_qos_ingress_tc(
-    ctx: &TcContext,
-    info: &parser::PacketInfo,
-    p: &mut PipelineCtx,
-) {
+unsafe fn phase_qos_ingress_tc(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx) {
     if !qos::apply_qos_ingress(p.tap_id, p.src_id, p.dst_id, p.pkt_len, p.now) {
         p.drop_reason = DROP_QOS_INGRESS;
         p.action = TC_ACT_SHOT as u32;
@@ -709,6 +736,34 @@ unsafe fn phase_post_accept_tc_ingress(
     p.action = TC_ACT_OK as u32;
 }
 
+#[inline(always)]
+unsafe fn phase_post_accept_tc_egress(
+    ctx: &TcContext,
+    info: &parser::PacketInfo,
+    p: &mut PipelineCtx,
+) {
+    stats::update_group_stats(p.tap_id, p.src_id, DIR_EGRESS, p.pkt_len);
+    stats::update_group_stats(p.tap_id, p.dst_id, DIR_INGRESS, p.pkt_len);
+    if (p.flags & FLAG_MIRROR_ON) != 0 {
+        let skb = ctx.as_ptr() as *mut __sk_buff;
+        mirror::try_mirror_tc(
+            skb, p.tap_id, p.src_id, p.dst_id, info.proto, DIR_EGRESS, p.pkt_len,
+        );
+    }
+    if (p.flags & FLAG_TRACING) != 0 {
+        do_trace(ctx, info, p, TRACE_TC_EGRESS, TRACE_RESULT_PASS);
+    }
+    p.action = TC_ACT_OK as u32;
+}
+
+#[inline(always)]
+unsafe fn phase_tc_pass(ctx: &TcContext, info: &parser::PacketInfo, p: &mut PipelineCtx, hook: u8) {
+    if (p.flags & FLAG_TRACING) != 0 {
+        do_trace(ctx, info, p, hook, TRACE_RESULT_PASS);
+    }
+    p.action = TC_ACT_OK as u32;
+}
+
 /// CT fast-path for TC ingress IPv4.
 #[inline(always)]
 unsafe fn phase_ct_fastpath_tc_ingress_v4(
@@ -734,13 +789,14 @@ unsafe fn phase_ct_fastpath_tc_ingress_v4(
     }
 
     if need_ingress_ids(p) {
-        load_packet_ids_v4(info, p);
         if (p.flags & FLAG_ACL_ON) != 0 {
+            load_acl_packet_ids_v4(info, p);
             phase_policy_tc(ctx, info, p);
             if p.action == TC_ACT_SHOT as u32 {
                 return;
             }
         }
+        load_packet_ids_v4(info, p);
         if should_apply_ingress_qos(p) {
             phase_qos_ingress_tc(ctx, info, p);
             if p.action == TC_ACT_SHOT as u32 {
@@ -779,13 +835,14 @@ unsafe fn phase_ct_fastpath_tc_ingress_v6(
     }
 
     if need_ingress_ids(p) {
-        load_packet_ids_v6(info, p);
         if (p.flags & FLAG_ACL_ON) != 0 {
+            load_acl_packet_ids_v6(info, p);
             phase_policy_tc(ctx, info, p);
             if p.action == TC_ACT_SHOT as u32 {
                 return;
             }
         }
+        load_packet_ids_v6(info, p);
         if should_apply_ingress_qos(p) {
             phase_qos_ingress_tc(ctx, info, p);
             if p.action == TC_ACT_SHOT as u32 {
@@ -813,13 +870,14 @@ unsafe fn phase_ct_miss_tc_ingress_v4(
     let need_ids = need_ingress_ids(p);
     if need_ids {
         record_tc_ingress_contract_fallback(p, CT_CONTRACT_FAMILY_IPV4);
-        load_packet_ids_v4(info, p);
         if (p.flags & FLAG_ACL_ON) != 0 {
+            load_acl_packet_ids_v4(info, p);
             phase_policy_tc(ctx, info, p);
             if p.action == TC_ACT_SHOT as u32 {
                 return;
             }
         }
+        load_packet_ids_v4(info, p);
         if should_apply_ingress_qos(p) {
             phase_qos_ingress_tc(ctx, info, p);
             if p.action == TC_ACT_SHOT as u32 {
@@ -847,13 +905,14 @@ unsafe fn phase_ct_miss_tc_ingress_v6(
     let need_ids = need_ingress_ids(p);
     if need_ids {
         record_tc_ingress_contract_fallback(p, CT_CONTRACT_FAMILY_IPV6);
-        load_packet_ids_v6(info, p);
         if (p.flags & FLAG_ACL_ON) != 0 {
+            load_acl_packet_ids_v6(info, p);
             phase_policy_tc(ctx, info, p);
             if p.action == TC_ACT_SHOT as u32 {
                 return;
             }
         }
+        load_packet_ids_v6(info, p);
         if should_apply_ingress_qos(p) {
             phase_qos_ingress_tc(ctx, info, p);
             if p.action == TC_ACT_SHOT as u32 {
@@ -997,6 +1056,7 @@ unsafe fn phase_policy_xdp(ctx: &XdpContext, info: &parser::PacketInfo, p: &mut 
         dst_port: info.dst_port,
         pkt_len: p.pkt_len,
         now: p.now,
+        bank: p.matched_bank,
     };
     let (result, drop_reason, matched, policy_hit) = policy::evaluate_policy(&args);
     p.action = result;
@@ -1009,7 +1069,13 @@ unsafe fn phase_policy_xdp(ctx: &XdpContext, info: &parser::PacketInfo, p: &mut 
         }
         policy::record_policy_drop(&args, drop_reason);
         if (p.flags & FLAG_TRACING) != 0 {
-            do_trace(ctx, info, p, TRACE_XDP_DROP, trace_result_from_drop_reason(drop_reason));
+            do_trace(
+                ctx,
+                info,
+                p,
+                TRACE_XDP_DROP,
+                trace_result_from_drop_reason(drop_reason),
+            );
         }
     }
 }
@@ -1026,6 +1092,7 @@ unsafe fn phase_policy_tc(ctx: &TcContext, info: &parser::PacketInfo, p: &mut Pi
         dst_port: info.dst_port,
         pkt_len: p.pkt_len,
         now: p.now,
+        bank: p.matched_bank,
     };
     let (result, drop_reason, matched, policy_hit) = policy::evaluate_policy(&args);
     if policy_hit {
@@ -1039,7 +1106,13 @@ unsafe fn phase_policy_tc(ctx: &TcContext, info: &parser::PacketInfo, p: &mut Pi
     } else {
         p.action = TC_ACT_SHOT as u32;
         if (p.flags & FLAG_TRACING) != 0 {
-            do_trace(ctx, info, p, TRACE_TC_DROP, trace_result_from_drop_reason(drop_reason));
+            do_trace(
+                ctx,
+                info,
+                p,
+                TRACE_TC_DROP,
+                trace_result_from_drop_reason(drop_reason),
+            );
         }
     }
 }

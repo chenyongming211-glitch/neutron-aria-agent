@@ -648,24 +648,25 @@ pub fn clear_rule_stats_for_policy(
     direction: u8,
 ) -> Result<(), String> {
     let map_path = format!("{}/RULE_STATS", runtime.pin_path);
-    let map_data =
-        MapData::from_pin(&map_path).map_err(|e| format!("open RULE_STATS: {:?}", e))?;
+    let map_data = MapData::from_pin(&map_path).map_err(|e| format!("open RULE_STATS: {:?}", e))?;
     let mut map = PerCpuHashMap::<_, PolicyKey, RuleStatsValue>::try_from(
         aya::maps::Map::PerCpuHashMap(map_data),
     )
     .map_err(|e| format!("convert RULE_STATS: {:?}", e))?;
 
-    let key = PolicyKey {
-        tap_id: runtime.tap_id,
-        src_id,
-        dst_id,
-        proto,
-        direction,
-        pad: [0; 2],
-    };
-    match map.remove(&key) {
-        Ok(()) | Err(_) => Ok(()),
+    for bank in [0u8, 1u8] {
+        let key = PolicyKey {
+            tap_id: runtime.tap_id,
+            src_id,
+            dst_id,
+            proto,
+            direction,
+            bank,
+            pad: [0; 1],
+        };
+        let _ = map.remove(&key);
     }
+    Ok(())
 }
 
 /// Remove all GROUP_STATS entries for a specific group id (both directions).
@@ -700,8 +701,7 @@ pub fn clear_qos_stats_for_rule(
     direction: u8,
 ) -> Result<(), String> {
     let map_path = format!("{}/QOS_STATS", runtime.pin_path);
-    let map_data =
-        MapData::from_pin(&map_path).map_err(|e| format!("open QOS_STATS: {:?}", e))?;
+    let map_data = MapData::from_pin(&map_path).map_err(|e| format!("open QOS_STATS: {:?}", e))?;
     let mut map = PerCpuHashMap::<_, QosKey, QosStatsValue>::try_from(
         aya::maps::Map::PerCpuHashMap(map_data),
     )

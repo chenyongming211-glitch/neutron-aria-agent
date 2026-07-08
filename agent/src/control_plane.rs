@@ -369,6 +369,66 @@ impl ControlPlane {
         }
     }
 
+    fn stage_acl_shadow_bank(
+        state: &FirewallState,
+        runtime: TapMapRuntime<'_>,
+        bank: u8,
+        ebpf_path: &str,
+        new_port_sets_by_key: &BTreeMap<OwnedAclPolicyKey, bool>,
+    ) -> Result<(), ControlPlaneError> {
+        aria_core::ebpf_ops::scrub_acl_bank(runtime, bank)
+            .map_err(ControlPlaneError::KernelError)?;
+
+        for group in state.groups.values() {
+            for cidr in &group.cidrs {
+                aria_core::ebpf_ops::add_acl_network_in_bank(
+                    "src", cidr, group.id, bank, runtime, ebpf_path,
+                )
+                .map_err(|e| {
+                    ControlPlaneError::KernelError(format!(
+                        "stage shadow bank {} src group {} cidr {}: {}",
+                        bank, group.name, cidr, e
+                    ))
+                })?;
+                aria_core::ebpf_ops::add_acl_network_in_bank(
+                    "dst", cidr, group.id, bank, runtime, ebpf_path,
+                )
+                .map_err(|e| {
+                    ControlPlaneError::KernelError(format!(
+                        "stage shadow bank {} dst group {} cidr {}: {}",
+                        bank, group.name, cidr, e
+                    ))
+                })?;
+            }
+        }
+
+        for rule in &state.rules {
+            let key = Self::owned_acl_policy_key_from_rule(state, rule);
+            let is_new_port_set = new_port_sets_by_key.get(&key).copied().unwrap_or(false);
+            aria_core::ebpf_ops::add_policy_in_bank(
+                rule.src_group_id,
+                rule.dst_group_id,
+                rule.proto,
+                rule.action,
+                rule.ports.as_deref(),
+                rule.bitmap_idx,
+                is_new_port_set,
+                rule.direction,
+                bank,
+                runtime,
+                ebpf_path,
+            )
+            .map_err(|e| {
+                ControlPlaneError::KernelError(format!(
+                    "stage shadow bank {} policy src={} dst={} proto={} direction={}: {}",
+                    bank, rule.src_group_id, rule.dst_group_id, rule.proto, rule.direction, e
+                ))
+            })?;
+        }
+
+        Ok(())
+    }
+
     fn owned_acl_validate_group_specs(
         owner_prefix: &str,
         groups: &[OwnedAclGroupSpec],
@@ -513,8 +573,9 @@ impl ControlPlane {
         ebpf_path: &str,
         deleted_rules: &[RuleInfo],
     ) -> Result<(), String> {
+        let bank = aria_core::ebpf_ops::read_acl_active_bank(runtime).unwrap_or(0);
         for rule in deleted_rules {
-            aria_core::ebpf_ops::add_policy(
+            aria_core::ebpf_ops::add_policy_in_bank(
                 rule.src_group_id,
                 rule.dst_group_id,
                 rule.proto,
@@ -523,6 +584,7 @@ impl ControlPlane {
                 rule.bitmap_idx,
                 false,
                 rule.direction,
+                bank,
                 runtime,
                 ebpf_path,
             )?;
@@ -536,8 +598,12 @@ impl ControlPlane {
         group_id: u32,
         deleted_networks: &[(&'static str, String)],
     ) -> Result<(), String> {
+        let bank = aria_core::ebpf_ops::read_acl_active_bank(runtime).unwrap_or(0);
         for (direction, cidr) in deleted_networks.iter().rev() {
             aria_core::ebpf_ops::add_network(direction, cidr, group_id, runtime, ebpf_path)?;
+            aria_core::ebpf_ops::add_acl_network_in_bank(
+                direction, cidr, group_id, bank, runtime, ebpf_path,
+            )?;
         }
         Ok(())
     }
@@ -681,6 +747,7 @@ impl ControlPlane {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn get_neutron_port_authority(&self, instance: &str) -> Option<NeutronPortAuthority> {
         self.neutron_authorities.read().await.get(instance).cloned()
     }
@@ -1356,6 +1423,9 @@ impl ControlPlane {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
         Self::check_xdp_ready(&state.pin_path)?;
+        let current_acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
+            .map_err(ControlPlaneError::KernelError)?;
+        let next_acl_bank = aria_core::common::acl_next_bank(current_acl_bank);
 
         let old_state = state.state.clone();
         let old_owned_policies: Vec<ExistingOwnedAclPolicy> = old_state
@@ -1539,6 +1609,15 @@ impl ControlPlane {
             port_set_delete_count: released_port_sets.len(),
             compact_ms: 0,
         };
+        let new_port_sets_by_key: BTreeMap<OwnedAclPolicyKey, bool> = runtime_adds
+            .iter()
+            .map(|add| {
+                (
+                    Self::owned_acl_policy_key_from_rule(&final_state, &add.rule),
+                    add.is_new_port_set,
+                )
+            })
+            .collect();
 
         for (name, group_id, cidr) in &group_cidr_adds {
             aria_core::ebpf_ops::add_network(
@@ -1559,45 +1638,6 @@ impl ControlPlane {
             .map_err(|e| ControlPlaneError::KernelError(format!("dst {}: {}", name, e)))?;
         }
 
-        for add in &runtime_adds {
-            aria_core::ebpf_ops::add_policy(
-                add.rule.src_group_id,
-                add.rule.dst_group_id,
-                add.rule.proto,
-                add.rule.action,
-                add.rule.ports.as_deref(),
-                add.rule.bitmap_idx,
-                add.is_new_port_set,
-                add.rule.direction,
-                state.map_runtime(),
-                &self.ebpf_path,
-            )
-            .map_err(ControlPlaneError::KernelError)?;
-        }
-
-        for existing in &policy_deletes {
-            let rule = &existing.rule;
-            aria_core::ebpf_ops::delete_policy(
-                rule.src_group_id,
-                rule.dst_group_id,
-                rule.proto,
-                rule.direction,
-                state.map_runtime(),
-                &self.ebpf_path,
-            )
-            .map_err(ControlPlaneError::KernelError)?;
-        }
-
-        for (idx, ports_normalized) in &released_port_sets {
-            aria_core::ebpf_ops::delete_port_set(
-                *idx,
-                ports_normalized,
-                state.map_runtime(),
-                &self.ebpf_path,
-            )
-            .map_err(ControlPlaneError::KernelError)?;
-        }
-
         for (name, group_id, cidr) in &group_cidr_deletes {
             aria_core::ebpf_ops::delete_network(
                 "src",
@@ -1615,6 +1655,38 @@ impl ControlPlane {
                 &self.ebpf_path,
             )
             .map_err(|e| ControlPlaneError::KernelError(format!("dst {}: {}", name, e)))?;
+        }
+
+        Self::stage_acl_shadow_bank(
+            &final_state,
+            state.map_runtime(),
+            next_acl_bank,
+            &self.ebpf_path,
+            &new_port_sets_by_key,
+        )?;
+        aria_core::ebpf_ops::set_acl_active_bank(state.map_runtime(), next_acl_bank)
+            .map_err(ControlPlaneError::KernelError)?;
+
+        for (idx, ports_normalized) in &released_port_sets {
+            if let Err(e) = aria_core::ebpf_ops::delete_port_set(
+                *idx,
+                ports_normalized,
+                state.map_runtime(),
+                &self.ebpf_path,
+            ) {
+                warn!(
+                    error = %e,
+                    bitmap_idx = *idx,
+                    "failed to clean released port set after ACL shadow bank switch"
+                );
+            }
+        }
+        if let Err(e) = aria_core::ebpf_ops::scrub_acl_bank(state.map_runtime(), current_acl_bank) {
+            warn!(
+                error = %e,
+                bank = current_acl_bank,
+                "failed to scrub previous ACL shadow bank after switch"
+            );
         }
 
         for existing in &policy_deletes {
@@ -1684,6 +1756,8 @@ impl ControlPlane {
             .state
             .add_group(name, cidr)
             .map_err(|e| ControlPlaneError::ValidationError(e))?;
+        let acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
+            .map_err(ControlPlaneError::KernelError)?;
 
         // Write to kernel maps
         if let Err(e) =
@@ -1704,6 +1778,64 @@ impl ControlPlane {
             );
             state.state.rollback_add_group(name, cidr, was_new_group);
             return Err(ControlPlaneError::KernelError(format!("dst: {}", e)));
+        }
+        if let Err(e) = aria_core::ebpf_ops::add_acl_network_in_bank(
+            "src",
+            cidr,
+            id,
+            acl_bank,
+            state.map_runtime(),
+            &self.ebpf_path,
+        ) {
+            let _ = aria_core::ebpf_ops::delete_network(
+                "src",
+                cidr,
+                id,
+                state.map_runtime(),
+                &self.ebpf_path,
+            );
+            let _ = aria_core::ebpf_ops::delete_network(
+                "dst",
+                cidr,
+                id,
+                state.map_runtime(),
+                &self.ebpf_path,
+            );
+            state.state.rollback_add_group(name, cidr, was_new_group);
+            return Err(ControlPlaneError::KernelError(format!("acl src: {}", e)));
+        }
+        if let Err(e) = aria_core::ebpf_ops::add_acl_network_in_bank(
+            "dst",
+            cidr,
+            id,
+            acl_bank,
+            state.map_runtime(),
+            &self.ebpf_path,
+        ) {
+            let _ = aria_core::ebpf_ops::delete_acl_network_in_bank(
+                "src",
+                cidr,
+                id,
+                acl_bank,
+                state.map_runtime(),
+                &self.ebpf_path,
+            );
+            let _ = aria_core::ebpf_ops::delete_network(
+                "src",
+                cidr,
+                id,
+                state.map_runtime(),
+                &self.ebpf_path,
+            );
+            let _ = aria_core::ebpf_ops::delete_network(
+                "dst",
+                cidr,
+                id,
+                state.map_runtime(),
+                &self.ebpf_path,
+            );
+            state.state.rollback_add_group(name, cidr, was_new_group);
+            return Err(ControlPlaneError::KernelError(format!("acl dst: {}", e)));
         }
 
         state
@@ -1760,6 +1892,8 @@ impl ControlPlane {
         // Delete from kernel
         let mut errors = Vec::new();
         let mut deleted_networks: Vec<(&'static str, String)> = Vec::new();
+        let acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
+            .map_err(ControlPlaneError::KernelError)?;
         for cidr in &group.cidrs {
             match aria_core::ebpf_ops::delete_network(
                 "src",
@@ -1780,6 +1914,28 @@ impl ControlPlane {
             ) {
                 Ok(()) => deleted_networks.push(("dst", cidr.clone())),
                 Err(e) => errors.push(format!("dst {}: {}", cidr, e)),
+            }
+            match aria_core::ebpf_ops::delete_acl_network_in_bank(
+                "src",
+                cidr,
+                group.id,
+                acl_bank,
+                state.map_runtime(),
+                &self.ebpf_path,
+            ) {
+                Ok(()) => {}
+                Err(e) => errors.push(format!("acl src {}: {}", cidr, e)),
+            }
+            match aria_core::ebpf_ops::delete_acl_network_in_bank(
+                "dst",
+                cidr,
+                group.id,
+                acl_bank,
+                state.map_runtime(),
+                &self.ebpf_path,
+            ) {
+                Ok(()) => {}
+                Err(e) => errors.push(format!("acl dst {}: {}", cidr, e)),
             }
         }
         if !errors.is_empty() {
@@ -1871,9 +2027,11 @@ impl ControlPlane {
             .state
             .apply_add_rule(src_id, dst_id, proto, action, ports, direction)
             .map_err(|e| ControlPlaneError::ValidationError(e))?;
+        let acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
+            .map_err(ControlPlaneError::KernelError)?;
 
         // Write to kernel
-        if let Err(e) = aria_core::ebpf_ops::add_policy(
+        if let Err(e) = aria_core::ebpf_ops::add_policy_in_bank(
             src_id,
             dst_id,
             proto,
@@ -1882,6 +2040,7 @@ impl ControlPlane {
             add_result.bitmap_idx,
             add_result.is_new_port_set,
             direction,
+            acl_bank,
             state.map_runtime(),
             &self.ebpf_path,
         ) {
@@ -1970,12 +2129,15 @@ impl ControlPlane {
         }
 
         let mut deleted_rules: Vec<RuleInfo> = Vec::new();
+        let acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
+            .map_err(ControlPlaneError::KernelError)?;
         for rule in &matching_rules {
-            if let Err(e) = aria_core::ebpf_ops::delete_policy(
+            if let Err(e) = aria_core::ebpf_ops::delete_policy_in_bank(
                 rule.src_group_id,
                 rule.dst_group_id,
                 rule.proto,
                 rule.direction,
+                acl_bank,
                 state.map_runtime(),
                 &self.ebpf_path,
             ) {
@@ -2049,6 +2211,7 @@ impl ControlPlane {
 
     // ── Policies with Stats (Aggregation) ──
 
+    #[allow(dead_code)]
     pub async fn list_policies_with_stats(
         &self,
         instance: &str,
@@ -2282,6 +2445,7 @@ impl ControlPlane {
 
     // ── QoS with Stats (Aggregation) ──
 
+    #[allow(dead_code)]
     pub async fn list_qos_with_stats(
         &self,
         instance: &str,
@@ -2548,6 +2712,7 @@ impl ControlPlane {
 
     // ── Mirror with Stats (Aggregation) ──
 
+    #[allow(dead_code)]
     pub async fn list_mirror_with_stats(
         &self,
         instance: &str,
@@ -3141,35 +3306,29 @@ mod tests {
         cp.mark_neutron_port_authority("tap-vm", "port-vm", &managed_domains, 7)
             .await;
 
-        assert!(
-            cp.ensure_local_write_allowed("tap-vm", LocalWriteDomain::Acl)
-                .await
-                .is_err()
-        );
-        assert!(
-            cp.ensure_local_write_allowed("tap-vm", LocalWriteDomain::Mirror)
-                .await
-                .is_err()
-        );
-        assert!(
-            cp.ensure_local_write_allowed("tap-vm", LocalWriteDomain::Qos)
-                .await
-                .is_ok()
-        );
-        assert!(
-            cp.ensure_local_write_allowed("tap-vm", LocalWriteDomain::Trace)
-                .await
-                .is_ok()
-        );
-        assert!(
-            cp.ensure_local_group_write_allowed("tap-vm", "neutron:acl-source")
-                .await
-                .is_err()
-        );
-        assert!(
-            cp.ensure_local_group_write_allowed("tap-vm", "local-qos-group")
-                .await
-                .is_ok()
-        );
+        assert!(cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Acl)
+            .await
+            .is_err());
+        assert!(cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Mirror)
+            .await
+            .is_err());
+        assert!(cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Qos)
+            .await
+            .is_ok());
+        assert!(cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Trace)
+            .await
+            .is_ok());
+        assert!(cp
+            .ensure_local_group_write_allowed("tap-vm", "neutron:acl-source")
+            .await
+            .is_err());
+        assert!(cp
+            .ensure_local_group_write_allowed("tap-vm", "local-qos-group")
+            .await
+            .is_ok());
     }
 }

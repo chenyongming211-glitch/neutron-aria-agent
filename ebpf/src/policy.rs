@@ -19,6 +19,7 @@ pub struct PolicyArgs {
     pub dst_port: u16,
     pub proto: u8,
     pub direction: u8,
+    pub bank: u8,
 }
 
 /// Check if ACL (policy evaluation) is enabled.
@@ -58,7 +59,8 @@ pub unsafe fn evaluate_policy(args: &PolicyArgs) -> (u32, u8, MatchedPolicy, boo
             dst_id: d,
             proto: p,
             direction: args.direction,
-            pad: [0; 2],
+            bank: args.bank,
+            pad: [0; 1],
         };
         if let Some(policy) = POLICY_TABLE.get(&key) {
             let (result, drop_reason) = apply_policy(args.tap_id, policy, args.dst_port);
@@ -68,6 +70,7 @@ pub unsafe fn evaluate_policy(args: &PolicyArgs) -> (u32, u8, MatchedPolicy, boo
                 dst_id: d,
                 proto: p,
                 direction: args.direction,
+                bank: args.bank,
             };
             return (result, drop_reason, matched, true);
         }
@@ -80,6 +83,7 @@ pub unsafe fn evaluate_policy(args: &PolicyArgs) -> (u32, u8, MatchedPolicy, boo
         dst_id: 0,
         proto: 0,
         direction: args.direction,
+        bank: args.bank,
     };
     (XDP_PASS, 0, matched, false)
 }

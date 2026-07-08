@@ -358,6 +358,76 @@
   line-height: 1.35;
 }
 
+.aria-report .module-map {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.aria-report .module-tier {
+  display: grid;
+  grid-template-columns: 145px 1fr;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.aria-report .module-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  color: var(--text-1);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  text-align: center;
+}
+
+.aria-report .module-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+}
+
+.aria-report .module-grid.three {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.aria-report .module-chip {
+  min-height: 66px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface) 88%, transparent), color-mix(in srgb, var(--bg-soft) 88%, transparent));
+}
+
+.aria-report .module-chip.primary {
+  border-color: var(--accent);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, var(--surface)), color-mix(in srgb, var(--surface) 86%, transparent));
+}
+
+.aria-report .module-chip.future {
+  border-style: dashed;
+  opacity: 0.82;
+}
+
+.aria-report .module-chip b {
+  display: block;
+  color: var(--text-1);
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.aria-report .module-chip span {
+  display: block;
+  margin-top: 5px;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
 .aria-report .table {
   display: grid;
   border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));

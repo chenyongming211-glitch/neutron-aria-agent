@@ -25,6 +25,13 @@ SUPPORTED_MANAGED_DOMAINS = ("acl", "qos", "mirror")
 SUPPORTED_ACL_SOURCES = ("disabled", "fixture", "neutron")
 SUPPORTED_PORT_SOURCES = ("disabled", "neutronclient")
 SUPPORTED_REVISIONLESS_INCREMENTAL_MODES = ("disabled", "experimental")
+SYNC_MODE_HEARTBEAT_ONLY = "heartbeat_only"
+SYNC_MODE_POLLING_FULL_RESYNC = "polling_full_resync"
+SYNC_MODE_RPC_FULL_RESYNC = "rpc_full_resync"
+SYNC_MODE_RPC_PORT_SCOPED = "rpc_port_scoped"
+SYNC_MODE_RPC_PORT_SCOPED_REVISIONLESS_EXPERIMENTAL = (
+    "rpc_port_scoped_revisionless_experimental"
+)
 
 
 class ConfigError(Exception):
@@ -121,10 +128,20 @@ def _split_domains(value):
     return domains
 
 
-def _parse_bool(value, default=False):
+def _parse_bool(value, default=False, section=None, option=None):
     if value is None:
         return default
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
+    normalized = str(value).strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    name = option or "boolean"
+    if section:
+        name = "%s.%s" % (section, name)
+    raise ConfigError(
+        "invalid boolean value for %s: %s" % (name, value)
+    )
 
 
 def _has_option_anywhere(parser, option):
@@ -199,6 +216,18 @@ def validate_config(config):
         )
 
 
+def sync_mode(config):
+    if not config.full_resync_enabled:
+        return SYNC_MODE_HEARTBEAT_ONLY
+    if not config.rpc_events_enabled:
+        return SYNC_MODE_POLLING_FULL_RESYNC
+    if not config.incremental_rpc_enabled:
+        return SYNC_MODE_RPC_FULL_RESYNC
+    if config.revisionless_incremental_mode == "experimental":
+        return SYNC_MODE_RPC_PORT_SCOPED_REVISIONLESS_EXPERIMENTAL
+    return SYNC_MODE_RPC_PORT_SCOPED
+
+
 def _validate_loaded_config(parser, config):
     if _has_option_anywhere(parser, "integration_mode"):
         raise ConfigError(
@@ -239,6 +268,8 @@ def load_config(path):
         full_resync_enabled=_parse_bool(
             _get(parser, "agent", "full_resync_enabled", "false"),
             default=False,
+            section="agent",
+            option="full_resync_enabled",
         ),
         port_source=_get(parser, "neutron", "port_source", DEFAULT_PORT_SOURCE),
         port_page_size=_get(parser, "neutron", "port_page_size"),
@@ -247,10 +278,14 @@ def load_config(path):
         rpc_events_enabled=_parse_bool(
             _get(parser, "neutron", "rpc_events_enabled", "false"),
             default=False,
+            section="neutron",
+            option="rpc_events_enabled",
         ),
         incremental_rpc_enabled=_parse_bool(
             _get(parser, "neutron", "incremental_rpc_enabled", "false"),
             default=False,
+            section="neutron",
+            option="incremental_rpc_enabled",
         ),
         revisionless_incremental_mode=_get(
             parser,

@@ -10,7 +10,10 @@ pub(crate) struct Cli {
     pub(crate) command: Commands,
     #[arg(long, env = "ARIA_API_URL", default_value = DEFAULT_API_URL, help = "aria-agent API URL")]
     pub(crate) api_url: String,
-    #[arg(long, help = "Operate on a specific tap instance managed by aria-agent")]
+    #[arg(
+        long,
+        help = "Operate on a specific tap instance managed by aria-agent"
+    )]
     pub(crate) tap: Option<String>,
 }
 
@@ -189,11 +192,19 @@ pub(crate) enum QosCommands {
         direction: String,
         #[arg(long, help = "Rate limit (e.g., 100mbps, 1gbps)")]
         rate: String,
-        #[arg(long, default_value = "0", help = "Burst size (e.g., 1mb, 512kb). 0=auto")]
+        #[arg(
+            long,
+            default_value = "0",
+            help = "Burst size (e.g., 1mb, 512kb). 0=auto"
+        )]
         burst: String,
         #[arg(long, default_value = "0", help = "Priority (0=highest, 7=lowest)")]
         priority: u8,
-        #[arg(long, default_value = "policing", help = "Mode: policing (drop excess, works everywhere) or shaping (EDT delay, needs FQ qdisc)")]
+        #[arg(
+            long,
+            default_value = "policing",
+            help = "Mode: policing (drop excess, works everywhere) or shaping (EDT delay, needs FQ qdisc)"
+        )]
         mode: String,
     },
     /// Delete a QoS rate limit
@@ -245,13 +256,21 @@ pub(crate) enum MirrorCommands {
 pub(crate) enum TcprtCommands {
     /// Cross-instance TopN summary sorted by a chosen metric
     Top {
-        #[arg(long, default_value = "art", help = "Sort dimension: art, crtt, srtt, hs, retrans, nqa")]
+        #[arg(
+            long,
+            default_value = "art",
+            help = "Sort dimension: art, crtt, srtt, hs, retrans, nqa"
+        )]
         by: String,
         #[arg(long, default_value = "10", help = "Number of top flows to show")]
         top: usize,
         #[arg(long, help = "Enable dynamic refresh mode (like top)")]
         watch: bool,
-        #[arg(long, default_value = "2", help = "Refresh interval in seconds (with --watch)")]
+        #[arg(
+            long,
+            default_value = "2",
+            help = "Refresh interval in seconds (with --watch)"
+        )]
         interval: u64,
     },
     /// Cross-instance single flow detail with latency/loss breakdown

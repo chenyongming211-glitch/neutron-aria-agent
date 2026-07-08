@@ -119,6 +119,23 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
         self.assertEqual(4, second["generation"])
         self.assertFalse(second["reused_pending"])
 
+    def test_prepare_snapshot_at_generation_tracks_remote_pending(self):
+        store = SnapshotStateStore(self.state_dir)
+        snapshot = self._snapshot("p1")
+        desired_hash = desired_snapshot_hash(snapshot)
+
+        prepared = store.prepare_snapshot_at_generation(
+            snapshot,
+            7,
+            desired_hash=desired_hash,
+        )
+        pending = SnapshotStateStore(self.state_dir).pending_snapshot()
+
+        self.assertEqual(7, prepared["generation"])
+        self.assertEqual(desired_hash, prepared["desired_hash"])
+        self.assertEqual(7, pending["generation"])
+        self.assertEqual(["p1"], pending["projected_port_ids"])
+
     def test_prepare_reuses_committed_generation_equal_to_remote_floor(self):
         store = SnapshotStateStore(self.state_dir)
         first = store.prepare_snapshot(self._snapshot("p1"))
@@ -162,6 +179,26 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
         self.assertEqual("p1", reloaded.pending_delete()["port_id"])
         self.assertEqual(["p1"], reloaded.last_projected_port_ids())
         self.assertEqual("p2", reloaded.to_dict()["last_deleted_port_id"])
+
+    def test_clear_pending_snapshot_records_reason(self):
+        store = SnapshotStateStore(self.state_dir)
+        prepared = store.prepare_snapshot(self._snapshot("p1"))
+
+        cleared = store.clear_pending_snapshot(reason="remote_generation_advanced")
+        reloaded = SnapshotStateStore(self.state_dir)
+        state = reloaded.to_dict()
+
+        self.assertEqual(prepared["generation"], cleared["generation"])
+        self.assertEqual(None, reloaded.pending_snapshot())
+        self.assertEqual(prepared["generation"], state["last_cleared_pending_generation"])
+        self.assertEqual(
+            prepared["desired_hash"],
+            state["last_cleared_pending_desired_hash"],
+        )
+        self.assertEqual(
+            "remote_generation_advanced",
+            state["last_cleared_pending_reason"],
+        )
 
 
 if __name__ == "__main__":

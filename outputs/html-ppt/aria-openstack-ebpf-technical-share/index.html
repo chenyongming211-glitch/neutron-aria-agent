@@ -1,0 +1,1034 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aria OpenStack eBPF 数据面增强平台技术分享</title>
+  <link rel="stylesheet" href="assets/animations/animations.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="deck" id="deck">
+    <section class="slide cover" data-title="封面">
+      <p class="eyebrow">technical sharing</p>
+      <h1>Aria OpenStack eBPF<br>数据面增强平台</h1>
+      <p class="subtitle">产品定位、架构边界、调用链、事务恢复、端口兼容和后续能力扩展</p>
+      <div class="cover-grid">
+        <div><strong>入口</strong><span>Neutron API / DB / Legacy CLI</span></div>
+        <div><strong>适配</strong><span>neutron-aria-agent</span></div>
+        <div><strong>执行</strong><span>aria-datapath / eBPF</span></div>
+        <div><strong>转发</strong><span>OVS br-int 保持原职责</span></div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="eBPF 能力地图">
+      <p class="eyebrow">ebpf capability map</p>
+      <h2>eBPF 的强大之处：把安全、治理和观测能力前移到内核数据面</h2>
+      <div class="domain-grid">
+        <div class="domain">
+          <h3>网络数据面</h3>
+          <p>在 XDP、TC、socket 等 hook 点解析和处理流量，更早做转发、放行、丢弃和重定向决策。</p>
+          <span class="tag blue">XDP / TC / hook</span>
+        </div>
+        <div class="domain">
+          <h3>流量治理</h3>
+          <p>实现 ACL、QoS、限速、镜像、重定向、服务链等能力，不重写 OVS，也不侵入业务应用。</p>
+          <span class="tag green">ACL / QoS / Mirror</span>
+        </div>
+        <div class="domain">
+          <h3>安全控制</h3>
+          <p>在端口和方向维度做 L3/L4 访问控制、黑白名单、异常流量丢弃和策略命中审计。</p>
+          <span class="tag red">policy enforcement</span>
+        </div>
+        <div class="domain">
+          <h3>可观测性</h3>
+          <p>输出 rule hit、packets、bytes、drop reason、flow stats，把“是否转发”变成“为什么这样转发”。</p>
+          <span class="tag amber">counters / drops</span>
+        </div>
+        <div class="domain">
+          <h3>性能诊断</h3>
+          <p>观测 TCP RTT、重传、kernel drop、SSL/HTTP 关键事件，减少线上排障对抓包的依赖。</p>
+          <span class="tag blue">TCP / SSL / trace</span>
+        </div>
+        <div class="domain">
+          <h3>运行可靠性</h3>
+          <p>依靠 verifier、BPF map、pin、版本化和渐进 attach，支撑灰度、回滚、旁路和运行态审计。</p>
+          <span class="tag green">verifier / map / pin</span>
+        </div>
+      </div>
+      <div class="statement">一句话：eBPF 提供“可编程内核数据面”，真正的产品价值来自控制面、生命周期、状态反馈和故障边界设计。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="当前 agent 已实现能力">
+      <p class="eyebrow">implemented capabilities</p>
+      <h2>当前 eBPF agent 已经具备 ACL 主线，以及治理、观测、诊断和可靠性基础</h2>
+      <div class="matrix failure-matrix compact-table">
+        <div class="th">能力</div><div class="th">代码实现情况</div><div class="th">OpenStack 当前接入</div><div class="th">成熟度</div>
+        <div class="td strong">ACL</div><div class="td">XDP/TC、IPv4/IPv6、CIDR group、端口范围、rule/group stats、轻量状态跟踪。</div><div class="td">已接入 aria_acl、snapshot、UDS apply、port status。</div><div class="td ok">主线可用</div>
+        <div class="td strong">Conntrack</div><div class="td">五元组、反向流量、reply seen、超时、policy 缓存、按 port flush。</div><div class="td">随 ACL apply 使用。</div><div class="td ok">轻量状态</div>
+        <div class="td strong">QoS</div><div class="td">token bucket、egress shaping/policing、ingress policing、QoS stats。</div><div class="td">当前未作为 OpenStack 产品闭环主线。</div><div class="td warn">待产品化</div>
+        <div class="td strong">Mirror</div><div class="td">per-rule mirror、global mirror、clone redirect、mirror stats。</div><div class="td">当前未扩展到 OpenStack 产品闭环。</div><div class="td warn">本地已具备</div>
+        <div class="td strong">Stats</div><div class="td">rule stats、flow stats、group stats、drop stats、packets、bytes。</div><div class="td">port status 已接入，页面 counters 展示后续再做。</div><div class="td ok">数据已具备</div>
+        <div class="td strong">Trace / Drop</div><div class="td">packet trace、drop reason、kernel drop tracepoint。</div><div class="td">主要用于本地诊断和 smoke 证据。</div><div class="td ok">诊断可用</div>
+        <div class="td strong">TCPRT</div><div class="td">RTT、ART、重传、客户端/服务端方向跟踪。</div><div class="td">暂未纳入租户产品入口。</div><div class="td warn">观测域</div>
+        <div class="td strong">SSL / HTTP</div><div class="td">libssl uprobe、SNI、SSL read/write、HTTP 状态观测。</div><div class="td">依赖现场 libssl 符号环境。</div><div class="td warn">可选诊断</div>
+        <div class="td strong">Runtime / WAL</div><div class="td">attach/detach、pinned maps、老内核 fallback、generation、desired_hash、WAL、rollback。</div><div class="td">通过 UDS 与 neutron-aria-agent 对接。</div><div class="td ok">支撑闭环</div>
+        <div class="td strong">Neutron 集成</div><div class="td">full snapshot、port-scoped snapshot、delete、managed_domains、本地写 gate、RPC/incremental 基础。</div><div class="td">ACL 已闭环；incremental 默认生产关闭。</div><div class="td ok">ACL 成熟</div>
+      </div>
+      <div class="statement">当前产品成熟主线是 OpenStack ACL；QoS、Mirror、TCPRT、SSL/HTTP、深度 counters 展示按 domain 渐进产品化。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="目录">
+      <p class="eyebrow">agenda</p>
+      <h2>这份分享按“eBPF 能力 -> 产品框架 -> 调用链 -> 边界 -> 扩展能力”展开</h2>
+      <div class="agenda-grid">
+        <div class="agenda-item"><b>01</b><span>eBPF 能力地图与当前实现</span></div>
+        <div class="agenda-item"><b>02</b><span>产品定位与设计目标</span></div>
+        <div class="agenda-item"><b>03</b><span>总体逻辑架构与组件职责</span></div>
+        <div class="agenda-item"><b>04</b><span>eBPF Manager 产品框架</span></div>
+        <div class="agenda-item"><b>05</b><span>ACL 业务流程与 Security Group 边界</span></div>
+        <div class="agenda-item"><b>06</b><span>Port 字段、snapshot、权限托管</span></div>
+        <div class="agenda-item"><b>07</b><span>事务恢复、同步模型、部署形态</span></div>
+        <div class="agenda-item"><b>08</b><span>QoS、Mirror、Observability、端口兼容边界</span></div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="一句话定位">
+      <p class="eyebrow">positioning</p>
+      <h2>Aria 是 OpenStack/OVS-aware eBPF 数据面增强平台</h2>
+      <div class="two-col">
+        <div class="panel">
+          <h3>它是什么</h3>
+          <p>Aria 在普通虚机 OVS tap 口上提供 ACL、QoS、Mirror 和可观测增强能力。</p>
+          <p>控制面走 Neutron，数据面由本机 aria-datapath 通过 eBPF 执行。</p>
+        </div>
+        <div class="panel">
+          <h3>它不是什么</h3>
+          <ul>
+            <li>不是 OVS 替代品。</li>
+            <li>不是 Security Group 的改名实现。</li>
+            <li>不是绕过 Neutron 的独立租户控制面。</li>
+            <li>不是直接接管所有网卡类型的万能 agent。</li>
+          </ul>
+        </div>
+      </div>
+      <div class="statement">一句话：Neutron 负责产品入口，OVS 负责基础转发，Aria 负责本机 tap 侧 eBPF 增强执行和状态反馈。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="背景与目标">
+      <p class="eyebrow">background and goals</p>
+      <h2>目标不是重写 OpenStack 网络，而是补一条可产品化的数据面增强路径</h2>
+      <div class="split-3">
+        <div class="panel">
+          <h3>现有路径</h3>
+          <p>普通 VM port 在计算节点上表现为 tap 设备，接入 OVS br-int。原生能力通常依赖 OVS flow、iptables、tc 或 agent extension。</p>
+        </div>
+        <div class="panel">
+          <h3>Aria 路径</h3>
+          <p>Aria 不改变 Neutron port 绑定和 OVS L2 转发，只在明确声明的本机接口上增加 eBPF 增强执行。</p>
+        </div>
+        <div class="panel">
+          <h3>失败原则</h3>
+          <p>失败时进入 degraded/bypass，状态必须可见，优先保护 OVS 原业务转发，不因为 Aria 异常主动打断基础链路。</p>
+        </div>
+      </div>
+      <div class="statement">目标能力：统一入口、清晰边界、可恢复事务、可观测运行状态、按 domain 渐进扩展。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="总体逻辑架构">
+      <p class="eyebrow">logical architecture</p>
+      <h2>总体逻辑架构：Neutron 逻辑策略转换成本机数据面目标状态</h2>
+      <pre class="mermaid">
+flowchart TB
+  user["管理员 / 云平台"] --> neutron["Neutron Server"]
+  neutron --> api["Aria Neutron 扩展 API"]
+  api --> db["Aria / Neutron DB"]
+  api --> notify["RPC / notification / full-resync 触发"]
+  notify --> adapter["neutron-aria-agent"]
+  adapter --> inventory["本机 port inventory 与 eligible 判断"]
+  adapter --> translator["策略翻译与 per-port snapshot 生成"]
+  translator --> uds["UDS: /run/aria/aria-agent.sock"]
+  uds --> datapath["aria-datapath / aria-agent"]
+  datapath --> wal["WAL / generation / desired_hash / rollback"]
+  datapath --> ebpf["eBPF programs / maps"]
+  ebpf --> tap["VM tap port"]
+  tap --> ovs["OVS br-int"]
+  ovs --> vm["虚机业务流量"]
+      </pre>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="架构边界">
+      <p class="eyebrow">architecture boundaries</p>
+      <h2>最重要的边界：谁拥有 API，谁拥有计算，谁拥有执行</h2>
+      <div class="matrix">
+        <div class="th">组件</div><div class="th">拥有的职责</div><div class="th">明确不负责</div>
+        <div class="td strong">Neutron Server</div><div class="td">API、DB、RBAC、revision、对象生命周期、状态读取。</div><div class="td">不直接写 eBPF，不管理本机 tap attach。</div>
+        <div class="td strong">neutron-aria-agent</div><div class="td">读取 Neutron，监听 RPC，做 full-resync，计算 effective snapshot，上报 heartbeat/status。</div><div class="td">不读写 eBPF map，不挂载 bpffs，不直接修改 OVS flow。</div>
+        <div class="td strong">aria-datapath</div><div class="td">UDS API、tap/ifindex 校验、eBPF attach/map apply、WAL、rollback、runtime status。</div><div class="td">不访问 Neutron DB，不做租户级 northbound。</div>
+        <div class="td strong">OVS / OVS agent</div><div class="td">br-int、隧道、二层交换、OpenStack port binding。</div><div class="td">不承载 Aria ACL 策略语义。</div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="产品能力框架">
+      <p class="eyebrow">product framework</p>
+      <h2>产品框架：一个 eBPF Manager，多个能力域</h2>
+      <div class="framework">
+        <div class="tier">
+          <b>manager core</b>
+          <span>program_manager</span>
+          <span>map_manager</span>
+          <span>hook_manager</span>
+          <span>pipeline_manager</span>
+          <span>rollback / WAL</span>
+        </div>
+        <div class="tier">
+          <b>network domains</b>
+          <span class="primary">ACL</span>
+          <span>QoS</span>
+          <span>Mirror</span>
+          <span>Observability</span>
+          <span>Stats</span>
+        </div>
+        <div class="tier">
+          <b>system diagnostics</b>
+          <span>Trace</span>
+          <span>TCP</span>
+          <span>Syscall</span>
+          <span>Block IO</span>
+          <span>Admin tools</span>
+        </div>
+        <div class="tier">
+          <b>local APIs</b>
+          <span>Policy API</span>
+          <span>Observability API</span>
+          <span>Admin API</span>
+          <span>Capabilities</span>
+          <span>Status</span>
+        </div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="Manager Core">
+      <p class="eyebrow">manager core</p>
+      <h2>Manager Core 是所有能力域共用的数据面地基</h2>
+      <div class="matrix two">
+        <div class="th">子模块</div><div class="th">职责</div>
+        <div class="td strong">program_manager</div><div class="td">管理 eBPF 程序加载、替换、pin、detach 和版本兼容。</div>
+        <div class="td strong">map_manager</div><div class="td">管理 BPF map schema、desired state、diff、清理和扩容。</div>
+        <div class="td strong">hook_manager</div><div class="td">管理 tap attach、ifindex 对账、TC hook 和未来其他 hook 类型。</div>
+        <div class="td strong">pipeline_manager</div><div class="td">管理 ACL、QoS、Mirror、观测等 domain 的执行顺序和 verdict。</div>
+        <div class="td strong">rollback / WAL</div><div class="td">管理本机事务、崩溃恢复、replay、rollback 和状态审计。</div>
+      </div>
+      <div class="statement">后续新增 QoS、Mirror、Observability 时，应该复用这套 core，而不是各自写一套 attach/map/rollback。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="Network Domains">
+      <p class="eyebrow">network domains</p>
+      <h2>Network Domains 面向云网络产品能力，按域独立接入和授权</h2>
+      <div class="matrix">
+        <div class="th">能力域</div><div class="th">产品入口</div><div class="th">底层模型与说明</div>
+        <div class="td strong">ACL</div><div class="td"><code>aria-acl</code></div><div class="td">Aria 独立 ACL API/DB；不复用 Security Group；面向显式绑定的 port/network 策略。</div>
+        <div class="td strong">QoS</div><div class="td"><code>aria-qos</code></div><div class="td">产品入口统一叫 Aria QoS，底层复用 Neutron QoS policy/rule，由 Aria 执行。</div>
+        <div class="td strong">Mirror</div><div class="td"><code>aria-mirror</code></div><div class="td">独立 Mirror API/DB；支持 global_l2 与按 IP/协议/方向的选择性镜像。</div>
+        <div class="td strong">Observability</div><div class="td"><code>aria-observability</code></div><div class="td">输出 rule hit、drop reason、PPS/BPS、per-port runtime status。</div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="System Diagnostics">
+      <p class="eyebrow">system diagnostics</p>
+      <h2>Trace、TCP、syscall、Block IO 属于诊断能力，不默认进入热路径</h2>
+      <div class="split-3">
+        <div class="panel">
+          <h3>默认关闭</h3>
+          <p>诊断模块不应该默认插入虚机网络转发热路径，避免增加未知延迟和运维复杂度。</p>
+        </div>
+        <div class="panel">
+          <h3>按需开启</h3>
+          <p>按端口、虚机、租户、进程或时间窗口显式启用，最好支持采样和自动过期。</p>
+        </div>
+        <div class="panel">
+          <h3>只做观测</h3>
+          <p>诊断模块不改变网络转发行为，也不作为当前 tenant networking API 主线。</p>
+        </div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="两容器部署形态">
+      <p class="eyebrow">deployment shape</p>
+      <h2>部署形态：非特权适配层 + 本机特权数据面</h2>
+      <pre class="mermaid">
+flowchart LR
+  subgraph compute["计算节点"]
+    subgraph agent["neutron-aria-agent 容器"]
+      a1["非特权"]
+      a2["Neutron REST / RPC"]
+      a3["inventory / snapshot 生成"]
+      a4["只访问 UDS"]
+    end
+    subgraph data["aria-datapath 容器"]
+      d1["特权或最小能力集"]
+      d2["host network / 必要 host pid"]
+      d3["/sys/fs/bpf"]
+      d4["tap / ifindex 校验"]
+      d5["eBPF attach / map apply"]
+    end
+    uds["/run/aria/aria-agent.sock"]
+    ovs["OVS br-int + VM tap"]
+  end
+  agent --> uds
+  uds --> data
+  data --> ovs
+      </pre>
+      <div class="statement">生产环境不让 Python agent 直接接触 eBPF、bpffs 或 OVS 底层资源。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="ACL 业务流程">
+      <p class="eyebrow">acl business flow</p>
+      <h2>Aria ACL 的 northbound 入口仍然是 Neutron Server</h2>
+      <pre class="mermaid">
+sequenceDiagram
+  participant Admin as 管理员 / 平台
+  participant Neutron as Neutron Server
+  participant DB as aria_acl DB
+  participant Agent as neutron-aria-agent
+  participant UDS as UDS socket
+  participant Data as aria-datapath
+  participant Tap as VM tap
+
+  Admin->>Neutron: 创建 policy
+  Neutron->>DB: 写入 policy 与 revision
+  Admin->>Neutron: 创建 rule / address-set
+  Neutron->>DB: 写入 rule / address-set 与 revision
+  Admin->>Neutron: 绑定 policy 到 network 或 port
+  Neutron->>DB: 写入 binding 与 revision
+  Neutron-->>Agent: RPC event 或等待 full-resync
+  Agent->>Neutron: 拉取 port 与 aria_acl 对象
+  Agent->>Agent: 过滤 eligible OVS tap port
+  Agent->>Agent: 计算 per-port effective ACL snapshot
+  Agent->>UDS: PUT /api/v1/neutron/snapshot
+  UDS->>Data: 本机 apply
+  Data->>Data: preflight + WAL intent
+  Data->>Tap: eBPF map/program 生效
+  Data-->>Agent: 返回 generation/status
+  Agent-->>Neutron: 上报 heartbeat 与 port status
+      </pre>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="ACL 关键语义">
+      <p class="eyebrow">acl semantics</p>
+      <h2>ACL 语义：显式绑定才生效，状态必须可解释</h2>
+      <div class="two-col">
+        <div class="panel">
+          <h3>对象模型</h3>
+          <ul>
+            <li><code>policy</code>：策略容器。</li>
+            <li><code>rule</code>：匹配条件和 action。</li>
+            <li><code>address-set</code>：IP/CIDR 集合。</li>
+            <li><code>binding</code>：绑定到 port 或 network。</li>
+            <li><code>port-status</code>：运行时状态读回。</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>执行原则</h3>
+          <ul>
+            <li>未绑定策略不改变流量。</li>
+            <li>端口不支持时状态要可见。</li>
+            <li>下发失败时不能假装 ready。</li>
+            <li>状态要说明 host、generation、effective_action 和原因。</li>
+          </ul>
+        </div>
+      </div>
+      <div class="statement">方向以 VM tap 视角定义：ingress 是进入 VM tap，egress 是 VM tap 发出。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="Security Group 边界">
+      <p class="eyebrow">security group boundary</p>
+      <h2>Aria ACL 不复用 Security Group，不继承默认安全组语义</h2>
+      <div class="matrix">
+        <div class="th">对比项</div><div class="th">Security Group</div><div class="th">Aria ACL</div>
+        <div class="td strong">产品定位</div><div class="td">OpenStack 默认虚机安全组。</div><div class="td">独立 ACL enhancement。</div>
+        <div class="td strong">默认行为</div><div class="td">通常存在 default SG 和自动绑定逻辑。</div><div class="td">无显式绑定则 bypass。</div>
+        <div class="td strong">数据模型</div><div class="td">security_group / security_group_rule。</div><div class="td">aria_acl_policy / rule / address_set / binding。</div>
+        <div class="td strong">执行后端</div><div class="td">iptables、OVS firewall、OVN ACL 等。</div><div class="td">Aria eBPF datapath。</div>
+        <div class="td strong">端口字段</div><div class="td">与 port security、安全组字段强相关。</div><div class="td">独立 binding，不修改 port binding 字段。</div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="Port 字段与状态表达">
+      <p class="eyebrow">port fields</p>
+      <h2>使用 Aria 后，Neutron port 仍然是普通 OVS port</h2>
+      <div class="two-col">
+        <div class="panel">
+          <h3>不应该改变</h3>
+          <ul>
+            <li><code>binding:vif_type</code> 仍然由 ML2/OVS 表达。</li>
+            <li><code>binding:vnic_type</code> 仍表达 normal/direct/macvtap。</li>
+            <li><code>device_owner</code> 仍表达 Nova、DHCP、router 等归属。</li>
+            <li><code>security_groups</code> 不作为 Aria ACL 输入。</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>应该独立表达</h3>
+          <ul>
+            <li><code>aria_acl_policy</code></li>
+            <li><code>aria_acl_rule</code></li>
+            <li><code>aria_acl_address_set</code></li>
+            <li><code>aria_acl_binding</code></li>
+            <li><code>aria_acl_port_status</code></li>
+          </ul>
+        </div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="CLI 与状态摘要">
+      <p class="eyebrow">legacy cli and status</p>
+      <h2>旧版 CLI 可以暴露独立对象，也可以在 port-show 里展示摘要</h2>
+      <div class="two-col">
+        <div class="panel">
+          <h3>独立 CLI</h3>
+          <pre class="code-block">neutron aria-acl-policy-list
+neutron aria-acl-rule-list &lt;policy&gt;
+neutron aria-acl-binding-list
+neutron aria-acl-port-status-show &lt;port&gt;</pre>
+        </div>
+        <div class="panel">
+          <h3>port-show 摘要字段</h3>
+          <pre class="code-block">aria_acl_status
+aria_acl_effective_action
+aria_acl_policy_ids
+aria_acl_runtime_host
+aria_acl_generation</pre>
+        </div>
+      </div>
+      <div class="statement">port-show 中的 Aria 字段只是摘要，权威对象仍然是 Aria ACL 独立 API/DB。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="Snapshot">
+      <p class="eyebrow">snapshot</p>
+      <h2>snapshot 是“本机期望状态快照”，不是虚机磁盘快照</h2>
+      <div class="two-col">
+        <div class="panel">
+          <h3>它包含什么</h3>
+          <ul>
+            <li>当前 host 上有哪些 Neutron ports。</li>
+            <li>哪些 port 是 eligible OVS tap。</li>
+            <li>每个 port 被哪些 domain 托管。</li>
+            <li>每个 port 应该应用哪些 ACL/QoS/Mirror 策略。</li>
+            <li>generation、desired_hash、host、ifname 等收敛信息。</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>为什么需要它</h3>
+          <ul>
+            <li>datapath 不直接读 Neutron DB。</li>
+            <li>复杂 Neutron 对象先被 agent 翻译成本机可执行目标状态。</li>
+            <li>同一个 snapshot 可以重复下发，保证幂等。</li>
+            <li>重启、恢复、纠偏时可以重新下发。</li>
+          </ul>
+        </div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="Snapshot 示例">
+      <p class="eyebrow">snapshot example</p>
+      <h2>snapshot 把 Neutron 逻辑策略变成本机可执行说明书</h2>
+      <pre class="code-block large">{
+  "generation": 248,
+  "host": "ostack2.example.net",
+  "ports": [
+    {
+      "port_id": "86b83885-671f-474c-9556-8af98cf1cdc8",
+      "ifname": "tap86b83885-67",
+      "eligible": true,
+      "managed_domains": ["acl"],
+      "acl": {
+        "effective_action": "enforce",
+        "rules": [
+          {
+            "direction": "ingress",
+            "protocol": "icmp",
+            "action": "deny",
+            "remote_ip_prefix": "10.58.159.2/32"
+          }
+        ]
+      }
+    }
+  ]
+}</pre>
+      <div class="statement">full snapshot 用于启动、恢复和周期纠偏；port-scoped snapshot 用于单 port 快速收敛。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="Neutron-managed 与 managed_domains">
+      <p class="eyebrow">authority</p>
+      <h2>控制权分两层：谁能 attach，谁能写 domain</h2>
+      <pre class="mermaid">
+flowchart TB
+  mode["neutron_managed 模式"]
+  domains["managed_domains"]
+  port["eligible port snapshot"]
+  local["ariactl 本地写入"]
+
+  mode --> port
+  domains --> acl["acl domain"]
+  domains --> qos["qos domain"]
+  domains --> mirror["mirror domain"]
+  domains --> trace["trace / tcp / drops 等非托管 domain"]
+
+  acl --> block1["本地 ACL 写入被拒绝"]
+  qos --> block2["若 QoS 被托管，本地 QoS 写入被拒绝"]
+  mirror --> block3["若 Mirror 被托管，本地 Mirror 写入被拒绝"]
+  trace --> allow["未托管能力仍允许本地使用"]
+  local --> block1
+  local --> allow
+      </pre>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="事务性与失败恢复">
+      <p class="eyebrow">transaction and recovery</p>
+      <h2>事务模型：最终一致、可恢复、可审计</h2>
+      <pre class="mermaid">
+stateDiagram-v2
+  [*] --> DesiredBuilt: 生成 desired snapshot
+  DesiredBuilt --> Prepared: prepare generation / desired_hash
+  Prepared --> Submitted: UDS 提交
+  Submitted --> Intent: WAL intent
+  Intent --> Preflight: host / ifname / ifindex 校验
+  Preflight --> Applying: attach / map apply
+  Applying --> Committed: WAL commit + status hash
+  Committed --> Ready: ready / enforce
+
+  Preflight --> Degraded: 校验失败
+  Applying --> Degraded: apply 失败或中断
+  Degraded --> Bypass: 保护 OVS 原转发
+  Bypass --> Resync: full-resync / replay
+  Resync --> Ready: 收敛成功
+  Resync --> Blocked: 状态不确定
+      </pre>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="事务机制明细">
+      <p class="eyebrow">transaction details</p>
+      <h2>事务不是分布式强 ACID，而是分层保证“不静默、不误报、可恢复”</h2>
+      <div class="matrix two">
+        <div class="th">层次</div><div class="th">事务与恢复机制</div>
+        <div class="td strong">Neutron Server</div><div class="td">CRUD 与 revision 在同一 DB transaction；notification 在 DB commit 后发送。</div>
+        <div class="td strong">neutron-aria-agent</div><div class="td">generation、desired_hash、pending snapshot/delete、本地状态恢复、full-resync 兜底。</div>
+        <div class="td strong">aria-datapath</div><div class="td">WAL intent/commit/replay、status hash、preflight、apply lock、rollback。</div>
+        <div class="td strong">eBPF runtime</div><div class="td">apply 失败进入 degraded/bypass，不能破坏 OVS 原转发，不能假装 ready。</div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="同步模型">
+      <p class="eyebrow">sync model</p>
+      <h2>同步模型：full-resync 是权威纠偏路径，RPC 和增量只做加速</h2>
+      <pre class="mermaid">
+flowchart LR
+  event["Neutron event"] --> merge["event merge / debounce"]
+  merge --> decision{"是否可安全局部处理"}
+  decision -->|"否"| full["full-resync"]
+  decision -->|"是"| scoped["port-scoped snapshot"]
+  full --> uds["UDS snapshot"]
+  scoped --> uds
+  timer["periodic timer"] --> full
+  restart["agent restart / datapath recovery"] --> full
+      </pre>
+      <div class="matrix two compact-table">
+        <div class="th">同步方式</div><div class="th">作用</div>
+        <div class="td strong">periodic full-resync</div><div class="td">启动、恢复、纠偏和最终一致权威路径，必须保留。</div>
+        <div class="td strong">RPC-triggered full-resync</div><div class="td">收到 Neutron 事件后加速触发全量同步。</div>
+        <div class="td strong">port-scoped apply</div><div class="td">只针对单 port 快速收敛，需要 revision-aware gate。</div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="故障与降级策略">
+      <p class="eyebrow">failure behavior</p>
+      <h2>故障时要做到状态可见、业务保护、自动纠偏</h2>
+      <div class="matrix">
+        <div class="th">场景</div><div class="th">状态表达</div><div class="th">恢复方式</div>
+        <div class="td strong">UDS 不通 / datapath down</div><div class="td"><code>degraded=true</code>，reason 为 local API 退化。</div><div class="td">datapath 恢复后由 full-resync 重新收敛。</div>
+        <div class="td strong">tap 不存在</div><div class="td">该 port/domain 标记 degraded 或 not_applicable。</div><div class="td">等待 tap recreate 或 port delete 清理。</div>
+        <div class="td strong">apply 失败</div><div class="td"><code>effective_action=bypass</code>，不能假装 enforce。</div><div class="td">重试、rollback、full-resync。</div>
+        <div class="td strong">VM migrate</div><div class="td">旧 host 清理，新 host 重新 claim。</div><div class="td">host-scoped full-resync 与 delete 清理。</div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="QoS 路线">
+      <p class="eyebrow">aria-qos</p>
+      <h2>QoS 不重造模型：产品入口叫 Aria QoS，底层复用 Neutron QoS 语义</h2>
+      <div class="two-col">
+        <div class="panel">
+          <h3>推荐分层</h3>
+          <ul>
+            <li>产品入口：Aria QoS / <code>aria-qos</code>。</li>
+            <li>底层语义：Neutron QoS policy/rule。</li>
+            <li>执行后端：Aria datapath。</li>
+            <li>状态表达：Aria QoS runtime status。</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>必须先澄清</h3>
+          <ul>
+            <li>QoS API 是否可见。</li>
+            <li>policy 如何绑定到 port/network。</li>
+            <li>Aria 是否拥有 QoS domain 写权限。</li>
+            <li>执行路径是 shaping、policing-only，还是 unsupported。</li>
+          </ul>
+        </div>
+      </div>
+      <div class="statement">重点是避免 OVS agent QoS、tc、已有定制 QoS 插件与 Aria 形成双重限速。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="Mirror 路线">
+      <p class="eyebrow">aria-mirror</p>
+      <h2>Mirror 建议做成独立 aria-mirror，不混用已有 mirror API 的歧义语义</h2>
+      <pre class="mermaid">
+flowchart TB
+  source["源 VM tap / 采集接口"]
+  mirror["aria-mirror domain"]
+  global["global_l2\n复制全部二层帧"]
+  policy["policy selective\n按 IP/协议/方向匹配"]
+  targetA["目标 VM port A"]
+  targetB["目标 VM port B"]
+  stats["mirror stats\npackets / bytes / rate"]
+
+  source --> mirror
+  mirror --> global
+  mirror --> policy
+  global --> targetA
+  policy --> targetB
+  mirror --> stats
+      </pre>
+      <div class="statement">global 就等于 global_l2；非 IP 二层流量由 global 覆盖，IP policy mirror 只匹配可解析 IP 流量。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="可观测性">
+      <p class="eyebrow">observability</p>
+      <h2>可观测性是 Aria 的产品差异化方向</h2>
+      <div class="split-3">
+        <div class="panel">
+          <h3>Policy API</h3>
+          <p>给 Neutron / 平台控制面使用，用于创建和下发 ACL、QoS、Mirror 策略。</p>
+        </div>
+        <div class="panel">
+          <h3>Observability API</h3>
+          <p>给监控、审计、平台 UI 使用，查询 counters、drop reason、rule hit、速率和事件。</p>
+        </div>
+        <div class="panel">
+          <h3>Admin API</h3>
+          <p>给运维和支持工具使用，查看 capabilities、WAL、attach、map、rollback、health。</p>
+        </div>
+      </div>
+      <div class="statement">长期价值不是“能拦包”，而是能解释哪个 tenant、VM、port、rule 造成了什么结果。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="支持的端口类型">
+      <p class="eyebrow">port support matrix</p>
+      <h2>当前主路径只接管普通 OVS tap port，其它类型必须状态可见</h2>
+      <div class="matrix">
+        <div class="th">端口类型</div><div class="th">Aria 处理建议</div><div class="th">原因</div>
+        <div class="td strong">普通 Nova VM OVS tap</div><div class="td">支持</div><div class="td">tap 接入 br-int，适合 TC/eBPF attach。</div>
+        <div class="td strong">DHCP / Metadata / Router 服务端口</div><div class="td">不默认接管</div><div class="td">属于云平台服务路径，误接管风险高。</div>
+        <div class="td strong">SR-IOV direct port</div><div class="td">unsupported / bypass</div><div class="td">数据面绕过普通 tap/OVS 路径。</div>
+        <div class="td strong">LinuxBridge port</div><div class="td">unsupported 或 not_applicable</div><div class="td">不属于当前 OVS tap 主路径。</div>
+        <div class="td strong">物理采集口</div><div class="td">按独立采集接口评估</div><div class="td">需要明确接线、target 和 mirror 语义。</div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="SR-IOV 兼容边界">
+      <p class="eyebrow">sriov compatibility</p>
+      <h2>SR-IOV 要区分 legacy direct 与 switchdev representor</h2>
+      <div class="matrix">
+        <div class="th">形态</div><div class="th">宿主机是否有可挂载 netdev</div><div class="th">Aria 建议</div>
+        <div class="td strong">legacy/direct SR-IOV</div><div class="td">通常没有。PF 只能看到 VF MAC/VLAN/spoofchk 配置。</div><div class="td">识别并跳过，状态为 unsupported/bypass。</div>
+        <div class="td strong">PF/uplink 口</div><div class="td">有 PF netdev，但粒度是物理口。</div><div class="td">不作为租户 port 级 ACL 主方案。</div>
+        <div class="td strong">switchdev / VF representor</div><div class="td">有代表 VF 的真实 netdev，例如 <code>pf0vf3</code>。</div><div class="td">后续可作为 SR-IOV 支持路线。</div>
+        <div class="td strong">VM 内 VF</div><div class="td">VM 内有接口。</div><div class="td">不建议作为云平台统一产品能力。</div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="为什么 representor 可以挂 eBPF">
+      <p class="eyebrow">representor principle</p>
+      <h2>representor 把 VF 在硬件 e-switch 里的逻辑端口暴露成宿主机 netdev</h2>
+      <pre class="mermaid">
+flowchart LR
+  subgraph legacy["legacy SR-IOV direct"]
+    vm1["VM"] --> vf1["VF PCI 设备"]
+    vf1 --> nic1["NIC e-switch"]
+    nic1 --> net1["物理网络"]
+  end
+
+  subgraph switchdev["switchdev / representor"]
+    vm2["VM"] --> vf2["VF PCI 设备"]
+    vf2 --> nic2["NIC e-switch"]
+    nic2 --> rep["VF representor netdev"]
+    rep --> ebpf["tc/eBPF hook"]
+    ebpf --> uplink["PF / uplink"]
+    uplink --> net2["物理网络"]
+  end
+      </pre>
+      <div class="statement">核心原因：Linux netdev 有 TC hook，representor 又能映射回一个 VF/Neutron port，所以适合做 per-port ACL/QoS/Mirror。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="如何识别 representor">
+      <p class="eyebrow">representor detection</p>
+      <h2>识别 switchdev/representor 主要看 devlink、phys_port_name 和 netdev</h2>
+      <div class="two-col">
+        <div class="panel">
+          <h3>只读检查命令</h3>
+          <pre class="code-block">devlink dev show
+devlink dev eswitch show pci/0000:xx:yy.z
+devlink port show
+ip -d link show
+cat /sys/class/net/&lt;if&gt;/phys_port_name
+cat /sys/class/net/&lt;if&gt;/phys_switch_id</pre>
+        </div>
+        <div class="panel">
+          <h3>判断依据</h3>
+          <ul>
+            <li><code>mode switchdev</code> 表示 e-switch 进入 switchdev。</li>
+            <li><code>flavour pcivf</code> 表示 VF representor。</li>
+            <li><code>netdev pf0vfX</code> 是可 attach 的接口。</li>
+            <li>只有 <code>vf N vlan X</code> 不是 representor。</li>
+          </ul>
+        </div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="当前环境 SR-IOV 结论">
+      <p class="eyebrow">current sriov conclusion</p>
+      <h2>当前 Intel X710/I350/82599 这类 legacy SR-IOV 不能承诺 Aria enforcement</h2>
+      <div class="matrix">
+        <div class="th">检查现象</div><div class="th">含义</div><div class="th">产品结论</div>
+        <div class="td strong"><code>devlink dev show</code> 为空</div><div class="td">没有 devlink/switchdev 设备暴露。</div><div class="td">没有 representor 入口。</div>
+        <div class="td strong"><code>phys_port_name</code> 不支持</div><div class="td">没有 <code>pf0vfX</code> 这类 representor netdev。</div><div class="td">不能按 representor attach。</div>
+        <div class="td strong">PF 显示 <code>vf N vlan X</code></div><div class="td">只是 PF 对 VF 的配置视图。</div><div class="td">不是可挂 eBPF 的 netdev。</div>
+        <div class="td strong">Intel 82599 / ixgbe</div><div class="td">支持 SR-IOV VF，但不是常用 switchdev representor 路线。</div><div class="td">按 unsupported/bypass 处理。</div>
+      </div>
+      <div class="statement">建议状态：status=unsupported，effective_action=bypass，reason=sriov_without_representor。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="典型部署与运行关系">
+      <p class="eyebrow">multi-node runtime</p>
+      <h2>多计算节点部署时，每个节点只负责本机 port</h2>
+      <div class="runtime-topology">
+        <section class="topology-card topology-control">
+          <h3>控制节点 / Neutron API 层</h3>
+          <div class="topology-control-grid">
+            <div class="topology-box primary">neutron-server<br><span>aria_acl service plugin</span></div>
+            <div class="topology-box">DB<br><span>aria_acl_* tables</span></div>
+            <div class="topology-box">message queue<br><span>RPC / notification</span></div>
+          </div>
+        </section>
+
+        <div class="topology-link-row">
+          <span>RPC / notification fanout</span>
+          <span>Neutron API / heartbeat</span>
+        </div>
+
+        <div class="topology-compute-row">
+          <section class="topology-card topology-compute">
+            <h3>计算节点 A</h3>
+            <div class="compute-stack">
+              <div class="topology-box primary">neutron-aria-agent</div>
+              <div class="topology-arrow">↓</div>
+              <div class="topology-box">aria-datapath</div>
+              <div class="topology-arrow">↓</div>
+              <div class="topology-box">VM tap ports</div>
+              <div class="topology-arrow">↓</div>
+              <div class="topology-box">OVS br-int</div>
+            </div>
+          </section>
+
+          <section class="topology-card topology-compute">
+            <h3>计算节点 B</h3>
+            <div class="compute-stack">
+              <div class="topology-box primary">neutron-aria-agent</div>
+              <div class="topology-arrow">↓</div>
+              <div class="topology-box">aria-datapath</div>
+              <div class="topology-arrow">↓</div>
+              <div class="topology-box">VM tap ports</div>
+              <div class="topology-arrow">↓</div>
+              <div class="topology-box">OVS br-int</div>
+            </div>
+          </section>
+        </div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="Fail-open 总原则">
+      <p class="eyebrow">fail-open contract</p>
+      <h2>最高原则：Aria ACL 是安全增强，不能成为 OVS 转发的单点依赖</h2>
+      <div class="two-col">
+        <div class="panel principle-panel">
+          <h3>最终目标</h3>
+          <p>不管 Aria 控制面、aria-datapath、eBPF attach、map apply、ACL 编译或状态回报发生什么故障，原有 OVS baseline forwarding 都不能被 Aria 主动打断。</p>
+          <p>最坏结果只能是 ACL enforcement 降级为 bypass，而不是业务流量中断。</p>
+        </div>
+        <div class="panel principle-panel">
+          <h3>产品语义</h3>
+          <ul>
+            <li><code>ready + enforce</code>：ACL 明确生效。</li>
+            <li><code>not_requested + bypass</code>：没有 ACL 绑定，不改变转发。</li>
+            <li><code>degraded + bypass</code>：ACL 异常，保护 OVS 原业务。</li>
+            <li><code>unsupported + bypass</code>：端口类型不支持，不接管。</li>
+          </ul>
+        </div>
+      </div>
+      <div class="statement">一句话：Aria 可以增强 OVS tap 流量，但不能让 OVS 转发依赖 Aria 正常运行。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="端口挂载与生效">
+      <p class="eyebrow">attach vs enforce</p>
+      <h2>要区分两个问题：eBPF 是否挂在 tap 上，以及 ACL 是否真正执行</h2>
+      <div class="matrix failure-matrix">
+        <div class="th">场景</div><div class="th">eBPF 是否可能挂载</div><div class="th">ACL 是否生效</div><div class="th">OVS 原转发</div>
+        <div class="td strong">非计算端口：DHCP / router / metadata</div><div class="td">不应挂载</div><div class="td"><span class="tag muted">not_applicable</span></div><div class="td ok">不影响</div>
+        <div class="td strong">SR-IOV direct / LinuxBridge / 非 OVS tap</div><div class="td">不应挂载</div><div class="td"><span class="tag amber">unsupported + bypass</span></div><div class="td ok">不影响</div>
+        <div class="td strong">普通 VM OVS tap，但没有 ACL binding</div><div class="td">当前实现可能挂载</div><div class="td"><span class="tag blue">not_requested + bypass</span></div><div class="td ok">不影响</div>
+        <div class="td strong">有 ACL binding，策略合法</div><div class="td">挂载</div><div class="td"><span class="tag green">ready + enforce</span></div><div class="td">只按 ACL 过滤该 port</div>
+        <div class="td strong">有 ACL binding，但策略缺失、规则非法或编译失败</div><div class="td">可能已挂载</div><div class="td"><span class="tag red">degraded + bypass</span></div><div class="td ok">不影响</div>
+      </div>
+      <div class="statement">当前 MVP 允许“eBPF 在场但 ACL bypass”。后续优化可以进一步做到“无任何 domain 需求的端口不 attach”。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="故障场景矩阵">
+      <p class="eyebrow">failure matrix</p>
+      <h2>不同组件挂掉时，ACL 生效性和 OVS 转发性要分开判断</h2>
+      <div class="matrix failure-matrix">
+        <div class="th">故障场景</div><div class="th">ACL 是否继续生效</div><div class="th">状态表达</div><div class="th">OVS 原转发</div>
+        <div class="td strong">neutron-aria-agent 挂了</div><div class="td">已下发旧 ACL 通常继续；新策略不同步</div><div class="td"><span class="tag amber">heartbeat stale</span></div><div class="td ok">不影响</div>
+        <div class="td strong">aria-agent / aria-datapath 挂了</div><div class="td">取决于 eBPF link/map 是否仍被内核持有；不能承诺一定继续</div><div class="td"><span class="tag red">datapath degraded</span></div><div class="td ok">不影响</div>
+        <div class="td strong">eBPF attach 失败</div><div class="td">不生效，或回滚到未挂载</div><div class="td"><span class="tag red">attach error</span></div><div class="td ok">不影响</div>
+        <div class="td strong">map 更新 / ACL apply 失败</div><div class="td">应停在旧 committed 状态或 bypass，不能半套生效</div><div class="td"><span class="tag red">degraded + bypass</span></div><div class="td ok">不影响</div>
+        <div class="td strong">OVS 自身挂了</div><div class="td">ACL 状态不能代表业务通断</div><div class="td"><span class="tag muted">OVS 维护事件</span></div><div class="td warn">由 OVS 自己恢复</div>
+      </div>
+      <div class="statement">汇报时要强调：ACL 是否生效是安全能力问题；OVS 是否转发是基础网络问题，Aria 不重启、不接管 OVS。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="如何做到不影响 OVS">
+      <p class="eyebrow">mechanism</p>
+      <h2>Fail-open 不是一句口号，而是控制面、事务层和 eBPF 热路径共同保证</h2>
+      <div class="flow-list mechanism-list">
+        <div><b>1</b><span><strong>控制面先判定有效性。</strong>没有 binding、策略缺失、端口不支持、规则非法时，生成 <code>bypass</code> 状态，而不是生成危险的 drop 规则。</span></div>
+        <div><b>2</b><span><strong>apply 前先关闭 ACL gate。</strong>端口更新时先 <code>acl_enabled=false</code>，清理旧 Neutron ACL，再写新 group/policy，最后才 enable。</span></div>
+        <div><b>3</b><span><strong>事务只提交收敛状态。</strong>WAL intent/commit、generation、desired_hash 保证失败不会被误报成 ready。</span></div>
+        <div><b>4</b><span><strong>eBPF 默认 PASS。</strong>XDP 默认 <code>XDP_PASS</code>，TC 默认 <code>TC_ACT_OK</code>；解析失败、map 缺失、内部异常都走放行。</span></div>
+        <div><b>5</b><span><strong>只在 ready/enforce 时 drop。</strong>只有 ACL gate 打开、规则明确命中 deny/drop 时，eBPF 才能丢包。</span></div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="最终硬约束">
+      <p class="eyebrow">hard rules</p>
+      <h2>后续开发必须守住这 6 条硬约束，避免“安全增强”变成“转发风险”</h2>
+      <div class="takeaways hard-rules">
+        <p><b>1.</b> Aria runtime 永远不主动重启 OVS、OVS agent、neutron-server。</p>
+        <p><b>2.</b> eBPF 入口默认放行；未知状态、解析失败、map miss 不允许默认 drop。</p>
+        <p><b>3.</b> ACL 只有 <code>ready + enforce</code> 且 per-port gate 打开时才能丢包。</p>
+        <p><b>4.</b> 任何 apply 失败必须进入 <code>degraded + bypass</code> 或保持上一代 committed 状态。</p>
+        <p><b>5.</b> 无支持能力的 port 必须显式 <code>unsupported/not_applicable + bypass</code>，不能静默接管。</p>
+        <p><b>6.</b> 监控必须区分 ACL enforcement 状态和 OVS forwarding 状态，不能混成一个 pass/fail。</p>
+      </div>
+      <div class="statement">这组约束就是最终产品原则：Aria 可以失效，业务转发不能因为 Aria 失效而中断。</div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="产品话术">
+      <p class="eyebrow">product wording</p>
+      <h2>对业务方可以这样讲</h2>
+      <div class="flow-list">
+        <div><b>ACL</b><span>Aria 为 OpenStack 普通虚机 OVS tap 端口提供独立 ACL 增强能力；控制面走 Neutron，数据面走本机 eBPF。</span></div>
+        <div><b>QoS</b><span>Aria QoS 的产品入口保持统一命名，底层复用 Neutron QoS 策略语义，后续由 Aria datapath 执行。</span></div>
+        <div><b>Mirror</b><span>Aria Mirror 是面向 Aria 管理接口的独立镜像能力，支持 global_l2 与按 IP/协议/方向的选择性镜像。</span></div>
+        <div><b>失败行为</b><span>Aria 异常时优先进入 degraded/bypass，不主动破坏 OVS 原有转发；状态通过 heartbeat 和 port status 暴露。</span></div>
+      </div>
+      <footer></footer>
+    </section>
+
+    <section class="slide" data-title="分享结论">
+      <p class="eyebrow">takeaways</p>
+      <h2>最后要让听众记住这几件事</h2>
+      <div class="takeaways">
+        <p><b>1.</b> Aria 是 OpenStack/OVS-aware eBPF 数据面增强平台，不是 OVS 替代品。</p>
+        <p><b>2.</b> Neutron Server 是生产 northbound，Aria 不绕过 Neutron 创建租户策略。</p>
+        <p><b>3.</b> ACL 使用独立 <code>aria-acl</code>，不复用 Security Group。</p>
+        <p><b>4.</b> QoS 产品入口叫 <code>aria-qos</code>，底层复用 Neutron QoS 语义。</p>
+        <p><b>5.</b> Mirror 建议独立 <code>aria-mirror</code>，避免复用已有 mirror API 的语义歧义。</p>
+        <p><b>6.</b> 事务模型是最终一致、可恢复、可审计，失败时优先保护原业务转发。</p>
+        <p><b>7.</b> SR-IOV legacy/direct 当前只做识别、跳过、状态可见。</p>
+        <p><b>8.</b> 后续真正支持 SR-IOV，推荐走 switchdev / VF representor 路线。</p>
+      </div>
+      <footer></footer>
+    </section>
+  </main>
+
+  <div class="toolbar">
+    <button id="prev" aria-label="上一页">‹</button>
+    <span id="page-indicator">1 / 1</span>
+    <span class="html-ppt-hint">S 演讲模式</span>
+    <button id="next" aria-label="下一页">›</button>
+  </div>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({
+      startOnLoad: true,
+      securityLevel: "loose",
+      theme: "base",
+      themeVariables: {
+        fontFamily: "Inter, system-ui, sans-serif",
+        primaryColor: "#e8f1ff",
+        primaryTextColor: "#102340",
+        primaryBorderColor: "#4278d8",
+        lineColor: "#53657d",
+        secondaryColor: "#e8f8ee",
+        tertiaryColor: "#fff2d8"
+      }
+    });
+  </script>
+  <script>
+    (() => {
+      const slides = Array.from(document.querySelectorAll(".slide"));
+      const esc = (value) => String(value || "").replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[ch]));
+
+      const focusedNotes = {
+        "封面": [
+          "开场先给听众定调：今天讲的不是一个单点 ACL 功能，而是 <strong>OpenStack 场景下的 eBPF 数据面增强平台</strong>。",
+          "强调三个边界：<strong>Neutron 做入口</strong>，<strong>OVS 做基础转发</strong>，<strong>Aria 做本机 tap 侧增强执行</strong>。这三个角色分清楚，后面所有架构选择都会更容易理解。",
+          "最后自然过渡到下一页：先不急着看实现，先看 eBPF 本身到底强在哪里。"
+        ],
+        "eBPF 能力地图": [
+          "这一页先讲 <strong>eBPF 的能力地图</strong>。不要把 eBPF 简单理解成包过滤，它更像一个安全受限、可动态加载的内核扩展机制。",
+          "讲的时候抓住六类能力：网络数据面、流量治理、安全控制、可观测、性能诊断、运行可靠性。我们产品真正用到的是这些能力的组合，而不是某一个 hook 点。",
+          "过渡句：能力很强不代表产品自动成熟，接下来要看我们自己的 agent 已经把哪些能力落到了代码里。"
+        ],
+        "当前 agent 已实现能力": [
+          "这一页汇报当前代码已经具备的能力。重点说清楚：<strong>ACL 是当前产品成熟主线</strong>，已经接入 Neutron、snapshot、UDS apply 和 port status。",
+          "同时也要如实表达边界：QoS、Mirror、TCPRT、SSL/HTTP 这些代码能力已经存在，但还没有全部变成 OpenStack 产品闭环。这个说法比较稳，不会过度承诺。",
+          "最后强调：后续扩展要按 domain 渐进产品化，不能因为 eBPF 能做很多事就一次性全做。"
+        ],
+        "Fail-open 总原则": [
+          "这一页非常关键，要讲给运维和架构同事听。我们的原则是：<strong>Aria 可以失效，但不能因为 Aria 失效把 OVS 原业务转发打断</strong>。",
+          "这里要把 ACL 生效性和 OVS 转发性分开。ACL 不 ready 时可以 bypass 或 degraded，但是不能主动重启 OVS，也不能把未知状态当成 drop。",
+          "过渡到后面故障矩阵时，可以说：接下来我们按具体场景拆开看，哪些情况 ACL 继续生效，哪些情况只保证 OVS 转发不受影响。"
+        ],
+        "最终硬约束": [
+          "这一页是后续开发必须守住的红线。尤其第一条：<strong>Aria runtime 永远不主动重启 OVS、OVS agent、neutron-server</strong>。",
+          "还要强调 eBPF 热路径默认 PASS，只有 ready + enforce 且明确命中 deny/drop 时才能丢包。这个原则能防止安全增强变成转发风险。",
+          "结尾可以收一下：这些约束不是保守，而是云平台产品必须具备的故障边界。"
+        ],
+        "分享结论": [
+          "最后一页不要逐条念完。抓四个结论：<strong>不是 OVS 替代品</strong>，<strong>不绕过 Neutron</strong>，<strong>ACL 已经形成当前主线</strong>，<strong>失败时优先保护原业务转发</strong>。",
+          "QoS、Mirror、SR-IOV 这些是后续路线，不要在结尾扩太大。让听众带走一个清晰判断：当前方案边界清楚，ACL 主线成熟，扩展能力按 domain 演进。",
+          "最后留给讨论的问题可以是：下一阶段优先补 QoS、Mirror，还是先做 counters 页面展示和运维闭环。"
+        ]
+      };
+
+      function fallbackNote(slide) {
+        const title = slide.getAttribute("data-title") || "这一页";
+        const heading = (slide.querySelector("h1, h2") || {}).textContent || title;
+        const tokens = Array.from(slide.querySelectorAll(".td.strong, .domain h3, .flow-list b, .takeaways b, li"))
+          .map((node) => node.textContent.trim().replace(/\s+/g, " "))
+          .filter(Boolean)
+          .slice(0, 5)
+          .join("、");
+        const keywords = tokens || title;
+        return [
+          `这一页重点讲 <strong>${esc(title)}</strong>。先用标题把听众拉到同一个上下文：${esc(heading.trim())}`,
+          `讲的时候抓住这些关键词：<strong>${esc(keywords)}</strong>。不要逐项念屏幕，重点说明它们和 OpenStack、OVS、eBPF 主线的关系。`,
+          "最后用一句话过渡：这个点解决的是能力、边界或运维风险问题，下一页继续看它在整体方案里的位置。"
+        ];
+      }
+
+      slides.forEach((slide, index) => {
+        const footer = slide.querySelector("footer");
+        if (footer) {
+          footer.textContent = `${String(index + 1).padStart(2, "0")} / ${String(slides.length).padStart(2, "0")}`;
+        }
+        if (!slide.querySelector(".notes, aside.notes, .speaker-notes")) {
+          const title = slide.getAttribute("data-title") || "";
+          const lines = focusedNotes[title] || fallbackNote(slide);
+          const aside = document.createElement("aside");
+          aside.className = "notes";
+          aside.innerHTML = lines.map((line) => `<p>${line}</p>`).join("");
+          slide.appendChild(aside);
+        }
+      });
+    })();
+  </script>
+  <script src="assets/runtime.js"></script>
+  <script>
+    (() => {
+      const slides = Array.from(document.querySelectorAll(".slide"));
+      const indicator = document.getElementById("page-indicator");
+      const prev = document.getElementById("prev");
+      const next = document.getElementById("next");
+
+      function activeIndex() {
+        const found = slides.findIndex((slide) => slide.classList.contains("is-active"));
+        return found >= 0 ? found : 0;
+      }
+
+      function updateIndicator() {
+        if (!indicator) return;
+        indicator.textContent = `${activeIndex() + 1} / ${slides.length}`;
+      }
+
+      function sendKey(key) {
+        document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+      }
+
+      prev?.addEventListener("click", () => sendKey("ArrowLeft"));
+      next?.addEventListener("click", () => sendKey("ArrowRight"));
+
+      const observer = new MutationObserver(updateIndicator);
+      slides.forEach((slide) => observer.observe(slide, { attributes: true, attributeFilter: ["class"] }));
+      updateIndicator();
+      setTimeout(updateIndicator, 0);
+    })();
+  </script>
+</body>
+</html>

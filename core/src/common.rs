@@ -8,9 +8,28 @@ pub struct PolicyKey {
     pub dst_id: u32,
     pub proto: u8,
     pub direction: u8, // 0=ingress, 1=egress
-    pub pad: [u8; 2],
+    pub bank: u8,
+    pub pad: [u8; 1],
 }
 unsafe impl Pod for PolicyKey {}
+
+pub const ACL_BANK_PRIMARY: u8 = 0;
+pub const ACL_BANK_SHADOW: u8 = 1;
+
+#[inline]
+pub fn normalize_acl_bank(bank: u8) -> u8 {
+    bank & 1
+}
+
+#[inline]
+pub fn acl_next_bank(bank: u8) -> u8 {
+    normalize_acl_bank(bank ^ 1)
+}
+
+#[inline]
+pub fn acl_banked_tap_id(tap_id: u32, bank: u8) -> u32 {
+    tap_id.saturating_mul(2) | normalize_acl_bank(bank) as u32
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -69,7 +88,8 @@ pub struct CtValue {
     pub matched_proto: u8,
     pub matched_src_id: u32,
     pub matched_dst_id: u32,
-    pub _pad: [u8; 4],
+    pub matched_bank: u8,
+    pub _pad: [u8; 3],
     pub last_seen: u64,
     pub pkt_count: u64,
     pub byte_count: u64,
@@ -330,7 +350,8 @@ pub struct TapConfig {
     pub qos_enabled: u8,
     pub mirror_enabled: u8,
     pub tcprt_enabled: u8,
-    pub pad: [u8; 2],
+    pub acl_active_bank: u8,
+    pub pad: [u8; 1],
 }
 unsafe impl Pod for TapConfig {}
 
@@ -343,7 +364,8 @@ impl From<FirewallConfig> for TapConfig {
             qos_enabled: value.qos_enabled,
             mirror_enabled: value.mirror_enabled,
             tcprt_enabled: value.tcprt_enabled,
-            pad: [0; 2],
+            acl_active_bank: ACL_BANK_PRIMARY,
+            pad: [0; 1],
         }
     }
 }
@@ -411,11 +433,27 @@ unsafe impl Pod for SslWriteScratch {}
 
 #[cfg(test)]
 mod tests {
-    use super::SslErrorEvent;
+    use super::{acl_banked_tap_id, acl_next_bank, CtValue, PolicyKey, SslErrorEvent, TapConfig};
 
     #[test]
     fn ssl_error_event_layout_matches_ebpf() {
         assert_eq!(core::mem::size_of::<SslErrorEvent>(), 32);
+    }
+
+    #[test]
+    fn acl_shadow_bank_layout_reuses_existing_padding() {
+        assert_eq!(core::mem::size_of::<PolicyKey>(), 16);
+        assert_eq!(core::mem::size_of::<TapConfig>(), 8);
+        assert_eq!(core::mem::size_of::<CtValue>(), 40);
+    }
+
+    #[test]
+    fn acl_shadow_bank_helpers_encode_bank_without_touching_group_ids() {
+        assert_eq!(acl_banked_tap_id(7, 0), 14);
+        assert_eq!(acl_banked_tap_id(7, 1), 15);
+        assert_eq!(acl_next_bank(0), 1);
+        assert_eq!(acl_next_bank(1), 0);
+        assert_eq!(acl_next_bank(42), 1);
     }
 }
 

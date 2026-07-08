@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::IntoResponse,
+    Json,
 };
 
 use crate::control_plane::{ControlPlane, ControlPlaneError};

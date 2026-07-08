@@ -2,12 +2,11 @@ use super::*;
 
 fn init_ct_config_pinned(pin_path: &str) -> Result<(), String> {
     let map_path = format!("{}/CT_CONFIG", pin_path);
-    let map_data = MapData::from_pin(&map_path)
-        .map_err(|e| format!("open pinned CT_CONFIG: {:?}", e))?;
-    let mut map = aya::maps::HashMap::<_, u32, CtConfig>::try_from(aya::maps::Map::HashMap(
-        map_data,
-    ))
-    .map_err(|e| format!("convert CT_CONFIG to HashMap: {:?}", e))?;
+    let map_data =
+        MapData::from_pin(&map_path).map_err(|e| format!("open pinned CT_CONFIG: {:?}", e))?;
+    let mut map =
+        aya::maps::HashMap::<_, u32, CtConfig>::try_from(aya::maps::Map::HashMap(map_data))
+            .map_err(|e| format!("convert CT_CONFIG to HashMap: {:?}", e))?;
 
     let config = CtConfig {
         tcp_established_ns: 300_000_000_000,
@@ -124,9 +123,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
         match bpf
             .map_mut("SRC_IPV6_TRIE")
             .ok_or_else(|| "SRC_IPV6_TRIE not found".to_string())
-            .and_then(|m| {
-                LpmTrie::<_, [u8; 20], u32>::try_from(m).map_err(|e| format!("{:?}", e))
-            })
+            .and_then(|m| LpmTrie::<_, [u8; 20], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
         {
             Ok(mut map) => {
                 for (octets, prefix, id) in &src_ipv6 {
@@ -144,9 +141,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
         match bpf
             .map_mut("DST_IPV6_TRIE")
             .ok_or_else(|| "DST_IPV6_TRIE not found".to_string())
-            .and_then(|m| {
-                LpmTrie::<_, [u8; 20], u32>::try_from(m).map_err(|e| format!("{:?}", e))
-            })
+            .and_then(|m| LpmTrie::<_, [u8; 20], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
         {
             Ok(mut map) => {
                 for (octets, prefix, id) in &dst_ipv6 {
@@ -160,6 +155,79 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
         }
     }
 
+    let acl_tap_id = acl_banked_tap_id(tap_id, 0);
+    {
+        match bpf
+            .map_mut("ACL_SRC_IPV4_TRIE")
+            .ok_or_else(|| "ACL_SRC_IPV4_TRIE not found".to_string())
+            .and_then(|m| LpmTrie::<_, [u8; 8], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
+        {
+            Ok(mut map) => {
+                for (octets, prefix, id) in &src_ipv4 {
+                    let key = tap_lpm_key_v4(acl_tap_id, *octets, *prefix);
+                    if let Err(e) = map.insert(&key, id, 0) {
+                        errors.push(format!("ACL_SRC_IPV4_TRIE id={}: {:?}", id, e));
+                    }
+                }
+            }
+            Err(e) => errors.push(format!("ACL_SRC_IPV4_TRIE: {}", e)),
+        }
+    }
+
+    {
+        match bpf
+            .map_mut("ACL_DST_IPV4_TRIE")
+            .ok_or_else(|| "ACL_DST_IPV4_TRIE not found".to_string())
+            .and_then(|m| LpmTrie::<_, [u8; 8], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
+        {
+            Ok(mut map) => {
+                for (octets, prefix, id) in &dst_ipv4 {
+                    let key = tap_lpm_key_v4(acl_tap_id, *octets, *prefix);
+                    if let Err(e) = map.insert(&key, id, 0) {
+                        errors.push(format!("ACL_DST_IPV4_TRIE id={}: {:?}", id, e));
+                    }
+                }
+            }
+            Err(e) => errors.push(format!("ACL_DST_IPV4_TRIE: {}", e)),
+        }
+    }
+
+    {
+        match bpf
+            .map_mut("ACL_SRC_IPV6_TRIE")
+            .ok_or_else(|| "ACL_SRC_IPV6_TRIE not found".to_string())
+            .and_then(|m| LpmTrie::<_, [u8; 20], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
+        {
+            Ok(mut map) => {
+                for (octets, prefix, id) in &src_ipv6 {
+                    let key = tap_lpm_key_v6(acl_tap_id, *octets, *prefix);
+                    if let Err(e) = map.insert(&key, id, 0) {
+                        errors.push(format!("ACL_SRC_IPV6_TRIE id={}: {:?}", id, e));
+                    }
+                }
+            }
+            Err(e) => errors.push(format!("ACL_SRC_IPV6_TRIE: {}", e)),
+        }
+    }
+
+    {
+        match bpf
+            .map_mut("ACL_DST_IPV6_TRIE")
+            .ok_or_else(|| "ACL_DST_IPV6_TRIE not found".to_string())
+            .and_then(|m| LpmTrie::<_, [u8; 20], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
+        {
+            Ok(mut map) => {
+                for (octets, prefix, id) in &dst_ipv6 {
+                    let key = tap_lpm_key_v6(acl_tap_id, *octets, *prefix);
+                    if let Err(e) = map.insert(&key, id, 0) {
+                        errors.push(format!("ACL_DST_IPV6_TRIE id={}: {:?}", id, e));
+                    }
+                }
+            }
+            Err(e) => errors.push(format!("ACL_DST_IPV6_TRIE: {}", e)),
+        }
+    }
+
     {
         let mut written_bitmaps: HashSet<u32> = HashSet::new();
         match bpf
@@ -167,8 +235,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
             .ok_or_else(|| "PORT_BITMAP_POOL not found".to_string())
             .and_then(|m| {
                 aya::maps::HashMap::<_, PortKey, u8>::try_from(m).map_err(|e| format!("{:?}", e))
-            })
-        {
+            }) {
             Ok(mut port_pool) => {
                 for rule in &valid_rules {
                     if let (Some(idx), Some(ref ports)) = (rule.bitmap_idx, &rule.ports) {
@@ -215,8 +282,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
             .and_then(|m| {
                 aya::maps::HashMap::<_, PolicyKey, PolicyValue>::try_from(m)
                     .map_err(|e| format!("{:?}", e))
-            })
-        {
+            }) {
             Ok(mut policy_table) => {
                 for rule in &valid_rules {
                     let is_all_ports = match &rule.ports {
@@ -234,7 +300,8 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
                         dst_id: rule.dst_group_id,
                         proto: rule.proto,
                         direction: rule.direction,
-                        pad: [0; 2],
+                        bank: 0,
+                        pad: [0; 1],
                     };
                     let value = PolicyValue {
                         action: stored_policy_action(rule.action, has_port_filter != 0),
@@ -268,8 +335,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
             .ok_or_else(|| "CT_CONFIG not found".to_string())
             .and_then(|m| {
                 aya::maps::HashMap::<_, u32, CtConfig>::try_from(m).map_err(|e| format!("{:?}", e))
-            })
-        {
+            }) {
             Ok(mut map) => {
                 if let Err(e) = map.insert(&0u32, &config, 0) {
                     errors.push(format!("CT_CONFIG: {:?}", e));
@@ -284,9 +350,9 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
             .map_mut("QOS_CONFIG")
             .ok_or_else(|| "QOS_CONFIG not found".to_string())
             .and_then(|m| {
-                aya::maps::HashMap::<_, QosKey, QosConfig>::try_from(m).map_err(|e| format!("{:?}", e))
-            })
-        {
+                aya::maps::HashMap::<_, QosKey, QosConfig>::try_from(m)
+                    .map_err(|e| format!("{:?}", e))
+            }) {
             Ok(mut map) => {
                 for qr in &state.qos_rules {
                     let key = QosKey {
@@ -368,8 +434,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
             .and_then(|m| {
                 aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(m)
                     .map_err(|e| format!("{:?}", e))
-            })
-        {
+            }) {
             Ok(mut map) => {
                 if let Err(e) = map.insert(&0u32, &cfg, 0) {
                     errors.push(format!("FIREWALL_CONFIG: {:?}", e));
@@ -395,16 +460,15 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
                 0
             },
             tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
-            pad: [0; 2],
+            acl_active_bank: 0,
+            pad: [0; 1],
         };
         match bpf
             .map_mut("TAP_CONFIG_MAP")
             .ok_or_else(|| "TAP_CONFIG_MAP not found".to_string())
             .and_then(|m| {
-                aya::maps::HashMap::<_, u32, TapConfig>::try_from(m)
-                    .map_err(|e| format!("{:?}", e))
-            })
-        {
+                aya::maps::HashMap::<_, u32, TapConfig>::try_from(m).map_err(|e| format!("{:?}", e))
+            }) {
             Ok(mut map) => {
                 if let Err(e) = map.insert(&tap_id, &tap_cfg, 0) {
                     errors.push(format!("TAP_CONFIG_MAP tap_id={}: {:?}", tap_id, e));
@@ -427,7 +491,12 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
         for err in &errors {
             warn!(error = %err, "replay error");
         }
-        let preview = errors.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
+        let preview = errors
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
         let suffix = if errors.len() > 3 {
             format!("; ... {} more", errors.len() - 3)
         } else {
@@ -519,7 +588,8 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
                 0
             },
             tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
-            pad: [0; 2],
+            acl_active_bank: 0,
+            pad: [0; 1],
         };
         if let Err(e) = write_tap_config(runtime, tap_cfg) {
             errors.push(format!("TAP_CONFIG_MAP tap_id={}: {}", tap_id, e));
@@ -537,6 +607,14 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
                 errors.push(format!("group '{}' cidr '{}' dst: {}", name, cidr, e));
                 failed = true;
             }
+            if let Err(e) = add_acl_network_in_bank("src", cidr, group.id, 0, runtime, "") {
+                errors.push(format!("group '{}' cidr '{}' acl src: {}", name, cidr, e));
+                failed = true;
+            }
+            if let Err(e) = add_acl_network_in_bank("dst", cidr, group.id, 0, runtime, "") {
+                errors.push(format!("group '{}' cidr '{}' acl dst: {}", name, cidr, e));
+                failed = true;
+            }
             if !failed {
                 group_count += 1;
             }
@@ -549,7 +627,9 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
         let write_port_set = match (rule.bitmap_idx, ports) {
             (Some(idx), Some(ports)) => {
                 let ports = ports.trim();
-                !ports.is_empty() && !ports.eq_ignore_ascii_case("all") && written_bitmaps.insert(idx)
+                !ports.is_empty()
+                    && !ports.eq_ignore_ascii_case("all")
+                    && written_bitmaps.insert(idx)
             }
             _ => false,
         };
@@ -622,7 +702,11 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
         };
 
         if let Err(e) = result {
-            let scope = if mr.is_global { "MIRROR_GLOBAL" } else { "MIRROR_POLICY" };
+            let scope = if mr.is_global {
+                "MIRROR_GLOBAL"
+            } else {
+                "MIRROR_POLICY"
+            };
             errors.push(format!(
                 "{} target={} dir={}: {}",
                 scope, mr.target_iface, mr.direction, e
@@ -639,11 +723,19 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
         "pinned replay complete"
     );
     if !errors.is_empty() {
-        warn!(error_count = errors.len(), "pinned replay encountered errors");
+        warn!(
+            error_count = errors.len(),
+            "pinned replay encountered errors"
+        );
         for err in &errors {
             warn!(error = %err, "pinned replay error");
         }
-        let preview = errors.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
+        let preview = errors
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
         let suffix = if errors.len() > 3 {
             format!("; ... {} more", errors.len() - 3)
         } else {

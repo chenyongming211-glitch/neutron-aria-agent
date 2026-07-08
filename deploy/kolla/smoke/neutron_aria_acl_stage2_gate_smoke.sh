@@ -76,6 +76,11 @@ smoke() {
         bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_live_downlink_smoke.sh"
     fi
 
+    if [ "${RUN_ACTIVE_TRAFFIC_SMOKE:-false}" = "true" ]; then
+        log "Running active traffic ACL smoke"
+        bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_active_traffic_smoke.sh"
+    fi
+
     if [ "${RUN_LIVE_EGRESS_SMOKE:-false}" = "true" ]; then
         log "Running live egress ACL smoke"
         bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_acl_live_egress_smoke.sh"

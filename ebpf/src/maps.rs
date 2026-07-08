@@ -41,6 +41,18 @@ pub static SRC_IPV6_TRIE: LpmTrie<[u8; 20], u32> = LpmTrie::with_max_entries(500
 #[map(name = "DST_IPV6_TRIE")]
 pub static DST_IPV6_TRIE: LpmTrie<[u8; 20], u32> = LpmTrie::with_max_entries(5000, 0);
 
+#[map(name = "ACL_SRC_IPV4_TRIE")]
+pub static ACL_SRC_IPV4_TRIE: LpmTrie<[u8; 8], u32> = LpmTrie::with_max_entries(20000, 0);
+
+#[map(name = "ACL_DST_IPV4_TRIE")]
+pub static ACL_DST_IPV4_TRIE: LpmTrie<[u8; 8], u32> = LpmTrie::with_max_entries(20000, 0);
+
+#[map(name = "ACL_SRC_IPV6_TRIE")]
+pub static ACL_SRC_IPV6_TRIE: LpmTrie<[u8; 20], u32> = LpmTrie::with_max_entries(10000, 0);
+
+#[map(name = "ACL_DST_IPV6_TRIE")]
+pub static ACL_DST_IPV6_TRIE: LpmTrie<[u8; 20], u32> = LpmTrie::with_max_entries(10000, 0);
+
 #[map(name = "POLICY_TABLE")]
 pub static POLICY_TABLE: HashMap<PolicyKey, PolicyValue> = HashMap::with_max_entries(65536, 0);
 
@@ -213,7 +225,8 @@ pub static TRACE_EVENT_BUF: PerCpuArray<TraceEvent> = PerCpuArray::with_max_entr
 pub static TRACE_EVENT_V6_BUF: PerCpuArray<TraceEventV6> = PerCpuArray::with_max_entries(1, 0);
 
 #[map(name = "TRACE_STREAM_EVENT_BUF")]
-pub static TRACE_STREAM_EVENT_BUF: PerCpuArray<TraceStreamEvent> = PerCpuArray::with_max_entries(1, 0);
+pub static TRACE_STREAM_EVENT_BUF: PerCpuArray<TraceStreamEvent> =
+    PerCpuArray::with_max_entries(1, 0);
 
 // --- SSL Observability maps ---
 

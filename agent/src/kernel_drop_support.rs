@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use aria_core::common::{
-    KERNEL_DROP_FLAG_HAS_LOCATION, KERNEL_DROP_FLAG_HAS_PROTOCOL, KERNEL_DROP_FLAG_HAS_REASON,
-    KernelDropConfig,
+    KernelDropConfig, KERNEL_DROP_FLAG_HAS_LOCATION, KERNEL_DROP_FLAG_HAS_PROTOCOL,
+    KERNEL_DROP_FLAG_HAS_REASON,
 };
 use regex::Regex;
 
@@ -85,6 +85,7 @@ pub fn load_tracepoint_program(bpf: &mut aya::Ebpf, prog_name: &str) -> Result<(
     }
 }
 
+#[allow(dead_code)]
 pub fn pin_program_if_needed(
     bpf: &mut aya::Ebpf,
     prog_name: &str,
@@ -124,6 +125,7 @@ pub fn replace_pinned_program(
         .map_err(|e| format!("{} pin: {:?}", prog_name, e))
 }
 
+#[allow(dead_code)]
 pub fn attach_tracepoint_if_needed(
     bpf: &mut aya::Ebpf,
     prog_name: &str,
@@ -215,8 +217,8 @@ pub fn replace_pinned_tracepoint_link(
     }
 }
 
-pub fn resolve_kernel_drop_config()
--> Result<(KernelDropConfig, std::collections::HashMap<u16, String>), String> {
+pub fn resolve_kernel_drop_config(
+) -> Result<(KernelDropConfig, std::collections::HashMap<u16, String>), String> {
     let trace_format = parse_tracepoint_format()?;
     let btf = BtfBlob::load(Path::new(KERNEL_BTF_PATH))?;
 

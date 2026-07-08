@@ -104,6 +104,31 @@ class SnapshotStateStore(object):
             "reused_pending": reused_pending,
         }
 
+    def prepare_snapshot_at_generation(self, snapshot, generation, desired_hash=None):
+        generation = _int_value(generation)
+        if generation <= 0:
+            generation = 1
+        desired_hash = desired_hash or desired_snapshot_hash(snapshot)
+        pending_generation = _int_value(self._state.get("pending_generation"))
+        pending_hash = self._state.get("pending_desired_hash")
+        reused_pending = bool(
+            pending_generation and
+            pending_hash == desired_hash and
+            pending_generation == generation
+        )
+        self._state["pending_generation"] = generation
+        self._state["pending_desired_hash"] = desired_hash
+        self._state["pending_snapshot_ports"] = len(snapshot.get("ports") or [])
+        self._state["pending_projected_port_ids"] = _projected_port_ids(snapshot)
+        self._state["pending_since"] = _now()
+        self._state["updated_at"] = _now()
+        self._write()
+        return {
+            "generation": generation,
+            "desired_hash": desired_hash,
+            "reused_pending": reused_pending,
+        }
+
     def prepare_scoped_snapshot(self, snapshot, minimum_generation=0):
         minimum_generation = _int_value(minimum_generation)
         desired_hash = desired_snapshot_hash(snapshot)
@@ -156,6 +181,22 @@ class SnapshotStateStore(object):
             self._state["pending_since"] = None
         self._state["updated_at"] = _now()
         self._write()
+
+    def clear_pending_snapshot(self, reason=None):
+        pending = self.pending_snapshot()
+        self._state["pending_generation"] = None
+        self._state["pending_desired_hash"] = None
+        self._state["pending_snapshot_ports"] = 0
+        self._state["pending_projected_port_ids"] = []
+        self._state["pending_since"] = None
+        if pending:
+            self._state["last_cleared_pending_generation"] = pending["generation"]
+            self._state["last_cleared_pending_desired_hash"] = pending["desired_hash"]
+            self._state["last_cleared_pending_reason"] = reason
+            self._state["last_cleared_pending_at"] = _now()
+        self._state["updated_at"] = _now()
+        self._write()
+        return pending
 
     def commit_scoped_snapshot(self, generation, desired_hash, managed_ports=0):
         generation = _int_value(generation)
@@ -287,6 +328,10 @@ class SnapshotStateStore(object):
         payload.setdefault("pending_delete_since", None)
         payload.setdefault("last_deleted_port_id", None)
         payload.setdefault("last_delete_committed_at", None)
+        payload.setdefault("last_cleared_pending_generation", None)
+        payload.setdefault("last_cleared_pending_desired_hash", None)
+        payload.setdefault("last_cleared_pending_reason", None)
+        payload.setdefault("last_cleared_pending_at", None)
         payload.setdefault("updated_at", None)
         return payload
 
@@ -343,6 +388,10 @@ class InMemorySnapshotStateStore(SnapshotStateStore):
         payload.setdefault("pending_delete_since", None)
         payload.setdefault("last_deleted_port_id", None)
         payload.setdefault("last_delete_committed_at", None)
+        payload.setdefault("last_cleared_pending_generation", None)
+        payload.setdefault("last_cleared_pending_desired_hash", None)
+        payload.setdefault("last_cleared_pending_reason", None)
+        payload.setdefault("last_cleared_pending_at", None)
         payload.setdefault("updated_at", None)
         return payload
 

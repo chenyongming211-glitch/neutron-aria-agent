@@ -73,6 +73,25 @@ fn parse_normalized_ports(ports_str: &str) -> Result<Vec<(u16, u16, u8)>, String
     parse_ports_impl(ports_str, 0, true)
 }
 
+fn policy_key_for_bank(
+    tap_id: u32,
+    src_id: u32,
+    dst_id: u32,
+    proto: u8,
+    direction: u8,
+    bank: u8,
+) -> PolicyKey {
+    PolicyKey {
+        tap_id,
+        src_id,
+        dst_id,
+        proto,
+        direction,
+        bank: normalize_acl_bank(bank),
+        pad: [0; 1],
+    }
+}
+
 pub fn add_policy(
     src_id: u32,
     dst_id: u32,
@@ -82,6 +101,34 @@ pub fn add_policy(
     bitmap_idx: Option<u32>,
     is_new_port_set: bool,
     direction: u8,
+    runtime: TapMapRuntime<'_>,
+    _ebpf_path: &str,
+) -> Result<(), String> {
+    add_policy_in_bank(
+        src_id,
+        dst_id,
+        proto,
+        action,
+        ports,
+        bitmap_idx,
+        is_new_port_set,
+        direction,
+        0,
+        runtime,
+        _ebpf_path,
+    )
+}
+
+pub fn add_policy_in_bank(
+    src_id: u32,
+    dst_id: u32,
+    proto: u8,
+    action: u8,
+    ports: Option<&str>,
+    bitmap_idx: Option<u32>,
+    is_new_port_set: bool,
+    direction: u8,
+    bank: u8,
     runtime: TapMapRuntime<'_>,
     _ebpf_path: &str,
 ) -> Result<(), String> {
@@ -122,7 +169,13 @@ pub fn add_policy(
                             return Err(format!("set port bitmap error: {:?}", e));
                         }
                     }
-                    info!(bitmap_idx = idx, start_port = start, end_port = end, rule_action, "programmed port bitmap range");
+                    info!(
+                        bitmap_idx = idx,
+                        start_port = start,
+                        end_port = end,
+                        rule_action,
+                        "programmed port bitmap range"
+                    );
                 }
             }
         }
@@ -130,14 +183,8 @@ pub fn add_policy(
 
     let mut policy_table = open_pinned_policy_table(pin_path)?;
 
-    let key = PolicyKey {
-        tap_id: runtime.tap_id,
-        src_id,
-        dst_id,
-        proto,
-        direction,
-        pad: [0; 2],
-    };
+    let bank = normalize_acl_bank(bank);
+    let key = policy_key_for_bank(runtime.tap_id, src_id, dst_id, proto, direction, bank);
     let value = PolicyValue {
         action: stored_policy_action(action, has_port_filter != 0),
         has_port_filter,
@@ -160,6 +207,7 @@ pub fn add_policy(
         proto,
         action,
         direction = %dir_str,
+        bank,
         ports = ?ports,
         "added policy"
     );
@@ -197,6 +245,18 @@ pub fn delete_policy(
     runtime: TapMapRuntime<'_>,
     _ebpf_path: &str,
 ) -> Result<(), String> {
+    delete_policy_in_bank(src_id, dst_id, proto, direction, 0, runtime, _ebpf_path)
+}
+
+pub fn delete_policy_in_bank(
+    src_id: u32,
+    dst_id: u32,
+    proto: u8,
+    direction: u8,
+    bank: u8,
+    runtime: TapMapRuntime<'_>,
+    _ebpf_path: &str,
+) -> Result<(), String> {
     let pin_path = runtime.pin_path;
     let prog_path = format!("{}/xdp_firewall", pin_path);
     if !std::path::Path::new(&prog_path).exists() {
@@ -205,19 +265,13 @@ pub fn delete_policy(
 
     let mut policy_table = open_pinned_policy_table(pin_path)?;
 
-    let key = PolicyKey {
-        tap_id: runtime.tap_id,
-        src_id,
-        dst_id,
-        proto,
-        direction,
-        pad: [0; 2],
-    };
+    let bank = normalize_acl_bank(bank);
+    let key = policy_key_for_bank(runtime.tap_id, src_id, dst_id, proto, direction, bank);
     policy_table
         .remove(&key)
         .map_err(|e| format!("remove policy error: {:?}", e))?;
 
-    info!(src_id, dst_id, proto, direction, "deleted policy");
+    info!(src_id, dst_id, proto, direction, bank, "deleted policy");
     Ok(())
 }
 
@@ -253,7 +307,7 @@ pub fn delete_port_set(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_normalized_ports, parse_ports, stored_policy_action};
+    use super::{parse_normalized_ports, parse_ports, policy_key_for_bank, stored_policy_action};
 
     #[test]
     fn parse_ports_inherits_rule_action_for_implicit_entries() {
@@ -282,5 +336,20 @@ mod tests {
         assert_eq!(stored_policy_action(1, false), 1);
         assert_eq!(stored_policy_action(0, true), 1);
         assert_eq!(stored_policy_action(1, true), 0);
+    }
+
+    #[test]
+    fn policy_key_for_bank_keeps_default_api_on_primary_bank() {
+        let key = policy_key_for_bank(9, 10, 11, 6, 1, 1);
+        assert_eq!(key.tap_id, 9);
+        assert_eq!(key.src_id, 10);
+        assert_eq!(key.dst_id, 11);
+        assert_eq!(key.proto, 6);
+        assert_eq!(key.direction, 1);
+        assert_eq!(key.bank, 1);
+        assert_eq!(key.pad, [0; 1]);
+
+        let normalized = policy_key_for_bank(9, 10, 11, 6, 1, 42);
+        assert_eq!(normalized.bank, 0);
     }
 }

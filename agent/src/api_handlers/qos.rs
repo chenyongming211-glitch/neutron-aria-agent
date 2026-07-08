@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use axum::{
-    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
+    Json,
 };
 
-use super::common::{AppState, err_response};
+use super::common::{err_response, AppState};
 use crate::control_plane::{ControlPlaneError, LocalWriteDomain};
 use aria_api::*;
 

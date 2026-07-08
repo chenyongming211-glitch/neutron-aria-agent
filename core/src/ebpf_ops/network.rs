@@ -18,6 +18,20 @@ pub fn parse_cidr(cidr: &str) -> Result<(IpAddr, u8), String> {
     }
 }
 
+fn network_map_name(direction: &str, is_ipv6: bool, acl: bool) -> Result<&'static str, String> {
+    match (direction, is_ipv6, acl) {
+        ("src", false, false) => Ok("SRC_IPV4_TRIE"),
+        ("dst", false, false) => Ok("DST_IPV4_TRIE"),
+        ("src", true, false) => Ok("SRC_IPV6_TRIE"),
+        ("dst", true, false) => Ok("DST_IPV6_TRIE"),
+        ("src", false, true) => Ok("ACL_SRC_IPV4_TRIE"),
+        ("dst", false, true) => Ok("ACL_DST_IPV4_TRIE"),
+        ("src", true, true) => Ok("ACL_SRC_IPV6_TRIE"),
+        ("dst", true, true) => Ok("ACL_DST_IPV6_TRIE"),
+        _ => Err("direction must be 'src' or 'dst'".to_string()),
+    }
+}
+
 pub fn add_network(
     direction: &str,
     cidr: &str,
@@ -25,7 +39,35 @@ pub fn add_network(
     runtime: TapMapRuntime<'_>,
     _ebpf_path: &str,
 ) -> Result<(), String> {
-    let pin_path = runtime.pin_path;
+    add_network_impl(direction, cidr, id, runtime.tap_id, runtime.pin_path, false)
+}
+
+pub fn add_acl_network_in_bank(
+    direction: &str,
+    cidr: &str,
+    id: u32,
+    bank: u8,
+    runtime: TapMapRuntime<'_>,
+    _ebpf_path: &str,
+) -> Result<(), String> {
+    add_network_impl(
+        direction,
+        cidr,
+        id,
+        acl_banked_tap_id(runtime.tap_id, bank),
+        runtime.pin_path,
+        true,
+    )
+}
+
+fn add_network_impl(
+    direction: &str,
+    cidr: &str,
+    id: u32,
+    lpm_tap_id: u32,
+    pin_path: &str,
+    acl: bool,
+) -> Result<(), String> {
     let prog_path = format!("{}/xdp_firewall", pin_path);
     if !std::path::Path::new(&prog_path).exists() {
         return Err("Firewall not started. Run 'system start' first.".to_string());
@@ -35,12 +77,8 @@ pub fn add_network(
 
     match ip {
         IpAddr::V4(v4) => {
-            let map_name = match direction {
-                "src" => "SRC_IPV4_TRIE",
-                "dst" => "DST_IPV4_TRIE",
-                _ => return Err("direction must be 'src' or 'dst'".to_string()),
-            };
-            let key = tap_lpm_key_v4(runtime.tap_id, v4.octets(), prefix_len);
+            let map_name = network_map_name(direction, false, acl)?;
+            let key = tap_lpm_key_v4(lpm_tap_id, v4.octets(), prefix_len);
             let mut lpm_map = open_pinned_lpm_v4(pin_path, map_name)?;
             lpm_map
                 .insert(&key, &id, 0)
@@ -48,12 +86,8 @@ pub fn add_network(
             info!(cidr = %cidr, id, direction = %direction, map = %map_name, "added IPv4 network");
         }
         IpAddr::V6(v6) => {
-            let map_name = match direction {
-                "src" => "SRC_IPV6_TRIE",
-                "dst" => "DST_IPV6_TRIE",
-                _ => return Err("direction must be 'src' or 'dst'".to_string()),
-            };
-            let key = tap_lpm_key_v6(runtime.tap_id, v6.octets(), prefix_len);
+            let map_name = network_map_name(direction, true, acl)?;
+            let key = tap_lpm_key_v6(lpm_tap_id, v6.octets(), prefix_len);
             let mut lpm_map = open_pinned_lpm_v6(pin_path, map_name)?;
             lpm_map
                 .insert(&key, &id, 0)
@@ -71,7 +105,33 @@ pub fn delete_network(
     runtime: TapMapRuntime<'_>,
     _ebpf_path: &str,
 ) -> Result<(), String> {
-    let pin_path = runtime.pin_path;
+    delete_network_impl(direction, cidr, runtime.tap_id, runtime.pin_path, false)
+}
+
+pub fn delete_acl_network_in_bank(
+    direction: &str,
+    cidr: &str,
+    _id: u32,
+    bank: u8,
+    runtime: TapMapRuntime<'_>,
+    _ebpf_path: &str,
+) -> Result<(), String> {
+    delete_network_impl(
+        direction,
+        cidr,
+        acl_banked_tap_id(runtime.tap_id, bank),
+        runtime.pin_path,
+        true,
+    )
+}
+
+fn delete_network_impl(
+    direction: &str,
+    cidr: &str,
+    lpm_tap_id: u32,
+    pin_path: &str,
+    acl: bool,
+) -> Result<(), String> {
     let prog_path = format!("{}/xdp_firewall", pin_path);
     if !std::path::Path::new(&prog_path).exists() {
         return Err("Firewall not started. Run 'system start' first.".to_string());
@@ -81,31 +141,68 @@ pub fn delete_network(
 
     match ip {
         IpAddr::V4(v4) => {
-            let map_name = match direction {
-                "src" => "SRC_IPV4_TRIE",
-                "dst" => "DST_IPV4_TRIE",
-                _ => return Err("direction must be 'src' or 'dst'".to_string()),
-            };
-            let key = tap_lpm_key_v4(runtime.tap_id, v4.octets(), prefix_len);
+            let map_name = network_map_name(direction, false, acl)?;
+            let key = tap_lpm_key_v4(lpm_tap_id, v4.octets(), prefix_len);
             let mut lpm_map = open_pinned_lpm_v4(pin_path, map_name)?;
             match lpm_map.remove(&key) {
                 Ok(()) => info!(cidr = %cidr, map = %map_name, "deleted IPv4 network"),
-                Err(_) => info!(cidr = %cidr, map = %map_name, "IPv4 network not present during delete"),
+                Err(_) => {
+                    info!(cidr = %cidr, map = %map_name, "IPv4 network not present during delete")
+                }
             }
         }
         IpAddr::V6(v6) => {
-            let map_name = match direction {
-                "src" => "SRC_IPV6_TRIE",
-                "dst" => "DST_IPV6_TRIE",
-                _ => return Err("direction must be 'src' or 'dst'".to_string()),
-            };
-            let key = tap_lpm_key_v6(runtime.tap_id, v6.octets(), prefix_len);
+            let map_name = network_map_name(direction, true, acl)?;
+            let key = tap_lpm_key_v6(lpm_tap_id, v6.octets(), prefix_len);
             let mut lpm_map = open_pinned_lpm_v6(pin_path, map_name)?;
             match lpm_map.remove(&key) {
                 Ok(()) => info!(cidr = %cidr, map = %map_name, "deleted IPv6 network"),
-                Err(_) => info!(cidr = %cidr, map = %map_name, "IPv6 network not present during delete"),
+                Err(_) => {
+                    info!(cidr = %cidr, map = %map_name, "IPv6 network not present during delete")
+                }
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::network_map_name;
+
+    #[test]
+    fn acl_network_maps_are_separate_from_shared_group_maps() {
+        assert_eq!(
+            network_map_name("src", false, false).unwrap(),
+            "SRC_IPV4_TRIE"
+        );
+        assert_eq!(
+            network_map_name("dst", false, false).unwrap(),
+            "DST_IPV4_TRIE"
+        );
+        assert_eq!(
+            network_map_name("src", true, false).unwrap(),
+            "SRC_IPV6_TRIE"
+        );
+        assert_eq!(
+            network_map_name("dst", true, false).unwrap(),
+            "DST_IPV6_TRIE"
+        );
+        assert_eq!(
+            network_map_name("src", false, true).unwrap(),
+            "ACL_SRC_IPV4_TRIE"
+        );
+        assert_eq!(
+            network_map_name("dst", false, true).unwrap(),
+            "ACL_DST_IPV4_TRIE"
+        );
+        assert_eq!(
+            network_map_name("src", true, true).unwrap(),
+            "ACL_SRC_IPV6_TRIE"
+        );
+        assert_eq!(
+            network_map_name("dst", true, true).unwrap(),
+            "ACL_DST_IPV6_TRIE"
+        );
+    }
 }

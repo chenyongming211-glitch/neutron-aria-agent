@@ -4,7 +4,12 @@ fn summarize_entries(entries: &BTreeSet<String>) -> String {
     if entries.is_empty() {
         return "none".to_string();
     }
-    entries.iter().take(3).cloned().collect::<Vec<_>>().join("; ")
+    entries
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn validate_entry_set(
@@ -121,12 +126,14 @@ pub fn validate_pinned_runtime_state(
             0
         },
         tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
-        pad: [0; 2],
+        acl_active_bank: 0,
+        pad: [0; 1],
     };
     let tap_config_map = open_pinned_tap_config(pin_path)?;
     let actual_tap_config = tap_config_map
         .get(&tap_id, 0)
         .map_err(|e| format!("read TAP_CONFIG_MAP for tap_id {}: {:?}", tap_id, e))?;
+    let active_acl_bank = normalize_acl_bank(actual_tap_config.acl_active_bank);
     if actual_tap_config.conntrack_enabled != expected_tap_config.conntrack_enabled
         || actual_tap_config.monitoring_enabled != expected_tap_config.monitoring_enabled
         || actual_tap_config.acl_enabled != expected_tap_config.acl_enabled
@@ -146,8 +153,8 @@ pub fn validate_pinned_runtime_state(
     let mut expected_dst_ipv6 = BTreeSet::new();
     for (name, group) in &state.groups {
         for cidr in &group.cidrs {
-            let (ip, prefix) = parse_cidr(cidr)
-                .map_err(|e| format!("group '{}' cidr '{}': {}", name, cidr, e))?;
+            let (ip, prefix) =
+                parse_cidr(cidr).map_err(|e| format!("group '{}' cidr '{}': {}", name, cidr, e))?;
             match ip {
                 IpAddr::V4(v4) => {
                     expected_src_ipv4.insert(format_lpm_entry_v4(
@@ -176,26 +183,51 @@ pub fn validate_pinned_runtime_state(
     validate_entry_set(
         "SRC_IPV4_TRIE",
         tap_id,
-        expected_src_ipv4,
+        expected_src_ipv4.clone(),
         collect_lpm_entries_v4(pin_path, "SRC_IPV4_TRIE", tap_id)?,
     )?;
     validate_entry_set(
         "DST_IPV4_TRIE",
         tap_id,
-        expected_dst_ipv4,
+        expected_dst_ipv4.clone(),
         collect_lpm_entries_v4(pin_path, "DST_IPV4_TRIE", tap_id)?,
     )?;
     validate_entry_set(
         "SRC_IPV6_TRIE",
         tap_id,
-        expected_src_ipv6,
+        expected_src_ipv6.clone(),
         collect_lpm_entries_v6(pin_path, "SRC_IPV6_TRIE", tap_id)?,
     )?;
     validate_entry_set(
         "DST_IPV6_TRIE",
         tap_id,
-        expected_dst_ipv6,
+        expected_dst_ipv6.clone(),
         collect_lpm_entries_v6(pin_path, "DST_IPV6_TRIE", tap_id)?,
+    )?;
+    let active_acl_lpm_tap_id = acl_banked_tap_id(tap_id, active_acl_bank);
+    validate_entry_set(
+        "ACL_SRC_IPV4_TRIE",
+        active_acl_lpm_tap_id,
+        expected_src_ipv4.clone(),
+        collect_lpm_entries_v4(pin_path, "ACL_SRC_IPV4_TRIE", active_acl_lpm_tap_id)?,
+    )?;
+    validate_entry_set(
+        "ACL_DST_IPV4_TRIE",
+        active_acl_lpm_tap_id,
+        expected_dst_ipv4.clone(),
+        collect_lpm_entries_v4(pin_path, "ACL_DST_IPV4_TRIE", active_acl_lpm_tap_id)?,
+    )?;
+    validate_entry_set(
+        "ACL_SRC_IPV6_TRIE",
+        active_acl_lpm_tap_id,
+        expected_src_ipv6.clone(),
+        collect_lpm_entries_v6(pin_path, "ACL_SRC_IPV6_TRIE", active_acl_lpm_tap_id)?,
+    )?;
+    validate_entry_set(
+        "ACL_DST_IPV6_TRIE",
+        active_acl_lpm_tap_id,
+        expected_dst_ipv6.clone(),
+        collect_lpm_entries_v6(pin_path, "ACL_DST_IPV6_TRIE", active_acl_lpm_tap_id)?,
     )?;
 
     let mut expected_policy = BTreeSet::new();
@@ -216,7 +248,8 @@ pub fn validate_pinned_runtime_state(
             dst_id: rule.dst_group_id,
             proto: rule.proto,
             direction: rule.direction,
-            pad: [0; 2],
+            bank: active_acl_bank,
+            pad: [0; 1],
         };
         let policy_value = PolicyValue {
             action: stored_policy_action(rule.action, has_port_filter != 0),
@@ -292,8 +325,8 @@ pub fn validate_pinned_runtime_state(
     let mut expected_policy_mirror = BTreeSet::new();
     let mut expected_global_mirror = BTreeSet::new();
     for rule in &state.mirror_rules {
-        let target_ifindex = crate::mirror_ops::resolve_ifindex(&rule.target_iface)
-            .map_err(|e| {
+        let target_ifindex =
+            crate::mirror_ops::resolve_ifindex(&rule.target_iface).map_err(|e| {
                 format!(
                     "resolve mirror target '{}' for validation: {}",
                     rule.target_iface, e
@@ -351,6 +384,10 @@ pub const NETWORK_MAP_NAMES: &[&str] = &[
     "DST_IPV4_TRIE",
     "SRC_IPV6_TRIE",
     "DST_IPV6_TRIE",
+    "ACL_SRC_IPV4_TRIE",
+    "ACL_DST_IPV4_TRIE",
+    "ACL_SRC_IPV6_TRIE",
+    "ACL_DST_IPV6_TRIE",
     "POLICY_TABLE",
     "PORT_BITMAP_POOL",
     "CT_TABLE_V4",
@@ -386,6 +423,10 @@ pub const CRITICAL_NETWORK_MAP_NAMES: &[&str] = &[
     "DST_IPV4_TRIE",
     "SRC_IPV6_TRIE",
     "DST_IPV6_TRIE",
+    "ACL_SRC_IPV4_TRIE",
+    "ACL_DST_IPV4_TRIE",
+    "ACL_SRC_IPV6_TRIE",
+    "ACL_DST_IPV6_TRIE",
     "POLICY_TABLE",
     "PORT_BITMAP_POOL",
     "CT_TABLE_V4",
@@ -415,6 +456,10 @@ pub const STREAM_CRITICAL_NETWORK_MAP_NAMES: &[&str] = &[
     "DST_IPV4_TRIE",
     "SRC_IPV6_TRIE",
     "DST_IPV6_TRIE",
+    "ACL_SRC_IPV4_TRIE",
+    "ACL_DST_IPV4_TRIE",
+    "ACL_SRC_IPV6_TRIE",
+    "ACL_DST_IPV6_TRIE",
     "POLICY_TABLE",
     "PORT_BITMAP_POOL",
     "CT_TABLE_V4",
@@ -464,6 +509,10 @@ pub const ALL_MAP_NAMES: &[&str] = &[
     "DST_IPV4_TRIE",
     "SRC_IPV6_TRIE",
     "DST_IPV6_TRIE",
+    "ACL_SRC_IPV4_TRIE",
+    "ACL_DST_IPV4_TRIE",
+    "ACL_SRC_IPV6_TRIE",
+    "ACL_DST_IPV6_TRIE",
     "POLICY_TABLE",
     "PORT_BITMAP_POOL",
     "CT_TABLE_V4",
@@ -550,7 +599,11 @@ pub fn show_stats(pin_path: &str, state_path: &str) -> Result<(), String> {
     let allow_count = state.rules.iter().filter(|r| r.action == 0).count();
     let drop_count = state.rules.iter().filter(|r| r.action == 1).count();
     println!("  Allow: {}, Drop: {}", allow_count, drop_count);
-    let with_ports = state.rules.iter().filter(|r| r.bitmap_idx.is_some()).count();
+    let with_ports = state
+        .rules
+        .iter()
+        .filter(|r| r.bitmap_idx.is_some())
+        .count();
     println!("  With port filter: {}", with_ports);
     println!();
 

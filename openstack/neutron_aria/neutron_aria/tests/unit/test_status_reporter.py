@@ -115,6 +115,35 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertEqual(["acl"], agent_state["configurations"]["managed_domains"])
         self.assertEqual("br-int", agent_state["configurations"]["ovs_bridge"])
 
+    def test_build_reporter_includes_rpc_sync_mode_configuration(self):
+        api = FakeReportStateApi()
+        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status.mark_ready(generation=1, snapshot_ports=0, managed_ports=0)
+        config = AgentConfig(
+            full_resync_enabled=True,
+            port_source="neutronclient",
+            rpc_events_enabled=True,
+            incremental_rpc_enabled=True,
+            revisionless_incremental_mode="disabled",
+            event_merge_interval=0.4,
+        )
+        reporter = build_neutron_status_reporter(
+            "ostack2",
+            config,
+            report_state_api=api,
+            context="ctx",
+        )
+
+        agent_state = reporter.report(runtime_status)
+        configurations = agent_state["configurations"]
+
+        self.assertEqual("rpc_port_scoped", configurations["sync_mode"])
+        self.assertTrue(configurations["full_resync_enabled"])
+        self.assertTrue(configurations["rpc_events_enabled"])
+        self.assertTrue(configurations["incremental_rpc_enabled"])
+        self.assertEqual("disabled", configurations["revisionless_incremental_mode"])
+        self.assertEqual(0.4, configurations["event_merge_interval"])
+
     def test_report_projects_domain_counts_and_degraded_reasons(self):
         api = FakeReportStateApi()
         runtime_status = AgentRuntimeStatus("ostack2")

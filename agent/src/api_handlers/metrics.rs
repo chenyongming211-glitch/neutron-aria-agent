@@ -4,13 +4,13 @@ use async_stream::stream;
 use axum::{
     body::Body,
     extract::State,
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     response::IntoResponse,
 };
 use bytes::Bytes;
 use tracing::warn;
 
-use super::common::{AppState, kernel_drop_mode_name, trace_map_mode_name};
+use super::common::{kernel_drop_mode_name, trace_map_mode_name, AppState};
 use aria_api::*;
 
 const METRICS_CHUNK_SIZE: usize = 16 * 1024;

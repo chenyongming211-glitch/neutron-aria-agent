@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Aria Firewall OpenStack Neutron Agent Mode 开发汇报</title>
+<title>Aria Firewall OpenStack Neutron Agent Mode 项目进展汇报</title>
 <link rel="stylesheet" href="assets/fonts.css">
 <link rel="stylesheet" href="assets/base.css">
 <link rel="stylesheet" id="theme-link" href="assets/themes/tokyo-night.css">
@@ -18,155 +18,201 @@
     <div class="split" style="align-items:center">
       <div>
         <h1 class="hero-title">Aria Firewall<br><span class="accent">Neutron Agent Mode</span></h1>
-        <p class="subtitle">在旧版 OpenStack 中把 Aria 做成 Neutron 可管理的 ACL/QoS/Mirror 执行后端：ACL 独立扩展，QoS 对外叫 aria-qos 且复用原生模型，Mirror 第二阶段新增 aria_mirror。</p>
-        <div class="quote">结论：方案可行，优先落 ACL 产品化闭环；aria-qos 作为产品入口复用 Neutron QoS API/DB；Mirror 作为第二阶段独立扩展接入 Aria eBPF clone 能力。</div>
+        <p class="subtitle">项目已从方案设计推进到 ACL 生产输入闭环验收、Stage3 生产硬化、P2/P3 事件同步受控验证；下一阶段聚焦 review bug 收敛和 QoS 入场评估。</p>
+        <div class="quote">当前口径：Aria 是 OpenStack/OVS-aware eBPF datapath enhancement platform；当前交付承诺仍然 ACL-first，QoS/Mirror/Observability 按后续 domain 分阶段进入。</div>
       </div>
       <div class="rail">
-        <div class="metric"><strong>ACL</strong><span>新增 Aria 独立 Neutron extension、DB、Legacy neutron CLI 和 port-show 摘要。</span></div>
-        <div class="metric"><strong>QoS</strong><span>产品入口叫 `aria-qos`，底层复用 Neutron 原生 QoS policy/rule。</span></div>
-        <div class="metric"><strong>Mirror</strong><span>第二阶段新增 `aria_mirror`，支持全局镜像和按 IP 网段分流。</span></div>
-        <div class="metric"><strong>Scope</strong><span>普通虚机 OVS tap 支持；SR-IOV、LinuxBridge、Neutron 服务端口第一阶段跳过。</span></div>
+        <div class="metric"><strong>ACL</strong><span>Stage2 acceptance passed：API/DB/CLI/source/full-resync/rollback 全链路已验收。</span></div>
+        <div class="metric"><strong>N3</strong><span>Stage3 生产硬化通过：UDS 持久 hardening、故障注入、迁移、tap 重建、OVS restart smoke。</span></div>
+        <div class="metric"><strong>P3</strong><span>增量 RPC/port-scoped apply 已受控通过；生产默认仍关闭，full-resync 保留兜底。</span></div>
+        <div class="metric"><strong>Next</strong><span>先修 P1/P2 review backlog；QoS 只进入 Q0/Q1/Q2 评估，不承诺 shaping。</span></div>
       </div>
     </div>
     <div class="footer"><span>Aria Firewall · v0.9-neutron-agent</span><span>01 / 26</span></div>
     <aside class="notes">
-      <p>开场先讲结论。现在方案已经从早期 agent mode 收敛到产品化 Neutron 扩展：ACL 自建 Aria extension，QoS 复用 Neutron QoS。</p>
-      <p>OpenStack 用户仍通过 Neutron、Horizon、平台后端或 Legacy neutron CLI 配置网络能力；Aria 在 compute node 上作为执行面。</p>
-      <p>第一阶段只接管普通虚机 OVS tap port。SR-IOV、LinuxBridge、DHCP/router/metadata 等 Neutron 服务端口不纳入 enforcement。</p>
+      <p>开场直接更新项目状态：ACL 已经不只是方案，Stage2 验收和 Stage3 硬化证据都已经闭环。</p>
+      <p>P2/P3 事件同步已经受控验证，但生产默认仍然保持 P3 关闭，避免在旧版 Neutron revision 不稳定时扩大风险。</p>
+      <p>下一阶段不是立刻扩 QoS/Mirror，而是先修 review backlog 中的 API/CLI/datapath 契约不一致问题。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Executive Summary">
     <p class="kicker">executive summary</p>
-    <h2 class="title">最终方案：aria-acl / aria-qos / aria-mirror 三个产品入口统一。</h2>
+    <h2 class="title">当前状态：ACL 已验收，生产硬化通过，下一步进入质量收敛和 QoS 入场评估。</h2>
     <div class="g3 grid">
-      <div class="card"><h3>ACL 主线</h3><p>开发 `aria_acl` service plugin、独立 API/DB/RBAC/RPC、Legacy neutron CLI 和 port-show 只读摘要。</p></div>
-      <div class="card"><h3>QoS 路线</h3><p>对外使用 `aria-qos-*`；底层仍启用 Neutron QoS policy/rule/binding，由 Aria 执行。</p></div>
-      <div class="card"><h3>Mirror 二阶段</h3><p>不复用现有 `networking_mirror` 语义，新增 `aria_mirror`，支持 global mirror 和按 IP prefix 分流。</p></div>
+      <div class="card"><h3>ACL 已闭环</h3><p>`aria_acl` Neutron API/DB、Legacy CLI、生产 ACL source、full-resync、UDS 下发、port status、rollback 均已有验收证据。</p></div>
+      <div class="card"><h3>硬化已推进</h3><p>Stage3 N3 覆盖 persistent UDS hardening、apply failure、timeout/crash、tap recreate、VM migration、OVS restart、same-host VM traffic。</p></div>
+      <div class="card"><h3>后续不扩散</h3><p>P3 增量同步默认关闭；QoS 先做 status/authority/discovery；Mirror 仍是后续独立阶段，不进入当前收敛主线。</p></div>
     </div>
-    <div class="quote">判断标准：Neutron 是唯一 source of truth；Aria 是 compute node 上可审计、可降级、可恢复的 ACL/QoS/Mirror runtime。</div>
+    <div class="quote">判断标准：Neutron 是 ACL 生产输入源；Aria datapath 是可审计、可降级、可恢复的执行面；当前先把 ACL 做成可长期运行的产品能力。</div>
     <div class="footer"><span>开发汇报 · 结论页</span><span>02 / 26</span></div>
     <aside class="notes">
-      <p>这一页是给管理层和开发团队对齐用的。ACL 不走 Security Group，也不靠 tag/mapping 作为产品形态，而是做独立 Neutron 扩展。</p>
-      <p>QoS 则相反，不重新设计底层模型。Neutron 里已有 QoS 代码，现场只是未启用；产品入口统一叫 aria-qos，底层仍写原生 QoS。</p>
-      <p>边界要收紧：Aria 不改 binding:vif_type，不替代 OVS L2，不接管 SR-IOV 第一阶段，也不能误伤 DHCP/router/metadata 端口。</p>
+      <p>这一页更新管理层口径：项目已经越过“方案是否可行”的阶段，ACL MVP 和生产硬化证据已经通过。</p>
+      <p>但这不等于 QoS/Mirror 已交付。QoS 当前只有 Q0 发现证据，Mirror 仍在路线图里。</p>
+      <p>下一步优先级是修 review backlog，避免 API 能创建但 datapath 不支持、状态误报 ready 等产品风险。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Current Assets">
     <p class="kicker">what we have now</p>
-    <h2 class="title">现在已有的东西足够做 datapath，但还不能直接接 Neutron。</h2>
+    <h2 class="title">项目已经形成三段式产品闭环：Neutron 输入、Python 投影、Rust datapath 执行。</h2>
     <div class="split">
       <div class="card">
-        <h3>v0.9 基线已有</h3>
+        <h3>已经完成</h3>
         <div class="checklist">
-          <div class="check"><i>✓</i><p>Rust `aria-agent` 二进制，本机 REST API 和 ariactl 管理入口。</p></div>
-          <div class="check"><i>✓</i><p>eBPF datapath runtime，具备本机 attach、map apply、观测和配置能力。</p></div>
-          <div class="check"><i>✓</i><p>WAL / compact state 基础，已有持久化和 replay 思路。</p></div>
-          <div class="check"><i>✓</i><p>ACL、QoS 以及 Group、Conntrack、Monitoring、WAL 等支撑能力代码基础。</p></div>
+          <div class="check"><i>✓</i><p>`aria_acl` extension/API/DB/CLI 和生产 NeutronAclSource 已可用。</p></div>
+          <div class="check"><i>✓</i><p>`neutron-aria-agent` 支持 full-resync、RPC-triggered resync、P3 port-scoped apply 受控路径。</p></div>
+          <div class="check"><i>✓</i><p>Rust UDS snapshot/status/delete、generation、desired_hash、WAL intent/commit/replay 已落地。</p></div>
+          <div class="check"><i>✓</i><p>Kolla bundle、smoke、CI artifact、现场 ostack2/3/4 证据链已经形成。</p></div>
         </div>
       </div>
       <div class="card">
-        <h3>还缺的关键接口</h3>
+        <h3>当前未关闭</h3>
         <div class="checklist">
-          <div class="check"><i>!</i><p>没有 Neutron snapshot schema / status / delete API。</p></div>
-          <div class="check"><i>!</i><p>没有 Python `neutron-aria-agent` 消费 Neutron RPC 和 full resync。</p></div>
-          <div class="check"><i>!</i><p>没有 OpenStack 托管状态下的本机写入 gate。</p></div>
-          <div class="check"><i>!</i><p>没有多租户 scoped key、Neutron WAL 隔离、容器化部署和 smoke。</p></div>
+          <div class="check"><i>!</i><p>API/CLI 仍允许部分当前 translator 不支持的 ACL 语义，需要前置校验。</p></div>
+          <div class="check"><i>!</i><p>重复 binding、重复 priority、异常映射、address-set 事务等 review bug 要收敛。</p></div>
+          <div class="check"><i>!</i><p>QoS 仍未进入实现：Neutron QoS extension 不可见，container `tc` 仅证明可读 qdisc。</p></div>
+          <div class="check"><i>!</i><p>Mirror、rule hit/drop reason、Prometheus/OTel 仍是后续能力，不属于当前交付。</p></div>
         </div>
       </div>
     </div>
     <div class="footer"><span>现状 · v0.9 基线能力</span><span>03 / 26</span></div>
     <aside class="notes">
-      <p>我们现在不是从零开始。v0.9 已经有 Rust agent、本机 API、ariactl、eBPF runtime、WAL 和 ACL/QoS/Mirror 相关能力。</p>
-      <p>但是这些能力现在是本机产品形态，不是 OpenStack agent 形态。它缺少 Neutron 的对象模型、snapshot 下发、host binding 判断、租户隔离和状态上报。</p>
-      <p>所以开发重点不是重写 datapath，而是在现有 runtime 外面补一层 Neutron 适配和托管边界。</p>
+      <p>这一页把旧的“还不能接 Neutron”口径更新掉。现在 ACL 已经完成 Neutron 接入和现场验证。</p>
+      <p>当前剩余工作不是补大框架，而是收敛产品质量问题，尤其是用户可创建对象和 datapath 可执行能力之间的契约一致性。</p>
+      <p>QoS/Mirror 不要在汇报中说成已经落地，它们只是路线清晰，尚未进入同级别验收。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Environment Findings">
     <p class="kicker">target environment findings</p>
-    <h2 class="title">现场环境支持 OVS tap 路线，但不支持“全端口接管”。</h2>
+    <h2 class="title">现场证据已经支撑 ACL 主路径；QoS 仍只能进入能力评估。</h2>
     <div class="table row4" style="margin-top:28px">
       <div class="th">现场事实</div><div class="th">当前状态</div><div class="th">对方案影响</div><div class="th">结论</div>
       <div class="td">Neutron 版本</div><div class="td">Python2，`neutronclient 2016.9.9`</div><div class="td">必须支持 Legacy `neutron` CLI 和老式 extension 写法</div><div class="td"><span class="tag ok">已纳入</span></div>
-      <div class="td">ML2/Agent</div><div class="td">OVS、LinuxBridge、SR-IOV agent 同时存在</div><div class="td">不能宣称统一接管所有端口</div><div class="td"><span class="tag warn">按端口类型声明能力</span></div>
-      <div class="td">安全组</div><div class="td">`enable_security_group=False`</div><div class="td">不能描述成 Security Group replacement</div><div class="td"><span class="tag ok">独立 ACL enhancement</span></div>
-      <div class="td">OVS tap</div><div class="td">tap 直挂 `br-int`，有 `external_ids:iface-id`</div><div class="td">普通 VM OVS tap 可建立 port 到 tap 的稳定映射</div><div class="td"><span class="tag ok">第一阶段主线</span></div>
+      <div class="td">ACL 主路径</div><div class="td">Stage2 验收通过；Stage3 N3 11 项 gate 通过</div><div class="td">ACL 已具备受控交付基础</div><div class="td"><span class="tag ok">已验收</span></div>
+      <div class="td">端口范围</div><div class="td">普通 compute-owned OVS tap；服务端口、SR-IOV、LinuxBridge 不纳入</div><div class="td">不能宣称全端口接管</div><div class="td"><span class="tag warn">按类型声明能力</span></div>
+      <div class="td">QoS 条件</div><div class="td">Neutron QoS extension 不可见；宿主机 shell 缺少 `tc`，容器内可读 qdisc</div><div class="td">不能承诺 shaping/policing 已可落地</div><div class="td"><span class="tag warn">暂不实现</span></div>
     </div>
-    <div class="quote">新增发现：DHCP port 也可能是 ovs/normal tap，所以必须按 `device_owner=compute:*` 过滤，只接管虚机端口。</div>
+    <div class="quote">当前汇报重点：ACL 主路径已经用真实环境证据闭环；QoS/Mirror 保持边界，避免把平台路线误说成当前交付。</div>
     <div class="footer"><span>现场结论 · 端口范围</span><span>04 / 26</span></div>
     <aside class="notes">
-      <p>这页汇报真实环境探测结论。Neutron 是旧版 Python2，所以客户端和服务端扩展都不能按现代 neutron-lib 方案默认实现。</p>
-      <p>现场不是纯 OVS：OVS、LinuxBridge、SR-IOV agent 同时存在。但业务普通 VM tap 确实直接挂在 br-int，且 OVSDB external_ids 里有 iface-id。</p>
-      <p>最关键修正是服务端口过滤。DHCP port 也可能是 ovs normal tap，不能只按 binding:vif_type 判断接管范围，必须排除 network:* 端口。</p>
+      <p>这页把现场结论从“是否可行”更新为“哪些已形成证据”。ACL 已经经过 Stage2、Stage3 和 P3 受控路径验证，能支撑当前汇报。</p>
+      <p>端口范围仍然要讲清楚：只接管普通虚机 OVS tap，不接管 DHCP、metadata、SR-IOV、LinuxBridge 等不在本阶段范围内的端口。</p>
+      <p>QoS 目前只是 Q0 能力刷新，不能在汇报里承诺 shaping 已落地。后续需要先做 status-only 和 authority gate。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Target Architecture">
     <p class="kicker">target architecture</p>
-    <h2 class="title">目标架构：Neutron 管对象，Aria 在计算节点执行 per-port ACL/QoS/Mirror。</h2>
-    <div class="arch">
-      <div class="arch-row">
-        <div class="node"><h3>OpenStack User</h3><p>Horizon / Terraform / Heat / Neutron API</p></div>
-        <div class="arrow">→</div>
-        <div class="node"><h3>Neutron Server</h3><p>Aria ACL API/DB、QoS policy、port binding、RBAC</p></div>
-        <div class="arrow">→</div>
-        <div class="node primary"><h3>neutron-aria-agent</h3><p>监听 RPC/full resync，计算 per-port effective ACL/QoS/Mirror</p></div>
+    <h2 class="title">目标架构：Neutron 是输入源，aria-datapath 是本机可恢复执行面。</h2>
+    <div class="lane">
+      <div class="lane-label">Northbound</div>
+      <div class="lane-body">
+        <div class="stage"><b>平台 / 管理员</b><span>Horizon、平台后端、Legacy neutron CLI 统一调用 Neutron。</span></div>
+        <div class="stage"><b>Neutron Server</b><span>`aria_acl` API/DB/RBAC、revision、binding、port status readback。</span></div>
+        <div class="stage"><b>DB transaction</b><span>policy/rule/address-set/binding 与 revision 在同一事务内提交。</span></div>
+        <div class="stage"><b>after-commit event</b><span>通知丢失时由 periodic full-resync 兜底。</span></div>
       </div>
-      <div class="arch-row">
-        <div class="node"><h3>OVS br-int</h3><p>继续做 L2 转发；tap 用 iface-id 映射 Neutron port</p></div>
-        <div class="arrow">↔</div>
-        <div class="node primary"><h3>/run/aria/aria-agent.sock</h3><p>OpenStack 模式唯一 datapath API 通道</p></div>
-        <div class="arrow">→</div>
-        <div class="node primary"><h3>aria-agent / eBPF</h3><p>接收 snapshot，写 map，在 VM tap/采集口上执行 ACL/QoS/Mirror</p></div>
+    </div>
+    <div class="lane">
+      <div class="lane-label">Compute adapter</div>
+      <div class="lane-body">
+        <div class="stage"><b>neutron-aria-agent</b><span>读取 Neutron 状态，接 RPC/full-resync，维护 heartbeat。</span></div>
+        <div class="stage"><b>inventory</b><span>只选择 compute-owned OVS tap，过滤 DHCP、metadata、SR-IOV、LinuxBridge。</span></div>
+        <div class="stage"><b>EffectiveAclIndex</b><span>计算 per-port effective ACL，处理 revision/generation/desired_hash。</span></div>
+        <div class="stage"><b>UDS client</b><span>通过 `/run/aria/aria-agent.sock` 下发 snapshot 和 delete。</span></div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="lane-label">Datapath host</div>
+      <div class="lane-body">
+        <div class="stage"><b>aria-datapath</b><span>本机唯一 eBPF 执行入口，不访问 Neutron DB/API。</span></div>
+        <div class="stage"><b>preflight</b><span>校验 host、ifname、ifindex、OVS tap 归属和权限。</span></div>
+        <div class="stage"><b>WAL apply</b><span>intent、commit、replay、rollback，失败进入 degraded/bypass。</span></div>
+        <div class="stage"><b>VM tap / br-int</b><span>OVS 仍负责 L2 转发；Aria 只做 tap 上的增强执行。</span></div>
       </div>
     </div>
     <div class="footer"><span>架构 · 两容器边界</span><span>05 / 26</span></div>
     <aside class="notes">
-      <p>目标架构分两层。Neutron Server 提供 Aria ACL 的 northbound API、DB 和 RBAC；QoS 仍走 Neutron 原生 QoS policy/rule。</p>
-      <p>compute 节点新增 neutron-aria-agent。它不替代 OVS agent，只读取 Neutron 状态、发现本 host 的 VM tap、生成 per-port snapshot。</p>
-      <p>aria-agent 不访问 Neutron DB，也不判断租户权限。它只接收 UDS snapshot，在 tap/采集口上执行 eBPF ACL/QoS/Mirror。</p>
+      <p>这页是端到端架构图。最上层是 Neutron northbound，负责 API、DB、RBAC、revision 和状态读回。</p>
+      <p>中间是 compute adapter，也就是 neutron-aria-agent。它不替代 OVS agent，只负责把 Neutron 对象投影成本机 eligible tap 的 effective ACL snapshot。</p>
+      <p>最下层是 aria-datapath。它只通过 UDS 接收声明式 snapshot，用 preflight、WAL、replay 和 rollback 保证本机执行可恢复。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Component Boundaries">
     <p class="kicker">component boundaries</p>
-    <h2 class="title">三个边界必须守住：Neutron 管语义，Python 管投影，Rust 管执行。</h2>
-    <div class="g3 grid">
-      <div class="card"><h3>Neutron Server</h3><ul><li>Aria ACL API/DB/RBAC</li><li>QoS policy/rule/binding</li><li>project / port / network</li><li>agent heartbeat</li></ul></div>
-      <div class="card"><h3>neutron-aria-agent</h3><ul><li>Python2 兼容</li><li>只处理本 host VM OVS tap</li><li>翻译 ACL / QoS snapshot</li><li>full resync + event merge</li></ul></div>
-      <div class="card"><h3>aria-agent</h3><ul><li>Rust runtime</li><li>不访问 Neutron DB/API</li><li>eBPF attach/map apply</li><li>WAL / Netlink / runtime status</li></ul></div>
+    <h2 class="title">aria-datapath 按 eBPF Manager 平台设计：core 稳定，domain 能力分阶段进入。</h2>
+    <div class="module-map">
+      <div class="module-tier">
+        <div class="module-label">manager core</div>
+        <div class="module-grid">
+          <div class="module-chip primary"><b>program_manager</b><span>程序加载、版本、pinning。</span></div>
+          <div class="module-chip primary"><b>map_manager</b><span>map schema、diff、desired_hash。</span></div>
+          <div class="module-chip primary"><b>hook_manager</b><span>tap attach、ifindex、netlink 对账。</span></div>
+          <div class="module-chip primary"><b>pipeline_manager</b><span>domain 顺序、旁路、失败隔离。</span></div>
+          <div class="module-chip primary"><b>rollback / WAL</b><span>intent、commit、replay、recovery。</span></div>
+        </div>
+      </div>
+      <div class="module-tier">
+        <div class="module-label">network modules</div>
+        <div class="module-grid">
+          <div class="module-chip primary"><b>acl</b><span>当前已验收主线。</span></div>
+          <div class="module-chip future"><b>qos</b><span>Q1/Q2 gate 后进入。</span></div>
+          <div class="module-chip future"><b>mirror</b><span>后续 global/policy。</span></div>
+          <div class="module-chip future"><b>observability</b><span>rule hit、drop reason。</span></div>
+          <div class="module-chip future"><b>stats</b><span>PPS/BPS、bytes、errors。</span></div>
+        </div>
+      </div>
+      <div class="module-tier">
+        <div class="module-label">system modules</div>
+        <div class="module-grid">
+          <div class="module-chip future"><b>trace</b><span>排障工具，默认关闭。</span></div>
+          <div class="module-chip future"><b>tcp</b><span>重传、reset、延迟诊断。</span></div>
+          <div class="module-chip future"><b>syscall</b><span>主机诊断能力。</span></div>
+          <div class="module-chip future"><b>block_io</b><span>IO 诊断能力。</span></div>
+          <div class="module-chip future"><b>admin tools</b><span>break-glass、dump、repair。</span></div>
+        </div>
+      </div>
+      <div class="module-tier">
+        <div class="module-label">local APIs</div>
+        <div class="module-grid three">
+          <div class="module-chip primary"><b>policy API</b><span>Neutron snapshot/delete，当前 ACL 使用。</span></div>
+          <div class="module-chip primary"><b>admin API</b><span>status、capabilities、health、recovery。</span></div>
+          <div class="module-chip future"><b>observability API</b><span>hits、drops、rates、events 后续开放。</span></div>
+        </div>
+      </div>
     </div>
-    <div class="quote">Rust 侧不解释 Neutron 内部语义；Python 侧不直接操作 eBPF map。</div>
+    <div class="quote">设计原则：当前只承诺 ACL domain；QoS、Mirror、Observability 以后按 domain gate 插入同一套 manager core。</div>
     <div class="footer"><span>职责边界</span><span>06 / 26</span></div>
     <aside class="notes">
-      <p>这页是后面代码 review 的基本边界。Neutron 负责用户语义，Python adapter 负责投影，Rust datapath 负责执行。</p>
-      <p>Rust 不应该知道 Neutron DB 内部结构，也不消费 Neutron RPC；否则后面版本兼容会很痛苦。</p>
-      <p>Python 也不应该直接写 eBPF map，它只生成声明式 snapshot。这样失败恢复、幂等、WAL 和 status 才能统一。</p>
+      <p>这页是 aria-datapath 内部架构设计图。核心思想是 manager core 稳定，ACL、QoS、Mirror、Observability 作为 domain module 分阶段接入。</p>
+      <p>当前已完成并验收的是 ACL network module 和必要的 policy/admin API；QoS、Mirror、Observability、system modules 都不能说成当前已交付。</p>
+      <p>这样设计的好处是后续能力不会各写一套 attach、map、WAL、rollback，而是复用同一个 eBPF Manager 地基。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Functional Scope">
     <p class="kicker">functional scope</p>
-    <h2 class="title">功能范围收敛为三条线：ACL 先落地，QoS 复用原生模型，Mirror 二阶段独立扩展。</h2>
+    <h2 class="title">功能范围现在收敛为：ACL 已交付；QoS 评估中；Mirror 后续阶段。</h2>
     <div class="g3 grid">
-      <div class="card"><h3>ACL：第一阶段主线</h3><p>开发 `aria_acl` 独立 Neutron extension，包含 policy/rule/address-set/binding、Legacy CLI、port-show 摘要和 runtime status。</p></div>
-      <div class="card"><h3>QoS：第二阶段</h3><p>新增 `aria-qos` 产品 facade，启用 Neutron 原生 QoS API/DB/ML2 extension，保留 `qos_policy_id`。</p></div>
-      <div class="card"><h3>Mirror：第二阶段增强</h3><p>新增 `aria_mirror`，保留现有 `mirror` 插件语义，Aria 负责 VM tap/host interface 的 eBPF clone。</p></div>
+      <div class="card"><h3>ACL：当前主线已验收</h3><p>`aria_acl` extension、API/DB、Legacy CLI、production source、full-resync、runtime status、rollback 和真实流量阻断证据已完成阶段验收。</p></div>
+      <div class="card"><h3>QoS：仅做入场评估</h3><p>当前只完成 Q0 事实刷新。下一步从 Q1 status-only、Q2 authority gate 开始，暂不承诺 shaping/policing。</p></div>
+      <div class="card"><h3>Mirror：后续独立阶段</h3><p>`aria_mirror` 继续按 global_l2 和 policy selective mirror 设计推进，但不进入当前 ACL 收敛主线。</p></div>
     </div>
     <div class="g4 grid" style="margin-top:18px">
-      <div class="metric"><strong>ext-show</strong><span>`neutron ext-show aria-acl` 可见。</span></div>
-      <div class="metric"><strong>aria-acl-*</strong><span>Legacy `neutron` 命令可创建、查询、绑定 ACL。</span></div>
-      <div class="metric"><strong>port-show</strong><span>展示 `aria_acl_*` 只读摘要字段。</span></div>
-      <div class="metric"><strong>agent-list</strong><span>`neutron-aria-agent` heartbeat alive。</span></div>
+      <div class="metric"><strong>Stage2</strong><span>生产 ACL 输入闭环已通过验收。</span></div>
+      <div class="metric"><strong>Stage3 N3</strong><span>11 项生产硬化 gate 全部通过。</span></div>
+      <div class="metric"><strong>P3</strong><span>port-scoped apply 受控通过，生产默认关闭。</span></div>
+      <div class="metric"><strong>QoS Q0</strong><span>能力事实已刷新，执行未承诺。</span></div>
     </div>
-    <div class="quote">不接管 SR-IOV、LinuxBridge、DHCP/router/metadata 等端口；这些必须显示 unsupported 或 not_applicable。</div>
+    <div class="quote">当前汇报只把 ACL 作为已验收能力；QoS/Mirror 是路线，不作为本轮交付承诺。</div>
     <div class="footer"><span>功能范围 · 两个 feature domain</span><span>07 / 26</span></div>
     <aside class="notes">
-      <p>功能范围现在更清楚：ACL 是第一阶段主线，QoS 放到第二阶段，但 QoS 不重新定义 API。</p>
-      <p>开发完成后不是只看内部日志，而是能从 Neutron CLI 和 port-show 看到能力可用、绑定关系、effective policy 和 runtime status。</p>
-      <p>端口范围是汇报重点。只处理普通虚机 OVS tap；SR-IOV、LinuxBridge 和 Neutron 服务端口都不能误接管。</p>
+      <p>这页用来避免范围发散。ACL 是当前已经通过阶段验收的能力，QoS 只是进入评估入口，Mirror 仍是后续阶段。</p>
+      <p>P2/P3 增量同步已经在受控测试 host 上通过，但生产默认仍然关闭，需要后续独立放量策略。</p>
+      <p>端口范围仍然是汇报重点。只处理普通虚机 OVS tap；SR-IOV、LinuxBridge 和 Neutron 服务端口都不能误接管。</p>
     </aside>
   </section>
 
@@ -195,79 +241,79 @@
 
   <section class="slide" data-title="QoS Principle">
     <p class="kicker">qos implementation principle</p>
-    <h2 class="title">QoS 对外叫 aria-qos，底层复用 Neutron QoS，执行后端切到 Aria。</h2>
+    <h2 class="title">QoS 当前只进入入场评估：先证明 status/authority，再决定执行语义。</h2>
     <div class="split">
       <div class="card">
-        <h3>Neutron 侧开发</h3>
+        <h3>已经确认</h3>
         <div class="checklist">
-          <div class="check"><i>1</i><p>启用 `service_plugins += qos,aria_qos`，让 `qos` 和 `aria-qos` 都可见。</p></div>
-          <div class="check"><i>2</i><p>启用 ML2 `extension_drivers = qos`，保留原生 `qos_policy_id`。</p></div>
-          <div class="check"><i>3</i><p>`aria-qos-*` CLI 作为 facade，底层调用原生 QoS API。</p></div>
-          <div class="check"><i>4</i><p>不使用 `qhqos`；它是 Floating IP / Router QoS 定制路径。</p></div>
+          <div class="check"><i>Q0</i><p>当前环境 `neutron ext-show qos` 不可见，不能直接使用原生 QoS API。</p></div>
+          <div class="check"><i>Q0</i><p>宿主机 shell 缺少 `tc`，容器内可读 qdisc；这只能证明观测入口，不等于执行可用。</p></div>
+          <div class="check"><i>Q0</i><p>现有 qhqos 更偏向浮动 IP / router 定制路径，和当前 VM tap ACL 主线无关。</p></div>
+          <div class="check"><i>Q0</i><p>产品命名可保留 `aria-qos`，但底层是否复用 Neutron QoS 要等 Q1/Q2 结果。</p></div>
         </div>
       </div>
       <div class="card">
-        <h3>Aria 执行规则</h3>
+        <h3>下一阶段 gate</h3>
         <div class="checklist">
-          <div class="check"><i>✓</i><p>neutron-aria-agent 计算 port-level &gt; network-level effective QoS。</p></div>
-          <div class="check"><i>✓</i><p>aria-agent 写 eBPF QoS map，带 status 和统计。</p></div>
-          <div class="check"><i>✓</i><p>OVS agent 保持 `extensions = mirror`，不启用 `qos` execution。</p></div>
-          <div class="check"><i>✓</i><p>tc/shaping 不满足时进入 degraded/unsupported，不宣称 ready。</p></div>
+          <div class="check"><i>Q1</i><p>先做 status-only：只发现能力、上报 unsupported/degraded，不改业务流。</p></div>
+          <div class="check"><i>Q2</i><p>再做 authority gate：明确 Aria、OVS、tc 谁有执行权，避免双重限速。</p></div>
+          <div class="check"><i>Q3</i><p>最后才讨论 eBPF shaping/policing map、统计和回滚。</p></div>
+          <div class="check"><i>!</i><p>没有 Q1/Q2 证据前，汇报里不能说 QoS 已经能落地。</p></div>
         </div>
       </div>
     </div>
-    <div class="quote">开发后现象：`aria-qos` extension 可见；`neutron aria-qos-*` 可创建/绑定策略；底层 `qos_policy_id` 生效；Aria 显示 per-port runtime status。</div>
+    <div class="quote">QoS 的推荐口径：产品入口可以叫 `aria-qos`，但当前阶段只承诺 discovery/status，不承诺执行限速。</div>
     <div class="footer"><span>QoS 原理 · per-port effective policy</span><span>09 / 26</span></div>
     <aside class="notes">
-      <p>QoS 和 ACL 的策略不一样。ACL 是新产品语义，所以新增 Aria ACL API；QoS 是 Neutron 已有成熟模型，所以底层复用，但产品入口统一叫 aria-qos。</p>
-      <p>现场镜像里已有 QoS plugin 和 ML2 extension 代码，只是未启用。qhqos 也存在，但它是 Floating IP / router 网关限速，不进入 Aria QoS 路线。</p>
-      <p>不要启用 OVS agent qos execution，避免同一个 port 被 OVS QoS 和 Aria QoS 双重限速。</p>
+      <p>这页从原来的 QoS 实施方案改成评估门禁。当前现场没有可见的 Neutron QoS extension，不能把 QoS 说成已可下发。</p>
+      <p>后续仍可保持 `aria-qos` 的产品命名一致性，但要先完成 status-only 和 authority gate，确认不会和 OVS、tc 或历史 qhqos 路径冲突。</p>
+      <p>只有当 Q1/Q2 有证据后，才进入真正的执行实现和验收。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Snapshot API">
     <p class="kicker">local snapshot api</p>
-    <h2 class="title">开发第一步是 Unix socket 上的 Neutron snapshot API。</h2>
+    <h2 class="title">Rust UDS 契约已经固定：Neutron 只通过本机 socket 下发声明式 snapshot。</h2>
     <div class="split">
       <div class="card">
-        <h3>需要新增的 API</h3>
+        <h3>已固定的 API</h3>
         <div class="code">PUT    /api/v1/neutron/snapshot
 GET    /api/v1/neutron/status
 DELETE /api/v1/neutron/ports/{port_id}</div>
         <p style="margin-top:14px">只监听 <span class="mono">/run/aria/aria-agent.sock</span>，不挂到现有 TCP REST router。</p>
       </div>
       <div class="card">
-        <h3>Snapshot 必填语义</h3>
+        <h3>Snapshot 核心语义</h3>
         <div class="status-row"><b>schema</b><p>schema_version、host、mode、local_generation。</p></div>
-        <div class="status-row"><b>ports</b><p>port_id、project_id、binding_host、if_name、ifindex、ACL ref、QoS、flags。</p></div>
-        <div class="status-row"><b>domains</b><p>groups、acl、qos，支撑项返回 runtime/conntrack/monitoring status。</p></div>
+        <div class="status-row"><b>ports</b><p>port_id、project_id、binding_host、if_name、ifindex、ACL ref、flags。</p></div>
+        <div class="status-row"><b>domains</b><p>当前验收 ACL domain；QoS/Mirror 后续按 domain 扩展。</p></div>
       </div>
     </div>
     <div class="footer"><span>本机 API · Unix socket only</span><span>10 / 26</span></div>
     <aside class="notes">
-      <p>第一批开发从 API 契约开始。Rust 侧要有 Neutron snapshot、status 和 port delete 三个接口。</p>
+      <p>这一页从开发计划更新为当前契约状态。Rust 侧已经围绕 snapshot、status 和 port delete 形成 Neutron UDS API。</p>
       <p>注意这里明确不使用 localhost HTTP 过渡方案。OpenStack 模式只走 Unix socket，这样权限边界清楚，也和 OVS agent 访问 OVSDB socket 的方式类似。</p>
-      <p>现有 TCP REST API 可以继续服务 ariactl 和本机管理员，但不能注册 Neutron snapshot route。</p>
+      <p>当前验收范围是 ACL domain。QoS/Mirror 后续扩展时应复用同一套 generation、desired_hash、status 和 rollback 语义。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Apply Ordering">
     <p class="kicker">apply engine</p>
-    <h2 class="title">Apply 顺序要先保证接口存在，再做 durable state，最后推进 generation。</h2>
+    <h2 class="title">事务地基已经成形：preflight、WAL、commit、status 必须按顺序收敛。</h2>
     <div class="flow">
       <div class="step"><b>01 schema</b><span>校验 schema_version、host、mode、authority。</span></div>
       <div class="step"><b>02 preflight</b><span>确认 binding_host、if_name、ifindex、Netlink。</span></div>
       <div class="step"><b>03 WAL intent</b><span>写入可恢复 intent，防止半 apply 无法解释。</span></div>
-      <div class="step"><b>04 apply</b><span>groups → conntrack/monitoring → ACL → QoS。</span></div>
+      <div class="step"><b>04 apply</b><span>groups → ACL；后续 domain 独立扩展。</span></div>
       <div class="step"><b>05 commit</b><span>WAL commit 后再更新 accepted/status。</span></div>
       <div class="step"><b>06 status</b><span>返回 domain status、last_good、degraded reason。</span></div>
     </div>
     <div class="quote">`accepted_generation` 只能在 WAL durable 且 enhancement 状态可解释后推进。</div>
     <div class="footer"><span>执行顺序 · generation 语义</span><span>11 / 26</span></div>
     <aside class="notes">
-      <p>这一页是 Rust apply engine 的核心约束。不能先把 eBPF map 写了，然后 WAL 失败还说成功。</p>
-      <p>推荐顺序是先校验 schema 和 authority，再做接口 preflight，然后写 WAL intent，再按 domain apply，最后 WAL commit 和更新 status。</p>
-      <p>accepted_generation 必须非常保守，只有 durable state 可证明一致、各 enhancement domain 有明确 ready/degraded/bypass 状态后才推进。ACL degraded 不能影响原 OVS 转发。</p>
+      <p>这一页强调当前事务模型。不能先把 eBPF map 写了，然后 WAL 失败还说成功。</p>
+      <p>顺序是先校验 schema 和 authority，再做接口 preflight，然后写 WAL intent，再按 domain apply，最后 WAL commit 和更新 status。</p>
+      <p>accepted_generation 必须非常保守，只有 durable state 可证明一致、domain 有明确 ready/degraded/bypass 状态后才推进。ACL degraded 不能影响原 OVS 转发。</p>
     </aside>
   </section>
 
@@ -320,7 +366,7 @@ DELETE /api/v1/neutron/ports/{port_id}</div>
 
   <section class="slide" data-title="Lifecycle Scenarios">
     <p class="kicker">runtime lifecycle scenarios</p>
-    <h2 class="title">VM 迁移、重启、tap 重建，都要靠 Neutron binding + Netlink 对账收敛。</h2>
+    <h2 class="title">VM 迁移、重启、tap 重建已经进入 hardening 验收路径。</h2>
     <div class="g3 grid">
       <div class="card"><h3>VM create / bind</h3><p>Neutron event 先到、tap 后出现时，先记录 desired state，返回 `PORT_IFACE_NOT_FOUND`，Netlink NEWLINK 后再 attach。</p></div>
       <div class="card"><h3>VM migration</h3><p>旧 host 看到 binding_host 不再本机就 delete；新 host 等 tap ready 后 port-scoped snapshot。</p></div>
@@ -329,9 +375,9 @@ DELETE /api/v1/neutron/ports/{port_id}</div>
     <div class="quote">tap 口不存在时不得挂载 eBPF；ifindex 改变时不能复用旧 ifindex runtime。</div>
     <div class="footer"><span>生命周期 · port / tap / ifindex</span><span>14 / 26</span></div>
     <aside class="notes">
-      <p>这页对应真实 OpenStack 环境里最常见的运行时问题。Neutron port 生命周期和 Linux interface 生命周期不是一回事。</p>
+      <p>这页对应 Stage3 生产硬化的重点场景。Neutron port 生命周期和 Linux interface 生命周期不是一回事。</p>
       <p>迁移时以 binding_host 为准，旧 host 清理，新 host 等 tap 出现再 attach。重启时 binding_host 不变，但 tap 和 ifindex 可能删除重建。</p>
-      <p>所以 Netlink 监听是必选项。不能只依赖 Neutron RPC，也不能在 tap 还没创建时提前写 accepted state。</p>
+      <p>当前 N3 gate 已覆盖 tap recreate、VM migration、OVS restart 等关键路径，后续继续补长期运行和灰度证据。</p>
     </aside>
   </section>
 
@@ -355,7 +401,7 @@ DELETE /api/v1/neutron/ports/{port_id}</div>
 
   <section class="slide" data-title="Container Deployment">
     <p class="kicker">container deployment</p>
-    <h2 class="title">容器化交付，但权限必须拆开：datapath 高权限，Neutron adapter 低权限。</h2>
+    <h2 class="title">产品形态按两容器交付：datapath 高权限，Neutron adapter 低权限。</h2>
     <div class="split">
       <div class="card">
         <h3>aria-datapath container</h3>
@@ -371,104 +417,104 @@ DELETE /api/v1/neutron/ports/{port_id}</div>
     <aside class="notes">
       <p>之前讨论过是裸机二进制还是容器，最终结论是容器。但容器不是普通隔离应用容器，aria-datapath 仍然是宿主机 datapath runtime。</p>
       <p>两个容器不能合并。合并会让 Python adapter 继承 eBPF 特权，安全面扩大，升级和故障定位也复杂。</p>
-      <p>通信方式参考 OVS agent 和 OVSDB：通过宿主机 Unix socket bind mount，不做 localhost HTTP fallback。</p>
+      <p>当前已形成 Kolla bundle、镜像构建入口和 smoke 证据；通信方式通过宿主机 Unix socket bind mount，不做 localhost HTTP fallback。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="What To Build">
     <p class="kicker">what we need to build</p>
-    <h2 class="title">要开发的是一整条 Neutron 到 Aria 的产品化闭环。</h2>
+    <h2 class="title">现在要开发的不是新主线，而是把 ACL 产品风险收敛掉。</h2>
     <div class="table row4" style="margin-top:24px">
-      <div class="th">模块</div><div class="th">开发内容</div><div class="th">开发后现象</div><div class="th">验收方式</div>
-      <div class="td">Neutron Server</div><div class="td">`aria_acl` service plugin、API extension、DB migration、policy.yaml</div><div class="td">`neutron ext-show aria-acl` 可见，`aria_acl_*` 表存在</div><div class="td">CRUD + DB migration + neutron-server 启动</div>
-      <div class="td">Legacy CLI</div><div class="td">`neutron aria-acl-policy/rule/address-set/binding-*` 命令</div><div class="td">旧版运维入口可直接创建、查询、绑定 ACL</div><div class="td">Python2 neutronclient 命令测试</div>
-      <div class="td">Port 展示</div><div class="td">port API 增加 `aria_acl_*` 只读摘要字段</div><div class="td">`neutron port-show` 显示 enabled、effective policy、runtime status</div><div class="td">show/list 不允许写入只读字段</div>
-      <div class="td">Agent 闭环</div><div class="td">`neutron-aria-agent`、RPC/full resync、OVS tap discovery</div><div class="td">`neutron agent-list` 显示 Aria agent alive，VM port 可映射 tap</div><div class="td">host filter + restart + migration smoke</div>
-      <div class="td">Datapath</div><div class="td">UDS snapshot API、ACL/QoS/Mirror apply、runtime status 上报</div><div class="td">allow/deny/limit/clone 在 VM tap 或采集口生效，失败显示 degraded/bypass</div><div class="td">流量 smoke + port status show</div>
-      <div class="td">产品化</div><div class="td">Kolla 镜像、配置、日志、metrics、runbook、回滚</div><div class="td">三节点可部署，能灰度启停，故障不影响原 OVS 转发</div><div class="td">部署 smoke + 回滚演练</div>
+      <div class="th">优先级</div><div class="th">当前任务</div><div class="th">修复后现象</div><div class="th">验收方式</div>
+      <div class="td">P1</div><div class="td">ACL API/CLI 禁止 datapath 不支持的语义：`default_action=deny`、IPv6、source port、未知 protocol/action</div><div class="td">用户不能创建“看似成功、实际无法执行”的规则</div><div class="td">API/CLI negative tests + translator contract</div>
+      <div class="td">P1</div><div class="td">重复 enabled binding、重复 priority 校验</div><div class="td">effective ACL 唯一且可预测，不靠 agent 猜测冲突</div><div class="td">DB/API validator + old Neutron exception mapping</div>
+      <div class="td">P2</div><div class="td">address-set member 事务安全、first-install rollback marker</div><div class="td">失败不会留下半写入对象，回滚路径可解释</div><div class="td">transaction tests + rollback smoke</div>
+      <div class="td">P2</div><div class="td">port/domain degraded stale status 上报闭环</div><div class="td">`port-show` 不展示假 applied，长期失联能标记 stale/unknown</div><div class="td">status timeout tests + agent heartbeat evidence</div>
+      <div class="td">P2</div><div class="td">smoke/runbook 去掉现场默认 adminrc 假设</div><div class="td">部署脚本可复用，环境差异通过参数传入</div><div class="td">三节点 smoke + artifact package check</div>
+      <div class="td">P3</div><div class="td">Legacy CLI skipped tests 转正式覆盖</div><div class="td">旧版运维入口不会回归</div><div class="td">CI check + Python2 compatible test</div>
     </div>
-    <div class="footer"><span>开发拆分 · ACL/QoS/Mirror</span><span>17 / 26</span></div>
+    <div class="footer"><span>开发拆分 · ACL 收敛</span><span>17 / 26</span></div>
     <aside class="notes">
-      <p>这一页直接回答“要开发哪些”。不是只写一个 agent，也不是只改 datapath，而是 Neutron Server、Legacy CLI、port 展示、agent、datapath、产品化六块一起闭环。</p>
-      <p>每一块都绑定开发后能看到的现象：extension 可见、命令可用、port-show 有字段、agent-list 有 heartbeat、VM tap 上流量生效。</p>
-      <p>汇报时要强调这些现象是验收标准，不是内部实现细节。</p>
+      <p>这一页从“要开发哪些模块”更新为当前真正的开发队列。主链路已经能创建、下发、执行 ACL，下一步重点是收敛产品风险。</p>
+      <p>最优先的是 API/CLI 和 datapath contract 对齐，避免用户创建 Rust translator 无法执行的规则。</p>
+      <p>这些任务完成后，ACL 才能从“受控测试可用”推进到“更接近生产可运维”。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Phase Gates">
     <p class="kicker">phase gates</p>
-    <h2 class="title">开发路线按六阶段推进，ACL、QoS、Mirror 分开交付。</h2>
+    <h2 class="title">阶段进度已经从 ACL 可行性推进到 ACL 验收和生产硬化。</h2>
     <div class="table row4" style="margin-top:24px">
-      <div class="th">阶段</div><div class="th">开发目标</div><div class="th">上线可见现象</div><div class="th">关键边界</div>
-      <div class="td">Phase 1</div><div class="td">ACL 控制面：extension、API、DB、CLI、port-show</div><div class="td">能创建 ACL，能绑定 port/network，能查询摘要</div><div class="td">不启用 datapath enforcement 也可先灰度</div>
-      <div class="td">Phase 2</div><div class="td">Agent 闭环：RPC/full resync、OVS tap discovery、status 上报</div><div class="td">agent alive，能算 effective ACL，能解释 unsupported/not_applicable</div><div class="td">只处理 compute-owned OVS tap</div>
-      <div class="td">Phase 3</div><div class="td">ACL datapath：UDS snapshot、eBPF apply、allow/deny smoke</div><div class="td">规则实时生效，重启/迁移/tap 重建后恢复</div><div class="td">失败 degraded+bypass，不中断原 OVS</div>
-      <div class="td">Phase 4</div><div class="td">QoS：新增 `aria-qos` facade，启用原生 QoS，Aria 执行</div><div class="td">`aria-qos-*` 可用，`qos_policy_id` 可绑定，限速可观察</div><div class="td">不启用 OVS agent qos execution；不使用 qhqos</div>
-      <div class="td">Phase 5</div><div class="td">Mirror：`aria_mirror` API/DB/CLI、global/policy mirror</div><div class="td">全局镜像可用，IP prefix 可分流到不同分析 VM</div><div class="td">保留现有 networking_mirror，不做跨 host target</div>
-      <div class="td">Phase 6</div><div class="td">产品化：Kolla 镜像、三节点 smoke、日志/metrics/runbook</div><div class="td">可部署、可灰度、可回滚、可定位故障</div><div class="td">三台节点一致性必须自动化验证</div>
+      <div class="th">阶段</div><div class="th">当前结果</div><div class="th">证据/现象</div><div class="th">边界</div>
+      <div class="td">Stage1</div><div class="td">Rust UDS、snapshot、managed domains、agent heartbeat/full-resync 地基完成</div><div class="td">本地 contract checks 和 smoke 通过</div><div class="td">不是业务验收，只是地基</div>
+      <div class="td">Stage2</div><div class="td">生产 ACL 输入闭环验收通过</div><div class="td">`aria_acl` API/DB/CLI/source 到 datapath 生效；真实 ICMP 阻断和 rollback 证据</div><div class="td">限定测试 VM/测试 port</div>
+      <div class="td">Stage3 N3</div><div class="td">生产硬化 gate 通过</div><div class="td">persistent UDS、timeout/crash、apply failure、rollback、tap recreate、VM migration、OVS restart 等 11 项 pass</div><div class="td">仍需长期运行观察</div>
+      <div class="td">P2/P3</div><div class="td">RPC-triggered full-resync 与 port-scoped apply 受控通过</div><div class="td">可在 controlled test-host 使用</div><div class="td">生产默认关闭；revisionless 仅实验室</div>
+      <div class="td">QoS Q0</div><div class="td">能力事实刷新完成</div><div class="td">QoS extension 不可见；host shell 缺 `tc`；容器内可读 qdisc</div><div class="td">不承诺 shaping</div>
+      <div class="td">Next</div><div class="td">review bug backlog 收敛</div><div class="td">P1/P2 修复后再进入 QoS Q1/Q2</div><div class="td">先质量，后扩功能</div>
     </div>
-    <div class="footer"><span>阶段计划 · 不跳门槛</span><span>18 / 26</span></div>
+    <div class="footer"><span>阶段进度 · 证据驱动</span><span>18 / 26</span></div>
     <aside class="notes">
-      <p>这页是开发路线。ACL 控制面和 datapath 要拆开，先让 Neutron API/DB/CLI 可用，再打开真实 enforcement。</p>
-      <p>QoS 放在 ACL 之后，因为现场 QoS plugin 未启用，且 tc/shaping 条件还要补齐。Mirror 作为第二阶段增强，新增 aria_mirror，不复用现有 networking_mirror 的 port_id/vm_type 语义。</p>
-      <p>产品化阶段要把 Kolla 镜像、三节点 smoke、回滚、日志和 metrics 都补齐，不只是功能验证。</p>
+      <p>这页是最重要的进度页。现在不是刚开始做 ACL，而是 ACL 已经通过阶段二输入闭环和阶段三生产硬化 gate。</p>
+      <p>P2/P3 代表增量同步和 port-scoped apply 已经受控通过，但生产默认仍关闭，避免把高风险快速路径直接放大。</p>
+      <p>下一阶段建议先修 review bug backlog，再进入 QoS Q1/Q2。这样汇报口径更稳。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Do Not Build">
     <p class="kicker">what not to build</p>
-    <h2 class="title">这些东西第一阶段明确不做，否则范围会失控。</h2>
+    <h2 class="title">这些边界当前仍然有效，否则 ACL 收敛会被范围拖垮。</h2>
     <div class="g3 grid">
       <div class="card"><h3>不复用安全组</h3><p>不消费 `security_group_ids`、remote group、port security，也不做默认安全组自动绑定。</p></div>
       <div class="card"><h3>不改 VIF 类型</h3><p>`binding:vif_type` 仍然是 `ovs`，Aria 不是新的 Nova/libvirt plug 类型。</p></div>
-      <div class="card"><h3>不接管 SR-IOV</h3><p>SR-IOV direct / direct-physical 第一阶段标记 unsupported，需要后续独立 backend。</p></div>
+      <div class="card"><h3>不接管 SR-IOV</h3><p>SR-IOV direct / direct-physical 当前阶段标记 unsupported，需要后续独立 backend。</p></div>
       <div class="card"><h3>不接管服务端口</h3><p>`network:dhcp`、router、metadata 等 Neutron 服务端口显示 not_applicable，不进 ACL snapshot。</p></div>
-      <div class="card"><h3>不启用 OVS QoS 执行</h3><p>Aria QoS 路线下 OVS agent 保持 `extensions = mirror`，避免双重限速。</p></div>
+      <div class="card"><h3>不承诺 QoS 执行</h3><p>QoS 先做 Q1/Q2 gate；没有执行权证据前，不承诺 shaping/policing。</p></div>
       <div class="card"><h3>不开放本机租户 API</h3><p>租户和平台只能走 Neutron API/CLI，不能直接调用 aria-agent socket 绕过 RBAC。</p></div>
     </div>
     <div class="footer"><span>不做项 · scope guard</span><span>19 / 26</span></div>
     <aside class="notes">
-      <p>这页很重要，因为范围失控通常不是因为大家不知道要做什么，而是因为不清楚什么不做。</p>
-      <p>第一阶段不走安全组替代链路，不改 VM plug 方式，不接管 SR-IOV，不接管 DHCP/router/metadata 服务端口，不启用 OVS agent QoS 执行。</p>
-      <p>这些约束不是保守，而是为了让第一阶段能交付、能验证、能回滚。</p>
+      <p>这页仍然重要，因为当前最应该做的是 ACL 质量收敛，而不是继续扩大功能面。</p>
+      <p>当前阶段不走安全组替代链路，不改 VM plug 方式，不接管 SR-IOV，不接管 DHCP/router/metadata 服务端口，也不提前承诺 QoS 执行。</p>
+      <p>这些约束不是保守，而是为了让已经验收的 ACL 能继续稳定、可回滚、可审计。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Risk Register">
     <p class="kicker">risk register</p>
-    <h2 class="title">风险集中在三类：OpenStack 语义、接口生命周期、持久化一致性。</h2>
+    <h2 class="title">当前风险从“架构可行性”转为“API 语义和 datapath 执行能力一致”。</h2>
     <div class="g3 grid">
-      <div class="card"><h3>OpenStack 语义风险</h3><ul><li>误把 Aria ACL enhancement 当成安全组替代链路</li><li>shared network / shared QoS 误拦截</li><li>未启用 ACL enhancement 的端口被误拦截</li><li>DHCP / metadata / IPv6 ND 被 ACL enhancement 误伤</li></ul></div>
-      <div class="card"><h3>接口生命周期风险</h3><ul><li>tap 未创建就 attach</li><li>VM reboot 后 ifindex 改变</li><li>migration 乱序 event</li><li>unsupported trunk / SR-IOV 假 ready</li></ul></div>
-      <div class="card"><h3>状态一致性风险</h3><ul><li>WAL 写失败但 generation 推进</li><li>pinned map schema 不兼容</li><li>local override 与 Neutron rejoin 冲突</li><li>双容器实例同时写 runtime</li></ul></div>
+      <div class="card"><h3>API 合同风险</h3><ul><li>`default_action=deny`、IPv6、source port 等 API 可创建但 datapath 不支持</li><li>重复 binding 或 priority 让 effective ACL 不确定</li><li>旧版 Neutron 400/404 异常映射不清晰</li></ul></div>
+      <div class="card"><h3>状态可见风险</h3><ul><li>agent 失联后 port status 仍显示 applied</li><li>degraded/stale/unknown 边界不够细</li><li>heartbeat 和 port/domain status 没完全闭环</li></ul></div>
+      <div class="card"><h3>交付运维风险</h3><ul><li>smoke 脚本假设固定 adminrc</li><li>first-install rollback marker 不完整</li><li>CLI skipped tests 可能掩盖旧版入口回归</li></ul></div>
     </div>
-    <div class="quote">每个风险都要变成 status、metric、smoke 或代码 gate，不能只留在文档里。</div>
+    <div class="quote">当前风险不在架构是否可行，而在用户可创建对象和 datapath 可执行能力必须一致。</div>
     <div class="footer"><span>风险与门槛</span><span>20 / 26</span></div>
     <aside class="notes">
-      <p>风险主要分三类。第一类是 OpenStack 语义，比如误把 Aria ACL enhancement 当成安全组替代、shared network、未启用 ACL enhancement 的端口、DHCP 和 metadata 被误伤。</p>
-      <p>第二类是接口生命周期，比如 tap 还没出现、ifindex 重建、迁移事件乱序、SR-IOV 这种 unsupported port 被误报 ready。</p>
-      <p>第三类是状态一致性，比如 WAL、pinned map、local override、双实例。所有这些都不能停留在文档里，必须进入 status、metric、smoke 或代码 gate。</p>
+      <p>风险页从早期架构风险更新为当前 review backlog 风险。最关键的是 API/CLI 允许创建的 ACL 必须和 Rust translator 能执行的能力一致。</p>
+      <p>第二类是状态可见性。agent 或 datapath 失联后，port-show 不能继续展示可靠 applied，应该进入 stale 或 unknown。</p>
+      <p>第三类是交付运维。smoke、rollback、CLI 测试要补齐，否则阶段验收证据很难稳定复用。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="OpenStack Discovery">
     <p class="kicker">before coding into target env</p>
-    <h2 class="title">真实环境已验证主路径，但三节点一致性还要产品化脚本补齐。</h2>
+    <h2 class="title">真实环境证据已支撑 ACL 验收；QoS Q0 仍保持 unsupported/deferred。</h2>
     <div class="g2 grid">
-      <div class="card"><h3>已确认</h3><ul><li>Neutron Server 是 Python2，镜像版本 `2.0.6sp2`。</li><li>`service_plugins` 当前无 `qos` / `aria_acl`。</li><li>Security Group 关闭，`enable_security_group=False`。</li><li>普通 tap 直挂 `br-int`，带 `external_ids:iface-id`。</li><li>Legacy `neutron port-show` 可展示服务端返回字段。</li></ul></div>
-      <div class="card"><h3>仍需补齐</h3><ul><li>ostack3/4 受 SSH 策略限制，需容器内脚本核验。</li><li>三台 compute 的 bpffs、BTF、OVSDB、socket 权限一致性。</li><li>`tc` 或 eBPF QoS shaping/policing 能力。</li><li>Kolla 镜像构建、配置分发和回滚路径。</li><li>迁移、重启、tap recreate 的完整 smoke。</li></ul></div>
+      <div class="card"><h3>已通过</h3><ul><li>Stage2 ACL 输入闭环验收通过。</li><li>Stage3 N3 11 项生产硬化 gate 通过。</li><li>P3 port-scoped apply 受控通过，默认关闭。</li><li>UDS hardening 三节点可逆验证通过。</li><li>DHCP/metadata/服务端口不纳入 eligible port。</li></ul></div>
+      <div class="card"><h3>仍不承诺</h3><ul><li>QoS shaping/policing 未进入执行验收。</li><li>Mirror 仍是后续独立阶段。</li><li>SR-IOV/LinuxBridge 端口不在本阶段范围。</li><li>P3 生产默认关闭，revisionless 仅实验室。</li><li>完整 Observability API 仍是平台化后续路线。</li></ul></div>
     </div>
     <div class="footer"><span>N0.5 · 目标环境发现</span><span>21 / 26</span></div>
     <aside class="notes">
-      <p>这页讲真实环境探测。ostack2 可以深度确认，ostack3/4 当前 SSH 网关限制很强，但从 Neutron agent-list 看三台 agent 都 alive。</p>
-      <p>已确认的事实支持 OVS tap 路线：tap 直挂 br-int，iface-id 可以映射 Neutron port。也确认当前没有 qos 和 aria_acl，需要新增配置和镜像。</p>
-      <p>上线前还要用产品容器或白名单脚本在三台 compute 上补齐一致性检查，不能只依赖 SSH 手工命令。</p>
+      <p>这页把现场发现更新为现场证据。ACL 已不只是“路线可行”，而是有 Stage2、Stage3、P3 和真实流量阻断/恢复证据。</p>
+      <p>同时要强调仍不承诺的内容：QoS 执行、Mirror、SR-IOV/LinuxBridge、完整 observability API 都不属于本轮交付。</p>
+      <p>这个表达可以保护汇报口径，避免把已验证的 ACL 和仍在路线中的能力混在一起。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Mirror Comparison">
     <p class="kicker">mirror phase two / comparison</p>
-    <h2 class="title">现有 networking_mirror 和 aria_mirror 不是同一个镜像模型。</h2>
+    <h2 class="title">Mirror 是后续阶段：现有 networking_mirror 和 aria_mirror 不是同一个模型。</h2>
     <div class="table row4" style="margin-top:22px">
       <div class="th">对比项</div><div class="th">现有 networking_mirror</div><div class="th">第二阶段 aria_mirror</div><div class="th">设计结论</div>
       <div class="td">源流量</div><div class="td">来自 `[mirror] interface` 采集口，经 `br-mirror` 进入 `br-int`</div><div class="td">显式 source：VM tap、network 下 VM tap 或 admin-only host interface</div><div class="td">不能把现有 `port_id` 当源端口复用</div>
@@ -476,10 +522,10 @@ DELETE /api/v1/neutron/ports/{port_id}</div>
       <div class="td">数据面</div><div class="td">OVS OpenFlow：group 10 + table 100/101/102 + output</div><div class="td">Aria TC/eBPF：`MIRROR_GLOBAL` / `MIRROR_POLICY` + `bpf_clone_redirect`</div><div class="td">新增独立扩展，避免两套执行面混淆</div>
       <div class="td">分流模型</div><div class="td">`vm_type=icg/dlp/nds` + `ip_prefix` 分发外部镜像流量</div><div class="td">`mirror_mode=global|policy`，policy rule 可按 prefix/address-set 指定目标 VM</div><div class="td">Aria 支持更明确的 per-rule target</div>
     </div>
-    <div class="quote">口径：保留现有 `mirror`；新增 `aria_mirror`。不把 `networking_mirror.port_id` 的目标端口语义改造成源端口语义。</div>
+    <div class="quote">口径：这页是后续路线，不进入当前 ACL 收敛交付；新增 `aria_mirror` 时必须拆清 source/target 语义。</div>
     <div class="footer"><span>Mirror 二阶段 · 语义对比</span><span>22 / 26</span></div>
     <aside class="notes">
-      <p>这一页先避免概念混淆。现有 networking_mirror 的 port_id 从代码看是目标分析 VM port，不是被镜像的源 port。</p>
+      <p>这一页先避免概念混淆，同时标注 Mirror 是后续阶段。现有 networking_mirror 的 port_id 从代码看是目标分析 VM port，不是被镜像的源 port。</p>
       <p>现有实现依赖 br-mirror、patch port、br-int group 10 和 table 100/101/102。Aria mirror 则是 eBPF clone 到 target ifindex。</p>
       <p>因此建议保留现有 mirror，不改它的语义；第二阶段新增 aria_mirror，字段明确拆分 source 和 target。</p>
     </aside>
@@ -487,7 +533,7 @@ DELETE /api/v1/neutron/ports/{port_id}</div>
 
   <section class="slide" data-title="Aria Mirror Semantics">
     <p class="kicker">aria_mirror semantics</p>
-    <h2 class="title">aria_mirror 要同时支持全局镜像和按 IP 网段分流。</h2>
+    <h2 class="title">后续 aria_mirror 要同时支持全局镜像和按 IP 网段分流。</h2>
     <div class="split">
       <div class="card">
         <h3>Global mirror</h3>
@@ -532,25 +578,25 @@ DELETE /api/v1/neutron/ports/{port_id}</div>
 
   <section class="slide" data-title="Aria Mirror Development Plan">
     <p class="kicker">aria_mirror development plan</p>
-    <h2 class="title">开发拆成四层：API/DB、CLI、translator、Aria-agent contract。</h2>
+    <h2 class="title">后续开发拆成四层：API/DB、CLI、translator、Aria datapath contract。</h2>
     <div class="g2 grid">
       <div class="card"><h3>1. Neutron API/DB</h3><ul><li>`aria-mirror` extension alias</li><li>`aria_mirror_sessions` / `rules` / `statuses`</li><li>`mirror_mode=global|policy`</li><li>rule 级 target override 和 priority validator</li></ul></div>
       <div class="card"><h3>2. Legacy CLI</h3><ul><li>`neutron aria-mirror-session-*`</li><li>`neutron aria-mirror-rule-*`</li><li>`neutron aria-mirror-status-show`</li><li>host interface source 只允许 admin</li></ul></div>
       <div class="card"><h3>3. neutron-aria-agent</h3><ul><li>full resync + 增量事件</li><li>source/target OVS tap discovery</li><li>prefix/address-set 编译成 group</li><li>cross-host / unsupported 状态上报</li></ul></div>
       <div class="card"><h3>4. aria-agent</h3><ul><li>OpenStack snapshot mirror domain</li><li>`MIRROR_GLOBAL` / `MIRROR_POLICY` 下发</li><li>mirror stats 回传</li><li>失败只影响 mirror，不阻断原业务流</li></ul></div>
     </div>
-    <div class="quote">开发后现象：`neutron ext-show aria-mirror` 可见；能创建全局镜像和 prefix 分流镜像；status 能展示 source/target ifindex、packets、bytes、errors。</div>
+    <div class="quote">后续开发后现象：`neutron ext-show aria-mirror` 可见；能创建全局镜像和 prefix 分流镜像；status 展示 source/target ifindex、packets、bytes、errors。</div>
     <div class="footer"><span>Mirror 二阶段 · 开发拆分</span><span>24 / 26</span></div>
     <aside class="notes">
-      <p>这一页是开发任务拆分。Neutron Server 先提供 API/DB 和 validator，CLI 给旧环境运维入口，Python agent 负责翻译，Rust agent 负责执行。</p>
+      <p>这一页是 Mirror 后续开发任务拆分，不是当前 ACL 阶段交付。Neutron Server 先提供 API/DB 和 validator，CLI 给旧环境运维入口，Python agent 负责翻译，Rust agent 负责执行。</p>
       <p>重点字段是 mirror_mode、rule target override、priority、source_type 和 target_type。</p>
-      <p>开发后一定要有可见现象：extension 可见、session/rule CRUD 可用、status 可查、stats 可看。</p>
+      <p>后续开发时一定要有可见现象：extension 可见、session/rule CRUD 可用、status 可查、stats 可看。</p>
     </aside>
   </section>
 
   <section class="slide" data-title="Aria Mirror Acceptance">
     <p class="kicker">aria_mirror acceptance</p>
-    <h2 class="title">验收按“能镜像、能分流、能解释失败、不影响原流量”来收口。</h2>
+    <h2 class="title">后续 Mirror 验收按“能镜像、能分流、能解释失败、不影响原流量”来收口。</h2>
     <div class="table row4" style="margin-top:22px">
       <div class="th">验收项</div><div class="th">操作</div><div class="th">预期现象</div><div class="th">边界</div>
       <div class="td">全局镜像</div><div class="td">source VM tap 或 host interface 创建 `mirror_mode=global` session</div><div class="td">source + direction 上全部流量 clone 到目标 VM port</div><div class="td">不修改原始业务流</div>
@@ -569,22 +615,22 @@ DELETE /api/v1/neutron/ports/{port_id}</div>
 
   <section class="slide" data-title="Next Steps">
     <p class="kicker">next execution</p>
-    <h2 class="title">下一步先交付 ACL 可见闭环，再推进 QoS 和 aria_mirror 二阶段。</h2>
+    <h2 class="title">下一步不是扩功能，是把已交付 ACL 做成更稳的产品。</h2>
     <div class="flow">
-      <div class="step"><b>1 控制面</b><span>`aria_acl` extension、DB migration、policy/rule/binding API。</span></div>
-      <div class="step"><b>2 CLI</b><span>Legacy `neutron aria-acl-*` 命令和 `port-show` 摘要字段。</span></div>
-      <div class="step"><b>3 Agent</b><span>neutron-aria-agent、RPC/full resync、OVS tap discovery。</span></div>
-      <div class="step"><b>4 ACL 执行</b><span>UDS snapshot、eBPF ACL apply、runtime status。</span></div>
-      <div class="step"><b>5 QoS</b><span>新增 `aria-qos` facade，启用 Neutron QoS，Aria translator 和执行后端。</span></div>
-      <div class="step"><b>6 Mirror</b><span>`aria_mirror` API/DB/CLI、global/policy mirror 和 prefix 分流。</span></div>
-      <div class="step"><b>7 产品化</b><span>Kolla 镜像、三节点 smoke、日志、metrics、回滚。</span></div>
+      <div class="step"><b>1 P1 合同</b><span>修复 API/CLI 与 datapath 能力不一致，拒绝 unsupported ACL rule/default_action。</span></div>
+      <div class="step"><b>2 P1 冲突</b><span>拒绝重复 enabled binding、重复 priority，补旧版 Neutron 异常映射。</span></div>
+      <div class="step"><b>3 P2 事务</b><span>补 address-set member 事务安全和 first-install rollback marker。</span></div>
+      <div class="step"><b>4 P2 状态</b><span>完善 degraded/stale/unknown port status，避免假 applied。</span></div>
+      <div class="step"><b>5 P2 交付</b><span>smoke/runbook 参数化，移除固定现场假设，补 CLI 正式测试。</span></div>
+      <div class="step"><b>6 QoS Q1/Q2</b><span>ACL backlog 收敛后，再做 QoS status-only 和 authority gate。</span></div>
+      <div class="step"><b>7 后续平台</b><span>Mirror、Observability、QoS 执行按 domain gate 独立推进。</span></div>
     </div>
-    <div class="quote">开发目标：先让 Neutron 里“看得见、查得到、能绑定”，再让 VM tap/采集口上“能生效、可恢复、可回滚”。</div>
+    <div class="quote">汇报结论：ACL 主路径已验收；下一阶段先修产品一致性和运维可见性，再扩 QoS/Mirror。</div>
     <div class="footer"><span>执行建议 · start small</span><span>26 / 26</span></div>
     <aside class="notes">
-      <p>最后落到执行。建议先做 ACL 控制面和 CLI，这样即使 enforcement 没打开，也能在 Neutron 中看到完整对象和绑定关系。</p>
-      <p>第二步做 agent 和 runtime status，再打开 ACL datapath。这样每一步都有可见现象，便于灰度。</p>
-      <p>QoS 放在 ACL 闭环之后，因为它涉及启用原生 QoS plugin、ML2 extension driver 和 Aria 执行后端，风险要单独验收。aria_mirror 再作为二阶段补充，重点验证 global mirror 和 prefix 分流。</p>
+      <p>最后落到执行建议。现在不是从零交付 ACL，而是先把 review bug backlog 里的 P1/P2 修掉。</p>
+      <p>重点是 API/CLI、DB transaction、port status、rollback、smoke 和 CLI 测试。这些都直接影响产品可运维性。</p>
+      <p>QoS 和 Mirror 不取消，但要排在 ACL 收敛之后，按独立 gate 推进，不要和当前验收口径混在一起。</p>
     </aside>
   </section>
 

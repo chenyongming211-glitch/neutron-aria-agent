@@ -241,6 +241,7 @@ impl TraceManager {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn clear_tap_cache(&self, pin_path: &str, tap_id: u32) {
         if self.backend == TraceBackendKind::LegacyMap {
             return;

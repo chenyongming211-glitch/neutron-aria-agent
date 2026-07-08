@@ -41,8 +41,7 @@ pub(crate) async fn handle(
                 .sum::<f64>()
                 / fc;
             let total_retrans_req: u32 = resp.instances.iter().map(|i| i.total_retrans_req).sum();
-            let total_retrans_resp: u32 =
-                resp.instances.iter().map(|i| i.total_retrans_resp).sum();
+            let total_retrans_resp: u32 = resp.instances.iter().map(|i| i.total_retrans_resp).sum();
             let avg_nqa: f64 = resp.instances.iter().map(|i| i.avg_nqa_score).sum::<f64>() / fc;
 
             println!(

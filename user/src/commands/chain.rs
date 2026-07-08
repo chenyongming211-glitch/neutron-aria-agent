@@ -35,9 +35,13 @@ pub(crate) async fn handle_action(
                 } else {
                     println!("{:<20} {:<30} {}", "Name", "Description", "Hops");
                     for c in &resp.chains {
-                        let hop_names: Vec<&str> =
-                            c.hops.iter().map(|h| h.name.as_str()).collect();
-                        println!("{:<20} {:<30} {}", c.name, c.description, hop_names.join(" → "));
+                        let hop_names: Vec<&str> = c.hops.iter().map(|h| h.name.as_str()).collect();
+                        println!(
+                            "{:<20} {:<30} {}",
+                            c.name,
+                            c.description,
+                            hop_names.join(" → ")
+                        );
                     }
                 }
                 Ok(())

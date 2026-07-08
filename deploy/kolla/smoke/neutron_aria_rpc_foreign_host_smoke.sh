@@ -8,6 +8,9 @@ HOST_FQDN="${HOST_FQDN:-$(hostname -f)}"
 SOCKET_PATH="${SOCKET_PATH:-/run/aria/aria-agent.sock}"
 AGENT_TIMEOUT="${AGENT_TIMEOUT:-45}"
 STARTUP_WAIT="${STARTUP_WAIT:-10}"
+STARTUP_CONVERGENCE_TIMEOUT="${STARTUP_CONVERGENCE_TIMEOUT:-60}"
+ROLLBACK_CONVERGENCE_ATTEMPTS="${ROLLBACK_CONVERGENCE_ATTEMPTS:-8}"
+ROLLBACK_CONVERGENCE_INTERVAL="${ROLLBACK_CONVERGENCE_INTERVAL:-1.0}"
 WORK_DIR="${WORK_DIR:-/tmp/neutron-aria-rpc-foreign-host-$(date +%Y%m%d%H%M%S)}"
 EVENT_PORT_ID="${EVENT_PORT_ID:-}"
 EVENT_BINDING_HOST="${EVENT_BINDING_HOST:-}"
@@ -68,31 +71,88 @@ docker_exec_agent_env() {
 }
 
 rollback_managed_ports() {
-    docker exec -i -u "${EXEC_USER}" "${SERVICE_NAME}" python - "${SOCKET_PATH}" <<'PY'
+    docker exec -i -u "${EXEC_USER}" "${SERVICE_NAME}" python - \
+        "${SOCKET_PATH}" \
+        "${ROLLBACK_CONVERGENCE_ATTEMPTS}" \
+        "${ROLLBACK_CONVERGENCE_INTERVAL}" <<'PY'
 from __future__ import print_function
 
 import sys
+import time
 
+from neutron_aria.agent.uds_client import LocalApiTimeoutError
 from neutron_aria.agent.uds_client import LocalClient
 
 client = LocalClient(sys.argv[1], timeout=3.0)
+attempts = int(sys.argv[2])
+interval = float(sys.argv[3])
+
+def managed_ids():
+    status = client.status()
+    return sorted([
+        port.get("port_id") for port in status.get("managed_ports") or []
+        if port.get("port_id")
+    ])
+
+def delete_with_convergence(port_id):
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = client.delete_port(port_id)
+            print("rollback_delete port_id=%s status=%s detached=%s attempt=%s" % (
+                port_id,
+                response.get("status"),
+                response.get("detached"),
+                attempt,
+            ))
+            return
+        except LocalApiTimeoutError as exc:
+            last_error = exc
+            print("rollback_delete_timeout port_id=%s attempt=%s error=%s" % (
+                port_id,
+                attempt,
+                exc,
+            ))
+        time.sleep(interval)
+        if port_id not in managed_ids():
+            print("rollback_delete_converged port_id=%s attempt=%s" % (
+                port_id,
+                attempt,
+            ))
+            return
+    raise SystemExit("rollback delete did not converge for %s: %s" % (
+        port_id,
+        last_error,
+    ))
+
 status = client.status()
 managed = status.get("managed_ports") or []
 for port in managed:
     port_id = port.get("port_id")
     if port_id:
-        response = client.delete_port(port_id)
-        print("rollback_delete port_id=%s status=%s detached=%s" % (
-            port_id,
-            response.get("status"),
-            response.get("detached"),
-        ))
-after = client.status()
-remaining = after.get("managed_ports") or []
+        delete_with_convergence(port_id)
+
+remaining = managed_ids()
 print("rollback_remaining_managed_ports=%d" % len(remaining))
 if remaining:
+    print("rollback_remaining_port_ids=%s" % ",".join(remaining))
     raise SystemExit(1)
 PY
+}
+
+wait_for_initial_convergence() {
+    local log="$1"
+    local waited=0
+    while [ "${waited}" -lt "${STARTUP_CONVERGENCE_TIMEOUT}" ]; do
+        if grep -q "full_resync_complete" "${log}"; then
+            echo "initial_full_resync_converged=true waited=${waited}"
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    tail -140 "${log}" || true
+    die "initial full-resync did not converge within ${STARTUP_CONVERGENCE_TIMEOUT}s"
 }
 
 write_temp_config() {
@@ -258,7 +318,7 @@ run_foreign_case() {
         >"${log}" 2>&1 &
     local pid=$!
 
-    sleep "${STARTUP_WAIT}"
+    wait_for_initial_convergence "${log}"
     initial_managed="$(managed_port_count)"
     echo "initial_managed_ports=${initial_managed}"
     send_foreign_port_update "${EVENT_PORT_ID}" "${EVENT_BINDING_HOST}" \

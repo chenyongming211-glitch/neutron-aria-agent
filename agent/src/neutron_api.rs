@@ -1,18 +1,17 @@
 use aria_api::{
-    ManagedNeutronPort, NEUTRON_UDS_BODY_MAX_BYTES, NEUTRON_UDS_SCHEMA_VERSION_MAX,
-    NEUTRON_UDS_SCHEMA_VERSION_MIN, NeutronAclRuleSnapshot, NeutronAclSnapshot,
-    NeutronCapabilitiesResponse, NeutronDeleteResponse, NeutronDomainStatus,
-    NeutronPortApplyResult, NeutronPortSnapshot, NeutronPortStatus, NeutronSnapshotRequest,
-    NeutronSnapshotResponse, NeutronStatusResponse, action_from_string, direction_from_string,
-    proto_from_string,
+    action_from_string, direction_from_string, proto_from_string, ManagedNeutronPort,
+    NeutronAclRuleSnapshot, NeutronAclSnapshot, NeutronCapabilitiesResponse, NeutronDeleteResponse,
+    NeutronDomainStatus, NeutronPortApplyResult, NeutronPortSnapshot, NeutronPortStatus,
+    NeutronSnapshotRequest, NeutronSnapshotResponse, NeutronStatusResponse,
+    NEUTRON_UDS_BODY_MAX_BYTES, NEUTRON_UDS_SCHEMA_VERSION_MAX, NEUTRON_UDS_SCHEMA_VERSION_MIN,
 };
 use axum::{
-    Json, Router,
     extract::DefaultBodyLimit,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, put},
+    Json, Router,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -1585,6 +1584,7 @@ fn validate_snapshot_preflight(
     validate_snapshot_scope(scope, snapshot).map_err(snapshot_scope_apply_error)
 }
 
+#[allow(dead_code)]
 fn snapshot_has_runtime_drift(
     current: &BTreeMap<String, ManagedNeutronPort>,
     snapshot: &NeutronSnapshotRequest,
@@ -3057,6 +3057,7 @@ async fn reconcile_neutron_acl(
     fault_injection::check("neutron.acl.after_enable_before_commit").await
 }
 
+#[allow(dead_code)]
 fn build_snapshot_plan(
     current: &BTreeMap<String, ManagedNeutronPort>,
     snapshot: &NeutronSnapshotRequest,
@@ -4345,12 +4346,11 @@ mod tests {
             body.get("error").and_then(|value| value.as_str()),
             Some("PORT_SCOPE_MISMATCH")
         );
-        assert!(
-            body.get("details")
-                .and_then(|value| value.as_str())
-                .map(|details| details.contains("expected target-port"))
-                .unwrap_or(false)
-        );
+        assert!(body
+            .get("details")
+            .and_then(|value| value.as_str())
+            .map(|details| details.contains("expected target-port"))
+            .unwrap_or(false));
         let _ = std::fs::remove_dir_all(root);
     }
 

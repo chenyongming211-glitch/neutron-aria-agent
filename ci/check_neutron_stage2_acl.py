@@ -300,6 +300,12 @@ def check_production_acl_smoke():
     full_resync_smoke = _read(os.path.join(
         "deploy", "kolla", "smoke", "neutron_aria_full_resync_smoke.sh"
     ))
+    active_traffic_smoke = _read(os.path.join(
+        "deploy", "kolla", "smoke", "neutron_aria_acl_active_traffic_smoke.sh"
+    ))
+    rpc_p2_soak_smoke = _read(os.path.join(
+        "deploy", "kolla", "smoke", "neutron_aria_rpc_p2_soak_smoke.sh"
+    ))
     migration_smoke = _read(os.path.join(
         "deploy", "kolla", "smoke", "neutron_aria_acl_db_migration_smoke.sh"
     ))
@@ -357,6 +363,8 @@ def check_production_acl_smoke():
         "Installing neutron-aria-agent package",
         "neutron_aria_acl_db_crud_smoke.sh",
         "neutron_aria_acl_neutron_source_smoke.sh",
+        "RUN_ACTIVE_TRAFFIC_SMOKE",
+        "neutron_aria_acl_active_traffic_smoke.sh",
         "ROLLBACK_DB_ON_ROLLBACK",
     ):
         if term not in stage2_gate:
@@ -449,6 +457,37 @@ def check_production_acl_smoke():
     ):
         if term not in workflow:
             raise SystemExit("ERROR: workflow missing stage-two ACL bundle term %s" % term)
+    for term in (
+        "OBSERVATION_SECONDS",
+        "rpc_events_enabled",
+        "incremental_rpc_enabled",
+        "revisionless_incremental_mode",
+        "sync_mode=rpc_full_resync",
+        "full_resync_complete",
+        "event_batch_drained",
+        "pending_generation",
+        "BAD_LOG_PATTERN",
+        "KEEP_ENABLED",
+        "config_restored",
+        "rpc_p2_soak=pass",
+    ):
+        if term not in rpc_p2_soak_smoke:
+            raise SystemExit("ERROR: RPC P2 soak smoke missing %s" % term)
+    for term in (
+        "active_traffic_started",
+        "active-downlink-ping.log",
+        "aria-acl-policies",
+        "aria-acl-rules",
+        "aria-acl-bindings",
+        "aria-acl-port-statuses",
+        "run_full_resync",
+        "wait_datapath_drop",
+        "wait_datapath_clear",
+        "observe_blocked_traffic",
+        "acl_active_traffic_smoke=pass",
+    ):
+        if term not in active_traffic_smoke:
+            raise SystemExit("ERROR: active traffic ACL smoke missing %s" % term)
     for term in (
         "neutron-aria==0.1.0",
         "neutron-aria-stage2-acl-kolla-bundle.tgz",

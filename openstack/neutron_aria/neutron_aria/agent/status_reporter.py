@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+from neutron_aria.agent.config import sync_mode
 from neutron_aria.agent.status import ARIA_AGENT_TYPE
 
 
@@ -276,6 +277,12 @@ def build_neutron_status_reporter(
         "managed_domains": list(config.managed_domains),
         "ovs_bridge": config.ovs_bridge,
         "socket_path": config.socket_path,
+        "sync_mode": sync_mode(config),
+        "full_resync_enabled": bool(config.full_resync_enabled),
+        "rpc_events_enabled": bool(config.rpc_events_enabled),
+        "incremental_rpc_enabled": bool(config.incremental_rpc_enabled),
+        "revisionless_incremental_mode": config.revisionless_incremental_mode,
+        "event_merge_interval": config.event_merge_interval,
     }
     heartbeat_reporter = NeutronStatusReporter(
         report_state_api=report_state_api,

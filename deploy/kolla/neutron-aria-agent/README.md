@@ -194,15 +194,19 @@ P2 production enablement is per host:
    evidence exists for the target environment.
 4. Flip only `[neutron] rpc_events_enabled = true`.
 5. Restart only `neutron_aria_agent` to load the setting.
-6. Verify heartbeat, `event_batch_drained`, and managed-port locality.
+6. Verify startup log and heartbeat report `sync_mode = rpc_full_resync`.
+7. Verify `event_batch_drained`, full-resync recovery, and managed-port
+   locality.
 
 Rollback is also per host: set `rpc_events_enabled = false` and restart only
-`neutron_aria_agent`. Keep polling/full-resync enabled so ACL recovery remains
-available. Do not restart OVS, OVS agent, neutron-server, or `aria-datapath`
-for this switch.
+`neutron_aria_agent`. Verify startup log and heartbeat return to
+`sync_mode = polling_full_resync`. Keep polling/full-resync enabled so ACL
+recovery remains available. Do not restart OVS, OVS agent, neutron-server, or
+`aria-datapath` for this switch.
 
-Keep `incremental_rpc_enabled = false`. P3 port-scoped apply requires a later
-entry gate and is intentionally rejected by current config validation.
+Keep `incremental_rpc_enabled = false` for production P2. P3 port-scoped apply
+is implemented behind explicit config gates, but it requires a later controlled
+entry gate and must remain disabled in packaged defaults.
 
 ## Full Resync Gate
 

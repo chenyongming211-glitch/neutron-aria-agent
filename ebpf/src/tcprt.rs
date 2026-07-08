@@ -61,7 +61,7 @@ unsafe fn is_retrans_resp(entry: *mut TcpRtValue, seq: u32) -> bool {
 /// Track TCP response time for an IPv4 flow.
 /// `ct_key` must be the forward (original direction) key.
 /// `is_forward` indicates whether this packet is in the original direction.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn track_tcp_rt_v4(
     ct_key: &CtKey4,
     info: &PacketInfo,
@@ -237,7 +237,7 @@ pub unsafe fn track_tcp_rt_v4(
 }
 
 /// Track TCP-RT for reverse direction IPv4 (constructs forward key internally).
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn track_tcp_rt_v4_rev(
     tap_id: u32,
     info: &PacketInfo,
@@ -258,7 +258,7 @@ pub unsafe fn track_tcp_rt_v4_rev(
 
 /// Track TCP-RT for either direction without relying on conntrack direction hints.
 /// Used on degraded paths where we only have the packet tuple and current TCPRT table state.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn track_tcp_rt_v4_auto(
     tap_id: u32,
     info: &PacketInfo,
@@ -312,7 +312,7 @@ pub unsafe fn track_tcp_rt_v4_auto(
 
 /// Track TCP response time for an IPv6 flow.
 /// Same logic as V4, different map.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn track_tcp_rt_v6(
     ct_key: &CtKey6,
     info: &PacketInfo,
@@ -470,7 +470,7 @@ pub unsafe fn track_tcp_rt_v6(
 }
 
 /// Track TCP-RT for reverse direction IPv6 (constructs forward key internally).
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn track_tcp_rt_v6_rev(
     tap_id: u32,
     info: &PacketInfo,
@@ -490,7 +490,7 @@ pub unsafe fn track_tcp_rt_v6_rev(
 }
 
 /// Track TCP-RT for either direction without relying on conntrack direction hints.
-#[inline(always)]
+#[inline(never)]
 pub unsafe fn track_tcp_rt_v6_auto(
     tap_id: u32,
     info: &PacketInfo,

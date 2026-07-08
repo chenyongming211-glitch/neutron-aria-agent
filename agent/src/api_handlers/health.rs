@@ -1,6 +1,6 @@
-use axum::{Json, extract::State, response::IntoResponse};
+use axum::{extract::State, response::IntoResponse, Json};
 
-use super::common::{AppState, kernel_drop_mode_name};
+use super::common::{kernel_drop_mode_name, AppState};
 use aria_api::HealthResponse;
 
 #[utoipa::path(

@@ -1,12 +1,12 @@
 use axum::{
-    Json,
     extract::{Path, State},
     response::IntoResponse,
+    Json,
 };
 
-use super::common::{AppState, err_response};
+use super::common::{err_response, AppState};
 use crate::control_plane::LocalWriteDomain;
-use aria_api::{ConntrackEntry, ConntrackFlushResponse, ConntrackResponse, proto_to_string};
+use aria_api::{proto_to_string, ConntrackEntry, ConntrackFlushResponse, ConntrackResponse};
 
 #[utoipa::path(
     get,

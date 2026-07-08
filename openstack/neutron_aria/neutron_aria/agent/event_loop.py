@@ -823,21 +823,34 @@ class SnapshotSynchronizer(object):
         if not acl_metadata:
             return statuses
 
+        managed_port_ids = set(
+            port.get("port_id") for port in status.get("managed_ports") or []
+            if port.get("port_id")
+        )
+        status_by_port = {}
         enriched = []
         for status_row in statuses:
             payload = dict(status_row)
             metadata = acl_metadata.get(payload.get("port_id"))
             if metadata:
-                self._setdefault_nonempty(
+                self._apply_acl_metadata_to_status(
                     payload,
-                    "policy_id",
-                    metadata.get("policy_id"),
+                    metadata,
+                    status.get("generation"),
                 )
-                self._setdefault_nonempty(
-                    payload,
-                    "binding_id",
-                    metadata.get("binding_id"),
-                )
+            status_by_port[payload.get("port_id")] = payload
+            enriched.append(payload)
+        for port_id in sorted(acl_metadata):
+            if port_id in status_by_port:
+                continue
+            if port_id not in managed_port_ids:
+                continue
+            payload = {"port_id": port_id}
+            self._apply_acl_metadata_to_status(
+                payload,
+                acl_metadata[port_id],
+                status.get("generation"),
+            )
             enriched.append(payload)
         return enriched
 
@@ -854,8 +867,58 @@ class SnapshotSynchronizer(object):
                 metadata[port_id] = {
                     "policy_id": policy_id,
                     "binding_id": binding_id,
+                    "acl_enabled": bool(acl.get("enabled")),
+                    "status": acl.get("status"),
+                    "reason": acl.get("reason"),
+                    "effective_action": acl.get("effective_action"),
                 }
         return metadata
+
+    def _apply_acl_metadata_to_status(self, payload, metadata, generation):
+        self._setdefault_nonempty(
+            payload,
+            "policy_id",
+            metadata.get("policy_id"),
+        )
+        self._setdefault_nonempty(
+            payload,
+            "binding_id",
+            metadata.get("binding_id"),
+        )
+        if generation is not None:
+            payload.setdefault("generation", generation)
+        if not metadata.get("acl_enabled"):
+            return
+
+        acl_status = metadata.get("status") or "ready"
+        acl_reason = metadata.get("reason") or "ready"
+        acl_action = metadata.get("effective_action") or "enforce"
+        if payload.get("status") in (None, "", "not_requested"):
+            payload["status"] = acl_status
+        if payload.get("effective_action") in (None, "", "bypass"):
+            payload["effective_action"] = acl_action
+        if payload.get("reason") in (None, "", "no_enabled_binding"):
+            payload["reason"] = acl_reason
+
+        domains = list(payload.get("domains") or [])
+        for domain_status in domains:
+            if domain_status.get("domain") != "acl":
+                continue
+            if domain_status.get("status") in (None, "", "not_requested"):
+                domain_status["status"] = acl_status
+            if domain_status.get("effective_action") in (None, "", "bypass"):
+                domain_status["effective_action"] = acl_action
+            if domain_status.get("reason") in (None, "", "no_enabled_binding"):
+                domain_status["reason"] = acl_reason
+            break
+        else:
+            domains.append({
+                "domain": "acl",
+                "status": acl_status,
+                "effective_action": acl_action,
+                "reason": acl_reason,
+            })
+        payload["domains"] = domains
 
     def _setdefault_nonempty(self, payload, key, value):
         if value and not payload.get(key):

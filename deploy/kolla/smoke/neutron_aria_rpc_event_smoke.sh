@@ -21,6 +21,7 @@ from __future__ import print_function
 
 from neutron_aria.agent.config import AgentConfig
 from neutron_aria.agent.config import ConfigError
+from neutron_aria.agent.config import sync_mode
 from neutron_aria.agent.config import validate_config
 from neutron_aria.agent.event_merge import EventMerger
 from neutron_aria.agent.service import AgentService
@@ -223,6 +224,53 @@ expect_config_error(
         revisionless_incremental_mode="experimental",
     ),
     "revisionless_incremental_mode must require incremental_rpc_enabled",
+)
+
+assert_equal(
+    "heartbeat_only",
+    sync_mode(AgentConfig(full_resync_enabled=False)),
+    "safe default sync mode",
+)
+assert_equal(
+    "polling_full_resync",
+    sync_mode(AgentConfig(
+        full_resync_enabled=True,
+        port_source="neutronclient",
+        rpc_events_enabled=False,
+    )),
+    "P1 polling sync mode",
+)
+assert_equal(
+    "rpc_full_resync",
+    sync_mode(AgentConfig(
+        full_resync_enabled=True,
+        port_source="neutronclient",
+        rpc_events_enabled=True,
+        incremental_rpc_enabled=False,
+    )),
+    "P2 RPC full-resync sync mode",
+)
+assert_equal(
+    "rpc_port_scoped",
+    sync_mode(AgentConfig(
+        full_resync_enabled=True,
+        port_source="neutronclient",
+        rpc_events_enabled=True,
+        incremental_rpc_enabled=True,
+        revisionless_incremental_mode="disabled",
+    )),
+    "P3 port-scoped sync mode",
+)
+assert_equal(
+    "rpc_port_scoped_revisionless_experimental",
+    sync_mode(AgentConfig(
+        full_resync_enabled=True,
+        port_source="neutronclient",
+        rpc_events_enabled=True,
+        incremental_rpc_enabled=True,
+        revisionless_incremental_mode="experimental",
+    )),
+    "P3 revisionless experimental sync mode",
 )
 
 clock, sync, merger, service = new_service()

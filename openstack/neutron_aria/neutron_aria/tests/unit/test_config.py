@@ -6,6 +6,7 @@ import unittest
 
 from neutron_aria.agent.config import ConfigError
 from neutron_aria.agent.config import load_config
+from neutron_aria.agent.config import sync_mode
 
 
 class ConfigTestCase(unittest.TestCase):
@@ -176,6 +177,54 @@ port_source = disabled
         finally:
             os.unlink(path)
 
+    def test_rejects_invalid_full_resync_boolean(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = ture
+""")
+        try:
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(path)
+            self.assertIn("agent.full_resync_enabled", str(ctx.exception))
+            self.assertIn("ture", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
+    def test_rejects_invalid_rpc_events_boolean(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = maybe
+""")
+        try:
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(path)
+            self.assertIn("neutron.rpc_events_enabled", str(ctx.exception))
+            self.assertIn("maybe", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
+    def test_rejects_invalid_incremental_rpc_boolean(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = true
+incremental_rpc_enabled = enable
+""")
+        try:
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(path)
+            self.assertIn("neutron.incremental_rpc_enabled", str(ctx.exception))
+            self.assertIn("enable", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
     def test_rejects_rpc_events_without_full_resync(self):
         path = self._write_config("""
 [agent]
@@ -269,6 +318,90 @@ revisionless_incremental_mode = optimistic
 """)
         try:
             self.assertRaises(ConfigError, load_config, path)
+        finally:
+            os.unlink(path)
+
+    def test_sync_mode_reports_heartbeat_only(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = false
+""")
+        try:
+            config = load_config(path)
+
+            self.assertEqual("heartbeat_only", sync_mode(config))
+        finally:
+            os.unlink(path)
+
+    def test_sync_mode_reports_polling_full_resync(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = false
+""")
+        try:
+            config = load_config(path)
+
+            self.assertEqual("polling_full_resync", sync_mode(config))
+        finally:
+            os.unlink(path)
+
+    def test_sync_mode_reports_rpc_full_resync(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = true
+incremental_rpc_enabled = false
+""")
+        try:
+            config = load_config(path)
+
+            self.assertEqual("rpc_full_resync", sync_mode(config))
+        finally:
+            os.unlink(path)
+
+    def test_sync_mode_reports_rpc_port_scoped(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = true
+incremental_rpc_enabled = true
+revisionless_incremental_mode = disabled
+""")
+        try:
+            config = load_config(path)
+
+            self.assertEqual("rpc_port_scoped", sync_mode(config))
+        finally:
+            os.unlink(path)
+
+    def test_sync_mode_reports_revisionless_experimental(self):
+        path = self._write_config("""
+[agent]
+full_resync_enabled = true
+
+[neutron]
+port_source = neutronclient
+rpc_events_enabled = true
+incremental_rpc_enabled = true
+revisionless_incremental_mode = experimental
+""")
+        try:
+            config = load_config(path)
+
+            self.assertEqual(
+                "rpc_port_scoped_revisionless_experimental",
+                sync_mode(config),
+            )
         finally:
             os.unlink(path)
 

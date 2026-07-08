@@ -6,7 +6,8 @@ pub struct PolicyKey {
     pub dst_id: u32,
     pub proto: u8,
     pub direction: u8, // 0=ingress, 1=egress
-    pub pad: [u8; 2],
+    pub bank: u8,
+    pub pad: [u8; 1],
 }
 
 #[repr(C)]
@@ -28,6 +29,26 @@ pub const IPPROTO_ICMPV6: u8 = 58;
 
 pub const DIR_INGRESS: u8 = 0;
 pub const DIR_EGRESS: u8 = 1;
+
+pub const ACL_BANK_PRIMARY: u8 = 0;
+#[allow(dead_code)]
+pub const ACL_BANK_SHADOW: u8 = 1;
+
+#[inline(always)]
+pub fn normalize_acl_bank(bank: u8) -> u8 {
+    bank & 1
+}
+
+#[inline(always)]
+#[allow(dead_code)]
+pub fn acl_next_bank(bank: u8) -> u8 {
+    normalize_acl_bank(bank ^ 1)
+}
+
+#[inline(always)]
+pub fn acl_banked_tap_id(tap_id: u32, bank: u8) -> u32 {
+    tap_id.saturating_mul(2) | normalize_acl_bank(bank) as u32
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -78,7 +99,8 @@ pub struct CtValue {
     pub matched_dst_id: u32,
     // Keep the 8-byte alignment before last_seen explicit so older verifiers
     // do not see an uninitialized padding hole during map_update_elem.
-    pub _pad: [u8; 4],
+    pub matched_bank: u8,
+    pub _pad: [u8; 3],
     pub last_seen: u64,
     pub pkt_count: u64,
     pub byte_count: u64,
@@ -511,7 +533,8 @@ pub struct PipelineCtx {
     pub matched_dst_id: u32,
     pub matched_proto: u8,
     pub matched_direction: u8,
-    pub _pad2: [u8; 2],
+    pub matched_bank: u8,
+    pub _pad2: [u8; 1],
 }
 
 // --- Global firewall config (feature switches) ---
@@ -551,7 +574,8 @@ pub struct TapConfig {
     pub qos_enabled: u8,
     pub mirror_enabled: u8,
     pub tcprt_enabled: u8,
-    pub pad: [u8; 2],
+    pub acl_active_bank: u8,
+    pub pad: [u8; 1],
 }
 
 // --- SSL Observability ---

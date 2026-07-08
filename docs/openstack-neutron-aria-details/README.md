@@ -36,6 +36,9 @@ or an explicitly approved later phase.
 | `09-aria-rpc-incremental-sync.md` | Record post-stage-three RPC evolution: P2 RPC-triggered full-resync and P3 incremental RPC with port-scoped apply. |
 | `10-rust-scoped-apply.md` | Detail the P3-3 Rust single-port scoped apply minimum design and test boundary before touching datapath logic. |
 | `11-qos-next-phase.md` | Record the QoS next-phase entry assessment after ACL/P3 closure; starts with capability discovery and degraded/unsupported semantics. |
+| `12-review-bug-backlog.md` | Track code-review bugs and risks that must be fixed without expanding the product scope. |
+| `13-acl-delivery-performance-optimization.md` | Detail ACL strategy delivery performance optimization after the 2026-07-07 200-rule convergence probe. |
+| `14-logging-level-governance.md` | Record Rust/Python agent logging-level governance, noisy-log demotion, SSL reconcile gating, and Kolla log routing cleanup. |
 
 ## Refinement Order
 
@@ -54,6 +57,10 @@ or an explicitly approved later phase.
    test contract.
 10. QoS next-phase entry assessment, only after ACL/P3 closure and target
     capability evidence are clear.
+11. ACL delivery performance optimization, starting with logging and duplicate
+    submit suppression before changing UDS semantics or eBPF map layout.
+12. Logging-level governance, to keep ACL product operation readable before
+    adding more feature surface or telemetry.
 
 ## Dependency Map
 
@@ -98,6 +105,19 @@ or an explicitly approved later phase.
   -> N0.5 capability refresh for Neutron QoS and tc/qdisc
   -> managed_domains qos authority gate
   -> degraded/unsupported QoS status before any shaping claim
+
+13 ACL delivery performance optimization
+  -> 07 pending generation and WAL idempotency
+  -> 09 RPC and port-scoped update path
+  -> 10 Rust scoped apply route
+  -> 04 async accepted UDS contract
+  -> ACL quota and capacity gates
+
+14 Logging level governance
+  -> 06 deployment log checks
+  -> 08 production hardening evidence
+  -> 09 RPC event log breadcrumbs
+  -> 13 ACL delivery performance logs
 ```
 
 ## Gate Mapping
@@ -115,6 +135,8 @@ or an explicitly approved later phase.
 | S3 production hardening | 08 | CI/release, persistent UDS rollout, ACL N3 fault, and lifecycle gates are ready. |
 | P2/P3 RPC sync evolution | 09, 10 | RPC-triggered resync and incremental port-scoped apply are accepted behind config gates; packaged defaults keep incremental runtime disabled. |
 | QoS next-phase entry | 11 | Q0 evidence is refreshed; QoS remains deferred until Q1/Q2 status and authority gates are accepted and Q4 decides shaping, policing-only, or unsupported/degraded behavior. |
+| ACL delivery performance | 07, 09, 10, 13 | 100/200-rule ACL changes must avoid duplicate generation churn, expose per-phase timing, prefer port-scoped/diff apply, and keep full-resync rollback. |
+| Logging governance | 06, 08, 09, 13, 14 | Production logs keep state transitions and failures visible while demoting high-frequency success paths, disabling non-product SSL noise in OpenStack mode, and avoiding duplicate Kolla log writes. |
 
 ## Stage-One Verification
 
@@ -254,8 +276,9 @@ python ci/check_stage3_readiness.py
 
 ## Post-Stage-Three: Aria RPC And Incremental Sync
 
-Stage three stopped at RPC-triggered full-resync (P2). The follow-up
-incremental RPC and port-scoped apply work (P3) is recorded in:
+RPC-triggered full-resync (P2) and config-gated incremental port-scoped apply
+(P3) have controlled acceptance evidence. The RPC design and scoped apply work
+are recorded in:
 
 ```text
 docs/openstack-neutron-aria-details/09-aria-rpc-incremental-sync.md
@@ -270,6 +293,10 @@ separate revision-aware rollout decision.
 Old Neutron environments without trustworthy `revision_number` stay on P2
 full-resync fallback by default; `revisionless_incremental_mode=experimental`
 is test-host only.
+The current RPC hardening pass adds strict boolean parsing for production
+enablement flags and exposes a `sync_mode` summary in logs/heartbeat:
+`heartbeat_only`, `polling_full_resync`, `rpc_full_resync`,
+`rpc_port_scoped`, or `rpc_port_scoped_revisionless_experimental`.
 
 The 2026-07-02 P3-5 smoke evidence is recorded in:
 

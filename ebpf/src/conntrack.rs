@@ -78,6 +78,7 @@ pub struct MatchedPolicy {
     pub dst_id: u32,
     pub proto: u8,
     pub direction: u8,
+    pub bank: u8,
 }
 
 impl MatchedPolicy {
@@ -89,7 +90,8 @@ impl MatchedPolicy {
             dst_id: self.dst_id,
             proto: self.proto,
             direction: self.direction,
-            pad: [0; 2],
+            bank: self.bank,
+            pad: [0; 1],
         }
     }
 }
@@ -112,6 +114,7 @@ fn extract_matched(entry: &CtValue, tap_id: u32) -> MatchedPolicy {
         dst_id: entry.matched_dst_id,
         proto: entry.matched_proto,
         direction: entry.direction,
+        bank: entry.matched_bank,
     }
 }
 
@@ -219,7 +222,8 @@ pub unsafe fn ct_create_v4(key: &CtKey4, now: u64, pkt_len: u32, matched: &Match
         matched_proto: matched.proto,
         matched_src_id: matched.src_id,
         matched_dst_id: matched.dst_id,
-        _pad: [0; 4],
+        matched_bank: matched.bank,
+        _pad: [0; 3],
         last_seen: now,
         pkt_count: 1,
         byte_count: pkt_len as u64,
@@ -240,7 +244,8 @@ pub unsafe fn ct_create_v6(key: &CtKey6, now: u64, pkt_len: u32, matched: &Match
         matched_proto: matched.proto,
         matched_src_id: matched.src_id,
         matched_dst_id: matched.dst_id,
-        _pad: [0; 4],
+        matched_bank: matched.bank,
+        _pad: [0; 3],
         last_seen: now,
         pkt_count: 1,
         byte_count: pkt_len as u64,

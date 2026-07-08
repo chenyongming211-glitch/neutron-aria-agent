@@ -36,9 +36,11 @@ pub fn attach_tc_ingress(bpf: &mut aya::Ebpf, iface: &str, pin_path: &str) -> Re
         .take_link(link_id)
         .map_err(|e| format!("tc_ingress take_link error: {:?}", e))?;
     let fd_link: aya::programs::links::FdLink =
-        tc_link.try_into().map_err(|e: aya::programs::links::LinkError| {
-            format!("tc_ingress convert to FdLink error: {:?}", e)
-        })?;
+        tc_link
+            .try_into()
+            .map_err(|e: aya::programs::links::LinkError| {
+                format!("tc_ingress convert to FdLink error: {:?}", e)
+            })?;
     let tc_link_pin = format!("{}/tc_ingress_link", pin_path);
     let _pinned = fd_link
         .pin(&tc_link_pin)
@@ -76,9 +78,12 @@ pub fn attach_tc_egress(bpf: &mut aya::Ebpf, iface: &str, pin_path: &str) -> Res
     let tc_link = tc
         .take_link(link_id)
         .map_err(|e| format!("tc take_link error: {:?}", e))?;
-    let fd_link: aya::programs::links::FdLink = tc_link
-        .try_into()
-        .map_err(|e: aya::programs::links::LinkError| format!("tc convert to FdLink error: {:?}", e))?;
+    let fd_link: aya::programs::links::FdLink =
+        tc_link
+            .try_into()
+            .map_err(|e: aya::programs::links::LinkError| {
+                format!("tc convert to FdLink error: {:?}", e)
+            })?;
     let tc_link_pin = format!("{}/tc_egress_link", pin_path);
     let _pinned = fd_link
         .pin(&tc_link_pin)

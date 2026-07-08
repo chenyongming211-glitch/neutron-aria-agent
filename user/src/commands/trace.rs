@@ -28,7 +28,10 @@ fn display_trace_live(
 ) {
     let src_label = if src.is_empty() { "*" } else { src };
     let dst_label = if dst.is_empty() { "*" } else { dst };
-    println!("Trace: {} → {}  (live, Ctrl+C to stop)\n", src_label, dst_label);
+    println!(
+        "Trace: {} → {}  (live, Ctrl+C to stop)\n",
+        src_label, dst_label
+    );
     println!(
         "  {:<20} {:<10} {:<10} {}",
         "Instance", "In", "Out", "Verdict"
@@ -38,7 +41,10 @@ fn display_trace_live(
         "────────────────", "────────", "────────", "──────────────"
     );
     for tap in taps {
-        let evts = events.get(tap.as_str()).map(|v| v.as_slice()).unwrap_or(&[]);
+        let evts = events
+            .get(tap.as_str())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         print_instance_summary(tap, evts);
     }
 }
@@ -62,12 +68,18 @@ fn display_trace_summary(
         "────────────────", "────────", "────────", "──────────────"
     );
     for tap in taps {
-        let evts = events.get(tap.as_str()).map(|v| v.as_slice()).unwrap_or(&[]);
+        let evts = events
+            .get(tap.as_str())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         print_instance_summary(tap, evts);
     }
 
     for tap in taps {
-        let evts = events.get(tap.as_str()).map(|v| v.as_slice()).unwrap_or(&[]);
+        let evts = events
+            .get(tap.as_str())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         let drops: Vec<&aria_api::TraceEventEntry> =
             evts.iter().filter(|e| e.result.contains("drop")).collect();
         if drops.is_empty() {
@@ -89,7 +101,10 @@ fn display_trace_summary(
 
 fn print_instance_summary(tap: &str, evts: &[aria_api::TraceEventEntry]) {
     if evts.is_empty() {
-        println!("  {:<20} {:<10} {:<10} {}", tap, "0 pkts", "0 pkts", "no data");
+        println!(
+            "  {:<20} {:<10} {:<10} {}",
+            tap, "0 pkts", "0 pkts", "no data"
+        );
         return;
     }
     let ingress = evts.iter().filter(|e| e.direction == "ingress").count();
@@ -293,7 +308,9 @@ fn print_drop_annotations(hops: &[ChainHopTrace], hop_aggs: &[HopAgg]) {
                 }
                 println!(
                     "  \u{2193} {} pkts lost between {} and {}",
-                    lost, hops[i].name, hops[i + 1].name
+                    lost,
+                    hops[i].name,
+                    hops[i + 1].name
                 );
             }
         }
@@ -310,7 +327,10 @@ fn display_trace_chain_summary(
 ) {
     let src_label = if src.is_empty() { "*" } else { src };
     let dst_label = if dst.is_empty() { "*" } else { dst };
-    println!("Chain: {}    Filter: {} \u{2192} {}\n", chain_name, src_label, dst_label);
+    println!(
+        "Chain: {}    Filter: {} \u{2192} {}\n",
+        chain_name, src_label, dst_label
+    );
 
     println!(
         "  {:<15} {:<12} {:<8} {:<12} {:<12} {}",

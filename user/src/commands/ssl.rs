@@ -2,7 +2,9 @@ use crate::{api_client, cli::SslCommands};
 
 fn note_ssl_is_global(has_tap: bool) {
     if has_tap {
-        eprintln!("Note: --tap is ignored for SSL observability commands; SSL data is host-global.");
+        eprintln!(
+            "Note: --tap is ignored for SSL observability commands; SSL data is host-global."
+        );
     }
 }
 
@@ -60,13 +62,7 @@ pub(crate) async fn handle_action(
                         for e in &resp.events {
                             println!(
                                 "{:<8} {:<8} {:<8} {:<23} {:<30} {:<8} {:.1}",
-                                e.pid,
-                                e.tid,
-                                e.method,
-                                e.host,
-                                e.path,
-                                e.status_code,
-                                e.latency_us
+                                e.pid, e.tid, e.method, e.host, e.path, e.status_code, e.latency_us
                             );
                         }
                     }

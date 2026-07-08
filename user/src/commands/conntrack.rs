@@ -13,7 +13,13 @@ pub(crate) async fn handle_action(
                 } else {
                     println!(
                         "{:<20} {:<20} {:<8} {:<8} {:<8} {:<12} {:<15} {}",
-                        "Source", "Destination", "SPort", "DPort", "Proto", "State", "Packets",
+                        "Source",
+                        "Destination",
+                        "SPort",
+                        "DPort",
+                        "Proto",
+                        "State",
+                        "Packets",
                         "Bytes"
                     );
                     for c in &resp.connections {

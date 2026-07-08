@@ -2,7 +2,9 @@ use crate::{api_client, cli::ConfigCommands};
 
 fn note_ssl_is_global(has_tap: bool) {
     if has_tap {
-        eprintln!("Note: --tap is ignored for SSL observability commands; SSL data is host-global.");
+        eprintln!(
+            "Note: --tap is ignored for SSL observability commands; SSL data is host-global."
+        );
     }
 }
 
@@ -17,7 +19,10 @@ pub(crate) async fn handle_action(
             Ok(cfg) => {
                 println!("=== Firewall Configuration ===");
                 println!("  conntrack:  {}", if cfg.conntrack { "on" } else { "off" });
-                println!("  monitoring: {}", if cfg.monitoring { "on" } else { "off" });
+                println!(
+                    "  monitoring: {}",
+                    if cfg.monitoring { "on" } else { "off" }
+                );
                 println!("  acl:        {}", if cfg.acl { "on" } else { "off" });
                 println!("  qos:        {}", if cfg.qos { "on" } else { "off" });
                 println!("  mirror:     {}", if cfg.mirror { "on" } else { "off" });

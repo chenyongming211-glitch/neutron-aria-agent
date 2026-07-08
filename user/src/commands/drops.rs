@@ -81,12 +81,8 @@ pub(crate) async fn handle_action(
             top,
             include_unattributed,
         } => {
-            let query = kernel_drop_query_from_cli(
-                tap_filter,
-                iface,
-                Some(top),
-                include_unattributed,
-            );
+            let query =
+                kernel_drop_query_from_cli(tap_filter, iface, Some(top), include_unattributed);
             match client.list_kernel_drops(&query).await {
                 Ok(resp) => {
                     if resp.drops.is_empty() {

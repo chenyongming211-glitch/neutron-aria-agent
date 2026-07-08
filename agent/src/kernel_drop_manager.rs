@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use aria_core::common::{KERNEL_DROP_FLAG_HAS_REASON, KernelDropConfig, KernelDropFilterValue};
+use aria_core::common::{KernelDropConfig, KernelDropFilterValue, KERNEL_DROP_FLAG_HAS_REASON};
 use aria_core::wal;
 use aya::maps::{HashMap as BpfHashMap, Map, MapData};
 use serde::{Deserialize, Serialize};
@@ -11,10 +11,10 @@ use tracing::{info, warn};
 
 use crate::control_plane::MANAGED_SHARED_PIN_NAMESPACE;
 use crate::kernel_drop_support::{
-    KERNEL_DROP_LINK_NAME, KERNEL_DROP_MAP_NAMES, KERNEL_DROP_PROGRAM_NAME,
-    KERNEL_DROP_TRACEPOINT_CATEGORY, KERNEL_DROP_TRACEPOINT_NAME, load_tracepoint_program,
-    replace_pinned_map, replace_pinned_program, replace_pinned_tracepoint_link,
-    resolve_kernel_drop_config,
+    load_tracepoint_program, replace_pinned_map, replace_pinned_program,
+    replace_pinned_tracepoint_link, resolve_kernel_drop_config, KERNEL_DROP_LINK_NAME,
+    KERNEL_DROP_MAP_NAMES, KERNEL_DROP_PROGRAM_NAME, KERNEL_DROP_TRACEPOINT_CATEGORY,
+    KERNEL_DROP_TRACEPOINT_NAME,
 };
 
 pub const KERNEL_DROP_PIN_NAMESPACE: &str = "kernel-drops-global";
@@ -25,6 +25,7 @@ const KERNEL_DROP_PERSISTED_LIVE_IFACES_SCHEMA_VERSION: u32 = 2;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum KernelDropMode {
     Disabled,
+    #[allow(dead_code)]
     ScaffoldOnly,
     KfreeSkbLegacy,
     KfreeSkbReasonful,
@@ -93,6 +94,7 @@ pub struct KernelDropManager {
 }
 
 /// Resolved location info for a kernel drop event.
+#[allow(dead_code)]
 pub struct ResolvedLocation {
     pub symbol: String,
     pub hint: Option<String>,
@@ -379,6 +381,7 @@ impl KernelDropManager {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn reason_name(&self, code: Option<u16>) -> String {
         match code {
             Some(c) => {

@@ -122,6 +122,14 @@ Config rules:
 
 - `rpc_events_enabled=true` requires `full_resync_enabled=true`.
 - `rpc_events_enabled=true` requires `port_source=neutronclient`.
+- `full_resync_enabled`, `rpc_events_enabled`, and
+  `incremental_rpc_enabled` are strict booleans. Invalid values such as
+  `ture`, `maybe`, or `enable` fail config load instead of silently disabling
+  the RPC path.
+- Agent logs and Neutron heartbeat configurations expose `sync_mode` so
+  operators can distinguish `heartbeat_only`, `polling_full_resync`,
+  `rpc_full_resync`, `rpc_port_scoped`, and
+  `rpc_port_scoped_revisionless_experimental`.
 
 Behavior:
 
@@ -163,6 +171,24 @@ Current evidence:
   records the source-host cleanup branch on `ostack2.bj159.net`. It proves a
   projected local port receiving a foreign-host `port.update` is deleted with
   `migration_source_cleanup` without triggering another full-resync.
+- `../evidence/openstack-n05-lite/20260706-rpc-p2-canary-ostack2/summary.md`
+  records a single-host P2 canary on `ostack2.bj159.net`: package RPC smoke,
+  real fanout A/B, foreign-host filtering, source-host cleanup, persistent
+  `sync_mode=rpc_full_resync`, and rollback to
+  `sync_mode=polling_full_resync`. It also records the stale Python
+  pending-state condition that led to the automatic stale-pending recovery and
+  smoke convergence-wait hardening. A follow-up retest in the same evidence
+  record validates automatic stale pending cleanup, startup convergence waits,
+  rollback DELETE convergence retries, a three-node package rollout, and short
+  persistent P2 canary windows on `ostack2.bj159.net` and
+  `ostack4.bj159.net`. It also records a dual-host persistent P2 parallel
+  canary with `ostack2.bj159.net` and `ostack4.bj159.net` subscribed to fanout
+  at the same time, plus a triple-host full fanout canary that includes
+  `ostack3.bj159.net` with zero managed ports. Both canaries were followed by
+  rollback to the default polling mode. The same evidence record also includes
+  a triple-host 30-minute P2 soak gate with 60 samples per host, stable
+  `managed_ports`, empty `pending_generation`, zero container restarts, zero
+  bad-log matches, and rollback to `polling_full_resync`.
 
 ### P2 Operational Enablement Contract
 
@@ -226,6 +252,141 @@ Failure disposition:
 P2 acceptance is a production operations gate. It closes when the runbook can
 enable and roll back RPC events without changing ACL semantics, OVS forwarding,
 or the polling/full-resync recovery model.
+
+### P2 Production Canary Plan
+
+P2 is promoted by host canary, not by cluster-wide config flip. The canary only
+enables RPC-triggered full-resync. It must not enable P3 port-scoped apply.
+
+Pre-flight checks:
+
+1. The deployed package passes `neutron_aria_rpc_event_smoke.sh` and includes
+   strict boolean config parsing plus `sync_mode` reporting.
+2. The host is healthy in P1 with `sync_mode=polling_full_resync`.
+3. `full_resync_enabled=true`, `port_source=neutronclient`, and
+   `acl.source=neutron` are already accepted on the host.
+4. UDS status is reachable, rollback is accepted, and no unexpected
+   `managed_ports` are present before the canary.
+5. The container uses the same effective oslo.messaging settings and host name
+   convention as the onsite OVS agent.
+6. `incremental_rpc_enabled=false` and
+   `revisionless_incremental_mode=disabled` are explicitly retained.
+7. Python local state has no unresolved same-generation pending snapshot. Older
+   stale pending state may be auto-cleared only if UDS status proves a newer
+   committed datapath generation and no runtime pending transaction.
+
+Enablement sequence:
+
+1. Pick one compute host with a known test VM/port.
+2. Back up `neutron-aria-agent.ini`.
+3. Set only `[neutron] rpc_events_enabled=true`.
+4. Restart only `neutron_aria_agent`.
+5. Verify the startup log reports `sync_mode=rpc_full_resync`.
+6. Verify Neutron heartbeat `configurations.sync_mode=rpc_full_resync`.
+7. Trigger a bounded port/network event and confirm `event_batch_drained`
+   followed by full-resync.
+8. Confirm local `managed_ports` and ACL behavior match the pre-canary
+   baseline except for the expected resync generation change.
+
+Observation window:
+
+- Watch for repeated full-resync loops after a single event.
+- Watch `last_event_decision_counts`, `last_event_decisions`, generation lag,
+  degraded reasons, and managed-port counts.
+- Watch RabbitMQ consumer errors and oslo.messaging reconnect churn.
+- Do not promote the next host until the current host can be rolled back to
+  `sync_mode=polling_full_resync` cleanly.
+
+Soak gate:
+
+- Short canary proves RPC P2 can start, consume fanout, converge, and roll back.
+  A 30-60 minute soak proves the same mode can remain a production candidate
+  without slow drift.
+- Run `deploy/kolla/smoke/neutron_aria_rpc_p2_soak_smoke.sh` on the canary
+  host. The script enables only P2 (`rpc_events_enabled=true`,
+  `incremental_rpc_enabled=false`, `revisionless_incremental_mode=disabled`),
+  waits for `sync_mode=rpc_full_resync`, sends one local `port.update` when a
+  bound port is available, samples status, and restores the original config by
+  default.
+- The soak must keep `managed_ports` stable, keep `pending_generation` empty,
+  avoid container restarts, avoid `degraded=True`, `overflowed=True`,
+  `Traceback`, `local_api_degraded`, heartbeat failures, and snapshot hash
+  mismatch blockers.
+- The onsite 10.58.159 three-host run completed successfully:
+  `ostack2.bj159.net` stayed at 15 managed ports, `ostack3.bj159.net` stayed at
+  0 managed ports, and `ostack4.bj159.net` stayed at 3 managed ports for 60
+  samples over 30 minutes. All three hosts restored polling mode after the
+  gate.
+- For cluster promotion, run the same host-local soak in parallel on every
+  target compute host. A host with zero managed ports is still valuable: it
+  proves fanout subscription does not claim ineligible local ports.
+- `KEEP_ENABLED=true` is only allowed for an explicit operator canary window.
+  The default acceptance run must roll back to polling mode on both success and
+  failure.
+
+Stop conditions:
+
+| Stop condition | Required action |
+| --- | --- |
+| `sync_mode` does not become `rpc_full_resync` after enablement | Roll back config and inspect package/config drift. |
+| Foreign-host event mutates local state | Roll back immediately and keep P2 closed. |
+| Full-resync loops repeatedly after one event | Roll back to polling-only and inspect event merge evidence. |
+| Heartbeat becomes degraded because of RPC consumer errors | Roll back to polling-only. |
+| `managed_ports` grows without a matching local Neutron port reason | Roll back and run cleanup/rollback smoke. |
+| P3 mode appears during P2 canary | Stop the canary; reset `incremental_rpc_enabled=false`. |
+| Same-generation pending snapshot hash mismatch appears | Stop the canary; keep degraded and require operator inspection. |
+
+Rollback verification:
+
+1. Set `[neutron] rpc_events_enabled=false`.
+2. Restart only `neutron_aria_agent`.
+3. Verify startup log and heartbeat report `sync_mode=polling_full_resync`.
+4. Run manual or periodic full-resync and confirm ACL state still converges.
+5. Confirm no OVS, OVS agent, Neutron server, or datapath restart was needed.
+
+### RPC Observability Contract
+
+The RPC path is production-operable only when the runtime tells operators which
+mode is active and why each event changed or did not change local datapath
+state.
+
+Required startup/status fields:
+
+| Field | Source | Purpose |
+| --- | --- | --- |
+| `sync_mode` | startup log and heartbeat configurations | Distinguishes heartbeat-only, polling, P2, P3, and revisionless experimental mode. |
+| `rpc_events_enabled` | heartbeat configurations | Shows whether the agent consumes RPC events. |
+| `incremental_rpc_enabled` | heartbeat configurations | Shows whether P3 port-scoped apply is enabled. |
+| `revisionless_incremental_mode` | heartbeat configurations | Shows whether old-Neutron revisionless P3 is disabled or explicitly experimental. |
+| `last_event_decision_counts` | runtime status | Summarizes event actions such as full-resync, ignore, local delete, or scoped apply. |
+| `last_event_decisions` | runtime status | Keeps bounded decision details for troubleshooting. |
+| `projection_index` | runtime status | Shows projected local-port inventory used by event filtering. |
+
+Expected mode mapping:
+
+| Config state | Expected `sync_mode` | Allowed behavior |
+| --- | --- | --- |
+| `full_resync_enabled=false` | `heartbeat_only` | Heartbeat only; no production snapshot submission. |
+| `full_resync_enabled=true`, `rpc_events_enabled=false` | `polling_full_resync` | Periodic/manual full-resync only. |
+| `rpc_events_enabled=true`, `incremental_rpc_enabled=false` | `rpc_full_resync` | P2 event merge plus full-resync/delete cleanup. |
+| `incremental_rpc_enabled=true`, `revisionless_incremental_mode=disabled` | `rpc_port_scoped` | P3 port-scoped apply only for revision-safe local single-port events. |
+| `incremental_rpc_enabled=true`, `revisionless_incremental_mode=experimental` | `rpc_port_scoped_revisionless_experimental` | Lab-only revisionless P3; not a packaged production default. |
+
+Required log breadcrumbs:
+
+- `agent_start ... sync_mode=...`
+- `event_batch_drained`
+- `service_result action=event_batch ...`
+- `port_scoped_apply_fallback` when P3 fails back to full-resync.
+- `pending_snapshot_stale_cleared` when Python safely clears an older local
+  pending snapshot after UDS proves a newer datapath generation.
+
+Smoke reliability rule:
+
+- Live RPC smoke must wait for the temporary agent's initial
+  `full_resync_complete` before reading `managed_ports` or sending the test
+  fanout event. Fixed `STARTUP_WAIT` sleeps are insufficient on hosts where
+  UDS convergence takes longer than the default delay.
 
 ## P3: Incremental RPC (Target Optimization)
 
@@ -441,11 +602,11 @@ Runtime modes:
 
 | Mode | Allowed scope | Required settings | Expected behavior |
 | --- | --- | --- | --- |
-| Packaged safe default | All installs | `rpc_events_enabled=false`, `incremental_rpc_enabled=false`, `revisionless_incremental_mode=disabled` | No RPC subscription; no scoped apply. |
-| P1 production ACL | Accepted ACL hosts | `full_resync_enabled=true`, `port_source=neutronclient`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync only. |
-| P2 canary | One host at a time after P1/N3 gates | P1 plus `rpc_events_enabled=true`, `incremental_rpc_enabled=false` | RPC event triggers full-resync; no scoped apply. |
-| P3 revision-aware test | Controlled test host with trustworthy port revision | P2 plus `incremental_rpc_enabled=true`, `revisionless_incremental_mode=disabled` | Single safe local newer-revision port update may use scoped apply. |
-| P3 legacy lab test | Controlled old-Neutron test host only | P2 plus `incremental_rpc_enabled=true`, `revisionless_incremental_mode=experimental` | Single safe local revisionless port update may use scoped apply for evidence only. |
+| Packaged safe default | All installs | `rpc_events_enabled=false`, `incremental_rpc_enabled=false`, `revisionless_incremental_mode=disabled` | No RPC subscription; no scoped apply. `sync_mode=heartbeat_only` until full resync is explicitly enabled. |
+| P1 production ACL | Accepted ACL hosts | `full_resync_enabled=true`, `port_source=neutronclient`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync only. `sync_mode=polling_full_resync`. |
+| P2 canary | One host at a time after P1/N3 gates | P1 plus `rpc_events_enabled=true`, `incremental_rpc_enabled=false` | RPC event triggers full-resync; no scoped apply. `sync_mode=rpc_full_resync`. |
+| P3 revision-aware test | Controlled test host with trustworthy port revision | P2 plus `incremental_rpc_enabled=true`, `revisionless_incremental_mode=disabled` | Single safe local newer-revision port update may use scoped apply. `sync_mode=rpc_port_scoped`. |
+| P3 legacy lab test | Controlled old-Neutron test host only | P2 plus `incremental_rpc_enabled=true`, `revisionless_incremental_mode=experimental` | Single safe local revisionless port update may use scoped apply for evidence only. `sync_mode=rpc_port_scoped_revisionless_experimental`. |
 
 Forbidden defaults:
 

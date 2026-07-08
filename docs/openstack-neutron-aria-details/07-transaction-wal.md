@@ -34,7 +34,7 @@ affected-port set. Its Rust minimum design and tests are recorded separately in
 | --- | --- | --- |
 | Rust WAL intent/commit | partial | Host-level Neutron WAL exists with snapshot/delete intent and commit semantics. |
 | Python local transaction state | partial | Snapshot/delete prepare and commit state exists. |
-| Timeout recovery | partial | Python can query status after timeout and decide whether to converge. |
+| Timeout recovery | partial | Python can query status after timeout and decide whether to converge. Stale local pending snapshot records are cleared only when datapath status proves a newer committed generation. |
 | Idempotent generation handling | partial | Same generation replay and desired hash behavior exist in Rust side. |
 | Rich transaction status | planned | Needs clearer external status projection and contract tests. |
 
@@ -114,6 +114,8 @@ On Python agent restart:
 - load pending snapshot/delete state;
 - query UDS status;
 - commit local state if converged;
+- clear stale local pending snapshot state only when UDS status has already
+  advanced to a newer applied generation with no runtime pending transaction;
 - otherwise mark degraded and trigger full resync when allowed.
 
 ## Local Write Gate Interaction
@@ -200,6 +202,7 @@ Rust side:
 | --- | --- | --- |
 | no pending transaction | Agent/datapath agree on current committed state or have not started. | Normal apply path. |
 | pending local snapshot | Python has prepared a generation but not committed local state. | Submit or reconcile via status. |
+| stale Python pending snapshot | Python still has an older pending generation, while datapath reports a newer applied generation with no runtime pending transaction. | Clear the Python pending fields, record `last_cleared_pending_*`, and run a new full resync using the datapath generation as the floor. |
 | WAL intent without commit | Datapath started apply but crashed or failed before commit. | Replay, scrub, or wait for full resync; never claim ready. |
 | committed with degraded domain | Generation was classified, but one or more domains are not enforcing. | Report per-domain status and keep local gate active. |
 | same generation same hash | Idempotent replay. | Return converged state without widening permissions. |
@@ -216,6 +219,8 @@ Rust side:
 | Same generation, different desired hash | `generation_hash_conflict` stable error. |
 | Older generation | `stale_generation` stable status reason. |
 | Client timeout | Python marks pending and reconciles with status; timeout is not authority release. |
+| Same-generation Python pending hash mismatch | Python keeps the pending record and reports `stale_pending_snapshot_requires_operator`; it must not auto-clear. |
+| Older Python pending hash mismatch with newer committed datapath status | Python clears only the stale pending fields and resubmits full snapshot with a newer generation. |
 | Recovery in progress | Local writes for managed domains remain blocked. |
 
 ### Test Matrix
@@ -230,6 +235,7 @@ Rust side:
 | WAL append failure | No accepted/applied generation is advanced. |
 | UDS timeout with later convergence | Python commits local transaction only after status proves match. |
 | UDS timeout without convergence | Python remains pending/degraded and schedules resync. |
+| Stale Python pending with newer datapath generation | Python clears stale pending state, records the clear reason, and full-resyncs at a generation above the datapath floor. |
 | Crash after ACL gate disabled | Result is bypass/degraded, not half-enforced ready. |
 | Local write during recovery | Rejected for domains in `managed_domains`. |
 

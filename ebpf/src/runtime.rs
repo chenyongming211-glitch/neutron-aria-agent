@@ -1,4 +1,4 @@
-use crate::common::{FirewallConfig, TAP_ID_UNASSIGNED};
+use crate::common::{normalize_acl_bank, FirewallConfig, ACL_BANK_PRIMARY, TAP_ID_UNASSIGNED};
 use crate::maps::{FIREWALL_CONFIG, TAP_CONFIG_MAP};
 
 #[inline(always)]
@@ -41,6 +41,16 @@ pub fn acl_enabled(tap_id: u32) -> bool {
     read_global_config()
         .map(|cfg| cfg.acl_enabled != 0)
         .unwrap_or(true)
+}
+
+#[inline(always)]
+pub fn acl_active_bank(tap_id: u32) -> u8 {
+    if tap_id != TAP_ID_UNASSIGNED {
+        if let Some(cfg) = unsafe { TAP_CONFIG_MAP.get(&tap_id) } {
+            return normalize_acl_bank(cfg.acl_active_bank);
+        }
+    }
+    ACL_BANK_PRIMARY
 }
 
 #[inline(always)]

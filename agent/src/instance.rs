@@ -1,7 +1,7 @@
-use aria_core::ebpf_ops::{NETWORK_MAP_NAMES, TraceMapMode, critical_network_map_names};
+use aria_core::ebpf_ops::{critical_network_map_names, TraceMapMode, NETWORK_MAP_NAMES};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
@@ -717,6 +717,64 @@ impl FirewallInstance {
         Ok(())
     }
 
+    fn repair_missing_optional_program_pins(&self, ebpf_path: &str) -> Result<Vec<String>, String> {
+        let mut metadata = self.load_runtime_metadata()?;
+        let missing: Vec<String> = Self::optional_program_pins()
+            .into_iter()
+            .filter(|name| !self.pin_path.join(name).exists())
+            .collect();
+        if missing.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let pin_path_str = self
+            .pin_path
+            .to_str()
+            .ok_or_else(|| format!("non-UTF-8 pin path: {}", self.pin_path.display()))?;
+
+        info!(
+            instance = %self.iface,
+            missing_programs = ?missing,
+            "repairing missing optional runtime program pins"
+        );
+        let bpf_bytes = std::fs::read(ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
+        let mut bpf = aya::EbpfLoader::new()
+            .map_pin_path(pin_path_str)
+            .load(&bpf_bytes)
+            .map_err(|e| format!("[{}] load for optional program repair: {:?}", self.iface, e))?;
+
+        let mut repaired = Vec::new();
+        for prog_name in missing {
+            if let Err(e) = self.load_tc_program(&mut bpf, &prog_name) {
+                warn!(instance = %self.iface, program = %prog_name, error = %e, "optional TC program repair load failed");
+                continue;
+            }
+
+            let Some(program) = bpf.program_mut(prog_name.as_str()) else {
+                warn!(instance = %self.iface, program = %prog_name, "optional TC program missing after repair load");
+                continue;
+            };
+            let target = format!("{}/{}", pin_path_str, prog_name);
+            if let Err(e) = program.pin(&target) {
+                warn!(instance = %self.iface, program = %prog_name, target = %target, error = ?e, "optional TC program repair pin failed");
+                continue;
+            }
+            repaired.push(prog_name);
+        }
+
+        if !repaired.is_empty() {
+            let mut present: BTreeSet<String> =
+                metadata.present_program_pins.iter().cloned().collect();
+            for prog_name in &repaired {
+                present.insert(prog_name.clone());
+            }
+            metadata.present_program_pins = present.into_iter().collect();
+            self.store_runtime_metadata_atomically(&metadata)?;
+        }
+
+        Ok(repaired)
+    }
+
     fn rebuild_shared_runtime(
         &self,
         ebpf_path: &str,
@@ -803,6 +861,15 @@ impl FirewallInstance {
         }
         match self.validate_runtime_inventory(&expected_metadata) {
             RuntimeInventoryStatus::Healthy => {
+                let repaired_optional_pins =
+                    self.repair_missing_optional_program_pins(ebpf_path)?;
+                if !repaired_optional_pins.is_empty() {
+                    info!(
+                        instance = %self.iface,
+                        repaired_programs = ?repaired_optional_pins,
+                        "repaired shared runtime optional program pins"
+                    );
+                }
                 info!(instance = %self.iface, preexisting_xdp_link, live_runtime, "reusing healthy shared runtime");
                 Ok(RuntimePinState {
                     created_shared_runtime: false,
