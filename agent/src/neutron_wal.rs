@@ -354,6 +354,7 @@ mod tests {
             ifname: ifname.to_string(),
             ifindex: None,
             managed_domains: vec!["acl".to_string()],
+            domain_desired_hashes: BTreeMap::new(),
         }
     }
 

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fmt;
 use utoipa::ToSchema;
 
@@ -250,7 +251,10 @@ pub struct NeutronAclRuleSnapshot {
     "port_id": "e607e86b-9e5f-4c63-a5df-3dc8986a1b0f",
     "ifname": "tape607e86b-9e",
     "ifindex": 27,
-    "managed_domains": ["acl"]
+    "managed_domains": ["acl"],
+    "domain_desired_hashes": {
+        "acl": "sha256:..."
+    }
 }))]
 pub struct ManagedNeutronPort {
     /// Neutron port UUID.
@@ -266,6 +270,9 @@ pub struct ManagedNeutronPort {
     /// Per-feature domains owned by Neutron.
     #[serde(default)]
     pub managed_domains: Vec<String>,
+    /// Per-domain desired-state hashes used to skip unchanged domain rewrites.
+    #[serde(default)]
+    pub domain_desired_hashes: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -482,7 +489,7 @@ pub struct NeutronSnapshotResponse {
     /// Latest generation fully applied by the local apply engine.
     #[serde(default)]
     pub applied_generation: u64,
-    /// Response status: ok, noop, stale, or partial.
+    /// Response status: accepted, pending, ok, noop, stale, or partial.
     #[serde(default)]
     pub status: String,
     /// Per-port apply results.
@@ -2045,7 +2052,9 @@ pub fn proto_from_string(proto: &str) -> Result<u8, String> {
         "udp" => Ok(17),
         "icmp" => Ok(1),
         "any" => Ok(0),
-        _ => proto.parse::<u8>().map_err(|_| format!("Invalid protocol '{}'", proto)),
+        _ => proto
+            .parse::<u8>()
+            .map_err(|_| format!("Invalid protocol '{}'", proto)),
     }
 }
 
@@ -2078,7 +2087,10 @@ pub fn direction_from_string(direction: &str) -> Result<u8, String> {
         "ingress" | "in" => Ok(0),
         "egress" | "out" => Ok(1),
         "both" | "all" => Ok(2),
-        _ => Err(format!("Invalid direction '{}': must be 'ingress', 'egress', or 'both'", direction)),
+        _ => Err(format!(
+            "Invalid direction '{}': must be 'ingress', 'egress', or 'both'",
+            direction
+        )),
     }
 }
 
@@ -2112,18 +2124,9 @@ mod tests {
         assert!(capabilities.mandatory_domains.is_empty());
         assert_eq!(capabilities.body_max_bytes, NEUTRON_UDS_BODY_MAX_BYTES);
         assert_eq!(capabilities.timeout_ms, NEUTRON_UDS_TIMEOUT_MS);
-        assert_eq!(
-            capabilities.error_codes_hash,
-            NEUTRON_UDS_ERROR_CODES_HASH
-        );
-        assert_eq!(
-            capabilities.peer_auth_policy,
-            NEUTRON_UDS_PEER_AUTH_POLICY
-        );
-        assert_eq!(
-            capabilities.capability_hash,
-            NEUTRON_UDS_CAPABILITY_HASH
-        );
+        assert_eq!(capabilities.error_codes_hash, NEUTRON_UDS_ERROR_CODES_HASH);
+        assert_eq!(capabilities.peer_auth_policy, NEUTRON_UDS_PEER_AUTH_POLICY);
+        assert_eq!(capabilities.capability_hash, NEUTRON_UDS_CAPABILITY_HASH);
     }
 
     #[test]
