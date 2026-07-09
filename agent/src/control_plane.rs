@@ -337,6 +337,15 @@ impl ControlPlane {
         src_group.starts_with(prefix) || dst_group.starts_with(prefix)
     }
 
+    fn owned_acl_rule_in_replace_scope(
+        state: &FirewallState,
+        rule: &RuleInfo,
+        prefix: &str,
+        exclusive_policy_domain: bool,
+    ) -> bool {
+        exclusive_policy_domain || Self::owned_acl_rule_matches_prefix(state, rule, prefix)
+    }
+
     fn owned_acl_policy_key_from_rule(state: &FirewallState, rule: &RuleInfo) -> OwnedAclPolicyKey {
         OwnedAclPolicyKey {
             src_group: Self::owned_acl_group_name_by_id(state, rule.src_group_id),
@@ -1414,6 +1423,7 @@ impl ControlPlane {
         &self,
         instance: &str,
         owner_prefix: &str,
+        exclusive_policy_domain: bool,
         groups: &[OwnedAclGroupSpec],
         policies: &[OwnedAclPolicySpec],
     ) -> Result<OwnedAclReconcileReport, ControlPlaneError> {
@@ -1431,7 +1441,14 @@ impl ControlPlane {
         let old_owned_policies: Vec<ExistingOwnedAclPolicy> = old_state
             .rules
             .iter()
-            .filter(|rule| Self::owned_acl_rule_matches_prefix(&old_state, rule, owner_prefix))
+            .filter(|rule| {
+                Self::owned_acl_rule_in_replace_scope(
+                    &old_state,
+                    rule,
+                    owner_prefix,
+                    exclusive_policy_domain,
+                )
+            })
             .map(|rule| ExistingOwnedAclPolicy {
                 key: Self::owned_acl_policy_key_from_rule(&old_state, rule),
                 value: Self::owned_acl_policy_value_from_rule(rule),
@@ -3330,5 +3347,33 @@ mod tests {
             .ensure_local_group_write_allowed("tap-vm", "local-qos-group")
             .await
             .is_ok());
+    }
+
+    #[test]
+    fn domain_authority_exclusive_acl_replace_claims_foreign_rules() {
+        let state = FirewallState::default();
+        let foreign_rule = RuleInfo {
+            name: None,
+            src_group_id: 0,
+            dst_group_id: 0,
+            proto: libc::IPPROTO_ICMP as u8,
+            action: 1,
+            ports: None,
+            bitmap_idx: None,
+            direction: 1,
+        };
+
+        assert!(!ControlPlane::owned_acl_rule_in_replace_scope(
+            &state,
+            &foreign_rule,
+            "neutron:port-1:",
+            false,
+        ));
+        assert!(ControlPlane::owned_acl_rule_in_replace_scope(
+            &state,
+            &foreign_rule,
+            "neutron:port-1:",
+            true,
+        ));
     }
 }

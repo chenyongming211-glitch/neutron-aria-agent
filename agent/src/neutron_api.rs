@@ -3264,6 +3264,7 @@ async fn reconcile_neutron_acl(
         .replace_owned_acl(
             &port.ifname,
             &neutron_acl_prefix(&port.port_id),
+            true,
             &group_specs,
             &policy_specs,
         )
