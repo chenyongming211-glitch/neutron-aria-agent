@@ -9,6 +9,7 @@ from neutron_aria.db.aria_acl.api import SqliteAriaAclRepository
 from neutron_aria.db.migration import aria_acl_initial
 from neutron_aria.extensions import aria_acl
 from neutron_aria.policies import aria_acl as aria_acl_policy
+from neutron_aria.services.aria_acl.plugin import AriaAclAgentNotifier
 from neutron_aria.services.aria_acl.plugin import AriaAclPlugin
 
 
@@ -82,6 +83,38 @@ class FakeResourceHelper(object):
         self.resource_maps.append(resource_map)
         self.service_types.append(service_type)
         return sorted(resource_map)
+
+
+class FakeNotifier(object):
+    def __init__(self):
+        self.events = []
+
+    def notify(self, context, **payload):
+        self.events.append((context, payload))
+
+
+class FakeTopics(object):
+    AGENT = "q-agent-notifier"
+    UPDATE = "update"
+
+
+class FakeRpcClient(object):
+    def __init__(self):
+        self.prepared = []
+
+    def prepare(self, **kwargs):
+        cctxt = FakePreparedClient(kwargs)
+        self.prepared.append(cctxt)
+        return cctxt
+
+
+class FakePreparedClient(object):
+    def __init__(self, prepare_kwargs):
+        self.prepare_kwargs = prepare_kwargs
+        self.casts = []
+
+    def cast(self, context, method, **payload):
+        self.casts.append((context, method, payload))
 
 
 class AriaAclPluginTestCase(unittest.TestCase):
@@ -322,6 +355,84 @@ class AriaAclPluginTestCase(unittest.TestCase):
         plugin.delete_aria_acl_address_set(None, "set-1")
         plugin.delete_aria_acl_policy(None, "policy-1")
         self.assertEqual([], plugin.get_aria_acl_policies(None))
+
+    def test_acl_policy_rule_and_binding_writes_emit_rpc_notifications(self):
+        notifier = FakeNotifier()
+        plugin = AriaAclPlugin(notifier=notifier)
+
+        policy = plugin.create_aria_acl_policy("ctx", {
+            "id": "policy-1",
+            "project_id": "project-1",
+            "name": "web",
+        })
+        rule = plugin.create_aria_acl_rule("ctx", {
+            "id": "rule-1",
+            "project_id": "project-1",
+            "policy_id": policy["id"],
+            "direction": "ingress",
+            "priority": 100,
+            "action": "drop",
+            "protocol": "tcp",
+            "dst_port_min": 8080,
+            "dst_port_max": 8080,
+        })
+        binding = plugin.create_aria_acl_binding("ctx", {
+            "id": "binding-1",
+            "project_id": "project-1",
+            "policy_id": policy["id"],
+            "target_type": "port",
+            "target_id": "port-1",
+        })
+        plugin.update_aria_acl_policy("ctx", policy["id"], {"enabled": False})
+        plugin.delete_aria_acl_rule("ctx", rule["id"])
+        plugin.delete_aria_acl_binding("ctx", binding["id"])
+
+        payloads = [event[1] for event in notifier.events]
+
+        self.assertEqual(
+            [
+                ("policy", "create", "policy-1"),
+                ("rule", "create", "rule-1"),
+                ("binding", "create", "binding-1"),
+                ("policy", "update", "policy-1"),
+                ("rule", "delete", "rule-1"),
+                ("binding", "delete", "binding-1"),
+            ],
+            [
+                (
+                    payload["resource"],
+                    payload["operation"],
+                    payload["resource_id"],
+                )
+                for payload in payloads
+            ],
+        )
+        self.assertEqual("acl", payloads[0]["domain"])
+        self.assertEqual("policy-1", payloads[1]["policy_id"])
+        self.assertEqual("port", payloads[2]["target_type"])
+        self.assertEqual("port-1", payloads[2]["target_id"])
+        self.assertEqual("port", payloads[-1]["target_type"])
+        self.assertEqual("port-1", payloads[-1]["target_id"])
+
+    def test_acl_agent_notifier_uses_legacy_agent_fanout_topic(self):
+        client = FakeRpcClient()
+        notifier = AriaAclAgentNotifier(client, FakeTopics)
+
+        notifier.notify("ctx", domain="acl", resource="policy", operation="update")
+
+        self.assertEqual(1, len(client.prepared))
+        self.assertEqual(
+            {"topic": "q-agent-notifier-aria_acl-update", "fanout": True},
+            client.prepared[0].prepare_kwargs,
+        )
+        self.assertEqual(
+            (
+                "ctx",
+                "aria_acl_update",
+                {"domain": "acl", "resource": "policy", "operation": "update"},
+            ),
+            client.prepared[0].casts[0],
+        )
 
     def test_delete_rejects_referenced_policy_and_address_set(self):
         plugin = AriaAclPlugin()

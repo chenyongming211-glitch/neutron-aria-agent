@@ -193,6 +193,26 @@ class UdsClientTestCase(unittest.TestCase):
         self.assertEqual("application/json", request["headers"]["Content-Type"])
         self.assertEqual(12, json.loads(request["body"])["generation"])
 
+    def test_recover_pending_snapshot_serializes_json_body(self):
+        FakeConnection.responses.append(FakeResponse(200, "OK", {
+            "status": "recovered",
+            "recovered_generation": 380,
+            "applied_generation": 379,
+        }))
+
+        self.client.recover_pending_snapshot(380, "hash-380")
+
+        request = FakeConnection.requests[0]
+        self.assertEqual("POST", request["method"])
+        self.assertEqual(
+            "/api/v1/neutron/snapshot/recover-pending",
+            request["path"],
+        )
+        body = json.loads(request["body"])
+        self.assertEqual(380, body["expected_pending_generation"])
+        self.assertEqual("hash-380", body["expected_desired_hash"])
+        self.assertEqual("rollback_to_last_applied", body["mode"])
+
     def test_put_snapshot_rejects_oversized_json_body_before_send(self):
         client = LocalClient(
             "/tmp/aria-agent.sock",

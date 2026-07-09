@@ -10,10 +10,10 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,6 +59,24 @@ struct SnapshotApplyError {
     status: StatusCode,
     code: &'static str,
     details: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct NeutronRecoverPendingRequest {
+    expected_pending_generation: u64,
+    expected_desired_hash: Option<String>,
+    mode: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+struct NeutronRecoverPendingResponse {
+    status: String,
+    recovered_generation: u64,
+    desired_hash: Option<String>,
+    applied_generation: u64,
+    applied_desired_hash: Option<String>,
+    authority_state: String,
+    wal_status: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,10 +183,26 @@ struct AclPolicyPlan {
     ports: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct AclEffectivePolicyKey {
+    src_group: String,
+    dst_group: String,
+    proto: u8,
+    direction: u8,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct AclApplyPlan {
     groups: Vec<AclGroupPlan>,
     policies: Vec<AclPolicyPlan>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AclPolicyDeleteTarget {
+    src_group: String,
+    dst_group: String,
+    proto: u8,
+    direction: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -607,6 +641,10 @@ pub(crate) fn build_router(
             get(get_neutron_capabilities),
         )
         .route("/api/v1/neutron/status", get(get_neutron_status))
+        .route(
+            "/api/v1/neutron/snapshot/recover-pending",
+            post(post_neutron_recover_pending),
+        )
         .route("/api/v1/neutron/snapshot", put(put_neutron_snapshot))
         .route(
             "/api/v1/neutron/ports/{port_id}/snapshot",
@@ -618,6 +656,123 @@ pub(crate) fn build_router(
         )
         .layer(DefaultBodyLimit::max(NEUTRON_UDS_BODY_MAX_BYTES as usize))
         .with_state(state)
+}
+
+async fn post_neutron_recover_pending(
+    State(state): State<NeutronApiState>,
+    Json(request): Json<NeutronRecoverPendingRequest>,
+) -> impl IntoResponse {
+    match recover_pending_snapshot(state, request).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => (
+            error.status,
+            Json(serde_json::json!({
+                "error": error.code,
+                "details": error.details,
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn recover_pending_snapshot(
+    state: NeutronApiState,
+    request: NeutronRecoverPendingRequest,
+) -> Result<NeutronRecoverPendingResponse, SnapshotApplyError> {
+    let mode = request
+        .mode
+        .as_deref()
+        .unwrap_or("rollback_to_last_applied");
+    if mode != "rollback_to_last_applied" {
+        return Err(SnapshotApplyError {
+            status: StatusCode::BAD_REQUEST,
+            code: "unsupported_pending_recovery_mode",
+            details: format!("unsupported pending recovery mode {}", mode),
+        });
+    }
+
+    let _guard = state.apply_lock.lock().await;
+    let mut runtime = state.runtime.write().await;
+    let next_runtime = recover_pending_runtime(&runtime, &request)?;
+    if let Err(e) = state
+        .wal
+        .append_snapshot_commit(next_runtime.to_wal_state())
+    {
+        runtime.authority_state = "pending_recovery_commit_failed".to_string();
+        runtime.wal_status = "commit_failed".to_string();
+        return Err(SnapshotApplyError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "pending_recovery_commit_failed",
+            details: e,
+        });
+    }
+
+    let response = NeutronRecoverPendingResponse {
+        status: "recovered".to_string(),
+        recovered_generation: request.expected_pending_generation,
+        desired_hash: next_runtime.desired_hash.clone(),
+        applied_generation: next_runtime.applied_generation,
+        applied_desired_hash: next_runtime.applied_desired_hash.clone(),
+        authority_state: next_runtime.authority_state.clone(),
+        wal_status: next_runtime.wal_status.clone(),
+    };
+    *runtime = next_runtime;
+    Ok(response)
+}
+
+fn recover_pending_runtime(
+    runtime: &NeutronRuntimeState,
+    request: &NeutronRecoverPendingRequest,
+) -> Result<NeutronRuntimeState, SnapshotApplyError> {
+    let Some(pending_generation) = runtime.pending_generation else {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "no_pending_snapshot",
+            details: "no pending generation exists".to_string(),
+        });
+    };
+    if pending_generation != request.expected_pending_generation {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "pending_generation_mismatch",
+            details: format!(
+                "pending generation {} does not match expected {}",
+                pending_generation, request.expected_pending_generation
+            ),
+        });
+    }
+    if !hashes_match(&runtime.desired_hash, &request.expected_desired_hash) {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "pending_desired_hash_mismatch",
+            details: "pending desired hash does not match expected hash".to_string(),
+        });
+    }
+    if runtime.applied_generation == 0 {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "no_applied_snapshot_to_restore",
+            details: "cannot recover pending snapshot without an applied baseline".to_string(),
+        });
+    }
+    if runtime.authority_state == "applying" || runtime.authority_state == "accepted" {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "pending_snapshot_still_active",
+            details: format!(
+                "pending snapshot is still active in state {}",
+                runtime.authority_state
+            ),
+        });
+    }
+
+    let mut next_runtime = runtime.clone();
+    next_runtime.accepted_generation = runtime.applied_generation;
+    next_runtime.pending_generation = None;
+    next_runtime.desired_hash = runtime.applied_desired_hash.clone();
+    next_runtime.authority_state = "recovered_pending_full_resync_required".to_string();
+    next_runtime.wal_status = "pending_recovered_to_last_applied".to_string();
+    Ok(next_runtime)
 }
 
 async fn get_neutron_capabilities() -> impl IntoResponse {
@@ -2631,6 +2786,35 @@ fn is_neutron_acl_group(port_id: &str, group_name: &str) -> bool {
     group_name.starts_with(&neutron_acl_prefix(port_id))
 }
 
+fn acl_group_name_for_delete(
+    group_id: u32,
+    group_names_by_id: &BTreeMap<u32, String>,
+) -> String {
+    if group_id == 0 {
+        "any".to_string()
+    } else {
+        group_names_by_id
+            .get(&group_id)
+            .cloned()
+            .unwrap_or_else(|| format!("id:{}", group_id))
+    }
+}
+
+fn acl_policy_delete_targets_for_neutron_domain(
+    rules: &[aria_core::state::RuleInfo],
+    group_names_by_id: &BTreeMap<u32, String>,
+) -> Vec<AclPolicyDeleteTarget> {
+    rules
+        .iter()
+        .map(|rule| AclPolicyDeleteTarget {
+            src_group: acl_group_name_for_delete(rule.src_group_id, group_names_by_id),
+            dst_group: acl_group_name_for_delete(rule.dst_group_id, group_names_by_id),
+            proto: rule.proto,
+            direction: rule.direction,
+        })
+        .collect()
+}
+
 fn acl_rule_id(rule: &NeutronAclRuleSnapshot, index: usize) -> String {
     rule.id
         .as_deref()
@@ -2719,6 +2903,109 @@ fn acl_ports(
     }
 }
 
+fn parse_acl_port_ranges(ports: &str) -> Result<Vec<(u16, u16)>, String> {
+    let mut ranges = Vec::new();
+    for part in ports.split(',') {
+        let value = part.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if value.eq_ignore_ascii_case("all") {
+            return Ok(Vec::new());
+        }
+        if value.contains(':') {
+            return Err(format!(
+                "port action suffix is unsupported in Neutron ACL port merge: {}",
+                value
+            ));
+        }
+        if value.contains('-') {
+            let mut pieces = value.split('-');
+            let start = pieces
+                .next()
+                .ok_or_else(|| "missing port range start".to_string())?
+                .trim()
+                .parse::<u16>()
+                .map_err(|_| format!("invalid port range start in {}", value))?;
+            let end = pieces
+                .next()
+                .ok_or_else(|| "missing port range end".to_string())?
+                .trim()
+                .parse::<u16>()
+                .map_err(|_| format!("invalid port range end in {}", value))?;
+            if pieces.next().is_some() {
+                return Err(format!("invalid port range format {}", value));
+            }
+            if start > end {
+                return Err(format!("invalid port range {}-{}", start, end));
+            }
+            ranges.push((start, end));
+        } else {
+            let port = value
+                .parse::<u16>()
+                .map_err(|_| format!("invalid port {}", value))?;
+            ranges.push((port, port));
+        }
+    }
+    Ok(ranges)
+}
+
+fn serialize_acl_port_ranges(mut ranges: Vec<(u16, u16)>) -> Option<String> {
+    if ranges.is_empty() {
+        return None;
+    }
+    ranges.sort();
+    let mut merged: Vec<(u16, u16)> = Vec::new();
+    for (start, end) in ranges {
+        if let Some((_, previous_end)) = merged.last_mut() {
+            if start as u32 <= *previous_end as u32 + 1 {
+                if end > *previous_end {
+                    *previous_end = end;
+                }
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    Some(
+        merged
+            .iter()
+            .map(|(start, end)| {
+                if start == end {
+                    start.to_string()
+                } else {
+                    format!("{}-{}", start, end)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+fn merge_acl_ports(
+    existing: Option<String>,
+    incoming: Option<String>,
+) -> Result<Option<String>, String> {
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    let Some(incoming) = incoming else {
+        return Ok(None);
+    };
+    let existing = existing.trim();
+    let incoming = incoming.trim();
+    if existing.is_empty()
+        || incoming.is_empty()
+        || existing.eq_ignore_ascii_case("all")
+        || incoming.eq_ignore_ascii_case("all")
+    {
+        return Ok(None);
+    }
+    let mut ranges = parse_acl_port_ranges(existing)?;
+    ranges.extend(parse_acl_port_ranges(incoming)?);
+    Ok(serialize_acl_port_ranges(ranges))
+}
+
 fn cidr_group(
     port_id: &str,
     rule_id: &str,
@@ -2754,8 +3041,7 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
     }
 
     let mut groups = Vec::new();
-    let mut policies = Vec::new();
-    let mut seen = BTreeSet::new();
+    let mut policies_by_key = BTreeMap::<AclEffectivePolicyKey, AclPolicyPlan>::new();
     for (index, rule) in acl.rules.iter().enumerate() {
         let rule_id = acl_rule_id(rule, index);
         if rule
@@ -2780,25 +3066,45 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
         let dst_group = cidr_group(port_id, &rule_id, "dst", &rule.dst_cidrs, &mut groups);
 
         for direction in neutron_acl_to_datapath_directions(direction) {
-            let key = (src_group.clone(), dst_group.clone(), proto, direction);
-            if !seen.insert(key.clone()) {
-                return Err(format!(
-                    "duplicate effective ACL key src={} dst={} proto={} direction={}",
-                    key.0, key.1, key.2, key.3
-                ));
-            }
-            policies.push(AclPolicyPlan {
-                src_group: key.0,
-                dst_group: key.1,
+            let key = AclEffectivePolicyKey {
+                src_group: src_group.clone(),
+                dst_group: dst_group.clone(),
                 proto,
-                action,
                 direction,
-                ports: ports.clone(),
-            });
+            };
+            if let Some(existing) = policies_by_key.get_mut(&key) {
+                if existing.action != action {
+                    return Err(format!(
+                        "conflicting effective ACL actions src={} dst={} proto={} direction={} existing_action={} new_action={}",
+                        key.src_group,
+                        key.dst_group,
+                        key.proto,
+                        key.direction,
+                        existing.action,
+                        action
+                    ));
+                }
+                existing.ports = merge_acl_ports(existing.ports.take(), ports.clone())?;
+                continue;
+            }
+            policies_by_key.insert(
+                key.clone(),
+                AclPolicyPlan {
+                    src_group: key.src_group,
+                    dst_group: key.dst_group,
+                    proto,
+                    action,
+                    direction,
+                    ports: ports.clone(),
+                },
+            );
         }
     }
 
-    Ok(AclApplyPlan { groups, policies })
+    Ok(AclApplyPlan {
+        groups,
+        policies: policies_by_key.into_values().collect(),
+    })
 }
 
 async fn purge_neutron_acl(
@@ -2818,32 +3124,23 @@ async fn purge_neutron_acl(
         .map(|group| (group.id, group.name.clone()))
         .collect();
 
+    let policy_delete_targets =
+        acl_policy_delete_targets_for_neutron_domain(&rules, &group_names_by_id);
+
     let mut policy_delete_count = 0usize;
-    for rule in rules {
-        let src_group = if rule.src_group_id == 0 {
-            "any".to_string()
-        } else {
-            group_names_by_id
-                .get(&rule.src_group_id)
-                .cloned()
-                .unwrap_or_else(|| format!("id:{}", rule.src_group_id))
-        };
-        let dst_group = if rule.dst_group_id == 0 {
-            "any".to_string()
-        } else {
-            group_names_by_id
-                .get(&rule.dst_group_id)
-                .cloned()
-                .unwrap_or_else(|| format!("id:{}", rule.dst_group_id))
-        };
-        if is_neutron_acl_group(port_id, &src_group) || is_neutron_acl_group(port_id, &dst_group) {
-            state
-                .control_plane
-                .delete_policy(ifname, &src_group, &dst_group, rule.proto, rule.direction)
-                .await
-                .map_err(|e| e.to_string())?;
-            policy_delete_count += 1;
-        }
+    for target in policy_delete_targets {
+        state
+            .control_plane
+            .delete_policy(
+                ifname,
+                &target.src_group,
+                &target.dst_group,
+                target.proto,
+                target.direction,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        policy_delete_count += 1;
     }
 
     let list_groups_started = Instant::now();
@@ -3378,6 +3675,40 @@ mod tests {
             .expect("response body should be readable");
         let value = serde_json::from_slice(body.as_ref()).expect("response should be json");
         (status, value)
+    }
+
+    fn ready_acl(rules: Vec<NeutronAclRuleSnapshot>) -> NeutronAclSnapshot {
+        NeutronAclSnapshot {
+            enabled: true,
+            status: "ready".to_string(),
+            reason: "ready".to_string(),
+            effective_action: "enforce".to_string(),
+            policy_id: Some("acl-policy".to_string()),
+            policy_name: Some("smoke".to_string()),
+            binding_id: Some("acl-binding".to_string()),
+            source: Some("port".to_string()),
+            default_action: "allow".to_string(),
+            stateful: true,
+            revision: 1,
+            rules,
+        }
+    }
+
+    fn tcp_rule(id: &str, action: &str, dst_port: u16) -> NeutronAclRuleSnapshot {
+        NeutronAclRuleSnapshot {
+            id: Some(id.to_string()),
+            direction: Some("ingress".to_string()),
+            priority: 100,
+            action: Some(action.to_string()),
+            ethertype: Some("IPv4".to_string()),
+            protocol: Some("tcp".to_string()),
+            src_cidrs: Vec::new(),
+            dst_cidrs: Vec::new(),
+            src_port_min: None,
+            src_port_max: None,
+            dst_port_min: Some(dst_port),
+            dst_port_max: Some(dst_port),
+        }
     }
 
     #[test]
@@ -4530,6 +4861,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn neutron_pending_recovery_writes_wal_and_unblocks_full_resync() {
+        let root = temp_root("pending-recovery");
+        let state = test_neutron_state(&root);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.accepted_generation = 380;
+            runtime.applied_generation = 379;
+            runtime.pending_generation = Some(380);
+            runtime.desired_hash = Some("hash-380".to_string());
+            runtime.applied_desired_hash = Some("hash-379".to_string());
+            runtime.authority_state = "partial".to_string();
+            runtime.wal_status = "commit_written".to_string();
+        }
+
+        let response = recover_pending_snapshot(
+            state.clone(),
+            NeutronRecoverPendingRequest {
+                expected_pending_generation: 380,
+                expected_desired_hash: Some("hash-380".to_string()),
+                mode: None,
+            },
+        )
+        .await
+        .expect("matching failed pending snapshot should recover");
+
+        assert_eq!(response.status, "recovered");
+        assert_eq!(response.recovered_generation, 380);
+        assert_eq!(response.applied_generation, 379);
+        assert_eq!(response.desired_hash, Some("hash-379".to_string()));
+        assert_eq!(
+            response.authority_state,
+            "recovered_pending_full_resync_required"
+        );
+
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.accepted_generation, 379);
+        assert_eq!(runtime.applied_generation, 379);
+        assert_eq!(runtime.pending_generation, None);
+        assert_eq!(runtime.desired_hash, Some("hash-379".to_string()));
+        assert_eq!(runtime.applied_desired_hash, Some("hash-379".to_string()));
+        assert_eq!(
+            runtime.authority_state,
+            "recovered_pending_full_resync_required"
+        );
+        drop(runtime);
+
+        let replay = state.wal.replay();
+        assert_eq!(replay.state.pending_generation, None);
+        assert_eq!(replay.state.desired_hash, Some("hash-379".to_string()));
+        assert_eq!(
+            replay.state.authority_state,
+            "recovered_pending_full_resync_required"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_pending_recovery_rejects_hash_mismatch() {
+        let runtime = NeutronRuntimeState {
+            accepted_generation: 380,
+            applied_generation: 379,
+            pending_generation: Some(380),
+            desired_hash: Some("hash-380".to_string()),
+            applied_desired_hash: Some("hash-379".to_string()),
+            authority_state: "partial".to_string(),
+            wal_status: "commit_written".to_string(),
+            ..NeutronRuntimeState::default()
+        };
+
+        let result = recover_pending_runtime(
+            &runtime,
+            &NeutronRecoverPendingRequest {
+                expected_pending_generation: 380,
+                expected_desired_hash: Some("different-hash".to_string()),
+                mode: None,
+            },
+        );
+        assert!(
+            result.is_err(),
+            "hash mismatch must not clear pending state"
+        );
+        let error = result.err().unwrap();
+
+        assert_eq!(error.code, "pending_desired_hash_mismatch");
+    }
+
     #[test]
     fn domain_statuses_track_each_managed_domain() {
         let domains = domain_statuses_for(
@@ -4858,34 +5276,57 @@ mod tests {
     }
 
     #[test]
+    fn neutron_acl_translator_merges_same_tuple_l4_port_rules() {
+        let acl = ready_acl(vec![
+            tcp_rule("drop-18081", "drop", 18081),
+            tcp_rule("drop-8080", "drop", 8080),
+        ]);
+
+        let plan = translate_neutron_acl("port-1", &acl).expect("ACL should translate");
+
+        assert_eq!(plan.groups, Vec::new());
+        assert_eq!(
+            plan.policies,
+            vec![AclPolicyPlan {
+                src_group: "any".to_string(),
+                dst_group: "any".to_string(),
+                proto: 6,
+                action: 1,
+                direction: 1,
+                ports: Some("8080,18081".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn neutron_acl_translator_rejects_conflicting_actions_for_same_tuple() {
+        let acl = ready_acl(vec![
+            tcp_rule("drop-8080", "drop", 8080),
+            tcp_rule("allow-18081", "allow", 18081),
+        ]);
+
+        let error = translate_neutron_acl("port-1", &acl)
+            .expect_err("mixed actions for one datapath tuple are unsupported");
+
+        assert!(error.contains("conflicting effective ACL actions"));
+    }
+
+    #[test]
     fn neutron_acl_translator_builds_drop_icmp_policy() {
-        let acl = NeutronAclSnapshot {
-            enabled: true,
-            status: "ready".to_string(),
-            reason: "ready".to_string(),
-            effective_action: "enforce".to_string(),
-            policy_id: Some("acl-policy".to_string()),
-            policy_name: Some("smoke".to_string()),
-            binding_id: Some("acl-binding".to_string()),
-            source: Some("port".to_string()),
-            default_action: "allow".to_string(),
-            stateful: true,
-            revision: 1,
-            rules: vec![NeutronAclRuleSnapshot {
-                id: Some("drop-icmp".to_string()),
-                direction: Some("ingress".to_string()),
-                priority: 100,
-                action: Some("drop".to_string()),
-                ethertype: Some("IPv4".to_string()),
-                protocol: Some("icmp".to_string()),
-                src_cidrs: vec!["10.58.159.2/32".to_string()],
-                dst_cidrs: Vec::new(),
-                src_port_min: None,
-                src_port_max: None,
-                dst_port_min: None,
-                dst_port_max: None,
-            }],
-        };
+        let acl = ready_acl(vec![NeutronAclRuleSnapshot {
+            id: Some("drop-icmp".to_string()),
+            direction: Some("ingress".to_string()),
+            priority: 100,
+            action: Some("drop".to_string()),
+            ethertype: Some("IPv4".to_string()),
+            protocol: Some("icmp".to_string()),
+            src_cidrs: vec!["10.58.159.2/32".to_string()],
+            dst_cidrs: Vec::new(),
+            src_port_min: None,
+            src_port_max: None,
+            dst_port_min: None,
+            dst_port_max: None,
+        }]);
 
         let plan = translate_neutron_acl("port-1", &acl).expect("ACL should translate");
 
@@ -4956,6 +5397,57 @@ mod tests {
         assert_eq!(
             acl_gate_update_mode(&plan),
             AclGateUpdateMode::KeepCurrentUntilEnable
+        );
+    }
+
+    #[test]
+    fn domain_authority_neutron_acl_purge_includes_foreign_acl_policies() {
+        let mut group_names_by_id = BTreeMap::new();
+        group_names_by_id.insert(
+            42,
+            "neutron:port-1:dst:drop-icmp".to_string(),
+        );
+        let rules = vec![
+            aria_core::state::RuleInfo {
+                name: None,
+                src_group_id: 0,
+                dst_group_id: 0,
+                proto: 1,
+                action: 1,
+                ports: None,
+                bitmap_idx: None,
+                direction: 1,
+            },
+            aria_core::state::RuleInfo {
+                name: None,
+                src_group_id: 0,
+                dst_group_id: 42,
+                proto: 1,
+                action: 1,
+                ports: None,
+                bitmap_idx: None,
+                direction: 1,
+            },
+        ];
+
+        let targets = acl_policy_delete_targets_for_neutron_domain(&rules, &group_names_by_id);
+
+        assert_eq!(
+            targets,
+            vec![
+                AclPolicyDeleteTarget {
+                    src_group: "any".to_string(),
+                    dst_group: "any".to_string(),
+                    proto: 1,
+                    direction: 1,
+                },
+                AclPolicyDeleteTarget {
+                    src_group: "any".to_string(),
+                    dst_group: "neutron:port-1:dst:drop-icmp".to_string(),
+                    proto: 1,
+                    direction: 1,
+                },
+            ]
         );
     }
 }

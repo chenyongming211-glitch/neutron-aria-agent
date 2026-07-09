@@ -76,6 +76,29 @@ class EventMergerTestCase(unittest.TestCase):
         self.assertIn(EVENT_QUEUE_OVERFLOW, batch.reasons)
         self.assertEqual({}, batch.port_updates)
 
+    def test_aria_acl_domain_update_requests_full_resync(self):
+        merger = EventMerger()
+
+        merger.record_domain_update(
+            domain="acl",
+            resource="binding",
+            operation="update",
+            resource_id="binding-1",
+            target_type="port",
+            target_id="port-1",
+            revision_number=7,
+        )
+
+        batch = merger.drain()
+
+        self.assertTrue(batch.full_resync)
+        self.assertEqual([], batch.deleted_ports)
+        self.assertEqual({}, batch.port_updates)
+        self.assertIn(
+            "aria_domain_update:acl:binding:update:binding-1",
+            batch.reasons,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

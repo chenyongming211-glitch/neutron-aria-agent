@@ -84,6 +84,47 @@ backup_current_egg() {
     fi
 }
 
+refresh_easy_install_pth() {
+    local target_entry="./${EGG_NAME}"
+    docker exec -i -u 0 "${SERVICE_NAME}" python - "${SITE_PACKAGES}" "${target_entry}" <<'PY'
+from __future__ import print_function
+
+import os
+import sys
+
+site_packages = sys.argv[1]
+target_entry = sys.argv[2]
+pth = os.path.join(site_packages, "easy-install.pth")
+start = "import sys; sys.__plen = len(sys.path)\n"
+end = (
+    "import sys; new=sys.path[sys.__plen:]; "
+    "del sys.path[sys.__plen:]; p=getattr(sys,'__egginsert',0); "
+    "sys.path[p:p]=new; sys.__egginsert = p+len(new)\n"
+)
+
+try:
+    with open(pth, "r") as fh:
+        lines = fh.readlines()
+except IOError:
+    lines = [start, end]
+
+lines = [
+    line for line in lines
+    if "neutron_aria-0.1.0-py2.7" not in line
+]
+if not lines or lines[0] != start:
+    lines.insert(0, start)
+if end not in lines:
+    lines.append(end)
+
+insert_at = lines.index(end) if end in lines else len(lines)
+lines.insert(insert_at, target_entry + "\n")
+
+with open(pth, "w") as fh:
+    fh.writelines(lines)
+PY
+}
+
 install_egg() {
     require_root_host
     docker inspect "${SERVICE_NAME}" >/dev/null
@@ -91,8 +132,10 @@ install_egg() {
     egg="$(resolve_egg)"
     backup_current_egg
     log "Installing ${egg} into ${SERVICE_NAME}:$(container_egg_path)"
+    docker exec -u 0 "${SERVICE_NAME}" rm -rf "$(container_egg_path)"
     docker cp "${egg}" "${SERVICE_NAME}:$(container_egg_path)"
     docker exec -u 0 "${SERVICE_NAME}" chmod 0644 "$(container_egg_path)"
+    refresh_easy_install_pth
     restart_agent_if_requested "${RESTART_AGENT_AFTER_INSTALL}"
     smoke
 }

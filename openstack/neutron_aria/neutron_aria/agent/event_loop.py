@@ -168,18 +168,27 @@ class SnapshotSynchronizer(object):
                 desired_hash=pending_action["desired_hash"],
             )
         elif pending_action.get("action") == "block":
-            LOG.warning(
-                "remote_snapshot_pending_blocks_submit host=%s "
-                "remote_pending_generation=%s remote_desired_hash=%s "
-                "local_desired_hash=%s",
-                self.host,
-                pending_action.get("generation"),
-                pending_action.get("remote_desired_hash"),
-                pending_action.get("desired_hash"),
-            )
-            raise LocalApiTimeoutError(
-                "remote snapshot generation %s is still pending" %
-                pending_action.get("generation")
+            recovery = self._recover_remote_pending_snapshot(pending_action)
+            if recovery is None:
+                LOG.warning(
+                    "remote_snapshot_pending_blocks_submit host=%s "
+                    "remote_pending_generation=%s remote_desired_hash=%s "
+                    "local_desired_hash=%s",
+                    self.host,
+                    pending_action.get("generation"),
+                    pending_action.get("remote_desired_hash"),
+                    pending_action.get("desired_hash"),
+                )
+                raise LocalApiTimeoutError(
+                    "remote snapshot generation %s is still pending" %
+                    pending_action.get("generation")
+                )
+            remote_status = self._remote_status()
+            generation_floor = self._generation_floor_from_status(remote_status)
+            pending_action = {}
+            prepared = self.state_store.prepare_snapshot(
+                snapshot,
+                minimum_generation=generation_floor,
             )
         else:
             prepared = self.state_store.prepare_snapshot(
@@ -966,6 +975,35 @@ class SnapshotSynchronizer(object):
             "port_statuses": status.get("port_statuses") or [],
             "recovered_before_submit": True,
         }
+
+    def _recover_remote_pending_snapshot(self, pending_action):
+        recover = getattr(self.local_client, "recover_pending_snapshot", None)
+        if recover is None:
+            return None
+        try:
+            response = recover(
+                pending_action.get("generation"),
+                pending_action.get("remote_desired_hash"),
+            )
+        except LocalApiError as exc:
+            LOG.warning(
+                "remote_pending_snapshot_recovery_failed host=%s "
+                "remote_pending_generation=%s remote_desired_hash=%s error=%s",
+                self.host,
+                pending_action.get("generation"),
+                pending_action.get("remote_desired_hash"),
+                exc,
+            )
+            return None
+        LOG.warning(
+            "remote_pending_snapshot_recovered host=%s "
+            "remote_pending_generation=%s remote_desired_hash=%s status=%s",
+            self.host,
+            pending_action.get("generation"),
+            pending_action.get("remote_desired_hash"),
+            response.get("status"),
+        )
+        return response
 
     def _remote_pending_action(self, snapshot, status, desired_hash):
         if status is None:

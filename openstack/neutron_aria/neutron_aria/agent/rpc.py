@@ -1,6 +1,9 @@
 from __future__ import absolute_import
 
 
+ARIA_ACL_RPC_RESOURCE = "aria_acl"
+
+
 def _rpc_target():
     try:
         import oslo_messaging
@@ -22,6 +25,7 @@ def rpc_topic_details(topics):
         [topics.PORT, topics.UPDATE],
         [topics.PORT, topics.DELETE],
         [topics.NETWORK, topics.UPDATE],
+        [ARIA_ACL_RPC_RESOURCE, topics.UPDATE],
     ]
 
 
@@ -52,6 +56,17 @@ class AriaAgentRpcCallback(object):
         network = kwargs.get("network") or {}
         self.event_merger.record_network_update(
             network.get("id") or kwargs.get("network_id")
+        )
+
+    def aria_acl_update(self, context, **kwargs):
+        self.event_merger.record_domain_update(
+            domain=kwargs.get("domain") or "acl",
+            resource=kwargs.get("resource"),
+            operation=kwargs.get("operation"),
+            resource_id=kwargs.get("resource_id"),
+            target_type=kwargs.get("target_type"),
+            target_id=kwargs.get("target_id"),
+            revision_number=kwargs.get("revision_number"),
         )
 
 

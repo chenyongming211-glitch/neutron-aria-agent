@@ -118,6 +118,32 @@ class EventMerger(object):
                 self._reasons.append("network_update_missing_network_id")
             self._check_overflow_locked()
 
+    def record_domain_update(
+        self,
+        domain,
+        resource=None,
+        operation=None,
+        resource_id=None,
+        target_type=None,
+        target_id=None,
+        revision_number=None,
+    ):
+        domain = _normalize_reason_part(domain)
+        if not domain:
+            self.request_full_resync("aria_domain_update_missing_domain")
+            return
+        resource = _normalize_reason_part(resource) or "unknown"
+        operation = _normalize_reason_part(operation) or "update"
+        reason_id = resource_id or target_id or "unknown"
+        self.request_full_resync(
+            "aria_domain_update:%s:%s:%s:%s" % (
+                domain,
+                resource,
+                operation,
+                reason_id,
+            )
+        )
+
     def request_full_resync(self, reason):
         with self._lock:
             self._mark_pending_locked()
@@ -181,3 +207,9 @@ class EventMerger(object):
             self._full_resync = True
             self._overflowed = True
             self._reasons.append(EVENT_QUEUE_OVERFLOW)
+
+
+def _normalize_reason_part(value):
+    if value in (None, ""):
+        return None
+    return str(value).strip().lower()

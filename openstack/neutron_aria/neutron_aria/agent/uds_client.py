@@ -103,6 +103,13 @@ class LocalClient(object):
     def put_snapshot(self, snapshot):
         return self._request("PUT", "/api/v1/neutron/snapshot", snapshot)
 
+    def recover_pending_snapshot(self, expected_generation, expected_desired_hash=None):
+        return self._request("POST", "/api/v1/neutron/snapshot/recover-pending", {
+            "expected_pending_generation": expected_generation,
+            "expected_desired_hash": expected_desired_hash,
+            "mode": "rollback_to_last_applied",
+        })
+
     def put_port_snapshot(self, port_id, snapshot, required_domains=None):
         self._validate_port_snapshot_request(port_id, snapshot)
         capabilities = self.capabilities(required_domains=required_domains or [])

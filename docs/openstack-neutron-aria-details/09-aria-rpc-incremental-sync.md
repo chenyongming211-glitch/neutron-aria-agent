@@ -43,7 +43,8 @@ Target end state:
 | P0 safe default | `port_source=disabled`, `full_resync_enabled=false`, `rpc_events_enabled=false` | Heartbeat only | shipped |
 | P1 MVP production | `port_source=neutronclient`, `full_resync_enabled=true`, `acl.source=neutron`, `rpc_events_enabled=false` | Periodic REST full-resync | stage-two accepted |
 | P2 RPC-triggered resync | P1 + `rpc_events_enabled=true` | RPC update/network event -> event merge -> **full-resync**; known local delete -> UDS delete cleanup | package smoke passed on 10.58.159; real fanout A/B passed on `ostack2.bj159.net`; multi-host foreign filtering passed on `ostack2/3/4`; source-host cleanup passed on `ostack2` |
-| P3 incremental RPC | P2 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | config-gated implementation and controlled test-host evidence are accepted through P3-6; packaged default remains disabled. Production P3 requires trustworthy revision data; old Neutron without `revision_number` stays on P2 fallback unless a controlled test explicitly enables revisionless experimental mode. |
+| P2.5 Aria domain object RPC | P2 + Aria service-plugin object events | `aria_acl` policy/rule/binding/address-set create/update/delete -> event merge -> **full-resync**; full-resync remains recovery | accepted design on 2026-07-09 after live ACL latency testing showed policy/binding updates waited for the 60 second periodic resync |
+| P3 incremental RPC | P2/P2.5 + port/network indexes + port-scoped apply | RPC event -> filtered **port-scoped** apply | config-gated implementation and controlled test-host evidence are accepted through P3-6; packaged default remains disabled. Production P3 requires trustworthy revision data; old Neutron without `revision_number` stays on P2 fallback unless a controlled test explicitly enables revisionless experimental mode. |
 
 Code anchors today:
 
@@ -189,6 +190,83 @@ Current evidence:
   a triple-host 30-minute P2 soak gate with 60 samples per host, stable
   `managed_ports`, empty `pending_generation`, zero container restarts, zero
   bad-log matches, and rollback to `polling_full_resync`.
+
+## P2.5: Aria Domain Object RPC
+
+Live ACL policy enable/disable testing on 2026-07-09 showed that `aria_acl`
+object changes do not naturally emit the legacy `port.update` or
+`network.update` events. With `resync_interval=60`, those changes may therefore
+wait for the next periodic full-resync even though Rust datapath apply is
+sub-second. P2.5 closes that product gap without enabling P3 port-scoped
+runtime by default.
+
+Event sources:
+
+- `aria_acl_policy create/update/delete`;
+- `aria_acl_rule create/update/delete`;
+- `aria_acl_binding create/update/delete`;
+- `aria_acl_address_set create/update/delete`.
+
+Event payload contract:
+
+```text
+domain = acl
+resource = policy | rule | binding | address_set
+operation = create | update | delete
+resource_id = <uuid if known>
+policy_id = <uuid if known>
+target_type = port | network | null
+target_id = <uuid if known>
+revision_number = <integer if known>
+```
+
+P2.5 behavior:
+
+1. The Neutron `aria_acl` service plugin emits a fanout RPC event only after the
+   DB operation succeeds.
+2. `neutron-aria-agent` consumes the event on the same legacy agent fanout
+   connection as port/network events.
+3. The event merger records a domain full-resync reason such as
+   `aria_domain_update:acl:binding:update:<id>`.
+4. Events arriving inside `event_merge_interval` are coalesced into one
+   `safe_full_resync()`.
+5. The full-resync path reloads the authoritative Neutron ACL payload and
+   submits one generation through the existing UDS/WAL path.
+
+This means ACL object changes become event driven, while the first production
+behavior is still full-host snapshot apply rather than partial delta mutation.
+
+Completeness and backpressure rules:
+
+- A generation is complete only when `accepted_generation == applied_generation`,
+  `pending_generation` is empty, the `desired_hash` matches, and target
+  port/domain statuses converge.
+- `accepted` from UDS is not sufficient by itself; Python must poll or observe
+  status convergence before reporting ready.
+- Any preflight, UDS, WAL, or status-convergence failure leaves the agent
+  degraded for that domain and schedules future full-resync recovery. ACL
+  failure must not break OVS L2 forwarding.
+- `event_merge_interval` is the minimum debounce window; default `0.2s`.
+- Multiple events for the same ACL object coalesce into one dirty full-resync
+  reason; the resync reads the final DB state rather than replaying all
+  intermediate states.
+- If the event queue overflows, the agent drops per-object detail, sets
+  `full_resync=true`, and runs one full-resync.
+- Only one apply may be in flight per agent process. New events that arrive
+  while an apply is running remain queued and trigger a later resync; they do
+  not start a parallel UDS apply.
+- Periodic full-resync remains enabled as the lost-RPC and drift fallback.
+
+Latency target:
+
+- Single ACL enable/disable or rule change: p95 under 3 seconds on the test
+  environment when RabbitMQ fanout is healthy.
+- Batch ACL changes: coalesce to one or a small bounded number of applies,
+  rather than one apply per rule.
+
+P2.5 deliberately does not require reverse dependency indexes for policy,
+rule, or address-set updates. Those events are treated as full-resync triggers
+until P3 can safely compute affected local ports.
 
 ### P2 Operational Enablement Contract
 
@@ -753,7 +831,7 @@ Still forbidden before production P3 runtime enablement:
 
 | Topic | Question | Default until resolved |
 | --- | --- | --- |
-| ACL object RPC | Will Neutron emit `aria_acl` object updates directly? | rely on port/network RPC + resync |
+| ACL object RPC | Will Neutron emit `aria_acl` object updates directly? | resolved: P2.5 emits `aria_acl` object updates and triggers merged full-resync |
 | Plugin RPC | Is legacy plugin RPC available for single-port device details? | use targeted REST |
 | Body size | Does port-scoped snapshot remove the need for 1 MiB full-body pressure? | keep contract limits until measured |
 | QoS | Does incremental RPC include QoS in the same phase? | ACL first, QoS later |

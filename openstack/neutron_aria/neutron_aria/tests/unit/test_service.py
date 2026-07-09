@@ -662,6 +662,52 @@ class AgentServiceTestCase(unittest.TestCase):
         self.assertEqual(["net1"], result["events"]["dirty_networks"])
         self.assertEqual("full_resync", result["events"]["decisions"][0]["action"])
 
+    def test_aria_acl_domain_event_triggers_one_full_resync_after_window(self):
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            clock=clock,
+        )
+        service.initialize()
+
+        merger.record_domain_update(
+            domain="acl",
+            resource="policy",
+            operation="update",
+            resource_id="policy-1",
+            revision_number=3,
+        )
+        merger.record_domain_update(
+            domain="acl",
+            resource="rule",
+            operation="create",
+            resource_id="rule-1",
+            revision_number=1,
+        )
+        clock.advance(0.2)
+        result = service.run_once()
+
+        self.assertEqual(2, sync.resync_calls)
+        self.assertEqual(2, result["snapshot"]["generation"])
+        self.assertTrue(result["events"]["full_resync"])
+        self.assertIn(
+            "aria_domain_update:acl:policy:update:policy-1",
+            result["events"]["reasons"],
+        )
+        self.assertIn(
+            "aria_domain_update:acl:rule:create:rule-1",
+            result["events"]["reasons"],
+        )
+        self.assertEqual([], result["events"]["port_updates"])
+        self.assertEqual([], result["events"]["dirty_networks"])
+
     def test_rpc_event_loop_caps_idle_sleep_to_poll_for_new_events(self):
         clock = FakeClock()
         sync = FakeSynchronizer()

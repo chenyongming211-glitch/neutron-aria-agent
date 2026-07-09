@@ -2,6 +2,7 @@ from __future__ import absolute_import
 
 import calendar
 import datetime
+import logging
 import os
 import time
 
@@ -10,6 +11,7 @@ from neutron_aria.db.aria_acl.api import InMemoryAriaAclRepository
 from neutron_aria.db.aria_acl.api import NeutronDbAriaAclRepository
 
 
+LOG = logging.getLogger(__name__)
 PLUGIN_TYPE = "aria_acl"
 PLUGIN_DESCRIPTION = "Aria ACL Neutron service plugin"
 DEFAULT_PORT_STATUS_STALE_SECONDS = 90
@@ -18,11 +20,18 @@ DEFAULT_PORT_STATUS_STALE_SECONDS = 90
 class AriaAclPlugin(object):
     supported_extension_aliases = ["aria-acl"]
 
-    def __init__(self, repository=None, port_status_stale_seconds=None, now=None):
+    def __init__(
+        self,
+        repository=None,
+        port_status_stale_seconds=None,
+        now=None,
+        notifier=None,
+    ):
         self.repository = repository
         self._fallback_repository = InMemoryAriaAclRepository()
         self.port_status_stale_seconds = port_status_stale_seconds
         self.now = now or time.time
+        self.notifier = notifier if notifier is not None else build_aria_acl_notifier()
 
     def get_plugin_type(self):
         return PLUGIN_TYPE
@@ -31,7 +40,11 @@ class AriaAclPlugin(object):
         return PLUGIN_DESCRIPTION
 
     def create_aria_acl_policy(self, context, aria_acl_policy):
-        return self._repo(context).create_policy(self._unwrap(aria_acl_policy, "aria_acl_policy"))
+        policy = self._repo(context).create_policy(
+            self._unwrap(aria_acl_policy, "aria_acl_policy")
+        )
+        self._notify_acl_change(context, "policy", "create", current=policy)
+        return policy
 
     def get_aria_acl_policies(
         self,
@@ -49,16 +62,31 @@ class AriaAclPlugin(object):
         return self._repo(context).get_policy(policy_id)
 
     def update_aria_acl_policy(self, context, policy_id, aria_acl_policy):
-        return self._repo(context).update_policy(
+        policy = self._repo(context).update_policy(
             policy_id,
             self._unwrap(aria_acl_policy, "aria_acl_policy"),
         )
+        self._notify_acl_change(context, "policy", "update", current=policy)
+        return policy
 
     def delete_aria_acl_policy(self, context, policy_id):
-        self._repo(context).delete_policy(policy_id)
+        repo = self._repo(context)
+        policy = repo.get_policy(policy_id)
+        repo.delete_policy(policy_id)
+        self._notify_acl_change(
+            context,
+            "policy",
+            "delete",
+            current=policy,
+            resource_id=policy_id,
+        )
 
     def create_aria_acl_rule(self, context, aria_acl_rule):
-        return self._repo(context).create_rule(self._unwrap(aria_acl_rule, "aria_acl_rule"))
+        rule = self._repo(context).create_rule(
+            self._unwrap(aria_acl_rule, "aria_acl_rule")
+        )
+        self._notify_acl_change(context, "rule", "create", current=rule)
+        return rule
 
     def get_aria_acl_rules(
         self,
@@ -76,18 +104,36 @@ class AriaAclPlugin(object):
         return self._repo(context).get_rule(rule_id)
 
     def update_aria_acl_rule(self, context, rule_id, aria_acl_rule):
-        return self._repo(context).update_rule(
+        rule = self._repo(context).update_rule(
             rule_id,
             self._unwrap(aria_acl_rule, "aria_acl_rule"),
         )
+        self._notify_acl_change(context, "rule", "update", current=rule)
+        return rule
 
     def delete_aria_acl_rule(self, context, rule_id):
-        self._repo(context).delete_rule(rule_id)
+        repo = self._repo(context)
+        rule = repo.get_rule(rule_id)
+        repo.delete_rule(rule_id)
+        self._notify_acl_change(
+            context,
+            "rule",
+            "delete",
+            current=rule,
+            resource_id=rule_id,
+        )
 
     def create_aria_acl_address_set(self, context, aria_acl_address_set):
-        return self._repo(context).create_address_set(
+        address_set = self._repo(context).create_address_set(
             self._unwrap(aria_acl_address_set, "aria_acl_address_set")
         )
+        self._notify_acl_change(
+            context,
+            "address_set",
+            "create",
+            current=address_set,
+        )
+        return address_set
 
     def get_aria_acl_address_sets(
         self,
@@ -105,16 +151,36 @@ class AriaAclPlugin(object):
         return self._repo(context).get_address_set(address_set_id)
 
     def update_aria_acl_address_set(self, context, address_set_id, aria_acl_address_set):
-        return self._repo(context).update_address_set(
+        address_set = self._repo(context).update_address_set(
             address_set_id,
             self._unwrap(aria_acl_address_set, "aria_acl_address_set"),
         )
+        self._notify_acl_change(
+            context,
+            "address_set",
+            "update",
+            current=address_set,
+        )
+        return address_set
 
     def delete_aria_acl_address_set(self, context, address_set_id):
-        self._repo(context).delete_address_set(address_set_id)
+        repo = self._repo(context)
+        address_set = repo.get_address_set(address_set_id)
+        repo.delete_address_set(address_set_id)
+        self._notify_acl_change(
+            context,
+            "address_set",
+            "delete",
+            current=address_set,
+            resource_id=address_set_id,
+        )
 
     def create_aria_acl_binding(self, context, aria_acl_binding):
-        return self._repo(context).create_binding(self._unwrap(aria_acl_binding, "aria_acl_binding"))
+        binding = self._repo(context).create_binding(
+            self._unwrap(aria_acl_binding, "aria_acl_binding")
+        )
+        self._notify_acl_change(context, "binding", "create", current=binding)
+        return binding
 
     def get_aria_acl_bindings(
         self,
@@ -132,13 +198,24 @@ class AriaAclPlugin(object):
         return self._repo(context).get_binding(binding_id)
 
     def update_aria_acl_binding(self, context, binding_id, aria_acl_binding):
-        return self._repo(context).update_binding(
+        binding = self._repo(context).update_binding(
             binding_id,
             self._unwrap(aria_acl_binding, "aria_acl_binding"),
         )
+        self._notify_acl_change(context, "binding", "update", current=binding)
+        return binding
 
     def delete_aria_acl_binding(self, context, binding_id):
-        self._repo(context).delete_binding(binding_id)
+        repo = self._repo(context)
+        binding = repo.get_binding(binding_id)
+        repo.delete_binding(binding_id)
+        self._notify_acl_change(
+            context,
+            "binding",
+            "delete",
+            current=binding,
+            resource_id=binding_id,
+        )
 
     def report_aria_acl_port_status(self, context, aria_acl_port_status):
         return self._project_port_status(
@@ -217,6 +294,33 @@ class AriaAclPlugin(object):
             )
         return self._fallback_repository
 
+    def _notify_acl_change(self, context, resource, operation, current=None, resource_id=None):
+        payload = {
+            "domain": "acl",
+            "resource": resource,
+            "operation": operation,
+            "resource_id": resource_id or (current or {}).get("id"),
+        }
+        for field in (
+            "policy_id",
+            "target_type",
+            "target_id",
+            "revision_number",
+        ):
+            if current and current.get(field) is not None:
+                payload[field] = current.get(field)
+        try:
+            self.notifier.notify(context, **payload)
+        except Exception as exc:
+            LOG.warning(
+                "aria_acl_rpc_notification_failed resource=%s operation=%s "
+                "resource_id=%s error=%s",
+                resource,
+                operation,
+                payload.get("resource_id"),
+                exc,
+            )
+
     def _project_port_status(self, status):
         if status is None:
             return None
@@ -248,6 +352,52 @@ class AriaAclPlugin(object):
             "ARIA_ACL_PORT_STATUS_STALE_SECONDS",
             DEFAULT_PORT_STATUS_STALE_SECONDS,
         )
+
+
+class NoopAriaAclNotifier(object):
+    def notify(self, context, **payload):
+        return None
+
+
+class AriaAclAgentNotifier(object):
+    def __init__(self, client, topics):
+        self.client = client
+        self.topics = topics
+
+    def notify(self, context, **payload):
+        topic = _rpc_topic_name(
+            self.topics,
+            getattr(self.topics, "AGENT", "q-agent-notifier"),
+            "aria_acl",
+            getattr(self.topics, "UPDATE", "update"),
+        )
+        cctxt = self.client.prepare(topic=topic, fanout=True)
+        cctxt.cast(context, "aria_acl_update", **payload)
+
+
+def build_aria_acl_notifier():
+    try:
+        from neutron.common import rpc as n_rpc
+        from neutron.common import topics
+        import oslo_messaging
+    except Exception:
+        return NoopAriaAclNotifier()
+    try:
+        target = oslo_messaging.Target(
+            topic=getattr(topics, "AGENT", "q-agent-notifier"),
+            version="1.4",
+        )
+        return AriaAclAgentNotifier(n_rpc.get_client(target), topics)
+    except Exception as exc:
+        LOG.warning("aria_acl_rpc_notifier_init_failed error=%s", exc)
+        return NoopAriaAclNotifier()
+
+
+def _rpc_topic_name(topics, topic, resource, operation):
+    get_topic_name = getattr(topics, "get_topic_name", None)
+    if get_topic_name is not None:
+        return get_topic_name(topic, resource, operation)
+    return "%s-%s-%s" % (topic, resource, operation)
 
 
 def _env_flag(name, default=False):

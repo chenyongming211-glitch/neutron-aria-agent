@@ -22,6 +22,7 @@ class RpcCallbackTestCase(unittest.TestCase):
                 ["port", "update"],
                 ["port", "delete"],
                 ["network", "update"],
+                ["aria_acl", "update"],
             ],
             rpc_topic_details(FakeTopics),
         )
@@ -67,6 +68,28 @@ class RpcCallbackTestCase(unittest.TestCase):
 
         self.assertEqual(["net1"], batch.dirty_networks)
         self.assertIn("network_update:net1", batch.reasons)
+
+    def test_aria_acl_update_records_domain_full_resync(self):
+        merger = EventMerger()
+        callback = AriaAgentRpcCallback(merger)
+
+        callback.aria_acl_update(
+            None,
+            resource="binding",
+            operation="update",
+            resource_id="binding-1",
+            target_type="port",
+            target_id="port-1",
+            revision_number=7,
+        )
+
+        batch = merger.drain()
+
+        self.assertTrue(batch.full_resync)
+        self.assertIn(
+            "aria_domain_update:acl:binding:update:binding-1",
+            batch.reasons,
+        )
 
 
 if __name__ == "__main__":

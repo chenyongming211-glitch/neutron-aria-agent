@@ -39,6 +39,7 @@ or an explicitly approved later phase.
 | `12-review-bug-backlog.md` | Track code-review bugs and risks that must be fixed without expanding the product scope. |
 | `13-acl-delivery-performance-optimization.md` | Detail ACL strategy delivery performance optimization after the 2026-07-07 200-rule convergence probe. |
 | `14-logging-level-governance.md` | Record Rust/Python agent logging-level governance, noisy-log demotion, SSL reconcile gating, and Kolla log routing cleanup. |
+| `15-acl-operator-ux-backlog.md` | Track read-only ACL operator UX improvements such as policy-with-rules and effective-port inspection commands. |
 
 ## Refinement Order
 
@@ -61,6 +62,9 @@ or an explicitly approved later phase.
     submit suppression before changing UDS semantics or eBPF map layout.
 12. Logging-level governance, to keep ACL product operation readable before
     adding more feature surface or telemetry.
+13. ACL operator UX backlog, after core ACL correctness and smoke coverage are
+    stable, to improve read-only troubleshooting without changing datapath
+    behavior.
 
 ## Dependency Map
 
@@ -118,6 +122,10 @@ or an explicitly approved later phase.
   -> 08 production hardening evidence
   -> 09 RPC event log breadcrumbs
   -> 13 ACL delivery performance logs
+
+15 ACL operator UX backlog
+  -> 02 aria_acl plugin/client read-side commands
+  -> 05 status/heartbeat effective port inspection
 ```
 
 ## Gate Mapping
@@ -297,6 +305,11 @@ The current RPC hardening pass adds strict boolean parsing for production
 enablement flags and exposes a `sync_mode` summary in logs/heartbeat:
 `heartbeat_only`, `polling_full_resync`, `rpc_full_resync`,
 `rpc_port_scoped`, or `rpc_port_scoped_revisionless_experimental`.
+
+The 2026-07-09 P2.5 design adds Aria domain object RPC for `aria_acl`
+policy/rule/binding/address-set changes. These events trigger merged
+full-resync first, retain periodic full-resync recovery, and keep port-scoped
+apply behind the existing P3 gates.
 
 The 2026-07-02 P3-5 smoke evidence is recorded in:
 
