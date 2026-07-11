@@ -488,6 +488,10 @@ impl NeutronApiState {
         let mut errors = Vec::new();
         let mut attached_for_recovery = false;
 
+        if let Some(recovery) = blocked_unsupported_recovery(&domains) {
+            return recovery;
+        }
+
         if domains.iter().any(|domain| domain.as_str() != "attach") && port.ifname.is_empty() {
             let reason = "missing_ifname_for_recovery".to_string();
             for domain in domains {
@@ -539,16 +543,11 @@ impl NeutronApiState {
                     "blocked",
                     Some("blocked_by_attach_recovery".to_string()),
                 )),
-                "qos" | "mirror" => statuses.push(domain_status(
-                    domain,
-                    "recovered",
-                    Some(format!("{}_no_runtime_executor", domain)),
-                )),
-                _ => statuses.push(domain_status(
-                    domain,
-                    "recovered",
-                    Some("no_neutron_recovery_action".to_string()),
-                )),
+                unsupported => {
+                    let reason = format!("unsupported_recovery_domain:{}", unsupported);
+                    statuses.push(domain_status(domain, "blocked", Some(reason.clone())));
+                    errors.push(reason);
+                }
             }
         }
 
@@ -2722,6 +2721,38 @@ fn recovery_domains_for_port(
     domains.extend(normalize_managed_domains(&port.managed_domains));
     domains.extend(normalize_managed_domains(&intent.affected_domains));
     domains.into_iter().collect()
+}
+
+fn blocked_unsupported_recovery(domains: &[String]) -> Option<IntentPortRecovery> {
+    let unsupported = domains
+        .iter()
+        .filter(|domain| !matches!(domain.as_str(), "attach" | "acl"))
+        .cloned()
+        .collect::<Vec<_>>();
+    if unsupported.is_empty() {
+        return None;
+    }
+
+    let reason = format!("unsupported_recovery_domains:{}", unsupported.join(","));
+    let statuses = domains
+        .iter()
+        .map(|domain| {
+            let domain_reason = if matches!(domain.as_str(), "attach" | "acl") {
+                "blocked_by_unsupported_recovery_domain".to_string()
+            } else {
+                format!("unsupported_recovery_domain:{}", domain)
+            };
+            domain_status(domain, "blocked", Some(domain_reason))
+        })
+        .collect();
+
+    Some(IntentPortRecovery {
+        managed_domains: domains.to_vec(),
+        domains: statuses,
+        status: "blocked".to_string(),
+        reason: Some(reason),
+        ok: false,
+    })
 }
 
 fn managed_port_from_snapshot(port: &NeutronPortSnapshot) -> ManagedNeutronPort {
@@ -5212,6 +5243,37 @@ mod tests {
         assert_eq!(1, ports.len());
         assert_eq!("tap-vm", ports[0].ifname);
         assert_eq!(Some(17), ports[0].ifindex);
+    }
+
+    #[test]
+    fn pending_intent_recovery_blocks_unimplemented_domains() {
+        let domains = vec![
+            "attach".to_string(),
+            "acl".to_string(),
+            "qos".to_string(),
+            "mirror".to_string(),
+        ];
+
+        let recovery = blocked_unsupported_recovery(&domains)
+            .expect("qos/mirror recovery must be rejected");
+
+        assert!(!recovery.ok);
+        assert_eq!("blocked", recovery.status);
+        assert_eq!(domains, recovery.managed_domains);
+        assert!(recovery
+            .reason
+            .as_deref()
+            .map(|reason| reason.contains("qos,mirror"))
+            .unwrap_or(false));
+        assert!(recovery.domains.iter().all(|domain| domain.status == "blocked"));
+        assert!(recovery.domains.iter().any(|domain| {
+            domain.domain == "qos"
+                && domain.reason.as_deref() == Some("unsupported_recovery_domain:qos")
+        }));
+        assert!(recovery.domains.iter().any(|domain| {
+            domain.domain == "mirror"
+                && domain.reason.as_deref() == Some("unsupported_recovery_domain:mirror")
+        }));
     }
 
     #[test]

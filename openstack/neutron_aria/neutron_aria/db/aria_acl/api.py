@@ -11,6 +11,12 @@ from neutron_aria.acl_contract import validate_policy
 from neutron_aria.acl_contract import validate_rule
 
 
+try:
+    STRING_TYPES = (basestring,)
+except NameError:
+    STRING_TYPES = (str,)
+
+
 class AriaAclError(Exception):
     pass
 
@@ -51,7 +57,7 @@ def _validate_contract(validator, values):
 
 def _enabled(obj):
     value = (obj or {}).get("enabled", True)
-    if isinstance(value, str):
+    if isinstance(value, STRING_TYPES):
         return value.strip().lower() not in ("0", "false", "no", "off")
     return value is not False
 

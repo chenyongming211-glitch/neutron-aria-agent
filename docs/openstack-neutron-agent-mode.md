@@ -6,6 +6,12 @@
 
 ACL 产品化独立 Neutron 扩展的详细设计见：[Aria ACL Neutron 独立扩展产品化设计](aria-acl-neutron-extension-product-design.md)。
 
+> 2026-07-11 当前实现边界：本轮只交付 ACL enhancement。Python agent
+> 仅接受 `managed_domains=acl`，Rust UDS capabilities 仅公布已经实现的
+> `attach` 和 `acl`。QoS/Mirror 继续作为后续规划和 bug 记录存在；当前
+> 配置或 UDS 请求包含这些未实现 domain 时必须明确拒绝，不能静默忽略，
+> 也不能因此把 ACL 标记为 ready。
+
 ## 1. 目标与结论
 
 ### 1.1 建设目标
@@ -686,7 +692,7 @@ GET /api/v1/neutron/capabilities
   "mandatory_domains": [],
   "error_codes_hash": "v0.9-neutron-errors-2",
   "peer_auth_policy": "filesystem_permissions_then_peercred",
-  "capability_hash": "v0.9-neutron-capabilities-2"
+  "capability_hash": "v0.9-neutron-capabilities-3"
 }
 ```
 

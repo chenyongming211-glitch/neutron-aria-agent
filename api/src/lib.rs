@@ -37,7 +37,7 @@ pub const NEUTRON_UDS_BODY_MAX_BYTES: u64 = 1_048_576;
 pub const NEUTRON_UDS_TIMEOUT_MS: u64 = 3_000;
 pub const NEUTRON_UDS_ERROR_CODES_HASH: &str = "v0.9-neutron-errors-2";
 pub const NEUTRON_UDS_PEER_AUTH_POLICY: &str = "filesystem_permissions_then_peercred";
-pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-2";
+pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-3";
 pub const NEUTRON_ATTACH_AUTHORITY: &str = "neutron_snapshot";
 pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &["attach", "acl"];
 
@@ -372,7 +372,7 @@ pub struct NeutronCapabilitiesResponse {
     pub peer_auth_policy: String,
     /// Stable hash/version for capability drift detection.
     #[serde(default)]
-    #[schema(example = "v0.9-neutron-capabilities-2")]
+    #[schema(example = "v0.9-neutron-capabilities-3")]
     pub capability_hash: String,
 }
 
