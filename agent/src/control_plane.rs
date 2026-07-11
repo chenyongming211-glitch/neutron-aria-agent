@@ -3359,6 +3359,34 @@ mod tests {
             .is_ok());
     }
 
+    #[tokio::test]
+    async fn domain_authority_blocks_conntrack_as_acl_dependency() {
+        let cp = test_control_plane();
+        cp.mark_neutron_port_authority(
+            "tap-vm",
+            "port-vm",
+            &["acl".to_string()],
+            7,
+        )
+        .await;
+
+        let error = cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Conntrack)
+            .await
+            .expect_err("ACL authority must protect its CT dependency");
+
+        assert_eq!(error.status_code(), 409);
+        assert!(error.to_string().contains("dependency of 'acl'"));
+        assert!(cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Qos)
+            .await
+            .is_ok());
+        assert!(cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Trace)
+            .await
+            .is_ok());
+    }
+
     #[test]
     fn domain_authority_exclusive_acl_replace_claims_foreign_rules() {
         let state = FirewallState::default();

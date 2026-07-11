@@ -6125,6 +6125,105 @@ mod tests {
     }
 
     #[test]
+    fn neutron_acl_translator_carries_conntrack_intent() {
+        let stateful = ready_acl(vec![tcp_rule("drop-8080", "drop", 8080)]);
+        assert_eq!(
+            translate_neutron_acl("port-1", &stateful)
+                .expect("stateful ACL should translate")
+                .conntrack_enabled,
+            Some(true)
+        );
+
+        let mut stateless = stateful;
+        stateless.stateful = false;
+        assert_eq!(
+            translate_neutron_acl("port-1", &stateless)
+                .expect("stateless ACL should translate")
+                .conntrack_enabled,
+            Some(false)
+        );
+
+        assert_eq!(AclApplyPlan::default().conntrack_enabled, None);
+    }
+
+    #[test]
+    fn neutron_acl_runtime_transition_is_atomic() {
+        let policy = AclPolicyPlan {
+            src_group: "any".to_string(),
+            dst_group: "any".to_string(),
+            proto: 6,
+            action: 1,
+            direction: 1,
+            ports: Some("8080".to_string()),
+        };
+        let quiesced = AclRuntimeFeatureState {
+            conntrack_enabled: false,
+            acl_enabled: false,
+        };
+
+        let stateful = acl_runtime_transition(
+            &AclApplyPlan {
+                groups: Vec::new(),
+                policies: vec![policy.clone()],
+                conntrack_enabled: Some(true),
+            },
+            false,
+        );
+        assert_eq!(stateful.quiesce, quiesced);
+        assert_eq!(
+            stateful.publish,
+            AclRuntimeFeatureState {
+                conntrack_enabled: true,
+                acl_enabled: true,
+            }
+        );
+
+        let stateless = acl_runtime_transition(
+            &AclApplyPlan {
+                groups: Vec::new(),
+                policies: vec![policy],
+                conntrack_enabled: Some(false),
+            },
+            true,
+        );
+        assert_eq!(stateless.quiesce, quiesced);
+        assert_eq!(
+            stateless.publish,
+            AclRuntimeFeatureState {
+                conntrack_enabled: false,
+                acl_enabled: true,
+            }
+        );
+
+        let empty_stateful = acl_runtime_transition(
+            &AclApplyPlan {
+                groups: Vec::new(),
+                policies: Vec::new(),
+                conntrack_enabled: Some(true),
+            },
+            false,
+        );
+        assert_eq!(empty_stateful.quiesce, quiesced);
+        assert_eq!(
+            empty_stateful.publish,
+            AclRuntimeFeatureState {
+                conntrack_enabled: true,
+                acl_enabled: false,
+            }
+        );
+
+        let missing_payload = acl_runtime_transition(&AclApplyPlan::default(), true);
+        assert_eq!(missing_payload.quiesce, quiesced);
+        assert_eq!(
+            missing_payload.publish,
+            AclRuntimeFeatureState {
+                conntrack_enabled: true,
+                acl_enabled: false,
+            }
+        );
+    }
+
+    #[test]
     fn neutron_acl_translator_rejects_conflicting_actions_for_same_tuple() {
         let acl = ready_acl(vec![
             tcp_rule("drop-8080", "drop", 8080),
