@@ -693,6 +693,7 @@ async fn recover_pending_snapshot(
     let _guard = state.apply_lock.lock().await;
     let replay = state.wal.replay();
     let mut runtime = state.runtime.write().await;
+    validate_pending_recovery_identity(&runtime, &request)?;
     if replay.pending_intent.is_none()
         && wal_state_newer_than_runtime(&replay.state, &runtime)
     {
@@ -752,30 +753,7 @@ fn recover_pending_runtime(
     runtime: &NeutronRuntimeState,
     request: &NeutronRecoverPendingRequest,
 ) -> Result<NeutronRuntimeState, SnapshotApplyError> {
-    let Some(pending_generation) = runtime.pending_generation else {
-        return Err(SnapshotApplyError {
-            status: StatusCode::CONFLICT,
-            code: "no_pending_snapshot",
-            details: "no pending generation exists".to_string(),
-        });
-    };
-    if pending_generation != request.expected_pending_generation {
-        return Err(SnapshotApplyError {
-            status: StatusCode::CONFLICT,
-            code: "pending_generation_mismatch",
-            details: format!(
-                "pending generation {} does not match expected {}",
-                pending_generation, request.expected_pending_generation
-            ),
-        });
-    }
-    if !hashes_match(&runtime.desired_hash, &request.expected_desired_hash) {
-        return Err(SnapshotApplyError {
-            status: StatusCode::CONFLICT,
-            code: "pending_desired_hash_mismatch",
-            details: "pending desired hash does not match expected hash".to_string(),
-        });
-    }
+    validate_pending_recovery_identity(runtime, request)?;
     if runtime.applied_generation == 0 {
         return Err(SnapshotApplyError {
             status: StatusCode::CONFLICT,
@@ -801,6 +779,37 @@ fn recover_pending_runtime(
     next_runtime.authority_state = "recovered_pending_full_resync_required".to_string();
     next_runtime.wal_status = "pending_recovered_to_last_applied".to_string();
     Ok(next_runtime)
+}
+
+fn validate_pending_recovery_identity(
+    runtime: &NeutronRuntimeState,
+    request: &NeutronRecoverPendingRequest,
+) -> Result<(), SnapshotApplyError> {
+    let Some(pending_generation) = runtime.pending_generation else {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "no_pending_snapshot",
+            details: "no pending generation exists".to_string(),
+        });
+    };
+    if pending_generation != request.expected_pending_generation {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "pending_generation_mismatch",
+            details: format!(
+                "pending generation {} does not match expected {}",
+                pending_generation, request.expected_pending_generation
+            ),
+        });
+    }
+    if !hashes_match(&runtime.desired_hash, &request.expected_desired_hash) {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "pending_desired_hash_mismatch",
+            details: "pending desired hash does not match expected hash".to_string(),
+        });
+    }
+    Ok(())
 }
 
 async fn get_neutron_capabilities() -> impl IntoResponse {
