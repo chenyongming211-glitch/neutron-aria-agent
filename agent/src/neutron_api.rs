@@ -1088,6 +1088,23 @@ async fn mark_snapshot_background_error(
     if runtime.pending_generation == Some(generation)
         && hashes_match(&runtime.desired_hash, &desired_hash)
     {
+        if matches!(
+            runtime.authority_state.as_str(),
+            "blocked_recovery_required"
+                | "wal_recovery_commit_failed"
+                | "pending_recovery_commit_failed"
+        ) {
+            warn!(
+                generation,
+                desired_hash = ?desired_hash,
+                code,
+                details = %details,
+                authority_state = %runtime.authority_state,
+                wal_status = %runtime.wal_status,
+                "neutron_snapshot_background_error_preserved_recovery_state"
+            );
+            return;
+        }
         runtime.authority_state = "degraded".to_string();
         runtime.wal_status = format!("background_apply_failed:{}", code);
         warn!(
@@ -1100,6 +1117,101 @@ async fn mark_snapshot_background_error(
     }
 }
 
+fn build_blocked_snapshot_runtime(
+    previous: &NeutronRuntimeState,
+    intent: &PendingNeutronIntent,
+    blocked_statuses: BTreeMap<String, NeutronPortStatus>,
+    wal_status: &str,
+) -> NeutronRuntimeState {
+    let mut blocked = previous.clone();
+    blocked.pending_generation = Some(intent.generation);
+    blocked.desired_hash = intent.desired_hash.clone();
+    blocked.authority_state = "blocked_recovery_required".to_string();
+    blocked.wal_status = wal_status.to_string();
+    blocked.port_statuses.extend(blocked_statuses);
+    blocked
+}
+
+async fn recover_failed_snapshot_transaction(
+    state: &NeutronApiState,
+    intent: &PendingNeutronIntent,
+    previous: &NeutronRuntimeState,
+    reason: &str,
+) -> NeutronRuntimeState {
+    let affected_ports = affected_ports_for_intent(intent, &previous.ports);
+    let mut blocked_statuses = BTreeMap::new();
+
+    for port in affected_ports {
+        let committed_before_intent = previous.ports.contains_key(&port.port_id);
+        let mut recovery = state
+            .recover_intent_port(intent, &port, committed_before_intent)
+            .await;
+        let recovery_reason = recovery.reason.clone();
+        let mut acl_status_present = false;
+        for domain in &mut recovery.domains {
+            if domain.domain == "acl" {
+                acl_status_present = true;
+                domain.status = "blocked".to_string();
+                domain.reason = Some("snapshot_commit_failed_acl_bypass".to_string());
+                domain.effective_action = Some("bypass".to_string());
+            }
+        }
+        if !acl_status_present
+            && recovery
+                .managed_domains
+                .iter()
+                .any(|domain| domain == "acl")
+        {
+            recovery.domains.push(domain_status_with_action(
+                "acl",
+                "blocked",
+                Some("snapshot_commit_failed_acl_bypass".to_string()),
+                Some("bypass".to_string()),
+            ));
+        }
+        recovery.status = "blocked".to_string();
+        recovery.reason = Some(match recovery_reason {
+            Some(details) if !recovery.ok => {
+                format!("snapshot_commit_failed_recovery_required:{}", details)
+            }
+            _ => "snapshot_commit_failed_recovery_required".to_string(),
+        });
+        recovery.ok = false;
+
+        blocked_statuses.insert(
+            port.port_id.clone(),
+            port_runtime_status(
+                &port.port_id,
+                &port.ifname,
+                intent.generation,
+                intent.desired_hash.clone(),
+                recovery.managed_domains,
+                recovery.status.as_str(),
+                recovery.reason,
+                recovery.domains,
+            ),
+        );
+    }
+
+    let mut blocked = build_blocked_snapshot_runtime(
+        previous,
+        intent,
+        blocked_statuses,
+        "commit_failed",
+    );
+    if let Err(error) = state.wal.append_snapshot_commit(blocked.to_wal_state()) {
+        blocked.wal_status = "recovery_commit_failed".to_string();
+        warn!(
+            generation = intent.generation,
+            desired_hash = ?intent.desired_hash,
+            reason,
+            error = %error,
+            "failed to commit blocked Neutron snapshot recovery state"
+        );
+    }
+    blocked
+}
+
 async fn apply_neutron_snapshot_for_scope(
     state: NeutronApiState,
     snapshot: NeutronSnapshotRequest,
@@ -1109,7 +1221,7 @@ async fn apply_neutron_snapshot_for_scope(
     let profile_started = Instant::now();
     let PreparedSnapshotApply {
         _apply_guard,
-        intent: _intent,
+        intent,
         transaction,
         current_ports,
         runtime_before_apply,
@@ -1166,7 +1278,7 @@ async fn apply_neutron_snapshot_for_scope(
         snapshot.generation,
         requested_hash.clone(),
         current_ports,
-        runtime_before_apply,
+        runtime_before_apply.clone(),
         transaction,
     )
     .await;
@@ -1179,6 +1291,15 @@ async fn apply_neutron_snapshot_for_scope(
     let runtime_apply_ms = elapsed_ms(runtime_apply_started);
 
     if let Err(e) = fault_injection::check("neutron.snapshot.before_commit").await {
+        let blocked = recover_failed_snapshot_transaction(
+            &state,
+            &intent,
+            &runtime_before_apply,
+            "before_commit_failed",
+        )
+        .await;
+        let mut runtime = state.runtime.write().await;
+        *runtime = blocked;
         return Err(SnapshotApplyError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "fault_injection",
@@ -1190,10 +1311,15 @@ async fn apply_neutron_snapshot_for_scope(
         .wal
         .append_snapshot_commit(next_runtime.to_wal_state())
     {
+        let blocked = recover_failed_snapshot_transaction(
+            &state,
+            &intent,
+            &runtime_before_apply,
+            "wal_commit_failed",
+        )
+        .await;
         let mut runtime = state.runtime.write().await;
-        runtime.pending_generation = Some(snapshot.generation);
-        runtime.authority_state = "wal_commit_failed".to_string();
-        runtime.wal_status = "commit_failed".to_string();
+        *runtime = blocked;
         return Err(SnapshotApplyError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "wal_commit_failed",
