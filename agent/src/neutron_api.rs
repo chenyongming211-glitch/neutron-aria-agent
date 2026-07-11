@@ -403,7 +403,7 @@ impl NeutronApiState {
         if degraded {
             next_runtime.authority_state = "runtime_degraded".to_string();
             next_runtime.wal_status = "runtime_reconcile_degraded".to_string();
-        } else if acl_requires_full_resync {
+        } else if acl_requires_full_resync && next_runtime.pending_generation.is_none() {
             next_runtime.authority_state =
                 "runtime_reconcile_requires_full_resync".to_string();
             next_runtime.wal_status =
@@ -2368,6 +2368,9 @@ fn invalidate_restarted_acl_runtime(
             continue;
         }
 
+        if !runtime.port_statuses.contains_key(&port.port_id) {
+            continue;
+        }
         let Some(restored) = runtime.ports.get_mut(&port.port_id) else {
             continue;
         };
@@ -2401,7 +2404,7 @@ fn invalidate_restarted_acl_runtime(
         invalidated = true;
     }
 
-    if invalidated {
+    if invalidated && runtime.pending_generation.is_none() {
         runtime.authority_state = "runtime_reconcile_requires_full_resync".to_string();
         runtime.wal_status = "runtime_reconciled_acl_resync_required".to_string();
     }
@@ -5825,6 +5828,39 @@ mod tests {
         ));
         assert_eq!(runtime.authority_state, "ready");
         assert_eq!(runtime.port_statuses["vm-port"].status, "ready");
+    }
+
+    #[test]
+    fn restart_invalidation_preserves_pending_recovery_authority() {
+        let mut restored = managed_with_ifindex("vm-port", "tap-vm", 17);
+        restored.managed_domains = vec!["acl".to_string()];
+        restored
+            .domain_desired_hashes
+            .insert("acl".to_string(), "acl-hash".to_string());
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            pending_generation: Some(43),
+            authority_state: "blocked_recovery_required".to_string(),
+            wal_status: "intent_recovery_blocked".to_string(),
+            ports: BTreeMap::from([("vm-port".to_string(), restored.clone())]),
+            port_statuses: BTreeMap::from([(
+                "vm-port".to_string(),
+                ready_status("vm-port", "tap-vm", 42),
+            )]),
+            ..Default::default()
+        };
+
+        assert!(invalidate_restarted_acl_runtime(
+            &mut runtime,
+            std::slice::from_ref(&restored),
+        ));
+        assert_eq!(runtime.authority_state, "blocked_recovery_required");
+        assert_eq!(runtime.wal_status, "intent_recovery_blocked");
+        assert_eq!(runtime.pending_generation, Some(43));
+        assert!(!runtime.ports["vm-port"]
+            .domain_desired_hashes
+            .contains_key("acl"));
     }
 
     #[test]
