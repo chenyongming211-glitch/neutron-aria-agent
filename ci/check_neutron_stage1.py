@@ -26,7 +26,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_preflight"],
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_early_response"],
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_port_route"],
-    ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_submit"],
+    ["test", "--locked", "-p", "aria-agent", "neutron_snapshot"],
     ["test", "--locked", "-p", "aria-agent", "neutron_pending_recovery"],
     ["test", "--locked", "-p", "aria-agent", "domain_authority"],
     ["test", "--locked", "-p", "aria-agent", "peercred_policy"],
@@ -640,6 +640,8 @@ def check_p3_rust_scoped_plan_boundary():
         "async fn neutron_snapshot_port_route_returns_hash_conflict(",
         "async fn neutron_snapshot_submit_persists_intent_before_pending_response(",
         "async fn neutron_snapshot_submit_wal_intent_failure_keeps_runtime_unaccepted(",
+        "fn neutron_snapshot_commit_failure_builds_blocked_bypass_runtime(",
+        "async fn neutron_snapshot_background_error_preserves_blocked_recovery(",
     ]
     for term in required_source_terms:
         if term not in neutron_api_source:

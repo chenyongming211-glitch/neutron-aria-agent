@@ -4980,6 +4980,100 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn neutron_snapshot_commit_failure_builds_blocked_bypass_runtime() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "port-1".to_string(),
+            ManagedNeutronPort {
+                managed_domains: vec!["acl".to_string()],
+                ..managed("port-1", "tap-port-1")
+            },
+        );
+        let previous = NeutronRuntimeState {
+            accepted_generation: 40,
+            applied_generation: 40,
+            applied_desired_hash: Some("hash-40".to_string()),
+            authority_state: "ready".to_string(),
+            ports,
+            ..NeutronRuntimeState::default()
+        };
+        let intent = PendingNeutronIntent {
+            kind: "snapshot".to_string(),
+            generation: 41,
+            desired_hash: Some("hash-41".to_string()),
+            port_ids: vec!["port-1".to_string()],
+            affected_domains: vec!["acl".to_string(), "attach".to_string()],
+            affected_ports: vec![managed("port-1", "tap-port-1")],
+        };
+        let mut blocked_statuses = BTreeMap::new();
+        blocked_statuses.insert(
+            "port-1".to_string(),
+            port_runtime_status(
+                "port-1",
+                "tap-port-1",
+                41,
+                Some("hash-41".to_string()),
+                vec!["acl".to_string()],
+                "blocked",
+                Some("wal_commit_failed".to_string()),
+                vec![domain_status_with_action(
+                    "acl",
+                    "blocked",
+                    Some("wal_commit_failed".to_string()),
+                    Some("bypass".to_string()),
+                )],
+            ),
+        );
+
+        let blocked = build_blocked_snapshot_runtime(
+            &previous,
+            &intent,
+            blocked_statuses,
+            "commit_failed",
+        );
+
+        assert_eq!(blocked.accepted_generation, 40);
+        assert_eq!(blocked.applied_generation, 40);
+        assert_eq!(blocked.pending_generation, Some(41));
+        assert_eq!(blocked.desired_hash.as_deref(), Some("hash-41"));
+        assert_eq!(blocked.authority_state, "blocked_recovery_required");
+        assert_eq!(blocked.wal_status, "commit_failed");
+        assert_eq!(blocked.ports, previous.ports);
+        let acl = &blocked.port_statuses["port-1"].domains[0];
+        assert_eq!(acl.status, "blocked");
+        assert_eq!(acl.effective_action.as_deref(), Some("bypass"));
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_background_error_preserves_blocked_recovery() {
+        let root = temp_root("background-error-blocked");
+        let state = test_neutron_state(&root);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.accepted_generation = 40;
+            runtime.applied_generation = 40;
+            runtime.pending_generation = Some(41);
+            runtime.desired_hash = Some("hash-41".to_string());
+            runtime.authority_state = "blocked_recovery_required".to_string();
+            runtime.wal_status = "recovery_commit_failed".to_string();
+        }
+
+        mark_snapshot_background_error(
+            &state,
+            41,
+            Some("hash-41".to_string()),
+            "wal_commit_failed",
+            "commit failed".to_string(),
+        )
+        .await;
+
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.authority_state, "blocked_recovery_required");
+        assert_eq!(runtime.wal_status, "recovery_commit_failed");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn neutron_pending_recovery_writes_wal_and_unblocks_full_resync() {
         let root = temp_root("pending-recovery");
