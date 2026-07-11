@@ -117,7 +117,7 @@ eBPF datapath               XDP / TC
 | Snapshot 语义 | Snapshot request 必须有 `runtime_foundations`；`feature_flags` 只允许表达 `acl/qos` |
 | Snapshot 语义 | response/status domain 顺序固定为 `runtime -> groups -> conntrack -> monitoring -> acl -> qos` |
 | 状态机 | `DomainStatus` 只允许表达 `ready/degraded/blocked/not_requested`；`bypass`、`unsupported`、`ignored optional field`、`agent alive` 必须放到各自维度，不能混成一个状态字符串 |
-| 状态机 | WAL 以 `intent -> apply -> commit -> status` 为准；`commit exists but status missing` 不能直接推进 accepted |
+| 状态机 | WAL 以 `intent -> apply -> commit -> status` 为准；`commit exists but status missing` 必须从校验通过的 durable commit 重建 RAM/status，不能依据旧 RAM 推进或回滚 accepted |
 | 状态机 | Aria readiness 与 OVS connectivity ready 必须分离；Aria readiness=false 或 `DomainStatus=degraded` 不能自动停止 OVS 转发 |
 | 运行边界 | `agent_mode = "openstack"` 是本机配置；`integration_mode = "coexist"` 是 snapshot 字段；两者不得混用 |
 | 运行边界 | inert/bypass runtime 只允许提前完成物理 attach 和基础观测，不能提前启用 feature、写 accepted state 或宣称 ready |
@@ -1206,6 +1206,14 @@ Snapshot apply 必须按固定顺序执行：
 
 WAL 顺序以本节为准：OpenStack snapshot apply 使用 `WAL intent -> datapath apply -> WAL commit -> generation/status`。不能使用“先 apply 完整 datapath，再单次写 WAL”的语义；那会在 WAL 失败时造成内存/eBPF 状态和持久状态分裂。
 
+当前 `attach + acl` 实现进一步固定以下边界：preflight/plan 完成后先
+fsync intent，HTTP 只返回 `pending`，此时 `accepted_generation` 和
+`applied_generation` 仍指向上一个 commit；后台任务持有同一把 apply lock
+执行 datapath apply。commit fsync 成功后立即发布 RAM，之后的
+`after_commit` return-error 只记录告警。commit 前失败或 commit append
+失败时恢复 attach、清理受影响 ACL 并标记 `blocked/bypass`，保留 pending
+等待显式 recovery，不实现 QoS/Mirror 功能。
+
 `WAL intent` 至少记录将要覆盖的 generation、affected ports、affected projects、scoped object keys、domain set 和 expected object revision 摘要。`WAL commit` 至少记录实际完成的 domain status、compacted state hash 和最终 accepted/applied generation 候选值。
 
 OpenStack 模式下要把两个动作拆开：
@@ -1266,12 +1274,21 @@ WAL 内容至少包含：
 - domain_status
 - compacted state hash
 
-如果 WAL append 失败：
+当前实现中的 WAL 失败语义：
 
-1. 尝试 compact 降级修复。
-2. compact 成功则返回 `runtime.degraded`。
-3. compact 失败则返回 `runtime.blocked`。
-4. `neutron-aria-agent` 必须保持 degraded 并触发 full resync。
+1. intent append/fsync 失败：拒绝请求，不建立 RAM pending，不推进
+   accepted/applied。
+2. datapath mutation 后 commit append/fsync 失败：按上一个 committed
+   runtime 恢复 attach，scrub 受影响 ACL 为 bypass，保留失败 generation
+   为 pending，并进入 `blocked_recovery_required`。
+3. blocked recovery 状态能写入 WAL 时，重启后继续保留该 blocked pending；
+   若该写入也失败，RAM 使用 `wal_status=recovery_commit_failed`，原始
+   durable intent 负责启动恢复。
+4. Python 发现 recoverable authority 时，即使 desired hash 相同也先调用
+   recover-pending；失败时保持本地 pending/degraded。
+
+WAL compact/rotation 尚未实现，继续由 `REVIEW-OPS-019` 跟踪，不能写成
+commit 失败后的现有自动修复能力。
 
 崩溃恢复矩阵：
 
@@ -1280,11 +1297,13 @@ WAL 内容至少包含：
 | 无 intent、无 commit | 忽略未开始的 apply，按上一个 compact state 和 committed WAL replay | 不推进 |
 | 有 intent、无 commit | 视为上次 apply 未完成，先 scrub/repair affected scoped objects，再等待或触发 full snapshot 重放 | 不推进 `accepted_generation` |
 | 有 intent、datapath 可能部分写入、无 commit | 标记 `runtime.degraded`，对 affected domains 做 map/state 对账；无法证明一致时要求 full resync | 不推进 `accepted_generation`，`applied_generation` 只可用于诊断 |
-| 有 commit、status 未写完 | 用 committed generation、domain status 和 map/state 校验重建 status | enhancement domains durable 后可恢复 `accepted_generation` |
+| 有 commit、status/RAM 未写完 | valid commit 是最终结果；从 committed generation/domain status 重建 RAM/status，随后做 runtime reconcile | 恢复 commit 中的 `accepted_generation`，不得由旧 RAM 写回更低 generation |
 | 存在 `local-override.wal` 且 Neutron reconnect | 进入 `rejoin_pending`，归档 local override，等待 Neutron full snapshot 重建托管 domains | 不 replay local override 到 OpenStack-managed state |
 | compact state hash 不匹配 | 停止自动接管，返回 `runtime.blocked`，要求人工介入或 full rebuild | 不推进 |
 
-`有 commit、status 未写完` 只能在完成最小校验后恢复 `accepted_generation`：
+`有 commit、status/RAM 未写完` 先通过 WAL record hash/格式校验恢复 durable
+state；后续 runtime reconcile 可以把 authority 降级，但不能把旧 RAM
+generation 追加成回滚 commit。最小校验包括：
 
 - `neutron-state.wal` 中存在同一 `local_generation` 的完整 commit entry。
 - commit entry 的 `compacted state hash` 与当前 compact state 或 replay 后 state 一致。

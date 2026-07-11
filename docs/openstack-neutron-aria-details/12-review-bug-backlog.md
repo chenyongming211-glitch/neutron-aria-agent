@@ -2,7 +2,8 @@
 
 Status: open review backlog.
 
-Date: 2026-07-03; refreshed 2026-07-10 (deep-dive); re-verified 2026-07-11.
+Date: 2026-07-03; refreshed 2026-07-10 (deep-dive); re-verified 2026-07-11;
+ACL transaction Batch 2 closed 2026-07-11.
 
 Scope rule:
 
@@ -14,31 +15,30 @@ Scope rule:
 ## 2026-07-11 Source Re-Verification And Classification
 
 Full re-check of all recorded `REVIEW-*` IDs against the current tree, followed
-by ACL contract-guardrail Batch 1 closure. The
+by ACL contract-guardrail Batch 1 and transaction Batch 2 closure. The
 `REVIEW-*` prefix remains a stable historical identifier and no longer implies
 that the item is an open implementation bug by itself.
 
 | Verdict | Count | IDs |
 | --- | ---: | --- |
-| Confirmed active defect or contract gap | 41 | Remaining open register rows after Batch 1 closure |
-| Fixed | 15 | `REVIEW-ACL-016`, `REVIEW-ACL-018`, and the 13 ACL Batch 1 IDs listed below |
+| Confirmed active defect or contract gap | 38 | Remaining open register rows after Batch 2 closure |
+| Fixed | 18 | `REVIEW-ACL-016`, `REVIEW-ACL-018`, 13 ACL Batch 1 IDs, and 3 transaction Batch 2 IDs listed below |
 | Verification needed | 1 | `REVIEW-ACL-012`: implementation path is present; clean-container evidence is still required |
 | Reclassified as risk/design boundary | 2 | `REVIEW-ACL-032`, `REVIEW-ACL-046` |
 | Closed: finding not supported as written | 1 | `REVIEW-ACL-052` |
 | **Total `REVIEW-*` IDs** | **60** | Stable IDs retained for audit history |
 
-The 41 active items are grouped by failure surface so that runtime bugs are not
+The 38 active items are grouped by failure surface so that runtime bugs are not
 mixed with delivery and documentation gaps:
 
 | Active class | Count | IDs |
 | --- | ---: | --- |
-| Transaction, datapath, recovery, and runtime consistency | 23 | `ACL-023`, `ACL-025`, `ACL-026`, `ACL-028`, `ACL-033`, `ACL-035`-`ACL-037`, `ACL-044`, `ACL-045`, `ACL-047`, `ACL-050`, `ACL-053`, `ACL-054`; `TXN-021`, `TXN-022`, `TXN-024`-`TXN-027`; `OPS-019`, `OPS-027`, `OPS-034` |
+| Transaction, datapath, recovery, and runtime consistency | 20 | `ACL-023`, `ACL-025`, `ACL-026`, `ACL-028`, `ACL-033`, `ACL-035`-`ACL-037`, `ACL-044`, `ACL-045`, `ACL-047`, `ACL-050`, `ACL-053`, `ACL-054`; `TXN-024`, `TXN-026`, `TXN-027`; `OPS-019`, `OPS-027`, `OPS-034` |
 | Northbound API, DB, compile, and status projection correctness | 8 | `ACL-003`, `ACL-004`, `ACL-008`, `ACL-013`, `ACL-038`, `ACL-040`-`ACL-042` |
 | Packaging, deployment, validation, documentation, and release gaps | 10 | `ACL-005`, `ACL-007`, `ACL-010`, `ACL-011`, `ACL-014`, `ACL-015`, `ACL-017`; `DOC-020`; `OPS-035`; `CI-001` |
-| **Total active defect or gap** | **41** | |
+| **Total active defect or gap** | **38** | |
 
-Remaining P1 set: `TXN-021`, `TXN-022`, `TXN-025`, `OPS-019`, `ACL-035`,
-`ACL-053`.
+Remaining P1 set: `OPS-019`, `ACL-035`, `ACL-053`.
 
 Also spot-checked: `ACL-004` (host=None returns `status[0]`), `ACL-014`
 (workflow `contents: write`), `ACL-015` (plugin policy backup only when file
@@ -51,11 +51,11 @@ remains four `DEBT-*` IDs. The unique tracking-item total remains 69.
 
 | Current tracking portfolio | Count | Included states |
 | --- | ---: | --- |
-| Active defect or contract gap | 41 | Open `REVIEW-*` register rows |
+| Active defect or contract gap | 38 | Open `REVIEW-*` register rows |
 | Risk / design boundary | 7 | Five `RISK-*` IDs plus two reclassified `REVIEW-*` IDs |
 | Engineering debt | 4 | `DEBT-*` IDs |
 | Verification needed | 1 | `REVIEW-ACL-012` |
-| Fixed | 15 | Two earlier fixes plus 13 ACL Batch 1 fixes |
+| Fixed | 18 | Two earlier fixes plus 13 ACL Batch 1 and three transaction Batch 2 fixes |
 | Closed / unsupported finding | 1 | `REVIEW-ACL-052` |
 | **Total unique tracking items** | **69** | No duplicate IDs added during reclassification |
 
@@ -71,6 +71,14 @@ remains four `DEBT-*` IDs. The unique tracking-item total remains 69.
 | `ACL-039`, `ACL-049`, `DOC-021` | Python accepts only `managed_domains=acl`; Rust/JSON capabilities advertise only `attach` and `acl`; Stage 1 enforces exact equality. Direct unsupported domains remain rejected. |
 | `ACL-048` | Runtime UDS status/action/reason are authoritative and cannot be overwritten by optimistic snapshot metadata. |
 | `ACL-051` | WAL pending-intent recovery blocks all domains outside `attach` and `acl`; legacy `qos`/`mirror` intents can no longer report recovered success without an executor. |
+
+### ACL Transaction Batch 2 Closure
+
+| IDs | Closure evidence |
+| --- | --- |
+| `TXN-021` | Snapshot admission now holds the owned apply lock, fsyncs the exact WAL intent before returning `pending`, and advances only pending/hash metadata. Accepted/applied remain at the last commit. Rust tests cover durable handoff and intent-write failure. |
+| `TXN-022` | Pre-commit and commit-append failures share recovery that restores/retains committed attach topology, scrubs affected ACL, reports `blocked` with `effective_action=bypass`, retains the failed pending generation, and prevents the generic background marker from overwriting recovery state. QoS/Mirror remain unimplemented and rejected. |
+| `TXN-025` | A successful WAL commit publishes RAM before the post-commit hook; return-error becomes a committed warning. Recover-pending replays WAL first and returns `already_committed` instead of appending stale RAM. Python prioritizes recoverable authority over same-hash waiting and preserves pending on recovery failure. |
 
 ## 2026-07-08 Full Review Refresh
 
@@ -307,8 +315,8 @@ verification-only, risk-classified, or closed.
 | REVIEW-ACL-018 | P2 | Root install script | fixed | Earlier review found CRLF line endings that broke `bash -n install.sh` on Linux. Current tracked `install.sh` is LF-only and `bash -n install.sh` passes. | Keep the implementation item closed. Track the missing root-installer regression gate under CI verification debt. |
 | REVIEW-OPS-019 | P1 | Neutron WAL lifecycle | open | `agent/src/neutron_wal.rs` appends snapshot/delete intent and full-state commit records and replays every valid line, but has no checkpoint, compaction, truncation, size bound, or rotation. Repeated full resync and scoped apply make the WAL grow without bound and increase restart replay cost. | Add atomic checkpoint/compaction with directory fsync, retain enough intent/commit information for crash recovery, define size/time thresholds, and add tests for compacted replay, crash during compaction, tampered latest records, and bounded file growth. |
 | REVIEW-DOC-020 | P3 | Domain status documentation | open | `docs/openstack-neutron-aria-details/05-domain-status-heartbeat.md` lists rich Rust fields including `effective_action` as still planned, but `agent/src/neutron_api.rs` already emits `effective_action` and `agent/status.py` projects it into heartbeat summaries. | Refresh the detail document to distinguish implemented fields from remaining status work, and add a lightweight documentation/contract check for the current status DTO fields. |
-| REVIEW-TXN-021 | P1 | Snapshot accept before WAL | open | `accept_neutron_snapshot_submit` advances `accepted_generation`, sets `authority_state=accepted`, and returns HTTP `"accepted"` before background apply writes WAL intent. Docs require `intent -> apply -> commit -> status` and say `accepted_generation` must not advance until WAL is durable. | Do not advance `accepted_generation` or return durable-accepted semantics until intent is fsynced (or return a distinct pre-intent pending status). Add crash-between-accept-and-intent coverage. |
-| REVIEW-TXN-022 | P1 | Apply/commit metadata split | open | After `apply_snapshot_runtime_transaction` mutates eBPF/ACL state, a failed `append_snapshot_commit` only patches `authority_state=wal_commit_failed` and keeps pending; it does not assign `next_runtime` and does not roll back datapath. Restart recovery can clear pending to the last applied generation while new rules remain live. | On commit failure, either roll back/scrub affected datapath state to the last committed generation, or durable-mark blocked recovery required and refuse further accepts until operator recover. Add fault-injection tests for before-commit failure. |
+| REVIEW-TXN-021 | P1 | Snapshot accept before WAL | fixed | Historical finding: snapshot admission returned accepted semantics before durable intent. Admission now fsyncs intent while holding the apply lock, returns `pending`, and leaves accepted/applied on the committed baseline. | Fixed with durable-intent and WAL-intent-failure Rust regression tests plus the permanent `neutron_snapshot*` CI test gate. |
+| REVIEW-TXN-022 | P1 | Apply/commit metadata split | fixed | Historical finding: datapath could mutate before a failed commit while RAM/WAL retained the old classification. Commit failure now restores attach where possible, scrubs ACL to bypass, retains the failed pending generation, and enters blocked recovery. | Fixed with blocked-runtime/background-preservation tests and shared pre-commit/commit-failure recovery. |
 | REVIEW-ACL-023 | P2 | Detach/delete ignores ACL purge failure | open | Snapshot detach and port-delete paths log `purge_neutron_acl` errors and continue, still returning `status=ok` / detached success. | Fail the detach/delete result (or mark port `degraded` with residual-ACL reason) when purge fails; add regression coverage for residual `neutron:{port_id}:*` objects. |
 | REVIEW-TXN-024 | P2 | Background apply error non-durable | open | `mark_snapshot_background_error` only updates in-memory `authority_state`/`wal_status` when pending generation/hash still match. It does not append WAL, clear or converge pending, or roll back datapath. Restart loses the degraded classification; pending can wedge later snapshots with `409 snapshot_apply_in_progress`. | Persist failure/blocked state, define recover-pending behavior after background failure, and add tests for restart and subsequent submit. |
 | REVIEW-ACL-025 | P2 | ACL bank switch before instance WAL compact | open | `ControlPlane::replace_owned_acl` calls `set_acl_active_bank` and updates in-memory `state.state` before `wal.compact`. Compact failure returns error after live enforcement already switched. | Reorder to durable compact (or dual-write intent) before activating the new bank, or activate only after compact success with compensating scrub. Add crash/compact-failure tests. |
@@ -322,7 +330,7 @@ verification-only, risk-classified, or closed.
 | REVIEW-ACL-033 | P2 | Composite status reporter partial success | open | `CompositeStatusReporter.report` runs heartbeat then aria_acl port-status reporters sequentially. Heartbeat can succeed while port-status reporting raises, leaving Neutron agent-state and `aria_acl_port_statuses` divergent. | Make dual-channel reporting atomic from the caller's perspective (rollback/compensate, or report a combined failure that suppresses stale port-status reads). Add partial-failure unit tests. |
 | REVIEW-OPS-034 | P3 | UDS client timeout permanently shrinks | open | `LocalClient._validate_capabilities` sets `self.timeout = min(self.timeout, timeout_ms/1000)`. Every port-scoped snapshot calls `capabilities()`, so later full-resync submits can run under a shorter timeout than configured. | Apply capability timeout as a per-request ceiling without mutating the configured client default, or reset after the call. Add a unit test that port-scoped traffic does not shrink later full-resync timeout. |
 | REVIEW-ACL-035 | P1 | Restart hash-skip leaves ACL unenforced | open | After restart, `reconcile_committed_runtime` re-attaches XDP but does not re-apply ACL. Later resync with matching `domain_desired_hashes` hits `can_skip_neutron_domain_reconcile` and keeps prior ready/enforce status while kernel ACL maps remain empty/stale. | Invalidate ACL skip after restart/scrub, force ACL reconcile when runtime maps are empty/drifted, or clear domain hashes on startup reconcile. Add restart + same-hash resync smoke/unit coverage. |
-| REVIEW-TXN-025 | P1 | Post-commit RAM assign skipped | open | `apply_neutron_snapshot_for_scope` appends WAL commit successfully, then `fault_injection::check("neutron.snapshot.after_commit")` (or equivalent post-commit Err path) returns before `*runtime = next_runtime`. Status reads RAM only; `recover_pending` can append an older applied generation over the newer WAL commit while eBPF still holds newer rules. | Assign/reload runtime from committed WAL before surfacing failure, or treat post-commit failure as committed-success with status rebuild from WAL. Block recover-pending from regressing a newer committed generation. Add after-commit fault tests. |
+| REVIEW-TXN-025 | P1 | Post-commit RAM assign skipped | fixed | Historical finding: a post-commit error could skip RAM publication and recover-pending could regress the newer WAL commit. Commit now publishes RAM before the hook, return-error is a warning, and recovery refreshes from a newer valid WAL commit. | Fixed with post-commit finality, stale-RAM anti-regression, and blocked same-hash Python recovery tests. |
 | REVIEW-TXN-026 | P2 | Startup recovery races accept path | open | `build_router` spawns `recover_incomplete_wal_intent` / `reconcile_committed_runtime` without gating UDS readiness. Recovery takes `apply_lock` and ends with full `*runtime = next_runtime`, while `accept_neutron_snapshot_submit` mutates pending/accepted under `runtime` write lock only (no apply_lock). | Gate snapshot accept until recovery completes, or make accept take the same apply/recovery barrier. Add concurrent accept-during-recovery test. |
 | REVIEW-ACL-036 | P2 | Port-scoped prepare overwrites unresolved pending | open | `full_resync` calls `recover_pending_state()` first; `apply_port_scoped_snapshot` does not. Both `prepare_snapshot` / `prepare_scoped_snapshot` overwrite `pending_generation`/`pending_desired_hash` without `clear_pending_snapshot` audit. Unresolved or operator-blocked pending from a prior full resync can be silently replaced. | Require pending recovery/guard before scoped prepare; refuse overwrite when pending is unresolved/operator-blocked; always clear-with-reason before replace. Add unit tests for pending survival across scoped apply. |
 | REVIEW-ACL-037 | P2 | Failed scoped apply leaves ready + dirty pending | open | `apply_port_scoped_snapshot` prepares pending before UDS submit. On port-level error it raises via `_raise_if_response_failed` without clearing pending or `mark_degraded`, so heartbeat can remain `ready` with durable dirty pending. Full-resync failure path degrades; scoped path does not. | On scoped failure, clear pending or mark degraded consistently with full-resync; add regression test asserting not `(ready and pending)`. |
@@ -445,24 +453,22 @@ Round 3 (contract / status / CT / CI):
   checkout policy. Rust findings remain source/contract-confirmed rather than
   locally compiled fault-injection reproductions.
 
-## Active Fix Order
+## Active Fix Order After Batch 2
 
-1. `REVIEW-TXN-022` / `REVIEW-TXN-025`: close apply/commit and post-commit RAM splits.
-2. `REVIEW-TXN-021`: stop advancing accepted generation before WAL intent.
-3. `REVIEW-ACL-035` / `REVIEW-ACL-053`: restart hash-skip and lenient CT flush (XDP bypass holes).
-4. `REVIEW-OPS-019`: bound Neutron WAL growth and restart replay cost.
-5. `REVIEW-ACL-054` / `REVIEW-ACL-050` / `REVIEW-ACL-047`: stateful/CT/priority datapath contract.
-6. `REVIEW-ACL-025` / `REVIEW-ACL-026` / `REVIEW-ACL-044`: owned-ACL durable ordering and no-op bank flips.
-7. `REVIEW-ACL-023` / `REVIEW-TXN-024` / `REVIEW-TXN-027` / `REVIEW-ACL-045`: detach/delete/orphan convergence.
-8. `REVIEW-ACL-036` / `REVIEW-ACL-037` / `REVIEW-ACL-028` / `REVIEW-ACL-008` / `REVIEW-ACL-033` / `REVIEW-ACL-004`: Python pending/status consistency.
-9. `REVIEW-TXN-026`: gate accept until startup recovery completes.
-10. `REVIEW-ACL-038` / `REVIEW-ACL-040` / `REVIEW-ACL-041` / `REVIEW-ACL-042`: client/DB/CLI correctness.
-11. `REVIEW-ACL-007`: first-install package rollback hygiene.
-12. `REVIEW-ACL-003`: make address-set parent/member writes transactional.
-13. `REVIEW-OPS-027` / `REVIEW-OPS-034` / `REVIEW-OPS-035` / `REVIEW-CI-001`: ops/CI hardening.
-14. `REVIEW-ACL-010` / `REVIEW-ACL-013` / `REVIEW-ACL-015` / `REVIEW-ACL-017`: smoke/projection/rollback polish.
-15. `REVIEW-DOC-020`: align domain-status detail documentation with current DTOs.
-16. `REVIEW-ACL-011` / `REVIEW-ACL-014` / `REVIEW-ACL-005`: release hygiene and coverage.
+1. `REVIEW-ACL-035` / `REVIEW-ACL-053`: restart hash-skip and lenient CT flush (XDP bypass holes).
+2. `REVIEW-OPS-019`: bound Neutron WAL growth and restart replay cost.
+3. `REVIEW-ACL-054` / `REVIEW-ACL-050` / `REVIEW-ACL-047`: stateful/CT/priority datapath contract.
+4. `REVIEW-ACL-025` / `REVIEW-ACL-026` / `REVIEW-ACL-044`: owned-ACL durable ordering and no-op bank flips.
+5. `REVIEW-ACL-023` / `REVIEW-TXN-024` / `REVIEW-TXN-027` / `REVIEW-ACL-045`: detach/delete/orphan convergence.
+6. `REVIEW-ACL-036` / `REVIEW-ACL-037` / `REVIEW-ACL-028` / `REVIEW-ACL-008` / `REVIEW-ACL-033` / `REVIEW-ACL-004`: Python pending/status consistency.
+7. `REVIEW-TXN-026`: gate accept until startup recovery completes.
+8. `REVIEW-ACL-038` / `REVIEW-ACL-040` / `REVIEW-ACL-041` / `REVIEW-ACL-042`: client/DB/CLI correctness.
+9. `REVIEW-ACL-007`: first-install package rollback hygiene.
+10. `REVIEW-ACL-003`: make address-set parent/member writes transactional.
+11. `REVIEW-OPS-027` / `REVIEW-OPS-034` / `REVIEW-OPS-035` / `REVIEW-CI-001`: ops/CI hardening.
+12. `REVIEW-ACL-010` / `REVIEW-ACL-013` / `REVIEW-ACL-015` / `REVIEW-ACL-017`: smoke/projection/rollback polish.
+13. `REVIEW-DOC-020`: align domain-status detail documentation with current DTOs.
+14. `REVIEW-ACL-011` / `REVIEW-ACL-014` / `REVIEW-ACL-005`: release hygiene and coverage.
 
 Risk follow-up is tracked separately from active bug fixing:
 
