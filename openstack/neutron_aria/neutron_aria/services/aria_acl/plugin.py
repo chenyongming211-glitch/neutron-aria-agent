@@ -7,6 +7,7 @@ import os
 import time
 
 from neutron_aria.agent.effective_acl import EffectiveAclIndex
+from neutron_aria.acl_contract import port_contract_eligibility
 from neutron_aria.db.aria_acl.api import InMemoryAriaAclRepository
 from neutron_aria.db.aria_acl.api import NeutronDbAriaAclRepository
 from neutron_aria.services.aria_acl.exceptions import ErrorMappingRepositoryProxy
@@ -264,7 +265,11 @@ class AriaAclPlugin(object):
 
     def get_aria_acl_effective_for_port(self, context, port):
         index = EffectiveAclIndex.from_payload(self.get_aria_acl_effective_payload(context))
-        return index.effective_for_port(port, {"eligible": True})
+        eligible, disposition = port_contract_eligibility(port)
+        return index.effective_for_port(port, {
+            "eligible": eligible,
+            "disposition": disposition,
+        })
 
     def get_aria_acl_effective_for_port_id(
         self,

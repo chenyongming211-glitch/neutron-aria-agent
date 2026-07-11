@@ -1,5 +1,10 @@
 from __future__ import absolute_import
 
+from neutron_aria.acl_contract import AclContractError
+from neutron_aria.acl_contract import validate_address_set_reference
+from neutron_aria.acl_contract import validate_policy
+from neutron_aria.acl_contract import validate_rule
+
 
 ACL_NOT_REQUESTED = "not_requested"
 ACL_READY = "ready"
@@ -129,6 +134,19 @@ class EffectiveAclIndex(object):
                 "policy_id": binding.get("policy_id"),
             }
 
+        try:
+            validate_policy(policy)
+        except AclContractError as exc:
+            return {
+                "enabled": False,
+                "status": ACL_DEGRADED,
+                "reason": "unsupported_policy:%s" % exc,
+                "effective_action": "bypass",
+                "binding_id": binding.get("id"),
+                "source": source,
+                "policy_id": policy.get("id"),
+            }
+
         policy_rules = self.rules_by_policy.get(policy.get("id"), [])
         compiled_rules = self._compile_rules(policy)
         acl_ready = compiled_rules["status"] == ACL_READY
@@ -237,6 +255,11 @@ class EffectiveAclIndex(object):
         }
 
     def _compile_rule(self, rule):
+        try:
+            validate_rule(rule)
+        except AclContractError as exc:
+            return None, "unsupported_rule:%s:%s" % (rule.get("id"), exc)
+
         protocol = rule.get("protocol")
         if self._has_l4_ports(rule) and str(protocol).lower() not in ("tcp", "udp", "6", "17"):
             return None, "l4_ports_require_tcp_or_udp:%s" % rule.get("id")
@@ -282,6 +305,16 @@ class EffectiveAclIndex(object):
             address_set = self.address_sets.get(address_set_id)
             if address_set is None:
                 return [], "%s_address_set_missing:%s" % (prefix, address_set_id)
+            try:
+                contract_address_set = dict(address_set)
+                contract_address_set["members"] = _members(address_set)
+                validate_address_set_reference(contract_address_set)
+            except AclContractError as exc:
+                return [], "%s_address_set_invalid:%s:%s" % (
+                    prefix,
+                    address_set_id,
+                    exc,
+                )
             return _members(address_set), None
         return [], None
 

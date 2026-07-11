@@ -112,6 +112,41 @@ class EffectiveAclTestCase(unittest.TestCase):
         self.assertEqual(3306, result["rules"][0]["dst_port_min"])
         self.assertEqual(7, result["revision"])
 
+    def test_disabled_or_empty_address_set_degrades(self):
+        for address_set in (
+            {
+                "id": "aset-1",
+                "enabled": False,
+                "members": ["10.10.20.0/24"],
+            },
+            {"id": "aset-1", "enabled": True, "members": []},
+        ):
+            index = EffectiveAclIndex(
+                policies=[{"id": "policy-1", "default_action": "allow"}],
+                address_sets=[address_set],
+                rules=[{
+                    "id": "rule-1",
+                    "policy_id": "policy-1",
+                    "direction": "ingress",
+                    "priority": 10,
+                    "action": "allow",
+                    "src_address_set_id": "aset-1",
+                }],
+                bindings=[{
+                    "id": "binding-1",
+                    "policy_id": "policy-1",
+                    "target_type": "port",
+                    "target_id": PORT_ID,
+                }],
+            )
+
+            result = index.effective_for_port(port(), snapshot())
+
+            self.assertFalse(result["enabled"])
+            self.assertEqual(ACL_DEGRADED, result["status"])
+            self.assertEqual("bypass", result["effective_action"])
+            self.assertIn("address_set", result["reason"])
+
     def test_revision_compare_uses_effective_acl_revision(self):
         index = EffectiveAclIndex(
             policies=[{"id": "policy-1", "revision_number": 2}],
@@ -238,7 +273,7 @@ class EffectiveAclTestCase(unittest.TestCase):
 
         self.assertEqual(ACL_DEGRADED, result["status"])
         self.assertFalse(result["enabled"])
-        self.assertIn("l4_ports_require_tcp_or_udp", result["reason"])
+        self.assertIn("destination ports require tcp or udp", result["reason"])
         self.assertEqual("bypass", result["effective_action"])
 
     def test_ineligible_port_is_unsupported(self):

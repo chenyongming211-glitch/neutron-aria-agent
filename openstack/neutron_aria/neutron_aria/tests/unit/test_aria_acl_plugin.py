@@ -638,6 +638,21 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertEqual("port", result["source"])
         self.assertEqual("policy-port", result["policy_id"])
 
+    def test_effective_api_uses_real_port_contract_eligibility(self):
+        plugin = AriaAclPlugin()
+
+        result = plugin.get_aria_acl_effective_for_port(None, {
+            "id": "port-1",
+            "device_owner": "compute:nova",
+            "binding:vif_type": "binding_failed",
+            "binding:vnic_type": "normal",
+        })
+
+        self.assertFalse(result["enabled"])
+        self.assertEqual("unsupported", result["status"])
+        self.assertEqual("bypass", result["effective_action"])
+        self.assertIn("unsupported_vif_type", result["reason"])
+
     def test_binding_rejects_missing_policy(self):
         plugin = AriaAclPlugin()
 
