@@ -128,7 +128,12 @@ fn scrub_ct_table_v4_strict(pin_path: &str, tap_id: u32) -> Result<u64, String> 
 
     let keys: Vec<CtKey4> = map
         .iter()
-        .filter_map(|item| item.ok().map(|(k, _)| k))
+        .map(|item| {
+            item.map(|(key, _)| key)
+                .map_err(|e| format!("iterate CT_TABLE_V4: {:?}", e))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|key| key.tap_id == tap_id)
         .collect();
     let count = keys.len() as u64;
@@ -148,7 +153,12 @@ fn scrub_ct_table_v6_strict(pin_path: &str, tap_id: u32) -> Result<u64, String> 
 
     let keys: Vec<CtKey6> = map
         .iter()
-        .filter_map(|item| item.ok().map(|(k, _)| k))
+        .map(|item| {
+            item.map(|(key, _)| key)
+                .map_err(|e| format!("iterate CT_TABLE_V6: {:?}", e))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|key| key.tap_id == tap_id)
         .collect();
     let count = keys.len() as u64;

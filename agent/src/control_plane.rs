@@ -2769,6 +2769,16 @@ impl ControlPlane {
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
+    pub async fn flush_conntrack_strict(
+        &self,
+        instance: &str,
+    ) -> Result<u64, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        aria_core::ct_ops::scrub_ct_tables_strict(state.map_runtime())
+            .map_err(ControlPlaneError::KernelError)
+    }
+
     // ── Config ──
 
     pub async fn get_config(

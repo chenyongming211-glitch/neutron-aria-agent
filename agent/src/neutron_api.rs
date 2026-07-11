@@ -208,23 +208,46 @@ struct AclPolicyDeleteTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AclGateUpdateMode {
     DisableBeforeReplace,
-    KeepCurrentUntilEnable,
 }
 
 impl AclGateUpdateMode {
     fn as_str(self) -> &'static str {
         match self {
             Self::DisableBeforeReplace => "disable_before_replace",
-            Self::KeepCurrentUntilEnable => "keep_current_until_enable",
         }
     }
 }
 
-fn acl_gate_update_mode(plan: &AclApplyPlan) -> AclGateUpdateMode {
-    if plan.policies.is_empty() {
-        AclGateUpdateMode::DisableBeforeReplace
-    } else {
-        AclGateUpdateMode::KeepCurrentUntilEnable
+fn acl_gate_update_mode(_plan: &AclApplyPlan) -> AclGateUpdateMode {
+    AclGateUpdateMode::DisableBeforeReplace
+}
+
+#[derive(Debug)]
+struct NeutronAclReconcileError {
+    details: String,
+    effective_action: &'static str,
+}
+
+impl NeutronAclReconcileError {
+    fn unchanged(details: impl Into<String>) -> Self {
+        Self {
+            details: details.into(),
+            effective_action: "unchanged",
+        }
+    }
+
+    fn bypass(details: impl Into<String>) -> Self {
+        Self {
+            details: details.into(),
+            effective_action: "bypass",
+        }
+    }
+
+    fn enforce(details: impl Into<String>) -> Self {
+        Self {
+            details: details.into(),
+            effective_action: "enforce",
+        }
     }
 }
 
@@ -2436,8 +2459,13 @@ async fn reconcile_neutron_domains(
             "acl" => match reconcile_neutron_acl(state, port).await {
                 Ok(()) => statuses.push(acl_domain_status_for(port)),
                 Err(e) => {
-                    let reason = format!("acl_apply_failed:{}", e);
-                    statuses.push(domain_status(&domain, "error", Some(reason.clone())));
+                    let reason = format!("acl_apply_failed:{}", e.details);
+                    statuses.push(domain_status_with_action(
+                        &domain,
+                        "error",
+                        Some(reason.clone()),
+                        Some(e.effective_action.to_string()),
+                    ));
                     errors.push(reason);
                 }
             },
@@ -3497,7 +3525,7 @@ async fn flush_neutron_acl_conntrack(
 ) -> Result<(), String> {
     let flushed = state
         .control_plane
-        .flush_conntrack(ifname)
+        .flush_conntrack_strict(ifname)
         .await
         .map_err(|e| e.to_string())?;
     if flushed > 0 {
@@ -3514,7 +3542,7 @@ async fn flush_neutron_acl_conntrack(
 async fn reconcile_neutron_acl(
     state: &NeutronApiState,
     port: &NeutronPortSnapshot,
-) -> Result<(), String> {
+) -> Result<(), NeutronAclReconcileError> {
     if !port_manages_acl(port) {
         return Ok(());
     }
@@ -3522,7 +3550,8 @@ async fn reconcile_neutron_acl(
     let profile_started = Instant::now();
     let translate_started = Instant::now();
     let plan = match &port.acl {
-        Some(acl) => translate_neutron_acl(&port.port_id, acl)?,
+        Some(acl) => translate_neutron_acl(&port.port_id, acl)
+            .map_err(NeutronAclReconcileError::unchanged)?,
         None => AclApplyPlan::default(),
     };
     let translate_ms = elapsed_ms(translate_started);
@@ -3545,9 +3574,11 @@ async fn reconcile_neutron_acl(
                 None,
             )
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| NeutronAclReconcileError::unchanged(e.to_string()))?;
         let elapsed = elapsed_ms(disable_started);
-        fault_injection::check("neutron.acl.after_disable").await?;
+        fault_injection::check("neutron.acl.after_disable")
+            .await
+            .map_err(NeutronAclReconcileError::bypass)?;
         elapsed
     } else {
         0
@@ -3584,14 +3615,20 @@ async fn reconcile_neutron_acl(
             &policy_specs,
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| NeutronAclReconcileError::bypass(e.to_string()))?;
     let replace_ms = elapsed_ms(replace_started);
-    fault_injection::check("neutron.acl.after_purge").await?;
+    fault_injection::check("neutron.acl.after_purge")
+        .await
+        .map_err(NeutronAclReconcileError::bypass)?;
     if replace_report.group_cidr_add_count > 0 {
-        fault_injection::check("neutron.acl.after_group_write").await?;
+        fault_injection::check("neutron.acl.after_group_write")
+            .await
+            .map_err(NeutronAclReconcileError::bypass)?;
     }
     if replace_report.policy_add_count > 0 {
-        fault_injection::check("neutron.acl.after_policy_write").await?;
+        fault_injection::check("neutron.acl.after_policy_write")
+            .await
+            .map_err(NeutronAclReconcileError::bypass)?;
     }
 
     let effective_reason = if port.acl.is_none() {
@@ -3603,7 +3640,9 @@ async fn reconcile_neutron_acl(
     };
     if plan.policies.is_empty() {
         let flush_started = Instant::now();
-        flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id).await?;
+        flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id)
+            .await
+            .map_err(NeutronAclReconcileError::bypass)?;
         let flush_ms = elapsed_ms(flush_started);
         info!(
             port_id = %port.port_id,
@@ -3633,15 +3672,19 @@ async fn reconcile_neutron_acl(
     }
 
     let flush_started = Instant::now();
-    flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id).await?;
+    flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id)
+        .await
+        .map_err(NeutronAclReconcileError::bypass)?;
     let flush_ms = elapsed_ms(flush_started);
-    fault_injection::check("neutron.acl.before_enable").await?;
+    fault_injection::check("neutron.acl.before_enable")
+        .await
+        .map_err(NeutronAclReconcileError::bypass)?;
     let enable_started = Instant::now();
     state
         .control_plane
         .update_config(&port.ifname, None, None, Some(true), None, None, None, None)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| NeutronAclReconcileError::bypass(e.to_string()))?;
     let enable_ms = elapsed_ms(enable_started);
     info!(
         port_id = %port.port_id,
@@ -3667,7 +3710,29 @@ async fn reconcile_neutron_acl(
         total_ms = elapsed_ms(profile_started),
         "neutron_acl_apply_profile"
     );
-    fault_injection::check("neutron.acl.after_enable_before_commit").await
+    if let Err(error) = fault_injection::check("neutron.acl.after_enable_before_commit").await {
+        return match state
+            .control_plane
+            .update_config(
+                &port.ifname,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+        {
+            Ok(()) => Err(NeutronAclReconcileError::bypass(error)),
+            Err(disable_error) => Err(NeutronAclReconcileError::enforce(format!(
+                "{}; acl_disable_compensation_failed:{}",
+                error, disable_error
+            ))),
+        };
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -6128,6 +6193,15 @@ mod tests {
     #[test]
     fn neutron_control_plane_exposes_strict_conntrack_flush() {
         let _strict_flush = ControlPlane::flush_conntrack_strict;
+    }
+
+    #[test]
+    fn neutron_acl_errors_report_the_proven_effective_action() {
+        let pre_disable = NeutronAclReconcileError::unchanged("translation failed");
+        assert_eq!(pre_disable.effective_action, "unchanged");
+
+        let post_disable = NeutronAclReconcileError::bypass("strict CT flush failed");
+        assert_eq!(post_disable.effective_action, "bypass");
     }
 
     #[test]
