@@ -642,6 +642,8 @@ def check_p3_rust_scoped_plan_boundary():
         "async fn neutron_snapshot_submit_wal_intent_failure_keeps_runtime_unaccepted(",
         "fn neutron_snapshot_commit_failure_builds_blocked_bypass_runtime(",
         "async fn neutron_snapshot_background_error_preserves_blocked_recovery(",
+        "async fn neutron_snapshot_post_commit_error_keeps_durable_runtime(",
+        "async fn neutron_snapshot_pending_recovery_keeps_newer_wal_commit(",
     ]
     for term in required_source_terms:
         if term not in neutron_api_source:

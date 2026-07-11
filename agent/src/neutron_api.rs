@@ -5201,6 +5201,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn neutron_snapshot_post_commit_error_keeps_durable_runtime() {
+        let root = temp_root("post-commit-final");
+        let state = test_neutron_state(&root);
+        let committed = NeutronRuntimeState {
+            accepted_generation: 501,
+            applied_generation: 501,
+            pending_generation: None,
+            desired_hash: Some("hash-501".to_string()),
+            applied_desired_hash: Some("hash-501".to_string()),
+            authority_state: "ready".to_string(),
+            wal_status: "commit_written".to_string(),
+            ..NeutronRuntimeState::default()
+        };
+        state
+            .wal
+            .append_snapshot_commit(committed.to_wal_state())
+            .expect("commit should be durable before the post-commit hook");
+
+        publish_committed_snapshot_runtime(&state, committed, 501, || async {
+            Err("after_commit_return_error".to_string())
+        })
+        .await;
+
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.accepted_generation, 501);
+        assert_eq!(runtime.applied_generation, 501);
+        assert_eq!(runtime.pending_generation, None);
+        assert_eq!(runtime.authority_state, "ready");
+        drop(runtime);
+        assert_eq!(state.wal.replay().state.applied_generation, 501);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_pending_recovery_keeps_newer_wal_commit() {
+        let root = temp_root("pending-newer-wal-commit");
+        let state = test_neutron_state(&root);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.accepted_generation = 500;
+            runtime.applied_generation = 500;
+            runtime.pending_generation = Some(501);
+            runtime.desired_hash = Some("hash-501".to_string());
+            runtime.applied_desired_hash = Some("hash-500".to_string());
+            runtime.authority_state = "applying".to_string();
+            runtime.wal_status = "intent_written".to_string();
+        }
+        let committed = NeutronRuntimeState {
+            accepted_generation: 501,
+            applied_generation: 501,
+            pending_generation: None,
+            desired_hash: Some("hash-501".to_string()),
+            applied_desired_hash: Some("hash-501".to_string()),
+            authority_state: "ready".to_string(),
+            ..NeutronRuntimeState::default()
+        };
+        state
+            .wal
+            .append_snapshot_commit(committed.to_wal_state())
+            .expect("newer commit should be durable");
+
+        let response = recover_pending_snapshot(
+            state.clone(),
+            NeutronRecoverPendingRequest {
+                expected_pending_generation: 501,
+                expected_desired_hash: Some("hash-501".to_string()),
+                mode: None,
+            },
+        )
+        .await
+        .expect("durable commit should win over stale pending RAM");
+
+        assert_eq!(response.status, "already_committed");
+        assert_eq!(response.applied_generation, 501);
+        assert_eq!(response.applied_desired_hash.as_deref(), Some("hash-501"));
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.accepted_generation, 501);
+        assert_eq!(runtime.applied_generation, 501);
+        assert_eq!(runtime.pending_generation, None);
+        assert_eq!(runtime.authority_state, "ready");
+        drop(runtime);
+        assert_eq!(state.wal.replay().state.applied_generation, 501);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn neutron_pending_recovery_writes_wal_and_unblocks_full_resync() {
         let root = temp_root("pending-recovery");
         let state = test_neutron_state(&root);
