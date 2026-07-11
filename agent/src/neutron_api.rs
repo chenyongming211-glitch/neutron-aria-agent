@@ -691,7 +691,28 @@ async fn recover_pending_snapshot(
     }
 
     let _guard = state.apply_lock.lock().await;
+    let replay = state.wal.replay();
     let mut runtime = state.runtime.write().await;
+    if replay.pending_intent.is_none()
+        && wal_state_newer_than_runtime(&replay.state, &runtime)
+    {
+        let refreshed = NeutronRuntimeState::from_wal_state(
+            replay.state,
+            replay.status,
+            replay.failures,
+        );
+        let response = NeutronRecoverPendingResponse {
+            status: "already_committed".to_string(),
+            recovered_generation: refreshed.applied_generation,
+            desired_hash: refreshed.desired_hash.clone(),
+            applied_generation: refreshed.applied_generation,
+            applied_desired_hash: refreshed.applied_desired_hash.clone(),
+            authority_state: refreshed.authority_state.clone(),
+            wal_status: refreshed.wal_status.clone(),
+        };
+        *runtime = refreshed;
+        return Ok(response);
+    }
     let next_runtime = recover_pending_runtime(&runtime, &request)?;
     if let Err(e) = state
         .wal
@@ -717,6 +738,14 @@ async fn recover_pending_snapshot(
     };
     *runtime = next_runtime;
     Ok(response)
+}
+
+fn wal_state_newer_than_runtime(
+    wal: &NeutronWalState,
+    runtime: &NeutronRuntimeState,
+) -> bool {
+    wal.applied_generation > runtime.applied_generation
+        || wal.accepted_generation > runtime.accepted_generation
 }
 
 fn recover_pending_runtime(
@@ -1212,6 +1241,28 @@ async fn recover_failed_snapshot_transaction(
     blocked
 }
 
+async fn publish_committed_snapshot_runtime<F, Fut>(
+    state: &NeutronApiState,
+    next_runtime: NeutronRuntimeState,
+    generation: u64,
+    post_commit: F,
+) where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    {
+        let mut runtime = state.runtime.write().await;
+        *runtime = next_runtime;
+    }
+    if let Err(error) = post_commit().await {
+        warn!(
+            generation,
+            error = %error,
+            "post-commit snapshot hook failed after durable commit"
+        );
+    }
+}
+
 async fn apply_neutron_snapshot_for_scope(
     state: NeutronApiState,
     snapshot: NeutronSnapshotRequest,
@@ -1327,18 +1378,10 @@ async fn apply_neutron_snapshot_for_scope(
         });
     }
     let wal_commit_ms = elapsed_ms(wal_commit_started);
-    if let Err(e) = fault_injection::check("neutron.snapshot.after_commit").await {
-        return Err(SnapshotApplyError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "fault_injection",
-            details: e,
-        });
-    }
-
-    {
-        let mut runtime = state.runtime.write().await;
-        *runtime = next_runtime;
-    }
+    publish_committed_snapshot_runtime(&state, next_runtime, snapshot.generation, || {
+        fault_injection::check("neutron.snapshot.after_commit")
+    })
+    .await;
 
     info!(
         generation = snapshot.generation,
