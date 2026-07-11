@@ -21,7 +21,7 @@ use std::fmt;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use tracing::{error, info, warn};
 
 use crate::control_plane::{ControlPlane, OwnedAclGroupSpec, OwnedAclPolicySpec};
@@ -40,7 +40,7 @@ pub(crate) struct NeutronApiState {
     pending_recovery: Option<PendingNeutronIntent>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct NeutronRuntimeState {
     accepted_generation: u64,
     applied_generation: u64,
@@ -842,9 +842,21 @@ async fn put_neutron_port_snapshot(
 }
 
 #[derive(Debug)]
+struct PreparedSnapshotApply {
+    _apply_guard: OwnedMutexGuard<()>,
+    intent: PendingNeutronIntent,
+    transaction: SnapshotApplyTransaction,
+    current_ports: BTreeMap<String, ManagedNeutronPort>,
+    runtime_before_apply: NeutronRuntimeState,
+    lock_wait_ms: u64,
+    preflight_ms: u64,
+    wal_intent_ms: u64,
+}
+
+#[derive(Debug)]
 struct SnapshotSubmitDecision {
     response: NeutronSnapshotResponse,
-    spawn_apply: bool,
+    prepared: Option<PreparedSnapshotApply>,
 }
 
 async fn submit_neutron_snapshot(
@@ -870,10 +882,18 @@ async fn submit_neutron_snapshot(
         }
     };
 
-    if decision.spawn_apply {
+    let SnapshotSubmitDecision { response, prepared } = decision;
+    if let Some(prepared) = prepared {
         let apply_state = state.clone();
         tokio::spawn(async move {
-            match apply_neutron_snapshot_for_scope(apply_state.clone(), snapshot, scope).await {
+            match apply_neutron_snapshot_for_scope(
+                apply_state.clone(),
+                snapshot,
+                scope,
+                prepared,
+            )
+            .await
+            {
                 Ok(response) => {
                     info!(
                         generation = response.generation,
@@ -905,7 +925,42 @@ async fn submit_neutron_snapshot(
         });
     }
 
-    Json(decision.response).into_response()
+    Json(response).into_response()
+}
+
+fn pending_snapshot_submit_response(
+    runtime: &NeutronRuntimeState,
+    snapshot: &NeutronSnapshotRequest,
+    requested_hash: &Option<String>,
+) -> Result<Option<NeutronSnapshotResponse>, SnapshotApplyError> {
+    let Some(pending_generation) = runtime.pending_generation else {
+        return Ok(None);
+    };
+    if !hashes_match(requested_hash, &runtime.desired_hash) {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "snapshot_apply_in_progress",
+            details: format!(
+                "pending generation {} is still applying",
+                pending_generation
+            ),
+        });
+    }
+    info!(
+        generation = snapshot.generation,
+        desired_hash = ?requested_hash,
+        pending_generation,
+        "neutron_snapshot_submit_deduplicated_pending"
+    );
+    Ok(Some(neutron_snapshot_response(
+        snapshot.generation,
+        requested_hash.clone(),
+        runtime.accepted_generation,
+        runtime.applied_generation,
+        "pending",
+        Vec::new(),
+        Vec::new(),
+    )))
 }
 
 async fn accept_neutron_snapshot_submit(
@@ -915,73 +970,110 @@ async fn accept_neutron_snapshot_submit(
 ) -> Result<SnapshotSubmitDecision, SnapshotApplyError> {
     validate_snapshot_preflight(scope, snapshot)?;
     let requested_hash = snapshot.desired_hash.clone();
+    if let Some(mut response) = {
+        let runtime = state.runtime.read().await;
+        pending_snapshot_submit_response(&runtime, snapshot, &requested_hash)?
+    } {
+        response.active_instances = state.registry.list().await;
+        return Ok(SnapshotSubmitDecision {
+            response,
+            prepared: None,
+        });
+    }
+
+    let lock_started = Instant::now();
+    let apply_guard = state.apply_lock.clone().lock_owned().await;
+    let lock_wait_ms = elapsed_ms(lock_started);
+    let preflight_started = Instant::now();
     let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
+    let runtime_before_apply = state.runtime.read().await.clone();
 
-    let immediate_response = {
-        let mut runtime = state.runtime.write().await;
-        if let Some(pending_generation) = runtime.pending_generation {
-            if hashes_match(&requested_hash, &runtime.desired_hash) {
-                let response = neutron_snapshot_response(
-                    snapshot.generation,
-                    requested_hash.clone(),
-                    runtime.accepted_generation,
-                    runtime.applied_generation,
-                    "pending",
-                    Vec::new(),
-                    Vec::new(),
-                );
-                info!(
-                    generation = snapshot.generation,
-                    desired_hash = ?requested_hash,
-                    pending_generation,
-                    "neutron_snapshot_submit_deduplicated_pending"
-                );
-                response
-            } else {
-                return Err(SnapshotApplyError {
-                    status: StatusCode::CONFLICT,
-                    code: "snapshot_apply_in_progress",
-                    details: format!(
-                        "pending generation {} is still applying",
-                        pending_generation
-                    ),
-                });
-            }
-        } else if let Some(response) = snapshot_early_response_for_scope(
-            scope,
-            &runtime,
-            snapshot,
-            &local_inventory,
-            &requested_hash,
-        )? {
-            response
-        } else {
-            runtime.accepted_generation = snapshot.generation;
-            runtime.pending_generation = Some(snapshot.generation);
-            runtime.desired_hash = requested_hash.clone();
-            runtime.authority_state = "accepted".to_string();
-            runtime.wal_status = "accepted_pending_intent".to_string();
-            let response = neutron_snapshot_response(
-                snapshot.generation,
-                requested_hash,
-                runtime.accepted_generation,
-                runtime.applied_generation,
-                "accepted",
-                Vec::new(),
-                Vec::new(),
-            );
-            return Ok(SnapshotSubmitDecision {
-                response,
-                spawn_apply: true,
-            });
-        }
+    if let Some(mut response) =
+        pending_snapshot_submit_response(&runtime_before_apply, snapshot, &requested_hash)?
+    {
+        response.active_instances = state.registry.list().await;
+        return Ok(SnapshotSubmitDecision {
+            response,
+            prepared: None,
+        });
+    }
+    if let Some(mut response) = snapshot_early_response_for_scope(
+        scope,
+        &runtime_before_apply,
+        snapshot,
+        &local_inventory,
+        &requested_hash,
+    )? {
+        response.active_instances = state.registry.list().await;
+        return Ok(SnapshotSubmitDecision {
+            response,
+            prepared: None,
+        });
+    }
+
+    let current_ports = runtime_before_apply.ports.clone();
+    let transaction = build_snapshot_apply_transaction(
+        &current_ports,
+        snapshot,
+        &local_inventory,
+        scope.clone(),
+    )
+    .map_err(snapshot_scope_apply_error)?;
+    let intent = PendingNeutronIntent {
+        kind: "snapshot".to_string(),
+        generation: snapshot.generation,
+        desired_hash: requested_hash.clone(),
+        port_ids: transaction.requested_port_ids.clone(),
+        affected_domains: transaction.affected_domains.clone(),
+        affected_ports: transaction.affected_ports.clone(),
     };
+    let preflight_ms = elapsed_ms(preflight_started);
+    let wal_intent_started = Instant::now();
+    state
+        .wal
+        .append_snapshot_intent(
+            intent.generation,
+            intent.desired_hash.clone(),
+            intent.port_ids.clone(),
+            intent.affected_domains.clone(),
+            intent.affected_ports.clone(),
+        )
+        .map_err(|details| SnapshotApplyError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "wal_intent_failed",
+            details,
+        })?;
+    let wal_intent_ms = elapsed_ms(wal_intent_started);
 
-    let mut response = immediate_response;
-    response.active_instances = state.registry.list().await;
+    {
+        let mut runtime = state.runtime.write().await;
+        runtime.pending_generation = Some(snapshot.generation);
+        runtime.desired_hash = requested_hash.clone();
+        runtime.authority_state = "applying".to_string();
+        runtime.wal_status = "intent_written".to_string();
+    }
+
+    let response = neutron_snapshot_response(
+        snapshot.generation,
+        requested_hash,
+        runtime_before_apply.accepted_generation,
+        runtime_before_apply.applied_generation,
+        "pending",
+        Vec::new(),
+        Vec::new(),
+    );
     Ok(SnapshotSubmitDecision {
         response,
-        spawn_apply: false,
+        prepared: Some(PreparedSnapshotApply {
+            _apply_guard: apply_guard,
+            intent,
+            transaction,
+            current_ports,
+            runtime_before_apply,
+            lock_wait_ms,
+            preflight_ms,
+            wal_intent_ms,
+        }),
     })
 }
 
@@ -1012,11 +1104,19 @@ async fn apply_neutron_snapshot_for_scope(
     state: NeutronApiState,
     snapshot: NeutronSnapshotRequest,
     scope: ApplyScope,
+    prepared: PreparedSnapshotApply,
 ) -> Result<NeutronSnapshotResponse, SnapshotApplyError> {
     let profile_started = Instant::now();
-    let lock_started = Instant::now();
-    let _guard = state.apply_lock.lock().await;
-    let lock_wait_ms = elapsed_ms(lock_started);
+    let PreparedSnapshotApply {
+        _apply_guard,
+        intent: _intent,
+        transaction,
+        current_ports,
+        runtime_before_apply,
+        lock_wait_ms,
+        preflight_ms,
+        wal_intent_ms,
+    } = prepared;
     let scope_name = apply_scope_name(&scope);
     let scope_port_id = apply_scope_port_id(&scope).map(|value| value.to_string());
     info!(
@@ -1028,40 +1128,7 @@ async fn apply_neutron_snapshot_for_scope(
         lock_wait_ms,
         "neutron_snapshot_apply_start"
     );
-    let preflight_started = Instant::now();
-    validate_snapshot_preflight(&scope, &snapshot)?;
     let requested_hash = snapshot.desired_hash.clone();
-    let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
-    let early_response = {
-        let runtime = state.runtime.read().await;
-        snapshot_early_response_for_scope(
-            &scope,
-            &runtime,
-            &snapshot,
-            &local_inventory,
-            &requested_hash,
-        )?
-    };
-    if let Some(mut response) = early_response {
-        response.active_instances = state.registry.list().await;
-        info!(
-            generation = snapshot.generation,
-            desired_hash = ?requested_hash,
-            scope = scope_name,
-            scope_port_id = ?scope_port_id,
-            snapshot_ports = snapshot.ports.len(),
-            lock_wait_ms,
-            preflight_ms = elapsed_ms(preflight_started),
-            total_ms = elapsed_ms(profile_started),
-            "neutron_snapshot_apply_early_response"
-        );
-        return Ok(response);
-    }
-
-    let current_ports = state.runtime.read().await.ports.clone();
-    let transaction =
-        build_snapshot_apply_transaction(&current_ports, &snapshot, &local_inventory, scope)
-            .map_err(snapshot_scope_apply_error)?;
     let plan_attach = transaction.plan.attach.len();
     let plan_update = transaction.plan.update.len();
     let plan_detach = transaction.plan.detach.len();
@@ -1069,7 +1136,6 @@ async fn apply_neutron_snapshot_for_scope(
     let requested_ports = transaction.requested_port_ids.len();
     let affected_ports = transaction.affected_ports.len();
     let affected_domains = transaction.affected_domains.len();
-    let preflight_ms = elapsed_ms(preflight_started);
     info!(
         generation = snapshot.generation,
         desired_hash = ?requested_hash,
@@ -1086,30 +1152,6 @@ async fn apply_neutron_snapshot_for_scope(
         preflight_ms,
         "neutron_snapshot_apply_plan"
     );
-    let wal_intent_started = Instant::now();
-    if let Err(e) = state.wal.append_snapshot_intent(
-        snapshot.generation,
-        requested_hash.clone(),
-        transaction.requested_port_ids.clone(),
-        transaction.affected_domains.clone(),
-        transaction.affected_ports.clone(),
-    ) {
-        return Err(SnapshotApplyError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "wal_intent_failed",
-            details: e,
-        });
-    }
-    let wal_intent_ms = elapsed_ms(wal_intent_started);
-
-    {
-        let mut runtime = state.runtime.write().await;
-        runtime.accepted_generation = snapshot.generation;
-        runtime.pending_generation = Some(snapshot.generation);
-        runtime.desired_hash = requested_hash.clone();
-        runtime.authority_state = "applying".to_string();
-        runtime.wal_status = "intent_written".to_string();
-    }
     if let Err(e) = fault_injection::check("neutron.snapshot.after_intent").await {
         return Err(SnapshotApplyError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -1118,10 +1160,6 @@ async fn apply_neutron_snapshot_for_scope(
         });
     }
 
-    let runtime_before_apply = {
-        let runtime = state.runtime.read().await;
-        runtime.clone()
-    };
     let runtime_apply_started = Instant::now();
     let outcome = apply_snapshot_runtime_transaction(
         &state,
@@ -4824,7 +4862,7 @@ mod tests {
             .await
             .expect("same hash pending should deduplicate");
 
-        assert!(!decision.spawn_apply);
+        assert!(decision.prepared.is_none());
         assert_eq!(decision.response.status, "pending");
         assert_eq!(decision.response.accepted_generation, 110);
         assert_eq!(decision.response.applied_generation, 109);
@@ -4882,7 +4920,7 @@ mod tests {
             .await
             .expect("new snapshot intent should become durable pending");
 
-        assert!(decision.spawn_apply);
+        assert!(decision.prepared.is_some());
         assert_eq!(decision.response.status, "pending");
         assert_eq!(decision.response.accepted_generation, 0);
         assert_eq!(decision.response.applied_generation, 0);
