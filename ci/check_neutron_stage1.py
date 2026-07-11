@@ -522,9 +522,22 @@ def check_rust_stage_one_tests_present():
         if term not in neutron_api_source:
             raise SystemExit("ERROR: Rust snapshot recovery source missing %s" % term)
 
+    required_acl_conntrack_terms = [
+        "fn neutron_acl_translator_carries_conntrack_intent(",
+        "fn neutron_acl_runtime_transition_is_atomic(",
+        "acl_runtime_transition(&plan, preserved_conntrack_enabled)",
+        "Some(transition.quiesce.conntrack_enabled)",
+        "Some(transition.publish.conntrack_enabled)",
+    ]
+    for term in required_acl_conntrack_terms:
+        if term not in neutron_api_source:
+            raise SystemExit("ERROR: Rust ACL conntrack contract missing %s" % term)
+
     required_domain_authority_terms = [
         "fn domain_authority_blocks_only_selected_domains(",
+        "fn domain_authority_blocks_conntrack_as_acl_dependency(",
         "LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN",
+        "dependency of '{}'",
         "Self::GroupInUse(_) | Self::LocalWriteBlocked { .. } => 409",
         "ensure_local_write_allowed(\"tap-vm\", LocalWriteDomain::Acl)",
         "ensure_local_write_allowed(\"tap-vm\", LocalWriteDomain::Mirror)",

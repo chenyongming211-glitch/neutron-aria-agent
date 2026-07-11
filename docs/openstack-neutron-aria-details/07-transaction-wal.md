@@ -181,19 +181,32 @@ startup recovery.
 
 Neutron ACL replacement uses the approved availability-first sequence:
 
-1. disable the ACL gate;
-2. replace and activate the desired ACL bank;
-3. strictly clear both `CT_TABLE_V4` and `CT_TABLE_V6` for the tap;
-4. enable the ACL gate only when the desired policy is non-empty and every
-   prior step succeeded.
+1. derive the desired per-tap CT mode from `NeutronAclSnapshot.stateful`;
+2. atomically write `conntrack=false, acl=false` to the tap config;
+3. replace and activate the desired ACL bank while CT lookup/create is
+   quiesced;
+4. strictly clear both `CT_TABLE_V4` and `CT_TABLE_V6` for the tap;
+5. atomically publish the desired CT mode and final ACL gate in one tap-config
+   write.
+
+The final state is `conntrack=true, acl=true` for a non-empty stateful policy
+and `conntrack=false, acl=true` for a non-empty stateless policy. Empty or
+bypass ACL keeps `acl=false` but still publishes the snapshot's stateful CT
+mode. A missing ACL payload preserves the CT mode read before quiesce.
+
+Quiescing both flags is required because monitoring or TCP-RT can otherwise
+create CT entries while the ACL gate alone is disabled. A strict flush followed
+by a separate ACL-only enable would leave a traffic race in which such an entry
+could be recreated between those operations.
 
 Missing or invalid map pins, iterator errors, and entry-removal errors all fail
 strict CT clear. An error after gate disable returns ACL `error` with
 `effective_action=bypass` and does not enable enforcement. Translation or
-pre-disable failure leaves the previous gate untouched and reports
+pre-quiesce failure leaves the previous gate/CT state untouched and reports
 `effective_action=unchanged`. The general management `ct_flush` retains its
 legacy lenient behavior; only the Neutron ACL transaction requires strict
-clearing.
+clearing. A post-publication compensation disables CT and ACL together; if
+that compensation fails, status reports the still-provable enforced action.
 
 ## Durable Commit Finality
 
