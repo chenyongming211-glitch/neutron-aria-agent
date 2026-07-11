@@ -6,6 +6,10 @@ import json
 import sqlite3
 import uuid
 
+from neutron_aria.acl_contract import AclContractError
+from neutron_aria.acl_contract import validate_policy
+from neutron_aria.acl_contract import validate_rule
+
 
 class AriaAclError(Exception):
     pass
@@ -28,10 +32,58 @@ def _new_id():
 
 
 def _require(obj, fields, object_type):
-    missing = [field for field in fields if not obj.get(field)]
+    missing = [
+        field for field in fields
+        if field not in obj or obj.get(field) is None
+    ]
     if missing:
         raise AriaAclValidationError(
             "%s missing required field(s): %s" % (object_type, ",".join(missing))
+        )
+
+
+def _validate_contract(validator, values):
+    try:
+        validator(values)
+    except AclContractError as exc:
+        raise AriaAclValidationError(str(exc))
+
+
+def _enabled(obj):
+    value = (obj or {}).get("enabled", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("0", "false", "no", "off")
+    return value is not False
+
+
+def _reject_duplicate_rule_priority(repository, values, exclude_id=None):
+    if not _enabled(values):
+        return
+    policy_id = values.get("policy_id")
+    direction = values.get("direction")
+    priority = int(values.get("priority"))
+    for rule in repository.list_rules(filters={"policy_id": [policy_id]}):
+        if rule.get("id") == exclude_id or not _enabled(rule):
+            continue
+        if rule.get("direction") == direction and int(rule.get("priority")) == priority:
+            raise AriaAclValidationError(
+                "duplicate enabled rule priority for policy=%s direction=%s priority=%s"
+                % (policy_id, direction, priority)
+            )
+
+
+def _reject_duplicate_binding_target(repository, values, exclude_id=None):
+    if not _enabled(values):
+        return
+    target_type = values.get("target_type")
+    target_id = values.get("target_id")
+    filters = {"target_type": [target_type], "target_id": [target_id]}
+    for binding in repository.list_bindings(filters=filters):
+        if binding.get("id") == exclude_id or not _enabled(binding):
+            continue
+        raise AriaAclValidationError(
+            "duplicate enabled binding for target_type=%s target_id=%s"
+            % (target_type, target_id)
         )
 
 
@@ -132,6 +184,7 @@ class InMemoryAriaAclRepository(object):
         values.setdefault("stateful", True)
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
+        _validate_contract(validate_policy, values)
         _stamp_create(values)
         self.policies[values["id"]] = values
         return _clone(values)
@@ -148,6 +201,7 @@ class InMemoryAriaAclRepository(object):
         current["id"] = policy_id
         _normalize_project_id(current)
         _require(current, ("project_id",), "aria_acl_policy")
+        _validate_contract(validate_policy, current)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self.policies[policy_id] = current
@@ -166,6 +220,8 @@ class InMemoryAriaAclRepository(object):
         values.setdefault("id", _new_id())
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
+        _validate_contract(validate_rule, values)
+        _reject_duplicate_rule_priority(self, values)
         _stamp_create(values)
         self.rules[values["id"]] = values
         return _clone(values)
@@ -184,6 +240,8 @@ class InMemoryAriaAclRepository(object):
         _normalize_project_id(current)
         _require(current, ("policy_id", "direction", "priority", "action"), "aria_acl_rule")
         self._validate_policy_project(current)
+        _validate_contract(validate_rule, current)
+        _reject_duplicate_rule_priority(self, current, exclude_id=rule_id)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self.rules[rule_id] = current
@@ -240,6 +298,7 @@ class InMemoryAriaAclRepository(object):
         values.setdefault("id", _new_id())
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
+        _reject_duplicate_binding_target(self, values)
         _stamp_create(values)
         self.bindings[values["id"]] = values
         return _clone(values)
@@ -264,6 +323,7 @@ class InMemoryAriaAclRepository(object):
             "aria_acl_binding",
         )
         self._validate_policy_project(current)
+        _reject_duplicate_binding_target(self, current, exclude_id=binding_id)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self.bindings[binding_id] = current
@@ -387,6 +447,7 @@ class NeutronDbAriaAclRepository(object):
         values.setdefault("stateful", True)
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
+        _validate_contract(validate_policy, values)
         _stamp_create(values)
         self._insert("policies", self._db_values("policies", values))
         return _clone(values)
@@ -403,6 +464,7 @@ class NeutronDbAriaAclRepository(object):
         current["id"] = policy_id
         _normalize_project_id(current)
         _require(current, ("project_id",), "aria_acl_policy")
+        _validate_contract(validate_policy, current)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._update("policies", policy_id, self._db_values("policies", current))
@@ -419,6 +481,8 @@ class NeutronDbAriaAclRepository(object):
         values.setdefault("id", _new_id())
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
+        _validate_contract(validate_rule, values)
+        _reject_duplicate_rule_priority(self, values)
         _stamp_create(values)
         self._insert("rules", self._db_values("rules", values))
         return _clone(values)
@@ -438,6 +502,8 @@ class NeutronDbAriaAclRepository(object):
         _normalize_project_id(current)
         _require(current, ("policy_id", "direction", "priority", "action"), "aria_acl_rule")
         self._validate_policy_project(current)
+        _validate_contract(validate_rule, current)
+        _reject_duplicate_rule_priority(self, current, exclude_id=rule_id)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._update("rules", rule_id, self._db_values("rules", current))
@@ -501,6 +567,7 @@ class NeutronDbAriaAclRepository(object):
         values.setdefault("id", _new_id())
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
+        _reject_duplicate_binding_target(self, values)
         _stamp_create(values)
         self._insert("bindings", self._db_values("bindings", values))
         return _clone(values)
@@ -526,6 +593,7 @@ class NeutronDbAriaAclRepository(object):
             "aria_acl_binding",
         )
         self._validate_policy_project(current)
+        _reject_duplicate_binding_target(self, current, exclude_id=binding_id)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._update("bindings", binding_id, self._db_values("bindings", current))
@@ -836,6 +904,7 @@ class SqliteAriaAclRepository(object):
         values.setdefault("stateful", True)
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
+        _validate_contract(validate_policy, values)
         _stamp_create(values)
         self._upsert(
             "aria_acl_policies",
@@ -857,6 +926,7 @@ class SqliteAriaAclRepository(object):
         current["id"] = policy_id
         _normalize_project_id(current)
         _require(current, ("project_id",), "aria_acl_policy")
+        _validate_contract(validate_policy, current)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._upsert(
@@ -878,6 +948,8 @@ class SqliteAriaAclRepository(object):
         values.setdefault("id", _new_id())
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
+        _validate_contract(validate_rule, values)
+        _reject_duplicate_rule_priority(self, values)
         _stamp_create(values)
         self._upsert(
             "aria_acl_rules",
@@ -902,6 +974,8 @@ class SqliteAriaAclRepository(object):
         _normalize_project_id(current)
         _require(current, ("policy_id", "direction", "priority", "action"), "aria_acl_rule")
         self._validate_policy_project(current)
+        _validate_contract(validate_rule, current)
+        _reject_duplicate_rule_priority(self, current, exclude_id=rule_id)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._upsert(
@@ -972,6 +1046,7 @@ class SqliteAriaAclRepository(object):
         values.setdefault("id", _new_id())
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
+        _reject_duplicate_binding_target(self, values)
         _stamp_create(values)
         self._upsert(
             "aria_acl_bindings",
@@ -1005,6 +1080,7 @@ class SqliteAriaAclRepository(object):
             "aria_acl_binding",
         )
         self._validate_policy_project(current)
+        _reject_duplicate_binding_target(self, current, exclude_id=binding_id)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._upsert(

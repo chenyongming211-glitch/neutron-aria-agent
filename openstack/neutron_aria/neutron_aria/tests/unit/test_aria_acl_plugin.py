@@ -118,6 +118,77 @@ class FakePreparedClient(object):
 
 
 class AriaAclPluginTestCase(unittest.TestCase):
+    def test_policy_rejects_unsupported_default_deny(self):
+        plugin = AriaAclPlugin()
+        with self.assertRaises(AriaAclValidationError):
+            plugin.create_aria_acl_policy(None, {
+                "aria_acl_policy": {
+                    "project_id": "project-1",
+                    "default_action": "deny",
+                }
+            })
+
+    def test_priority_zero_is_valid_but_duplicate_priority_is_rejected(self):
+        plugin = AriaAclPlugin()
+        policy = plugin.create_aria_acl_policy(None, {
+            "aria_acl_policy": {
+                "id": "policy-1",
+                "project_id": "project-1",
+                "default_action": "allow",
+            }
+        })
+        plugin.create_aria_acl_rule(None, {
+            "aria_acl_rule": {
+                "id": "rule-1",
+                "project_id": "project-1",
+                "policy_id": policy["id"],
+                "direction": "ingress",
+                "priority": 0,
+                "action": "allow",
+            }
+        })
+        with self.assertRaises(AriaAclValidationError):
+            plugin.create_aria_acl_rule(None, {
+                "aria_acl_rule": {
+                    "id": "rule-2",
+                    "project_id": "project-1",
+                    "policy_id": policy["id"],
+                    "direction": "ingress",
+                    "priority": 0,
+                    "action": "drop",
+                }
+            })
+
+    def test_duplicate_enabled_binding_for_target_is_rejected(self):
+        plugin = AriaAclPlugin()
+        for policy_id in ("policy-1", "policy-2"):
+            plugin.create_aria_acl_policy(None, {
+                "aria_acl_policy": {
+                    "id": policy_id,
+                    "project_id": "project-1",
+                    "default_action": "allow",
+                }
+            })
+        plugin.create_aria_acl_binding(None, {
+            "aria_acl_binding": {
+                "id": "binding-1",
+                "project_id": "project-1",
+                "policy_id": "policy-1",
+                "target_type": "port",
+                "target_id": "port-1",
+            }
+        })
+        with self.assertRaises(AriaAclValidationError):
+            plugin.create_aria_acl_binding(None, {
+                "aria_acl_binding": {
+                    "id": "binding-2",
+                    "project_id": "project-1",
+                    "policy_id": "policy-2",
+                    "target_type": "port",
+                    "target_id": "port-1",
+                }
+            })
+
     def test_extension_exposes_expected_resources_and_port_summary_fields(self):
         resources = aria_acl.get_resources()
         extended = aria_acl.get_extended_resources("2.0")
@@ -318,7 +389,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         })
 
         policy = plugin.update_aria_acl_policy(None, "policy-1", {
-            "default_action": "deny",
+            "name": "web-updated",
         })
         rule = plugin.update_aria_acl_rule(None, "rule-1", {"priority": 90})
         address_set = plugin.update_aria_acl_address_set(None, "set-1", {
@@ -346,7 +417,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
             "id": "port-1",
             "network_id": "net-1",
         })
-        self.assertEqual("deny", result["default_action"])
+        self.assertEqual("allow", result["default_action"])
         self.assertEqual(90, result["rules"][0]["priority"])
         self.assertEqual(["10.58.159.3/32"], result["rules"][0]["src_cidrs"])
 
@@ -751,7 +822,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 "default_action": "allow",
             })
             updated_policy = plugin.update_aria_acl_policy(None, "policy-1", {
-                "default_action": "deny",
+                "name": "persisted-policy",
             })
             plugin.create_aria_acl_rule(None, {
                 "id": "rule-1",
