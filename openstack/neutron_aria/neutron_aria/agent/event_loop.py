@@ -23,6 +23,7 @@ RECOVERY_REQUIRED_AUTHORITY_STATES = frozenset((
     "blocked_recovery_required",
     "wal_commit_failed",
     "wal_recovery_commit_failed",
+    "pending_recovery_commit_failed",
     "recovered_pending_full_resync",
 ))
 

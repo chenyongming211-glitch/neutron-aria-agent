@@ -871,18 +871,23 @@ class EventLoopTestCase(unittest.TestCase):
             FakeLocalClient(),
             managed_domains=["acl"],
         )
-        action = sync._remote_pending_action({}, {
-            "accepted_generation": 10,
-            "applied_generation": 10,
-            "pending_generation": 11,
-            "desired_hash": "hash-11",
-            "applied_desired_hash": "hash-10",
-            "authority_state": "blocked_recovery_required",
-        }, "hash-11")
+        for authority_state in (
+            "blocked_recovery_required",
+            "pending_recovery_commit_failed",
+        ):
+            with self.subTest(authority_state=authority_state):
+                action = sync._remote_pending_action({}, {
+                    "accepted_generation": 10,
+                    "applied_generation": 10,
+                    "pending_generation": 11,
+                    "desired_hash": "hash-11",
+                    "applied_desired_hash": "hash-10",
+                    "authority_state": authority_state,
+                }, "hash-11")
 
-        self.assertEqual("recover", action["action"])
-        self.assertEqual(11, action["generation"])
-        self.assertEqual("hash-11", action["remote_desired_hash"])
+                self.assertEqual("recover", action["action"])
+                self.assertEqual(11, action["generation"])
+                self.assertEqual("hash-11", action["remote_desired_hash"])
 
     def test_full_resync_recovers_blocked_same_hash_before_submit(self):
         port_source = StaticPortSource([{

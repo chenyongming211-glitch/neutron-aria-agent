@@ -125,8 +125,9 @@ On Python agent restart:
 
 For a runtime pending state whose authority is
 `blocked_recovery_required`, `wal_commit_failed`,
-`wal_recovery_commit_failed`, or `recovered_pending_full_resync`, Python calls
-the exact recover-pending generation/hash before same-hash convergence waiting.
+`wal_recovery_commit_failed`, `pending_recovery_commit_failed`, or
+`recovered_pending_full_resync`, Python calls the exact recover-pending
+generation/hash before same-hash convergence waiting.
 After successful recovery it re-reads status and submits above the refreshed
 generation floor. Recovery failure leaves the local pending record intact and
 the agent degraded.
