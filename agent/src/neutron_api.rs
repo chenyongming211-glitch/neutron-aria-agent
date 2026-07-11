@@ -4867,8 +4867,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn neutron_snapshot_submit_accepts_new_snapshot_without_blocking_apply() {
-        let root = temp_root("submit-accepted");
+    async fn neutron_snapshot_submit_persists_intent_before_pending_response() {
+        let root = temp_root("submit-pending-durable");
         let state = test_neutron_state(&root);
         let snapshot = NeutronSnapshotRequest {
             schema_version: None,
@@ -4880,16 +4880,65 @@ mod tests {
 
         let decision = accept_neutron_snapshot_submit(&state, &snapshot, &ApplyScope::FullHost)
             .await
-            .expect("new snapshot should be accepted");
+            .expect("new snapshot intent should become durable pending");
 
         assert!(decision.spawn_apply);
-        assert_eq!(decision.response.status, "accepted");
-        assert_eq!(decision.response.accepted_generation, 130);
+        assert_eq!(decision.response.status, "pending");
+        assert_eq!(decision.response.accepted_generation, 0);
         assert_eq!(decision.response.applied_generation, 0);
         let runtime = state.runtime.read().await;
+        assert_eq!(runtime.accepted_generation, 0);
         assert_eq!(runtime.pending_generation, Some(130));
-        assert_eq!(runtime.authority_state, "accepted");
-        assert_eq!(runtime.wal_status, "accepted_pending_intent");
+        assert_eq!(runtime.authority_state, "applying");
+        assert_eq!(runtime.wal_status, "intent_written");
+        drop(runtime);
+
+        let replay = state.wal.replay();
+        assert_eq!(replay.state.accepted_generation, 0);
+        assert_eq!(replay.state.pending_generation, Some(130));
+        assert_eq!(
+            replay
+                .pending_intent
+                .as_ref()
+                .map(|intent| intent.generation),
+            Some(130)
+        );
+        assert_eq!(
+            replay
+                .pending_intent
+                .as_ref()
+                .and_then(|intent| intent.desired_hash.as_deref()),
+            Some("hash-130")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_submit_wal_intent_failure_keeps_runtime_unaccepted() {
+        let root = temp_root("submit-intent-failure");
+        let invalid_state_path = root.join("not-a-directory");
+        std::fs::write(&invalid_state_path, b"regular file").unwrap();
+        let mut state = test_neutron_state(&root);
+        state.wal = Arc::new(NeutronWal::new(&invalid_state_path));
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 131,
+            desired_hash: Some("hash-131".to_string()),
+            host: None,
+            ports: vec![port("target-port", "tap-target", true)],
+        };
+
+        let error = accept_neutron_snapshot_submit(&state, &snapshot, &ApplyScope::FullHost)
+            .await
+            .expect_err("failed WAL intent must reject snapshot admission");
+
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code, "wal_intent_failed");
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.accepted_generation, 0);
+        assert_eq!(runtime.applied_generation, 0);
+        assert_eq!(runtime.pending_generation, None);
+        assert_eq!(runtime.authority_state, "idle");
         let _ = std::fs::remove_dir_all(root);
     }
 
