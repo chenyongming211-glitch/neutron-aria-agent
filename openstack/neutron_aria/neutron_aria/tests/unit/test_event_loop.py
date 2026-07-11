@@ -1425,7 +1425,7 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertEqual("acl-binding", port_status["binding_id"])
         self.assertEqual("ready", port_status["domains"][0]["status"])
 
-    def test_full_resync_refreshes_stale_not_requested_acl_status(self):
+    def test_full_resync_preserves_runtime_not_requested_acl_status(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         acl_index = EffectiveAclIndex(
             policies=[{"id": "acl-policy", "default_action": "allow"}],
@@ -1465,11 +1465,11 @@ class EventLoopTestCase(unittest.TestCase):
         result = sync.full_resync()
 
         port_status = result["status"]["last_port_statuses"][0]
-        self.assertEqual("ready", port_status["status"])
-        self.assertEqual("enforce", port_status["effective_action"])
-        self.assertEqual("ready", port_status["reason"])
-        self.assertEqual("ready", port_status["domains"][0]["status"])
-        self.assertEqual("enforce", port_status["domains"][0]["effective_action"])
+        self.assertEqual("not_requested", port_status["status"])
+        self.assertEqual("bypass", port_status["effective_action"])
+        self.assertEqual("no_enabled_binding", port_status["reason"])
+        self.assertEqual("not_requested", port_status["domains"][0]["status"])
+        self.assertEqual("bypass", port_status["domains"][0]["effective_action"])
 
     def test_dry_run_port_update_builds_scoped_snapshot_without_submit(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -1800,6 +1800,51 @@ class EventLoopTestCase(unittest.TestCase):
             "effective_action": "bypass",
             "count": 1,
         }, result["status"]["domain_counts"])
+
+    def test_status_projection_never_overwrites_runtime_bypass(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        status = {
+            "generation": 8,
+            "managed_ports": [{"port_id": port_id}],
+            "port_statuses": [{
+                "port_id": port_id,
+                "status": "degraded",
+                "effective_action": "bypass",
+                "reason": "acl_apply_failed",
+                "domains": [{
+                    "domain": "acl",
+                    "status": "degraded",
+                    "effective_action": "bypass",
+                    "reason": "acl_apply_failed",
+                }],
+            }],
+        }
+        snapshot = {"ports": [{
+            "port_id": port_id,
+            "acl": {
+                "enabled": True,
+                "status": "ready",
+                "effective_action": "enforce",
+                "reason": "ready",
+                "policy_id": "policy-1",
+            },
+        }]}
+
+        row = sync._port_statuses_from_status(status, snapshot)[0]
+
+        self.assertEqual("degraded", row["status"])
+        self.assertEqual("bypass", row["effective_action"])
+        self.assertEqual("acl_apply_failed", row["reason"])
+        self.assertEqual("degraded", row["domains"][0]["status"])
+        self.assertEqual("bypass", row["domains"][0]["effective_action"])
+        self.assertEqual("acl_apply_failed", row["domains"][0]["reason"])
 
     def test_full_resync_reloads_acl_source_each_time(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

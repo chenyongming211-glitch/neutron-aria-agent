@@ -902,22 +902,22 @@ class SnapshotSynchronizer(object):
         acl_status = metadata.get("status") or "ready"
         acl_reason = metadata.get("reason") or "ready"
         acl_action = metadata.get("effective_action") or "enforce"
-        if payload.get("status") in (None, "", "not_requested"):
+        if payload.get("status") in (None, ""):
             payload["status"] = acl_status
-        if payload.get("effective_action") in (None, "", "bypass"):
+        if payload.get("effective_action") in (None, ""):
             payload["effective_action"] = acl_action
-        if payload.get("reason") in (None, "", "no_enabled_binding"):
+        if payload.get("reason") in (None, ""):
             payload["reason"] = acl_reason
 
         domains = list(payload.get("domains") or [])
         for domain_status in domains:
             if domain_status.get("domain") != "acl":
                 continue
-            if domain_status.get("status") in (None, "", "not_requested"):
+            if domain_status.get("status") in (None, ""):
                 domain_status["status"] = acl_status
-            if domain_status.get("effective_action") in (None, "", "bypass"):
+            if domain_status.get("effective_action") in (None, ""):
                 domain_status["effective_action"] = acl_action
-            if domain_status.get("reason") in (None, "", "no_enabled_binding"):
+            if domain_status.get("reason") in (None, ""):
                 domain_status["reason"] = acl_reason
             break
         else:
