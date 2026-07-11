@@ -97,6 +97,10 @@ state becomes `runtime_reconcile_requires_full_resync`. This prevents the
 same-generation early no-op path, and the missing ACL domain hash prevents the
 per-port same-hash skip path.
 
+An existing pending recovery authority has higher priority. Invalidation still
+removes the ACL skip hash and marks the port ACL degraded, but it must not
+replace `blocked_recovery_required` or another pending authority/WAL status.
+
 The invalidated runtime is appended to the Neutron WAL before it is published
 to RAM. A second restart therefore cannot recover the previous false-ready ACL
 hash/status from the older commit.
@@ -175,6 +179,7 @@ Rust regression coverage must prove:
 
 - restart invalidation keeps attach ready but marks ACL degraded/unchanged;
 - only the ACL desired hash is removed;
+- pending recovery authority and pending generation survive invalidation;
 - the runtime authority is not ready, so same-generation early no-op is
   rejected;
 - the same ACL payload cannot satisfy the domain hash skip after invalidation;

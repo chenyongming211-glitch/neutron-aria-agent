@@ -114,6 +114,31 @@ On datapath restart:
 - preserve local standalone state separately from Neutron-managed state;
 - wait for full resync when recovery cannot prove correctness.
 
+A successfully claimed interface proves only that attach and the tap-local
+runtime replay/validation succeeded. The tap-local WAL does not share the
+Neutron ACL desired hash, so restart recovery does not use attach success as
+proof that ACL is current:
+
+- `attach` remains `ready`;
+- managed ACL becomes `degraded` with
+  `effective_action=unchanged` and
+  `reason=acl_restart_replay_requires_resync`;
+- only the ACL entry in `domain_desired_hashes` is removed;
+- authority becomes `runtime_reconcile_requires_full_resync`;
+- same-generation and same-hash shortcuts are disabled until full resync
+  executes and commits ACL reconcile.
+
+If an unresolved pending recovery already exists, its pending generation,
+authority, and WAL status take precedence. Restart invalidation still removes
+the ACL skip hash and marks ACL degraded, but does not overwrite the stronger
+recovery classification.
+
+The invalidated state is appended to the Neutron WAL before RAM publication.
+If that append fails, RAM still publishes the invalidated hash/status with
+`authority_state=wal_runtime_reconcile_commit_failed` and
+`wal_status=commit_failed`. The next restart repeats recovery from the older
+WAL, while the current process cannot skip ACL using false-ready metadata.
+
 On Python agent restart:
 
 - load pending snapshot/delete state;
@@ -151,6 +176,24 @@ The blocked classification is appended to WAL when storage permits. If that
 second append also fails, RAM remains blocked with
 `wal_status=recovery_commit_failed`, and the original durable intent drives
 startup recovery.
+
+## ACL Update And Conntrack Boundary
+
+Neutron ACL replacement uses the approved availability-first sequence:
+
+1. disable the ACL gate;
+2. replace and activate the desired ACL bank;
+3. strictly clear both `CT_TABLE_V4` and `CT_TABLE_V6` for the tap;
+4. enable the ACL gate only when the desired policy is non-empty and every
+   prior step succeeded.
+
+Missing or invalid map pins, iterator errors, and entry-removal errors all fail
+strict CT clear. An error after gate disable returns ACL `error` with
+`effective_action=bypass` and does not enable enforcement. Translation or
+pre-disable failure leaves the previous gate untouched and reports
+`effective_action=unchanged`. The general management `ct_flush` retains its
+legacy lenient behavior; only the Neutron ACL transaction requires strict
+clearing.
 
 ## Durable Commit Finality
 
