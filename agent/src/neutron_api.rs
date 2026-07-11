@@ -5594,6 +5594,107 @@ mod tests {
     }
 
     #[test]
+    fn restart_invalidation_requires_acl_resync_without_losing_binding_or_other_hashes() {
+        let mut desired = managed_with_ifindex("vm-port", "tap-vm", 17);
+        desired.managed_domains = vec!["acl".to_string()];
+        desired
+            .domain_desired_hashes
+            .insert("acl".to_string(), "acl-hash".to_string());
+        desired
+            .domain_desired_hashes
+            .insert("future-domain".to_string(), "future-hash".to_string());
+
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            applied_desired_hash: Some("snapshot-hash".to_string()),
+            authority_state: "ready".to_string(),
+            ports: BTreeMap::from([("vm-port".to_string(), desired.clone())]),
+            port_statuses: BTreeMap::from([(
+                "vm-port".to_string(),
+                ready_status("vm-port", "tap-vm", 42),
+            )]),
+            ..Default::default()
+        };
+
+        assert!(invalidate_restarted_acl_runtime(
+            &mut runtime,
+            std::slice::from_ref(&desired),
+        ));
+
+        let restored = &runtime.ports["vm-port"];
+        assert_eq!(restored.ifname, "tap-vm");
+        assert_eq!(restored.ifindex, Some(17));
+        assert!(!restored.domain_desired_hashes.contains_key("acl"));
+        assert_eq!(
+            restored.domain_desired_hashes.get("future-domain"),
+            Some(&"future-hash".to_string())
+        );
+
+        let status = &runtime.port_statuses["vm-port"];
+        assert_eq!(status.status, "degraded");
+        let attach = status
+            .domains
+            .iter()
+            .find(|domain| domain.domain == "attach")
+            .expect("attach status");
+        assert_eq!(attach.status, "ready");
+        let acl = status
+            .domains
+            .iter()
+            .find(|domain| domain.domain == "acl")
+            .expect("ACL status");
+        assert_eq!(acl.status, "degraded");
+        assert_eq!(
+            acl.reason.as_deref(),
+            Some("acl_restart_replay_requires_resync")
+        );
+        assert_eq!(acl.effective_action.as_deref(), Some("unchanged"));
+        assert_eq!(
+            runtime.authority_state,
+            "runtime_reconcile_requires_full_resync"
+        );
+        assert!(!snapshot_generation_fully_applied(&runtime, 42));
+        assert!(!can_skip_neutron_domain_reconcile(
+            Some(restored),
+            Some(status),
+            &desired,
+        ));
+    }
+
+    #[test]
+    fn restart_invalidation_leaves_non_acl_runtime_ready() {
+        let restored = managed_with_ifindex("vm-port", "tap-vm", 17);
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            authority_state: "ready".to_string(),
+            ports: BTreeMap::from([("vm-port".to_string(), restored.clone())]),
+            port_statuses: BTreeMap::from([(
+                "vm-port".to_string(),
+                port_runtime_status(
+                    "vm-port",
+                    "tap-vm",
+                    42,
+                    Some("snapshot-hash".to_string()),
+                    Vec::new(),
+                    "ready",
+                    None,
+                    vec![domain_status("attach", "ready", None)],
+                ),
+            )]),
+            ..Default::default()
+        };
+
+        assert!(!invalidate_restarted_acl_runtime(
+            &mut runtime,
+            std::slice::from_ref(&restored),
+        ));
+        assert_eq!(runtime.authority_state, "ready");
+        assert_eq!(runtime.port_statuses["vm-port"].status, "ready");
+    }
+
+    #[test]
     fn affected_domains_include_attach_and_feature_domains() {
         let ports = vec![ManagedNeutronPort {
             port_id: "vm-port".to_string(),
@@ -5929,7 +6030,7 @@ mod tests {
     }
 
     #[test]
-    fn neutron_acl_gate_mode_disables_only_for_empty_policy() {
+    fn neutron_acl_gate_mode_disables_before_every_replacement() {
         assert_eq!(
             acl_gate_update_mode(&AclApplyPlan::default()),
             AclGateUpdateMode::DisableBeforeReplace
@@ -5952,8 +6053,13 @@ mod tests {
 
         assert_eq!(
             acl_gate_update_mode(&plan),
-            AclGateUpdateMode::KeepCurrentUntilEnable
+            AclGateUpdateMode::DisableBeforeReplace
         );
+    }
+
+    #[test]
+    fn neutron_control_plane_exposes_strict_conntrack_flush() {
+        let _strict_flush = ControlPlane::flush_conntrack_strict;
     }
 
     #[test]
