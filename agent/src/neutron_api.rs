@@ -5330,6 +5330,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn neutron_pending_recovery_rejects_mismatch_with_newer_wal_commit() {
+        let root = temp_root("pending-newer-wal-mismatch");
+        let state = test_neutron_state(&root);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.accepted_generation = 500;
+            runtime.applied_generation = 500;
+            runtime.pending_generation = Some(501);
+            runtime.desired_hash = Some("hash-501".to_string());
+            runtime.applied_desired_hash = Some("hash-500".to_string());
+            runtime.authority_state = "applying".to_string();
+        }
+        state
+            .wal
+            .append_snapshot_commit(
+                NeutronRuntimeState {
+                    accepted_generation: 501,
+                    applied_generation: 501,
+                    desired_hash: Some("hash-501".to_string()),
+                    applied_desired_hash: Some("hash-501".to_string()),
+                    authority_state: "ready".to_string(),
+                    ..NeutronRuntimeState::default()
+                }
+                .to_wal_state(),
+            )
+            .expect("newer commit should be durable");
+
+        let error = recover_pending_snapshot(
+            state.clone(),
+            NeutronRecoverPendingRequest {
+                expected_pending_generation: 501,
+                expected_desired_hash: Some("wrong-hash".to_string()),
+                mode: None,
+            },
+        )
+        .await
+        .expect_err("mismatched recovery request must not bypass validation");
+
+        assert_eq!(error.code, "pending_desired_hash_mismatch");
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.applied_generation, 500);
+        assert_eq!(runtime.pending_generation, Some(501));
+        drop(runtime);
+        assert_eq!(state.wal.replay().state.applied_generation, 501);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn neutron_pending_recovery_writes_wal_and_unblocks_full_resync() {
         let root = temp_root("pending-recovery");
         let state = test_neutron_state(&root);
