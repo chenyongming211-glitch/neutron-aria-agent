@@ -19,6 +19,13 @@ from neutron_aria.agent.uds_client import LocalApiTimeoutError
 
 LOG = logging.getLogger(__name__)
 
+RECOVERY_REQUIRED_AUTHORITY_STATES = frozenset((
+    "blocked_recovery_required",
+    "wal_commit_failed",
+    "wal_recovery_commit_failed",
+    "recovered_pending_full_resync",
+))
+
 
 def _elapsed_ms(started_at):
     return int((time.time() - started_at) * 1000)
@@ -167,7 +174,7 @@ class SnapshotSynchronizer(object):
                 pending_action["generation"],
                 desired_hash=pending_action["desired_hash"],
             )
-        elif pending_action.get("action") == "block":
+        elif pending_action.get("action") in ("block", "recover"):
             recovery = self._recover_remote_pending_snapshot(pending_action)
             if recovery is None:
                 LOG.warning(
@@ -1020,6 +1027,14 @@ class SnapshotSynchronizer(object):
             status.get("applied_desired_hash") or
             status.get("desired_hash")
         )
+        if self._status_requires_pending_recovery(status):
+            return {
+                "action": "recover",
+                "generation": pending_generation,
+                "desired_hash": desired_hash,
+                "remote_desired_hash": remote_hash,
+                "applied_desired_hash": applied_hash,
+            }
         if remote_hash and desired_hash and remote_hash == desired_hash:
             return {
                 "action": "wait",
@@ -1035,6 +1050,12 @@ class SnapshotSynchronizer(object):
             "remote_desired_hash": remote_hash,
             "applied_desired_hash": applied_hash,
         }
+
+    def _status_requires_pending_recovery(self, status):
+        return bool(
+            self._status_has_pending_generation(status) and
+            status.get("authority_state") in RECOVERY_REQUIRED_AUTHORITY_STATES
+        )
 
     def _poll_snapshot_convergence(
         self,
