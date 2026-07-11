@@ -22,7 +22,7 @@ class ConfigTestCase(unittest.TestCase):
             os.write(fd, b"""
 [agent]
 host = ostack2.bj159.net
-managed_domains = acl,qos
+managed_domains = acl
 resync_interval = 120
 report_interval = 15
 full_resync_enabled = true
@@ -58,7 +58,7 @@ fixture_path = /tmp/aria-acl-fixture.json
             config = load_config(path)
 
             self.assertEqual("ostack2.bj159.net", config.host)
-            self.assertEqual(["acl", "qos"], config.managed_domains)
+            self.assertEqual(["acl"], config.managed_domains)
             self.assertEqual(120, config.resync_interval)
             self.assertEqual(15, config.report_interval)
             self.assertTrue(config.full_resync_enabled)
@@ -115,12 +115,12 @@ integration_bridge = br-int-target
     def test_normalizes_and_deduplicates_managed_domains(self):
         path = self._write_config("""
 [agent]
-managed_domains = ACL, qos, acl
+managed_domains = ACL, acl
 """)
         try:
             config = load_config(path)
 
-            self.assertEqual(["acl", "qos"], config.managed_domains)
+            self.assertEqual(["acl"], config.managed_domains)
         finally:
             os.unlink(path)
 
@@ -133,6 +133,17 @@ managed_domains = acl,ssl
             self.assertRaises(ConfigError, load_config, path)
         finally:
             os.unlink(path)
+
+    def test_rejects_unimplemented_qos_and_mirror_managed_domains(self):
+        for domain in ("qos", "mirror"):
+            path = self._write_config("""
+[agent]
+managed_domains = acl,%s
+""" % domain)
+            try:
+                self.assertRaises(ConfigError, load_config, path)
+            finally:
+                os.unlink(path)
 
     def test_rejects_integration_mode_in_ini(self):
         path = self._write_config("""

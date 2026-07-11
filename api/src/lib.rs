@@ -39,18 +39,7 @@ pub const NEUTRON_UDS_ERROR_CODES_HASH: &str = "v0.9-neutron-errors-2";
 pub const NEUTRON_UDS_PEER_AUTH_POLICY: &str = "filesystem_permissions_then_peercred";
 pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-2";
 pub const NEUTRON_ATTACH_AUTHORITY: &str = "neutron_snapshot";
-pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &[
-    "attach",
-    "acl",
-    "qos",
-    "mirror",
-    "config",
-    "conntrack",
-    "tcprt",
-    "trace",
-    "drops",
-    "ssl",
-];
+pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &["attach", "acl"];
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[schema(example = json!({
@@ -329,7 +318,7 @@ pub struct NeutronPortStatus {
     "supports_full_snapshot": true,
     "supports_port_scoped_snapshot": true,
     "supports_port_delete": true,
-    "supported_domains": ["attach", "acl", "qos", "mirror"]
+    "supported_domains": ["attach", "acl"]
 }))]
 pub struct NeutronCapabilitiesResponse {
     /// Local UDS API version.

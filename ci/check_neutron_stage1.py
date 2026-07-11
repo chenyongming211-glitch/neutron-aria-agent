@@ -156,10 +156,12 @@ def check_uds_contract_artifact():
     if not contract.get("peer_auth_policy"):
         raise SystemExit("ERROR: peer_auth_policy must be non-empty")
 
-    domains = set(contract.get("supported_domains") or [])
-    for domain in ("attach", "acl", "qos", "mirror"):
-        if domain not in domains:
-            raise SystemExit("ERROR: supported_domains missing %s" % domain)
+    domains = contract.get("supported_domains") or []
+    if domains != ["attach", "acl"]:
+        raise SystemExit(
+            "ERROR: supported_domains must match implemented domains "
+            "['attach', 'acl'], got %r" % domains
+        )
 
     routes = {
         (route.get("method"), route.get("path"))
