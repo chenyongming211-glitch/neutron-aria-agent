@@ -9,6 +9,7 @@ import time
 from neutron_aria.agent.effective_acl import EffectiveAclIndex
 from neutron_aria.db.aria_acl.api import InMemoryAriaAclRepository
 from neutron_aria.db.aria_acl.api import NeutronDbAriaAclRepository
+from neutron_aria.services.aria_acl.exceptions import ErrorMappingRepositoryProxy
 
 
 LOG = logging.getLogger(__name__)
@@ -286,13 +287,15 @@ class AriaAclPlugin(object):
 
     def _repo(self, context):
         if self.repository is not None:
-            return self.repository
+            return ErrorMappingRepositoryProxy(self.repository)
         if context is not None and getattr(context, "session", None) is not None:
-            return NeutronDbAriaAclRepository(
-                context,
-                auto_create=_env_flag("ARIA_ACL_DB_AUTO_CREATE", default=False),
+            return ErrorMappingRepositoryProxy(
+                NeutronDbAriaAclRepository(
+                    context,
+                    auto_create=_env_flag("ARIA_ACL_DB_AUTO_CREATE", default=False),
+                )
             )
-        return self._fallback_repository
+        return ErrorMappingRepositoryProxy(self._fallback_repository)
 
     def _notify_acl_change(self, context, resource, operation, current=None, resource_id=None):
         payload = {

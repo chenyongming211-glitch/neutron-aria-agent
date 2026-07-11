@@ -4,11 +4,14 @@ import os
 import tempfile
 import unittest
 
+from neutron_aria.db.aria_acl.api import AriaAclNotFound
 from neutron_aria.db.aria_acl.api import AriaAclValidationError
 from neutron_aria.db.aria_acl.api import SqliteAriaAclRepository
 from neutron_aria.db.migration import aria_acl_initial
 from neutron_aria.extensions import aria_acl
 from neutron_aria.policies import aria_acl as aria_acl_policy
+from neutron_aria.services.aria_acl.exceptions import AriaAclBadRequest
+from neutron_aria.services.aria_acl.exceptions import map_repository_error
 from neutron_aria.services.aria_acl.plugin import AriaAclAgentNotifier
 from neutron_aria.services.aria_acl.plugin import AriaAclPlugin
 
@@ -118,9 +121,19 @@ class FakePreparedClient(object):
 
 
 class AriaAclPluginTestCase(unittest.TestCase):
+    def test_repository_errors_map_to_legacy_http_semantics(self):
+        bad_request = map_repository_error(AriaAclValidationError("invalid"))
+        not_found = map_repository_error(AriaAclNotFound("missing"))
+        self.assertEqual(400, bad_request.status_code)
+        self.assertEqual(404, not_found.status_code)
+
+    def test_unexpected_repository_error_is_not_mapped(self):
+        error = RuntimeError("database offline")
+        self.assertIs(error, map_repository_error(error))
+
     def test_policy_rejects_unsupported_default_deny(self):
         plugin = AriaAclPlugin()
-        with self.assertRaises(AriaAclValidationError):
+        with self.assertRaises(AriaAclBadRequest):
             plugin.create_aria_acl_policy(None, {
                 "aria_acl_policy": {
                     "project_id": "project-1",
@@ -147,7 +160,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 "action": "allow",
             }
         })
-        with self.assertRaises(AriaAclValidationError):
+        with self.assertRaises(AriaAclBadRequest):
             plugin.create_aria_acl_rule(None, {
                 "aria_acl_rule": {
                     "id": "rule-2",
@@ -178,7 +191,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 "target_id": "port-1",
             }
         })
-        with self.assertRaises(AriaAclValidationError):
+        with self.assertRaises(AriaAclBadRequest):
             plugin.create_aria_acl_binding(None, {
                 "aria_acl_binding": {
                     "id": "binding-2",
@@ -527,13 +540,13 @@ class AriaAclPluginTestCase(unittest.TestCase):
         })
 
         self.assertRaises(
-            AriaAclValidationError,
+            AriaAclBadRequest,
             plugin.delete_aria_acl_policy,
             None,
             "policy-1",
         )
         self.assertRaises(
-            AriaAclValidationError,
+            AriaAclBadRequest,
             plugin.delete_aria_acl_address_set,
             None,
             "set-1",
@@ -629,7 +642,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         plugin = AriaAclPlugin()
 
         self.assertRaises(
-            AriaAclValidationError,
+            AriaAclBadRequest,
             plugin.create_aria_acl_binding,
             None,
             {
@@ -649,7 +662,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         })
 
         self.assertRaises(
-            AriaAclValidationError,
+            AriaAclBadRequest,
             plugin.create_aria_acl_rule,
             None,
             {
@@ -670,7 +683,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         })
 
         self.assertRaises(
-            AriaAclValidationError,
+            AriaAclBadRequest,
             plugin.create_aria_acl_binding,
             None,
             {
