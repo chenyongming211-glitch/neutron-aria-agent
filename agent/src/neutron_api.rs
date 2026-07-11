@@ -195,6 +195,37 @@ struct AclEffectivePolicyKey {
 struct AclApplyPlan {
     groups: Vec<AclGroupPlan>,
     policies: Vec<AclPolicyPlan>,
+    conntrack_enabled: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AclRuntimeFeatureState {
+    conntrack_enabled: bool,
+    acl_enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AclRuntimeTransition {
+    quiesce: AclRuntimeFeatureState,
+    publish: AclRuntimeFeatureState,
+}
+
+fn acl_runtime_transition(
+    plan: &AclApplyPlan,
+    preserved_conntrack_enabled: bool,
+) -> AclRuntimeTransition {
+    AclRuntimeTransition {
+        quiesce: AclRuntimeFeatureState {
+            conntrack_enabled: false,
+            acl_enabled: false,
+        },
+        publish: AclRuntimeFeatureState {
+            conntrack_enabled: plan
+                .conntrack_enabled
+                .unwrap_or(preserved_conntrack_enabled),
+            acl_enabled: !plan.policies.is_empty(),
+        },
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3375,7 +3406,10 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
         || !acl.status.eq_ignore_ascii_case("ready")
         || !acl.effective_action.eq_ignore_ascii_case("enforce")
     {
-        return Ok(AclApplyPlan::default());
+        return Ok(AclApplyPlan {
+            conntrack_enabled: Some(acl.stateful),
+            ..AclApplyPlan::default()
+        });
     }
 
     let default_action = normalize_default_action(&acl.default_action);
@@ -3450,6 +3484,7 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
     Ok(AclApplyPlan {
         groups,
         policies: policies_by_key.into_values().collect(),
+        conntrack_enabled: Some(acl.stateful),
     })
 }
 
@@ -3558,6 +3593,18 @@ async fn reconcile_neutron_acl(
         None => AclApplyPlan::default(),
     };
     let translate_ms = elapsed_ms(translate_started);
+    let preserved_conntrack_enabled = if plan.conntrack_enabled.is_none() {
+        state
+            .control_plane
+            .get_config(&port.ifname)
+            .await
+            .map_err(|e| NeutronAclReconcileError::unchanged(e.to_string()))?
+            .conntrack_enabled
+            != 0
+    } else {
+        false
+    };
+    let transition = acl_runtime_transition(&plan, preserved_conntrack_enabled);
     let group_count = plan.groups.len();
     let group_cidr_count: usize = plan.groups.iter().map(|group| group.cidrs.len()).sum();
     let policy_count = plan.policies.len();
@@ -3568,9 +3615,9 @@ async fn reconcile_neutron_acl(
             .control_plane
             .update_config(
                 &port.ifname,
+                Some(transition.quiesce.conntrack_enabled),
                 None,
-                None,
-                Some(false),
+                Some(transition.quiesce.acl_enabled),
                 None,
                 None,
                 None,
@@ -3647,6 +3694,22 @@ async fn reconcile_neutron_acl(
             .await
             .map_err(NeutronAclReconcileError::bypass)?;
         let flush_ms = elapsed_ms(flush_started);
+        let publish_started = Instant::now();
+        state
+            .control_plane
+            .update_config(
+                &port.ifname,
+                Some(transition.publish.conntrack_enabled),
+                None,
+                Some(transition.publish.acl_enabled),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| NeutronAclReconcileError::bypass(e.to_string()))?;
+        let publish_ms = elapsed_ms(publish_started);
         info!(
             port_id = %port.port_id,
             ifname = %port.ifname,
@@ -3668,6 +3731,7 @@ async fn reconcile_neutron_acl(
             port_set_delete_count = replace_report.port_set_delete_count,
             compact_ms = replace_report.compact_ms,
             flush_ms,
+            publish_ms,
             total_ms = elapsed_ms(profile_started),
             "neutron_acl_apply_profile"
         );
@@ -3682,13 +3746,22 @@ async fn reconcile_neutron_acl(
     fault_injection::check("neutron.acl.before_enable")
         .await
         .map_err(NeutronAclReconcileError::bypass)?;
-    let enable_started = Instant::now();
+    let publish_started = Instant::now();
     state
         .control_plane
-        .update_config(&port.ifname, None, None, Some(true), None, None, None, None)
+        .update_config(
+            &port.ifname,
+            Some(transition.publish.conntrack_enabled),
+            None,
+            Some(transition.publish.acl_enabled),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .map_err(|e| NeutronAclReconcileError::bypass(e.to_string()))?;
-    let enable_ms = elapsed_ms(enable_started);
+    let publish_ms = elapsed_ms(publish_started);
     info!(
         port_id = %port.port_id,
         ifname = %port.ifname,
@@ -3709,7 +3782,7 @@ async fn reconcile_neutron_acl(
         replace_ms,
         compact_ms = replace_report.compact_ms,
         flush_ms,
-        enable_ms,
+        publish_ms,
         total_ms = elapsed_ms(profile_started),
         "neutron_acl_apply_profile"
     );
@@ -3718,7 +3791,7 @@ async fn reconcile_neutron_acl(
             .control_plane
             .update_config(
                 &port.ifname,
-                None,
+                Some(false),
                 None,
                 Some(false),
                 None,
@@ -6317,6 +6390,7 @@ mod tests {
                 direction: 1,
                 ports: None,
             }],
+            conntrack_enabled: Some(true),
         };
 
         assert_eq!(

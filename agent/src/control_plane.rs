@@ -230,7 +230,11 @@ pub enum ControlPlaneError {
     ValidationError(String),
     KernelError(String),
     InstanceNotReady(String),
-    LocalWriteBlocked { instance: String, domain: String },
+    LocalWriteBlocked {
+        instance: String,
+        domain: String,
+        dependency_of: Option<String>,
+    },
 }
 
 impl std::fmt::Display for ControlPlaneError {
@@ -243,7 +247,20 @@ impl std::fmt::Display for ControlPlaneError {
             Self::ValidationError(s) => write!(f, "Validation error: {}", s),
             Self::KernelError(s) => write!(f, "Kernel error: {}", s),
             Self::InstanceNotReady(s) => write!(f, "Instance not ready: {}", s),
-            Self::LocalWriteBlocked { instance, domain } => write!(
+            Self::LocalWriteBlocked {
+                instance,
+                domain,
+                dependency_of: Some(dependency),
+            } => write!(
+                f,
+                "LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN: instance '{}' domain '{}' is managed by Neutron as a dependency of '{}'; update this domain through Neutron",
+                instance, domain, dependency
+            ),
+            Self::LocalWriteBlocked {
+                instance,
+                domain,
+                dependency_of: None,
+            } => write!(
                 f,
                 "LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN: instance '{}' domain '{}' is managed by Neutron; update this domain through Neutron",
                 instance, domain
@@ -768,14 +785,22 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let domain_name = domain.as_str();
         let authorities = self.neutron_authorities.read().await;
-        if authorities
-            .get(instance)
-            .map(|authority| authority.managed_domains.contains(domain_name))
-            .unwrap_or(false)
-        {
+        let block = authorities.get(instance).and_then(|authority| {
+            if authority.managed_domains.contains(domain_name) {
+                Some(None)
+            } else if domain == LocalWriteDomain::Conntrack
+                && authority.managed_domains.contains("acl")
+            {
+                Some(Some("acl".to_string()))
+            } else {
+                None
+            }
+        });
+        if let Some(dependency_of) = block {
             return Err(ControlPlaneError::LocalWriteBlocked {
                 instance: instance.to_string(),
                 domain: domain_name.to_string(),
+                dependency_of,
             });
         }
         Ok(())
@@ -796,6 +821,7 @@ impl ControlPlane {
                 return Err(ControlPlaneError::LocalWriteBlocked {
                     instance: instance.to_string(),
                     domain: "acl".to_string(),
+                    dependency_of: None,
                 });
             }
         }
