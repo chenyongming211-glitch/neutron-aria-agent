@@ -326,6 +326,7 @@ impl NeutronApiState {
             runtime.clone()
         };
         let mut degraded = results.iter().any(|result| result.status == "blocked");
+        let mut successfully_claimed_ports = Vec::new();
         for port in &ports {
             let Some(result) = results
                 .iter()
@@ -358,6 +359,9 @@ impl NeutronApiState {
                     ),
                 ),
             );
+            if result.status == "ready" {
+                successfully_claimed_ports.push(port.clone());
+            }
         }
         for result in results
             .iter()
@@ -368,9 +372,19 @@ impl NeutronApiState {
             }
         }
 
+        let acl_requires_full_resync = invalidate_restarted_acl_runtime(
+            &mut next_runtime,
+            &successfully_claimed_ports,
+        );
+
         if degraded {
             next_runtime.authority_state = "runtime_degraded".to_string();
             next_runtime.wal_status = "runtime_reconcile_degraded".to_string();
+        } else if acl_requires_full_resync {
+            next_runtime.authority_state =
+                "runtime_reconcile_requires_full_resync".to_string();
+            next_runtime.wal_status =
+                "runtime_reconciled_acl_resync_required".to_string();
         } else if next_runtime.pending_generation.is_none() {
             next_runtime.authority_state = "ready".to_string();
             next_runtime.wal_status = "runtime_reconciled".to_string();
@@ -379,9 +393,10 @@ impl NeutronApiState {
         }
 
         if let Err(e) = self.wal.append_snapshot_commit(next_runtime.to_wal_state()) {
+            next_runtime.authority_state = "wal_runtime_reconcile_commit_failed".to_string();
+            next_runtime.wal_status = "commit_failed".to_string();
             let mut runtime = self.runtime.write().await;
-            runtime.authority_state = "wal_runtime_reconcile_commit_failed".to_string();
-            runtime.wal_status = "commit_failed".to_string();
+            *runtime = next_runtime;
             warn!(error = %e, "failed to commit Neutron runtime reconciliation state");
             return;
         }
@@ -2315,6 +2330,59 @@ fn runtime_domain_statuses_for(
         .into_iter()
         .map(|domain| domain_status(&domain, status, reason.clone()))
         .collect()
+}
+
+fn invalidate_restarted_acl_runtime(
+    runtime: &mut NeutronRuntimeState,
+    successfully_claimed_ports: &[ManagedNeutronPort],
+) -> bool {
+    let mut invalidated = false;
+    for port in successfully_claimed_ports {
+        if !normalize_managed_domains(&port.managed_domains)
+            .iter()
+            .any(|domain| domain == "acl")
+        {
+            continue;
+        }
+
+        let Some(restored) = runtime.ports.get_mut(&port.port_id) else {
+            continue;
+        };
+        restored.domain_desired_hashes.remove("acl");
+
+        let reason = "acl_restart_replay_requires_resync".to_string();
+        let Some(status) = runtime.port_statuses.get_mut(&port.port_id) else {
+            continue;
+        };
+        let mut domains: BTreeMap<String, NeutronDomainStatus> = status
+            .domains
+            .drain(..)
+            .map(|domain| (domain.domain.clone(), domain))
+            .collect();
+        domains.insert(
+            "attach".to_string(),
+            domain_status("attach", "ready", None),
+        );
+        domains.insert(
+            "acl".to_string(),
+            domain_status_with_action(
+                "acl",
+                "degraded",
+                Some(reason.clone()),
+                Some("unchanged".to_string()),
+            ),
+        );
+        status.status = "degraded".to_string();
+        status.reason = Some(reason);
+        status.domains = domains.into_values().collect();
+        invalidated = true;
+    }
+
+    if invalidated {
+        runtime.authority_state = "runtime_reconcile_requires_full_resync".to_string();
+        runtime.wal_status = "runtime_reconciled_acl_resync_required".to_string();
+    }
+    invalidated
 }
 
 fn blocked_by_unimplemented_domains(domains: &[String]) -> String {
