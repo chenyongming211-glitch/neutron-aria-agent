@@ -397,6 +397,15 @@ class RecoveringRemotePendingClient(FakeLocalClient):
         return self.pending_status
 
 
+class FailingRemotePendingRecoveryClient(RecoveringRemotePendingClient):
+    def recover_pending_snapshot(self, expected_generation, expected_desired_hash=None):
+        self.recoveries.append({
+            "expected_generation": expected_generation,
+            "expected_desired_hash": expected_desired_hash,
+        })
+        raise LocalApiError("pending recovery failed")
+
+
 class StalePendingThenConvergedLocalClient(FakeLocalClient):
     def __init__(self, stale_status):
         FakeLocalClient.__init__(self)
@@ -851,6 +860,134 @@ class EventLoopTestCase(unittest.TestCase):
                 second_result["snapshot"]["generation"],
             )
             self.assertTrue(second_result["status"]["ready"])
+        finally:
+            shutil.rmtree(state_dir)
+
+    def test_remote_pending_action_recovers_blocked_same_hash(self):
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        action = sync._remote_pending_action({}, {
+            "accepted_generation": 10,
+            "applied_generation": 10,
+            "pending_generation": 11,
+            "desired_hash": "hash-11",
+            "applied_desired_hash": "hash-10",
+            "authority_state": "blocked_recovery_required",
+        }, "hash-11")
+
+        self.assertEqual("recover", action["action"])
+        self.assertEqual(11, action["generation"])
+        self.assertEqual("hash-11", action["remote_desired_hash"])
+
+    def test_full_resync_recovers_blocked_same_hash_before_submit(self):
+        port_source = StaticPortSource([{
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+        probe = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        ).full_resync()
+        desired_hash = probe["snapshot"]["desired_hash"]
+        local_client = RecoveringRemotePendingClient({
+            "generation": 11,
+            "accepted_generation": 10,
+            "applied_generation": 10,
+            "pending_generation": 11,
+            "desired_hash": desired_hash,
+            "applied_desired_hash": "hash-10",
+            "authority_state": "blocked_recovery_required",
+            "managed_ports": [],
+            "active_instances": [],
+        })
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            timeout_convergence_attempts=1,
+            timeout_convergence_interval=0,
+        )
+
+        result = sync.full_resync()
+
+        self.assertEqual([{
+            "expected_generation": 11,
+            "expected_desired_hash": desired_hash,
+        }], local_client.recoveries)
+        self.assertEqual(1, len(local_client.snapshots))
+        self.assertGreater(result["snapshot"]["generation"], 10)
+        self.assertTrue(result["status"]["ready"])
+
+    def test_failed_blocked_same_hash_recovery_preserves_local_pending(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            port_source = StaticPortSource([{
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "device_owner": "compute:nova",
+                "binding:host_id": "ostack2",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+            }])
+            probe = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                FakeLocalClient(),
+                managed_domains=["acl"],
+            ).full_resync()
+            desired_hash = probe["snapshot"]["desired_hash"]
+            store = SnapshotStateStore(state_dir)
+            store.prepare_snapshot_at_generation(
+                probe["snapshot"],
+                11,
+                desired_hash=desired_hash,
+            )
+            local_client = FailingRemotePendingRecoveryClient({
+                "generation": 11,
+                "accepted_generation": 10,
+                "applied_generation": 10,
+                "pending_generation": 11,
+                "desired_hash": desired_hash,
+                "applied_desired_hash": "hash-10",
+                "authority_state": "blocked_recovery_required",
+                "managed_ports": [],
+                "active_instances": [],
+            })
+            sync = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                local_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+                timeout_convergence_attempts=1,
+                timeout_convergence_interval=0,
+            )
+
+            result = sync.safe_full_resync()
+            pending = SnapshotStateStore(state_dir).pending_snapshot()
+
+            self.assertEqual([{
+                "expected_generation": 11,
+                "expected_desired_hash": desired_hash,
+            }], local_client.recoveries)
+            self.assertEqual([], local_client.snapshots)
+            self.assertTrue(result["status"]["degraded"])
+            self.assertEqual(11, pending["generation"])
+            self.assertEqual(desired_hash, pending["desired_hash"])
         finally:
             shutil.rmtree(state_dir)
 
