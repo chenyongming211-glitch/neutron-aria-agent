@@ -345,7 +345,9 @@ The smoke must prove both TC directions with IPv4 and IPv6 when available:
   managed QoS is rejected;
 - bank transition captures the pre-existing controlled-flow CT entry before
   Neutron resync, proves the strict publication flush leaves zero matching CT,
-  then requires a first `ct_miss`, exact counter recreation, and later hits;
+  then requires a first `ct_miss`, later hits, and exact packet/byte recreation;
+  the byte assertion uses `stateful-egress-after` as the same-flow, same-`2*N`
+  observation reference rather than accepting any positive byte count;
 - CT packet/byte deltas are not doubled on ingress;
 - both required TC link pins are present before enforcement; missing-link
   rejection is proved by the exact host-side readiness tests without
