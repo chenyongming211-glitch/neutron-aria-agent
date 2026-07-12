@@ -2,8 +2,8 @@
 
 Date: 2026-07-12
 
-Status: initial hardening implemented and verified; selector-resource addendum
-approved in conversation and pending written-spec review
+Status: initial hardening and selector-resource addendum implemented, reviewed,
+and verified
 
 ## Goal
 
@@ -374,6 +374,45 @@ Implementation evidence:
   userspace static, agent static, and binary verification passed.
 - No local Cargo command was run, and the pre-existing `README.md` worktree
   modification was not staged or committed.
+
+Selector-resource closure evidence:
+
+- Python RED commit `5f4df94` added the selector-table/ID/sweep contracts.
+  The focused module ran 37 tests with the expected five errors because
+  `_acl_validation_view` did not exist; the existing public DTO defensive-copy
+  contract continued to pass.
+- Python GREEN commit `dbff51d` added independent source/destination selector
+  tables, ID-only validation rules, and the per-side heap sweep. The focused
+  module passed 37/37, the full Python suite passed 276/276, Stage 1 passed
+  276/276, Stage 2 passed 146/146, and `git diff --check` passed.
+- Rust RED commit `d96c8b4` added the ID-only normalized-rule, retained-table,
+  sweep, nesting, independent-ID-space, and cached group-rendering contracts.
+  GitHub Build
+  [`29180675411`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29180675411)
+  failed with the expected 21 compiler errors for the absent
+  `AclSelectorId`, selector-ID fields, retained selector tables, and
+  three-argument overlap validator. The Python adapter remained green; the
+  workflow stopped when Stage 1 invoked its persistent Rust tests.
+- Rust GREEN commit `0d89b6f` implemented the retained interned tables and
+  interval sweep. GitHub Build
+  [`29180820079`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29180820079)
+  passed Python 276/276, Stage 2 146/146, the persistent `neutron_acl_` filter
+  28/28, eBPF build and artifact discovery, static userspace and agent builds,
+  and static binary verification.
+
+The closed representation has no selector vectors in retained normalized
+rules and no selector-pair relation cache. Source and destination tables own
+each unique canonical selector once, with ID `0` reserved for `any`. CIDR work
+is one deterministic `O(T log T)` interval sweep per side; storage is
+proportional to input rules plus unique selector members and sweep state. The
+remaining worst-case 499,500 rule pairs compare selector IDs and behavior
+fields only.
+
+This closure is runtime-only. It changes Python policy validation and Rust
+request-scoped validated-template representation, but not Neutron API quotas,
+the UDS/public effective-ACL DTO, datapath maps, policy ordering semantics,
+limits, stable reasons, group-name format, cache lifetime, force-bypass
+classification, or readiness boundaries.
 
 ## Completion Criteria
 
