@@ -334,6 +334,7 @@ def _acl_overlap_reason(validation):
 
     src_best = best_by_side["src"]
     dst_best = best_by_side["dst"]
+    cidr_candidate = None
     if src_best is not None or dst_best is not None:
         if dst_best is None or (src_best is not None and src_best <= dst_best):
             side = "src"
@@ -341,15 +342,18 @@ def _acl_overlap_reason(validation):
         else:
             side = "dst"
             left_index, right_index = dst_best
-        left = normalized[left_index]
-        right = normalized[right_index]
-        return "unsupported_acl_cidr_overlap:%s:%s:%s:%s:%s" % (
-            side, left["id"], left["priority"],
-            right["id"], right["priority"],
-        )
+        cidr_candidate = (left_index, right_index, side)
 
     for left_index, left in enumerate(normalized):
-        for right in normalized[left_index + 1:]:
+        for right_index in range(left_index + 1, len(normalized)):
+            right = normalized[right_index]
+            if (cidr_candidate is not None and
+                    cidr_candidate[:2] == (left_index, right_index)):
+                return "unsupported_acl_cidr_overlap:%s:%s:%s:%s:%s" % (
+                    cidr_candidate[2], left["id"], left["priority"],
+                    right["id"], right["priority"],
+                )
+
             relations = {}
             for side in ("src", "dst"):
                 left_selector_id = left[side + "_selector_id"]

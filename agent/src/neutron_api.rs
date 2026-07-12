@@ -3865,24 +3865,25 @@ fn acl_priority_overlap_reason(
     }
     let src_best = acl_selector_best_overlap(src_selectors, &src_first_rule_indexes);
     let dst_best = acl_selector_best_overlap(dst_selectors, &dst_first_rule_indexes);
-    let best = match (src_best, dst_best) {
-        (Some(src), Some(dst)) if src <= dst => Some(("src", src)),
-        (Some(_), Some(dst)) => Some(("dst", dst)),
-        (Some(src), None) => Some(("src", src)),
-        (None, Some(dst)) => Some(("dst", dst)),
+    let cidr_candidate = match (src_best, dst_best) {
+        (Some(src), Some(dst)) if src <= dst => Some((src.0, src.1, "src")),
+        (Some(_), Some(dst)) => Some((dst.0, dst.1, "dst")),
+        (Some(src), None) => Some((src.0, src.1, "src")),
+        (None, Some(dst)) => Some((dst.0, dst.1, "dst")),
         (None, None) => None,
     };
-    if let Some((side, (left_index, right_index))) = best {
-        let left = ordered[left_index];
-        let right = ordered[right_index];
-        return Some(format!(
-            "unsupported_acl_cidr_overlap:{}:{}:{}:{}:{}",
-            side, left.id, left.priority, right.id, right.priority
-        ));
-    }
 
     for (left_index, left) in ordered.iter().enumerate() {
-        for right in ordered.iter().skip(left_index + 1) {
+        for (right_index, right) in ordered.iter().enumerate().skip(left_index + 1) {
+            if let Some((cidr_left_index, cidr_right_index, side)) = cidr_candidate {
+                if (left_index, right_index) == (cidr_left_index, cidr_right_index) {
+                    return Some(format!(
+                        "unsupported_acl_cidr_overlap:{}:{}:{}:{}:{}",
+                        side, left.id, left.priority, right.id, right.priority
+                    ));
+                }
+            }
+
             let src_relation =
                 acl_selector_relation(left.src_selector_id, right.src_selector_id);
             let dst_relation =
