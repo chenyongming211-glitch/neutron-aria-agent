@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 
 import copy
+import heapq
 
 from neutron_aria.acl_contract import AclContractError
 from neutron_aria.acl_contract import validate_address_set_reference
@@ -150,16 +151,6 @@ def _canonical_ipv4_strings(cidrs):
     return [parsed[key] for key in sorted(parsed)]
 
 
-def _ipv4_cidrs_intersect(left, right):
-    for left_network, left_prefix in left:
-        for right_network, right_prefix in right:
-            prefix = min(left_prefix, right_prefix)
-            mask = 0 if prefix == 0 else ((0xffffffff << (32 - prefix)) & 0xffffffff)
-            if (left_network & mask) == (right_network & mask):
-                return True
-    return False
-
-
 def _normalized_protocol(protocol):
     value = str(protocol or "any").strip().lower()
     known = {"any": 0, "tcp": 6, "udp": 17, "icmp": 1}
@@ -198,24 +189,29 @@ def _datapath_directions(direction):
     return frozenset((1,)) if value == "ingress" else frozenset((0,))
 
 
-def _selector_relation(left, right, cache):
-    key = (left, right) if left <= right else (right, left)
-    if key not in cache:
-        if left == right:
-            relation = SELECTOR_IDENTICAL
-        elif not left or not right:
-            relation = SELECTOR_INTERSECTING
-        elif _ipv4_cidrs_intersect(left, right):
-            relation = SELECTOR_INTERSECTING
-        else:
-            relation = SELECTOR_DISJOINT
-        cache[key] = relation
-    return cache[key]
+def _intern_selector(cidrs, selectors, selector_ids):
+    selector = tuple(cidrs or ())
+    if not selector:
+        return 0
+    selector_id = selector_ids.get(selector)
+    if selector_id is None:
+        selector_id = len(selectors)
+        selector_ids[selector] = selector_id
+        selectors.append(selector)
+    return selector_id
 
 
-def _acl_overlap_reason(compiled_rules):
+def _acl_validation_view(compiled_rules):
+    src_selectors = [()]
+    dst_selectors = [()]
+    src_selector_ids = {}
+    dst_selector_ids = {}
     normalized = []
-    for rule in compiled_rules:
+    for rule in sorted(compiled_rules, key=lambda item: (
+            _normalized_direction(item.get("direction")),
+            int(item.get("priority") or 0),
+            str(item.get("id") or ""),
+    )):
         normalized.append({
             "id": str(rule.get("id") or ""),
             "direction": _normalized_direction(rule.get("direction")),
@@ -223,31 +219,124 @@ def _acl_overlap_reason(compiled_rules):
             "action": _normalized_action(rule.get("action")),
             "protocol": _normalized_protocol(rule.get("protocol")),
             "directions": _datapath_directions(rule.get("direction")),
-            "src_cidrs": _canonical_ipv4_cidrs(rule.get("src_cidrs")),
-            "dst_cidrs": _canonical_ipv4_cidrs(rule.get("dst_cidrs")),
+            "src_selector_id": _intern_selector(
+                rule.get("src_cidrs"), src_selectors, src_selector_ids,
+            ),
+            "dst_selector_id": _intern_selector(
+                rule.get("dst_cidrs"), dst_selectors, dst_selector_ids,
+            ),
             "ports": _normalized_ports(rule),
         })
-    normalized.sort(key=lambda rule: (
-        rule["direction"], rule["priority"], rule["id"],
-    ))
-    relation_cache = {}
+    return {
+        "rules": normalized,
+        "src_selectors": tuple(src_selectors),
+        "dst_selectors": tuple(dst_selectors),
+    }
+
+
+def _selector_relation(left_id, right_id):
+    if left_id == right_id:
+        return SELECTOR_IDENTICAL
+    if left_id == 0 or right_id == 0:
+        return SELECTOR_INTERSECTING
+    return SELECTOR_DISJOINT
+
+
+def _prune_active_selector_heap(active_selector_heap, active_tokens):
+    while active_selector_heap:
+        selector_id, token = active_selector_heap[0]
+        if active_tokens.get(selector_id) == token:
+            return
+        heapq.heappop(active_selector_heap)
+
+
+def _other_active_selector(active_selector_heap, active_tokens, selector_id):
+    _prune_active_selector_heap(active_selector_heap, active_tokens)
+    if not active_selector_heap:
+        return None
+    if active_selector_heap[0][0] != selector_id:
+        return active_selector_heap[0][0]
+
+    current = heapq.heappop(active_selector_heap)
+    _prune_active_selector_heap(active_selector_heap, active_tokens)
+    other = active_selector_heap[0][0] if active_selector_heap else None
+    heapq.heappush(active_selector_heap, current)
+    return other
+
+
+def _selector_overlap_pair(selectors):
+    intervals = []
+    for selector_id, selector in enumerate(selectors):
+        if selector_id == 0:
+            continue
+        for network, prefix in _canonical_ipv4_cidrs(selector):
+            host_mask = 0 if prefix == 32 else (1 << (32 - prefix)) - 1
+            intervals.append((network, network | host_mask, selector_id))
+    intervals.sort()
+
+    active_intervals = []
+    active_counts = {}
+    active_selector_heap = []
+    active_tokens = {}
+    next_token = 0
+    for start, end, selector_id in intervals:
+        while active_intervals and active_intervals[0][0] < start:
+            _, expired_selector_id = heapq.heappop(active_intervals)
+            remaining = active_counts[expired_selector_id] - 1
+            if remaining:
+                active_counts[expired_selector_id] = remaining
+            else:
+                del active_counts[expired_selector_id]
+                active_tokens.pop(expired_selector_id, None)
+
+        other_selector_id = _other_active_selector(
+            active_selector_heap, active_tokens, selector_id,
+        )
+        if other_selector_id is not None:
+            return tuple(sorted((selector_id, other_selector_id)))
+
+        if selector_id not in active_counts:
+            next_token += 1
+            active_tokens[selector_id] = next_token
+            heapq.heappush(
+                active_selector_heap, (selector_id, next_token),
+            )
+            active_counts[selector_id] = 0
+        active_counts[selector_id] += 1
+        heapq.heappush(active_intervals, (end, selector_id))
+    return None
+
+
+def _selector_overlap_reason(rules, side, selector_pair):
+    selector_key = side + "_selector_id"
+    selector_ids = frozenset(selector_pair)
+    for left_index, left in enumerate(rules):
+        for right in rules[left_index + 1:]:
+            if frozenset((
+                    left[selector_key], right[selector_key],
+            )) == selector_ids:
+                return "unsupported_acl_cidr_overlap:%s:%s:%s:%s:%s" % (
+                    side, left["id"], left["priority"],
+                    right["id"], right["priority"],
+                )
+    return None
+
+
+def _acl_overlap_reason(validation):
+    normalized = validation["rules"]
+    for side in ("src", "dst"):
+        selector_pair = _selector_overlap_pair(validation[side + "_selectors"])
+        if selector_pair is not None:
+            return _selector_overlap_reason(normalized, side, selector_pair)
 
     for left_index, left in enumerate(normalized):
         for right in normalized[left_index + 1:]:
             relations = {}
             for side in ("src", "dst"):
-                left_cidrs = left[side + "_cidrs"]
-                right_cidrs = right[side + "_cidrs"]
-                relation = _selector_relation(
-                    left_cidrs, right_cidrs, relation_cache,
+                relations[side] = _selector_relation(
+                    left[side + "_selector_id"],
+                    right[side + "_selector_id"],
                 )
-                relations[side] = relation
-                if (left_cidrs and right_cidrs and
-                        relation == SELECTOR_INTERSECTING):
-                    return "unsupported_acl_cidr_overlap:%s:%s:%s:%s:%s" % (
-                        side, left["id"], left["priority"],
-                        right["id"], right["priority"],
-                    )
 
             if not (left["directions"] & right["directions"]):
                 continue
@@ -261,8 +350,8 @@ def _acl_overlap_reason(compiled_rules):
 
             same_key = (
                 left["protocol"] == right["protocol"] and
-                left["src_cidrs"] == right["src_cidrs"] and
-                left["dst_cidrs"] == right["dst_cidrs"]
+                left["src_selector_id"] == right["src_selector_id"] and
+                left["dst_selector_id"] == right["dst_selector_id"]
             )
             same_behavior = (
                 left["action"] == right["action"] and
@@ -477,7 +566,7 @@ class EffectiveAclIndex(object):
                 continue
             compiled.append(compiled_rule)
 
-        overlap_reason = _acl_overlap_reason(compiled)
+        overlap_reason = _acl_overlap_reason(_acl_validation_view(compiled))
         if overlap_reason:
             reasons.append(overlap_reason)
 
