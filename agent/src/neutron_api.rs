@@ -6509,6 +6509,68 @@ mod tests {
     }
 
     #[test]
+    fn neutron_acl_translator_trims_protocol_before_parsing() {
+        let acl = ready_acl(vec![acl_rule_with(
+            "trimmed-protocol",
+            10,
+            " TCP ",
+            "drop",
+            &[],
+            &[],
+            None,
+        )]);
+
+        let plan = translate_neutron_acl("port-1", &acl)
+            .expect("protocol whitespace and case should normalize");
+
+        assert_eq!(plan.policies.len(), 1);
+        assert_eq!(plan.policies[0].proto, 6);
+        assert_eq!(plan.force_bypass_reason, None);
+    }
+
+    #[test]
+    fn neutron_acl_translator_trims_action_before_parsing() {
+        let acl = ready_acl(vec![acl_rule_with(
+            "trimmed-action",
+            10,
+            "tcp",
+            " DENY ",
+            &[],
+            &[],
+            None,
+        )]);
+
+        let plan = translate_neutron_acl("port-1", &acl)
+            .expect("action whitespace and case should normalize");
+
+        assert_eq!(plan.policies.len(), 1);
+        assert_eq!(plan.policies[0].action, 1);
+        assert_eq!(plan.force_bypass_reason, None);
+    }
+
+    #[test]
+    fn neutron_acl_translator_trims_direction_before_parsing() {
+        let mut rule = acl_rule_with(
+            "trimmed-direction",
+            10,
+            "tcp",
+            "drop",
+            &[],
+            &[],
+            None,
+        );
+        rule.direction = Some(" InGrEsS ".to_string());
+        let acl = ready_acl(vec![rule]);
+
+        let plan = translate_neutron_acl("port-1", &acl)
+            .expect("direction whitespace and case should normalize");
+
+        assert_eq!(plan.policies.len(), 1);
+        assert_eq!(plan.policies[0].direction, 1);
+        assert_eq!(plan.force_bypass_reason, None);
+    }
+
+    #[test]
     fn neutron_acl_translator_force_bypasses_nested_cidrs() {
         let acl = ready_acl(vec![
             acl_rule_with("broad", 10, "tcp", "allow", &["10.0.0.0/8"], &[], None),

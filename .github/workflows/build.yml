@@ -185,6 +185,7 @@ jobs:
         if: steps.rust_changes.outputs.rust_required == 'true'
         run: |
           python3 ci/check_neutron_stage1.py --require-rust --rust-toolchain stable
+          cargo +stable test --locked -p aria-agent neutron_acl_
           cargo +stable test -p aria-agent startup_mode
           cargo +stable test -p aria-agent domain_authority
 
