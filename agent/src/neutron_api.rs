@@ -16,7 +16,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 use std::process::Command;
 use std::sync::Arc;
@@ -251,14 +252,13 @@ impl AclIpv4Cidr {
         })
     }
 
-    fn intersects(self, other: Self) -> bool {
-        let prefix = self.prefix.min(other.prefix);
-        let mask = if prefix == 0 {
+    fn end(self) -> u32 {
+        let host_mask = if self.prefix == 32 {
             0
         } else {
-            u32::MAX << (32 - prefix)
+            u32::MAX >> self.prefix
         };
-        (self.network & mask) == (other.network & mask)
+        self.network | host_mask
     }
 
     fn canonical(self) -> String {
@@ -270,8 +270,19 @@ impl AclIpv4Cidr {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct AclSelectorId(usize);
+
+impl AclSelectorId {
+    const ANY: Self = Self(0);
+
+    fn group_ordinal(self) -> usize {
+        self.0 - 1
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct NormalizedAclRule {
+struct CanonicalAclRule {
     id: String,
     direction: String,
     priority: i64,
@@ -284,8 +295,25 @@ struct NormalizedAclRule {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct NormalizedAclRule {
+    id: String,
+    direction: String,
+    priority: i64,
+    directions: Vec<u8>,
+    proto: u8,
+    action: u8,
+    src_selector_id: AclSelectorId,
+    dst_selector_id: AclSelectorId,
+    ports: Vec<(u16, u16)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum AclValidatedTemplate {
-    Ready(Vec<NormalizedAclRule>),
+    Ready {
+        rules: Vec<NormalizedAclRule>,
+        src_selectors: Vec<Vec<AclIpv4Cidr>>,
+        dst_selectors: Vec<Vec<AclIpv4Cidr>>,
+    },
     ForceBypass(String),
 }
 
@@ -3577,7 +3605,7 @@ fn merge_acl_ports(
 fn normalize_acl_rule(
     rule: &NeutronAclRuleSnapshot,
     index: usize,
-) -> Result<NormalizedAclRule, String> {
+) -> Result<CanonicalAclRule, String> {
     let rule_id = acl_rule_id(rule, index);
     if rule
         .ethertype
@@ -3604,7 +3632,7 @@ fn normalize_acl_rule(
     directions.sort_unstable();
     directions.dedup();
 
-    Ok(NormalizedAclRule {
+    Ok(CanonicalAclRule {
         id: rule_id,
         direction: normalized_acl_direction(direction),
         priority: rule.priority,
@@ -3617,11 +3645,6 @@ fn normalize_acl_rule(
     })
 }
 
-fn acl_cidr_selectors_intersect(left: &[AclIpv4Cidr], right: &[AclIpv4Cidr]) -> bool {
-    left.iter()
-        .any(|left_cidr| right.iter().any(|right_cidr| left_cidr.intersects(*right_cidr)))
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AclSelectorRelation {
     Identical,
@@ -3630,32 +3653,176 @@ enum AclSelectorRelation {
 }
 
 fn acl_selector_relation(
-    left: &[AclIpv4Cidr],
-    right: &[AclIpv4Cidr],
-    cache: &mut BTreeMap<(Vec<AclIpv4Cidr>, Vec<AclIpv4Cidr>), AclSelectorRelation>,
+    left: AclSelectorId,
+    right: AclSelectorId,
 ) -> AclSelectorRelation {
-    let key = if left <= right {
-        (left.to_vec(), right.to_vec())
-    } else {
-        (right.to_vec(), left.to_vec())
-    };
-    if let Some(relation) = cache.get(&key) {
-        return *relation;
-    }
-    let relation = if left == right {
+    if left == right {
         AclSelectorRelation::Identical
-    } else if left.is_empty() || right.is_empty() {
-        AclSelectorRelation::Intersecting
-    } else if acl_cidr_selectors_intersect(left, right) {
+    } else if left == AclSelectorId::ANY || right == AclSelectorId::ANY {
         AclSelectorRelation::Intersecting
     } else {
         AclSelectorRelation::Disjoint
-    };
-    cache.insert(key, relation);
-    relation
+    }
 }
 
-fn acl_priority_overlap_reason(rules: &[NormalizedAclRule]) -> Option<String> {
+fn acl_selector_tables(
+    rules: &[CanonicalAclRule],
+) -> (Vec<Vec<AclIpv4Cidr>>, Vec<Vec<AclIpv4Cidr>>) {
+    let mut src_selectors = BTreeSet::new();
+    let mut dst_selectors = BTreeSet::new();
+    for rule in rules {
+        if !rule.src_cidrs.is_empty() && !src_selectors.contains(&rule.src_cidrs) {
+            src_selectors.insert(rule.src_cidrs.clone());
+        }
+        if !rule.dst_cidrs.is_empty() && !dst_selectors.contains(&rule.dst_cidrs) {
+            dst_selectors.insert(rule.dst_cidrs.clone());
+        }
+    }
+
+    let mut src_table = vec![Vec::new()];
+    src_table.extend(src_selectors);
+    let mut dst_table = vec![Vec::new()];
+    dst_table.extend(dst_selectors);
+    (src_table, dst_table)
+}
+
+fn acl_selector_id(
+    selector: &[AclIpv4Cidr],
+    selectors: &[Vec<AclIpv4Cidr>],
+) -> AclSelectorId {
+    if selector.is_empty() {
+        return AclSelectorId::ANY;
+    }
+    let ordinal = selectors[1..]
+        .binary_search_by(|candidate| candidate.as_slice().cmp(selector))
+        .expect("canonical ACL selector must be interned");
+    AclSelectorId(ordinal + 1)
+}
+
+fn intern_acl_rules(
+    canonical_rules: Vec<CanonicalAclRule>,
+) -> (
+    Vec<NormalizedAclRule>,
+    Vec<Vec<AclIpv4Cidr>>,
+    Vec<Vec<AclIpv4Cidr>>,
+) {
+    let (src_selectors, dst_selectors) = acl_selector_tables(&canonical_rules);
+    let rules = canonical_rules
+        .into_iter()
+        .map(|rule| NormalizedAclRule {
+            id: rule.id,
+            direction: rule.direction,
+            priority: rule.priority,
+            directions: rule.directions,
+            proto: rule.proto,
+            action: rule.action,
+            src_selector_id: acl_selector_id(&rule.src_cidrs, &src_selectors),
+            dst_selector_id: acl_selector_id(&rule.dst_cidrs, &dst_selectors),
+            ports: rule.ports,
+        })
+        .collect();
+    (rules, src_selectors, dst_selectors)
+}
+
+fn active_selector_other(
+    active_counts: &BTreeMap<AclSelectorId, usize>,
+    selector_id: AclSelectorId,
+) -> Option<AclSelectorId> {
+    let first = active_counts.keys().next().copied()?;
+    if first != selector_id {
+        return Some(first);
+    }
+    active_counts
+        .range((std::ops::Bound::Excluded(selector_id), std::ops::Bound::Unbounded))
+        .next()
+        .map(|(other_id, _)| *other_id)
+}
+
+fn acl_selector_overlap_pair(
+    selectors: &[Vec<AclIpv4Cidr>],
+) -> Option<(AclSelectorId, AclSelectorId)> {
+    let mut intervals = Vec::new();
+    for (selector_index, selector) in selectors.iter().enumerate().skip(1) {
+        let selector_id = AclSelectorId(selector_index);
+        for cidr in selector {
+            intervals.push((cidr.network, cidr.end(), selector_id));
+        }
+    }
+    intervals.sort_unstable();
+
+    let mut active_ends = BinaryHeap::<Reverse<(u32, AclSelectorId)>>::new();
+    let mut active_counts = BTreeMap::<AclSelectorId, usize>::new();
+    for (start, end, selector_id) in intervals {
+        while active_ends
+            .peek()
+            .map(|Reverse((active_end, _))| *active_end < start)
+            .unwrap_or(false)
+        {
+            let Reverse((_, expired_selector_id)) = active_ends
+                .pop()
+                .expect("active ACL interval heap cannot be empty after peek");
+            let count = active_counts
+                .get_mut(&expired_selector_id)
+                .expect("active ACL selector must have a count");
+            *count -= 1;
+            if *count == 0 {
+                active_counts.remove(&expired_selector_id);
+            }
+        }
+
+        if let Some(other_id) = active_selector_other(&active_counts, selector_id) {
+            return Some(if selector_id < other_id {
+                (selector_id, other_id)
+            } else {
+                (other_id, selector_id)
+            });
+        }
+
+        *active_counts.entry(selector_id).or_insert(0) += 1;
+        active_ends.push(Reverse((end, selector_id)));
+    }
+    None
+}
+
+fn ordered_selector_pair(
+    left: AclSelectorId,
+    right: AclSelectorId,
+) -> (AclSelectorId, AclSelectorId) {
+    if left < right {
+        (left, right)
+    } else {
+        (right, left)
+    }
+}
+
+fn acl_selector_overlap_reason(
+    ordered: &[&NormalizedAclRule],
+    side: &str,
+    selector_pair: (AclSelectorId, AclSelectorId),
+) -> Option<String> {
+    for (left_index, left) in ordered.iter().enumerate() {
+        for right in ordered.iter().skip(left_index + 1) {
+            let (left_selector_id, right_selector_id) = if side == "src" {
+                (left.src_selector_id, right.src_selector_id)
+            } else {
+                (left.dst_selector_id, right.dst_selector_id)
+            };
+            if ordered_selector_pair(left_selector_id, right_selector_id) == selector_pair {
+                return Some(format!(
+                    "unsupported_acl_cidr_overlap:{}:{}:{}:{}:{}",
+                    side, left.id, left.priority, right.id, right.priority
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn acl_priority_overlap_reason(
+    rules: &[NormalizedAclRule],
+    src_selectors: &[Vec<AclIpv4Cidr>],
+    dst_selectors: &[Vec<AclIpv4Cidr>],
+) -> Option<String> {
     let mut priorities = BTreeMap::<(String, i64), String>::new();
     for rule in rules {
         if rule.priority < 0 {
@@ -3681,44 +3848,19 @@ fn acl_priority_overlap_reason(rules: &[NormalizedAclRule]) -> Option<String> {
             .then_with(|| left.priority.cmp(&right.priority))
             .then_with(|| left.id.cmp(&right.id))
     });
-    let mut relation_cache = BTreeMap::new();
+
+    for (side, selectors) in [("src", src_selectors), ("dst", dst_selectors)] {
+        if let Some(selector_pair) = acl_selector_overlap_pair(selectors) {
+            return acl_selector_overlap_reason(&ordered, side, selector_pair);
+        }
+    }
 
     for (left_index, left) in ordered.iter().enumerate() {
         for right in ordered.iter().skip(left_index + 1) {
-            let src_relation = acl_selector_relation(
-                &left.src_cidrs,
-                &right.src_cidrs,
-                &mut relation_cache,
-            );
-            let dst_relation = acl_selector_relation(
-                &left.dst_cidrs,
-                &right.dst_cidrs,
-                &mut relation_cache,
-            );
-            for (side, left_cidrs, right_cidrs, selector_relation) in [
-                (
-                    "src",
-                    &left.src_cidrs,
-                    &right.src_cidrs,
-                    src_relation,
-                ),
-                (
-                    "dst",
-                    &left.dst_cidrs,
-                    &right.dst_cidrs,
-                    dst_relation,
-                ),
-            ] {
-                if !left_cidrs.is_empty()
-                    && !right_cidrs.is_empty()
-                    && selector_relation == AclSelectorRelation::Intersecting
-                {
-                    return Some(format!(
-                        "unsupported_acl_cidr_overlap:{}:{}:{}:{}:{}",
-                        side, left.id, left.priority, right.id, right.priority
-                    ));
-                }
-            }
+            let src_relation =
+                acl_selector_relation(left.src_selector_id, right.src_selector_id);
+            let dst_relation =
+                acl_selector_relation(left.dst_selector_id, right.dst_selector_id);
 
             if !left
                 .directions
@@ -3738,8 +3880,8 @@ fn acl_priority_overlap_reason(rules: &[NormalizedAclRule]) -> Option<String> {
             }
 
             let same_key = left.proto == right.proto
-                && left.src_cidrs == right.src_cidrs
-                && left.dst_cidrs == right.dst_cidrs;
+                && left.src_selector_id == right.src_selector_id
+                && left.dst_selector_id == right.dst_selector_id;
             let same_behavior = left.action == right.action && left.ports == right.ports;
             if same_behavior || (same_key && left.action == right.action) {
                 continue;
@@ -3811,14 +3953,23 @@ fn validate_neutron_acl_template(
         return Ok(AclValidatedTemplate::ForceBypass(reason));
     }
 
-    let mut normalized_rules = Vec::new();
+    let mut canonical_rules = Vec::new();
     for (index, rule) in acl.rules.iter().enumerate() {
-        normalized_rules.push(normalize_acl_rule(rule, index)?);
+        canonical_rules.push(normalize_acl_rule(rule, index)?);
     }
-    if let Some(reason) = acl_priority_overlap_reason(&normalized_rules) {
+    let (rules, src_selectors, dst_selectors) = intern_acl_rules(canonical_rules);
+    if let Some(reason) = acl_priority_overlap_reason(
+        &rules,
+        &src_selectors,
+        &dst_selectors,
+    ) {
         return Ok(AclValidatedTemplate::ForceBypass(reason));
     }
-    Ok(AclValidatedTemplate::Ready(normalized_rules))
+    Ok(AclValidatedTemplate::Ready {
+        rules,
+        src_selectors,
+        dst_selectors,
+    })
 }
 
 fn cached_neutron_acl_template(
@@ -3839,40 +3990,39 @@ fn cached_neutron_acl_template(
 fn acl_selector_registry(
     port_id: &str,
     side: &str,
-    selectors: BTreeSet<Vec<AclIpv4Cidr>>,
-) -> (
-    Vec<AclGroupPlan>,
-    BTreeMap<Vec<AclIpv4Cidr>, String>,
-) {
+    selectors: &[Vec<AclIpv4Cidr>],
+) -> Vec<AclGroupPlan> {
     let mut groups = Vec::new();
-    let mut names = BTreeMap::new();
-    for (ordinal, selector) in selectors.into_iter().enumerate() {
+    for (selector_index, selector) in selectors.iter().enumerate().skip(1) {
+        let selector_id = AclSelectorId(selector_index);
         let name = format!(
             "{}{}:selector:{}",
             neutron_acl_prefix(port_id),
             side,
-            ordinal
+            selector_id.group_ordinal()
         );
         groups.push(AclGroupPlan {
-            name: name.clone(),
+            name,
             cidrs: selector.iter().map(|cidr| cidr.canonical()).collect(),
         });
-        names.insert(selector, name);
     }
-    (groups, names)
+    groups
 }
 
 fn acl_group_for_selector(
-    selector: &[AclIpv4Cidr],
-    names: &BTreeMap<Vec<AclIpv4Cidr>, String>,
+    port_id: &str,
+    side: &str,
+    selector_id: AclSelectorId,
 ) -> String {
-    if selector.is_empty() {
+    if selector_id == AclSelectorId::ANY {
         "any".to_string()
     } else {
-        names
-            .get(selector)
-            .expect("non-empty ACL selector must be registered")
-            .clone()
+        format!(
+            "{}{}:selector:{}",
+            neutron_acl_prefix(port_id),
+            side,
+            selector_id.group_ordinal(),
+        )
     }
 }
 
@@ -3880,28 +4030,18 @@ fn render_neutron_acl_plan(
     port_id: &str,
     acl: &NeutronAclSnapshot,
     normalized_rules: &[NormalizedAclRule],
+    src_selectors: &[Vec<AclIpv4Cidr>],
+    dst_selectors: &[Vec<AclIpv4Cidr>],
 ) -> Result<AclApplyPlan, String> {
-    let src_selectors = normalized_rules
-        .iter()
-        .filter(|rule| !rule.src_cidrs.is_empty())
-        .map(|rule| rule.src_cidrs.clone())
-        .collect();
-    let dst_selectors = normalized_rules
-        .iter()
-        .filter(|rule| !rule.dst_cidrs.is_empty())
-        .map(|rule| rule.dst_cidrs.clone())
-        .collect();
-    let (mut groups, src_group_names) =
-        acl_selector_registry(port_id, "src", src_selectors);
-    let (mut dst_groups, dst_group_names) =
-        acl_selector_registry(port_id, "dst", dst_selectors);
+    let mut groups = acl_selector_registry(port_id, "src", src_selectors);
+    let mut dst_groups = acl_selector_registry(port_id, "dst", dst_selectors);
     groups.append(&mut dst_groups);
 
     let mut policies_by_key = BTreeMap::<AclEffectivePolicyKey, AclPolicyPlan>::new();
     for rule in normalized_rules {
         let ports = serialize_acl_port_ranges(rule.ports.clone());
-        let src_group = acl_group_for_selector(&rule.src_cidrs, &src_group_names);
-        let dst_group = acl_group_for_selector(&rule.dst_cidrs, &dst_group_names);
+        let src_group = acl_group_for_selector(port_id, "src", rule.src_selector_id);
+        let dst_group = acl_group_for_selector(port_id, "dst", rule.dst_selector_id);
 
         for direction in &rule.directions {
             let key = AclEffectivePolicyKey {
@@ -3963,9 +4103,17 @@ fn translate_neutron_acl_with_cache(
     }
 
     match cached_neutron_acl_template(acl, cache)? {
-        AclValidatedTemplate::Ready(normalized_rules) => {
-            render_neutron_acl_plan(port_id, acl, &normalized_rules)
-        }
+        AclValidatedTemplate::Ready {
+            rules,
+            src_selectors,
+            dst_selectors,
+        } => render_neutron_acl_plan(
+            port_id,
+            acl,
+            &rules,
+            &src_selectors,
+            &dst_selectors,
+        ),
         AclValidatedTemplate::ForceBypass(reason) => Ok(force_bypass_acl_plan(acl, reason)),
     }
 }
