@@ -193,6 +193,22 @@ def check_source(source):
         if term not in stateful_assert:
             errors.append("XDP single-authority proof missing %s" % term)
 
+    bank_assert = bodies["assert_bank_evidence"]
+    for term in (
+        "bank-before-conntrack.json",
+        "bank-after-conntrack.json",
+        "before_ct_count",
+        "before_ct_packets",
+        "before_ct_bytes",
+        'bank_stale_delta}" -ge 1',
+        'ct_packets}" -eq "${expected}',
+        "stale bank flow was not recreated",
+    ):
+        if term not in bank_assert:
+            errors.append("bank stale revalidation proof missing %s" % term)
+    if 'bank_miss_delta}" -ge' in bank_assert:
+        errors.append("bank stale revalidation must not require a simultaneous ct_miss")
+
     return errors
 
 
@@ -220,6 +236,7 @@ def run_mutation_self_tests(source, verbose=False):
         ("stateless resync", mutate_remove, "run_full_resync | tee \"${WORK_DIR}/stateless-full-resync.log\"", "run_stateless_evidence"),
         ("deny resync", mutate_remove, "run_full_resync | tee \"${WORK_DIR}/deny-full-resync.log\"", "run_deny_evidence"),
         ("bank resync", mutate_remove, "run_full_resync | tee \"${WORK_DIR}/bank-full-resync.log\"", "run_bank_evidence"),
+        ("bank stale proof", mutate_remove, '[ "${bank_stale_delta}" -ge 1 ]', "bank stale revalidation proof"),
         ("summary before cleanup result", mutate_early_pass, "", "main body must not mark pass"),
     ]
     failures = []
