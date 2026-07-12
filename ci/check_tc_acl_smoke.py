@@ -207,15 +207,22 @@ def check_source(source):
 
     bank_assert = bodies["assert_bank_evidence"]
     for term in (
+        "stateful-egress-after-conntrack.json",
         "bank-pre-resync-conntrack.json",
         "bank-before-conntrack.json",
         "bank-after-conntrack.json",
+        "reference_ct_count",
+        "reference_ct_packets",
+        "reference_ct_bytes",
         "pre_resync_ct_count",
         "before_ct_count",
         'before_ct_count}" -eq 0',
         'bank_miss_delta}" -ge 1',
         "bank_stale_delta=",
+        'reference_ct_packets}" -eq "${expected}',
         'ct_packets}" -eq "${expected}',
+        'ct_bytes}" -eq "${reference_ct_bytes}',
+        "exact byte reference",
         "strict CT flush",
         "recreated after strict flush",
     ):
@@ -240,6 +247,13 @@ def mutate_early_pass(source, _needle, label):
     return source.replace(anchor, 'RESULT="pass"\n' + anchor, 1)
 
 
+def mutate_degrade_bank_bytes(source, _needle, label):
+    anchor = '[ "${ct_bytes}" -eq "${reference_ct_bytes}" ]'
+    if anchor not in source:
+        raise ValueError("mutation anchor missing: %s" % label)
+    return source.replace(anchor, '[ "${ct_bytes}" -gt 0 ]', 1)
+
+
 def run_mutation_self_tests(source, verbose=False):
     specs = [
         ("cleanup error false-pass", mutate_remove, 'record_cleanup_error "cleanup-full-resync', "cleanup must"),
@@ -254,6 +268,7 @@ def run_mutation_self_tests(source, verbose=False):
         ("bank pre-resync CT capture", mutate_remove, "capture bank-pre-resync", "bank proof must capture"),
         ("bank strict-flush zero CT", mutate_remove, '[ "${before_ct_count}" -eq 0 ]', "bank strict-flush revalidation proof"),
         ("bank miss proof", mutate_remove, '[ "${bank_miss_delta}" -ge 1 ]', "bank strict-flush revalidation proof"),
+        ("bank exact byte reference", mutate_degrade_bank_bytes, "", "bank strict-flush revalidation proof"),
         ("summary before cleanup result", mutate_early_pass, "", "main body must not mark pass"),
     ]
     failures = []
