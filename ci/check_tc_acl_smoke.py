@@ -193,21 +193,36 @@ def check_source(source):
         if term not in stateful_assert:
             errors.append("XDP single-authority proof missing %s" % term)
 
+    main_body = source.split("trap cleanup EXIT\n", 1)[-1]
+    if not ordered(
+        main_body,
+        (
+            "run_stateful_evidence",
+            "capture bank-pre-resync",
+            "create_rule ingress allow tcp 200",
+            "run_bank_evidence",
+        ),
+    ):
+        errors.append("bank proof must capture the live controlled CT before Neutron resync")
+
     bank_assert = bodies["assert_bank_evidence"]
     for term in (
+        "bank-pre-resync-conntrack.json",
         "bank-before-conntrack.json",
         "bank-after-conntrack.json",
+        "pre_resync_ct_count",
         "before_ct_count",
-        "before_ct_packets",
-        "before_ct_bytes",
-        'bank_stale_delta}" -ge 1',
+        'before_ct_count}" -eq 0',
+        'bank_miss_delta}" -ge 1',
+        "bank_stale_delta=",
         'ct_packets}" -eq "${expected}',
-        "stale bank flow was not recreated",
+        "strict CT flush",
+        "recreated after strict flush",
     ):
         if term not in bank_assert:
-            errors.append("bank stale revalidation proof missing %s" % term)
-    if 'bank_miss_delta}" -ge' in bank_assert:
-        errors.append("bank stale revalidation must not require a simultaneous ct_miss")
+            errors.append("bank strict-flush revalidation proof missing %s" % term)
+    if 'bank_stale_delta}" -ge' in bank_assert:
+        errors.append("Neutron bank smoke must not require stale_bank after strict CT flush")
 
     return errors
 
@@ -236,7 +251,9 @@ def run_mutation_self_tests(source, verbose=False):
         ("stateless resync", mutate_remove, "run_full_resync | tee \"${WORK_DIR}/stateless-full-resync.log\"", "run_stateless_evidence"),
         ("deny resync", mutate_remove, "run_full_resync | tee \"${WORK_DIR}/deny-full-resync.log\"", "run_deny_evidence"),
         ("bank resync", mutate_remove, "run_full_resync | tee \"${WORK_DIR}/bank-full-resync.log\"", "run_bank_evidence"),
-        ("bank stale proof", mutate_remove, '[ "${bank_stale_delta}" -ge 1 ]', "bank stale revalidation proof"),
+        ("bank pre-resync CT capture", mutate_remove, "capture bank-pre-resync", "bank proof must capture"),
+        ("bank strict-flush zero CT", mutate_remove, '[ "${before_ct_count}" -eq 0 ]', "bank strict-flush revalidation proof"),
+        ("bank miss proof", mutate_remove, '[ "${bank_miss_delta}" -ge 1 ]', "bank strict-flush revalidation proof"),
         ("summary before cleanup result", mutate_early_pass, "", "main body must not mark pass"),
     ]
     failures = []
