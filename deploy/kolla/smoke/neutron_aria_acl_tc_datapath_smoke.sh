@@ -261,8 +261,8 @@ PY
     BYTE_DELTA="${byte_delta}" BANK_STALE_DELTA="${bank_stale_delta}" \
     BANK_MISS_DELTA="${bank_miss_delta}" BANK_HIT_DELTA="${bank_hit_delta}" \
     STATELESS_HIT_DELTA="${stateless_hit_delta}" \
-    STATELESS_DISABLED_DELTA="${stateless_disabled_delta}" python3 - <<'PY' \
-        >"${WORK_DIR}/counter-deltas.json"
+    STATELESS_DISABLED_DELTA="${stateless_disabled_delta}" \
+        python3 >"${WORK_DIR}/counter-deltas.json" <<'PY'
 import json,os
 print(json.dumps({k.lower():int(v) for k,v in os.environ.items() if k.endswith("_DELTA")},
                  sort_keys=True,indent=2))
