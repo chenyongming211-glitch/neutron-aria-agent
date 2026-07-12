@@ -7251,6 +7251,77 @@ mod tests {
     }
 
     #[test]
+    fn neutron_acl_earlier_priority_pair_beats_later_cidr_pair() {
+        let src_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("10.0.0.0/32").unwrap()],
+            vec![AclIpv4Cidr::parse("10.0.0.0/31").unwrap()],
+        ];
+        let dst_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("192.0.2.0/24").unwrap()],
+        ];
+        let mut first = normalized_acl_rule_with_selectors("first", 10, 17, 1, 0);
+        first.action = 0;
+        let second = normalized_acl_rule_with_selectors("second", 20, 0, 0, 1);
+        let mut third = normalized_acl_rule_with_selectors("third", 30, 6, 2, 0);
+        third.action = 0;
+
+        assert_eq!(
+            acl_priority_overlap_reason(
+                &[first, second, third],
+                &src_selectors,
+                &dst_selectors,
+            ),
+            Some("unsupported_acl_priority_overlap:first:10:second:20".to_string()),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_same_rule_pair_source_cidr_overlap_beats_destination() {
+        let src_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("10.0.0.0/24").unwrap()],
+            vec![AclIpv4Cidr::parse("10.0.0.128/25").unwrap()],
+        ];
+        let dst_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("192.0.2.0/24").unwrap()],
+            vec![AclIpv4Cidr::parse("192.0.2.128/25").unwrap()],
+        ];
+        let rules = vec![
+            normalized_acl_rule_with_selectors("first", 10, 6, 1, 1),
+            normalized_acl_rule_with_selectors("second", 20, 17, 2, 2),
+        ];
+
+        assert_eq!(
+            acl_priority_overlap_reason(&rules, &src_selectors, &dst_selectors),
+            Some("unsupported_acl_cidr_overlap:src:first:10:second:20".to_string()),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_selector_sweep_reactivates_multi_gap_selectors_stably() {
+        let selectors = vec![
+            Vec::new(),
+            vec![
+                AclIpv4Cidr::parse("0.0.0.0/32").unwrap(),
+                AclIpv4Cidr::parse("0.0.0.4/32").unwrap(),
+            ],
+            vec![
+                AclIpv4Cidr::parse("0.0.0.0/31").unwrap(),
+                AclIpv4Cidr::parse("0.0.0.4/31").unwrap(),
+            ],
+        ];
+        let first_rule_indexes = vec![None, Some(1), Some(0)];
+
+        assert_eq!(
+            acl_selector_best_overlap(&selectors, &first_rule_indexes),
+            Some((0, 1)),
+        );
+    }
+
+    #[test]
     fn neutron_acl_selector_sweep_returns_only_best_rule_pair_rank() {
         let selectors = vec![
             Vec::new(),
