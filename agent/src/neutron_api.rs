@@ -7227,6 +7227,44 @@ mod tests {
     }
 
     #[test]
+    fn neutron_acl_selector_sweep_returns_only_best_rule_pair_rank() {
+        let selectors = vec![
+            Vec::new(),
+            vec![
+                AclIpv4Cidr::parse("10.0.0.0/8").unwrap(),
+                AclIpv4Cidr::parse("192.0.2.0/24").unwrap(),
+            ],
+            vec![AclIpv4Cidr::parse("192.0.2.128/25").unwrap()],
+            vec![AclIpv4Cidr::parse("10.1.0.0/16").unwrap()],
+        ];
+        let first_rule_indexes = vec![None, Some(0), Some(1), Some(2)];
+
+        assert_eq!(
+            acl_selector_best_overlap(&selectors, &first_rule_indexes),
+            Some((0, 1)),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_selector_sweep_repeated_overlap_keeps_one_best_candidate() {
+        let mut selectors = vec![Vec::new()];
+        for member in numbered_acl_members(MAX_ACL_RULES_PER_POLICY) {
+            selectors.push(vec![
+                AclIpv4Cidr::parse("10.0.0.0/8").unwrap(),
+                AclIpv4Cidr::parse(&member).unwrap(),
+            ]);
+        }
+        let first_rule_indexes = (0..selectors.len())
+            .map(|selector_index| selector_index.checked_sub(1))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            acl_selector_best_overlap(&selectors, &first_rule_indexes),
+            Some((0, 1)),
+        );
+    }
+
+    #[test]
     fn neutron_acl_same_selector_internal_nesting_is_accepted() {
         let src_selectors = vec![
             Vec::new(),
