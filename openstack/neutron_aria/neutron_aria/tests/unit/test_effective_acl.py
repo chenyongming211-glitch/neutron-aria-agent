@@ -170,6 +170,49 @@ class EffectiveAclTestCase(unittest.TestCase):
             effective_acl_module._acl_overlap_reason(validation),
         )
 
+    def test_overlap_reason_uses_earliest_rule_pair_not_cidr_address_order(self):
+        validation = effective_acl_module._acl_validation_view([
+            compiled_acl_rule(
+                "first", 10,
+                src_cidrs=["10.0.0.0/8", "192.0.2.0/24"],
+            ),
+            compiled_acl_rule(
+                "second", 20, protocol="udp",
+                src_cidrs=["192.0.2.128/25"],
+            ),
+            compiled_acl_rule(
+                "third", 30, protocol="icmp",
+                src_cidrs=["10.1.0.0/16"],
+            ),
+        ])
+
+        self.assertEqual(
+            "unsupported_acl_cidr_overlap:src:first:10:second:20",
+            effective_acl_module._acl_overlap_reason(validation),
+        )
+
+    def test_earlier_rule_pair_destination_overlap_beats_later_source(self):
+        validation = effective_acl_module._acl_validation_view([
+            compiled_acl_rule(
+                "first", 10,
+                src_cidrs=["10.0.0.0/8"],
+                dst_cidrs=["192.0.2.0/24"],
+            ),
+            compiled_acl_rule(
+                "second", 20, protocol="udp",
+                dst_cidrs=["192.0.2.128/25"],
+            ),
+            compiled_acl_rule(
+                "third", 30, protocol="icmp",
+                src_cidrs=["10.1.0.0/16"],
+            ),
+        ])
+
+        self.assertEqual(
+            "unsupported_acl_cidr_overlap:dst:first:10:second:20",
+            effective_acl_module._acl_overlap_reason(validation),
+        )
+
     def test_nested_members_inside_shared_selector_remain_valid(self):
         shared = ["10.0.0.0/8", "10.1.0.0/16"]
         validation = effective_acl_module._acl_validation_view([
