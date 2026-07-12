@@ -658,3 +658,36 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
         Body::from_stream(stream),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ct_contract_hook_to_string, ct_contract_reason_to_string};
+
+    #[test]
+    fn tc_ct_contract_metric_labels_are_exact() {
+        assert_eq!(
+            ct_contract_hook_to_string(aria_core::common::CT_CONTRACT_HOOK_TC_INGRESS),
+            "tc_ingress"
+        );
+        assert_eq!(
+            ct_contract_hook_to_string(aria_core::common::CT_CONTRACT_HOOK_TC_EGRESS),
+            "tc_egress"
+        );
+        assert_eq!(
+            ct_contract_reason_to_string(aria_core::common::CT_CONTRACT_REASON_CT_HIT),
+            "ct_hit"
+        );
+        assert_eq!(
+            ct_contract_reason_to_string(aria_core::common::CT_CONTRACT_REASON_CT_MISS),
+            "ct_miss"
+        );
+        assert_eq!(
+            ct_contract_reason_to_string(aria_core::common::CT_CONTRACT_REASON_CT_DISABLED),
+            "ct_disabled"
+        );
+        assert_eq!(
+            ct_contract_reason_to_string(aria_core::common::CT_CONTRACT_REASON_STALE_BANK),
+            "stale_bank"
+        );
+    }
+}

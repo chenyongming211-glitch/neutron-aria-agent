@@ -55,6 +55,9 @@ KOLLA_AGENT_INI_PATH = os.path.join("deploy", "kolla", "config", "neutron-aria-a
 KOLLA_DATAPATH_CONFIG_PATH = os.path.join(
     "deploy", "kolla", "config", "aria-agent-openstack.toml"
 )
+TC_ACL_DATAPATH_SMOKE_PATH = os.path.join(
+    "deploy", "kolla", "smoke", "neutron_aria_acl_tc_datapath_smoke.sh"
+)
 PYTHON_UDS_CLIENT_PATH = os.path.join(
     "openstack", "neutron_aria", "neutron_aria", "agent", "uds_client.py"
 )
@@ -798,6 +801,30 @@ def check_smoke_timeout_contract():
             )
 
 
+def check_tc_acl_datapath_smoke_contract():
+    print("==> checking TC-unified ACL real-tap smoke contract")
+    if not os.path.isfile(os.path.join(ROOT, TC_ACL_DATAPATH_SMOKE_PATH)):
+        raise SystemExit(
+            "ERROR: TC ACL real-tap smoke is missing: %s"
+            % TC_ACL_DATAPATH_SMOKE_PATH
+        )
+    smoke_source = _read_repo_text(TC_ACL_DATAPATH_SMOKE_PATH)
+    for marker in (
+        "ACL_INGRESS_HOOK_TC",
+        "aria_ct_contract_packets_total",
+        "ct_hit", "ct_miss", "ct_disabled", "stale_bank",
+        "TRACE_FILTER",
+        "XDP_NO_ACL_CT",
+        "TC_INGRESS_HIT", "TC_EGRESS_HIT",
+        "STATELESS_ZERO_CT",
+        "NO_INGRESS_DOUBLE_COUNT",
+        "TC_LINK_REQUIRED",
+        "summary.json",
+    ):
+        if marker not in smoke_source:
+            raise SystemExit("ERROR: TC ACL smoke missing %s" % marker)
+
+
 def run_rust_tests(require_rust, toolchain):
     cargo = shutil.which("cargo")
     if not cargo:
@@ -838,6 +865,7 @@ def main():
     check_p3_rust_scoped_plan_boundary()
     run([sys.executable, os.path.join("ci", "check_tc_acl_datapath.py")])
     check_smoke_timeout_contract()
+    check_tc_acl_datapath_smoke_contract()
     run_smoke_syntax()
     run_rust_tests(args.require_rust, args.rust_toolchain)
     return 0
