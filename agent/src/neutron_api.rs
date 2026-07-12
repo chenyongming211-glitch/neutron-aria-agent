@@ -4479,6 +4479,35 @@ mod tests {
         }
     }
 
+    fn numbered_acl_rules(count: usize) -> Vec<NeutronAclRuleSnapshot> {
+        (0..count)
+            .map(|index| {
+                acl_rule_with(
+                    &format!("rule-{}", index),
+                    index as i64,
+                    "tcp",
+                    "drop",
+                    &[],
+                    &[],
+                    None,
+                )
+            })
+            .collect()
+    }
+
+    fn numbered_acl_members(count: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| {
+                format!(
+                    "10.{}.{}.{}/32",
+                    (index >> 16) & 0xff,
+                    (index >> 8) & 0xff,
+                    index & 0xff,
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn neutron_snapshot_plan_attaches_only_eligible_ports() {
         let current = BTreeMap::new();
@@ -6573,6 +6602,114 @@ mod tests {
     }
 
     #[test]
+    fn neutron_acl_cidrs_match_python_strict_grammar() {
+        assert_eq!(
+            AclIpv4Cidr::parse(" 10.1.2.3/24 ")
+                .unwrap()
+                .canonical(),
+            "10.1.2.0/24"
+        );
+        assert!(AclIpv4Cidr::parse("10.1/16").is_err());
+        assert!(AclIpv4Cidr::parse("010.1.2.3/24").is_err());
+    }
+
+    #[test]
+    fn neutron_acl_runtime_limits_accept_boundary_and_force_bypass_overflow() {
+        let accepted = ready_acl(numbered_acl_rules(MAX_ACL_RULES_PER_POLICY));
+        assert_eq!(
+            translate_neutron_acl("port-1", &accepted)
+                .unwrap()
+                .force_bypass_reason,
+            None
+        );
+
+        let rejected = ready_acl(numbered_acl_rules(MAX_ACL_RULES_PER_POLICY + 1));
+        assert_eq!(
+            translate_neutron_acl("port-1", &rejected)
+                .unwrap()
+                .force_bypass_reason
+                .as_deref(),
+            Some("acl_rule_limit_exceeded:1001:1000")
+        );
+    }
+
+    #[test]
+    fn neutron_acl_selector_limit_accepts_2048_and_force_bypasses_2049() {
+        let mut accepted_rule = acl_rule_with(
+            "accepted-members",
+            10,
+            "tcp",
+            "drop",
+            &[],
+            &[],
+            None,
+        );
+        accepted_rule.src_cidrs = numbered_acl_members(MAX_ACL_SELECTOR_MEMBERS);
+        let accepted = ready_acl(vec![accepted_rule]);
+        assert_eq!(
+            translate_neutron_acl("port-1", &accepted)
+                .unwrap()
+                .force_bypass_reason,
+            None,
+        );
+
+        let mut rejected_rule = acl_rule_with(
+            "rejected-members",
+            10,
+            "tcp",
+            "drop",
+            &[],
+            &[],
+            None,
+        );
+        rejected_rule.src_cidrs = numbered_acl_members(MAX_ACL_SELECTOR_MEMBERS + 1);
+        let rejected = ready_acl(vec![rejected_rule]);
+        assert_eq!(
+            translate_neutron_acl("port-1", &rejected)
+                .unwrap()
+                .force_bypass_reason
+                .as_deref(),
+            Some("acl_selector_member_limit_exceeded:src:rejected-members:2049:2048"),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_validation_cache_is_content_safe_and_port_specific() {
+        let acl = ready_acl(vec![acl_rule_with(
+            "cached",
+            10,
+            "tcp",
+            "drop",
+            &["10.1.2.3/24"],
+            &[],
+            None,
+        )]);
+        let mut cache = AclValidationCache::default();
+        let first = translate_neutron_acl_with_cache("port-1", &acl, &mut cache).unwrap();
+        let second = translate_neutron_acl_with_cache("port-2", &acl, &mut cache).unwrap();
+        assert_eq!(cache.misses, 1);
+        assert_eq!(cache.hits, 1);
+        assert!(first
+            .groups
+            .iter()
+            .all(|group| group.name.starts_with("neutron:port-1:")));
+        assert!(second
+            .groups
+            .iter()
+            .all(|group| group.name.starts_with("neutron:port-2:")));
+
+        let mut changed_revision = acl.clone();
+        changed_revision.revision += 1;
+        translate_neutron_acl_with_cache("port-3", &changed_revision, &mut cache).unwrap();
+        assert_eq!(cache.misses, 2);
+
+        let mut changed_rules = acl;
+        changed_rules.rules[0].action = Some("allow".to_string());
+        translate_neutron_acl_with_cache("port-4", &changed_rules, &mut cache).unwrap();
+        assert_eq!(cache.misses, 3);
+    }
+
+    #[test]
     fn neutron_acl_translator_force_bypasses_nested_cidrs() {
         let acl = ready_acl(vec![
             acl_rule_with("broad", 10, "tcp", "allow", &["10.0.0.0/8"], &[], None),
@@ -6653,19 +6790,22 @@ mod tests {
 
     #[test]
     fn neutron_acl_force_bypass_outcome_overrides_optimistic_snapshot() {
-        let mut snapshot = port("vm-port", "tap-vm", true);
+        let acl = ready_acl(vec![
+            acl_rule_with("wildcard", 10, "any", "allow", &[], &[], None),
+            acl_rule_with("tcp-drop", 20, "tcp", "drop", &[], &[], None),
+        ]);
+        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        let outcome = NeutronAclReconcileOutcome::from_plan(&plan);
+        let mut snapshot = port("port-1", "tap-port-1", true);
         snapshot.managed_domains = vec!["acl".to_string()];
-        snapshot.acl = Some(ready_acl(Vec::new()));
-        let outcome = NeutronAclReconcileOutcome::force_bypass(
-            "unsupported_acl_priority_overlap:first:10:second:20".to_string(),
-        );
+        snapshot.acl = Some(acl);
 
         let status = outcome.domain_status(&snapshot);
         assert_eq!(status.status, "degraded");
         assert_eq!(status.effective_action.as_deref(), Some("bypass"));
         assert_eq!(
             status.reason.as_deref(),
-            Some("unsupported_acl_priority_overlap:first:10:second:20")
+            Some("unsupported_acl_priority_overlap:wildcard:10:tcp-drop:20")
         );
     }
 
@@ -6887,12 +7027,16 @@ mod tests {
     }
 
     #[test]
-    fn neutron_acl_errors_report_the_proven_effective_action() {
-        let pre_disable = NeutronAclReconcileError::unchanged("translation failed");
+    fn neutron_acl_reconcile_failure_phase_reports_the_proven_effective_action() {
+        let pre_disable = acl_reconcile_error(AclReconcileFailurePhase::BeforeQuiesce, "x");
         assert_eq!(pre_disable.effective_action, "unchanged");
 
-        let post_disable = NeutronAclReconcileError::bypass("strict CT flush failed");
+        let post_disable = acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, "x");
         assert_eq!(post_disable.effective_action, "bypass");
+
+        let compensation =
+            acl_reconcile_error(AclReconcileFailurePhase::CompensationFailed, "x");
+        assert_eq!(compensation.effective_action, "enforce");
     }
 
     #[test]
