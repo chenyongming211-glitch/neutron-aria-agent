@@ -6772,7 +6772,7 @@ mod tests {
     }
 
     #[test]
-    fn neutron_acl_translator_rejects_conflicting_actions_for_same_tuple() {
+    fn neutron_acl_translator_force_bypasses_conflicting_actions_for_same_tuple() {
         let mut allow_18081 = tcp_rule("allow-18081", "allow", 18081);
         allow_18081.priority = 101;
         let acl = ready_acl(vec![
@@ -6780,10 +6780,14 @@ mod tests {
             allow_18081,
         ]);
 
-        let error = translate_neutron_acl("port-1", &acl)
-            .expect_err("mixed actions for one datapath tuple are unsupported");
+        let plan = translate_neutron_acl("port-1", &acl).unwrap();
 
-        assert!(error.contains("conflicting effective ACL actions"));
+        assert!(plan.groups.is_empty());
+        assert!(plan.policies.is_empty());
+        assert_eq!(
+            plan.force_bypass_reason.as_deref(),
+            Some("unsupported_acl_priority_overlap:drop-8080:100:allow-18081:101")
+        );
     }
 
     #[test]
