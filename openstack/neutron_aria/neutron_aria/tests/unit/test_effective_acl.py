@@ -2,6 +2,7 @@ from __future__ import absolute_import
 
 import unittest
 
+from neutron_aria.agent import effective_acl as effective_acl_module
 from neutron_aria.agent.effective_acl import ACL_DEGRADED
 from neutron_aria.agent.effective_acl import ACL_NOT_REQUESTED
 from neutron_aria.agent.effective_acl import ACL_READY
@@ -70,6 +71,22 @@ def selector_members(count):
     ) for index in range(count)]
 
 
+def compiled_acl_rule(rule_id, priority, **overrides):
+    rule = {
+        "id": rule_id,
+        "direction": "egress",
+        "priority": priority,
+        "action": "deny",
+        "protocol": "tcp",
+        "src_cidrs": [],
+        "dst_cidrs": [],
+        "dst_port_min": None,
+        "dst_port_max": None,
+    }
+    rule.update(overrides)
+    return rule
+
+
 def effective_acl_with_address_set(members):
     return EffectiveAclIndex(
         policies=[{"id": "policy-1", "default_action": "allow"}],
@@ -95,6 +112,117 @@ class CountingEffectiveAclIndex(EffectiveAclIndex):
 
 
 class EffectiveAclTestCase(unittest.TestCase):
+    def test_shared_large_selector_is_interned_once_for_1000_rules(self):
+        shared = tuple(selector_members(2048))
+        rules = [compiled_acl_rule(
+            "shared-%s" % index,
+            index,
+            protocol="tcp" if index % 2 else "udp",
+            src_cidrs=shared,
+        ) for index in range(1000)]
+
+        validation = effective_acl_module._acl_validation_view(rules)
+
+        self.assertEqual(2, len(validation["src_selectors"]))
+        self.assertEqual((), validation["src_selectors"][0])
+        self.assertEqual(tuple(shared), validation["src_selectors"][1])
+        self.assertEqual(
+            {1},
+            set(rule["src_selector_id"] for rule in validation["rules"]),
+        )
+        self.assertTrue(all(
+            "src_cidrs" not in rule and "dst_cidrs" not in rule
+            for rule in validation["rules"]
+        ))
+
+    def test_1000_disjoint_selectors_pass_without_pair_relation_cache(self):
+        rules = [compiled_acl_rule(
+            "disjoint-%s" % index,
+            index,
+            protocol="tcp" if index % 2 else "udp",
+            src_cidrs=["10.%s.%s.%s/32" % (
+                (index >> 16) & 0xff,
+                (index >> 8) & 0xff,
+                index & 0xff,
+            )],
+        ) for index in range(1000)]
+
+        validation = effective_acl_module._acl_validation_view(rules)
+
+        self.assertEqual(1001, len(validation["src_selectors"]))
+        self.assertEqual(None, effective_acl_module._acl_overlap_reason(validation))
+        self.assertEqual(
+            {"rules", "src_selectors", "dst_selectors"},
+            set(validation),
+        )
+
+    def test_cross_selector_nesting_keeps_stable_overlap_reason(self):
+        validation = effective_acl_module._acl_validation_view([
+            compiled_acl_rule("broad", 10, src_cidrs=["10.0.0.0/8"]),
+            compiled_acl_rule(
+                "narrow", 20, protocol="udp",
+                src_cidrs=["10.1.0.0/16"],
+            ),
+        ])
+
+        self.assertEqual(
+            "unsupported_acl_cidr_overlap:src:broad:10:narrow:20",
+            effective_acl_module._acl_overlap_reason(validation),
+        )
+
+    def test_nested_members_inside_shared_selector_remain_valid(self):
+        shared = ["10.0.0.0/8", "10.1.0.0/16"]
+        validation = effective_acl_module._acl_validation_view([
+            compiled_acl_rule("tcp", 10, src_cidrs=shared),
+            compiled_acl_rule("udp", 20, protocol="udp", src_cidrs=shared),
+        ])
+
+        self.assertEqual(2, len(validation["src_selectors"]))
+        self.assertEqual(
+            [1, 1],
+            [rule["src_selector_id"] for rule in validation["rules"]],
+        )
+        self.assertEqual(None, effective_acl_module._acl_overlap_reason(validation))
+
+    def test_source_and_destination_selector_id_spaces_are_independent(self):
+        shared_text = ["192.0.2.0/24"]
+        validation = effective_acl_module._acl_validation_view([
+            compiled_acl_rule("source", 10, src_cidrs=shared_text),
+            compiled_acl_rule(
+                "destination", 20, protocol="udp", dst_cidrs=shared_text,
+            ),
+        ])
+
+        self.assertEqual(validation["src_selectors"], validation["dst_selectors"])
+        self.assertIsNot(validation["src_selectors"], validation["dst_selectors"])
+        self.assertEqual(1, validation["rules"][0]["src_selector_id"])
+        self.assertEqual(0, validation["rules"][0]["dst_selector_id"])
+        self.assertEqual(0, validation["rules"][1]["src_selector_id"])
+        self.assertEqual(1, validation["rules"][1]["dst_selector_id"])
+
+    def test_public_dto_stays_id_free_and_defensively_copied(self):
+        index = EffectiveAclIndex(
+            policies=[{"id": "policy-1", "default_action": "allow"}],
+            address_sets=[{"id": "aset-1", "members": ["10.1.2.3/24"]}],
+            rules=[acl_rule("cached", 10, src_address_set_id="aset-1")],
+            bindings=[{
+                "id": "binding-1",
+                "policy_id": "policy-1",
+                "target_type": "network",
+                "target_id": NETWORK_ID,
+            }],
+        )
+
+        first = index.effective_for_port(port("port-1", NETWORK_ID), snapshot())
+        first["rules"][0]["src_cidrs"].append("192.0.2.0/24")
+        second = index.effective_for_port(port("port-2", NETWORK_ID), snapshot())
+
+        self.assertNotIn("src_selectors", second)
+        self.assertNotIn("dst_selectors", second)
+        self.assertNotIn("src_selector_id", second["rules"][0])
+        self.assertNotIn("dst_selector_id", second["rules"][0])
+        self.assertEqual(["10.1.2.0/24"], second["rules"][0]["src_cidrs"])
+
     def test_cidr_whitespace_is_canonicalized_in_snapshot(self):
         result = effective_acl([
             acl_rule("spaced", 10, src_cidr=" 10.1.2.3/24 "),
