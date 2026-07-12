@@ -6487,9 +6487,11 @@ mod tests {
 
     #[test]
     fn neutron_acl_translator_merges_same_tuple_l4_port_rules() {
+        let mut drop_8080 = tcp_rule("drop-8080", "drop", 8080);
+        drop_8080.priority = 101;
         let acl = ready_acl(vec![
             tcp_rule("drop-18081", "drop", 18081),
-            tcp_rule("drop-8080", "drop", 8080),
+            drop_8080,
         ]);
 
         let plan = translate_neutron_acl("port-1", &acl).expect("ACL should translate");
@@ -6771,9 +6773,11 @@ mod tests {
 
     #[test]
     fn neutron_acl_translator_rejects_conflicting_actions_for_same_tuple() {
+        let mut allow_18081 = tcp_rule("allow-18081", "allow", 18081);
+        allow_18081.priority = 101;
         let acl = ready_acl(vec![
             tcp_rule("drop-8080", "drop", 8080),
-            tcp_rule("allow-18081", "allow", 18081),
+            allow_18081,
         ]);
 
         let error = translate_neutron_acl("port-1", &acl)
