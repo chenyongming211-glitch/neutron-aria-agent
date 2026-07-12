@@ -186,6 +186,8 @@ jobs:
         run: |
           python3 ci/check_neutron_stage1.py --require-rust --rust-toolchain stable
           cargo +stable test --locked -p aria-agent neutron_acl_
+          cargo +stable test --locked -p aria-agent neutron_tc_acl_
+          cargo +stable test --locked -p aria-agent neutron_acl_runtime_transition_is_atomic
           cargo +stable test --locked -p aria-core acl_ingress_hook_
           cargo +stable test -p aria-agent startup_mode
           cargo +stable test -p aria-agent domain_authority

@@ -7584,6 +7584,7 @@ mod tests {
         let quiesced = AclRuntimeFeatureState {
             conntrack_enabled: false,
             acl_enabled: false,
+            acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
         };
 
         let stateful = acl_runtime_transition(
@@ -7601,6 +7602,7 @@ mod tests {
             AclRuntimeFeatureState {
                 conntrack_enabled: true,
                 acl_enabled: true,
+                acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
             }
         );
 
@@ -7619,6 +7621,7 @@ mod tests {
             AclRuntimeFeatureState {
                 conntrack_enabled: false,
                 acl_enabled: true,
+                acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
             }
         );
 
@@ -7637,6 +7640,7 @@ mod tests {
             AclRuntimeFeatureState {
                 conntrack_enabled: true,
                 acl_enabled: false,
+                acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
             }
         );
 
@@ -7647,6 +7651,7 @@ mod tests {
             AclRuntimeFeatureState {
                 conntrack_enabled: true,
                 acl_enabled: false,
+                acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
             }
         );
     }

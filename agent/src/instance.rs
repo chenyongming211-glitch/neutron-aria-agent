@@ -1312,3 +1312,16 @@ impl FirewallInstance {
         self.detach_with_cleanup(!self.shared_runtime)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn neutron_tc_acl_requires_both_direction_links() {
+        assert!(tc_acl_links_complete(true, true));
+        assert!(!tc_acl_links_complete(true, false));
+        assert!(!tc_acl_links_complete(false, true));
+        assert!(!tc_acl_links_complete(false, false));
+    }
+}
