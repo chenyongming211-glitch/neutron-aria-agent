@@ -7178,6 +7178,53 @@ mod tests {
     }
 
     #[test]
+    fn neutron_acl_overlap_reason_uses_earliest_rule_pair_not_address_order() {
+        let src_selectors = vec![
+            Vec::new(),
+            vec![
+                AclIpv4Cidr::parse("10.0.0.0/8").unwrap(),
+                AclIpv4Cidr::parse("192.0.2.0/24").unwrap(),
+            ],
+            vec![AclIpv4Cidr::parse("192.0.2.128/25").unwrap()],
+            vec![AclIpv4Cidr::parse("10.1.0.0/16").unwrap()],
+        ];
+        let rules = vec![
+            normalized_acl_rule_with_selectors("first", 10, 6, 1, 0),
+            normalized_acl_rule_with_selectors("second", 20, 17, 2, 0),
+            normalized_acl_rule_with_selectors("third", 30, 1, 3, 0),
+        ];
+
+        assert_eq!(
+            acl_priority_overlap_reason(&rules, &src_selectors, &[Vec::new()]),
+            Some("unsupported_acl_cidr_overlap:src:first:10:second:20".to_string()),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_earlier_destination_pair_beats_later_source_conflict() {
+        let src_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("10.0.0.0/8").unwrap()],
+            vec![AclIpv4Cidr::parse("10.1.0.0/16").unwrap()],
+        ];
+        let dst_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("192.0.2.0/24").unwrap()],
+            vec![AclIpv4Cidr::parse("192.0.2.128/25").unwrap()],
+        ];
+        let rules = vec![
+            normalized_acl_rule_with_selectors("first", 10, 6, 1, 1),
+            normalized_acl_rule_with_selectors("second", 20, 17, 0, 2),
+            normalized_acl_rule_with_selectors("third", 30, 1, 2, 0),
+        ];
+
+        assert_eq!(
+            acl_priority_overlap_reason(&rules, &src_selectors, &dst_selectors),
+            Some("unsupported_acl_cidr_overlap:dst:first:10:second:20".to_string()),
+        );
+    }
+
+    #[test]
     fn neutron_acl_same_selector_internal_nesting_is_accepted() {
         let src_selectors = vec![
             Vec::new(),
