@@ -49,6 +49,8 @@ RUST_API_PATH = os.path.join("api", "src", "lib.rs")
 RUST_NEUTRON_API_PATH = os.path.join("agent", "src", "neutron_api.rs")
 RUST_NEUTRON_WAL_PATH = os.path.join("agent", "src", "neutron_wal.rs")
 RUST_OPENAPI_PATH = os.path.join("agent", "src", "openapi.rs")
+EBPF_COMMON_PATH = os.path.join("ebpf", "src", "common.rs")
+BUILD_WORKFLOW_PATH = os.path.join(".github", "workflows", "build.yml")
 KOLLA_AGENT_INI_PATH = os.path.join("deploy", "kolla", "config", "neutron-aria-agent.ini")
 KOLLA_DATAPATH_CONFIG_PATH = os.path.join(
     "deploy", "kolla", "config", "aria-agent-openstack.toml"
@@ -481,6 +483,8 @@ def check_rust_stage_one_tests_present():
     neutron_api_source = _read_repo_text(RUST_NEUTRON_API_PATH)
     wal_source = _read_repo_text(RUST_NEUTRON_WAL_PATH)
     openapi_source = _read_repo_text(RUST_OPENAPI_PATH)
+    ebpf_common_source = _read_repo_text(EBPF_COMMON_PATH)
+    build_workflow_source = _read_repo_text(BUILD_WORKFLOW_PATH)
     control_plane_source = _read_repo_text(os.path.join("agent", "src", "control_plane.rs"))
 
     required_wal_tests = [
@@ -532,6 +536,34 @@ def check_rust_stage_one_tests_present():
     for term in required_acl_conntrack_terms:
         if term not in neutron_api_source:
             raise SystemExit("ERROR: Rust ACL conntrack contract missing %s" % term)
+
+    required_acl_priority_terms = [
+        "struct AclIpv4Cidr {",
+        "force_bypass_reason: Option<String>",
+        "fn neutron_acl_translator_force_bypasses_nested_cidrs(",
+        "fn neutron_acl_translator_reuses_canonical_cidr_groups(",
+        "fn neutron_acl_translator_force_bypasses_priority_fallback_conflict(",
+        "fn neutron_acl_force_bypass_outcome_overrides_optimistic_snapshot(",
+        "unsupported_acl_cidr_overlap:",
+        "unsupported_acl_priority_overlap:",
+    ]
+    for term in required_acl_priority_terms:
+        if term not in neutron_api_source:
+            raise SystemExit("ERROR: Rust ACL priority guard missing %s" % term)
+
+    policy_key_match = re.search(
+        r"(?:pub\s+)?struct\s+PolicyKey\s*\{(?P<body>.*?)\n\}",
+        ebpf_common_source,
+        re.DOTALL,
+    )
+    if not policy_key_match:
+        raise SystemExit("ERROR: eBPF PolicyKey block not found")
+    if re.search(r"\bpriority\s*:", policy_key_match.group("body")):
+        raise SystemExit("ERROR: eBPF PolicyKey must not contain priority")
+
+    acl_test_command = "cargo +stable test --locked -p aria-agent neutron_acl_"
+    if acl_test_command not in build_workflow_source:
+        raise SystemExit("ERROR: Build workflow missing %s" % acl_test_command)
 
     required_domain_authority_terms = [
         "fn domain_authority_blocks_only_selected_domains(",

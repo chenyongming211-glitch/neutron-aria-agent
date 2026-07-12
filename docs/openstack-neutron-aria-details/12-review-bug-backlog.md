@@ -2,9 +2,10 @@
 
 Status: open review backlog.
 
-Date: 2026-07-03; refreshed 2026-07-10 (deep-dive); re-verified 2026-07-11;
+Date: 2026-07-03; refreshed 2026-07-10 (deep-dive); re-verified 2026-07-12;
 ACL transaction Batch 2, restart/CT safety Batch 3, and stateful/CT contract
-Batch 4 closed 2026-07-11.
+Batch 4 closed 2026-07-11; priority/overlap Batch 5 closure recorded
+2026-07-12.
 
 Scope rule:
 
@@ -13,32 +14,32 @@ Scope rule:
 - Prefer API/config validation and narrowly scoped tests over new behavior.
 - Record-only updates are allowed without expanding product scope.
 
-## 2026-07-11 Source Re-Verification And Classification
+## 2026-07-12 Source Re-Verification And Classification
 
 Full re-check of all recorded `REVIEW-*` IDs against the current tree, followed
 by ACL contract-guardrail Batch 1, transaction Batch 2, restart/CT safety Batch
-3, and stateful/CT contract Batch 4 closure. The
+3, stateful/CT contract Batch 4, and priority/overlap Batch 5 closure. The
 `REVIEW-*` prefix remains a stable historical identifier and no longer implies
 that the item is an open implementation bug by itself.
 
 | Verdict | Count | IDs |
 | --- | ---: | --- |
-| Confirmed active defect or contract gap | 34 | Remaining open register rows after Batch 4 closure |
-| Fixed | 22 | `REVIEW-ACL-016`, `REVIEW-ACL-018`, 13 ACL Batch 1 IDs, 3 transaction Batch 2 IDs, 2 Batch 3 IDs, and 2 Batch 4 IDs listed below |
+| Confirmed active defect or contract gap | 33 | Remaining open register rows after Batch 5 closure |
+| Fixed | 23 | `REVIEW-ACL-016`, `REVIEW-ACL-018`, 13 ACL Batch 1 IDs, 3 transaction Batch 2 IDs, 2 Batch 3 IDs, 2 Batch 4 IDs, and `REVIEW-ACL-047` in Batch 5 |
 | Verification needed | 1 | `REVIEW-ACL-012`: implementation path is present; clean-container evidence is still required |
 | Reclassified as risk/design boundary | 2 | `REVIEW-ACL-032`, `REVIEW-ACL-046` |
 | Closed: finding not supported as written | 1 | `REVIEW-ACL-052` |
 | **Total `REVIEW-*` IDs** | **60** | Stable IDs retained for audit history |
 
-The 34 active items are grouped by failure surface so that runtime bugs are not
+The 33 active items are grouped by failure surface so that runtime bugs are not
 mixed with delivery and documentation gaps:
 
 | Active class | Count | IDs |
 | --- | ---: | --- |
-| Transaction, datapath, recovery, and runtime consistency | 16 | `ACL-023`, `ACL-025`, `ACL-026`, `ACL-028`, `ACL-033`, `ACL-036`, `ACL-037`, `ACL-044`, `ACL-045`, `ACL-047`; `TXN-024`, `TXN-026`, `TXN-027`; `OPS-019`, `OPS-027`, `OPS-034` |
+| Transaction, datapath, recovery, and runtime consistency | 15 | `ACL-023`, `ACL-025`, `ACL-026`, `ACL-028`, `ACL-033`, `ACL-036`, `ACL-037`, `ACL-044`, `ACL-045`; `TXN-024`, `TXN-026`, `TXN-027`; `OPS-019`, `OPS-027`, `OPS-034` |
 | Northbound API, DB, compile, and status projection correctness | 8 | `ACL-003`, `ACL-004`, `ACL-008`, `ACL-013`, `ACL-038`, `ACL-040`-`ACL-042` |
 | Packaging, deployment, validation, documentation, and release gaps | 10 | `ACL-005`, `ACL-007`, `ACL-010`, `ACL-011`, `ACL-014`, `ACL-015`, `ACL-017`; `DOC-020`; `OPS-035`; `CI-001` |
-| **Total active defect or gap** | **34** | |
+| **Total active defect or gap** | **33** | |
 
 Remaining active P1 set: `OPS-019`.
 
@@ -53,11 +54,11 @@ remains four `DEBT-*` IDs. The unique tracking-item total remains 69.
 
 | Current tracking portfolio | Count | Included states |
 | --- | ---: | --- |
-| Active defect or contract gap | 34 | Open `REVIEW-*` register rows |
+| Active defect or contract gap | 33 | Open `REVIEW-*` register rows |
 | Risk / design boundary | 7 | Five `RISK-*` IDs plus two reclassified `REVIEW-*` IDs |
 | Engineering debt | 4 | `DEBT-*` IDs |
 | Verification needed | 1 | `REVIEW-ACL-012` |
-| Fixed | 22 | Two earlier fixes plus 13 ACL Batch 1, three transaction Batch 2, two Batch 3, and two Batch 4 fixes |
+| Fixed | 23 | Two earlier fixes plus 13 ACL Batch 1, three transaction Batch 2, two Batch 3, two Batch 4, and one Batch 5 fix |
 | Closed / unsupported finding | 1 | `REVIEW-ACL-052` |
 | **Total unique tracking items** | **69** | No duplicate IDs added during reclassification |
 
@@ -95,6 +96,12 @@ remains four `DEBT-*` IDs. The unique tracking-item total remains 69.
 | --- | --- |
 | `ACL-050` | ACL reconcile now atomically quiesces per-tap CT and ACL, strictly clears CT while lookup/create is disabled, and atomically publishes the desired CT mode with the final ACL gate. ACL-selected authority rejects local conntrack mutation as an internal dependency without adding `conntrack` to advertised or accepted managed domains. |
 | `ACL-054` | Rust translation carries `NeutronAclSnapshot.stateful` into the ACL apply plan. Stateful enforcement publishes CT on plus ACL on; stateless enforcement publishes CT off plus ACL on, so the existing eBPF per-tap guard skips both CT lookup and CT create. Empty/bypass and missing-payload preservation paths have explicit transition tests. |
+
+### ACL Priority And Overlap Batch 5 Closure
+
+| IDs | Closure evidence |
+| --- | --- |
+| `ACL-047` | Python effective-ACL preflight and the Rust direct-UDS defense both reject priority-dependent overlaps with stable reasons. Exact canonical CIDR selector sets reuse one Rust group. Rust returns the actual `degraded/bypass` outcome only after the classified empty-ACL transaction succeeds; failed transactions retain the existing proven-action error classification. Numeric priority ordering is not implemented in the current eBPF datapath, and QoS/Mirror remain outside this fix. |
 
 ## 2026-07-08 Full Review Refresh
 
@@ -359,7 +366,7 @@ verification-only, risk-classified, or closed.
 | REVIEW-ACL-044 | P2 | Metadata-only ACL flips bank without WAL | open | `replace_owned_acl` stages/switches ACL banks even when group/policy diffs are empty, then early-returns without `state.state` update or `wal.compact`. Metadata-only hash changes (revision/name) force reconcile via domain hash. | Skip bank flip on true no-op, or persist bank/state whenever the active bank changes. Add metadata-only reconcile test asserting no unsynced bank flip. |
 | REVIEW-ACL-045 | P2 | Orphan reconcile skips map scrub | open | `TapRegistry::reconcile_neutron_runtime` orphan cleanup only removes link pins / live-iface markers. It does not `detach`, `unregister_instance`, or `scrub_managed_runtime_state`. | Scrub orphaned tap-scoped maps (or full detach path) during orphan reconcile; add residual-map assertion test. Distinct from `REVIEW-ACL-035` hash-skip. |
 | REVIEW-ACL-046 | P2 | Selected-domain group authority | reclassified-risk | `ensure_local_group_write_allowed` intentionally blocks `neutron:*` names while allowing non-Neutron groups, and the authority unit test explicitly expects that coexistence behavior. No current evidence demonstrates that non-Neutron group writes change effective Neutron ACL enforcement. | Document the authority/isolation boundary and add a cross-domain isolation test. Reopen as a bug only if non-Neutron writes are shown to alter Neutron-owned enforcement. |
-| REVIEW-ACL-047 | P2 | Translator ignores rule priority | open | `NeutronAclRuleSnapshot.priority` exists in the DTO, but `translate_neutron_acl` never reads it. Overlapping rules collapse by group/proto/direction key; eBPF match order is specificity-based, not Neutron priority. | Honor priority in translation/apply ordering, or reject overlapping same-key rules and document unsupported priority semantics. Add translator contract tests. Distinct from `REVIEW-ACL-009`. |
+| REVIEW-ACL-047 | P2 | Translator ignores rule priority | fixed | Numeric priority remains northbound metadata and is not added to eBPF `PolicyKey`. Python preflight and Rust direct-UDS validation now reject priority-dependent CIDR/specificity overlaps with stable reasons; canonical-equivalent CIDR groups are reused. A classified direct-UDS rejection reports real `degraded/bypass` only after the empty owned-ACL transaction succeeds. | Fixed with Python and Rust overlap/canonicalization/outcome regression tests, persistent Stage 1/2 static guards, and the documented priority-independent acceptance boundary. QoS/Mirror are unchanged. Distinct from `REVIEW-ACL-009`. |
 | REVIEW-TXN-027 | P2 | Delete detach succeeds / WAL commit fails | open | `apply_delete_neutron_port` can detach and purge, then fail `append_delete_commit` (or after-detach fault) and return `detached: true` with `status=error` while runtime/WAL still diverge. | Roll back or durable-mark blocked recovery; do not report detached success without durable commit. Add after-detach-before-commit fault tests. Distinct from `REVIEW-ACL-023`. |
 | REVIEW-ACL-048 | P1 | Status projection overwrites bypass→enforce | fixed | `_port_statuses_from_status` replaces UDS `effective_action` values of `bypass` (and empty) with snapshot metadata defaulting to `enforce` when `acl_enabled` is true. Northbound `aria_acl_port_statuses` can report enforce while datapath bypassed. | Never overwrite a concrete UDS runtime `effective_action`/`status`; treat UDS as runtime truth. Add unit tests for UDS bypass + snapshot enforce. |
 | REVIEW-ACL-049 | P1 | Unwired managed_domains wedge ACL | fixed | Config allows `qos`/`mirror` in `managed_domains`. Rust `reconcile_neutron_domains` treats any domain outside `attach|acl` as unimplemented and marks ACL `blocked` for the whole port. Distinct from `REVIEW-ACL-039` (missing qos payload). | Reject unwired domains at config validation, or implement them; never block ACL solely because another domain is unimplemented. |
@@ -495,21 +502,40 @@ Round 3 (contract / status / CT / CI):
   tests and all static/shell checks passed. Stage 2 passed 120 Python tests.
 - No local Cargo command was run.
 
-## Active Fix Order After Batch 4
+## ACL Batch 5 Verification
+
+- Formal Python RED run `29174377822` failed on the eight expected missing
+  overlap/stable-reason contracts.
+- Authorized Rust compiler RED probe `29174454194` failed only on the future
+  `AclApplyPlan.force_bypass_reason` and `NeutronAclReconcileOutcome`
+  interfaces: six `E0609` errors and one `E0433` error.
+- Exact parser-parity RED run `29175746390` executed the persistent
+  `neutron_acl_` filter and failed only the three expected whitespace tests:
+  15 passed and 3 failed.
+- Implementation GREEN run `29175882048` passed the complete Build workflow,
+  including `neutron_acl_`: 18 passed, 0 failed, 83 filtered out.
+- Closure workflow run: pending. Its final green run ID will be appended in a
+  documentation-only evidence commit.
+- Local full discovery passed 263 Python tests. Stage 1, with Cargo deliberately
+  absent from `PATH`, passed the same 263 Python tests plus its static/shell
+  checks. Stage 2 passed 133 Python tests, and Stage 3 checked 18 files.
+- `check_blocked_terms.py` and `git diff --check` passed. No local Cargo command
+  was run.
+
+## Active Fix Order After Batch 5
 
 1. `REVIEW-OPS-019`: bound Neutron WAL growth and restart replay cost.
-2. `REVIEW-ACL-047`: define and enforce the ACL priority/overlap datapath contract.
-3. `REVIEW-ACL-025` / `REVIEW-ACL-026` / `REVIEW-ACL-044`: owned-ACL durable ordering and no-op bank flips.
-4. `REVIEW-ACL-023` / `REVIEW-TXN-024` / `REVIEW-TXN-027` / `REVIEW-ACL-045`: detach/delete/orphan convergence.
-5. `REVIEW-ACL-036` / `REVIEW-ACL-037` / `REVIEW-ACL-028` / `REVIEW-ACL-008` / `REVIEW-ACL-033` / `REVIEW-ACL-004`: Python pending/status consistency.
-6. `REVIEW-TXN-026`: gate accept until startup recovery completes.
-7. `REVIEW-ACL-038` / `REVIEW-ACL-040` / `REVIEW-ACL-041` / `REVIEW-ACL-042`: client/DB/CLI correctness.
-8. `REVIEW-ACL-007`: first-install package rollback hygiene.
-9. `REVIEW-ACL-003`: make address-set parent/member writes transactional.
-10. `REVIEW-OPS-027` / `REVIEW-OPS-034` / `REVIEW-OPS-035` / `REVIEW-CI-001`: ops/CI hardening.
-11. `REVIEW-ACL-010` / `REVIEW-ACL-013` / `REVIEW-ACL-015` / `REVIEW-ACL-017`: smoke/projection/rollback polish.
-12. `REVIEW-DOC-020`: align domain-status detail documentation with current DTOs.
-14. `REVIEW-ACL-011` / `REVIEW-ACL-014` / `REVIEW-ACL-005`: release hygiene and coverage.
+2. `REVIEW-ACL-025` / `REVIEW-ACL-026` / `REVIEW-ACL-044`: owned-ACL durable ordering and no-op bank flips.
+3. `REVIEW-ACL-023` / `REVIEW-TXN-024` / `REVIEW-TXN-027` / `REVIEW-ACL-045`: detach/delete/orphan convergence.
+4. `REVIEW-ACL-036` / `REVIEW-ACL-037` / `REVIEW-ACL-028` / `REVIEW-ACL-008` / `REVIEW-ACL-033` / `REVIEW-ACL-004`: Python pending/status consistency.
+5. `REVIEW-TXN-026`: gate accept until startup recovery completes.
+6. `REVIEW-ACL-038` / `REVIEW-ACL-040` / `REVIEW-ACL-041` / `REVIEW-ACL-042`: client/DB/CLI correctness.
+7. `REVIEW-ACL-007`: first-install package rollback hygiene.
+8. `REVIEW-ACL-003`: make address-set parent/member writes transactional.
+9. `REVIEW-OPS-027` / `REVIEW-OPS-034` / `REVIEW-OPS-035` / `REVIEW-CI-001`: ops/CI hardening.
+10. `REVIEW-ACL-010` / `REVIEW-ACL-013` / `REVIEW-ACL-015` / `REVIEW-ACL-017`: smoke/projection/rollback polish.
+11. `REVIEW-DOC-020`: align domain-status detail documentation with current DTOs.
+12. `REVIEW-ACL-011` / `REVIEW-ACL-014` / `REVIEW-ACL-005`: release hygiene and coverage.
 
 Risk follow-up is tracked separately from active bug fixing:
 

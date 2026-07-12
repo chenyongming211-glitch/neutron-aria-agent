@@ -127,6 +127,20 @@ Runtime status ownership:
   values are API validation errors.
 - Address set members must be bounded; large sets need explicit product limits.
 
+### Rule Priority Support Boundary
+
+- The northbound rule model stores `priority`, and lower numeric values remain
+  the northbound ordering convention.
+- The current eBPF datapath does not implement numeric priority ordering:
+  `PolicyKey` has no priority field and lookup remains specificity-based.
+- Only priority-independent selector shapes are accepted. Exact canonical CIDR
+  sets may share one selector group, and concretely disjoint rules remain safe.
+- Non-identical intersecting CIDRs, plus wildcard/specific fallbacks whose
+  action or port behavior changes, are rejected before enforcement and converge
+  to ACL `degraded` with `effective_action=bypass`.
+- This boundary does not add or change QoS or Mirror behavior; both remain
+  outside the Batch 5 ACL fix.
+
 ### Effective ACL Read Flow
 
 1. Receive port id and resolve port/project/network.

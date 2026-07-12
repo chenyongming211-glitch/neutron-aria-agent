@@ -111,6 +111,30 @@ def check_no_forbidden_production_inputs():
                 )
 
 
+def check_acl_priority_guard():
+    print("==> checking stage-two ACL priority guard")
+    effective_source = _read(os.path.join(
+        "openstack", "neutron_aria", "neutron_aria", "agent", "effective_acl.py"
+    ))
+    effective_tests = _read(os.path.join(
+        "openstack", "neutron_aria", "neutron_aria", "tests", "unit",
+        "test_effective_acl.py",
+    ))
+    for term in (
+        "def _canonical_ipv4_cidrs(",
+        "def _acl_overlap_reason(",
+        "unsupported_acl_cidr_overlap:",
+        "unsupported_acl_priority_overlap:",
+        "invalid_acl_priority:",
+        "duplicate_acl_priority:",
+        "test_nested_cidrs_degrade_with_stable_overlap_reason",
+        "test_canonical_equivalent_cidrs_are_one_safe_selector",
+        "test_specificity_port_behavior_conflict_degrades",
+    ):
+        if term not in effective_source + effective_tests:
+            raise SystemExit("ERROR: ACL priority guard missing %s" % term)
+
+
 def check_plugin_entrypoint():
     print("==> checking aria_acl service plugin entry point")
     setup_py = _read(os.path.join("openstack", "neutron_aria", "setup.py"))
@@ -508,6 +532,7 @@ def main():
     run_stage2_tests()
     check_acl_source_contract()
     check_no_forbidden_production_inputs()
+    check_acl_priority_guard()
     check_plugin_entrypoint()
     check_minimum_db_contract()
     check_neutron_server_contract_files()
