@@ -58,10 +58,14 @@ def _matching_brace(source, opening):
                 index += 1
             elif char == '"':
                 state = "string"
-            elif char == "'" and nxt and nxt != "s":
-                # Target functions have no lifetime parameters.  This still
-                # handles ordinary Rust character literals without allowing a
-                # brace inside one to affect the function boundary.
+            elif char == "'" and (
+                (index + 2 < len(source) and source[index + 2] == "'")
+                or (
+                    nxt == "\\"
+                    and index + 3 < len(source)
+                    and source[index + 3] == "'"
+                )
+            ):
                 state = "char"
             elif char == "{":
                 depth += 1
@@ -120,8 +124,19 @@ def check_xdp(source, errors):
         "conntrack::ct_create_",
     ]
     first_acl_ct = min((body.find(term) for term in forbidden if term in body), default=-1)
-    pass_after_hook = body.find("return Ok(XDP_PASS)", hook + 1) if hook >= 0 else -1
-    if hook < 0 or pass_after_hook < 0 or (first_acl_ct >= 0 and hook > first_acl_ct):
+    resolve = body.find("load_runtime_ctx_xdp(ctx, p)")
+    hook_block_ok = False
+    if hook >= 0:
+        opening = body.find("{", hook)
+        if opening >= 0:
+            closing = _matching_brace(body, opening)
+            hook_block_ok = "return Ok(XDP_PASS)" in body[opening + 1 : closing]
+    if (
+        resolve < 0
+        or hook <= resolve
+        or not hook_block_ok
+        or (first_acl_ct >= 0 and hook > first_acl_ct)
+    ):
         errors.append(
             "XDP: try_xdp_firewall must return PASS for TC hook mode before ACL/CT work"
         )
@@ -137,15 +152,25 @@ def check_live_path(source, errors, direction, family):
         return
 
     required = [key, phase, "FLAG_CT_HIT"]
+    wrong_bits = "6" if bits == "4" else "4"
+    forbidden = ["CtKey%s {" % wrong_bits, "phase_ct_v%s(" % wrong_bits, "ct_state"]
     if direction == "ingress":
-        required.extend(
-            [
-                "runtime::acl_ingress_hook(p.tap_id) == ACL_INGRESS_HOOK_TC",
-                "phase_ct_fastpath_tc_ingress_%s(" % family,
-                "phase_ct_miss_tc_ingress_%s(" % family,
-                "phase_legacy_tc_ingress_%s(" % family,
-            ]
-        )
+        hook_term = "runtime::acl_ingress_hook(p.tap_id) == ACL_INGRESS_HOOK_TC"
+        hit = "phase_ct_fastpath_tc_ingress_%s(" % family
+        miss = "phase_ct_miss_tc_ingress_%s(" % family
+        legacy = "phase_legacy_tc_ingress_%s(" % family
+        required.extend([hook_term, hit, miss, legacy])
+        hook = body.find(hook_term)
+        tc_block = ""
+        if hook >= 0:
+            opening = body.find("{", hook)
+            if opening >= 0:
+                closing = _matching_brace(body, opening)
+                tc_block = body[opening + 1 : closing]
+        if any(term not in tc_block for term in (phase, "FLAG_CT_HIT", hit, miss)):
+            forbidden.append("TC_LOOKUP_OUTSIDE_HOOK_BLOCK")
+        if legacy in tc_block:
+            forbidden.append("LEGACY_INSIDE_TC_HOOK_BLOCK")
     else:
         required.extend(
             [
@@ -153,7 +178,9 @@ def check_live_path(source, errors, direction, family):
                 "phase_ct_miss_tc_egress_%s(" % family,
             ]
         )
-    if any(term not in body for term in required) or "ct_state >= 2" in body:
+    has_structural_error = any(term.startswith(("TC_", "LEGACY_")) for term in forbidden)
+    has_wrong_family = any(term in body for term in forbidden if not term.startswith(("TC_", "LEGACY_")))
+    if any(term not in body for term in required) or has_structural_error or has_wrong_family:
         errors.append(
             "TC %s %s: live path must use a family-correct CT key, CT phase, and FLAG_CT_HIT decision"
             % (direction, family)
@@ -181,8 +208,12 @@ def check_hit_helper(source, errors, direction, family):
     qos = "phase_qos_ingress_tc(" if direction == "ingress" else "phase_qos_egress_tc("
     flow = "stats::update_flow_stats_v%s(" % ("4" if family == "v4" else "6")
     post = "phase_post_accept_tc_%s(" % direction
-    required = ("FLAG_POLICY_HIT", "stats::monitoring_enabled", qos, flow, post)
-    if any(term in body for term in forbidden) or any(term not in body for term in required):
+    monitoring_policy_hit = re.search(
+        r"stats::monitoring_enabled\(p\.tap_id\)\s*&&\s*\(p\.flags\s*&\s*FLAG_POLICY_HIT\)\s*!=\s*0",
+        body,
+    )
+    passed_order = _contains_in_order(body, [qos, "TC_ACT_SHOT", flow, post])
+    if any(term in body for term in forbidden) or not monitoring_policy_hit or not passed_order:
         errors.append(
             "%s: cached hit must skip ACL/create, reapply QoS, and account only passed traffic"
             % path
