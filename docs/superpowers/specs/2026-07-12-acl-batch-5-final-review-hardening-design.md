@@ -242,10 +242,14 @@ conflict-pair set, matrix, or bitset is materialized.
 
 Source and destination each yield at most one rule-index pair. The lower pair
 rank wins across sides; source wins only when both sides name the same pair.
-The winning indices map directly to the stable rule IDs/priorities for
-`unsupported_acl_cidr_overlap`. This preserves both rule-pair and side ordering
-even when address order discovers a later conflict first. The wire reason
-format does not change.
+The combined bounded candidate is retained as
+`(left_rule_index, right_rule_index, side)` while the existing ordered,
+ID-only rule-pair scan runs. When the scan reaches that exact pair, it returns
+`unsupported_acl_cidr_overlap` before ordinary priority checks for the same
+pair. Any ordinary priority overlap on an earlier pair therefore remains the
+stable first reason. This preserves pair and side ordering even when address
+order discovers a later conflict first. The wire reason format does not
+change.
 
 After a side passes the sweep, selector relation is constant-time:
 
@@ -469,6 +473,31 @@ Bounded-candidate review closure evidence:
 - Build
   [`29186328080`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29186328080)
   passed Python 280/280, Stage 2 150/150, the persistent Rust ACL filter 32/32,
+  eBPF build and artifact discovery, static userspace and agent builds, and
+  static binary verification. No local Cargo command was run.
+
+Final reason-interleaving review closure evidence:
+
+- Python RED commit `d330a28` added the reviewer scenario, a same-pair
+  source/destination CIDR tie, and multi-gap expiration/reactivation coverage.
+  The focused module ran 44 tests with exactly one failure: the implementation
+  returned `unsupported_acl_cidr_overlap:src:first:10:third:30` instead of the
+  earlier `unsupported_acl_priority_overlap:first:10:second:20`. The tie and
+  multi-gap synchronization tests passed.
+- Rust RED commit `5f9ffe6` added the equivalent `neutron_acl_` contracts.
+  Test-only commit `de02f21` isolated the Rust RED, and Build
+  [`29186984104`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29186984104)
+  ran 35 persistent Rust ACL tests with 34 passing and the same single reason
+  mismatch. Commit `723b5ce` restored the Python regressions before
+  implementation.
+- GREEN commit `204c056` retained the one bounded `(left, right, side)`
+  candidate and moved only its return point into the existing ordered ID-only
+  rule-pair scan. Locally, the focused Python module passed 44/44, the full
+  suite and Stage 1 passed 283/283, Stage 2 passed 153/153, and
+  `git diff --check` passed.
+- Build
+  [`29187140448`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29187140448)
+  passed Python 283/283, Stage 2 153/153, the persistent Rust ACL filter 35/35,
   eBPF build and artifact discovery, static userspace and agent builds, and
   static binary verification. No local Cargo command was run.
 
