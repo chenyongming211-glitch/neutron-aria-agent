@@ -123,6 +123,20 @@ fn tap_config_with_acl_runtime_gate(
     }
 }
 
+fn acl_runtime_gate_current_config(
+    lookup: Result<TapConfig, aya::maps::MapError>,
+    tap_id: u32,
+) -> Result<Option<TapConfig>, String> {
+    match lookup {
+        Ok(config) => Ok(Some(config)),
+        Err(aya::maps::MapError::KeyNotFound) => Ok(None),
+        Err(error) => Err(format!(
+            "read TAP_CONFIG_MAP for tap_id {}: {}",
+            tap_id, error
+        )),
+    }
+}
+
 pub fn set_acl_active_bank(runtime: TapMapRuntime<'_>, bank: u8) -> Result<(), String> {
     if runtime.tap_id == TAP_ID_UNASSIGNED {
         return Err("ACL active bank is only supported for per-tap runtime config".to_string());
@@ -162,7 +176,10 @@ pub fn update_acl_runtime_gate(
     }
 
     let mut map = open_pinned_tap_config(runtime.pin_path)?;
-    let current = map.get(&runtime.tap_id, 0).ok();
+    let current = acl_runtime_gate_current_config(
+        map.get(&runtime.tap_id, 0),
+        runtime.tap_id,
+    )?;
     let cfg = tap_config_with_acl_runtime_gate(
         current,
         conntrack_enabled,
