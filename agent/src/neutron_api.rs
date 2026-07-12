@@ -4759,6 +4759,26 @@ mod tests {
             .collect()
     }
 
+    fn normalized_acl_rule_with_selectors(
+        id: &str,
+        priority: i64,
+        proto: u8,
+        src_selector_id: usize,
+        dst_selector_id: usize,
+    ) -> NormalizedAclRule {
+        NormalizedAclRule {
+            id: id.to_string(),
+            direction: "egress".to_string(),
+            priority,
+            directions: vec![0],
+            proto,
+            action: 1,
+            src_selector_id: AclSelectorId(src_selector_id),
+            dst_selector_id: AclSelectorId(dst_selector_id),
+            ports: Vec::new(),
+        }
+    }
+
     #[test]
     fn neutron_snapshot_plan_attaches_only_eligible_ports() {
         let current = BTreeMap::new();
@@ -6925,6 +6945,142 @@ mod tests {
     }
 
     #[test]
+    fn neutron_acl_normalized_rules_store_only_selector_ids() {
+        let rule = normalized_acl_rule_with_selectors("id-only", 10, 6, 1, 2);
+
+        assert_eq!(rule.src_selector_id, AclSelectorId(1));
+        assert_eq!(rule.dst_selector_id, AclSelectorId(2));
+    }
+
+    #[test]
+    fn neutron_acl_shared_large_selector_is_stored_once_for_1000_rules() {
+        let selector = numbered_acl_members(MAX_ACL_SELECTOR_MEMBERS)
+            .iter()
+            .map(|cidr| AclIpv4Cidr::parse(cidr).unwrap())
+            .collect::<Vec<_>>();
+        let rules = (0..MAX_ACL_RULES_PER_POLICY)
+            .map(|index| {
+                normalized_acl_rule_with_selectors(
+                    &format!("shared-{}", index),
+                    index as i64,
+                    if index % 2 == 0 { 6 } else { 17 },
+                    1,
+                    0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let template = AclValidatedTemplate::Ready {
+            rules,
+            src_selectors: vec![Vec::new(), selector.clone()],
+            dst_selectors: vec![Vec::new()],
+        };
+
+        let AclValidatedTemplate::Ready {
+            rules,
+            src_selectors,
+            dst_selectors,
+        } = template
+        else {
+            panic!("expected ready template");
+        };
+        assert_eq!(rules.len(), MAX_ACL_RULES_PER_POLICY);
+        assert!(rules.iter().all(|rule| rule.src_selector_id == AclSelectorId(1)));
+        assert_eq!(src_selectors, vec![Vec::new(), selector]);
+        assert_eq!(dst_selectors, vec![Vec::new()]);
+    }
+
+    #[test]
+    fn neutron_acl_1000_disjoint_selectors_pass_interval_sweep() {
+        let mut src_selectors = vec![Vec::new()];
+        let mut rules = Vec::new();
+        let members = numbered_acl_members(MAX_ACL_RULES_PER_POLICY);
+        for index in 0..MAX_ACL_RULES_PER_POLICY {
+            src_selectors.push(vec![AclIpv4Cidr::parse(&members[index]).unwrap()]);
+            rules.push(normalized_acl_rule_with_selectors(
+                &format!("disjoint-{}", index),
+                index as i64,
+                6,
+                index + 1,
+                0,
+            ));
+        }
+
+        assert_eq!(
+            acl_priority_overlap_reason(&rules, &src_selectors, &[Vec::new()]),
+            None,
+        );
+    }
+
+    #[test]
+    fn neutron_acl_cross_selector_nesting_keeps_stable_overlap_reason() {
+        let src_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("10.0.0.0/8").unwrap()],
+            vec![AclIpv4Cidr::parse("10.1.0.0/16").unwrap()],
+        ];
+        let rules = vec![
+            normalized_acl_rule_with_selectors("broad", 10, 6, 1, 0),
+            normalized_acl_rule_with_selectors("narrow", 20, 17, 2, 0),
+        ];
+
+        assert_eq!(
+            acl_priority_overlap_reason(&rules, &src_selectors, &[Vec::new()]),
+            Some("unsupported_acl_cidr_overlap:src:broad:10:narrow:20".to_string()),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_same_selector_internal_nesting_is_accepted() {
+        let src_selectors = vec![
+            Vec::new(),
+            vec![
+                AclIpv4Cidr::parse("10.0.0.0/8").unwrap(),
+                AclIpv4Cidr::parse("10.1.0.0/16").unwrap(),
+            ],
+        ];
+        let rules = vec![
+            normalized_acl_rule_with_selectors("tcp", 10, 6, 1, 0),
+            normalized_acl_rule_with_selectors("udp", 20, 17, 1, 0),
+        ];
+
+        assert_eq!(
+            acl_priority_overlap_reason(&rules, &src_selectors, &[Vec::new()]),
+            None,
+        );
+    }
+
+    #[test]
+    fn neutron_acl_source_and_destination_selector_spaces_are_independent() {
+        let acl = ready_acl(vec![
+            acl_rule_with("source", 10, "tcp", "drop", &["192.0.2.0/24"], &[], None),
+            acl_rule_with(
+                "destination",
+                20,
+                "udp",
+                "drop",
+                &[],
+                &["192.0.2.0/24"],
+                None,
+            ),
+        ]);
+
+        let AclValidatedTemplate::Ready {
+            rules,
+            src_selectors,
+            dst_selectors,
+        } = validate_neutron_acl_template(&acl).unwrap()
+        else {
+            panic!("expected ready template");
+        };
+        assert_eq!(src_selectors, dst_selectors);
+        assert_eq!(src_selectors.len(), 2);
+        assert_eq!(rules[0].src_selector_id, AclSelectorId(1));
+        assert_eq!(rules[0].dst_selector_id, AclSelectorId(0));
+        assert_eq!(rules[1].src_selector_id, AclSelectorId(0));
+        assert_eq!(rules[1].dst_selector_id, AclSelectorId(1));
+    }
+
+    #[test]
     fn neutron_acl_validation_cache_is_content_safe_and_port_specific() {
         let acl = ready_acl(vec![acl_rule_with(
             "cached",
@@ -6948,6 +7104,8 @@ mod tests {
             .groups
             .iter()
             .all(|group| group.name.starts_with("neutron:port-2:")));
+        assert_eq!(first.groups[0].name, "neutron:port-1:src:selector:0");
+        assert_eq!(second.groups[0].name, "neutron:port-2:src:selector:0");
 
         let mut changed_revision = acl.clone();
         changed_revision.revision += 1;
