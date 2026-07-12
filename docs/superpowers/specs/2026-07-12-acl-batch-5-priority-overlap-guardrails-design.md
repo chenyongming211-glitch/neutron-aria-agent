@@ -2,7 +2,7 @@
 
 Date: 2026-07-12
 
-Status: implementation complete; final closure workflow verification pending
+Status: implemented and verified
 
 ## Goal
 
@@ -273,10 +273,13 @@ green.
   `NeutronAclReconcileOutcome` type.
 - Exact parser-parity RED run `29175746390` ran the persistent `neutron_acl_`
   filter: 15 passed and only the three expected whitespace cases failed.
-- Implementation GREEN run `29175882048` passed Build, including 18/18
+- Final implementation commit `53e5ddfdd613fb0948b56e273adcdde5b372b061`
+  was green in implementation run `29175882048`, including 18/18
   `neutron_acl_` tests and all eBPF/userspace/static-binary steps.
-- Closure workflow run: pending. Its final commit and green run ID will be
-  appended in a documentation-only evidence commit.
+- Guard/docs closure commit `2ebc46991334d75de22c0f8cf47e8e36a3c86e12`
+  was green in closure run `29176402461`. Stage 1/2/3, the persistent
+  `neutron_acl_` filter (18 passed, 0 failed, 83 filtered out), eBPF, userspace
+  static, agent static, and static-binary verification all passed.
 - Local full discovery and the Cargo-hidden Stage 1 each passed 263 Python
   tests. Stage 2 passed 133 Python tests; Stage 3 checked 18 files. The blocked
   terms and diff checks passed, and no local Cargo command was run.

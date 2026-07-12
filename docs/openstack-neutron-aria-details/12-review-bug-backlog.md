@@ -512,10 +512,13 @@ Round 3 (contract / status / CT / CI):
 - Exact parser-parity RED run `29175746390` executed the persistent
   `neutron_acl_` filter and failed only the three expected whitespace tests:
   15 passed and 3 failed.
-- Implementation GREEN run `29175882048` passed the complete Build workflow,
-  including `neutron_acl_`: 18 passed, 0 failed, 83 filtered out.
-- Closure workflow run: pending. Its final green run ID will be appended in a
-  documentation-only evidence commit.
+- Implementation GREEN run `29175882048` at final implementation commit
+  `53e5ddfdd613fb0948b56e273adcdde5b372b061` passed the complete Build
+  workflow, including `neutron_acl_`: 18 passed, 0 failed, 83 filtered out.
+- Closure workflow run `29176402461` at guard/docs commit
+  `2ebc46991334d75de22c0f8cf47e8e36a3c86e12` passed Stage 1/2/3, the
+  persistent `neutron_acl_` filter (18 passed, 0 failed, 83 filtered out), eBPF,
+  userspace static, agent static, and static-binary verification.
 - Local full discovery passed 263 Python tests. Stage 1, with Cargo deliberately
   absent from `PATH`, passed the same 263 Python tests plus its static/shell
   checks. Stage 2 passed 133 Python tests, and Stage 3 checked 18 files.
