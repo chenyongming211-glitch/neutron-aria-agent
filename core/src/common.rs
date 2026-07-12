@@ -433,7 +433,10 @@ unsafe impl Pod for SslWriteScratch {}
 
 #[cfg(test)]
 mod tests {
-    use super::{acl_banked_tap_id, acl_next_bank, CtValue, PolicyKey, SslErrorEvent, TapConfig};
+    use super::{
+        acl_banked_tap_id, acl_next_bank, normalize_acl_ingress_hook, CtValue, PolicyKey,
+        SslErrorEvent, TapConfig, ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP,
+    };
 
     #[test]
     fn ssl_error_event_layout_matches_ebpf() {
@@ -445,6 +448,16 @@ mod tests {
         assert_eq!(core::mem::size_of::<PolicyKey>(), 16);
         assert_eq!(core::mem::size_of::<TapConfig>(), 8);
         assert_eq!(core::mem::size_of::<CtValue>(), 40);
+    }
+
+    #[test]
+    fn acl_ingress_hook_reuses_tap_config_padding_without_abi_change() {
+        assert_eq!(core::mem::size_of::<TapConfig>(), 8);
+        assert_eq!(ACL_INGRESS_HOOK_XDP, 0);
+        assert_eq!(ACL_INGRESS_HOOK_TC, 1);
+        assert_eq!(normalize_acl_ingress_hook(0), ACL_INGRESS_HOOK_XDP);
+        assert_eq!(normalize_acl_ingress_hook(1), ACL_INGRESS_HOOK_TC);
+        assert_eq!(normalize_acl_ingress_hook(255), ACL_INGRESS_HOOK_XDP);
     }
 
     #[test]

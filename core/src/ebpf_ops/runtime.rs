@@ -217,11 +217,11 @@ pub fn update_firewall_config(
 
 #[cfg(test)]
 mod tests {
-    use super::tap_config_with_acl_bank;
-    use crate::common::TapConfig;
+    use super::{tap_config_with_acl_bank, tap_config_with_runtime_updates};
+    use crate::common::{TapConfig, ACL_INGRESS_HOOK_TC};
 
     #[test]
-    fn tap_config_with_acl_bank_preserves_existing_feature_flags() {
+    fn acl_ingress_hook_active_bank_update_preserves_tc_mode() {
         let current = TapConfig {
             conntrack_enabled: 1,
             monitoring_enabled: 0,
@@ -230,7 +230,7 @@ mod tests {
             mirror_enabled: 1,
             tcprt_enabled: 0,
             acl_active_bank: 0,
-            pad: [0; 1],
+            acl_ingress_hook: ACL_INGRESS_HOOK_TC,
         };
 
         let next = tap_config_with_acl_bank(Some(current), 1);
@@ -242,7 +242,40 @@ mod tests {
         assert_eq!(next.mirror_enabled, 1);
         assert_eq!(next.tcprt_enabled, 0);
         assert_eq!(next.acl_active_bank, 1);
-        assert_eq!(next.pad, [0; 1]);
+        assert_eq!(next.acl_ingress_hook, ACL_INGRESS_HOOK_TC);
+    }
+
+    #[test]
+    fn acl_ingress_hook_partial_feature_update_preserves_tc_mode() {
+        let current = TapConfig {
+            conntrack_enabled: 1,
+            monitoring_enabled: 0,
+            acl_enabled: 1,
+            qos_enabled: 1,
+            mirror_enabled: 1,
+            tcprt_enabled: 0,
+            acl_active_bank: 1,
+            acl_ingress_hook: ACL_INGRESS_HOOK_TC,
+        };
+
+        let next = tap_config_with_runtime_updates(
+            Some(current),
+            None,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(next.conntrack_enabled, 1);
+        assert_eq!(next.monitoring_enabled, 1);
+        assert_eq!(next.acl_enabled, 1);
+        assert_eq!(next.qos_enabled, 1);
+        assert_eq!(next.mirror_enabled, 1);
+        assert_eq!(next.tcprt_enabled, 0);
+        assert_eq!(next.acl_active_bank, 1);
+        assert_eq!(next.acl_ingress_hook, ACL_INGRESS_HOOK_TC);
     }
 }
 
