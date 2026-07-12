@@ -31,7 +31,105 @@ def snapshot(eligible=True, disposition="eligible_ovs_tap"):
     }
 
 
+def acl_rule(rule_id, priority, **overrides):
+    rule = {
+        "id": rule_id,
+        "policy_id": "policy-1",
+        "direction": "egress",
+        "priority": priority,
+        "action": "deny",
+        "ethertype": "IPv4",
+        "protocol": "tcp",
+    }
+    rule.update(overrides)
+    return rule
+
+
+def effective_acl(rules):
+    return EffectiveAclIndex(
+        policies=[{"id": "policy-1", "default_action": "allow"}],
+        rules=rules,
+        bindings=[{
+            "id": "binding-1",
+            "policy_id": "policy-1",
+            "target_type": "port",
+            "target_id": PORT_ID,
+        }],
+    ).effective_for_port(port(), snapshot())
+
+
 class EffectiveAclTestCase(unittest.TestCase):
+    def test_nested_cidrs_degrade_with_stable_overlap_reason(self):
+        result = effective_acl([
+            acl_rule("broad", 10, src_cidr="10.0.0.0/8"),
+            acl_rule("narrow", 20, src_cidr="10.1.0.0/16", protocol="udp"),
+        ])
+        self.assertEqual(ACL_DEGRADED, result["status"])
+        self.assertEqual("bypass", result["effective_action"])
+        self.assertIn(
+            "unsupported_acl_cidr_overlap:src:broad:10:narrow:20",
+            result["reason"],
+        )
+
+    def test_partial_cidr_intersection_degrades(self):
+        result = effective_acl([
+            acl_rule("left", 10, dst_cidr="10.0.0.0/23"),
+            acl_rule("right", 20, dst_cidr="10.0.1.0/24", protocol="udp"),
+        ])
+        self.assertIn("unsupported_acl_cidr_overlap:dst:left:10:right:20", result["reason"])
+
+    def test_wildcard_specific_behavior_conflict_degrades(self):
+        result = effective_acl([
+            acl_rule("wildcard", 10, protocol=None, action="allow"),
+            acl_rule("tcp-drop", 20, protocol="tcp", action="deny"),
+        ])
+        self.assertIn(
+            "unsupported_acl_priority_overlap:wildcard:10:tcp-drop:20",
+            result["reason"],
+        )
+
+    def test_specificity_port_behavior_conflict_degrades(self):
+        result = effective_acl([
+            acl_rule("any-src", 10, dst_port_min=80, dst_port_max=80),
+            acl_rule(
+                "specific-src", 20, src_cidr="10.1.0.0/16",
+                dst_port_min=443, dst_port_max=443,
+            ),
+        ])
+        self.assertIn(
+            "unsupported_acl_priority_overlap:any-src:10:specific-src:20",
+            result["reason"],
+        )
+
+    def test_canonical_equivalent_cidrs_are_one_safe_selector(self):
+        result = effective_acl([
+            acl_rule("tcp", 10, src_cidr="10.1.2.3/24", dst_port_min=80),
+            acl_rule("udp", 20, src_cidr="10.1.2.0/24", protocol="udp", dst_port_min=53),
+        ])
+        self.assertEqual(ACL_READY, result["status"])
+        self.assertEqual("enforce", result["effective_action"])
+
+    def test_disjoint_protocols_and_cidrs_remain_ready(self):
+        result = effective_acl([
+            acl_rule("tcp-left", 10, src_cidr="10.1.0.0/16"),
+            acl_rule("udp-right", 20, src_cidr="10.2.0.0/16", protocol="udp"),
+        ])
+        self.assertEqual(ACL_READY, result["status"])
+
+    def test_negative_priority_uses_stable_reason(self):
+        result = effective_acl([acl_rule("negative", -1)])
+        self.assertIn("invalid_acl_priority:negative:-1", result["reason"])
+
+    def test_duplicate_priority_uses_stable_reason(self):
+        result = effective_acl([
+            acl_rule("first", 10),
+            acl_rule("second", 10, protocol="udp"),
+        ])
+        self.assertIn(
+            "duplicate_acl_priority:egress:10:first:second",
+            result["reason"],
+        )
+
     def test_no_binding_is_not_requested(self):
         index = EffectiveAclIndex()
 
@@ -231,7 +329,7 @@ class EffectiveAclTestCase(unittest.TestCase):
 
         self.assertEqual(ACL_DEGRADED, result["status"])
         self.assertFalse(result["enabled"])
-        self.assertIn("invalid_rule_priority:rule-1", result["reason"])
+        self.assertIn("invalid_acl_priority:rule-1:bad", result["reason"])
         self.assertEqual("bypass", result["effective_action"])
 
     def test_duplicate_enabled_bindings_degrade(self):

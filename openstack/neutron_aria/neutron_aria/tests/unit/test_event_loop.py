@@ -1931,9 +1931,9 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertTrue(result["submitted"])
         self.assertEqual("degraded", acl["status"])
         self.assertEqual("bypass", acl["effective_action"])
-        self.assertIn("invalid_rule_priority:bad-rule", acl["reason"])
+        self.assertIn("invalid_acl_priority:bad-rule:invalid", acl["reason"])
         self.assertEqual(
-            [{"reason": "invalid_rule_priority:bad-rule", "count": 1}],
+            [{"reason": "invalid_acl_priority:bad-rule:invalid", "count": 1}],
             result["status"]["degraded_reasons"],
         )
         self.assertIn({

@@ -4168,6 +4168,31 @@ mod tests {
         }
     }
 
+    fn acl_rule_with(
+        id: &str,
+        priority: i64,
+        protocol: &str,
+        action: &str,
+        src_cidrs: &[&str],
+        dst_cidrs: &[&str],
+        dst_port: Option<u16>,
+    ) -> NeutronAclRuleSnapshot {
+        NeutronAclRuleSnapshot {
+            id: Some(id.to_string()),
+            direction: Some("egress".to_string()),
+            priority,
+            action: Some(action.to_string()),
+            ethertype: Some("IPv4".to_string()),
+            protocol: Some(protocol.to_string()),
+            src_cidrs: src_cidrs.iter().map(|value| value.to_string()).collect(),
+            dst_cidrs: dst_cidrs.iter().map(|value| value.to_string()).collect(),
+            src_port_min: None,
+            src_port_max: None,
+            dst_port_min: dst_port,
+            dst_port_max: dst_port,
+        }
+    }
+
     #[test]
     fn neutron_snapshot_plan_attaches_only_eligible_ports() {
         let current = BTreeMap::new();
@@ -6194,6 +6219,103 @@ mod tests {
                 direction: 1,
                 ports: Some("8080,18081".to_string()),
             }]
+        );
+    }
+
+    #[test]
+    fn neutron_acl_translator_force_bypasses_nested_cidrs() {
+        let acl = ready_acl(vec![
+            acl_rule_with("broad", 10, "tcp", "allow", &["10.0.0.0/8"], &[], None),
+            acl_rule_with("narrow", 20, "udp", "allow", &["10.1.0.0/16"], &[], None),
+        ]);
+        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        assert!(plan.groups.is_empty());
+        assert!(plan.policies.is_empty());
+        assert_eq!(
+            plan.force_bypass_reason.as_deref(),
+            Some("unsupported_acl_cidr_overlap:src:broad:10:narrow:20")
+        );
+    }
+
+    #[test]
+    fn neutron_acl_translator_reuses_canonical_cidr_groups() {
+        let acl = ready_acl(vec![
+            acl_rule_with("tcp", 10, "tcp", "drop", &["10.1.2.3/24"], &[], Some(80)),
+            acl_rule_with("udp", 20, "udp", "drop", &["10.1.2.0/24"], &[], Some(53)),
+        ]);
+        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        assert_eq!(plan.groups.len(), 1);
+        assert_eq!(plan.groups[0].cidrs, vec!["10.1.2.0/24"]);
+        assert_eq!(plan.policies[0].src_group, plan.policies[1].src_group);
+        assert_eq!(plan.force_bypass_reason, None);
+    }
+
+    #[test]
+    fn neutron_acl_translator_force_bypasses_priority_fallback_conflict() {
+        let acl = ready_acl(vec![
+            acl_rule_with("wildcard", 10, "any", "allow", &[], &[], None),
+            acl_rule_with("tcp-drop", 20, "tcp", "drop", &[], &[], None),
+        ]);
+        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        assert_eq!(
+            plan.force_bypass_reason.as_deref(),
+            Some("unsupported_acl_priority_overlap:wildcard:10:tcp-drop:20")
+        );
+    }
+
+    #[test]
+    fn neutron_acl_translator_force_bypasses_invalid_and_duplicate_priority() {
+        let negative = ready_acl(vec![acl_rule_with(
+            "negative", -1, "tcp", "drop", &[], &[], None,
+        )]);
+        assert_eq!(
+            translate_neutron_acl("port-1", &negative)
+                .unwrap()
+                .force_bypass_reason
+                .as_deref(),
+            Some("invalid_acl_priority:negative:-1")
+        );
+
+        let duplicate = ready_acl(vec![
+            acl_rule_with("first", 10, "tcp", "drop", &[], &[], None),
+            acl_rule_with("second", 10, "udp", "drop", &[], &[], None),
+        ]);
+        assert_eq!(
+            translate_neutron_acl("port-1", &duplicate)
+                .unwrap()
+                .force_bypass_reason
+                .as_deref(),
+            Some("duplicate_acl_priority:egress:10:first:second")
+        );
+    }
+
+    #[test]
+    fn neutron_acl_translator_keeps_disjoint_cidrs_separate() {
+        let acl = ready_acl(vec![
+            acl_rule_with("tcp-left", 10, "tcp", "drop", &["10.1.0.0/16"], &[], None),
+            acl_rule_with("udp-right", 20, "udp", "drop", &["10.2.0.0/16"], &[], None),
+        ]);
+        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        assert_eq!(plan.groups.len(), 2);
+        assert_eq!(plan.policies.len(), 2);
+        assert_eq!(plan.force_bypass_reason, None);
+    }
+
+    #[test]
+    fn neutron_acl_force_bypass_outcome_overrides_optimistic_snapshot() {
+        let mut snapshot = port("vm-port", "tap-vm", true);
+        snapshot.managed_domains = vec!["acl".to_string()];
+        snapshot.acl = Some(ready_acl(Vec::new()));
+        let outcome = NeutronAclReconcileOutcome::force_bypass(
+            "unsupported_acl_priority_overlap:first:10:second:20".to_string(),
+        );
+
+        let status = outcome.domain_status(&snapshot);
+        assert_eq!(status.status, "degraded");
+        assert_eq!(status.effective_action.as_deref(), Some("bypass"));
+        assert_eq!(
+            status.reason.as_deref(),
+            Some("unsupported_acl_priority_overlap:first:10:second:20")
         );
     }
 
