@@ -24,6 +24,24 @@ Neutron priority are rejected before enforcement and converge to explicit ACL
   differs and would therefore require priority ordering.
 - Preserve current safe same-key, same-action port-range merging.
 
+## Control-Plane Ownership Constraint
+
+The product datapath remains priority-independent. Numeric priority is a
+control-plane ordering, uniqueness, and diagnostic field; it is not a runtime
+action-arbitration mechanism.
+
+For the normal Neutron API path, any CIDR, protocol, or port match-space
+overlap whose result would depend on numeric priority or produce different
+actions must be rejected during policy/rule create or update. The controller
+must return an actionable conflict containing the affected rules. It must not
+accept such desired state and rely on a later agent resync to silently convert
+the port to degraded/bypass.
+
+Python effective-state and Rust translator overlap checks remain defense in
+depth for legacy persisted data, upgrade drift, and direct UDS input. Their
+runtime degraded/bypass behavior is not the primary user-facing validation
+path and does not replace controller-side rejection.
+
 ## Non-Goals
 
 - Do not add priority to `PolicyKey`, `PolicyValue`, CT state, WAL state, or

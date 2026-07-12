@@ -409,7 +409,7 @@ POST /v2.0/aria-acl-policies
 | `project_id` | string | 是 | owner project，必须与 policy 兼容 |
 | `policy_id` | uuid | 是 | 所属 policy |
 | `direction` | enum | 是 | `ingress` 或 `egress` |
-| `priority` | int | 是 | 数字越小优先级越高 |
+| `priority` | int | 是 | 控制层稳定排序与同方向唯一性字段；不参与 datapath 动作仲裁 |
 | `action` | enum | 是 | `allow` 或 `deny` |
 | `ethertype` | enum | 否 | `IPv4` 或 `IPv6` |
 | `protocol` | string/int | 否 | `tcp`、`udp`、`icmp`、`1` 等 |
@@ -417,8 +417,8 @@ POST /v2.0/aria-acl-policies
 | `dst_cidr` | cidr | 否 | 目的 CIDR |
 | `src_address_set_id` | uuid | 否 | 源 address set |
 | `dst_address_set_id` | uuid | 否 | 目的 address set |
-| `src_port_min` | int | 否 | L4 源端口下限 |
-| `src_port_max` | int | 否 | L4 源端口上限 |
+| `src_port_min` | int | 否 | 保留兼容字段；当前 ACL 产品不支持，create/update 必须拒绝 |
+| `src_port_max` | int | 否 | 保留兼容字段；当前 ACL 产品不支持，create/update 必须拒绝 |
 | `dst_port_min` | int | 否 | L4 目的端口下限 |
 | `dst_port_max` | int | 否 | L4 目的端口上限 |
 | `enabled` | bool | 否 | 默认 true |
@@ -451,12 +451,25 @@ POST /v2.0/aria-acl-rules
 规则校验：
 
 - `priority` 在同一 policy、同一 direction 内不能重复。
+- 当前 ACL datapath 是 priority-independent；合法策略的最终动作不能依赖
+  `priority` 决定。
+- CIDR、协议或端口匹配空间发生重叠，且重叠结果需要依赖 priority 或产生
+  不同动作时，Neutron API / 控制层必须在 create/update 阶段拒绝并向用户返回
+  明确的规则冲突信息，不能先接受策略再由运行期静默降级为 bypass。
+- Rust translator 的 overlap 检查只作为 legacy state、旧数据或 direct UDS
+  输入的防御边界，不替代控制层校验。
 - `src_cidr` 与 `src_address_set_id` 不能同时设置。
 - `dst_cidr` 与 `dst_address_set_id` 不能同时设置。
 - 设置 L4 端口时必须指定 TCP 或 UDP。
+- 源端口不是当前 ACL 匹配维度；底层完整五元组只用于 conntrack、trace、
+  TCP-RT、统计和诊断。
 - `port_min` 不能大于 `port_max`。
 - IPv4 rule 不能引用 IPv6 CIDR，反之亦然。
 - `action=deny` 和 `action=allow` 都必须显式写入。
+
+ACL 语义统一、selector side、编译缓存、shadow-bank 性能观测和 TC CT
+fast-path 的边界见
+[`2026-07-12-acl-semantic-unification-and-datapath-boundaries-design.md`](superpowers/specs/2026-07-12-acl-semantic-unification-and-datapath-boundaries-design.md)。
 
 ### 5.4 Address Set API
 

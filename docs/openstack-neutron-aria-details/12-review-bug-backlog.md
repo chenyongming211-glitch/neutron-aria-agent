@@ -181,6 +181,32 @@ persistence debt. The unique tracking-item total is now 73.
 | --- | --- |
 | `ACL-047` | Python effective-ACL preflight and the Rust direct-UDS defense both reject priority-dependent overlaps with stable reasons. Exact canonical CIDR selector sets reuse one Rust group. Rust returns the actual `degraded/bypass` outcome only after the classified empty-ACL transaction succeeds; failed transactions retain the existing proven-action error classification. Numeric priority ordering is not implemented in the current eBPF datapath, and QoS/Mirror remain outside this fix. |
 
+#### Batch 5 Final Review Hardening Verification
+
+`REVIEW-ACL-047` remains fixed and the inventory counts above are unchanged.
+The final hardening pass added strict Python/Rust IPv4 CIDR parity, exact
+1000-rule and 2048-raw-selector-member runtime bounds, an index-lifetime Python
+compile cache, and a snapshot-request-scoped Rust validation-template cache.
+Production force-bypass status now flows through `AclApplyPlan` and
+`NeutronAclReconcileOutcome::from_plan`; reconcile errors use the same
+before-quiesce, after-quiesce, and compensation-failed classifier at tests and
+production call sites.
+
+- Python RED: `PYTHONPATH=openstack/neutron_aria python3 -m unittest
+  neutron_aria.tests.unit.test_effective_acl` ran 31 tests and produced the
+  expected 5 failures plus 2 errors before implementation.
+- Python GREEN: the effective-ACL and event-loop suites ran 75 tests with zero
+  failures after implementation.
+- Rust RED: GitHub Build run `29177709424` failed with the expected 15 missing
+  constant/cache/translation/phase-interface compiler errors.
+- Rust GREEN: GitHub Build run `29177888031` passed the persistent
+  `neutron_acl_` filter, eBPF build, userspace static build, agent static build,
+  and binary verification.
+- Focused hardening coverage comprises 4 CIDR parity tests, 4 boundary-limit
+  tests, 3 cache/defensive-copy tests, and 2 production outcome/failure-phase
+  tests across Python and Rust.
+- No local Cargo build, check, or test command was run.
+
 ### ACL TC-Unified Datapath Batch 6 Evidence State
 
 | IDs | Evidence state |
@@ -568,6 +594,13 @@ Round 3 (contract / status / CT / CI):
   lie (`REVIEW-DOC-021`), smoke zero-port pass (`REVIEW-OPS-035`), marker-heavy
   CI (`REVIEW-CI-001`).
 - No code fixes were applied in any of the three rounds.
+
+Round 4 (TC conntrack fast path):
+
+- Confirmed that the live TC ingress/egress paths do not call the existing TC
+  CT lookup, fast-path, or accepted-flow creation helpers
+  (`REVIEW-ACL-055`). This is both a per-packet performance gap and a stateful
+  behavior inconsistency relative to XDP.
 
 ## Verification Refresh 2026-07-11 Classification
 
