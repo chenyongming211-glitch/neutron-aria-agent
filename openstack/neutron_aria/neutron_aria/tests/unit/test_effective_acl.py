@@ -213,6 +213,60 @@ class EffectiveAclTestCase(unittest.TestCase):
             effective_acl_module._acl_overlap_reason(validation),
         )
 
+    def test_earlier_priority_pair_beats_later_cidr_pair(self):
+        validation = effective_acl_module._acl_validation_view([
+            compiled_acl_rule(
+                "first", 10, protocol="udp", action="allow",
+                src_cidrs=["10.0.0.0/32"],
+            ),
+            compiled_acl_rule(
+                "second", 20, protocol=None, action="deny",
+                dst_cidrs=["192.0.2.0/24"],
+            ),
+            compiled_acl_rule(
+                "third", 30, protocol="tcp", action="allow",
+                src_cidrs=["10.0.0.0/31"],
+            ),
+        ])
+
+        self.assertEqual(
+            "unsupported_acl_priority_overlap:first:10:second:20",
+            effective_acl_module._acl_overlap_reason(validation),
+        )
+
+    def test_same_rule_pair_source_cidr_overlap_beats_destination(self):
+        validation = effective_acl_module._acl_validation_view([
+            compiled_acl_rule(
+                "first", 10,
+                src_cidrs=["10.0.0.0/24"],
+                dst_cidrs=["192.0.2.0/24"],
+            ),
+            compiled_acl_rule(
+                "second", 20, protocol="udp",
+                src_cidrs=["10.0.0.128/25"],
+                dst_cidrs=["192.0.2.128/25"],
+            ),
+        ])
+
+        self.assertEqual(
+            "unsupported_acl_cidr_overlap:src:first:10:second:20",
+            effective_acl_module._acl_overlap_reason(validation),
+        )
+
+    def test_selector_sweep_reactivates_multi_gap_selectors_stably(self):
+        selectors = (
+            (),
+            ("0.0.0.0/32", "0.0.0.4/32"),
+            ("0.0.0.0/31", "0.0.0.4/31"),
+        )
+
+        self.assertEqual(
+            (0, 1),
+            effective_acl_module._selector_best_overlap(
+                selectors, (None, 1, 0),
+            ),
+        )
+
     def test_selector_sweep_returns_only_best_rule_pair_rank(self):
         selectors = (
             (),
