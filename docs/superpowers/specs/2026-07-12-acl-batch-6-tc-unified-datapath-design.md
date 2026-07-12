@@ -363,10 +363,11 @@ Code/CI evidence moves the item to `likely-fixed`. Only successful real-tap
 evidence moves it to `fixed`.
 
 Current evidence state: `REVIEW-ACL-055` is `likely-fixed`. GREEN Build
-[29204424678](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29204424678)
+[29204885966](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29204885966)
 passed the exact Rust metric-label test, nightly eBPF build, static
 userspace/agent builds, binary verification, Python stages, and the fail-closed
-smoke structure/mutation checks, including strict-flush→miss→hit bank evidence.
+smoke structure/mutation checks, including strict-flush→miss→hit bank evidence
+and exact same-flow CT byte accounting.
 `real-tap smoke pending` remains explicit because this development environment
 does not provide the guarded Kolla credentials, Neutron UDS, managed tap, VM,
 or pinned live TC links required to run the smoke safely.
