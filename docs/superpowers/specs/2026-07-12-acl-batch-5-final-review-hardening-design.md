@@ -221,19 +221,23 @@ selector in the policy validation view.
 
 CIDR ownership is validated once per side with an interval sweep:
 
-1. flatten every interned CIDR into
+1. merge overlapping or nested intervals inside each interned selector;
+2. flatten every merged CIDR into
    `(network_start, network_end, selector_id)`;
-2. sort intervals by start, end, and selector ID;
-3. maintain active interval ends in a min-heap plus active counts by selector;
-4. before inserting the next interval, remove intervals whose end is before
+3. sort intervals by start, end, and selector ID;
+4. maintain active interval ends in a min-heap plus active counts by selector;
+5. before inserting the next interval, remove intervals whose end is before
    its start;
-5. if any remaining active selector ID differs from the current selector ID,
-   return that deterministic selector pair as a cross-selector overlap;
-6. overlapping or nested members inside the same selector remain allowed.
+6. for every remaining different active selector ID, record only the small
+   ordered selector-ID pair as a cross-selector conflict.
 
-The stable `unsupported_acl_cidr_overlap` diagnostic is produced by finding
-the first priority/ID-ordered rule pair that references the conflicting
-selector IDs. The wire reason format does not change.
+The interval sweep never chooses the diagnostic rule pair. After source and
+destination conflict sets are complete, the existing priority/ID-ordered rule
+scan is authoritative: for each rule pair it checks source first and then
+destination. The first matching pair produces the stable
+`unsupported_acl_cidr_overlap` diagnostic. This preserves both rule-pair and
+side ordering even when address order discovers a later conflict first. The
+wire reason format does not change.
 
 After a side passes the sweep, selector relation is constant-time:
 
@@ -246,9 +250,12 @@ different non-zero IDs  -> disjoint
 Priority fallback retains the existing rule-pair scan, but the scan compares
 small IDs and behavior fields only. It owns no CIDR vectors and performs no
 member-by-member intersection. The `O(R^2)` portion is therefore bounded to
-at most 499,500 cheap comparisons for 1000 rules, while CIDR work is
-`O(T log T)` for `T` raw canonical intervals and memory remains proportional
-to input plus unique selectors.
+at most 499,500 cheap comparisons for 1000 rules. Interval sorting and expiry
+remain `O(T log T)` for `T` raw canonical intervals. Materializing conflict
+IDs is output-sensitive in the number `K` of unique conflicting selector-ID
+pairs, with `K` bounded by 499,500; those entries contain IDs only, never CIDR
+vectors. Memory remains proportional to input, unique selectors, sweep state,
+and the small-ID conflict output.
 
 This is a representation and validation optimization, not a different
 priority algorithm. It preserves exact-selector reuse, conservative overlap
@@ -403,10 +410,36 @@ Selector-resource closure evidence:
 The closed representation has no selector vectors in retained normalized
 rules and no selector-pair relation cache. Source and destination tables own
 each unique canonical selector once, with ID `0` reserved for `any`. CIDR work
-is one deterministic `O(T log T)` interval sweep per side; storage is
-proportional to input rules plus unique selector members and sweep state. The
-remaining worst-case 499,500 rule pairs compare selector IDs and behavior
-fields only.
+uses deterministic interval sorting and expiry per side; storage is
+proportional to input rules, unique selector members, sweep state, and the
+output-sensitive set of conflicting small-ID pairs. The remaining worst-case
+499,500 rule pairs compare selector IDs and behavior fields only.
+
+Stable-order review closure evidence:
+
+- Python RED commit `c511715` added regressions in which address-order
+  discovery points to a later rule pair and in which a later source conflict
+  competes with an earlier destination conflict. The focused module ran 39
+  tests with the expected two failures: both diagnostics named the later
+  source pair instead of the priority/ID-first pair.
+- Rust RED commit `2d56149` added the equivalent contracts. The combined run
+  [`29181315421`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29181315421)
+  stopped at the intentionally failing Python tests. Test-only commit
+  `596bca4` temporarily isolated the Rust RED, and Build
+  [`29181345551`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29181345551)
+  reached the persistent Rust filter with 28 passing and the expected two
+  ordering failures. Commit `d38e638` restored the Python regressions before
+  implementation.
+- GREEN commit `9de7368` changed both validators to collect selector-ID
+  conflict pairs and made the priority/ID-ordered rule scan authoritative,
+  checking source before destination for each pair. Locally, the focused
+  Python module passed 39/39, the full Python suite and Stage 1 passed 278/278,
+  Stage 2 passed 148/148, and `git diff --check` passed.
+- Build
+  [`29181524962`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29181524962)
+  passed Python 278/278, Stage 2 148/148, the persistent Rust ACL filter 30/30,
+  eBPF build and artifact discovery, static userspace and agent builds, and
+  static binary verification. No local Cargo command was run.
 
 This closure is runtime-only. It changes Python policy validation and Rust
 request-scoped validated-template representation, but not Neutron API quotas,
