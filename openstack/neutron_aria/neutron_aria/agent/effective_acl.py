@@ -242,43 +242,30 @@ def _selector_relation(left_id, right_id):
     return SELECTOR_DISJOINT
 
 
-def _prune_active_selector_heap(active_selector_heap, active_tokens):
-    while active_selector_heap:
-        selector_id, token = active_selector_heap[0]
-        if active_tokens.get(selector_id) == token:
-            return
-        heapq.heappop(active_selector_heap)
-
-
-def _other_active_selector(active_selector_heap, active_tokens, selector_id):
-    _prune_active_selector_heap(active_selector_heap, active_tokens)
-    if not active_selector_heap:
-        return None
-    if active_selector_heap[0][0] != selector_id:
-        return active_selector_heap[0][0]
-
-    current = heapq.heappop(active_selector_heap)
-    _prune_active_selector_heap(active_selector_heap, active_tokens)
-    other = active_selector_heap[0][0] if active_selector_heap else None
-    heapq.heappush(active_selector_heap, current)
-    return other
-
-
-def _selector_overlap_pair(selectors):
+def _selector_overlap_pairs(selectors):
     intervals = []
     for selector_id, selector in enumerate(selectors):
         if selector_id == 0:
             continue
+        selector_intervals = []
         for network, prefix in _canonical_ipv4_cidrs(selector):
             host_mask = 0 if prefix == 32 else (1 << (32 - prefix)) - 1
-            intervals.append((network, network | host_mask, selector_id))
+            selector_intervals.append((network, network | host_mask))
+        selector_intervals.sort()
+        merged = []
+        for start, end in selector_intervals:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        intervals.extend(
+            (start, end, selector_id) for start, end in merged
+        )
     intervals.sort()
 
     active_intervals = []
     active_counts = {}
-    active_selector_heap = []
-    active_tokens = {}
-    next_token = 0
+    conflicts = set()
     for start, end, selector_id in intervals:
         while active_intervals and active_intervals[0][0] < start:
             _, expired_selector_id = heapq.heappop(active_intervals)
@@ -287,55 +274,39 @@ def _selector_overlap_pair(selectors):
                 active_counts[expired_selector_id] = remaining
             else:
                 del active_counts[expired_selector_id]
-                active_tokens.pop(expired_selector_id, None)
 
-        other_selector_id = _other_active_selector(
-            active_selector_heap, active_tokens, selector_id,
-        )
-        if other_selector_id is not None:
-            return tuple(sorted((selector_id, other_selector_id)))
+        for other_selector_id in active_counts:
+            if other_selector_id != selector_id:
+                conflicts.add(tuple(sorted((selector_id, other_selector_id))))
 
-        if selector_id not in active_counts:
-            next_token += 1
-            active_tokens[selector_id] = next_token
-            heapq.heappush(
-                active_selector_heap, (selector_id, next_token),
-            )
-            active_counts[selector_id] = 0
-        active_counts[selector_id] += 1
+        active_counts[selector_id] = active_counts.get(selector_id, 0) + 1
         heapq.heappush(active_intervals, (end, selector_id))
-    return None
-
-
-def _selector_overlap_reason(rules, side, selector_pair):
-    selector_key = side + "_selector_id"
-    selector_ids = frozenset(selector_pair)
-    for left_index, left in enumerate(rules):
-        for right in rules[left_index + 1:]:
-            if frozenset((
-                    left[selector_key], right[selector_key],
-            )) == selector_ids:
-                return "unsupported_acl_cidr_overlap:%s:%s:%s:%s:%s" % (
-                    side, left["id"], left["priority"],
-                    right["id"], right["priority"],
-                )
-    return None
+    return conflicts
 
 
 def _acl_overlap_reason(validation):
     normalized = validation["rules"]
-    for side in ("src", "dst"):
-        selector_pair = _selector_overlap_pair(validation[side + "_selectors"])
-        if selector_pair is not None:
-            return _selector_overlap_reason(normalized, side, selector_pair)
+    conflict_pairs = dict(
+        (side, _selector_overlap_pairs(validation[side + "_selectors"]))
+        for side in ("src", "dst")
+    )
 
     for left_index, left in enumerate(normalized):
         for right in normalized[left_index + 1:]:
             relations = {}
             for side in ("src", "dst"):
+                left_selector_id = left[side + "_selector_id"]
+                right_selector_id = right[side + "_selector_id"]
+                selector_pair = tuple(sorted((
+                    left_selector_id, right_selector_id,
+                )))
+                if selector_pair in conflict_pairs[side]:
+                    return "unsupported_acl_cidr_overlap:%s:%s:%s:%s:%s" % (
+                        side, left["id"], left["priority"],
+                        right["id"], right["priority"],
+                    )
                 relations[side] = _selector_relation(
-                    left[side + "_selector_id"],
-                    right[side + "_selector_id"],
+                    left_selector_id, right_selector_id,
                 )
 
             if not (left["directions"] & right["directions"]):

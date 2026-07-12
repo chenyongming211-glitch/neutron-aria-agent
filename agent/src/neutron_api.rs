@@ -3724,34 +3724,40 @@ fn intern_acl_rules(
     (rules, src_selectors, dst_selectors)
 }
 
-fn active_selector_other(
-    active_counts: &BTreeMap<AclSelectorId, usize>,
-    selector_id: AclSelectorId,
-) -> Option<AclSelectorId> {
-    let first = active_counts.keys().next().copied()?;
-    if first != selector_id {
-        return Some(first);
+fn acl_selector_intervals(selector: &[AclIpv4Cidr]) -> Vec<(u32, u32)> {
+    let mut intervals = selector
+        .iter()
+        .map(|cidr| (cidr.network, cidr.end()))
+        .collect::<Vec<_>>();
+    intervals.sort_unstable();
+    let mut merged = Vec::<(u32, u32)>::new();
+    for (start, end) in intervals {
+        if let Some((_, active_end)) = merged.last_mut() {
+            if start <= *active_end {
+                *active_end = (*active_end).max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
     }
-    active_counts
-        .range((std::ops::Bound::Excluded(selector_id), std::ops::Bound::Unbounded))
-        .next()
-        .map(|(other_id, _)| *other_id)
+    merged
 }
 
-fn acl_selector_overlap_pair(
+fn acl_selector_overlap_pairs(
     selectors: &[Vec<AclIpv4Cidr>],
-) -> Option<(AclSelectorId, AclSelectorId)> {
+) -> BTreeSet<(AclSelectorId, AclSelectorId)> {
     let mut intervals = Vec::new();
     for (selector_index, selector) in selectors.iter().enumerate().skip(1) {
         let selector_id = AclSelectorId(selector_index);
-        for cidr in selector {
-            intervals.push((cidr.network, cidr.end(), selector_id));
+        for (start, end) in acl_selector_intervals(selector) {
+            intervals.push((start, end, selector_id));
         }
     }
     intervals.sort_unstable();
 
     let mut active_ends = BinaryHeap::<Reverse<(u32, AclSelectorId)>>::new();
     let mut active_counts = BTreeMap::<AclSelectorId, usize>::new();
+    let mut conflicts = BTreeSet::new();
     for (start, end, selector_id) in intervals {
         while active_ends
             .peek()
@@ -3770,18 +3776,16 @@ fn acl_selector_overlap_pair(
             }
         }
 
-        if let Some(other_id) = active_selector_other(&active_counts, selector_id) {
-            return Some(if selector_id < other_id {
-                (selector_id, other_id)
-            } else {
-                (other_id, selector_id)
-            });
+        for other_id in active_counts.keys().copied() {
+            if other_id != selector_id {
+                conflicts.insert(ordered_selector_pair(selector_id, other_id));
+            }
         }
 
         *active_counts.entry(selector_id).or_insert(0) += 1;
         active_ends.push(Reverse((end, selector_id)));
     }
-    None
+    conflicts
 }
 
 fn ordered_selector_pair(
@@ -3793,29 +3797,6 @@ fn ordered_selector_pair(
     } else {
         (right, left)
     }
-}
-
-fn acl_selector_overlap_reason(
-    ordered: &[&NormalizedAclRule],
-    side: &str,
-    selector_pair: (AclSelectorId, AclSelectorId),
-) -> Option<String> {
-    for (left_index, left) in ordered.iter().enumerate() {
-        for right in ordered.iter().skip(left_index + 1) {
-            let (left_selector_id, right_selector_id) = if side == "src" {
-                (left.src_selector_id, right.src_selector_id)
-            } else {
-                (left.dst_selector_id, right.dst_selector_id)
-            };
-            if ordered_selector_pair(left_selector_id, right_selector_id) == selector_pair {
-                return Some(format!(
-                    "unsupported_acl_cidr_overlap:{}:{}:{}:{}:{}",
-                    side, left.id, left.priority, right.id, right.priority
-                ));
-            }
-        }
-    }
-    None
 }
 
 fn acl_priority_overlap_reason(
@@ -3848,15 +3829,36 @@ fn acl_priority_overlap_reason(
             .then_with(|| left.priority.cmp(&right.priority))
             .then_with(|| left.id.cmp(&right.id))
     });
-
-    for (side, selectors) in [("src", src_selectors), ("dst", dst_selectors)] {
-        if let Some(selector_pair) = acl_selector_overlap_pair(selectors) {
-            return acl_selector_overlap_reason(&ordered, side, selector_pair);
-        }
-    }
+    let src_conflicts = acl_selector_overlap_pairs(src_selectors);
+    let dst_conflicts = acl_selector_overlap_pairs(dst_selectors);
 
     for (left_index, left) in ordered.iter().enumerate() {
         for right in ordered.iter().skip(left_index + 1) {
+            for (side, left_selector_id, right_selector_id, conflicts) in [
+                (
+                    "src",
+                    left.src_selector_id,
+                    right.src_selector_id,
+                    &src_conflicts,
+                ),
+                (
+                    "dst",
+                    left.dst_selector_id,
+                    right.dst_selector_id,
+                    &dst_conflicts,
+                ),
+            ] {
+                if conflicts.contains(&ordered_selector_pair(
+                    left_selector_id,
+                    right_selector_id,
+                )) {
+                    return Some(format!(
+                        "unsupported_acl_cidr_overlap:{}:{}:{}:{}:{}",
+                        side, left.id, left.priority, right.id, right.priority
+                    ));
+                }
+            }
+
             let src_relation =
                 acl_selector_relation(left.src_selector_id, right.src_selector_id);
             let dst_relation =
