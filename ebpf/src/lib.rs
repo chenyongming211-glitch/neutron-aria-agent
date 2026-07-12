@@ -28,8 +28,9 @@ mod trace;
 
 use common::{
     acl_banked_tap_id, CtKey4, CtKey6, PipelineCtx, CT_CONTRACT_FAMILY_IPV4,
-    CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED,
-    CT_CONTRACT_REASON_CT_MISS, ACL_INGRESS_HOOK_TC, DIR_EGRESS, DIR_INGRESS, DROP_QOS_EGRESS,
+    CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_EGRESS, CT_CONTRACT_HOOK_TC_INGRESS,
+    CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_HIT, CT_CONTRACT_REASON_CT_MISS,
+    CT_CONTRACT_REASON_STALE_BANK, ACL_INGRESS_HOOK_TC, DIR_EGRESS, DIR_INGRESS, DROP_QOS_EGRESS,
     DROP_QOS_INGRESS, FLAG_ACL_ON, FLAG_CT_HIT, FLAG_CT_STALE_BANK, FLAG_IS_FORWARD,
     FLAG_MIRROR_ON, FLAG_POLICY_HIT, FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP,
     TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL,
@@ -234,11 +235,11 @@ unsafe fn try_tc_egress_v4(ctx: &TcContext, info: &parser::PacketInfo, p: &mut P
         proto: info.proto,
         pad: [0; 3],
     };
-    let _ = phase_ct_v4(info, p, &ct_key);
+    let miss_reason = phase_ct_v4(info, p, &ct_key);
     if (p.flags & FLAG_CT_HIT) != 0 {
         phase_ct_fastpath_tc_egress_v4(ctx, info, p, &ct_key);
     } else {
-        phase_ct_miss_tc_egress_v4(ctx, info, p, &ct_key);
+        phase_ct_miss_tc_egress_v4(ctx, info, p, &ct_key, miss_reason);
     }
     p.action as i32
 }
@@ -254,11 +255,11 @@ unsafe fn try_tc_egress_v6(ctx: &TcContext, info: &parser::PacketInfo, p: &mut P
         proto: info.proto,
         pad: [0; 3],
     };
-    let _ = phase_ct_v6(info, p, &ct_key);
+    let miss_reason = phase_ct_v6(info, p, &ct_key);
     if (p.flags & FLAG_CT_HIT) != 0 {
         phase_ct_fastpath_tc_egress_v6(ctx, info, p, &ct_key);
     } else {
-        phase_ct_miss_tc_egress_v6(ctx, info, p, &ct_key);
+        phase_ct_miss_tc_egress_v6(ctx, info, p, &ct_key, miss_reason);
     }
     p.action as i32
 }
@@ -333,11 +334,11 @@ unsafe fn try_tc_ingress_v4(
         pad: [0; 3],
     };
     if runtime::acl_ingress_hook(p.tap_id) == ACL_INGRESS_HOOK_TC {
-        let _ = phase_ct_v4(info, p, &ct_key);
+        let miss_reason = phase_ct_v4(info, p, &ct_key);
         if (p.flags & FLAG_CT_HIT) != 0 {
             phase_ct_fastpath_tc_ingress_v4(ctx, info, p, &ct_key);
         } else {
-            phase_ct_miss_tc_ingress_v4(ctx, info, p, &ct_key);
+            phase_ct_miss_tc_ingress_v4(ctx, info, p, &ct_key, miss_reason);
         }
     } else {
         phase_legacy_tc_ingress_v4(ctx, info, p, &ct_key);
@@ -361,11 +362,11 @@ unsafe fn try_tc_ingress_v6(
         pad: [0; 3],
     };
     if runtime::acl_ingress_hook(p.tap_id) == ACL_INGRESS_HOOK_TC {
-        let _ = phase_ct_v6(info, p, &ct_key);
+        let miss_reason = phase_ct_v6(info, p, &ct_key);
         if (p.flags & FLAG_CT_HIT) != 0 {
             phase_ct_fastpath_tc_ingress_v6(ctx, info, p, &ct_key);
         } else {
-            phase_ct_miss_tc_ingress_v6(ctx, info, p, &ct_key);
+            phase_ct_miss_tc_ingress_v6(ctx, info, p, &ct_key, miss_reason);
         }
     } else {
         phase_legacy_tc_ingress_v6(ctx, info, p, &ct_key);
@@ -708,17 +709,31 @@ unsafe fn should_apply_ingress_qos(p: &PipelineCtx) -> bool {
 }
 
 #[inline(always)]
-unsafe fn record_tc_ingress_contract_fallback(p: &PipelineCtx, family: u8) {
-    let reason = if runtime::conntrack_enabled(p.tap_id) {
-        CT_CONTRACT_REASON_CT_MISS
-    } else {
-        CT_CONTRACT_REASON_CT_DISABLED
-    };
+unsafe fn should_record_tc_ct_contract(p: &PipelineCtx, reason: u8) -> bool {
+    reason == CT_CONTRACT_REASON_STALE_BANK || (p.flags & FLAG_TRACING) != 0
+}
+
+#[inline(always)]
+fn ct_miss_contract_reason(reason: Option<CtMissReason>) -> u8 {
+    match reason {
+        Some(CtMissReason::Disabled) => CT_CONTRACT_REASON_CT_DISABLED,
+        Some(CtMissReason::StaleBank) => CT_CONTRACT_REASON_STALE_BANK,
+        Some(CtMissReason::NotFound) | Some(CtMissReason::Expired) | None => {
+            CT_CONTRACT_REASON_CT_MISS
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn record_tc_ct_contract(p: &PipelineCtx, hook: u8, family: u8, reason: u8) {
+    if !should_record_tc_ct_contract(p, reason) {
+        return;
+    }
     ct_contract::record_event(&ct_contract::CtContractArgs {
         tap_id: p.tap_id,
         pkt_len: p.pkt_len,
         now: p.now,
-        hook: CT_CONTRACT_HOOK_TC_INGRESS,
+        hook,
         family,
         reason,
         _pad: 0,
@@ -841,6 +856,12 @@ unsafe fn phase_ct_fastpath_tc_ingress_v4(
     p: &mut PipelineCtx,
     ct_key: &CtKey4,
 ) {
+    record_tc_ct_contract(
+        p,
+        CT_CONTRACT_HOOK_TC_INGRESS,
+        CT_CONTRACT_FAMILY_IPV4,
+        CT_CONTRACT_REASON_CT_HIT,
+    );
     if stats::monitoring_enabled(p.tap_id) && (p.flags & FLAG_POLICY_HIT) != 0 {
         let matched = get_matched(p);
         stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
@@ -873,6 +894,12 @@ unsafe fn phase_ct_fastpath_tc_ingress_v6(
     p: &mut PipelineCtx,
     ct_key: &CtKey6,
 ) {
+    record_tc_ct_contract(
+        p,
+        CT_CONTRACT_HOOK_TC_INGRESS,
+        CT_CONTRACT_FAMILY_IPV6,
+        CT_CONTRACT_REASON_CT_HIT,
+    );
     if stats::monitoring_enabled(p.tap_id) && (p.flags & FLAG_POLICY_HIT) != 0 {
         let matched = get_matched(p);
         stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
@@ -904,8 +931,14 @@ unsafe fn phase_ct_miss_tc_ingress_v4(
     info: &parser::PacketInfo,
     p: &mut PipelineCtx,
     ct_key: &CtKey4,
+    miss_reason: Option<CtMissReason>,
 ) {
-    record_tc_ingress_contract_fallback(p, CT_CONTRACT_FAMILY_IPV4);
+    record_tc_ct_contract(
+        p,
+        CT_CONTRACT_HOOK_TC_INGRESS,
+        CT_CONTRACT_FAMILY_IPV4,
+        ct_miss_contract_reason(miss_reason),
+    );
     if (p.flags & FLAG_ACL_ON) != 0 {
         load_acl_packet_ids_v4(info, p);
         phase_policy_tc(ctx, info, p);
@@ -940,8 +973,14 @@ unsafe fn phase_ct_miss_tc_ingress_v6(
     info: &parser::PacketInfo,
     p: &mut PipelineCtx,
     ct_key: &CtKey6,
+    miss_reason: Option<CtMissReason>,
 ) {
-    record_tc_ingress_contract_fallback(p, CT_CONTRACT_FAMILY_IPV6);
+    record_tc_ct_contract(
+        p,
+        CT_CONTRACT_HOOK_TC_INGRESS,
+        CT_CONTRACT_FAMILY_IPV6,
+        ct_miss_contract_reason(miss_reason),
+    );
     if (p.flags & FLAG_ACL_ON) != 0 {
         load_acl_packet_ids_v6(info, p);
         phase_policy_tc(ctx, info, p);
@@ -977,6 +1016,12 @@ unsafe fn phase_ct_fastpath_tc_egress_v4(
     p: &mut PipelineCtx,
     ct_key: &CtKey4,
 ) {
+    record_tc_ct_contract(
+        p,
+        CT_CONTRACT_HOOK_TC_EGRESS,
+        CT_CONTRACT_FAMILY_IPV4,
+        CT_CONTRACT_REASON_CT_HIT,
+    );
     if stats::monitoring_enabled(p.tap_id) && (p.flags & FLAG_POLICY_HIT) != 0 {
         let matched = get_matched(p);
         stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
@@ -1009,6 +1054,12 @@ unsafe fn phase_ct_fastpath_tc_egress_v6(
     p: &mut PipelineCtx,
     ct_key: &CtKey6,
 ) {
+    record_tc_ct_contract(
+        p,
+        CT_CONTRACT_HOOK_TC_EGRESS,
+        CT_CONTRACT_FAMILY_IPV6,
+        CT_CONTRACT_REASON_CT_HIT,
+    );
     if stats::monitoring_enabled(p.tap_id) && (p.flags & FLAG_POLICY_HIT) != 0 {
         let matched = get_matched(p);
         stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
@@ -1040,7 +1091,14 @@ unsafe fn phase_ct_miss_tc_egress_v4(
     info: &parser::PacketInfo,
     p: &mut PipelineCtx,
     ct_key: &CtKey4,
+    miss_reason: Option<CtMissReason>,
 ) {
+    record_tc_ct_contract(
+        p,
+        CT_CONTRACT_HOOK_TC_EGRESS,
+        CT_CONTRACT_FAMILY_IPV4,
+        ct_miss_contract_reason(miss_reason),
+    );
     if (p.flags & FLAG_ACL_ON) != 0 {
         load_acl_packet_ids_v4(info, p);
         phase_policy_tc(ctx, info, p);
@@ -1075,7 +1133,14 @@ unsafe fn phase_ct_miss_tc_egress_v6(
     info: &parser::PacketInfo,
     p: &mut PipelineCtx,
     ct_key: &CtKey6,
+    miss_reason: Option<CtMissReason>,
 ) {
+    record_tc_ct_contract(
+        p,
+        CT_CONTRACT_HOOK_TC_EGRESS,
+        CT_CONTRACT_FAMILY_IPV6,
+        ct_miss_contract_reason(miss_reason),
+    );
     if (p.flags & FLAG_ACL_ON) != 0 {
         load_acl_packet_ids_v6(info, p);
         phase_policy_tc(ctx, info, p);

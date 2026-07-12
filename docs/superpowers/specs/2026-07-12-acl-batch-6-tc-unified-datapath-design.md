@@ -2,7 +2,7 @@
 
 Date: 2026-07-12
 
-Status: approved in conversation; implementation pending
+Status: implemented in code; GitHub GREEN and real managed-tap evidence pending
 
 ## Goal
 
@@ -351,6 +351,12 @@ The smoke must prove both TC directions with IPv4 and IPv6 when available:
 
 Code/CI evidence moves the item to `likely-fixed`. Only successful real-tap
 evidence moves it to `fixed`.
+
+Current evidence state: `REVIEW-ACL-055` is `likely-fixed`; the exact GREEN
+Build URL will be recorded after the implementation commit passes, and
+`real-tap smoke pending` remains explicit because this development environment
+does not provide the guarded Kolla credentials, Neutron UDS, managed tap, VM,
+or pinned live TC links required to run the smoke safely.
 
 ## Separate Finding: Fragment-Safe ACL/CT Keys
 

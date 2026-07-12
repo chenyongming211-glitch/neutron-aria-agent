@@ -123,12 +123,15 @@ unsafe impl Pod for CtConfig {}
 // --- Conntrack contract telemetry ---
 
 pub const CT_CONTRACT_HOOK_TC_INGRESS: u8 = 1;
+pub const CT_CONTRACT_HOOK_TC_EGRESS: u8 = 2;
 
 pub const CT_CONTRACT_FAMILY_IPV4: u8 = 4;
 pub const CT_CONTRACT_FAMILY_IPV6: u8 = 6;
 
+pub const CT_CONTRACT_REASON_CT_HIT: u8 = 0;
 pub const CT_CONTRACT_REASON_CT_MISS: u8 = 1;
 pub const CT_CONTRACT_REASON_CT_DISABLED: u8 = 2;
+pub const CT_CONTRACT_REASON_STALE_BANK: u8 = 3;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]

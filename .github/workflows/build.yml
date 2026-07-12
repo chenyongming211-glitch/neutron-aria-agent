@@ -188,6 +188,7 @@ jobs:
           cargo +stable test --locked -p aria-agent neutron_acl_
           cargo +stable test --locked -p aria-agent neutron_tc_acl_
           cargo +stable test --locked -p aria-agent neutron_acl_runtime_transition_is_atomic
+          cargo +stable test --locked -p aria-agent tc_ct_contract_metric_labels_are_exact
           cargo +stable test --locked -p aria-core acl_ingress_hook_
           cargo +stable test --locked -p aria-core tc_ct_
           cargo +stable test -p aria-agent startup_mode

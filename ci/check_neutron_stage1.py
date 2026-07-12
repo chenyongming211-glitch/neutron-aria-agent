@@ -823,6 +823,21 @@ def check_tc_acl_datapath_smoke_contract():
     ):
         if marker not in smoke_source:
             raise SystemExit("ERROR: TC ACL smoke missing %s" % marker)
+    for guard in (
+        ': "${EXPECTED_IFNAME:?EXPECTED_IFNAME is required}"',
+        ': "${VM_IP:?VM_IP is required}"',
+        'ADMIN_RC_FILE="${ADMIN_RC_FILE:-/etc/kolla/.adminrc}"',
+        "trap cleanup EXIT",
+    ):
+        if guard not in smoke_source:
+            raise SystemExit("ERROR: TC ACL smoke missing hard guard %s" % guard)
+    mkdir_pos = smoke_source.index('mkdir -p "${WORK_DIR}"')
+    for guard in (
+        ': "${EXPECTED_IFNAME:?EXPECTED_IFNAME is required}"',
+        ': "${VM_IP:?VM_IP is required}"',
+    ):
+        if smoke_source.index(guard) > mkdir_pos:
+            raise SystemExit("ERROR: TC ACL smoke guard must precede WORK_DIR mutation")
 
 
 def run_rust_tests(require_rust, toolchain):
