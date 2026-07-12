@@ -191,6 +191,9 @@ struct AclEffectivePolicyKey {
     direction: u8,
 }
 
+const MAX_ACL_RULES_PER_POLICY: usize = 1000;
+const MAX_ACL_SELECTOR_MEMBERS: usize = 2048;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct AclIpv4Cidr {
     network: u32,
@@ -199,25 +202,51 @@ struct AclIpv4Cidr {
 
 impl AclIpv4Cidr {
     fn parse(value: &str) -> Result<Self, String> {
-        let (address, prefix) = value
-            .split_once('/')
+        let text = value.trim();
+        let mut pieces = text.split('/');
+        let address = pieces
+            .next()
             .ok_or_else(|| format!("invalid IPv4 CIDR {}", value))?;
-        let address = address
-            .parse::<std::net::Ipv4Addr>()
-            .map_err(|_| format!("invalid IPv4 CIDR {}", value))?;
+        let prefix = pieces
+            .next()
+            .ok_or_else(|| format!("invalid IPv4 CIDR {}", value))?;
+        if pieces.next().is_some() {
+            return Err(format!("invalid IPv4 CIDR {}", value));
+        }
+
+        let octets: Vec<&str> = address.split('.').collect();
+        if octets.len() != 4 {
+            return Err(format!("invalid IPv4 CIDR {}", value));
+        }
+        let mut values = [0u8; 4];
+        for (index, octet) in octets.iter().enumerate() {
+            if octet.is_empty()
+                || !octet.as_bytes().iter().all(u8::is_ascii_digit)
+                || (octet.len() > 1 && octet.starts_with('0'))
+            {
+                return Err(format!("invalid IPv4 CIDR {}", value));
+            }
+            values[index] = octet
+                .parse::<u8>()
+                .map_err(|_| format!("invalid IPv4 CIDR {}", value))?;
+        }
+        if prefix.is_empty() || !prefix.as_bytes().iter().all(u8::is_ascii_digit) {
+            return Err(format!("invalid IPv4 CIDR {}", value));
+        }
         let prefix = prefix
             .parse::<u8>()
             .map_err(|_| format!("invalid IPv4 CIDR {}", value))?;
         if prefix > 32 {
             return Err(format!("invalid IPv4 CIDR {}", value));
         }
+        let address = u32::from_be_bytes(values);
         let mask = if prefix == 0 {
             0
         } else {
             u32::MAX << (32 - prefix)
         };
         Ok(Self {
-            network: u32::from(address) & mask,
+            network: address & mask,
             prefix,
         })
     }
@@ -254,6 +283,32 @@ struct NormalizedAclRule {
     ports: Vec<(u16, u16)>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AclValidatedTemplate {
+    Ready(Vec<NormalizedAclRule>),
+    ForceBypass(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct AclValidationCacheKey {
+    policy_id: Option<String>,
+    revision: u64,
+    content_hash: String,
+}
+
+#[derive(Serialize)]
+struct AclValidationHashPayload<'a> {
+    default_action: &'a str,
+    rules: &'a [NeutronAclRuleSnapshot],
+}
+
+#[derive(Default)]
+struct AclValidationCache {
+    entries: BTreeMap<AclValidationCacheKey, Result<AclValidatedTemplate, String>>,
+    hits: usize,
+    misses: usize,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct AclApplyPlan {
     groups: Vec<AclGroupPlan>,
@@ -271,12 +326,6 @@ impl NeutronAclReconcileOutcome {
     fn from_plan(plan: &AclApplyPlan) -> Self {
         Self {
             force_bypass_reason: plan.force_bypass_reason.clone(),
-        }
-    }
-
-    fn force_bypass(reason: String) -> Self {
-        Self {
-            force_bypass_reason: Some(reason),
         }
     }
 
@@ -373,6 +422,28 @@ impl NeutronAclReconcileError {
         Self {
             details: details.into(),
             effective_action: "enforce",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AclReconcileFailurePhase {
+    BeforeQuiesce,
+    AfterQuiesce,
+    CompensationFailed,
+}
+
+fn acl_reconcile_error(
+    phase: AclReconcileFailurePhase,
+    details: impl Into<String>,
+) -> NeutronAclReconcileError {
+    match phase {
+        AclReconcileFailurePhase::BeforeQuiesce => {
+            NeutronAclReconcileError::unchanged(details)
+        }
+        AclReconcileFailurePhase::AfterQuiesce => NeutronAclReconcileError::bypass(details),
+        AclReconcileFailurePhase::CompensationFailed => {
+            NeutronAclReconcileError::enforce(details)
         }
     }
 }
@@ -1631,6 +1702,7 @@ async fn apply_snapshot_runtime_transaction(
     );
     let mut next_statuses = port_status_seed_for_scope(&runtime_before_apply, &scope);
     let mut results = ignored;
+    let mut acl_validation_cache = AclValidationCache::default();
 
     for port in detach {
         let port_started = Instant::now();
@@ -1782,7 +1854,8 @@ async fn apply_snapshot_runtime_transaction(
             );
             continue;
         }
-        let domain_result = reconcile_neutron_domains(state, &port).await;
+        let domain_result =
+            reconcile_neutron_domains(state, &port, &mut acl_validation_cache).await;
         let domain_ms = elapsed_ms(port_started);
         if domain_result.ok {
             state
@@ -1901,7 +1974,8 @@ async fn apply_snapshot_runtime_transaction(
                 }
                 let managed = managed_port_from_snapshot(&port);
                 let domain_started = Instant::now();
-                let domain_result = reconcile_neutron_domains(state, &port).await;
+                let domain_result =
+                    reconcile_neutron_domains(state, &port, &mut acl_validation_cache).await;
                 let domain_ms = elapsed_ms(domain_started);
                 if domain_result.ok {
                     state
@@ -2548,6 +2622,7 @@ fn unimplemented_domain_reason(domain: &str) -> String {
 async fn reconcile_neutron_domains(
     state: &NeutronApiState,
     port: &NeutronPortSnapshot,
+    acl_validation_cache: &mut AclValidationCache,
 ) -> DomainReconcileResult {
     let domains = normalize_managed_domains(&port.managed_domains);
     if domains.is_empty() {
@@ -2585,7 +2660,7 @@ async fn reconcile_neutron_domains(
     for domain in domains {
         match domain.as_str() {
             "attach" => statuses.push(domain_status(&domain, "ready", None)),
-            "acl" => match reconcile_neutron_acl(state, port).await {
+            "acl" => match reconcile_neutron_acl(state, port, acl_validation_cache).await {
                 Ok(outcome) => statuses.push(outcome.domain_status(port)),
                 Err(error) => {
                     let reason = format!("acl_apply_failed:{}", error.details);
@@ -3547,11 +3622,37 @@ fn acl_cidr_selectors_intersect(left: &[AclIpv4Cidr], right: &[AclIpv4Cidr]) -> 
         .any(|left_cidr| right.iter().any(|right_cidr| left_cidr.intersects(*right_cidr)))
 }
 
-fn acl_selector_dimension_is_disjoint(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AclSelectorRelation {
+    Identical,
+    Disjoint,
+    Intersecting,
+}
+
+fn acl_selector_relation(
     left: &[AclIpv4Cidr],
     right: &[AclIpv4Cidr],
-) -> bool {
-    !left.is_empty() && !right.is_empty() && !acl_cidr_selectors_intersect(left, right)
+    cache: &mut BTreeMap<(Vec<AclIpv4Cidr>, Vec<AclIpv4Cidr>), AclSelectorRelation>,
+) -> AclSelectorRelation {
+    let key = if left <= right {
+        (left.to_vec(), right.to_vec())
+    } else {
+        (right.to_vec(), left.to_vec())
+    };
+    if let Some(relation) = cache.get(&key) {
+        return *relation;
+    }
+    let relation = if left == right {
+        AclSelectorRelation::Identical
+    } else if left.is_empty() || right.is_empty() {
+        AclSelectorRelation::Intersecting
+    } else if acl_cidr_selectors_intersect(left, right) {
+        AclSelectorRelation::Intersecting
+    } else {
+        AclSelectorRelation::Disjoint
+    };
+    cache.insert(key, relation);
+    relation
 }
 
 fn acl_priority_overlap_reason(rules: &[NormalizedAclRule]) -> Option<String> {
@@ -3580,17 +3681,37 @@ fn acl_priority_overlap_reason(rules: &[NormalizedAclRule]) -> Option<String> {
             .then_with(|| left.priority.cmp(&right.priority))
             .then_with(|| left.id.cmp(&right.id))
     });
+    let mut relation_cache = BTreeMap::new();
 
     for (left_index, left) in ordered.iter().enumerate() {
         for right in ordered.iter().skip(left_index + 1) {
-            for (side, left_cidrs, right_cidrs) in [
-                ("src", &left.src_cidrs, &right.src_cidrs),
-                ("dst", &left.dst_cidrs, &right.dst_cidrs),
+            let src_relation = acl_selector_relation(
+                &left.src_cidrs,
+                &right.src_cidrs,
+                &mut relation_cache,
+            );
+            let dst_relation = acl_selector_relation(
+                &left.dst_cidrs,
+                &right.dst_cidrs,
+                &mut relation_cache,
+            );
+            for (side, left_cidrs, right_cidrs, selector_relation) in [
+                (
+                    "src",
+                    &left.src_cidrs,
+                    &right.src_cidrs,
+                    src_relation,
+                ),
+                (
+                    "dst",
+                    &left.dst_cidrs,
+                    &right.dst_cidrs,
+                    dst_relation,
+                ),
             ] {
                 if !left_cidrs.is_empty()
                     && !right_cidrs.is_empty()
-                    && left_cidrs != right_cidrs
-                    && acl_cidr_selectors_intersect(left_cidrs, right_cidrs)
+                    && selector_relation == AclSelectorRelation::Intersecting
                 {
                     return Some(format!(
                         "unsupported_acl_cidr_overlap:{}:{}:{}:{}:{}",
@@ -3609,10 +3730,10 @@ fn acl_priority_overlap_reason(rules: &[NormalizedAclRule]) -> Option<String> {
             if left.proto != 0 && right.proto != 0 && left.proto != right.proto {
                 continue;
             }
-            if acl_selector_dimension_is_disjoint(&left.src_cidrs, &right.src_cidrs) {
+            if src_relation == AclSelectorRelation::Disjoint {
                 continue;
             }
-            if acl_selector_dimension_is_disjoint(&left.dst_cidrs, &right.dst_cidrs) {
+            if dst_relation == AclSelectorRelation::Disjoint {
                 continue;
             }
 
@@ -3638,6 +3759,81 @@ fn force_bypass_acl_plan(acl: &NeutronAclSnapshot, reason: String) -> AclApplyPl
         force_bypass_reason: Some(reason),
         ..AclApplyPlan::default()
     }
+}
+
+fn acl_runtime_limit_reason(acl: &NeutronAclSnapshot) -> Option<String> {
+    if acl.rules.len() > MAX_ACL_RULES_PER_POLICY {
+        return Some(format!(
+            "acl_rule_limit_exceeded:{}:{}",
+            acl.rules.len(),
+            MAX_ACL_RULES_PER_POLICY,
+        ));
+    }
+    for (index, rule) in acl.rules.iter().enumerate() {
+        let rule_id = acl_rule_id(rule, index);
+        for (side, members) in [("src", &rule.src_cidrs), ("dst", &rule.dst_cidrs)] {
+            if members.len() > MAX_ACL_SELECTOR_MEMBERS {
+                return Some(format!(
+                    "acl_selector_member_limit_exceeded:{}:{}:{}:{}",
+                    side,
+                    rule_id,
+                    members.len(),
+                    MAX_ACL_SELECTOR_MEMBERS,
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn acl_validation_cache_key(acl: &NeutronAclSnapshot) -> AclValidationCacheKey {
+    AclValidationCacheKey {
+        policy_id: acl.policy_id.clone(),
+        revision: acl.revision,
+        content_hash: stable_json_hash(&AclValidationHashPayload {
+            default_action: &acl.default_action,
+            rules: &acl.rules,
+        }),
+    }
+}
+
+fn validate_neutron_acl_template(
+    acl: &NeutronAclSnapshot,
+) -> Result<AclValidatedTemplate, String> {
+    let default_action = normalize_default_action(&acl.default_action);
+    if !matches!(default_action.as_str(), "allow" | "accept" | "pass") {
+        return Err(format!(
+            "default_action {} is unsupported in the minimal Neutron ACL translator",
+            acl.default_action
+        ));
+    }
+    if let Some(reason) = acl_runtime_limit_reason(acl) {
+        return Ok(AclValidatedTemplate::ForceBypass(reason));
+    }
+
+    let mut normalized_rules = Vec::new();
+    for (index, rule) in acl.rules.iter().enumerate() {
+        normalized_rules.push(normalize_acl_rule(rule, index)?);
+    }
+    if let Some(reason) = acl_priority_overlap_reason(&normalized_rules) {
+        return Ok(AclValidatedTemplate::ForceBypass(reason));
+    }
+    Ok(AclValidatedTemplate::Ready(normalized_rules))
+}
+
+fn cached_neutron_acl_template(
+    acl: &NeutronAclSnapshot,
+    cache: &mut AclValidationCache,
+) -> Result<AclValidatedTemplate, String> {
+    let key = acl_validation_cache_key(acl);
+    if let Some(template) = cache.entries.get(&key) {
+        cache.hits += 1;
+        return template.clone();
+    }
+    cache.misses += 1;
+    let template = validate_neutron_acl_template(acl);
+    cache.entries.insert(key, template.clone());
+    template
 }
 
 fn acl_selector_registry(
@@ -3680,33 +3876,11 @@ fn acl_group_for_selector(
     }
 }
 
-fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclApplyPlan, String> {
-    if !acl.enabled
-        || !acl.status.eq_ignore_ascii_case("ready")
-        || !acl.effective_action.eq_ignore_ascii_case("enforce")
-    {
-        return Ok(AclApplyPlan {
-            conntrack_enabled: Some(acl.stateful),
-            ..AclApplyPlan::default()
-        });
-    }
-
-    let default_action = normalize_default_action(&acl.default_action);
-    if !matches!(default_action.as_str(), "allow" | "accept" | "pass") {
-        return Err(format!(
-            "default_action {} is unsupported in the minimal Neutron ACL translator",
-            acl.default_action
-        ));
-    }
-
-    let mut normalized_rules = Vec::new();
-    for (index, rule) in acl.rules.iter().enumerate() {
-        normalized_rules.push(normalize_acl_rule(rule, index)?);
-    }
-    if let Some(reason) = acl_priority_overlap_reason(&normalized_rules) {
-        return Ok(force_bypass_acl_plan(acl, reason));
-    }
-
+fn render_neutron_acl_plan(
+    port_id: &str,
+    acl: &NeutronAclSnapshot,
+    normalized_rules: &[NormalizedAclRule],
+) -> Result<AclApplyPlan, String> {
     let src_selectors = normalized_rules
         .iter()
         .filter(|rule| !rule.src_cidrs.is_empty())
@@ -3724,7 +3898,7 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
     groups.append(&mut dst_groups);
 
     let mut policies_by_key = BTreeMap::<AclEffectivePolicyKey, AclPolicyPlan>::new();
-    for rule in &normalized_rules {
+    for rule in normalized_rules {
         let ports = serialize_acl_port_ranges(rule.ports.clone());
         let src_group = acl_group_for_selector(&rule.src_cidrs, &src_group_names);
         let dst_group = acl_group_for_selector(&rule.dst_cidrs, &dst_group_names);
@@ -3771,6 +3945,34 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
         conntrack_enabled: Some(acl.stateful),
         force_bypass_reason: None,
     })
+}
+
+fn translate_neutron_acl_with_cache(
+    port_id: &str,
+    acl: &NeutronAclSnapshot,
+    cache: &mut AclValidationCache,
+) -> Result<AclApplyPlan, String> {
+    if !acl.enabled
+        || !acl.status.eq_ignore_ascii_case("ready")
+        || !acl.effective_action.eq_ignore_ascii_case("enforce")
+    {
+        return Ok(AclApplyPlan {
+            conntrack_enabled: Some(acl.stateful),
+            ..AclApplyPlan::default()
+        });
+    }
+
+    match cached_neutron_acl_template(acl, cache)? {
+        AclValidatedTemplate::Ready(normalized_rules) => {
+            render_neutron_acl_plan(port_id, acl, &normalized_rules)
+        }
+        AclValidatedTemplate::ForceBypass(reason) => Ok(force_bypass_acl_plan(acl, reason)),
+    }
+}
+
+fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclApplyPlan, String> {
+    let mut cache = AclValidationCache::default();
+    translate_neutron_acl_with_cache(port_id, acl, &mut cache)
 }
 
 async fn purge_neutron_acl(
@@ -3865,6 +4067,7 @@ async fn flush_neutron_acl_conntrack(
 async fn reconcile_neutron_acl(
     state: &NeutronApiState,
     port: &NeutronPortSnapshot,
+    acl_validation_cache: &mut AclValidationCache,
 ) -> Result<NeutronAclReconcileOutcome, NeutronAclReconcileError> {
     if !port_manages_acl(port) {
         return Ok(NeutronAclReconcileOutcome::default());
@@ -3873,8 +4076,14 @@ async fn reconcile_neutron_acl(
     let profile_started = Instant::now();
     let translate_started = Instant::now();
     let plan = match &port.acl {
-        Some(acl) => translate_neutron_acl(&port.port_id, acl)
-            .map_err(NeutronAclReconcileError::unchanged)?,
+        Some(acl) => translate_neutron_acl_with_cache(
+            &port.port_id,
+            acl,
+            acl_validation_cache,
+        )
+        .map_err(|error| {
+            acl_reconcile_error(AclReconcileFailurePhase::BeforeQuiesce, error)
+        })?,
         None => AclApplyPlan::default(),
     };
     let outcome = NeutronAclReconcileOutcome::from_plan(&plan);
@@ -3884,7 +4093,12 @@ async fn reconcile_neutron_acl(
             .control_plane
             .get_config(&port.ifname)
             .await
-            .map_err(|e| NeutronAclReconcileError::unchanged(e.to_string()))?
+            .map_err(|error| {
+                acl_reconcile_error(
+                    AclReconcileFailurePhase::BeforeQuiesce,
+                    error.to_string(),
+                )
+            })?
             .conntrack_enabled
             != 0
     } else {
@@ -3910,11 +4124,18 @@ async fn reconcile_neutron_acl(
                 None,
             )
             .await
-            .map_err(|e| NeutronAclReconcileError::unchanged(e.to_string()))?;
+            .map_err(|error| {
+                acl_reconcile_error(
+                    AclReconcileFailurePhase::BeforeQuiesce,
+                    error.to_string(),
+                )
+            })?;
         let elapsed = elapsed_ms(disable_started);
         fault_injection::check("neutron.acl.after_disable")
             .await
-            .map_err(NeutronAclReconcileError::bypass)?;
+            .map_err(|error| {
+                acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+            })?;
         elapsed
     } else {
         0
@@ -3951,20 +4172,31 @@ async fn reconcile_neutron_acl(
             &policy_specs,
         )
         .await
-        .map_err(|e| NeutronAclReconcileError::bypass(e.to_string()))?;
+        .map_err(|error| {
+            acl_reconcile_error(
+                AclReconcileFailurePhase::AfterQuiesce,
+                error.to_string(),
+            )
+        })?;
     let replace_ms = elapsed_ms(replace_started);
     fault_injection::check("neutron.acl.after_purge")
         .await
-        .map_err(NeutronAclReconcileError::bypass)?;
+        .map_err(|error| {
+            acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+        })?;
     if replace_report.group_cidr_add_count > 0 {
         fault_injection::check("neutron.acl.after_group_write")
             .await
-            .map_err(NeutronAclReconcileError::bypass)?;
+            .map_err(|error| {
+                acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+            })?;
     }
     if replace_report.policy_add_count > 0 {
         fault_injection::check("neutron.acl.after_policy_write")
             .await
-            .map_err(NeutronAclReconcileError::bypass)?;
+            .map_err(|error| {
+                acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+            })?;
     }
 
     let effective_reason = if port.acl.is_none() {
@@ -3978,7 +4210,9 @@ async fn reconcile_neutron_acl(
         let flush_started = Instant::now();
         flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id)
             .await
-            .map_err(NeutronAclReconcileError::bypass)?;
+            .map_err(|error| {
+                acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+            })?;
         let flush_ms = elapsed_ms(flush_started);
         let publish_started = Instant::now();
         state
@@ -3994,7 +4228,12 @@ async fn reconcile_neutron_acl(
                 None,
             )
             .await
-            .map_err(|e| NeutronAclReconcileError::bypass(e.to_string()))?;
+            .map_err(|error| {
+                acl_reconcile_error(
+                    AclReconcileFailurePhase::AfterQuiesce,
+                    error.to_string(),
+                )
+            })?;
         let publish_ms = elapsed_ms(publish_started);
         info!(
             port_id = %port.port_id,
@@ -4027,11 +4266,15 @@ async fn reconcile_neutron_acl(
     let flush_started = Instant::now();
     flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id)
         .await
-        .map_err(NeutronAclReconcileError::bypass)?;
+        .map_err(|error| {
+            acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+        })?;
     let flush_ms = elapsed_ms(flush_started);
     fault_injection::check("neutron.acl.before_enable")
         .await
-        .map_err(NeutronAclReconcileError::bypass)?;
+        .map_err(|error| {
+            acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+        })?;
     let publish_started = Instant::now();
     state
         .control_plane
@@ -4046,7 +4289,12 @@ async fn reconcile_neutron_acl(
             None,
         )
         .await
-        .map_err(|e| NeutronAclReconcileError::bypass(e.to_string()))?;
+        .map_err(|error| {
+            acl_reconcile_error(
+                AclReconcileFailurePhase::AfterQuiesce,
+                error.to_string(),
+            )
+        })?;
     let publish_ms = elapsed_ms(publish_started);
     info!(
         port_id = %port.port_id,
@@ -4087,11 +4335,14 @@ async fn reconcile_neutron_acl(
             )
             .await
         {
-            Ok(()) => Err(NeutronAclReconcileError::bypass(error)),
-            Err(disable_error) => Err(NeutronAclReconcileError::enforce(format!(
-                "{}; acl_disable_compensation_failed:{}",
-                error, disable_error
-            ))),
+            Ok(()) => Err(acl_reconcile_error(
+                AclReconcileFailurePhase::AfterQuiesce,
+                error,
+            )),
+            Err(disable_error) => Err(acl_reconcile_error(
+                AclReconcileFailurePhase::CompensationFailed,
+                format!("{}; acl_disable_compensation_failed:{}", error, disable_error),
+            )),
         };
     }
     Ok(outcome)
