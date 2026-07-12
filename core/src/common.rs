@@ -443,7 +443,14 @@ pub struct SslWriteScratch {
 unsafe impl Pod for SslWriteScratch {}
 
 #[cfg(test)]
+#[path = "../../ebpf/src/common.rs"]
+mod ebpf_common_contract;
+
+#[cfg(test)]
 mod tests {
+    use super::ebpf_common_contract::{
+        ct_acl_bank_is_current, CtValue as EbpfCtValue, CT_FLAG_POLICY_HIT,
+    };
     use super::{
         acl_banked_tap_id, acl_next_bank, normalize_acl_ingress_hook, CtValue, PolicyKey,
         SslErrorEvent, TapConfig, ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP,
@@ -478,6 +485,20 @@ mod tests {
         assert_eq!(acl_next_bank(0), 1);
         assert_eq!(acl_next_bank(1), 0);
         assert_eq!(acl_next_bank(42), 1);
+    }
+
+    #[test]
+    fn tc_ct_bank_accepts_only_current_bank_when_acl_is_active() {
+        assert!(ct_acl_bank_is_current(0, 1, 0));
+        assert!(ct_acl_bank_is_current(1, 1, 1));
+        assert!(!ct_acl_bank_is_current(1, 1, 0));
+    }
+
+    #[test]
+    fn ct_policy_hit_uses_an_unused_flag_without_layout_change() {
+        assert_eq!(CT_FLAG_POLICY_HIT, 2);
+        assert_eq!(core::mem::size_of::<EbpfCtValue>(), 40);
+        assert_eq!(core::mem::size_of::<CtValue>(), 40);
     }
 }
 
