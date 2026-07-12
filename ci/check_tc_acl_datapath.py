@@ -77,7 +77,7 @@ def _matching_brace(source, opening):
     raise ValueError("unbalanced Rust function body")
 
 
-def function_body(source, name):
+def function_body_span(source, name):
     pattern = re.compile(
         r"(?:^|\n)\s*(?:pub\s+)?(?:unsafe\s+)?fn\s+%s\s*\(" % re.escape(name)
     )
@@ -88,7 +88,12 @@ def function_body(source, name):
     if opening < 0:
         raise ValueError("function %s has no body" % name)
     closing = _matching_brace(source, opening)
-    return source[opening + 1 : closing]
+    return opening + 1, closing
+
+
+def function_body(source, name):
+    start, end = function_body_span(source, name)
+    return source[start:end]
 
 
 def _body_or_error(source, name, errors, path):
@@ -99,13 +104,26 @@ def _body_or_error(source, name, errors, path):
         return None
 
 
-def _contains_in_order(body, markers):
-    cursor = -1
-    for marker in markers:
-        cursor = body.find(marker, cursor + 1)
-        if cursor < 0:
-            return False
-    return True
+def _block_after(body, marker, start=0):
+    """Extract the first brace-balanced block following marker."""
+    marker_at = body.find(marker, start)
+    if marker_at < 0:
+        return None
+    opening = body.find("{", marker_at + len(marker))
+    if opening < 0:
+        return None
+    try:
+        closing = _matching_brace(body, opening)
+    except ValueError:
+        return None
+    return body[opening + 1 : closing], marker_at, opening, closing
+
+
+def _drop_guard_after(body, phase_marker, start=0):
+    phase_at = body.find(phase_marker, start)
+    if phase_at < 0:
+        return None
+    return _block_after(body, "if p.action == TC_ACT_SHOT as u32", phase_at)
 
 
 def check_xdp(source, errors):
@@ -114,6 +132,7 @@ def check_xdp(source, errors):
         return
     hook = body.find("runtime::acl_ingress_hook(p.tap_id) == ACL_INGRESS_HOOK_TC")
     forbidden = [
+        "load_feature_flags_xdp(p, info)",
         "CtKey4 {",
         "CtKey6 {",
         "phase_ct_v4(",
@@ -212,8 +231,22 @@ def check_hit_helper(source, errors, direction, family):
         r"stats::monitoring_enabled\(p\.tap_id\)\s*&&\s*\(p\.flags\s*&\s*FLAG_POLICY_HIT\)\s*!=\s*0",
         body,
     )
-    passed_order = _contains_in_order(body, [qos, "TC_ACT_SHOT", flow, post])
-    if any(term in body for term in forbidden) or not monitoring_policy_hit or not passed_order:
+    qos_at = body.find(qos)
+    drop_guard = _drop_guard_after(body, qos)
+    flow_at = body.find(flow)
+    post_at = body.find(post)
+    drop_returns = drop_guard is not None and "return;" in drop_guard[0]
+    passed_order = (
+        drop_guard is not None
+        and qos_at >= 0
+        and qos_at < drop_guard[1] < drop_guard[3] < flow_at < post_at
+    )
+    if (
+        any(term in body for term in forbidden)
+        or not monitoring_policy_hit
+        or not drop_returns
+        or not passed_order
+    ):
         errors.append(
             "%s: cached hit must skip ACL/create, reapply QoS, and account only passed traffic"
             % path
@@ -230,28 +263,55 @@ def check_miss_helper(source, errors, direction, family):
     qos = "phase_qos_ingress_tc(" if direction == "ingress" else "phase_qos_egress_tc("
     post = "phase_post_accept_tc_%s(" % direction
     tcp_rt = "tcprt::track_tcp_rt_v%s_auto(" % bits
-    markers = [
-        "load_acl_packet_ids_v%s(" % bits,
-        "phase_policy_tc(",
-        "TC_ACT_SHOT",
-        qos,
-        "TC_ACT_SHOT",
-        "stats::update_flow_stats_v%s(" % bits,
-        post,
-        tcp_rt,
-        "conntrack::ct_create_v%s(" % bits,
-    ]
-    if not _contains_in_order(body, markers):
+    acl_load = "load_acl_packet_ids_v%s(" % bits
+    policy = "phase_policy_tc("
+    flow = "stats::update_flow_stats_v%s(" % bits
+    create = "conntrack::ct_create_v%s(" % bits
+    create_statement = (
+        "conntrack::ct_create_v%s(ct_key, p.now, p.pkt_len, &matched);" % bits
+    )
+    ct_guard_marker = "if runtime::conntrack_enabled(p.tap_id)"
+
+    acl_at = body.find(acl_load)
+    policy_at = body.find(policy, acl_at + 1)
+    acl_drop = _drop_guard_after(body, policy, acl_at + 1)
+    qos_at = body.find(qos, acl_drop[3] + 1 if acl_drop else 0)
+    qos_drop = _drop_guard_after(body, qos, qos_at if qos_at >= 0 else 0)
+    flow_at = body.find(flow, qos_drop[3] + 1 if qos_drop else 0)
+    post_at = body.find(post, flow_at + 1 if flow_at >= 0 else 0)
+    tcp_rt_at = body.find(tcp_rt, post_at + 1 if post_at >= 0 else 0)
+    ct_guard = _block_after(body, ct_guard_marker, tcp_rt_at + 1 if tcp_rt_at >= 0 else 0)
+
+    drop_blocks_return = (
+        acl_drop is not None
+        and "return;" in acl_drop[0]
+        and qos_drop is not None
+        and "return;" in qos_drop[0]
+    )
+    ordered = (
+        acl_drop is not None
+        and qos_drop is not None
+        and ct_guard is not None
+        and 0 <= acl_at < policy_at < acl_drop[1] < acl_drop[3]
+        and acl_drop[3] < qos_at < qos_drop[1] < qos_drop[3]
+        and qos_drop[3] < flow_at < post_at < tcp_rt_at < ct_guard[1]
+    )
+    guarded_final_create = (
+        ct_guard is not None
+        and create_statement in ct_guard[0]
+        and ct_guard[0].strip().endswith(create_statement)
+        and body[ct_guard[3] + 1 :].strip() == ""
+        and body.count(create) == 1
+        and body.count("conntrack::ct_create_") == 1
+    )
+    if not drop_blocks_return or not ordered or not guarded_final_create:
         errors.append(
             "%s: require ACL drop -> QoS drop -> passed post-processing -> CT create last"
             % path
         )
 
 
-def main():
-    with open(EBPF_LIB, "r", encoding="utf-8") as handle:
-        source = handle.read()
-
+def check_source(source):
     errors = []
     check_xdp(source, errors)
     for direction in ("ingress", "egress"):
@@ -261,12 +321,127 @@ def main():
             check_miss_helper(source, errors, direction, family)
     for family in ("v4", "v6"):
         check_legacy_ingress(source, errors, family)
+    return errors
+
+
+def _mutate_function(source, name, mutate):
+    start, end = function_body_span(source, name)
+    body = source[start:end]
+    mutated = mutate(body)
+    if mutated == body:
+        raise ValueError("mutation did not alter %s" % name)
+    return source[:start] + mutated + source[end:]
+
+
+def _move_xdp_feature_flags_before_bypass(body):
+    feature = "    load_feature_flags_xdp(p, info);\n"
+    anchor = "    load_runtime_ctx_xdp(ctx, p);\n"
+    if body.count(feature) != 1 or body.count(anchor) != 1:
+        raise ValueError("XDP feature-flag mutation anchors drifted")
+    body = body.replace(feature, "", 1)
+    return body.replace(anchor, anchor + feature, 1)
+
+
+def _remove_drop_return_after(body, phase_marker, label):
+    drop_guard = _drop_guard_after(body, phase_marker)
+    if drop_guard is None or drop_guard[0].count("return;") != 1:
+        raise ValueError("%s mutation anchor drifted" % label)
+    mutated_block = drop_guard[0].replace("return;", "", 1)
+    return body[: drop_guard[2] + 1] + mutated_block + body[drop_guard[3] :]
+
+
+def _remove_egress_v4_hit_qos_return(body):
+    return _remove_drop_return_after(
+        body, "phase_qos_egress_tc(", "egress v4 hit QoS drop"
+    )
+
+
+def _remove_ingress_v4_miss_acl_return(body):
+    return _remove_drop_return_after(
+        body, "phase_policy_tc(", "ingress v4 miss ACL drop"
+    )
+
+
+def _remove_ingress_v4_miss_qos_return(body):
+    return _remove_drop_return_after(
+        body, "phase_qos_ingress_tc(", "ingress v4 miss QoS drop"
+    )
+
+
+def _remove_egress_v4_miss_ct_guard(body):
+    guard = _block_after(body, "if runtime::conntrack_enabled(p.tap_id)")
+    if guard is None:
+        raise ValueError("egress v4 miss CT-guard mutation anchor drifted")
+    return body[: guard[1]] + guard[0] + body[guard[3] + 1 :]
+
+
+def run_mutation_self_tests(source, verbose=False):
+    specs = [
+        (
+            "XDP feature flags before TC bypass",
+            "try_xdp_firewall",
+            _move_xdp_feature_flags_before_bypass,
+            "XDP:",
+        ),
+        (
+            "egress v4 hit QoS drop without return",
+            "phase_ct_fastpath_tc_egress_v4",
+            _remove_egress_v4_hit_qos_return,
+            "TC egress v4 hit:",
+        ),
+        (
+            "ingress v4 miss ACL drop without return",
+            "phase_ct_miss_tc_ingress_v4",
+            _remove_ingress_v4_miss_acl_return,
+            "TC ingress v4 miss:",
+        ),
+        (
+            "ingress v4 miss QoS drop without return",
+            "phase_ct_miss_tc_ingress_v4",
+            _remove_ingress_v4_miss_qos_return,
+            "TC ingress v4 miss:",
+        ),
+        (
+            "egress v4 miss CT create without runtime guard",
+            "phase_ct_miss_tc_egress_v4",
+            _remove_egress_v4_miss_ct_guard,
+            "TC egress v4 miss:",
+        ),
+    ]
+    failures = []
+    for label, function, mutate, expected_prefix in specs:
+        try:
+            mutant = _mutate_function(source, function, mutate)
+        except (KeyError, ValueError) as exc:
+            failures.append("mutation %s could not run (%s)" % (label, exc))
+            continue
+        mutant_errors = check_source(mutant)
+        matching = [error for error in mutant_errors if error.startswith(expected_prefix)]
+        if not matching:
+            failures.append("mutation %s was accepted" % label)
+        elif verbose:
+            print("PASS: rejected mutation %s" % label)
+    return failures
+
+
+def main():
+    args = sys.argv[1:]
+    if any(arg != "--self-test" for arg in args):
+        print("usage: %s [--self-test]" % sys.argv[0])
+        return 2
+    verbose_mutations = "--self-test" in args
+    with open(EBPF_LIB, "r", encoding="utf-8") as handle:
+        source = handle.read()
+
+    errors = check_source(source)
+    if not errors:
+        errors.extend(run_mutation_self_tests(source, verbose=verbose_mutations))
 
     if errors:
         for error in errors:
             print("ERROR: %s" % error)
         return 1
-    print("TC ACL datapath source contracts: OK")
+    print("TC ACL datapath source contracts and mutation self-tests: OK")
     return 0
 
 
