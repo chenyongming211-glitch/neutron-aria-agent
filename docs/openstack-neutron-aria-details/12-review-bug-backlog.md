@@ -52,7 +52,7 @@ present.
 
 Risk tracking now contains seven classified items: five existing `RISK-*` IDs
 plus reclassified `REVIEW-ACL-032` and `REVIEW-ACL-046`. Engineering debt
-remains four `DEBT-*` IDs. The unique tracking-item total remains 69.
+remains four `DEBT-*` IDs. The unique tracking-item total is now 71.
 
 | Current tracking portfolio | Count | Included states |
 | --- | ---: | --- |

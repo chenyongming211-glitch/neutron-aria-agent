@@ -12,6 +12,9 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 SMOKE = os.path.join(
     ROOT, "deploy", "kolla", "smoke", "neutron_aria_acl_tc_datapath_smoke.sh"
 )
+BACKLOG = os.path.join(
+    ROOT, "docs", "openstack-neutron-aria-details", "12-review-bug-backlog.md"
+)
 
 
 def function_body(source, name):
@@ -47,9 +50,13 @@ def check_source(source):
         "metric_sum",
         "rule_counter_sum",
         "run_observed_flow",
+        "assert_stateful_evidence",
         "run_stateful_evidence",
+        "assert_bank_evidence",
         "run_bank_evidence",
+        "assert_stateless_evidence",
         "run_stateless_evidence",
+        "assert_deny_evidence",
         "run_deny_evidence",
         "verify_cleanup_restored",
         "cleanup",
@@ -75,9 +82,11 @@ def check_source(source):
             "cleanup-delete-binding",
             "cleanup-delete-policy",
             "cleanup-full-resync",
+            'record_cleanup_error "cleanup-full-resync failed"',
             "verify_cleanup_restored",
             "BODY_SUCCEEDED",
             "write_summary",
+            'record_cleanup_error "write_summary failed"',
             'RESULT="fail"',
             'RESULT="pass"',
         )
@@ -102,8 +111,19 @@ def check_source(source):
     if 'RESULT="pass"' in outside_cleanup:
         errors.append("main body must not mark pass before cleanup verification")
     summary = bodies["write_summary"]
-    if "cleanup_errors" not in summary or '"cleanup_errors"' not in summary:
+    if (
+        "cleanup_errors" not in summary
+        or '"cleanup_errors"' not in summary
+        or summary.count("|| return 1") < 4
+    ):
         errors.append("summary.json must contain cleanup_errors")
+    restore = bodies["verify_cleanup_restored"]
+    if (
+        "run_controlled_traffic" in restore
+        or "cleanup-baseline-traffic.log" not in restore
+        or "capture cleanup-restored || return 1" not in restore
+    ):
+        errors.append("cleanup restore checks must return failures without exiting before summary")
 
     flow = bodies["flow_conntrack_totals"]
     for term in (
@@ -159,12 +179,20 @@ def check_source(source):
     for forbidden in ("unknown_hook_delta", "hook\") not in"):
         if forbidden in source:
             errors.append("XDP proof must not rely on unknown-hook absence")
-    for term in ("NO_INGRESS_DOUBLE_COUNT", "XDP_NO_ACL_CT", "rule_counter_sum", "flow_conntrack_totals"):
-        if term not in bodies["run_stateful_evidence"] and term not in source:
+    stateful_assert = bodies["assert_stateful_evidence"]
+    for term in (
+        "NO_INGRESS_DOUBLE_COUNT",
+        "XDP_NO_ACL_CT",
+        "rule_counter_sum",
+        "flow_conntrack_totals",
+        "packet_delta",
+        "byte_delta",
+        "rule_packet_delta",
+        "authoritative TC observations",
+    ):
+        if term not in stateful_assert:
             errors.append("XDP single-authority proof missing %s" % term)
 
-    if "remains 69" in source:
-        errors.append("stale backlog count marker remains in smoke source")
     return errors
 
 
@@ -174,19 +202,30 @@ def mutate_remove(source, needle, label):
     return source.replace(needle, "", 1)
 
 
+def mutate_early_pass(source, _needle, label):
+    anchor = 'BODY_SUCCEEDED=true\n'
+    if anchor not in source:
+        raise ValueError("mutation anchor missing: %s" % label)
+    return source.replace(anchor, 'RESULT="pass"\n' + anchor, 1)
+
+
 def run_mutation_self_tests(source, verbose=False):
     specs = [
-        ("cleanup error false-pass", 'record_cleanup_error "cleanup-full-resync', "cleanup must"),
-        ("flow address filter", 'row.get("src_ip")', "flow CT evidence"),
-        ("metric family filter", 'labels.get("family")==family', "selected IP family"),
-        ("trace-before-evidence order", "set_trace_filter", "Trace filter must"),
-        ("stateful resync", "run_full_resync | tee \"${WORK_DIR}/stateful-full-resync.log\"", "run_stateful_evidence"),
-        ("summary after cleanup", 'RESULT="pass"', "cleanup must"),
+        ("cleanup error false-pass", mutate_remove, 'record_cleanup_error "cleanup-full-resync', "cleanup must"),
+        ("cleanup restore early exit", mutate_remove, "capture cleanup-restored || return 1", "cleanup restore checks"),
+        ("flow address filter", mutate_remove, 'row.get("src_ip")', "flow CT evidence"),
+        ("metric family filter", mutate_remove, 'labels.get("family")==family', "selected IP family"),
+        ("trace-before-evidence order", mutate_remove, '    set_trace_filter "${trace_src}" "${trace_dst}"', "Trace filter must"),
+        ("stateful resync", mutate_remove, "run_full_resync | tee \"${WORK_DIR}/stateful-full-resync.log\"", "run_stateful_evidence"),
+        ("stateless resync", mutate_remove, "run_full_resync | tee \"${WORK_DIR}/stateless-full-resync.log\"", "run_stateless_evidence"),
+        ("deny resync", mutate_remove, "run_full_resync | tee \"${WORK_DIR}/deny-full-resync.log\"", "run_deny_evidence"),
+        ("bank resync", mutate_remove, "run_full_resync | tee \"${WORK_DIR}/bank-full-resync.log\"", "run_bank_evidence"),
+        ("summary before cleanup result", mutate_early_pass, "", "main body must not mark pass"),
     ]
     failures = []
-    for label, needle, expected in specs:
+    for label, mutate, needle, expected in specs:
         try:
-            mutant = mutate_remove(source, needle, label)
+            mutant = mutate(source, needle, label)
         except ValueError as exc:
             failures.append(str(exc))
             continue
@@ -206,6 +245,12 @@ def main():
     with open(SMOKE, "r", encoding="utf-8") as handle:
         source = handle.read()
     errors = check_source(source)
+    with open(BACKLOG, "r", encoding="utf-8") as handle:
+        backlog = handle.read()
+    if "unique tracking-item total remains 69" in backlog:
+        errors.append("backlog still says the unique tracking-item total remains 69")
+    if "unique tracking-item total is now 71" not in backlog:
+        errors.append("backlog must state the corrected unique tracking-item total is 71")
     if not errors:
         errors.extend(run_mutation_self_tests(source, verbose="--self-test" in args))
     if errors:
