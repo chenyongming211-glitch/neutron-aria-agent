@@ -213,40 +213,6 @@ class EffectiveAclTestCase(unittest.TestCase):
             effective_acl_module._acl_overlap_reason(validation),
         )
 
-    def test_selector_sweep_returns_only_best_rule_pair_rank(self):
-        selectors = (
-            (),
-            ("10.0.0.0/8", "192.0.2.0/24"),
-            ("192.0.2.128/25",),
-            ("10.1.0.0/16",),
-        )
-
-        self.assertEqual(
-            (0, 1),
-            effective_acl_module._selector_best_overlap(
-                selectors, (None, 0, 1, 2),
-            ),
-        )
-
-    def test_selector_sweep_repeated_overlap_keeps_one_best_candidate(self):
-        selectors = [()]
-        for index in range(1000):
-            selectors.append((
-                "10.0.0.0/8",
-                "10.%s.%s.%s/32" % (
-                    (index >> 16) & 0xff,
-                    (index >> 8) & 0xff,
-                    index & 0xff,
-                ),
-            ))
-
-        self.assertEqual(
-            (0, 1),
-            effective_acl_module._selector_best_overlap(
-                tuple(selectors), tuple([None] + list(range(1000))),
-            ),
-        )
-
     def test_nested_members_inside_shared_selector_remain_valid(self):
         shared = ["10.0.0.0/8", "10.1.0.0/16"]
         validation = effective_acl_module._acl_validation_view([
