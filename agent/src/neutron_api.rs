@@ -191,11 +191,106 @@ struct AclEffectivePolicyKey {
     direction: u8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct AclIpv4Cidr {
+    network: u32,
+    prefix: u8,
+}
+
+impl AclIpv4Cidr {
+    fn parse(value: &str) -> Result<Self, String> {
+        let (address, prefix) = value
+            .split_once('/')
+            .ok_or_else(|| format!("invalid IPv4 CIDR {}", value))?;
+        let address = address
+            .parse::<std::net::Ipv4Addr>()
+            .map_err(|_| format!("invalid IPv4 CIDR {}", value))?;
+        let prefix = prefix
+            .parse::<u8>()
+            .map_err(|_| format!("invalid IPv4 CIDR {}", value))?;
+        if prefix > 32 {
+            return Err(format!("invalid IPv4 CIDR {}", value));
+        }
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        };
+        Ok(Self {
+            network: u32::from(address) & mask,
+            prefix,
+        })
+    }
+
+    fn intersects(self, other: Self) -> bool {
+        let prefix = self.prefix.min(other.prefix);
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        };
+        (self.network & mask) == (other.network & mask)
+    }
+
+    fn canonical(self) -> String {
+        format!(
+            "{}/{}",
+            std::net::Ipv4Addr::from(self.network),
+            self.prefix
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NormalizedAclRule {
+    id: String,
+    direction: String,
+    priority: i64,
+    directions: Vec<u8>,
+    proto: u8,
+    action: u8,
+    src_cidrs: Vec<AclIpv4Cidr>,
+    dst_cidrs: Vec<AclIpv4Cidr>,
+    ports: Vec<(u16, u16)>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct AclApplyPlan {
     groups: Vec<AclGroupPlan>,
     policies: Vec<AclPolicyPlan>,
     conntrack_enabled: Option<bool>,
+    force_bypass_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NeutronAclReconcileOutcome {
+    force_bypass_reason: Option<String>,
+}
+
+impl NeutronAclReconcileOutcome {
+    fn from_plan(plan: &AclApplyPlan) -> Self {
+        Self {
+            force_bypass_reason: plan.force_bypass_reason.clone(),
+        }
+    }
+
+    fn force_bypass(reason: String) -> Self {
+        Self {
+            force_bypass_reason: Some(reason),
+        }
+    }
+
+    fn domain_status(&self, port: &NeutronPortSnapshot) -> NeutronDomainStatus {
+        match &self.force_bypass_reason {
+            Some(reason) => domain_status_with_action(
+                "acl",
+                "degraded",
+                Some(reason.clone()),
+                Some("bypass".to_string()),
+            ),
+            None => acl_domain_status_for(port),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2491,14 +2586,14 @@ async fn reconcile_neutron_domains(
         match domain.as_str() {
             "attach" => statuses.push(domain_status(&domain, "ready", None)),
             "acl" => match reconcile_neutron_acl(state, port).await {
-                Ok(()) => statuses.push(acl_domain_status_for(port)),
-                Err(e) => {
-                    let reason = format!("acl_apply_failed:{}", e.details);
+                Ok(outcome) => statuses.push(outcome.domain_status(port)),
+                Err(error) => {
+                    let reason = format!("acl_apply_failed:{}", error.details);
                     statuses.push(domain_status_with_action(
                         &domain,
                         "error",
                         Some(reason.clone()),
-                        Some(e.effective_action.to_string()),
+                        Some(error.effective_action.to_string()),
                     ));
                     errors.push(reason);
                 }
@@ -3243,6 +3338,27 @@ fn ensure_ipv4_cidrs(cidrs: &[String], rule_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn canonical_acl_cidrs(
+    cidrs: &[String],
+    rule_id: &str,
+) -> Result<Vec<AclIpv4Cidr>, String> {
+    ensure_ipv4_cidrs(cidrs, rule_id)?;
+    let mut normalized = BTreeSet::new();
+    for cidr in cidrs {
+        normalized.insert(AclIpv4Cidr::parse(cidr)?);
+    }
+    Ok(normalized.into_iter().collect())
+}
+
+fn normalized_acl_direction(direction: u8) -> String {
+    match direction {
+        0 => "ingress".to_string(),
+        1 => "egress".to_string(),
+        2 => "both".to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn acl_ports(
     rule: &NeutronAclRuleSnapshot,
     proto: u8,
@@ -3383,22 +3499,185 @@ fn merge_acl_ports(
     Ok(serialize_acl_port_ranges(ranges))
 }
 
-fn cidr_group(
-    port_id: &str,
-    rule_id: &str,
-    side: &str,
-    cidrs: &[String],
-    groups: &mut Vec<AclGroupPlan>,
-) -> String {
-    if cidrs.is_empty() {
-        return "any".to_string();
+fn normalize_acl_rule(
+    rule: &NeutronAclRuleSnapshot,
+    index: usize,
+) -> Result<NormalizedAclRule, String> {
+    let rule_id = acl_rule_id(rule, index);
+    if rule
+        .ethertype
+        .as_deref()
+        .map(|ethertype| ethertype.eq_ignore_ascii_case("IPv6"))
+        .unwrap_or(false)
+    {
+        return Err(format!("rule {} uses IPv6 ethertype; unsupported", rule_id));
     }
-    let name = format!("{}{}:{}", neutron_acl_prefix(port_id), side, rule_id);
-    groups.push(AclGroupPlan {
-        name: name.clone(),
-        cidrs: cidrs.to_vec(),
+
+    let src_cidrs = canonical_acl_cidrs(&rule.src_cidrs, &rule_id)?;
+    let dst_cidrs = canonical_acl_cidrs(&rule.dst_cidrs, &rule_id)?;
+    let proto = proto_from_string(rule.protocol.as_deref().unwrap_or("any"))
+        .map_err(|e| format!("rule {} protocol: {}", rule_id, e))?;
+    let action = action_from_string(rule.action.as_deref().unwrap_or("allow"))
+        .map_err(|e| format!("rule {} action: {}", rule_id, e))?;
+    let direction = direction_from_string(rule.direction.as_deref().unwrap_or("ingress"))
+        .map_err(|e| format!("rule {} direction: {}", rule_id, e))?;
+    let ports = match acl_ports(rule, proto, &rule_id)? {
+        Some(ports) => parse_acl_port_ranges(&ports)?,
+        None => Vec::new(),
+    };
+    let mut directions = neutron_acl_to_datapath_directions(direction);
+    directions.sort_unstable();
+    directions.dedup();
+
+    Ok(NormalizedAclRule {
+        id: rule_id,
+        direction: normalized_acl_direction(direction),
+        priority: rule.priority,
+        directions,
+        proto,
+        action,
+        src_cidrs,
+        dst_cidrs,
+        ports,
+    })
+}
+
+fn acl_cidr_selectors_intersect(left: &[AclIpv4Cidr], right: &[AclIpv4Cidr]) -> bool {
+    left.iter()
+        .any(|left_cidr| right.iter().any(|right_cidr| left_cidr.intersects(*right_cidr)))
+}
+
+fn acl_selector_dimension_is_disjoint(
+    left: &[AclIpv4Cidr],
+    right: &[AclIpv4Cidr],
+) -> bool {
+    !left.is_empty() && !right.is_empty() && !acl_cidr_selectors_intersect(left, right)
+}
+
+fn acl_priority_overlap_reason(rules: &[NormalizedAclRule]) -> Option<String> {
+    let mut priorities = BTreeMap::<(String, i64), String>::new();
+    for rule in rules {
+        if rule.priority < 0 {
+            return Some(format!(
+                "invalid_acl_priority:{}:{}",
+                rule.id, rule.priority
+            ));
+        }
+        let key = (rule.direction.clone(), rule.priority);
+        if let Some(first_id) = priorities.get(&key) {
+            return Some(format!(
+                "duplicate_acl_priority:{}:{}:{}:{}",
+                rule.direction, rule.priority, first_id, rule.id
+            ));
+        }
+        priorities.insert(key, rule.id.clone());
+    }
+
+    let mut ordered: Vec<&NormalizedAclRule> = rules.iter().collect();
+    ordered.sort_by(|left, right| {
+        left.direction
+            .cmp(&right.direction)
+            .then_with(|| left.priority.cmp(&right.priority))
+            .then_with(|| left.id.cmp(&right.id))
     });
-    name
+
+    for (left_index, left) in ordered.iter().enumerate() {
+        for right in ordered.iter().skip(left_index + 1) {
+            for (side, left_cidrs, right_cidrs) in [
+                ("src", &left.src_cidrs, &right.src_cidrs),
+                ("dst", &left.dst_cidrs, &right.dst_cidrs),
+            ] {
+                if !left_cidrs.is_empty()
+                    && !right_cidrs.is_empty()
+                    && left_cidrs != right_cidrs
+                    && acl_cidr_selectors_intersect(left_cidrs, right_cidrs)
+                {
+                    return Some(format!(
+                        "unsupported_acl_cidr_overlap:{}:{}:{}:{}:{}",
+                        side, left.id, left.priority, right.id, right.priority
+                    ));
+                }
+            }
+
+            if !left
+                .directions
+                .iter()
+                .any(|direction| right.directions.contains(direction))
+            {
+                continue;
+            }
+            if left.proto != 0 && right.proto != 0 && left.proto != right.proto {
+                continue;
+            }
+            if acl_selector_dimension_is_disjoint(&left.src_cidrs, &right.src_cidrs) {
+                continue;
+            }
+            if acl_selector_dimension_is_disjoint(&left.dst_cidrs, &right.dst_cidrs) {
+                continue;
+            }
+
+            let same_key = left.proto == right.proto
+                && left.src_cidrs == right.src_cidrs
+                && left.dst_cidrs == right.dst_cidrs;
+            let same_behavior = left.action == right.action && left.ports == right.ports;
+            if same_behavior || (same_key && left.action == right.action) {
+                continue;
+            }
+            return Some(format!(
+                "unsupported_acl_priority_overlap:{}:{}:{}:{}",
+                left.id, left.priority, right.id, right.priority
+            ));
+        }
+    }
+    None
+}
+
+fn force_bypass_acl_plan(acl: &NeutronAclSnapshot, reason: String) -> AclApplyPlan {
+    AclApplyPlan {
+        conntrack_enabled: Some(acl.stateful),
+        force_bypass_reason: Some(reason),
+        ..AclApplyPlan::default()
+    }
+}
+
+fn acl_selector_registry(
+    port_id: &str,
+    side: &str,
+    selectors: BTreeSet<Vec<AclIpv4Cidr>>,
+) -> (
+    Vec<AclGroupPlan>,
+    BTreeMap<Vec<AclIpv4Cidr>, String>,
+) {
+    let mut groups = Vec::new();
+    let mut names = BTreeMap::new();
+    for (ordinal, selector) in selectors.into_iter().enumerate() {
+        let name = format!(
+            "{}{}:selector:{}",
+            neutron_acl_prefix(port_id),
+            side,
+            ordinal
+        );
+        groups.push(AclGroupPlan {
+            name: name.clone(),
+            cidrs: selector.iter().map(|cidr| cidr.canonical()).collect(),
+        });
+        names.insert(selector, name);
+    }
+    (groups, names)
+}
+
+fn acl_group_for_selector(
+    selector: &[AclIpv4Cidr],
+    names: &BTreeMap<Vec<AclIpv4Cidr>, String>,
+) -> String {
+    if selector.is_empty() {
+        "any".to_string()
+    } else {
+        names
+            .get(selector)
+            .expect("non-empty ACL selector must be registered")
+            .clone()
+    }
 }
 
 fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclApplyPlan, String> {
@@ -3420,40 +3699,45 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
         ));
     }
 
-    let mut groups = Vec::new();
-    let mut policies_by_key = BTreeMap::<AclEffectivePolicyKey, AclPolicyPlan>::new();
+    let mut normalized_rules = Vec::new();
     for (index, rule) in acl.rules.iter().enumerate() {
-        let rule_id = acl_rule_id(rule, index);
-        if rule
-            .ethertype
-            .as_deref()
-            .map(|ethertype| ethertype.eq_ignore_ascii_case("IPv6"))
-            .unwrap_or(false)
-        {
-            return Err(format!("rule {} uses IPv6 ethertype; unsupported", rule_id));
-        }
-        ensure_ipv4_cidrs(&rule.src_cidrs, &rule_id)?;
-        ensure_ipv4_cidrs(&rule.dst_cidrs, &rule_id)?;
+        normalized_rules.push(normalize_acl_rule(rule, index)?);
+    }
+    if let Some(reason) = acl_priority_overlap_reason(&normalized_rules) {
+        return Ok(force_bypass_acl_plan(acl, reason));
+    }
 
-        let proto = proto_from_string(rule.protocol.as_deref().unwrap_or("any"))
-            .map_err(|e| format!("rule {} protocol: {}", rule_id, e))?;
-        let action = action_from_string(rule.action.as_deref().unwrap_or("allow"))
-            .map_err(|e| format!("rule {} action: {}", rule_id, e))?;
-        let direction = direction_from_string(rule.direction.as_deref().unwrap_or("ingress"))
-            .map_err(|e| format!("rule {} direction: {}", rule_id, e))?;
-        let ports = acl_ports(rule, proto, &rule_id)?;
-        let src_group = cidr_group(port_id, &rule_id, "src", &rule.src_cidrs, &mut groups);
-        let dst_group = cidr_group(port_id, &rule_id, "dst", &rule.dst_cidrs, &mut groups);
+    let src_selectors = normalized_rules
+        .iter()
+        .filter(|rule| !rule.src_cidrs.is_empty())
+        .map(|rule| rule.src_cidrs.clone())
+        .collect();
+    let dst_selectors = normalized_rules
+        .iter()
+        .filter(|rule| !rule.dst_cidrs.is_empty())
+        .map(|rule| rule.dst_cidrs.clone())
+        .collect();
+    let (mut groups, src_group_names) =
+        acl_selector_registry(port_id, "src", src_selectors);
+    let (mut dst_groups, dst_group_names) =
+        acl_selector_registry(port_id, "dst", dst_selectors);
+    groups.append(&mut dst_groups);
 
-        for direction in neutron_acl_to_datapath_directions(direction) {
+    let mut policies_by_key = BTreeMap::<AclEffectivePolicyKey, AclPolicyPlan>::new();
+    for rule in &normalized_rules {
+        let ports = serialize_acl_port_ranges(rule.ports.clone());
+        let src_group = acl_group_for_selector(&rule.src_cidrs, &src_group_names);
+        let dst_group = acl_group_for_selector(&rule.dst_cidrs, &dst_group_names);
+
+        for direction in &rule.directions {
             let key = AclEffectivePolicyKey {
                 src_group: src_group.clone(),
                 dst_group: dst_group.clone(),
-                proto,
-                direction,
+                proto: rule.proto,
+                direction: *direction,
             };
             if let Some(existing) = policies_by_key.get_mut(&key) {
-                if existing.action != action {
+                if existing.action != rule.action {
                     return Err(format!(
                         "conflicting effective ACL actions src={} dst={} proto={} direction={} existing_action={} new_action={}",
                         key.src_group,
@@ -3461,7 +3745,7 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
                         key.proto,
                         key.direction,
                         existing.action,
-                        action
+                        rule.action
                     ));
                 }
                 existing.ports = merge_acl_ports(existing.ports.take(), ports.clone())?;
@@ -3472,9 +3756,9 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
                 AclPolicyPlan {
                     src_group: key.src_group,
                     dst_group: key.dst_group,
-                    proto,
-                    action,
-                    direction,
+                    proto: rule.proto,
+                    action: rule.action,
+                    direction: *direction,
                     ports: ports.clone(),
                 },
             );
@@ -3485,6 +3769,7 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
         groups,
         policies: policies_by_key.into_values().collect(),
         conntrack_enabled: Some(acl.stateful),
+        force_bypass_reason: None,
     })
 }
 
@@ -3580,9 +3865,9 @@ async fn flush_neutron_acl_conntrack(
 async fn reconcile_neutron_acl(
     state: &NeutronApiState,
     port: &NeutronPortSnapshot,
-) -> Result<(), NeutronAclReconcileError> {
+) -> Result<NeutronAclReconcileOutcome, NeutronAclReconcileError> {
     if !port_manages_acl(port) {
-        return Ok(());
+        return Ok(NeutronAclReconcileOutcome::default());
     }
 
     let profile_started = Instant::now();
@@ -3592,6 +3877,7 @@ async fn reconcile_neutron_acl(
             .map_err(NeutronAclReconcileError::unchanged)?,
         None => AclApplyPlan::default(),
     };
+    let outcome = NeutronAclReconcileOutcome::from_plan(&plan);
     let translate_ms = elapsed_ms(translate_started);
     let preserved_conntrack_enabled = if plan.conntrack_enabled.is_none() {
         state
@@ -3735,7 +4021,7 @@ async fn reconcile_neutron_acl(
             total_ms = elapsed_ms(profile_started),
             "neutron_acl_apply_profile"
         );
-        return Ok(());
+        return Ok(outcome);
     }
 
     let flush_started = Instant::now();
@@ -3808,7 +4094,7 @@ async fn reconcile_neutron_acl(
             ))),
         };
     }
-    Ok(())
+    Ok(outcome)
 }
 
 #[allow(dead_code)]
@@ -6361,6 +6647,7 @@ mod tests {
                 groups: Vec::new(),
                 policies: vec![policy.clone()],
                 conntrack_enabled: Some(true),
+                force_bypass_reason: None,
             },
             false,
         );
@@ -6378,6 +6665,7 @@ mod tests {
                 groups: Vec::new(),
                 policies: vec![policy],
                 conntrack_enabled: Some(false),
+                force_bypass_reason: None,
             },
             true,
         );
@@ -6395,6 +6683,7 @@ mod tests {
                 groups: Vec::new(),
                 policies: Vec::new(),
                 conntrack_enabled: Some(true),
+                force_bypass_reason: None,
             },
             false,
         );
@@ -6453,14 +6742,14 @@ mod tests {
         assert_eq!(
             plan.groups,
             vec![AclGroupPlan {
-                name: "neutron:port-1:src:drop-icmp".to_string(),
+                name: "neutron:port-1:src:selector:0".to_string(),
                 cidrs: vec!["10.58.159.2/32".to_string()],
             }]
         );
         assert_eq!(
             plan.policies,
             vec![AclPolicyPlan {
-                src_group: "neutron:port-1:src:drop-icmp".to_string(),
+                src_group: "neutron:port-1:src:selector:0".to_string(),
                 dst_group: "any".to_string(),
                 proto: 1,
                 action: 1,
@@ -6501,11 +6790,11 @@ mod tests {
 
         let plan = AclApplyPlan {
             groups: vec![AclGroupPlan {
-                name: "neutron:port-1:src:drop-icmp".to_string(),
+                name: "neutron:port-1:src:selector:0".to_string(),
                 cidrs: vec!["10.58.159.2/32".to_string()],
             }],
             policies: vec![AclPolicyPlan {
-                src_group: "neutron:port-1:src:drop-icmp".to_string(),
+                src_group: "neutron:port-1:src:selector:0".to_string(),
                 dst_group: "any".to_string(),
                 proto: 1,
                 action: 1,
@@ -6513,6 +6802,7 @@ mod tests {
                 ports: None,
             }],
             conntrack_enabled: Some(true),
+            force_bypass_reason: None,
         };
 
         assert_eq!(
