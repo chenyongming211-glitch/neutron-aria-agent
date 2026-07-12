@@ -130,6 +130,46 @@ class EffectiveAclTestCase(unittest.TestCase):
             result["reason"],
         )
 
+    def test_duplicate_priority_normalizes_direction_and_reason(self):
+        result = effective_acl([
+            acl_rule("first", 10, direction=" EGRESS "),
+            acl_rule("second", 10, direction="egress", protocol="udp"),
+        ])
+        self.assertIn(
+            "duplicate_acl_priority:egress:10:first:second",
+            result["reason"],
+        )
+
+    def test_overlap_normalization_strips_protocol_and_action(self):
+        result = effective_acl([
+            acl_rule("spaced", 10, protocol=" TCP ", action=" DENY "),
+            acl_rule("canonical", 20, protocol="tcp", action="drop"),
+        ])
+        self.assertEqual(ACL_READY, result["status"])
+
+    def test_overlap_normalization_strips_direction(self):
+        result = effective_acl([
+            acl_rule("spaced", 10, direction=" INGRESS ", action="allow"),
+            acl_rule("canonical", 20, direction="ingress", action="deny"),
+        ])
+        self.assertIn(
+            "unsupported_acl_priority_overlap:spaced:10:canonical:20",
+            result["reason"],
+        )
+
+    def test_non_integer_priorities_use_stable_reason(self):
+        for rule_id, priority in (
+                ("boolean", True), ("float", 1.5), ("text", "1.5")):
+            result = effective_acl([acl_rule(rule_id, priority)])
+            self.assertIn(
+                "invalid_acl_priority:%s:%s" % (rule_id, priority),
+                result["reason"],
+            )
+
+    def test_integer_string_priority_remains_valid(self):
+        result = effective_acl([acl_rule("string", "10")])
+        self.assertEqual(ACL_READY, result["status"])
+
     def test_no_binding_is_not_requested(self):
         index = EffectiveAclIndex()
 

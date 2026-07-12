@@ -9,6 +9,14 @@ from neutron_aria.acl_contract import validate_policy
 from neutron_aria.acl_contract import validate_rule
 
 
+try:
+    _INTEGER_TYPES = (int, long)
+    _STRING_TYPES = (basestring,)
+except NameError:
+    _INTEGER_TYPES = (int,)
+    _STRING_TYPES = (str,)
+
+
 ACL_NOT_REQUESTED = "not_requested"
 ACL_READY = "ready"
 ACL_DEGRADED = "degraded"
@@ -63,9 +71,22 @@ def _ip_version(address):
     return "IPv6" if ":" in address else "IPv4"
 
 
+def _strict_priority(value):
+    if isinstance(value, bool):
+        raise ValueError("priority must be an integer")
+    if isinstance(value, _INTEGER_TYPES):
+        return int(value)
+    if isinstance(value, _STRING_TYPES):
+        text = value.strip()
+        digits = text[1:] if text[:1] in ("+", "-") else text
+        if digits and all(character in "0123456789" for character in digits):
+            return int(text, 10)
+    raise ValueError("priority must be an integer")
+
+
 def _rule_priority(rule):
     try:
-        return int(rule.get("priority") or 0)
+        return _strict_priority(rule.get("priority"))
     except (TypeError, ValueError):
         return 0
 
@@ -95,7 +116,7 @@ def _ipv4_cidrs_intersect(left, right):
 
 
 def _normalized_protocol(protocol):
-    value = str(protocol or "any").lower()
+    value = str(protocol or "any").strip().lower()
     known = {"any": 0, "tcp": 6, "udp": 17, "icmp": 1}
     if value in known:
         return known[value]
@@ -103,7 +124,7 @@ def _normalized_protocol(protocol):
 
 
 def _normalized_action(action):
-    value = str(action or "allow").lower()
+    value = str(action or "allow").strip().lower()
     if value in ("allow", "accept", "pass"):
         return "allow"
     if value in ("deny", "drop"):
@@ -121,8 +142,12 @@ def _normalized_ports(rule):
     return ((minimum, maximum),)
 
 
+def _normalized_direction(direction):
+    return str(direction or "ingress").strip().lower()
+
+
 def _datapath_directions(direction):
-    value = str(direction or "ingress").lower()
+    value = _normalized_direction(direction)
     if value == "both":
         return frozenset((0, 1))
     return frozenset((1,)) if value == "ingress" else frozenset((0,))
@@ -137,7 +162,7 @@ def _acl_overlap_reason(compiled_rules):
     for rule in compiled_rules:
         normalized.append({
             "id": str(rule.get("id") or ""),
-            "direction": str(rule.get("direction") or "ingress").lower(),
+            "direction": _normalized_direction(rule.get("direction")),
             "priority": int(rule.get("priority") or 0),
             "action": _normalized_action(rule.get("action")),
             "protocol": _normalized_protocol(rule.get("protocol")),
@@ -355,7 +380,8 @@ class EffectiveAclIndex(object):
         priority_keys = {}
         compiled = []
         reasons = []
-        for rule in sorted(rules, key=lambda r: (r.get("direction") or "", _rule_priority(r))):
+        for rule in sorted(rules, key=lambda r: (
+                _normalized_direction(r.get("direction")), _rule_priority(r))):
             if self._invalid_priority(rule):
                 reasons.append("invalid_acl_priority:%s:%s" % (
                     rule.get("id"), rule.get("priority"),
@@ -363,7 +389,7 @@ class EffectiveAclIndex(object):
                 continue
 
             priority = _rule_priority(rule)
-            key = (rule.get("direction"), priority)
+            key = (_normalized_direction(rule.get("direction")), priority)
             if key in priority_keys:
                 reasons.append("duplicate_acl_priority:%s:%s:%s:%s" % (
                     key[0], key[1], priority_keys[key], rule.get("id"),
@@ -462,7 +488,7 @@ class EffectiveAclIndex(object):
 
     def _invalid_priority(self, rule):
         try:
-            priority = int(rule.get("priority"))
+            priority = _strict_priority(rule.get("priority"))
         except (TypeError, ValueError):
             return True
         return priority < 0
