@@ -107,6 +107,9 @@ pub struct CtValue {
 }
 unsafe impl Pod for CtValue {}
 
+pub const CT_FLAG_SEEN_REPLY: u8 = 1;
+pub const CT_FLAG_POLICY_HIT: u8 = 1 << 1;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CtConfig {

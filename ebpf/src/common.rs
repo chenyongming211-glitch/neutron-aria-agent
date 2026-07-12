@@ -98,6 +98,17 @@ pub struct CtKey6 {
 
 pub const CT_NEW: u8 = 1;
 pub const CT_ESTABLISHED: u8 = 2;
+pub const CT_FLAG_SEEN_REPLY: u8 = 1;
+pub const CT_FLAG_POLICY_HIT: u8 = 1 << 1;
+
+#[inline(always)]
+pub fn ct_acl_bank_is_current(
+    matched_bank: u8,
+    validate_acl_bank: u8,
+    expected_acl_bank: u8,
+) -> bool {
+    validate_acl_bank == 0 || matched_bank == normalize_acl_bank(expected_acl_bank)
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -514,6 +525,8 @@ pub const FLAG_CT_HIT: u16 = 1 << 5;
 pub const FLAG_IS_FORWARD: u16 = 1 << 6;
 #[allow(dead_code)]
 pub const FLAG_NEED_IDS: u16 = 1 << 7;
+pub const FLAG_POLICY_HIT: u16 = 1 << 8;
+pub const FLAG_CT_STALE_BANK: u16 = 1 << 9;
 
 /// Per-CPU scratch buffer for passing state between pipeline phases.
 /// Lives in PIPE_SCRATCH PerCpuArray — zero stack overhead.

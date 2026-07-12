@@ -30,13 +30,14 @@ use common::{
     acl_banked_tap_id, CtKey4, CtKey6, PipelineCtx, CT_CONTRACT_FAMILY_IPV4,
     CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED,
     CT_CONTRACT_REASON_CT_MISS, DIR_EGRESS, DIR_INGRESS, DROP_QOS_EGRESS, DROP_QOS_INGRESS,
-    FLAG_ACL_ON, FLAG_CT_HIT, FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_QOS_ON, FLAG_TCPRT_ON,
-    FLAG_TRACING, IPPROTO_TCP, TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL,
+    FLAG_ACL_ON, FLAG_CT_HIT, FLAG_CT_STALE_BANK, FLAG_IS_FORWARD, FLAG_MIRROR_ON,
+    FLAG_POLICY_HIT, FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP, TAP_ID_UNASSIGNED,
+    TRACE_RESULT_DROP_ACL,
     TRACE_RESULT_DROP_ACL_DEFAULT, TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_QOS,
     TRACE_RESULT_PASS, TRACE_TC_DROP, TRACE_TC_EGRESS, TRACE_TC_INGRESS, TRACE_XDP_DROP, XDP_DROP,
     XDP_PASS,
 };
-use conntrack::CtLookupResult;
+use conntrack::{CtLookupResult, CtMissReason};
 use maps::{
     ACL_DST_IPV4_TRIE, ACL_DST_IPV6_TRIE, ACL_SRC_IPV4_TRIE, ACL_SRC_IPV6_TRIE, DST_IPV4_TRIE,
     DST_IPV6_TRIE, SRC_IPV4_TRIE, SRC_IPV6_TRIE,
@@ -111,9 +112,9 @@ unsafe fn try_xdp_firewall(
             pad: [0; 3],
         };
 
-        phase_ct_v6(info, p, &ct_key);
+        let _ = phase_ct_v6(info, p, &ct_key);
 
-        if p.ct_state >= 2 {
+        if (p.flags & FLAG_CT_HIT) != 0 {
             phase_ct_fastpath_xdp_v6(info, p, &ct_key);
             return Ok(p.action);
         }
@@ -141,9 +142,9 @@ unsafe fn try_xdp_firewall(
         pad: [0; 3],
     };
 
-    phase_ct_v4(info, p, &ct_key);
+    let _ = phase_ct_v4(info, p, &ct_key);
 
-    if p.ct_state >= 2 {
+    if (p.flags & FLAG_CT_HIT) != 0 {
         phase_ct_fastpath_xdp_v4(info, p, &ct_key);
         return Ok(p.action);
     }
@@ -479,6 +480,11 @@ unsafe fn set_matched(p: &mut PipelineCtx, m: &conntrack::MatchedPolicy) {
     p.matched_proto = m.proto;
     p.matched_direction = m.direction;
     p.matched_bank = m.bank;
+    if m.policy_hit {
+        p.flags |= FLAG_POLICY_HIT;
+    } else {
+        p.flags &= !FLAG_POLICY_HIT;
+    }
 }
 
 #[inline(always)]
@@ -490,6 +496,7 @@ fn get_matched(p: &PipelineCtx) -> conntrack::MatchedPolicy {
         proto: p.matched_proto,
         direction: p.matched_direction,
         bank: p.matched_bank,
+        policy_hit: (p.flags & FLAG_POLICY_HIT) != 0,
     }
 }
 
@@ -567,38 +574,74 @@ unsafe fn lookup_ipv6(map: &LpmTrie<[u8; 20], u32>, tap_id: u32, ip: [u8; 16]) -
 
 /// Phase: CT lookup for IPv4. Sets p.ct_state, p.matched_*, p.flags (CT_HIT, IS_FORWARD).
 #[inline(never)]
-unsafe fn phase_ct_v4(_info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey4) {
-    match conntrack::ct_lookup_v4(ct_key, p.now, p.pkt_len) {
-        CtLookupResult::Established(matched, is_forward)
-        | CtLookupResult::SeenReply(matched, is_forward) => {
-            p.ct_state = 2;
+unsafe fn phase_ct_v4(
+    _info: &parser::PacketInfo,
+    p: &mut PipelineCtx,
+    ct_key: &CtKey4,
+) -> Option<CtMissReason> {
+    let validate_acl_bank = if (p.flags & FLAG_ACL_ON) != 0 { 1 } else { 0 };
+    let expected_acl_bank = runtime::acl_active_bank(p.tap_id);
+    match conntrack::ct_lookup_v4(
+        ct_key,
+        p.now,
+        p.pkt_len,
+        validate_acl_bank,
+        expected_acl_bank,
+    ) {
+        CtLookupResult::Hit(matched, is_forward, state) => {
+            p.ct_state = state;
+            p.flags &= !(FLAG_CT_HIT | FLAG_IS_FORWARD | FLAG_POLICY_HIT | FLAG_CT_STALE_BANK);
             p.flags |= FLAG_CT_HIT;
             if is_forward {
                 p.flags |= FLAG_IS_FORWARD;
             }
             set_matched(p, &matched);
+            None
         }
-        CtLookupResult::NotFound => {
+        CtLookupResult::Miss(reason) => {
             p.ct_state = 0;
+            p.flags &= !(FLAG_CT_HIT | FLAG_IS_FORWARD | FLAG_POLICY_HIT | FLAG_CT_STALE_BANK);
+            if let CtMissReason::StaleBank = reason {
+                p.flags |= FLAG_CT_STALE_BANK;
+            }
+            Some(reason)
         }
     }
 }
 
 /// Phase: CT lookup for IPv6.
 #[inline(never)]
-unsafe fn phase_ct_v6(_info: &parser::PacketInfo, p: &mut PipelineCtx, ct_key: &CtKey6) {
-    match conntrack::ct_lookup_v6(ct_key, p.now, p.pkt_len) {
-        CtLookupResult::Established(matched, is_forward)
-        | CtLookupResult::SeenReply(matched, is_forward) => {
-            p.ct_state = 2;
+unsafe fn phase_ct_v6(
+    _info: &parser::PacketInfo,
+    p: &mut PipelineCtx,
+    ct_key: &CtKey6,
+) -> Option<CtMissReason> {
+    let validate_acl_bank = if (p.flags & FLAG_ACL_ON) != 0 { 1 } else { 0 };
+    let expected_acl_bank = runtime::acl_active_bank(p.tap_id);
+    match conntrack::ct_lookup_v6(
+        ct_key,
+        p.now,
+        p.pkt_len,
+        validate_acl_bank,
+        expected_acl_bank,
+    ) {
+        CtLookupResult::Hit(matched, is_forward, state) => {
+            p.ct_state = state;
+            p.flags &= !(FLAG_CT_HIT | FLAG_IS_FORWARD | FLAG_POLICY_HIT | FLAG_CT_STALE_BANK);
             p.flags |= FLAG_CT_HIT;
             if is_forward {
                 p.flags |= FLAG_IS_FORWARD;
             }
             set_matched(p, &matched);
+            None
         }
-        CtLookupResult::NotFound => {
+        CtLookupResult::Miss(reason) => {
             p.ct_state = 0;
+            p.flags &= !(FLAG_CT_HIT | FLAG_IS_FORWARD | FLAG_POLICY_HIT | FLAG_CT_STALE_BANK);
+            if let CtMissReason::StaleBank = reason {
+                p.flags |= FLAG_CT_STALE_BANK;
+            }
+            Some(reason)
         }
     }
 }
@@ -781,7 +824,9 @@ unsafe fn phase_ct_fastpath_tc_ingress_v4(
     }
 
     if stats::monitoring_enabled(p.tap_id) {
-        if (p.flags & FLAG_ACL_ON) != 0 {
+        if (p.flags & (FLAG_ACL_ON | FLAG_POLICY_HIT))
+            == (FLAG_ACL_ON | FLAG_POLICY_HIT)
+        {
             let matched = get_matched(p);
             stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
         }
@@ -827,7 +872,9 @@ unsafe fn phase_ct_fastpath_tc_ingress_v6(
     }
 
     if stats::monitoring_enabled(p.tap_id) {
-        if (p.flags & FLAG_ACL_ON) != 0 {
+        if (p.flags & (FLAG_ACL_ON | FLAG_POLICY_HIT))
+            == (FLAG_ACL_ON | FLAG_POLICY_HIT)
+        {
             let matched = get_matched(p);
             stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
         }
@@ -935,7 +982,7 @@ unsafe fn phase_ct_fastpath_tc_v4(
     ct_key: &CtKey4,
 ) {
     let tracing = (p.flags & FLAG_TRACING) != 0;
-    if (p.flags & FLAG_ACL_ON) != 0 {
+    if (p.flags & (FLAG_ACL_ON | FLAG_POLICY_HIT)) == (FLAG_ACL_ON | FLAG_POLICY_HIT) {
         let matched = get_matched(p);
         stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
     }
@@ -994,7 +1041,7 @@ unsafe fn phase_ct_fastpath_tc_v6(
     ct_key: &CtKey6,
 ) {
     let tracing = (p.flags & FLAG_TRACING) != 0;
-    if (p.flags & FLAG_ACL_ON) != 0 {
+    if (p.flags & (FLAG_ACL_ON | FLAG_POLICY_HIT)) == (FLAG_ACL_ON | FLAG_POLICY_HIT) {
         let matched = get_matched(p);
         stats::update_rule_stats(&matched.to_policy_key(), p.pkt_len, false);
     }

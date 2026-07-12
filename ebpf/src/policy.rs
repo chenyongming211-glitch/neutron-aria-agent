@@ -71,6 +71,7 @@ pub unsafe fn evaluate_policy(args: &PolicyArgs) -> (u32, u8, MatchedPolicy, boo
                 proto: p,
                 direction: args.direction,
                 bank: args.bank,
+                policy_hit: true,
             };
             return (result, drop_reason, matched, true);
         }
@@ -84,6 +85,7 @@ pub unsafe fn evaluate_policy(args: &PolicyArgs) -> (u32, u8, MatchedPolicy, boo
         proto: 0,
         direction: args.direction,
         bank: args.bank,
+        policy_hit: false,
     };
     (XDP_PASS, 0, matched, false)
 }
