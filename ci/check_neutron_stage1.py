@@ -537,6 +537,29 @@ def check_rust_stage_one_tests_present():
         if term not in neutron_api_source:
             raise SystemExit("ERROR: Rust ACL conntrack contract missing %s" % term)
 
+    restart_runtime_match = re.search(
+        r"async fn reconcile_committed_runtime\(&self\) \{(?P<body>.*?)\n    async fn recover_incomplete_wal_intent",
+        neutron_api_source,
+        re.DOTALL,
+    )
+    if not restart_runtime_match:
+        raise SystemExit("ERROR: Rust committed-runtime restart path not found")
+    restart_runtime_body = restart_runtime_match.group("body")
+    restart_acl_invalidation = restart_runtime_body.find(
+        "let acl_requires_full_resync = invalidate_restarted_acl_runtime("
+    )
+    restart_ready_transition = restart_runtime_body.find(
+        'next_runtime.authority_state = "ready".to_string()'
+    )
+    if (
+        restart_acl_invalidation < 0
+        or restart_ready_transition < 0
+        or restart_acl_invalidation > restart_ready_transition
+    ):
+        raise SystemExit(
+            "ERROR: restart path must invalidate managed ACL runtime before ready"
+        )
+
     required_acl_priority_terms = [
         "const MAX_ACL_RULES_PER_POLICY: usize = 1000;",
         "const MAX_ACL_SELECTOR_MEMBERS: usize = 2048;",

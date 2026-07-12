@@ -15,6 +15,17 @@ unsafe impl Pod for PolicyKey {}
 
 pub const ACL_BANK_PRIMARY: u8 = 0;
 pub const ACL_BANK_SHADOW: u8 = 1;
+pub const ACL_INGRESS_HOOK_XDP: u8 = 0;
+pub const ACL_INGRESS_HOOK_TC: u8 = 1;
+
+#[inline(always)]
+pub fn normalize_acl_ingress_hook(value: u8) -> u8 {
+    if value == ACL_INGRESS_HOOK_TC {
+        ACL_INGRESS_HOOK_TC
+    } else {
+        ACL_INGRESS_HOOK_XDP
+    }
+}
 
 #[inline]
 pub fn normalize_acl_bank(bank: u8) -> u8 {
@@ -351,7 +362,7 @@ pub struct TapConfig {
     pub mirror_enabled: u8,
     pub tcprt_enabled: u8,
     pub acl_active_bank: u8,
-    pub pad: [u8; 1],
+    pub acl_ingress_hook: u8,
 }
 unsafe impl Pod for TapConfig {}
 
@@ -365,7 +376,7 @@ impl From<FirewallConfig> for TapConfig {
             mirror_enabled: value.mirror_enabled,
             tcprt_enabled: value.tcprt_enabled,
             acl_active_bank: ACL_BANK_PRIMARY,
-            pad: [0; 1],
+            acl_ingress_hook: ACL_INGRESS_HOOK_XDP,
         }
     }
 }

@@ -461,7 +461,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
             },
             tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
             acl_active_bank: 0,
-            pad: [0; 1],
+            acl_ingress_hook: ACL_INGRESS_HOOK_XDP,
         };
         match bpf
             .map_mut("TAP_CONFIG_MAP")
@@ -589,7 +589,7 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
             },
             tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
             acl_active_bank: 0,
-            pad: [0; 1],
+            acl_ingress_hook: ACL_INGRESS_HOOK_XDP,
         };
         if let Err(e) = write_tap_config(runtime, tap_cfg) {
             errors.push(format!("TAP_CONFIG_MAP tap_id={}: {}", tap_id, e));

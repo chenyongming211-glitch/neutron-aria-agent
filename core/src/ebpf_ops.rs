@@ -1,9 +1,9 @@
 use crate::common::{
-    acl_banked_tap_id, normalize_acl_bank, CtConfig, CtContractKey, CtContractValue, CtKey4,
-    CtKey6, FirewallConfig, FlowStatsValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue,
-    IfaceCtx, MirrorConfig, MirrorKey, MirrorStatsValue, PolicyKey, PolicyValue, PortKey,
-    QosConfig, QosKey, QosStatsValue, RuleStatsValue, TapConfig, TapMapRuntime, TokenBucket,
-    ACL_BANK_PRIMARY, TAP_ID_UNASSIGNED,
+    acl_banked_tap_id, normalize_acl_bank, normalize_acl_ingress_hook, CtConfig, CtContractKey,
+    CtContractValue, CtKey4, CtKey6, FirewallConfig, FlowStatsValue, GlobalMirrorKey,
+    GroupStatsKey, GroupStatsValue, IfaceCtx, MirrorConfig, MirrorKey, MirrorStatsValue, PolicyKey,
+    PolicyValue, PortKey, QosConfig, QosKey, QosStatsValue, RuleStatsValue, TapConfig,
+    TapMapRuntime, TokenBucket, ACL_BANK_PRIMARY, ACL_INGRESS_HOOK_XDP, TAP_ID_UNASSIGNED,
 };
 use crate::state::FirewallState;
 use aya::maps::lpm_trie::Key;
@@ -40,8 +40,8 @@ pub use policy::{
 pub use replay::{replay_state, replay_state_to_pinned_maps};
 pub use runtime::{
     clear_iface_ctx, delete_tap_config, read_acl_active_bank, read_firewall_config, read_iface_ctx,
-    read_runtime_config, set_acl_active_bank, sync_iface_ctx, update_firewall_config,
-    update_runtime_config, write_tap_config,
+    read_runtime_config, set_acl_active_bank, sync_iface_ctx, update_acl_runtime_gate,
+    update_firewall_config, update_runtime_config, write_tap_config,
 };
 pub use scrub::{scrub_acl_bank, scrub_managed_runtime_state, scrub_standalone_runtime_state};
 

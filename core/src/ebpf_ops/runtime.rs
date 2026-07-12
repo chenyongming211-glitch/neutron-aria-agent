@@ -58,7 +58,68 @@ fn tap_config_with_acl_bank(current: Option<TapConfig>, bank: u8) -> TapConfig {
         mirror_enabled: current.map(|c| c.mirror_enabled).unwrap_or(0),
         tcprt_enabled: current.map(|c| c.tcprt_enabled).unwrap_or(0),
         acl_active_bank: normalize_acl_bank(bank),
-        pad: [0; 1],
+        acl_ingress_hook: current
+            .map(|c| normalize_acl_ingress_hook(c.acl_ingress_hook))
+            .unwrap_or(ACL_INGRESS_HOOK_XDP),
+    }
+}
+
+fn tap_config_with_runtime_updates(
+    current: Option<TapConfig>,
+    conntrack_enabled: Option<bool>,
+    monitoring_enabled: Option<bool>,
+    acl_enabled: Option<bool>,
+    qos_enabled: Option<bool>,
+    mirror_enabled: Option<bool>,
+    tcprt_enabled: Option<bool>,
+) -> TapConfig {
+    let current = current.as_ref();
+    TapConfig {
+        conntrack_enabled: conntrack_enabled
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or_else(|| current.map(|c| c.conntrack_enabled).unwrap_or(1)),
+        monitoring_enabled: monitoring_enabled
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or_else(|| current.map(|c| c.monitoring_enabled).unwrap_or(1)),
+        acl_enabled: acl_enabled
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or_else(|| current.map(|c| c.acl_enabled).unwrap_or(1)),
+        qos_enabled: qos_enabled
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or_else(|| current.map(|c| c.qos_enabled).unwrap_or(0)),
+        mirror_enabled: mirror_enabled
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or_else(|| current.map(|c| c.mirror_enabled).unwrap_or(0)),
+        tcprt_enabled: tcprt_enabled
+            .map(|b| if b { 1 } else { 0 })
+            .unwrap_or_else(|| current.map(|c| c.tcprt_enabled).unwrap_or(0)),
+        acl_active_bank: current
+            .map(|c| normalize_acl_bank(c.acl_active_bank))
+            .unwrap_or(ACL_BANK_PRIMARY),
+        acl_ingress_hook: current
+            .map(|c| normalize_acl_ingress_hook(c.acl_ingress_hook))
+            .unwrap_or(ACL_INGRESS_HOOK_XDP),
+    }
+}
+
+fn tap_config_with_acl_runtime_gate(
+    current: Option<TapConfig>,
+    conntrack_enabled: bool,
+    acl_enabled: bool,
+    acl_ingress_hook: u8,
+) -> TapConfig {
+    let current = current.as_ref();
+    TapConfig {
+        conntrack_enabled: if conntrack_enabled { 1 } else { 0 },
+        monitoring_enabled: current.map(|c| c.monitoring_enabled).unwrap_or(1),
+        acl_enabled: if acl_enabled { 1 } else { 0 },
+        qos_enabled: current.map(|c| c.qos_enabled).unwrap_or(0),
+        mirror_enabled: current.map(|c| c.mirror_enabled).unwrap_or(0),
+        tcprt_enabled: current.map(|c| c.tcprt_enabled).unwrap_or(0),
+        acl_active_bank: current
+            .map(|c| normalize_acl_bank(c.acl_active_bank))
+            .unwrap_or(ACL_BANK_PRIMARY),
+        acl_ingress_hook: normalize_acl_ingress_hook(acl_ingress_hook),
     }
 }
 
@@ -90,6 +151,32 @@ pub fn read_acl_active_bank(runtime: TapMapRuntime<'_>) -> Result<u8, String> {
     Ok(normalize_acl_bank(cfg.acl_active_bank))
 }
 
+pub fn update_acl_runtime_gate(
+    runtime: TapMapRuntime<'_>,
+    conntrack_enabled: bool,
+    acl_enabled: bool,
+    acl_ingress_hook: u8,
+) -> Result<(), String> {
+    if runtime.tap_id == TAP_ID_UNASSIGNED {
+        return Err("ACL runtime gate is only supported for per-tap runtime config".to_string());
+    }
+
+    let mut map = open_pinned_tap_config(runtime.pin_path)?;
+    let current = map.get(&runtime.tap_id, 0).ok();
+    let cfg = tap_config_with_acl_runtime_gate(
+        current,
+        conntrack_enabled,
+        acl_enabled,
+        acl_ingress_hook,
+    );
+    map.insert(&runtime.tap_id, &cfg, 0).map_err(|e| {
+        format!(
+            "TAP_CONFIG_MAP insert for tap_id {}: {:?}",
+            runtime.tap_id, e
+        )
+    })
+}
+
 pub fn update_runtime_config(
     runtime: TapMapRuntime<'_>,
     conntrack_enabled: Option<bool>,
@@ -115,31 +202,15 @@ pub fn update_runtime_config(
 
     let mut map = open_pinned_tap_config(runtime.pin_path)?;
     let current = map.get(&runtime.tap_id, 0).ok();
-    let cfg = TapConfig {
-        conntrack_enabled: conntrack_enabled
-            .map(|b| if b { 1 } else { 0 })
-            .unwrap_or_else(|| current.as_ref().map(|c| c.conntrack_enabled).unwrap_or(1)),
-        monitoring_enabled: monitoring_enabled
-            .map(|b| if b { 1 } else { 0 })
-            .unwrap_or_else(|| current.as_ref().map(|c| c.monitoring_enabled).unwrap_or(1)),
-        acl_enabled: acl_enabled
-            .map(|b| if b { 1 } else { 0 })
-            .unwrap_or_else(|| current.as_ref().map(|c| c.acl_enabled).unwrap_or(1)),
-        qos_enabled: qos_enabled
-            .map(|b| if b { 1 } else { 0 })
-            .unwrap_or_else(|| current.as_ref().map(|c| c.qos_enabled).unwrap_or(0)),
-        mirror_enabled: mirror_enabled
-            .map(|b| if b { 1 } else { 0 })
-            .unwrap_or_else(|| current.as_ref().map(|c| c.mirror_enabled).unwrap_or(0)),
-        tcprt_enabled: tcprt_enabled
-            .map(|b| if b { 1 } else { 0 })
-            .unwrap_or_else(|| current.as_ref().map(|c| c.tcprt_enabled).unwrap_or(0)),
-        acl_active_bank: current
-            .as_ref()
-            .map(|c| normalize_acl_bank(c.acl_active_bank))
-            .unwrap_or(ACL_BANK_PRIMARY),
-        pad: [0; 1],
-    };
+    let cfg = tap_config_with_runtime_updates(
+        current,
+        conntrack_enabled,
+        monitoring_enabled,
+        acl_enabled,
+        qos_enabled,
+        mirror_enabled,
+        tcprt_enabled,
+    );
     map.insert(&runtime.tap_id, &cfg, 0).map_err(|e| {
         format!(
             "TAP_CONFIG_MAP insert for tap_id {}: {:?}",
