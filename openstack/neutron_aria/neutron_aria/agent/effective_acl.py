@@ -1,5 +1,8 @@
 from __future__ import absolute_import
 
+import socket
+import struct
+
 from neutron_aria.acl_contract import AclContractError
 from neutron_aria.acl_contract import validate_address_set_reference
 from neutron_aria.acl_contract import validate_policy
@@ -65,6 +68,127 @@ def _rule_priority(rule):
         return int(rule.get("priority") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _ipv4_network(cidr):
+    address, prefix = str(cidr).split("/", 1)
+    prefix = int(prefix)
+    if prefix < 0 or prefix > 32:
+        raise ValueError("invalid IPv4 prefix")
+    value = struct.unpack("!I", socket.inet_aton(address))[0]
+    mask = 0 if prefix == 0 else ((0xffffffff << (32 - prefix)) & 0xffffffff)
+    return value & mask, prefix
+
+
+def _canonical_ipv4_cidrs(cidrs):
+    return tuple(sorted(set(_ipv4_network(cidr) for cidr in cidrs or [])))
+
+
+def _ipv4_cidrs_intersect(left, right):
+    for left_network, left_prefix in left:
+        for right_network, right_prefix in right:
+            prefix = min(left_prefix, right_prefix)
+            mask = 0 if prefix == 0 else ((0xffffffff << (32 - prefix)) & 0xffffffff)
+            if (left_network & mask) == (right_network & mask):
+                return True
+    return False
+
+
+def _normalized_protocol(protocol):
+    value = str(protocol or "any").lower()
+    known = {"any": 0, "tcp": 6, "udp": 17, "icmp": 1}
+    if value in known:
+        return known[value]
+    return int(value)
+
+
+def _normalized_action(action):
+    value = str(action or "allow").lower()
+    if value in ("allow", "accept", "pass"):
+        return "allow"
+    if value in ("deny", "drop"):
+        return "deny"
+    return value
+
+
+def _normalized_ports(rule):
+    minimum = rule.get("dst_port_min")
+    maximum = rule.get("dst_port_max")
+    if minimum is None and maximum is None:
+        return ()
+    minimum = int(minimum if minimum is not None else maximum)
+    maximum = int(maximum if maximum is not None else minimum)
+    return ((minimum, maximum),)
+
+
+def _datapath_directions(direction):
+    value = str(direction or "ingress").lower()
+    if value == "both":
+        return frozenset((0, 1))
+    return frozenset((1,)) if value == "ingress" else frozenset((0,))
+
+
+def _selector_dimension_is_disjoint(left, right):
+    return bool(left and right and not _ipv4_cidrs_intersect(left, right))
+
+
+def _acl_overlap_reason(compiled_rules):
+    normalized = []
+    for rule in compiled_rules:
+        normalized.append({
+            "id": str(rule.get("id") or ""),
+            "direction": str(rule.get("direction") or "ingress").lower(),
+            "priority": int(rule.get("priority") or 0),
+            "action": _normalized_action(rule.get("action")),
+            "protocol": _normalized_protocol(rule.get("protocol")),
+            "directions": _datapath_directions(rule.get("direction")),
+            "src_cidrs": _canonical_ipv4_cidrs(rule.get("src_cidrs")),
+            "dst_cidrs": _canonical_ipv4_cidrs(rule.get("dst_cidrs")),
+            "ports": _normalized_ports(rule),
+        })
+    normalized.sort(key=lambda rule: (
+        rule["direction"], rule["priority"], rule["id"],
+    ))
+
+    for left_index, left in enumerate(normalized):
+        for right in normalized[left_index + 1:]:
+            for side in ("src", "dst"):
+                left_cidrs = left[side + "_cidrs"]
+                right_cidrs = right[side + "_cidrs"]
+                if (left_cidrs and right_cidrs and left_cidrs != right_cidrs and
+                        _ipv4_cidrs_intersect(left_cidrs, right_cidrs)):
+                    return "unsupported_acl_cidr_overlap:%s:%s:%s:%s:%s" % (
+                        side, left["id"], left["priority"],
+                        right["id"], right["priority"],
+                    )
+
+            if not (left["directions"] & right["directions"]):
+                continue
+            if (left["protocol"] and right["protocol"] and
+                    left["protocol"] != right["protocol"]):
+                continue
+            if _selector_dimension_is_disjoint(
+                    left["src_cidrs"], right["src_cidrs"]):
+                continue
+            if _selector_dimension_is_disjoint(
+                    left["dst_cidrs"], right["dst_cidrs"]):
+                continue
+
+            same_key = (
+                left["protocol"] == right["protocol"] and
+                left["src_cidrs"] == right["src_cidrs"] and
+                left["dst_cidrs"] == right["dst_cidrs"]
+            )
+            same_behavior = (
+                left["action"] == right["action"] and
+                left["ports"] == right["ports"]
+            )
+            if same_behavior or (same_key and left["action"] == right["action"]):
+                continue
+            return "unsupported_acl_priority_overlap:%s:%s:%s:%s" % (
+                left["id"], left["priority"], right["id"], right["priority"],
+            )
+    return None
 
 
 class EffectiveAclIndex(object):
@@ -228,25 +352,33 @@ class EffectiveAclIndex(object):
     def _compile_rules(self, policy):
         policy_id = policy.get("id")
         rules = [rule for rule in self.rules_by_policy.get(policy_id, []) if _enabled(rule)]
-        priority_keys = set()
+        priority_keys = {}
         compiled = []
         reasons = []
         for rule in sorted(rules, key=lambda r: (r.get("direction") or "", _rule_priority(r))):
             if self._invalid_priority(rule):
-                reasons.append("invalid_rule_priority:%s" % rule.get("id"))
+                reasons.append("invalid_acl_priority:%s:%s" % (
+                    rule.get("id"), rule.get("priority"),
+                ))
                 continue
 
             priority = _rule_priority(rule)
             key = (rule.get("direction"), priority)
             if key in priority_keys:
-                reasons.append("duplicate_rule_priority:%s:%s" % key)
+                reasons.append("duplicate_acl_priority:%s:%s:%s:%s" % (
+                    key[0], key[1], priority_keys[key], rule.get("id"),
+                ))
                 continue
-            priority_keys.add(key)
+            priority_keys[key] = rule.get("id")
             compiled_rule, error = self._compile_rule(rule)
             if error:
                 reasons.append(error)
                 continue
             compiled.append(compiled_rule)
+
+        overlap_reason = _acl_overlap_reason(compiled)
+        if overlap_reason:
+            reasons.append(overlap_reason)
 
         return {
             "status": ACL_DEGRADED if reasons else ACL_READY,
@@ -330,10 +462,10 @@ class EffectiveAclIndex(object):
 
     def _invalid_priority(self, rule):
         try:
-            int(rule.get("priority") or 0)
-            return False
+            priority = int(rule.get("priority"))
         except (TypeError, ValueError):
             return True
+        return priority < 0
 
     def _address_set_revisions(self, rules):
         revisions = []
