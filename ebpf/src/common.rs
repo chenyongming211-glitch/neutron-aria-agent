@@ -114,7 +114,7 @@ pub fn ct_acl_bank_is_current(
 #[derive(Copy, Clone)]
 pub struct CtValue {
     pub state: u8,
-    pub flags: u8,         // bit 0: seen_reply
+    pub flags: u8,         // bit 0: seen_reply; bit 1: policy_hit
     pub direction: u8,     // direction of the matched policy rule
     pub matched_proto: u8, // proto of the matched policy rule (0 = wildcard)
     pub matched_src_id: u32,
