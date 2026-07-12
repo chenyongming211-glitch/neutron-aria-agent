@@ -343,7 +343,8 @@ The smoke must prove both TC directions with IPv4 and IPv6 when available:
 - deny traffic creates no CT;
 - QoS-drop ordering is covered only in a standalone fixture because Neutron
   managed QoS is rejected;
-- bank transition produces stale/miss revalidation, never stale hit;
+- bank transition proves a pre-existing controlled-flow CT entry, records
+  `stale_bank`, recreates exact counters from zero, and then returns to hits;
 - CT packet/byte deltas are not doubled on ingress;
 - both required TC link pins are present before enforcement; missing-link
   rejection is proved by the exact host-side readiness tests without
@@ -353,9 +354,10 @@ Code/CI evidence moves the item to `likely-fixed`. Only successful real-tap
 evidence moves it to `fixed`.
 
 Current evidence state: `REVIEW-ACL-055` is `likely-fixed`. GREEN Build
-[29202917780](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29202917780)
+[29203912209](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29203912209)
 passed the exact Rust metric-label test, nightly eBPF build, static
-userspace/agent builds, binary verification, and Python stages.
+userspace/agent builds, binary verification, Python stages, and the fail-closed
+smoke structure/mutation checks.
 `real-tap smoke pending` remains explicit because this development environment
 does not provide the guarded Kolla credentials, Neutron UDS, managed tap, VM,
 or pinned live TC links required to run the smoke safely.
