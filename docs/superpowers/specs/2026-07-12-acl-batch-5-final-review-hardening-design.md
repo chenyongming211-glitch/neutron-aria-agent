@@ -2,7 +2,7 @@
 
 Date: 2026-07-12
 
-Status: approved in conversation; pending written-spec review
+Status: implemented and verified
 
 ## Goal
 
@@ -313,6 +313,19 @@ execute the persistent `neutron_acl_` Rust filter, eBPF build, userspace static
 build, agent static build, and binary verification. The Batch 5 backlog and
 design evidence must be refreshed only after the final hardening workflow is
 green.
+
+Implementation evidence:
+
+- Python RED ran 31 focused effective-ACL tests with the expected 5 failures
+  and 2 errors; Python GREEN ran the effective-ACL and event-loop suites with
+  75/75 passing.
+- GitHub Build `29177709424` is the Rust RED evidence: 15 expected missing
+  constant/cache/translation/phase-interface compiler errors.
+- GitHub Build `29177888031` is the implementation GREEN evidence: the
+  persistent `neutron_acl_` filter, eBPF build, userspace static build, agent
+  static build, and binary verification all passed.
+- No local Cargo command was run, and the pre-existing `README.md` worktree
+  modification was not staged or committed.
 
 ## Completion Criteria
 

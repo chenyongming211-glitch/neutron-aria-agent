@@ -538,12 +538,20 @@ def check_rust_stage_one_tests_present():
             raise SystemExit("ERROR: Rust ACL conntrack contract missing %s" % term)
 
     required_acl_priority_terms = [
+        "const MAX_ACL_RULES_PER_POLICY: usize = 1000;",
+        "const MAX_ACL_SELECTOR_MEMBERS: usize = 2048;",
         "struct AclIpv4Cidr {",
+        "enum AclValidatedTemplate {",
+        "struct AclValidationCacheKey {",
+        "struct AclValidationCache {",
+        "fn translate_neutron_acl_with_cache(",
         "force_bypass_reason: Option<String>",
         "fn neutron_acl_translator_force_bypasses_nested_cidrs(",
         "fn neutron_acl_translator_reuses_canonical_cidr_groups(",
         "fn neutron_acl_translator_force_bypasses_priority_fallback_conflict(",
         "fn neutron_acl_force_bypass_outcome_overrides_optimistic_snapshot(",
+        "NeutronAclReconcileOutcome::from_plan(&plan)",
+        "fn neutron_acl_reconcile_failure_phase_reports_the_proven_effective_action(",
         "unsupported_acl_cidr_overlap:",
         "unsupported_acl_priority_overlap:",
     ]
@@ -562,8 +570,9 @@ def check_rust_stage_one_tests_present():
         raise SystemExit("ERROR: eBPF PolicyKey must not contain priority")
 
     acl_test_command = "cargo +stable test --locked -p aria-agent neutron_acl_"
-    if acl_test_command not in build_workflow_source:
-        raise SystemExit("ERROR: Build workflow missing %s" % acl_test_command)
+    acl_test_pattern = r"(?m)^[ \t]+%s[ \t]*$" % re.escape(acl_test_command)
+    if not re.search(acl_test_pattern, build_workflow_source):
+        raise SystemExit("ERROR: Build workflow missing active %s" % acl_test_command)
 
     required_domain_authority_terms = [
         "fn domain_authority_blocks_only_selected_domains(",

@@ -120,19 +120,36 @@ def check_acl_priority_guard():
         "openstack", "neutron_aria", "neutron_aria", "tests", "unit",
         "test_effective_acl.py",
     ))
-    for term in (
+    required_source_terms = (
+        "MAX_ACL_RULES_PER_POLICY = 1000",
+        "MAX_ACL_SELECTOR_MEMBERS = 2048",
+        "def _strict_ipv4_cidr(",
         "def _canonical_ipv4_cidrs(",
+        "def _selector_relation(",
         "def _acl_overlap_reason(",
+        "def _compile_rules_uncached(",
+        "acl_rule_limit_exceeded:",
+        "acl_selector_member_limit_exceeded:",
         "unsupported_acl_cidr_overlap:",
         "unsupported_acl_priority_overlap:",
         "invalid_acl_priority:",
         "duplicate_acl_priority:",
+    )
+    required_test_terms = (
+        "test_cidr_whitespace_is_canonicalized_in_snapshot",
+        "test_rule_runtime_limit_accepts_1000_and_bypasses_1001",
+        "test_selector_runtime_limit_accepts_2048_and_bypasses_2049",
+        "test_policy_compile_cache_reuses_ready_result",
         "test_nested_cidrs_degrade_with_stable_overlap_reason",
         "test_canonical_equivalent_cidrs_are_one_safe_selector",
         "test_specificity_port_behavior_conflict_degrades",
-    ):
-        if term not in effective_source + effective_tests:
-            raise SystemExit("ERROR: ACL priority guard missing %s" % term)
+    )
+    for term in required_source_terms:
+        if term not in effective_source:
+            raise SystemExit("ERROR: ACL priority source guard missing %s" % term)
+    for term in required_test_terms:
+        if term not in effective_tests:
+            raise SystemExit("ERROR: ACL priority test guard missing %s" % term)
 
 
 def check_plugin_entrypoint():
