@@ -58,7 +58,141 @@ def effective_acl(rules):
     ).effective_for_port(port(), snapshot())
 
 
+def acl_rules(count):
+    return [acl_rule("rule-%s" % index, index) for index in range(count)]
+
+
+def selector_members(count):
+    return ["10.%s.%s.%s/32" % (
+        (index >> 16) & 0xff,
+        (index >> 8) & 0xff,
+        index & 0xff,
+    ) for index in range(count)]
+
+
+def effective_acl_with_address_set(members):
+    return EffectiveAclIndex(
+        policies=[{"id": "policy-1", "default_action": "allow"}],
+        address_sets=[{"id": "aset-1", "members": members}],
+        rules=[acl_rule("aset-rule", 10, src_address_set_id="aset-1")],
+        bindings=[{
+            "id": "binding-1",
+            "policy_id": "policy-1",
+            "target_type": "port",
+            "target_id": PORT_ID,
+        }],
+    ).effective_for_port(port(), snapshot())
+
+
+class CountingEffectiveAclIndex(EffectiveAclIndex):
+    def __init__(self, *args, **kwargs):
+        self.compile_count = 0
+        super(CountingEffectiveAclIndex, self).__init__(*args, **kwargs)
+
+    def _compile_rules_uncached(self, policy):
+        self.compile_count += 1
+        return super(CountingEffectiveAclIndex, self)._compile_rules_uncached(policy)
+
+
 class EffectiveAclTestCase(unittest.TestCase):
+    def test_cidr_whitespace_is_canonicalized_in_snapshot(self):
+        result = effective_acl([
+            acl_rule("spaced", 10, src_cidr=" 10.1.2.3/24 "),
+        ])
+
+        self.assertEqual(ACL_READY, result["status"])
+        self.assertEqual(["10.1.2.0/24"], result["rules"][0]["src_cidrs"])
+
+    def test_address_set_member_whitespace_uses_same_canonicalizer(self):
+        index = EffectiveAclIndex(
+            policies=[{"id": "policy-1", "default_action": "allow"}],
+            address_sets=[{"id": "aset-1", "members": [" 10.2.3.4/24 "]}],
+            rules=[acl_rule("aset", 10, src_address_set_id="aset-1")],
+            bindings=[{
+                "id": "binding-1",
+                "policy_id": "policy-1",
+                "target_type": "port",
+                "target_id": PORT_ID,
+            }],
+        )
+
+        result = index.effective_for_port(port(), snapshot())
+
+        self.assertEqual(ACL_READY, result["status"])
+        self.assertEqual(["10.2.3.0/24"], result["rules"][0]["src_cidrs"])
+
+    def test_noncanonical_ipv4_forms_degrade_without_exception(self):
+        for rule_id, cidr in (
+                ("short", "10.1/16"),
+                ("leading-zero", "010.1.2.3/24")):
+            result = effective_acl([acl_rule(rule_id, 10, src_cidr=cidr)])
+            self.assertEqual(ACL_DEGRADED, result["status"])
+            self.assertEqual("bypass", result["effective_action"])
+            self.assertIn(
+                "invalid_acl_ipv4_cidr:src:%s:" % rule_id,
+                result["reason"],
+            )
+
+    def test_rule_runtime_limit_accepts_1000_and_bypasses_1001(self):
+        accepted = effective_acl(acl_rules(1000))
+        rejected = effective_acl(acl_rules(1001))
+
+        self.assertEqual(ACL_READY, accepted["status"])
+        self.assertEqual(ACL_DEGRADED, rejected["status"])
+        self.assertEqual("acl_rule_limit_exceeded:1001:1000", rejected["reason"])
+
+    def test_selector_runtime_limit_accepts_2048_and_bypasses_2049(self):
+        accepted = effective_acl_with_address_set(selector_members(2048))
+        rejected = effective_acl_with_address_set(selector_members(2049))
+
+        self.assertEqual(ACL_READY, accepted["status"])
+        self.assertEqual(ACL_DEGRADED, rejected["status"])
+        self.assertEqual(
+            "acl_selector_member_limit_exceeded:src:aset-rule:2049:2048",
+            rejected["reason"],
+        )
+
+    def test_policy_compile_cache_reuses_ready_result(self):
+        index = CountingEffectiveAclIndex(
+            policies=[{"id": "policy-1", "default_action": "allow"}],
+            rules=[acl_rule("cached", 10, src_cidr="10.1.2.3/24")],
+            bindings=[{
+                "id": "binding-1",
+                "policy_id": "policy-1",
+                "target_type": "network",
+                "target_id": NETWORK_ID,
+            }],
+        )
+
+        first = index.effective_for_port(port("port-1", NETWORK_ID), snapshot())
+        first["rules"][0]["src_cidrs"].append("192.0.2.0/24")
+        second = index.effective_for_port(port("port-2", NETWORK_ID), snapshot())
+
+        self.assertEqual(1, index.compile_count)
+        self.assertEqual(["10.1.2.0/24"], second["rules"][0]["src_cidrs"])
+
+    def test_policy_compile_cache_reuses_degraded_result(self):
+        index = CountingEffectiveAclIndex(
+            policies=[{"id": "policy-1", "default_action": "allow"}],
+            rules=[acl_rule("invalid", "not-an-integer")],
+            bindings=[{
+                "id": "binding-1",
+                "policy_id": "policy-1",
+                "target_type": "network",
+                "target_id": NETWORK_ID,
+            }],
+        )
+
+        first = index.effective_for_port(port("port-1", NETWORK_ID), snapshot())
+        first["reason"] = "mutated"
+        first["rules"].append({"id": "mutated"})
+        second = index.effective_for_port(port("port-2", NETWORK_ID), snapshot())
+
+        self.assertEqual(1, index.compile_count)
+        self.assertEqual(ACL_DEGRADED, second["status"])
+        self.assertIn("invalid_acl_priority:invalid:not-an-integer", second["reason"])
+        self.assertEqual([], second["rules"])
+
     def test_nested_cidrs_degrade_with_stable_overlap_reason(self):
         result = effective_acl([
             acl_rule("broad", 10, src_cidr="10.0.0.0/8"),
