@@ -364,20 +364,22 @@ run_stateful_evidence() {
 }
 
 assert_bank_evidence() {
-    local old_bank new_bank before_ct_count before_ct_packets before_ct_bytes ct_count ct_packets ct_bytes rule_before rule_after expected
-    old_bank="$(awk '{print $1}' "${WORK_DIR}/stateful-ingress-after-runtime-mode.txt")"
+    local old_bank new_bank pre_resync_ct_count pre_resync_ct_packets pre_resync_ct_bytes before_ct_count before_ct_packets before_ct_bytes ct_count ct_packets ct_bytes rule_before rule_after expected
+    old_bank="$(awk '{print $1}' "${WORK_DIR}/bank-pre-resync-runtime-mode.txt")"
     new_bank="$(awk '{print $1}' "${WORK_DIR}/bank-before-runtime-mode.txt")"
     [ "${new_bank}" != "${old_bank}" ] || die "ACL bank did not transition"
     bank_stale_delta=$(( $(metric_sum "${WORK_DIR}/bank-after-metrics.prom" tc_egress stale_bank "${METRIC_FAMILY}") - $(metric_sum "${WORK_DIR}/bank-before-metrics.prom" tc_egress stale_bank "${METRIC_FAMILY}") ))
     bank_miss_delta=$(( $(metric_sum "${WORK_DIR}/bank-after-metrics.prom" tc_egress ct_miss "${METRIC_FAMILY}") - $(metric_sum "${WORK_DIR}/bank-before-metrics.prom" tc_egress ct_miss "${METRIC_FAMILY}") ))
     bank_hit_delta=$(( $(metric_sum "${WORK_DIR}/bank-after-metrics.prom" tc_egress ct_hit "${METRIC_FAMILY}") - $(metric_sum "${WORK_DIR}/bank-before-metrics.prom" tc_egress ct_hit "${METRIC_FAMILY}") ))
-    [ "${bank_stale_delta}" -ge 1 ] || die "controlled bank-transition flow did not record stale_bank"
+    [ "${bank_miss_delta}" -ge 1 ] || die "controlled bank-transition flow did not miss after strict CT flush"
     [ "${bank_hit_delta}" -ge "${MIN_HIT_PACKETS}" ] || die "controlled bank-transition flow did not return to hits"
+    read -r pre_resync_ct_count pre_resync_ct_packets pre_resync_ct_bytes < <(flow_conntrack_totals "${WORK_DIR}/bank-pre-resync-conntrack.json")
     read -r before_ct_count before_ct_packets before_ct_bytes < <(flow_conntrack_totals "${WORK_DIR}/bank-before-conntrack.json")
     read -r ct_count ct_packets ct_bytes < <(flow_conntrack_totals "${WORK_DIR}/bank-after-conntrack.json")
     expected=$((TRAFFIC_PACKETS * 2))
-    [ "${before_ct_count}" -eq 1 ] && [ "${before_ct_packets}" -gt 0 ] && [ "${before_ct_bytes}" -gt 0 ] || die "bank transition did not begin with the controlled-flow CT entry"
-    [ "${ct_count}" -eq 1 ] && [ "${ct_packets}" -eq "${expected}" ] && [ "${ct_bytes}" -gt 0 ] || die "stale bank flow was not recreated with exact controlled-flow counters"
+    [ "${pre_resync_ct_count}" -eq 1 ] && [ "${pre_resync_ct_packets}" -gt 0 ] && [ "${pre_resync_ct_bytes}" -gt 0 ] || die "bank transition did not capture the live controlled-flow CT before resync"
+    [ "${before_ct_count}" -eq 0 ] && [ "${before_ct_packets}" -eq 0 ] && [ "${before_ct_bytes}" -eq 0 ] || die "Neutron strict CT flush did not clear the controlled flow before bank traffic"
+    [ "${ct_count}" -eq 1 ] && [ "${ct_packets}" -eq "${expected}" ] && [ "${ct_bytes}" -gt 0 ] || die "bank flow was not recreated after strict flush with exact controlled-flow counters"
     rule_before="$(rule_counter_sum "${WORK_DIR}/bank-before-rules.json" egress packets)"
     rule_after="$(rule_counter_sum "${WORK_DIR}/bank-after-rules.json" egress packets)"
     [ $((rule_after - rule_before)) -eq "${expected}" ] || die "bank ACL rule evidence does not match controlled TC observations"
@@ -622,6 +624,7 @@ binding_id="$(curl_body POST aria-acl-bindings "${binding_body}" | tee "${WORK_D
 RESYNC_ROLLBACK_ARMED=true
 
 run_stateful_evidence
+capture bank-pre-resync
 create_rule ingress allow tcp 200
 run_bank_evidence
 update_policy_stateful false

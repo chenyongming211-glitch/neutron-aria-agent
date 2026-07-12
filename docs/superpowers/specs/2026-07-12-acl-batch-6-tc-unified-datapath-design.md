@@ -343,12 +343,19 @@ The smoke must prove both TC directions with IPv4 and IPv6 when available:
 - deny traffic creates no CT;
 - QoS-drop ordering is covered only in a standalone fixture because Neutron
   managed QoS is rejected;
-- bank transition proves a pre-existing controlled-flow CT entry, records
-  `stale_bank`, recreates exact counters from zero, and then returns to hits;
+- bank transition captures the pre-existing controlled-flow CT entry before
+  Neutron resync, proves the strict publication flush leaves zero matching CT,
+  then requires a first `ct_miss`, exact counter recreation, and later hits;
 - CT packet/byte deltas are not doubled on ingress;
 - both required TC link pins are present before enforcement; missing-link
   rejection is proved by the exact host-side readiness tests without
   destructively removing a live link during smoke.
+
+`stale_bank` behavior remains covered by the exact host-side CT contract tests.
+The real Neutron bank smoke cannot require a stale lookup because Neutron ACL
+publication deliberately performs a strict CT flush before publishing the new
+bank. Exercising a real stale entry therefore requires a separate standalone or
+non-Neutron fixture that does not run the Neutron strict-flush transaction.
 
 Code/CI evidence moves the item to `likely-fixed`. Only successful real-tap
 evidence moves it to `fixed`.
