@@ -2,7 +2,7 @@
 
 Date: 2026-07-12
 
-Status: implemented in code; GitHub GREEN and real managed-tap evidence pending
+Status: implemented; GitHub Build green; real managed-tap evidence pending
 
 ## Goal
 
@@ -352,8 +352,10 @@ The smoke must prove both TC directions with IPv4 and IPv6 when available:
 Code/CI evidence moves the item to `likely-fixed`. Only successful real-tap
 evidence moves it to `fixed`.
 
-Current evidence state: `REVIEW-ACL-055` is `likely-fixed`; the exact GREEN
-Build URL will be recorded after the implementation commit passes, and
+Current evidence state: `REVIEW-ACL-055` is `likely-fixed`. GREEN Build
+[29202917780](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29202917780)
+passed the exact Rust metric-label test, nightly eBPF build, static
+userspace/agent builds, binary verification, and Python stages.
 `real-tap smoke pending` remains explicit because this development environment
 does not provide the guarded Kolla credentials, Neutron UDS, managed tap, VM,
 or pinned live TC links required to run the smoke safely.
