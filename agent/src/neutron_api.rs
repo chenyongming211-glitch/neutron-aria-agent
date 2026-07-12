@@ -3515,11 +3515,11 @@ fn normalize_acl_rule(
 
     let src_cidrs = canonical_acl_cidrs(&rule.src_cidrs, &rule_id)?;
     let dst_cidrs = canonical_acl_cidrs(&rule.dst_cidrs, &rule_id)?;
-    let proto = proto_from_string(rule.protocol.as_deref().unwrap_or("any"))
+    let proto = proto_from_string(rule.protocol.as_deref().unwrap_or("any").trim())
         .map_err(|e| format!("rule {} protocol: {}", rule_id, e))?;
-    let action = action_from_string(rule.action.as_deref().unwrap_or("allow"))
+    let action = action_from_string(rule.action.as_deref().unwrap_or("allow").trim())
         .map_err(|e| format!("rule {} action: {}", rule_id, e))?;
-    let direction = direction_from_string(rule.direction.as_deref().unwrap_or("ingress"))
+    let direction = direction_from_string(rule.direction.as_deref().unwrap_or("ingress").trim())
         .map_err(|e| format!("rule {} direction: {}", rule_id, e))?;
     let ports = match acl_ports(rule, proto, &rule_id)? {
         Some(ports) => parse_acl_port_ranges(&ports)?,
