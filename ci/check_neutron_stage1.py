@@ -879,6 +879,7 @@ def main():
     check_rust_stage_one_tests_present()
     check_p3_rust_scoped_plan_boundary()
     run([sys.executable, os.path.join("ci", "check_tc_acl_datapath.py")])
+    run([sys.executable, os.path.join("ci", "check_tc_acl_smoke.py")])
     check_smoke_timeout_contract()
     check_tc_acl_datapath_smoke_contract()
     run_smoke_syntax()
