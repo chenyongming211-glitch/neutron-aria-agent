@@ -6,7 +6,7 @@ use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
-use crate::instance::RuntimePinState;
+use crate::instance::{FirewallInstance, RuntimePinState};
 use crate::kernel_drop_manager::{KernelDropManager, KernelDropStatusSnapshot};
 use crate::service_chain::{self, ServiceChain};
 use crate::ssl_manager::SslManager;
@@ -2803,6 +2803,55 @@ impl ControlPlane {
         let state = inst.read().await;
         aria_core::ct_ops::scrub_ct_tables_strict(state.map_runtime())
             .map_err(ControlPlaneError::KernelError)
+    }
+
+    pub async fn require_tc_acl_ready(&self, instance: &str) -> Result<(), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        let iface = Self::runtime_iface_name(instance, &state)?;
+        let runtime = FirewallInstance::new(
+            &iface,
+            state.pin_path.clone().into(),
+            state.state_path.clone().into(),
+            true,
+            self.trace_map_mode(),
+        );
+        runtime
+            .require_tc_acl_links()
+            .map_err(ControlPlaneError::InstanceNotReady)
+    }
+
+    pub async fn update_neutron_acl_runtime_gate(
+        &self,
+        instance: &str,
+        conntrack_enabled: bool,
+        acl_enabled: bool,
+    ) -> Result<(), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        Self::check_xdp_ready(&state.pin_path)?;
+        aria_core::ebpf_ops::update_acl_runtime_gate(
+            state.map_runtime(),
+            conntrack_enabled,
+            acl_enabled,
+            aria_core::common::ACL_INGRESS_HOOK_TC,
+        )
+        .map_err(ControlPlaneError::KernelError)?;
+
+        state.state.conntrack_enabled = conntrack_enabled;
+        state.state.acl_enabled = acl_enabled;
+        state
+            .wal_append(&WalEntry::UpdateConfig {
+                conntrack: Some(conntrack_enabled),
+                monitoring: None,
+                acl: Some(acl_enabled),
+                qos: None,
+                mirror: None,
+                tcprt: None,
+                ssl: None,
+            })
+            .await;
+        Ok(())
     }
 
     // ── Config ──

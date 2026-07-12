@@ -530,12 +530,39 @@ def check_rust_stage_one_tests_present():
         "fn neutron_acl_translator_carries_conntrack_intent(",
         "fn neutron_acl_runtime_transition_is_atomic(",
         "acl_runtime_transition(&plan, preserved_conntrack_enabled)",
-        "Some(transition.quiesce.conntrack_enabled)",
-        "Some(transition.publish.conntrack_enabled)",
+        "transition.quiesce.conntrack_enabled",
+        "transition.publish.conntrack_enabled",
+        "acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC",
     ]
     for term in required_acl_conntrack_terms:
         if term not in neutron_api_source:
             raise SystemExit("ERROR: Rust ACL conntrack contract missing %s" % term)
+
+    acl_reconcile_start = neutron_api_source.find("async fn reconcile_neutron_acl(")
+    acl_reconcile_end = neutron_api_source.find(
+        "\n#[allow(dead_code)]\nfn build_snapshot_plan(", acl_reconcile_start
+    )
+    if acl_reconcile_start < 0 or acl_reconcile_end < 0:
+        raise SystemExit("ERROR: Rust Neutron ACL reconcile source not found")
+    acl_reconcile_body = neutron_api_source[acl_reconcile_start:acl_reconcile_end]
+    readiness = acl_reconcile_body.find(".require_tc_acl_ready(&port.ifname)")
+    first_gate_write = acl_reconcile_body.find(".update_neutron_acl_runtime_gate(")
+    if readiness < 0 or first_gate_write < 0 or readiness > first_gate_write:
+        raise SystemExit(
+            "ERROR: Neutron TC ACL readiness must be checked before quiesce"
+        )
+    if "if !plan.policies.is_empty() {" not in acl_reconcile_body[:readiness]:
+        raise SystemExit(
+            "ERROR: Neutron TC ACL readiness must be conditional on non-empty policies"
+        )
+    if ".update_config(" in acl_reconcile_body:
+        raise SystemExit(
+            "ERROR: Neutron ACL gate writes must use update_neutron_acl_runtime_gate"
+        )
+    if acl_reconcile_body.count(".update_neutron_acl_runtime_gate(") != 4:
+        raise SystemExit(
+            "ERROR: Neutron ACL quiesce, publish, and compensation must use atomic gate writes"
+        )
 
     restart_runtime_match = re.search(
         r"async fn reconcile_committed_runtime\(&self\) \{(?P<body>.*?)\n    async fn recover_incomplete_wal_intent",

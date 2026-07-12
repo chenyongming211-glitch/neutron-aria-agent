@@ -88,6 +88,10 @@ fn default_persisted_live_iface_active() -> bool {
     true
 }
 
+fn tc_acl_links_complete(ingress: bool, egress: bool) -> bool {
+    ingress && egress
+}
+
 impl FirewallInstance {
     fn fq_qdisc_marker_path(&self) -> PathBuf {
         self.state_path.join(FQ_QDISC_MARKER)
@@ -156,6 +160,26 @@ impl FirewallInstance {
         } else {
             format!("{}/{}_link", self.pin_path.display(), prog_name)
         }
+    }
+
+    pub fn require_tc_acl_links(&self) -> Result<(), String> {
+        let ingress = Path::new(&self.tc_link_pin_path("tc_ingress")).exists();
+        let egress = Path::new(&self.tc_link_pin_path("tc_egress")).exists();
+        if tc_acl_links_complete(ingress, egress) {
+            return Ok(());
+        }
+
+        let mut missing = Vec::new();
+        if !egress {
+            missing.push("tc_egress");
+        }
+        if !ingress {
+            missing.push("tc_ingress");
+        }
+        Err(format!(
+            "missing pinned TC ACL links: {}",
+            missing.join(", ")
+        ))
     }
 
     fn pin_runtime_maps(&self, bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {

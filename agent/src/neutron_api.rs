@@ -374,6 +374,7 @@ impl NeutronAclReconcileOutcome {
 struct AclRuntimeFeatureState {
     conntrack_enabled: bool,
     acl_enabled: bool,
+    acl_ingress_hook: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -390,12 +391,14 @@ fn acl_runtime_transition(
         quiesce: AclRuntimeFeatureState {
             conntrack_enabled: false,
             acl_enabled: false,
+            acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
         },
         publish: AclRuntimeFeatureState {
             conntrack_enabled: plan
                 .conntrack_enabled
                 .unwrap_or(preserved_conntrack_enabled),
             acl_enabled: !plan.policies.is_empty(),
+            acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
         },
     }
 }
@@ -4284,19 +4287,26 @@ async fn reconcile_neutron_acl(
     let group_cidr_count: usize = plan.groups.iter().map(|group| group.cidrs.len()).sum();
     let policy_count = plan.policies.len();
     let gate_update_mode = acl_gate_update_mode(&plan);
+    if !plan.policies.is_empty() {
+        state
+            .control_plane
+            .require_tc_acl_ready(&port.ifname)
+            .await
+            .map_err(|error| {
+                acl_reconcile_error(
+                    AclReconcileFailurePhase::BeforeQuiesce,
+                    error.to_string(),
+                )
+            })?;
+    }
     let disable_ms = if gate_update_mode == AclGateUpdateMode::DisableBeforeReplace {
         let disable_started = Instant::now();
         state
             .control_plane
-            .update_config(
+            .update_neutron_acl_runtime_gate(
                 &port.ifname,
-                Some(transition.quiesce.conntrack_enabled),
-                None,
-                Some(transition.quiesce.acl_enabled),
-                None,
-                None,
-                None,
-                None,
+                transition.quiesce.conntrack_enabled,
+                transition.quiesce.acl_enabled,
             )
             .await
             .map_err(|error| {
@@ -4392,15 +4402,10 @@ async fn reconcile_neutron_acl(
         let publish_started = Instant::now();
         state
             .control_plane
-            .update_config(
+            .update_neutron_acl_runtime_gate(
                 &port.ifname,
-                Some(transition.publish.conntrack_enabled),
-                None,
-                Some(transition.publish.acl_enabled),
-                None,
-                None,
-                None,
-                None,
+                transition.publish.conntrack_enabled,
+                transition.publish.acl_enabled,
             )
             .await
             .map_err(|error| {
@@ -4453,15 +4458,10 @@ async fn reconcile_neutron_acl(
     let publish_started = Instant::now();
     state
         .control_plane
-        .update_config(
+        .update_neutron_acl_runtime_gate(
             &port.ifname,
-            Some(transition.publish.conntrack_enabled),
-            None,
-            Some(transition.publish.acl_enabled),
-            None,
-            None,
-            None,
-            None,
+            transition.publish.conntrack_enabled,
+            transition.publish.acl_enabled,
         )
         .await
         .map_err(|error| {
@@ -4498,15 +4498,10 @@ async fn reconcile_neutron_acl(
     if let Err(error) = fault_injection::check("neutron.acl.after_enable_before_commit").await {
         return match state
             .control_plane
-            .update_config(
+            .update_neutron_acl_runtime_gate(
                 &port.ifname,
-                Some(false),
-                None,
-                Some(false),
-                None,
-                None,
-                None,
-                None,
+                false,
+                false,
             )
             .await
         {
