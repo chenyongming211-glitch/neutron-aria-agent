@@ -2,7 +2,8 @@
 
 Date: 2026-07-12
 
-Status: implemented and verified
+Status: initial hardening implemented and verified; selector-resource addendum
+approved in conversation and pending written-spec review
 
 ## Goal
 
@@ -26,8 +27,8 @@ without changing the approved priority-independent datapath boundary:
   within a full or port-scoped snapshot request.
 - Add explicit runtime limits of 1000 effective rules per policy and 2048 raw
   members per rule-side selector in both Python and Rust.
-- Memoize canonical selector relations so repeated rule pairs do not repeat
-  nested CIDR member comparisons.
+- Intern canonical selectors and validate cross-selector ownership with one
+  interval sweep so rule pairs never own or rescan complete CIDR vectors.
 - Connect Rust status tests to the production
   `translate_neutron_acl -> AclApplyPlan -> NeutronAclReconcileOutcome::from_plan`
   path.
@@ -204,24 +205,55 @@ deterministic source/destination group names under the current port's
 `neutron:<port-id>:` ownership prefix. Stateful intent remains per snapshot,
 not part of the reusable validation result.
 
-### 5. Selector Relation Memoization
+### 5. Selector Interning And Global Interval Sweep
 
-Within one validation, use canonical selector sets as keys and memoize their
-relationship independently for source and destination sides:
+The first implementation used complete canonical CIDR vectors as owning
+relation-cache keys. At the permitted `1000 rules x 2048 members` boundary,
+unique rule pairs could copy the vectors hundreds of thousands of times. This
+is not an acceptable bounded-validation profile.
+
+Both Python and Rust intern canonical selectors independently for source and
+destination. Selector ID `0` means `any`; every unique non-empty canonical
+selector receives one deterministic positive integer ID. A validation rule
+stores only its source and destination selector IDs. Rust stores each CIDR
+vector once in the validated template; Python keeps one tuple per interned
+selector in the policy validation view.
+
+CIDR ownership is validated once per side with an interval sweep:
+
+1. flatten every interned CIDR into
+   `(network_start, network_end, selector_id)`;
+2. sort intervals by start, end, and selector ID;
+3. maintain active interval ends in a min-heap plus active counts by selector;
+4. before inserting the next interval, remove intervals whose end is before
+   its start;
+5. if any remaining active selector ID differs from the current selector ID,
+   return that deterministic selector pair as a cross-selector overlap;
+6. overlapping or nested members inside the same selector remain allowed.
+
+The stable `unsupported_acl_cidr_overlap` diagnostic is produced by finding
+the first priority/ID-ordered rule pair that references the conflicting
+selector IDs. The wire reason format does not change.
+
+After a side passes the sweep, selector relation is constant-time:
 
 ```text
-identical | disjoint | intersecting
+same ID                 -> identical
+either ID is 0          -> intersecting through any
+different non-zero IDs  -> disjoint
 ```
 
-CIDR ownership rejection consumes this relation. Priority fallback validation
-reuses it rather than re-running member-by-member intersection for every rule
-pair. Empty selectors retain `any` semantics and are handled without CIDR
-member comparison.
+Priority fallback retains the existing rule-pair scan, but the scan compares
+small IDs and behavior fields only. It owns no CIDR vectors and performs no
+member-by-member intersection. The `O(R^2)` portion is therefore bounded to
+at most 499,500 cheap comparisons for 1000 rules, while CIDR work is
+`O(T log T)` for `T` raw canonical intervals and memory remains proportional
+to input plus unique selectors.
 
-This retains the approved conservative pair semantics. It does not introduce
-a different priority algorithm. With explicit `1000/2048` limits, one
-validation per unique policy payload per request, and selector-relation reuse,
-the existing 1000-rule target remains the required acceptance profile.
+This is a representation and validation optimization, not a different
+priority algorithm. It preserves exact-selector reuse, conservative overlap
+rejection, `any` fallback semantics, deterministic group rendering, and the
+approved `1000/2048` runtime limits.
 
 ## Data Flow
 
@@ -233,7 +265,8 @@ Neutron ACL payload
      -> or degraded/bypass reason
   -> Rust request-scoped template cache
      -> strict normalization and raw-size guards on cache miss
-     -> memoized selector relations and priority-independent validation
+     -> per-side selector interning and global interval sweep
+     -> ID-only priority-independent rule-pair validation
      -> cached safe template / force reason / ordinary error
   -> port-specific canonical group and policy rendering
   -> Batch 4 CT/ACL transaction
@@ -308,6 +341,18 @@ Rust red/green coverage must prove:
 - the production failure-phase classifier returns unchanged, bypass, and
   enforce exactly at the approved boundaries.
 
+Selector-resource red/green coverage must additionally prove in both Python
+and Rust:
+
+- identical 2048-member selectors are stored once and referenced by ID;
+- 1000 rules sharing one large selector do not create rule-pair CIDR copies;
+- 1000 disjoint selectors pass the ownership sweep;
+- nested or intersecting CIDRs across different selector IDs are rejected;
+- nested CIDRs inside one selector remain one valid selector;
+- the stable overlap reason still names the expected rule IDs and priorities;
+- source and destination selector ID spaces remain independent;
+- port-specific group names are rendered after cached template lookup.
+
 Allowed local verification remains Python/static only. GitHub Actions must
 execute the persistent `neutron_acl_` Rust filter, eBPF build, userspace static
 build, agent static build, and binary verification. The Batch 5 backlog and
@@ -324,6 +369,9 @@ Implementation evidence:
 - GitHub Build `29177888031` is the implementation GREEN evidence: the
   persistent `neutron_acl_` filter, eBPF build, userspace static build, agent
   static build, and binary verification all passed.
+- GitHub Build `29178194781` is the initial hardening closure GREEN evidence:
+  Python 270/270, Stage 2 140/140, persistent Rust ACL tests 22/22, eBPF,
+  userspace static, agent static, and binary verification passed.
 - No local Cargo command was run, and the pre-existing `README.md` worktree
   modification was not staged or committed.
 
@@ -338,3 +386,5 @@ Implementation evidence:
 6. No local Cargo command is run.
 7. Final GitHub Actions is green at the implementation head.
 8. The user's uncommitted `README.md` change remains untouched.
+9. Selector-relation state owns only interned selector tables and small
+   selector-ID pairs; it never owns one CIDR vector per rule pair.
