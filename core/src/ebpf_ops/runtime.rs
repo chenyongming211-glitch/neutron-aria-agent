@@ -288,8 +288,12 @@ pub fn update_firewall_config(
 
 #[cfg(test)]
 mod tests {
-    use super::{tap_config_with_acl_bank, tap_config_with_runtime_updates};
-    use crate::common::{TapConfig, ACL_INGRESS_HOOK_TC};
+    use super::{
+        acl_runtime_gate_current_config, tap_config_with_acl_bank,
+        tap_config_with_acl_runtime_gate, tap_config_with_runtime_updates,
+    };
+    use crate::common::{TapConfig, ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP};
+    use aya::maps::MapError;
 
     #[test]
     fn acl_ingress_hook_active_bank_update_preserves_tc_mode() {
@@ -347,6 +351,50 @@ mod tests {
         assert_eq!(next.tcprt_enabled, 0);
         assert_eq!(next.acl_active_bank, 1);
         assert_eq!(next.acl_ingress_hook, ACL_INGRESS_HOOK_TC);
+    }
+
+    #[test]
+    fn acl_ingress_hook_gate_transformer_preserves_runtime_and_normalizes_unknown_to_xdp() {
+        let current = TapConfig {
+            conntrack_enabled: 0,
+            monitoring_enabled: 0,
+            acl_enabled: 0,
+            qos_enabled: 1,
+            mirror_enabled: 1,
+            tcprt_enabled: 1,
+            acl_active_bank: 1,
+            acl_ingress_hook: ACL_INGRESS_HOOK_TC,
+        };
+
+        let next = tap_config_with_acl_runtime_gate(Some(current), true, true, 255);
+
+        assert_eq!(next.conntrack_enabled, 1);
+        assert_eq!(next.monitoring_enabled, 0);
+        assert_eq!(next.acl_enabled, 1);
+        assert_eq!(next.qos_enabled, 1);
+        assert_eq!(next.mirror_enabled, 1);
+        assert_eq!(next.tcprt_enabled, 1);
+        assert_eq!(next.acl_active_bank, 1);
+        assert_eq!(next.acl_ingress_hook, ACL_INGRESS_HOOK_XDP);
+    }
+
+    #[test]
+    fn acl_ingress_hook_gate_lookup_treats_only_key_not_found_as_absent() {
+        let absent = acl_runtime_gate_current_config(Err(MapError::KeyNotFound), 42).unwrap();
+        assert!(absent.is_none());
+
+        let error = acl_runtime_gate_current_config(
+            Err(MapError::InvalidKeySize {
+                size: 1,
+                expected: 4,
+            }),
+            42,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "read TAP_CONFIG_MAP for tap_id 42: invalid key size 1, expected 4"
+        );
     }
 }
 
