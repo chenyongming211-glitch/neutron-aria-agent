@@ -1,6 +1,5 @@
 use crate::common::{
-    normalize_acl_bank, normalize_acl_ingress_hook, FirewallConfig, ACL_BANK_PRIMARY,
-    ACL_INGRESS_HOOK_XDP, TAP_ID_UNASSIGNED,
+    normalize_acl_bank, FirewallConfig, ACL_BANK_PRIMARY, TAP_ID_UNASSIGNED,
 };
 use crate::maps::{FIREWALL_CONFIG, TAP_CONFIG_MAP};
 
@@ -54,16 +53,6 @@ pub fn acl_active_bank(tap_id: u32) -> u8 {
         }
     }
     ACL_BANK_PRIMARY
-}
-
-#[inline(always)]
-pub fn acl_ingress_hook(tap_id: u32) -> u8 {
-    if tap_id != TAP_ID_UNASSIGNED {
-        if let Some(cfg) = unsafe { TAP_CONFIG_MAP.get(&tap_id) } {
-            return normalize_acl_ingress_hook(cfg.acl_ingress_hook);
-        }
-    }
-    ACL_INGRESS_HOOK_XDP
 }
 
 #[inline(always)]

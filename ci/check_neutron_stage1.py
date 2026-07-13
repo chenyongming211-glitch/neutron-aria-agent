@@ -49,6 +49,7 @@ RUST_API_PATH = os.path.join("api", "src", "lib.rs")
 RUST_NEUTRON_API_PATH = os.path.join("agent", "src", "neutron_api.rs")
 RUST_NEUTRON_WAL_PATH = os.path.join("agent", "src", "neutron_wal.rs")
 RUST_OPENAPI_PATH = os.path.join("agent", "src", "openapi.rs")
+CORE_COMMON_PATH = os.path.join("core", "src", "common.rs")
 EBPF_COMMON_PATH = os.path.join("ebpf", "src", "common.rs")
 EBPF_RUNTIME_PATH = os.path.join("ebpf", "src", "runtime.rs")
 BUILD_WORKFLOW_PATH = os.path.join(".github", "workflows", "build.yml")
@@ -672,17 +673,18 @@ def check_rust_stage_one_tests_present():
 def check_ebpf_acl_ingress_boundary():
     print("==> checking eBPF ACL ingress boundary")
     runtime_source = _read_repo_text(EBPF_RUNTIME_PATH)
-    if re.search(r"\bpub\s+fn\s+acl_ingress_hook\s*\(", runtime_source):
+    if re.search(r"\bfn\s+acl_ingress_hook\s*\(", runtime_source):
         raise SystemExit("ERROR: eBPF runtime must not expose acl_ingress_hook")
 
-    common_source = _read_repo_text(EBPF_COMMON_PATH)
-    for term in (
-        "pub const ACL_INGRESS_HOOK_XDP: u8 = 0;",
-        "pub const ACL_INGRESS_HOOK_TC: u8 = 1;",
-        "pub acl_ingress_hook: u8,",
-    ):
-        if term not in common_source:
-            raise SystemExit("ERROR: eBPF compatibility ABI missing %s" % term)
+    for path in (CORE_COMMON_PATH, EBPF_COMMON_PATH):
+        common_source = _read_repo_text(path)
+        for term in (
+            "pub const ACL_INGRESS_HOOK_XDP: u8 = 0;",
+            "pub const ACL_INGRESS_HOOK_TC: u8 = 1;",
+            "pub acl_ingress_hook: u8,",
+        ):
+            if term not in common_source:
+                raise SystemExit("ERROR: %s compatibility ABI missing %s" % (path, term))
 
 
 def check_p3_rust_scoped_plan_boundary():
