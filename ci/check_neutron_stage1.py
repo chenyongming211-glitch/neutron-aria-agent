@@ -900,6 +900,7 @@ def check_rust_stage_one_tests_present():
     ebpf_common_source = _read_repo_text(EBPF_COMMON_PATH)
     build_workflow_source = _read_repo_text(BUILD_WORKFLOW_PATH)
     control_plane_source = _read_repo_text(os.path.join("agent", "src", "control_plane.rs"))
+    main_source = _read_repo_text(os.path.join("agent", "src", "main.rs"))
     system_manager_source = _read_repo_text(os.path.join("agent", "src", "system_manager.rs"))
     replay_source = _read_repo_text(os.path.join("core", "src", "ebpf_ops", "replay.rs"))
     ebpf_ops_source = _read_repo_text(CORE_EBPF_OPS_PATH)
@@ -907,6 +908,24 @@ def check_rust_stage_one_tests_present():
     network_source = _read_repo_text(CORE_EBPF_NETWORK_PATH)
     policy_source = _read_repo_text(CORE_EBPF_POLICY_PATH)
     tap_registry_source = _read_repo_text(os.path.join("agent", "src", "tap_registry.rs"))
+
+    for term in (
+        "const TC_ACL_HEALTH_INTERVAL_SECS: u64 = 10;",
+        "MissedTickBehavior::Skip",
+        "reconcile_tc_acl_health().await",
+        "tc_acl_health_task.abort()",
+    ):
+        if term not in main_source:
+            raise SystemExit("ERROR: TC ACL health loop missing %s" % term)
+
+    for term in (
+        "tc_acl_link_lost",
+        "runtime_degraded",
+        "effective_action",
+        "bypass",
+    ):
+        if term not in neutron_api_source:
+            raise SystemExit("ERROR: Neutron TC health status missing %s" % term)
 
     helper_contracts = (
         (network_source, "add_network_impl", ("open_pinned_lpm_v4", "open_pinned_lpm_v6")),

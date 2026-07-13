@@ -2088,6 +2088,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn instance_info_reports_acl_and_xdp_health_independently() {
+        let value = serde_json::to_value(InstanceInfo {
+            name: "tap0".to_string(),
+            active: true,
+            acl_ready: true,
+            xdp_ready: false,
+            readiness_reason: Some("xdp_ddos_hook_unavailable".to_string()),
+        })
+        .unwrap();
+        assert_eq!(value["acl_ready"], true);
+        assert_eq!(value["xdp_ready"], false);
+    }
+
+    #[test]
     fn neutron_contract_capabilities_are_stable() {
         let capabilities = NeutronCapabilitiesResponse::current();
         let expected_domains: Vec<String> = NEUTRON_SUPPORTED_DOMAINS

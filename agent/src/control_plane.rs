@@ -4153,6 +4153,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tc_health_loss_is_deduplicated_and_never_auto_restores_ready() {
+        let ready = RuntimeHealthState {
+            acl_ready: true,
+            xdp_ready: true,
+            acl_error: None,
+        };
+        let lost = apply_tc_health_observation(
+            ready,
+            crate::instance::TcAclLinkHealth::new(true, false, true),
+        );
+        assert!(lost.changed);
+        assert!(!lost.next.acl_ready);
+        assert_eq!(
+            lost.next.acl_error.as_deref(),
+            Some("missing_tc_egress")
+        );
+
+        let repeated = apply_tc_health_observation(
+            lost.next.clone(),
+            crate::instance::TcAclLinkHealth::new(true, false, true),
+        );
+        assert!(!repeated.changed);
+
+        let links_returned = apply_tc_health_observation(
+            lost.next,
+            crate::instance::TcAclLinkHealth::new(true, true, true),
+        );
+        assert!(!links_returned.next.acl_ready);
+        assert_eq!(
+            links_returned.next.acl_error.as_deref(),
+            Some("recovery_required")
+        );
+    }
+
+    #[test]
     fn local_config_enable_requires_dual_tc_but_disable_does_not() {
         assert!(config_update_requires_tc(Some(true), None));
         assert!(config_update_requires_tc(None, Some(true)));
