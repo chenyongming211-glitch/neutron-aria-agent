@@ -21,6 +21,21 @@ pub enum ManagedAttachMode {
     NeutronResyncRequired { acl_managed: bool },
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum ManagedRegistrationPublication {
+    PublishBoth,
+    PublishNeither(String),
+}
+
+fn managed_registration_publication(
+    activation: Result<(), String>,
+) -> ManagedRegistrationPublication {
+    match activation {
+        Ok(()) => ManagedRegistrationPublication::PublishBoth,
+        Err(error) => ManagedRegistrationPublication::PublishNeither(error),
+    }
+}
+
 pub struct TapRegistry {
     instances: RwLock<HashMap<String, FirewallInstance>>,
     /// Per-iface mutex to serialize attach/detach on the same interface
@@ -356,24 +371,27 @@ impl TapRegistry {
             }
         }
 
-        if let Err(e) = self
-            .control_plane
-            .activate_managed_registration(&prepared)
-            .await
-        {
-            if let Err(rollback_err) = instance.rollback_attached_links(&attached, false) {
-                warn!(instance = %iface, error = %rollback_err, "failed to roll back links after managed runtime activation failure");
-            }
-            if let Err(release_err) = instance.release_persisted_live_iface() {
-                warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
-            }
+        match managed_registration_publication(
             self.control_plane
-                .abort_managed_registration(prepared)
-                .await;
-            if runtime_pin.created_shared_runtime {
-                self.cleanup_shared_runtime_dir();
+                .activate_managed_registration(&prepared)
+                .await,
+        ) {
+            ManagedRegistrationPublication::PublishBoth => {}
+            ManagedRegistrationPublication::PublishNeither(error) => {
+                if let Err(rollback_err) = instance.rollback_attached_links(&attached, false) {
+                    warn!(instance = %iface, error = %rollback_err, "failed to roll back links after managed runtime activation failure");
+                }
+                if let Err(release_err) = instance.release_persisted_live_iface() {
+                    warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
+                }
+                self.control_plane
+                    .abort_managed_registration(prepared)
+                    .await;
+                if runtime_pin.created_shared_runtime {
+                    self.cleanup_shared_runtime_dir();
+                }
+                return Err(format!("managed runtime activation failed: {}", error));
             }
-            return Err(format!("managed runtime activation failed: {}", e));
         }
 
         self.control_plane.publish_managed_instance(prepared).await;

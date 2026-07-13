@@ -79,17 +79,75 @@ impl InstanceState {
         }
     }
 
-    /// Append a WAL entry. If append fails, attempt a full compact as fallback
-    /// to ensure the current state is persisted despite the individual write failure.
-    async fn wal_append(&mut self, entry: &WalEntry) {
-        if let Err(e) = self.wal.append(entry.clone()).await {
+    /// Strictly append a WAL entry. If append fails, a successful full compact
+    /// is the only fallback that may acknowledge durable persistence.
+    async fn wal_append_strict(&mut self, entry: &WalEntry) -> Result<(), String> {
+        if let Err(append_error) = self.wal.append(entry.clone()).await {
             error!(
                 state_path = %self.state_path,
-                error = %e,
+                error = %append_error,
                 "WAL append failed; attempting compact fallback"
             );
-            self.do_compact().await;
+            let json = serde_json::to_string_pretty(&self.state).map_err(|serialize_error| {
+                format!(
+                    "WAL append failed: {}; compact fallback serialization failed: {}",
+                    append_error, serialize_error
+                )
+            })?;
+            self.wal.compact(json).await.map_err(|compact_error| {
+                format!(
+                    "WAL append failed: {}; compact fallback failed: {}",
+                    append_error, compact_error
+                )
+            })?;
         }
+        Ok(())
+    }
+
+    /// Best-effort wrapper retained for legacy mutation paths whose public
+    /// error contract predates strict persistence acknowledgement.
+    async fn wal_append(&mut self, entry: &WalEntry) {
+        if let Err(error) = self.wal_append_strict(entry).await {
+            error!(state_path = %self.state_path, error = %error, "state persistence failed");
+        }
+    }
+
+    async fn recover_gate_persistence_failure<F>(
+        &mut self,
+        requested_conntrack: bool,
+        requested_acl: bool,
+        persistence_error: impl Into<String>,
+        mut update_kernel_gate: F,
+    ) -> ControlPlaneError
+    where
+        F: FnMut(bool, bool) -> Result<(), String>,
+    {
+        let mut errors = vec![persistence_error.into()];
+        self.state.conntrack_enabled = false;
+        self.state.acl_enabled = false;
+
+        if neutron_acl_gate_requires_tc(requested_conntrack, requested_acl) {
+            if let Err(error) = update_kernel_gate(false, false) {
+                errors.push(format!("kernel gate quiesce failed: {}", error));
+            }
+        }
+
+        if let Err(error) = self
+            .wal_append_strict(&WalEntry::UpdateConfig {
+                conntrack: Some(false),
+                monitoring: None,
+                acl: Some(false),
+                qos: None,
+                mirror: None,
+                tcprt: None,
+                ssl: None,
+            })
+            .await
+        {
+            errors.push(format!("disabled gate persistence failed: {}", error));
+        }
+
+        ControlPlaneError::PersistenceError(errors.join("; "))
     }
 
     async fn shutdown_wal(&mut self) {
@@ -285,6 +343,7 @@ pub enum ControlPlaneError {
     GroupInUse(String),
     ValidationError(String),
     KernelError(String),
+    PersistenceError(String),
     InstanceNotReady(String),
     LocalWriteBlocked {
         instance: String,
@@ -302,6 +361,7 @@ impl std::fmt::Display for ControlPlaneError {
             Self::GroupInUse(s) => write!(f, "Group in use: {}", s),
             Self::ValidationError(s) => write!(f, "Validation error: {}", s),
             Self::KernelError(s) => write!(f, "Kernel error: {}", s),
+            Self::PersistenceError(s) => write!(f, "Persistence error: {}", s),
             Self::InstanceNotReady(s) => write!(f, "Instance not ready: {}", s),
             Self::LocalWriteBlocked {
                 instance,
@@ -332,7 +392,7 @@ impl ControlPlaneError {
             Self::InstanceNotFound(_) | Self::GroupNotFound(_) | Self::PolicyNotFound(_) => 404,
             Self::GroupInUse(_) | Self::LocalWriteBlocked { .. } => 409,
             Self::KernelError(_) => 500,
-            Self::InstanceNotReady(_) => 503,
+            Self::PersistenceError(_) | Self::InstanceNotReady(_) => 503,
         }
     }
 }
@@ -2983,8 +3043,8 @@ impl ControlPlane {
 
         state.state.conntrack_enabled = conntrack_enabled;
         state.state.acl_enabled = acl_enabled;
-        state
-            .wal_append(&WalEntry::UpdateConfig {
+        let persistence_result = state
+            .wal_append_strict(&WalEntry::UpdateConfig {
                 conntrack: Some(conntrack_enabled),
                 monitoring: None,
                 acl: Some(acl_enabled),
@@ -2994,6 +3054,26 @@ impl ControlPlane {
                 ssl: None,
             })
             .await;
+        if let Err(persistence_error) = persistence_result {
+            let pin_path = state.pin_path.clone();
+            let tap_id = state.tap_id;
+            let recovery_error = state
+                .recover_gate_persistence_failure(
+                    conntrack_enabled,
+                    acl_enabled,
+                    persistence_error,
+                    |safe_conntrack, safe_acl| {
+                        aria_core::ebpf_ops::update_acl_runtime_gate(
+                            TapMapRuntime::new(&pin_path, tap_id),
+                            safe_conntrack,
+                            safe_acl,
+                            aria_core::common::ACL_INGRESS_HOOK_TC,
+                        )
+                    },
+                )
+                .await;
+            return Err(recovery_error);
+        }
         Ok(())
     }
 
@@ -3648,7 +3728,7 @@ mod tests {
         assert_eq!(kernel_writes, vec![(false, false)]);
         assert!(!state.state.conntrack_enabled);
         assert!(!state.state.acl_enabled);
-        assert!(matches!(error, ControlPlaneError::PersistenceError(_)));
+        assert!(matches!(&error, ControlPlaneError::PersistenceError(_)));
         assert!(error.to_string().contains("forced persistence failure"));
     }
 

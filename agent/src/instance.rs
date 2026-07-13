@@ -93,6 +93,56 @@ impl Default for AttachedLinks {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum LinkRollbackAction {
+    RemoveXdpAttachment,
+    RemoveTcLinkPin(&'static str),
+    RemoveRuntimePinPath,
+}
+
+fn rollback_link_cleanup_plan(
+    attached: &AttachedLinks,
+    remove_pin_path: bool,
+) -> Vec<LinkRollbackAction> {
+    let mut plan = Vec::new();
+    if attached.xdp == LinkOwnership::AttachedNow {
+        plan.push(LinkRollbackAction::RemoveXdpAttachment);
+    }
+    if attached.tc_egress == LinkOwnership::AttachedNow {
+        plan.push(LinkRollbackAction::RemoveTcLinkPin("tc_egress"));
+    }
+    if attached.tc_ingress == LinkOwnership::AttachedNow {
+        plan.push(LinkRollbackAction::RemoveTcLinkPin("tc_ingress"));
+    }
+    let has_claimed_existing = attached.xdp == LinkOwnership::ClaimedExisting
+        || attached.tc_egress == LinkOwnership::ClaimedExisting
+        || attached.tc_ingress == LinkOwnership::ClaimedExisting;
+    if remove_pin_path && !has_claimed_existing {
+        plan.push(LinkRollbackAction::RemoveRuntimePinPath);
+    }
+    plan
+}
+
+fn execute_rollback_cleanup_plan<F>(
+    plan: &[LinkRollbackAction],
+    mut cleanup: F,
+) -> Result<(), String>
+where
+    F: FnMut(LinkRollbackAction) -> Result<(), String>,
+{
+    let mut errors = Vec::new();
+    for action in plan {
+        if let Err(error) = cleanup(*action) {
+            errors.push(format!("{:?}: {}", action, error));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RuntimeMetadata {
     schema_version: u32,
@@ -1019,30 +1069,23 @@ impl FirewallInstance {
         attached: &AttachedLinks,
         remove_pin_path: bool,
     ) -> Result<(), String> {
-        if attached.xdp == LinkOwnership::AttachedNow {
-            let xdp_link_pin = self.xdp_link_pin_path();
-            if std::path::Path::new(&xdp_link_pin).exists() {
-                std::fs::remove_file(&xdp_link_pin).map_err(|e| {
-                    format!("[{}] Failed to remove pinned XDP link: {}", self.iface, e)
-                })?;
-            } else {
-                let _ = std::process::Command::new("ip")
-                    .args(["link", "set", "dev", &self.iface, "xdp", "off"])
-                    .output();
-            }
-            info!(instance = %self.iface, "rolled back newly attached XDP link");
-        }
-
-        let tc_attached_now = attached.tc_egress == LinkOwnership::AttachedNow
-            || attached.tc_ingress == LinkOwnership::AttachedNow;
-        if tc_attached_now {
-            for (prog_name, ownership) in [
-                ("tc_egress", attached.tc_egress),
-                ("tc_ingress", attached.tc_ingress),
-            ] {
-                if ownership != LinkOwnership::AttachedNow {
-                    continue;
+        let plan = rollback_link_cleanup_plan(attached, remove_pin_path);
+        execute_rollback_cleanup_plan(&plan, |action| match action {
+            LinkRollbackAction::RemoveXdpAttachment => {
+                let xdp_link_pin = self.xdp_link_pin_path();
+                if std::path::Path::new(&xdp_link_pin).exists() {
+                    std::fs::remove_file(&xdp_link_pin).map_err(|e| {
+                        format!("[{}] Failed to remove pinned XDP link: {}", self.iface, e)
+                    })?;
+                } else {
+                    let _ = std::process::Command::new("ip")
+                        .args(["link", "set", "dev", &self.iface, "xdp", "off"])
+                        .output();
                 }
+                info!(instance = %self.iface, "rolled back newly attached XDP link");
+                Ok(())
+            }
+            LinkRollbackAction::RemoveTcLinkPin(prog_name) => {
                 let link_pin = self.tc_link_pin_path(prog_name);
                 if std::path::Path::new(&link_pin).exists() {
                     std::fs::remove_file(&link_pin).map_err(|e| {
@@ -1052,18 +1095,19 @@ impl FirewallInstance {
                         )
                     })?;
                 }
+                info!(instance = %self.iface, program = %prog_name, "rolled back newly attached TC link");
+                Ok(())
             }
-            aria_core::ebpf_ops::detach_tc_egress(&self.iface);
-            info!(instance = %self.iface, "rolled back newly attached TC links");
-        }
-
-        if remove_pin_path && self.pin_path.exists() {
-            std::fs::remove_dir_all(&self.pin_path)
-                .map_err(|e| format!("[{}] Failed to remove pin directory: {}", self.iface, e))?;
-            info!(instance = %self.iface, "runtime pin directory cleaned after rollback");
-        }
-
-        Ok(())
+            LinkRollbackAction::RemoveRuntimePinPath => {
+                if self.pin_path.exists() {
+                    std::fs::remove_dir_all(&self.pin_path).map_err(|e| {
+                        format!("[{}] Failed to remove pin directory: {}", self.iface, e)
+                    })?;
+                    info!(instance = %self.iface, "runtime pin directory cleaned after rollback");
+                }
+                Ok(())
+            }
+        })
     }
 
     fn load_runtime_programs(&self, bpf: &mut aya::Ebpf) -> Result<Vec<String>, String> {
@@ -1306,31 +1350,15 @@ impl FirewallInstance {
             .attach(&self.iface, attach_type)
             .map_err(|e| format!("{} attach from pin: {:?}", prog_name, e))?;
 
-        match (|| -> Result<(), String> {
-            let tc_link = tc
-                .take_link(link_id)
-                .map_err(|e| format!("take_link: {:?}", e))?;
-            let fd_link: aya::programs::links::FdLink = tc_link
-                .try_into()
-                .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
-            let link_pin = self.tc_link_pin_path(prog_name);
-            fd_link
-                .pin(&link_pin)
-                .map_err(|e| format!("pin: {:?}", e))?;
-            Ok(())
-        })() {
-            Ok(()) => {
-                info!(instance = %self.iface, direction = %dir_str, "TC program reattached from pinned runtime")
-            }
-            Err(e) => {
-                info!(
-                    instance = %self.iface,
-                    direction = %dir_str,
-                    error = %e,
-                    "TC reattached successfully on old kernel without pinnable link"
-                )
-            }
-        }
+        let tc_link = tc
+            .take_link(link_id)
+            .map_err(|e| format!("take_link: {:?}", e))?;
+        let fd_link: aya::programs::links::FdLink = tc_link
+            .try_into()
+            .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
+        let link_pin = self.tc_link_pin_path(prog_name);
+        fd_link.pin(&link_pin).map_err(|e| format!("pin: {:?}", e))?;
+        info!(instance = %self.iface, direction = %dir_str, "TC program reattached from pinned runtime");
 
         Ok(())
     }
@@ -1416,7 +1444,7 @@ mod tests {
         };
 
         assert_eq!(
-            rollback_link_cleanup_plan(&mixed, false),
+            rollback_link_cleanup_plan(&mixed, true),
             vec![LinkRollbackAction::RemoveTcLinkPin("tc_ingress")]
         );
 

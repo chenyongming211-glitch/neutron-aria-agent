@@ -179,7 +179,7 @@ def _rust_function_body(source, function_name):
     """Extract a Rust function body after blanking comments and literals."""
     code = _blank_rust_non_code(source)
     match = re.search(
-        r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+%s\s*\("
+        r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+%s(?:\s*<[^>{}]*>)?\s*\("
         % re.escape(function_name),
         code,
     )
@@ -220,6 +220,10 @@ def _run_rust_function_body_parser_self_tests():
         raise SystemExit("ERROR: Rust function parser rejected harmless formatting")
     if _rust_function_body("// fn missing() {}", "missing") is not None:
         raise SystemExit("ERROR: Rust function parser accepted a comment-only function")
+    generic = "fn execute<T>(value: T) where T: Copy { nested_call(); }"
+    generic_body = _rust_function_body(generic, "execute")
+    if generic_body is None or "nested_call" not in generic_body:
+        raise SystemExit("ERROR: Rust function parser rejected a generic function")
 
 
 def _run_acl_ingress_parser_self_tests():
@@ -893,6 +897,10 @@ def check_rust_stage_one_tests_present():
     )
     if rollback_plan_body is None:
         raise SystemExit("ERROR: ownership-specific rollback cleanup plan missing")
+    if "LinkOwnership::ClaimedExisting" not in rollback_plan_body:
+        raise SystemExit(
+            "ERROR: rollback cleanup plan must preserve runtime pins for claimed links"
+        )
     rollback_execute_body = _rust_function_body(
         instance_source, "execute_rollback_cleanup_plan"
     )
