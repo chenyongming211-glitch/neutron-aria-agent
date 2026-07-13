@@ -4605,6 +4605,119 @@ mod tests {
     }
 
     #[test]
+    fn standalone_review_same_diff_release_is_quarantined_before_later_allocation() {
+        let mut old_state = FirewallState::default();
+        let old_add = old_state
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("80"), 0)
+            .unwrap();
+        let released_idx = old_add.bitmap_idx.unwrap();
+        assert_eq!(released_idx, 0);
+
+        let mut final_state = old_state.clone();
+        let mut released_port_sets = BTreeMap::new();
+        let mut runtime_adds = Vec::new();
+
+        // This is the earlier BTreeMap-sorted policy update. It allocates a
+        // fresh bitmap and releases the old policy's index.
+        let early_update = final_state
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .unwrap();
+        quarantine_owned_acl_released_port_set(
+            &mut final_state,
+            &mut released_port_sets,
+            early_update.old_port_set_released.clone(),
+        )
+        .unwrap();
+        runtime_adds.push(OwnedAclPolicyRuntimeAdd {
+            rule: final_state
+                .rules
+                .iter()
+                .find(|rule| rule.src_group_id == 1 && rule.dst_group_id == 2)
+                .unwrap()
+                .clone(),
+            is_new_port_set: early_update.is_new_port_set,
+        });
+
+        // This later sorted policy must not consume the just-released index.
+        let later_add = final_state
+            .apply_add_rule(3, 4, libc::IPPROTO_TCP as u8, 1, Some("8443"), 0)
+            .unwrap();
+        quarantine_owned_acl_released_port_set(
+            &mut final_state,
+            &mut released_port_sets,
+            later_add.old_port_set_released.clone(),
+        )
+        .unwrap();
+        runtime_adds.push(OwnedAclPolicyRuntimeAdd {
+            rule: final_state
+                .rules
+                .iter()
+                .find(|rule| rule.src_group_id == 3 && rule.dst_group_id == 4)
+                .unwrap()
+                .clone(),
+            is_new_port_set: later_add.is_new_port_set,
+        });
+
+        assert_ne!(later_add.bitmap_idx, Some(released_idx));
+        assert_eq!(later_add.bitmap_idx, Some(2));
+        assert_eq!(released_port_sets.len(), 1);
+        assert!(final_state.is_bitmap_index_quarantined(released_idx));
+
+        let created = transaction_created_port_sets(&final_state, &runtime_adds).unwrap();
+        assert_eq!(
+            created
+                .iter()
+                .map(|port_set| port_set.bitmap_idx)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let mut allocator_guard = old_state.clone();
+        quarantine_port_set_indices(&mut allocator_guard, &created)
+            .expect("created guard must not collide with the live old bitmap index");
+
+        let mut durable_final_state = final_state.clone();
+        durable_final_state
+            .quarantine_bitmap_index(released_idx)
+            .expect("same-index quarantine must be idempotent");
+        let cleanup = PortSetCleanupReport {
+            cleaned_bitmap_indices: vec![released_idx],
+            failures: Vec::new(),
+        };
+        apply_confirmed_port_set_cleanups(&mut durable_final_state, &cleanup).unwrap();
+        let after_cleanup = durable_final_state
+            .apply_add_rule(5, 6, libc::IPPROTO_TCP as u8, 1, Some("9443"), 0)
+            .unwrap();
+        assert_eq!(after_cleanup.bitmap_idx, Some(released_idx));
+    }
+
+    #[test]
+    fn standalone_review_same_diff_normalized_port_dedup_keeps_release_quarantined() {
+        let mut final_state = FirewallState::default();
+        final_state
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("80"), 0)
+            .unwrap();
+        let early_update = final_state
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .unwrap();
+        let mut released_port_sets = BTreeMap::new();
+        quarantine_owned_acl_released_port_set(
+            &mut final_state,
+            &mut released_port_sets,
+            early_update.old_port_set_released,
+        )
+        .unwrap();
+
+        let same_ports_later = final_state
+            .apply_add_rule(3, 4, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .unwrap();
+
+        assert_eq!(same_ports_later.bitmap_idx, early_update.bitmap_idx);
+        assert!(!same_ports_later.is_new_port_set);
+        assert_eq!(released_port_sets.len(), 1);
+        assert!(final_state.is_bitmap_index_quarantined(0));
+    }
+
+    #[test]
     fn standalone_review_bank_map_helpers_use_required_maps_without_xdp_sentinel() {
         let pin_dir = std::env::temp_dir().join(format!(
             "aria-xdp-independent-bank-maps-{}",
