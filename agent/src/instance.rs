@@ -1342,6 +1342,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tc_acl_link_health_requires_both_directions_but_not_xdp() {
+        assert!(TcAclLinkHealth::new(true, true, false).acl_ready());
+        assert!(!TcAclLinkHealth::new(true, false, true).acl_ready());
+        assert!(!TcAclLinkHealth::new(false, true, true).acl_ready());
+        assert!(TcAclLinkHealth::new(true, true, true).xdp_ready());
+        assert!(!TcAclLinkHealth::new(true, true, false).xdp_ready());
+    }
+
+    #[test]
     fn neutron_tc_acl_requires_both_direction_links() {
         assert!(tc_acl_links_complete(true, true));
         assert!(!tc_acl_links_complete(true, false));

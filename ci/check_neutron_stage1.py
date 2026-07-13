@@ -650,6 +650,16 @@ def check_rust_stage_one_tests_present():
         if term not in neutron_api_source:
             raise SystemExit("ERROR: Rust snapshot recovery source missing %s" % term)
 
+    for marker in (
+        'let acl_managed = domains.iter().any(|domain| domain == "acl")',
+        "state.registry.attach_neutron(&port.ifname, port_manages_acl(port)).await",
+        ".reconcile_neutron_runtime(&committed_ifaces)",
+    ):
+        if marker not in neutron_api_source:
+            raise SystemExit("ERROR: Neutron attach path missing %s" % marker)
+    if neutron_api_source.count(".attach_neutron(") < 2:
+        raise SystemExit("ERROR: recovery and snapshot attach must use Neutron mode")
+
     required_acl_conntrack_terms = [
         "fn neutron_acl_translator_carries_conntrack_intent(",
         "fn neutron_acl_runtime_transition_is_atomic(",

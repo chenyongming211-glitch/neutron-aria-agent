@@ -3347,6 +3347,7 @@ impl ControlPlane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tap_registry::ManagedAttachMode;
 
     fn test_control_plane() -> ControlPlane {
         let base = std::env::temp_dir().join(format!(
@@ -3389,6 +3390,53 @@ mod tests {
         assert!(normalized.contains("mirror"));
         assert!(normalized.contains("trace"));
         assert_eq!(normalized.len(), 4);
+    }
+
+    #[test]
+    fn managed_runtime_activation_distinguishes_standalone_and_neutron() {
+        assert_eq!(
+            managed_runtime_activation(
+                ManagedAttachMode::StandaloneRestoreAfterTcAttach,
+                false,
+                true,
+                true,
+            ),
+            ManagedRuntimeActivation::RestoreStandalone {
+                conntrack: true,
+                acl: true,
+            }
+        );
+        assert_eq!(
+            managed_runtime_activation(
+                ManagedAttachMode::NeutronResyncRequired { acl_managed: true },
+                false,
+                true,
+                true,
+            ),
+            ManagedRuntimeActivation::AwaitNeutronResync {
+                require_tc_acl_links: true,
+            }
+        );
+        assert_eq!(
+            managed_runtime_activation(
+                ManagedAttachMode::NeutronResyncRequired { acl_managed: false },
+                false,
+                false,
+                false,
+            ),
+            ManagedRuntimeActivation::AwaitNeutronResync {
+                require_tc_acl_links: false,
+            }
+        );
+        assert_eq!(
+            managed_runtime_activation(
+                ManagedAttachMode::NeutronResyncRequired { acl_managed: true },
+                true,
+                true,
+                true,
+            ),
+            ManagedRuntimeActivation::PreserveVerifiedLive
+        );
     }
 
     #[test]
