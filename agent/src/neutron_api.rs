@@ -870,8 +870,8 @@ impl NeutronApiState {
     }
 
     async fn project_tc_acl_health(&self) {
-        let health = self.control_plane.list_instance_runtime_health().await;
         let _guard = self.apply_lock.lock().await;
+        let health = self.control_plane.list_instance_runtime_health().await;
         let mut next_runtime = {
             let runtime = self.runtime.read().await;
             runtime.clone()

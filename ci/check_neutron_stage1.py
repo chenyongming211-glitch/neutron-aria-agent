@@ -929,6 +929,24 @@ def check_rust_stage_one_tests_present():
         if term not in neutron_api_source:
             raise SystemExit("ERROR: Neutron TC health status missing %s" % term)
 
+    health_projection_body = _rust_function_body(
+        neutron_api_source, "project_tc_acl_health"
+    )
+    if health_projection_body is None:
+        raise SystemExit("ERROR: Neutron TC health projection function missing")
+    health_projection_lock = health_projection_body.find("self.apply_lock.lock().await")
+    health_projection_snapshot = health_projection_body.find(
+        "self.control_plane.list_instance_runtime_health().await"
+    )
+    if (
+        health_projection_lock < 0
+        or health_projection_snapshot < 0
+        or health_projection_snapshot < health_projection_lock
+    ):
+        raise SystemExit(
+            "ERROR: Neutron TC health snapshot must be read under apply_lock"
+        )
+
     for term in (
         "runtime_health: RuntimeHealthState",
         "pub async fn reconcile_tc_acl_health(&self)",
