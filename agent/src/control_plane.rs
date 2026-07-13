@@ -4830,6 +4830,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tc_health_reconcile_skips_stale_same_name_candidate_before_transition_or_quiesce() {
+        let control_plane = test_control_plane();
+        let shared_pin_path = std::env::temp_dir()
+            .join(format!(
+                "aria-tc-health-stale-candidate-{}",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned();
+
+        let mut stale_state = stopped_wal_instance_state("tc-health-stale-old").await;
+        stale_state.state.acl_enabled = true;
+        stale_state.pin_path = shared_pin_path.clone();
+        let stale = Arc::new(tokio::sync::RwLock::new(stale_state));
+
+        let mut replacement_state = stopped_wal_instance_state("tc-health-stale-current").await;
+        replacement_state.state.acl_enabled = true;
+        replacement_state.pin_path = shared_pin_path;
+        let replacement = Arc::new(tokio::sync::RwLock::new(replacement_state));
+
+        control_plane
+            .instances
+            .write()
+            .await
+            .insert("tap-reused".to_string(), replacement.clone());
+
+        let stale_change = control_plane
+            .reconcile_tc_acl_health_candidate("tap-reused", &stale)
+            .await;
+        assert!(stale_change.is_none());
+        let stale_health = stale.read().await.runtime_health.clone();
+        assert!(stale_health.acl_ready);
+        assert!(stale_health.acl_error.is_none());
+
+        let current_change = control_plane
+            .reconcile_tc_acl_health_candidate("tap-reused", &replacement)
+            .await
+            .expect("the current same-name Arc must enter health reconciliation");
+        assert!(!current_change.acl_ready);
+        assert!(!current_change.quiesced);
+        assert!(current_change
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("acl_quiesce_failed:")));
+        let current_health = replacement.read().await.runtime_health.clone();
+        assert!(!current_health.acl_ready);
+        assert!(current_health
+            .acl_error
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("acl_quiesce_failed:")));
+    }
+
+    #[tokio::test]
     async fn managed_failure_path_strict_wal_failure_propagates() {
         let mut state = stopped_wal_instance_state("strict-wal").await;
         let error = state
