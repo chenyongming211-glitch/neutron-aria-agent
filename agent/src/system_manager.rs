@@ -213,7 +213,7 @@ where
 }
 
 fn create_runtime_pin_directories(path: &Path) -> Result<Vec<PathBuf>, String> {
-    create_runtime_pin_directories_with(path, fs::create_dir_all)
+    create_runtime_pin_directories_with(path, |candidate| fs::create_dir_all(candidate))
 }
 
 fn system_acl_activation(
@@ -861,13 +861,14 @@ pub async fn system_stop(
 
     if Path::new(pin_path).exists() {
         match fs::read_dir(pin_path) {
-            Ok(mut entries) if entries.next().is_none() => {
-                if let Err(error) = fs::remove_dir(pin_path) {
-                    errors.push(format!("failed to remove empty pin directory: {}", error));
+            Ok(mut entries) => {
+                if entries.next().is_none() {
+                    if let Err(error) = fs::remove_dir(pin_path) {
+                        errors.push(format!("failed to remove empty pin directory: {}", error));
+                    }
+                } else {
+                    info!(pin_path = %pin_path, "preserving non-empty runtime pin directory after exact pin cleanup");
                 }
-            }
-            Ok(_) => {
-                info!(pin_path = %pin_path, "preserving non-empty runtime pin directory after exact pin cleanup");
             }
             Err(error) => {
                 errors.push(format!("failed to inspect pin directory: {}", error));
