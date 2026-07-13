@@ -4908,10 +4908,24 @@ mod tests {
 
     #[test]
     fn tc_health_reconcile_recovery_publication_failure_is_fail_closed() {
+        let failed_health = RuntimeHealthState {
+            acl_ready: false,
+            xdp_ready: true,
+            acl_error: Some("missing_tc_ingress".to_string()),
+        };
         let readiness_error = ControlPlaneError::InstanceNotReady(
             "missing live TCX ACL attachments: ingress".to_string(),
         );
-        let preserved = recovery_publication_failure_error(readiness_error, Ok(()));
+        let (quiesced_health, preserved) = apply_recovery_publication_quiesce_result(
+            failed_health.clone(),
+            readiness_error,
+            Ok(()),
+        );
+        assert!(!quiesced_health.acl_ready);
+        assert_eq!(
+            quiesced_health.acl_error.as_deref(),
+            Some("missing_tc_ingress")
+        );
         assert!(matches!(preserved, ControlPlaneError::InstanceNotReady(_)));
         assert!(preserved
             .to_string()
@@ -4921,10 +4935,16 @@ mod tests {
         let readiness_error = ControlPlaneError::InstanceNotReady(
             "missing live TCX ACL attachments: egress".to_string(),
         );
-        let combined = recovery_publication_failure_error(
+        let (failed_quiesce_health, combined) = apply_recovery_publication_quiesce_result(
+            failed_health,
             readiness_error,
             Err("runtime gate write failed: map unavailable".to_string()),
         );
+        assert!(!failed_quiesce_health.acl_ready);
+        assert!(failed_quiesce_health
+            .acl_error
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("acl_quiesce_failed:")));
         assert!(matches!(combined, ControlPlaneError::InstanceNotReady(_)));
         assert!(combined
             .to_string()

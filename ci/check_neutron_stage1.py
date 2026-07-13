@@ -1051,9 +1051,13 @@ def check_rust_stage_one_tests_present():
     for term in (
         "restore_task.abort()",
         "health_task.abort()",
-        "background.abort()",
+        "restore_task.await",
+        "health_task.await",
+        "background.abort().await",
     ):
-        source = neutron_api_source if term != "background.abort()" else main_source
+        source = (
+            main_source if term == "background.abort().await" else neutron_api_source
+        )
         if term not in source:
             raise SystemExit("ERROR: Neutron shutdown ownership missing %s" % term)
 
@@ -1438,6 +1442,19 @@ def check_rust_stage_one_tests_present():
         raise SystemExit(
             "ERROR: failed recovery readiness publication must quiesce the live ACL gate before returning"
         )
+    mark_ready_body = _rust_function_body(
+        control_plane_source, "mark_tc_acl_runtime_ready_locked"
+    )
+    for term in (
+        "missing_tc_reason(",
+        "state.runtime_health.acl_ready = false",
+        "state.runtime_health.acl_error = Some(",
+    ):
+        if mark_ready_body is None or term not in mark_ready_body:
+            raise SystemExit(
+                "ERROR: failed recovery readiness publication must project non-ready runtime health: %s"
+                % term
+            )
     for function_name in (
         "neutron_acl_gate_requires_tc",
         "neutron_acl_gate_serialization_requires_tc_only_for_enabling_writes",
