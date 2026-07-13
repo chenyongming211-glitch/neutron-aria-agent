@@ -900,6 +900,7 @@ def check_rust_stage_one_tests_present():
     ebpf_common_source = _read_repo_text(EBPF_COMMON_PATH)
     build_workflow_source = _read_repo_text(BUILD_WORKFLOW_PATH)
     control_plane_source = _read_repo_text(os.path.join("agent", "src", "control_plane.rs"))
+    instance_source = _read_repo_text(os.path.join("agent", "src", "instance.rs"))
     main_source = _read_repo_text(os.path.join("agent", "src", "main.rs"))
     system_manager_source = _read_repo_text(os.path.join("agent", "src", "system_manager.rs"))
     replay_source = _read_repo_text(os.path.join("core", "src", "ebpf_ops", "replay.rs"))
@@ -957,6 +958,114 @@ def check_rust_stage_one_tests_present():
     ):
         if term not in control_plane_source:
             raise SystemExit("ERROR: TC ACL runtime health contract missing %s" % term)
+
+    for term in (
+        "SchedClassifier::from_pin",
+        "SchedClassifier::query_tcx",
+        "PinnedLink::from_pin",
+        "SchedClassifierLink",
+        "tcx_query_contains_expected_program",
+        "tcx_attachment_query_requires_the_expected_program_id",
+    ):
+        if term not in instance_source:
+            raise SystemExit("ERROR: live TCX attachment health contract missing %s" % term)
+
+    tc_health_candidate_body = _rust_function_body(
+        control_plane_source, "reconcile_tc_acl_health_candidate"
+    )
+    if tc_health_candidate_body is None:
+        raise SystemExit("ERROR: per-candidate TC ACL health reconcile function missing")
+    candidate_contract = (
+        "self.lock_runtime_lifecycle().await",
+        "self.instances.read().await",
+        "Arc::ptr_eq",
+        "if !is_current",
+        "instance.write().await",
+    )
+    candidate_positions = [
+        tc_health_candidate_body.find(term) for term in candidate_contract
+    ]
+    if any(position < 0 for position in candidate_positions) or candidate_positions != sorted(
+        candidate_positions
+    ):
+        raise SystemExit(
+            "ERROR: TC health candidate must lock lifecycle, validate current Arc, skip stale handles, then lock instance"
+        )
+    desired_position = tc_health_candidate_body.find("let desired_enforcement")
+    xdp_only_position = tc_health_candidate_body.find("runtime_xdp_health_locked")
+    full_health_position = tc_health_candidate_body.find("runtime_link_health_locked")
+    if (
+        desired_position < 0
+        or xdp_only_position < 0
+        or full_health_position < 0
+        or not desired_position < xdp_only_position < full_health_position
+    ):
+        raise SystemExit(
+            "ERROR: disabled TC health reconcile must read desired state and use XDP-only health before any TCX query"
+        )
+
+    projection_guard_body = _rust_function_body(
+        neutron_api_source, "neutron_tc_health_projection_blocked"
+    )
+    if projection_guard_body is None:
+        raise SystemExit("ERROR: structured Neutron TC health projection guard missing")
+    for term in (
+        "pending_generation.is_some()",
+        '"blocked_recovery_required"',
+        '"recovered_pending_full_resync_required"',
+        '"recovered_pending_full_resync"',
+        '"wal_recovery_commit_failed"',
+        '"pending_recovery_commit_failed"',
+        '"runtime_reconcile_requires_full_resync"',
+    ):
+        if term not in projection_guard_body:
+            raise SystemExit(
+                "ERROR: structured Neutron TC health projection guard missing %s" % term
+            )
+    projection_body = _rust_function_body(neutron_api_source, "project_tc_acl_link_loss")
+    projection_guard = (projection_body or "").find(
+        "neutron_tc_health_projection_blocked(runtime)"
+    )
+    projection_inventory = (projection_body or "").find("health_by_instance")
+    if (
+        projection_guard < 0
+        or projection_inventory < 0
+        or projection_guard > projection_inventory
+    ):
+        raise SystemExit(
+            "ERROR: structured recovery guard must precede Neutron TC health projection work"
+        )
+
+    neutron_router_body = _rust_function_body(neutron_api_source, "build_router")
+    for term in (
+        "struct NeutronRouterRuntime",
+        "struct NeutronBackgroundTasks",
+        "restore_task",
+        "health_task",
+        "fn abort(self)",
+    ):
+        if term not in neutron_api_source:
+            raise SystemExit("ERROR: Neutron background task ownership missing %s" % term)
+    if neutron_router_body is None or "NeutronRouterRuntime" not in neutron_router_body:
+        raise SystemExit("ERROR: Neutron router must return owned background task handles")
+    for term in (
+        "restore_task.abort()",
+        "health_task.abort()",
+        "background.abort()",
+    ):
+        source = neutron_api_source if term != "background.abort()" else main_source
+        if term not in source:
+            raise SystemExit("ERROR: Neutron shutdown ownership missing %s" % term)
+
+    apply_scope_body = _rust_function_body(
+        neutron_api_source, "apply_neutron_snapshot_for_scope"
+    )
+    if apply_scope_body is None:
+        raise SystemExit("ERROR: Neutron snapshot apply function missing")
+    if ".mark_tc_acl_runtime_ready(" in apply_scope_body:
+        raise SystemExit(
+            "ERROR: FullHost readiness must be committed by the serialized gate publication, not after global WAL commit"
+        )
 
     helper_contracts = (
         (network_source, "add_network_impl", ("open_pinned_lpm_v4", "open_pinned_lpm_v6")),
@@ -1271,6 +1380,38 @@ def check_rust_stage_one_tests_present():
         raise SystemExit(
             "ERROR: await or unlock window exists between serialized TC readiness and ACL gate write"
         )
+    for term in (
+        "NeutronGateHealthCommitAction::ClearDisabled",
+        "NeutronGateHealthCommitAction::VerifyRecoveryPublication",
+        "NeutronGateHealthCommitAction::Preserve",
+        "neutron_gate_health_commit_action(",
+    ):
+        if term not in serialized_gate_body:
+            raise SystemExit(
+                "ERROR: serialized ACL gate post-persistence health commit missing %s" % term
+            )
+    strict_wal_position = serialized_gate_body.find("wal_append_strict")
+    health_commit_position = serialized_gate_body.find(
+        "neutron_gate_health_commit_action("
+    )
+    ready_commit_position = serialized_gate_body.find(
+        "Self::mark_tc_acl_runtime_ready_locked("
+    )
+    disabled_clear_position = serialized_gate_body.find(
+        "state.runtime_health.acl_ready = true"
+    )
+    if (
+        strict_wal_position < 0
+        or health_commit_position < 0
+        or ready_commit_position < 0
+        or disabled_clear_position < 0
+        or not strict_wal_position < health_commit_position
+        or not health_commit_position < ready_commit_position
+        or not health_commit_position < disabled_clear_position
+    ):
+        raise SystemExit(
+            "ERROR: Neutron ACL health may change only after strict gate persistence, with recovery readiness revalidated before return"
+        )
     for function_name in (
         "neutron_acl_gate_requires_tc",
         "neutron_acl_gate_serialization_requires_tc_only_for_enabling_writes",
@@ -1288,6 +1429,15 @@ def check_rust_stage_one_tests_present():
         build_workflow_source,
     ):
         raise SystemExit("ERROR: serialized ACL gate Rust test filter missing")
+    for test_filter in ("tc_health_reconcile_", "tcx_attachment_"):
+        if not re.search(
+            r"cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-agent\s+%s"
+            % re.escape(test_filter),
+            build_workflow_source,
+        ):
+            raise SystemExit(
+                "ERROR: hosted TC health Rust test filter missing %s" % test_filter
+            )
 
     instance_source = _read_repo_text(os.path.join("agent", "src", "instance.rs"))
     rollback_plan_body = _rust_function_body(

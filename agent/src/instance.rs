@@ -1555,6 +1555,13 @@ mod tests {
     }
 
     #[test]
+    fn tcx_attachment_query_requires_the_expected_program_id() {
+        assert!(tcx_query_contains_expected_program(42, &[7, 42, 99]));
+        assert!(!tcx_query_contains_expected_program(42, &[]));
+        assert!(!tcx_query_contains_expected_program(42, &[7, 41, 99]));
+    }
+
+    #[test]
     fn standalone_review_program_pin_completeness_requires_links_and_programs() {
         let pin_path = std::env::temp_dir().join(format!(
             "aria-standalone-runtime-health-{}",

@@ -4992,6 +4992,107 @@ mod tests {
             Some("acl_restart_replay_requires_resync")
         );
     }
+
+    fn tc_health_projection_fixture(
+        status_reason: Option<String>,
+        domains: Vec<NeutronDomainStatus>,
+    ) -> (
+        NeutronRuntimeState,
+        ManagedNeutronPort,
+        Vec<InstanceRuntimeHealthSnapshot>,
+    ) {
+        let port = ManagedNeutronPort {
+            port_id: "port-health-guard".to_string(),
+            ifname: "tap-health-guard".to_string(),
+            ifindex: Some(19),
+            managed_domains: vec!["acl".to_string()],
+            domain_desired_hashes: BTreeMap::new(),
+        };
+        let mut runtime = NeutronRuntimeState::default();
+        runtime.ports.insert(port.port_id.clone(), port.clone());
+        runtime.port_statuses.insert(
+            port.port_id.clone(),
+            port_runtime_status(
+                &port.port_id,
+                &port.ifname,
+                11,
+                Some("hash-11".to_string()),
+                port.managed_domains.clone(),
+                if status_reason.is_some() {
+                    "blocked"
+                } else {
+                    "ready"
+                },
+                status_reason,
+                domains,
+            ),
+        );
+        let health = vec![InstanceRuntimeHealthSnapshot {
+            name: port.ifname.clone(),
+            active: true,
+            acl_ready: false,
+            xdp_ready: true,
+            readiness_reason: Some("missing_tc_ingress".to_string()),
+        }];
+        (runtime, port, health)
+    }
+
+    #[test]
+    fn neutron_tc_acl_health_projection_preserves_pending_generation_state() {
+        let (mut runtime, port, health) = tc_health_projection_fixture(
+            None,
+            vec![domain_status_with_action(
+                "acl",
+                "ready",
+                None,
+                Some("enforce".to_string()),
+            )],
+        );
+        runtime.pending_generation = Some(12);
+        runtime.authority_state = "applying".to_string();
+        runtime.wal_status = "intent_written".to_string();
+
+        assert!(!project_tc_acl_link_loss(&mut runtime, &health));
+        assert_eq!(runtime.pending_generation, Some(12));
+        assert_eq!(runtime.authority_state, "applying");
+        assert_eq!(runtime.wal_status, "intent_written");
+        assert_eq!(
+            runtime.port_statuses.get(&port.port_id).unwrap().status,
+            "ready"
+        );
+    }
+
+    #[test]
+    fn neutron_tc_acl_health_projection_preserves_recovery_failures() {
+        for reason in [
+            "attach_recovery_failed:link unavailable",
+            "acl_recovery_failed:map unavailable",
+        ] {
+            let (mut runtime, port, health) = tc_health_projection_fixture(
+                Some(reason.to_string()),
+                vec![domain_status_with_action(
+                    "acl",
+                    "blocked",
+                    Some(reason.to_string()),
+                    Some("unchanged".to_string()),
+                )],
+            );
+            runtime.authority_state = "blocked_recovery_required".to_string();
+            runtime.wal_status = "intent_recovery_blocked".to_string();
+
+            assert!(!project_tc_acl_link_loss(&mut runtime, &health));
+            assert_eq!(runtime.authority_state, "blocked_recovery_required");
+            assert_eq!(runtime.wal_status, "intent_recovery_blocked");
+            let status = runtime.port_statuses.get(&port.port_id).unwrap();
+            assert_eq!(status.status, "blocked");
+            assert_eq!(status.reason.as_deref(), Some(reason));
+            assert_eq!(
+                status.domains[0].reason.as_deref(),
+                Some(reason),
+                "domain recovery evidence must be preserved"
+            );
+        }
+    }
     use crate::kernel_drop_manager::KernelDropManager;
     use crate::ssl_manager::SslManager;
     use crate::trace_backend::TraceManager;

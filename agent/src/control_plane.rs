@@ -4798,6 +4798,26 @@ mod tests {
         assert!(!neutron_acl_gate_requires_full_resync(
             false, false, false, false
         ));
+        assert_eq!(
+            neutron_gate_health_commit_action(false, false, false),
+            NeutronGateHealthCommitAction::ClearDisabled
+        );
+        assert_eq!(
+            neutron_gate_health_commit_action(false, false, true),
+            NeutronGateHealthCommitAction::ClearDisabled
+        );
+        assert_eq!(
+            neutron_gate_health_commit_action(true, false, true),
+            NeutronGateHealthCommitAction::VerifyRecoveryPublication
+        );
+        assert_eq!(
+            neutron_gate_health_commit_action(false, true, true),
+            NeutronGateHealthCommitAction::VerifyRecoveryPublication
+        );
+        assert_eq!(
+            neutron_gate_health_commit_action(true, true, false),
+            NeutronGateHealthCommitAction::Preserve
+        );
     }
 
     async fn stopped_wal_instance_state(test_name: &str) -> InstanceState {
