@@ -445,6 +445,20 @@ fn quarantine_port_set_indices(
     }
 }
 
+fn quarantine_owned_acl_released_port_set(
+    state: &mut FirewallState,
+    released_port_sets: &mut BTreeMap<u32, String>,
+    released: Option<(u32, String)>,
+) -> Result<(), String> {
+    if let Some((bitmap_idx, ports_normalized)) = released {
+        // Quarantine before recording the cleanup target. This keeps the
+        // released index out of the allocator for the rest of this diff.
+        state.quarantine_bitmap_index(bitmap_idx)?;
+        released_port_sets.insert(bitmap_idx, ports_normalized);
+    }
+    Ok(())
+}
+
 fn apply_confirmed_port_set_cleanups(
     state: &mut FirewallState,
     cleanup: &PortSetCleanupReport,
@@ -2172,9 +2186,12 @@ impl ControlPlane {
                     policy.direction,
                 )
                 .map_err(ControlPlaneError::ValidationError)?;
-            if let Some((idx, ports_normalized)) = add_result.old_port_set_released {
-                released_port_sets.insert(idx, ports_normalized);
-            }
+            quarantine_owned_acl_released_port_set(
+                &mut final_state,
+                &mut released_port_sets,
+                add_result.old_port_set_released.clone(),
+            )
+            .map_err(ControlPlaneError::ValidationError)?;
             let rule = final_state
                 .rules
                 .iter()
@@ -2206,27 +2223,18 @@ impl ControlPlane {
                     rule.direction,
                 )
                 .map_err(ControlPlaneError::ValidationError)?;
-            if let (Some(idx), Some(ports_normalized)) =
-                (remove_result.bitmap_idx, remove_result.port_set_released)
-            {
-                released_port_sets.insert(idx, ports_normalized);
-            }
+            quarantine_owned_acl_released_port_set(
+                &mut final_state,
+                &mut released_port_sets,
+                remove_result
+                    .bitmap_idx
+                    .zip(remove_result.port_set_released),
+            )
+            .map_err(ControlPlaneError::ValidationError)?;
         }
         for group in &group_deletes {
             final_state.groups.remove(&group.name);
         }
-
-        // A released index may be allocated again by a later mutation in the
-        // same diff. Such an index is live in `final_state` and must never be
-        // cleaned or quarantined as released.
-        released_port_sets.retain(|bitmap_idx, _| {
-            !final_state
-                .port_sets
-                .values()
-                .any(|port_set| {
-                    port_set.bitmap_idx == *bitmap_idx && port_set.ref_count > 0
-                })
-        });
 
         let mut report = OwnedAclReconcileReport {
             group_delete_count: group_deletes.len(),

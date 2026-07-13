@@ -360,6 +360,107 @@ def _run_acl_delete_semantics_mutation_self_tests():
     print("ACL exact-delete mutation self-tests: OK (4 scenarios)")
 
 
+def _owned_acl_release_quarantine_contract_errors(source):
+    helper_body = _rust_function_body_raw(
+        source, "quarantine_owned_acl_released_port_set"
+    )
+    replace_body = _rust_function_body_raw(source, "replace_owned_acl")
+    errors = []
+    if helper_body is None:
+        errors.append("missing owned ACL released-port-set quarantine helper")
+    else:
+        helper_code = _blank_rust_non_code(helper_body)
+        quarantine = helper_code.find("quarantine_bitmap_index")
+        record = helper_code.find("released_port_sets.insert")
+        if not (0 <= quarantine < record):
+            errors.append(
+                "owned ACL released index must be quarantined before cleanup recording"
+            )
+
+    if replace_body is None:
+        errors.append("missing replace_owned_acl for immediate quarantine contract")
+        return errors
+
+    replace_code = _blank_rust_non_code(replace_body)
+    calls = [
+        match.start()
+        for match in re.finditer(
+            r"\bquarantine_owned_acl_released_port_set\s*\(", replace_code
+        )
+    ]
+    add_rule = replace_code.find(".apply_add_rule(")
+    remove_rule = replace_code.find(".apply_remove_rule(")
+    brace_depth = lambda position: (
+        replace_code[:position].count("{") - replace_code[:position].count("}")
+    )
+    if not (
+        len(calls) == 2
+        and 0 <= add_rule < calls[0] < remove_rule < calls[1]
+        and brace_depth(add_rule) == brace_depth(calls[0])
+        and brace_depth(remove_rule) == brace_depth(calls[1])
+    ):
+        errors.append(
+            "replace_owned_acl must quarantine each add/remove release before the next mutation"
+        )
+    if re.search(r"\breleased_port_sets\s*\.\s*retain\s*\(", replace_code):
+        errors.append(
+            "replace_owned_acl must not permit same-diff released-index reuse via retain"
+        )
+    return errors
+
+
+def _run_owned_acl_release_quarantine_mutation_self_tests():
+    safe = """
+        fn quarantine_owned_acl_released_port_set() {
+            state.quarantine_bitmap_index(bitmap_idx)?;
+            released_port_sets.insert(bitmap_idx, ports_normalized);
+        }
+        fn replace_owned_acl() {
+            for policy in desired {
+                final_state.apply_add_rule();
+                quarantine_owned_acl_released_port_set();
+            }
+            for existing in deletes {
+                final_state.apply_remove_rule();
+                quarantine_owned_acl_released_port_set();
+            }
+        }
+    """
+    if _owned_acl_release_quarantine_contract_errors(safe):
+        raise SystemExit("ERROR: owned ACL quarantine contract rejected safe ordering")
+
+    record_first = safe.replace(
+        "state.quarantine_bitmap_index(bitmap_idx)?;\n            released_port_sets.insert(bitmap_idx, ports_normalized);",
+        "released_port_sets.insert(bitmap_idx, ports_normalized);\n            state.quarantine_bitmap_index(bitmap_idx)?;",
+    )
+    if not any(
+        "before cleanup recording" in error
+        for error in _owned_acl_release_quarantine_contract_errors(record_first)
+    ):
+        raise SystemExit("ERROR: owned ACL quarantine contract accepted record-first mutation")
+
+    after_loop = safe.replace(
+        "                quarantine_owned_acl_released_port_set();\n            }\n            for existing in deletes {",
+        "            }\n            quarantine_owned_acl_released_port_set();\n            for existing in deletes {",
+    )
+    if not any(
+        "before the next mutation" in error
+        for error in _owned_acl_release_quarantine_contract_errors(after_loop)
+    ):
+        raise SystemExit("ERROR: owned ACL quarantine contract accepted after-loop mutation")
+
+    retain_reuse = safe.replace(
+        "            }\n        }\n    ",
+        "            }\n            released_port_sets.retain(|_, _| true);\n        }\n    ",
+    )
+    if not any(
+        "same-diff released-index reuse" in error
+        for error in _owned_acl_release_quarantine_contract_errors(retain_reuse)
+    ):
+        raise SystemExit("ERROR: owned ACL quarantine contract accepted retain mutation")
+    print("Owned ACL immediate-quarantine mutation self-tests: OK (4 scenarios)")
+
+
 def _run_acl_ingress_parser_self_tests():
     comment_only = """
         // fn acl_ingress_hook(tap_id: u32) -> u8 { 0 }
@@ -792,6 +893,7 @@ def check_rust_stage_one_tests_present():
     _run_rust_function_body_parser_self_tests()
     _run_acl_map_helper_contract_mutation_self_tests()
     _run_acl_delete_semantics_mutation_self_tests()
+    _run_owned_acl_release_quarantine_mutation_self_tests()
     neutron_api_source = _read_repo_text(RUST_NEUTRON_API_PATH)
     wal_source = _read_repo_text(RUST_NEUTRON_WAL_PATH)
     openapi_source = _read_repo_text(RUST_OPENAPI_PATH)
@@ -845,6 +947,12 @@ def check_rust_stage_one_tests_present():
         )
     if delete_semantics_errors:
         raise SystemExit("ERROR: " + "; ".join(delete_semantics_errors))
+
+    release_quarantine_errors = _owned_acl_release_quarantine_contract_errors(
+        control_plane_source
+    )
+    if release_quarantine_errors:
+        raise SystemExit("ERROR: " + "; ".join(release_quarantine_errors))
 
     for term in (
         "Err(aya::maps::MapError::KeyNotFound)",
@@ -1437,6 +1545,8 @@ def check_rust_stage_one_tests_present():
         "standalone_review_port_set_cleanup_attempts_every_created_set",
         "standalone_review_failed_cleanup_quarantine_survives_retry_and_restart",
         "standalone_review_rollback_recovery_persists_only_failed_cleanup_quarantine",
+        "standalone_review_same_diff_release_is_quarantined_before_later_allocation",
+        "standalone_review_same_diff_normalized_port_dedup_keeps_release_quarantined",
         "standalone_review_bank_map_helpers_use_required_maps_without_xdp_sentinel",
         "standalone_review_bank_rollback_port_set_cleanup_requires_map_without_xdp",
     ):
