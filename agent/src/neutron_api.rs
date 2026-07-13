@@ -4315,7 +4315,7 @@ async fn reconcile_neutron_acl(
     let disable_ms = if gate_update_mode == AclGateUpdateMode::DisableBeforeReplace {
         let disable_started = Instant::now();
         state
-            .control_plane
+            .registry
             .update_neutron_acl_runtime_gate(
                 &port.ifname,
                 transition.quiesce.conntrack_enabled,
@@ -4414,7 +4414,7 @@ async fn reconcile_neutron_acl(
         let flush_ms = elapsed_ms(flush_started);
         let publish_started = Instant::now();
         state
-            .control_plane
+            .registry
             .update_neutron_acl_runtime_gate(
                 &port.ifname,
                 transition.publish.conntrack_enabled,
@@ -4470,7 +4470,7 @@ async fn reconcile_neutron_acl(
         })?;
     let publish_started = Instant::now();
     state
-        .control_plane
+        .registry
         .update_neutron_acl_runtime_gate(
             &port.ifname,
             transition.publish.conntrack_enabled,
@@ -4510,7 +4510,7 @@ async fn reconcile_neutron_acl(
     );
     if let Err(error) = fault_injection::check("neutron.acl.after_enable_before_commit").await {
         return match state
-            .control_plane
+            .registry
             .update_neutron_acl_runtime_gate(
                 &port.ifname,
                 false,

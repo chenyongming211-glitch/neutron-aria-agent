@@ -175,6 +175,53 @@ def _missing_acl_ingress_abi(source):
     return [label for label, pattern in ABI_DECLARATIONS if not pattern.search(code)]
 
 
+def _rust_function_body(source, function_name):
+    """Extract a Rust function body after blanking comments and literals."""
+    code = _blank_rust_non_code(source)
+    match = re.search(
+        r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+%s\s*\("
+        % re.escape(function_name),
+        code,
+    )
+    if not match:
+        return None
+    opening = code.find("{", match.end())
+    if opening < 0:
+        return None
+    depth = 1
+    index = opening + 1
+    while index < len(code) and depth:
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+        index += 1
+    if depth:
+        return None
+    return code[opening + 1:index - 1]
+
+
+def _run_rust_function_body_parser_self_tests():
+    formatted = """
+        // async fn serialized_writer() { fake(); }
+        pub(crate)
+        async fn serialized_writer (
+            enabled: bool,
+        ) -> Result<(), String> {
+            if enabled {
+                nested_call();
+            }
+            let ignored = "}";
+            Ok(())
+        }
+    """
+    body = _rust_function_body(formatted, "serialized_writer")
+    if body is None or "nested_call" not in body or "fake" in body:
+        raise SystemExit("ERROR: Rust function parser rejected harmless formatting")
+    if _rust_function_body("// fn missing() {}", "missing") is not None:
+        raise SystemExit("ERROR: Rust function parser accepted a comment-only function")
+
+
 def _run_acl_ingress_parser_self_tests():
     comment_only = """
         // fn acl_ingress_hook(tap_id: u32) -> u8 { 0 }
@@ -604,12 +651,14 @@ def check_rust_uds_contract_source():
 
 def check_rust_stage_one_tests_present():
     print("==> checking Rust stage-one test sources")
+    _run_rust_function_body_parser_self_tests()
     neutron_api_source = _read_repo_text(RUST_NEUTRON_API_PATH)
     wal_source = _read_repo_text(RUST_NEUTRON_WAL_PATH)
     openapi_source = _read_repo_text(RUST_OPENAPI_PATH)
     ebpf_common_source = _read_repo_text(EBPF_COMMON_PATH)
     build_workflow_source = _read_repo_text(BUILD_WORKFLOW_PATH)
     control_plane_source = _read_repo_text(os.path.join("agent", "src", "control_plane.rs"))
+    tap_registry_source = _read_repo_text(os.path.join("agent", "src", "tap_registry.rs"))
 
     required_wal_tests = [
         "replay_reports_intent_without_commit",
@@ -697,6 +746,128 @@ def check_rust_stage_one_tests_present():
         raise SystemExit(
             "ERROR: Neutron ACL quiesce, publish, and compensation must use atomic gate writes"
         )
+
+    neutron_api_code = _blank_rust_non_code(neutron_api_source)
+    if re.search(
+        r"state\s*\.\s*control_plane\s*\.\s*update_neutron_acl_runtime_gate\s*\(",
+        neutron_api_code,
+    ):
+        raise SystemExit(
+            "ERROR: Neutron ACL gate writes must use TapRegistry lifecycle serialization"
+        )
+    registry_gate_calls = re.findall(
+        r"state\s*\.\s*registry\s*\.\s*update_neutron_acl_runtime_gate\s*\(",
+        neutron_api_code,
+    )
+    if len(registry_gate_calls) != 4:
+        raise SystemExit(
+            "ERROR: all four Neutron ACL gate writes must use TapRegistry lifecycle serialization"
+        )
+
+    registry_gate_body = _rust_function_body(
+        tap_registry_source, "update_neutron_acl_runtime_gate"
+    )
+    if registry_gate_body is None:
+        raise SystemExit("ERROR: TapRegistry serialized ACL gate writer missing")
+    lifecycle_lock = re.search(
+        r"let\s+_runtime_guard\s*=\s*self\s*\.\s*runtime_lock\s*\.\s*lock\s*\(\s*\)\s*\.\s*await\s*;",
+        registry_gate_body,
+    )
+    serialized_call = re.search(
+        r"self\s*\.\s*control_plane\s*\.\s*update_neutron_acl_runtime_gate_serialized\s*\(",
+        registry_gate_body,
+    )
+    if (
+        lifecycle_lock is None
+        or serialized_call is None
+        or lifecycle_lock.end() > serialized_call.start()
+        or re.search(
+            r"drop\s*\(\s*_runtime_guard\s*\)",
+            registry_gate_body[lifecycle_lock.end():serialized_call.start()],
+        )
+    ):
+        raise SystemExit(
+            "ERROR: TapRegistry ACL gate writer must hold runtime_lock across the serialized control-plane call"
+        )
+
+    for lifecycle_function in ("attach_with_mode", "detach"):
+        lifecycle_body = _rust_function_body(tap_registry_source, lifecycle_function)
+        if lifecycle_body is None or not re.search(
+            r"self\s*\.\s*runtime_lock\s*\.\s*lock\s*\(\s*\)\s*\.\s*await",
+            lifecycle_body,
+        ):
+            raise SystemExit(
+                "ERROR: managed lifecycle function %s must use runtime_lock"
+                % lifecycle_function
+            )
+    reconcile_runtime_body = _rust_function_body(
+        tap_registry_source, "reconcile_neutron_runtime"
+    )
+    orphan_lock = re.search(
+        r"let\s+_runtime_guard\s*=\s*self\s*\.\s*runtime_lock\s*\.\s*lock\s*\(\s*\)\s*\.\s*await\s*;",
+        reconcile_runtime_body or "",
+    )
+    orphan_remove = re.search(
+        r"self\s*\.\s*remove_orphaned_managed_link_pins\s*\(",
+        reconcile_runtime_body or "",
+    )
+    if (
+        orphan_lock is None
+        or orphan_remove is None
+        or orphan_lock.end() > orphan_remove.start()
+        or re.search(
+            r"drop\s*\(\s*_runtime_guard\s*\)",
+            (reconcile_runtime_body or "")[orphan_lock.end():orphan_remove.start()],
+        )
+    ):
+        raise SystemExit(
+            "ERROR: orphaned managed link removal must use runtime_lock"
+        )
+
+    serialized_gate_body = _rust_function_body(
+        control_plane_source, "update_neutron_acl_runtime_gate_serialized"
+    )
+    if serialized_gate_body is None:
+        raise SystemExit("ERROR: serialized control-plane ACL gate writer missing")
+    readiness_match = re.search(
+        r"\.\s*require_tc_acl_links\s*\(", serialized_gate_body
+    )
+    gate_write_match = re.search(
+        r"aria_core\s*::\s*ebpf_ops\s*::\s*update_acl_runtime_gate\s*\(",
+        serialized_gate_body,
+    )
+    if (
+        readiness_match is None
+        or gate_write_match is None
+        or readiness_match.start() > gate_write_match.start()
+    ):
+        raise SystemExit(
+            "ERROR: serialized enabling ACL gate writer must recheck TC immediately before the map write"
+        )
+    readiness_window = serialized_gate_body[
+        readiness_match.start():gate_write_match.start()
+    ]
+    if ".await" in readiness_window or re.search(r"\bdrop\s*\(", readiness_window):
+        raise SystemExit(
+            "ERROR: await or unlock window exists between serialized TC readiness and ACL gate write"
+        )
+    for function_name in (
+        "neutron_acl_gate_requires_tc",
+        "neutron_acl_gate_serialization_requires_tc_only_for_enabling_writes",
+    ):
+        if not re.search(
+            r"\bfn\s+%s\s*\(" % re.escape(function_name),
+            _blank_rust_non_code(control_plane_source),
+        ):
+            raise SystemExit(
+                "ERROR: serialized ACL gate contract missing Rust function %s"
+                % function_name
+            )
+    if not re.search(
+        r"cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-agent\s+neutron_acl_gate_serialization_",
+        build_workflow_source,
+    ):
+        raise SystemExit("ERROR: serialized ACL gate Rust test filter missing")
 
     restart_runtime_match = re.search(
         r"async fn reconcile_committed_runtime\(&self\) \{(?P<body>.*?)\n    async fn recover_incomplete_wal_intent",

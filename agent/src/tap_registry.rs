@@ -1,4 +1,4 @@
-use crate::control_plane::{ControlPlane, MANAGED_SHARED_PIN_NAMESPACE};
+use crate::control_plane::{ControlPlane, ControlPlaneError, MANAGED_SHARED_PIN_NAMESPACE};
 use crate::instance::FirewallInstance;
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -196,6 +196,7 @@ impl TapRegistry {
         }
 
         for ifname in pinned_ifaces.difference(&committed_names) {
+            let _runtime_guard = self.runtime_lock.lock().await;
             match self.remove_orphaned_managed_link_pins(ifname) {
                 Ok(()) => results.push(RuntimeReconcileResult {
                     ifname: ifname.clone(),
@@ -227,6 +228,22 @@ impl TapRegistry {
             ManagedAttachMode::NeutronResyncRequired { acl_managed },
         )
         .await
+    }
+
+    pub async fn update_neutron_acl_runtime_gate(
+        &self,
+        instance: &str,
+        conntrack_enabled: bool,
+        acl_enabled: bool,
+    ) -> Result<(), ControlPlaneError> {
+        let _runtime_guard = self.runtime_lock.lock().await;
+        self.control_plane
+            .update_neutron_acl_runtime_gate_serialized(
+                instance,
+                conntrack_enabled,
+                acl_enabled,
+            )
+            .await
     }
 
     async fn attach_with_mode(&self, iface: &str, mode: ManagedAttachMode) -> Result<(), String> {

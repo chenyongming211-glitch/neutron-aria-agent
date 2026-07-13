@@ -148,6 +148,10 @@ fn managed_runtime_activation(
     }
 }
 
+fn neutron_acl_gate_requires_tc(conntrack_enabled: bool, acl_enabled: bool) -> bool {
+    conntrack_enabled || acl_enabled
+}
+
 impl PreparedManagedInstance {
     pub fn requires_tc_acl_links(&self) -> bool {
         match self.activation {
@@ -2948,17 +2952,27 @@ impl ControlPlane {
             .map_err(ControlPlaneError::InstanceNotReady)
     }
 
-    pub async fn update_neutron_acl_runtime_gate(
+    pub(crate) async fn update_neutron_acl_runtime_gate_serialized(
         &self,
         instance: &str,
         conntrack_enabled: bool,
         acl_enabled: bool,
     ) -> Result<(), ControlPlaneError> {
-        if conntrack_enabled || acl_enabled {
-            self.require_tc_acl_ready(instance).await?;
-        }
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        if neutron_acl_gate_requires_tc(conntrack_enabled, acl_enabled) {
+            let iface = Self::runtime_iface_name(instance, &state)?;
+            let runtime = FirewallInstance::new(
+                &iface,
+                state.pin_path.clone().into(),
+                state.state_path.clone().into(),
+                true,
+                self.trace_map_mode(),
+            );
+            runtime
+                .require_tc_acl_links()
+                .map_err(ControlPlaneError::InstanceNotReady)?;
+        }
         aria_core::ebpf_ops::update_acl_runtime_gate(
             state.map_runtime(),
             conntrack_enabled,
@@ -3563,6 +3577,14 @@ mod tests {
             ),
             ManagedRuntimeActivation::PreserveVerifiedLive
         );
+    }
+
+    #[test]
+    fn neutron_acl_gate_serialization_requires_tc_only_for_enabling_writes() {
+        assert!(!neutron_acl_gate_requires_tc(false, false));
+        assert!(neutron_acl_gate_requires_tc(true, false));
+        assert!(neutron_acl_gate_requires_tc(false, true));
+        assert!(neutron_acl_gate_requires_tc(true, true));
     }
 
     #[test]
