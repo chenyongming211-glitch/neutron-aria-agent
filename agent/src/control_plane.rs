@@ -79,6 +79,17 @@ impl InstanceState {
         }
     }
 
+    /// Publish an in-memory state only after its complete snapshot is durable.
+    /// On any serialization/compact error, `self.state` remains the previously
+    /// acknowledged allocator state.
+    async fn compact_and_publish_state(&mut self, next: FirewallState) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(&next)
+            .map_err(|error| format!("failed to serialize state for compact: {}", error))?;
+        self.wal.compact(json).await?;
+        self.state = next;
+        Ok(())
+    }
+
     /// Strictly append a WAL entry. If append fails, a successful full compact
     /// is the only fallback that may acknowledge durable persistence.
     async fn wal_append_strict(&mut self, entry: &WalEntry) -> Result<(), String> {
@@ -321,6 +332,18 @@ struct TransactionCreatedPortSet {
     ports_normalized: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PortSetCleanupFailure {
+    bitmap_idx: u32,
+    error: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PortSetCleanupReport {
+    cleaned_bitmap_indices: Vec<u32>,
+    failures: Vec<PortSetCleanupFailure>,
+}
+
 fn transaction_created_port_sets(
     state: &FirewallState,
     runtime_adds: &[OwnedAclPolicyRuntimeAdd],
@@ -355,28 +378,29 @@ fn transaction_created_port_sets(
 fn execute_transaction_port_set_cleanup<F>(
     port_sets: &[TransactionCreatedPortSet],
     mut cleanup: F,
-) -> Result<(), String>
+) -> PortSetCleanupReport
 where
     F: FnMut(&TransactionCreatedPortSet) -> Result<(), String>,
 {
-    let mut errors = Vec::new();
+    let mut report = PortSetCleanupReport::default();
     for port_set in port_sets {
-        if let Err(error) = cleanup(port_set) {
-            errors.push(error);
+        match cleanup(port_set) {
+            Ok(()) => report.cleaned_bitmap_indices.push(port_set.bitmap_idx),
+            Err(error) => report.failures.push(PortSetCleanupFailure {
+                bitmap_idx: port_set.bitmap_idx,
+                error,
+            }),
         }
     }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
+    report
 }
 
-fn cleanup_transaction_created_port_sets(
+fn cleanup_port_sets(
     port_sets: &[TransactionCreatedPortSet],
     runtime: TapMapRuntime<'_>,
     ebpf_path: &str,
-) -> Result<(), String> {
+    cleanup_context: &str,
+) -> PortSetCleanupReport {
     execute_transaction_port_set_cleanup(port_sets, |port_set| {
         aria_core::ebpf_ops::delete_port_set(
             port_set.bitmap_idx,
@@ -386,11 +410,98 @@ fn cleanup_transaction_created_port_sets(
         )
         .map_err(|error| {
             format!(
-                "cleanup transaction-created port set {} ({}): {}",
-                port_set.bitmap_idx, port_set.ports_normalized, error
+                "cleanup {} port set {} ({}): {}",
+                cleanup_context, port_set.bitmap_idx, port_set.ports_normalized, error
             )
         })
     })
+}
+
+fn cleanup_transaction_created_port_sets(
+    port_sets: &[TransactionCreatedPortSet],
+    runtime: TapMapRuntime<'_>,
+    ebpf_path: &str,
+) -> PortSetCleanupReport {
+    cleanup_port_sets(port_sets, runtime, ebpf_path, "transaction-created")
+}
+
+fn quarantine_port_set_indices(
+    state: &mut FirewallState,
+    port_sets: &[TransactionCreatedPortSet],
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for port_set in port_sets {
+        if let Err(error) = state.quarantine_bitmap_index(port_set.bitmap_idx) {
+            errors.push(format!(
+                "quarantine bitmap index {}: {}",
+                port_set.bitmap_idx, error
+            ));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn apply_confirmed_port_set_cleanups(
+    state: &mut FirewallState,
+    cleanup: &PortSetCleanupReport,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for bitmap_idx in &cleanup.cleaned_bitmap_indices {
+        match state.release_quarantined_bitmap_index(*bitmap_idx) {
+            Ok(true) => {}
+            Ok(false) => errors.push(format!(
+                "cleaned bitmap index {} had no durable quarantine",
+                bitmap_idx
+            )),
+            Err(error) => errors.push(format!(
+                "release cleaned bitmap index {}: {}",
+                bitmap_idx, error
+            )),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn old_state_with_failed_cleanup_quarantines(
+    old_state: &FirewallState,
+    cleanup: &PortSetCleanupReport,
+) -> Result<FirewallState, String> {
+    let mut recovery_state = old_state.clone();
+    for failure in &cleanup.failures {
+        recovery_state
+            .quarantine_bitmap_index(failure.bitmap_idx)
+            .map_err(|error| {
+                format!(
+                    "preserve failed bitmap cleanup quarantine {}: {}",
+                    failure.bitmap_idx, error
+                )
+            })?;
+    }
+    Ok(recovery_state)
+}
+
+async fn restore_old_state_after_created_cleanup(
+    state: &mut InstanceState,
+    old_state: &FirewallState,
+    created_port_sets: &[TransactionCreatedPortSet],
+    cleanup: &PortSetCleanupReport,
+) -> Result<(), String> {
+    if created_port_sets.is_empty() {
+        return Ok(());
+    }
+    let recovery_state = old_state_with_failed_cleanup_quarantines(old_state, cleanup)?;
+    state
+        .compact_and_publish_state(recovery_state)
+        .await
+        .map_err(|error| format!("restore durable old ACL allocator state: {}", error))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -498,13 +609,15 @@ fn rollback_shared_network_mutations(
     })
 }
 
-fn rollback_owned_acl_prepublication(
+async fn rollback_owned_acl_prepublication(
     original: ControlPlaneError,
     mutations: &[SharedNetworkMutation],
     created_port_sets: &[TransactionCreatedPortSet],
     runtime: TapMapRuntime<'_>,
     ebpf_path: &str,
     shadow_bank: u8,
+    state: &mut InstanceState,
+    old_state: &FirewallState,
 ) -> ControlPlaneError {
     let mut rollback_errors = Vec::new();
     if let Err(error) = rollback_shared_network_mutations(mutations, runtime, ebpf_path) {
@@ -513,8 +626,17 @@ fn rollback_owned_acl_prepublication(
     if let Err(error) = aria_core::ebpf_ops::scrub_acl_bank(runtime, shadow_bank) {
         rollback_errors.push(format!("scrub shadow bank {}: {}", shadow_bank, error));
     }
-    if let Err(error) =
-        cleanup_transaction_created_port_sets(created_port_sets, runtime, ebpf_path)
+    let cleanup = cleanup_transaction_created_port_sets(created_port_sets, runtime, ebpf_path);
+    for failure in &cleanup.failures {
+        rollback_errors.push(failure.error.clone());
+    }
+    if let Err(error) = restore_old_state_after_created_cleanup(
+        state,
+        old_state,
+        created_port_sets,
+        &cleanup,
+    )
+    .await
     {
         rollback_errors.push(error);
     }
@@ -2094,6 +2216,18 @@ impl ControlPlane {
             final_state.groups.remove(&group.name);
         }
 
+        // A released index may be allocated again by a later mutation in the
+        // same diff. Such an index is live in `final_state` and must never be
+        // cleaned or quarantined as released.
+        released_port_sets.retain(|bitmap_idx, _| {
+            !final_state
+                .port_sets
+                .values()
+                .any(|port_set| {
+                    port_set.bitmap_idx == *bitmap_idx && port_set.ref_count > 0
+                })
+        });
+
         let mut report = OwnedAclReconcileReport {
             group_delete_count: group_deletes.len(),
             group_add_count: desired_groups
@@ -2128,6 +2262,34 @@ impl ControlPlane {
             return Ok(report);
         }
 
+        // Validate the post-publication quarantine snapshot before changing
+        // durable state. This cannot fail after the created-index guard has
+        // already been acknowledged.
+        let mut durable_final_state = final_state.clone();
+        for bitmap_idx in released_port_sets.keys() {
+            durable_final_state
+                .quarantine_bitmap_index(*bitmap_idx)
+                .map_err(ControlPlaneError::ValidationError)?;
+        }
+
+        // Reserve every transaction-created index durably before the first
+        // kernel mutation. A crash or rollback-cleanup fault can therefore
+        // never expose a stale bitmap through the old free-list/next cursor.
+        if !created_port_sets.is_empty() {
+            let mut allocator_guard_state = old_state.clone();
+            quarantine_port_set_indices(&mut allocator_guard_state, &created_port_sets)
+                .map_err(ControlPlaneError::ValidationError)?;
+            state
+                .compact_and_publish_state(allocator_guard_state)
+                .await
+                .map_err(|error| {
+                    ControlPlaneError::PersistenceError(format!(
+                        "persist transaction-created bitmap quarantine before ACL staging: {}",
+                        error
+                    ))
+                })?;
+        }
+
         let runtime_pin_path = state.pin_path.clone();
         let runtime_tap_id = state.tap_id;
         let runtime = TapMapRuntime::new(&runtime_pin_path, runtime_tap_id);
@@ -2152,7 +2314,10 @@ impl ControlPlane {
                         runtime,
                         &self.ebpf_path,
                         next_acl_bank,
-                    ));
+                        &mut state,
+                        &old_state,
+                    )
+                    .await);
                 }
                 applied_shared_mutations.push(mutation);
             }
@@ -2178,7 +2343,10 @@ impl ControlPlane {
                         runtime,
                         &self.ebpf_path,
                         next_acl_bank,
-                    ));
+                        &mut state,
+                        &old_state,
+                    )
+                    .await);
                 }
                 applied_shared_mutations.push(mutation);
             }
@@ -2198,7 +2366,10 @@ impl ControlPlane {
                 runtime,
                 &self.ebpf_path,
                 next_acl_bank,
-            ));
+                &mut state,
+                &old_state,
+            )
+            .await);
         }
         if state.state.conntrack_enabled || state.state.acl_enabled {
             if let Err(error) =
@@ -2211,7 +2382,10 @@ impl ControlPlane {
                     runtime,
                     &self.ebpf_path,
                     next_acl_bank,
-                ));
+                    &mut state,
+                    &old_state,
+                )
+                .await);
             }
         }
         if let Err(error) = aria_core::ebpf_ops::set_acl_active_bank(runtime, next_acl_bank) {
@@ -2222,18 +2396,17 @@ impl ControlPlane {
                 runtime,
                 &self.ebpf_path,
                 next_acl_bank,
-            ));
+                &mut state,
+                &old_state,
+            )
+            .await);
         }
 
-        state.state = final_state;
         let compact_started = Instant::now();
-        let final_json = serde_json::to_string_pretty(&state.state)
-            .map_err(|e| ControlPlaneError::ValidationError(e.to_string()));
-        let compact_result = match final_json {
-            Ok(json) => state.wal.compact(json).await.map_err(|e| e.to_string()),
-            Err(error) => Err(error.to_string()),
-        };
-        if let Err(error) = compact_result {
+        if let Err(error) = state
+            .compact_and_publish_state(durable_final_state)
+            .await
+        {
             let mut recovery_errors = vec![format!("owned ACL persistence failed: {}", error)];
             if let Err(bank_error) =
                 aria_core::ebpf_ops::set_acl_active_bank(runtime, current_acl_bank)
@@ -2253,30 +2426,23 @@ impl ControlPlane {
                     next_acl_bank, scrub_error
                 ));
             }
-            if let Err(port_set_error) = cleanup_transaction_created_port_sets(
+            let cleanup = cleanup_transaction_created_port_sets(
                 &created_port_sets,
                 runtime,
                 &self.ebpf_path,
-            ) {
-                recovery_errors.push(port_set_error);
+            );
+            for failure in &cleanup.failures {
+                recovery_errors.push(failure.error.clone());
             }
-            // Restore allocation metadata only after transaction-created kernel
-            // bitmap entries have been removed, so a retried transaction can
-            // safely reuse recycled indices.
-            state.state = old_state;
-            match serde_json::to_string_pretty(&state.state) {
-                Ok(json) => {
-                    if let Err(old_state_error) = state.wal.compact(json).await {
-                        recovery_errors.push(format!(
-                            "restore durable old ACL state failed: {}",
-                            old_state_error
-                        ));
-                    }
-                }
-                Err(old_state_error) => recovery_errors.push(format!(
-                    "serialize old ACL state for recovery failed: {}",
-                    old_state_error
-                )),
+            if let Err(recovery_error) = restore_old_state_after_created_cleanup(
+                &mut state,
+                &old_state,
+                &created_port_sets,
+                &cleanup,
+            )
+            .await
+            {
+                recovery_errors.push(recovery_error);
             }
             return Err(ControlPlaneError::PersistenceError(
                 recovery_errors.join("; "),
@@ -2284,19 +2450,39 @@ impl ControlPlane {
         }
         report.compact_ms = compact_started.elapsed().as_millis();
 
-        for (idx, ports_normalized) in &released_port_sets {
-            if let Err(e) = aria_core::ebpf_ops::delete_port_set(
-                *idx,
-                ports_normalized,
-                runtime,
-                &self.ebpf_path,
-            ) {
-                warn!(
-                    error = %e,
-                    bitmap_idx = *idx,
-                    "failed to clean released port set after ACL shadow bank switch"
-                );
-            }
+        let released_cleanup_targets = released_port_sets
+            .iter()
+            .map(|(bitmap_idx, ports_normalized)| TransactionCreatedPortSet {
+                bitmap_idx: *bitmap_idx,
+                ports_normalized: ports_normalized.clone(),
+            })
+            .collect::<Vec<_>>();
+        let released_cleanup = cleanup_port_sets(
+            &released_cleanup_targets,
+            runtime,
+            &self.ebpf_path,
+            "released",
+        );
+        if !released_cleanup.cleaned_bitmap_indices.is_empty() {
+            let mut reusable_state = state.state.clone();
+            apply_confirmed_port_set_cleanups(&mut reusable_state, &released_cleanup)
+                .map_err(ControlPlaneError::PersistenceError)?;
+            state
+                .compact_and_publish_state(reusable_state)
+                .await
+                .map_err(|error| {
+                    ControlPlaneError::PersistenceError(format!(
+                        "persist confirmed released bitmap cleanup: {}",
+                        error
+                    ))
+                })?;
+        }
+        for failure in &released_cleanup.failures {
+            warn!(
+                error = %failure.error,
+                bitmap_idx = failure.bitmap_idx,
+                "released port set remains durably quarantined after cleanup failure"
+            );
         }
         if let Err(e) = aria_core::ebpf_ops::scrub_acl_bank(runtime, current_acl_bank) {
             warn!(
@@ -2366,15 +2552,18 @@ impl ControlPlane {
         if let Err(e) =
             aria_core::ebpf_ops::add_network("dst", cidr, id, state.map_runtime(), &self.ebpf_path)
         {
-            let _ = aria_core::ebpf_ops::delete_network(
+            let mut errors = vec![format!("dst: {}", e)];
+            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
                 "src",
                 cidr,
                 id,
                 state.map_runtime(),
                 &self.ebpf_path,
-            );
+            ) {
+                errors.push(format!("rollback src network: {}", cleanup_error));
+            }
             state.state.rollback_add_group(name, cidr, was_new_group);
-            return Err(ControlPlaneError::KernelError(format!("dst: {}", e)));
+            return Err(ControlPlaneError::KernelError(errors.join("; ")));
         }
         if let Err(e) = aria_core::ebpf_ops::add_acl_network_in_bank(
             "src",
@@ -2384,22 +2573,27 @@ impl ControlPlane {
             state.map_runtime(),
             &self.ebpf_path,
         ) {
-            let _ = aria_core::ebpf_ops::delete_network(
+            let mut errors = vec![format!("acl src: {}", e)];
+            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
                 "src",
                 cidr,
                 id,
                 state.map_runtime(),
                 &self.ebpf_path,
-            );
-            let _ = aria_core::ebpf_ops::delete_network(
+            ) {
+                errors.push(format!("rollback src network: {}", cleanup_error));
+            }
+            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
                 "dst",
                 cidr,
                 id,
                 state.map_runtime(),
                 &self.ebpf_path,
-            );
+            ) {
+                errors.push(format!("rollback dst network: {}", cleanup_error));
+            }
             state.state.rollback_add_group(name, cidr, was_new_group);
-            return Err(ControlPlaneError::KernelError(format!("acl src: {}", e)));
+            return Err(ControlPlaneError::KernelError(errors.join("; ")));
         }
         if let Err(e) = aria_core::ebpf_ops::add_acl_network_in_bank(
             "dst",
@@ -2409,30 +2603,37 @@ impl ControlPlane {
             state.map_runtime(),
             &self.ebpf_path,
         ) {
-            let _ = aria_core::ebpf_ops::delete_acl_network_in_bank(
+            let mut errors = vec![format!("acl dst: {}", e)];
+            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_acl_network_in_bank(
                 "src",
                 cidr,
                 id,
                 acl_bank,
                 state.map_runtime(),
                 &self.ebpf_path,
-            );
-            let _ = aria_core::ebpf_ops::delete_network(
+            ) {
+                errors.push(format!("rollback ACL src network: {}", cleanup_error));
+            }
+            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
                 "src",
                 cidr,
                 id,
                 state.map_runtime(),
                 &self.ebpf_path,
-            );
-            let _ = aria_core::ebpf_ops::delete_network(
+            ) {
+                errors.push(format!("rollback src network: {}", cleanup_error));
+            }
+            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
                 "dst",
                 cidr,
                 id,
                 state.map_runtime(),
                 &self.ebpf_path,
-            );
+            ) {
+                errors.push(format!("rollback dst network: {}", cleanup_error));
+            }
             state.state.rollback_add_group(name, cidr, was_new_group);
-            return Err(ControlPlaneError::KernelError(format!("acl dst: {}", e)));
+            return Err(ControlPlaneError::KernelError(errors.join("; ")));
         }
 
         state
@@ -4356,16 +4557,8 @@ mod tests {
         let mut guarded = FirewallState::default();
         guarded.free_bitmap_indices.extend([7, 8]);
         guarded.next_bitmap_idx = 9;
-        for port_set in &created {
-            guarded
-                .quarantine_bitmap_index(port_set.bitmap_idx)
-                .unwrap();
-        }
-        for bitmap_idx in &cleanup.cleaned_bitmap_indices {
-            guarded
-                .release_quarantined_bitmap_index(*bitmap_idx)
-                .unwrap();
-        }
+        quarantine_port_set_indices(&mut guarded, &created).unwrap();
+        apply_confirmed_port_set_cleanups(&mut guarded, &cleanup).unwrap();
 
         let json = serde_json::to_string(&guarded).unwrap();
         let mut restarted: FirewallState = serde_json::from_str(&json).unwrap();
@@ -4378,6 +4571,35 @@ mod tests {
 
         assert_eq!(cleanup.failures[0].bitmap_idx, 7);
         assert!(restarted.is_bitmap_index_quarantined(7));
+        assert_eq!(first_retry.bitmap_idx, Some(8));
+        assert_eq!(second_retry.bitmap_idx, Some(9));
+    }
+
+    #[test]
+    fn standalone_review_rollback_recovery_persists_only_failed_cleanup_quarantine() {
+        let mut old_state = FirewallState::default();
+        old_state.free_bitmap_indices.extend([7, 8]);
+        old_state.next_bitmap_idx = 9;
+        let cleanup = PortSetCleanupReport {
+            cleaned_bitmap_indices: vec![8],
+            failures: vec![PortSetCleanupFailure {
+                bitmap_idx: 7,
+                error: "forced rollback cleanup failure".to_string(),
+            }],
+        };
+
+        let recovered = old_state_with_failed_cleanup_quarantines(&old_state, &cleanup).unwrap();
+        let json = serde_json::to_string(&recovered).unwrap();
+        let mut restarted: FirewallState = serde_json::from_str(&json).unwrap();
+        let first_retry = restarted
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("8443"), 0)
+            .unwrap();
+        let second_retry = restarted
+            .apply_add_rule(3, 4, libc::IPPROTO_TCP as u8, 1, Some("9443"), 0)
+            .unwrap();
+
+        assert!(restarted.is_bitmap_index_quarantined(7));
+        assert!(!restarted.is_bitmap_index_quarantined(8));
         assert_eq!(first_retry.bitmap_idx, Some(8));
         assert_eq!(second_retry.bitmap_idx, Some(9));
     }

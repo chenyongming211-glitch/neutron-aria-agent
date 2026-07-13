@@ -50,6 +50,8 @@ RUST_NEUTRON_API_PATH = os.path.join("agent", "src", "neutron_api.rs")
 RUST_NEUTRON_WAL_PATH = os.path.join("agent", "src", "neutron_wal.rs")
 RUST_OPENAPI_PATH = os.path.join("agent", "src", "openapi.rs")
 CORE_COMMON_PATH = os.path.join("core", "src", "common.rs")
+CORE_STATE_PATH = os.path.join("core", "src", "state.rs")
+CORE_EBPF_OPS_PATH = os.path.join("core", "src", "ebpf_ops.rs")
 EBPF_COMMON_PATH = os.path.join("ebpf", "src", "common.rs")
 EBPF_RUNTIME_PATH = os.path.join("ebpf", "src", "runtime.rs")
 CORE_EBPF_NETWORK_PATH = os.path.join("core", "src", "ebpf_ops", "network.rs")
@@ -309,6 +311,53 @@ def _run_acl_map_helper_contract_mutation_self_tests():
     if not any("opening required map" in error for error in missing_errors):
         raise SystemExit("ERROR: ACL map helper contract accepted missing-map mutation")
     print("ACL map helper XDP-independence mutation self-tests: OK (4 scenarios)")
+
+
+def _acl_delete_semantics_contract_errors(source, function_name, required_seam):
+    body = _rust_function_body_raw(source, function_name)
+    if body is None:
+        return ["missing ACL delete helper %s" % function_name]
+    code = _blank_rust_non_code(body)
+    errors = []
+    if required_seam not in code:
+        errors.append(
+            "%s must use exact delete error seam %s"
+            % (function_name, required_seam)
+        )
+    if re.search(r"\bErr\s*\(\s*_\s*\)", code):
+        errors.append(
+            "%s must not classify every map error as not-found" % function_name
+        )
+    if re.search(r"\blet\s+_\s*=\s*[^;]*\b(?:delete_|remove\s*\()", code):
+        errors.append(
+            "%s must not discard ACL delete/rollback failures" % function_name
+        )
+    return errors
+
+
+def _run_acl_delete_semantics_mutation_self_tests():
+    safe = "fn helper() { classify_map_delete(map.remove(&key), context)?; }"
+    if _acl_delete_semantics_contract_errors(safe, "helper", "classify_map_delete"):
+        raise SystemExit("ERROR: ACL delete contract rejected exact classifier use")
+    wildcard = "fn helper() { match map.remove(&key) { Ok(()) => {}, Err(_) => {} } }"
+    wildcard_errors = _acl_delete_semantics_contract_errors(
+        wildcard, "helper", "classify_map_delete"
+    )
+    if not any("every map error" in error for error in wildcard_errors):
+        raise SystemExit("ERROR: ACL delete contract accepted wildcard error mutation")
+    discarded = "fn helper() { let _ = delete_port_set(idx); classify_map_delete(result, ctx)?; }"
+    discarded_errors = _acl_delete_semantics_contract_errors(
+        discarded, "helper", "classify_map_delete"
+    )
+    if not any("discard" in error for error in discarded_errors):
+        raise SystemExit("ERROR: ACL delete contract accepted discarded rollback mutation")
+    missing = "fn helper() { map.remove(&key)?; }"
+    missing_errors = _acl_delete_semantics_contract_errors(
+        missing, "helper", "classify_map_delete"
+    )
+    if not any("exact delete error seam" in error for error in missing_errors):
+        raise SystemExit("ERROR: ACL delete contract accepted missing classifier mutation")
+    print("ACL exact-delete mutation self-tests: OK (4 scenarios)")
 
 
 def _run_acl_ingress_parser_self_tests():
@@ -742,6 +791,7 @@ def check_rust_stage_one_tests_present():
     print("==> checking Rust stage-one test sources")
     _run_rust_function_body_parser_self_tests()
     _run_acl_map_helper_contract_mutation_self_tests()
+    _run_acl_delete_semantics_mutation_self_tests()
     neutron_api_source = _read_repo_text(RUST_NEUTRON_API_PATH)
     wal_source = _read_repo_text(RUST_NEUTRON_WAL_PATH)
     openapi_source = _read_repo_text(RUST_OPENAPI_PATH)
@@ -750,6 +800,8 @@ def check_rust_stage_one_tests_present():
     control_plane_source = _read_repo_text(os.path.join("agent", "src", "control_plane.rs"))
     system_manager_source = _read_repo_text(os.path.join("agent", "src", "system_manager.rs"))
     replay_source = _read_repo_text(os.path.join("core", "src", "ebpf_ops", "replay.rs"))
+    ebpf_ops_source = _read_repo_text(CORE_EBPF_OPS_PATH)
+    state_source = _read_repo_text(CORE_STATE_PATH)
     network_source = _read_repo_text(CORE_EBPF_NETWORK_PATH)
     policy_source = _read_repo_text(CORE_EBPF_POLICY_PATH)
     tap_registry_source = _read_repo_text(os.path.join("agent", "src", "tap_registry.rs"))
@@ -776,6 +828,81 @@ def check_rust_stage_one_tests_present():
         )
     if helper_errors:
         raise SystemExit("ERROR: " + "; ".join(helper_errors))
+
+    delete_semantics_contracts = (
+        (network_source, "delete_network_impl", "classify_map_delete"),
+        (policy_source, "delete_policy_in_bank", "classify_map_delete"),
+        (policy_source, "delete_port_set", "execute_map_delete_batch"),
+        (policy_source, "add_policy_in_bank", "cleanup_error"),
+        (control_plane_source, "add_group", "cleanup_error"),
+    )
+    delete_semantics_errors = []
+    for source, function_name, required_seam in delete_semantics_contracts:
+        delete_semantics_errors.extend(
+            _acl_delete_semantics_contract_errors(
+                source, function_name, required_seam
+            )
+        )
+    if delete_semantics_errors:
+        raise SystemExit("ERROR: " + "; ".join(delete_semantics_errors))
+
+    for term in (
+        "Err(aya::maps::MapError::KeyNotFound)",
+        "fn execute_map_delete_batch",
+        "map_delete_classifier_only_treats_key_not_found_as_idempotent_success",
+        "map_delete_batch_attempts_every_key_and_aggregates_non_missing_errors",
+    ):
+        if term not in ebpf_ops_source:
+            raise SystemExit("ERROR: exact ACL map delete seam missing %s" % term)
+
+    for term in (
+        "BITMAP_QUARANTINE_PREFIX",
+        "pub fn quarantine_bitmap_index",
+        "pub fn release_quarantined_bitmap_index",
+        "pub fn is_bitmap_index_quarantined",
+        "quarantined_bitmap_survives_restart_and_is_not_reused",
+        "quarantined_fresh_bitmap_advances_next_cursor_across_restart",
+        "confirmed_bitmap_cleanup_releases_only_the_successful_quarantine",
+    ):
+        if term not in state_source:
+            raise SystemExit("ERROR: durable bitmap quarantine contract missing %s" % term)
+
+    for term in (
+        "struct PortSetCleanupFailure",
+        "struct PortSetCleanupReport",
+        "persist transaction-created bitmap quarantine before ACL staging",
+        "released port set remains durably quarantined after cleanup failure",
+        "standalone_review_failed_cleanup_quarantine_survives_retry_and_restart",
+        "standalone_review_rollback_recovery_persists_only_failed_cleanup_quarantine",
+    ):
+        if term not in control_plane_source:
+            raise SystemExit("ERROR: owned ACL cleanup quarantine contract missing %s" % term)
+
+    replace_owned_acl_body = _rust_function_body(control_plane_source, "replace_owned_acl")
+    if replace_owned_acl_body is None:
+        raise SystemExit("ERROR: replace_owned_acl source missing")
+    guard_compact = re.search(
+        r"compact_and_publish_state\s*\(\s*allocator_guard_state\s*\)",
+        replace_owned_acl_body,
+    )
+    first_kernel_mutation = replace_owned_acl_body.find("apply_shared_network_mutation")
+    durable_final_compact = re.search(
+        r"compact_and_publish_state\s*\(\s*durable_final_state\s*\)",
+        replace_owned_acl_body,
+    )
+    released_cleanup = replace_owned_acl_body.find("released_cleanup_targets")
+    if (
+        guard_compact is None
+        or first_kernel_mutation < 0
+        or guard_compact.start() > first_kernel_mutation
+    ):
+        raise SystemExit(
+            "ERROR: created bitmap quarantine must be durable before owned ACL kernel mutation"
+        )
+    if durable_final_compact is None or released_cleanup < durable_final_compact.end():
+        raise SystemExit(
+            "ERROR: released bitmap quarantine must be durable before cleanup"
+        )
 
     required_wal_tests = [
         "replay_reports_intent_without_commit",
@@ -1278,7 +1405,9 @@ def check_rust_stage_one_tests_present():
     persistence_cleanup = replace_acl_body.find(
         "cleanup_transaction_created_port_sets(", bank_publish
     )
-    allocation_restore = replace_acl_body.find("state.state = old_state", bank_publish)
+    allocation_restore = replace_acl_body.find(
+        "restore_old_state_after_created_cleanup(", bank_publish
+    )
     if not (bank_publish < persistence_cleanup < allocation_restore):
         raise SystemExit(
             "ERROR: ACL persistence rollback must clean created port sets before restoring allocation metadata"
@@ -1306,6 +1435,8 @@ def check_rust_stage_one_tests_present():
         "standalone_review_partial_runtime_dir_creation_is_rolled_back",
         "standalone_review_port_set_rollback_cleans_recycled_bitmap",
         "standalone_review_port_set_cleanup_attempts_every_created_set",
+        "standalone_review_failed_cleanup_quarantine_survives_retry_and_restart",
+        "standalone_review_rollback_recovery_persists_only_failed_cleanup_quarantine",
         "standalone_review_bank_map_helpers_use_required_maps_without_xdp_sentinel",
         "standalone_review_bank_rollback_port_set_cleanup_requires_map_without_xdp",
     ):

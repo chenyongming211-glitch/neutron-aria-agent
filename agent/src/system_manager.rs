@@ -41,7 +41,7 @@ struct SystemStartOwnership {
 }
 
 impl SystemStartOwnership {
-    fn new(_pin_path_created: bool) -> Self {
+    fn new() -> Self {
         Self {
             xdp_link: false,
             tc_egress_link: false,
@@ -510,7 +510,7 @@ pub async fn system_start(
     control_plane: Arc<ControlPlane>,
 ) -> Result<(), String> {
     let _lifecycle_guard = control_plane.lock_runtime_lifecycle().await;
-    let mut ownership = SystemStartOwnership::new(false);
+    let mut ownership = SystemStartOwnership::new();
     ownership.owned_runtime_dirs = create_runtime_pin_directories(Path::new(pin_path))?;
     if let Err(error) = fs::create_dir_all(state_path) {
         return Err(start_error_with_cleanup(
@@ -962,7 +962,7 @@ mod tests {
     fn standalone_review_cleanup_plan_preserves_preexisting_clsact() {
         let xdp = PathBuf::from("/review/xdp_link");
         let ingress = PathBuf::from("/review/tc_ingress_link");
-        let mut ownership = SystemStartOwnership::new(false);
+        let mut ownership = SystemStartOwnership::new();
         ownership.xdp_link = true;
         ownership.tc_ingress_link = true;
         ownership.clsact = ClsactOwnership::Preexisting;
@@ -977,7 +977,7 @@ mod tests {
         );
 
         let runtime_dir = PathBuf::from("/review/runtime");
-        let mut created = SystemStartOwnership::new(false);
+        let mut created = SystemStartOwnership::new();
         created.clsact = ClsactOwnership::Created;
         created.owned_runtime_dirs.push(runtime_dir.clone());
         assert_eq!(
@@ -1032,7 +1032,7 @@ mod tests {
         ] {
             std::fs::write(pin_path.join(name), b"pin").unwrap();
         }
-        let mut ownership = SystemStartOwnership::new(false);
+        let mut ownership = SystemStartOwnership::new();
         ownership.xdp_link = true;
         ownership.tc_ingress_link = true;
         ownership.clsact = ClsactOwnership::Preexisting;
@@ -1055,7 +1055,7 @@ mod tests {
     #[test]
     fn standalone_review_xdp_program_pin_failure_rolls_back_owned_link() {
         let xdp_link = PathBuf::from("/review/xdp_link");
-        let mut ownership = SystemStartOwnership::new(false);
+        let mut ownership = SystemStartOwnership::new();
         ownership.xdp_link = true;
         ownership.tc_egress_link = true;
         ownership.tc_ingress_link = true;
@@ -1110,7 +1110,7 @@ mod tests {
             std::fs::write(path, b"pin").unwrap();
         }
 
-        let mut ownership = SystemStartOwnership::new(false);
+        let mut ownership = SystemStartOwnership::new();
         ownership.owned_map_pins.push(owned_map.clone());
         ownership.owned_program_pins.push(owned_program.clone());
         let pin_path_string = pin_path.to_string_lossy().into_owned();
@@ -1139,7 +1139,7 @@ mod tests {
         let program_pin = pin_path.join("tc_ingress");
         std::fs::write(&program_pin, b"pin").unwrap();
 
-        let mut ownership = SystemStartOwnership::new(false);
+        let mut ownership = SystemStartOwnership::new();
         ownership.owned_program_pins.push(program_pin.clone());
         let plan = unbacked_program_link_cleanup_plan(
             &ownership,

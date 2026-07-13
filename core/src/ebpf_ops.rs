@@ -129,6 +129,43 @@ fn open_pinned_tap_config(pin_path: &str) -> Result<HashMap<MapData, u32, TapCon
         .map_err(|e| format!("convert TAP_CONFIG_MAP to HashMap: {:?}", e))
 }
 
+/// Classify one idempotent map deletion without collapsing operational faults
+/// into a false "not found" success.
+fn classify_map_delete(
+    result: Result<(), aya::maps::MapError>,
+    context: &str,
+) -> Result<bool, String> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(aya::maps::MapError::KeyNotFound) => Ok(false),
+        Err(error) => Err(format!("{}: {}", context, error)),
+    }
+}
+
+/// Execute every requested delete even after faults, then return every
+/// non-idempotent failure as one aggregate error.
+fn execute_map_delete_batch<T, I, F>(
+    items: I,
+    mut remove: F,
+    context: &str,
+) -> Result<(), String>
+where
+    I: IntoIterator<Item = T>,
+    F: FnMut(T) -> Result<(), aya::maps::MapError>,
+{
+    let mut errors = Vec::new();
+    for item in items {
+        if let Err(error) = classify_map_delete(remove(item), context) {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 #[cfg(test)]
 mod map_delete_tests {
     use super::{classify_map_delete, execute_map_delete_batch};
