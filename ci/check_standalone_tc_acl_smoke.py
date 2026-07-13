@@ -96,7 +96,7 @@ def function_body(source, name):
                 heredoc = None
             continue
         code = _shell_code(line)
-        match = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", code)
+        match = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", line)
         if match:
             heredoc = match.group(1)
         depth += code.count("{") - code.count("}")
@@ -223,6 +223,8 @@ def check_source(source):
         'item["xdp_ready"] is True',
         '"tc_ingress"',
         '"tc_egress"',
+        'ingress.get("prog_id")==ingress_prog.get("id")',
+        'egress.get("prog_id")==egress_prog.get("id")',
     ):
         if term not in ready:
             errors.append("dual-TC readiness assertion missing %s" % term)
@@ -241,18 +243,24 @@ def check_source(source):
     denied = bodies["run_denied_flow"]
     if 'ping -c "${ALLOWED_PACKETS}"' not in allowed:
         errors.append("allowed flow must use the exact controlled packet count")
-    for term in ('10.203.0.3/30', 'ping -c "${DENIED_PACKETS}"', "return 1"):
+    if 'DENIED_IP="10.203.0.6"' not in source:
+        errors.append("denied flow must use a routable fixture-only /32 source")
+    for term in (
+        'ping -I "${DENIED_IP}" -c "${DENIED_PACKETS}"',
+        'ping -I "${HOST_IF}" -c "${DENIED_PACKETS}"',
+        "return 1",
+    ):
         if term not in denied:
             errors.append("denied flow contract missing %s" % term)
 
     xdp = bodies["assert_xdp_neutral"]
     for term in (
-        '"${before}-conntrack.json"',
-        '"${after}-conntrack.json"',
-        '"${before}-rules.json"',
-        '"${after}-rules.json"',
-        '"${before}-metrics.prom"',
-        '"${after}-metrics.prom"',
+        '${before}-conntrack.json',
+        '${after}-conntrack.json',
+        '${before}-rules.json',
+        '${after}-rules.json',
+        '${before}-metrics.prom',
+        '${after}-metrics.prom',
         'row.get("packets")',
         'row.get("bytes")',
         'row.get("direction")',
@@ -262,8 +270,8 @@ def check_source(source):
         "assert after_xdp-before_xdp==0",
         "assert after_ct_packets-before_ct_packets==expected_packets",
         "assert after_ct_bytes-before_ct_bytes==expected_bytes",
-        "assert ingress_delta==packets",
-        "assert egress_delta==packets",
+        "assert ingress_delta==expected_packets",
+        "assert egress_delta==0",
     ):
         if term not in xdp:
             errors.append("exact TC-only/XDP-neutral evidence missing %s" % term)
@@ -314,7 +322,7 @@ def check_source(source):
     cleanup = bodies["cleanup"]
     for term in (
         "trap - EXIT",
-        'curl -sS -X POST "${HTTP}/api/v1/system/stop"',
+        'curl --fail-with-body -sS -X POST "${HTTP}/api/v1/system/stop"',
         'kill "${AGENT_PID}"',
         'wait "${AGENT_PID}"',
         'umount "${PIN_ROOT}"',
@@ -359,11 +367,9 @@ def check_source(source):
     ):
         if term not in summary:
             errors.append("final standalone summary missing %s" % term)
-    outside_cleanup = source.replace(cleanup, "", 1)
-    if "write_summary" in outside_cleanup.replace(summary, "", 1):
-        errors.append("summary.json may only be written from cleanup after rollback verification")
-
     main_body = source.split("trap cleanup EXIT\n", 1)[-1]
+    if "write_summary" in main_body or 'RESULT="pass"' in main_body:
+        errors.append("main body must not write summary.json or select pass before cleanup")
     if not ordered(
         main_body,
         (
@@ -396,10 +402,26 @@ def mutate_replace(source, needle, replacement, label):
     return source.replace(needle, replacement, 1)
 
 
+def mutate_remove_ingress_ready(source, _needle, _replacement, label):
+    anchor = 'assert_dual_tc_ready() {\n    [ -e "${TC_INGRESS_LINK}" ]\n'
+    if anchor not in source:
+        raise ValueError("mutation anchor missing: %s" % label)
+    return source.replace(anchor, "assert_dual_tc_ready() {\n", 1)
+
+
+def mutate_remove_egress_ready(source, _needle, _replacement, label):
+    anchor = '    [ -e "${TC_EGRESS_LINK}" ]\n    capture_links dual-tc-ready'
+    if anchor not in source:
+        raise ValueError("mutation anchor missing: %s" % label)
+    return source.replace(anchor, "    capture_links dual-tc-ready", 1)
+
+
 def run_mutation_self_tests(source, verbose=False):
     specs = (
-        ("TC ingress pin assertion", mutate_remove, '[ -e "${TC_INGRESS_LINK}" ]', "", "dual-TC readiness"),
-        ("TC egress pin assertion", mutate_remove, '[ -e "${TC_EGRESS_LINK}" ]', "", "dual-TC readiness"),
+        ("TC ingress pin assertion", mutate_remove_ingress_ready, "", "", "dual-TC readiness"),
+        ("TC egress pin assertion", mutate_remove_egress_ready, "", "", "dual-TC readiness"),
+        ("TC ingress live program identity", mutate_remove, 'ingress.get("prog_id")==ingress_prog.get("id")', "", "dual-TC readiness"),
+        ("TC egress live program identity", mutate_remove, 'egress.get("prog_id")==egress_prog.get("id")', "", "dual-TC readiness"),
         ("XDP before/after comparison", mutate_remove, "assert after_xdp-before_xdp==0", "", "XDP-neutral evidence"),
         ("exact CT byte comparison", mutate_remove, "assert after_ct_bytes-before_ct_bytes==expected_bytes", "", "TC-only/XDP-neutral"),
         ("detached pinned link", mutate_remove, 'bpftool link detach pinned "${lost_link}"', "", "detached-but-pinned"),
@@ -408,9 +430,9 @@ def run_mutation_self_tests(source, verbose=False):
         ("health degraded assertion", mutate_remove, 'item["acl_ready"] is False', "", "TC health evidence"),
         ("live ACL gate off", mutate_remove, 'config["acl"] is False', "", "TC health evidence"),
         ("missing TC rejection", mutate_remove, '[ "${code}" = 503 ]', "", "enable rejection"),
-        ("cleanup rollback verification", mutate_remove, "verify_cleanup", "", "fail-closed cleanup"),
+        ("cleanup rollback verification", mutate_remove, "    if ! verify_cleanup", "", "fail-closed cleanup"),
         ("final summary write", mutate_remove, 'mv "${WORK_DIR}/summary.json.tmp" "${WORK_DIR}/summary.json"', "", "final standalone summary"),
-        ("no early pass", mutate_replace, 'BODY_SUCCEEDED=true\n', 'RESULT="pass"\nBODY_SUCCEEDED=true\n', "", "summary.json may only"),
+        ("no early pass", mutate_replace, 'BODY_SUCCEEDED=true\n', 'RESULT="pass"\nBODY_SUCCEEDED=true\n', "main body must not"),
     )
     failures = []
     for label, mutate, needle, replacement, expected in specs:

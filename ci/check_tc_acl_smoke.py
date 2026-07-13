@@ -46,6 +46,7 @@ def check_source(source):
 
     required_functions = (
         "record_cleanup_error",
+        "capture_runtime_compatibility",
         "flow_conntrack_totals",
         "metric_sum",
         "rule_counter_sum",
@@ -70,6 +71,20 @@ def check_source(source):
             errors.append("missing structured smoke helper %s (%s)" % (name, exc))
     if errors:
         return errors
+
+    if "capture_runtime_mode" in source or "runtime-mode" in source:
+        errors.append("TapConfig byte 7 must be reported as compatibility, not runtime authority")
+    compatibility = bodies["capture_runtime_compatibility"]
+    for term in (
+        "TAP_CONFIG_MAP",
+        "len(v)==8",
+        "v[7]==int(sys.argv[2])",
+        '"compatibility_byte"',
+    ):
+        if term not in compatibility:
+            errors.append("TapConfig migration compatibility evidence missing %s" % term)
+    if 'capture_runtime_compatibility "${label}" >"${WORK_DIR}/${label}-runtime-compatibility.txt"' not in source:
+        errors.append("capture must preserve TapConfig migration compatibility evidence")
 
     cleanup = bodies["cleanup"]
     if not all(
@@ -254,6 +269,20 @@ def mutate_degrade_bank_bytes(source, _needle, label):
     return source.replace(anchor, '[ "${ct_bytes}" -gt 0 ]', 1)
 
 
+def mutate_add_unknown_hook_proof(source, _needle, label):
+    anchor = "assert_stateful_evidence() {\n"
+    if anchor not in source:
+        raise ValueError("mutation anchor missing: %s" % label)
+    return source.replace(anchor, anchor + "    unknown_hook_delta=0\n", 1)
+
+
+def mutate_add_hook_selector_proof(source, _needle, label):
+    anchor = "assert_stateful_evidence() {\n"
+    if anchor not in source:
+        raise ValueError("mutation anchor missing: %s" % label)
+    return source.replace(anchor, anchor + '    if row.get("hook") not in observed: return 1\n', 1)
+
+
 def run_mutation_self_tests(source, verbose=False):
     specs = [
         ("cleanup error false-pass", mutate_remove, 'record_cleanup_error "cleanup-full-resync', "cleanup must"),
@@ -270,6 +299,8 @@ def run_mutation_self_tests(source, verbose=False):
         ("bank miss proof", mutate_remove, '[ "${bank_miss_delta}" -ge 1 ]', "bank strict-flush revalidation proof"),
         ("bank exact byte reference", mutate_degrade_bank_bytes, "", "bank strict-flush revalidation proof"),
         ("summary before cleanup result", mutate_early_pass, "", "main body must not mark pass"),
+        ("unknown hook proof", mutate_add_unknown_hook_proof, "", "unknown-hook absence"),
+        ("hook selector proof", mutate_add_hook_selector_proof, "", "unknown-hook absence"),
     ]
     failures = []
     for label, mutate, needle, expected in specs:

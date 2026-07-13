@@ -220,7 +220,7 @@ wait_port_enforced() {
     return 1
 }
 
-capture_runtime_mode() {
+capture_runtime_compatibility() {
     local label="$1" ifindex key_hex tap_id config_hex
     ifindex="$(cat "/sys/class/net/${EXPECTED_IFNAME}/ifindex")" || return 1
     key_hex="$(python3 - "${ifindex}" <<'PY'
@@ -247,7 +247,7 @@ PY
 import json,sys
 v=json.load(open(sys.argv[1]))["value"]
 assert len(v)==8,v
-assert v[7]==int(sys.argv[2]),{"acl_ingress_hook":v[7],"expected":int(sys.argv[2])}
+assert v[7]==int(sys.argv[2]),{"compatibility_byte":v[7],"expected":int(sys.argv[2])}
 print(v[6],v[7])
 PY
 }
@@ -268,7 +268,7 @@ capture() {
     bpftool -j net show >"${WORK_DIR}/${label}-bpftool-net.json" || return 1
     bpftool -j map dump pinned "${PIN_ROOT}/CT_CONTRACT_STATS" \
         >"${WORK_DIR}/${label}-ct-contract-map.json" || return 1
-    capture_runtime_mode "${label}" >"${WORK_DIR}/${label}-runtime-mode.txt" || return 1
+    capture_runtime_compatibility "${label}" >"${WORK_DIR}/${label}-runtime-compatibility.txt" || return 1
 }
 
 run_controlled_traffic() {
@@ -365,8 +365,8 @@ run_stateful_evidence() {
 
 assert_bank_evidence() {
     local old_bank new_bank reference_ct_count reference_ct_packets reference_ct_bytes pre_resync_ct_count pre_resync_ct_packets pre_resync_ct_bytes before_ct_count before_ct_packets before_ct_bytes ct_count ct_packets ct_bytes rule_before rule_after expected
-    old_bank="$(awk '{print $1}' "${WORK_DIR}/bank-pre-resync-runtime-mode.txt")"
-    new_bank="$(awk '{print $1}' "${WORK_DIR}/bank-before-runtime-mode.txt")"
+    old_bank="$(awk '{print $1}' "${WORK_DIR}/bank-pre-resync-runtime-compatibility.txt")"
+    new_bank="$(awk '{print $1}' "${WORK_DIR}/bank-before-runtime-compatibility.txt")"
     [ "${new_bank}" != "${old_bank}" ] || die "ACL bank did not transition"
     bank_stale_delta=$(( $(metric_sum "${WORK_DIR}/bank-after-metrics.prom" tc_egress stale_bank "${METRIC_FAMILY}") - $(metric_sum "${WORK_DIR}/bank-before-metrics.prom" tc_egress stale_bank "${METRIC_FAMILY}") ))
     bank_miss_delta=$(( $(metric_sum "${WORK_DIR}/bank-after-metrics.prom" tc_egress ct_miss "${METRIC_FAMILY}") - $(metric_sum "${WORK_DIR}/bank-before-metrics.prom" tc_egress ct_miss "${METRIC_FAMILY}") ))
