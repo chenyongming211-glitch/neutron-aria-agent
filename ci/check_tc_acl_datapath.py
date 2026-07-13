@@ -130,35 +130,20 @@ def check_xdp(source, errors):
     body = _body_or_error(source, "try_xdp_firewall", errors, "XDP")
     if body is None:
         return
-    hook = body.find("runtime::acl_ingress_hook(p.tap_id) == ACL_INGRESS_HOOK_TC")
-    forbidden = [
-        "load_feature_flags_xdp(p, info)",
+    forbidden = (
+        "load_runtime_ctx_xdp(",
+        "load_feature_flags_xdp(",
+        "runtime::acl_ingress_hook(",
         "CtKey4 {",
         "CtKey6 {",
-        "phase_ct_v4(",
-        "phase_ct_v6(",
+        "phase_ct_",
         "load_acl_packet_ids_",
         "phase_policy_xdp(",
-        "phase_post_accept_xdp_",
         "conntrack::ct_create_",
-    ]
-    first_acl_ct = min((body.find(term) for term in forbidden if term in body), default=-1)
-    resolve = body.find("load_runtime_ctx_xdp(ctx, p)")
-    hook_block_ok = False
-    if hook >= 0:
-        opening = body.find("{", hook)
-        if opening >= 0:
-            closing = _matching_brace(body, opening)
-            hook_block_ok = "return Ok(XDP_PASS)" in body[opening + 1 : closing]
-    if (
-        resolve < 0
-        or hook <= resolve
-        or not hook_block_ok
-        or (first_acl_ct >= 0 and hook > first_acl_ct)
-    ):
-        errors.append(
-            "XDP: try_xdp_firewall must return PASS for TC hook mode before ACL/CT work"
-        )
+        "stats::update_rule_stats",
+    )
+    if any(term in body for term in forbidden) or "return Ok(XDP_PASS)" not in body:
+        errors.append("XDP: all runtime modes must return PASS without ACL/CT work")
 
 
 def check_live_path(source, errors, direction, family):
@@ -174,22 +159,11 @@ def check_live_path(source, errors, direction, family):
     wrong_bits = "6" if bits == "4" else "4"
     forbidden = ["CtKey%s {" % wrong_bits, "phase_ct_v%s(" % wrong_bits, "ct_state"]
     if direction == "ingress":
-        hook_term = "runtime::acl_ingress_hook(p.tap_id) == ACL_INGRESS_HOOK_TC"
         hit = "phase_ct_fastpath_tc_ingress_%s(" % family
         miss = "phase_ct_miss_tc_ingress_%s(" % family
         legacy = "phase_legacy_tc_ingress_%s(" % family
-        required.extend([hook_term, hit, miss, legacy])
-        hook = body.find(hook_term)
-        tc_block = ""
-        if hook >= 0:
-            opening = body.find("{", hook)
-            if opening >= 0:
-                closing = _matching_brace(body, opening)
-                tc_block = body[opening + 1 : closing]
-        if any(term not in tc_block for term in (phase, "FLAG_CT_HIT", hit, miss)):
-            forbidden.append("TC_LOOKUP_OUTSIDE_HOOK_BLOCK")
-        if legacy in tc_block:
-            forbidden.append("LEGACY_INSIDE_TC_HOOK_BLOCK")
+        required.extend([hit, miss])
+        forbidden.extend(["runtime::acl_ingress_hook(", legacy])
     else:
         required.extend(
             [
@@ -197,24 +171,11 @@ def check_live_path(source, errors, direction, family):
                 "phase_ct_miss_tc_egress_%s(" % family,
             ]
         )
-    has_structural_error = any(term.startswith(("TC_", "LEGACY_")) for term in forbidden)
-    has_wrong_family = any(term in body for term in forbidden if not term.startswith(("TC_", "LEGACY_")))
-    if any(term not in body for term in required) or has_structural_error or has_wrong_family:
+    if any(term not in body for term in required) or any(term in body for term in forbidden):
         errors.append(
             "TC %s %s: live path must use a family-correct CT key, CT phase, and FLAG_CT_HIT decision"
             % (direction, family)
         )
-
-
-def check_legacy_ingress(source, errors, family):
-    name = "phase_legacy_tc_ingress_%s" % family
-    path = "TC ingress %s legacy" % family
-    body = _body_or_error(source, name, errors, path)
-    if body is None:
-        return
-    forbidden = ("phase_ct_", "ct_lookup_", "load_acl_packet_ids_", "phase_policy_tc(", "ct_create_")
-    if any(term in body for term in forbidden):
-        errors.append("%s: legacy post-processing must not execute ACL or conntrack" % path)
 
 
 def check_hit_helper(source, errors, direction, family):
@@ -320,7 +281,9 @@ def check_source(source):
             check_hit_helper(source, errors, direction, family)
             check_miss_helper(source, errors, direction, family)
     for family in ("v4", "v6"):
-        check_legacy_ingress(source, errors, family)
+        legacy = "phase_legacy_tc_ingress_%s" % family
+        if re.search(r"\bfn\s+%s\s*\(" % re.escape(legacy), source):
+            errors.append("TC ingress %s: legacy helper must be removed" % family)
     return errors
 
 
@@ -333,13 +296,15 @@ def _mutate_function(source, name, mutate):
     return source[:start] + mutated + source[end:]
 
 
-def _move_xdp_feature_flags_before_bypass(body):
-    feature = "    load_feature_flags_xdp(p, info);\n"
-    anchor = "    load_runtime_ctx_xdp(ctx, p);\n"
-    if body.count(feature) != 1 or body.count(anchor) != 1:
-        raise ValueError("XDP feature-flag mutation anchors drifted")
-    body = body.replace(feature, "", 1)
-    return body.replace(anchor, anchor + feature, 1)
+def _inject_xdp_acl_read(body):
+    anchor = "    p.action = XDP_PASS;\n"
+    if anchor not in body:
+        raise ValueError("XDP PASS mutation anchor drifted")
+    return body.replace(
+        anchor,
+        anchor + "    load_feature_flags_xdp(p, info);\n",
+        1,
+    )
 
 
 def _remove_drop_return_after(body, phase_marker, label):
@@ -378,9 +343,9 @@ def _remove_egress_v4_miss_ct_guard(body):
 def run_mutation_self_tests(source, verbose=False):
     specs = [
         (
-            "XDP feature flags before TC bypass",
+            "XDP ACL feature read",
             "try_xdp_firewall",
-            _move_xdp_feature_flags_before_bypass,
+            _inject_xdp_acl_read,
             "XDP:",
         ),
         (

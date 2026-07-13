@@ -50,6 +50,7 @@ RUST_NEUTRON_API_PATH = os.path.join("agent", "src", "neutron_api.rs")
 RUST_NEUTRON_WAL_PATH = os.path.join("agent", "src", "neutron_wal.rs")
 RUST_OPENAPI_PATH = os.path.join("agent", "src", "openapi.rs")
 EBPF_COMMON_PATH = os.path.join("ebpf", "src", "common.rs")
+EBPF_RUNTIME_PATH = os.path.join("ebpf", "src", "runtime.rs")
 BUILD_WORKFLOW_PATH = os.path.join(".github", "workflows", "build.yml")
 KOLLA_AGENT_INI_PATH = os.path.join("deploy", "kolla", "config", "neutron-aria-agent.ini")
 KOLLA_DATAPATH_CONFIG_PATH = os.path.join(
@@ -668,6 +669,22 @@ def check_rust_stage_one_tests_present():
             raise SystemExit("ERROR: OpenAPI exclusion test missing %s" % path)
 
 
+def check_ebpf_acl_ingress_boundary():
+    print("==> checking eBPF ACL ingress boundary")
+    runtime_source = _read_repo_text(EBPF_RUNTIME_PATH)
+    if re.search(r"\bpub\s+fn\s+acl_ingress_hook\s*\(", runtime_source):
+        raise SystemExit("ERROR: eBPF runtime must not expose acl_ingress_hook")
+
+    common_source = _read_repo_text(EBPF_COMMON_PATH)
+    for term in (
+        "pub const ACL_INGRESS_HOOK_XDP: u8 = 0;",
+        "pub const ACL_INGRESS_HOOK_TC: u8 = 1;",
+        "pub acl_ingress_hook: u8,",
+    ):
+        if term not in common_source:
+            raise SystemExit("ERROR: eBPF compatibility ABI missing %s" % term)
+
+
 def check_p3_rust_scoped_plan_boundary():
     print("==> checking P3 Rust scoped-apply design boundary")
     plan = _read_repo_text(P3_RUST_SCOPED_PLAN_PATH)
@@ -879,6 +896,7 @@ def main():
     check_rust_stage_one_tests_present()
     check_p3_rust_scoped_plan_boundary()
     run([sys.executable, os.path.join("ci", "check_tc_acl_datapath.py")])
+    check_ebpf_acl_ingress_boundary()
     run([sys.executable, os.path.join("ci", "check_tc_acl_smoke.py")])
     check_smoke_timeout_contract()
     check_tc_acl_datapath_smoke_contract()
