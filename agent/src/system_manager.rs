@@ -1,15 +1,43 @@
 use crate::control_plane::ControlPlane;
+use crate::instance::TcAclLinkHealth;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
 
+use aria_core::common::TapMapRuntime;
 use aria_core::ebpf_ops::{
     cleanup_root_qdisc, critical_network_map_names, detach_tc_egress, ensure_fq_qdisc,
     replay_state, scrub_standalone_runtime_state, FqQdiscState, TraceMapMode, NETWORK_MAP_NAMES,
 };
 
 const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SystemAclActivation {
+    Restore { conntrack: bool, acl: bool },
+    StayDisabled,
+}
+
+fn system_acl_activation(
+    desired_conntrack: bool,
+    desired_acl: bool,
+    health: TcAclLinkHealth,
+) -> Result<SystemAclActivation, String> {
+    if !desired_conntrack && !desired_acl {
+        return Ok(SystemAclActivation::StayDisabled);
+    }
+    if !health.acl_ready() {
+        return Err(format!(
+            "standalone ACL/CT requires pinned TC links: {}",
+            health.missing_tc().join(", ")
+        ));
+    }
+    Ok(SystemAclActivation::Restore {
+        conntrack: desired_conntrack,
+        acl: desired_acl,
+    })
+}
 
 fn fq_qdisc_marker_path(state_path: &str) -> PathBuf {
     Path::new(state_path).join(FQ_QDISC_MARKER)
@@ -83,17 +111,38 @@ fn pin_runtime_maps(
     Ok(())
 }
 
-fn pin_runtime_programs(bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {
+fn pin_runtime_programs(
+    bpf: &mut aya::Ebpf,
+    pin_path: &str,
+    require_tc_acl: bool,
+) -> TcAclLinkHealth {
+    let mut ingress = false;
+    let mut egress = false;
+    let mut xdp = false;
     for name in &["xdp_firewall", "tc_egress", "tc_ingress"] {
-        let program = match bpf.program_mut(name) {
-            Some(program) => program,
-            None => return Err(format!("Program {} not found", name)),
+        let result = match bpf.program_mut(name) {
+            Some(program) => program
+                .pin(format!("{}/{}", pin_path, name))
+                .map_err(|e| format!("Failed to pin program {}: {:?}", name, e)),
+            None => Err(format!("Program {} not found", name)),
         };
-        if let Err(e) = program.pin(format!("{}/{}", pin_path, name)) {
-            return Err(format!("Failed to pin program {}: {:?}", name, e));
+        match (*name, result) {
+            ("xdp_firewall", Ok(())) => xdp = true,
+            ("tc_ingress", Ok(())) => ingress = true,
+            ("tc_egress", Ok(())) => egress = true,
+            ("xdp_firewall", Err(error)) => {
+                warn!(error = %error, "XDP program pin unavailable; XDP health degraded");
+            }
+            (tc_name, Err(error)) if require_tc_acl => {
+                warn!(program = %tc_name, error = %error, "required TC ACL program pin unavailable");
+            }
+            (tc_name, Err(error)) => {
+                warn!(program = %tc_name, error = %error, "optional TC runtime program pin unavailable");
+            }
+            _ => {}
         }
     }
-    Ok(())
+    TcAclLinkHealth::new(ingress, egress, xdp)
 }
 
 fn attach_xdp_program(bpf: &mut aya::Ebpf, iface: &str, pin_path: &str) -> Result<(), String> {
@@ -115,7 +164,7 @@ fn attach_xdp_program(bpf: &mut aya::Ebpf, iface: &str, pin_path: &str) -> Resul
     info!(iface = %iface, link_id = ?link_id, "XDP attached successfully");
 
     let xdp_link_pin = format!("{}/xdp_link", pin_path);
-    match (|| -> Result<(), String> {
+    (|| -> Result<(), String> {
         let xdp_link = xdp
             .take_link(link_id)
             .map_err(|e| format!("take_link: {:?}", e))?;
@@ -126,12 +175,8 @@ fn attach_xdp_program(bpf: &mut aya::Ebpf, iface: &str, pin_path: &str) -> Resul
             .pin(&xdp_link_pin)
             .map_err(|e| format!("pin: {:?}", e))?;
         Ok(())
-    })() {
-        Ok(()) => info!(iface = %iface, "XDP link pinned"),
-        Err(e) => {
-            warn!(iface = %iface, error = %e, "XDP link pin not supported; XDP will detach on agent exit")
-        }
-    }
+    })()?;
+    info!(iface = %iface, "XDP link pinned");
 
     Ok(())
 }
@@ -199,10 +244,31 @@ pub async fn system_start(
         ));
     }
 
+    let desired = aria_core::wal::load_with_wal(state_path);
+    let desired_conntrack = desired.conntrack_enabled;
+    let desired_acl = desired.acl_enabled;
+
     // Replay state
     if let Err(e) = replay_state(&mut bpf, state_path) {
         cleanup_failed_start(iface, pin_path, state_path);
         return Err(format!("failed to replay state: {}", e));
+    }
+
+    if let Err(e) = aria_core::ebpf_ops::update_firewall_config(
+        TapMapRuntime::new(pin_path, aria_core::common::TAP_ID_UNASSIGNED),
+        Some(false),
+        None,
+        Some(false),
+        None,
+        None,
+        None,
+        None,
+    ) {
+        cleanup_failed_start(iface, pin_path, state_path);
+        return Err(format!(
+            "failed to quiesce standalone ACL/CT before attach: {}",
+            e
+        ));
     }
 
     match ensure_fq_qdisc(iface) {
@@ -221,34 +287,52 @@ pub async fn system_start(
         }
     }
 
-    if let Err(e) = attach_xdp_program(&mut bpf, iface, pin_path) {
-        cleanup_failed_start(iface, pin_path, state_path);
-        return Err(e);
-    }
+    let xdp_ready = match attach_xdp_program(&mut bpf, iface, pin_path) {
+        Ok(()) => true,
+        Err(error) => {
+            warn!(iface = %iface, error = %error, "XDP DDoS hook unavailable; continuing with TC ACL");
+            false
+        }
+    };
 
-    if let Err(e) = attach_tc_program(
+    let tc_egress_ready = match attach_tc_program(
         &mut bpf,
         "tc_egress",
         iface,
         aya::programs::tc::TcAttachType::Egress,
         pin_path,
     ) {
-        warn!(iface = %iface, error = %e, "TC egress attach failed; egress control disabled");
-    }
+        Ok(()) => true,
+        Err(error) => {
+            warn!(iface = %iface, error = %error, "TC egress attach failed; egress control disabled");
+            false
+        }
+    };
 
-    if let Err(e) = attach_tc_program(
+    let tc_ingress_ready = match attach_tc_program(
         &mut bpf,
         "tc_ingress",
         iface,
         aya::programs::tc::TcAttachType::Ingress,
         pin_path,
     ) {
-        warn!(iface = %iface, error = %e, "TC ingress attach failed; ingress mirror disabled");
-    }
+        Ok(()) => true,
+        Err(error) => {
+            warn!(iface = %iface, error = %error, "TC ingress attach failed; ingress mirror disabled");
+            false
+        }
+    };
 
-    if let Err(e) = pin_runtime_programs(&mut bpf, pin_path) {
+    let program_health =
+        pin_runtime_programs(&mut bpf, pin_path, desired_conntrack || desired_acl);
+    let health = TcAclLinkHealth::new(
+        tc_ingress_ready && program_health.ingress,
+        tc_egress_ready && program_health.egress,
+        xdp_ready && program_health.xdp,
+    );
+    if let Err(error) = system_acl_activation(desired_conntrack, desired_acl, health) {
         cleanup_failed_start(iface, pin_path, state_path);
-        return Err(e);
+        return Err(error);
     }
 
     if let Err(e) = sm.set_attached_iface(iface) {
@@ -388,8 +472,7 @@ fn attach_tc_program(
         .attach(iface, attach_type)
         .map_err(|e| format!("{} attach: {:?}", prog_name, e))?;
 
-    // Try to pin TC link (graceful fallback)
-    match (|| -> Result<(), String> {
+    (|| -> Result<(), String> {
         let tc_link = tc
             .take_link(link_id)
             .map_err(|e| format!("take_link: {:?}", e))?;
@@ -401,14 +484,8 @@ fn attach_tc_program(
             .pin(&link_pin)
             .map_err(|e| format!("pin: {:?}", e))?;
         Ok(())
-    })() {
-        Ok(()) => {
-            info!(iface = %iface, direction = %dir_str, "TC program attached with pinned link")
-        }
-        Err(e) => {
-            info!(iface = %iface, direction = %dir_str, error = %e, "TC program attached without link pin")
-        }
-    }
+    })()?;
+    info!(iface = %iface, direction = %dir_str, "TC program attached with pinned link");
 
     Ok(())
 }
@@ -416,7 +493,6 @@ fn attach_tc_program(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instance::TcAclLinkHealth;
 
     #[test]
     fn standalone_acl_activation_requires_both_tc_links() {

@@ -210,6 +210,10 @@ fn neutron_acl_gate_requires_tc(conntrack_enabled: bool, acl_enabled: bool) -> b
     conntrack_enabled || acl_enabled
 }
 
+fn config_update_requires_tc(conntrack: Option<bool>, acl: Option<bool>) -> bool {
+    conntrack == Some(true) || acl == Some(true)
+}
+
 impl PreparedManagedInstance {
     pub fn requires_tc_acl_links(&self) -> bool {
         match self.activation {
@@ -409,6 +413,23 @@ impl ControlPlane {
         } else {
             Ok(instance.to_string())
         }
+    }
+
+    fn require_tc_acl_ready_locked(
+        instance: &str,
+        state: &InstanceState,
+        trace_map_mode: TraceMapMode,
+    ) -> Result<(), ControlPlaneError> {
+        let iface = Self::runtime_iface_name(instance, state)?;
+        FirewallInstance::new(
+            &iface,
+            state.pin_path.clone().into(),
+            state.state_path.clone().into(),
+            instance != "system",
+            trace_map_mode,
+        )
+        .require_tc_acl_links()
+        .map_err(ControlPlaneError::InstanceNotReady)
     }
 
     fn fq_qdisc_marker_path(state: &InstanceState) -> std::path::PathBuf {
@@ -1624,7 +1645,7 @@ impl ControlPlane {
         })
     }
 
-    fn check_xdp_ready(pin_path: &str) -> Result<(), ControlPlaneError> {
+    fn check_runtime_maps_ready(pin_path: &str) -> Result<(), ControlPlaneError> {
         let cfg_path = format!("{}/FIREWALL_CONFIG", pin_path);
         if !std::path::Path::new(&cfg_path).exists() {
             return Err(ControlPlaneError::InstanceNotReady(
@@ -1649,7 +1670,7 @@ impl ControlPlane {
 
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
         let current_acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
             .map_err(ControlPlaneError::KernelError)?;
         let next_acl_bank = aria_core::common::acl_next_bank(current_acl_bank);
@@ -1898,6 +1919,9 @@ impl ControlPlane {
             &self.ebpf_path,
             &new_port_sets_by_key,
         )?;
+        if state.state.conntrack_enabled || state.state.acl_enabled {
+            Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
+        }
         aria_core::ebpf_ops::set_acl_active_bank(state.map_runtime(), next_acl_bank)
             .map_err(ControlPlaneError::KernelError)?;
 
@@ -1980,7 +2004,7 @@ impl ControlPlane {
     ) -> Result<u32, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         // Check if this is a new group (for rollback)
         let was_new_group = !state.state.groups.contains_key(name);
@@ -2084,7 +2108,7 @@ impl ControlPlane {
     pub async fn delete_group(&self, instance: &str, name: &str) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let group = state
             .state
@@ -2244,7 +2268,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
@@ -2333,7 +2357,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
@@ -2486,7 +2510,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let group_id = if group_name == "default" || group_name == "any" {
             0
@@ -2577,7 +2601,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let group_id = if group_name == "default" || group_name == "any" {
             0
@@ -2717,7 +2741,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
@@ -2803,7 +2827,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
@@ -2999,17 +3023,7 @@ impl ControlPlane {
     pub async fn require_tc_acl_ready(&self, instance: &str) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
-        let iface = Self::runtime_iface_name(instance, &state)?;
-        let runtime = FirewallInstance::new(
-            &iface,
-            state.pin_path.clone().into(),
-            state.state_path.clone().into(),
-            true,
-            self.trace_map_mode(),
-        );
-        runtime
-            .require_tc_acl_links()
-            .map_err(ControlPlaneError::InstanceNotReady)
+        Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())
     }
 
     pub(crate) async fn update_neutron_acl_runtime_gate_serialized(
@@ -3021,17 +3035,7 @@ impl ControlPlane {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
         if neutron_acl_gate_requires_tc(conntrack_enabled, acl_enabled) {
-            let iface = Self::runtime_iface_name(instance, &state)?;
-            let runtime = FirewallInstance::new(
-                &iface,
-                state.pin_path.clone().into(),
-                state.state_path.clone().into(),
-                true,
-                self.trace_map_mode(),
-            );
-            runtime
-                .require_tc_acl_links()
-                .map_err(ControlPlaneError::InstanceNotReady)?;
+            Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
         }
         aria_core::ebpf_ops::update_acl_runtime_gate(
             state.map_runtime(),
@@ -3123,7 +3127,10 @@ impl ControlPlane {
         }
 
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
+        if config_update_requires_tc(conntrack, acl) {
+            Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
+        }
 
         // For QoS, the kernel flag = user_wants_qos && has_rules
         let kernel_qos = qos.map(|q| q && !state.state.qos_rules.is_empty());

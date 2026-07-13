@@ -662,6 +662,7 @@ def check_rust_stage_one_tests_present():
     ebpf_common_source = _read_repo_text(EBPF_COMMON_PATH)
     build_workflow_source = _read_repo_text(BUILD_WORKFLOW_PATH)
     control_plane_source = _read_repo_text(os.path.join("agent", "src", "control_plane.rs"))
+    system_manager_source = _read_repo_text(os.path.join("agent", "src", "system_manager.rs"))
     tap_registry_source = _read_repo_text(os.path.join("agent", "src", "tap_registry.rs"))
 
     required_wal_tests = [
@@ -852,7 +853,7 @@ def check_rust_stage_one_tests_present():
     if serialized_gate_body is None:
         raise SystemExit("ERROR: serialized control-plane ACL gate writer missing")
     readiness_match = re.search(
-        r"\.\s*require_tc_acl_links\s*\(", serialized_gate_body
+        r"Self\s*::\s*require_tc_acl_ready_locked\s*\(", serialized_gate_body
     )
     gate_write_match = re.search(
         r"aria_core\s*::\s*ebpf_ops\s*::\s*update_acl_runtime_gate\s*\(",
@@ -864,7 +865,7 @@ def check_rust_stage_one_tests_present():
         or readiness_match.start() > gate_write_match.start()
     ):
         raise SystemExit(
-            "ERROR: serialized enabling ACL gate writer must recheck TC immediately before the map write"
+            "ERROR: serialized enabling ACL gate writer must use lock-safe TC readiness immediately before the map write"
         )
     readiness_window = serialized_gate_body[
         readiness_match.start():gate_write_match.start()
@@ -984,6 +985,109 @@ def check_rust_stage_one_tests_present():
         build_workflow_source,
     ):
         raise SystemExit("ERROR: managed failure-path Rust test filter missing")
+
+    system_activation_body = _rust_function_body(
+        system_manager_source, "system_acl_activation"
+    )
+    if system_activation_body is None or not all(
+        marker in system_activation_body
+        for marker in ("health.acl_ready()", "health.missing_tc()")
+    ):
+        raise SystemExit("ERROR: standalone dual-TC activation decision missing")
+    system_start_body = _rust_function_body(system_manager_source, "system_start")
+    if system_start_body is None:
+        raise SystemExit("ERROR: standalone system_start body missing")
+    desired_load = system_start_body.find("aria_core::wal::load_with_wal(state_path)")
+    replay = system_start_body.find("replay_state(&mut bpf, state_path)")
+    quiesce = system_start_body.find("aria_core::ebpf_ops::update_firewall_config(")
+    xdp_attach = system_start_body.find("attach_xdp_program(&mut bpf, iface, pin_path)")
+    activation = system_start_body.find("system_acl_activation(")
+    registration = system_start_body.find(".register_system_instance(pin_path, state_path)")
+    if not (
+        0 <= desired_load < replay < quiesce < xdp_attach < activation < registration
+    ):
+        raise SystemExit(
+            "ERROR: standalone startup must load desired state, replay, quiesce, attach, decide TC, then register"
+        )
+    if not re.search(
+        r"TapMapRuntime\s*::\s*new\s*\(\s*pin_path\s*,\s*aria_core\s*::\s*common\s*::\s*TAP_ID_UNASSIGNED\s*\)\s*,\s*Some\s*\(\s*false\s*\)\s*,\s*None\s*,\s*Some\s*\(\s*false\s*\)",
+        system_start_body[quiesce:xdp_attach],
+    ):
+        raise SystemExit(
+            "ERROR: standalone startup must quiesce only live ACL/CT before attach"
+        )
+    if not re.search(
+        r"let\s+xdp_ready\s*=\s*match\s+attach_xdp_program",
+        system_start_body,
+    ):
+        raise SystemExit("ERROR: standalone XDP attach must be independent best-effort health")
+    for marker in (
+        "let tc_egress_ready = match attach_tc_program(",
+        "let tc_ingress_ready = match attach_tc_program(",
+        "pin_runtime_programs(&mut bpf, pin_path, desired_conntrack || desired_acl)",
+    ):
+        if marker not in system_start_body:
+            raise SystemExit("ERROR: standalone TC readiness missing %s" % marker)
+    activation_window = system_start_body[activation:registration]
+    if "cleanup_failed_start(iface, pin_path, state_path)" not in activation_window:
+        raise SystemExit("ERROR: standalone required-TC failure must clean startup state")
+
+    control_code = _blank_rust_non_code(control_plane_source)
+    for function_name in (
+        "config_update_requires_tc",
+        "local_config_enable_requires_dual_tc_but_disable_does_not",
+        "require_tc_acl_ready_locked",
+        "check_runtime_maps_ready",
+    ):
+        if not re.search(r"\bfn\s+%s\s*\(" % function_name, control_code):
+            raise SystemExit("ERROR: local standalone TC contract missing %s" % function_name)
+    if re.search(r"\bfn\s+check_xdp_ready\s*\(", control_code):
+        raise SystemExit("ERROR: runtime map readiness must not imply an XDP link dependency")
+    locked_readiness_body = _rust_function_body(
+        control_plane_source, "require_tc_acl_ready_locked"
+    )
+    if locked_readiness_body is None or not all(
+        marker in locked_readiness_body
+        for marker in (
+            "instance !=",
+            "runtime_iface_name(instance, state)",
+            ".require_tc_acl_links()",
+        )
+    ):
+        raise SystemExit("ERROR: lock-safe shared dual-TC readiness helper missing")
+    update_config_body = _rust_function_body(control_plane_source, "update_config")
+    local_guard = update_config_body.find("config_update_requires_tc(conntrack, acl)")
+    local_readiness = update_config_body.find(
+        "require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())"
+    )
+    local_write = update_config_body.find("aria_core::ebpf_ops::update_runtime_config(")
+    if not (0 <= local_guard < local_readiness < local_write):
+        raise SystemExit(
+            "ERROR: local ACL/CT enable must require dual TC under the instance lock before map write"
+        )
+    replace_acl_body = _rust_function_body(control_plane_source, "replace_owned_acl")
+    shadow_stage = replace_acl_body.find("Self::stage_acl_shadow_bank(")
+    bank_readiness = replace_acl_body.find(
+        "Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())"
+    )
+    bank_publish = replace_acl_body.find("aria_core::ebpf_ops::set_acl_active_bank(")
+    if not (0 <= shadow_stage < bank_readiness < bank_publish):
+        raise SystemExit(
+            "ERROR: enforcement-affecting ACL bank publication must recheck dual TC after staging"
+        )
+    readiness_prefix = replace_acl_body[shadow_stage:bank_readiness]
+    if not re.search(
+        r"if\s+state\s*\.\s*state\s*\.\s*conntrack_enabled\s*\|\|\s*state\s*\.\s*state\s*\.\s*acl_enabled",
+        readiness_prefix,
+    ):
+        raise SystemExit(
+            "ERROR: ACL bank TC gate must remain conditional while ACL/CT are disabled"
+        )
+    if not re.search(
+        r"cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-agent\s+standalone_acl_activation_",
+        build_workflow_source,
+    ):
+        raise SystemExit("ERROR: standalone activation Rust test filter missing")
 
     restart_runtime_match = re.search(
         r"async fn reconcile_committed_runtime\(&self\) \{(?P<body>.*?)\n    async fn recover_incomplete_wal_intent",
