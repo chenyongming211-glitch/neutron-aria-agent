@@ -319,7 +319,7 @@ mod tests {
             mirror_enabled: 1,
             tcprt_enabled: 0,
             acl_active_bank: 0,
-            acl_ingress_hook: ACL_INGRESS_HOOK_TC,
+            acl_ingress_hook: ACL_INGRESS_HOOK_XDP,
         };
 
         let next = tap_config_with_acl_bank(current, 1);
@@ -377,7 +377,7 @@ mod tests {
             mirror_enabled: 1,
             tcprt_enabled: 1,
             acl_active_bank: 1,
-            acl_ingress_hook: ACL_INGRESS_HOOK_TC,
+            acl_ingress_hook: ACL_INGRESS_HOOK_XDP,
         };
 
         let next = tap_config_with_acl_runtime_gate(current, true, true, 255);
@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn tap_runtime_partial_writes_force_tc_and_preserve_unrelated_fields() {
+    fn tap_runtime_config_partial_writes_force_tc_and_preserve_unrelated_fields() {
         let current = TapConfig {
             conntrack_enabled: 1,
             monitoring_enabled: 0,
