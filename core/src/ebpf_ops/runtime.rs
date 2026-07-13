@@ -48,24 +48,16 @@ pub fn delete_tap_config(runtime: TapMapRuntime<'_>) -> Result<(), String> {
     }
 }
 
-fn tap_config_with_acl_bank(current: Option<TapConfig>, bank: u8) -> TapConfig {
-    let current = current.as_ref();
+fn tap_config_with_acl_bank(current: TapConfig, bank: u8) -> TapConfig {
     TapConfig {
-        conntrack_enabled: current.map(|c| c.conntrack_enabled).unwrap_or(1),
-        monitoring_enabled: current.map(|c| c.monitoring_enabled).unwrap_or(1),
-        acl_enabled: current.map(|c| c.acl_enabled).unwrap_or(1),
-        qos_enabled: current.map(|c| c.qos_enabled).unwrap_or(0),
-        mirror_enabled: current.map(|c| c.mirror_enabled).unwrap_or(0),
-        tcprt_enabled: current.map(|c| c.tcprt_enabled).unwrap_or(0),
         acl_active_bank: normalize_acl_bank(bank),
-        acl_ingress_hook: current
-            .map(|c| normalize_acl_ingress_hook(c.acl_ingress_hook))
-            .unwrap_or(ACL_INGRESS_HOOK_XDP),
+        acl_ingress_hook: ACL_INGRESS_HOOK_TC,
+        ..current
     }
 }
 
 fn tap_config_with_runtime_updates(
-    current: Option<TapConfig>,
+    current: TapConfig,
     conntrack_enabled: Option<bool>,
     monitoring_enabled: Option<bool>,
     acl_enabled: Option<bool>,
@@ -73,66 +65,62 @@ fn tap_config_with_runtime_updates(
     mirror_enabled: Option<bool>,
     tcprt_enabled: Option<bool>,
 ) -> TapConfig {
-    let current = current.as_ref();
     TapConfig {
         conntrack_enabled: conntrack_enabled
             .map(|b| if b { 1 } else { 0 })
-            .unwrap_or_else(|| current.map(|c| c.conntrack_enabled).unwrap_or(1)),
+            .unwrap_or(current.conntrack_enabled),
         monitoring_enabled: monitoring_enabled
             .map(|b| if b { 1 } else { 0 })
-            .unwrap_or_else(|| current.map(|c| c.monitoring_enabled).unwrap_or(1)),
+            .unwrap_or(current.monitoring_enabled),
         acl_enabled: acl_enabled
             .map(|b| if b { 1 } else { 0 })
-            .unwrap_or_else(|| current.map(|c| c.acl_enabled).unwrap_or(1)),
+            .unwrap_or(current.acl_enabled),
         qos_enabled: qos_enabled
             .map(|b| if b { 1 } else { 0 })
-            .unwrap_or_else(|| current.map(|c| c.qos_enabled).unwrap_or(0)),
+            .unwrap_or(current.qos_enabled),
         mirror_enabled: mirror_enabled
             .map(|b| if b { 1 } else { 0 })
-            .unwrap_or_else(|| current.map(|c| c.mirror_enabled).unwrap_or(0)),
+            .unwrap_or(current.mirror_enabled),
         tcprt_enabled: tcprt_enabled
             .map(|b| if b { 1 } else { 0 })
-            .unwrap_or_else(|| current.map(|c| c.tcprt_enabled).unwrap_or(0)),
-        acl_active_bank: current
-            .map(|c| normalize_acl_bank(c.acl_active_bank))
-            .unwrap_or(ACL_BANK_PRIMARY),
-        acl_ingress_hook: current
-            .map(|c| normalize_acl_ingress_hook(c.acl_ingress_hook))
-            .unwrap_or(ACL_INGRESS_HOOK_XDP),
+            .unwrap_or(current.tcprt_enabled),
+        acl_active_bank: current.acl_active_bank,
+        acl_ingress_hook: ACL_INGRESS_HOOK_TC,
     }
 }
 
 fn tap_config_with_acl_runtime_gate(
-    current: Option<TapConfig>,
+    current: TapConfig,
     conntrack_enabled: bool,
     acl_enabled: bool,
-    acl_ingress_hook: u8,
+    _acl_ingress_hook: u8,
 ) -> TapConfig {
-    let current = current.as_ref();
     TapConfig {
         conntrack_enabled: if conntrack_enabled { 1 } else { 0 },
-        monitoring_enabled: current.map(|c| c.monitoring_enabled).unwrap_or(1),
+        monitoring_enabled: current.monitoring_enabled,
         acl_enabled: if acl_enabled { 1 } else { 0 },
-        qos_enabled: current.map(|c| c.qos_enabled).unwrap_or(0),
-        mirror_enabled: current.map(|c| c.mirror_enabled).unwrap_or(0),
-        tcprt_enabled: current.map(|c| c.tcprt_enabled).unwrap_or(0),
-        acl_active_bank: current
-            .map(|c| normalize_acl_bank(c.acl_active_bank))
-            .unwrap_or(ACL_BANK_PRIMARY),
-        acl_ingress_hook: normalize_acl_ingress_hook(acl_ingress_hook),
+        qos_enabled: current.qos_enabled,
+        mirror_enabled: current.mirror_enabled,
+        tcprt_enabled: current.tcprt_enabled,
+        acl_active_bank: current.acl_active_bank,
+        acl_ingress_hook: ACL_INGRESS_HOOK_TC,
     }
 }
 
-fn acl_runtime_gate_current_config(
+fn required_tap_config(
     lookup: Result<TapConfig, aya::maps::MapError>,
     tap_id: u32,
-) -> Result<Option<TapConfig>, String> {
+    operation: &str,
+) -> Result<TapConfig, String> {
     match lookup {
-        Ok(config) => Ok(Some(config)),
-        Err(aya::maps::MapError::KeyNotFound) => Ok(None),
+        Ok(config) => Ok(config),
+        Err(aya::maps::MapError::KeyNotFound) => Err(format!(
+            "{} requires initialized TAP_CONFIG_MAP for tap_id {}",
+            operation, tap_id
+        )),
         Err(error) => Err(format!(
-            "read TAP_CONFIG_MAP for tap_id {}: {}",
-            tap_id, error
+            "{} read TAP_CONFIG_MAP for tap_id {}: {}",
+            operation, tap_id, error
         )),
     }
 }
@@ -143,7 +131,11 @@ pub fn set_acl_active_bank(runtime: TapMapRuntime<'_>, bank: u8) -> Result<(), S
     }
 
     let mut map = open_pinned_tap_config(runtime.pin_path)?;
-    let current = map.get(&runtime.tap_id, 0).ok();
+    let current = required_tap_config(
+        map.get(&runtime.tap_id, 0),
+        runtime.tap_id,
+        "active bank update",
+    )?;
     let cfg = tap_config_with_acl_bank(current, bank);
     map.insert(&runtime.tap_id, &cfg, 0).map_err(|e| {
         format!(
@@ -176,9 +168,10 @@ pub fn update_acl_runtime_gate(
     }
 
     let mut map = open_pinned_tap_config(runtime.pin_path)?;
-    let current = acl_runtime_gate_current_config(
+    let current = required_tap_config(
         map.get(&runtime.tap_id, 0),
         runtime.tap_id,
+        "ACL runtime gate update",
     )?;
     let cfg = tap_config_with_acl_runtime_gate(
         current,
@@ -218,7 +211,11 @@ pub fn update_runtime_config(
     }
 
     let mut map = open_pinned_tap_config(runtime.pin_path)?;
-    let current = map.get(&runtime.tap_id, 0).ok();
+    let current = required_tap_config(
+        map.get(&runtime.tap_id, 0),
+        runtime.tap_id,
+        "partial update",
+    )?;
     let cfg = tap_config_with_runtime_updates(
         current,
         conntrack_enabled,
@@ -306,8 +303,8 @@ pub fn update_firewall_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        acl_runtime_gate_current_config, required_tap_config, tap_config_with_acl_bank,
-        tap_config_with_acl_runtime_gate, tap_config_with_runtime_updates,
+        required_tap_config, tap_config_with_acl_bank, tap_config_with_acl_runtime_gate,
+        tap_config_with_runtime_updates,
     };
     use crate::common::{TapConfig, ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP};
     use aya::maps::MapError;
@@ -325,7 +322,7 @@ mod tests {
             acl_ingress_hook: ACL_INGRESS_HOOK_TC,
         };
 
-        let next = tap_config_with_acl_bank(Some(current), 1);
+        let next = tap_config_with_acl_bank(current, 1);
 
         assert_eq!(next.conntrack_enabled, 1);
         assert_eq!(next.monitoring_enabled, 0);
@@ -351,7 +348,7 @@ mod tests {
         };
 
         let next = tap_config_with_runtime_updates(
-            Some(current),
+            current,
             None,
             Some(true),
             None,
@@ -371,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn acl_ingress_hook_gate_transformer_preserves_runtime_and_normalizes_unknown_to_xdp() {
+    fn acl_ingress_hook_gate_transformer_preserves_runtime_and_forces_tc() {
         let current = TapConfig {
             conntrack_enabled: 0,
             monitoring_enabled: 0,
@@ -383,7 +380,7 @@ mod tests {
             acl_ingress_hook: ACL_INGRESS_HOOK_TC,
         };
 
-        let next = tap_config_with_acl_runtime_gate(Some(current), true, true, 255);
+        let next = tap_config_with_acl_runtime_gate(current, true, true, 255);
 
         assert_eq!(next.conntrack_enabled, 1);
         assert_eq!(next.monitoring_enabled, 0);
@@ -392,26 +389,7 @@ mod tests {
         assert_eq!(next.mirror_enabled, 1);
         assert_eq!(next.tcprt_enabled, 1);
         assert_eq!(next.acl_active_bank, 1);
-        assert_eq!(next.acl_ingress_hook, ACL_INGRESS_HOOK_XDP);
-    }
-
-    #[test]
-    fn acl_ingress_hook_gate_lookup_treats_only_key_not_found_as_absent() {
-        let absent = acl_runtime_gate_current_config(Err(MapError::KeyNotFound), 42).unwrap();
-        assert!(absent.is_none());
-
-        let error = acl_runtime_gate_current_config(
-            Err(MapError::InvalidKeySize {
-                size: 1,
-                expected: 4,
-            }),
-            42,
-        )
-        .unwrap_err();
-        assert_eq!(
-            error,
-            "read TAP_CONFIG_MAP for tap_id 42: invalid key size 1, expected 4"
-        );
+        assert_eq!(next.acl_ingress_hook, ACL_INGRESS_HOOK_TC);
     }
 
     #[test]

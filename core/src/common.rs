@@ -19,12 +19,8 @@ pub const ACL_INGRESS_HOOK_XDP: u8 = 0;
 pub const ACL_INGRESS_HOOK_TC: u8 = 1;
 
 #[inline(always)]
-pub fn normalize_acl_ingress_hook(value: u8) -> u8 {
-    if value == ACL_INGRESS_HOOK_TC {
-        ACL_INGRESS_HOOK_TC
-    } else {
-        ACL_INGRESS_HOOK_XDP
-    }
+pub fn normalize_acl_ingress_hook(_value: u8) -> u8 {
+    ACL_INGRESS_HOOK_TC
 }
 
 #[inline]
@@ -382,7 +378,7 @@ impl From<FirewallConfig> for TapConfig {
             mirror_enabled: value.mirror_enabled,
             tcprt_enabled: value.tcprt_enabled,
             acl_active_bank: ACL_BANK_PRIMARY,
-            acl_ingress_hook: ACL_INGRESS_HOOK_XDP,
+            acl_ingress_hook: ACL_INGRESS_HOOK_TC,
         }
     }
 }

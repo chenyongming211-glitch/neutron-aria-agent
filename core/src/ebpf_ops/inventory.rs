@@ -127,7 +127,7 @@ pub fn validate_pinned_runtime_state(
         },
         tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
         acl_active_bank: 0,
-        acl_ingress_hook: ACL_INGRESS_HOOK_XDP,
+        acl_ingress_hook: ACL_INGRESS_HOOK_TC,
     };
     let tap_config_map = open_pinned_tap_config(pin_path)?;
     let actual_tap_config = tap_config_map

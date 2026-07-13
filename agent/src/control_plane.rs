@@ -924,15 +924,18 @@ impl ControlPlane {
         }
 
         if !pin_state.preexisting_xdp_link {
-            if let Err(e) = aria_core::ebpf_ops::update_runtime_config(
+            if let Err(e) = aria_core::ebpf_ops::write_tap_config(
                 TapMapRuntime::new(&pin_path, tap_id),
-                Some(state.conntrack_enabled),
-                Some(state.monitoring_enabled),
-                Some(state.acl_enabled),
-                Some(state.qos_enabled && !state.qos_rules.is_empty()),
-                Some(state.mirror_enabled && !state.mirror_rules.is_empty()),
-                Some(state.tcprt_enabled),
-                None,
+                aria_core::common::TapConfig {
+                    conntrack_enabled: state.conntrack_enabled as u8,
+                    monitoring_enabled: state.monitoring_enabled as u8,
+                    acl_enabled: state.acl_enabled as u8,
+                    qos_enabled: (state.qos_enabled && !state.qos_rules.is_empty()) as u8,
+                    mirror_enabled: (state.mirror_enabled && !state.mirror_rules.is_empty()) as u8,
+                    tcprt_enabled: state.tcprt_enabled as u8,
+                    acl_active_bank: aria_core::common::ACL_BANK_PRIMARY,
+                    acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
+                },
             ) {
                 Self::cleanup_failed_managed_registration(
                     name,

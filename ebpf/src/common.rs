@@ -37,12 +37,8 @@ pub const ACL_INGRESS_HOOK_XDP: u8 = 0;
 pub const ACL_INGRESS_HOOK_TC: u8 = 1;
 
 #[inline(always)]
-pub fn normalize_acl_ingress_hook(value: u8) -> u8 {
-    if value == ACL_INGRESS_HOOK_TC {
-        ACL_INGRESS_HOOK_TC
-    } else {
-        ACL_INGRESS_HOOK_XDP
-    }
+pub fn normalize_acl_ingress_hook(_value: u8) -> u8 {
+    ACL_INGRESS_HOOK_TC
 }
 
 #[inline(always)]
