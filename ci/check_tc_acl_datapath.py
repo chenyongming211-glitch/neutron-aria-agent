@@ -8,6 +8,7 @@ the eBPF source while a live packet path remains unwired.
 
 from __future__ import print_function
 
+from functools import lru_cache
 import os
 import re
 import sys
@@ -78,16 +79,17 @@ def _matching_brace(source, opening):
 
 
 def function_body_span(source, name):
+    code = _blank_non_code(source)
     pattern = re.compile(
         r"(?:^|\n)\s*(?:pub\s+)?(?:unsafe\s+)?fn\s+%s\s*\(" % re.escape(name)
     )
-    match = pattern.search(source)
+    match = pattern.search(code)
     if not match:
         raise KeyError(name)
-    opening = source.find("{", match.end())
+    opening = code.find("{", match.end())
     if opening < 0:
         raise ValueError("function %s has no body" % name)
-    closing = _matching_brace(source, opening)
+    closing = _matching_brace(code, opening)
     return opening + 1, closing
 
 
@@ -102,6 +104,84 @@ def _body_or_error(source, name, errors, path):
     except (KeyError, ValueError) as exc:
         errors.append("%s: missing extractable helper %s (%s)" % (path, name, exc))
         return None
+
+
+@lru_cache(maxsize=32)
+def _blank_non_code(text):
+    """Blank Rust comments and literals while preserving code and newlines."""
+    output = []
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index + 2)
+            if end < 0:
+                output.extend(" " for _ in text[index:])
+                break
+            output.extend(" " for _ in text[index:end])
+            output.append("\n")
+            index = end + 1
+            continue
+
+        if text.startswith("/*", index):
+            depth = 1
+            end = index + 2
+            while end < len(text) and depth:
+                if text.startswith("/*", end):
+                    depth += 1
+                    end += 2
+                elif text.startswith("*/", end):
+                    depth -= 1
+                    end += 2
+                else:
+                    end += 1
+            output.extend("\n" if char == "\n" else " " for char in text[index:end])
+            index = end
+            continue
+
+        raw = re.match(r'(?:b|c)?r(?P<hashes>#{0,32})"', text[index:])
+        if raw:
+            delimiter = '"' + raw.group("hashes")
+            content_start = index + raw.end()
+            close = text.find(delimiter, content_start)
+            end = len(text) if close < 0 else close + len(delimiter)
+            output.extend("\n" if char == "\n" else " " for char in text[index:end])
+            index = end
+            continue
+
+        if text[index] == '"':
+            end = index + 1
+            while end < len(text):
+                if text[end] == "\\":
+                    end += 2
+                    continue
+                end += 1
+                if text[end - 1] == '"':
+                    break
+            output.extend("\n" if char == "\n" else " " for char in text[index:end])
+            index = end
+            continue
+
+        char_literal = re.match(r"'(?:\\.|[^\\'\n])'", text[index:])
+        if char_literal:
+            end = index + char_literal.end()
+            output.extend(" " for _ in text[index:end])
+            index = end
+            continue
+
+        output.append(text[index])
+        index += 1
+    return "".join(output)
+
+
+RUST_TOKEN = re.compile(
+    r"r#[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*|[0-9]+|"
+    r"::|->|=>|==|!=|<=|>=|&&|\|\||<<|>>|\.\.=|\.\.|"
+    r"[{}()\[\];,.&*=:<>!+\-/|]|\S"
+)
+
+
+def _rust_tokens(text):
+    return RUST_TOKEN.findall(_blank_non_code(text))
 
 
 def _block_after(body, marker, start=0):
@@ -130,50 +210,57 @@ def check_xdp(source, errors):
     body = _body_or_error(source, "try_xdp_firewall", errors, "XDP")
     if body is None:
         return
-    forbidden = (
-        "load_runtime_ctx_xdp(",
-        "load_feature_flags_xdp(",
-        "runtime::acl_ingress_hook(",
-        "CtKey4 {",
-        "CtKey6 {",
-        "phase_ct_",
-        "load_acl_packet_ids_",
-        "phase_policy_xdp(",
-        "conntrack::ct_create_",
-        "stats::update_rule_stats",
+    prefix = "let p = &mut *pipe; p.action = XDP_PASS;"
+    permitted = (
+        _rust_tokens(prefix + " return Ok(XDP_PASS);"),
+        _rust_tokens(prefix + " Ok(XDP_PASS)"),
     )
-    if any(term in body for term in forbidden) or "return Ok(XDP_PASS)" not in body:
+    if _rust_tokens(body) not in permitted:
         errors.append("XDP: all runtime modes must return PASS without ACL/CT work")
 
 
-def check_live_path(source, errors, direction, family):
+def _tc_wrapper_tokens(direction, family, explicit_return=False):
     bits = "4" if family == "v4" else "6"
-    key = "CtKey%s {" % bits
-    phase = "phase_ct_v%s(" % bits
+    ip_fields = (
+        "src_ip: info.src_ip, dst_ip: info.dst_ip,"
+        if family == "v4"
+        else "src_ip: info.src_ip_v6, dst_ip: info.dst_ip_v6,"
+    )
+    tail = "return p.action as i32;" if explicit_return else "p.action as i32"
+    return _rust_tokens(
+        """
+        let ct_key = CtKey%s {
+            tap_id: p.tap_id,
+            %s
+            src_port: info.src_port,
+            dst_port: info.dst_port,
+            proto: info.proto,
+            pad: [0; 3],
+        };
+        let miss_reason = phase_ct_v%s(info, p, &ct_key);
+        if (p.flags & FLAG_CT_HIT) != 0 {
+            phase_ct_fastpath_tc_%s_%s(ctx, info, p, &ct_key);
+        } else {
+            phase_ct_miss_tc_%s_%s(ctx, info, p, &ct_key, miss_reason);
+        }
+        %s
+        """
+        % (bits, ip_fields, bits, direction, family, direction, family, tail)
+    )
+
+
+def check_live_path(source, errors, direction, family):
     wrapper = "try_tc_%s_%s" % (direction, family)
     body = _body_or_error(source, wrapper, errors, "TC %s %s" % (direction, family))
     if body is None:
         return
-
-    required = [key, phase, "FLAG_CT_HIT"]
-    wrong_bits = "6" if bits == "4" else "4"
-    forbidden = ["CtKey%s {" % wrong_bits, "phase_ct_v%s(" % wrong_bits, "ct_state"]
-    if direction == "ingress":
-        hit = "phase_ct_fastpath_tc_ingress_%s(" % family
-        miss = "phase_ct_miss_tc_ingress_%s(" % family
-        legacy = "phase_legacy_tc_ingress_%s(" % family
-        required.extend([hit, miss])
-        forbidden.extend(["runtime::acl_ingress_hook(", legacy])
-    else:
-        required.extend(
-            [
-                "phase_ct_fastpath_tc_egress_%s(" % family,
-                "phase_ct_miss_tc_egress_%s(" % family,
-            ]
-        )
-    if any(term not in body for term in required) or any(term in body for term in forbidden):
+    permitted = (
+        _tc_wrapper_tokens(direction, family),
+        _tc_wrapper_tokens(direction, family, explicit_return=True),
+    )
+    if _rust_tokens(body) not in permitted:
         errors.append(
-            "TC %s %s: live path must use a family-correct CT key, CT phase, and FLAG_CT_HIT decision"
+            "TC %s %s: require exactly one family CT lookup and one mutually exclusive FLAG_CT_HIT hit/miss branch"
             % (direction, family)
         )
 
@@ -184,6 +271,7 @@ def check_hit_helper(source, errors, direction, family):
     body = _body_or_error(source, name, errors, path)
     if body is None:
         return
+    body = _blank_non_code(body)
     forbidden = ("load_acl_packet_ids_", "phase_policy_tc(", "ct_create_")
     qos = "phase_qos_ingress_tc(" if direction == "ingress" else "phase_qos_egress_tc("
     flow = "stats::update_flow_stats_v%s(" % ("4" if family == "v4" else "6")
@@ -220,6 +308,7 @@ def check_miss_helper(source, errors, direction, family):
     body = _body_or_error(source, name, errors, path)
     if body is None:
         return
+    body = _blank_non_code(body)
     bits = "4" if family == "v4" else "6"
     qos = "phase_qos_ingress_tc(" if direction == "ingress" else "phase_qos_egress_tc("
     post = "phase_post_accept_tc_%s(" % direction
@@ -280,9 +369,10 @@ def check_source(source):
             check_live_path(source, errors, direction, family)
             check_hit_helper(source, errors, direction, family)
             check_miss_helper(source, errors, direction, family)
+    code = _blank_non_code(source)
     for family in ("v4", "v6"):
         legacy = "phase_legacy_tc_ingress_%s" % family
-        if re.search(r"\bfn\s+%s\s*\(" % re.escape(legacy), source):
+        if re.search(r"\bfn\s+%s\s*\(" % re.escape(legacy), code):
             errors.append("TC ingress %s: legacy helper must be removed" % family)
     return errors
 
@@ -296,14 +386,189 @@ def _mutate_function(source, name, mutate):
     return source[:start] + mutated + source[end:]
 
 
-def _inject_xdp_acl_read(body):
-    anchor = "    p.action = XDP_PASS;\n"
-    if anchor not in body:
-        raise ValueError("XDP PASS mutation anchor drifted")
-    return body.replace(
-        anchor,
-        anchor + "    load_feature_flags_xdp(p, info);\n",
-        1,
+def _insert_before_match(body, pattern, code, label):
+    match = re.search(pattern, body, re.MULTILINE)
+    if not match:
+        raise ValueError("%s mutation anchor drifted" % label)
+    indent = match.groupdict().get("indent", "")
+    injected = "".join(
+        indent + line + "\n" if line else "\n" for line in code.splitlines()
+    )
+    return body[: match.start()] + injected + body[match.start() :]
+
+
+def _insert_before_xdp_pass(body, code, label):
+    return _insert_before_match(
+        body,
+        r"^(?P<indent>[ \t]*)p\s*\.\s*action\s*=\s*XDP_PASS\s*;",
+        code,
+        label,
+    )
+
+
+def _inject_xdp_runtime_acl_read(body):
+    return _insert_before_xdp_pass(
+        body,
+        "let _acl_enabled = runtime::acl_enabled(p.tap_id);",
+        "XDP runtime ACL read",
+    )
+
+
+def _inject_xdp_ct_lookup(body):
+    return _insert_before_xdp_pass(
+        body,
+        """let info = &*_info;
+let ct_key = CtKey4
+{
+    tap_id: p.tap_id,
+    src_ip: info.src_ip,
+    dst_ip: info.dst_ip,
+    src_port: info.src_port,
+    dst_port: info.dst_port,
+    proto: info.proto,
+    pad: [0; 3],
+};
+let _ct_result = conntrack::ct_lookup_v4(&ct_key, p.now, p.pkt_len, 0, 0);""",
+        "XDP CT lookup",
+    )
+
+
+def _inject_xdp_alternate_drop(body):
+    return _insert_before_xdp_pass(
+        body,
+        """if p.tap_id == TAP_ID_UNASSIGNED {
+    return Ok(1);
+}""",
+        "XDP alternate drop",
+    )
+
+
+def _format_xdp_pass_only(_body):
+    return """
+    /* runtime::acl_ingress_hook(p.tap_id) is forbidden code, not a comment. */
+        let p = & mut * pipe ;
+    // conntrack::ct_lookup_v4 must not execute here.
+    p . action = XDP_PASS ;
+    Ok ( XDP_PASS )
+"""
+
+
+def _insert_before_ingress_v4_tail(body, code, label):
+    return _insert_before_match(
+        body,
+        r"^(?P<indent>[ \t]*)p\s*\.\s*action\s+as\s+i32\b",
+        code,
+        label,
+    )
+
+
+def _duplicate_ingress_v4_lookup(body):
+    pattern = re.compile(
+        r"^(?P<indent>[ \t]*)let\s+miss_reason\s*=\s*"
+        r"phase_ct_v4\s*\([^;]*\)\s*;",
+        re.MULTILINE,
+    )
+    match = pattern.search(body)
+    if not match:
+        raise ValueError("ingress v4 CT lookup mutation anchor drifted")
+    duplicate = (
+        "\n%slet _duplicate_miss_reason = phase_ct_v4(info, p, &ct_key);"
+        % match.group("indent")
+    )
+    return body[: match.end()] + duplicate + body[match.end() :]
+
+
+def _inject_ingress_v4_unconditional_hit(body):
+    return _insert_before_ingress_v4_tail(
+        body,
+        "phase_ct_fastpath_tc_ingress_v4(ctx, info, p, &ct_key);",
+        "ingress v4 unconditional hit",
+    )
+
+
+def _inject_ingress_v4_both_helpers_in_hit_arm(body):
+    pattern = re.compile(
+        r"^(?P<indent>[ \t]*)phase_ct_fastpath_tc_ingress_v4\s*"
+        r"\(\s*ctx\s*,\s*info\s*,\s*p\s*,\s*&\s*ct_key\s*\)\s*;",
+        re.MULTILINE,
+    )
+    match = pattern.search(body)
+    if not match:
+        raise ValueError("ingress v4 hit-arm mutation anchor drifted")
+    miss = (
+        "\n%sphase_ct_miss_tc_ingress_v4(ctx, info, p, &ct_key, miss_reason);"
+        % match.group("indent")
+    )
+    return body[: match.end()] + miss + body[match.end() :]
+
+
+def _duplicate_ingress_v4_hit_miss_branch(body):
+    return _insert_before_ingress_v4_tail(
+        body,
+        """if (p.flags & FLAG_CT_HIT) != 0 {
+    phase_ct_fastpath_tc_ingress_v4(ctx, info, p, &ct_key);
+} else {
+    phase_ct_miss_tc_ingress_v4(ctx, info, p, &ct_key, miss_reason);
+}""",
+        "ingress v4 duplicate hit/miss branch",
+    )
+
+
+def _inject_ingress_v4_selector(body):
+    return _insert_before_ingress_v4_tail(
+        body,
+        "let _selector = runtime::acl_ingress_hook(p.tap_id);",
+        "ingress v4 selector",
+    )
+
+
+def _inject_ingress_v4_legacy_call(body):
+    return _insert_before_ingress_v4_tail(
+        body,
+        "phase_legacy_tc_ingress_v4(ctx, info, p, &ct_key);",
+        "ingress v4 legacy call",
+    )
+
+
+def _format_ingress_v4(_body):
+    return """
+    // runtime::acl_ingress_hook(p.tap_id) is intentionally absent.
+    let ct_key = CtKey4
+    {
+        tap_id : p . tap_id,
+        src_ip : info . src_ip,
+        dst_ip : info . dst_ip,
+        src_port : info . src_port,
+        dst_port : info . dst_port,
+        proto : info . proto,
+        pad : [ 0 ; 3 ],
+    };
+    let miss_reason=phase_ct_v4 ( info,p,& ct_key ) ;
+    if(p.flags&FLAG_CT_HIT)!=0
+    {
+        phase_ct_fastpath_tc_ingress_v4 ( ctx, info, p, & ct_key ) ;
+    }
+    else
+    {
+        phase_ct_miss_tc_ingress_v4 ( ctx, info, p, & ct_key, miss_reason ) ;
+    }
+    p.action as i32
+"""
+
+
+def _add_legacy_helper_comment(source):
+    return source + "\n/* fn phase_legacy_tc_ingress_v4() is forbidden. */\n"
+
+
+def _add_fake_xdp_function_comment(source):
+    return (
+        """/*
+fn try_xdp_firewall() {
+    return Ok(1);
+}
+*/
+"""
+        + source
     )
 
 
@@ -343,10 +608,58 @@ def _remove_egress_v4_miss_ct_guard(body):
 def run_mutation_self_tests(source, verbose=False):
     specs = [
         (
-            "XDP ACL feature read",
+            "XDP direct runtime ACL read",
             "try_xdp_firewall",
-            _inject_xdp_acl_read,
+            _inject_xdp_runtime_acl_read,
             "XDP:",
+        ),
+        (
+            "XDP CT lookup",
+            "try_xdp_firewall",
+            _inject_xdp_ct_lookup,
+            "XDP:",
+        ),
+        (
+            "XDP alternate drop return",
+            "try_xdp_firewall",
+            _inject_xdp_alternate_drop,
+            "XDP:",
+        ),
+        (
+            "ingress v4 duplicate CT lookup",
+            "try_tc_ingress_v4",
+            _duplicate_ingress_v4_lookup,
+            "TC ingress v4:",
+        ),
+        (
+            "ingress v4 unconditional hit helper",
+            "try_tc_ingress_v4",
+            _inject_ingress_v4_unconditional_hit,
+            "TC ingress v4:",
+        ),
+        (
+            "ingress v4 both helpers in hit arm",
+            "try_tc_ingress_v4",
+            _inject_ingress_v4_both_helpers_in_hit_arm,
+            "TC ingress v4:",
+        ),
+        (
+            "ingress v4 duplicate FLAG_CT_HIT branch",
+            "try_tc_ingress_v4",
+            _duplicate_ingress_v4_hit_miss_branch,
+            "TC ingress v4:",
+        ),
+        (
+            "ingress v4 selector reintroduction",
+            "try_tc_ingress_v4",
+            _inject_ingress_v4_selector,
+            "TC ingress v4:",
+        ),
+        (
+            "ingress v4 legacy helper reintroduction",
+            "try_tc_ingress_v4",
+            _inject_ingress_v4_legacy_call,
+            "TC ingress v4:",
         ),
         (
             "egress v4 hit QoS drop without return",
@@ -386,6 +699,54 @@ def run_mutation_self_tests(source, verbose=False):
             failures.append("mutation %s was accepted" % label)
         elif verbose:
             print("PASS: rejected mutation %s" % label)
+
+    accepted_specs = [
+        (
+            "XDP comments, whitespace, and tail expression",
+            "try_xdp_firewall",
+            _format_xdp_pass_only,
+        ),
+        (
+            "ingress v4 comments and whitespace",
+            "try_tc_ingress_v4",
+            _format_ingress_v4,
+        ),
+    ]
+    for label, function, mutate in accepted_specs:
+        try:
+            mutant = _mutate_function(source, function, mutate)
+        except (KeyError, ValueError) as exc:
+            failures.append("harmless mutation %s could not run (%s)" % (label, exc))
+            continue
+        mutant_errors = check_source(mutant)
+        if mutant_errors:
+            failures.append(
+                "harmless mutation %s was rejected (%s)"
+                % (label, "; ".join(mutant_errors))
+            )
+        elif verbose:
+            print("PASS: accepted harmless mutation %s" % label)
+
+    accepted_source_specs = [
+        ("legacy-helper comment", _add_legacy_helper_comment),
+        ("commented fake XDP function", _add_fake_xdp_function_comment),
+    ]
+    for label, mutate in accepted_source_specs:
+        harmless_source = mutate(source)
+        harmless_errors = check_source(harmless_source)
+        if harmless_errors:
+            failures.append(
+                "harmless mutation %s was rejected (%s)"
+                % (label, "; ".join(harmless_errors))
+            )
+        elif verbose:
+            print("PASS: accepted harmless mutation %s" % label)
+
+    if verbose:
+        print(
+            "Mutation scenarios: %d rejection, %d acceptance"
+            % (len(specs), len(accepted_specs) + len(accepted_source_specs))
+        )
     return failures
 
 

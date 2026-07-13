@@ -83,6 +83,125 @@ def _read_repo_text(path):
         return handle.read()
 
 
+def _blank_rust_non_code(text):
+    """Blank Rust comments and literals while preserving code and newlines."""
+    output = []
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index + 2)
+            if end < 0:
+                output.extend(" " for _ in text[index:])
+                break
+            output.extend(" " for _ in text[index:end])
+            output.append("\n")
+            index = end + 1
+            continue
+        if text.startswith("/*", index):
+            depth = 1
+            end = index + 2
+            while end < len(text) and depth:
+                if text.startswith("/*", end):
+                    depth += 1
+                    end += 2
+                elif text.startswith("*/", end):
+                    depth -= 1
+                    end += 2
+                else:
+                    end += 1
+            output.extend("\n" if char == "\n" else " " for char in text[index:end])
+            index = end
+            continue
+        raw = re.match(r'(?:b|c)?r(?P<hashes>#{0,32})"', text[index:])
+        if raw:
+            delimiter = '"' + raw.group("hashes")
+            content_start = index + raw.end()
+            close = text.find(delimiter, content_start)
+            end = len(text) if close < 0 else close + len(delimiter)
+            output.extend("\n" if char == "\n" else " " for char in text[index:end])
+            index = end
+            continue
+        if text[index] == '"':
+            end = index + 1
+            while end < len(text):
+                if text[end] == "\\":
+                    end += 2
+                    continue
+                end += 1
+                if text[end - 1] == '"':
+                    break
+            output.extend("\n" if char == "\n" else " " for char in text[index:end])
+            index = end
+            continue
+        char_literal = re.match(r"'(?:\\.|[^\\'\n])'", text[index:])
+        if char_literal:
+            end = index + char_literal.end()
+            output.extend(" " for _ in text[index:end])
+            index = end
+            continue
+        output.append(text[index])
+        index += 1
+    return "".join(output)
+
+
+ABI_DECLARATIONS = (
+    (
+        "ACL_INGRESS_HOOK_XDP",
+        re.compile(
+            r"\bpub\s+const\s+ACL_INGRESS_HOOK_XDP\s*:\s*u8\s*=\s*0\s*;"
+        ),
+    ),
+    (
+        "ACL_INGRESS_HOOK_TC",
+        re.compile(
+            r"\bpub\s+const\s+ACL_INGRESS_HOOK_TC\s*:\s*u8\s*=\s*1\s*;"
+        ),
+    ),
+    (
+        "acl_ingress_hook field",
+        re.compile(r"\bpub\s+acl_ingress_hook\s*:\s*u8\s*,"),
+    ),
+)
+
+
+def _has_acl_ingress_hook_definition(source):
+    return bool(
+        re.search(r"\bfn\s+acl_ingress_hook\s*\(", _blank_rust_non_code(source))
+    )
+
+
+def _missing_acl_ingress_abi(source):
+    code = _blank_rust_non_code(source)
+    return [label for label, pattern in ABI_DECLARATIONS if not pattern.search(code)]
+
+
+def _run_acl_ingress_parser_self_tests():
+    comment_only = """
+        // fn acl_ingress_hook(tap_id: u32) -> u8 { 0 }
+        /* pub const ACL_INGRESS_HOOK_XDP: u8 = 0;
+           pub const ACL_INGRESS_HOOK_TC: u8 = 1;
+           pub acl_ingress_hook: u8, */
+    """
+    if _has_acl_ingress_hook_definition(comment_only):
+        raise SystemExit("ERROR: eBPF boundary parser treated a comment as code")
+    if len(_missing_acl_ingress_abi(comment_only)) != len(ABI_DECLARATIONS):
+        raise SystemExit("ERROR: eBPF ABI parser accepted comment-only declarations")
+
+    formatted_runtime = "pub\nunsafe fn acl_ingress_hook ( tap_id: u32 ) -> u8 { 0 }"
+    if not _has_acl_ingress_hook_definition(formatted_runtime):
+        raise SystemExit("ERROR: eBPF boundary parser missed a formatted definition")
+
+    formatted_abi = """
+        pub
+        const ACL_INGRESS_HOOK_XDP : u8 = 0 ;
+        pub const ACL_INGRESS_HOOK_TC:u8=1;
+        pub acl_ingress_hook : u8 ,
+    """
+    if _missing_acl_ingress_abi(formatted_abi):
+        raise SystemExit("ERROR: eBPF ABI parser rejected harmless formatting")
+    print("eBPF ACL ingress parser self-tests: OK (4 scenarios)")
+
+
 def _rust_string_const(source, name):
     pattern = r'pub const %s: &str = "([^"]+)";' % re.escape(name)
     match = re.search(pattern, source)
@@ -672,19 +791,19 @@ def check_rust_stage_one_tests_present():
 
 def check_ebpf_acl_ingress_boundary():
     print("==> checking eBPF ACL ingress boundary")
+    _run_acl_ingress_parser_self_tests()
     runtime_source = _read_repo_text(EBPF_RUNTIME_PATH)
-    if re.search(r"\bfn\s+acl_ingress_hook\s*\(", runtime_source):
+    if _has_acl_ingress_hook_definition(runtime_source):
         raise SystemExit("ERROR: eBPF runtime must not expose acl_ingress_hook")
 
     for path in (CORE_COMMON_PATH, EBPF_COMMON_PATH):
         common_source = _read_repo_text(path)
-        for term in (
-            "pub const ACL_INGRESS_HOOK_XDP: u8 = 0;",
-            "pub const ACL_INGRESS_HOOK_TC: u8 = 1;",
-            "pub acl_ingress_hook: u8,",
-        ):
-            if term not in common_source:
-                raise SystemExit("ERROR: %s compatibility ABI missing %s" % (path, term))
+        missing = _missing_acl_ingress_abi(common_source)
+        if missing:
+            raise SystemExit(
+                "ERROR: %s compatibility ABI missing %s"
+                % (path, ", ".join(missing))
+            )
 
 
 def check_p3_rust_scoped_plan_boundary():
