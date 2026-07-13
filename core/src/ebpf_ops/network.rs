@@ -68,11 +68,6 @@ fn add_network_impl(
     pin_path: &str,
     acl: bool,
 ) -> Result<(), String> {
-    let prog_path = format!("{}/xdp_firewall", pin_path);
-    if !std::path::Path::new(&prog_path).exists() {
-        return Err("Firewall not started. Run 'system start' first.".to_string());
-    }
-
     let (ip, prefix_len) = parse_cidr(cidr)?;
 
     match ip {
@@ -132,11 +127,6 @@ fn delete_network_impl(
     pin_path: &str,
     acl: bool,
 ) -> Result<(), String> {
-    let prog_path = format!("{}/xdp_firewall", pin_path);
-    if !std::path::Path::new(&prog_path).exists() {
-        return Err("Firewall not started. Run 'system start' first.".to_string());
-    }
-
     let (ip, prefix_len) = parse_cidr(cidr)?;
 
     match ip {

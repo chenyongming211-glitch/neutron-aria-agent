@@ -52,6 +52,8 @@ RUST_OPENAPI_PATH = os.path.join("agent", "src", "openapi.rs")
 CORE_COMMON_PATH = os.path.join("core", "src", "common.rs")
 EBPF_COMMON_PATH = os.path.join("ebpf", "src", "common.rs")
 EBPF_RUNTIME_PATH = os.path.join("ebpf", "src", "runtime.rs")
+CORE_EBPF_NETWORK_PATH = os.path.join("core", "src", "ebpf_ops", "network.rs")
+CORE_EBPF_POLICY_PATH = os.path.join("core", "src", "ebpf_ops", "policy.rs")
 BUILD_WORKFLOW_PATH = os.path.join(".github", "workflows", "build.yml")
 KOLLA_AGENT_INI_PATH = os.path.join("deploy", "kolla", "config", "neutron-aria-agent.ini")
 KOLLA_DATAPATH_CONFIG_PATH = os.path.join(
@@ -224,6 +226,89 @@ def _run_rust_function_body_parser_self_tests():
     generic_body = _rust_function_body(generic, "execute")
     if generic_body is None or "nested_call" not in generic_body:
         raise SystemExit("ERROR: Rust function parser rejected a generic function")
+
+
+def _rust_function_body_raw(source, function_name):
+    """Extract a Rust function body while retaining literals for sentinel checks."""
+    code = _blank_rust_non_code(source)
+    match = re.search(
+        r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+%s(?:\s*<[^>{}]*>)?\s*\("
+        % re.escape(function_name),
+        code,
+    )
+    if not match:
+        return None
+    opening = code.find("{", match.end())
+    if opening < 0:
+        return None
+    depth = 1
+    index = opening + 1
+    while index < len(code) and depth:
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+        index += 1
+    if depth:
+        return None
+    return source[opening + 1:index - 1]
+
+
+def _acl_map_helper_contract_errors(source, function_name, required_map_openers):
+    body = _rust_function_body_raw(source, function_name)
+    if body is None:
+        return ["missing low-level ACL map helper %s" % function_name]
+    code = _blank_rust_non_code(body)
+    errors = []
+    if "xdp_firewall" in body or "Firewall not started" in body:
+        errors.append(
+            "%s must not use the XDP program pin as ACL/map readiness"
+            % function_name
+        )
+    for tc_marker in ("tc_ingress_link", "tc_egress_link"):
+        if tc_marker in body:
+            errors.append(
+                "%s must not duplicate agent TC lifecycle readiness via %s"
+                % (function_name, tc_marker)
+            )
+    for opener in required_map_openers:
+        if opener not in code:
+            errors.append(
+                "%s must fail closed by opening required map via %s"
+                % (function_name, opener)
+            )
+    return errors
+
+
+def _run_acl_map_helper_contract_mutation_self_tests():
+    safe = "fn helper() { open_pinned_policy_table(pin_path)?; }"
+    if _acl_map_helper_contract_errors(safe, "helper", ("open_pinned_policy_table",)):
+        raise SystemExit("ERROR: ACL map helper contract rejected XDP-independent code")
+    xdp_mutant = """
+        fn helper() {
+            let prog_path = format!("{}/xdp_firewall", pin_path);
+            if !Path::new(&prog_path).exists() { return Ok(()); }
+            open_pinned_policy_table(pin_path)?;
+        }
+    """
+    xdp_errors = _acl_map_helper_contract_errors(
+        xdp_mutant, "helper", ("open_pinned_policy_table",)
+    )
+    if not any("XDP program pin" in error for error in xdp_errors):
+        raise SystemExit("ERROR: ACL map helper contract accepted XDP sentinel mutation")
+    tc_mutant = "fn helper() { require_pin(tc_ingress_link); open_pinned_policy_table(pin_path)?; }"
+    tc_errors = _acl_map_helper_contract_errors(
+        tc_mutant, "helper", ("open_pinned_policy_table",)
+    )
+    if not any("agent TC lifecycle readiness" in error for error in tc_errors):
+        raise SystemExit("ERROR: ACL map helper contract accepted TC-link sentinel mutation")
+    missing_map = "fn helper() { do_nothing(); }"
+    missing_errors = _acl_map_helper_contract_errors(
+        missing_map, "helper", ("open_pinned_policy_table",)
+    )
+    if not any("opening required map" in error for error in missing_errors):
+        raise SystemExit("ERROR: ACL map helper contract accepted missing-map mutation")
+    print("ACL map helper XDP-independence mutation self-tests: OK (4 scenarios)")
 
 
 def _run_acl_ingress_parser_self_tests():
@@ -656,6 +741,7 @@ def check_rust_uds_contract_source():
 def check_rust_stage_one_tests_present():
     print("==> checking Rust stage-one test sources")
     _run_rust_function_body_parser_self_tests()
+    _run_acl_map_helper_contract_mutation_self_tests()
     neutron_api_source = _read_repo_text(RUST_NEUTRON_API_PATH)
     wal_source = _read_repo_text(RUST_NEUTRON_WAL_PATH)
     openapi_source = _read_repo_text(RUST_OPENAPI_PATH)
@@ -664,7 +750,32 @@ def check_rust_stage_one_tests_present():
     control_plane_source = _read_repo_text(os.path.join("agent", "src", "control_plane.rs"))
     system_manager_source = _read_repo_text(os.path.join("agent", "src", "system_manager.rs"))
     replay_source = _read_repo_text(os.path.join("core", "src", "ebpf_ops", "replay.rs"))
+    network_source = _read_repo_text(CORE_EBPF_NETWORK_PATH)
+    policy_source = _read_repo_text(CORE_EBPF_POLICY_PATH)
     tap_registry_source = _read_repo_text(os.path.join("agent", "src", "tap_registry.rs"))
+
+    helper_contracts = (
+        (network_source, "add_network_impl", ("open_pinned_lpm_v4", "open_pinned_lpm_v6")),
+        (
+            network_source,
+            "delete_network_impl",
+            ("open_pinned_lpm_v4", "open_pinned_lpm_v6"),
+        ),
+        (
+            policy_source,
+            "add_policy_in_bank",
+            ("open_pinned_port_pool", "open_pinned_policy_table"),
+        ),
+        (policy_source, "delete_policy_in_bank", ("open_pinned_policy_table",)),
+        (policy_source, "delete_port_set", ("open_pinned_port_pool",)),
+    )
+    helper_errors = []
+    for source, function_name, required_openers in helper_contracts:
+        helper_errors.extend(
+            _acl_map_helper_contract_errors(source, function_name, required_openers)
+        )
+    if helper_errors:
+        raise SystemExit("ERROR: " + "; ".join(helper_errors))
 
     required_wal_tests = [
         "replay_reports_intent_without_commit",

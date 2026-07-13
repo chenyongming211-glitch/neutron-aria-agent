@@ -133,11 +133,6 @@ pub fn add_policy_in_bank(
     _ebpf_path: &str,
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
-    let prog_path = format!("{}/xdp_firewall", pin_path);
-    if !std::path::Path::new(&prog_path).exists() {
-        return Err("Firewall not started. Run 'system start' first.".to_string());
-    }
-
     validate_policy_ports(proto, ports)?;
 
     let is_all_ports = match ports {
@@ -258,11 +253,6 @@ pub fn delete_policy_in_bank(
     _ebpf_path: &str,
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
-    let prog_path = format!("{}/xdp_firewall", pin_path);
-    if !std::path::Path::new(&prog_path).exists() {
-        return Err("Firewall not started. Run 'system start' first.".to_string());
-    }
-
     let mut policy_table = open_pinned_policy_table(pin_path)?;
 
     let bank = normalize_acl_bank(bank);
@@ -282,11 +272,6 @@ pub fn delete_port_set(
     _ebpf_path: &str,
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
-    let prog_path = format!("{}/xdp_firewall", pin_path);
-    if !std::path::Path::new(&prog_path).exists() {
-        return Ok(());
-    }
-
     let mut port_pool = open_pinned_port_pool(pin_path)?;
 
     let rules = parse_normalized_ports(ports_normalized)?;
