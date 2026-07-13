@@ -412,3 +412,30 @@ fn attach_tc_program(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instance::TcAclLinkHealth;
+
+    #[test]
+    fn standalone_acl_activation_requires_both_tc_links() {
+        assert_eq!(
+            system_acl_activation(true, true, TcAclLinkHealth::new(true, true, false)).unwrap(),
+            SystemAclActivation::Restore {
+                conntrack: true,
+                acl: true,
+            }
+        );
+        assert!(
+            system_acl_activation(true, false, TcAclLinkHealth::new(true, false, true)).is_err()
+        );
+        assert!(
+            system_acl_activation(false, true, TcAclLinkHealth::new(false, true, true)).is_err()
+        );
+        assert_eq!(
+            system_acl_activation(false, false, TcAclLinkHealth::new(false, false, false)).unwrap(),
+            SystemAclActivation::StayDisabled
+        );
+    }
+}

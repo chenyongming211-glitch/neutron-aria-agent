@@ -3567,6 +3567,14 @@ impl ControlPlane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_config_enable_requires_dual_tc_but_disable_does_not() {
+        assert!(config_update_requires_tc(Some(true), None));
+        assert!(config_update_requires_tc(None, Some(true)));
+        assert!(!config_update_requires_tc(Some(false), Some(false)));
+        assert!(!config_update_requires_tc(None, None));
+    }
     use crate::tap_registry::ManagedAttachMode;
 
     fn test_control_plane() -> ControlPlane {
