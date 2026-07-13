@@ -214,6 +214,8 @@ def check_source(source):
         'ip link show dev "${HOST_IF}"',
         'ip link show dev "${PEER_IF}"',
         'sock.bind((host,port))',
+        'math.isfinite(timeout)',
+        'timeout>0',
     ):
         if term not in preflight:
             errors.append("fail-closed fixture preflight missing %s" % term)
@@ -374,7 +376,7 @@ def check_source(source):
     if not ordered(
         observed,
         (
-            "set_trace_filter",
+            'set_trace_filter "" ""',
             'capture_acl_counters "${label}-before"',
             'run_allowed_flow "${label}"',
             'capture_acl_counters "${label}-after"',
@@ -383,6 +385,8 @@ def check_source(source):
         ),
     ):
         errors.append("allowed flow must be traced across exact before/after TC evidence")
+    if 'set_trace_filter "${PEER_IP}" "${HOST_IP}"' in observed:
+        errors.append("allowed flow trace must be instance-scoped wildcard ICMP for both TC directions")
 
     health = bodies["assert_health_poll_degrades"]
     for term in (
@@ -434,6 +438,7 @@ def check_source(source):
                 'v[7]=0',
                 "len(value)==8",
                 "value[7]==1",
+                'set_trace_filter "" ""',
                 "assert_xdp_neutral legacy-zero-before legacy-zero-after",
                 '-X PUT',
             ):
@@ -558,6 +563,7 @@ def run_mutation_self_tests(source, verbose=False):
         ("unique host interface", mutate_remove, 'HOST_IF="ah${FIXTURE_TOKEN}"', "", "fixture identity"),
         ("free loopback port", mutate_remove, 'sock.bind(("127.0.0.1",0))', "", "loopback port selection"),
         ("workdir collision preflight", mutate_remove, '[ ! -e "${WORK_DIR}" ]', "", "fixture preflight"),
+        ("positive finite shutdown timeout", mutate_remove, "math.isfinite(timeout)", "", "fixture preflight"),
         ("host interface ownership", mutate_remove, '[ "${VETH_CREATED}" = true ]', "", "fail-closed cleanup"),
         ("bpffs mount ownership", mutate_replace,
          '    if [ "${PRIVATE_BPFFS_MOUNTED}" = true ]; then\n        if ! umount',
@@ -566,6 +572,8 @@ def run_mutation_self_tests(source, verbose=False):
         ("TC egress packet evidence", mutate_remove, "assert tc_egress_packets==packets", "", "TC-only/XDP-neutral"),
         ("TC ingress byte evidence", mutate_remove, "assert tc_ingress_bytes==packets*packet_bytes", "", "TC-only/XDP-neutral"),
         ("TC egress byte evidence", mutate_remove, "assert tc_egress_bytes==packets*packet_bytes", "", "TC-only/XDP-neutral"),
+        ("bidirectional wildcard trace", mutate_replace, 'set_trace_filter "" ""',
+         'set_trace_filter "${PEER_IP}" "${HOST_IP}"', "wildcard ICMP"),
         ("exact CT byte comparison", mutate_remove, "assert after_ct_bytes-before_ct_bytes==expected_bytes", "", "TC-only/XDP-neutral"),
         ("unknown hook inference", mutate_replace, "expected_packets=packets*2",
          "unknown_hook=0\nexpected_packets=packets*2", "must not be inferred"),
