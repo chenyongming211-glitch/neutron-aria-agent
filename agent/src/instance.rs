@@ -1406,4 +1406,52 @@ mod tests {
         assert!(!tc_acl_links_complete(false, true));
         assert!(!tc_acl_links_complete(false, false));
     }
+
+    #[test]
+    fn managed_failure_path_cleanup_plan_preserves_claimed_direction() {
+        let mixed = AttachedLinks {
+            xdp: LinkOwnership::ClaimedExisting,
+            tc_egress: LinkOwnership::ClaimedExisting,
+            tc_ingress: LinkOwnership::AttachedNow,
+        };
+
+        assert_eq!(
+            rollback_link_cleanup_plan(&mixed, false),
+            vec![LinkRollbackAction::RemoveTcLinkPin("tc_ingress")]
+        );
+
+        let reversed = AttachedLinks {
+            xdp: LinkOwnership::Absent,
+            tc_egress: LinkOwnership::AttachedNow,
+            tc_ingress: LinkOwnership::ClaimedExisting,
+        };
+        assert_eq!(
+            rollback_link_cleanup_plan(&reversed, false),
+            vec![LinkRollbackAction::RemoveTcLinkPin("tc_egress")]
+        );
+    }
+
+    #[test]
+    fn managed_failure_path_cleanup_continues_after_error() {
+        let plan = vec![
+            LinkRollbackAction::RemoveXdpAttachment,
+            LinkRollbackAction::RemoveTcLinkPin("tc_egress"),
+            LinkRollbackAction::RemoveTcLinkPin("tc_ingress"),
+            LinkRollbackAction::RemoveRuntimePinPath,
+        ];
+        let mut attempted = Vec::new();
+
+        let error = execute_rollback_cleanup_plan(&plan, |action| {
+            attempted.push(action);
+            if action == LinkRollbackAction::RemoveXdpAttachment {
+                Err("forced xdp cleanup failure".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(attempted, plan);
+        assert!(error.contains("forced xdp cleanup failure"));
+    }
 }

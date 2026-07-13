@@ -455,3 +455,22 @@ impl TapRegistry {
         info!("all firewall instances detached");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_failure_path_activation_failure_blocks_both_registry_publications() {
+        assert_eq!(
+            managed_registration_publication(Err("forced activation failure".to_string())),
+            ManagedRegistrationPublication::PublishNeither(
+                "forced activation failure".to_string()
+            )
+        );
+        assert_eq!(
+            managed_registration_publication(Ok(())),
+            ManagedRegistrationPublication::PublishBoth
+        );
+    }
+}

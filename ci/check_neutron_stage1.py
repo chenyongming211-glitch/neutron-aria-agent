@@ -699,15 +699,33 @@ def check_rust_stage_one_tests_present():
         if term not in neutron_api_source:
             raise SystemExit("ERROR: Rust snapshot recovery source missing %s" % term)
 
-    for marker in (
-        'let acl_managed = domains.iter().any(|domain| domain == "acl")',
-        "state.registry.attach_neutron(&port.ifname, port_manages_acl(port)).await",
-        ".reconcile_neutron_runtime(&committed_ifaces)",
+    recovery_attach_body = _rust_function_body(neutron_api_source, "recover_intent_port")
+    snapshot_attach_body = _rust_function_body(
+        neutron_api_source, "apply_snapshot_runtime_transaction"
+    )
+    committed_runtime_body = _rust_function_body(
+        neutron_api_source, "reconcile_committed_runtime"
+    )
+    if recovery_attach_body is None or not re.search(
+        r"\blet\s+acl_managed\s*=\s*domains\s*\.\s*iter\s*\(\s*\)\s*\.\s*any\s*\(\s*\|\s*domain\s*\|\s*domain\s*==\s*[^;]+\s*\)\s*;",
+        recovery_attach_body,
     ):
-        if marker not in neutron_api_source:
-            raise SystemExit("ERROR: Neutron attach path missing %s" % marker)
-    if neutron_api_source.count(".attach_neutron(") < 2:
-        raise SystemExit("ERROR: recovery and snapshot attach must use Neutron mode")
+        raise SystemExit("ERROR: WAL recovery must derive Neutron ACL attach authority")
+    if recovery_attach_body is None or not re.search(
+        r"self\s*\.\s*registry\s*\.\s*attach_neutron\s*\(\s*&\s*port\s*\.\s*ifname\s*,\s*acl_managed\s*\)\s*\.\s*await",
+        recovery_attach_body,
+    ):
+        raise SystemExit("ERROR: WAL recovery must use Neutron attach mode")
+    if snapshot_attach_body is None or not re.search(
+        r"state\s*\.\s*registry\s*\.\s*attach_neutron\s*\(\s*&\s*port\s*\.\s*ifname\s*,\s*port_manages_acl\s*\(\s*port\s*\)\s*\)\s*\.\s*await",
+        snapshot_attach_body,
+    ):
+        raise SystemExit("ERROR: snapshot attach must use Neutron ACL authority")
+    if committed_runtime_body is None or not re.search(
+        r"self\s*\.\s*registry\s*\.\s*reconcile_neutron_runtime\s*\(\s*&\s*committed_ifaces\s*\)\s*\.\s*await",
+        committed_runtime_body,
+    ):
+        raise SystemExit("ERROR: committed runtime recovery must use registry reconciliation")
 
     required_acl_conntrack_terms = [
         "fn neutron_acl_translator_carries_conntrack_intent(",
@@ -868,6 +886,81 @@ def check_rust_stage_one_tests_present():
         build_workflow_source,
     ):
         raise SystemExit("ERROR: serialized ACL gate Rust test filter missing")
+
+    instance_source = _read_repo_text(os.path.join("agent", "src", "instance.rs"))
+    rollback_plan_body = _rust_function_body(
+        instance_source, "rollback_link_cleanup_plan"
+    )
+    if rollback_plan_body is None:
+        raise SystemExit("ERROR: ownership-specific rollback cleanup plan missing")
+    rollback_execute_body = _rust_function_body(
+        instance_source, "execute_rollback_cleanup_plan"
+    )
+    if rollback_execute_body is None:
+        raise SystemExit("ERROR: best-effort rollback cleanup executor missing")
+    rollback_body = _rust_function_body(instance_source, "rollback_attached_links")
+    if rollback_body is None or not re.search(
+        r"rollback_link_cleanup_plan\s*\(", rollback_body
+    ) or not re.search(r"execute_rollback_cleanup_plan\s*\(", rollback_body):
+        raise SystemExit("ERROR: rollback must execute the ownership cleanup plan")
+    if re.search(r"\bdetach_tc_egress\s*\(", rollback_body):
+        raise SystemExit("ERROR: transaction rollback must not delete the shared clsact qdisc")
+
+    tc_attach_body = _rust_function_body(instance_source, "try_attach_tc_from_pin")
+    if tc_attach_body is None or not re.search(
+        r"fd_link\s*\.\s*pin\s*\([^;]+\)\s*\.\s*map_err\s*\([^;]+\)\s*\?",
+        tc_attach_body,
+    ):
+        raise SystemExit("ERROR: TC link pin failure must fail the attach transaction")
+
+    strict_wal_body = _rust_function_body(control_plane_source, "wal_append_strict")
+    if strict_wal_body is None:
+        raise SystemExit("ERROR: strict managed gate WAL persistence missing")
+    persistence_recovery_body = _rust_function_body(
+        control_plane_source, "recover_gate_persistence_failure"
+    )
+    if persistence_recovery_body is None:
+        raise SystemExit("ERROR: managed gate persistence fail-closed recovery missing")
+    if not re.search(r"\.\s*wal_append_strict\s*\(", serialized_gate_body):
+        raise SystemExit("ERROR: serialized managed gate must use strict WAL persistence")
+    if not re.search(
+        r"\.\s*recover_gate_persistence_failure\s*\(", serialized_gate_body
+    ):
+        raise SystemExit("ERROR: serialized managed gate must recover persistence failure")
+
+    attach_body = _rust_function_body(tap_registry_source, "attach_with_mode")
+    activation_disposition = (attach_body or "").find(
+        "managed_registration_publication"
+    )
+    control_plane_publish = (attach_body or "").find("publish_managed_instance")
+    tap_registry_publish = (attach_body or "").find("instances.insert")
+    if (
+        activation_disposition < 0
+        or control_plane_publish < 0
+        or tap_registry_publish < 0
+        or activation_disposition > control_plane_publish
+        or activation_disposition > tap_registry_publish
+        or "ManagedRegistrationPublication::PublishNeither" not in (attach_body or "")
+    ):
+        raise SystemExit(
+            "ERROR: failed activation must publish neither managed registry"
+        )
+
+    for source, function_name in (
+        (instance_source, "managed_failure_path_cleanup_plan_preserves_claimed_direction"),
+        (instance_source, "managed_failure_path_cleanup_continues_after_error"),
+        (control_plane_source, "managed_failure_path_strict_wal_failure_propagates"),
+        (control_plane_source, "managed_failure_path_enabling_persistence_failure_quiesces"),
+        (control_plane_source, "managed_failure_path_disabling_persistence_failure_stays_disabled"),
+        (tap_registry_source, "managed_failure_path_activation_failure_blocks_both_registry_publications"),
+    ):
+        if _rust_function_body(source, function_name) is None:
+            raise SystemExit("ERROR: managed failure-path Rust test missing %s" % function_name)
+    if not re.search(
+        r"cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-agent\s+managed_failure_path_",
+        build_workflow_source,
+    ):
+        raise SystemExit("ERROR: managed failure-path Rust test filter missing")
 
     restart_runtime_match = re.search(
         r"async fn reconcile_committed_runtime\(&self\) \{(?P<body>.*?)\n    async fn recover_incomplete_wal_intent",

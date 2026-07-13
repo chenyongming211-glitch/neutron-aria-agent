@@ -3587,6 +3587,91 @@ mod tests {
         assert!(neutron_acl_gate_requires_tc(true, true));
     }
 
+    async fn stopped_wal_instance_state(test_name: &str) -> InstanceState {
+        let state_path = std::env::temp_dir().join(format!(
+            "aria-managed-failure-path-{}-{}",
+            std::process::id(),
+            test_name
+        ));
+        if state_path.exists() {
+            std::fs::remove_dir_all(&state_path).unwrap();
+        }
+        let state_path_string = state_path.to_string_lossy().into_owned();
+        let wal = WalClient::open(&state_path_string).unwrap();
+        wal.shutdown().await;
+        InstanceState {
+            state: FirewallState::default(),
+            tap_id: 7,
+            ifindex: Some(11),
+            pin_path: state_path_string.clone(),
+            state_path: state_path_string,
+            wal,
+            ssl_sync_pending: false,
+            last_ssl_sync_error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_failure_path_strict_wal_failure_propagates() {
+        let mut state = stopped_wal_instance_state("strict-wal").await;
+        let error = state
+            .wal_append_strict(&WalEntry::UpdateConfig {
+                conntrack: Some(true),
+                monitoring: None,
+                acl: Some(true),
+                qos: None,
+                mirror: None,
+                tcprt: None,
+                ssl: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("WAL append failed"));
+        assert!(error.contains("compact fallback failed"));
+    }
+
+    #[tokio::test]
+    async fn managed_failure_path_enabling_persistence_failure_quiesces() {
+        let mut state = stopped_wal_instance_state("enable-quiesce").await;
+        state.state.conntrack_enabled = true;
+        state.state.acl_enabled = true;
+        let mut kernel_writes = Vec::new();
+
+        let error = state
+            .recover_gate_persistence_failure(true, true, "forced persistence failure", |ct, acl| {
+                kernel_writes.push((ct, acl));
+                Ok(())
+            })
+            .await;
+
+        assert_eq!(kernel_writes, vec![(false, false)]);
+        assert!(!state.state.conntrack_enabled);
+        assert!(!state.state.acl_enabled);
+        assert!(matches!(error, ControlPlaneError::PersistenceError(_)));
+        assert!(error.to_string().contains("forced persistence failure"));
+    }
+
+    #[tokio::test]
+    async fn managed_failure_path_disabling_persistence_failure_stays_disabled() {
+        let mut state = stopped_wal_instance_state("disable-stays-disabled").await;
+        state.state.conntrack_enabled = false;
+        state.state.acl_enabled = false;
+        let mut kernel_write_count = 0;
+
+        let error = state
+            .recover_gate_persistence_failure(false, false, "forced persistence failure", |_, _| {
+                kernel_write_count += 1;
+                Ok(())
+            })
+            .await;
+
+        assert_eq!(kernel_write_count, 0);
+        assert!(!state.state.conntrack_enabled);
+        assert!(!state.state.acl_enabled);
+        assert!(matches!(error, ControlPlaneError::PersistenceError(_)));
+    }
+
     #[test]
     fn domain_authority_domain_labels_are_stable() {
         assert_eq!(LocalWriteDomain::Acl.as_str(), "acl");
