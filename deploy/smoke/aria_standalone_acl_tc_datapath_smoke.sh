@@ -125,7 +125,6 @@ create_netns_fixture() {
     ip link set "${HOST_IF}" up
     ip netns exec "${NETNS}" ip addr add "${PEER_IP}/30" dev "${PEER_IF}"
     ip netns exec "${NETNS}" ip addr add "${DENIED_IP}/32" dev "${PEER_IF}"
-    ip netns exec "${NETNS}" ip route add "${HOST_IP}/32" dev "${PEER_IF}" src "${DENIED_IP}"
     ip route add "${DENIED_IP}/32" dev "${HOST_IF}"
     ip netns exec "${NETNS}" ip link set lo up
     ip netns exec "${NETNS}" ip link set "${PEER_IF}" up
@@ -322,7 +321,7 @@ clear_trace_filter() {
 
 run_allowed_flow() {
     local label="${1:-allowed}"
-    ip netns exec "${NETNS}" ping -c "${ALLOWED_PACKETS}" -W 1 \
+    ip netns exec "${NETNS}" ping -I "${PEER_IP}" -c "${ALLOWED_PACKETS}" -W 1 \
         -s "${PING_PAYLOAD_BYTES}" "${HOST_IP}" >"${WORK_DIR}/${label}-flow.log"
 }
 
