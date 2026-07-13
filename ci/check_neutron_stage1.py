@@ -1139,6 +1139,7 @@ def check_rust_stage_one_tests_present():
     for test_name in (
         "standalone_review_cleanup_plan_preserves_preexisting_clsact",
         "standalone_review_cleanup_attempts_every_owned_resource",
+        "standalone_review_partial_tc_cleanup_removes_only_owned_pins",
         "standalone_review_xdp_program_pin_failure_rolls_back_owned_link",
         "standalone_review_program_pin_completeness_requires_links_and_programs",
         "standalone_review_publication_uses_approved_snapshot_not_reload",

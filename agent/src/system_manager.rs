@@ -855,6 +855,46 @@ mod tests {
     }
 
     #[test]
+    fn standalone_review_partial_tc_cleanup_removes_only_owned_pins() {
+        let pin_path = std::env::temp_dir().join(format!(
+            "aria-standalone-owned-cleanup-{}",
+            std::process::id()
+        ));
+        if pin_path.exists() {
+            std::fs::remove_dir_all(&pin_path).unwrap();
+        }
+        std::fs::create_dir_all(&pin_path).unwrap();
+        for name in [
+            "xdp_link",
+            "tc_ingress_link",
+            "tc_egress_link",
+            "unrelated_link",
+        ] {
+            std::fs::write(pin_path.join(name), b"pin").unwrap();
+        }
+        let ownership = SystemStartOwnership {
+            xdp_link: true,
+            tc_egress_link: false,
+            tc_ingress_link: true,
+            clsact: ClsactOwnership::Preexisting,
+            pin_path_created: false,
+            fq_root_qdisc: false,
+        };
+        let pin_path_string = pin_path.to_string_lossy().into_owned();
+
+        execute_system_cleanup_plan(&failed_start_cleanup_plan(&ownership), |action| {
+            execute_system_cleanup_action(action, "unused-review-iface", &pin_path_string)
+        })
+        .unwrap();
+
+        assert!(!pin_path.join("xdp_link").exists());
+        assert!(!pin_path.join("tc_ingress_link").exists());
+        assert!(pin_path.join("tc_egress_link").exists());
+        assert!(pin_path.join("unrelated_link").exists());
+        std::fs::remove_dir_all(pin_path).unwrap();
+    }
+
+    #[test]
     fn standalone_review_xdp_program_pin_failure_rolls_back_owned_link() {
         let ownership = SystemStartOwnership {
             xdp_link: true,
