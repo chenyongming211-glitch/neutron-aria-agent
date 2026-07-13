@@ -306,7 +306,7 @@ pub fn update_firewall_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        acl_runtime_gate_current_config, tap_config_with_acl_bank,
+        acl_runtime_gate_current_config, required_tap_config, tap_config_with_acl_bank,
         tap_config_with_acl_runtime_gate, tap_config_with_runtime_updates,
     };
     use crate::common::{TapConfig, ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP};
@@ -412,6 +412,61 @@ mod tests {
             error,
             "read TAP_CONFIG_MAP for tap_id 42: invalid key size 1, expected 4"
         );
+    }
+
+    #[test]
+    fn tap_runtime_config_rejects_missing_and_non_key_not_found_reads() {
+        let missing = required_tap_config(Err(MapError::KeyNotFound), 42, "partial update")
+            .unwrap_err();
+        assert_eq!(
+            missing,
+            "partial update requires initialized TAP_CONFIG_MAP for tap_id 42"
+        );
+
+        let read_error = required_tap_config(
+            Err(MapError::InvalidKeySize {
+                size: 1,
+                expected: 4,
+            }),
+            42,
+            "active bank update",
+        )
+        .unwrap_err();
+        assert_eq!(
+            read_error,
+            "active bank update read TAP_CONFIG_MAP for tap_id 42: invalid key size 1, expected 4"
+        );
+    }
+
+    #[test]
+    fn tap_runtime_partial_writes_force_tc_and_preserve_unrelated_fields() {
+        let current = TapConfig {
+            conntrack_enabled: 1,
+            monitoring_enabled: 0,
+            acl_enabled: 1,
+            qos_enabled: 1,
+            mirror_enabled: 1,
+            tcprt_enabled: 0,
+            acl_active_bank: 1,
+            acl_ingress_hook: ACL_INGRESS_HOOK_XDP,
+        };
+        let next = tap_config_with_runtime_updates(
+            current,
+            None,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(next.conntrack_enabled, 1);
+        assert_eq!(next.monitoring_enabled, 1);
+        assert_eq!(next.acl_enabled, 1);
+        assert_eq!(next.qos_enabled, 1);
+        assert_eq!(next.mirror_enabled, 1);
+        assert_eq!(next.tcprt_enabled, 0);
+        assert_eq!(next.acl_active_bank, 1);
+        assert_eq!(next.acl_ingress_hook, ACL_INGRESS_HOOK_TC);
     }
 }
 

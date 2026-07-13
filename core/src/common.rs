@@ -475,13 +475,13 @@ mod tests {
     }
 
     #[test]
-    fn acl_ingress_hook_reuses_tap_config_padding_without_abi_change() {
+    fn acl_ingress_hook_byte_is_abi_only_and_normalizes_to_tc() {
         assert_eq!(core::mem::size_of::<TapConfig>(), 8);
         assert_eq!(ACL_INGRESS_HOOK_XDP, 0);
         assert_eq!(ACL_INGRESS_HOOK_TC, 1);
-        assert_eq!(normalize_acl_ingress_hook(0), ACL_INGRESS_HOOK_XDP);
+        assert_eq!(normalize_acl_ingress_hook(0), ACL_INGRESS_HOOK_TC);
         assert_eq!(normalize_acl_ingress_hook(1), ACL_INGRESS_HOOK_TC);
-        assert_eq!(normalize_acl_ingress_hook(255), ACL_INGRESS_HOOK_XDP);
+        assert_eq!(normalize_acl_ingress_hook(255), ACL_INGRESS_HOOK_TC);
     }
 
     #[test]
