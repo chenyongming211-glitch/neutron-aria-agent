@@ -35,11 +35,14 @@ RUST_TESTS = [
 
 
 SMOKE_DIR = os.path.join("deploy", "kolla", "smoke")
+STANDALONE_TC_ACL_SMOKE_PATH = os.path.join(
+    "deploy", "smoke", "aria_standalone_acl_tc_datapath_smoke.sh"
+)
 SMOKE_SYNTAX = sorted(
     os.path.join(SMOKE_DIR, name)
     for name in os.listdir(os.path.join(ROOT, SMOKE_DIR))
     if name.endswith(".sh")
-)
+) + [STANDALONE_TC_ACL_SMOKE_PATH]
 
 UDS_CONTRACT_PATH = os.path.join("docs", "neutron-uds-contract.json")
 P3_RUST_SCOPED_PLAN_PATH = os.path.join(
@@ -2174,6 +2177,7 @@ def main():
     run([sys.executable, os.path.join("ci", "check_tc_acl_datapath.py")])
     check_ebpf_acl_ingress_boundary()
     run([sys.executable, os.path.join("ci", "check_tc_acl_smoke.py")])
+    run([sys.executable, os.path.join("ci", "check_standalone_tc_acl_smoke.py")])
     check_smoke_timeout_contract()
     check_tc_acl_datapath_smoke_contract()
     run_smoke_syntax()
