@@ -1,9 +1,9 @@
 use crate::common::{
-    acl_banked_tap_id, normalize_acl_bank, normalize_acl_ingress_hook, CtConfig, CtContractKey,
-    CtContractValue, CtKey4, CtKey6, FirewallConfig, FlowStatsValue, GlobalMirrorKey,
-    GroupStatsKey, GroupStatsValue, IfaceCtx, MirrorConfig, MirrorKey, MirrorStatsValue, PolicyKey,
-    PolicyValue, PortKey, QosConfig, QosKey, QosStatsValue, RuleStatsValue, TapConfig,
-    TapMapRuntime, TokenBucket, ACL_BANK_PRIMARY, ACL_INGRESS_HOOK_XDP, TAP_ID_UNASSIGNED,
+    acl_banked_tap_id, normalize_acl_bank, CtConfig, CtContractKey, CtContractValue, CtKey4, CtKey6,
+    FirewallConfig, FlowStatsValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue, IfaceCtx,
+    MirrorConfig, MirrorKey, MirrorStatsValue, PolicyKey, PolicyValue, PortKey, QosConfig, QosKey,
+    QosStatsValue, RuleStatsValue, TapConfig, TapMapRuntime, TokenBucket, ACL_BANK_PRIMARY,
+    ACL_INGRESS_HOOK_TC, TAP_ID_UNASSIGNED,
 };
 use crate::state::FirewallState;
 use aya::maps::lpm_trie::Key;
