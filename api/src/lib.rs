@@ -600,7 +600,7 @@ pub struct InstanceInfo {
     /// Managed instance or tap name.
     #[schema(example = "eth0")]
     pub name: String,
-    /// Whether the instance currently has active data plane programs attached.
+    /// Whether the instance remains registered, independently of link health.
     #[schema(example = true)]
     pub active: bool,
     /// Whether desired ACL/CT enforcement has a complete dual-TC runtime and published gate.
