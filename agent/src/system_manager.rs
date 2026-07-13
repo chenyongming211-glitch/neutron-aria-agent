@@ -7,8 +7,9 @@ use tracing::{info, warn};
 
 use aria_core::common::TapMapRuntime;
 use aria_core::ebpf_ops::{
-    cleanup_root_qdisc, critical_network_map_names, ensure_fq_qdisc, replay_state,
-    scrub_standalone_runtime_state, FqQdiscState, TraceMapMode, NETWORK_MAP_NAMES,
+    cleanup_root_qdisc, critical_network_map_names, ensure_fq_qdisc,
+    replay_state_from_snapshot, scrub_standalone_runtime_state, FqQdiscState, TraceMapMode,
+    NETWORK_MAP_NAMES,
 };
 
 const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
@@ -26,55 +27,83 @@ enum ClsactOwnership {
     Created,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct SystemStartOwnership {
     xdp_link: bool,
     tc_egress_link: bool,
     tc_ingress_link: bool,
     clsact: ClsactOwnership,
-    pin_path_created: bool,
+    owned_map_pins: Vec<PathBuf>,
+    owned_program_pins: Vec<PathBuf>,
+    owned_link_pins: Vec<PathBuf>,
+    owned_runtime_dirs: Vec<PathBuf>,
     fq_root_qdisc: bool,
 }
 
 impl SystemStartOwnership {
-    fn new(pin_path_created: bool) -> Self {
+    fn new(_pin_path_created: bool) -> Self {
         Self {
             xdp_link: false,
             tc_egress_link: false,
             tc_ingress_link: false,
             clsact: ClsactOwnership::Absent,
-            pin_path_created,
+            owned_map_pins: Vec::new(),
+            owned_program_pins: Vec::new(),
+            owned_link_pins: Vec::new(),
+            owned_runtime_dirs: Vec::new(),
             fq_root_qdisc: false,
         }
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum SystemCleanupAction {
-    RemoveXdpLink,
-    RemoveTcLink(&'static str),
+    RemoveOwnedPin(PathBuf),
     RemoveOwnedClsact,
-    RemoveRuntimePinPath,
+    RemoveOwnedRuntimeDirectory(PathBuf),
 }
 
 fn failed_start_cleanup_plan(ownership: &SystemStartOwnership) -> Vec<SystemCleanupAction> {
     let mut plan = Vec::new();
-    if ownership.xdp_link {
-        plan.push(SystemCleanupAction::RemoveXdpLink);
-    }
-    if ownership.tc_egress_link {
-        plan.push(SystemCleanupAction::RemoveTcLink("tc_egress"));
-    }
-    if ownership.tc_ingress_link {
-        plan.push(SystemCleanupAction::RemoveTcLink("tc_ingress"));
+    for path in ownership
+        .owned_link_pins
+        .iter()
+        .chain(ownership.owned_program_pins.iter())
+        .chain(ownership.owned_map_pins.iter())
+    {
+        plan.push(SystemCleanupAction::RemoveOwnedPin(path.clone()));
     }
     if ownership.clsact == ClsactOwnership::Created {
         plan.push(SystemCleanupAction::RemoveOwnedClsact);
     }
-    if ownership.pin_path_created {
-        plan.push(SystemCleanupAction::RemoveRuntimePinPath);
+    for path in ownership.owned_runtime_dirs.iter().rev() {
+        plan.push(SystemCleanupAction::RemoveOwnedRuntimeDirectory(path.clone()));
     }
     plan
+}
+
+fn owned_program_pin(
+    ownership: &SystemStartOwnership,
+    program: &str,
+) -> Option<SystemCleanupAction> {
+    ownership
+        .owned_program_pins
+        .iter()
+        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(program))
+        .cloned()
+        .map(SystemCleanupAction::RemoveOwnedPin)
+}
+
+fn owned_link_pin(
+    ownership: &SystemStartOwnership,
+    link: &str,
+) -> Option<SystemCleanupAction> {
+    ownership
+        .owned_link_pins
+        .iter()
+        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(link))
+        .cloned()
+        .map(SystemCleanupAction::RemoveOwnedPin)
 }
 
 fn unbacked_program_link_cleanup_plan(
@@ -83,13 +112,27 @@ fn unbacked_program_link_cleanup_plan(
 ) -> Vec<SystemCleanupAction> {
     let mut plan = Vec::new();
     if ownership.xdp_link && !program_health.xdp {
-        plan.push(SystemCleanupAction::RemoveXdpLink);
+        if let Some(action) = owned_link_pin(ownership, "xdp_link") {
+            plan.push(action);
+        }
     }
     if ownership.tc_egress_link && !program_health.egress {
-        plan.push(SystemCleanupAction::RemoveTcLink("tc_egress"));
+        if let Some(action) = owned_link_pin(ownership, "tc_egress_link") {
+            plan.push(action);
+        }
+    } else if !ownership.tc_egress_link && program_health.egress {
+        if let Some(action) = owned_program_pin(ownership, "tc_egress") {
+            plan.push(action);
+        }
     }
     if ownership.tc_ingress_link && !program_health.ingress {
-        plan.push(SystemCleanupAction::RemoveTcLink("tc_ingress"));
+        if let Some(action) = owned_link_pin(ownership, "tc_ingress_link") {
+            plan.push(action);
+        }
+    } else if !ownership.tc_ingress_link && program_health.ingress {
+        if let Some(action) = owned_program_pin(ownership, "tc_ingress") {
+            plan.push(action);
+        }
     }
     plan
 }
@@ -103,7 +146,7 @@ where
 {
     let mut errors = Vec::new();
     for action in plan {
-        if let Err(error) = cleanup(*action) {
+        if let Err(error) = cleanup(action.clone()) {
             errors.push(error);
         }
     }
@@ -112,6 +155,65 @@ where
     } else {
         Err(errors.join("; "))
     }
+}
+
+fn missing_runtime_directories(path: &Path) -> Vec<PathBuf> {
+    let mut missing = Vec::new();
+    let mut cursor = Some(path);
+    while let Some(current) = cursor {
+        if current.exists() {
+            break;
+        }
+        missing.push(current.to_path_buf());
+        cursor = current.parent();
+    }
+    missing.reverse();
+    missing
+}
+
+fn cleanup_empty_runtime_directories(paths: &[PathBuf]) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for path in paths.iter().rev() {
+        if !path.exists() {
+            continue;
+        }
+        if let Err(error) = fs::remove_dir(path) {
+            errors.push(format!(
+                "failed to remove transaction-created runtime directory {}: {}",
+                path.display(),
+                error
+            ));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn create_runtime_pin_directories_with<F>(
+    path: &Path,
+    create: F,
+) -> Result<Vec<PathBuf>, String>
+where
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
+    let owned_directories = missing_runtime_directories(path);
+    match create(path) {
+        Ok(()) => Ok(owned_directories),
+        Err(error) => match cleanup_empty_runtime_directories(&owned_directories) {
+            Ok(()) => Err(format!("Failed to create pin directory: {}", error)),
+            Err(cleanup_error) => Err(format!(
+                "Failed to create pin directory: {}; partial directory cleanup failed: {}",
+                error, cleanup_error
+            )),
+        },
+    }
+}
+
+fn create_runtime_pin_directories(path: &Path) -> Result<Vec<PathBuf>, String> {
+    create_runtime_pin_directories_with(path, fs::create_dir_all)
 }
 
 fn system_acl_activation(
@@ -223,20 +325,20 @@ fn remove_owned_clsact(iface: &str) -> Result<(), String> {
 fn execute_system_cleanup_action(
     action: SystemCleanupAction,
     iface: &str,
-    pin_path: &str,
+    _pin_path: &str,
 ) -> Result<(), String> {
     match action {
-        SystemCleanupAction::RemoveXdpLink => {
-            remove_pin_file_if_present(&Path::new(pin_path).join("xdp_link"))
-        }
-        SystemCleanupAction::RemoveTcLink(program) => {
-            remove_pin_file_if_present(&Path::new(pin_path).join(format!("{}_link", program)))
-        }
+        SystemCleanupAction::RemoveOwnedPin(path) => remove_pin_file_if_present(&path),
         SystemCleanupAction::RemoveOwnedClsact => remove_owned_clsact(iface),
-        SystemCleanupAction::RemoveRuntimePinPath => {
-            if Path::new(pin_path).exists() {
-                fs::remove_dir_all(pin_path)
-                    .map_err(|e| format!("failed to remove owned runtime pin path: {}", e))?;
+        SystemCleanupAction::RemoveOwnedRuntimeDirectory(path) => {
+            if path.exists() {
+                fs::remove_dir(&path).map_err(|e| {
+                    format!(
+                        "failed to remove owned runtime directory {}: {}",
+                        path.display(),
+                        e
+                    )
+                })?;
             }
             Ok(())
         }
@@ -300,15 +402,20 @@ fn pin_runtime_maps(
     bpf: &mut aya::Ebpf,
     pin_path: &str,
     trace_map_mode: TraceMapMode,
+    ownership: &mut SystemStartOwnership,
 ) -> Result<(), String> {
     let critical_map_names = critical_network_map_names(trace_map_mode);
     for name in NETWORK_MAP_NAMES {
         if let Some(map) = bpf.map_mut(name) {
-            if let Err(e) = map.pin(format!("{}/{}", pin_path, name)) {
+            let target = Path::new(pin_path).join(name);
+            let target_preexisting = target.exists();
+            if let Err(e) = map.pin(&target) {
                 if critical_map_names.contains(name) {
                     return Err(format!("failed to pin critical map {}: {}", name, e));
                 }
                 warn!(map = %name, error = %e, "failed to pin runtime map");
+            } else if !target_preexisting {
+                ownership.owned_map_pins.push(target);
             }
         } else if critical_map_names.contains(name) {
             return Err(format!("critical map {} not found", name));
@@ -321,17 +428,23 @@ fn pin_runtime_programs(
     bpf: &mut aya::Ebpf,
     pin_path: &str,
     require_tc_acl: bool,
+    ownership: &mut SystemStartOwnership,
 ) -> TcAclLinkHealth {
     let mut ingress = false;
     let mut egress = false;
     let mut xdp = false;
     for name in &["xdp_firewall", "tc_egress", "tc_ingress"] {
+        let target = Path::new(pin_path).join(name);
+        let target_preexisting = target.exists();
         let result = match bpf.program_mut(name) {
             Some(program) => program
-                .pin(format!("{}/{}", pin_path, name))
+                .pin(&target)
                 .map_err(|e| format!("Failed to pin program {}: {:?}", name, e)),
             None => Err(format!("Program {} not found", name)),
         };
+        if result.is_ok() && !target_preexisting {
+            ownership.owned_program_pins.push(target);
+        }
         match (*name, result) {
             ("xdp_firewall", Ok(())) => xdp = true,
             ("tc_ingress", Ok(())) => ingress = true,
@@ -397,8 +510,8 @@ pub async fn system_start(
     control_plane: Arc<ControlPlane>,
 ) -> Result<(), String> {
     let _lifecycle_guard = control_plane.lock_runtime_lifecycle().await;
-    let mut ownership = SystemStartOwnership::new(!Path::new(pin_path).exists());
-    fs::create_dir_all(pin_path).map_err(|e| format!("Failed to create pin directory: {}", e))?;
+    let mut ownership = SystemStartOwnership::new(false);
+    ownership.owned_runtime_dirs = create_runtime_pin_directories(Path::new(pin_path))?;
     if let Err(error) = fs::create_dir_all(state_path) {
         return Err(start_error_with_cleanup(
             format!("Failed to create state directory: {}", error),
@@ -441,7 +554,7 @@ pub async fn system_start(
 
     // Pin all maps before attaching any programs so replay can rebuild runtime state
     // before packets hit the dataplane.
-    if let Err(e) = pin_runtime_maps(&mut bpf, pin_path, trace_map_mode) {
+    if let Err(e) = pin_runtime_maps(&mut bpf, pin_path, trace_map_mode, &mut ownership) {
         return Err(start_error_with_cleanup(
             e,
             iface,
@@ -493,7 +606,7 @@ pub async fn system_start(
     let desired_acl = desired.acl_enabled;
 
     // Replay state
-    if let Err(e) = replay_state(&mut bpf, state_path) {
+    if let Err(e) = replay_state_from_snapshot(&mut bpf, state_path, &desired) {
         return Err(start_error_with_cleanup(
             format!("failed to replay state: {}", e),
             iface,
@@ -544,8 +657,15 @@ pub async fn system_start(
         }
     }
 
+    let xdp_link_pin = Path::new(pin_path).join("xdp_link");
+    let xdp_link_preexisting = xdp_link_pin.exists();
     match attach_xdp_program(&mut bpf, iface, pin_path) {
-        Ok(()) => ownership.xdp_link = true,
+        Ok(()) => {
+            ownership.xdp_link = true;
+            if !xdp_link_preexisting {
+                ownership.owned_link_pins.push(xdp_link_pin);
+            }
+        }
         Err(error) => {
             warn!(iface = %iface, error = %error, "XDP DDoS hook unavailable; continuing with TC ACL");
         }
@@ -558,6 +678,8 @@ pub async fn system_start(
         }
     }
     if ownership.clsact != ClsactOwnership::Absent {
+        let tc_egress_link_pin = Path::new(pin_path).join("tc_egress_link");
+        let tc_egress_link_preexisting = tc_egress_link_pin.exists();
         match attach_tc_program(
             &mut bpf,
             "tc_egress",
@@ -565,12 +687,19 @@ pub async fn system_start(
             aya::programs::tc::TcAttachType::Egress,
             pin_path,
         ) {
-            Ok(()) => ownership.tc_egress_link = true,
+            Ok(()) => {
+                ownership.tc_egress_link = true;
+                if !tc_egress_link_preexisting {
+                    ownership.owned_link_pins.push(tc_egress_link_pin);
+                }
+            }
             Err(error) => {
                 warn!(iface = %iface, error = %error, "TC egress attach failed; egress control disabled");
             }
         }
 
+        let tc_ingress_link_pin = Path::new(pin_path).join("tc_ingress_link");
+        let tc_ingress_link_preexisting = tc_ingress_link_pin.exists();
         match attach_tc_program(
             &mut bpf,
             "tc_ingress",
@@ -578,15 +707,24 @@ pub async fn system_start(
             aya::programs::tc::TcAttachType::Ingress,
             pin_path,
         ) {
-            Ok(()) => ownership.tc_ingress_link = true,
+            Ok(()) => {
+                ownership.tc_ingress_link = true;
+                if !tc_ingress_link_preexisting {
+                    ownership.owned_link_pins.push(tc_ingress_link_pin);
+                }
+            }
             Err(error) => {
                 warn!(iface = %iface, error = %error, "TC ingress attach failed; ingress mirror disabled");
             }
         }
     }
 
-    let program_health =
-        pin_runtime_programs(&mut bpf, pin_path, desired_conntrack || desired_acl);
+    let program_health = pin_runtime_programs(
+        &mut bpf,
+        pin_path,
+        desired_conntrack || desired_acl,
+        &mut ownership,
+    );
     let split_cleanup = unbacked_program_link_cleanup_plan(&ownership, program_health);
     if let Err(error) = execute_system_cleanup_plan(&split_cleanup, |action| {
         execute_system_cleanup_action(action, iface, pin_path)
@@ -678,11 +816,10 @@ pub async fn system_stop(
     let mut errors = Vec::new();
     match sm.get_attached_iface() {
         Ok(Some(iface)) => {
-            let plan = [
-                SystemCleanupAction::RemoveXdpLink,
-                SystemCleanupAction::RemoveTcLink("tc_egress"),
-                SystemCleanupAction::RemoveTcLink("tc_ingress"),
-            ];
+            let plan = ["xdp_link", "tc_egress_link", "tc_ingress_link"]
+                .into_iter()
+                .map(|name| SystemCleanupAction::RemoveOwnedPin(Path::new(pin_path).join(name)))
+                .collect::<Vec<_>>();
             if let Err(error) = execute_system_cleanup_plan(&plan, |action| {
                 execute_system_cleanup_action(action, &iface, pin_path)
             }) {
@@ -704,11 +841,38 @@ pub async fn system_stop(
         }
     }
 
+    let runtime_pin_plan = [
+        "xdp_link",
+        "tc_egress_link",
+        "tc_ingress_link",
+        "xdp_firewall",
+        "tc_egress",
+        "tc_ingress",
+    ]
+        .into_iter()
+        .chain(NETWORK_MAP_NAMES.iter().copied())
+        .map(|name| SystemCleanupAction::RemoveOwnedPin(Path::new(pin_path).join(name)))
+        .collect::<Vec<_>>();
+    if let Err(error) = execute_system_cleanup_plan(&runtime_pin_plan, |action| {
+        execute_system_cleanup_action(action, "system", pin_path)
+    }) {
+        errors.push(error);
+    }
+
     if Path::new(pin_path).exists() {
-        if let Err(error) = fs::remove_dir_all(pin_path) {
-            errors.push(format!("failed to remove pin directory: {}", error));
+        match fs::read_dir(pin_path) {
+            Ok(mut entries) if entries.next().is_none() => {
+                if let Err(error) = fs::remove_dir(pin_path) {
+                    errors.push(format!("failed to remove empty pin directory: {}", error));
+                }
+            }
+            Ok(_) => {
+                info!(pin_path = %pin_path, "preserving non-empty runtime pin directory after exact pin cleanup");
+            }
+            Err(error) => {
+                errors.push(format!("failed to inspect pin directory: {}", error));
+            }
         }
-        info!(pin_path = %pin_path, "removed pinned maps and programs");
     }
 
     // Always publish the stop attempt, while returning any detach/degraded error.
@@ -795,36 +959,31 @@ mod tests {
 
     #[test]
     fn standalone_review_cleanup_plan_preserves_preexisting_clsact() {
-        let ownership = SystemStartOwnership {
-            xdp_link: true,
-            tc_egress_link: false,
-            tc_ingress_link: true,
-            clsact: ClsactOwnership::Preexisting,
-            pin_path_created: false,
-            fq_root_qdisc: false,
-        };
+        let xdp = PathBuf::from("/review/xdp_link");
+        let ingress = PathBuf::from("/review/tc_ingress_link");
+        let mut ownership = SystemStartOwnership::new(false);
+        ownership.xdp_link = true;
+        ownership.tc_ingress_link = true;
+        ownership.clsact = ClsactOwnership::Preexisting;
+        ownership.owned_link_pins = vec![xdp.clone(), ingress.clone()];
 
         assert_eq!(
             failed_start_cleanup_plan(&ownership),
             vec![
-                SystemCleanupAction::RemoveXdpLink,
-                SystemCleanupAction::RemoveTcLink("tc_ingress"),
+                SystemCleanupAction::RemoveOwnedPin(xdp),
+                SystemCleanupAction::RemoveOwnedPin(ingress),
             ]
         );
 
-        let created = SystemStartOwnership {
-            xdp_link: false,
-            tc_egress_link: false,
-            tc_ingress_link: false,
-            clsact: ClsactOwnership::Created,
-            pin_path_created: true,
-            fq_root_qdisc: false,
-        };
+        let runtime_dir = PathBuf::from("/review/runtime");
+        let mut created = SystemStartOwnership::new(false);
+        created.clsact = ClsactOwnership::Created;
+        created.owned_runtime_dirs.push(runtime_dir.clone());
         assert_eq!(
             failed_start_cleanup_plan(&created),
             vec![
                 SystemCleanupAction::RemoveOwnedClsact,
-                SystemCleanupAction::RemoveRuntimePinPath,
+                SystemCleanupAction::RemoveOwnedRuntimeDirectory(runtime_dir),
             ]
         );
     }
@@ -832,17 +991,17 @@ mod tests {
     #[test]
     fn standalone_review_cleanup_attempts_every_owned_resource() {
         let plan = vec![
-            SystemCleanupAction::RemoveXdpLink,
-            SystemCleanupAction::RemoveTcLink("tc_egress"),
-            SystemCleanupAction::RemoveTcLink("tc_ingress"),
+            SystemCleanupAction::RemoveOwnedPin(PathBuf::from("/review/xdp_link")),
+            SystemCleanupAction::RemoveOwnedPin(PathBuf::from("/review/tc_egress_link")),
+            SystemCleanupAction::RemoveOwnedPin(PathBuf::from("/review/tc_ingress_link")),
             SystemCleanupAction::RemoveOwnedClsact,
-            SystemCleanupAction::RemoveRuntimePinPath,
+            SystemCleanupAction::RemoveOwnedRuntimeDirectory(PathBuf::from("/review/runtime")),
         ];
         let mut attempted = Vec::new();
 
         let error = execute_system_cleanup_plan(&plan, |action| {
-            attempted.push(action);
-            if action == SystemCleanupAction::RemoveXdpLink {
+            attempted.push(action.clone());
+            if action == SystemCleanupAction::RemoveOwnedPin(PathBuf::from("/review/xdp_link")) {
                 Err("forced XDP cleanup failure".to_string())
             } else {
                 Ok(())
@@ -872,14 +1031,12 @@ mod tests {
         ] {
             std::fs::write(pin_path.join(name), b"pin").unwrap();
         }
-        let ownership = SystemStartOwnership {
-            xdp_link: true,
-            tc_egress_link: false,
-            tc_ingress_link: true,
-            clsact: ClsactOwnership::Preexisting,
-            pin_path_created: false,
-            fq_root_qdisc: false,
-        };
+        let mut ownership = SystemStartOwnership::new(false);
+        ownership.xdp_link = true;
+        ownership.tc_ingress_link = true;
+        ownership.clsact = ClsactOwnership::Preexisting;
+        ownership.owned_link_pins =
+            vec![pin_path.join("xdp_link"), pin_path.join("tc_ingress_link")];
         let pin_path_string = pin_path.to_string_lossy().into_owned();
 
         execute_system_cleanup_plan(&failed_start_cleanup_plan(&ownership), |action| {
@@ -896,21 +1053,20 @@ mod tests {
 
     #[test]
     fn standalone_review_xdp_program_pin_failure_rolls_back_owned_link() {
-        let ownership = SystemStartOwnership {
-            xdp_link: true,
-            tc_egress_link: true,
-            tc_ingress_link: true,
-            clsact: ClsactOwnership::Preexisting,
-            pin_path_created: false,
-            fq_root_qdisc: false,
-        };
+        let xdp_link = PathBuf::from("/review/xdp_link");
+        let mut ownership = SystemStartOwnership::new(false);
+        ownership.xdp_link = true;
+        ownership.tc_egress_link = true;
+        ownership.tc_ingress_link = true;
+        ownership.clsact = ClsactOwnership::Preexisting;
+        ownership.owned_link_pins.push(xdp_link.clone());
 
         assert_eq!(
             unbacked_program_link_cleanup_plan(
                 &ownership,
                 TcAclLinkHealth::new(true, true, false),
             ),
-            vec![SystemCleanupAction::RemoveXdpLink]
+            vec![SystemCleanupAction::RemoveOwnedPin(xdp_link)]
         );
     }
 
@@ -979,14 +1135,14 @@ mod tests {
             std::fs::remove_dir_all(&pin_path).unwrap();
         }
         std::fs::create_dir_all(&pin_path).unwrap();
-        let program_pin = pin_path.join("xdp_firewall");
+        let program_pin = pin_path.join("tc_ingress");
         std::fs::write(&program_pin, b"pin").unwrap();
 
         let mut ownership = SystemStartOwnership::new(false);
         ownership.owned_program_pins.push(program_pin.clone());
         let plan = unbacked_program_link_cleanup_plan(
             &ownership,
-            TcAclLinkHealth::new(true, true, true),
+            TcAclLinkHealth::new(true, false, true),
         );
         assert_eq!(
             plan,

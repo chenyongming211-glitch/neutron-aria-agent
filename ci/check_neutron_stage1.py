@@ -663,6 +663,7 @@ def check_rust_stage_one_tests_present():
     build_workflow_source = _read_repo_text(BUILD_WORKFLOW_PATH)
     control_plane_source = _read_repo_text(os.path.join("agent", "src", "control_plane.rs"))
     system_manager_source = _read_repo_text(os.path.join("agent", "src", "system_manager.rs"))
+    replay_source = _read_repo_text(os.path.join("core", "src", "ebpf_ops", "replay.rs"))
     tap_registry_source = _read_repo_text(os.path.join("agent", "src", "tap_registry.rs"))
 
     required_wal_tests = [
@@ -998,7 +999,9 @@ def check_rust_stage_one_tests_present():
     if system_start_body is None:
         raise SystemExit("ERROR: standalone system_start body missing")
     desired_load = system_start_body.find("aria_core::wal::load_with_wal(state_path)")
-    replay = system_start_body.find("replay_state(&mut bpf, state_path)")
+    replay = system_start_body.find(
+        "replay_state_from_snapshot(&mut bpf, state_path, &desired)"
+    )
     quiesce = system_start_body.find("aria_core::ebpf_ops::update_firewall_config(")
     xdp_attach = system_start_body.find("attach_xdp_program(&mut bpf, iface, pin_path)")
     activation = system_start_body.find("system_acl_activation(")
@@ -1009,6 +1012,21 @@ def check_rust_stage_one_tests_present():
         raise SystemExit(
             "ERROR: standalone startup must load desired state, replay, quiesce, attach, decide TC, then register"
         )
+    if system_start_body.count("aria_core::wal::load_with_wal(state_path)") != 1:
+        raise SystemExit("ERROR: standalone startup must approve exactly one WAL snapshot")
+    if "replay_state(&mut bpf, state_path)" in system_start_body:
+        raise SystemExit("ERROR: standalone startup must not replay from a second path load")
+    replay_snapshot_body = _rust_function_body(
+        replay_source, "replay_state_from_snapshot"
+    )
+    if replay_snapshot_body is None or "load_with_wal" in replay_snapshot_body:
+        raise SystemExit("ERROR: snapshot replay must consume the caller-approved state object")
+    replay_wrapper_body = _rust_function_body(replay_source, "replay_state")
+    if replay_wrapper_body is None or not all(
+        marker in replay_wrapper_body
+        for marker in ("load_with_wal", "replay_state_from_snapshot")
+    ):
+        raise SystemExit("ERROR: path-based replay compatibility wrapper is missing")
     if not re.search(
         r"TapMapRuntime\s*::\s*new\s*\(\s*pin_path\s*,\s*aria_core\s*::\s*common\s*::\s*TAP_ID_UNASSIGNED\s*\)\s*,\s*Some\s*\(\s*false\s*\)\s*,\s*None\s*,\s*Some\s*\(\s*false\s*\)",
         system_start_body[quiesce:xdp_attach],
@@ -1021,7 +1039,8 @@ def check_rust_stage_one_tests_present():
     for marker in (
         "ownership.tc_egress_link = true",
         "ownership.tc_ingress_link = true",
-        "pin_runtime_programs(&mut bpf, pin_path, desired_conntrack || desired_acl)",
+        "pin_runtime_programs(",
+        "&mut ownership",
         "unbacked_program_link_cleanup_plan(&ownership, program_health)",
     ):
         if marker not in system_start_body:
@@ -1050,6 +1069,20 @@ def check_rust_stage_one_tests_present():
         raise SystemExit("ERROR: standalone ownership cleanup plan/executor missing")
     if "ClsactOwnership::Created" not in cleanup_plan_body:
         raise SystemExit("ERROR: standalone cleanup must remove only owned clsact")
+    for marker in (
+        "owned_map_pins",
+        "owned_program_pins",
+        "owned_link_pins",
+        "RemoveOwnedPin",
+        "owned_runtime_dirs",
+    ):
+        if marker not in system_manager_source:
+            raise SystemExit("ERROR: standalone per-resource ownership missing %s" % marker)
+    partial_dir_body = _rust_function_body(
+        system_manager_source, "create_runtime_pin_directories_with"
+    )
+    if partial_dir_body is None or "cleanup_empty_runtime_directories" not in partial_dir_body:
+        raise SystemExit("ERROR: partial runtime directory creation must be rolled back")
     system_stop_body = _rust_function_body(system_manager_source, "system_stop")
     if system_stop_body is None or "lock_runtime_lifecycle().await" not in system_stop_body:
         raise SystemExit("ERROR: standalone stop must hold the shared lifecycle lock")
@@ -1126,9 +1159,19 @@ def check_rust_stage_one_tests_present():
         "lock_runtime_lifecycle().await",
         "rollback_owned_acl_prepublication(",
         "rollback_shared_network_mutations(",
+        "transaction_created_port_sets(",
+        "cleanup_transaction_created_port_sets(",
     ):
         if marker not in replace_acl_body:
             raise SystemExit("ERROR: ACL bank rollback/lifecycle contract missing %s" % marker)
+    persistence_cleanup = replace_acl_body.find(
+        "cleanup_transaction_created_port_sets(", bank_publish
+    )
+    allocation_restore = replace_acl_body.find("state.state = old_state", bank_publish)
+    if not (bank_publish < persistence_cleanup < allocation_restore):
+        raise SystemExit(
+            "ERROR: ACL persistence rollback must clean created port sets before restoring allocation metadata"
+        )
     tap_code = _blank_rust_non_code(tap_registry_source)
     if re.search(r"\bruntime_lock\s*:", tap_code):
         raise SystemExit("ERROR: TapRegistry must use the ControlPlane lifecycle lock")

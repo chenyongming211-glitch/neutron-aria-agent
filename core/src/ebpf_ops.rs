@@ -37,7 +37,7 @@ pub use policy::{
     add_policy, add_policy_in_bank, delete_policy, delete_policy_in_bank, delete_port_set,
     parse_ports, validate_policy_ports,
 };
-pub use replay::{replay_state, replay_state_to_pinned_maps};
+pub use replay::{replay_state, replay_state_from_snapshot, replay_state_to_pinned_maps};
 pub use runtime::{
     clear_iface_ctx, delete_tap_config, read_acl_active_bank, read_firewall_config, read_iface_ctx,
     read_runtime_config, set_acl_active_bank, sync_iface_ctx, update_acl_runtime_gate,

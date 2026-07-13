@@ -315,6 +315,84 @@ struct OwnedAclPolicyRuntimeAdd {
     is_new_port_set: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TransactionCreatedPortSet {
+    bitmap_idx: u32,
+    ports_normalized: String,
+}
+
+fn transaction_created_port_sets(
+    state: &FirewallState,
+    runtime_adds: &[OwnedAclPolicyRuntimeAdd],
+) -> Result<Vec<TransactionCreatedPortSet>, ControlPlaneError> {
+    let mut created = BTreeMap::<u32, String>::new();
+    for add in runtime_adds.iter().filter(|add| add.is_new_port_set) {
+        let Some(bitmap_idx) = add.rule.bitmap_idx else {
+            continue;
+        };
+        let ports_normalized = state
+            .port_sets
+            .values()
+            .find(|port_set| port_set.bitmap_idx == bitmap_idx)
+            .map(|port_set| port_set.ports_normalized.clone())
+            .ok_or_else(|| {
+                ControlPlaneError::ValidationError(format!(
+                    "transaction-created port set {} is missing allocation metadata",
+                    bitmap_idx
+                ))
+            })?;
+        created.insert(bitmap_idx, ports_normalized);
+    }
+    Ok(created
+        .into_iter()
+        .map(|(bitmap_idx, ports_normalized)| TransactionCreatedPortSet {
+            bitmap_idx,
+            ports_normalized,
+        })
+        .collect())
+}
+
+fn execute_transaction_port_set_cleanup<F>(
+    port_sets: &[TransactionCreatedPortSet],
+    mut cleanup: F,
+) -> Result<(), String>
+where
+    F: FnMut(&TransactionCreatedPortSet) -> Result<(), String>,
+{
+    let mut errors = Vec::new();
+    for port_set in port_sets {
+        if let Err(error) = cleanup(port_set) {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn cleanup_transaction_created_port_sets(
+    port_sets: &[TransactionCreatedPortSet],
+    runtime: TapMapRuntime<'_>,
+    ebpf_path: &str,
+) -> Result<(), String> {
+    execute_transaction_port_set_cleanup(port_sets, |port_set| {
+        aria_core::ebpf_ops::delete_port_set(
+            port_set.bitmap_idx,
+            &port_set.ports_normalized,
+            runtime,
+            ebpf_path,
+        )
+        .map_err(|error| {
+            format!(
+                "cleanup transaction-created port set {} ({}): {}",
+                port_set.bitmap_idx, port_set.ports_normalized, error
+            )
+        })
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct OwnedAclPolicyKey {
     src_group: String,
@@ -423,6 +501,7 @@ fn rollback_shared_network_mutations(
 fn rollback_owned_acl_prepublication(
     original: ControlPlaneError,
     mutations: &[SharedNetworkMutation],
+    created_port_sets: &[TransactionCreatedPortSet],
     runtime: TapMapRuntime<'_>,
     ebpf_path: &str,
     shadow_bank: u8,
@@ -433,6 +512,11 @@ fn rollback_owned_acl_prepublication(
     }
     if let Err(error) = aria_core::ebpf_ops::scrub_acl_bank(runtime, shadow_bank) {
         rollback_errors.push(format!("scrub shadow bank {}: {}", shadow_bank, error));
+    }
+    if let Err(error) =
+        cleanup_transaction_created_port_sets(created_port_sets, runtime, ebpf_path)
+    {
+        rollback_errors.push(error);
     }
     if rollback_errors.is_empty() {
         original
@@ -2032,6 +2116,7 @@ impl ControlPlane {
                 )
             })
             .collect();
+        let created_port_sets = transaction_created_port_sets(&final_state, &runtime_adds)?;
 
         if runtime_adds.is_empty()
             && policy_deletes.is_empty()
@@ -2063,6 +2148,7 @@ impl ControlPlane {
                             direction, name, error
                         )),
                         &applied_shared_mutations,
+                        &created_port_sets,
                         runtime,
                         &self.ebpf_path,
                         next_acl_bank,
@@ -2088,6 +2174,7 @@ impl ControlPlane {
                             direction, name, error
                         )),
                         &applied_shared_mutations,
+                        &created_port_sets,
                         runtime,
                         &self.ebpf_path,
                         next_acl_bank,
@@ -2107,6 +2194,7 @@ impl ControlPlane {
             return Err(rollback_owned_acl_prepublication(
                 error,
                 &applied_shared_mutations,
+                &created_port_sets,
                 runtime,
                 &self.ebpf_path,
                 next_acl_bank,
@@ -2119,6 +2207,7 @@ impl ControlPlane {
                 return Err(rollback_owned_acl_prepublication(
                     error,
                     &applied_shared_mutations,
+                    &created_port_sets,
                     runtime,
                     &self.ebpf_path,
                     next_acl_bank,
@@ -2129,6 +2218,7 @@ impl ControlPlane {
             return Err(rollback_owned_acl_prepublication(
                 ControlPlaneError::KernelError(error),
                 &applied_shared_mutations,
+                &created_port_sets,
                 runtime,
                 &self.ebpf_path,
                 next_acl_bank,
@@ -2144,7 +2234,6 @@ impl ControlPlane {
             Err(error) => Err(error.to_string()),
         };
         if let Err(error) = compact_result {
-            state.state = old_state;
             let mut recovery_errors = vec![format!("owned ACL persistence failed: {}", error)];
             if let Err(bank_error) =
                 aria_core::ebpf_ops::set_acl_active_bank(runtime, current_acl_bank)
@@ -2164,6 +2253,17 @@ impl ControlPlane {
                     next_acl_bank, scrub_error
                 ));
             }
+            if let Err(port_set_error) = cleanup_transaction_created_port_sets(
+                &created_port_sets,
+                runtime,
+                &self.ebpf_path,
+            ) {
+                recovery_errors.push(port_set_error);
+            }
+            // Restore allocation metadata only after transaction-created kernel
+            // bitmap entries have been removed, so a retried transaction can
+            // safely reuse recycled indices.
+            state.state = old_state;
             match serde_json::to_string_pretty(&state.state) {
                 Ok(json) => {
                     if let Err(old_state_error) = state.wal.compact(json).await {
@@ -4180,7 +4280,7 @@ mod tests {
             rule,
             is_new_port_set: add.is_new_port_set,
         }];
-        let created = transaction_created_port_sets(&staged, &runtime_adds);
+        let created = transaction_created_port_sets(&staged, &runtime_adds).unwrap();
         let mut cleaned = Vec::new();
 
         execute_transaction_port_set_cleanup(&created, |port_set| {
