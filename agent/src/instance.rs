@@ -1530,6 +1530,46 @@ mod tests {
     }
 
     #[test]
+    fn standalone_review_program_pin_completeness_requires_links_and_programs() {
+        let pin_path = std::env::temp_dir().join(format!(
+            "aria-standalone-runtime-health-{}",
+            std::process::id()
+        ));
+        if pin_path.exists() {
+            std::fs::remove_dir_all(&pin_path).unwrap();
+        }
+        std::fs::create_dir_all(&pin_path).unwrap();
+        let state_path = pin_path.join("state");
+        std::fs::create_dir_all(&state_path).unwrap();
+
+        let instance = FirewallInstance::new(
+            "standalone-review",
+            pin_path.clone(),
+            state_path,
+            false,
+            TraceMapMode::Legacy,
+        );
+        std::fs::write(pin_path.join("tc_ingress_link"), b"link").unwrap();
+        std::fs::write(pin_path.join("tc_egress_link"), b"link").unwrap();
+
+        let missing_programs = instance.require_tc_acl_runtime().unwrap_err();
+        assert!(missing_programs.contains("tc_ingress program"));
+        assert!(missing_programs.contains("tc_egress program"));
+
+        std::fs::write(pin_path.join("tc_ingress"), b"program").unwrap();
+        std::fs::write(pin_path.join("tc_egress"), b"program").unwrap();
+        instance.require_tc_acl_runtime().unwrap();
+
+        std::fs::remove_file(pin_path.join("tc_ingress_link")).unwrap();
+        assert!(instance
+            .require_tc_acl_runtime()
+            .unwrap_err()
+            .contains("tc_ingress link"));
+
+        std::fs::remove_dir_all(pin_path).unwrap();
+    }
+
+    #[test]
     fn neutron_tc_acl_requires_both_direction_links() {
         assert!(tc_acl_links_complete(true, true));
         assert!(!tc_acl_links_complete(true, false));

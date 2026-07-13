@@ -3607,6 +3607,43 @@ mod tests {
     }
 
     #[test]
+    fn standalone_review_publication_uses_approved_snapshot_not_reload() {
+        let mut approved = FirewallState::default();
+        approved.conntrack_enabled = true;
+        approved.acl_enabled = false;
+        approved.monitoring_enabled = true;
+
+        let published = prepare_system_publication_state(approved, "eth-review", Some(true));
+
+        assert!(published.conntrack_enabled);
+        assert!(!published.acl_enabled);
+        assert!(published.monitoring_enabled);
+        assert!(published.ssl_enabled);
+        assert_eq!(published.attached_iface.as_deref(), Some("eth-review"));
+        assert_eq!(published.tap_id, aria_core::common::TAP_ID_UNASSIGNED);
+    }
+
+    #[tokio::test]
+    async fn standalone_review_lifecycle_serializes_detach_and_enable() {
+        let control_plane = Arc::new(test_control_plane());
+        let held = control_plane.lock_runtime_lifecycle().await;
+        let waiter_control_plane = control_plane.clone();
+        let mut waiter = tokio::spawn(async move {
+            let _guard = waiter_control_plane.lock_runtime_lifecycle().await;
+            true
+        });
+
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiter)
+            .await
+            .is_err());
+        drop(held);
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap());
+    }
+
+    #[test]
     fn domain_authority_normalizes_neutron_domain_aliases() {
         let domains = vec![
             "aria-acl".to_string(),
@@ -3790,6 +3827,75 @@ mod tests {
         assert!(error.to_string().contains("forced kernel quiesce failure"));
         assert!(!state.state.conntrack_enabled);
         assert!(!state.state.acl_enabled);
+    }
+
+    #[tokio::test]
+    async fn standalone_review_local_persistence_failure_is_fail_closed() {
+        let mut state = stopped_wal_instance_state("local-config-enable").await;
+        let mut old_state = FirewallState::default();
+        old_state.monitoring_enabled = true;
+        state.state = old_state.clone();
+        state.state.conntrack_enabled = true;
+        state.state.acl_enabled = true;
+        state.state.monitoring_enabled = false;
+        let mut kernel_states = Vec::new();
+
+        let error = state
+            .recover_local_config_persistence_failure(
+                old_state,
+                true,
+                "forced local persistence failure",
+                |safe_state| {
+                    kernel_states.push((
+                        safe_state.conntrack_enabled,
+                        safe_state.acl_enabled,
+                        safe_state.monitoring_enabled,
+                    ));
+                    Ok(())
+                },
+            )
+            .await;
+
+        assert_eq!(kernel_states, vec![(false, false, true)]);
+        assert!(!state.state.conntrack_enabled);
+        assert!(!state.state.acl_enabled);
+        assert!(state.state.monitoring_enabled);
+        assert_eq!(error.status_code(), 503);
+        assert!(error.to_string().contains("forced local persistence failure"));
+        assert!(error.to_string().contains("compact fallback failed"));
+    }
+
+    #[test]
+    fn standalone_review_bank_rollback_attempts_all_shared_mutations() {
+        let mutations = vec![
+            SharedNetworkMutation::Added {
+                direction: "src",
+                cidr: "10.0.0.0/24".to_string(),
+                group_id: 7,
+            },
+            SharedNetworkMutation::Deleted {
+                direction: "dst",
+                cidr: "10.0.1.0/24".to_string(),
+                group_id: 8,
+            },
+        ];
+        let mut attempted = Vec::new();
+
+        let error = execute_shared_network_rollback(&mutations, |mutation| {
+            attempted.push(mutation.clone());
+            if attempted.len() == 1 {
+                Err("forced first rollback failure".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            attempted,
+            vec![mutations[1].clone(), mutations[0].clone()]
+        );
+        assert!(error.contains("forced first rollback failure"));
     }
 
     #[test]

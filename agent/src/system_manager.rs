@@ -514,4 +514,82 @@ mod tests {
             SystemAclActivation::StayDisabled
         );
     }
+
+    #[test]
+    fn standalone_review_cleanup_plan_preserves_preexisting_clsact() {
+        let ownership = SystemStartOwnership {
+            xdp_link: true,
+            tc_egress_link: false,
+            tc_ingress_link: true,
+            clsact: ClsactOwnership::Preexisting,
+            pin_path_created: false,
+        };
+
+        assert_eq!(
+            failed_start_cleanup_plan(&ownership),
+            vec![
+                SystemCleanupAction::RemoveXdpLink,
+                SystemCleanupAction::RemoveTcLink("tc_ingress"),
+            ]
+        );
+
+        let created = SystemStartOwnership {
+            xdp_link: false,
+            tc_egress_link: false,
+            tc_ingress_link: false,
+            clsact: ClsactOwnership::Created,
+            pin_path_created: true,
+        };
+        assert_eq!(
+            failed_start_cleanup_plan(&created),
+            vec![
+                SystemCleanupAction::RemoveOwnedClsact,
+                SystemCleanupAction::RemoveRuntimePinPath,
+            ]
+        );
+    }
+
+    #[test]
+    fn standalone_review_cleanup_attempts_every_owned_resource() {
+        let plan = vec![
+            SystemCleanupAction::RemoveXdpLink,
+            SystemCleanupAction::RemoveTcLink("tc_egress"),
+            SystemCleanupAction::RemoveTcLink("tc_ingress"),
+            SystemCleanupAction::RemoveOwnedClsact,
+            SystemCleanupAction::RemoveRuntimePinPath,
+        ];
+        let mut attempted = Vec::new();
+
+        let error = execute_system_cleanup_plan(&plan, |action| {
+            attempted.push(action);
+            if action == SystemCleanupAction::RemoveXdpLink {
+                Err("forced XDP cleanup failure".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(attempted, plan);
+        assert!(error.contains("forced XDP cleanup failure"));
+    }
+
+    #[test]
+    fn standalone_review_xdp_program_pin_failure_rolls_back_owned_link() {
+        let ownership = SystemStartOwnership {
+            xdp_link: true,
+            tc_egress_link: true,
+            tc_ingress_link: true,
+            clsact: ClsactOwnership::Preexisting,
+            pin_path_created: false,
+        };
+
+        assert_eq!(
+            unbacked_program_link_cleanup_plan(
+                &ownership,
+                TcAclLinkHealth::new(true, true, false),
+            ),
+            vec![SystemCleanupAction::RemoveXdpLink]
+        );
+    }
 }
