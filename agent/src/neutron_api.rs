@@ -2001,7 +2001,12 @@ async fn apply_snapshot_runtime_transaction(
         let managed = managed_port_from_snapshot(&port);
         let previous_managed = next_ports.get(&port.port_id).cloned();
         let previous_status = runtime_before_apply.port_statuses.get(&port.port_id);
-        if can_skip_neutron_domain_reconcile(previous_managed.as_ref(), previous_status, &managed) {
+        if can_skip_neutron_domain_reconcile(
+            previous_managed.as_ref(),
+            previous_status,
+            &managed,
+            full_resync,
+        ) {
             state
                 .control_plane
                 .mark_neutron_port_authority(
@@ -4873,7 +4878,15 @@ fn can_skip_neutron_domain_reconcile(
     current: Option<&ManagedNeutronPort>,
     previous_status: Option<&NeutronPortStatus>,
     desired: &ManagedNeutronPort,
+    full_resync: bool,
 ) -> bool {
+    if full_resync
+        && normalize_managed_domains(&desired.managed_domains)
+            .iter()
+            .any(|domain| domain == "acl")
+    {
+        return false;
+    }
     let Some(current) = current else {
         return false;
     };

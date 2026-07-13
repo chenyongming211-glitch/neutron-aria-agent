@@ -94,20 +94,20 @@ fn apply_tc_health_observation(
 ) -> RuntimeHealthTransition {
     let mut next = current.clone();
     next.xdp_ready = observed.xdp_ready();
+    let retry_failed_quiesce = current
+        .acl_error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("acl_quiesce_failed:"));
     let quiesce_acl_ct = if let Some(reason) = missing_tc_reason(observed) {
         next.acl_ready = false;
-        if !current
-            .acl_error
-            .as_deref()
-            .is_some_and(|error| error.starts_with("acl_quiesce_failed:"))
-        {
-            next.acl_error = Some(reason.to_string());
-        }
-        current.acl_ready || current.acl_error.as_deref() == Some("recovery_required")
+        next.acl_error = Some(reason.to_string());
+        current.acl_ready
+            || current.acl_error.as_deref() == Some("recovery_required")
+            || retry_failed_quiesce
     } else if !current.acl_ready {
         next.acl_ready = false;
         next.acl_error = Some("recovery_required".to_string());
-        false
+        retry_failed_quiesce
     } else {
         next.acl_ready = true;
         next.acl_error = None;
@@ -117,6 +117,20 @@ fn apply_tc_health_observation(
         changed: next != current,
         next,
         quiesce_acl_ct,
+    }
+}
+
+fn apply_tc_health_quiesce_result(
+    mut next: RuntimeHealthState,
+    result: Result<(), String>,
+) -> (RuntimeHealthState, bool) {
+    match result {
+        Ok(()) => (next, true),
+        Err(error) => {
+            next.acl_ready = false;
+            next.acl_error = Some(format!("acl_quiesce_failed:{}", error));
+            (next, false)
+        }
     }
 }
 
@@ -2145,17 +2159,14 @@ impl ControlPlane {
                 continue;
             }
 
-            let mut next = transition.next;
-            let mut quiesced = false;
-            if transition.quiesce_acl_ct {
-                match Self::quiesce_tc_acl_runtime_locked(&name, &state) {
-                    Ok(()) => quiesced = true,
-                    Err(error) => {
-                        next.acl_ready = false;
-                        next.acl_error = Some(format!("acl_quiesce_failed:{}", error));
-                    }
-                }
-            }
+            let (next, quiesced) = if transition.quiesce_acl_ct {
+                apply_tc_health_quiesce_result(
+                    transition.next,
+                    Self::quiesce_tc_acl_runtime_locked(&name, &state),
+                )
+            } else {
+                (transition.next, false)
+            };
 
             if next == state.runtime_health {
                 continue;
