@@ -1146,6 +1146,12 @@ def check_rust_stage_one_tests_present():
         "standalone_review_lifecycle_serializes_detach_and_enable",
         "standalone_review_local_persistence_failure_is_fail_closed",
         "standalone_review_bank_rollback_attempts_all_shared_mutations",
+        "standalone_review_start_replays_exact_approved_snapshot",
+        "standalone_review_preexisting_pin_dir_cleans_only_transaction_pins",
+        "standalone_review_program_pin_without_link_is_cleaned_for_retry",
+        "standalone_review_partial_runtime_dir_creation_is_rolled_back",
+        "standalone_review_port_set_rollback_cleans_recycled_bitmap",
+        "standalone_review_port_set_cleanup_attempts_every_created_set",
     ):
         if test_name not in system_manager_source + instance_source + control_plane_source:
             raise SystemExit("ERROR: standalone review behavior test missing %s" % test_name)

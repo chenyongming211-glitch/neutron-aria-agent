@@ -913,4 +913,122 @@ mod tests {
             vec![SystemCleanupAction::RemoveXdpLink]
         );
     }
+
+    #[test]
+    fn standalone_review_start_replays_exact_approved_snapshot() {
+        let source = include_str!("system_manager.rs");
+        let start = source
+            .split("pub async fn system_start(")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn system_stop(")
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            start.matches("aria_core::wal::load_with_wal(state_path)").count(),
+            1,
+            "standalone startup must approve exactly one durable snapshot"
+        );
+        assert!(start.contains(
+            "replay_state_from_snapshot(&mut bpf, state_path, &desired)"
+        ));
+        assert!(!start.contains("replay_state(&mut bpf, state_path)"));
+    }
+
+    #[test]
+    fn standalone_review_preexisting_pin_dir_cleans_only_transaction_pins() {
+        let pin_path = std::env::temp_dir().join(format!(
+            "aria-standalone-individual-pin-cleanup-{}",
+            std::process::id()
+        ));
+        if pin_path.exists() {
+            std::fs::remove_dir_all(&pin_path).unwrap();
+        }
+        std::fs::create_dir_all(&pin_path).unwrap();
+        let preexisting_map = pin_path.join("preexisting_map");
+        let owned_map = pin_path.join("owned_map");
+        let owned_program = pin_path.join("xdp_firewall");
+        for path in [&preexisting_map, &owned_map, &owned_program] {
+            std::fs::write(path, b"pin").unwrap();
+        }
+
+        let mut ownership = SystemStartOwnership::new(false);
+        ownership.owned_map_pins.push(owned_map.clone());
+        ownership.owned_program_pins.push(owned_program.clone());
+        let pin_path_string = pin_path.to_string_lossy().into_owned();
+        execute_system_cleanup_plan(&failed_start_cleanup_plan(&ownership), |action| {
+            execute_system_cleanup_action(action, "unused-review-iface", &pin_path_string)
+        })
+        .unwrap();
+
+        assert!(!owned_map.exists());
+        assert!(!owned_program.exists());
+        assert!(preexisting_map.exists());
+        assert!(pin_path.exists());
+        std::fs::remove_dir_all(pin_path).unwrap();
+    }
+
+    #[test]
+    fn standalone_review_program_pin_without_link_is_cleaned_for_retry() {
+        let pin_path = std::env::temp_dir().join(format!(
+            "aria-standalone-program-pin-retry-{}",
+            std::process::id()
+        ));
+        if pin_path.exists() {
+            std::fs::remove_dir_all(&pin_path).unwrap();
+        }
+        std::fs::create_dir_all(&pin_path).unwrap();
+        let program_pin = pin_path.join("xdp_firewall");
+        std::fs::write(&program_pin, b"pin").unwrap();
+
+        let mut ownership = SystemStartOwnership::new(false);
+        ownership.owned_program_pins.push(program_pin.clone());
+        let plan = unbacked_program_link_cleanup_plan(
+            &ownership,
+            TcAclLinkHealth::new(true, true, true),
+        );
+        assert_eq!(
+            plan,
+            vec![SystemCleanupAction::RemoveOwnedPin(program_pin.clone())]
+        );
+        let pin_path_string = pin_path.to_string_lossy().into_owned();
+        execute_system_cleanup_plan(&plan, |action| {
+            execute_system_cleanup_action(action, "unused-review-iface", &pin_path_string)
+        })
+        .unwrap();
+
+        assert!(!program_pin.exists());
+        std::fs::write(&program_pin, b"retry-pin").unwrap();
+        assert!(program_pin.exists(), "retry must not be blocked by a stale pin");
+        std::fs::remove_dir_all(pin_path).unwrap();
+    }
+
+    #[test]
+    fn standalone_review_partial_runtime_dir_creation_is_rolled_back() {
+        let root = std::env::temp_dir().join(format!(
+            "aria-standalone-partial-dir-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        let first_created = root.join("runtime");
+        let requested = first_created.join("system");
+
+        let error = create_runtime_pin_directories_with(&requested, |_| {
+            std::fs::create_dir(&first_created)?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "forced create_dir_all failure",
+            ))
+        })
+        .unwrap_err();
+
+        assert!(error.contains("forced create_dir_all failure"));
+        assert!(!first_created.exists());
+        assert!(root.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

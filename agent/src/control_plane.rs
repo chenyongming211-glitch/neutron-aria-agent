@@ -4167,6 +4167,68 @@ mod tests {
     }
 
     #[test]
+    fn standalone_review_port_set_rollback_cleans_recycled_bitmap() {
+        let mut baseline = FirewallState::default();
+        baseline.free_bitmap_indices.push(7);
+        baseline.next_bitmap_idx = 8;
+        let mut staged = baseline.clone();
+        let add = staged
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("80"), 0)
+            .unwrap();
+        let rule = staged.rules.last().unwrap().clone();
+        let runtime_adds = vec![OwnedAclPolicyRuntimeAdd {
+            rule,
+            is_new_port_set: add.is_new_port_set,
+        }];
+        let created = transaction_created_port_sets(&staged, &runtime_adds);
+        let mut cleaned = Vec::new();
+
+        execute_transaction_port_set_cleanup(&created, |port_set| {
+            cleaned.push(port_set.clone());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].bitmap_idx, 7);
+        assert_eq!(cleaned, created);
+        let mut retry = baseline;
+        let retry_add = retry
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .unwrap();
+        assert_eq!(retry_add.bitmap_idx, Some(7));
+        assert!(retry_add.is_new_port_set);
+    }
+
+    #[test]
+    fn standalone_review_port_set_cleanup_attempts_every_created_set() {
+        let created = vec![
+            TransactionCreatedPortSet {
+                bitmap_idx: 7,
+                ports_normalized: "80:1".to_string(),
+            },
+            TransactionCreatedPortSet {
+                bitmap_idx: 8,
+                ports_normalized: "443:1".to_string(),
+            },
+        ];
+        let mut attempted = Vec::new();
+
+        let error = execute_transaction_port_set_cleanup(&created, |port_set| {
+            attempted.push(port_set.clone());
+            if attempted.len() == 1 {
+                Err("forced first bitmap cleanup failure".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(attempted, created);
+        assert!(error.contains("forced first bitmap cleanup failure"));
+    }
+
+    #[test]
     fn domain_authority_domain_labels_are_stable() {
         assert_eq!(LocalWriteDomain::Acl.as_str(), "acl");
         assert_eq!(LocalWriteDomain::Qos.as_str(), "qos");
