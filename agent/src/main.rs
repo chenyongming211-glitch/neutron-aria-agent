@@ -933,7 +933,7 @@ async fn main() {
     http_task.abort();
     if let Some((server, background)) = neutron_runtime {
         server.abort();
-        background.abort();
+        background.abort().await;
     }
     compact_task.abort();
     tc_acl_health_task.abort();

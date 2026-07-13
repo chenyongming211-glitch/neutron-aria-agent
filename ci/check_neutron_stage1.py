@@ -1430,14 +1430,27 @@ def check_rust_stage_one_tests_present():
     recovery_failure_quiesce_position = recovery_failure_tail.find(
         "Self::quiesce_tc_acl_runtime_locked("
     )
+    recovery_failure_health_result_position = recovery_failure_tail.find(
+        "apply_recovery_publication_quiesce_result("
+    )
+    recovery_failure_health_assignment_position = recovery_failure_tail.find(
+        "state.runtime_health = health"
+    )
     recovery_failure_return_position = recovery_failure_tail.find("return Err(")
     if (
         recovery_failure_position < 0
         or recovery_failure_mark_position < 0
         or recovery_failure_quiesce_position < 0
+        or recovery_failure_health_result_position < 0
+        or recovery_failure_health_assignment_position < 0
         or recovery_failure_return_position < 0
         or not recovery_failure_mark_position < recovery_failure_quiesce_position
-        or not recovery_failure_quiesce_position < recovery_failure_return_position
+        or not recovery_failure_quiesce_position
+        < recovery_failure_health_result_position
+        or not recovery_failure_health_result_position
+        < recovery_failure_health_assignment_position
+        or not recovery_failure_health_assignment_position
+        < recovery_failure_return_position
     ):
         raise SystemExit(
             "ERROR: failed recovery readiness publication must quiesce the live ACL gate before returning"
@@ -1693,13 +1706,22 @@ def check_rust_stage_one_tests_present():
     locked_readiness_body = _rust_function_body(
         control_plane_source, "require_tc_acl_ready_locked"
     )
-    if locked_readiness_body is None or not all(
-        marker in locked_readiness_body
-        for marker in (
-            "instance !=",
-            "runtime_iface_name(instance, state)",
-            ".tc_acl_link_health()",
-            "health.acl_ready()",
+    shared_tc_health_body = _rust_function_body(
+        control_plane_source, "tc_acl_link_health_locked"
+    )
+    if (
+        locked_readiness_body is None
+        or "Self::tc_acl_link_health_locked(instance, state, trace_map_mode)"
+        not in locked_readiness_body
+        or "health.acl_ready()" not in locked_readiness_body
+        or shared_tc_health_body is None
+        or not all(
+            marker in shared_tc_health_body
+            for marker in (
+                "runtime_iface_name(instance, state)",
+                "instance !=",
+                ".tc_acl_link_health()",
+            )
         )
     ):
         raise SystemExit("ERROR: lock-safe shared dual-TC readiness helper missing")

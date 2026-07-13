@@ -1043,9 +1043,23 @@ pub(crate) struct NeutronBackgroundTasks {
 }
 
 impl NeutronBackgroundTasks {
-    pub(crate) fn abort(self) {
-        self.restore_task.abort();
-        self.health_task.abort();
+    pub(crate) async fn abort(self) {
+        let Self {
+            restore_task,
+            health_task,
+        } = self;
+        restore_task.abort();
+        health_task.abort();
+        if let Err(error) = restore_task.await {
+            if !error.is_cancelled() {
+                warn!(error = %error, "Neutron restore task failed during shutdown");
+            }
+        }
+        if let Err(error) = health_task.await {
+            if !error.is_cancelled() {
+                warn!(error = %error, "Neutron health task failed during shutdown");
+            }
+        }
     }
 }
 

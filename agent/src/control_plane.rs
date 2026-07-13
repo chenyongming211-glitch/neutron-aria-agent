@@ -134,6 +134,27 @@ fn apply_tc_health_quiesce_result(
     }
 }
 
+fn apply_recovery_publication_quiesce_result(
+    mut health: RuntimeHealthState,
+    readiness_error: ControlPlaneError,
+    quiesce_result: Result<(), String>,
+) -> (RuntimeHealthState, ControlPlaneError) {
+    health.acl_ready = false;
+    match quiesce_result {
+        Ok(()) => (health, readiness_error),
+        Err(error) => {
+            health.acl_error = Some(format!("acl_quiesce_failed:{}", error));
+            (
+                health,
+                ControlPlaneError::InstanceNotReady(format!(
+                    "{}; acl_quiesce_failed:{}",
+                    readiness_error, error
+                )),
+            )
+        }
+    }
+}
+
 fn initial_runtime_health(
     desired_conntrack: bool,
     desired_acl: bool,
@@ -934,6 +955,22 @@ impl ControlPlaneError {
 }
 
 impl ControlPlane {
+    fn tc_acl_link_health_locked(
+        instance: &str,
+        state: &InstanceState,
+        trace_map_mode: TraceMapMode,
+    ) -> Result<TcAclLinkHealth, ControlPlaneError> {
+        let iface = Self::runtime_iface_name(instance, state)?;
+        Ok(FirewallInstance::new(
+            &iface,
+            state.pin_path.clone().into(),
+            state.state_path.clone().into(),
+            instance != "system",
+            trace_map_mode,
+        )
+        .tc_acl_link_health())
+    }
+
     fn runtime_iface_name(
         instance: &str,
         state: &InstanceState,
@@ -952,15 +989,7 @@ impl ControlPlane {
         state: &InstanceState,
         trace_map_mode: TraceMapMode,
     ) -> Result<(), ControlPlaneError> {
-        let iface = Self::runtime_iface_name(instance, state)?;
-        let runtime = FirewallInstance::new(
-            &iface,
-            state.pin_path.clone().into(),
-            state.state_path.clone().into(),
-            instance != "system",
-            trace_map_mode,
-        );
-        let health = runtime.tc_acl_link_health();
+        let health = Self::tc_acl_link_health_locked(instance, state, trace_map_mode)?;
         if health.acl_ready() {
             Ok(())
         } else {
@@ -977,7 +1006,24 @@ impl ControlPlane {
         xdp_ready: bool,
         trace_map_mode: TraceMapMode,
     ) -> Result<(), ControlPlaneError> {
-        Self::require_tc_acl_ready_locked(instance, state, trace_map_mode)?;
+        let health = match Self::tc_acl_link_health_locked(instance, state, trace_map_mode) {
+            Ok(health) => health,
+            Err(error) => {
+                state.runtime_health.acl_ready = false;
+                state.runtime_health.xdp_ready = xdp_ready;
+                state.runtime_health.acl_error = Some("recovery_required".to_string());
+                return Err(error);
+            }
+        };
+        if let Some(reason) = missing_tc_reason(health) {
+            state.runtime_health.acl_ready = false;
+            state.runtime_health.xdp_ready = xdp_ready;
+            state.runtime_health.acl_error = Some(reason.to_string());
+            return Err(ControlPlaneError::InstanceNotReady(format!(
+                "missing live TCX ACL attachments: {}",
+                health.missing_tc().join(", ")
+            )));
+        }
         state.runtime_health = RuntimeHealthState {
             acl_ready: true,
             xdp_ready,
@@ -4078,12 +4124,21 @@ impl ControlPlane {
             }
             NeutronGateHealthCommitAction::VerifyRecoveryPublication => {
                 let xdp_ready = self.runtime_xdp_health_locked(instance, &state);
-                Self::mark_tc_acl_runtime_ready_locked(
+                if let Err(readiness_error) = Self::mark_tc_acl_runtime_ready_locked(
                     instance,
                     &mut state,
                     xdp_ready,
                     self.trace_map_mode(),
-                )?;
+                ) {
+                    let quiesce_result = Self::quiesce_tc_acl_runtime_locked(instance, &state);
+                    let (health, error) = apply_recovery_publication_quiesce_result(
+                        state.runtime_health.clone(),
+                        readiness_error,
+                        quiesce_result,
+                    );
+                    state.runtime_health = health;
+                    return Err(error);
+                }
             }
             NeutronGateHealthCommitAction::Preserve => {}
         }
