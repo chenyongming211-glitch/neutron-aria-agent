@@ -197,6 +197,9 @@ jobs:
           cargo +stable test --locked -p aria-core acl_ingress_hook_
           cargo +stable test --locked -p aria-core tap_runtime_config_
           cargo +stable test --locked -p aria-core tc_ct_
+          cargo +stable test --locked -p aria-core map_delete_
+          cargo +stable test --locked -p aria-core quarantined_
+          cargo +stable test --locked -p aria-core confirmed_bitmap_cleanup_
           cargo +stable test -p aria-agent startup_mode
           cargo +stable test -p aria-agent domain_authority
 

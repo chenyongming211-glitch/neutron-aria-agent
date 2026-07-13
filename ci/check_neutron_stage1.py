@@ -1562,6 +1562,20 @@ def check_rust_stage_one_tests_present():
         build_workflow_source,
     ):
         raise SystemExit("ERROR: standalone activation Rust test filter missing")
+    for core_filter in (
+        "map_delete_",
+        "quarantined_",
+        "confirmed_bitmap_cleanup_",
+    ):
+        if not re.search(
+            r"(?m)^\s*cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-core\s+%s\s*$"
+            % re.escape(core_filter),
+            build_workflow_source,
+        ):
+            raise SystemExit(
+                "ERROR: aria-core ACL allocator Rust test filter missing %s"
+                % core_filter
+            )
 
     restart_runtime_match = re.search(
         r"async fn reconcile_committed_runtime\(&self\) \{(?P<body>.*?)\n    async fn recover_incomplete_wal_intent",
