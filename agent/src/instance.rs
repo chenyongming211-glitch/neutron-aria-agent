@@ -1482,4 +1482,48 @@ mod tests {
         assert_eq!(attempted, plan);
         assert!(error.contains("forced xdp cleanup failure"));
     }
+
+    #[test]
+    fn managed_failure_path_xdp_pin_failure_is_never_acknowledged() {
+        let detach_calls = std::cell::Cell::new(0);
+        let error = recover_unpinned_xdp_attachment("forced pin failure", || {
+            detach_calls.set(detach_calls.get() + 1);
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert_eq!(detach_calls.get(), 1);
+        assert!(error.contains("forced pin failure"));
+        assert!(error.contains("detached"));
+
+        let error = recover_unpinned_xdp_attachment("forced pin failure", || {
+            Err("forced detach failure".to_string())
+        })
+        .unwrap_err();
+        assert!(error.contains("forced pin failure"));
+        assert!(error.contains("forced detach failure"));
+    }
+
+    #[test]
+    fn managed_failure_path_xdp_detach_command_failure_propagates() {
+        let spawn_error = checked_xdp_detach_output(
+            "tap-failure",
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "forced spawn failure",
+            )),
+        )
+        .unwrap_err();
+        assert!(spawn_error.contains("forced spawn failure"));
+
+        let nonzero = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "printf 'forced detach stderr' >&2; exit 23",
+            ])
+            .output();
+        let status_error = checked_xdp_detach_output("tap-failure", nonzero).unwrap_err();
+        assert!(status_error.contains("forced detach stderr"));
+        assert!(status_error.contains("23"));
+    }
 }

@@ -3752,6 +3752,31 @@ mod tests {
         assert!(matches!(error, ControlPlaneError::PersistenceError(_)));
     }
 
+    #[tokio::test]
+    async fn managed_failure_path_kernel_quiesce_failure_stays_disabled() {
+        let mut state = stopped_wal_instance_state("kernel-quiesce-failure").await;
+        state.state.conntrack_enabled = true;
+        state.state.acl_enabled = true;
+
+        let error = state
+            .recover_gate_persistence_failure(
+                true,
+                true,
+                "forced persistence failure",
+                |ct, acl| {
+                    assert_eq!((ct, acl), (false, false));
+                    Err("forced kernel quiesce failure".to_string())
+                },
+            )
+            .await;
+
+        assert_eq!(error.status_code(), 503);
+        assert!(error.to_string().contains("forced persistence failure"));
+        assert!(error.to_string().contains("forced kernel quiesce failure"));
+        assert!(!state.state.conntrack_enabled);
+        assert!(!state.state.acl_enabled);
+    }
+
     #[test]
     fn domain_authority_domain_labels_are_stable() {
         assert_eq!(LocalWriteDomain::Acl.as_str(), "acl");

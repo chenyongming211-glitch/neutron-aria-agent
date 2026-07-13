@@ -914,6 +914,20 @@ def check_rust_stage_one_tests_present():
     if re.search(r"\bdetach_tc_egress\s*\(", rollback_body):
         raise SystemExit("ERROR: transaction rollback must not delete the shared clsact qdisc")
 
+    xdp_attach_body = _rust_function_body(instance_source, "attach_xdp_from_pin")
+    xdp_detach_body = _rust_function_body(instance_source, "detach_xdp_with_ip")
+    xdp_pin_recovery_body = _rust_function_body(
+        instance_source, "recover_unpinned_xdp_attachment"
+    )
+    if xdp_detach_body is None or xdp_pin_recovery_body is None:
+        raise SystemExit("ERROR: checked XDP detach recovery seam missing")
+    if xdp_attach_body is None or not re.search(
+        r"recover_unpinned_xdp_attachment\s*\(", xdp_attach_body
+    ):
+        raise SystemExit("ERROR: XDP pin failure must detach before returning attach error")
+    if not re.search(r"detach_xdp_with_ip\s*\(", rollback_body):
+        raise SystemExit("ERROR: XDP rollback must propagate fallback detach failure")
+
     tc_attach_body = _rust_function_body(instance_source, "try_attach_tc_from_pin")
     if tc_attach_body is None or not re.search(
         r"fd_link\s*\.\s*pin\s*\([^;]+\)\s*\.\s*map_err\s*\([^;]+\)\s*\?",
@@ -937,30 +951,24 @@ def check_rust_stage_one_tests_present():
         raise SystemExit("ERROR: serialized managed gate must recover persistence failure")
 
     attach_body = _rust_function_body(tap_registry_source, "attach_with_mode")
-    activation_disposition = (attach_body or "").find(
-        "managed_registration_publication"
+    registration_transaction_body = _rust_function_body(
+        tap_registry_source, "complete_managed_registration_transaction"
     )
-    control_plane_publish = (attach_body or "").find("publish_managed_instance")
-    tap_registry_publish = (attach_body or "").find("instances.insert")
-    if (
-        activation_disposition < 0
-        or control_plane_publish < 0
-        or tap_registry_publish < 0
-        or activation_disposition > control_plane_publish
-        or activation_disposition > tap_registry_publish
-        or "ManagedRegistrationPublication::PublishNeither" not in (attach_body or "")
+    if registration_transaction_body is None or not re.search(
+        r"complete_managed_registration_transaction\s*\(", attach_body or ""
     ):
-        raise SystemExit(
-            "ERROR: failed activation must publish neither managed registry"
-        )
+        raise SystemExit("ERROR: managed publication must use the tested transaction seam")
 
     for source, function_name in (
         (instance_source, "managed_failure_path_cleanup_plan_preserves_claimed_direction"),
         (instance_source, "managed_failure_path_cleanup_continues_after_error"),
+        (instance_source, "managed_failure_path_xdp_pin_failure_is_never_acknowledged"),
+        (instance_source, "managed_failure_path_xdp_detach_command_failure_propagates"),
         (control_plane_source, "managed_failure_path_strict_wal_failure_propagates"),
         (control_plane_source, "managed_failure_path_enabling_persistence_failure_quiesces"),
         (control_plane_source, "managed_failure_path_disabling_persistence_failure_stays_disabled"),
-        (tap_registry_source, "managed_failure_path_activation_failure_blocks_both_registry_publications"),
+        (control_plane_source, "managed_failure_path_kernel_quiesce_failure_stays_disabled"),
+        (tap_registry_source, "managed_failure_path_activation_failure_leaves_real_registries_empty"),
     ):
         if _rust_function_body(source, function_name) is None:
             raise SystemExit("ERROR: managed failure-path Rust test missing %s" % function_name)

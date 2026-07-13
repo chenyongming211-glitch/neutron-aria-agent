@@ -478,17 +478,50 @@ impl TapRegistry {
 mod tests {
     use super::*;
 
-    #[test]
-    fn managed_failure_path_activation_failure_blocks_both_registry_publications() {
-        assert_eq!(
-            managed_registration_publication(Err("forced activation failure".to_string())),
-            ManagedRegistrationPublication::PublishNeither(
-                "forced activation failure".to_string()
-            )
-        );
-        assert_eq!(
-            managed_registration_publication(Ok(())),
-            ManagedRegistrationPublication::PublishBoth
-        );
+    #[derive(Default)]
+    struct TestManagedTransactionState {
+        control_plane_instances: BTreeSet<String>,
+        tap_instances: BTreeSet<String>,
+        rollback_count: usize,
+        release_count: usize,
+        abort_count: usize,
+    }
+
+    #[tokio::test]
+    async fn managed_failure_path_activation_failure_leaves_real_registries_empty() {
+        let state = Arc::new(Mutex::new(TestManagedTransactionState::default()));
+        let failure_state = state.clone();
+        let publish_state = state.clone();
+
+        let error = complete_managed_registration_transaction(
+            Err("forced activation failure".to_string()),
+            "tap-failed".to_string(),
+            move |_iface, activation_error| async move {
+                let mut state = failure_state.lock().await;
+                state.rollback_count += 1;
+                state.release_count += 1;
+                state.abort_count += 1;
+                Err(format!(
+                    "managed runtime activation failed: {}",
+                    activation_error
+                ))
+            },
+            move |iface| async move {
+                let mut state = publish_state.lock().await;
+                state.control_plane_instances.insert(iface.clone());
+                state.tap_instances.insert(iface);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("forced activation failure"));
+        let state = state.lock().await;
+        assert!(state.control_plane_instances.is_empty());
+        assert!(state.tap_instances.is_empty());
+        assert_eq!(state.rollback_count, 1);
+        assert_eq!(state.release_count, 1);
+        assert_eq!(state.abort_count, 1);
     }
 }
