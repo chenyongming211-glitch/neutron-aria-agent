@@ -310,14 +310,14 @@ def check_source(source):
 
     trace = bodies["set_trace_filter"]
     for term in (
-        "/trace/filter",
+        "/trace",
         '"proto":"icmp"',
         "TRACE_ARMED=true",
     ):
         if term not in trace:
             errors.append("controlled-flow trace arm missing %s" % term)
     clear_trace = bodies["clear_trace_filter"]
-    if '-X DELETE "${HTTP}/api/v1/${INSTANCE}/trace/filter"' not in clear_trace:
+    if '-X DELETE' not in clear_trace or '"${HTTP}/api/v1/${INSTANCE}/trace"' not in clear_trace:
         errors.append("controlled-flow trace disarm is missing")
 
     allowed = bodies["run_allowed_flow"]
@@ -443,7 +443,8 @@ def check_source(source):
     cleanup = bodies["cleanup"]
     for term in (
         "trap - EXIT",
-        'curl --fail-with-body -sS -X POST "${HTTP}/api/v1/system/stop"',
+        '"${HTTP}/api/v1/system/stop"',
+        '--max-time "${AGENT_STOP_TIMEOUT_SECS}"',
         "stop_agent_bounded",
         '[ "${PRIVATE_BPFFS_MOUNTED}" = true ]',
         'umount "${PIN_ROOT}"',
@@ -495,12 +496,18 @@ def check_source(source):
     if "write_summary" in main_body or 'RESULT="pass"' in main_body:
         errors.append("main body must not write summary.json or select pass before cleanup")
     if not ordered(
-        main_body,
+        source,
         (
             "derive_fixture_identity",
             "select_http_addr",
             "preflight_fixture",
             'mkdir -p "${WORK_DIR}"',
+        ),
+    ):
+        errors.append("standalone smoke must preflight unique resources before mutation")
+    if not ordered(
+        main_body,
+        (
             "run_observed_allowed_flow allowed",
             "exercise_legacy_zero_compatibility",
             "run_denied_flow",
@@ -548,17 +555,27 @@ def run_mutation_self_tests(source, verbose=False):
         ("TC ingress live program identity", mutate_remove, 'ingress.get("prog_id")==ingress_prog.get("id")', "", "dual-TC readiness"),
         ("TC egress live program identity", mutate_remove, 'egress.get("prog_id")==egress_prog.get("id")', "", "dual-TC readiness"),
         ("unique fixture token", mutate_remove, "secrets.token_hex(5)", "", "fixture identity"),
+        ("unique host interface", mutate_remove, 'HOST_IF="ah${FIXTURE_TOKEN}"', "", "fixture identity"),
+        ("free loopback port", mutate_remove, 'sock.bind(("127.0.0.1",0))', "", "loopback port selection"),
         ("workdir collision preflight", mutate_remove, '[ ! -e "${WORK_DIR}" ]', "", "fixture preflight"),
         ("host interface ownership", mutate_remove, '[ "${VETH_CREATED}" = true ]', "", "fail-closed cleanup"),
-        ("bpffs mount ownership", mutate_remove, '[ "${PRIVATE_BPFFS_MOUNTED}" = true ]', "", "fail-closed cleanup"),
+        ("bpffs mount ownership", mutate_replace,
+         '    if [ "${PRIVATE_BPFFS_MOUNTED}" = true ]; then\n        if ! umount',
+         '    if true; then\n        if ! umount', "fail-closed cleanup"),
         ("TC ingress packet evidence", mutate_remove, "assert tc_ingress_packets==packets", "", "TC-only/XDP-neutral"),
         ("TC egress packet evidence", mutate_remove, "assert tc_egress_packets==packets", "", "TC-only/XDP-neutral"),
         ("TC ingress byte evidence", mutate_remove, "assert tc_ingress_bytes==packets*packet_bytes", "", "TC-only/XDP-neutral"),
         ("TC egress byte evidence", mutate_remove, "assert tc_egress_bytes==packets*packet_bytes", "", "TC-only/XDP-neutral"),
         ("exact CT byte comparison", mutate_remove, "assert after_ct_bytes-before_ct_bytes==expected_bytes", "", "TC-only/XDP-neutral"),
+        ("unknown hook inference", mutate_replace, "expected_packets=packets*2",
+         "unknown_hook=0\nexpected_packets=packets*2", "must not be inferred"),
         ("recovery ACL proof", mutate_remove, 'config["acl"] is True', "", "recovery proof"),
+        ("recovery CT proof", mutate_remove, 'config["conntrack"] is True', "", "recovery proof"),
+        ("recovery policy proof", mutate_remove, "len(policies)==4", "", "recovery proof"),
         ("recovery traffic proof", mutate_remove, "run_observed_allowed_flow recovery-allowed", "", "recovery proof"),
+        ("recovery deny proof", mutate_remove, "run_denied_flow recovery-denied", "", "recovery proof"),
         ("recovery summary bit", mutate_remove, "RECOVERY_VERIFIED=true", "", "recovery proof"),
+        ("bounded TERM wait", mutate_remove, 'sleep "${AGENT_STOP_TIMEOUT_SECS}"', "", "bounded agent shutdown"),
         ("bounded KILL fallback", mutate_remove, 'kill -KILL "${pid}"', "", "bounded agent shutdown"),
         ("detached pinned link", mutate_remove, 'bpftool link detach pinned "${lost_link}"', "", "detached-but-pinned"),
         ("detached pin retained", mutate_remove, '[ -e "${lost_link}" ]', "", "detached-but-pinned"),
