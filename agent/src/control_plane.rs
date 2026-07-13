@@ -4564,7 +4564,7 @@ mod tests {
     }
 
     #[test]
-    fn tc_health_loss_keeps_xdp_independent_and_quiesce_failures_stable() {
+    fn tc_health_loss_keeps_xdp_independent_and_disabled_acl_ready() {
         let xdp_lost = apply_tc_health_observation(
             RuntimeHealthState {
                 acl_ready: true,
@@ -4577,21 +4577,6 @@ mod tests {
         assert!(!xdp_lost.next.xdp_ready);
         assert!(!xdp_lost.quiesce_acl_ct);
 
-        let failed = apply_tc_health_observation(
-            RuntimeHealthState {
-                acl_ready: false,
-                xdp_ready: true,
-                acl_error: Some("acl_quiesce_failed:map unavailable".to_string()),
-            },
-            TcAclLinkHealth::new(false, true, true),
-        );
-        assert!(!failed.changed);
-        assert!(!failed.quiesce_acl_ct);
-        assert_eq!(
-            failed.next.acl_error.as_deref(),
-            Some("acl_quiesce_failed:map unavailable")
-        );
-
         let disabled = initial_runtime_health(
             false,
             false,
@@ -4600,6 +4585,55 @@ mod tests {
         );
         assert!(disabled.acl_ready);
         assert!(!disabled.xdp_ready);
+    }
+
+    #[test]
+    fn tc_health_loss_quiesce_failure_retries_until_success_without_reason_loss() {
+        let failed_state = RuntimeHealthState {
+            acl_ready: false,
+            xdp_ready: true,
+            acl_error: Some("acl_quiesce_failed:map unavailable".to_string()),
+        };
+
+        let missing_retry = apply_tc_health_observation(
+            failed_state.clone(),
+            TcAclLinkHealth::new(false, true, true),
+        );
+        assert!(missing_retry.quiesce_acl_ct);
+        assert_eq!(
+            missing_retry.next.acl_error.as_deref(),
+            Some("missing_tc_ingress")
+        );
+        let (missing_failed_again, quiesced) = apply_tc_health_quiesce_result(
+            missing_retry.next,
+            Err("map unavailable".to_string()),
+        );
+        assert!(!quiesced);
+        assert_eq!(missing_failed_again, failed_state);
+
+        let healthy_retry = apply_tc_health_observation(
+            failed_state.clone(),
+            TcAclLinkHealth::new(true, true, true),
+        );
+        assert!(healthy_retry.quiesce_acl_ct);
+        assert_eq!(
+            healthy_retry.next.acl_error.as_deref(),
+            Some("recovery_required")
+        );
+        let (healthy_failed_again, quiesced) = apply_tc_health_quiesce_result(
+            healthy_retry.next.clone(),
+            Err("map unavailable".to_string()),
+        );
+        assert!(!quiesced);
+        assert_eq!(healthy_failed_again, failed_state);
+
+        let (recovery_required, quiesced) =
+            apply_tc_health_quiesce_result(healthy_retry.next, Ok(()));
+        assert!(quiesced);
+        assert_eq!(
+            recovery_required.acl_error.as_deref(),
+            Some("recovery_required")
+        );
     }
 
     #[test]

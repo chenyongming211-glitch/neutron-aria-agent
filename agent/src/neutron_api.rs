@@ -6807,7 +6807,7 @@ mod tests {
     }
 
     #[test]
-    fn port_domain_reconcile_skip_requires_ready_matching_acl_hash() {
+    fn neutron_acl_full_host_resync_republishes_after_unprojected_health_loss() {
         let mut snapshot = port("vm-port", "tap-vm", true);
         snapshot.managed_domains = vec!["acl".to_string()];
         snapshot.acl = Some(NeutronAclSnapshot {
@@ -6830,7 +6830,17 @@ mod tests {
         assert!(can_skip_neutron_domain_reconcile(
             Some(&managed),
             Some(&status),
-            &managed
+            &managed,
+            false,
+        ));
+        // The detector may already have quiesced the live gate while the
+        // projector has not yet replaced this still-ready status. A full-host
+        // authoritative resync must therefore reconcile and republish ACL.
+        assert!(!can_skip_neutron_domain_reconcile(
+            Some(&managed),
+            Some(&status),
+            &managed,
+            true,
         ));
 
         let mut changed_snapshot = snapshot.clone();
@@ -6839,7 +6849,8 @@ mod tests {
         assert!(!can_skip_neutron_domain_reconcile(
             Some(&managed),
             Some(&status),
-            &changed
+            &changed,
+            false,
         ));
 
         let error_status = port_runtime_status(
@@ -6859,7 +6870,8 @@ mod tests {
         assert!(!can_skip_neutron_domain_reconcile(
             Some(&managed),
             Some(&error_status),
-            &managed
+            &managed,
+            false,
         ));
     }
 
@@ -6929,6 +6941,7 @@ mod tests {
             Some(restored),
             Some(status),
             &desired,
+            false,
         ));
     }
 
