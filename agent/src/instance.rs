@@ -69,6 +69,13 @@ impl TcAclLinkHealth {
     }
 }
 
+fn tcx_query_contains_expected_program(
+    expected_program_id: u32,
+    attached_program_ids: &[u32],
+) -> bool {
+    attached_program_ids.contains(&expected_program_id)
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum LinkOwnership {
     Absent,
@@ -353,11 +360,56 @@ impl FirewallInstance {
         ))
     }
 
+    fn tcx_attachment_is_live(
+        &self,
+        prog_name: &str,
+        attach_type: aya::programs::tc::TcAttachType,
+    ) -> bool {
+        let Ok(program) =
+            aya::programs::SchedClassifier::from_pin(self.tc_prog_pin_path(prog_name))
+        else {
+            return false;
+        };
+        let Ok(program_info) = program.info() else {
+            return false;
+        };
+        let Ok(pinned_link) =
+            aya::programs::links::PinnedLink::from_pin(self.tc_link_pin_path(prog_name))
+        else {
+            return false;
+        };
+        let fd_link: aya::programs::links::FdLink = pinned_link.into();
+        let Ok(_tcx_link): Result<aya::programs::tc::SchedClassifierLink, _> = fd_link.try_into()
+        else {
+            return false;
+        };
+        let Ok((_revision, attached_programs)) =
+            aya::programs::SchedClassifier::query_tcx(&self.iface, attach_type)
+        else {
+            return false;
+        };
+        let attached_program_ids: Vec<u32> = attached_programs
+            .iter()
+            .map(|attached| attached.id())
+            .collect();
+        tcx_query_contains_expected_program(program_info.id(), &attached_program_ids)
+    }
+
+    pub fn xdp_link_health(&self) -> bool {
+        Path::new(&self.xdp_link_pin_path()).exists()
+    }
+
     pub fn tc_acl_link_health(&self) -> TcAclLinkHealth {
         TcAclLinkHealth::new(
-            Path::new(&self.tc_link_pin_path("tc_ingress")).exists(),
-            Path::new(&self.tc_link_pin_path("tc_egress")).exists(),
-            Path::new(&self.xdp_link_pin_path()).exists(),
+            self.tcx_attachment_is_live(
+                "tc_ingress",
+                aya::programs::tc::TcAttachType::Ingress,
+            ),
+            self.tcx_attachment_is_live(
+                "tc_egress",
+                aya::programs::tc::TcAttachType::Egress,
+            ),
+            self.xdp_link_health(),
         )
     }
 

@@ -1004,7 +1004,7 @@ def check_rust_stage_one_tests_present():
             "ERROR: disabled TC health reconcile must read desired state and use XDP-only health before any TCX query"
         )
 
-    projection_guard_body = _rust_function_body(
+    projection_guard_body = _rust_function_body_raw(
         neutron_api_source, "neutron_tc_health_projection_blocked"
     )
     if projection_guard_body is None:
@@ -1655,7 +1655,8 @@ def check_rust_stage_one_tests_present():
         for marker in (
             "instance !=",
             "runtime_iface_name(instance, state)",
-            ".require_tc_acl_runtime()",
+            ".tc_acl_link_health()",
+            "health.acl_ready()",
         )
     ):
         raise SystemExit("ERROR: lock-safe shared dual-TC readiness helper missing")

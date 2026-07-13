@@ -939,6 +939,9 @@ fn project_tc_acl_link_loss(
     runtime: &mut NeutronRuntimeState,
     health: &[InstanceRuntimeHealthSnapshot],
 ) -> bool {
+    if neutron_tc_health_projection_blocked(runtime) {
+        return false;
+    }
     let health_by_instance: BTreeMap<&str, &InstanceRuntimeHealthSnapshot> = health
         .iter()
         .map(|snapshot| (snapshot.name.as_str(), snapshot))
@@ -1012,20 +1015,59 @@ fn project_tc_acl_link_loss(
     changed
 }
 
+fn neutron_tc_health_projection_blocked(runtime: &NeutronRuntimeState) -> bool {
+    runtime.pending_generation.is_some()
+        || matches!(
+            runtime.authority_state.as_str(),
+            "blocked_recovery_required"
+                | "recovered_pending_full_resync_required"
+                | "recovered_pending_full_resync"
+                | "wal_recovery_commit_failed"
+                | "pending_recovery_commit_failed"
+                | "runtime_reconcile_requires_full_resync"
+                | "wal_runtime_reconcile_commit_failed"
+        )
+        || matches!(
+            runtime.wal_status.as_str(),
+            "commit_failed"
+                | "intent_recovery_blocked"
+                | "intent_recovered"
+                | "pending_recovered_to_last_applied"
+                | "runtime_reconciled_acl_resync_required"
+        )
+}
+
+pub(crate) struct NeutronBackgroundTasks {
+    restore_task: tokio::task::JoinHandle<()>,
+    health_task: tokio::task::JoinHandle<()>,
+}
+
+impl NeutronBackgroundTasks {
+    pub(crate) fn abort(self) {
+        self.restore_task.abort();
+        self.health_task.abort();
+    }
+}
+
+pub(crate) struct NeutronRouterRuntime {
+    pub(crate) router: Router,
+    pub(crate) background: NeutronBackgroundTasks,
+}
+
 pub(crate) fn build_router(
     registry: Arc<TapRegistry>,
     control_plane: Arc<ControlPlane>,
     ovs_bridge: String,
-) -> Router {
+) -> NeutronRouterRuntime {
     let state = NeutronApiState::new(registry, control_plane, ovs_bridge);
     let restore_state = state.clone();
-    tokio::spawn(async move {
+    let restore_task = tokio::spawn(async move {
         restore_state.recover_incomplete_wal_intent().await;
         restore_state.reconcile_committed_runtime().await;
         restore_state.restore_neutron_authorities().await;
     });
     let health_state = state.clone();
-    tokio::spawn(async move {
+    let health_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(
             NEUTRON_TC_ACL_HEALTH_INTERVAL_SECS,
         ));
@@ -1036,7 +1078,7 @@ pub(crate) fn build_router(
             health_state.project_tc_acl_health().await;
         }
     });
-    Router::new()
+    let router = Router::new()
         .route(
             "/api/v1/neutron/capabilities",
             get(get_neutron_capabilities),
@@ -1056,7 +1098,14 @@ pub(crate) fn build_router(
             delete(delete_neutron_port),
         )
         .layer(DefaultBodyLimit::max(NEUTRON_UDS_BODY_MAX_BYTES as usize))
-        .with_state(state)
+        .with_state(state);
+    NeutronRouterRuntime {
+        router,
+        background: NeutronBackgroundTasks {
+            restore_task,
+            health_task,
+        },
+    }
 }
 
 async fn post_neutron_recover_pending(
@@ -1789,34 +1838,6 @@ async fn apply_neutron_snapshot_for_scope(
         });
     }
     let wal_commit_ms = elapsed_ms(wal_commit_started);
-    if matches!(scope, ApplyScope::FullHost) && !has_error {
-        let health = state.control_plane.list_instance_runtime_health().await;
-        let xdp_health: BTreeMap<&str, bool> = health
-            .iter()
-            .map(|snapshot| (snapshot.name.as_str(), snapshot.xdp_ready))
-            .collect();
-        for port in next_runtime.ports.values().filter(|port| {
-            normalize_managed_domains(&port.managed_domains)
-                .iter()
-                .any(|domain| domain == "acl")
-        }) {
-            let Some(xdp_ready) = xdp_health.get(port.ifname.as_str()) else {
-                continue;
-            };
-            if let Err(error) = state
-                .control_plane
-                .mark_tc_acl_runtime_ready(&port.ifname, *xdp_ready)
-                .await
-            {
-                warn!(
-                    port_id = %port.port_id,
-                    ifname = %port.ifname,
-                    error = %error,
-                    "successful Neutron full resync could not publish TC ACL runtime readiness"
-                );
-            }
-        }
-    }
     publish_committed_snapshot_runtime(&state, next_runtime, snapshot.generation, || {
         fault_injection::check("neutron.snapshot.after_commit")
     })
