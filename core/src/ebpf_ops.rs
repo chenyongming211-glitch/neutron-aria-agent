@@ -128,3 +128,51 @@ fn open_pinned_tap_config(pin_path: &str) -> Result<HashMap<MapData, u32, TapCon
     HashMap::try_from(aya::maps::Map::HashMap(map_data))
         .map_err(|e| format!("convert TAP_CONFIG_MAP to HashMap: {:?}", e))
 }
+
+#[cfg(test)]
+mod map_delete_tests {
+    use super::{classify_map_delete, execute_map_delete_batch};
+    use aya::maps::MapError;
+
+    #[test]
+    fn map_delete_classifier_only_treats_key_not_found_as_idempotent_success() {
+        assert!(classify_map_delete(Ok(()), "delete test key").unwrap());
+        assert!(!classify_map_delete(Err(MapError::KeyNotFound), "delete test key").unwrap());
+
+        let error = classify_map_delete(
+            Err(MapError::InvalidKeySize {
+                size: 1,
+                expected: 8,
+            }),
+            "delete test key",
+        )
+        .unwrap_err();
+        assert!(error.contains("delete test key"));
+        assert!(error.contains("invalid key size"));
+    }
+
+    #[test]
+    fn map_delete_batch_attempts_every_key_and_aggregates_non_missing_errors() {
+        let mut attempted = Vec::new();
+        let error = execute_map_delete_batch(
+            [1u16, 2, 3],
+            |port| {
+                attempted.push(port);
+                match port {
+                    1 => Err(MapError::InvalidKeySize {
+                        size: 1,
+                        expected: 8,
+                    }),
+                    2 => Err(MapError::KeyNotFound),
+                    _ => Ok(()),
+                }
+            },
+            "delete bitmap port",
+        )
+        .unwrap_err();
+
+        assert_eq!(attempted, vec![1, 2, 3]);
+        assert!(error.contains("invalid key size"));
+        assert!(!error.contains("key not found"));
+    }
+}

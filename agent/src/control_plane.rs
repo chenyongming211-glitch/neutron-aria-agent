@@ -4283,15 +4283,16 @@ mod tests {
         let created = transaction_created_port_sets(&staged, &runtime_adds).unwrap();
         let mut cleaned = Vec::new();
 
-        execute_transaction_port_set_cleanup(&created, |port_set| {
+        let cleanup = execute_transaction_port_set_cleanup(&created, |port_set| {
             cleaned.push(port_set.clone());
             Ok(())
-        })
-        .unwrap();
+        });
 
         assert_eq!(created.len(), 1);
         assert_eq!(created[0].bitmap_idx, 7);
         assert_eq!(cleaned, created);
+        assert_eq!(cleanup.cleaned_bitmap_indices, vec![7]);
+        assert!(cleanup.failures.is_empty());
         let mut retry = baseline;
         let retry_add = retry
             .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
@@ -4314,18 +4315,71 @@ mod tests {
         ];
         let mut attempted = Vec::new();
 
-        let error = execute_transaction_port_set_cleanup(&created, |port_set| {
+        let cleanup = execute_transaction_port_set_cleanup(&created, |port_set| {
             attempted.push(port_set.clone());
             if attempted.len() == 1 {
                 Err("forced first bitmap cleanup failure".to_string())
             } else {
                 Ok(())
             }
-        })
-        .unwrap_err();
+        });
 
         assert_eq!(attempted, created);
-        assert!(error.contains("forced first bitmap cleanup failure"));
+        assert_eq!(cleanup.cleaned_bitmap_indices, vec![8]);
+        assert_eq!(cleanup.failures.len(), 1);
+        assert_eq!(cleanup.failures[0].bitmap_idx, 7);
+        assert!(cleanup.failures[0]
+            .error
+            .contains("forced first bitmap cleanup failure"));
+    }
+
+    #[test]
+    fn standalone_review_failed_cleanup_quarantine_survives_retry_and_restart() {
+        let created = vec![
+            TransactionCreatedPortSet {
+                bitmap_idx: 7,
+                ports_normalized: "80:1".to_string(),
+            },
+            TransactionCreatedPortSet {
+                bitmap_idx: 8,
+                ports_normalized: "443:1".to_string(),
+            },
+        ];
+        let cleanup = execute_transaction_port_set_cleanup(&created, |port_set| {
+            if port_set.bitmap_idx == 7 {
+                Err("forced durable quarantine".to_string())
+            } else {
+                Ok(())
+            }
+        });
+
+        let mut guarded = FirewallState::default();
+        guarded.free_bitmap_indices.extend([7, 8]);
+        guarded.next_bitmap_idx = 9;
+        for port_set in &created {
+            guarded
+                .quarantine_bitmap_index(port_set.bitmap_idx)
+                .unwrap();
+        }
+        for bitmap_idx in &cleanup.cleaned_bitmap_indices {
+            guarded
+                .release_quarantined_bitmap_index(*bitmap_idx)
+                .unwrap();
+        }
+
+        let json = serde_json::to_string(&guarded).unwrap();
+        let mut restarted: FirewallState = serde_json::from_str(&json).unwrap();
+        let first_retry = restarted
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("8443"), 0)
+            .unwrap();
+        let second_retry = restarted
+            .apply_add_rule(3, 4, libc::IPPROTO_TCP as u8, 1, Some("9443"), 0)
+            .unwrap();
+
+        assert_eq!(cleanup.failures[0].bitmap_idx, 7);
+        assert!(restarted.is_bitmap_index_quarantined(7));
+        assert_eq!(first_retry.bitmap_idx, Some(8));
+        assert_eq!(second_retry.bitmap_idx, Some(9));
     }
 
     #[test]

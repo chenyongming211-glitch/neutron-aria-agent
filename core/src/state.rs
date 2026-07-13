@@ -853,6 +853,53 @@ mod tests {
     }
 
     #[test]
+    fn quarantined_bitmap_survives_restart_and_is_not_reused() {
+        let mut state = FirewallState::default();
+        state.free_bitmap_indices.push(7);
+        state.next_bitmap_idx = 8;
+        state
+            .quarantine_bitmap_index(7)
+            .expect("quarantine recycled bitmap index");
+
+        assert!(state.is_bitmap_index_quarantined(7));
+        assert!(!state.free_bitmap_indices.contains(&7));
+
+        let json = serde_json::to_string(&state).expect("serialize quarantined allocator");
+        let mut restarted: FirewallState =
+            serde_json::from_str(&json).expect("deserialize quarantined allocator");
+        let retry = restarted
+            .apply_add_rule(1, 2, 6, 1, Some("443"), 0)
+            .expect("retry allocation");
+
+        assert_eq!(retry.bitmap_idx, Some(8));
+        assert!(restarted.is_bitmap_index_quarantined(7));
+    }
+
+    #[test]
+    fn confirmed_bitmap_cleanup_releases_only_the_successful_quarantine() {
+        let mut state = FirewallState::default();
+        state.free_bitmap_indices.extend([7, 8]);
+        state.next_bitmap_idx = 9;
+        state.quarantine_bitmap_index(7).unwrap();
+        state.quarantine_bitmap_index(8).unwrap();
+
+        assert!(state.release_quarantined_bitmap_index(8).unwrap());
+        assert!(state.is_bitmap_index_quarantined(7));
+        assert!(!state.is_bitmap_index_quarantined(8));
+
+        let first = state
+            .apply_add_rule(1, 2, 6, 1, Some("443"), 0)
+            .unwrap();
+        let second = state
+            .apply_add_rule(3, 4, 6, 1, Some("8443"), 0)
+            .unwrap();
+        assert_eq!(first.bitmap_idx, Some(8));
+        assert_eq!(second.bitmap_idx, Some(9));
+        assert_ne!(first.bitmap_idx, Some(7));
+        assert_ne!(second.bitmap_idx, Some(7));
+    }
+
+    #[test]
     fn tap_id_round_trips_in_state_file() {
         let state_path = unique_state_path();
         let mgr = StateManager::new(&state_path);
