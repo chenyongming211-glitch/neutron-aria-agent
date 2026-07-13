@@ -257,6 +257,7 @@ impl TapRegistry {
         instance: &str,
         conntrack_enabled: bool,
         acl_enabled: bool,
+        allow_recovery_publication: bool,
     ) -> Result<(), ControlPlaneError> {
         let _runtime_guard = self.control_plane.lock_runtime_lifecycle().await;
         self.control_plane
@@ -264,6 +265,7 @@ impl TapRegistry {
                 instance,
                 conntrack_enabled,
                 acl_enabled,
+                allow_recovery_publication,
             )
             .await
     }

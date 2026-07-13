@@ -656,6 +656,7 @@ fn read_peercred(_stream: &tokio::net::UnixStream) -> Result<UnixPeerCred, Strin
 #[tokio::main]
 async fn main() {
     const SSL_RECONCILE_INTERVAL_SECS: u64 = 15;
+    const TC_ACL_HEALTH_INTERVAL_SECS: u64 = 10;
 
     // Root privilege check
     if unsafe { libc::geteuid() } != 0 {
@@ -858,6 +859,19 @@ async fn main() {
         }
     });
 
+    let tc_health_cp = control_plane.clone();
+    let tc_acl_health_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            TC_ACL_HEALTH_INTERVAL_SECS,
+        ));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let _ = tc_health_cp.reconcile_tc_acl_health().await;
+        }
+    });
+
     let ssl_reconcile_cp = control_plane.clone();
     let ssl_reconcile_task = tokio::spawn(async move {
         let mut interval =
@@ -918,6 +932,7 @@ async fn main() {
         task.abort();
     }
     compact_task.abort();
+    tc_acl_health_task.abort();
     ssl_reconcile_task.abort();
 
     // Final compact: ensure WAL is flushed to snapshot

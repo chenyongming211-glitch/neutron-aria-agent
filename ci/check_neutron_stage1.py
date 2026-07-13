@@ -923,9 +923,22 @@ def check_rust_stage_one_tests_present():
         "runtime_degraded",
         "effective_action",
         "bypass",
+        "fn project_tc_acl_link_loss(",
+        "append_snapshot_commit(next_runtime.to_wal_state())",
     ):
         if term not in neutron_api_source:
             raise SystemExit("ERROR: Neutron TC health status missing %s" % term)
+
+    for term in (
+        "runtime_health: RuntimeHealthState",
+        "pub async fn reconcile_tc_acl_health(&self)",
+        "acl_quiesce_failed:",
+        "recovery_required",
+        "allow_recovery_publication",
+        "tc_acl_full_resync_required",
+    ):
+        if term not in control_plane_source:
+            raise SystemExit("ERROR: TC ACL runtime health contract missing %s" % term)
 
     helper_contracts = (
         (network_source, "add_network_impl", ("open_pinned_lpm_v4", "open_pinned_lpm_v6")),

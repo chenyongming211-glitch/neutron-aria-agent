@@ -25,10 +25,14 @@ use std::time::Instant;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use tracing::{error, info, warn};
 
-use crate::control_plane::{ControlPlane, OwnedAclGroupSpec, OwnedAclPolicySpec};
+use crate::control_plane::{
+    ControlPlane, InstanceRuntimeHealthSnapshot, OwnedAclGroupSpec, OwnedAclPolicySpec,
+};
 use crate::fault_injection;
 use crate::neutron_wal::{NeutronWal, NeutronWalState, PendingNeutronIntent};
 use crate::tap_registry::TapRegistry;
+
+const NEUTRON_TC_ACL_HEALTH_INTERVAL_SECS: u64 = 10;
 
 #[derive(Clone)]
 pub(crate) struct NeutronApiState {
@@ -864,6 +868,24 @@ impl NeutronApiState {
             }
         }
     }
+
+    async fn project_tc_acl_health(&self) {
+        let health = self.control_plane.list_instance_runtime_health().await;
+        let _guard = self.apply_lock.lock().await;
+        let mut next_runtime = {
+            let runtime = self.runtime.read().await;
+            runtime.clone()
+        };
+        if !project_tc_acl_link_loss(&mut next_runtime, &health) {
+            return;
+        }
+        if let Err(error) = self.wal.append_snapshot_commit(next_runtime.to_wal_state()) {
+            warn!(error = %error, "failed to commit Neutron TC ACL link-loss status");
+            return;
+        }
+        let mut runtime = self.runtime.write().await;
+        *runtime = next_runtime;
+    }
 }
 
 impl NeutronRuntimeState {
@@ -901,6 +923,95 @@ impl NeutronRuntimeState {
     }
 }
 
+fn neutron_status_requires_full_resync(status: &NeutronPortStatus) -> bool {
+    status
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("requires_resync") || reason.contains("full_resync"))
+        || status.domains.iter().any(|domain| {
+            domain.reason.as_deref().is_some_and(|reason| {
+                reason.contains("requires_resync") || reason.contains("full_resync")
+            })
+        })
+}
+
+fn project_tc_acl_link_loss(
+    runtime: &mut NeutronRuntimeState,
+    health: &[InstanceRuntimeHealthSnapshot],
+) -> bool {
+    let health_by_instance: BTreeMap<&str, &InstanceRuntimeHealthSnapshot> = health
+        .iter()
+        .map(|snapshot| (snapshot.name.as_str(), snapshot))
+        .collect();
+    let committed_ports: Vec<ManagedNeutronPort> = runtime.ports.values().cloned().collect();
+    let mut changed = false;
+
+    for port in committed_ports {
+        if !normalize_managed_domains(&port.managed_domains)
+            .iter()
+            .any(|domain| domain == "acl")
+        {
+            continue;
+        }
+        let Some(snapshot) = health_by_instance.get(port.ifname.as_str()) else {
+            continue;
+        };
+        if snapshot.acl_ready {
+            continue;
+        }
+        let Some(runtime_reason) = snapshot.readiness_reason.as_deref() else {
+            continue;
+        };
+        if !runtime_reason.starts_with("missing_tc_")
+            && !runtime_reason.starts_with("acl_quiesce_failed:")
+        {
+            continue;
+        }
+        let Some(status) = runtime.port_statuses.get_mut(&port.port_id) else {
+            continue;
+        };
+        if neutron_status_requires_full_resync(status) {
+            continue;
+        }
+        let already_projected = status.status == "degraded"
+            && status.reason.as_deref() == Some("tc_acl_link_lost")
+            && status.domains.iter().any(|domain| {
+                domain.domain == "acl"
+                    && domain.status == "degraded"
+                    && domain.reason.as_deref() == Some("tc_acl_link_lost")
+                    && domain.effective_action.as_deref() == Some("bypass")
+            });
+        if already_projected {
+            continue;
+        }
+
+        let mut domains: BTreeMap<String, NeutronDomainStatus> = status
+            .domains
+            .drain(..)
+            .map(|domain| (domain.domain.clone(), domain))
+            .collect();
+        domains.insert(
+            "acl".to_string(),
+            domain_status_with_action(
+                "acl",
+                "degraded",
+                Some("tc_acl_link_lost".to_string()),
+                Some("bypass".to_string()),
+            ),
+        );
+        status.status = "degraded".to_string();
+        status.reason = Some("tc_acl_link_lost".to_string());
+        status.domains = domains.into_values().collect();
+        changed = true;
+    }
+
+    if changed {
+        runtime.authority_state = "runtime_degraded".to_string();
+        runtime.wal_status = "tc_acl_link_lost".to_string();
+    }
+    changed
+}
+
 pub(crate) fn build_router(
     registry: Arc<TapRegistry>,
     control_plane: Arc<ControlPlane>,
@@ -912,6 +1023,18 @@ pub(crate) fn build_router(
         restore_state.recover_incomplete_wal_intent().await;
         restore_state.reconcile_committed_runtime().await;
         restore_state.restore_neutron_authorities().await;
+    });
+    let health_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            NEUTRON_TC_ACL_HEALTH_INTERVAL_SECS,
+        ));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            health_state.project_tc_acl_health().await;
+        }
     });
     Router::new()
         .route(
@@ -1666,6 +1789,34 @@ async fn apply_neutron_snapshot_for_scope(
         });
     }
     let wal_commit_ms = elapsed_ms(wal_commit_started);
+    if matches!(scope, ApplyScope::FullHost) && !has_error {
+        let health = state.control_plane.list_instance_runtime_health().await;
+        let xdp_health: BTreeMap<&str, bool> = health
+            .iter()
+            .map(|snapshot| (snapshot.name.as_str(), snapshot.xdp_ready))
+            .collect();
+        for port in next_runtime.ports.values().filter(|port| {
+            normalize_managed_domains(&port.managed_domains)
+                .iter()
+                .any(|domain| domain == "acl")
+        }) {
+            let Some(xdp_ready) = xdp_health.get(port.ifname.as_str()) else {
+                continue;
+            };
+            if let Err(error) = state
+                .control_plane
+                .mark_tc_acl_runtime_ready(&port.ifname, *xdp_ready)
+                .await
+            {
+                warn!(
+                    port_id = %port.port_id,
+                    ifname = %port.ifname,
+                    error = %error,
+                    "successful Neutron full resync could not publish TC ACL runtime readiness"
+                );
+            }
+        }
+    }
     publish_committed_snapshot_runtime(&state, next_runtime, snapshot.generation, || {
         fault_injection::check("neutron.snapshot.after_commit")
     })
@@ -1721,6 +1872,7 @@ async fn apply_snapshot_runtime_transaction(
     let profile_started = Instant::now();
     let mut next_ports = current_ports;
     let SnapshotApplyTransaction { scope, plan, .. } = transaction;
+    let full_resync = matches!(&scope, ApplyScope::FullHost);
     let scope_name = apply_scope_name(&scope);
     let scope_port_id = apply_scope_port_id(&scope).map(|value| value.to_string());
     let SnapshotPlan {
@@ -1898,8 +2050,13 @@ async fn apply_snapshot_runtime_transaction(
             );
             continue;
         }
-        let domain_result =
-            reconcile_neutron_domains(state, &port, &mut acl_validation_cache).await;
+        let domain_result = reconcile_neutron_domains(
+            state,
+            &port,
+            &mut acl_validation_cache,
+            full_resync,
+        )
+        .await;
         let domain_ms = elapsed_ms(port_started);
         if domain_result.ok {
             state
@@ -2018,8 +2175,13 @@ async fn apply_snapshot_runtime_transaction(
                 }
                 let managed = managed_port_from_snapshot(port);
                 let domain_started = Instant::now();
-                let domain_result =
-                    reconcile_neutron_domains(state, port, &mut acl_validation_cache).await;
+                let domain_result = reconcile_neutron_domains(
+                    state,
+                    port,
+                    &mut acl_validation_cache,
+                    full_resync,
+                )
+                .await;
                 let domain_ms = elapsed_ms(domain_started);
                 if domain_result.ok {
                     state
@@ -2667,6 +2829,7 @@ async fn reconcile_neutron_domains(
     state: &NeutronApiState,
     port: &NeutronPortSnapshot,
     acl_validation_cache: &mut AclValidationCache,
+    full_resync: bool,
 ) -> DomainReconcileResult {
     let domains = normalize_managed_domains(&port.managed_domains);
     if domains.is_empty() {
@@ -2704,7 +2867,14 @@ async fn reconcile_neutron_domains(
     for domain in domains {
         match domain.as_str() {
             "attach" => statuses.push(domain_status(&domain, "ready", None)),
-            "acl" => match reconcile_neutron_acl(state, port, acl_validation_cache).await {
+            "acl" => match reconcile_neutron_acl(
+                state,
+                port,
+                acl_validation_cache,
+                full_resync,
+            )
+            .await
+            {
                 Ok(outcome) => statuses.push(outcome.domain_status(port)),
                 Err(error) => {
                     let reason = format!("acl_apply_failed:{}", error.details);
@@ -4259,6 +4429,7 @@ async fn reconcile_neutron_acl(
     state: &NeutronApiState,
     port: &NeutronPortSnapshot,
     acl_validation_cache: &mut AclValidationCache,
+    full_resync: bool,
 ) -> Result<NeutronAclReconcileOutcome, NeutronAclReconcileError> {
     if !port_manages_acl(port) {
         return Ok(NeutronAclReconcileOutcome::default());
@@ -4320,6 +4491,7 @@ async fn reconcile_neutron_acl(
                 &port.ifname,
                 transition.quiesce.conntrack_enabled,
                 transition.quiesce.acl_enabled,
+                false,
             )
             .await
             .map_err(|error| {
@@ -4419,6 +4591,7 @@ async fn reconcile_neutron_acl(
                 &port.ifname,
                 transition.publish.conntrack_enabled,
                 transition.publish.acl_enabled,
+                full_resync,
             )
             .await
             .map_err(|error| {
@@ -4475,6 +4648,7 @@ async fn reconcile_neutron_acl(
             &port.ifname,
             transition.publish.conntrack_enabled,
             transition.publish.acl_enabled,
+            full_resync,
         )
         .await
         .map_err(|error| {
@@ -4513,6 +4687,7 @@ async fn reconcile_neutron_acl(
             .registry
             .update_neutron_acl_runtime_gate(
                 &port.ifname,
+                false,
                 false,
                 false,
             )
@@ -4712,6 +4887,98 @@ fn can_skip_neutron_domain_reconcile(
 mod tests {
     use super::*;
     use crate::ebpf_binary::TraceBackendKind;
+
+    #[test]
+    fn neutron_tc_acl_health_projection_is_deduplicated_and_preserves_resync() {
+        let port = ManagedNeutronPort {
+            port_id: "port-health".to_string(),
+            ifname: "tap-health".to_string(),
+            ifindex: Some(17),
+            managed_domains: vec!["acl".to_string()],
+            domain_desired_hashes: BTreeMap::new(),
+        };
+        let mut runtime = NeutronRuntimeState::default();
+        runtime.ports.insert(port.port_id.clone(), port.clone());
+        runtime.port_statuses.insert(
+            port.port_id.clone(),
+            port_runtime_status(
+                &port.port_id,
+                &port.ifname,
+                9,
+                Some("hash-9".to_string()),
+                port.managed_domains.clone(),
+                "ready",
+                None,
+                vec![domain_status_with_action(
+                    "acl",
+                    "ready",
+                    None,
+                    Some("enforce".to_string()),
+                )],
+            ),
+        );
+        let health = vec![InstanceRuntimeHealthSnapshot {
+            name: port.ifname.clone(),
+            active: true,
+            acl_ready: false,
+            xdp_ready: true,
+            readiness_reason: Some("missing_tc_egress".to_string()),
+        }];
+
+        let recovery_only = vec![InstanceRuntimeHealthSnapshot {
+            readiness_reason: Some("recovery_required".to_string()),
+            ..health[0].clone()
+        }];
+        assert!(!project_tc_acl_link_loss(&mut runtime, &recovery_only));
+        assert_eq!(
+            runtime.port_statuses.get(&port.port_id).unwrap().status,
+            "ready"
+        );
+
+        assert!(project_tc_acl_link_loss(&mut runtime, &health));
+        assert_eq!(runtime.authority_state, "runtime_degraded");
+        let status = runtime.port_statuses.get(&port.port_id).unwrap();
+        assert_eq!(status.reason.as_deref(), Some("tc_acl_link_lost"));
+        assert!(status.domains.iter().any(|domain| {
+            domain.domain == "acl"
+                && domain.status == "degraded"
+                && domain.effective_action.as_deref() == Some("bypass")
+        }));
+        assert!(!project_tc_acl_link_loss(&mut runtime, &health));
+
+        let mut resync_runtime = NeutronRuntimeState::default();
+        resync_runtime
+            .ports
+            .insert(port.port_id.clone(), port.clone());
+        resync_runtime.port_statuses.insert(
+            port.port_id.clone(),
+            port_runtime_status(
+                &port.port_id,
+                &port.ifname,
+                9,
+                Some("hash-9".to_string()),
+                port.managed_domains,
+                "degraded",
+                Some("acl_restart_replay_requires_resync".to_string()),
+                vec![domain_status_with_action(
+                    "acl",
+                    "degraded",
+                    Some("acl_restart_replay_requires_resync".to_string()),
+                    Some("unchanged".to_string()),
+                )],
+            ),
+        );
+        assert!(!project_tc_acl_link_loss(&mut resync_runtime, &health));
+        assert_eq!(
+            resync_runtime
+                .port_statuses
+                .get("port-health")
+                .unwrap()
+                .reason
+                .as_deref(),
+            Some("acl_restart_replay_requires_resync")
+        );
+    }
     use crate::kernel_drop_manager::KernelDropManager;
     use crate::ssl_manager::SslManager;
     use crate::trace_backend::TraceManager;

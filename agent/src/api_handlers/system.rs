@@ -14,11 +14,17 @@ use aria_api::{ApiError, InstanceInfo, InstancesResponse, MessageResponse, Syste
     )
 )]
 pub async fn list_instances(State(cp): State<AppState>) -> impl IntoResponse {
-    let names = cp.list_instances().await;
+    let snapshots = cp.list_instance_runtime_health().await;
     Json(InstancesResponse {
-        instances: names
+        instances: snapshots
             .into_iter()
-            .map(|name| InstanceInfo { name, active: true })
+            .map(|snapshot| InstanceInfo {
+                name: snapshot.name,
+                active: snapshot.active,
+                acl_ready: snapshot.acl_ready,
+                xdp_ready: snapshot.xdp_ready,
+                readiness_reason: snapshot.readiness_reason,
+            })
             .collect(),
     })
 }

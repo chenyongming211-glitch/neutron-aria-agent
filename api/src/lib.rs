@@ -591,7 +591,10 @@ pub struct HealthResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[schema(example = json!({
     "name": "eth0",
-    "active": true
+    "active": true,
+    "acl_ready": true,
+    "xdp_ready": false,
+    "readiness_reason": "xdp_ddos_hook_unavailable"
 }))]
 pub struct InstanceInfo {
     /// Managed instance or tap name.
@@ -600,6 +603,17 @@ pub struct InstanceInfo {
     /// Whether the instance currently has active data plane programs attached.
     #[schema(example = true)]
     pub active: bool,
+    /// Whether desired ACL/CT enforcement has a complete dual-TC runtime and published gate.
+    #[serde(default)]
+    #[schema(example = true)]
+    pub acl_ready: bool,
+    /// Whether the independent XDP link is currently present.
+    #[serde(default)]
+    #[schema(example = false)]
+    pub xdp_ready: bool,
+    /// Stable runtime readiness reason when either independent health dimension is degraded.
+    #[serde(default)]
+    pub readiness_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -2099,6 +2113,13 @@ mod tests {
         .unwrap();
         assert_eq!(value["acl_ready"], true);
         assert_eq!(value["xdp_ready"], false);
+
+        let legacy: InstanceInfo =
+            serde_json::from_value(serde_json::json!({"name": "tap0", "active": true}))
+                .unwrap();
+        assert!(!legacy.acl_ready);
+        assert!(!legacy.xdp_ready);
+        assert_eq!(legacy.readiness_reason, None);
     }
 
     #[test]

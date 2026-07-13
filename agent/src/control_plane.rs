@@ -6,7 +6,7 @@ use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
-use crate::instance::{FirewallInstance, RuntimePinState};
+use crate::instance::{FirewallInstance, RuntimePinState, TcAclLinkHealth};
 use crate::kernel_drop_manager::{KernelDropManager, KernelDropStatusSnapshot};
 use crate::service_chain::{self, ServiceChain};
 use crate::ssl_manager::SslManager;
@@ -29,6 +29,7 @@ const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
 /// Per-instance in-memory state
 struct InstanceState {
     state: FirewallState,
+    runtime_health: RuntimeHealthState,
     tap_id: u32,
     ifindex: Option<u32>,
     pin_path: String,
@@ -36,6 +37,109 @@ struct InstanceState {
     wal: WalClient,
     ssl_sync_pending: bool,
     last_ssl_sync_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RuntimeHealthState {
+    acl_ready: bool,
+    xdp_ready: bool,
+    acl_error: Option<String>,
+}
+
+impl RuntimeHealthState {
+    fn readiness_reason(&self) -> Option<String> {
+        self.acl_error.clone().or_else(|| {
+            (!self.xdp_ready).then(|| "xdp_ddos_hook_unavailable".to_string())
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RuntimeHealthTransition {
+    next: RuntimeHealthState,
+    changed: bool,
+    quiesce_acl_ct: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstanceRuntimeHealthSnapshot {
+    pub name: String,
+    pub active: bool,
+    pub acl_ready: bool,
+    pub xdp_ready: bool,
+    pub readiness_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TcAclHealthChange {
+    pub instance: String,
+    pub acl_ready: bool,
+    pub xdp_ready: bool,
+    pub reason: Option<String>,
+    pub quiesced: bool,
+}
+
+fn missing_tc_reason(health: TcAclLinkHealth) -> Option<&'static str> {
+    match (health.ingress, health.egress) {
+        (false, false) => Some("missing_tc_ingress_and_egress"),
+        (false, true) => Some("missing_tc_ingress"),
+        (true, false) => Some("missing_tc_egress"),
+        (true, true) => None,
+    }
+}
+
+fn apply_tc_health_observation(
+    current: RuntimeHealthState,
+    observed: TcAclLinkHealth,
+) -> RuntimeHealthTransition {
+    let mut next = current.clone();
+    next.xdp_ready = observed.xdp_ready();
+    let quiesce_acl_ct = if let Some(reason) = missing_tc_reason(observed) {
+        next.acl_ready = false;
+        if !current
+            .acl_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("acl_quiesce_failed:"))
+        {
+            next.acl_error = Some(reason.to_string());
+        }
+        current.acl_ready || current.acl_error.as_deref() == Some("recovery_required")
+    } else if !current.acl_ready {
+        next.acl_ready = false;
+        next.acl_error = Some("recovery_required".to_string());
+        false
+    } else {
+        next.acl_ready = true;
+        next.acl_error = None;
+        false
+    };
+    RuntimeHealthTransition {
+        changed: next != current,
+        next,
+        quiesce_acl_ct,
+    }
+}
+
+fn initial_runtime_health(
+    desired_conntrack: bool,
+    desired_acl: bool,
+    health: TcAclLinkHealth,
+    enforcement_published: bool,
+) -> RuntimeHealthState {
+    let enforcement_required = desired_conntrack || desired_acl;
+    let acl_ready = !enforcement_required || (health.acl_ready() && enforcement_published);
+    let acl_error = if acl_ready {
+        None
+    } else {
+        missing_tc_reason(health)
+            .map(str::to_string)
+            .or_else(|| Some("recovery_required".to_string()))
+    };
+    RuntimeHealthState {
+        acl_ready,
+        xdp_ready: health.xdp_ready(),
+        acl_error,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -258,6 +362,17 @@ fn managed_runtime_activation(
 
 fn neutron_acl_gate_requires_tc(conntrack_enabled: bool, acl_enabled: bool) -> bool {
     conntrack_enabled || acl_enabled
+}
+
+fn neutron_acl_gate_requires_full_resync(
+    conntrack_enabled: bool,
+    acl_enabled: bool,
+    runtime_ready: bool,
+    allow_recovery_publication: bool,
+) -> bool {
+    neutron_acl_gate_requires_tc(conntrack_enabled, acl_enabled)
+        && !runtime_ready
+        && !allow_recovery_publication
 }
 
 fn config_update_requires_tc(conntrack: Option<bool>, acl: Option<bool>) -> bool {
@@ -812,6 +927,21 @@ impl ControlPlane {
         )
         .require_tc_acl_runtime()
         .map_err(ControlPlaneError::InstanceNotReady)
+    }
+
+    fn mark_tc_acl_runtime_ready_locked(
+        instance: &str,
+        state: &mut InstanceState,
+        xdp_ready: bool,
+        trace_map_mode: TraceMapMode,
+    ) -> Result<(), ControlPlaneError> {
+        Self::require_tc_acl_ready_locked(instance, state, trace_map_mode)?;
+        state.runtime_health = RuntimeHealthState {
+            acl_ready: true,
+            xdp_ready,
+            acl_error: None,
+        };
+        Ok(())
     }
 
     fn fq_qdisc_marker_path(state: &InstanceState) -> std::path::PathBuf {
@@ -1612,11 +1742,32 @@ impl ControlPlane {
             state_path,
             wal,
             desired_ssl_enabled,
+            activation,
             ..
         } = prepared;
 
+        let runtime = FirewallInstance::new(
+            &name,
+            pin_path.clone().into(),
+            state_path.clone().into(),
+            true,
+            self.trace_map_mode(),
+        );
+        let link_health = runtime.tc_acl_link_health();
+        let enforcement_published = !matches!(
+            activation,
+            ManagedRuntimeActivation::AwaitNeutronResync { .. }
+        ) && runtime.require_tc_acl_runtime().is_ok();
+        let runtime_health = initial_runtime_health(
+            state.conntrack_enabled,
+            state.acl_enabled,
+            link_health,
+            enforcement_published,
+        );
+
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
+            runtime_health,
             tap_id,
             ifindex: Some(ifindex),
             pin_path,
@@ -1749,8 +1900,24 @@ impl ControlPlane {
             Some(state.tcprt_enabled),
             None,
         )?;
+        let runtime_instance = FirewallInstance::new(
+            iface,
+            pin_path.to_string().into(),
+            state_path.to_string().into(),
+            false,
+            self.trace_map_mode(),
+        );
+        let system_link_health = runtime_instance.tc_acl_link_health();
+        let runtime_health = initial_runtime_health(
+            state.conntrack_enabled,
+            state.acl_enabled,
+            system_link_health,
+            false,
+        );
+        let enforcement_required = state.conntrack_enabled || state.acl_enabled;
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
+            runtime_health,
             tap_id,
             ifindex,
             pin_path: pin_path.to_string(),
@@ -1763,6 +1930,19 @@ impl ControlPlane {
         let mut instances = self.instances.write().await;
         instances.insert("system".to_string(), instance.clone());
         drop(instances);
+
+        if enforcement_required {
+            if let Err(error) = self
+                .mark_tc_acl_runtime_ready("system", system_link_health.xdp_ready())
+                .await
+            {
+                self.unregister_instance("system").await;
+                return Err(format!(
+                    "failed to publish system TC ACL runtime health: {}",
+                    error
+                ));
+            }
+        }
 
         if let Err(e) = self.trace_manager.register_tap(pin_path, tap_id).await {
             warn!(
@@ -1857,6 +2037,179 @@ impl ControlPlane {
         let mut names: Vec<String> = instances.keys().cloned().collect();
         names.sort();
         names
+    }
+
+    fn runtime_link_health_locked(
+        &self,
+        instance: &str,
+        state: &InstanceState,
+    ) -> TcAclLinkHealth {
+        let Ok(iface) = Self::runtime_iface_name(instance, state) else {
+            return TcAclLinkHealth::new(false, false, false);
+        };
+        let runtime = FirewallInstance::new(
+            &iface,
+            state.pin_path.clone().into(),
+            state.state_path.clone().into(),
+            instance != "system",
+            self.trace_map_mode(),
+        );
+        let pinned = runtime.tc_acl_link_health();
+        let ifindex_matches = Self::resolve_ifindex(&iface)
+            .ok()
+            .is_some_and(|actual| state.ifindex.map_or(true, |expected| expected == actual));
+        TcAclLinkHealth::new(
+            ifindex_matches
+                && pinned.ingress
+                && Path::new(&state.pin_path).join("tc_ingress").exists(),
+            ifindex_matches
+                && pinned.egress
+                && Path::new(&state.pin_path).join("tc_egress").exists(),
+            ifindex_matches && pinned.xdp,
+        )
+    }
+
+    fn quiesce_tc_acl_runtime_locked(
+        instance: &str,
+        state: &InstanceState,
+    ) -> Result<(), String> {
+        let runtime = state.map_runtime();
+        aria_core::ebpf_ops::read_runtime_config(runtime)
+            .map_err(|error| format!("runtime gate read failed: {}", error))?;
+        if instance == "system" {
+            aria_core::ebpf_ops::update_runtime_config(
+                runtime,
+                Some(false),
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+                None,
+            )
+        } else {
+            aria_core::ebpf_ops::update_acl_runtime_gate(
+                runtime,
+                false,
+                false,
+                aria_core::common::ACL_INGRESS_HOOK_TC,
+            )
+        }
+        .map_err(|error| format!("runtime gate write failed: {}", error))
+    }
+
+    pub async fn list_instance_runtime_health(&self) -> Vec<InstanceRuntimeHealthSnapshot> {
+        let instances = self.instance_entries().await;
+        let mut snapshots = Vec::with_capacity(instances.len());
+        for (name, instance) in instances {
+            let state = instance.read().await;
+            snapshots.push(InstanceRuntimeHealthSnapshot {
+                name,
+                active: true,
+                acl_ready: state.runtime_health.acl_ready,
+                xdp_ready: state.runtime_health.xdp_ready,
+                readiness_reason: state.runtime_health.readiness_reason(),
+            });
+        }
+        snapshots.sort_by(|left, right| left.name.cmp(&right.name));
+        snapshots
+    }
+
+    pub async fn reconcile_tc_acl_health(&self) -> Vec<TcAclHealthChange> {
+        let instances = self.instance_entries().await;
+        let mut changes = Vec::new();
+
+        for (name, instance) in instances {
+            let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+            let mut state = instance.write().await;
+            let observed = self.runtime_link_health_locked(&name, &state);
+            let desired_enforcement = state.state.conntrack_enabled || state.state.acl_enabled;
+
+            if !desired_enforcement {
+                if state.runtime_health.xdp_ready != observed.xdp_ready() {
+                    state.runtime_health.xdp_ready = observed.xdp_ready();
+                    changes.push(TcAclHealthChange {
+                        instance: name.clone(),
+                        acl_ready: state.runtime_health.acl_ready,
+                        xdp_ready: state.runtime_health.xdp_ready,
+                        reason: state.runtime_health.readiness_reason(),
+                        quiesced: false,
+                    });
+                }
+                continue;
+            }
+
+            let transition =
+                apply_tc_health_observation(state.runtime_health.clone(), observed);
+            if !transition.changed && !transition.quiesce_acl_ct {
+                continue;
+            }
+
+            let mut next = transition.next;
+            let mut quiesced = false;
+            if transition.quiesce_acl_ct {
+                match Self::quiesce_tc_acl_runtime_locked(&name, &state) {
+                    Ok(()) => quiesced = true,
+                    Err(error) => {
+                        next.acl_ready = false;
+                        next.acl_error = Some(format!("acl_quiesce_failed:{}", error));
+                    }
+                }
+            }
+
+            if next == state.runtime_health {
+                continue;
+            }
+            state.runtime_health = next;
+            let change = TcAclHealthChange {
+                instance: name.clone(),
+                acl_ready: state.runtime_health.acl_ready,
+                xdp_ready: state.runtime_health.xdp_ready,
+                reason: state.runtime_health.readiness_reason(),
+                quiesced,
+            };
+            if !change.acl_ready {
+                warn!(
+                    instance = %change.instance,
+                    reason = ?change.reason,
+                    quiesced = change.quiesced,
+                    "TC ACL runtime health changed"
+                );
+            } else {
+                info!(
+                    instance = %change.instance,
+                    xdp_ready = change.xdp_ready,
+                    "runtime link health changed"
+                );
+            }
+            changes.push(change);
+        }
+
+        changes.sort_by(|left, right| left.instance.cmp(&right.instance));
+        changes
+    }
+
+    pub async fn mark_tc_acl_runtime_ready(
+        &self,
+        instance: &str,
+        xdp_ready: bool,
+    ) -> Result<(), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        let observed = self.runtime_link_health_locked(instance, &state);
+        if !observed.acl_ready() {
+            return Err(ControlPlaneError::InstanceNotReady(
+                missing_tc_reason(observed)
+                    .unwrap_or("missing_tc_ingress_and_egress")
+                    .to_string(),
+            ));
+        }
+        Self::mark_tc_acl_runtime_ready_locked(
+            instance,
+            &mut state,
+            xdp_ready,
+            self.trace_map_mode(),
+        )
     }
 
     async fn get_instance(
@@ -3579,11 +3932,22 @@ impl ControlPlane {
         instance: &str,
         conntrack_enabled: bool,
         acl_enabled: bool,
+        allow_recovery_publication: bool,
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
         if neutron_acl_gate_requires_tc(conntrack_enabled, acl_enabled) {
             Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
+            if neutron_acl_gate_requires_full_resync(
+                conntrack_enabled,
+                acl_enabled,
+                state.runtime_health.acl_ready,
+                allow_recovery_publication,
+            ) {
+                return Err(ControlPlaneError::InstanceNotReady(
+                    "tc_acl_full_resync_required".to_string(),
+                ));
+            }
         }
         aria_core::ebpf_ops::update_acl_runtime_gate(
             state.map_runtime(),
@@ -3755,6 +4119,18 @@ impl ControlPlane {
                 )
                 .await;
             return Err(recovery_error);
+        }
+        if attempted_enable {
+            let xdp_ready = state.runtime_health.xdp_ready;
+            Self::mark_tc_acl_runtime_ready_locked(
+                instance,
+                &mut state,
+                xdp_ready,
+                self.trace_map_mode(),
+            )?;
+        } else if !state.state.conntrack_enabled && !state.state.acl_enabled {
+            state.runtime_health.acl_ready = true;
+            state.runtime_health.acl_error = None;
         }
         Ok(())
     }
@@ -4188,6 +4564,45 @@ mod tests {
     }
 
     #[test]
+    fn tc_health_loss_keeps_xdp_independent_and_quiesce_failures_stable() {
+        let xdp_lost = apply_tc_health_observation(
+            RuntimeHealthState {
+                acl_ready: true,
+                xdp_ready: true,
+                acl_error: None,
+            },
+            TcAclLinkHealth::new(true, true, false),
+        );
+        assert!(xdp_lost.next.acl_ready);
+        assert!(!xdp_lost.next.xdp_ready);
+        assert!(!xdp_lost.quiesce_acl_ct);
+
+        let failed = apply_tc_health_observation(
+            RuntimeHealthState {
+                acl_ready: false,
+                xdp_ready: true,
+                acl_error: Some("acl_quiesce_failed:map unavailable".to_string()),
+            },
+            TcAclLinkHealth::new(false, true, true),
+        );
+        assert!(!failed.changed);
+        assert!(!failed.quiesce_acl_ct);
+        assert_eq!(
+            failed.next.acl_error.as_deref(),
+            Some("acl_quiesce_failed:map unavailable")
+        );
+
+        let disabled = initial_runtime_health(
+            false,
+            false,
+            TcAclLinkHealth::new(false, false, false),
+            false,
+        );
+        assert!(disabled.acl_ready);
+        assert!(!disabled.xdp_ready);
+    }
+
+    #[test]
     fn local_config_enable_requires_dual_tc_but_disable_does_not() {
         assert!(config_update_requires_tc(Some(true), None));
         assert!(config_update_requires_tc(None, Some(true)));
@@ -4329,6 +4744,15 @@ mod tests {
         assert!(neutron_acl_gate_requires_tc(true, false));
         assert!(neutron_acl_gate_requires_tc(false, true));
         assert!(neutron_acl_gate_requires_tc(true, true));
+        assert!(neutron_acl_gate_requires_full_resync(
+            false, true, false, false
+        ));
+        assert!(!neutron_acl_gate_requires_full_resync(
+            false, true, false, true
+        ));
+        assert!(!neutron_acl_gate_requires_full_resync(
+            false, false, false, false
+        ));
     }
 
     async fn stopped_wal_instance_state(test_name: &str) -> InstanceState {
@@ -4345,6 +4769,11 @@ mod tests {
         wal.shutdown().await;
         InstanceState {
             state: FirewallState::default(),
+            runtime_health: RuntimeHealthState {
+                acl_ready: true,
+                xdp_ready: false,
+                acl_error: None,
+            },
             tap_id: 7,
             ifindex: Some(11),
             pin_path: state_path_string.clone(),
