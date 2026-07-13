@@ -563,7 +563,15 @@ impl NeutronApiState {
                 runtime.applied_desired_hash.clone(),
             )
         };
-        let committed_ifaces: Vec<String> = ports.iter().map(|port| port.ifname.clone()).collect();
+        let committed_ifaces: Vec<(String, bool)> = ports
+            .iter()
+            .map(|port| {
+                (
+                    port.ifname.clone(),
+                    port.managed_domains.iter().any(|domain| domain == "acl"),
+                )
+            })
+            .collect();
         let results = self
             .registry
             .reconcile_neutron_runtime(&committed_ifaces)
@@ -750,6 +758,7 @@ impl NeutronApiState {
         committed_before_intent: bool,
     ) -> IntentPortRecovery {
         let domains = recovery_domains_for_port(intent, port);
+        let acl_managed = domains.iter().any(|domain| domain == "acl");
         let mut statuses = Vec::new();
         let mut errors = Vec::new();
         let mut attached_for_recovery = false;
@@ -771,7 +780,11 @@ impl NeutronApiState {
                 .iter()
                 .any(|domain| matches!(domain.as_str(), "attach" | "acl"))
         {
-            match self.registry.attach(&port.ifname).await {
+            match self
+                .registry
+                .attach_neutron(&port.ifname, acl_managed)
+                .await
+            {
                 Ok(()) => {
                     attached_for_recovery = true;
                     statuses.push(domain_status(
@@ -1971,7 +1984,7 @@ async fn apply_snapshot_runtime_transaction(
         let port_id = port.port_id.clone();
         let ifname = port.ifname.clone();
         let attach_started = Instant::now();
-        match state.registry.attach(&port.ifname).await {
+        match state.registry.attach_neutron(&port.ifname, port_manages_acl(port)).await {
             Ok(()) => {
                 let attach_ms = elapsed_ms(attach_started);
                 if let Err(e) = fault_injection::check("neutron.port.after_attach").await {

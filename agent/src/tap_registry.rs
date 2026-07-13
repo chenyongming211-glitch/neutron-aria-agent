@@ -1,7 +1,7 @@
 use crate::control_plane::{ControlPlane, MANAGED_SHARED_PIN_NAMESPACE};
 use crate::instance::FirewallInstance;
 use regex::Regex;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -13,6 +13,12 @@ pub struct RuntimeReconcileResult {
     pub action: String,
     pub status: String,
     pub reason: Option<String>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ManagedAttachMode {
+    StandaloneRestoreAfterTcAttach,
+    NeutronResyncRequired { acl_managed: bool },
 }
 
 pub struct TapRegistry {
@@ -146,13 +152,19 @@ impl TapRegistry {
     /// then removes pinned link orphans that are not present in the committed set.
     pub async fn reconcile_neutron_runtime(
         &self,
-        committed_ifaces: &[String],
+        committed_ifaces: &[(String, bool)],
     ) -> Vec<RuntimeReconcileResult> {
-        let committed: BTreeSet<String> = committed_ifaces
-            .iter()
-            .filter(|ifname| !ifname.trim().is_empty())
-            .cloned()
-            .collect();
+        let mut committed = BTreeMap::new();
+        for (ifname, acl_managed) in committed_ifaces {
+            if ifname.trim().is_empty() {
+                continue;
+            }
+            committed
+                .entry(ifname.clone())
+                .and_modify(|managed| *managed |= *acl_managed)
+                .or_insert(*acl_managed);
+        }
+        let committed_names: BTreeSet<String> = committed.keys().cloned().collect();
         let pinned_ifaces = match self.managed_link_pin_ifaces() {
             Ok(ifaces) => ifaces,
             Err(e) => {
@@ -166,8 +178,8 @@ impl TapRegistry {
         };
 
         let mut results = Vec::new();
-        for ifname in &committed {
-            match self.attach(ifname).await {
+        for (ifname, acl_managed) in &committed {
+            match self.attach_neutron(ifname, *acl_managed).await {
                 Ok(()) => results.push(RuntimeReconcileResult {
                     ifname: ifname.clone(),
                     action: "claim_committed".to_string(),
@@ -183,7 +195,7 @@ impl TapRegistry {
             }
         }
 
-        for ifname in pinned_ifaces.difference(&committed) {
+        for ifname in pinned_ifaces.difference(&committed_names) {
             match self.remove_orphaned_managed_link_pins(ifname) {
                 Ok(()) => results.push(RuntimeReconcileResult {
                     ifname: ifname.clone(),
@@ -205,6 +217,19 @@ impl TapRegistry {
 
     /// Attach XDP firewall to a tap interface. Idempotent: skips if already attached.
     pub async fn attach(&self, iface: &str) -> Result<(), String> {
+        self.attach_with_mode(iface, ManagedAttachMode::StandaloneRestoreAfterTcAttach)
+            .await
+    }
+
+    pub async fn attach_neutron(&self, iface: &str, acl_managed: bool) -> Result<(), String> {
+        self.attach_with_mode(
+            iface,
+            ManagedAttachMode::NeutronResyncRequired { acl_managed },
+        )
+        .await
+    }
+
+    async fn attach_with_mode(&self, iface: &str, mode: ManagedAttachMode) -> Result<(), String> {
         // Idempotent check
         {
             let instances = self.instances.read().await;
@@ -255,7 +280,7 @@ impl TapRegistry {
 
         let prepared = match self
             .control_plane
-            .prepare_managed_registration(iface, &runtime_pin)
+            .prepare_managed_registration(iface, &runtime_pin, mode)
             .await
         {
             Ok(prepared) => prepared,
@@ -280,7 +305,48 @@ impl TapRegistry {
             ));
         }
 
-        if let Err(e) = instance.attach_links_from_pinned_runtime(&runtime_pin) {
+        let attached = match instance.attach_links_from_pinned_runtime(&runtime_pin) {
+            Ok(attached) => attached,
+            Err(e) => {
+                if let Err(release_err) = instance.release_persisted_live_iface() {
+                    warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
+                }
+                self.control_plane
+                    .abort_managed_registration(prepared)
+                    .await;
+                if runtime_pin.created_shared_runtime {
+                    self.cleanup_shared_runtime_dir();
+                }
+                return Err(format!("interface link attach failed: {}", e));
+            }
+        };
+
+        if prepared.requires_tc_acl_links() {
+            if let Err(e) = instance.require_tc_acl_links() {
+                if let Err(rollback_err) = instance.rollback_attached_links(&attached, false) {
+                    warn!(instance = %iface, error = %rollback_err, "failed to roll back links after required TC readiness failure");
+                }
+                if let Err(release_err) = instance.release_persisted_live_iface() {
+                    warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
+                }
+                self.control_plane
+                    .abort_managed_registration(prepared)
+                    .await;
+                if runtime_pin.created_shared_runtime {
+                    self.cleanup_shared_runtime_dir();
+                }
+                return Err(format!("required TC ACL links unavailable: {}", e));
+            }
+        }
+
+        if let Err(e) = self
+            .control_plane
+            .activate_managed_registration(&prepared)
+            .await
+        {
+            if let Err(rollback_err) = instance.rollback_attached_links(&attached, false) {
+                warn!(instance = %iface, error = %rollback_err, "failed to roll back links after managed runtime activation failure");
+            }
             if let Err(release_err) = instance.release_persisted_live_iface() {
                 warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
             }
@@ -290,7 +356,7 @@ impl TapRegistry {
             if runtime_pin.created_shared_runtime {
                 self.cleanup_shared_runtime_dir();
             }
-            return Err(format!("interface link attach failed: {}", e));
+            return Err(format!("managed runtime activation failed: {}", e));
         }
 
         self.control_plane.publish_managed_instance(prepared).await;

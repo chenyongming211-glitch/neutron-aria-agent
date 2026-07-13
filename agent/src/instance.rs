@@ -27,7 +27,46 @@ const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
 pub struct RuntimePinState {
     pub created_shared_runtime: bool,
     pub reused_existing_runtime: bool,
+    pub preexisting_live_links: bool,
     pub preexisting_xdp_link: bool,
+    pub preexisting_tc_ingress_link: bool,
+    pub preexisting_tc_egress_link: bool,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TcAclLinkHealth {
+    pub ingress: bool,
+    pub egress: bool,
+    pub xdp: bool,
+}
+
+impl TcAclLinkHealth {
+    pub fn new(ingress: bool, egress: bool, xdp: bool) -> Self {
+        Self {
+            ingress,
+            egress,
+            xdp,
+        }
+    }
+
+    pub fn acl_ready(self) -> bool {
+        self.ingress && self.egress
+    }
+
+    pub fn xdp_ready(self) -> bool {
+        self.xdp
+    }
+
+    pub fn missing_tc(self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.ingress {
+            missing.push("tc_ingress");
+        }
+        if !self.egress {
+            missing.push("tc_egress");
+        }
+        missing
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -163,23 +202,23 @@ impl FirewallInstance {
     }
 
     pub fn require_tc_acl_links(&self) -> Result<(), String> {
-        let ingress = Path::new(&self.tc_link_pin_path("tc_ingress")).exists();
-        let egress = Path::new(&self.tc_link_pin_path("tc_egress")).exists();
-        if tc_acl_links_complete(ingress, egress) {
+        let health = self.tc_acl_link_health();
+        if health.acl_ready() {
             return Ok(());
         }
 
-        let mut missing = Vec::new();
-        if !egress {
-            missing.push("tc_egress");
-        }
-        if !ingress {
-            missing.push("tc_ingress");
-        }
         Err(format!(
             "missing pinned TC ACL links: {}",
-            missing.join(", ")
+            health.missing_tc().join(", ")
         ))
+    }
+
+    pub fn tc_acl_link_health(&self) -> TcAclLinkHealth {
+        TcAclLinkHealth::new(
+            Path::new(&self.tc_link_pin_path("tc_ingress")).exists(),
+            Path::new(&self.tc_link_pin_path("tc_egress")).exists(),
+            Path::new(&self.xdp_link_pin_path()).exists(),
+        )
     }
 
     fn pin_runtime_maps(&self, bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {
@@ -838,6 +877,13 @@ impl FirewallInstance {
         let created_shared_runtime = self.shared_runtime && !pin_path_preexisted;
         let xdp_link_pin = self.xdp_link_pin_path();
         let preexisting_xdp_link = Path::new(&xdp_link_pin).exists();
+        let preexisting_tc_ingress_link =
+            Path::new(&self.tc_link_pin_path("tc_ingress")).exists();
+        let preexisting_tc_egress_link =
+            Path::new(&self.tc_link_pin_path("tc_egress")).exists();
+        let preexisting_live_links = preexisting_xdp_link
+            || preexisting_tc_ingress_link
+            || preexisting_tc_egress_link;
         let expected_metadata = self.expected_runtime_metadata(ebpf_path)?;
         let mut persisted_live_runtime = self.persisted_live_ifaces_active()?;
         let pinned_live_runtime = if pin_path_preexisted {
@@ -880,7 +926,10 @@ impl FirewallInstance {
             return Ok(RuntimePinState {
                 created_shared_runtime,
                 reused_existing_runtime: false,
+                preexisting_live_links: false,
                 preexisting_xdp_link: false,
+                preexisting_tc_ingress_link: false,
+                preexisting_tc_egress_link: false,
             });
         }
         match self.validate_runtime_inventory(&expected_metadata) {
@@ -894,11 +943,14 @@ impl FirewallInstance {
                         "repaired shared runtime optional program pins"
                     );
                 }
-                info!(instance = %self.iface, preexisting_xdp_link, live_runtime, "reusing healthy shared runtime");
+                info!(instance = %self.iface, preexisting_live_links, preexisting_xdp_link, preexisting_tc_ingress_link, preexisting_tc_egress_link, live_runtime, "reusing healthy shared runtime");
                 Ok(RuntimePinState {
                     created_shared_runtime: false,
                     reused_existing_runtime: true,
+                    preexisting_live_links,
                     preexisting_xdp_link,
+                    preexisting_tc_ingress_link,
+                    preexisting_tc_egress_link,
                 })
             }
             RuntimeInventoryStatus::StaleOrIncomplete(reason) => {
@@ -914,7 +966,10 @@ impl FirewallInstance {
                 Ok(RuntimePinState {
                     created_shared_runtime: false,
                     reused_existing_runtime: false,
+                    preexisting_live_links: false,
                     preexisting_xdp_link: false,
+                    preexisting_tc_ingress_link: false,
+                    preexisting_tc_egress_link: false,
                 })
             }
         }
@@ -927,30 +982,24 @@ impl FirewallInstance {
     ) -> Result<AttachedLinks, String> {
         let mut attached = AttachedLinks::default();
         let xdp_link_pin = self.xdp_link_pin_path();
-
-        if pin_state.preexisting_xdp_link {
-            attached.xdp = LinkOwnership::ClaimedExisting;
-            self.ensure_tc_runtime(&mut attached);
-            self.ensure_fq_runtime();
-            self.activate_persisted_live_iface()?;
-            info!(instance = %self.iface, edt_available = self.edt_available, "claimed preexisting live links without runtime mutation");
-            return Ok(attached);
-        }
-
         let pin_path_str = self
             .pin_path
             .to_str()
             .ok_or_else(|| format!("non-UTF-8 pin path: {}", self.pin_path.display()))?;
+
+        self.ensure_tc_runtime(&mut attached);
+
         let xdp_prog_pin = format!("{}/xdp_firewall", pin_path_str);
-        if !std::path::Path::new(&xdp_prog_pin).exists() {
-            return Err(format!(
-                "[{}] pinned XDP program missing at {}",
-                self.iface, xdp_prog_pin
-            ));
+        if pin_state.preexisting_xdp_link {
+            attached.xdp = LinkOwnership::ClaimedExisting;
+        } else if !std::path::Path::new(&xdp_prog_pin).exists() {
+            warn!(instance = %self.iface, prog_pin = %xdp_prog_pin, "pinned XDP DDoS program missing; TC ACL remains independent");
+        } else if let Err(error) = self.attach_xdp_from_pin(&xdp_prog_pin, &xdp_link_pin) {
+            warn!(instance = %self.iface, error = %error, "XDP DDoS hook unavailable; TC ACL remains independent");
+        } else {
+            attached.xdp = LinkOwnership::AttachedNow;
         }
 
-        self.attach_xdp_from_pin(&xdp_prog_pin, &xdp_link_pin)?;
-        attached.xdp = LinkOwnership::AttachedNow;
         if let Err(e) = self.activate_persisted_live_iface() {
             if let Err(rollback_err) = self.rollback_attached_links(&attached, false) {
                 warn!(instance = %self.iface, error = %rollback_err, "failed to roll back links after persisted live activation failure");
@@ -958,10 +1007,10 @@ impl FirewallInstance {
             return Err(e);
         }
 
-        self.ensure_tc_runtime(&mut attached);
         self.ensure_fq_runtime();
 
-        info!(instance = %self.iface, edt_available = self.edt_available, "interface links attached from pinned runtime");
+        let health = self.tc_acl_link_health();
+        info!(instance = %self.iface, tc_ingress = health.ingress, tc_egress = health.egress, xdp = health.xdp, edt_available = self.edt_available, "interface links attached from pinned runtime");
         Ok(attached)
     }
 

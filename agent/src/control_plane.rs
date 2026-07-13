@@ -10,6 +10,7 @@ use crate::instance::{FirewallInstance, RuntimePinState};
 use crate::kernel_drop_manager::{KernelDropManager, KernelDropStatusSnapshot};
 use crate::service_chain::{self, ServiceChain};
 use crate::ssl_manager::SslManager;
+use crate::tap_registry::ManagedAttachMode;
 use crate::trace_backend::{TraceManager, TraceRuntimeStatusSnapshot};
 use aria_core::common::TapMapRuntime;
 use aria_core::ebpf_ops::TraceMapMode;
@@ -108,6 +109,57 @@ pub struct PreparedManagedInstance {
     preserve_existing_runtime: bool,
     iface_ctx_synced: bool,
     tap_config_written: bool,
+    activation: ManagedRuntimeActivation,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ManagedRuntimeActivation {
+    PreserveVerifiedLive,
+    RestoreStandalone {
+        conntrack: bool,
+        acl: bool,
+    },
+    AwaitNeutronResync {
+        require_tc_acl_links: bool,
+    },
+}
+
+fn managed_runtime_activation(
+    mode: ManagedAttachMode,
+    preexisting_live_verified: bool,
+    desired_conntrack: bool,
+    desired_acl: bool,
+) -> ManagedRuntimeActivation {
+    if preexisting_live_verified {
+        return ManagedRuntimeActivation::PreserveVerifiedLive;
+    }
+    match mode {
+        ManagedAttachMode::StandaloneRestoreAfterTcAttach => {
+            ManagedRuntimeActivation::RestoreStandalone {
+                conntrack: desired_conntrack,
+                acl: desired_acl,
+            }
+        }
+        ManagedAttachMode::NeutronResyncRequired { acl_managed } => {
+            ManagedRuntimeActivation::AwaitNeutronResync {
+                require_tc_acl_links: acl_managed,
+            }
+        }
+    }
+}
+
+impl PreparedManagedInstance {
+    pub fn requires_tc_acl_links(&self) -> bool {
+        match self.activation {
+            ManagedRuntimeActivation::PreserveVerifiedLive => {
+                self.state.conntrack_enabled || self.state.acl_enabled
+            }
+            ManagedRuntimeActivation::RestoreStandalone { conntrack, acl } => conntrack || acl,
+            ManagedRuntimeActivation::AwaitNeutronResync {
+                require_tc_acl_links,
+            } => require_tc_acl_links,
+        }
+    }
 }
 
 pub struct ControlPlane {
@@ -837,6 +889,7 @@ impl ControlPlane {
         &self,
         name: &str,
         pin_state: &RuntimePinState,
+        mode: ManagedAttachMode,
     ) -> Result<PreparedManagedInstance, String> {
         let pin_path = self.managed_pin_path();
         let state_path = format!("{}/{}", self.base_state_path, name);
@@ -901,16 +954,40 @@ impl ControlPlane {
         }
 
         let tap_id = state.tap_id;
-        let preserve_existing_runtime = replacing_existing || pin_state.preexisting_xdp_link;
+        let activation = managed_runtime_activation(
+            mode,
+            pin_state.preexisting_live_links,
+            state.conntrack_enabled,
+            state.acl_enabled,
+        );
+        let preserve_existing_runtime = replacing_existing || pin_state.preexisting_live_links;
         let mut iface_ctx_synced = false;
         let mut tap_config_written = false;
 
-        if pin_state.preexisting_xdp_link {
+        if pin_state.preexisting_live_links {
             if let Err(e) =
                 self.validate_preexisting_live_runtime(name, &pin_path, tap_id, ifindex, &state)
             {
                 wal.shutdown().await;
                 return Err(e);
+            }
+            if (state.conntrack_enabled || state.acl_enabled)
+                && !(pin_state.preexisting_tc_ingress_link
+                    && pin_state.preexisting_tc_egress_link)
+            {
+                let mut missing = Vec::new();
+                if !pin_state.preexisting_tc_ingress_link {
+                    missing.push("tc_ingress");
+                }
+                if !pin_state.preexisting_tc_egress_link {
+                    missing.push("tc_egress");
+                }
+                wal.shutdown().await;
+                return Err(format!(
+                    "preexisting live runtime mismatch for {}: missing pinned TC ACL links: {}; detach and reattach to rebuild safely",
+                    name,
+                    missing.join(", ")
+                ));
             }
         } else if !replacing_existing {
             if let Err(e) = aria_core::ebpf_ops::scrub_managed_runtime_state(TapMapRuntime::new(
@@ -923,7 +1000,7 @@ impl ControlPlane {
             info!(instance = %name, tap_id, "skipping pre-replay scrub while replacing existing registered instance");
         }
 
-        if !pin_state.preexisting_xdp_link {
+        if !pin_state.preexisting_live_links {
             if let Err(e) = aria_core::ebpf_ops::write_tap_config(
                 TapMapRuntime::new(&pin_path, tap_id),
                 aria_core::common::TapConfig {
@@ -968,6 +1045,26 @@ impl ControlPlane {
                 return Err(e);
             }
 
+            if let Err(e) = aria_core::ebpf_ops::update_acl_runtime_gate(
+                TapMapRuntime::new(&pin_path, tap_id),
+                false,
+                false,
+                aria_core::common::ACL_INGRESS_HOOK_TC,
+            ) {
+                Self::cleanup_failed_managed_registration(
+                    name,
+                    &pin_path,
+                    tap_id,
+                    ifindex,
+                    wal,
+                    preserve_existing_runtime,
+                    iface_ctx_synced,
+                    tap_config_written,
+                )
+                .await;
+                return Err(format!("failed to quiesce managed runtime gate: {}", e));
+            }
+
             if let Err(e) =
                 aria_core::ebpf_ops::sync_iface_ctx(TapMapRuntime::new(&pin_path, tap_id), ifindex)
             {
@@ -995,7 +1092,7 @@ impl ControlPlane {
             pin_path,
             state_path,
             wal,
-            desired_ssl_enabled: if pin_state.preexisting_xdp_link {
+            desired_ssl_enabled: if pin_state.preexisting_live_links {
                 None
             } else {
                 global_ssl_enabled
@@ -1003,7 +1100,34 @@ impl ControlPlane {
             preserve_existing_runtime,
             iface_ctx_synced,
             tap_config_written,
+            activation,
         })
+    }
+
+    pub async fn activate_managed_registration(
+        &self,
+        prepared: &PreparedManagedInstance,
+    ) -> Result<(), String> {
+        let runtime = TapMapRuntime::new(&prepared.pin_path, prepared.tap_id);
+        match prepared.activation {
+            ManagedRuntimeActivation::PreserveVerifiedLive => Ok(()),
+            ManagedRuntimeActivation::RestoreStandalone { conntrack, acl } => {
+                aria_core::ebpf_ops::update_acl_runtime_gate(
+                    runtime,
+                    conntrack,
+                    acl,
+                    aria_core::common::ACL_INGRESS_HOOK_TC,
+                )
+            }
+            ManagedRuntimeActivation::AwaitNeutronResync { .. } => {
+                aria_core::ebpf_ops::update_acl_runtime_gate(
+                    runtime,
+                    false,
+                    false,
+                    aria_core::common::ACL_INGRESS_HOOK_TC,
+                )
+            }
+        }
     }
 
     pub async fn publish_managed_instance(&self, prepared: PreparedManagedInstance) {
@@ -2830,9 +2954,11 @@ impl ControlPlane {
         conntrack_enabled: bool,
         acl_enabled: bool,
     ) -> Result<(), ControlPlaneError> {
+        if conntrack_enabled || acl_enabled {
+            self.require_tc_acl_ready(instance).await?;
+        }
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
         aria_core::ebpf_ops::update_acl_runtime_gate(
             state.map_runtime(),
             conntrack_enabled,
