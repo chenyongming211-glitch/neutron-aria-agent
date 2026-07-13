@@ -925,6 +925,13 @@ def check_rust_stage_one_tests_present():
         r"recover_unpinned_xdp_attachment\s*\(", xdp_attach_body
     ):
         raise SystemExit("ERROR: XDP pin failure must detach before returning attach error")
+    attach_links_body = _rust_function_body(
+        instance_source, "attach_links_from_pinned_runtime"
+    )
+    if attach_links_body is None or not re.search(
+        r"attachment_may_remain\s*\(", attach_links_body
+    ):
+        raise SystemExit("ERROR: unresolved XDP detach failure must fail link transaction")
     if not re.search(r"detach_xdp_with_ip\s*\(", rollback_body):
         raise SystemExit("ERROR: XDP rollback must propagate fallback detach failure")
 

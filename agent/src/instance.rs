@@ -143,6 +143,76 @@ where
     }
 }
 
+fn checked_xdp_detach_output(
+    iface: &str,
+    output: std::io::Result<std::process::Output>,
+) -> Result<(), String> {
+    let output = output
+        .map_err(|error| format!("[{}] failed to spawn XDP detach command: {}", iface, error))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let detail = if stderr.is_empty() {
+        "no stderr".to_string()
+    } else {
+        stderr
+    };
+    Err(format!(
+        "[{}] XDP detach command failed with status {}: {}",
+        iface, output.status, detail
+    ))
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct XdpAttachFailure {
+    message: String,
+    attachment_may_remain: bool,
+}
+
+impl XdpAttachFailure {
+    fn safe(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            attachment_may_remain: false,
+        }
+    }
+
+    fn attachment_may_remain(&self) -> bool {
+        self.attachment_may_remain
+    }
+}
+
+impl std::fmt::Display for XdpAttachFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+fn recover_unpinned_xdp_attachment<F>(
+    pin_error: impl Into<String>,
+    detach: F,
+) -> Result<(), XdpAttachFailure>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let pin_error = pin_error.into();
+    match detach() {
+        Ok(()) => Err(XdpAttachFailure::safe(format!(
+            "XDP link pin failed: {}; newly attached XDP program detached",
+            pin_error
+        ))),
+        Err(detach_error) => Err(XdpAttachFailure {
+            message: format!(
+                "XDP link pin failed: {}; immediate XDP detach failed: {}",
+                pin_error, detach_error
+            ),
+            attachment_may_remain: true,
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RuntimeMetadata {
     schema_version: u32,
@@ -1044,10 +1114,27 @@ impl FirewallInstance {
             attached.xdp = LinkOwnership::ClaimedExisting;
         } else if !std::path::Path::new(&xdp_prog_pin).exists() {
             warn!(instance = %self.iface, prog_pin = %xdp_prog_pin, "pinned XDP DDoS program missing; TC ACL remains independent");
-        } else if let Err(error) = self.attach_xdp_from_pin(&xdp_prog_pin, &xdp_link_pin) {
-            warn!(instance = %self.iface, error = %error, "XDP DDoS hook unavailable; TC ACL remains independent");
         } else {
-            attached.xdp = LinkOwnership::AttachedNow;
+            match self.attach_xdp_from_pin(&xdp_prog_pin, &xdp_link_pin) {
+                Ok(()) => attached.xdp = LinkOwnership::AttachedNow,
+                Err(error) if error.attachment_may_remain() => {
+                    attached.xdp = LinkOwnership::AttachedNow;
+                    let rollback_error = self.rollback_attached_links(&attached, false).err();
+                    return Err(match rollback_error {
+                        Some(rollback_error) => format!(
+                            "XDP attachment may remain after pin failure: {}; rollback failed: {}",
+                            error, rollback_error
+                        ),
+                        None => format!(
+                            "XDP attachment pin failed and required transaction rollback: {}",
+                            error
+                        ),
+                    });
+                }
+                Err(error) => {
+                    warn!(instance = %self.iface, error = %error, "XDP DDoS hook unavailable; TC ACL remains independent");
+                }
+            }
         }
 
         if let Err(e) = self.activate_persisted_live_iface() {
@@ -1078,9 +1165,7 @@ impl FirewallInstance {
                         format!("[{}] Failed to remove pinned XDP link: {}", self.iface, e)
                     })?;
                 } else {
-                    let _ = std::process::Command::new("ip")
-                        .args(["link", "set", "dev", &self.iface, "xdp", "off"])
-                        .output();
+                    self.detach_xdp_with_ip()?;
                 }
                 info!(instance = %self.iface, "rolled back newly attached XDP link");
                 Ok(())
@@ -1302,26 +1387,43 @@ impl FirewallInstance {
     }
 
     /// Attach XDP from the already pinned shared runtime without loading a new eBPF object.
-    fn attach_xdp_from_pin(&self, prog_pin: &str, xdp_link_pin: &str) -> Result<(), String> {
+    fn attach_xdp_from_pin(
+        &self,
+        prog_pin: &str,
+        xdp_link_pin: &str,
+    ) -> Result<(), XdpAttachFailure> {
         let mut xdp =
             aya::programs::Xdp::from_pin(prog_pin, aya_obj::programs::XdpAttachType::Interface)
-                .map_err(|e| format!("[{}] XDP from_pin during recovery: {:?}", self.iface, e))?;
+                .map_err(|e| {
+                    XdpAttachFailure::safe(format!(
+                        "[{}] XDP from_pin during recovery: {:?}",
+                        self.iface, e
+                    ))
+                })?;
 
         let link_id = xdp
             .attach(&self.iface, aya::programs::XdpFlags::default())
-            .map_err(|e| format!("[{}] xdp.attach during recovery: {:?}", self.iface, e))?;
+            .map_err(|e| {
+                XdpAttachFailure::safe(format!(
+                    "[{}] xdp.attach during recovery: {:?}",
+                    self.iface, e
+                ))
+            })?;
 
-        match self.try_pin_xdp_link(&mut xdp, link_id, xdp_link_pin) {
-            Ok(()) => info!(instance = %self.iface, "recovered XDP link pin"),
-            Err(e) => {
-                info!(
-                    instance = %self.iface,
-                    error = %e,
-                    "XDP reattached successfully on old kernel without pinnable link"
-                )
-            }
+        if let Err(pin_error) = self.try_pin_xdp_link(&mut xdp, link_id, xdp_link_pin) {
+            return recover_unpinned_xdp_attachment(pin_error, || self.detach_xdp_with_ip());
         }
+        info!(instance = %self.iface, "recovered XDP link pin");
         Ok(())
+    }
+
+    fn detach_xdp_with_ip(&self) -> Result<(), String> {
+        checked_xdp_detach_output(
+            &self.iface,
+            std::process::Command::new("ip")
+                .args(["link", "set", "dev", &self.iface, "xdp", "off"])
+                .output(),
+        )
     }
 
     fn try_attach_tc_from_pin(
@@ -1493,15 +1595,17 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(detach_calls.get(), 1);
-        assert!(error.contains("forced pin failure"));
-        assert!(error.contains("detached"));
+        assert!(!error.attachment_may_remain());
+        assert!(error.to_string().contains("forced pin failure"));
+        assert!(error.to_string().contains("detached"));
 
         let error = recover_unpinned_xdp_attachment("forced pin failure", || {
             Err("forced detach failure".to_string())
         })
         .unwrap_err();
-        assert!(error.contains("forced pin failure"));
-        assert!(error.contains("forced detach failure"));
+        assert!(error.attachment_may_remain());
+        assert!(error.to_string().contains("forced pin failure"));
+        assert!(error.to_string().contains("forced detach failure"));
     }
 
     #[test]

@@ -21,18 +21,27 @@ pub enum ManagedAttachMode {
     NeutronResyncRequired { acl_managed: bool },
 }
 
-#[derive(Debug, Eq, PartialEq)]
-enum ManagedRegistrationPublication {
-    PublishBoth,
-    PublishNeither(String),
-}
-
-fn managed_registration_publication(
+async fn complete_managed_registration_transaction<
+    T,
+    Failure,
+    FailureFuture,
+    Success,
+    SuccessFuture,
+>(
     activation: Result<(), String>,
-) -> ManagedRegistrationPublication {
+    transaction: T,
+    on_failure: Failure,
+    on_success: Success,
+) -> Result<(), String>
+where
+    Failure: FnOnce(T, String) -> FailureFuture,
+    FailureFuture: std::future::Future<Output = Result<(), String>>,
+    Success: FnOnce(T) -> SuccessFuture,
+    SuccessFuture: std::future::Future<Output = Result<(), String>>,
+{
     match activation {
-        Ok(()) => ManagedRegistrationPublication::PublishBoth,
-        Err(error) => ManagedRegistrationPublication::PublishNeither(error),
+        Ok(()) => on_success(transaction).await,
+        Err(error) => on_failure(transaction, error).await,
     }
 }
 
@@ -371,13 +380,19 @@ impl TapRegistry {
             }
         }
 
-        match managed_registration_publication(
-            self.control_plane
-                .activate_managed_registration(&prepared)
-                .await,
-        ) {
-            ManagedRegistrationPublication::PublishBoth => {}
-            ManagedRegistrationPublication::PublishNeither(error) => {
+        let activation = self
+            .control_plane
+            .activate_managed_registration(&prepared)
+            .await;
+        complete_managed_registration_transaction(
+            activation,
+            (
+                prepared,
+                instance,
+                attached,
+                runtime_pin.created_shared_runtime,
+            ),
+            |(prepared, instance, attached, created_shared_runtime), error| async move {
                 if let Err(rollback_err) = instance.rollback_attached_links(&attached, false) {
                     warn!(instance = %iface, error = %rollback_err, "failed to roll back links after managed runtime activation failure");
                 }
@@ -387,19 +402,20 @@ impl TapRegistry {
                 self.control_plane
                     .abort_managed_registration(prepared)
                     .await;
-                if runtime_pin.created_shared_runtime {
+                if created_shared_runtime {
                     self.cleanup_shared_runtime_dir();
                 }
-                return Err(format!("managed runtime activation failed: {}", error));
-            }
-        }
+                Err(format!("managed runtime activation failed: {}", error))
+            },
+            |(prepared, instance, _attached, _created_shared_runtime)| async move {
+                self.control_plane.publish_managed_instance(prepared).await;
 
-        self.control_plane.publish_managed_instance(prepared).await;
-
-        let mut instances = self.instances.write().await;
-        instances.insert(iface.to_string(), instance);
-
-        Ok(())
+                let mut instances = self.instances.write().await;
+                instances.insert(iface.to_string(), instance);
+                Ok(())
+            },
+        )
+        .await
     }
 
     /// Detach XDP firewall from a tap interface.
