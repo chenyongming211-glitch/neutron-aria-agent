@@ -4329,6 +4329,127 @@ mod tests {
     }
 
     #[test]
+    fn standalone_review_bank_map_helpers_use_required_maps_without_xdp_sentinel() {
+        let pin_dir = std::env::temp_dir().join(format!(
+            "aria-xdp-independent-bank-maps-{}",
+            std::process::id()
+        ));
+        if pin_dir.exists() {
+            std::fs::remove_dir_all(&pin_dir).unwrap();
+        }
+        std::fs::create_dir_all(&pin_dir).unwrap();
+        let pin_path = pin_dir.to_string_lossy().into_owned();
+        let runtime = TapMapRuntime::new(&pin_path, 17);
+
+        let failures = vec![
+            (
+                "bank network add",
+                aria_core::ebpf_ops::add_acl_network_in_bank(
+                    "src",
+                    "10.0.0.0/24",
+                    7,
+                    1,
+                    runtime,
+                    "/tmp/unused-ebpf",
+                )
+                .unwrap_err(),
+                "ACL_SRC_IPV4_TRIE",
+            ),
+            (
+                "bank network delete",
+                aria_core::ebpf_ops::delete_acl_network_in_bank(
+                    "dst",
+                    "10.0.1.0/24",
+                    8,
+                    1,
+                    runtime,
+                    "/tmp/unused-ebpf",
+                )
+                .unwrap_err(),
+                "ACL_DST_IPV4_TRIE",
+            ),
+            (
+                "bank policy add",
+                aria_core::ebpf_ops::add_policy_in_bank(
+                    7,
+                    8,
+                    libc::IPPROTO_TCP as u8,
+                    1,
+                    None,
+                    None,
+                    false,
+                    0,
+                    1,
+                    runtime,
+                    "/tmp/unused-ebpf",
+                )
+                .unwrap_err(),
+                "POLICY_TABLE",
+            ),
+            (
+                "bank policy delete",
+                aria_core::ebpf_ops::delete_policy_in_bank(
+                    7,
+                    8,
+                    libc::IPPROTO_TCP as u8,
+                    0,
+                    1,
+                    runtime,
+                    "/tmp/unused-ebpf",
+                )
+                .unwrap_err(),
+                "POLICY_TABLE",
+            ),
+        ];
+        std::fs::remove_dir_all(&pin_dir).unwrap();
+
+        for (operation, error, required_map) in failures {
+            assert!(
+                error.contains(required_map),
+                "{} must fail on its required map, got: {}",
+                operation,
+                error
+            );
+            assert!(
+                !error.contains("Firewall not started"),
+                "{} must not use XDP as an ACL runtime sentinel: {}",
+                operation,
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_review_bank_rollback_port_set_cleanup_requires_map_without_xdp() {
+        let pin_dir = std::env::temp_dir().join(format!(
+            "aria-xdp-independent-port-cleanup-{}",
+            std::process::id()
+        ));
+        if pin_dir.exists() {
+            std::fs::remove_dir_all(&pin_dir).unwrap();
+        }
+        std::fs::create_dir_all(&pin_dir).unwrap();
+        let pin_path = pin_dir.to_string_lossy().into_owned();
+        let result = aria_core::ebpf_ops::delete_port_set(
+            9,
+            "80:1",
+            TapMapRuntime::new(&pin_path, 17),
+            "/tmp/unused-ebpf",
+        );
+        std::fs::remove_dir_all(&pin_dir).unwrap();
+
+        let error = result.expect_err(
+            "port-set rollback must not silently succeed when XDP and PORT_BITMAP_POOL are absent",
+        );
+        assert!(
+            error.contains("PORT_BITMAP_POOL"),
+            "port-set rollback must fail on its required map, got: {}",
+            error
+        );
+        assert!(!error.contains("Firewall not started"));
+    }
+
+    #[test]
     fn domain_authority_domain_labels_are_stable() {
         assert_eq!(LocalWriteDomain::Acl.as_str(), "acl");
         assert_eq!(LocalWriteDomain::Qos.as_str(), "qos");

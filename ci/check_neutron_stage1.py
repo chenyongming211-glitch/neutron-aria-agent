@@ -1195,6 +1195,8 @@ def check_rust_stage_one_tests_present():
         "standalone_review_partial_runtime_dir_creation_is_rolled_back",
         "standalone_review_port_set_rollback_cleans_recycled_bitmap",
         "standalone_review_port_set_cleanup_attempts_every_created_set",
+        "standalone_review_bank_map_helpers_use_required_maps_without_xdp_sentinel",
+        "standalone_review_bank_rollback_port_set_cleanup_requires_map_without_xdp",
     ):
         if test_name not in system_manager_source + instance_source + control_plane_source:
             raise SystemExit("ERROR: standalone review behavior test missing %s" % test_name)
