@@ -7,8 +7,8 @@ use tracing::{info, warn};
 
 use aria_core::common::TapMapRuntime;
 use aria_core::ebpf_ops::{
-    cleanup_root_qdisc, critical_network_map_names, detach_tc_egress, ensure_fq_qdisc,
-    replay_state, scrub_standalone_runtime_state, FqQdiscState, TraceMapMode, NETWORK_MAP_NAMES,
+    cleanup_root_qdisc, critical_network_map_names, ensure_fq_qdisc, replay_state,
+    scrub_standalone_runtime_state, FqQdiscState, TraceMapMode, NETWORK_MAP_NAMES,
 };
 
 const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
@@ -17,6 +17,101 @@ const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
 enum SystemAclActivation {
     Restore { conntrack: bool, acl: bool },
     StayDisabled,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ClsactOwnership {
+    Absent,
+    Preexisting,
+    Created,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct SystemStartOwnership {
+    xdp_link: bool,
+    tc_egress_link: bool,
+    tc_ingress_link: bool,
+    clsact: ClsactOwnership,
+    pin_path_created: bool,
+    fq_root_qdisc: bool,
+}
+
+impl SystemStartOwnership {
+    fn new(pin_path_created: bool) -> Self {
+        Self {
+            xdp_link: false,
+            tc_egress_link: false,
+            tc_ingress_link: false,
+            clsact: ClsactOwnership::Absent,
+            pin_path_created,
+            fq_root_qdisc: false,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SystemCleanupAction {
+    RemoveXdpLink,
+    RemoveTcLink(&'static str),
+    RemoveOwnedClsact,
+    RemoveRuntimePinPath,
+}
+
+fn failed_start_cleanup_plan(ownership: &SystemStartOwnership) -> Vec<SystemCleanupAction> {
+    let mut plan = Vec::new();
+    if ownership.xdp_link {
+        plan.push(SystemCleanupAction::RemoveXdpLink);
+    }
+    if ownership.tc_egress_link {
+        plan.push(SystemCleanupAction::RemoveTcLink("tc_egress"));
+    }
+    if ownership.tc_ingress_link {
+        plan.push(SystemCleanupAction::RemoveTcLink("tc_ingress"));
+    }
+    if ownership.clsact == ClsactOwnership::Created {
+        plan.push(SystemCleanupAction::RemoveOwnedClsact);
+    }
+    if ownership.pin_path_created {
+        plan.push(SystemCleanupAction::RemoveRuntimePinPath);
+    }
+    plan
+}
+
+fn unbacked_program_link_cleanup_plan(
+    ownership: &SystemStartOwnership,
+    program_health: TcAclLinkHealth,
+) -> Vec<SystemCleanupAction> {
+    let mut plan = Vec::new();
+    if ownership.xdp_link && !program_health.xdp {
+        plan.push(SystemCleanupAction::RemoveXdpLink);
+    }
+    if ownership.tc_egress_link && !program_health.egress {
+        plan.push(SystemCleanupAction::RemoveTcLink("tc_egress"));
+    }
+    if ownership.tc_ingress_link && !program_health.ingress {
+        plan.push(SystemCleanupAction::RemoveTcLink("tc_ingress"));
+    }
+    plan
+}
+
+fn execute_system_cleanup_plan<F>(
+    plan: &[SystemCleanupAction],
+    mut cleanup: F,
+) -> Result<(), String>
+where
+    F: FnMut(SystemCleanupAction) -> Result<(), String>,
+{
+    let mut errors = Vec::new();
+    for action in plan {
+        if let Err(error) = cleanup(*action) {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 fn system_acl_activation(
@@ -79,15 +174,126 @@ fn cleanup_owned_root_qdisc(iface: &str, state_path: &str) -> Result<(), String>
     Ok(())
 }
 
-fn cleanup_failed_start(iface: &str, pin_path: &str, state_path: &str) {
-    let _ = std::process::Command::new("ip")
-        .args(["link", "set", "dev", iface, "xdp", "off"])
-        .output();
-    detach_tc_egress(iface);
-    if let Err(e) = cleanup_owned_root_qdisc(iface, state_path) {
-        warn!(iface = %iface, error = %e, "failed to clean owned root qdisc during start rollback");
+fn remove_pin_file_if_present(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
     }
-    let _ = fs::remove_dir_all(pin_path);
+    fs::remove_file(path).map_err(|e| format!("failed to remove {}: {}", path.display(), e))
+}
+
+fn checked_tc_output(iface: &str, args: &[&str], operation: &str) -> Result<Vec<u8>, String> {
+    let output = std::process::Command::new("tc")
+        .args(args)
+        .output()
+        .map_err(|e| format!("{} on {} could not start: {}", operation, iface, e))?;
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+    Err(format!(
+        "{} on {} failed ({}): {}",
+        operation,
+        iface,
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+fn remove_owned_clsact(iface: &str) -> Result<(), String> {
+    for direction in ["ingress", "egress"] {
+        let output = checked_tc_output(
+            iface,
+            &["filter", "show", "dev", iface, direction],
+            "inspect clsact filters",
+        )?;
+        if !String::from_utf8_lossy(&output).trim().is_empty() {
+            return Err(format!(
+                "preserving transaction-created clsact on {} because unrelated {} filters remain",
+                iface, direction
+            ));
+        }
+    }
+    checked_tc_output(
+        iface,
+        &["qdisc", "del", "dev", iface, "clsact"],
+        "remove owned clsact",
+    )?;
+    Ok(())
+}
+
+fn execute_system_cleanup_action(
+    action: SystemCleanupAction,
+    iface: &str,
+    pin_path: &str,
+) -> Result<(), String> {
+    match action {
+        SystemCleanupAction::RemoveXdpLink => {
+            remove_pin_file_if_present(&Path::new(pin_path).join("xdp_link"))
+        }
+        SystemCleanupAction::RemoveTcLink(program) => {
+            remove_pin_file_if_present(&Path::new(pin_path).join(format!("{}_link", program)))
+        }
+        SystemCleanupAction::RemoveOwnedClsact => remove_owned_clsact(iface),
+        SystemCleanupAction::RemoveRuntimePinPath => {
+            if Path::new(pin_path).exists() {
+                fs::remove_dir_all(pin_path)
+                    .map_err(|e| format!("failed to remove owned runtime pin path: {}", e))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn cleanup_failed_start(
+    iface: &str,
+    pin_path: &str,
+    state_path: &str,
+    ownership: &SystemStartOwnership,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    let plan = failed_start_cleanup_plan(ownership);
+    if let Err(error) = execute_system_cleanup_plan(&plan, |action| {
+        execute_system_cleanup_action(action, iface, pin_path)
+    }) {
+        errors.push(error);
+    }
+    if ownership.fq_root_qdisc {
+        if let Err(error) = cleanup_owned_root_qdisc(iface, state_path) {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn start_error_with_cleanup(
+    error: impl Into<String>,
+    iface: &str,
+    pin_path: &str,
+    state_path: &str,
+    ownership: &SystemStartOwnership,
+) -> String {
+    let error = error.into();
+    match cleanup_failed_start(iface, pin_path, state_path, ownership) {
+        Ok(()) => error,
+        Err(cleanup_error) => format!("{}; standalone cleanup failed: {}", error, cleanup_error),
+    }
+}
+
+fn ensure_clsact(iface: &str) -> Result<ClsactOwnership, String> {
+    match aya::programs::tc::qdisc_add_clsact(iface) {
+        Ok(()) => Ok(ClsactOwnership::Created),
+        Err(error) => {
+            let error = format!("{:?}", error);
+            if error.contains("File exists") {
+                Ok(ClsactOwnership::Preexisting)
+            } else {
+                Err(format!("qdisc_add_clsact: {}", error))
+            }
+        }
+    }
 }
 
 fn pin_runtime_maps(
@@ -190,13 +396,18 @@ pub async fn system_start(
     max_port_policies: u32,
     control_plane: Arc<ControlPlane>,
 ) -> Result<(), String> {
+    let _lifecycle_guard = control_plane.lock_runtime_lifecycle().await;
+    let mut ownership = SystemStartOwnership::new(!Path::new(pin_path).exists());
     fs::create_dir_all(pin_path).map_err(|e| format!("Failed to create pin directory: {}", e))?;
-    fs::create_dir_all(state_path)
-        .map_err(|e| format!("Failed to create state directory: {}", e))?;
-
-    // Clear stale FQ qdisc ownership marker from a previous start/stop cycle.
-    // Only a fresh InstalledNow in this cycle will (re)create the marker.
-    let _ = fs::remove_file(fq_qdisc_marker_path(state_path));
+    if let Err(error) = fs::create_dir_all(state_path) {
+        return Err(start_error_with_cleanup(
+            format!("Failed to create state directory: {}", error),
+            iface,
+            pin_path,
+            state_path,
+            &ownership,
+        ));
+    }
 
     // Set max_port_policies
     let sm = aria_core::state::StateManager::new(state_path);
@@ -205,18 +416,39 @@ pub async fn system_start(
     }
 
     info!(iface = %iface, ebpf_path = %ebpf_path, "loading eBPF for system instance");
-    let bpf_bytes = std::fs::read(ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
+    let bpf_bytes = std::fs::read(ebpf_path).map_err(|error| {
+        start_error_with_cleanup(
+            format!("read ebpf: {}", error),
+            iface,
+            pin_path,
+            state_path,
+            &ownership,
+        )
+    })?;
     let mut bpf = aya::EbpfLoader::new()
         .map_pin_path(pin_path)
         .load(&bpf_bytes)
-        .map_err(|e| format!("load error: {:?}", e))?;
+        .map_err(|error| {
+            start_error_with_cleanup(
+                format!("load error: {:?}", error),
+                iface,
+                pin_path,
+                state_path,
+                &ownership,
+            )
+        })?;
     let trace_map_mode = control_plane.trace_map_mode();
 
     // Pin all maps before attaching any programs so replay can rebuild runtime state
     // before packets hit the dataplane.
     if let Err(e) = pin_runtime_maps(&mut bpf, pin_path, trace_map_mode) {
-        cleanup_failed_start(iface, pin_path, state_path);
-        return Err(e);
+        return Err(start_error_with_cleanup(
+            e,
+            iface,
+            pin_path,
+            state_path,
+            &ownership,
+        ));
     }
 
     let sm = aria_core::state::StateManager::new(state_path);
@@ -224,23 +456,35 @@ pub async fn system_start(
         Ok(tap_id) if tap_id != aria_core::common::TAP_ID_UNASSIGNED => {
             sm.set_tap_id(aria_core::common::TAP_ID_UNASSIGNED)
                 .map_err(|e| {
-                    cleanup_failed_start(iface, pin_path, state_path);
-                    format!("failed to reset system tap_id before replay: {}", e)
+                    start_error_with_cleanup(
+                        format!("failed to reset system tap_id before replay: {}", e),
+                        iface,
+                        pin_path,
+                        state_path,
+                        &ownership,
+                    )
                 })?;
             info!(iface = %iface, stale_tap_id = tap_id, "reset stale system tap_id before replay");
         }
         Ok(_) => {}
         Err(e) => {
-            cleanup_failed_start(iface, pin_path, state_path);
-            return Err(format!("failed to read system tap_id before replay: {}", e));
+            return Err(start_error_with_cleanup(
+                format!("failed to read system tap_id before replay: {}", e),
+                iface,
+                pin_path,
+                state_path,
+                &ownership,
+            ));
         }
     }
 
     if let Err(e) = scrub_standalone_runtime_state(pin_path) {
-        cleanup_failed_start(iface, pin_path, state_path);
-        return Err(format!(
-            "failed to scrub standalone runtime state before replay: {}",
-            e
+        return Err(start_error_with_cleanup(
+            format!("failed to scrub standalone runtime state before replay: {}", e),
+            iface,
+            pin_path,
+            state_path,
+            &ownership,
         ));
     }
 
@@ -250,8 +494,13 @@ pub async fn system_start(
 
     // Replay state
     if let Err(e) = replay_state(&mut bpf, state_path) {
-        cleanup_failed_start(iface, pin_path, state_path);
-        return Err(format!("failed to replay state: {}", e));
+        return Err(start_error_with_cleanup(
+            format!("failed to replay state: {}", e),
+            iface,
+            pin_path,
+            state_path,
+            &ownership,
+        ));
     }
 
     if let Err(e) = aria_core::ebpf_ops::update_firewall_config(
@@ -264,10 +513,12 @@ pub async fn system_start(
         None,
         None,
     ) {
-        cleanup_failed_start(iface, pin_path, state_path);
-        return Err(format!(
-            "failed to quiesce standalone ACL/CT before attach: {}",
-            e
+        return Err(start_error_with_cleanup(
+            format!("failed to quiesce standalone ACL/CT before attach: {}", e),
+            iface,
+            pin_path,
+            state_path,
+            &ownership,
         ));
     }
 
@@ -277,9 +528,15 @@ pub async fn system_start(
                 if let Err(cleanup_err) = cleanup_root_qdisc(iface) {
                     warn!(iface = %iface, error = %cleanup_err, "failed to roll back root qdisc after marker write failure");
                 }
-                cleanup_failed_start(iface, pin_path, state_path);
-                return Err(e);
+                return Err(start_error_with_cleanup(
+                    e,
+                    iface,
+                    pin_path,
+                    state_path,
+                    &ownership,
+                ));
             }
+            ownership.fq_root_qdisc = true;
         }
         Ok(FqQdiscState::AlreadyPresent) => {}
         Err(e) => {
@@ -287,52 +544,102 @@ pub async fn system_start(
         }
     }
 
-    let xdp_ready = match attach_xdp_program(&mut bpf, iface, pin_path) {
-        Ok(()) => true,
+    match attach_xdp_program(&mut bpf, iface, pin_path) {
+        Ok(()) => ownership.xdp_link = true,
         Err(error) => {
             warn!(iface = %iface, error = %error, "XDP DDoS hook unavailable; continuing with TC ACL");
-            false
         }
-    };
+    }
 
-    let tc_egress_ready = match attach_tc_program(
-        &mut bpf,
-        "tc_egress",
-        iface,
-        aya::programs::tc::TcAttachType::Egress,
-        pin_path,
-    ) {
-        Ok(()) => true,
+    match ensure_clsact(iface) {
+        Ok(clsact) => ownership.clsact = clsact,
         Err(error) => {
-            warn!(iface = %iface, error = %error, "TC egress attach failed; egress control disabled");
-            false
+            warn!(iface = %iface, error = %error, "TC clsact unavailable; TC ACL disabled");
         }
-    };
+    }
+    if ownership.clsact != ClsactOwnership::Absent {
+        match attach_tc_program(
+            &mut bpf,
+            "tc_egress",
+            iface,
+            aya::programs::tc::TcAttachType::Egress,
+            pin_path,
+        ) {
+            Ok(()) => ownership.tc_egress_link = true,
+            Err(error) => {
+                warn!(iface = %iface, error = %error, "TC egress attach failed; egress control disabled");
+            }
+        }
 
-    let tc_ingress_ready = match attach_tc_program(
-        &mut bpf,
-        "tc_ingress",
-        iface,
-        aya::programs::tc::TcAttachType::Ingress,
-        pin_path,
-    ) {
-        Ok(()) => true,
-        Err(error) => {
-            warn!(iface = %iface, error = %error, "TC ingress attach failed; ingress mirror disabled");
-            false
+        match attach_tc_program(
+            &mut bpf,
+            "tc_ingress",
+            iface,
+            aya::programs::tc::TcAttachType::Ingress,
+            pin_path,
+        ) {
+            Ok(()) => ownership.tc_ingress_link = true,
+            Err(error) => {
+                warn!(iface = %iface, error = %error, "TC ingress attach failed; ingress mirror disabled");
+            }
         }
-    };
+    }
 
     let program_health =
         pin_runtime_programs(&mut bpf, pin_path, desired_conntrack || desired_acl);
+    let split_cleanup = unbacked_program_link_cleanup_plan(&ownership, program_health);
+    if let Err(error) = execute_system_cleanup_plan(&split_cleanup, |action| {
+        execute_system_cleanup_action(action, iface, pin_path)
+    }) {
+        return Err(start_error_with_cleanup(
+            format!("failed to roll back link without matching program pin: {}", error),
+            iface,
+            pin_path,
+            state_path,
+            &ownership,
+        ));
+    }
+    if !program_health.xdp {
+        ownership.xdp_link = false;
+    }
+    if !program_health.egress {
+        ownership.tc_egress_link = false;
+    }
+    if !program_health.ingress {
+        ownership.tc_ingress_link = false;
+    }
     let health = TcAclLinkHealth::new(
-        tc_ingress_ready && program_health.ingress,
-        tc_egress_ready && program_health.egress,
-        xdp_ready && program_health.xdp,
+        ownership.tc_ingress_link,
+        ownership.tc_egress_link,
+        ownership.xdp_link,
     );
     if let Err(error) = system_acl_activation(desired_conntrack, desired_acl, health) {
-        cleanup_failed_start(iface, pin_path, state_path);
-        return Err(error);
+        return Err(start_error_with_cleanup(
+            error,
+            iface,
+            pin_path,
+            state_path,
+            &ownership,
+        ));
+    }
+    if ownership.clsact == ClsactOwnership::Created
+        && !ownership.tc_ingress_link
+        && !ownership.tc_egress_link
+    {
+        if let Err(error) = execute_system_cleanup_action(
+            SystemCleanupAction::RemoveOwnedClsact,
+            iface,
+            pin_path,
+        ) {
+            return Err(start_error_with_cleanup(
+                error,
+                iface,
+                pin_path,
+                state_path,
+                &ownership,
+            ));
+        }
+        ownership.clsact = ClsactOwnership::Absent;
     }
 
     if let Err(e) = sm.set_attached_iface(iface) {
@@ -341,14 +648,19 @@ pub async fn system_start(
 
     // Register with control plane
     if let Err(e) = control_plane
-        .register_system_instance(pin_path, state_path)
+        .register_system_instance(pin_path, state_path, desired, iface)
         .await
     {
         if let Err(clear_err) = sm.clear_attached_iface() {
             warn!(iface = %iface, error = %clear_err, "failed to clear attached interface record after register failure");
         }
-        cleanup_failed_start(iface, pin_path, state_path);
-        return Err(format!("control-plane register failed: {}", e));
+        return Err(start_error_with_cleanup(
+            format!("control-plane register failed: {}", e),
+            iface,
+            pin_path,
+            state_path,
+            &ownership,
+        ));
     }
 
     info!(iface = %iface, "system firewall started successfully");
@@ -361,77 +673,50 @@ pub async fn system_stop(
     state_path: &str,
     control_plane: Arc<ControlPlane>,
 ) -> Result<(), String> {
+    let _lifecycle_guard = control_plane.lock_runtime_lifecycle().await;
     let sm = aria_core::state::StateManager::new(state_path);
+    let mut errors = Vec::new();
     match sm.get_attached_iface() {
         Ok(Some(iface)) => {
-            // Remove pinned XDP link (this detaches XDP from the interface)
-            let xdp_link_pin = format!("{}/xdp_link", pin_path);
-            if std::path::Path::new(&xdp_link_pin).exists() {
-                if let Err(e) = fs::remove_file(&xdp_link_pin) {
-                    warn!(iface = %iface, error = %e, "failed to remove pinned XDP link");
-                } else {
-                    info!(iface = %iface, "XDP link unpinned");
-                }
-            } else {
-                // Fallback: use ip command if pin file doesn't exist
-                let output = std::process::Command::new("ip")
-                    .args(["link", "set", "dev", &iface, "xdp", "off"])
-                    .output();
-                match output {
-                    Ok(o) if o.status.success() => {
-                        info!(iface = %iface, "detached XDP via ip link")
-                    }
-                    Ok(o) => warn!(
-                        iface = %iface,
-                        stderr = %String::from_utf8_lossy(&o.stderr),
-                        "failed to detach XDP"
-                    ),
-                    Err(e) => warn!(iface = %iface, error = %e, "failed to run ip command"),
-                }
+            let plan = [
+                SystemCleanupAction::RemoveXdpLink,
+                SystemCleanupAction::RemoveTcLink("tc_egress"),
+                SystemCleanupAction::RemoveTcLink("tc_ingress"),
+            ];
+            if let Err(error) = execute_system_cleanup_plan(&plan, |action| {
+                execute_system_cleanup_action(action, &iface, pin_path)
+            }) {
+                errors.push(error);
+            }
+            if let Err(error) = cleanup_owned_root_qdisc(&iface, state_path) {
+                errors.push(error);
             }
 
-            // Remove pinned TC egress link
-            let tc_link_pin = format!("{}/tc_egress_link", pin_path);
-            if std::path::Path::new(&tc_link_pin).exists() {
-                if let Err(e) = fs::remove_file(&tc_link_pin) {
-                    warn!(iface = %iface, error = %e, "failed to remove pinned TC egress link");
-                }
-            }
-
-            // Remove pinned TC ingress link
-            let tc_ingress_link_pin = format!("{}/tc_ingress_link", pin_path);
-            if std::path::Path::new(&tc_ingress_link_pin).exists() {
-                if let Err(e) = fs::remove_file(&tc_ingress_link_pin) {
-                    warn!(iface = %iface, error = %e, "failed to remove pinned TC ingress link");
-                }
-            }
-
-            detach_tc_egress(&iface);
-            if let Err(e) = cleanup_owned_root_qdisc(&iface, state_path) {
-                warn!(iface = %iface, error = %e, "failed to clean owned root qdisc");
-            }
-
-            if let Err(e) = sm.clear_attached_iface() {
-                warn!(iface = %iface, error = %e, "failed to clear attached interface record");
+            if let Err(error) = sm.clear_attached_iface() {
+                errors.push(format!("failed to clear attached interface record: {}", error));
             }
         }
         Ok(None) => {
             info!("no attached interface recorded; skipping XDP/TC detach");
         }
         Err(e) => {
-            warn!(error = %e, "failed to read system state");
+            errors.push(format!("failed to read system attached interface: {}", e));
         }
     }
 
-    if std::path::Path::new(pin_path).exists() {
-        fs::remove_dir_all(pin_path)
-            .map_err(|e| format!("Failed to remove pin directory: {}", e))?;
+    if Path::new(pin_path).exists() {
+        if let Err(error) = fs::remove_dir_all(pin_path) {
+            errors.push(format!("failed to remove pin directory: {}", error));
+        }
         info!(pin_path = %pin_path, "removed pinned maps and programs");
     }
 
-    // Unregister after best-effort interface cleanup and pin removal.
+    // Always publish the stop attempt, while returning any detach/degraded error.
     control_plane.unregister_instance("system").await;
 
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
     info!("system firewall stopped");
     Ok(())
 }
@@ -444,13 +729,6 @@ fn attach_tc_program(
     attach_type: aya::programs::tc::TcAttachType,
     pin_path: &str,
 ) -> Result<(), String> {
-    if let Err(e) = aya::programs::tc::qdisc_add_clsact(iface) {
-        let err_str = format!("{:?}", e);
-        if !err_str.contains("File exists") {
-            return Err(format!("qdisc_add_clsact: {}", err_str));
-        }
-    }
-
     let tc_program = bpf
         .program_mut(prog_name)
         .ok_or_else(|| format!("{} program not found", prog_name))?;
@@ -523,6 +801,7 @@ mod tests {
             tc_ingress_link: true,
             clsact: ClsactOwnership::Preexisting,
             pin_path_created: false,
+            fq_root_qdisc: false,
         };
 
         assert_eq!(
@@ -539,6 +818,7 @@ mod tests {
             tc_ingress_link: false,
             clsact: ClsactOwnership::Created,
             pin_path_created: true,
+            fq_root_qdisc: false,
         };
         assert_eq!(
             failed_start_cleanup_plan(&created),
@@ -582,6 +862,7 @@ mod tests {
             tc_ingress_link: true,
             clsact: ClsactOwnership::Preexisting,
             pin_path_created: false,
+            fq_root_qdisc: false,
         };
 
         assert_eq!(

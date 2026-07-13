@@ -333,6 +333,26 @@ impl FirewallInstance {
         ))
     }
 
+    pub fn require_tc_acl_runtime(&self) -> Result<(), String> {
+        let mut missing = Vec::new();
+        for prog_name in ["tc_ingress", "tc_egress"] {
+            if !Path::new(&self.tc_link_pin_path(prog_name)).exists() {
+                missing.push(format!("{} link", prog_name));
+            }
+            if !self.pin_path.join(prog_name).exists() {
+                missing.push(format!("{} program", prog_name));
+            }
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        Err(format!(
+            "missing pinned TC ACL runtime: {}",
+            missing.join(", ")
+        ))
+    }
+
     pub fn tc_acl_link_health(&self) -> TcAclLinkHealth {
         TcAclLinkHealth::new(
             Path::new(&self.tc_link_pin_path("tc_ingress")).exists(),
@@ -1467,44 +1487,49 @@ impl FirewallInstance {
 
     fn detach_with_cleanup(&self, remove_pin_path: bool) -> Result<(), String> {
         let xdp_link_pin = self.xdp_link_pin_path();
+        let mut errors = Vec::new();
 
-        // Method 1: Remove pinned link (kernel 5.7+ with bpf_link)
         if std::path::Path::new(&xdp_link_pin).exists() {
-            std::fs::remove_file(&xdp_link_pin)
-                .map_err(|e| format!("[{}] Failed to remove pinned link: {}", self.iface, e))?;
-            info!(instance = %self.iface, "XDP link unpinned");
-        } else {
-            // Method 2: Use ip command to detach XDP (older kernels)
-            let _ = std::process::Command::new("ip")
-                .args(["link", "set", "dev", &self.iface, "xdp", "off"])
-                .output();
-            info!(instance = %self.iface, "XDP detached via netlink");
+            match std::fs::remove_file(&xdp_link_pin) {
+                Ok(()) => info!(instance = %self.iface, "XDP link unpinned"),
+                Err(error) => errors.push(format!(
+                    "[{}] Failed to remove pinned XDP link: {}",
+                    self.iface, error
+                )),
+            }
         }
 
         for prog_name in ["tc_egress", "tc_ingress"] {
             let link_pin = self.tc_link_pin_path(prog_name);
             if std::path::Path::new(&link_pin).exists() {
-                std::fs::remove_file(&link_pin).map_err(|e| {
-                    format!(
+                match std::fs::remove_file(&link_pin) {
+                    Ok(()) => info!(instance = %self.iface, program = %prog_name, "TC link unpinned"),
+                    Err(error) => errors.push(format!(
                         "[{}] Failed to remove pinned {} link: {}",
-                        self.iface, prog_name, e
-                    )
-                })?;
-                info!(instance = %self.iface, program = %prog_name, "TC link unpinned");
+                        self.iface, prog_name, error
+                    )),
+                }
             }
         }
 
-        // Detach TC egress
-        aria_core::ebpf_ops::detach_tc_egress(&self.iface);
-        self.cleanup_owned_fq_qdisc()?;
+        if let Err(error) = self.cleanup_owned_fq_qdisc() {
+            errors.push(error);
+        }
 
         // Clean up pinned runtime dir only for non-shared runtimes or explicit rollback.
         if remove_pin_path && self.pin_path.exists() {
-            std::fs::remove_dir_all(&self.pin_path)
-                .map_err(|e| format!("[{}] Failed to remove pin directory: {}", self.iface, e))?;
-            info!(instance = %self.iface, "pin directory cleaned");
+            match std::fs::remove_dir_all(&self.pin_path) {
+                Ok(()) => info!(instance = %self.iface, "pin directory cleaned"),
+                Err(error) => errors.push(format!(
+                    "[{}] Failed to remove pin directory: {}",
+                    self.iface, error
+                )),
+            }
         }
 
+        if !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
         info!(instance = %self.iface, "firewall instance detached");
         Ok(())
     }

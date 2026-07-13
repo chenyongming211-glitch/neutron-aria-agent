@@ -49,7 +49,6 @@ pub struct TapRegistry {
     instances: RwLock<HashMap<String, FirewallInstance>>,
     /// Per-iface mutex to serialize attach/detach on the same interface
     iface_locks: RwLock<HashMap<String, Arc<Mutex<()>>>>,
-    runtime_lock: Mutex<()>,
     pub ebpf_path: PathBuf,
     pub base_pin_path: PathBuf,
     pub base_state_path: PathBuf,
@@ -70,7 +69,6 @@ impl TapRegistry {
         Self {
             instances: RwLock::new(HashMap::new()),
             iface_locks: RwLock::new(HashMap::new()),
-            runtime_lock: Mutex::new(()),
             ebpf_path: PathBuf::from(ebpf_path),
             base_pin_path: PathBuf::from(base_pin_path),
             base_state_path: PathBuf::from(base_state_path),
@@ -220,7 +218,7 @@ impl TapRegistry {
         }
 
         for ifname in pinned_ifaces.difference(&committed_names) {
-            let _runtime_guard = self.runtime_lock.lock().await;
+            let _runtime_guard = self.control_plane.lock_runtime_lifecycle().await;
             match self.remove_orphaned_managed_link_pins(ifname) {
                 Ok(()) => results.push(RuntimeReconcileResult {
                     ifname: ifname.clone(),
@@ -260,7 +258,7 @@ impl TapRegistry {
         conntrack_enabled: bool,
         acl_enabled: bool,
     ) -> Result<(), ControlPlaneError> {
-        let _runtime_guard = self.runtime_lock.lock().await;
+        let _runtime_guard = self.control_plane.lock_runtime_lifecycle().await;
         self.control_plane
             .update_neutron_acl_runtime_gate_serialized(
                 instance,
@@ -281,7 +279,7 @@ impl TapRegistry {
 
         let iface_lock = self.get_iface_lock(iface).await;
         let _guard = iface_lock.lock().await;
-        let _runtime_guard = self.runtime_lock.lock().await;
+        let _runtime_guard = self.control_plane.lock_runtime_lifecycle().await;
 
         // Re-check after acquiring lock
         {
@@ -422,7 +420,7 @@ impl TapRegistry {
     pub async fn detach(&self, iface: &str) -> Result<(), String> {
         let iface_lock = self.get_iface_lock(iface).await;
         let _guard = iface_lock.lock().await;
-        let _runtime_guard = self.runtime_lock.lock().await;
+        let _runtime_guard = self.control_plane.lock_runtime_lifecycle().await;
 
         let instance_exists = {
             let instances = self.instances.read().await;

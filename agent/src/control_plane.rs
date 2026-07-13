@@ -150,6 +150,45 @@ impl InstanceState {
         ControlPlaneError::PersistenceError(errors.join("; "))
     }
 
+    async fn recover_local_config_persistence_failure<F>(
+        &mut self,
+        old_state: FirewallState,
+        attempted_enable: bool,
+        persistence_error: impl Into<String>,
+        mut restore_kernel_config: F,
+    ) -> ControlPlaneError
+    where
+        F: FnMut(&FirewallState) -> Result<(), String>,
+    {
+        let mut errors = vec![persistence_error.into()];
+        self.state = old_state;
+        if attempted_enable {
+            self.state.conntrack_enabled = false;
+            self.state.acl_enabled = false;
+        }
+
+        if let Err(error) = restore_kernel_config(&self.state) {
+            errors.push(format!("kernel config rollback failed: {}", error));
+        }
+
+        if let Err(error) = self
+            .wal_append_strict(&WalEntry::UpdateConfig {
+                conntrack: Some(self.state.conntrack_enabled),
+                monitoring: Some(self.state.monitoring_enabled),
+                acl: Some(self.state.acl_enabled),
+                qos: Some(self.state.qos_enabled),
+                mirror: Some(self.state.mirror_enabled),
+                tcprt: Some(self.state.tcprt_enabled),
+                ssl: None,
+            })
+            .await
+        {
+            errors.push(format!("rollback config persistence failed: {}", error));
+        }
+
+        ControlPlaneError::PersistenceError(errors.join("; "))
+    }
+
     async fn shutdown_wal(&mut self) {
         self.wal.shutdown().await;
     }
@@ -232,6 +271,7 @@ pub struct ControlPlane {
     instances: RwLock<HashMap<String, Arc<tokio::sync::RwLock<InstanceState>>>>,
     neutron_authorities: RwLock<HashMap<String, NeutronPortAuthority>>,
     tap_id_lock: Mutex<()>,
+    runtime_lifecycle_lock: Mutex<()>,
     pub ebpf_path: String,
     pub base_pin_path: String,
     pub base_state_path: String,
@@ -294,6 +334,128 @@ struct ExistingOwnedAclPolicy {
     key: OwnedAclPolicyKey,
     value: OwnedAclPolicyValue,
     rule: RuleInfo,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SharedNetworkMutation {
+    Added {
+        direction: &'static str,
+        cidr: String,
+        group_id: u32,
+    },
+    Deleted {
+        direction: &'static str,
+        cidr: String,
+        group_id: u32,
+    },
+}
+
+fn execute_shared_network_rollback<F>(
+    mutations: &[SharedNetworkMutation],
+    mut rollback: F,
+) -> Result<(), String>
+where
+    F: FnMut(&SharedNetworkMutation) -> Result<(), String>,
+{
+    let mut errors = Vec::new();
+    for mutation in mutations.iter().rev() {
+        if let Err(error) = rollback(mutation) {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn apply_shared_network_mutation(
+    mutation: &SharedNetworkMutation,
+    runtime: TapMapRuntime<'_>,
+    ebpf_path: &str,
+) -> Result<(), String> {
+    match mutation {
+        SharedNetworkMutation::Added {
+            direction,
+            cidr,
+            group_id,
+        } => aria_core::ebpf_ops::add_network(direction, cidr, *group_id, runtime, ebpf_path),
+        SharedNetworkMutation::Deleted {
+            direction,
+            cidr,
+            group_id,
+        } => aria_core::ebpf_ops::delete_network(direction, cidr, *group_id, runtime, ebpf_path),
+    }
+}
+
+fn rollback_shared_network_mutations(
+    mutations: &[SharedNetworkMutation],
+    runtime: TapMapRuntime<'_>,
+    ebpf_path: &str,
+) -> Result<(), String> {
+    execute_shared_network_rollback(mutations, |mutation| match mutation {
+        SharedNetworkMutation::Added {
+            direction,
+            cidr,
+            group_id,
+        } => aria_core::ebpf_ops::delete_network(direction, cidr, *group_id, runtime, ebpf_path)
+            .map_err(|error| {
+                format!(
+                    "rollback added {} network {} group {}: {}",
+                    direction, cidr, group_id, error
+                )
+            }),
+        SharedNetworkMutation::Deleted {
+            direction,
+            cidr,
+            group_id,
+        } => aria_core::ebpf_ops::add_network(direction, cidr, *group_id, runtime, ebpf_path)
+            .map_err(|error| {
+                format!(
+                    "rollback deleted {} network {} group {}: {}",
+                    direction, cidr, group_id, error
+                )
+            }),
+    })
+}
+
+fn rollback_owned_acl_prepublication(
+    original: ControlPlaneError,
+    mutations: &[SharedNetworkMutation],
+    runtime: TapMapRuntime<'_>,
+    ebpf_path: &str,
+    shadow_bank: u8,
+) -> ControlPlaneError {
+    let mut rollback_errors = Vec::new();
+    if let Err(error) = rollback_shared_network_mutations(mutations, runtime, ebpf_path) {
+        rollback_errors.push(error);
+    }
+    if let Err(error) = aria_core::ebpf_ops::scrub_acl_bank(runtime, shadow_bank) {
+        rollback_errors.push(format!("scrub shadow bank {}: {}", shadow_bank, error));
+    }
+    if rollback_errors.is_empty() {
+        original
+    } else {
+        ControlPlaneError::KernelError(format!(
+            "{}; owned ACL rollback failed: {}",
+            original,
+            rollback_errors.join("; ")
+        ))
+    }
+}
+
+fn prepare_system_publication_state(
+    mut state: FirewallState,
+    iface: &str,
+    global_ssl_enabled: Option<bool>,
+) -> FirewallState {
+    state.tap_id = aria_core::common::TAP_ID_UNASSIGNED;
+    state.attached_iface = Some(iface.to_string());
+    if let Some(enabled) = global_ssl_enabled {
+        state.ssl_enabled = enabled;
+    }
+    state
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -428,7 +590,7 @@ impl ControlPlane {
             instance != "system",
             trace_map_mode,
         )
-        .require_tc_acl_links()
+        .require_tc_acl_runtime()
         .map_err(ControlPlaneError::InstanceNotReady)
     }
 
@@ -832,6 +994,7 @@ impl ControlPlane {
             instances: RwLock::new(HashMap::new()),
             neutron_authorities: RwLock::new(HashMap::new()),
             tap_id_lock: Mutex::new(()),
+            runtime_lifecycle_lock: Mutex::new(()),
             ebpf_path: ebpf_path.to_string(),
             base_pin_path: base_pin_path.to_string(),
             base_state_path: base_state_path.to_string(),
@@ -848,6 +1011,10 @@ impl ControlPlane {
 
     pub fn trace_map_mode(&self) -> TraceMapMode {
         self.trace_manager.map_mode()
+    }
+
+    pub(crate) async fn lock_runtime_lifecycle(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.runtime_lifecycle_lock.lock().await
     }
 
     pub fn trace_backend_name(&self) -> &'static str {
@@ -1302,6 +1469,8 @@ impl ControlPlane {
         &self,
         pin_path: &str,
         state_path: &str,
+        approved_state: FirewallState,
+        iface: &str,
     ) -> Result<(), String> {
         let global_ssl_enabled = match self.read_ssl_global_config().await {
             Ok(enabled) => Some(enabled),
@@ -1310,21 +1479,12 @@ impl ControlPlane {
                 None
             }
         };
-        let mut state = aria_core::wal::load_with_wal(state_path);
-        let tap_id_reset = if state.tap_id != aria_core::common::TAP_ID_UNASSIGNED {
-            state.tap_id = aria_core::common::TAP_ID_UNASSIGNED;
-            true
-        } else {
-            false
-        };
+        let tap_id_reset = approved_state.tap_id != aria_core::common::TAP_ID_UNASSIGNED;
         let ssl_changed = global_ssl_enabled
-            .map(|enabled| state.ssl_enabled != enabled)
+            .map(|enabled| approved_state.ssl_enabled != enabled)
             .unwrap_or(false);
-        if let Some(enabled) = global_ssl_enabled {
-            if ssl_changed {
-                state.ssl_enabled = enabled;
-            }
-        }
+        let iface_changed = approved_state.attached_iface.as_deref() != Some(iface);
+        let state = prepare_system_publication_state(approved_state, iface, global_ssl_enabled);
         let ifindex = match state.attached_iface.as_deref() {
             Some(iface) => match Self::resolve_ifindex(iface) {
                 Ok(ifindex) => Some(ifindex),
@@ -1349,17 +1509,12 @@ impl ControlPlane {
         };
 
         // Compact on startup if WAL had replayed entries
-        if wal.entry_count() > 0 || ssl_changed || tap_id_reset {
-            match serde_json::to_string_pretty(&state) {
-                Ok(json) => {
-                    if let Err(e) = wal.compact(json).await {
-                        error!(instance = "system", error = %e, "failed to compact WAL on system register");
-                    }
-                }
-                Err(e) => {
-                    error!(instance = "system", error = %e, "failed to serialize state on system register");
-                }
-            }
+        if wal.entry_count() > 0 || ssl_changed || tap_id_reset || iface_changed {
+            let json = serde_json::to_string_pretty(&state)
+                .map_err(|e| format!("failed to serialize approved system state: {}", e))?;
+            wal.compact(json)
+                .await
+                .map_err(|e| format!("failed to persist approved system state: {}", e))?;
         }
 
         let tap_id = state.tap_id;
@@ -1668,9 +1823,13 @@ impl ControlPlane {
         Self::owned_acl_validate_group_specs(owner_prefix, groups)?;
         Self::owned_acl_validate_policy_specs(owner_prefix, policies)?;
 
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
         Self::check_runtime_maps_ready(&state.pin_path)?;
+        if state.state.conntrack_enabled || state.state.acl_enabled {
+            Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
+        }
         let current_acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
             .map_err(ControlPlaneError::KernelError)?;
         let next_acl_bank = aria_core::common::acl_next_bank(current_acl_bank);
@@ -1874,99 +2033,6 @@ impl ControlPlane {
             })
             .collect();
 
-        for (name, group_id, cidr) in &group_cidr_adds {
-            aria_core::ebpf_ops::add_network(
-                "src",
-                cidr,
-                *group_id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            )
-            .map_err(|e| ControlPlaneError::KernelError(format!("src {}: {}", name, e)))?;
-            aria_core::ebpf_ops::add_network(
-                "dst",
-                cidr,
-                *group_id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            )
-            .map_err(|e| ControlPlaneError::KernelError(format!("dst {}: {}", name, e)))?;
-        }
-
-        for (name, group_id, cidr) in &group_cidr_deletes {
-            aria_core::ebpf_ops::delete_network(
-                "src",
-                cidr,
-                *group_id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            )
-            .map_err(|e| ControlPlaneError::KernelError(format!("src {}: {}", name, e)))?;
-            aria_core::ebpf_ops::delete_network(
-                "dst",
-                cidr,
-                *group_id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            )
-            .map_err(|e| ControlPlaneError::KernelError(format!("dst {}: {}", name, e)))?;
-        }
-
-        Self::stage_acl_shadow_bank(
-            &final_state,
-            state.map_runtime(),
-            next_acl_bank,
-            &self.ebpf_path,
-            &new_port_sets_by_key,
-        )?;
-        if state.state.conntrack_enabled || state.state.acl_enabled {
-            Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
-        }
-        aria_core::ebpf_ops::set_acl_active_bank(state.map_runtime(), next_acl_bank)
-            .map_err(ControlPlaneError::KernelError)?;
-
-        for (idx, ports_normalized) in &released_port_sets {
-            if let Err(e) = aria_core::ebpf_ops::delete_port_set(
-                *idx,
-                ports_normalized,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                warn!(
-                    error = %e,
-                    bitmap_idx = *idx,
-                    "failed to clean released port set after ACL shadow bank switch"
-                );
-            }
-        }
-        if let Err(e) = aria_core::ebpf_ops::scrub_acl_bank(state.map_runtime(), current_acl_bank) {
-            warn!(
-                error = %e,
-                bank = current_acl_bank,
-                "failed to scrub previous ACL shadow bank after switch"
-            );
-        }
-
-        for existing in &policy_deletes {
-            let rule = &existing.rule;
-            if let Err(e) = aria_core::monitoring::clear_rule_stats_for_policy(
-                state.map_runtime(),
-                rule.src_group_id,
-                rule.dst_group_id,
-                rule.proto,
-                rule.direction,
-            ) {
-                warn!(error = %e, "failed to clear rule stats after owned ACL diff delete");
-            }
-        }
-        for group in &group_deletes {
-            if let Err(e) =
-                aria_core::monitoring::clear_group_stats_for_id(state.map_runtime(), group.id)
-            {
-                warn!(error = %e, group_id = group.id, "failed to clear group stats after owned ACL diff delete");
-            }
-        }
-
         if runtime_adds.is_empty()
             && policy_deletes.is_empty()
             && group_cidr_adds.is_empty()
@@ -1977,16 +2043,189 @@ impl ControlPlane {
             return Ok(report);
         }
 
+        let runtime_pin_path = state.pin_path.clone();
+        let runtime_tap_id = state.tap_id;
+        let runtime = TapMapRuntime::new(&runtime_pin_path, runtime_tap_id);
+        let mut applied_shared_mutations = Vec::new();
+        for (name, group_id, cidr) in &group_cidr_adds {
+            for direction in ["src", "dst"] {
+                let mutation = SharedNetworkMutation::Added {
+                    direction,
+                    cidr: cidr.clone(),
+                    group_id: *group_id,
+                };
+                if let Err(error) =
+                    apply_shared_network_mutation(&mutation, runtime, &self.ebpf_path)
+                {
+                    return Err(rollback_owned_acl_prepublication(
+                        ControlPlaneError::KernelError(format!(
+                            "{} {}: {}",
+                            direction, name, error
+                        )),
+                        &applied_shared_mutations,
+                        runtime,
+                        &self.ebpf_path,
+                        next_acl_bank,
+                    ));
+                }
+                applied_shared_mutations.push(mutation);
+            }
+        }
+
+        for (name, group_id, cidr) in &group_cidr_deletes {
+            for direction in ["src", "dst"] {
+                let mutation = SharedNetworkMutation::Deleted {
+                    direction,
+                    cidr: cidr.clone(),
+                    group_id: *group_id,
+                };
+                if let Err(error) =
+                    apply_shared_network_mutation(&mutation, runtime, &self.ebpf_path)
+                {
+                    return Err(rollback_owned_acl_prepublication(
+                        ControlPlaneError::KernelError(format!(
+                            "{} {}: {}",
+                            direction, name, error
+                        )),
+                        &applied_shared_mutations,
+                        runtime,
+                        &self.ebpf_path,
+                        next_acl_bank,
+                    ));
+                }
+                applied_shared_mutations.push(mutation);
+            }
+        }
+
+        if let Err(error) = Self::stage_acl_shadow_bank(
+            &final_state,
+            runtime,
+            next_acl_bank,
+            &self.ebpf_path,
+            &new_port_sets_by_key,
+        ) {
+            return Err(rollback_owned_acl_prepublication(
+                error,
+                &applied_shared_mutations,
+                runtime,
+                &self.ebpf_path,
+                next_acl_bank,
+            ));
+        }
+        if state.state.conntrack_enabled || state.state.acl_enabled {
+            if let Err(error) =
+                Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())
+            {
+                return Err(rollback_owned_acl_prepublication(
+                    error,
+                    &applied_shared_mutations,
+                    runtime,
+                    &self.ebpf_path,
+                    next_acl_bank,
+                ));
+            }
+        }
+        if let Err(error) = aria_core::ebpf_ops::set_acl_active_bank(runtime, next_acl_bank) {
+            return Err(rollback_owned_acl_prepublication(
+                ControlPlaneError::KernelError(error),
+                &applied_shared_mutations,
+                runtime,
+                &self.ebpf_path,
+                next_acl_bank,
+            ));
+        }
+
         state.state = final_state;
         let compact_started = Instant::now();
-        let json = serde_json::to_string_pretty(&state.state)
-            .map_err(|e| ControlPlaneError::ValidationError(e.to_string()))?;
-        state
-            .wal
-            .compact(json)
-            .await
-            .map_err(ControlPlaneError::KernelError)?;
+        let final_json = serde_json::to_string_pretty(&state.state)
+            .map_err(|e| ControlPlaneError::ValidationError(e.to_string()));
+        let compact_result = match final_json {
+            Ok(json) => state.wal.compact(json).await.map_err(|e| e.to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(error) = compact_result {
+            state.state = old_state;
+            let mut recovery_errors = vec![format!("owned ACL persistence failed: {}", error)];
+            if let Err(bank_error) =
+                aria_core::ebpf_ops::set_acl_active_bank(runtime, current_acl_bank)
+            {
+                recovery_errors.push(format!("restore active bank failed: {}", bank_error));
+            }
+            if let Err(rollback_error) = rollback_shared_network_mutations(
+                &applied_shared_mutations,
+                runtime,
+                &self.ebpf_path,
+            ) {
+                recovery_errors.push(rollback_error);
+            }
+            if let Err(scrub_error) = aria_core::ebpf_ops::scrub_acl_bank(runtime, next_acl_bank) {
+                recovery_errors.push(format!(
+                    "scrub failed publication bank {}: {}",
+                    next_acl_bank, scrub_error
+                ));
+            }
+            match serde_json::to_string_pretty(&state.state) {
+                Ok(json) => {
+                    if let Err(old_state_error) = state.wal.compact(json).await {
+                        recovery_errors.push(format!(
+                            "restore durable old ACL state failed: {}",
+                            old_state_error
+                        ));
+                    }
+                }
+                Err(old_state_error) => recovery_errors.push(format!(
+                    "serialize old ACL state for recovery failed: {}",
+                    old_state_error
+                )),
+            }
+            return Err(ControlPlaneError::PersistenceError(
+                recovery_errors.join("; "),
+            ));
+        }
         report.compact_ms = compact_started.elapsed().as_millis();
+
+        for (idx, ports_normalized) in &released_port_sets {
+            if let Err(e) = aria_core::ebpf_ops::delete_port_set(
+                *idx,
+                ports_normalized,
+                runtime,
+                &self.ebpf_path,
+            ) {
+                warn!(
+                    error = %e,
+                    bitmap_idx = *idx,
+                    "failed to clean released port set after ACL shadow bank switch"
+                );
+            }
+        }
+        if let Err(e) = aria_core::ebpf_ops::scrub_acl_bank(runtime, current_acl_bank) {
+            warn!(
+                error = %e,
+                bank = current_acl_bank,
+                "failed to scrub previous ACL shadow bank after switch"
+            );
+        }
+
+        for existing in &policy_deletes {
+            let rule = &existing.rule;
+            if let Err(e) = aria_core::monitoring::clear_rule_stats_for_policy(
+                runtime,
+                rule.src_group_id,
+                rule.dst_group_id,
+                rule.proto,
+                rule.direction,
+            ) {
+                warn!(error = %e, "failed to clear rule stats after owned ACL diff delete");
+            }
+        }
+        for group in &group_deletes {
+            if let Err(e) =
+                aria_core::monitoring::clear_group_stats_for_id(runtime, group.id)
+            {
+                warn!(error = %e, group_id = group.id, "failed to clear group stats after owned ACL diff delete");
+            }
+        }
+
         Ok(report)
     }
 
@@ -3110,6 +3349,7 @@ impl ControlPlane {
         tcprt: Option<bool>,
         ssl: Option<bool>,
     ) -> Result<(), ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
         let only_ssl = ssl.is_some()
             && conntrack.is_none()
@@ -3131,6 +3371,8 @@ impl ControlPlane {
         if config_update_requires_tc(conntrack, acl) {
             Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
         }
+        let old_state = state.state.clone();
+        let attempted_enable = conntrack == Some(true) || acl == Some(true);
 
         // For QoS, the kernel flag = user_wants_qos && has_rules
         let kernel_qos = qos.map(|q| q && !state.state.qos_rules.is_empty());
@@ -3168,8 +3410,8 @@ impl ControlPlane {
         if let Some(t) = tcprt {
             state.state.tcprt_enabled = t;
         }
-        state
-            .wal_append(&WalEntry::UpdateConfig {
+        let persistence_result = state
+            .wal_append_strict(&WalEntry::UpdateConfig {
                 conntrack,
                 monitoring,
                 acl,
@@ -3179,6 +3421,32 @@ impl ControlPlane {
                 ssl: None,
             })
             .await;
+        if let Err(persistence_error) = persistence_result {
+            let pin_path = state.pin_path.clone();
+            let tap_id = state.tap_id;
+            let recovery_error = state
+                .recover_local_config_persistence_failure(
+                    old_state,
+                    attempted_enable,
+                    persistence_error,
+                    |safe_state| {
+                        aria_core::ebpf_ops::update_runtime_config(
+                            TapMapRuntime::new(&pin_path, tap_id),
+                            Some(safe_state.conntrack_enabled),
+                            Some(safe_state.monitoring_enabled),
+                            Some(safe_state.acl_enabled),
+                            Some(safe_state.qos_enabled && !safe_state.qos_rules.is_empty()),
+                            Some(
+                                safe_state.mirror_enabled && !safe_state.mirror_rules.is_empty(),
+                            ),
+                            Some(safe_state.tcprt_enabled),
+                            None,
+                        )
+                    },
+                )
+                .await;
+            return Err(recovery_error);
+        }
         Ok(())
     }
 
@@ -3882,7 +4150,7 @@ mod tests {
         let mut attempted = Vec::new();
 
         let error = execute_shared_network_rollback(&mutations, |mutation| {
-            attempted.push(mutation.clone());
+            attempted.push((*mutation).clone());
             if attempted.len() == 1 {
                 Err("forced first rollback failure".to_string())
             } else {

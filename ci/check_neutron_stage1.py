@@ -793,7 +793,7 @@ def check_rust_stage_one_tests_present():
     if registry_gate_body is None:
         raise SystemExit("ERROR: TapRegistry serialized ACL gate writer missing")
     lifecycle_lock = re.search(
-        r"let\s+_runtime_guard\s*=\s*self\s*\.\s*runtime_lock\s*\.\s*lock\s*\(\s*\)\s*\.\s*await\s*;",
+        r"let\s+_runtime_guard\s*=\s*self\s*\.\s*control_plane\s*\.\s*lock_runtime_lifecycle\s*\(\s*\)\s*\.\s*await\s*;",
         registry_gate_body,
     )
     serialized_call = re.search(
@@ -810,24 +810,24 @@ def check_rust_stage_one_tests_present():
         )
     ):
         raise SystemExit(
-            "ERROR: TapRegistry ACL gate writer must hold runtime_lock across the serialized control-plane call"
+            "ERROR: TapRegistry ACL gate writer must hold the shared lifecycle lock across the serialized control-plane call"
         )
 
     for lifecycle_function in ("attach_with_mode", "detach"):
         lifecycle_body = _rust_function_body(tap_registry_source, lifecycle_function)
         if lifecycle_body is None or not re.search(
-            r"self\s*\.\s*runtime_lock\s*\.\s*lock\s*\(\s*\)\s*\.\s*await",
+            r"self\s*\.\s*control_plane\s*\.\s*lock_runtime_lifecycle\s*\(\s*\)\s*\.\s*await",
             lifecycle_body,
         ):
             raise SystemExit(
-                "ERROR: managed lifecycle function %s must use runtime_lock"
+                "ERROR: managed lifecycle function %s must use shared lifecycle lock"
                 % lifecycle_function
             )
     reconcile_runtime_body = _rust_function_body(
         tap_registry_source, "reconcile_neutron_runtime"
     )
     orphan_lock = re.search(
-        r"let\s+_runtime_guard\s*=\s*self\s*\.\s*runtime_lock\s*\.\s*lock\s*\(\s*\)\s*\.\s*await\s*;",
+        r"let\s+_runtime_guard\s*=\s*self\s*\.\s*control_plane\s*\.\s*lock_runtime_lifecycle\s*\(\s*\)\s*\.\s*await\s*;",
         reconcile_runtime_body or "",
     )
     orphan_remove = re.search(
@@ -844,7 +844,7 @@ def check_rust_stage_one_tests_present():
         )
     ):
         raise SystemExit(
-            "ERROR: orphaned managed link removal must use runtime_lock"
+            "ERROR: orphaned managed link removal must use shared lifecycle lock"
         )
 
     serialized_gate_body = _rust_function_body(
@@ -1002,7 +1002,7 @@ def check_rust_stage_one_tests_present():
     quiesce = system_start_body.find("aria_core::ebpf_ops::update_firewall_config(")
     xdp_attach = system_start_body.find("attach_xdp_program(&mut bpf, iface, pin_path)")
     activation = system_start_body.find("system_acl_activation(")
-    registration = system_start_body.find(".register_system_instance(pin_path, state_path)")
+    registration = system_start_body.find(".register_system_instance(")
     if not (
         0 <= desired_load < replay < quiesce < xdp_attach < activation < registration
     ):
@@ -1016,21 +1016,46 @@ def check_rust_stage_one_tests_present():
         raise SystemExit(
             "ERROR: standalone startup must quiesce only live ACL/CT before attach"
         )
-    if not re.search(
-        r"let\s+xdp_ready\s*=\s*match\s+attach_xdp_program",
-        system_start_body,
-    ):
+    if not re.search(r"match\s+attach_xdp_program", system_start_body):
         raise SystemExit("ERROR: standalone XDP attach must be independent best-effort health")
     for marker in (
-        "let tc_egress_ready = match attach_tc_program(",
-        "let tc_ingress_ready = match attach_tc_program(",
+        "ownership.tc_egress_link = true",
+        "ownership.tc_ingress_link = true",
         "pin_runtime_programs(&mut bpf, pin_path, desired_conntrack || desired_acl)",
+        "unbacked_program_link_cleanup_plan(&ownership, program_health)",
     ):
         if marker not in system_start_body:
             raise SystemExit("ERROR: standalone TC readiness missing %s" % marker)
     activation_window = system_start_body[activation:registration]
-    if "cleanup_failed_start(iface, pin_path, state_path)" not in activation_window:
+    if "start_error_with_cleanup(" not in activation_window:
         raise SystemExit("ERROR: standalone required-TC failure must clean startup state")
+    lifecycle_lock = system_start_body.find("lock_runtime_lifecycle().await")
+    if not (0 <= lifecycle_lock < desired_load):
+        raise SystemExit("ERROR: standalone startup must hold the shared lifecycle lock")
+    register_body = _rust_function_body(
+        control_plane_source, "register_system_instance"
+    )
+    if register_body is None or "load_with_wal" in register_body:
+        raise SystemExit("ERROR: system publication must not reload a drifting snapshot")
+    for marker in ("approved_state", "prepare_system_publication_state"):
+        if marker not in register_body:
+            raise SystemExit("ERROR: system publication missing approved snapshot handoff")
+    cleanup_plan_body = _rust_function_body(
+        system_manager_source, "failed_start_cleanup_plan"
+    )
+    cleanup_execute_body = _rust_function_body(
+        system_manager_source, "execute_system_cleanup_plan"
+    )
+    if cleanup_plan_body is None or cleanup_execute_body is None:
+        raise SystemExit("ERROR: standalone ownership cleanup plan/executor missing")
+    if "ClsactOwnership::Created" not in cleanup_plan_body:
+        raise SystemExit("ERROR: standalone cleanup must remove only owned clsact")
+    system_stop_body = _rust_function_body(system_manager_source, "system_stop")
+    if system_stop_body is None or "lock_runtime_lifecycle().await" not in system_stop_body:
+        raise SystemExit("ERROR: standalone stop must hold the shared lifecycle lock")
+    for forbidden in ("detach_tc_egress(", '"xdp", "off"'):
+        if forbidden in system_stop_body:
+            raise SystemExit("ERROR: standalone stop contains unowned teardown %s" % forbidden)
 
     control_code = _blank_rust_non_code(control_plane_source)
     for function_name in (
@@ -1051,7 +1076,7 @@ def check_rust_stage_one_tests_present():
         for marker in (
             "instance !=",
             "runtime_iface_name(instance, state)",
-            ".require_tc_acl_links()",
+            ".require_tc_acl_runtime()",
         )
     ):
         raise SystemExit("ERROR: lock-safe shared dual-TC readiness helper missing")
@@ -1065,15 +1090,29 @@ def check_rust_stage_one_tests_present():
         raise SystemExit(
             "ERROR: local ACL/CT enable must require dual TC under the instance lock before map write"
         )
+    for marker in (
+        "lock_runtime_lifecycle().await",
+        ".wal_append_strict(",
+        ".recover_local_config_persistence_failure(",
+    ):
+        if marker not in update_config_body:
+            raise SystemExit("ERROR: local config strict lifecycle contract missing %s" % marker)
     replace_acl_body = _rust_function_body(control_plane_source, "replace_owned_acl")
     shadow_stage = replace_acl_body.find("Self::stage_acl_shadow_bank(")
-    bank_readiness = replace_acl_body.find(
+    first_bank_readiness = replace_acl_body.find(
         "Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())"
     )
+    shared_mutation = replace_acl_body.find("apply_shared_network_mutation(")
+    bank_readiness = replace_acl_body.find(
+        "Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())",
+        shadow_stage,
+    )
     bank_publish = replace_acl_body.find("aria_core::ebpf_ops::set_acl_active_bank(")
-    if not (0 <= shadow_stage < bank_readiness < bank_publish):
+    if not (
+        0 <= first_bank_readiness < shared_mutation < shadow_stage < bank_readiness < bank_publish
+    ):
         raise SystemExit(
-            "ERROR: enforcement-affecting ACL bank publication must recheck dual TC after staging"
+            "ERROR: ACL replace must preflight TC before shared maps and recheck after staging"
         )
     readiness_prefix = replace_acl_body[shadow_stage:bank_readiness]
     if not re.search(
@@ -1083,6 +1122,37 @@ def check_rust_stage_one_tests_present():
         raise SystemExit(
             "ERROR: ACL bank TC gate must remain conditional while ACL/CT are disabled"
         )
+    for marker in (
+        "lock_runtime_lifecycle().await",
+        "rollback_owned_acl_prepublication(",
+        "rollback_shared_network_mutations(",
+    ):
+        if marker not in replace_acl_body:
+            raise SystemExit("ERROR: ACL bank rollback/lifecycle contract missing %s" % marker)
+    tap_code = _blank_rust_non_code(tap_registry_source)
+    if re.search(r"\bruntime_lock\s*:", tap_code):
+        raise SystemExit("ERROR: TapRegistry must use the ControlPlane lifecycle lock")
+    for function_name in ("attach_with_mode", "detach", "update_neutron_acl_runtime_gate"):
+        body = _rust_function_body(tap_registry_source, function_name)
+        if body is None or "lock_runtime_lifecycle().await" not in body:
+            raise SystemExit("ERROR: managed lifecycle path missing shared lock: %s" % function_name)
+    for test_name in (
+        "standalone_review_cleanup_plan_preserves_preexisting_clsact",
+        "standalone_review_cleanup_attempts_every_owned_resource",
+        "standalone_review_xdp_program_pin_failure_rolls_back_owned_link",
+        "standalone_review_program_pin_completeness_requires_links_and_programs",
+        "standalone_review_publication_uses_approved_snapshot_not_reload",
+        "standalone_review_lifecycle_serializes_detach_and_enable",
+        "standalone_review_local_persistence_failure_is_fail_closed",
+        "standalone_review_bank_rollback_attempts_all_shared_mutations",
+    ):
+        if test_name not in system_manager_source + instance_source + control_plane_source:
+            raise SystemExit("ERROR: standalone review behavior test missing %s" % test_name)
+    if not re.search(
+        r"cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-agent\s+standalone_review_",
+        build_workflow_source,
+    ):
+        raise SystemExit("ERROR: standalone review Rust test filter missing")
     if not re.search(
         r"cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-agent\s+standalone_acl_activation_",
         build_workflow_source,
