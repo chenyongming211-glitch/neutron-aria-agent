@@ -238,6 +238,8 @@ def check_source(source):
             errors.append("fixture ownership tracking missing %s" % term)
     if re.search(r"\b(eth|ens|eno|bond|br-ex)[0-9A-Za-z_.:-]*\b", fixture):
         errors.append("standalone smoke must not target a production-style host interface")
+    if 'ip route add "${HOST_IP}/32" dev "${PEER_IF}" src "${DENIED_IP}"' in fixture:
+        errors.append("fixture must not override the connected allowed route with DENIED_IP")
 
     start = bodies["start_agent"]
     for term in (
@@ -325,8 +327,8 @@ def check_source(source):
 
     allowed = bodies["run_allowed_flow"]
     denied = bodies["run_denied_flow"]
-    if 'ping -c "${ALLOWED_PACKETS}"' not in allowed:
-        errors.append("allowed flow must use the exact controlled packet count")
+    if 'ping -I "${PEER_IP}" -c "${ALLOWED_PACKETS}"' not in allowed:
+        errors.append("allowed flow must bind PEER_IP and use the exact controlled packet count")
     if 'DENIED_IP="10.203.0.6"' not in source:
         errors.append("denied flow must use a routable fixture-only /32 source")
     for term in (
@@ -575,6 +577,11 @@ def run_mutation_self_tests(source, verbose=False):
         ("TC egress packet evidence", mutate_remove, "assert tc_egress_packets==packets", "", "TC-only/XDP-neutral"),
         ("TC ingress byte evidence", mutate_remove, "assert tc_ingress_bytes==packets*packet_bytes", "", "TC-only/XDP-neutral"),
         ("TC egress byte evidence", mutate_remove, "assert tc_egress_bytes==packets*packet_bytes", "", "TC-only/XDP-neutral"),
+        ("allowed PEER_IP binding", mutate_remove, '-I "${PEER_IP}"', "", "allowed flow must bind PEER_IP"),
+        ("denied source route override", mutate_replace,
+         '    ip route add "${DENIED_IP}/32" dev "${HOST_IF}"',
+         '    ip netns exec "${NETNS}" ip route add "${HOST_IP}/32" dev "${PEER_IF}" src "${DENIED_IP}"\n    ip route add "${DENIED_IP}/32" dev "${HOST_IF}"',
+         "must not override the connected allowed route"),
         ("bidirectional wildcard trace", mutate_replace, 'set_trace_filter "" ""',
          'set_trace_filter "${PEER_IP}" "${HOST_IP}"', "wildcard ICMP"),
         ("exact CT byte comparison", mutate_remove, "assert after_ct_bytes-before_ct_bytes==expected_bytes", "", "TC-only/XDP-neutral"),
