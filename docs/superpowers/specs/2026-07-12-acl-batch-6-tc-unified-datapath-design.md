@@ -2,7 +2,14 @@
 
 Date: 2026-07-12
 
-Status: implemented; GitHub Build green; real managed-tap evidence pending
+Status: implemented baseline; standalone/XDP portions superseded 2026-07-13
+
+Supersession note: the approved
+`2026-07-13-xdp-ddos-only-tc-acl-design.md` replaces this document's legacy
+standalone XDP ACL mode, ingress-hook selector semantics, XDP-required ACL
+readiness, and related acceptance tests. Historical implementation and CI
+evidence below remains valid for the Neutron TC baseline, but it is not closure
+evidence for the new all-mode TC boundary.
 
 ## Goal
 
@@ -362,7 +369,8 @@ non-Neutron fixture that does not run the Neutron strict-flush transaction.
 Code/CI evidence moves the item to `likely-fixed`. Only successful real-tap
 evidence moves it to `fixed`.
 
-Current evidence state: `REVIEW-ACL-055` is `likely-fixed`. GREEN Build
+Historical baseline evidence state before the 2026-07-13 superseding design:
+`REVIEW-ACL-055` was classified `likely-fixed`. GREEN Build
 [29204885966](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29204885966)
 passed the exact Rust metric-label test, nightly eBPF build, static
 userspace/agent builds, binary verification, Python stages, and the fail-closed

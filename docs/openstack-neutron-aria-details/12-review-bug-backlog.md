@@ -5,8 +5,10 @@ Status: open review backlog.
 Date: 2026-07-03; refreshed 2026-07-10 (deep-dive); re-verified 2026-07-12;
 ACL transaction Batch 2, restart/CT safety Batch 3, and stateful/CT contract
 Batch 4 closed 2026-07-11; priority/overlap Batch 5 closure recorded
-2026-07-12; TC-unified ACL/CT Batch 6 is likely fixed in code pending real-tap
-evidence, and its separate fragment defect is recorded open.
+2026-07-12; the all-mode TC-unified follow-up was approved 2026-07-13 and keeps
+Batch 6 in progress until standalone XDP ACL removal, restart/read-error
+hardening, CI, and real-runtime evidence are complete. The separate fragment
+defect remains open.
 
 Scope rule:
 
@@ -25,8 +27,8 @@ that the item is an open implementation bug by itself.
 
 | Verdict | Count | IDs |
 | --- | ---: | --- |
-| Confirmed active defect or contract gap | 34 | Remaining open register rows, including the new fragment defect |
-| Likely fixed; operational evidence pending | 1 | `REVIEW-ACL-055`: code/static gates implemented; real-tap smoke pending |
+| Confirmed active defect or contract gap | 35 | Remaining open/in-progress register rows, including `REVIEW-ACL-055` and the fragment defect |
+| Likely fixed; operational evidence pending | 0 | None; the previous Batch 6 evidence is superseded by the approved all-mode TC boundary |
 | Fixed | 23 | `REVIEW-ACL-016`, `REVIEW-ACL-018`, 13 ACL Batch 1 IDs, 3 transaction Batch 2 IDs, 2 Batch 3 IDs, 2 Batch 4 IDs, and `REVIEW-ACL-047` in Batch 5 |
 | Verification needed | 1 | `REVIEW-ACL-012`: implementation path is present; clean-container evidence is still required |
 | Reclassified as risk/design boundary | 2 | `REVIEW-ACL-032`, `REVIEW-ACL-046` |
@@ -56,7 +58,7 @@ remains four `DEBT-*` IDs. The unique tracking-item total is now 71.
 
 | Current tracking portfolio | Count | Included states |
 | --- | ---: | --- |
-| Active defect or contract gap | 35 | Open or likely-fixed `REVIEW-*` register rows pending closure evidence |
+| Active defect or contract gap | 35 | Open or in-progress `REVIEW-*` register rows pending closure evidence |
 | Risk / design boundary | 7 | Five `RISK-*` IDs plus two reclassified `REVIEW-*` IDs |
 | Engineering debt | 4 | `DEBT-*` IDs |
 | Verification needed | 1 | `REVIEW-ACL-012` |
@@ -109,7 +111,7 @@ remains four `DEBT-*` IDs. The unique tracking-item total is now 71.
 
 | IDs | Evidence state |
 | --- | --- |
-| `ACL-055` | **Likely fixed, not operationally closed.** Neutron-managed ACL/CT now uses bank-aware TC ingress and egress; TC-mode XDP bypasses ACL/CT; routine CT diagnostic events require a matching Trace filter while stale-bank remains unconditional; enforcement publication requires both TC links. GREEN Build [29204885966](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29204885966) passed the exact Rust metric test, nightly eBPF build, static userspace/agent builds, binary verification, Python stage gates, and fail-closed smoke structure/mutation checks, including strict-flush bank handling and exact same-flow CT byte accounting. `real-tap smoke pending`: a successful managed-tap `summary.json` is still required before changing this item to `fixed`. |
+| `ACL-055` | **In progress under the approved 2026-07-13 all-mode TC design.** The previous green build proves the Neutron TC baseline, but standalone still executes ingress ACL/CT in XDP. Final review also found fresh/rebuilt restart replay capable of enabling a default XDP gate before resync and map reads that can synthesize enabled defaults after non-`KeyNotFound` failures. The superseding design makes XDP ACL/CT-neutral in every mode, makes both TC links mandatory for ACL/CT enablement, and hardens startup and map-read transactions. New code/CI plus real standalone and managed-tap evidence are required before closure. |
 | `ACL-056` | **Open P1.** Fragment-safe ACL/CT semantics are intentionally excluded from Batch 6 and require a separate design. |
 
 ## 2026-07-08 Full Review Refresh
@@ -384,7 +386,7 @@ verification-only, risk-classified, or closed.
 | REVIEW-ACL-052 | P2 | Update-error preserves unmanaged state | closed-not-supported | Attach failure purges/detaches, while update failure records an error and preserves the attached port plus state outside the failed Neutron-managed domain. Preserving unmanaged mirror/tcprt/local state is consistent with selected-domain authority and the availability-first OVS enhancement boundary; the original finding does not demonstrate an invariant violation. ACL partial-write/rollback defects remain tracked by `REVIEW-ACL-025` and `REVIEW-ACL-026`. | Keep closed unless a residual-state test proves that a failed update changes or falsely reports a Neutron-managed domain. Do not scrub unrelated domains or detach solely on this finding. |
 | REVIEW-ACL-053 | P1 | Lenient ct_flush hides CT clear failure | fixed | Historical Neutron ACL reconcile used `core::ct_ops::ct_flush`, which returned `Ok(0)` when CT pins could not be opened or converted. Neutron now pre-disables ACL before every replacement, calls a dedicated strict control-plane flush backed by `scrub_ct_tables_strict`, propagates V4/V6 open/convert/iterate/remove failures, and enables non-empty ACL only after clear succeeds. Post-disable failures report `error/bypass`; translation or pre-disable failures report `error/unchanged`. | Fixed with gate-order, strict-method contract, proven effective-action, and missing-pin compatibility tests. The general lenient flush API remains unchanged. |
 | REVIEW-ACL-054 | P2 | stateful=false still uses XDP CT fast-path | fixed | Rust now carries `NeutronAclSnapshot.stateful` as per-apply CT intent. Non-empty stateful policy publishes `conntrack=true,acl=true`; non-empty stateless policy publishes `conntrack=false,acl=true`. The existing eBPF per-tap CT guards therefore skip lookup and create for stateless ACL. Empty/bypass publishes ACL off with snapshot CT intent, while a missing ACL payload preserves the prior CT mode. | Fixed with translator intent and atomic runtime-transition tests covering stateful, stateless, empty, and missing-payload paths. |
-| REVIEW-ACL-055 | P1 | Neutron ACL/CT hook split and missing TC fast path | likely-fixed | Neutron ingress ACL previously remained authoritative in XDP while TC egress had no complete bank-aware CT fast path, which split enforcement/accounting semantics and made TC-only post-processing incompatible with authoritative CT creation. Batch 6 moves Neutron ACL/CT authority to TC ingress and egress, keeps legacy XDP mode for standalone taps, and makes TC-mode XDP ACL/CT-neutral. | GREEN Build [29204885966](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29204885966) passed, including fail-closed smoke structure, mutation checks, strict-flush→miss→hit bank evidence, and exact same-flow CT byte accounting. Keep `real-tap smoke pending` until the bounded managed-tap smoke preserves a passing `summary.json`; only then mark fixed. |
+| REVIEW-ACL-055 | P1 | Split ACL/CT hooks and incomplete all-mode TC recovery | in-progress | The Neutron TC baseline is implemented, but standalone ingress ACL/CT still runs in XDP. Final review also found fresh/rebuilt restart replay can expose a default XDP gate before resync and non-`KeyNotFound` map read failures can synthesize enabled defaults. The approved 2026-07-13 design makes XDP ACL/CT-neutral for all modes and TC ingress/egress the only ACL/CT authorities. | Implement dual-TC readiness and quiesced recovery for Neutron and standalone, retire the hook selector as a datapath branch without changing the eight-byte ABI, propagate map read errors, pass new GitHub CI, then preserve standalone and managed-tap smoke evidence. The previous GREEN Build [29204885966](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29204885966) remains historical Neutron-path evidence only. |
 | REVIEW-ACL-056 | P1 | Fragment-safe ACL/CT key semantics | open | IPv4 non-first fragments are parsed as if payload bytes were TCP/UDP ports, while IPv6 non-first fragments use zero ports. Port ACL and CT keys can diverge across fragments. | A separate design must define fragment allow/drop/reassembly semantics before implementation. Do not treat Batch 6 TC unification as a parser fix. |
 | REVIEW-DOC-021 | P2 | Capabilities advertise unimplemented domains | fixed | `NEUTRON_SUPPORTED_DOMAINS` / `neutron-uds-contract.json` / capabilities response list qos/mirror/config/ct/… while reconcile only implements `attach`+`acl`. Stage-1 CI even requires qos/mirror in supported_domains. | Split advertised vs implemented domains; shrink supported set or mark planned and reject managed_domains that are unimplemented. |
 | REVIEW-OPS-035 | P2 | Transaction smoke can pass with zero ports | open | `neutron_aria_transaction_state_smoke.sh` defaults `MIN_MANAGED_PORTS=0` and skips pending-delete / migration-source checks when no managed port exists, still exiting success. | Require `MIN_MANAGED_PORTS>=1` for release gates, or fail when skip paths are taken. |
@@ -555,12 +557,13 @@ Round 3 (contract / status / CT / CI):
   TC datapath static checker, Stage 1/2/3 and evidence gates, and
   `git diff --check`. No local Cargo command was run.
 - Real managed-tap execution was not available in this development
-  environment. `REVIEW-ACL-055` therefore remains `likely-fixed` with
-  `real-tap smoke pending`; `REVIEW-ACL-056` remains open P1.
+  environment. The 2026-07-13 all-mode design also supersedes the legacy
+  standalone XDP path and records two final-review blockers. `REVIEW-ACL-055`
+  is therefore `in-progress`; `REVIEW-ACL-056` remains open P1.
 
 ## Active Fix Order After Batch 6
 
-1. `REVIEW-ACL-055`: run and preserve the guarded real managed-tap smoke; only a passing `summary.json` closes the likely-fixed item.
+1. `REVIEW-ACL-055`: implement the approved all-mode TC/XDP-neutral design, fix restart and map-read blockers, pass new CI, then preserve guarded standalone and managed-tap smoke evidence before closure.
 2. `REVIEW-ACL-056`: define fragment allow/drop/reassembly and ACL/CT key semantics before parser implementation.
 3. `REVIEW-OPS-019`: bound Neutron WAL growth and restart replay cost.
 4. `REVIEW-ACL-025` / `REVIEW-ACL-026` / `REVIEW-ACL-044`: owned-ACL durable ordering and no-op bank flips.
