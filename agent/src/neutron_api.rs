@@ -1979,7 +1979,7 @@ async fn apply_snapshot_runtime_transaction(
         }
     }
 
-    for port in attach {
+    for port in &attach {
         let port_started = Instant::now();
         let port_id = port.port_id.clone();
         let ifname = port.ifname.clone();
@@ -1997,8 +1997,8 @@ async fn apply_snapshot_runtime_transaction(
                         );
                     }
                     results.push(NeutronPortApplyResult {
-                        port_id: port.port_id,
-                        ifname: port.ifname,
+                        port_id: port.port_id.clone(),
+                        ifname: port.ifname.clone(),
                         action: "attach".to_string(),
                         status: "error".to_string(),
                         reason: Some(e),
@@ -2016,10 +2016,10 @@ async fn apply_snapshot_runtime_transaction(
                     );
                     continue;
                 }
-                let managed = managed_port_from_snapshot(&port);
+                let managed = managed_port_from_snapshot(port);
                 let domain_started = Instant::now();
                 let domain_result =
-                    reconcile_neutron_domains(state, &port, &mut acl_validation_cache).await;
+                    reconcile_neutron_domains(state, port, &mut acl_validation_cache).await;
                 let domain_ms = elapsed_ms(domain_started);
                 if domain_result.ok {
                     state
@@ -2138,8 +2138,8 @@ async fn apply_snapshot_runtime_transaction(
                     ),
                 );
                 results.push(NeutronPortApplyResult {
-                    port_id: port.port_id,
-                    ifname: port.ifname,
+                    port_id: port.port_id.clone(),
+                    ifname: port.ifname.clone(),
                     action: "attach".to_string(),
                     status: "error".to_string(),
                     reason: Some(e),
