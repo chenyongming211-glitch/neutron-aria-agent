@@ -4906,6 +4906,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tc_health_reconcile_recovery_publication_failure_is_fail_closed() {
+        let readiness_error = ControlPlaneError::InstanceNotReady(
+            "missing live TCX ACL attachments: ingress".to_string(),
+        );
+        let preserved = recovery_publication_failure_error(readiness_error, Ok(()));
+        assert!(matches!(preserved, ControlPlaneError::InstanceNotReady(_)));
+        assert!(preserved
+            .to_string()
+            .contains("missing live TCX ACL attachments: ingress"));
+        assert!(!preserved.to_string().contains("acl_quiesce_failed"));
+
+        let readiness_error = ControlPlaneError::InstanceNotReady(
+            "missing live TCX ACL attachments: egress".to_string(),
+        );
+        let combined = recovery_publication_failure_error(
+            readiness_error,
+            Err("runtime gate write failed: map unavailable".to_string()),
+        );
+        assert!(matches!(combined, ControlPlaneError::InstanceNotReady(_)));
+        assert!(combined
+            .to_string()
+            .contains("missing live TCX ACL attachments: egress"));
+        assert!(combined.to_string().contains("acl_quiesce_failed"));
+        assert!(combined.to_string().contains("map unavailable"));
+    }
+
     async fn stopped_wal_instance_state(test_name: &str) -> InstanceState {
         let state_path = std::env::temp_dir().join(format!(
             "aria-managed-failure-path-{}-{}",

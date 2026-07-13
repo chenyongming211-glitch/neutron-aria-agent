@@ -1412,6 +1412,32 @@ def check_rust_stage_one_tests_present():
         raise SystemExit(
             "ERROR: Neutron ACL health may change only after strict gate persistence, with recovery readiness revalidated before return"
         )
+    recovery_failure_position = serialized_gate_body.find(
+        "if let Err(readiness_error) ="
+    )
+    recovery_failure_tail = (
+        serialized_gate_body[recovery_failure_position:]
+        if recovery_failure_position >= 0
+        else ""
+    )
+    recovery_failure_mark_position = recovery_failure_tail.find(
+        "Self::mark_tc_acl_runtime_ready_locked("
+    )
+    recovery_failure_quiesce_position = recovery_failure_tail.find(
+        "Self::quiesce_tc_acl_runtime_locked("
+    )
+    recovery_failure_return_position = recovery_failure_tail.find("return Err(")
+    if (
+        recovery_failure_position < 0
+        or recovery_failure_mark_position < 0
+        or recovery_failure_quiesce_position < 0
+        or recovery_failure_return_position < 0
+        or not recovery_failure_mark_position < recovery_failure_quiesce_position
+        or not recovery_failure_quiesce_position < recovery_failure_return_position
+    ):
+        raise SystemExit(
+            "ERROR: failed recovery readiness publication must quiesce the live ACL gate before returning"
+        )
     for function_name in (
         "neutron_acl_gate_requires_tc",
         "neutron_acl_gate_serialization_requires_tc_only_for_enabling_writes",
