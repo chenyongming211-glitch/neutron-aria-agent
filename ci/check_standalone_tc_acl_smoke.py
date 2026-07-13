@@ -216,6 +216,7 @@ def check_source(source):
         'sock.bind((host,port))',
         'math.isfinite(timeout)',
         'timeout>0',
+        're.fullmatch(r"(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)"',
     ):
         if term not in preflight:
             errors.append("fail-closed fixture preflight missing %s" % term)
@@ -564,6 +565,8 @@ def run_mutation_self_tests(source, verbose=False):
         ("free loopback port", mutate_remove, 'sock.bind(("127.0.0.1",0))', "", "loopback port selection"),
         ("workdir collision preflight", mutate_remove, '[ ! -e "${WORK_DIR}" ]', "", "fixture preflight"),
         ("positive finite shutdown timeout", mutate_remove, "math.isfinite(timeout)", "", "fixture preflight"),
+        ("legal sleep duration", mutate_remove,
+         're.fullmatch(r"(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)"', "", "fixture preflight"),
         ("host interface ownership", mutate_remove, '[ "${VETH_CREATED}" = true ]', "", "fail-closed cleanup"),
         ("bpffs mount ownership", mutate_replace,
          '    if [ "${PRIVATE_BPFFS_MOUNTED}" = true ]; then\n        if ! umount',

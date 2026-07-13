@@ -98,6 +98,13 @@ preflight_fixture() {
     if ip link show dev "${PEER_IF}" >/dev/null 2>&1; then
         die "peer fixture interface already exists: ${PEER_IF}"
     fi
+    python3 - "${AGENT_STOP_TIMEOUT_SECS}" <<'PY' || die "AGENT_STOP_TIMEOUT_SECS must be a finite positive number"
+import math,re,sys
+raw=sys.argv[1]
+assert re.fullmatch(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)",raw),raw
+timeout=float(raw)
+assert math.isfinite(timeout) and timeout>0,timeout
+PY
     python3 - "${HTTP_ADDR}" <<'PY' || die "loopback listen address is unavailable: ${HTTP_ADDR}"
 import ipaddress,socket,sys
 host,raw_port=sys.argv[1].rsplit(":",1)
@@ -321,7 +328,7 @@ run_allowed_flow() {
 
 run_observed_allowed_flow() {
     local label="$1"
-    set_trace_filter "${PEER_IP}" "${HOST_IP}"
+    set_trace_filter "" ""
     capture_acl_counters "${label}-before"
     run_allowed_flow "${label}"
     capture_acl_counters "${label}-after"
@@ -452,7 +459,7 @@ print(" ".join("%02x"%b for b in v))
 PY
     )"
     bpftool map update pinned "${map}" key hex ${key} value hex ${value}
-    set_trace_filter "${PEER_IP}" "${HOST_IP}"
+    set_trace_filter "" ""
     capture_acl_counters legacy-zero-before
     run_allowed_flow legacy-zero
     capture_acl_counters legacy-zero-after
