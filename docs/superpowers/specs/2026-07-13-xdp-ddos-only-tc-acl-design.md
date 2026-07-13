@@ -2,10 +2,28 @@
 
 Date: 2026-07-13
 
-Status: approved design; implementation pending
+Status: implemented; GitHub Build green; privileged runtime evidence pending
 
 Supersedes the standalone/XDP compatibility portions of
 `2026-07-12-acl-batch-6-tc-unified-datapath-design.md`.
+
+## Implementation Status
+
+The all-mode implementation is present at code commit
+`5800940bcc54b5ec7bcb7cf35ee980492436addf`. Complete GitHub Build
+[29293162332](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29293162332)
+passed Python stages, targeted Rust authority tests, nightly eBPF, static
+userspace/agent builds, and binary verification. Local non-Cargo gates also
+passed, including 283 Stage 1 tests, 153 Stage 2 tests, both smoke mutation
+checkers, the datapath checker, embedded Python extraction, and Stage 2/3
+evidence.
+
+The normal Build runs syntax and structure/mutation contracts; it does not run
+the privileged netns/tap smokes. No privileged environment with the built
+artifacts was available during this implementation. `REVIEW-ACL-055` is
+therefore `likely-fixed`. It becomes `fixed` only after preserved passing
+summaries exist for standalone `MODE=system`, standalone `MODE=tap`, and the
+managed-Neutron smoke.
 
 ## Goal
 
@@ -328,13 +346,15 @@ checkers. No local Cargo command is used.
 
 ### Integration Evidence
 
-- A disposable netns/veth fixture validates system standalone ingress and
-  egress TC enforcement without changing a host production interface.
-- A tap-managed standalone fixture validates dual-TC readiness, restart restore,
-  missing-link rejection, and no XDP ACL/CT counter changes.
-- The guarded Neutron managed-tap smoke validates ingress/egress stateful and
-  stateless ACL, deny behavior, strict bank transition, exact CT packet/byte
-  accounting, and full-resync publication.
+- The guarded disposable netns/veth fixture is prepared to validate system
+  standalone ingress and egress TC enforcement without changing a host
+  production interface.
+- The guarded tap-managed standalone fixture is prepared to validate dual-TC
+  readiness, restart restore, missing-link rejection, and exact TC-only ACL/CT
+  accounting.
+- The guarded Neutron managed-tap smoke is prepared to validate ingress/egress
+  stateful and stateless ACL, deny behavior, strict bank transition, exact CT
+  packet/byte accounting, and full-resync publication.
 - Negative mutations prove that removing either expected TC readiness marker
   fails the static/smoke contract.
 
@@ -347,9 +367,10 @@ real runtime evidence may move it to fixed.
   semantics, XDP-required ACL readiness, and related acceptance tests.
 - Update the implementation plan rather than editing completed task history in
   place; the new work receives explicit follow-up tasks.
-- Keep `REVIEW-ACL-055` in progress while the superseding implementation and CI
-  are incomplete. Its previous green build remains historical evidence for the
-  Neutron TC path, not closure evidence for the new all-mode boundary.
+- Keep `REVIEW-ACL-055` `likely-fixed` after the complete all-mode Build. Its
+  previous green builds remain historical/superseded evidence, not closure
+  evidence. Promote to `fixed` only after all three privileged runtime
+  summaries are preserved and pass.
 - Keep `REVIEW-ACL-056` separate. Fragment semantics are not changed here.
 
 ## Acceptance Criteria

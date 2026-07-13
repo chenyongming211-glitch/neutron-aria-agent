@@ -5,10 +5,10 @@ Status: open review backlog.
 Date: 2026-07-03; refreshed 2026-07-10 (deep-dive); re-verified 2026-07-12;
 ACL transaction Batch 2, restart/CT safety Batch 3, and stateful/CT contract
 Batch 4 closed 2026-07-11; priority/overlap Batch 5 closure recorded
-2026-07-12; the all-mode TC-unified follow-up was approved 2026-07-13 and keeps
-Batch 6 in progress until standalone XDP ACL removal, restart/read-error
-hardening, CI, and real-runtime evidence are complete. The separate fragment
-defect remains open.
+2026-07-12; the all-mode TC-unified follow-up was approved 2026-07-13 and its
+code/CI implementation passed on 2026-07-14. Batch 6 is now likely-fixed while
+privileged standalone system/tap and managed-Neutron runtime evidence remains
+pending. The separate fragment defect remains open.
 
 Scope rule:
 
@@ -27,25 +27,26 @@ that the item is an open implementation bug by itself.
 
 | Verdict | Count | IDs |
 | --- | ---: | --- |
-| Confirmed active defect or contract gap | 35 | Remaining open/in-progress register rows, including `REVIEW-ACL-055` and the fragment defect |
-| Likely fixed; operational evidence pending | 0 | None; the previous Batch 6 evidence is superseded by the approved all-mode TC boundary |
+| Confirmed active defect or contract gap | 34 | Remaining open/in-progress register rows, including the fragment defect |
+| Likely fixed; operational evidence pending | 1 | `REVIEW-ACL-055`: all-mode TC/XDP-neutral code and full GitHub Build are green; three privileged runtime summaries remain pending |
 | Fixed | 23 | `REVIEW-ACL-016`, `REVIEW-ACL-018`, 13 ACL Batch 1 IDs, 3 transaction Batch 2 IDs, 2 Batch 3 IDs, 2 Batch 4 IDs, and `REVIEW-ACL-047` in Batch 5 |
 | Verification needed | 1 | `REVIEW-ACL-012`: implementation path is present; clean-container evidence is still required |
 | Reclassified as risk/design boundary | 2 | `REVIEW-ACL-032`, `REVIEW-ACL-046` |
 | Closed: finding not supported as written | 1 | `REVIEW-ACL-052` |
 | **Total `REVIEW-*` IDs** | **62** | Stable IDs retained for audit history |
 
-The 35 active or evidence-pending items are grouped by failure surface so that
+The 34 active items are grouped by failure surface so that
 runtime bugs are not mixed with delivery and documentation gaps:
 
 | Active class | Count | IDs |
 | --- | ---: | --- |
-| Transaction, datapath, recovery, and runtime consistency | 17 | `ACL-023`, `ACL-025`, `ACL-026`, `ACL-028`, `ACL-033`, `ACL-036`, `ACL-037`, `ACL-044`, `ACL-045`, `ACL-055`, `ACL-056`; `TXN-024`, `TXN-026`, `TXN-027`; `OPS-019`, `OPS-027`, `OPS-034` |
+| Transaction, datapath, recovery, and runtime consistency | 16 | `ACL-023`, `ACL-025`, `ACL-026`, `ACL-028`, `ACL-033`, `ACL-036`, `ACL-037`, `ACL-044`, `ACL-045`, `ACL-056`; `TXN-024`, `TXN-026`, `TXN-027`; `OPS-019`, `OPS-027`, `OPS-034` |
 | Northbound API, DB, compile, and status projection correctness | 8 | `ACL-003`, `ACL-004`, `ACL-008`, `ACL-013`, `ACL-038`, `ACL-040`-`ACL-042` |
 | Packaging, deployment, validation, documentation, and release gaps | 10 | `ACL-005`, `ACL-007`, `ACL-010`, `ACL-011`, `ACL-014`, `ACL-015`, `ACL-017`; `DOC-020`; `OPS-035`; `CI-001` |
-| **Total active defect, gap, or evidence-pending item** | **35** | Includes `REVIEW-ACL-055` until real-tap evidence closes it |
+| **Total active defect or contract gap** | **34** | Excludes the separately reported likely-fixed and verification-needed states |
 
-Remaining active P1 set: `ACL-055`, `ACL-056`, and `OPS-019`.
+Remaining active P1 set: `ACL-056` and `OPS-019`. `ACL-055` remains a P1
+likely-fixed item until its privileged runtime evidence closes it.
 
 Also spot-checked: `ACL-004` (host=None returns `status[0]`), `ACL-014`
 (workflow `contents: write`), `ACL-015` (plugin policy backup only when file
@@ -53,18 +54,20 @@ exists), `ACL-017` (CLI installer hard-codes `/etc/kolla/.adminrc`) — all stil
 present.
 
 Risk tracking now contains seven classified items: five existing `RISK-*` IDs
-plus reclassified `REVIEW-ACL-032` and `REVIEW-ACL-046`. Engineering debt
-remains four `DEBT-*` IDs. The unique tracking-item total is now 71.
+plus reclassified `REVIEW-ACL-032` and `REVIEW-ACL-046`. Engineering debt now
+contains five `DEBT-*` IDs, including the separately recorded legacy local-ACL
+persistence debt. The unique tracking-item total is now 72.
 
 | Current tracking portfolio | Count | Included states |
 | --- | ---: | --- |
-| Active defect or contract gap | 35 | Open or in-progress `REVIEW-*` register rows pending closure evidence |
+| Active defect or contract gap | 34 | Open or in-progress `REVIEW-*` register rows pending closure evidence |
+| Likely fixed; operational evidence pending | 1 | `REVIEW-ACL-055` |
 | Risk / design boundary | 7 | Five `RISK-*` IDs plus two reclassified `REVIEW-*` IDs |
-| Engineering debt | 4 | `DEBT-*` IDs |
+| Engineering debt | 5 | `DEBT-*` IDs |
 | Verification needed | 1 | `REVIEW-ACL-012` |
 | Fixed | 23 | Two earlier fixes plus 13 ACL Batch 1, three transaction Batch 2, two Batch 3, two Batch 4, and one Batch 5 fix |
 | Closed / unsupported finding | 1 | `REVIEW-ACL-052` |
-| **Total unique tracking items** | **71** | Includes the Batch 6 fast-path and fragment findings |
+| **Total unique tracking items** | **72** | Includes the Batch 6 fast-path, fragment finding, and local-ACL persistence debt |
 
 ### ACL Batch 1 Closure
 
@@ -111,7 +114,7 @@ remains four `DEBT-*` IDs. The unique tracking-item total is now 71.
 
 | IDs | Evidence state |
 | --- | --- |
-| `ACL-055` | **In progress under the approved 2026-07-13 all-mode TC design.** The previous green build proves the Neutron TC baseline, but standalone still executes ingress ACL/CT in XDP. Final review also found fresh/rebuilt restart replay capable of enabling a default XDP gate before resync and map reads that can synthesize enabled defaults after non-`KeyNotFound` failures. The superseding design makes XDP ACL/CT-neutral in every mode, makes both TC links mandatory for ACL/CT enablement, and hardens startup and map-read transactions. New code/CI plus real standalone and managed-tap evidence are required before closure. |
+| `ACL-055` | **Likely fixed; privileged runtime evidence pending.** Code commit `5800940bcc54b5ec7bcb7cf35ee980492436addf` makes XDP ACL/CT-neutral in all modes, requires dual TC for ACL/CT, hardens restart/read-error recovery, and adds guarded standalone system/tap plus managed-Neutron smoke contracts. Complete Build [29293162332](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29293162332) passed Python stages, Rust contracts, nightly eBPF, static userspace/agent builds, and binary verification. Do not mark fixed until preserved `result=pass` summaries exist for privileged `MODE=system`, `MODE=tap`, and managed Neutron execution. |
 | `ACL-056` | **Open P1.** Fragment-safe ACL/CT semantics are intentionally excluded from Batch 6 and require a separate design. |
 
 ## 2026-07-08 Full Review Refresh
@@ -317,6 +320,7 @@ Existing bug/risk IDs reused instead of duplicated:
 | REVIEW-ACL-046 | medium | domain authority boundary | reclassified-risk | `ensure_local_group_write_allowed` intentionally blocks `neutron:*` group names while allowing non-Neutron groups, and existing authority tests encode that selected-domain behavior. No evidence currently shows a non-Neutron group mutation changing effective Neutron ACL rules. | Document the selected-domain coexistence boundary and add an isolation test proving non-Neutron groups cannot alter Neutron-owned enforcement. Reopen as a bug if cross-domain map interference is reproduced. |
 | DEBT-MAINT-001 | medium | source modularity | open | `agent/src/neutron_api.rs` is about 5.4k lines and `agent/src/control_plane.rs` about 3.4k lines. Snapshot transactions, ACL translation, status projection, recovery, and control-plane mutation are concentrated in large modules. This is maintainability and review-risk debt, not a reproduced behavior bug. | Split along existing contract boundaries without changing behavior: snapshot transaction/recovery, ACL translator/executor, status projection, and domain authority. Preserve focused contract tests during extraction. |
 | DEBT-CI-001 | medium | verification breadth | open | CI runs Python/stage gates, selected Rust Neutron tests, eBPF and static builds, but has no full Rust workspace test job and no dedicated clippy, rustfmt, Python linter, or shellcheck gate. | Add separate CI jobs for full workspace tests and static analysis; keep the existing targeted gates for fast contract feedback. Follow the repository rule that Rust compilation remains in GitHub Actions rather than local development runs. |
+| DEBT-ACL-001 | medium | legacy local ACL durability | open | Standalone/local add/delete group and policy paths mutate in-memory/kernel ACL state and then call the legacy best-effort `wal_append` wrapper. If both append and compact fallback fail, the API can still acknowledge a mutation that is not durable across restart. This pre-existing local API debt is separate from the strict managed-Neutron replacement transaction and from `REVIEW-ACL-055`. | Move local ACL mutations to a strict durable acknowledgement contract with rollback or explicit degraded/error reporting. Add append/compact failure injection for add/delete group and policy, including bitmap allocator state. |
 | RISK-CI-001 | medium | workflow supply chain | open | Actions are referenced by version tags such as `actions/checkout@v4` rather than immutable commit SHAs. Workflow-wide write permission is separately tracked by `REVIEW-ACL-014`. | Pin third-party actions to reviewed immutable SHAs and use automated, reviewed dependency updates. Close `REVIEW-ACL-014` independently by reducing default token permissions. |
 | DEBT-RELEASE-001 | medium | release metadata and licensing | open | Workspace metadata remains `version=0.1.0` with placeholder author data while the product line is documented as v0.9. The manifest declares MIT, but no root `LICENSE` or `COPYING` file was found. | Define one release-version source, replace placeholder author metadata, add the intended license text, and add a release-hygiene CI check. |
 | DEBT-REPO-001 | medium | repository and evidence hygiene | open | The repository tracks generated HTML/ZIP output, a roughly 4.6 MiB latest-build binary archive, and extensive field evidence containing environment hostnames and internal addresses. The current shared Git object store is roughly 211 MiB. This is repository/disclosure debt, not a runtime bug. | Move generated binaries and presentation bundles to CI artifacts/releases, retain only durable evidence summaries where possible, define evidence retention/redaction rules, and reuse `REVIEW-ACL-011` for public identifier scrubbing. |
@@ -386,7 +390,7 @@ verification-only, risk-classified, or closed.
 | REVIEW-ACL-052 | P2 | Update-error preserves unmanaged state | closed-not-supported | Attach failure purges/detaches, while update failure records an error and preserves the attached port plus state outside the failed Neutron-managed domain. Preserving unmanaged mirror/tcprt/local state is consistent with selected-domain authority and the availability-first OVS enhancement boundary; the original finding does not demonstrate an invariant violation. ACL partial-write/rollback defects remain tracked by `REVIEW-ACL-025` and `REVIEW-ACL-026`. | Keep closed unless a residual-state test proves that a failed update changes or falsely reports a Neutron-managed domain. Do not scrub unrelated domains or detach solely on this finding. |
 | REVIEW-ACL-053 | P1 | Lenient ct_flush hides CT clear failure | fixed | Historical Neutron ACL reconcile used `core::ct_ops::ct_flush`, which returned `Ok(0)` when CT pins could not be opened or converted. Neutron now pre-disables ACL before every replacement, calls a dedicated strict control-plane flush backed by `scrub_ct_tables_strict`, propagates V4/V6 open/convert/iterate/remove failures, and enables non-empty ACL only after clear succeeds. Post-disable failures report `error/bypass`; translation or pre-disable failures report `error/unchanged`. | Fixed with gate-order, strict-method contract, proven effective-action, and missing-pin compatibility tests. The general lenient flush API remains unchanged. |
 | REVIEW-ACL-054 | P2 | stateful=false still uses XDP CT fast-path | fixed | Rust now carries `NeutronAclSnapshot.stateful` as per-apply CT intent. Non-empty stateful policy publishes `conntrack=true,acl=true`; non-empty stateless policy publishes `conntrack=false,acl=true`. The existing eBPF per-tap CT guards therefore skip lookup and create for stateless ACL. Empty/bypass publishes ACL off with snapshot CT intent, while a missing ACL payload preserves the prior CT mode. | Fixed with translator intent and atomic runtime-transition tests covering stateful, stateless, empty, and missing-payload paths. |
-| REVIEW-ACL-055 | P1 | Split ACL/CT hooks and incomplete all-mode TC recovery | in-progress | The Neutron TC baseline is implemented, but standalone ingress ACL/CT still runs in XDP. Final review also found fresh/rebuilt restart replay can expose a default XDP gate before resync and non-`KeyNotFound` map read failures can synthesize enabled defaults. The approved 2026-07-13 design makes XDP ACL/CT-neutral for all modes and TC ingress/egress the only ACL/CT authorities. | Implement dual-TC readiness and quiesced recovery for Neutron and standalone, retire the hook selector as a datapath branch without changing the eight-byte ABI, propagate map read errors, pass new GitHub CI, then preserve standalone and managed-tap smoke evidence. The previous GREEN Build [29204885966](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29204885966) remains historical Neutron-path evidence only. |
+| REVIEW-ACL-055 | P1 | Split ACL/CT hooks and incomplete all-mode TC recovery | likely-fixed | The all-mode implementation now keeps XDP ACL/CT-neutral, makes TC ingress/egress the only ACL/CT authorities, requires both TC links for enable/readiness, preserves the eight-byte ABI as compatibility only, propagates map-read failures, and quiesces restart recovery until the appropriate authority is ready. Code and complete CI are green at `5800940bcc54b5ec7bcb7cf35ee980492436addf`. | Preserve passing privileged summaries for standalone `MODE=system`, standalone `MODE=tap`, and managed Neutron using the guarded smoke scripts. Only then change this row to `fixed`. Complete code Build: [29293162332](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29293162332). |
 | REVIEW-ACL-056 | P1 | Fragment-safe ACL/CT key semantics | open | IPv4 non-first fragments are parsed as if payload bytes were TCP/UDP ports, while IPv6 non-first fragments use zero ports. Port ACL and CT keys can diverge across fragments. | A separate design must define fragment allow/drop/reassembly semantics before implementation. Do not treat Batch 6 TC unification as a parser fix. |
 | REVIEW-DOC-021 | P2 | Capabilities advertise unimplemented domains | fixed | `NEUTRON_SUPPORTED_DOMAINS` / `neutron-uds-contract.json` / capabilities response list qos/mirror/config/ct/… while reconcile only implements `attach`+`acl`. Stage-1 CI even requires qos/mirror in supported_domains. | Split advertised vs implemented domains; shrink supported set or mark planned and reject managed_domains that are unimplemented. |
 | REVIEW-OPS-035 | P2 | Transaction smoke can pass with zero ports | open | `neutron_aria_transaction_state_smoke.sh` defaults `MIN_MANAGED_PORTS=0` and skips pending-delete / migration-source checks when no managed port exists, still exiting success. | Require `MIN_MANAGED_PORTS>=1` for release gates, or fail when skip paths are taken. |
@@ -559,13 +563,50 @@ Round 3 (contract / status / CT / CI):
 - Real managed-tap execution was not available in this development
   environment. The 2026-07-13 all-mode design also supersedes the legacy
   standalone XDP path and records two final-review blockers. `REVIEW-ACL-055`
-  is therefore `in-progress`; `REVIEW-ACL-056` remains open P1.
+  was therefore still `in-progress` at that historical checkpoint;
+  `REVIEW-ACL-056` remains open P1.
+
+## ACL All-Mode TC Follow-Up Verification
+
+- Initial RED commit `9c3b3ef2d9e41a721c005be6190c9a0164b529f5`
+  and Build [29290357578](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29290357578)
+  failed at the intended missing standalone smoke contract.
+- The first complete candidate Build
+  [29291211798](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29291211798)
+  passed but is explicitly superseded: quality review found unsafe fixture
+  ownership, tautological XDP-neutral evidence, incomplete restart proof, and
+  unbounded shutdown.
+- Review RED commits `95c8e709d19ae640f09fe80c7424a36610462cd6`,
+  `65c340ee1dcae6fbbd2f602f4f996d4acbe349ab`, and
+  `059f923a33922de41cd71e343565531f62956222` produced the intended failures in
+  Builds [29292055118](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29292055118),
+  [29292895250](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29292895250),
+  and [29293113342](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29293113342).
+  Those gates reject resource collisions/foreign cleanup, missing exact
+  `tc_ingress`/`tc_egress` packet-byte evidence, partial recovery proof,
+  unbounded/invalid shutdown timeouts, one-way tracing, and denied-source
+  routing in the allowed flow.
+- Final code commit `5800940bcc54b5ec7bcb7cf35ee980492436addf`
+  passed complete Build
+  [29293162332](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29293162332),
+  including Stage 1/2/3, targeted Rust authority tests, nightly eBPF, static
+  userspace/agent builds, and binary verification.
+- Final local allowed gates passed: 283 Stage 1 Python tests with Cargo absent
+  from `PATH`, 153 Stage 2 tests, Stage 2/3 evidence, both TC smoke mutation
+  checkers, the datapath mutation checker, 109 embedded smoke Python blocks,
+  shell syntax, blocked terms, and `git diff --check`. No local Cargo command
+  was run.
+- This development environment did not provide a privileged Linux runner with
+  the built artifacts. Standalone `MODE=system`, standalone `MODE=tap`, and
+  managed-Neutron smoke scripts were therefore not executed here. Their
+  missing summaries are pending evidence, not passes; `REVIEW-ACL-055` is
+  `likely-fixed`, not `fixed`.
 
 ## Active Fix Order After Batch 6
 
-1. `REVIEW-ACL-055`: implement the approved all-mode TC/XDP-neutral design, fix restart and map-read blockers, pass new CI, then preserve guarded standalone and managed-tap smoke evidence before closure.
-2. `REVIEW-ACL-056`: define fragment allow/drop/reassembly and ACL/CT key semantics before parser implementation.
-3. `REVIEW-OPS-019`: bound Neutron WAL growth and restart replay cost.
+1. `REVIEW-ACL-056`: define fragment allow/drop/reassembly and ACL/CT key semantics before parser implementation.
+2. `REVIEW-OPS-019`: bound Neutron WAL growth and restart replay cost.
+3. `REVIEW-ACL-055` evidence closure: run and preserve guarded standalone system/tap and managed-Neutron summaries; do not reopen implementation scope unless a smoke fails.
 4. `REVIEW-ACL-025` / `REVIEW-ACL-026` / `REVIEW-ACL-044`: owned-ACL durable ordering and no-op bank flips.
 5. `REVIEW-ACL-023` / `REVIEW-TXN-024` / `REVIEW-TXN-027` / `REVIEW-ACL-045`: detach/delete/orphan convergence.
 6. `REVIEW-ACL-036` / `REVIEW-ACL-037` / `REVIEW-ACL-028` / `REVIEW-ACL-008` / `REVIEW-ACL-033` / `REVIEW-ACL-004`: Python pending/status consistency.
