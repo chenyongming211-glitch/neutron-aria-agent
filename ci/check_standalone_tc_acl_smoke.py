@@ -16,18 +16,26 @@ SMOKE = os.path.join(
 REQUIRED_FUNCTIONS = (
     "cleanup",
     "write_summary",
+    "derive_fixture_identity",
+    "select_http_addr",
+    "preflight_fixture",
     "create_netns_fixture",
     "start_agent",
+    "stop_agent_bounded",
     "start_system_mode",
     "start_tap_mode",
     "capture_links",
     "capture_acl_counters",
+    "set_trace_filter",
+    "clear_trace_filter",
     "run_allowed_flow",
+    "run_observed_allowed_flow",
     "run_denied_flow",
     "assert_xdp_neutral",
     "assert_dual_tc_ready",
     "assert_missing_tc_rejected",
     "assert_health_poll_degrades",
+    "assert_recovery_verified",
 )
 
 REQUIRED_MARKERS = (
@@ -35,6 +43,7 @@ REQUIRED_MARKERS = (
     ': "${ARIA_AGENT_BIN:?ARIA_AGENT_BIN is required}"',
     ': "${EBPF_OBJECT:?EBPF_OBJECT is required}"',
     'TC_HEALTH_WAIT_SECS="${TC_HEALTH_WAIT_SECS:-12}"',
+    'AGENT_STOP_TIMEOUT_SECS="${AGENT_STOP_TIMEOUT_SECS:-5}"',
     "ip netns add",
     "tc_ingress_link",
     "tc_egress_link",
@@ -42,6 +51,11 @@ REQUIRED_MARKERS = (
     '"xdp_ready"',
     "summary.json",
     "trap cleanup EXIT",
+    "NETNS_CREATED=false",
+    "VETH_CREATED=false",
+    "PIN_ROOT_CREATED=false",
+    "PRIVATE_BPFFS_MOUNTED=false",
+    "RECOVERY_VERIFIED=false",
 )
 
 
@@ -172,6 +186,38 @@ def check_source(source):
             if position < 0 or position > first_mutation:
                 errors.append("hard guard must precede first mutation: %s" % term)
 
+    identity = bodies["derive_fixture_identity"]
+    for term in (
+        "secrets.token_hex(5)",
+        'HOST_IF="ah${FIXTURE_TOKEN}"',
+        'PEER_IF="ap${FIXTURE_TOKEN}"',
+        'NETNS="aria-tc-${FIXTURE_TOKEN}"',
+    ):
+        if term not in identity:
+            errors.append("collision-resistant fixture identity missing %s" % term)
+
+    port = bodies["select_http_addr"]
+    for term in (
+        'if [ -z "${HTTP_ADDR}" ]',
+        'sock.bind(("127.0.0.1",0))',
+        'HTTP="http://${HTTP_ADDR}"',
+    ):
+        if term not in port:
+            errors.append("collision-resistant loopback port selection missing %s" % term)
+
+    preflight = bodies["preflight_fixture"]
+    for term in (
+        '[ "${#HOST_IF}" -le 15 ]',
+        '[ "${#PEER_IF}" -le 15 ]',
+        '[ ! -e "${WORK_DIR}" ]',
+        'grep -Fx "${NETNS}"',
+        'ip link show dev "${HOST_IF}"',
+        'ip link show dev "${PEER_IF}"',
+        'sock.bind((host,port))',
+    ):
+        if term not in preflight:
+            errors.append("fail-closed fixture preflight missing %s" % term)
+
     fixture = bodies["create_netns_fixture"]
     for term in (
         'ip netns add "${NETNS}"',
@@ -181,6 +227,12 @@ def check_source(source):
     ):
         if term not in fixture:
             errors.append("disposable netns fixture missing %s" % term)
+    for term in (
+        "NETNS_CREATED=true",
+        "VETH_CREATED=true",
+    ):
+        if term not in fixture:
+            errors.append("fixture ownership tracking missing %s" % term)
     if re.search(r"\b(eth|ens|eno|bond|br-ex)[0-9A-Za-z_.:-]*\b", fixture):
         errors.append("standalone smoke must not target a production-style host interface")
 
@@ -198,6 +250,23 @@ def check_source(source):
     ):
         if term not in start:
             errors.append("scoped standalone agent config missing %s" % term)
+    for term in (
+        '[ ! -e "${PIN_ROOT}" ]',
+        "PIN_ROOT_CREATED=true",
+        "PRIVATE_BPFFS_MOUNTED=true",
+    ):
+        if term not in start:
+            errors.append("private bpffs ownership tracking missing %s" % term)
+
+    stop = bodies["stop_agent_bounded"]
+    for term in (
+        'sleep "${AGENT_STOP_TIMEOUT_SECS}"',
+        'kill -KILL "${pid}"',
+        'wait "${pid}"',
+        "timed_out=true",
+    ):
+        if term not in stop:
+            errors.append("bounded agent shutdown missing %s" % term)
 
     if '/api/v1/system/start' not in bodies["start_system_mode"]:
         errors.append("system standalone smoke must use /api/v1/system/start")
@@ -239,6 +308,18 @@ def check_source(source):
         if term not in capture:
             errors.append("ACL/CT counter capture missing %s" % term)
 
+    trace = bodies["set_trace_filter"]
+    for term in (
+        "/trace/filter",
+        '"proto":"icmp"',
+        "TRACE_ARMED=true",
+    ):
+        if term not in trace:
+            errors.append("controlled-flow trace arm missing %s" % term)
+    clear_trace = bodies["clear_trace_filter"]
+    if '-X DELETE "${HTTP}/api/v1/${INSTANCE}/trace/filter"' not in clear_trace:
+        errors.append("controlled-flow trace disarm is missing")
+
     allowed = bodies["run_allowed_flow"]
     denied = bodies["run_denied_flow"]
     if 'ping -c "${ALLOWED_PACKETS}"' not in allowed:
@@ -264,10 +345,16 @@ def check_source(source):
         'row.get("packets")',
         'row.get("bytes")',
         'row.get("direction")',
-        'labels.get("hook")=="xdp"',
         "expected_packets=packets*2",
         "expected_bytes=expected_packets*packet_bytes",
-        "assert after_xdp-before_xdp==0",
+        'metric_delta("aria_ct_contract_packets_total","tc_ingress")',
+        'metric_delta("aria_ct_contract_packets_total","tc_egress")',
+        'metric_delta("aria_ct_contract_bytes_total","tc_ingress")',
+        'metric_delta("aria_ct_contract_bytes_total","tc_egress")',
+        "assert tc_ingress_packets==packets",
+        "assert tc_egress_packets==packets",
+        "assert tc_ingress_bytes==packets*packet_bytes",
+        "assert tc_egress_bytes==packets*packet_bytes",
         "assert after_ct_packets-before_ct_packets==expected_packets",
         "assert after_ct_bytes-before_ct_bytes==expected_bytes",
         "assert ingress_delta==expected_packets",
@@ -275,6 +362,27 @@ def check_source(source):
     ):
         if term not in xdp:
             errors.append("exact TC-only/XDP-neutral evidence missing %s" % term)
+    for forbidden in (
+        'labels.get("hook")=="xdp"',
+        "unknown_hook",
+        'hook not in ("tc_ingress","tc_egress")',
+    ):
+        if forbidden in xdp:
+            errors.append("XDP neutrality must not be inferred from absent hook labels: %s" % forbidden)
+
+    observed = bodies["run_observed_allowed_flow"]
+    if not ordered(
+        observed,
+        (
+            "set_trace_filter",
+            'capture_acl_counters "${label}-before"',
+            'run_allowed_flow "${label}"',
+            'capture_acl_counters "${label}-after"',
+            "clear_trace_filter",
+            'assert_xdp_neutral "${label}-before" "${label}-after"',
+        ),
+    ):
+        errors.append("allowed flow must be traced across exact before/after TC evidence")
 
     health = bodies["assert_health_poll_degrades"]
     for term in (
@@ -301,6 +409,19 @@ def check_source(source):
         if term not in rejected:
             errors.append("missing-TC enable rejection missing %s" % term)
 
+    recovery = bodies["assert_recovery_verified"]
+    for term in (
+        'config["acl"] is True',
+        'config["conntrack"] is True',
+        '"peer","host","denied"',
+        "len(policies)==4",
+        "run_observed_allowed_flow recovery-allowed",
+        "run_denied_flow recovery-denied",
+        "RECOVERY_VERIFIED=true",
+    ):
+        if term not in recovery:
+            errors.append("post-restart full recovery proof missing %s" % term)
+
     if "exercise_legacy_zero_compatibility" not in source:
         errors.append("tap legacy-zero compatibility exercise is missing")
     else:
@@ -323,11 +444,14 @@ def check_source(source):
     for term in (
         "trap - EXIT",
         'curl --fail-with-body -sS -X POST "${HTTP}/api/v1/system/stop"',
-        'kill "${AGENT_PID}"',
-        'wait "${AGENT_PID}"',
+        "stop_agent_bounded",
+        '[ "${PRIVATE_BPFFS_MOUNTED}" = true ]',
         'umount "${PIN_ROOT}"',
+        '[ "${PIN_ROOT_CREATED}" = true ]',
+        '[ "${VETH_CREATED}" = true ]',
         'ip netns del "${NETNS}"',
         'ip link del "${HOST_IF}"',
+        '[ "${NETNS_CREATED}" = true ]',
         "verify_cleanup",
         "cleanup_errors",
         'RESULT="fail"',
@@ -340,11 +464,10 @@ def check_source(source):
         cleanup,
         (
             "trap - EXIT",
-            'kill "${AGENT_PID}"',
-            'wait "${AGENT_PID}"',
+            "stop_agent_bounded",
             'umount "${PIN_ROOT}"',
-            'ip netns del "${NETNS}"',
             'ip link del "${HOST_IF}"',
+            'ip netns del "${NETNS}"',
             "verify_cleanup",
             'RESULT="fail"',
             'RESULT="pass"',
@@ -360,6 +483,7 @@ def check_source(source):
         '"xdp_neutral"',
         '"missing_tc_rejected"',
         '"health_poll_degraded"',
+        '"recovery_verified"',
         '"cleanup_errors"',
         '"result"',
         "summary.json.tmp",
@@ -373,10 +497,11 @@ def check_source(source):
     if not ordered(
         main_body,
         (
-            "capture_acl_counters allowed-before",
-            "run_allowed_flow",
-            "capture_acl_counters allowed-after",
-            "assert_xdp_neutral allowed-before allowed-after",
+            "derive_fixture_identity",
+            "select_http_addr",
+            "preflight_fixture",
+            'mkdir -p "${WORK_DIR}"',
+            "run_observed_allowed_flow allowed",
             "exercise_legacy_zero_compatibility",
             "run_denied_flow",
             "assert_health_poll_degrades",
@@ -422,8 +547,19 @@ def run_mutation_self_tests(source, verbose=False):
         ("TC egress pin assertion", mutate_remove_egress_ready, "", "", "dual-TC readiness"),
         ("TC ingress live program identity", mutate_remove, 'ingress.get("prog_id")==ingress_prog.get("id")', "", "dual-TC readiness"),
         ("TC egress live program identity", mutate_remove, 'egress.get("prog_id")==egress_prog.get("id")', "", "dual-TC readiness"),
-        ("XDP before/after comparison", mutate_remove, "assert after_xdp-before_xdp==0", "", "XDP-neutral evidence"),
+        ("unique fixture token", mutate_remove, "secrets.token_hex(5)", "", "fixture identity"),
+        ("workdir collision preflight", mutate_remove, '[ ! -e "${WORK_DIR}" ]', "", "fixture preflight"),
+        ("host interface ownership", mutate_remove, '[ "${VETH_CREATED}" = true ]', "", "fail-closed cleanup"),
+        ("bpffs mount ownership", mutate_remove, '[ "${PRIVATE_BPFFS_MOUNTED}" = true ]', "", "fail-closed cleanup"),
+        ("TC ingress packet evidence", mutate_remove, "assert tc_ingress_packets==packets", "", "TC-only/XDP-neutral"),
+        ("TC egress packet evidence", mutate_remove, "assert tc_egress_packets==packets", "", "TC-only/XDP-neutral"),
+        ("TC ingress byte evidence", mutate_remove, "assert tc_ingress_bytes==packets*packet_bytes", "", "TC-only/XDP-neutral"),
+        ("TC egress byte evidence", mutate_remove, "assert tc_egress_bytes==packets*packet_bytes", "", "TC-only/XDP-neutral"),
         ("exact CT byte comparison", mutate_remove, "assert after_ct_bytes-before_ct_bytes==expected_bytes", "", "TC-only/XDP-neutral"),
+        ("recovery ACL proof", mutate_remove, 'config["acl"] is True', "", "recovery proof"),
+        ("recovery traffic proof", mutate_remove, "run_observed_allowed_flow recovery-allowed", "", "recovery proof"),
+        ("recovery summary bit", mutate_remove, "RECOVERY_VERIFIED=true", "", "recovery proof"),
+        ("bounded KILL fallback", mutate_remove, 'kill -KILL "${pid}"', "", "bounded agent shutdown"),
         ("detached pinned link", mutate_remove, 'bpftool link detach pinned "${lost_link}"', "", "detached-but-pinned"),
         ("detached pin retained", mutate_remove, '[ -e "${lost_link}" ]', "", "detached-but-pinned"),
         ("health poll wait", mutate_remove, 'sleep "${TC_HEALTH_WAIT_SECS}"', "", "TC health evidence"),
