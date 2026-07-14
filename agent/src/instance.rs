@@ -76,6 +76,49 @@ fn tcx_query_contains_expected_program(
     attached_program_ids.contains(&expected_program_id)
 }
 
+pub(crate) fn preexisting_tc_acl_runtime_is_healthy(
+    enforcement_required: bool,
+    preexisting_live_links: bool,
+    preexisting_tc_ingress_link: bool,
+    preexisting_tc_egress_link: bool,
+    live_health: TcAclLinkHealth,
+) -> Result<bool, String> {
+    if !preexisting_live_links {
+        return Ok(false);
+    }
+    if !enforcement_required {
+        return Ok(true);
+    }
+
+    let mut invalid = Vec::new();
+    for (name, pinned, live) in [
+        (
+            "tc_ingress",
+            preexisting_tc_ingress_link,
+            live_health.ingress,
+        ),
+        (
+            "tc_egress",
+            preexisting_tc_egress_link,
+            live_health.egress,
+        ),
+    ] {
+        if !pinned {
+            invalid.push(format!("{} pin missing", name));
+        } else if !live {
+            invalid.push(format!("{} pinned/live identity mismatch", name));
+        }
+    }
+    if invalid.is_empty() {
+        Ok(true)
+    } else {
+        Err(format!(
+            "preexisting ACL/CT runtime is incomplete: {}",
+            invalid.join(", ")
+        ))
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum LinkOwnership {
     Absent,
@@ -1659,6 +1702,48 @@ mod tests {
         assert!(!tc_acl_links_complete(true, false));
         assert!(!tc_acl_links_complete(false, true));
         assert!(!tc_acl_links_complete(false, false));
+    }
+
+    #[test]
+    fn preexisting_acl_runtime_requires_exact_dual_tcx_identity() {
+        assert_eq!(
+            preexisting_tc_acl_runtime_is_healthy(
+                true,
+                false,
+                false,
+                false,
+                TcAclLinkHealth::new(false, false, false),
+            )
+            .unwrap(),
+            false
+        );
+        assert!(preexisting_tc_acl_runtime_is_healthy(
+            true,
+            true,
+            true,
+            true,
+            TcAclLinkHealth::new(true, true, false),
+        )
+        .unwrap());
+        let error = preexisting_tc_acl_runtime_is_healthy(
+            true,
+            true,
+            true,
+            true,
+            TcAclLinkHealth::new(true, false, false),
+        )
+        .unwrap_err();
+        assert!(error.contains("tc_egress"));
+
+        let missing_pin = preexisting_tc_acl_runtime_is_healthy(
+            true,
+            true,
+            true,
+            false,
+            TcAclLinkHealth::new(true, false, false),
+        )
+        .unwrap_err();
+        assert!(missing_pin.contains("tc_egress pin missing"));
     }
 
     #[test]

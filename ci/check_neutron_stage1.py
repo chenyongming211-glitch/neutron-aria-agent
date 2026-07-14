@@ -55,7 +55,9 @@ RUST_OPENAPI_PATH = os.path.join("agent", "src", "openapi.rs")
 CORE_COMMON_PATH = os.path.join("core", "src", "common.rs")
 CORE_STATE_PATH = os.path.join("core", "src", "state.rs")
 CORE_EBPF_OPS_PATH = os.path.join("core", "src", "ebpf_ops.rs")
+CORE_EBPF_RUNTIME_PATH = os.path.join("core", "src", "ebpf_ops", "runtime.rs")
 EBPF_COMMON_PATH = os.path.join("ebpf", "src", "common.rs")
+EBPF_CONNTRACK_PATH = os.path.join("ebpf", "src", "conntrack.rs")
 EBPF_RUNTIME_PATH = os.path.join("ebpf", "src", "runtime.rs")
 CORE_EBPF_NETWORK_PATH = os.path.join("core", "src", "ebpf_ops", "network.rs")
 CORE_EBPF_POLICY_PATH = os.path.join("core", "src", "ebpf_ops", "policy.rs")
@@ -901,6 +903,7 @@ def check_rust_stage_one_tests_present():
     wal_source = _read_repo_text(RUST_NEUTRON_WAL_PATH)
     openapi_source = _read_repo_text(RUST_OPENAPI_PATH)
     ebpf_common_source = _read_repo_text(EBPF_COMMON_PATH)
+    ebpf_conntrack_source = _read_repo_text(EBPF_CONNTRACK_PATH)
     build_workflow_source = _read_repo_text(BUILD_WORKFLOW_PATH)
     control_plane_source = _read_repo_text(os.path.join("agent", "src", "control_plane.rs"))
     instance_source = _read_repo_text(os.path.join("agent", "src", "instance.rs"))
@@ -908,6 +911,7 @@ def check_rust_stage_one_tests_present():
     system_manager_source = _read_repo_text(os.path.join("agent", "src", "system_manager.rs"))
     replay_source = _read_repo_text(os.path.join("core", "src", "ebpf_ops", "replay.rs"))
     ebpf_ops_source = _read_repo_text(CORE_EBPF_OPS_PATH)
+    ebpf_runtime_source = _read_repo_text(CORE_EBPF_RUNTIME_PATH)
     state_source = _read_repo_text(CORE_STATE_PATH)
     network_source = _read_repo_text(CORE_EBPF_NETWORK_PATH)
     policy_source = _read_repo_text(CORE_EBPF_POLICY_PATH)
@@ -969,9 +973,39 @@ def check_rust_stage_one_tests_present():
         "SchedClassifierLink",
         "tcx_query_contains_expected_program",
         "tcx_attachment_query_requires_the_expected_program_id",
+        "preexisting_tc_acl_runtime_is_healthy",
+        "preexisting_acl_runtime_requires_exact_dual_tcx_identity",
     ):
         if term not in instance_source:
             raise SystemExit("ERROR: live TCX attachment health contract missing %s" % term)
+
+    for term in (
+        "fn required_firewall_config(",
+        "global_runtime_partial_update_requires_an_existing_config",
+        "global_runtime_full_initialization_only_accepts_key_not_found",
+        "let global = read_firewall_config(runtime)?;",
+    ):
+        if term not in ebpf_runtime_source:
+            raise SystemExit("ERROR: strict FIREWALL_CONFIG read contract missing %s" % term)
+    update_firewall_body = _rust_function_body(
+        ebpf_runtime_source, "update_firewall_config"
+    )
+    if update_firewall_body is None or ".get(&0u32, 0).ok()" in update_firewall_body:
+        raise SystemExit(
+            "ERROR: FIREWALL_CONFIG partial update must propagate map read failures"
+        )
+
+    for term in (
+        "CT_FLAG_ACL_EVALUATED",
+        "ct_acl_cache_is_current",
+        "tc_ct_cache_requires_acl_evaluation_when_acl_turns_on",
+    ):
+        if term not in ebpf_common_source and term not in _read_repo_text(CORE_COMMON_PATH):
+            raise SystemExit("ERROR: CT-only to ACL enable guard missing %s" % term)
+    if ebpf_conntrack_source.count("ct_acl_cache_is_current(") != 4:
+        raise SystemExit(
+            "ERROR: IPv4/IPv6 forward/reverse CT lookups must reject entries not evaluated by ACL"
+        )
 
     tc_health_candidate_body = _rust_function_body(
         control_plane_source, "reconcile_tc_acl_health_candidate"
@@ -1488,7 +1522,11 @@ def check_rust_stage_one_tests_present():
         build_workflow_source,
     ):
         raise SystemExit("ERROR: serialized ACL gate Rust test filter missing")
-    for test_filter in ("tc_health_reconcile_", "tcx_attachment_"):
+    for test_filter in (
+        "tc_health_reconcile_",
+        "tcx_attachment_",
+        "preexisting_acl_runtime_",
+    ):
         if not re.search(
             r"cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-agent\s+%s"
             % re.escape(test_filter),
@@ -1605,22 +1643,31 @@ def check_rust_stage_one_tests_present():
         raise SystemExit("ERROR: standalone system_start body missing")
     desired_load = system_start_body.find("aria_core::wal::load_with_wal(state_path)")
     replay = system_start_body.find(
-        "replay_state_from_snapshot(&mut bpf, state_path, &desired)"
+        "replay_state_from_snapshot(&mut bpf, state_path, &quiesced_desired)"
     )
     quiesce = system_start_body.find("aria_core::ebpf_ops::update_firewall_config(")
+    scrub = system_start_body.find("scrub_standalone_runtime_state(pin_path)")
     xdp_attach = system_start_body.find("attach_xdp_program(&mut bpf, iface, pin_path)")
     activation = system_start_body.find("system_acl_activation(")
     registration = system_start_body.find(".register_system_instance(")
     if not (
-        0 <= desired_load < replay < quiesce < xdp_attach < activation < registration
+        0 <= desired_load < quiesce < scrub < replay < xdp_attach < activation < registration
     ):
         raise SystemExit(
-            "ERROR: standalone startup must load desired state, replay, quiesce, attach, decide TC, then register"
+            "ERROR: standalone startup must load desired, quiesce old links, replay a disabled gate, attach/claim TC, decide, then register"
         )
     if system_start_body.count("aria_core::wal::load_with_wal(state_path)") != 1:
         raise SystemExit("ERROR: standalone startup must approve exactly one WAL snapshot")
     if "replay_state(&mut bpf, state_path)" in system_start_body:
         raise SystemExit("ERROR: standalone startup must not replay from a second path load")
+    for marker in (
+        "quiesced_desired.conntrack_enabled = false",
+        "quiesced_desired.acl_enabled = false",
+        "preexisting_tc_acl_runtime_is_healthy(",
+        "reuse_preexisting_tc",
+    ):
+        if marker not in system_start_body:
+            raise SystemExit("ERROR: standalone pinned-runtime boundary missing %s" % marker)
     replay_snapshot_body = _rust_function_body(
         replay_source, "replay_state_from_snapshot"
     )
@@ -1634,10 +1681,10 @@ def check_rust_stage_one_tests_present():
         raise SystemExit("ERROR: path-based replay compatibility wrapper is missing")
     if not re.search(
         r"TapMapRuntime\s*::\s*new\s*\(\s*pin_path\s*,\s*aria_core\s*::\s*common\s*::\s*TAP_ID_UNASSIGNED\s*\)\s*,\s*Some\s*\(\s*false\s*\)\s*,\s*None\s*,\s*Some\s*\(\s*false\s*\)",
-        system_start_body[quiesce:xdp_attach],
+        system_start_body[quiesce:scrub],
     ):
         raise SystemExit(
-            "ERROR: standalone startup must quiesce only live ACL/CT before attach"
+            "ERROR: standalone startup must quiesce preexisting live ACL/CT before map scrub/replay"
         )
     if not re.search(r"match\s+attach_xdp_program", system_start_body):
         raise SystemExit("ERROR: standalone XDP attach must be independent best-effort health")
@@ -1664,6 +1711,33 @@ def check_rust_stage_one_tests_present():
     for marker in ("approved_state", "prepare_system_publication_state"):
         if marker not in register_body:
             raise SystemExit("ERROR: system publication missing approved snapshot handoff")
+    system_live_health = register_body.find("runtime_instance.tc_acl_link_health()")
+    system_gate_restore = register_body.find("aria_core::ebpf_ops::update_runtime_config(")
+    if not (0 <= system_live_health < system_gate_restore):
+        raise SystemExit(
+            "ERROR: system publication must validate exact live TCX before restoring ACL/CT"
+        )
+    preexisting_validation = _rust_function_body(
+        control_plane_source, "validate_preexisting_live_runtime"
+    )
+    if preexisting_validation is None or not all(
+        marker in preexisting_validation
+        for marker in ("tc_acl_link_health()", "preexisting_tc_acl_runtime_is_healthy")
+    ):
+        raise SystemExit(
+            "ERROR: managed preexisting runtime must validate exact live TCX identity"
+        )
+    managed_quiesce = _rust_function_body(
+        control_plane_source, "quiesce_managed_registration"
+    )
+    if managed_quiesce is None or "update_acl_runtime_gate(" not in managed_quiesce:
+        raise SystemExit(
+            "ERROR: managed attach failure paths must expose an explicit ACL/CT quiesce transaction"
+        )
+    if tap_registry_source.count(".quiesce_managed_registration(&prepared)") < 4:
+        raise SystemExit(
+            "ERROR: all managed post-prepare failure paths must quiesce surviving ACL/CT links"
+        )
     cleanup_plan_body = _rust_function_body(
         system_manager_source, "failed_start_cleanup_plan"
     )

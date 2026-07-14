@@ -6,7 +6,9 @@ use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
-use crate::instance::{FirewallInstance, RuntimePinState, TcAclLinkHealth};
+use crate::instance::{
+    preexisting_tc_acl_runtime_is_healthy, FirewallInstance, RuntimePinState, TcAclLinkHealth,
+};
 use crate::kernel_drop_manager::{KernelDropManager, KernelDropStatusSnapshot};
 use crate::service_chain::{self, ServiceChain};
 use crate::ssl_manager::SslManager;
@@ -1256,10 +1258,27 @@ impl ControlPlane {
         &self,
         name: &str,
         pin_path: &str,
+        state_path: &str,
         tap_id: u32,
         ifindex: u32,
         state: &FirewallState,
+        pin_state: &RuntimePinState,
     ) -> Result<(), String> {
+        let runtime_instance = FirewallInstance::new(
+            name,
+            pin_path.to_string().into(),
+            state_path.to_string().into(),
+            true,
+            self.trace_map_mode(),
+        );
+        preexisting_tc_acl_runtime_is_healthy(
+            state.conntrack_enabled || state.acl_enabled,
+            pin_state.preexisting_live_links,
+            pin_state.preexisting_tc_ingress_link,
+            pin_state.preexisting_tc_egress_link,
+            runtime_instance.tc_acl_link_health(),
+        )?;
+
         let iface_ctx = aria_core::ebpf_ops::read_iface_ctx(pin_path, ifindex)?;
         if iface_ctx.tap_id != tap_id {
             return Err(format!(
@@ -1655,29 +1674,33 @@ impl ControlPlane {
         let mut tap_config_written = false;
 
         if pin_state.preexisting_live_links {
-            if let Err(e) =
-                self.validate_preexisting_live_runtime(name, &pin_path, tap_id, ifindex, &state)
-            {
+            if let Err(e) = self.validate_preexisting_live_runtime(
+                name,
+                &pin_path,
+                &state_path,
+                tap_id,
+                ifindex,
+                &state,
+                pin_state,
+            ) {
+                let quiesce_error = aria_core::ebpf_ops::update_acl_runtime_gate(
+                    TapMapRuntime::new(&pin_path, tap_id),
+                    false,
+                    false,
+                    aria_core::common::ACL_INGRESS_HOOK_TC,
+                )
+                .err();
                 wal.shutdown().await;
-                return Err(e);
-            }
-            if (state.conntrack_enabled || state.acl_enabled)
-                && !(pin_state.preexisting_tc_ingress_link
-                    && pin_state.preexisting_tc_egress_link)
-            {
-                let mut missing = Vec::new();
-                if !pin_state.preexisting_tc_ingress_link {
-                    missing.push("tc_ingress");
-                }
-                if !pin_state.preexisting_tc_egress_link {
-                    missing.push("tc_egress");
-                }
-                wal.shutdown().await;
-                return Err(format!(
-                    "preexisting live runtime mismatch for {}: missing pinned TC ACL links: {}; detach and reattach to rebuild safely",
-                    name,
-                    missing.join(", ")
-                ));
+                return Err(match quiesce_error {
+                    Some(quiesce_error) => format!(
+                        "preexisting live runtime mismatch for {}: {}; failed to quiesce surviving ACL/CT path: {}",
+                        name, e, quiesce_error
+                    ),
+                    None => format!(
+                        "preexisting live runtime mismatch for {}: {}; ACL/CT gate quiesced",
+                        name, e
+                    ),
+                });
             }
         } else if !replacing_existing {
             if let Err(e) = aria_core::ebpf_ops::scrub_managed_runtime_state(TapMapRuntime::new(
@@ -1818,6 +1841,18 @@ impl ControlPlane {
                 )
             }
         }
+    }
+
+    pub fn quiesce_managed_registration(
+        &self,
+        prepared: &PreparedManagedInstance,
+    ) -> Result<(), String> {
+        aria_core::ebpf_ops::update_acl_runtime_gate(
+            TapMapRuntime::new(&prepared.pin_path, prepared.tap_id),
+            false,
+            false,
+            aria_core::common::ACL_INGRESS_HOOK_TC,
+        )
     }
 
     pub async fn publish_managed_instance(&self, prepared: PreparedManagedInstance) {
@@ -1978,6 +2013,21 @@ impl ControlPlane {
 
         let tap_id = state.tap_id;
         let runtime = TapMapRuntime::new(pin_path, tap_id);
+        let runtime_instance = FirewallInstance::new(
+            iface,
+            pin_path.to_string().into(),
+            state_path.to_string().into(),
+            false,
+            self.trace_map_mode(),
+        );
+        let system_link_health = runtime_instance.tc_acl_link_health();
+        let enforcement_required = state.conntrack_enabled || state.acl_enabled;
+        if enforcement_required && !system_link_health.acl_ready() {
+            return Err(format!(
+                "system ACL/CT gate remains quiesced; exact live TCX validation failed: {}",
+                system_link_health.missing_tc().join(", ")
+            ));
+        }
         aria_core::ebpf_ops::update_runtime_config(
             runtime,
             Some(state.conntrack_enabled),
@@ -1988,21 +2038,12 @@ impl ControlPlane {
             Some(state.tcprt_enabled),
             None,
         )?;
-        let runtime_instance = FirewallInstance::new(
-            iface,
-            pin_path.to_string().into(),
-            state_path.to_string().into(),
-            false,
-            self.trace_map_mode(),
-        );
-        let system_link_health = runtime_instance.tc_acl_link_health();
         let runtime_health = initial_runtime_health(
             state.conntrack_enabled,
             state.acl_enabled,
             system_link_health,
             false,
         );
-        let enforcement_required = state.conntrack_enabled || state.acl_enabled;
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             runtime_health,

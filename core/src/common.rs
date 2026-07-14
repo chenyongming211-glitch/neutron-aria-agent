@@ -105,6 +105,7 @@ unsafe impl Pod for CtValue {}
 
 pub const CT_FLAG_SEEN_REPLY: u8 = 1;
 pub const CT_FLAG_POLICY_HIT: u8 = 1 << 1;
+pub const CT_FLAG_ACL_EVALUATED: u8 = 1 << 2;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -451,7 +452,8 @@ mod ebpf_common_contract;
 #[cfg(test)]
 mod tests {
     use super::ebpf_common_contract::{
-        ct_acl_bank_is_current, CtValue as EbpfCtValue, CT_FLAG_POLICY_HIT,
+        ct_acl_bank_is_current, ct_acl_cache_is_current, CtValue as EbpfCtValue,
+        CT_FLAG_ACL_EVALUATED, CT_FLAG_POLICY_HIT,
     };
     use super::{
         acl_banked_tap_id, acl_next_bank, normalize_acl_ingress_hook, CtValue, PolicyKey,
@@ -497,8 +499,27 @@ mod tests {
     }
 
     #[test]
+    fn tc_ct_cache_requires_acl_evaluation_when_acl_turns_on() {
+        assert!(ct_acl_cache_is_current(0, 0, 0, 0));
+        assert!(!ct_acl_cache_is_current(0, 0, 1, 0));
+        assert!(ct_acl_cache_is_current(
+            CT_FLAG_ACL_EVALUATED,
+            0,
+            1,
+            0,
+        ));
+        assert!(!ct_acl_cache_is_current(
+            CT_FLAG_ACL_EVALUATED,
+            0,
+            1,
+            1,
+        ));
+    }
+
+    #[test]
     fn ct_policy_hit_uses_an_unused_flag_without_layout_change() {
         assert_eq!(CT_FLAG_POLICY_HIT, 2);
+        assert_eq!(CT_FLAG_ACL_EVALUATED, 4);
         assert_eq!(core::mem::size_of::<EbpfCtValue>(), 40);
         assert_eq!(core::mem::size_of::<CtValue>(), 40);
     }

@@ -21,7 +21,10 @@ REQUIRED_FUNCTIONS = (
     "preflight_fixture",
     "create_netns_fixture",
     "start_agent",
+    "start_agent_process",
+    "restart_agent_preserving_bpffs",
     "stop_agent_bounded",
+    "crash_agent_bounded",
     "start_system_mode",
     "start_tap_mode",
     "capture_links",
@@ -35,6 +38,9 @@ REQUIRED_FUNCTIONS = (
     "assert_dual_tc_ready",
     "assert_missing_tc_rejected",
     "assert_health_poll_degrades",
+    "assert_incomplete_pinned_runtime_quiesced",
+    "restart_healthy_pinned_runtime",
+    "recover_incomplete_pinned_runtime",
     "assert_recovery_verified",
 )
 
@@ -56,6 +62,8 @@ REQUIRED_MARKERS = (
     "PIN_ROOT_CREATED=false",
     "PRIVATE_BPFFS_MOUNTED=false",
     "RECOVERY_VERIFIED=false",
+    "HEALTHY_PINNED_RESTART=false",
+    "INCOMPLETE_PINNED_QUIESCED=false",
 )
 
 
@@ -251,7 +259,6 @@ def check_source(source):
         'iface_pattern = "^${HOST_IF}$"',
         'listen_addr = "${HTTP_ADDR}"',
         'trace_backend = "legacy-map"',
-        '"${ARIA_AGENT_BIN}" --config "${CONFIG_FILE}"',
     ):
         if term not in start:
             errors.append("scoped standalone agent config missing %s" % term)
@@ -263,6 +270,15 @@ def check_source(source):
         if term not in start:
             errors.append("private bpffs ownership tracking missing %s" % term)
 
+    start_process = bodies["start_agent_process"]
+    for term in (
+        '"${ARIA_AGENT_BIN}" --config "${CONFIG_FILE}"',
+        'AGENT_PID=$!',
+        'curl -fsS "${HTTP}/api/v1/health"',
+    ):
+        if term not in start_process:
+            errors.append("standalone agent process launch missing %s" % term)
+
     stop = bodies["stop_agent_bounded"]
     for term in (
         'sleep "${AGENT_STOP_TIMEOUT_SECS}"',
@@ -272,6 +288,20 @@ def check_source(source):
     ):
         if term not in stop:
             errors.append("bounded agent shutdown missing %s" % term)
+
+    crash = bodies["crash_agent_bounded"]
+    for term in ('kill -KILL "${pid}"', 'wait "${pid}"', 'AGENT_PID=""'):
+        if term not in crash:
+            errors.append("pinned-runtime crash restart missing %s" % term)
+
+    restart_process = bodies["restart_agent_preserving_bpffs"]
+    for term in (
+        '[ "${PRIVATE_BPFFS_MOUNTED}" = true ]',
+        '[ -d "${PIN_ROOT}" ]',
+        "start_agent_process",
+    ):
+        if term not in restart_process:
+            errors.append("preserved-bpffs restart missing %s" % term)
 
     if '/api/v1/system/start' not in bodies["start_system_mode"]:
         errors.append("system standalone smoke must use /api/v1/system/start")
@@ -429,6 +459,37 @@ def check_source(source):
         if term not in recovery:
             errors.append("post-restart full recovery proof missing %s" % term)
 
+    healthy_restart = bodies["restart_healthy_pinned_runtime"]
+    for term in (
+        "crash_agent_bounded",
+        "restart_agent_preserving_bpffs",
+        "assert_dual_tc_ready",
+        "HEALTHY_PINNED_RESTART=true",
+    ):
+        if term not in healthy_restart:
+            errors.append("healthy pinned-runtime restart proof missing %s" % term)
+
+    incomplete = bodies["assert_incomplete_pinned_runtime_quiesced"]
+    for term in (
+        'item["acl_ready"] is False',
+        'value[0]==0',
+        "INCOMPLETE_PINNED_QUIESCED=true",
+    ):
+        if term not in incomplete:
+            errors.append("incomplete pinned-runtime quiesce proof missing %s" % term)
+
+    recover = bodies["recover_incomplete_pinned_runtime"]
+    for forbidden in ('umount "${PIN_ROOT}"', 'rm -rf "${PIN_ROOT}"'):
+        if forbidden in recover:
+            errors.append("pinned-runtime recovery must not cold-delete bpffs: %s" % forbidden)
+    for term in (
+        "assert_incomplete_pinned_runtime_quiesced",
+        "assert_dual_tc_ready",
+        "assert_recovery_verified",
+    ):
+        if term not in recover:
+            errors.append("incomplete pinned-runtime recovery proof missing %s" % term)
+
     if "exercise_legacy_zero_compatibility" not in source:
         errors.append("tap legacy-zero compatibility exercise is missing")
     else:
@@ -493,6 +554,8 @@ def check_source(source):
         '"missing_tc_rejected"',
         '"health_poll_degraded"',
         '"recovery_verified"',
+        '"healthy_pinned_restart"',
+        '"incomplete_pinned_quiesced"',
         '"cleanup_errors"',
         '"result"',
         "summary.json.tmp",
@@ -519,9 +582,10 @@ def check_source(source):
             "run_observed_allowed_flow allowed",
             "exercise_legacy_zero_compatibility",
             "run_denied_flow",
+            "restart_healthy_pinned_runtime",
             "assert_health_poll_degrades",
             "assert_missing_tc_rejected",
-            "restore_runtime_after_tc_loss",
+            "recover_incomplete_pinned_runtime",
         ),
     ):
         errors.append("standalone smoke main body does not preserve the required evidence order")

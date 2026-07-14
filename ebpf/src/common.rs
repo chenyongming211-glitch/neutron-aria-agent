@@ -96,6 +96,7 @@ pub const CT_NEW: u8 = 1;
 pub const CT_ESTABLISHED: u8 = 2;
 pub const CT_FLAG_SEEN_REPLY: u8 = 1;
 pub const CT_FLAG_POLICY_HIT: u8 = 1 << 1;
+pub const CT_FLAG_ACL_EVALUATED: u8 = 1 << 2;
 
 #[inline(always)]
 pub fn ct_acl_bank_is_current(
@@ -106,11 +107,23 @@ pub fn ct_acl_bank_is_current(
     validate_acl_bank == 0 || matched_bank == normalize_acl_bank(expected_acl_bank)
 }
 
+#[inline(always)]
+pub fn ct_acl_cache_is_current(
+    flags: u8,
+    matched_bank: u8,
+    validate_acl_bank: u8,
+    expected_acl_bank: u8,
+) -> bool {
+    validate_acl_bank == 0
+        || ((flags & CT_FLAG_ACL_EVALUATED) != 0
+            && ct_acl_bank_is_current(matched_bank, validate_acl_bank, expected_acl_bank))
+}
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct CtValue {
     pub state: u8,
-    pub flags: u8,         // bit 0: seen_reply; bit 1: policy_hit
+    pub flags: u8,         // bit 0: seen_reply; bit 1: policy_hit; bit 2: ACL evaluated
     pub direction: u8,     // direction of the matched policy rule
     pub matched_proto: u8, // proto of the matched policy rule (0 = wildcard)
     pub matched_src_id: u32,

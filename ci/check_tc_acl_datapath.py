@@ -317,8 +317,9 @@ def check_miss_helper(source, errors, direction, family):
     policy = "phase_policy_tc("
     flow = "stats::update_flow_stats_v%s(" % bits
     create = "conntrack::ct_create_v%s(" % bits
-    create_statement = (
-        "conntrack::ct_create_v%s(ct_key, p.now, p.pkt_len, &matched);" % bits
+    create_tokens = _rust_tokens(
+        "conntrack::ct_create_v%s("
+        "ct_key, p.now, p.pkt_len, &matched, (p.flags & FLAG_ACL_ON) != 0,);" % bits
     )
     ct_guard_marker = "if runtime::conntrack_enabled(p.tap_id)"
 
@@ -346,10 +347,10 @@ def check_miss_helper(source, errors, direction, family):
         and acl_drop[3] < qos_at < qos_drop[1] < qos_drop[3]
         and qos_drop[3] < flow_at < post_at < tcp_rt_at < ct_guard[1]
     )
+    ct_guard_tokens = _rust_tokens(ct_guard[0]) if ct_guard is not None else []
     guarded_final_create = (
         ct_guard is not None
-        and create_statement in ct_guard[0]
-        and ct_guard[0].strip().endswith(create_statement)
+        and ct_guard_tokens[-len(create_tokens) :] == create_tokens
         and body[ct_guard[3] + 1 :].strip() == ""
         and body.count(create) == 1
         and body.count("conntrack::ct_create_") == 1

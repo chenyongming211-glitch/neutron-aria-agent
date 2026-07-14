@@ -334,21 +334,32 @@ impl TapRegistry {
         };
 
         if let Err(e) = instance.reserve_persisted_live_iface() {
+            let quiesce_error = self
+                .control_plane
+                .quiesce_managed_registration(&prepared)
+                .err();
             self.control_plane
                 .abort_managed_registration(prepared)
                 .await;
             if runtime_pin.created_shared_runtime {
                 self.cleanup_shared_runtime_dir();
             }
-            return Err(format!(
-                "failed to reserve persisted live runtime state: {}",
-                e
-            ));
+            return Err(match quiesce_error {
+                Some(quiesce_error) => format!(
+                    "failed to reserve persisted live runtime state: {}; ACL/CT quiesce failed: {}",
+                    e, quiesce_error
+                ),
+                None => format!("failed to reserve persisted live runtime state: {}", e),
+            });
         }
 
         let attached = match instance.attach_links_from_pinned_runtime(&runtime_pin) {
             Ok(attached) => attached,
             Err(e) => {
+                let quiesce_error = self
+                    .control_plane
+                    .quiesce_managed_registration(&prepared)
+                    .err();
                 if let Err(release_err) = instance.release_persisted_live_iface() {
                     warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
                 }
@@ -358,12 +369,22 @@ impl TapRegistry {
                 if runtime_pin.created_shared_runtime {
                     self.cleanup_shared_runtime_dir();
                 }
-                return Err(format!("interface link attach failed: {}", e));
+                return Err(match quiesce_error {
+                    Some(quiesce_error) => format!(
+                        "interface link attach failed: {}; ACL/CT quiesce failed: {}",
+                        e, quiesce_error
+                    ),
+                    None => format!("interface link attach failed: {}", e),
+                });
             }
         };
 
         if prepared.requires_tc_acl_links() {
             if let Err(e) = instance.require_tc_acl_links() {
+                let quiesce_error = self
+                    .control_plane
+                    .quiesce_managed_registration(&prepared)
+                    .err();
                 if let Err(rollback_err) = instance.rollback_attached_links(&attached, false) {
                     warn!(instance = %iface, error = %rollback_err, "failed to roll back links after required TC readiness failure");
                 }
@@ -376,7 +397,13 @@ impl TapRegistry {
                 if runtime_pin.created_shared_runtime {
                     self.cleanup_shared_runtime_dir();
                 }
-                return Err(format!("required TC ACL links unavailable: {}", e));
+                return Err(match quiesce_error {
+                    Some(quiesce_error) => format!(
+                        "required TC ACL links unavailable: {}; ACL/CT quiesce failed: {}",
+                        e, quiesce_error
+                    ),
+                    None => format!("required TC ACL links unavailable: {}", e),
+                });
             }
         }
 
@@ -393,6 +420,10 @@ impl TapRegistry {
                 runtime_pin.created_shared_runtime,
             ),
             |(prepared, instance, attached, created_shared_runtime), error| async move {
+                let quiesce_error = self
+                    .control_plane
+                    .quiesce_managed_registration(&prepared)
+                    .err();
                 if let Err(rollback_err) = instance.rollback_attached_links(&attached, false) {
                     warn!(instance = %iface, error = %rollback_err, "failed to roll back links after managed runtime activation failure");
                 }
@@ -405,7 +436,13 @@ impl TapRegistry {
                 if created_shared_runtime {
                     self.cleanup_shared_runtime_dir();
                 }
-                Err(format!("managed runtime activation failed: {}", error))
+                Err(match quiesce_error {
+                    Some(quiesce_error) => format!(
+                        "managed runtime activation failed: {}; ACL/CT quiesce failed: {}",
+                        error, quiesce_error
+                    ),
+                    None => format!("managed runtime activation failed: {}", error),
+                })
             },
             |(prepared, instance, _attached, _created_shared_runtime)| async move {
                 self.control_plane.publish_managed_instance(prepared).await;

@@ -1,7 +1,7 @@
 use crate::common::{
-    ct_acl_bank_is_current, CtKey4, CtKey6, CtValue, PolicyKey, CT_ESTABLISHED,
-    CT_FLAG_POLICY_HIT, CT_FLAG_SEEN_REPLY, CT_NEW, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP,
-    IPPROTO_UDP,
+    ct_acl_cache_is_current, CtKey4, CtKey6, CtValue, PolicyKey, CT_ESTABLISHED,
+    CT_FLAG_ACL_EVALUATED, CT_FLAG_POLICY_HIT, CT_FLAG_SEEN_REPLY, CT_NEW, IPPROTO_ICMP,
+    IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP,
 };
 use crate::maps::{CT_CONFIG, CT_TABLE_V4, CT_TABLE_V6};
 
@@ -140,7 +140,8 @@ pub unsafe fn ct_lookup_v4(
     }
     // Forward lookup
     if let Some(entry) = CT_TABLE_V4.get_ptr_mut(key) {
-        if !ct_acl_bank_is_current(
+        if !ct_acl_cache_is_current(
+            (*entry).flags,
             (*entry).matched_bank,
             validate_acl_bank,
             expected_acl_bank,
@@ -167,7 +168,8 @@ pub unsafe fn ct_lookup_v4(
     // Reverse lookup — only set SEEN_REPLY flag, do NOT promote state
     let rev = reverse_key4(key);
     if let Some(entry) = CT_TABLE_V4.get_ptr_mut(&rev) {
-        if !ct_acl_bank_is_current(
+        if !ct_acl_cache_is_current(
+            (*entry).flags,
             (*entry).matched_bank,
             validate_acl_bank,
             expected_acl_bank,
@@ -205,7 +207,8 @@ pub unsafe fn ct_lookup_v6(
     }
     // Forward lookup
     if let Some(entry) = CT_TABLE_V6.get_ptr_mut(key) {
-        if !ct_acl_bank_is_current(
+        if !ct_acl_cache_is_current(
+            (*entry).flags,
             (*entry).matched_bank,
             validate_acl_bank,
             expected_acl_bank,
@@ -231,7 +234,8 @@ pub unsafe fn ct_lookup_v6(
     // Reverse lookup — only set SEEN_REPLY flag, do NOT promote state
     let rev = reverse_key6(key);
     if let Some(entry) = CT_TABLE_V6.get_ptr_mut(&rev) {
-        if !ct_acl_bank_is_current(
+        if !ct_acl_cache_is_current(
+            (*entry).flags,
             (*entry).matched_bank,
             validate_acl_bank,
             expected_acl_bank,
@@ -257,14 +261,24 @@ pub unsafe fn ct_lookup_v6(
 
 /// Create a new CT entry for IPv4 with matched policy info.
 #[inline(always)]
-pub unsafe fn ct_create_v4(key: &CtKey4, now: u64, pkt_len: u32, matched: &MatchedPolicy) {
+pub unsafe fn ct_create_v4(
+    key: &CtKey4,
+    now: u64,
+    pkt_len: u32,
+    matched: &MatchedPolicy,
+    acl_evaluated: bool,
+) {
     if !crate::runtime::conntrack_enabled(key.tap_id) {
         return;
     }
     let val = CtValue {
         state: CT_NEW,
-        flags: if matched.policy_hit {
+        flags: (if matched.policy_hit {
             CT_FLAG_POLICY_HIT
+        } else {
+            0
+        }) | if acl_evaluated {
+            CT_FLAG_ACL_EVALUATED
         } else {
             0
         },
@@ -283,14 +297,24 @@ pub unsafe fn ct_create_v4(key: &CtKey4, now: u64, pkt_len: u32, matched: &Match
 
 /// Create a new CT entry for IPv6 with matched policy info.
 #[inline(always)]
-pub unsafe fn ct_create_v6(key: &CtKey6, now: u64, pkt_len: u32, matched: &MatchedPolicy) {
+pub unsafe fn ct_create_v6(
+    key: &CtKey6,
+    now: u64,
+    pkt_len: u32,
+    matched: &MatchedPolicy,
+    acl_evaluated: bool,
+) {
     if !crate::runtime::conntrack_enabled(key.tap_id) {
         return;
     }
     let val = CtValue {
         state: CT_NEW,
-        flags: if matched.policy_hit {
+        flags: (if matched.policy_hit {
             CT_FLAG_POLICY_HIT
+        } else {
+            0
+        }) | if acl_evaluated {
+            CT_FLAG_ACL_EVALUATED
         } else {
             0
         },

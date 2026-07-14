@@ -805,7 +805,13 @@ unsafe fn phase_ct_miss_tc_ingress_v4(
     }
     if runtime::conntrack_enabled(p.tap_id) {
         let matched = get_matched(p);
-        conntrack::ct_create_v4(ct_key, p.now, p.pkt_len, &matched);
+        conntrack::ct_create_v4(
+            ct_key,
+            p.now,
+            p.pkt_len,
+            &matched,
+            (p.flags & FLAG_ACL_ON) != 0,
+        );
     }
 }
 
@@ -847,7 +853,13 @@ unsafe fn phase_ct_miss_tc_ingress_v6(
     }
     if runtime::conntrack_enabled(p.tap_id) {
         let matched = get_matched(p);
-        conntrack::ct_create_v6(ct_key, p.now, p.pkt_len, &matched);
+        conntrack::ct_create_v6(
+            ct_key,
+            p.now,
+            p.pkt_len,
+            &matched,
+            (p.flags & FLAG_ACL_ON) != 0,
+        );
     }
 }
 
@@ -965,7 +977,13 @@ unsafe fn phase_ct_miss_tc_egress_v4(
     }
     if runtime::conntrack_enabled(p.tap_id) {
         let matched = get_matched(p);
-        conntrack::ct_create_v4(ct_key, p.now, p.pkt_len, &matched);
+        conntrack::ct_create_v4(
+            ct_key,
+            p.now,
+            p.pkt_len,
+            &matched,
+            (p.flags & FLAG_ACL_ON) != 0,
+        );
     }
 }
 
@@ -1007,7 +1025,13 @@ unsafe fn phase_ct_miss_tc_egress_v6(
     }
     if runtime::conntrack_enabled(p.tap_id) {
         let matched = get_matched(p);
-        conntrack::ct_create_v6(ct_key, p.now, p.pkt_len, &matched);
+        conntrack::ct_create_v6(
+            ct_key,
+            p.now,
+            p.pkt_len,
+            &matched,
+            (p.flags & FLAG_ACL_ON) != 0,
+        );
     }
 }
 

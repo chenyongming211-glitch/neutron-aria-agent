@@ -233,6 +233,25 @@ pub fn update_runtime_config(
     })
 }
 
+fn required_firewall_config(
+    lookup: Result<FirewallConfig, aya::maps::MapError>,
+    full_initialization: bool,
+    operation: &str,
+) -> Result<Option<FirewallConfig>, String> {
+    match lookup {
+        Ok(config) => Ok(Some(config)),
+        Err(aya::maps::MapError::KeyNotFound) if full_initialization => Ok(None),
+        Err(aya::maps::MapError::KeyNotFound) => Err(format!(
+            "{} requires initialized FIREWALL_CONFIG key 0",
+            operation
+        )),
+        Err(error) => Err(format!(
+            "{} read FIREWALL_CONFIG key 0: {}",
+            operation, error
+        )),
+    }
+}
+
 /// Update FIREWALL_CONFIG map at runtime via pinned map.
 /// Reads the current config, applies the changes, and writes back.
 pub fn update_firewall_config(
@@ -253,7 +272,23 @@ pub fn update_firewall_config(
         aya::maps::HashMap::<_, u32, FirewallConfig>::try_from(aya::maps::Map::HashMap(map_data))
             .map_err(|e| format!("convert FIREWALL_CONFIG: {:?}", e))?;
 
-    let current = map.get(&0u32, 0).ok();
+    let full_initialization = conntrack_enabled.is_some()
+        && monitoring_enabled.is_some()
+        && acl_enabled.is_some()
+        && qos_enabled.is_some()
+        && mirror_enabled.is_some()
+        && tcprt_enabled.is_some()
+        && ssl_enabled.is_some();
+    let operation = if full_initialization {
+        "full initialization"
+    } else {
+        "partial update"
+    };
+    let current = required_firewall_config(
+        map.get(&0u32, 0),
+        full_initialization,
+        operation,
+    )?;
     let num_cpus_val = current.as_ref().map(|c| c.num_cpus).unwrap_or_else(|| {
         let raw = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
         if raw > 0 {
@@ -303,10 +338,12 @@ pub fn update_firewall_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        required_tap_config, tap_config_with_acl_bank, tap_config_with_acl_runtime_gate,
-        tap_config_with_runtime_updates,
+        required_firewall_config, required_tap_config, tap_config_with_acl_bank,
+        tap_config_with_acl_runtime_gate, tap_config_with_runtime_updates,
     };
-    use crate::common::{TapConfig, ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP};
+    use crate::common::{
+        FirewallConfig, TapConfig, ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP,
+    };
     use aya::maps::MapError;
 
     #[test]
@@ -417,6 +454,59 @@ mod tests {
     }
 
     #[test]
+    fn global_runtime_partial_update_requires_an_existing_config() {
+        let missing = required_firewall_config(
+            Err(MapError::KeyNotFound),
+            false,
+            "partial update",
+        )
+        .unwrap_err();
+        assert_eq!(
+            missing,
+            "partial update requires initialized FIREWALL_CONFIG key 0"
+        );
+
+        let read_error = required_firewall_config(
+            Err(MapError::InvalidValueSize {
+                size: 1,
+                expected: core::mem::size_of::<FirewallConfig>(),
+            }),
+            false,
+            "partial update",
+        )
+        .unwrap_err();
+        assert!(read_error.starts_with("partial update read FIREWALL_CONFIG key 0:"));
+    }
+
+    #[test]
+    fn global_runtime_full_initialization_only_accepts_key_not_found() {
+        assert!(required_firewall_config(
+            Err(MapError::KeyNotFound),
+            true,
+            "full initialization",
+        )
+        .unwrap()
+        .is_none());
+        let existing = FirewallConfig {
+            conntrack_enabled: 0,
+            monitoring_enabled: 1,
+            num_cpus: 8,
+            qos_enabled: 0,
+            acl_enabled: 0,
+            mirror_enabled: 0,
+            tcprt_enabled: 0,
+            ssl_enabled: 0,
+        };
+        assert_eq!(
+            required_firewall_config(Ok(existing), true, "full initialization")
+                .unwrap()
+                .unwrap()
+                .num_cpus,
+            8
+        );
+    }
+
+    #[test]
     fn tap_runtime_config_partial_writes_force_tc_and_preserve_unrelated_fields() {
         let current = TapConfig {
             conntrack_enabled: 1,
@@ -467,19 +557,7 @@ pub fn read_runtime_config(runtime: TapMapRuntime<'_>) -> Result<FirewallConfig,
         return read_firewall_config(runtime);
     }
 
-    let global = read_firewall_config(runtime).unwrap_or_else(|_| {
-        let raw = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-        FirewallConfig {
-            conntrack_enabled: 1,
-            monitoring_enabled: 1,
-            num_cpus: if raw > 0 { raw as u16 } else { 1u16 },
-            qos_enabled: 0,
-            acl_enabled: 1,
-            mirror_enabled: 0,
-            tcprt_enabled: 1,
-            ssl_enabled: 0,
-        }
-    });
+    let global = read_firewall_config(runtime)?;
 
     let map = open_pinned_tap_config(runtime.pin_path)?;
     let tap_cfg = map

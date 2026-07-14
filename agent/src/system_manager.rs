@@ -1,5 +1,7 @@
 use crate::control_plane::ControlPlane;
-use crate::instance::TcAclLinkHealth;
+use crate::instance::{
+    preexisting_tc_acl_runtime_is_healthy, FirewallInstance, TcAclLinkHealth,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -409,12 +411,15 @@ fn pin_runtime_maps(
         if let Some(map) = bpf.map_mut(name) {
             let target = Path::new(pin_path).join(name);
             let target_preexisting = target.exists();
+            if target_preexisting {
+                continue;
+            }
             if let Err(e) = map.pin(&target) {
                 if critical_map_names.contains(name) {
                     return Err(format!("failed to pin critical map {}: {}", name, e));
                 }
                 warn!(map = %name, error = %e, "failed to pin runtime map");
-            } else if !target_preexisting {
+            } else {
                 ownership.owned_map_pins.push(target);
             }
         } else if critical_map_names.contains(name) {
@@ -428,6 +433,7 @@ fn pin_runtime_programs(
     bpf: &mut aya::Ebpf,
     pin_path: &str,
     require_tc_acl: bool,
+    claimed_health: TcAclLinkHealth,
     ownership: &mut SystemStartOwnership,
 ) -> TcAclLinkHealth {
     let mut ingress = false;
@@ -436,13 +442,23 @@ fn pin_runtime_programs(
     for name in &["xdp_firewall", "tc_egress", "tc_ingress"] {
         let target = Path::new(pin_path).join(name);
         let target_preexisting = target.exists();
-        let result = match bpf.program_mut(name) {
-            Some(program) => program
-                .pin(&target)
-                .map_err(|e| format!("Failed to pin program {}: {:?}", name, e)),
-            None => Err(format!("Program {} not found", name)),
+        let claimed = match *name {
+            "xdp_firewall" => claimed_health.xdp,
+            "tc_ingress" => claimed_health.ingress,
+            "tc_egress" => claimed_health.egress,
+            _ => false,
         };
-        if result.is_ok() && !target_preexisting {
+        let result = if claimed {
+            Ok(())
+        } else {
+            match bpf.program_mut(name) {
+                Some(program) => program
+                    .pin(&target)
+                    .map_err(|e| format!("Failed to pin program {}: {:?}", name, e)),
+                None => Err(format!("Program {} not found", name)),
+            }
+        };
+        if result.is_ok() && !claimed && !target_preexisting {
             ownership.owned_program_pins.push(target);
         }
         match (*name, result) {
@@ -528,6 +544,10 @@ pub async fn system_start(
         warn!(iface = %iface, error = %e, "failed to persist max_port_policies");
     }
 
+    let desired = aria_core::wal::load_with_wal(state_path);
+    let desired_conntrack = desired.conntrack_enabled;
+    let desired_acl = desired.acl_enabled;
+
     info!(iface = %iface, ebpf_path = %ebpf_path, "loading eBPF for system instance");
     let bpf_bytes = std::fs::read(ebpf_path).map_err(|error| {
         start_error_with_cleanup(
@@ -563,6 +583,61 @@ pub async fn system_start(
             &ownership,
         ));
     }
+
+    let preexisting_xdp_link = Path::new(pin_path).join("xdp_link").exists();
+    let preexisting_tc_ingress_link = Path::new(pin_path).join("tc_ingress_link").exists();
+    let preexisting_tc_egress_link = Path::new(pin_path).join("tc_egress_link").exists();
+    let preexisting_live_links = preexisting_xdp_link
+        || preexisting_tc_ingress_link
+        || preexisting_tc_egress_link;
+    let preexisting_instance = FirewallInstance::new(
+        iface,
+        pin_path.to_string().into(),
+        state_path.to_string().into(),
+        false,
+        trace_map_mode,
+    );
+    let preexisting_health = preexisting_instance.tc_acl_link_health();
+
+    if preexisting_live_links {
+        if let Err(e) = aria_core::ebpf_ops::update_firewall_config(
+            TapMapRuntime::new(pin_path, aria_core::common::TAP_ID_UNASSIGNED),
+            Some(false),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+        ) {
+            return Err(start_error_with_cleanup(
+                format!("failed to quiesce preexisting standalone ACL/CT runtime: {}", e),
+                iface,
+                pin_path,
+                state_path,
+                &ownership,
+            ));
+        }
+    }
+
+    if let Err(e) = preexisting_tc_acl_runtime_is_healthy(
+        desired_conntrack || desired_acl,
+        preexisting_live_links,
+        preexisting_tc_ingress_link,
+        preexisting_tc_egress_link,
+        preexisting_health,
+    ) {
+        return Err(start_error_with_cleanup(
+            format!("standalone pinned runtime validation failed after quiesce: {}", e),
+            iface,
+            pin_path,
+            state_path,
+            &ownership,
+        ));
+    }
+    let reuse_preexisting_tc = preexisting_tc_ingress_link
+        && preexisting_tc_egress_link
+        && preexisting_health.acl_ready();
 
     let sm = aria_core::state::StateManager::new(state_path);
     match sm.get_tap_id() {
@@ -601,33 +676,13 @@ pub async fn system_start(
         ));
     }
 
-    let desired = aria_core::wal::load_with_wal(state_path);
-    let desired_conntrack = desired.conntrack_enabled;
-    let desired_acl = desired.acl_enabled;
-
-    // Replay state
-    if let Err(e) = replay_state_from_snapshot(&mut bpf, state_path, &desired) {
+    // Replay desired maps while keeping the live ACL/CT gate quiesced.
+    let mut quiesced_desired = desired.clone();
+    quiesced_desired.conntrack_enabled = false;
+    quiesced_desired.acl_enabled = false;
+    if let Err(e) = replay_state_from_snapshot(&mut bpf, state_path, &quiesced_desired) {
         return Err(start_error_with_cleanup(
             format!("failed to replay state: {}", e),
-            iface,
-            pin_path,
-            state_path,
-            &ownership,
-        ));
-    }
-
-    if let Err(e) = aria_core::ebpf_ops::update_firewall_config(
-        TapMapRuntime::new(pin_path, aria_core::common::TAP_ID_UNASSIGNED),
-        Some(false),
-        None,
-        Some(false),
-        None,
-        None,
-        None,
-        None,
-    ) {
-        return Err(start_error_with_cleanup(
-            format!("failed to quiesce standalone ACL/CT before attach: {}", e),
             iface,
             pin_path,
             state_path,
@@ -659,15 +714,20 @@ pub async fn system_start(
 
     let xdp_link_pin = Path::new(pin_path).join("xdp_link");
     let xdp_link_preexisting = xdp_link_pin.exists();
-    match attach_xdp_program(&mut bpf, iface, pin_path) {
-        Ok(()) => {
-            ownership.xdp_link = true;
-            if !xdp_link_preexisting {
-                ownership.owned_link_pins.push(xdp_link_pin);
+    if xdp_link_preexisting && preexisting_health.xdp_ready() {
+        ownership.xdp_link = true;
+        info!(iface = %iface, "claimed preexisting XDP DDoS hook");
+    } else {
+        match attach_xdp_program(&mut bpf, iface, pin_path) {
+            Ok(()) => {
+                ownership.xdp_link = true;
+                if !xdp_link_preexisting {
+                    ownership.owned_link_pins.push(xdp_link_pin);
+                }
             }
-        }
-        Err(error) => {
-            warn!(iface = %iface, error = %error, "XDP DDoS hook unavailable; continuing with TC ACL");
+            Err(error) => {
+                warn!(iface = %iface, error = %error, "XDP DDoS hook unavailable; continuing with TC ACL");
+            }
         }
     }
 
@@ -678,51 +738,63 @@ pub async fn system_start(
         }
     }
     if ownership.clsact != ClsactOwnership::Absent {
-        let tc_egress_link_pin = Path::new(pin_path).join("tc_egress_link");
-        let tc_egress_link_preexisting = tc_egress_link_pin.exists();
-        match attach_tc_program(
-            &mut bpf,
-            "tc_egress",
-            iface,
-            aya::programs::tc::TcAttachType::Egress,
-            pin_path,
-        ) {
-            Ok(()) => {
-                ownership.tc_egress_link = true;
-                if !tc_egress_link_preexisting {
-                    ownership.owned_link_pins.push(tc_egress_link_pin);
+        if reuse_preexisting_tc {
+            ownership.tc_ingress_link = true;
+            ownership.tc_egress_link = true;
+            info!(iface = %iface, "claimed exact preexisting dual-TCX ACL runtime");
+        } else {
+            let tc_egress_link_pin = Path::new(pin_path).join("tc_egress_link");
+            let tc_egress_link_preexisting = tc_egress_link_pin.exists();
+            match attach_tc_program(
+                &mut bpf,
+                "tc_egress",
+                iface,
+                aya::programs::tc::TcAttachType::Egress,
+                pin_path,
+            ) {
+                Ok(()) => {
+                    ownership.tc_egress_link = true;
+                    if !tc_egress_link_preexisting {
+                        ownership.owned_link_pins.push(tc_egress_link_pin);
+                    }
+                }
+                Err(error) => {
+                    warn!(iface = %iface, error = %error, "TC egress attach failed; egress control disabled");
                 }
             }
-            Err(error) => {
-                warn!(iface = %iface, error = %error, "TC egress attach failed; egress control disabled");
-            }
-        }
 
-        let tc_ingress_link_pin = Path::new(pin_path).join("tc_ingress_link");
-        let tc_ingress_link_preexisting = tc_ingress_link_pin.exists();
-        match attach_tc_program(
-            &mut bpf,
-            "tc_ingress",
-            iface,
-            aya::programs::tc::TcAttachType::Ingress,
-            pin_path,
-        ) {
-            Ok(()) => {
-                ownership.tc_ingress_link = true;
-                if !tc_ingress_link_preexisting {
-                    ownership.owned_link_pins.push(tc_ingress_link_pin);
+            let tc_ingress_link_pin = Path::new(pin_path).join("tc_ingress_link");
+            let tc_ingress_link_preexisting = tc_ingress_link_pin.exists();
+            match attach_tc_program(
+                &mut bpf,
+                "tc_ingress",
+                iface,
+                aya::programs::tc::TcAttachType::Ingress,
+                pin_path,
+            ) {
+                Ok(()) => {
+                    ownership.tc_ingress_link = true;
+                    if !tc_ingress_link_preexisting {
+                        ownership.owned_link_pins.push(tc_ingress_link_pin);
+                    }
                 }
-            }
-            Err(error) => {
-                warn!(iface = %iface, error = %error, "TC ingress attach failed; ingress mirror disabled");
+                Err(error) => {
+                    warn!(iface = %iface, error = %error, "TC ingress attach failed; ingress mirror disabled");
+                }
             }
         }
     }
 
+    let claimed_health = TcAclLinkHealth::new(
+        reuse_preexisting_tc,
+        reuse_preexisting_tc,
+        xdp_link_preexisting && preexisting_health.xdp_ready(),
+    );
     let program_health = pin_runtime_programs(
         &mut bpf,
         pin_path,
         desired_conntrack || desired_acl,
+        claimed_health,
         &mut ownership,
     );
     let split_cleanup = unbacked_program_link_cleanup_plan(&ownership, program_health);

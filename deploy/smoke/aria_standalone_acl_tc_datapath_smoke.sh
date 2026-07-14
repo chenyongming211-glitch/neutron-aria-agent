@@ -48,6 +48,8 @@ XDP_NEUTRAL=false
 MISSING_TC_REJECTED=false
 HEALTH_POLL_DEGRADED=false
 RECOVERY_VERIFIED=false
+HEALTHY_PINNED_RESTART=false
+INCOMPLETE_PINNED_QUIESCED=false
 cleanup_errors=()
 
 die() {
@@ -130,6 +132,17 @@ create_netns_fixture() {
     ip netns exec "${NETNS}" ip link set "${PEER_IF}" up
 }
 
+start_agent_process() {
+    "${ARIA_AGENT_BIN}" --config "${CONFIG_FILE}" >>"${WORK_DIR}/agent.stdout" 2>&1 &
+    AGENT_PID=$!
+    for _ in $(seq 1 100); do
+        curl -fsS "${HTTP}/api/v1/health" >/dev/null && return 0
+        kill -0 "${AGENT_PID}" 2>/dev/null || return 1
+        sleep 0.1
+    done
+    return 1
+}
+
 start_agent() {
     local auto_attach=false
     [ "${MODE}" = tap ] && auto_attach=true
@@ -150,14 +163,14 @@ listen_addr = "${HTTP_ADDR}"
 trace_backend = "legacy-map"
 log_file_path = "${WORK_DIR}/agent.log"
 EOF
-    "${ARIA_AGENT_BIN}" --config "${CONFIG_FILE}" >"${WORK_DIR}/agent.stdout" 2>&1 &
-    AGENT_PID=$!
-    for _ in $(seq 1 100); do
-        curl -fsS "${HTTP}/api/v1/health" >/dev/null && return 0
-        kill -0 "${AGENT_PID}" 2>/dev/null || return 1
-        sleep 0.1
-    done
-    return 1
+    start_agent_process
+}
+
+restart_agent_preserving_bpffs() {
+    [ "${PRIVATE_BPFFS_MOUNTED}" = true ]
+    [ -d "${PIN_ROOT}" ]
+    [ -r "${CONFIG_FILE}" ]
+    start_agent_process
 }
 
 stop_agent_bounded() {
@@ -191,6 +204,20 @@ stop_agent_bounded() {
         return 124
     fi
     case "${wait_rc}" in 0|143) return 0 ;; *) return "${wait_rc}" ;; esac
+}
+
+crash_agent_bounded() {
+    local pid="${AGENT_PID}" wait_rc=0
+    [ -n "${pid}" ] || return 0
+    if ! kill -0 "${pid}" 2>/dev/null; then
+        wait "${pid}" 2>/dev/null || true
+        AGENT_PID=""
+        return 0
+    fi
+    kill -KILL "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || wait_rc=$?
+    AGENT_PID=""
+    case "${wait_rc}" in 0|137) return 0 ;; *) return "${wait_rc}" ;; esac
 }
 
 start_system_mode() {
@@ -513,6 +540,52 @@ PY
     MISSING_TC_REJECTED=true
 }
 
+assert_incomplete_pinned_runtime_quiesced() {
+    local map key ifindex ifindex_key tap_id
+    curl -fsS "${HTTP}/api/v1/instances" >"${WORK_DIR}/incomplete-restart-instances.json"
+    python3 - "${WORK_DIR}/incomplete-restart-instances.json" "${INSTANCE}" <<'PY'
+import json,sys
+items=json.load(open(sys.argv[1],encoding="utf-8"))["instances"]
+item=next((row for row in items if row["name"]==sys.argv[2]),{"acl_ready":False})
+assert item["acl_ready"] is False,item
+PY
+    if [ "${MODE}" = system ]; then
+        map="${PIN_ROOT}/system/FIREWALL_CONFIG"
+        key="00 00 00 00"
+    else
+        map="${PIN_ROOT}/global-v2/TAP_CONFIG_MAP"
+        ifindex="$(cat "/sys/class/net/${HOST_IF}/ifindex")"
+        ifindex_key="$(python3 -c 'import struct,sys; print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))' "${ifindex}")"
+        tap_id="$(bpftool -j map lookup pinned "${PIN_ROOT}/global-v2/IFACE_CTX_MAP" \
+            key hex ${ifindex_key} | python3 -c 'import json,struct,sys; v=json.load(sys.stdin)["value"]; print(struct.unpack("=I",bytes(v[:4]))[0])')"
+        key="$(python3 -c 'import struct,sys; print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))' "${tap_id}")"
+    fi
+    bpftool -j map lookup pinned "${map}" key hex ${key} >"${WORK_DIR}/incomplete-restart-gate.json"
+    python3 - "${WORK_DIR}/incomplete-restart-gate.json" "${MODE}" <<'PY'
+import json,sys
+value=json.load(open(sys.argv[1],encoding="utf-8"))["value"]
+acl_index=5 if sys.argv[2]=="system" else 2
+assert value[0]==0,value
+assert value[acl_index]==0,value
+PY
+    INCOMPLETE_PINNED_QUIESCED=true
+}
+
+restart_healthy_pinned_runtime() {
+    crash_agent_bounded || die "healthy pinned-runtime crash did not terminate cleanly"
+    SYSTEM_STARTED=false
+    restart_agent_preserving_bpffs || die "healthy pinned-runtime agent restart failed"
+    if [ "${MODE}" = system ]; then
+        start_system_mode
+    else
+        start_tap_mode
+    fi
+    assert_dual_tc_ready
+    run_observed_allowed_flow healthy-restart
+    run_denied_flow healthy-restart-denied
+    HEALTHY_PINNED_RESTART=true
+}
+
 assert_recovery_verified() {
     curl -fsS "${HTTP}/api/v1/${INSTANCE}/config" >"${WORK_DIR}/recovery-config.json"
     curl -fsS "${HTTP}/api/v1/${INSTANCE}/groups" >"${WORK_DIR}/recovery-groups.json"
@@ -539,23 +612,53 @@ PY
     RECOVERY_VERIFIED=true
 }
 
-restore_runtime_after_tc_loss() {
-    if ! stop_agent_bounded; then
-        die "agent restart shutdown exceeded ${AGENT_STOP_TIMEOUT_SECS}s"
-    fi
-    if [ "${PRIVATE_BPFFS_MOUNTED}" = true ]; then
-        umount "${PIN_ROOT}"
-        PRIVATE_BPFFS_MOUNTED=false
-    fi
-    if [ "${PIN_ROOT_CREATED}" = true ]; then
-        rm -rf "${PIN_ROOT}"
-        PIN_ROOT_CREATED=false
-    fi
-    start_agent || die "agent restart failed after detached TCX link"
+recover_incomplete_pinned_runtime() {
+    local code
+    crash_agent_bounded || die "incomplete pinned-runtime crash did not terminate cleanly"
+    SYSTEM_STARTED=false
+    restart_agent_preserving_bpffs || die "agent restart failed with incomplete pinned runtime"
     if [ "${MODE}" = system ]; then
-        SYSTEM_STARTED=false
+        INSTANCE="system"
+        TC_INGRESS_LINK="${PIN_ROOT}/system/tc_ingress_link"
+        TC_EGRESS_LINK="${PIN_ROOT}/system/tc_egress_link"
+        TC_INGRESS_PROG="${PIN_ROOT}/system/tc_ingress"
+        TC_EGRESS_PROG="${PIN_ROOT}/system/tc_egress"
+        code="$(curl -sS -o "${WORK_DIR}/incomplete-system-start.json" -w '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            -d "{\"iface\":\"${HOST_IF}\",\"max_port_policies\":16384}" \
+            "${HTTP}/api/v1/system/start")"
+        case "${code}" in 2*) die "incomplete system pinned runtime was incorrectly accepted" ;; esac
+    else
+        INSTANCE="${HOST_IF}"
+        TC_INGRESS_LINK="${PIN_ROOT}/global-v2/${HOST_IF}_tc_ingress_link"
+        TC_EGRESS_LINK="${PIN_ROOT}/global-v2/${HOST_IF}_tc_egress_link"
+        TC_INGRESS_PROG="${PIN_ROOT}/global-v2/tc_ingress"
+        TC_EGRESS_PROG="${PIN_ROOT}/global-v2/tc_egress"
+        sleep 1
+    fi
+    assert_incomplete_pinned_runtime_quiesced
+
+    if [ "${MODE}" = system ]; then
+        curl --fail-with-body -sS -X POST "${HTTP}/api/v1/system/stop" \
+            >"${WORK_DIR}/incomplete-system-stop.json"
         start_system_mode
     else
+        ip link del "${HOST_IF}"
+        VETH_CREATED=false
+        for _ in $(seq 1 100); do
+            [ ! -e "${PIN_ROOT}/global-v2" ] && break
+            sleep 0.1
+        done
+        [ ! -e "${PIN_ROOT}/global-v2" ] || die "tap delete did not clean incomplete shared runtime"
+        ip link add "${HOST_IF}" type veth peer name "${PEER_IF}"
+        VETH_CREATED=true
+        ip link set "${PEER_IF}" netns "${NETNS}"
+        ip addr add "${HOST_IP}/30" dev "${HOST_IF}"
+        ip link set "${HOST_IF}" up
+        ip netns exec "${NETNS}" ip addr add "${PEER_IP}/30" dev "${PEER_IF}"
+        ip netns exec "${NETNS}" ip addr add "${DENIED_IP}/32" dev "${PEER_IF}"
+        ip route add "${DENIED_IP}/32" dev "${HOST_IF}"
+        ip netns exec "${NETNS}" ip link set "${PEER_IF}" up
         start_tap_mode
     fi
     assert_dual_tc_ready
@@ -584,6 +687,8 @@ write_summary() {
     WORK_DIR="${WORK_DIR}" DUAL_TC_READY="${DUAL_TC_READY}" \
     XDP_NEUTRAL="${XDP_NEUTRAL}" MISSING_TC_REJECTED="${MISSING_TC_REJECTED}" \
     HEALTH_POLL_DEGRADED="${HEALTH_POLL_DEGRADED}" RECOVERY_VERIFIED="${RECOVERY_VERIFIED}" \
+    HEALTHY_PINNED_RESTART="${HEALTHY_PINNED_RESTART}" \
+    INCOMPLETE_PINNED_QUIESCED="${INCOMPLETE_PINNED_QUIESCED}" \
     RUN_ID="${RUN_ID}" HOST_IF="${HOST_IF}" NETNS="${NETNS}" HTTP_ADDR="${HTTP_ADDR}" \
         python3 >"${WORK_DIR}/summary.json.tmp" <<'PY' || return 1
 import json,os
@@ -593,6 +698,8 @@ out={"mode":os.environ["MODE"],"dual_tc_ready":os.environ["DUAL_TC_READY"].lower
      "missing_tc_rejected":os.environ["MISSING_TC_REJECTED"].lower()=="true",
      "health_poll_degraded":os.environ["HEALTH_POLL_DEGRADED"].lower()=="true",
      "recovery_verified":os.environ["RECOVERY_VERIFIED"].lower()=="true",
+     "healthy_pinned_restart":os.environ["HEALTHY_PINNED_RESTART"].lower()=="true",
+     "incomplete_pinned_quiesced":os.environ["INCOMPLETE_PINNED_QUIESCED"].lower()=="true",
      "cleanup_errors":cleanup_errors,"result":os.environ["RESULT"],
      "failure_reason":os.environ["FAILURE_REASON"],"work_dir":os.environ["WORK_DIR"],
      "run_id":os.environ["RUN_ID"],"host_if":os.environ["HOST_IF"],
@@ -702,9 +809,10 @@ assert_dual_tc_ready
 run_observed_allowed_flow allowed
 exercise_legacy_zero_compatibility
 run_denied_flow denied
+restart_healthy_pinned_runtime
 assert_health_poll_degrades
 assert_missing_tc_rejected
-restore_runtime_after_tc_loss
+recover_incomplete_pinned_runtime
 
 BODY_SUCCEEDED=true
 FAILURE_REASON=""
