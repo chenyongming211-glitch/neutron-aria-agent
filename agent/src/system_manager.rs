@@ -1159,8 +1159,14 @@ mod tests {
             1,
             "standalone startup must approve exactly one durable snapshot"
         );
+        assert!(start.contains("let mut quiesced_desired = desired.clone();"));
+        assert!(start.contains("quiesced_desired.conntrack_enabled = false;"));
+        assert!(start.contains("quiesced_desired.acl_enabled = false;"));
         assert!(start.contains(
-            "replay_state_from_snapshot(&mut bpf, state_path, &desired)"
+            "replay_state_from_snapshot(&mut bpf, state_path, &quiesced_desired)"
+        ));
+        assert!(start.contains(
+            ".register_system_instance(pin_path, state_path, desired, iface)"
         ));
         assert!(!start.contains("replay_state(&mut bpf, state_path)"));
     }
