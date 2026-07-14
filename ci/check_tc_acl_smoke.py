@@ -329,12 +329,14 @@ def main():
         backlog = handle.read()
     if "unique tracking-item total remains 69" in backlog:
         errors.append("backlog still says the unique tracking-item total remains 69")
-    if "unique tracking-item total is now 72" not in backlog:
-        errors.append("backlog must state the corrected unique tracking-item total is 72")
+    if "unique tracking-item total is now 73" not in backlog:
+        errors.append("backlog must state the corrected unique tracking-item total is 73")
     if "Engineering debt now" not in backlog or "five `DEBT-*` IDs" not in backlog:
         errors.append("backlog must state the corrected engineering-debt total is five")
     if "DEBT-ACL-001" not in backlog:
         errors.append("backlog must retain the legacy local ACL durability debt")
+    if "REVIEW-OPS-036" not in backlog:
+        errors.append("backlog must retain the independent XDP hook-health defect")
     if not errors:
         errors.extend(run_mutation_self_tests(source, verbose="--self-test" in args))
     if errors:

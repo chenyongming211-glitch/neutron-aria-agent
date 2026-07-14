@@ -9,14 +9,26 @@ Supersedes the standalone/XDP compatibility portions of
 
 ## Implementation Status
 
-The all-mode implementation is present at code commit
-`5800940bcc54b5ec7bcb7cf35ee980492436addf`. Complete GitHub Build
-[29293162332](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29293162332)
-passed Python stages, targeted Rust authority tests, nightly eBPF, static
-userspace/agent builds, and binary verification. Local non-Cargo gates also
-passed, including 283 Stage 1 tests, 153 Stage 2 tests, both smoke mutation
-checkers, the datapath checker, embedded Python extraction, and Stage 2/3
-evidence.
+The final all-mode implementation is present at code commit
+`89b81e94ac7a6aaaf98295132a9b09d556b99796`. Complete GitHub Build
+[29297316622](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29297316622)
+passed Python stages, targeted Rust authority/recovery tests, nightly eBPF,
+static userspace/agent builds, and binary verification. Local non-Cargo gates
+also passed, including 283 Stage 1 tests, both smoke mutation checkers, the
+datapath checker, shell syntax, and `git diff --check`.
+
+Whole-branch reliability review added four final hardening boundaries after
+the first green checkpoint:
+
+- CT entries created while ACL was disabled do not receive the
+  `ACL_EVALUATED` flag and cannot become ACL fast-path hits merely because
+  their stored bank happens to match;
+- managed and system restart reuse requires exact live dual-TCX identity, not
+  only surviving pin paths;
+- partial global runtime updates and reads propagate missing/corrupt map state
+  instead of synthesizing enabled defaults;
+- the guarded standalone smoke preserves bpffs across healthy and incomplete
+  restarts, proves the incomplete gate is quiesced, and then proves recovery.
 
 The normal Build runs syntax and structure/mutation contracts; it does not run
 the privileged netns/tap smokes. No privileged environment with the built
@@ -24,6 +36,12 @@ artifacts was available during this implementation. `REVIEW-ACL-055` is
 therefore `likely-fixed`. It becomes `fixed` only after preserved passing
 summaries exist for standalone `MODE=system`, standalone `MODE=tap`, and the
 managed-Neutron smoke.
+
+`REVIEW-OPS-036` separately records that XDP hook health is still path-only and
+can false-pass for a detached-but-pinned link. This does not affect ACL/CT
+readiness because XDP is neutral and TC is authoritative. Exact XDP live-link
+identity is required before implementing or advertising the future DDoS
+domain.
 
 ## Goal
 

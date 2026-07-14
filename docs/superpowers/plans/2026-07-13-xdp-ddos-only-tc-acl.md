@@ -8,6 +8,22 @@
 
 **Tech Stack:** Rust, Aya/Aya eBPF, Tokio, bpffs pinned maps/links, Python source-contract checkers, Bash guarded smoke tests, GitHub Actions.
 
+## Implementation Outcome
+
+Implemented through commit `89b81e94ac7a6aaaf98295132a9b09d556b99796`.
+Complete GitHub Build
+[29297316622](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29297316622)
+passed the Python stages, targeted Rust contracts, nightly eBPF, static
+userspace/agent builds, and binary verification.
+
+Final whole-branch hardening added the `CT_FLAG_ACL_EVALUATED` transition
+guard, exact dual-TCX validation for preexisting managed/system runtimes,
+strict global runtime-config reads, fail-closed quiesce coverage for every
+managed attach failure, and preserved-bpffs standalone restart smokes. The
+remaining privileged system/tap/Neutron execution evidence still gates
+`REVIEW-ACL-055` from `fixed`. Independent path-only XDP hook health is tracked
+as `REVIEW-OPS-036` and is not part of the TC ACL closure.
+
 ## Global Constraints
 
 - Implement only the approved design in `docs/superpowers/specs/2026-07-13-xdp-ddos-only-tc-acl-design.md`.
