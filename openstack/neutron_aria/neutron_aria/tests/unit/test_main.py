@@ -42,7 +42,60 @@ class FakeLocalClient(object):
         return {"generation": snapshot["generation"], "results": []}
 
     def status(self):
-        return {"generation": 0, "managed_ports": [], "active_instances": []}
+        if not self.snapshots:
+            return {"generation": 0, "managed_ports": [], "active_instances": []}
+
+        snapshot = self.snapshots[-1]
+        managed_ports = []
+        port_statuses = []
+        for port in snapshot.get("ports") or []:
+            if not (port.get("eligible") or port.get("managed_domains")):
+                continue
+            port_id = port["port_id"]
+            ifname = port.get("ifname") or "tap%s" % port_id[:11]
+            domains = []
+            for domain in port.get("managed_domains") or []:
+                if domain == "acl":
+                    acl = port.get("acl") or {}
+                    domain_status = acl.get("status") or "ready"
+                    effective_action = (
+                        acl.get("effective_action") or
+                        ("enforce" if domain_status == "ready" else "bypass")
+                    )
+                else:
+                    domain_status = "ready"
+                    effective_action = None
+                domains.append({
+                    "domain": domain,
+                    "status": domain_status,
+                    "reason": None,
+                    "effective_action": effective_action,
+                })
+            managed_ports.append({"port_id": port_id, "ifname": ifname})
+            port_statuses.append({
+                "port_id": port_id,
+                "ifname": ifname,
+                "generation": snapshot["generation"],
+                "desired_hash": snapshot.get("desired_hash"),
+                "status": "ready",
+                "reason": None,
+                "managed_domains": list(port.get("managed_domains") or []),
+                "domains": domains,
+            })
+        return {
+            "generation": snapshot["generation"],
+            "accepted_generation": snapshot["generation"],
+            "applied_generation": snapshot["generation"],
+            "pending_generation": None,
+            "desired_hash": snapshot.get("desired_hash"),
+            "applied_desired_hash": snapshot.get("desired_hash"),
+            "wal_status": "commit_written",
+            "wal_replay_failures": 0,
+            "authority_state": "ready",
+            "managed_ports": managed_ports,
+            "port_statuses": port_statuses,
+            "active_instances": [port["ifname"] for port in managed_ports],
+        }
 
 
 class FakeAriaAclClient(object):

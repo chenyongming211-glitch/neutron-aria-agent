@@ -26,10 +26,22 @@ RECOVERY_REQUIRED_AUTHORITY_STATES = frozenset((
     "pending_recovery_commit_failed",
     "recovered_pending_full_resync",
 ))
+TERMINAL_FAILURE_AUTHORITY_STATES = RECOVERY_REQUIRED_AUTHORITY_STATES.union((
+    "runtime_degraded",
+    "degraded",
+    "blocked",
+    "error",
+    "unsupported",
+    "detached",
+))
 
 
 def _elapsed_ms(started_at):
     return int((time.time() - started_at) * 1000)
+
+
+def _status_token(value):
+    return str(value or "").strip().lower()
 
 
 def _acl_index_profile(acl_index):
@@ -964,7 +976,16 @@ class SnapshotSynchronizer(object):
             status = self.local_client.status()
         except LocalApiError:
             return None
-        if not self._status_converged(snapshot, projected_port_ids, status):
+        verdict, reason = self._snapshot_status_verdict(
+            snapshot,
+            projected_port_ids,
+            status,
+        )
+        if verdict == "failed":
+            raise LocalApiError(
+                "pending snapshot failed terminal-ready validation: %s" % reason
+            )
+        if verdict != "ready":
             return None
         LOG.warning(
             "snapshot_pending_already_converged host=%s generation=%s "
@@ -1085,10 +1106,12 @@ class SnapshotSynchronizer(object):
                     exc,
                 )
             else:
-                if (
-                    self._status_converged(snapshot, projected_port_ids, status) or
-                    self._status_transaction_committed(snapshot, status)
-                ):
+                verdict, reason = self._snapshot_status_verdict(
+                    snapshot,
+                    projected_port_ids,
+                    status,
+                )
+                if verdict == "ready":
                     LOG.warning(
                         "snapshot_convergence_reached host=%s generation=%s "
                         "attempt=%s projected_ports=%s managed_ports=%s "
@@ -1114,8 +1137,16 @@ class SnapshotSynchronizer(object):
                         status_poll_total_ms=_elapsed_ms(poll_started),
                     )
                     return status
+                if verdict == "failed":
+                    raise LocalApiError(
+                        "snapshot status failed terminal-ready validation: %s" %
+                        reason
+                    )
                 last_error = LocalApiTimeoutError(
-                    "status did not converge for generation %s" % snapshot["generation"]
+                    "status did not converge for generation %s: %s" % (
+                        snapshot["generation"],
+                        reason,
+                    )
                 )
                 LOG.warning(
                     "snapshot_convergence_not_reached host=%s generation=%s "
@@ -1193,10 +1224,12 @@ class SnapshotSynchronizer(object):
                     exc,
                 )
             else:
-                if (
-                    self._status_converged(snapshot, projected_port_ids, status) or
-                    self._status_transaction_committed(snapshot, status)
-                ):
+                verdict, reason = self._snapshot_status_verdict(
+                    snapshot,
+                    projected_port_ids,
+                    status,
+                )
+                if verdict == "ready":
                     LOG.warning(
                         "snapshot_timeout_converged host=%s generation=%s "
                         "attempt=%s projected_ports=%s managed_ports=%s",
@@ -1228,8 +1261,16 @@ class SnapshotSynchronizer(object):
                         "port_statuses": status.get("port_statuses") or [],
                         "recovered_after_timeout": True,
                     }
+                if verdict == "failed":
+                    raise LocalApiError(
+                        "snapshot status failed terminal-ready validation: %s" %
+                        reason
+                    )
                 last_error = LocalApiTimeoutError(
-                    "status did not converge for generation %s" % snapshot["generation"]
+                    "status did not converge for generation %s: %s" % (
+                        snapshot["generation"],
+                        reason,
+                    )
                 )
                 LOG.warning(
                     "snapshot_timeout_not_converged host=%s generation=%s "
@@ -1371,21 +1412,33 @@ class SnapshotSynchronizer(object):
                 snapshot["generation"],
                 exc,
             )
-            return None
-        if (
-            self._status_converged(snapshot, projected_port_ids, status) or
-            self._status_transaction_committed(snapshot, status)
-        ):
+            raise LocalApiError(
+                "post-apply status unavailable for generation %s: %s" % (
+                    snapshot["generation"],
+                    exc,
+                )
+            )
+        verdict, reason = self._snapshot_status_verdict(
+            snapshot,
+            projected_port_ids,
+            status,
+        )
+        if verdict == "ready":
             return status
         LOG.warning(
             "post_apply_status_not_converged host=%s generation=%s "
-            "response_status=%s status_generation=%s",
+            "response_status=%s status_generation=%s verdict=%s reason=%s",
             self.host,
             snapshot["generation"],
             response.get("status"),
             status.get("generation"),
+            verdict,
+            reason,
         )
-        if response.get("status") in ("accepted", "pending"):
+        if (
+            verdict == "pending" and
+            response.get("status") in ("accepted", "pending")
+        ):
             return self._poll_snapshot_convergence(
                 snapshot,
                 projected_port_ids,
@@ -1393,7 +1446,9 @@ class SnapshotSynchronizer(object):
                 failure_phase="accepted_status_failed",
                 attempts=self._accepted_convergence_attempts(),
             )
-        return None
+        raise LocalApiError(
+            "post-apply status failed terminal-ready validation: %s" % reason
+        )
 
     def _pending_snapshot_converged(self, pending, status):
         snapshot = {
@@ -1436,44 +1491,216 @@ class SnapshotSynchronizer(object):
         return bool(status_hash and pending.get("desired_hash"))
 
     def _status_converged(self, snapshot, projected_port_ids, status):
-        if self._status_has_pending_generation(status):
-            return False
-        status_generation = self._applied_generation_from_status(status)
-        if status_generation < int(snapshot["generation"]):
-            return False
-        status_hash = (
-            status.get("applied_desired_hash") or
-            status.get("desired_hash")
-        )
-        if status_hash and snapshot.get("desired_hash") and status_hash != snapshot.get("desired_hash"):
-            return False
+        return self._snapshot_status_verdict(
+            snapshot, projected_port_ids, status,
+        )[0] == "ready"
 
+    def _snapshot_status_verdict(self, snapshot, projected_port_ids, status):
+        if not status:
+            return "pending", "status is unavailable"
+
+        expected_generation = int(snapshot["generation"])
+        authority_state = status.get("authority_state")
+        if authority_state in TERMINAL_FAILURE_AUTHORITY_STATES:
+            return (
+                "failed",
+                "authority_state is %s" % (authority_state or "missing"),
+            )
+
+        if self._status_has_pending_generation(status):
+            return "pending", "pending generation remains"
+
+        applied_value = status.get("applied_generation")
+        try:
+            applied_generation = (
+                int(applied_value) if applied_value is not None else None
+            )
+        except (TypeError, ValueError):
+            return "failed", "applied_generation is invalid"
+        if applied_generation is None:
+            if self._generation_floor_from_status(status) < expected_generation:
+                return "pending", "applied generation has not reached target"
+            return "failed", "applied_generation is missing"
+        if applied_generation < expected_generation:
+            return "pending", "applied generation has not reached target"
+        if applied_generation != expected_generation:
+            return (
+                "failed",
+                "applied generation %s does not match %s" % (
+                    applied_generation,
+                    expected_generation,
+                ),
+            )
+
+        expected_hash = snapshot.get("desired_hash")
+        applied_hash = status.get("applied_desired_hash")
+        if not expected_hash:
+            return "failed", "snapshot desired_hash is missing"
+        if not applied_hash:
+            return "failed", "applied_desired_hash is missing"
+        if applied_hash != expected_hash:
+            return "failed", "applied desired hash does not match snapshot"
+        if authority_state != "ready":
+            return (
+                "failed",
+                "authority_state is %s, not ready" %
+                (authority_state or "missing"),
+            )
+
+        projected_port_ids = set(
+            port_id for port_id in projected_port_ids or [] if port_id
+        )
         if not projected_port_ids:
-            return True
+            return "ready", None
 
         managed = status.get("managed_ports")
         if managed is None:
-            return False
+            return "failed", "managed port evidence is missing"
         managed_port_ids = set(
             port.get("port_id") for port in managed
             if port.get("port_id")
         )
-        return projected_port_ids.issubset(managed_port_ids)
+        missing_managed = sorted(projected_port_ids - managed_port_ids)
+        if missing_managed:
+            return (
+                "failed",
+                "projected ports are not managed: %s" % missing_managed,
+            )
 
-    def _status_transaction_committed(self, snapshot, status):
-        if self._status_has_pending_generation(status):
-            return False
-        status_generation = self._applied_generation_from_status(status)
-        if status_generation < int(snapshot["generation"]):
-            return False
-        expected_hash = snapshot.get("desired_hash")
-        if not expected_hash:
-            return False
-        status_hash = (
-            status.get("applied_desired_hash") or
-            status.get("desired_hash")
+        snapshot_ports = dict(
+            (port.get("port_id"), port)
+            for port in snapshot.get("ports") or []
+            if port.get("port_id")
         )
-        return bool(status_hash and status_hash == expected_hash)
+        port_statuses = dict(
+            (port.get("port_id"), port)
+            for port in status.get("port_statuses") or []
+            if port.get("port_id")
+        )
+        for port_id in sorted(projected_port_ids):
+            runtime_port = port_statuses.get(port_id)
+            if runtime_port is None:
+                return "failed", "runtime status is missing for port %s" % port_id
+
+            snapshot_port = snapshot_ports.get(port_id)
+            if snapshot_port is None:
+                required_domains = list(self.managed_domains)
+            else:
+                required_domains = list(
+                    snapshot_port.get("managed_domains") or []
+                )
+            runtime_domains = dict(
+                (_status_token(domain.get("domain")), domain)
+                for domain in runtime_port.get("domains") or []
+                if domain.get("domain")
+            )
+            expects_not_requested = False
+            for domain in required_domains:
+                domain_name = _status_token(domain)
+                runtime_domain = runtime_domains.get(domain_name)
+                if runtime_domain is None:
+                    return (
+                        "failed",
+                        "runtime status is missing for port %s domain %s" % (
+                            port_id,
+                            domain_name,
+                        ),
+                    )
+                domain_verdict, reason = self._domain_status_verdict(
+                    domain_name,
+                    snapshot_port,
+                    runtime_domain,
+                )
+                if domain_verdict == "failed":
+                    return "failed", "port %s %s" % (port_id, reason)
+                if domain_verdict == "not_requested":
+                    expects_not_requested = True
+
+            runtime_port_status = _status_token(runtime_port.get("status"))
+            expected_port_status = (
+                "not_requested" if expects_not_requested else "ready"
+            )
+            if runtime_port_status != expected_port_status:
+                return (
+                    "failed",
+                    "port %s runtime status %s does not match %s" % (
+                        port_id,
+                        runtime_port_status or "missing",
+                        expected_port_status,
+                    ),
+                )
+
+        return "ready", None
+
+    def _domain_status_verdict(self, domain, snapshot_port, runtime_domain):
+        runtime_status = _status_token(runtime_domain.get("status"))
+        runtime_action = _status_token(runtime_domain.get("effective_action"))
+
+        if domain != "acl":
+            if runtime_status != "ready":
+                return (
+                    "failed",
+                    "domain %s runtime status is %s" % (
+                        domain,
+                        runtime_status or "missing",
+                    ),
+                )
+            return "ready", None
+
+        desired_acl = None
+        if snapshot_port is not None and "acl" in snapshot_port:
+            desired_acl = snapshot_port.get("acl") or {}
+        if desired_acl is None:
+            if runtime_status != "ready" or runtime_action == "bypass":
+                return (
+                    "failed",
+                    "acl runtime status/action is %s/%s" % (
+                        runtime_status or "missing",
+                        runtime_action or "missing",
+                    ),
+                )
+            return "ready", None
+
+        desired_status = _status_token(desired_acl.get("status") or "ready")
+        desired_action = _status_token(desired_acl.get("effective_action"))
+        desired_enabled = desired_acl.get("enabled") is not False
+        if (
+            desired_status == "not_requested" and
+            not desired_enabled and
+            desired_action in ("", "bypass")
+        ):
+            if runtime_status == "not_requested" and runtime_action == "bypass":
+                return "not_requested", None
+            return (
+                "failed",
+                "acl runtime status/action is %s/%s for not-requested desired ACL" % (
+                    runtime_status or "missing",
+                    runtime_action or "missing",
+                ),
+            )
+
+        if (
+            desired_status == "ready" and
+            desired_enabled and
+            desired_action in ("", "enforce")
+        ):
+            if runtime_status == "ready" and runtime_action == "enforce":
+                return "ready", None
+            return (
+                "failed",
+                "acl runtime status/action is %s/%s for ready desired ACL" % (
+                    runtime_status or "missing",
+                    runtime_action or "missing",
+                ),
+            )
+
+        return (
+            "failed",
+            "desired acl is not terminal-ready: %s/%s" % (
+                desired_status or "missing",
+                desired_action or "missing",
+            ),
+        )
 
     def _delete_status_converged(self, port_id, status):
         managed = status.get("managed_ports")
