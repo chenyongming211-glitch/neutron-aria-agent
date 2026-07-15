@@ -1,7 +1,7 @@
-use crate::control_plane::{ControlPlane, MANAGED_SHARED_PIN_NAMESPACE};
+use crate::control_plane::{ControlPlane, ControlPlaneError, MANAGED_SHARED_PIN_NAMESPACE};
 use crate::instance::FirewallInstance;
 use regex::Regex;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -15,11 +15,40 @@ pub struct RuntimeReconcileResult {
     pub reason: Option<String>,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ManagedAttachMode {
+    StandaloneRestoreAfterTcAttach,
+    NeutronResyncRequired { acl_managed: bool },
+}
+
+async fn complete_managed_registration_transaction<
+    T,
+    Failure,
+    FailureFuture,
+    Success,
+    SuccessFuture,
+>(
+    activation: Result<(), String>,
+    transaction: T,
+    on_failure: Failure,
+    on_success: Success,
+) -> Result<(), String>
+where
+    Failure: FnOnce(T, String) -> FailureFuture,
+    FailureFuture: std::future::Future<Output = Result<(), String>>,
+    Success: FnOnce(T) -> SuccessFuture,
+    SuccessFuture: std::future::Future<Output = Result<(), String>>,
+{
+    match activation {
+        Ok(()) => on_success(transaction).await,
+        Err(error) => on_failure(transaction, error).await,
+    }
+}
+
 pub struct TapRegistry {
     instances: RwLock<HashMap<String, FirewallInstance>>,
     /// Per-iface mutex to serialize attach/detach on the same interface
     iface_locks: RwLock<HashMap<String, Arc<Mutex<()>>>>,
-    runtime_lock: Mutex<()>,
     pub ebpf_path: PathBuf,
     pub base_pin_path: PathBuf,
     pub base_state_path: PathBuf,
@@ -40,7 +69,6 @@ impl TapRegistry {
         Self {
             instances: RwLock::new(HashMap::new()),
             iface_locks: RwLock::new(HashMap::new()),
-            runtime_lock: Mutex::new(()),
             ebpf_path: PathBuf::from(ebpf_path),
             base_pin_path: PathBuf::from(base_pin_path),
             base_state_path: PathBuf::from(base_state_path),
@@ -146,13 +174,19 @@ impl TapRegistry {
     /// then removes pinned link orphans that are not present in the committed set.
     pub async fn reconcile_neutron_runtime(
         &self,
-        committed_ifaces: &[String],
+        committed_ifaces: &[(String, bool)],
     ) -> Vec<RuntimeReconcileResult> {
-        let committed: BTreeSet<String> = committed_ifaces
-            .iter()
-            .filter(|ifname| !ifname.trim().is_empty())
-            .cloned()
-            .collect();
+        let mut committed = BTreeMap::new();
+        for (ifname, acl_managed) in committed_ifaces {
+            if ifname.trim().is_empty() {
+                continue;
+            }
+            committed
+                .entry(ifname.clone())
+                .and_modify(|managed| *managed |= *acl_managed)
+                .or_insert(*acl_managed);
+        }
+        let committed_names: BTreeSet<String> = committed.keys().cloned().collect();
         let pinned_ifaces = match self.managed_link_pin_ifaces() {
             Ok(ifaces) => ifaces,
             Err(e) => {
@@ -166,8 +200,8 @@ impl TapRegistry {
         };
 
         let mut results = Vec::new();
-        for ifname in &committed {
-            match self.attach(ifname).await {
+        for (ifname, acl_managed) in &committed {
+            match self.attach_neutron(ifname, *acl_managed).await {
                 Ok(()) => results.push(RuntimeReconcileResult {
                     ifname: ifname.clone(),
                     action: "claim_committed".to_string(),
@@ -183,7 +217,8 @@ impl TapRegistry {
             }
         }
 
-        for ifname in pinned_ifaces.difference(&committed) {
+        for ifname in pinned_ifaces.difference(&committed_names) {
+            let _runtime_guard = self.control_plane.lock_runtime_lifecycle().await;
             match self.remove_orphaned_managed_link_pins(ifname) {
                 Ok(()) => results.push(RuntimeReconcileResult {
                     ifname: ifname.clone(),
@@ -205,6 +240,37 @@ impl TapRegistry {
 
     /// Attach XDP firewall to a tap interface. Idempotent: skips if already attached.
     pub async fn attach(&self, iface: &str) -> Result<(), String> {
+        self.attach_with_mode(iface, ManagedAttachMode::StandaloneRestoreAfterTcAttach)
+            .await
+    }
+
+    pub async fn attach_neutron(&self, iface: &str, acl_managed: bool) -> Result<(), String> {
+        self.attach_with_mode(
+            iface,
+            ManagedAttachMode::NeutronResyncRequired { acl_managed },
+        )
+        .await
+    }
+
+    pub async fn update_neutron_acl_runtime_gate(
+        &self,
+        instance: &str,
+        conntrack_enabled: bool,
+        acl_enabled: bool,
+        allow_recovery_publication: bool,
+    ) -> Result<(), ControlPlaneError> {
+        let _runtime_guard = self.control_plane.lock_runtime_lifecycle().await;
+        self.control_plane
+            .update_neutron_acl_runtime_gate_serialized(
+                instance,
+                conntrack_enabled,
+                acl_enabled,
+                allow_recovery_publication,
+            )
+            .await
+    }
+
+    async fn attach_with_mode(&self, iface: &str, mode: ManagedAttachMode) -> Result<(), String> {
         // Idempotent check
         {
             let instances = self.instances.read().await;
@@ -215,7 +281,7 @@ impl TapRegistry {
 
         let iface_lock = self.get_iface_lock(iface).await;
         let _guard = iface_lock.lock().await;
-        let _runtime_guard = self.runtime_lock.lock().await;
+        let _runtime_guard = self.control_plane.lock_runtime_lifecycle().await;
 
         // Re-check after acquiring lock
         {
@@ -255,7 +321,7 @@ impl TapRegistry {
 
         let prepared = match self
             .control_plane
-            .prepare_managed_registration(iface, &runtime_pin)
+            .prepare_managed_registration(iface, &runtime_pin, mode)
             .await
         {
             Ok(prepared) => prepared,
@@ -268,44 +334,132 @@ impl TapRegistry {
         };
 
         if let Err(e) = instance.reserve_persisted_live_iface() {
+            let quiesce_error = self
+                .control_plane
+                .quiesce_managed_registration(&prepared)
+                .err();
             self.control_plane
                 .abort_managed_registration(prepared)
                 .await;
             if runtime_pin.created_shared_runtime {
                 self.cleanup_shared_runtime_dir();
             }
-            return Err(format!(
-                "failed to reserve persisted live runtime state: {}",
-                e
-            ));
+            return Err(match quiesce_error {
+                Some(quiesce_error) => format!(
+                    "failed to reserve persisted live runtime state: {}; ACL/CT quiesce failed: {}",
+                    e, quiesce_error
+                ),
+                None => format!("failed to reserve persisted live runtime state: {}", e),
+            });
         }
 
-        if let Err(e) = instance.attach_links_from_pinned_runtime(&runtime_pin) {
-            if let Err(release_err) = instance.release_persisted_live_iface() {
-                warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
+        let attached = match instance.attach_links_from_pinned_runtime(&runtime_pin) {
+            Ok(attached) => attached,
+            Err(e) => {
+                let quiesce_error = self
+                    .control_plane
+                    .quiesce_managed_registration(&prepared)
+                    .err();
+                if let Err(release_err) = instance.release_persisted_live_iface() {
+                    warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
+                }
+                self.control_plane
+                    .abort_managed_registration(prepared)
+                    .await;
+                if runtime_pin.created_shared_runtime {
+                    self.cleanup_shared_runtime_dir();
+                }
+                return Err(match quiesce_error {
+                    Some(quiesce_error) => format!(
+                        "interface link attach failed: {}; ACL/CT quiesce failed: {}",
+                        e, quiesce_error
+                    ),
+                    None => format!("interface link attach failed: {}", e),
+                });
             }
-            self.control_plane
-                .abort_managed_registration(prepared)
-                .await;
-            if runtime_pin.created_shared_runtime {
-                self.cleanup_shared_runtime_dir();
+        };
+
+        if prepared.requires_tc_acl_links() {
+            if let Err(e) = instance.require_tc_acl_links() {
+                let quiesce_error = self
+                    .control_plane
+                    .quiesce_managed_registration(&prepared)
+                    .err();
+                if let Err(rollback_err) = instance.rollback_attached_links(&attached, false) {
+                    warn!(instance = %iface, error = %rollback_err, "failed to roll back links after required TC readiness failure");
+                }
+                if let Err(release_err) = instance.release_persisted_live_iface() {
+                    warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
+                }
+                self.control_plane
+                    .abort_managed_registration(prepared)
+                    .await;
+                if runtime_pin.created_shared_runtime {
+                    self.cleanup_shared_runtime_dir();
+                }
+                return Err(match quiesce_error {
+                    Some(quiesce_error) => format!(
+                        "required TC ACL links unavailable: {}; ACL/CT quiesce failed: {}",
+                        e, quiesce_error
+                    ),
+                    None => format!("required TC ACL links unavailable: {}", e),
+                });
             }
-            return Err(format!("interface link attach failed: {}", e));
         }
 
-        self.control_plane.publish_managed_instance(prepared).await;
+        let activation = self
+            .control_plane
+            .activate_managed_registration(&prepared)
+            .await;
+        complete_managed_registration_transaction(
+            activation,
+            (
+                prepared,
+                instance,
+                attached,
+                runtime_pin.created_shared_runtime,
+            ),
+            |(prepared, instance, attached, created_shared_runtime), error| async move {
+                let quiesce_error = self
+                    .control_plane
+                    .quiesce_managed_registration(&prepared)
+                    .err();
+                if let Err(rollback_err) = instance.rollback_attached_links(&attached, false) {
+                    warn!(instance = %iface, error = %rollback_err, "failed to roll back links after managed runtime activation failure");
+                }
+                if let Err(release_err) = instance.release_persisted_live_iface() {
+                    warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
+                }
+                self.control_plane
+                    .abort_managed_registration(prepared)
+                    .await;
+                if created_shared_runtime {
+                    self.cleanup_shared_runtime_dir();
+                }
+                Err(match quiesce_error {
+                    Some(quiesce_error) => format!(
+                        "managed runtime activation failed: {}; ACL/CT quiesce failed: {}",
+                        error, quiesce_error
+                    ),
+                    None => format!("managed runtime activation failed: {}", error),
+                })
+            },
+            |(prepared, instance, _attached, _created_shared_runtime)| async move {
+                self.control_plane.publish_managed_instance(prepared).await;
 
-        let mut instances = self.instances.write().await;
-        instances.insert(iface.to_string(), instance);
-
-        Ok(())
+                let mut instances = self.instances.write().await;
+                instances.insert(iface.to_string(), instance);
+                Ok(())
+            },
+        )
+        .await
     }
 
     /// Detach XDP firewall from a tap interface.
     pub async fn detach(&self, iface: &str) -> Result<(), String> {
         let iface_lock = self.get_iface_lock(iface).await;
         let _guard = iface_lock.lock().await;
-        let _runtime_guard = self.runtime_lock.lock().await;
+        let _runtime_guard = self.control_plane.lock_runtime_lifecycle().await;
 
         let instance_exists = {
             let instances = self.instances.read().await;
@@ -370,5 +524,57 @@ impl TapRegistry {
             }
         }
         info!("all firewall instances detached");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct TestManagedTransactionState {
+        control_plane_instances: BTreeSet<String>,
+        tap_instances: BTreeSet<String>,
+        rollback_count: usize,
+        release_count: usize,
+        abort_count: usize,
+    }
+
+    #[tokio::test]
+    async fn managed_failure_path_activation_failure_leaves_real_registries_empty() {
+        let state = Arc::new(Mutex::new(TestManagedTransactionState::default()));
+        let failure_state = state.clone();
+        let publish_state = state.clone();
+
+        let error = complete_managed_registration_transaction(
+            Err("forced activation failure".to_string()),
+            "tap-failed".to_string(),
+            move |_iface, activation_error| async move {
+                let mut state = failure_state.lock().await;
+                state.rollback_count += 1;
+                state.release_count += 1;
+                state.abort_count += 1;
+                Err(format!(
+                    "managed runtime activation failed: {}",
+                    activation_error
+                ))
+            },
+            move |iface| async move {
+                let mut state = publish_state.lock().await;
+                state.control_plane_instances.insert(iface.clone());
+                state.tap_instances.insert(iface);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("forced activation failure"));
+        let state = state.lock().await;
+        assert!(state.control_plane_instances.is_empty());
+        assert!(state.tap_instances.is_empty());
+        assert_eq!(state.rollback_count, 1);
+        assert_eq!(state.release_count, 1);
+        assert_eq!(state.abort_count, 1);
     }
 }

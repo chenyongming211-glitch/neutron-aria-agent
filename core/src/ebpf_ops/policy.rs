@@ -133,11 +133,6 @@ pub fn add_policy_in_bank(
     _ebpf_path: &str,
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
-    let prog_path = format!("{}/xdp_firewall", pin_path);
-    if !std::path::Path::new(&prog_path).exists() {
-        return Err("Firewall not started. Run 'system start' first.".to_string());
-    }
-
     validate_policy_ports(proto, ports)?;
 
     let is_all_ports = match ports {
@@ -165,8 +160,16 @@ pub fn add_policy_in_bank(
                             pad: 0,
                         };
                         if let Err(e) = port_pool.insert(&key, &rule_action, 0) {
-                            let _ = delete_port_set(idx, ports_str, runtime, _ebpf_path);
-                            return Err(format!("set port bitmap error: {:?}", e));
+                            let mut error = format!("set port bitmap error: {:?}", e);
+                            if let Err(cleanup_error) =
+                                delete_port_set(idx, ports_str, runtime, _ebpf_path)
+                            {
+                                error.push_str(&format!(
+                                    "; rollback port bitmap {} failed: {}",
+                                    idx, cleanup_error
+                                ));
+                            }
+                            return Err(error);
                         }
                     }
                     info!(
@@ -192,12 +195,20 @@ pub fn add_policy_in_bank(
         bitmap_idx: bitmap_idx.unwrap_or(0),
     };
     if let Err(e) = policy_table.insert(&key, &value, 0) {
+        let mut error = format!("insert error: {:?}", e);
         if is_new_port_set {
             if let (Some(idx), Some(ports_str)) = (bitmap_idx, ports) {
-                let _ = delete_port_set(idx, ports_str, runtime, _ebpf_path);
+                if let Err(cleanup_error) =
+                    delete_port_set(idx, ports_str, runtime, _ebpf_path)
+                {
+                    error.push_str(&format!(
+                        "; rollback port bitmap {} failed: {}",
+                        idx, cleanup_error
+                    ));
+                }
             }
         }
-        return Err(format!("insert error: {:?}", e));
+        return Err(error);
     }
 
     let dir_str = if direction == 1 { "egress" } else { "ingress" };
@@ -258,20 +269,14 @@ pub fn delete_policy_in_bank(
     _ebpf_path: &str,
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
-    let prog_path = format!("{}/xdp_firewall", pin_path);
-    if !std::path::Path::new(&prog_path).exists() {
-        return Err("Firewall not started. Run 'system start' first.".to_string());
-    }
-
     let mut policy_table = open_pinned_policy_table(pin_path)?;
 
     let bank = normalize_acl_bank(bank);
     let key = policy_key_for_bank(runtime.tap_id, src_id, dst_id, proto, direction, bank);
-    policy_table
-        .remove(&key)
-        .map_err(|e| format!("remove policy error: {:?}", e))?;
-
-    info!(src_id, dst_id, proto, direction, bank, "deleted policy");
+    match classify_map_delete(policy_table.remove(&key), "remove policy")? {
+        true => info!(src_id, dst_id, proto, direction, bank, "deleted policy"),
+        false => info!(src_id, dst_id, proto, direction, bank, "policy not present during delete"),
+    }
     Ok(())
 }
 
@@ -282,27 +287,23 @@ pub fn delete_port_set(
     _ebpf_path: &str,
 ) -> Result<(), String> {
     let pin_path = runtime.pin_path;
-    let prog_path = format!("{}/xdp_firewall", pin_path);
-    if !std::path::Path::new(&prog_path).exists() {
-        return Ok(());
-    }
-
     let mut port_pool = open_pinned_port_pool(pin_path)?;
 
-    let rules = parse_normalized_ports(ports_normalized)?;
-    for (start, end, _) in rules {
-        for port in start..=end {
-            let key = PortKey {
+    let keys = parse_normalized_ports(ports_normalized)?
+        .into_iter()
+        .flat_map(|(start, end, _)| {
+            (start..=end).map(move |port| PortKey {
                 tap_id: runtime.tap_id,
                 idx: bitmap_idx,
                 port,
                 pad: 0,
-            };
-            let _ = port_pool.remove(&key);
-        }
-    }
-
-    Ok(())
+            })
+        });
+    execute_map_delete_batch(
+        keys,
+        |key| port_pool.remove(&key),
+        "remove port bitmap entry",
+    )
 }
 
 #[cfg(test)]

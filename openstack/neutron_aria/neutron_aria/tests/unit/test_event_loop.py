@@ -397,6 +397,15 @@ class RecoveringRemotePendingClient(FakeLocalClient):
         return self.pending_status
 
 
+class FailingRemotePendingRecoveryClient(RecoveringRemotePendingClient):
+    def recover_pending_snapshot(self, expected_generation, expected_desired_hash=None):
+        self.recoveries.append({
+            "expected_generation": expected_generation,
+            "expected_desired_hash": expected_desired_hash,
+        })
+        raise LocalApiError("pending recovery failed")
+
+
 class StalePendingThenConvergedLocalClient(FakeLocalClient):
     def __init__(self, stale_status):
         FakeLocalClient.__init__(self)
@@ -851,6 +860,139 @@ class EventLoopTestCase(unittest.TestCase):
                 second_result["snapshot"]["generation"],
             )
             self.assertTrue(second_result["status"]["ready"])
+        finally:
+            shutil.rmtree(state_dir)
+
+    def test_remote_pending_action_recovers_blocked_same_hash(self):
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        for authority_state in (
+            "blocked_recovery_required",
+            "pending_recovery_commit_failed",
+        ):
+            with self.subTest(authority_state=authority_state):
+                action = sync._remote_pending_action({}, {
+                    "accepted_generation": 10,
+                    "applied_generation": 10,
+                    "pending_generation": 11,
+                    "desired_hash": "hash-11",
+                    "applied_desired_hash": "hash-10",
+                    "authority_state": authority_state,
+                }, "hash-11")
+
+                self.assertEqual("recover", action["action"])
+                self.assertEqual(11, action["generation"])
+                self.assertEqual("hash-11", action["remote_desired_hash"])
+
+    def test_full_resync_recovers_blocked_same_hash_before_submit(self):
+        port_source = StaticPortSource([{
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+        probe = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        ).full_resync()
+        desired_hash = probe["snapshot"]["desired_hash"]
+        local_client = RecoveringRemotePendingClient({
+            "generation": 11,
+            "accepted_generation": 10,
+            "applied_generation": 10,
+            "pending_generation": 11,
+            "desired_hash": desired_hash,
+            "applied_desired_hash": "hash-10",
+            "authority_state": "blocked_recovery_required",
+            "managed_ports": [],
+            "active_instances": [],
+        })
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            port_source,
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            timeout_convergence_attempts=1,
+            timeout_convergence_interval=0,
+        )
+
+        result = sync.full_resync()
+
+        self.assertEqual([{
+            "expected_generation": 11,
+            "expected_desired_hash": desired_hash,
+        }], local_client.recoveries)
+        self.assertEqual(1, len(local_client.snapshots))
+        self.assertGreater(result["snapshot"]["generation"], 10)
+        self.assertTrue(result["status"]["ready"])
+
+    def test_failed_blocked_same_hash_recovery_preserves_local_pending(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            port_source = StaticPortSource([{
+                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "device_owner": "compute:nova",
+                "binding:host_id": "ostack2",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+            }])
+            probe = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                FakeLocalClient(),
+                managed_domains=["acl"],
+            ).full_resync()
+            desired_hash = probe["snapshot"]["desired_hash"]
+            store = SnapshotStateStore(state_dir)
+            store.prepare_snapshot_at_generation(
+                probe["snapshot"],
+                11,
+                desired_hash=desired_hash,
+            )
+            local_client = FailingRemotePendingRecoveryClient({
+                "generation": 11,
+                "accepted_generation": 10,
+                "applied_generation": 10,
+                "pending_generation": 11,
+                "desired_hash": desired_hash,
+                "applied_desired_hash": "hash-10",
+                "authority_state": "blocked_recovery_required",
+                "managed_ports": [],
+                "active_instances": [],
+            })
+            sync = SnapshotSynchronizer(
+                "ostack2",
+                port_source,
+                FakeOvsReader(),
+                local_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+                timeout_convergence_attempts=1,
+                timeout_convergence_interval=0,
+            )
+
+            result = sync.safe_full_resync()
+            pending = SnapshotStateStore(state_dir).pending_snapshot()
+
+            self.assertEqual([{
+                "expected_generation": 11,
+                "expected_desired_hash": desired_hash,
+            }], local_client.recoveries)
+            self.assertEqual([], local_client.snapshots)
+            self.assertTrue(result["status"]["degraded"])
+            self.assertEqual(11, pending["generation"])
+            self.assertEqual(desired_hash, pending["desired_hash"])
         finally:
             shutil.rmtree(state_dir)
 
@@ -1425,7 +1567,7 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertEqual("acl-binding", port_status["binding_id"])
         self.assertEqual("ready", port_status["domains"][0]["status"])
 
-    def test_full_resync_refreshes_stale_not_requested_acl_status(self):
+    def test_full_resync_preserves_runtime_not_requested_acl_status(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         acl_index = EffectiveAclIndex(
             policies=[{"id": "acl-policy", "default_action": "allow"}],
@@ -1465,11 +1607,11 @@ class EventLoopTestCase(unittest.TestCase):
         result = sync.full_resync()
 
         port_status = result["status"]["last_port_statuses"][0]
-        self.assertEqual("ready", port_status["status"])
-        self.assertEqual("enforce", port_status["effective_action"])
-        self.assertEqual("ready", port_status["reason"])
-        self.assertEqual("ready", port_status["domains"][0]["status"])
-        self.assertEqual("enforce", port_status["domains"][0]["effective_action"])
+        self.assertEqual("not_requested", port_status["status"])
+        self.assertEqual("bypass", port_status["effective_action"])
+        self.assertEqual("no_enabled_binding", port_status["reason"])
+        self.assertEqual("not_requested", port_status["domains"][0]["status"])
+        self.assertEqual("bypass", port_status["domains"][0]["effective_action"])
 
     def test_dry_run_port_update_builds_scoped_snapshot_without_submit(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -1789,9 +1931,9 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertTrue(result["submitted"])
         self.assertEqual("degraded", acl["status"])
         self.assertEqual("bypass", acl["effective_action"])
-        self.assertIn("invalid_rule_priority:bad-rule", acl["reason"])
+        self.assertIn("invalid_acl_priority:bad-rule:invalid", acl["reason"])
         self.assertEqual(
-            [{"reason": "invalid_rule_priority:bad-rule", "count": 1}],
+            [{"reason": "invalid_acl_priority:bad-rule:invalid", "count": 1}],
             result["status"]["degraded_reasons"],
         )
         self.assertIn({
@@ -1800,6 +1942,51 @@ class EventLoopTestCase(unittest.TestCase):
             "effective_action": "bypass",
             "count": 1,
         }, result["status"]["domain_counts"])
+
+    def test_status_projection_never_overwrites_runtime_bypass(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        status = {
+            "generation": 8,
+            "managed_ports": [{"port_id": port_id}],
+            "port_statuses": [{
+                "port_id": port_id,
+                "status": "degraded",
+                "effective_action": "bypass",
+                "reason": "acl_apply_failed",
+                "domains": [{
+                    "domain": "acl",
+                    "status": "degraded",
+                    "effective_action": "bypass",
+                    "reason": "acl_apply_failed",
+                }],
+            }],
+        }
+        snapshot = {"ports": [{
+            "port_id": port_id,
+            "acl": {
+                "enabled": True,
+                "status": "ready",
+                "effective_action": "enforce",
+                "reason": "ready",
+                "policy_id": "policy-1",
+            },
+        }]}
+
+        row = sync._port_statuses_from_status(status, snapshot)[0]
+
+        self.assertEqual("degraded", row["status"])
+        self.assertEqual("bypass", row["effective_action"])
+        self.assertEqual("acl_apply_failed", row["reason"])
+        self.assertEqual("degraded", row["domains"][0]["status"])
+        self.assertEqual("bypass", row["domains"][0]["effective_action"])
+        self.assertEqual("acl_apply_failed", row["domains"][0]["reason"])
 
     def test_full_resync_reloads_acl_source_each_time(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

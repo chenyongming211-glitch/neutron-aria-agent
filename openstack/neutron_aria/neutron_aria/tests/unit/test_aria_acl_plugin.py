@@ -4,11 +4,14 @@ import os
 import tempfile
 import unittest
 
+from neutron_aria.db.aria_acl.api import AriaAclNotFound
 from neutron_aria.db.aria_acl.api import AriaAclValidationError
 from neutron_aria.db.aria_acl.api import SqliteAriaAclRepository
 from neutron_aria.db.migration import aria_acl_initial
 from neutron_aria.extensions import aria_acl
 from neutron_aria.policies import aria_acl as aria_acl_policy
+from neutron_aria.services.aria_acl.exceptions import AriaAclBadRequest
+from neutron_aria.services.aria_acl.exceptions import map_repository_error
 from neutron_aria.services.aria_acl.plugin import AriaAclAgentNotifier
 from neutron_aria.services.aria_acl.plugin import AriaAclPlugin
 
@@ -118,6 +121,87 @@ class FakePreparedClient(object):
 
 
 class AriaAclPluginTestCase(unittest.TestCase):
+    def test_repository_errors_map_to_legacy_http_semantics(self):
+        bad_request = map_repository_error(AriaAclValidationError("invalid"))
+        not_found = map_repository_error(AriaAclNotFound("missing"))
+        self.assertEqual(400, bad_request.status_code)
+        self.assertEqual(404, not_found.status_code)
+
+    def test_unexpected_repository_error_is_not_mapped(self):
+        error = RuntimeError("database offline")
+        self.assertIs(error, map_repository_error(error))
+
+    def test_policy_rejects_unsupported_default_deny(self):
+        plugin = AriaAclPlugin()
+        with self.assertRaises(AriaAclBadRequest):
+            plugin.create_aria_acl_policy(None, {
+                "aria_acl_policy": {
+                    "project_id": "project-1",
+                    "default_action": "deny",
+                }
+            })
+
+    def test_priority_zero_is_valid_but_duplicate_priority_is_rejected(self):
+        plugin = AriaAclPlugin()
+        policy = plugin.create_aria_acl_policy(None, {
+            "aria_acl_policy": {
+                "id": "policy-1",
+                "project_id": "project-1",
+                "default_action": "allow",
+            }
+        })
+        plugin.create_aria_acl_rule(None, {
+            "aria_acl_rule": {
+                "id": "rule-1",
+                "project_id": "project-1",
+                "policy_id": policy["id"],
+                "direction": "ingress",
+                "priority": 0,
+                "action": "allow",
+            }
+        })
+        with self.assertRaises(AriaAclBadRequest):
+            plugin.create_aria_acl_rule(None, {
+                "aria_acl_rule": {
+                    "id": "rule-2",
+                    "project_id": "project-1",
+                    "policy_id": policy["id"],
+                    "direction": "ingress",
+                    "priority": 0,
+                    "action": "drop",
+                }
+            })
+
+    def test_duplicate_enabled_binding_for_target_is_rejected(self):
+        plugin = AriaAclPlugin()
+        for policy_id in ("policy-1", "policy-2"):
+            plugin.create_aria_acl_policy(None, {
+                "aria_acl_policy": {
+                    "id": policy_id,
+                    "project_id": "project-1",
+                    "default_action": "allow",
+                }
+            })
+        plugin.create_aria_acl_binding(None, {
+            "aria_acl_binding": {
+                "id": "binding-1",
+                "project_id": "project-1",
+                "policy_id": "policy-1",
+                "target_type": "port",
+                "target_id": "port-1",
+            }
+        })
+        with self.assertRaises(AriaAclBadRequest):
+            plugin.create_aria_acl_binding(None, {
+                "aria_acl_binding": {
+                    "id": "binding-2",
+                    "project_id": "project-1",
+                    "policy_id": "policy-2",
+                    "target_type": "port",
+                    "target_id": "port-1",
+                }
+            })
+
     def test_extension_exposes_expected_resources_and_port_summary_fields(self):
         resources = aria_acl.get_resources()
         extended = aria_acl.get_extended_resources("2.0")
@@ -318,7 +402,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         })
 
         policy = plugin.update_aria_acl_policy(None, "policy-1", {
-            "default_action": "deny",
+            "name": "web-updated",
         })
         rule = plugin.update_aria_acl_rule(None, "rule-1", {"priority": 90})
         address_set = plugin.update_aria_acl_address_set(None, "set-1", {
@@ -346,7 +430,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
             "id": "port-1",
             "network_id": "net-1",
         })
-        self.assertEqual("deny", result["default_action"])
+        self.assertEqual("allow", result["default_action"])
         self.assertEqual(90, result["rules"][0]["priority"])
         self.assertEqual(["10.58.159.3/32"], result["rules"][0]["src_cidrs"])
 
@@ -456,13 +540,13 @@ class AriaAclPluginTestCase(unittest.TestCase):
         })
 
         self.assertRaises(
-            AriaAclValidationError,
+            AriaAclBadRequest,
             plugin.delete_aria_acl_policy,
             None,
             "policy-1",
         )
         self.assertRaises(
-            AriaAclValidationError,
+            AriaAclBadRequest,
             plugin.delete_aria_acl_address_set,
             None,
             "set-1",
@@ -554,11 +638,26 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertEqual("port", result["source"])
         self.assertEqual("policy-port", result["policy_id"])
 
+    def test_effective_api_uses_real_port_contract_eligibility(self):
+        plugin = AriaAclPlugin()
+
+        result = plugin.get_aria_acl_effective_for_port(None, {
+            "id": "port-1",
+            "device_owner": "compute:nova",
+            "binding:vif_type": "binding_failed",
+            "binding:vnic_type": "normal",
+        })
+
+        self.assertFalse(result["enabled"])
+        self.assertEqual("unsupported", result["status"])
+        self.assertEqual("bypass", result["effective_action"])
+        self.assertIn("unsupported_vif_type", result["reason"])
+
     def test_binding_rejects_missing_policy(self):
         plugin = AriaAclPlugin()
 
         self.assertRaises(
-            AriaAclValidationError,
+            AriaAclBadRequest,
             plugin.create_aria_acl_binding,
             None,
             {
@@ -578,7 +677,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         })
 
         self.assertRaises(
-            AriaAclValidationError,
+            AriaAclBadRequest,
             plugin.create_aria_acl_rule,
             None,
             {
@@ -599,7 +698,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
         })
 
         self.assertRaises(
-            AriaAclValidationError,
+            AriaAclBadRequest,
             plugin.create_aria_acl_binding,
             None,
             {
@@ -751,7 +850,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 "default_action": "allow",
             })
             updated_policy = plugin.update_aria_acl_policy(None, "policy-1", {
-                "default_action": "deny",
+                "name": "persisted-policy",
             })
             plugin.create_aria_acl_rule(None, {
                 "id": "rule-1",

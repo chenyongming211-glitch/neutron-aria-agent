@@ -125,7 +125,42 @@ Runtime status ownership:
   for the agent rather than picking one implicitly.
 - Rule action vocabulary must map to Aria datapath action vocabulary; unknown
   values are API validation errors.
-- Address set members must be bounded; large sets need explicit product limits.
+- Effective runtime compilation accepts at most 1000 enabled rules per policy
+  and at most 2048 raw members on each rule-side selector. The selector bound is
+  checked before canonicalization or deduplication. Overflow projects the ACL as
+  `degraded/bypass` with stable `acl_rule_limit_exceeded:*` or
+  `acl_selector_member_limit_exceeded:*` reasons; it does not add a Neutron API
+  create/update quota.
+- IPv4 selectors use one strict grammar in Python and Rust: surrounding
+  whitespace is trimmed, exactly four decimal octets and a `0..32` prefix are
+  required, multi-character leading-zero octets are rejected, and host bits are
+  rendered as the canonical network address.
+
+### Rule Priority Support Boundary
+
+- The northbound rule model stores `priority`, and lower numeric values remain
+  the northbound ordering convention.
+- The current eBPF datapath does not implement numeric priority ordering:
+  `PolicyKey` has no priority field and lookup remains specificity-based.
+- Only priority-independent selector shapes are accepted. Exact canonical CIDR
+  sets may share one selector group, and concretely disjoint rules remain safe.
+- Non-identical intersecting CIDRs, plus wildcard/specific fallbacks whose
+  action or port behavior changes, are rejected before enforcement and converge
+  to ACL `degraded` with `effective_action=bypass`.
+- This boundary does not add or change QoS or Mirror behavior; both remain
+  outside the Batch 5 ACL fix.
+
+### Effective ACL Validation Cache Boundary
+
+- One immutable Python `EffectiveAclIndex` compiles each policy once and caches
+  both ready and degraded results. Each port projection receives a defensive
+  copy, while revision and binding metadata remain port-specific.
+- Rust caches normalized/validated ACL templates only within one full or
+  port-scoped snapshot request. The key contains policy id, revision, and a
+  deterministic digest of every translated rule field; there is no persistent
+  cross-request cache.
+- Cache hits still render selector-group names under the current port ownership
+  prefix, so validation reuse cannot leak another port's group identity.
 
 ### Effective ACL Read Flow
 

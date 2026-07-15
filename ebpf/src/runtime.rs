@@ -1,4 +1,6 @@
-use crate::common::{normalize_acl_bank, FirewallConfig, ACL_BANK_PRIMARY, TAP_ID_UNASSIGNED};
+use crate::common::{
+    normalize_acl_bank, FirewallConfig, ACL_BANK_PRIMARY, TAP_ID_UNASSIGNED,
+};
 use crate::maps::{FIREWALL_CONFIG, TAP_CONFIG_MAP};
 
 #[inline(always)]

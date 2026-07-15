@@ -64,6 +64,7 @@ jobs:
           python3 ci/check_stage3_readiness.py
           python3 ci/check_stage3_n3_evidence.py
           python3 ci/check_smoke_python_blocks.py
+          python3 ci/check_standalone_tc_acl_smoke.py --self-test
 
       - name: Build Neutron stage-two ACL Kolla bundle
         run: RELEASE_VERSION="${GITHUB_REF_NAME:-stage2-acl-dev}" bash deploy/kolla/package/build_stage2_acl_bundle.sh
@@ -185,6 +186,26 @@ jobs:
         if: steps.rust_changes.outputs.rust_required == 'true'
         run: |
           python3 ci/check_neutron_stage1.py --require-rust --rust-toolchain stable
+          cargo +stable test --locked -p aria-agent neutron_acl_
+          cargo +stable test --locked -p aria-agent neutron_tc_acl_
+          cargo +stable test --locked -p aria-agent neutron_acl_runtime_transition_is_atomic
+          cargo +stable test --locked -p aria-agent managed_runtime_activation_
+          cargo +stable test --locked -p aria-agent neutron_acl_gate_serialization_
+          cargo +stable test --locked -p aria-agent managed_failure_path_
+          cargo +stable test --locked -p aria-agent standalone_acl_activation_
+          cargo +stable test --locked -p aria-agent standalone_review_
+          cargo +stable test --locked -p aria-agent tc_health_loss_
+          cargo +stable test --locked -p aria-agent tc_health_reconcile_
+          cargo +stable test --locked -p aria-agent tcx_attachment_
+          cargo +stable test --locked -p aria-agent preexisting_acl_runtime_
+          cargo +stable test --locked -p aria-api instance_info_reports_
+          cargo +stable test --locked -p aria-agent tc_ct_contract_metric_labels_are_exact
+          cargo +stable test --locked -p aria-core acl_ingress_hook_
+          cargo +stable test --locked -p aria-core tap_runtime_config_
+          cargo +stable test --locked -p aria-core tc_ct_
+          cargo +stable test --locked -p aria-core map_delete_
+          cargo +stable test --locked -p aria-core quarantined_
+          cargo +stable test --locked -p aria-core confirmed_bitmap_cleanup_
           cargo +stable test -p aria-agent startup_mode
           cargo +stable test -p aria-agent domain_authority
 

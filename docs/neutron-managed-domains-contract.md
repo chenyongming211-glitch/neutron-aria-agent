@@ -143,10 +143,10 @@ Rules:
 
 | Scenario | Required Behavior |
 | --- | --- |
-| `managed_domains=["acl"]` | Local ACL writes are rejected; local QoS/Mirror writes remain allowed. |
+| `managed_domains=["acl"]` | Local ACL writes are rejected. Local conntrack mutation/flush is also rejected because CT is an internal ACL lifecycle dependency; local QoS/Mirror writes remain allowed. |
 | `managed_domains=["acl","qos"]` | Local ACL and QoS writes are rejected. |
 | `managed_domains=["acl","qos","mirror"]` | Local ACL, QoS, and Mirror writes are rejected. |
-| Domain not listed in `managed_domains` | Local `ariactl` writes remain allowed, subject to normal local validation. |
+| Domain not listed in `managed_domains` | Local `ariactl` writes remain allowed, subject to normal local validation, except an internal dependency explicitly owned by a selected domain. |
 | Read-only/status/stats/diagnose | Allowed for Neutron-attached ports. |
 | Trace/drops/tcprt troubleshooting | Allowed unless the domain is explicitly added to `managed_domains` later. |
 
@@ -156,6 +156,13 @@ with:
 ```text
 LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN
 ```
+
+Conntrack remains a runtime foundation rather than an advertised Neutron
+managed domain. The Python agent still accepts only `managed_domains=acl`, and
+Rust capabilities still publish only `attach` and `acl`. ACL authority blocks
+local CT mutation so a local operator cannot invalidate `stateful=true` or
+silently re-enable the CT fast path for `stateful=false`; internal Neutron ACL
+reconcile controls both flags in the same per-tap config transaction.
 
 ## Status Contract
 

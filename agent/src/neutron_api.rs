@@ -16,18 +16,23 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use tracing::{error, info, warn};
 
-use crate::control_plane::{ControlPlane, OwnedAclGroupSpec, OwnedAclPolicySpec};
+use crate::control_plane::{
+    ControlPlane, InstanceRuntimeHealthSnapshot, OwnedAclGroupSpec, OwnedAclPolicySpec,
+};
 use crate::fault_injection;
 use crate::neutron_wal::{NeutronWal, NeutronWalState, PendingNeutronIntent};
 use crate::tap_registry::TapRegistry;
+
+const NEUTRON_TC_ACL_HEALTH_INTERVAL_SECS: u64 = 10;
 
 #[derive(Clone)]
 pub(crate) struct NeutronApiState {
@@ -40,7 +45,7 @@ pub(crate) struct NeutronApiState {
     pending_recovery: Option<PendingNeutronIntent>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct NeutronRuntimeState {
     accepted_generation: u64,
     applied_generation: u64,
@@ -191,10 +196,215 @@ struct AclEffectivePolicyKey {
     direction: u8,
 }
 
+const MAX_ACL_RULES_PER_POLICY: usize = 1000;
+const MAX_ACL_SELECTOR_MEMBERS: usize = 2048;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct AclIpv4Cidr {
+    network: u32,
+    prefix: u8,
+}
+
+impl AclIpv4Cidr {
+    fn parse(value: &str) -> Result<Self, String> {
+        let text = value.trim();
+        let mut pieces = text.split('/');
+        let address = pieces
+            .next()
+            .ok_or_else(|| format!("invalid IPv4 CIDR {}", value))?;
+        let prefix = pieces
+            .next()
+            .ok_or_else(|| format!("invalid IPv4 CIDR {}", value))?;
+        if pieces.next().is_some() {
+            return Err(format!("invalid IPv4 CIDR {}", value));
+        }
+
+        let octets: Vec<&str> = address.split('.').collect();
+        if octets.len() != 4 {
+            return Err(format!("invalid IPv4 CIDR {}", value));
+        }
+        let mut values = [0u8; 4];
+        for (index, octet) in octets.iter().enumerate() {
+            if octet.is_empty()
+                || !octet.as_bytes().iter().all(u8::is_ascii_digit)
+                || (octet.len() > 1 && octet.starts_with('0'))
+            {
+                return Err(format!("invalid IPv4 CIDR {}", value));
+            }
+            values[index] = octet
+                .parse::<u8>()
+                .map_err(|_| format!("invalid IPv4 CIDR {}", value))?;
+        }
+        if prefix.is_empty() || !prefix.as_bytes().iter().all(u8::is_ascii_digit) {
+            return Err(format!("invalid IPv4 CIDR {}", value));
+        }
+        let prefix = prefix
+            .parse::<u8>()
+            .map_err(|_| format!("invalid IPv4 CIDR {}", value))?;
+        if prefix > 32 {
+            return Err(format!("invalid IPv4 CIDR {}", value));
+        }
+        let address = u32::from_be_bytes(values);
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        };
+        Ok(Self {
+            network: address & mask,
+            prefix,
+        })
+    }
+
+    fn end(self) -> u32 {
+        let host_mask = if self.prefix == 32 {
+            0
+        } else {
+            u32::MAX >> self.prefix
+        };
+        self.network | host_mask
+    }
+
+    fn canonical(self) -> String {
+        format!(
+            "{}/{}",
+            std::net::Ipv4Addr::from(self.network),
+            self.prefix
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct AclSelectorId(usize);
+
+impl AclSelectorId {
+    const ANY: Self = Self(0);
+
+    fn group_ordinal(self) -> usize {
+        self.0 - 1
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CanonicalAclRule {
+    id: String,
+    direction: String,
+    priority: i64,
+    directions: Vec<u8>,
+    proto: u8,
+    action: u8,
+    src_cidrs: Vec<AclIpv4Cidr>,
+    dst_cidrs: Vec<AclIpv4Cidr>,
+    ports: Vec<(u16, u16)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NormalizedAclRule {
+    id: String,
+    direction: String,
+    priority: i64,
+    directions: Vec<u8>,
+    proto: u8,
+    action: u8,
+    src_selector_id: AclSelectorId,
+    dst_selector_id: AclSelectorId,
+    ports: Vec<(u16, u16)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AclValidatedTemplate {
+    Ready {
+        rules: Vec<NormalizedAclRule>,
+        src_selectors: Vec<Vec<AclIpv4Cidr>>,
+        dst_selectors: Vec<Vec<AclIpv4Cidr>>,
+    },
+    ForceBypass(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct AclValidationCacheKey {
+    policy_id: Option<String>,
+    revision: u64,
+    content_hash: String,
+}
+
+#[derive(Serialize)]
+struct AclValidationHashPayload<'a> {
+    default_action: &'a str,
+    rules: &'a [NeutronAclRuleSnapshot],
+}
+
+#[derive(Default)]
+struct AclValidationCache {
+    entries: BTreeMap<AclValidationCacheKey, Result<AclValidatedTemplate, String>>,
+    hits: usize,
+    misses: usize,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct AclApplyPlan {
     groups: Vec<AclGroupPlan>,
     policies: Vec<AclPolicyPlan>,
+    conntrack_enabled: Option<bool>,
+    force_bypass_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NeutronAclReconcileOutcome {
+    force_bypass_reason: Option<String>,
+}
+
+impl NeutronAclReconcileOutcome {
+    fn from_plan(plan: &AclApplyPlan) -> Self {
+        Self {
+            force_bypass_reason: plan.force_bypass_reason.clone(),
+        }
+    }
+
+    fn domain_status(&self, port: &NeutronPortSnapshot) -> NeutronDomainStatus {
+        match &self.force_bypass_reason {
+            Some(reason) => domain_status_with_action(
+                "acl",
+                "degraded",
+                Some(reason.clone()),
+                Some("bypass".to_string()),
+            ),
+            None => acl_domain_status_for(port),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AclRuntimeFeatureState {
+    conntrack_enabled: bool,
+    acl_enabled: bool,
+    acl_ingress_hook: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AclRuntimeTransition {
+    quiesce: AclRuntimeFeatureState,
+    publish: AclRuntimeFeatureState,
+}
+
+fn acl_runtime_transition(
+    plan: &AclApplyPlan,
+    preserved_conntrack_enabled: bool,
+) -> AclRuntimeTransition {
+    AclRuntimeTransition {
+        quiesce: AclRuntimeFeatureState {
+            conntrack_enabled: false,
+            acl_enabled: false,
+            acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
+        },
+        publish: AclRuntimeFeatureState {
+            conntrack_enabled: plan
+                .conntrack_enabled
+                .unwrap_or(preserved_conntrack_enabled),
+            acl_enabled: !plan.policies.is_empty(),
+            acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
+        },
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,23 +418,68 @@ struct AclPolicyDeleteTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AclGateUpdateMode {
     DisableBeforeReplace,
-    KeepCurrentUntilEnable,
 }
 
 impl AclGateUpdateMode {
     fn as_str(self) -> &'static str {
         match self {
             Self::DisableBeforeReplace => "disable_before_replace",
-            Self::KeepCurrentUntilEnable => "keep_current_until_enable",
         }
     }
 }
 
-fn acl_gate_update_mode(plan: &AclApplyPlan) -> AclGateUpdateMode {
-    if plan.policies.is_empty() {
-        AclGateUpdateMode::DisableBeforeReplace
-    } else {
-        AclGateUpdateMode::KeepCurrentUntilEnable
+fn acl_gate_update_mode(_plan: &AclApplyPlan) -> AclGateUpdateMode {
+    AclGateUpdateMode::DisableBeforeReplace
+}
+
+#[derive(Debug)]
+struct NeutronAclReconcileError {
+    details: String,
+    effective_action: &'static str,
+}
+
+impl NeutronAclReconcileError {
+    fn unchanged(details: impl Into<String>) -> Self {
+        Self {
+            details: details.into(),
+            effective_action: "unchanged",
+        }
+    }
+
+    fn bypass(details: impl Into<String>) -> Self {
+        Self {
+            details: details.into(),
+            effective_action: "bypass",
+        }
+    }
+
+    fn enforce(details: impl Into<String>) -> Self {
+        Self {
+            details: details.into(),
+            effective_action: "enforce",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AclReconcileFailurePhase {
+    BeforeQuiesce,
+    AfterQuiesce,
+    CompensationFailed,
+}
+
+fn acl_reconcile_error(
+    phase: AclReconcileFailurePhase,
+    details: impl Into<String>,
+) -> NeutronAclReconcileError {
+    match phase {
+        AclReconcileFailurePhase::BeforeQuiesce => {
+            NeutronAclReconcileError::unchanged(details)
+        }
+        AclReconcileFailurePhase::AfterQuiesce => NeutronAclReconcileError::bypass(details),
+        AclReconcileFailurePhase::CompensationFailed => {
+            NeutronAclReconcileError::enforce(details)
+        }
     }
 }
 
@@ -312,7 +567,15 @@ impl NeutronApiState {
                 runtime.applied_desired_hash.clone(),
             )
         };
-        let committed_ifaces: Vec<String> = ports.iter().map(|port| port.ifname.clone()).collect();
+        let committed_ifaces: Vec<(String, bool)> = ports
+            .iter()
+            .map(|port| {
+                (
+                    port.ifname.clone(),
+                    port.managed_domains.iter().any(|domain| domain == "acl"),
+                )
+            })
+            .collect();
         let results = self
             .registry
             .reconcile_neutron_runtime(&committed_ifaces)
@@ -326,6 +589,7 @@ impl NeutronApiState {
             runtime.clone()
         };
         let mut degraded = results.iter().any(|result| result.status == "blocked");
+        let mut successfully_claimed_ports = Vec::new();
         for port in &ports {
             let Some(result) = results
                 .iter()
@@ -358,6 +622,9 @@ impl NeutronApiState {
                     ),
                 ),
             );
+            if result.status == "ready" {
+                successfully_claimed_ports.push(port.clone());
+            }
         }
         for result in results
             .iter()
@@ -368,9 +635,19 @@ impl NeutronApiState {
             }
         }
 
+        let acl_requires_full_resync = invalidate_restarted_acl_runtime(
+            &mut next_runtime,
+            &successfully_claimed_ports,
+        );
+
         if degraded {
             next_runtime.authority_state = "runtime_degraded".to_string();
             next_runtime.wal_status = "runtime_reconcile_degraded".to_string();
+        } else if acl_requires_full_resync && next_runtime.pending_generation.is_none() {
+            next_runtime.authority_state =
+                "runtime_reconcile_requires_full_resync".to_string();
+            next_runtime.wal_status =
+                "runtime_reconciled_acl_resync_required".to_string();
         } else if next_runtime.pending_generation.is_none() {
             next_runtime.authority_state = "ready".to_string();
             next_runtime.wal_status = "runtime_reconciled".to_string();
@@ -379,9 +656,10 @@ impl NeutronApiState {
         }
 
         if let Err(e) = self.wal.append_snapshot_commit(next_runtime.to_wal_state()) {
+            next_runtime.authority_state = "wal_runtime_reconcile_commit_failed".to_string();
+            next_runtime.wal_status = "commit_failed".to_string();
             let mut runtime = self.runtime.write().await;
-            runtime.authority_state = "wal_runtime_reconcile_commit_failed".to_string();
-            runtime.wal_status = "commit_failed".to_string();
+            *runtime = next_runtime;
             warn!(error = %e, "failed to commit Neutron runtime reconciliation state");
             return;
         }
@@ -484,9 +762,14 @@ impl NeutronApiState {
         committed_before_intent: bool,
     ) -> IntentPortRecovery {
         let domains = recovery_domains_for_port(intent, port);
+        let acl_managed = domains.iter().any(|domain| domain == "acl");
         let mut statuses = Vec::new();
         let mut errors = Vec::new();
         let mut attached_for_recovery = false;
+
+        if let Some(recovery) = blocked_unsupported_recovery(&domains) {
+            return recovery;
+        }
 
         if domains.iter().any(|domain| domain.as_str() != "attach") && port.ifname.is_empty() {
             let reason = "missing_ifname_for_recovery".to_string();
@@ -501,7 +784,11 @@ impl NeutronApiState {
                 .iter()
                 .any(|domain| matches!(domain.as_str(), "attach" | "acl"))
         {
-            match self.registry.attach(&port.ifname).await {
+            match self
+                .registry
+                .attach_neutron(&port.ifname, acl_managed)
+                .await
+            {
                 Ok(()) => {
                     attached_for_recovery = true;
                     statuses.push(domain_status(
@@ -539,16 +826,11 @@ impl NeutronApiState {
                     "blocked",
                     Some("blocked_by_attach_recovery".to_string()),
                 )),
-                "qos" | "mirror" => statuses.push(domain_status(
-                    domain,
-                    "recovered",
-                    Some(format!("{}_no_runtime_executor", domain)),
-                )),
-                _ => statuses.push(domain_status(
-                    domain,
-                    "recovered",
-                    Some("no_neutron_recovery_action".to_string()),
-                )),
+                unsupported => {
+                    let reason = format!("unsupported_recovery_domain:{}", unsupported);
+                    statuses.push(domain_status(domain, "blocked", Some(reason.clone())));
+                    errors.push(reason);
+                }
             }
         }
 
@@ -585,6 +867,24 @@ impl NeutronApiState {
                 ok: false,
             }
         }
+    }
+
+    async fn project_tc_acl_health(&self) {
+        let _guard = self.apply_lock.lock().await;
+        let health = self.control_plane.list_instance_runtime_health().await;
+        let mut next_runtime = {
+            let runtime = self.runtime.read().await;
+            runtime.clone()
+        };
+        if !project_tc_acl_link_loss(&mut next_runtime, &health) {
+            return;
+        }
+        if let Err(error) = self.wal.append_snapshot_commit(next_runtime.to_wal_state()) {
+            warn!(error = %error, "failed to commit Neutron TC ACL link-loss status");
+            return;
+        }
+        let mut runtime = self.runtime.write().await;
+        *runtime = next_runtime;
     }
 }
 
@@ -623,19 +923,176 @@ impl NeutronRuntimeState {
     }
 }
 
+fn neutron_status_requires_full_resync(status: &NeutronPortStatus) -> bool {
+    status
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("requires_resync") || reason.contains("full_resync"))
+        || status.domains.iter().any(|domain| {
+            domain.reason.as_deref().is_some_and(|reason| {
+                reason.contains("requires_resync") || reason.contains("full_resync")
+            })
+        })
+}
+
+fn project_tc_acl_link_loss(
+    runtime: &mut NeutronRuntimeState,
+    health: &[InstanceRuntimeHealthSnapshot],
+) -> bool {
+    if neutron_tc_health_projection_blocked(runtime) {
+        return false;
+    }
+    let health_by_instance: BTreeMap<&str, &InstanceRuntimeHealthSnapshot> = health
+        .iter()
+        .map(|snapshot| (snapshot.name.as_str(), snapshot))
+        .collect();
+    let committed_ports: Vec<ManagedNeutronPort> = runtime.ports.values().cloned().collect();
+    let mut changed = false;
+
+    for port in committed_ports {
+        if !normalize_managed_domains(&port.managed_domains)
+            .iter()
+            .any(|domain| domain == "acl")
+        {
+            continue;
+        }
+        let Some(snapshot) = health_by_instance.get(port.ifname.as_str()) else {
+            continue;
+        };
+        if snapshot.acl_ready {
+            continue;
+        }
+        let Some(runtime_reason) = snapshot.readiness_reason.as_deref() else {
+            continue;
+        };
+        if !runtime_reason.starts_with("missing_tc_")
+            && !runtime_reason.starts_with("acl_quiesce_failed:")
+        {
+            continue;
+        }
+        let Some(status) = runtime.port_statuses.get_mut(&port.port_id) else {
+            continue;
+        };
+        if neutron_status_requires_full_resync(status) {
+            continue;
+        }
+        let already_projected = status.status == "degraded"
+            && status.reason.as_deref() == Some("tc_acl_link_lost")
+            && status.domains.iter().any(|domain| {
+                domain.domain == "acl"
+                    && domain.status == "degraded"
+                    && domain.reason.as_deref() == Some("tc_acl_link_lost")
+                    && domain.effective_action.as_deref() == Some("bypass")
+            });
+        if already_projected {
+            continue;
+        }
+
+        let mut domains: BTreeMap<String, NeutronDomainStatus> = status
+            .domains
+            .drain(..)
+            .map(|domain| (domain.domain.clone(), domain))
+            .collect();
+        domains.insert(
+            "acl".to_string(),
+            domain_status_with_action(
+                "acl",
+                "degraded",
+                Some("tc_acl_link_lost".to_string()),
+                Some("bypass".to_string()),
+            ),
+        );
+        status.status = "degraded".to_string();
+        status.reason = Some("tc_acl_link_lost".to_string());
+        status.domains = domains.into_values().collect();
+        changed = true;
+    }
+
+    if changed {
+        runtime.authority_state = "runtime_degraded".to_string();
+        runtime.wal_status = "tc_acl_link_lost".to_string();
+    }
+    changed
+}
+
+fn neutron_tc_health_projection_blocked(runtime: &NeutronRuntimeState) -> bool {
+    runtime.pending_generation.is_some()
+        || matches!(
+            runtime.authority_state.as_str(),
+            "blocked_recovery_required"
+                | "recovered_pending_full_resync_required"
+                | "recovered_pending_full_resync"
+                | "wal_recovery_commit_failed"
+                | "pending_recovery_commit_failed"
+                | "runtime_reconcile_requires_full_resync"
+                | "wal_runtime_reconcile_commit_failed"
+        )
+        || matches!(
+            runtime.wal_status.as_str(),
+            "commit_failed"
+                | "intent_recovery_blocked"
+                | "intent_recovered"
+                | "pending_recovered_to_last_applied"
+                | "runtime_reconciled_acl_resync_required"
+        )
+}
+
+pub(crate) struct NeutronBackgroundTasks {
+    restore_task: tokio::task::JoinHandle<()>,
+    health_task: tokio::task::JoinHandle<()>,
+}
+
+impl NeutronBackgroundTasks {
+    pub(crate) async fn abort(self) {
+        let Self {
+            restore_task,
+            health_task,
+        } = self;
+        restore_task.abort();
+        health_task.abort();
+        if let Err(error) = restore_task.await {
+            if !error.is_cancelled() {
+                warn!(error = %error, "Neutron restore task failed during shutdown");
+            }
+        }
+        if let Err(error) = health_task.await {
+            if !error.is_cancelled() {
+                warn!(error = %error, "Neutron health task failed during shutdown");
+            }
+        }
+    }
+}
+
+pub(crate) struct NeutronRouterRuntime {
+    pub(crate) router: Router,
+    pub(crate) background: NeutronBackgroundTasks,
+}
+
 pub(crate) fn build_router(
     registry: Arc<TapRegistry>,
     control_plane: Arc<ControlPlane>,
     ovs_bridge: String,
-) -> Router {
+) -> NeutronRouterRuntime {
     let state = NeutronApiState::new(registry, control_plane, ovs_bridge);
     let restore_state = state.clone();
-    tokio::spawn(async move {
+    let restore_task = tokio::spawn(async move {
         restore_state.recover_incomplete_wal_intent().await;
         restore_state.reconcile_committed_runtime().await;
         restore_state.restore_neutron_authorities().await;
     });
-    Router::new()
+    let health_state = state.clone();
+    let health_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            NEUTRON_TC_ACL_HEALTH_INTERVAL_SECS,
+        ));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            health_state.project_tc_acl_health().await;
+        }
+    });
+    let router = Router::new()
         .route(
             "/api/v1/neutron/capabilities",
             get(get_neutron_capabilities),
@@ -655,7 +1112,14 @@ pub(crate) fn build_router(
             delete(delete_neutron_port),
         )
         .layer(DefaultBodyLimit::max(NEUTRON_UDS_BODY_MAX_BYTES as usize))
-        .with_state(state)
+        .with_state(state);
+    NeutronRouterRuntime {
+        router,
+        background: NeutronBackgroundTasks {
+            restore_task,
+            health_task,
+        },
+    }
 }
 
 async fn post_neutron_recover_pending(
@@ -692,7 +1156,29 @@ async fn recover_pending_snapshot(
     }
 
     let _guard = state.apply_lock.lock().await;
+    let replay = state.wal.replay();
     let mut runtime = state.runtime.write().await;
+    validate_pending_recovery_identity(&runtime, &request)?;
+    if replay.pending_intent.is_none()
+        && wal_state_newer_than_runtime(&replay.state, &runtime)
+    {
+        let refreshed = NeutronRuntimeState::from_wal_state(
+            replay.state,
+            replay.status,
+            replay.failures,
+        );
+        let response = NeutronRecoverPendingResponse {
+            status: "already_committed".to_string(),
+            recovered_generation: refreshed.applied_generation,
+            desired_hash: refreshed.desired_hash.clone(),
+            applied_generation: refreshed.applied_generation,
+            applied_desired_hash: refreshed.applied_desired_hash.clone(),
+            authority_state: refreshed.authority_state.clone(),
+            wal_status: refreshed.wal_status.clone(),
+        };
+        *runtime = refreshed;
+        return Ok(response);
+    }
     let next_runtime = recover_pending_runtime(&runtime, &request)?;
     if let Err(e) = state
         .wal
@@ -720,34 +1206,19 @@ async fn recover_pending_snapshot(
     Ok(response)
 }
 
+fn wal_state_newer_than_runtime(
+    wal: &NeutronWalState,
+    runtime: &NeutronRuntimeState,
+) -> bool {
+    wal.applied_generation > runtime.applied_generation
+        || wal.accepted_generation > runtime.accepted_generation
+}
+
 fn recover_pending_runtime(
     runtime: &NeutronRuntimeState,
     request: &NeutronRecoverPendingRequest,
 ) -> Result<NeutronRuntimeState, SnapshotApplyError> {
-    let Some(pending_generation) = runtime.pending_generation else {
-        return Err(SnapshotApplyError {
-            status: StatusCode::CONFLICT,
-            code: "no_pending_snapshot",
-            details: "no pending generation exists".to_string(),
-        });
-    };
-    if pending_generation != request.expected_pending_generation {
-        return Err(SnapshotApplyError {
-            status: StatusCode::CONFLICT,
-            code: "pending_generation_mismatch",
-            details: format!(
-                "pending generation {} does not match expected {}",
-                pending_generation, request.expected_pending_generation
-            ),
-        });
-    }
-    if !hashes_match(&runtime.desired_hash, &request.expected_desired_hash) {
-        return Err(SnapshotApplyError {
-            status: StatusCode::CONFLICT,
-            code: "pending_desired_hash_mismatch",
-            details: "pending desired hash does not match expected hash".to_string(),
-        });
-    }
+    validate_pending_recovery_identity(runtime, request)?;
     if runtime.applied_generation == 0 {
         return Err(SnapshotApplyError {
             status: StatusCode::CONFLICT,
@@ -773,6 +1244,37 @@ fn recover_pending_runtime(
     next_runtime.authority_state = "recovered_pending_full_resync_required".to_string();
     next_runtime.wal_status = "pending_recovered_to_last_applied".to_string();
     Ok(next_runtime)
+}
+
+fn validate_pending_recovery_identity(
+    runtime: &NeutronRuntimeState,
+    request: &NeutronRecoverPendingRequest,
+) -> Result<(), SnapshotApplyError> {
+    let Some(pending_generation) = runtime.pending_generation else {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "no_pending_snapshot",
+            details: "no pending generation exists".to_string(),
+        });
+    };
+    if pending_generation != request.expected_pending_generation {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "pending_generation_mismatch",
+            details: format!(
+                "pending generation {} does not match expected {}",
+                pending_generation, request.expected_pending_generation
+            ),
+        });
+    }
+    if !hashes_match(&runtime.desired_hash, &request.expected_desired_hash) {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "pending_desired_hash_mismatch",
+            details: "pending desired hash does not match expected hash".to_string(),
+        });
+    }
+    Ok(())
 }
 
 async fn get_neutron_capabilities() -> impl IntoResponse {
@@ -843,9 +1345,21 @@ async fn put_neutron_port_snapshot(
 }
 
 #[derive(Debug)]
+struct PreparedSnapshotApply {
+    _apply_guard: OwnedMutexGuard<()>,
+    intent: PendingNeutronIntent,
+    transaction: SnapshotApplyTransaction,
+    current_ports: BTreeMap<String, ManagedNeutronPort>,
+    runtime_before_apply: NeutronRuntimeState,
+    lock_wait_ms: u64,
+    preflight_ms: u64,
+    wal_intent_ms: u64,
+}
+
+#[derive(Debug)]
 struct SnapshotSubmitDecision {
     response: NeutronSnapshotResponse,
-    spawn_apply: bool,
+    prepared: Option<PreparedSnapshotApply>,
 }
 
 async fn submit_neutron_snapshot(
@@ -871,10 +1385,18 @@ async fn submit_neutron_snapshot(
         }
     };
 
-    if decision.spawn_apply {
+    let SnapshotSubmitDecision { response, prepared } = decision;
+    if let Some(prepared) = prepared {
         let apply_state = state.clone();
         tokio::spawn(async move {
-            match apply_neutron_snapshot_for_scope(apply_state.clone(), snapshot, scope).await {
+            match apply_neutron_snapshot_for_scope(
+                apply_state.clone(),
+                snapshot,
+                scope,
+                prepared,
+            )
+            .await
+            {
                 Ok(response) => {
                     info!(
                         generation = response.generation,
@@ -906,7 +1428,42 @@ async fn submit_neutron_snapshot(
         });
     }
 
-    Json(decision.response).into_response()
+    Json(response).into_response()
+}
+
+fn pending_snapshot_submit_response(
+    runtime: &NeutronRuntimeState,
+    snapshot: &NeutronSnapshotRequest,
+    requested_hash: &Option<String>,
+) -> Result<Option<NeutronSnapshotResponse>, SnapshotApplyError> {
+    let Some(pending_generation) = runtime.pending_generation else {
+        return Ok(None);
+    };
+    if !hashes_match(requested_hash, &runtime.desired_hash) {
+        return Err(SnapshotApplyError {
+            status: StatusCode::CONFLICT,
+            code: "snapshot_apply_in_progress",
+            details: format!(
+                "pending generation {} is still applying",
+                pending_generation
+            ),
+        });
+    }
+    info!(
+        generation = snapshot.generation,
+        desired_hash = ?requested_hash,
+        pending_generation,
+        "neutron_snapshot_submit_deduplicated_pending"
+    );
+    Ok(Some(neutron_snapshot_response(
+        snapshot.generation,
+        requested_hash.clone(),
+        runtime.accepted_generation,
+        runtime.applied_generation,
+        "pending",
+        Vec::new(),
+        Vec::new(),
+    )))
 }
 
 async fn accept_neutron_snapshot_submit(
@@ -916,73 +1473,110 @@ async fn accept_neutron_snapshot_submit(
 ) -> Result<SnapshotSubmitDecision, SnapshotApplyError> {
     validate_snapshot_preflight(scope, snapshot)?;
     let requested_hash = snapshot.desired_hash.clone();
+    if let Some(mut response) = {
+        let runtime = state.runtime.read().await;
+        pending_snapshot_submit_response(&runtime, snapshot, &requested_hash)?
+    } {
+        response.active_instances = state.registry.list().await;
+        return Ok(SnapshotSubmitDecision {
+            response,
+            prepared: None,
+        });
+    }
+
+    let lock_started = Instant::now();
+    let apply_guard = state.apply_lock.clone().lock_owned().await;
+    let lock_wait_ms = elapsed_ms(lock_started);
+    let preflight_started = Instant::now();
     let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
+    let runtime_before_apply = state.runtime.read().await.clone();
 
-    let immediate_response = {
-        let mut runtime = state.runtime.write().await;
-        if let Some(pending_generation) = runtime.pending_generation {
-            if hashes_match(&requested_hash, &runtime.desired_hash) {
-                let response = neutron_snapshot_response(
-                    snapshot.generation,
-                    requested_hash.clone(),
-                    runtime.accepted_generation,
-                    runtime.applied_generation,
-                    "pending",
-                    Vec::new(),
-                    Vec::new(),
-                );
-                info!(
-                    generation = snapshot.generation,
-                    desired_hash = ?requested_hash,
-                    pending_generation,
-                    "neutron_snapshot_submit_deduplicated_pending"
-                );
-                response
-            } else {
-                return Err(SnapshotApplyError {
-                    status: StatusCode::CONFLICT,
-                    code: "snapshot_apply_in_progress",
-                    details: format!(
-                        "pending generation {} is still applying",
-                        pending_generation
-                    ),
-                });
-            }
-        } else if let Some(response) = snapshot_early_response_for_scope(
-            scope,
-            &runtime,
-            snapshot,
-            &local_inventory,
-            &requested_hash,
-        )? {
-            response
-        } else {
-            runtime.accepted_generation = snapshot.generation;
-            runtime.pending_generation = Some(snapshot.generation);
-            runtime.desired_hash = requested_hash.clone();
-            runtime.authority_state = "accepted".to_string();
-            runtime.wal_status = "accepted_pending_intent".to_string();
-            let response = neutron_snapshot_response(
-                snapshot.generation,
-                requested_hash,
-                runtime.accepted_generation,
-                runtime.applied_generation,
-                "accepted",
-                Vec::new(),
-                Vec::new(),
-            );
-            return Ok(SnapshotSubmitDecision {
-                response,
-                spawn_apply: true,
-            });
-        }
+    if let Some(mut response) =
+        pending_snapshot_submit_response(&runtime_before_apply, snapshot, &requested_hash)?
+    {
+        response.active_instances = state.registry.list().await;
+        return Ok(SnapshotSubmitDecision {
+            response,
+            prepared: None,
+        });
+    }
+    if let Some(mut response) = snapshot_early_response_for_scope(
+        scope,
+        &runtime_before_apply,
+        snapshot,
+        &local_inventory,
+        &requested_hash,
+    )? {
+        response.active_instances = state.registry.list().await;
+        return Ok(SnapshotSubmitDecision {
+            response,
+            prepared: None,
+        });
+    }
+
+    let current_ports = runtime_before_apply.ports.clone();
+    let transaction = build_snapshot_apply_transaction(
+        &current_ports,
+        snapshot,
+        &local_inventory,
+        scope.clone(),
+    )
+    .map_err(snapshot_scope_apply_error)?;
+    let intent = PendingNeutronIntent {
+        kind: "snapshot".to_string(),
+        generation: snapshot.generation,
+        desired_hash: requested_hash.clone(),
+        port_ids: transaction.requested_port_ids.clone(),
+        affected_domains: transaction.affected_domains.clone(),
+        affected_ports: transaction.affected_ports.clone(),
     };
+    let preflight_ms = elapsed_ms(preflight_started);
+    let wal_intent_started = Instant::now();
+    state
+        .wal
+        .append_snapshot_intent(
+            intent.generation,
+            intent.desired_hash.clone(),
+            intent.port_ids.clone(),
+            intent.affected_domains.clone(),
+            intent.affected_ports.clone(),
+        )
+        .map_err(|details| SnapshotApplyError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "wal_intent_failed",
+            details,
+        })?;
+    let wal_intent_ms = elapsed_ms(wal_intent_started);
 
-    let mut response = immediate_response;
-    response.active_instances = state.registry.list().await;
+    {
+        let mut runtime = state.runtime.write().await;
+        runtime.pending_generation = Some(snapshot.generation);
+        runtime.desired_hash = requested_hash.clone();
+        runtime.authority_state = "applying".to_string();
+        runtime.wal_status = "intent_written".to_string();
+    }
+
+    let response = neutron_snapshot_response(
+        snapshot.generation,
+        requested_hash,
+        runtime_before_apply.accepted_generation,
+        runtime_before_apply.applied_generation,
+        "pending",
+        Vec::new(),
+        Vec::new(),
+    );
     Ok(SnapshotSubmitDecision {
         response,
-        spawn_apply: false,
+        prepared: Some(PreparedSnapshotApply {
+            _apply_guard: apply_guard,
+            intent,
+            transaction,
+            current_ports,
+            runtime_before_apply,
+            lock_wait_ms,
+            preflight_ms,
+            wal_intent_ms,
+        }),
     })
 }
 
@@ -997,6 +1591,23 @@ async fn mark_snapshot_background_error(
     if runtime.pending_generation == Some(generation)
         && hashes_match(&runtime.desired_hash, &desired_hash)
     {
+        if matches!(
+            runtime.authority_state.as_str(),
+            "blocked_recovery_required"
+                | "wal_recovery_commit_failed"
+                | "pending_recovery_commit_failed"
+        ) {
+            warn!(
+                generation,
+                desired_hash = ?desired_hash,
+                code,
+                details = %details,
+                authority_state = %runtime.authority_state,
+                wal_status = %runtime.wal_status,
+                "neutron_snapshot_background_error_preserved_recovery_state"
+            );
+            return;
+        }
         runtime.authority_state = "degraded".to_string();
         runtime.wal_status = format!("background_apply_failed:{}", code);
         warn!(
@@ -1009,15 +1620,140 @@ async fn mark_snapshot_background_error(
     }
 }
 
+fn build_blocked_snapshot_runtime(
+    previous: &NeutronRuntimeState,
+    intent: &PendingNeutronIntent,
+    blocked_statuses: BTreeMap<String, NeutronPortStatus>,
+    wal_status: &str,
+) -> NeutronRuntimeState {
+    let mut blocked = previous.clone();
+    blocked.pending_generation = Some(intent.generation);
+    blocked.desired_hash = intent.desired_hash.clone();
+    blocked.authority_state = "blocked_recovery_required".to_string();
+    blocked.wal_status = wal_status.to_string();
+    blocked.port_statuses.extend(blocked_statuses);
+    blocked
+}
+
+async fn recover_failed_snapshot_transaction(
+    state: &NeutronApiState,
+    intent: &PendingNeutronIntent,
+    previous: &NeutronRuntimeState,
+    reason: &str,
+) -> NeutronRuntimeState {
+    let affected_ports = affected_ports_for_intent(intent, &previous.ports);
+    let mut blocked_statuses = BTreeMap::new();
+
+    for port in affected_ports {
+        let committed_before_intent = previous.ports.contains_key(&port.port_id);
+        let mut recovery = state
+            .recover_intent_port(intent, &port, committed_before_intent)
+            .await;
+        let recovery_reason = recovery.reason.clone();
+        let mut acl_status_present = false;
+        for domain in &mut recovery.domains {
+            if domain.domain == "acl" {
+                acl_status_present = true;
+                domain.status = "blocked".to_string();
+                domain.reason = Some("snapshot_commit_failed_acl_bypass".to_string());
+                domain.effective_action = Some("bypass".to_string());
+            }
+        }
+        if !acl_status_present
+            && recovery
+                .managed_domains
+                .iter()
+                .any(|domain| domain == "acl")
+        {
+            recovery.domains.push(domain_status_with_action(
+                "acl",
+                "blocked",
+                Some("snapshot_commit_failed_acl_bypass".to_string()),
+                Some("bypass".to_string()),
+            ));
+        }
+        recovery.status = "blocked".to_string();
+        recovery.reason = Some(match recovery_reason {
+            Some(details) if !recovery.ok => {
+                format!("snapshot_commit_failed_recovery_required:{}", details)
+            }
+            _ => "snapshot_commit_failed_recovery_required".to_string(),
+        });
+        recovery.ok = false;
+
+        blocked_statuses.insert(
+            port.port_id.clone(),
+            port_runtime_status(
+                &port.port_id,
+                &port.ifname,
+                intent.generation,
+                intent.desired_hash.clone(),
+                recovery.managed_domains,
+                recovery.status.as_str(),
+                recovery.reason,
+                recovery.domains,
+            ),
+        );
+    }
+
+    let mut blocked = build_blocked_snapshot_runtime(
+        previous,
+        intent,
+        blocked_statuses,
+        "commit_failed",
+    );
+    if let Err(error) = state.wal.append_snapshot_commit(blocked.to_wal_state()) {
+        blocked.wal_status = "recovery_commit_failed".to_string();
+        warn!(
+            generation = intent.generation,
+            desired_hash = ?intent.desired_hash,
+            reason,
+            error = %error,
+            "failed to commit blocked Neutron snapshot recovery state"
+        );
+    }
+    blocked
+}
+
+async fn publish_committed_snapshot_runtime<F, Fut>(
+    state: &NeutronApiState,
+    next_runtime: NeutronRuntimeState,
+    generation: u64,
+    post_commit: F,
+) where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    {
+        let mut runtime = state.runtime.write().await;
+        *runtime = next_runtime;
+    }
+    if let Err(error) = post_commit().await {
+        warn!(
+            generation,
+            error = %error,
+            "post-commit snapshot hook failed after durable commit"
+        );
+    }
+}
+
 async fn apply_neutron_snapshot_for_scope(
     state: NeutronApiState,
     snapshot: NeutronSnapshotRequest,
     scope: ApplyScope,
+    prepared: PreparedSnapshotApply,
 ) -> Result<NeutronSnapshotResponse, SnapshotApplyError> {
     let profile_started = Instant::now();
-    let lock_started = Instant::now();
-    let _guard = state.apply_lock.lock().await;
-    let lock_wait_ms = elapsed_ms(lock_started);
+    let PreparedSnapshotApply {
+        _apply_guard,
+        intent,
+        transaction,
+        current_ports,
+        runtime_before_apply,
+        lock_wait_ms,
+        preflight_ms,
+        wal_intent_ms,
+    } = prepared;
     let scope_name = apply_scope_name(&scope);
     let scope_port_id = apply_scope_port_id(&scope).map(|value| value.to_string());
     info!(
@@ -1029,40 +1765,7 @@ async fn apply_neutron_snapshot_for_scope(
         lock_wait_ms,
         "neutron_snapshot_apply_start"
     );
-    let preflight_started = Instant::now();
-    validate_snapshot_preflight(&scope, &snapshot)?;
     let requested_hash = snapshot.desired_hash.clone();
-    let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
-    let early_response = {
-        let runtime = state.runtime.read().await;
-        snapshot_early_response_for_scope(
-            &scope,
-            &runtime,
-            &snapshot,
-            &local_inventory,
-            &requested_hash,
-        )?
-    };
-    if let Some(mut response) = early_response {
-        response.active_instances = state.registry.list().await;
-        info!(
-            generation = snapshot.generation,
-            desired_hash = ?requested_hash,
-            scope = scope_name,
-            scope_port_id = ?scope_port_id,
-            snapshot_ports = snapshot.ports.len(),
-            lock_wait_ms,
-            preflight_ms = elapsed_ms(preflight_started),
-            total_ms = elapsed_ms(profile_started),
-            "neutron_snapshot_apply_early_response"
-        );
-        return Ok(response);
-    }
-
-    let current_ports = state.runtime.read().await.ports.clone();
-    let transaction =
-        build_snapshot_apply_transaction(&current_ports, &snapshot, &local_inventory, scope)
-            .map_err(snapshot_scope_apply_error)?;
     let plan_attach = transaction.plan.attach.len();
     let plan_update = transaction.plan.update.len();
     let plan_detach = transaction.plan.detach.len();
@@ -1070,7 +1773,6 @@ async fn apply_neutron_snapshot_for_scope(
     let requested_ports = transaction.requested_port_ids.len();
     let affected_ports = transaction.affected_ports.len();
     let affected_domains = transaction.affected_domains.len();
-    let preflight_ms = elapsed_ms(preflight_started);
     info!(
         generation = snapshot.generation,
         desired_hash = ?requested_hash,
@@ -1087,30 +1789,6 @@ async fn apply_neutron_snapshot_for_scope(
         preflight_ms,
         "neutron_snapshot_apply_plan"
     );
-    let wal_intent_started = Instant::now();
-    if let Err(e) = state.wal.append_snapshot_intent(
-        snapshot.generation,
-        requested_hash.clone(),
-        transaction.requested_port_ids.clone(),
-        transaction.affected_domains.clone(),
-        transaction.affected_ports.clone(),
-    ) {
-        return Err(SnapshotApplyError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "wal_intent_failed",
-            details: e,
-        });
-    }
-    let wal_intent_ms = elapsed_ms(wal_intent_started);
-
-    {
-        let mut runtime = state.runtime.write().await;
-        runtime.accepted_generation = snapshot.generation;
-        runtime.pending_generation = Some(snapshot.generation);
-        runtime.desired_hash = requested_hash.clone();
-        runtime.authority_state = "applying".to_string();
-        runtime.wal_status = "intent_written".to_string();
-    }
     if let Err(e) = fault_injection::check("neutron.snapshot.after_intent").await {
         return Err(SnapshotApplyError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -1119,17 +1797,13 @@ async fn apply_neutron_snapshot_for_scope(
         });
     }
 
-    let runtime_before_apply = {
-        let runtime = state.runtime.read().await;
-        runtime.clone()
-    };
     let runtime_apply_started = Instant::now();
     let outcome = apply_snapshot_runtime_transaction(
         &state,
         snapshot.generation,
         requested_hash.clone(),
         current_ports,
-        runtime_before_apply,
+        runtime_before_apply.clone(),
         transaction,
     )
     .await;
@@ -1142,6 +1816,15 @@ async fn apply_neutron_snapshot_for_scope(
     let runtime_apply_ms = elapsed_ms(runtime_apply_started);
 
     if let Err(e) = fault_injection::check("neutron.snapshot.before_commit").await {
+        let blocked = recover_failed_snapshot_transaction(
+            &state,
+            &intent,
+            &runtime_before_apply,
+            "before_commit_failed",
+        )
+        .await;
+        let mut runtime = state.runtime.write().await;
+        *runtime = blocked;
         return Err(SnapshotApplyError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "fault_injection",
@@ -1153,10 +1836,15 @@ async fn apply_neutron_snapshot_for_scope(
         .wal
         .append_snapshot_commit(next_runtime.to_wal_state())
     {
+        let blocked = recover_failed_snapshot_transaction(
+            &state,
+            &intent,
+            &runtime_before_apply,
+            "wal_commit_failed",
+        )
+        .await;
         let mut runtime = state.runtime.write().await;
-        runtime.pending_generation = Some(snapshot.generation);
-        runtime.authority_state = "wal_commit_failed".to_string();
-        runtime.wal_status = "commit_failed".to_string();
+        *runtime = blocked;
         return Err(SnapshotApplyError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "wal_commit_failed",
@@ -1164,18 +1852,10 @@ async fn apply_neutron_snapshot_for_scope(
         });
     }
     let wal_commit_ms = elapsed_ms(wal_commit_started);
-    if let Err(e) = fault_injection::check("neutron.snapshot.after_commit").await {
-        return Err(SnapshotApplyError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "fault_injection",
-            details: e,
-        });
-    }
-
-    {
-        let mut runtime = state.runtime.write().await;
-        *runtime = next_runtime;
-    }
+    publish_committed_snapshot_runtime(&state, next_runtime, snapshot.generation, || {
+        fault_injection::check("neutron.snapshot.after_commit")
+    })
+    .await;
 
     info!(
         generation = snapshot.generation,
@@ -1227,6 +1907,7 @@ async fn apply_snapshot_runtime_transaction(
     let profile_started = Instant::now();
     let mut next_ports = current_ports;
     let SnapshotApplyTransaction { scope, plan, .. } = transaction;
+    let full_resync = matches!(&scope, ApplyScope::FullHost);
     let scope_name = apply_scope_name(&scope);
     let scope_port_id = apply_scope_port_id(&scope).map(|value| value.to_string());
     let SnapshotPlan {
@@ -1252,6 +1933,7 @@ async fn apply_snapshot_runtime_transaction(
     );
     let mut next_statuses = port_status_seed_for_scope(&runtime_before_apply, &scope);
     let mut results = ignored;
+    let mut acl_validation_cache = AclValidationCache::default();
 
     for port in detach {
         let port_started = Instant::now();
@@ -1354,7 +2036,12 @@ async fn apply_snapshot_runtime_transaction(
         let managed = managed_port_from_snapshot(&port);
         let previous_managed = next_ports.get(&port.port_id).cloned();
         let previous_status = runtime_before_apply.port_statuses.get(&port.port_id);
-        if can_skip_neutron_domain_reconcile(previous_managed.as_ref(), previous_status, &managed) {
+        if can_skip_neutron_domain_reconcile(
+            previous_managed.as_ref(),
+            previous_status,
+            &managed,
+            full_resync,
+        ) {
             state
                 .control_plane
                 .mark_neutron_port_authority(
@@ -1403,7 +2090,13 @@ async fn apply_snapshot_runtime_transaction(
             );
             continue;
         }
-        let domain_result = reconcile_neutron_domains(state, &port).await;
+        let domain_result = reconcile_neutron_domains(
+            state,
+            &port,
+            &mut acl_validation_cache,
+            full_resync,
+        )
+        .await;
         let domain_ms = elapsed_ms(port_started);
         if domain_result.ok {
             state
@@ -1483,12 +2176,12 @@ async fn apply_snapshot_runtime_transaction(
         }
     }
 
-    for port in attach {
+    for port in &attach {
         let port_started = Instant::now();
         let port_id = port.port_id.clone();
         let ifname = port.ifname.clone();
         let attach_started = Instant::now();
-        match state.registry.attach(&port.ifname).await {
+        match state.registry.attach_neutron(&port.ifname, port_manages_acl(port)).await {
             Ok(()) => {
                 let attach_ms = elapsed_ms(attach_started);
                 if let Err(e) = fault_injection::check("neutron.port.after_attach").await {
@@ -1501,8 +2194,8 @@ async fn apply_snapshot_runtime_transaction(
                         );
                     }
                     results.push(NeutronPortApplyResult {
-                        port_id: port.port_id,
-                        ifname: port.ifname,
+                        port_id: port.port_id.clone(),
+                        ifname: port.ifname.clone(),
                         action: "attach".to_string(),
                         status: "error".to_string(),
                         reason: Some(e),
@@ -1520,9 +2213,15 @@ async fn apply_snapshot_runtime_transaction(
                     );
                     continue;
                 }
-                let managed = managed_port_from_snapshot(&port);
+                let managed = managed_port_from_snapshot(port);
                 let domain_started = Instant::now();
-                let domain_result = reconcile_neutron_domains(state, &port).await;
+                let domain_result = reconcile_neutron_domains(
+                    state,
+                    port,
+                    &mut acl_validation_cache,
+                    full_resync,
+                )
+                .await;
                 let domain_ms = elapsed_ms(domain_started);
                 if domain_result.ok {
                     state
@@ -1641,8 +2340,8 @@ async fn apply_snapshot_runtime_transaction(
                     ),
                 );
                 results.push(NeutronPortApplyResult {
-                    port_id: port.port_id,
-                    ifname: port.ifname,
+                    port_id: port.port_id.clone(),
+                    ifname: port.ifname.clone(),
                     action: "attach".to_string(),
                     status: "error".to_string(),
                     reason: Some(e),
@@ -2102,6 +2801,62 @@ fn runtime_domain_statuses_for(
         .collect()
 }
 
+fn invalidate_restarted_acl_runtime(
+    runtime: &mut NeutronRuntimeState,
+    successfully_claimed_ports: &[ManagedNeutronPort],
+) -> bool {
+    let mut invalidated = false;
+    for port in successfully_claimed_ports {
+        if !normalize_managed_domains(&port.managed_domains)
+            .iter()
+            .any(|domain| domain == "acl")
+        {
+            continue;
+        }
+
+        if !runtime.port_statuses.contains_key(&port.port_id) {
+            continue;
+        }
+        let Some(restored) = runtime.ports.get_mut(&port.port_id) else {
+            continue;
+        };
+        restored.domain_desired_hashes.remove("acl");
+
+        let reason = "acl_restart_replay_requires_resync".to_string();
+        let Some(status) = runtime.port_statuses.get_mut(&port.port_id) else {
+            continue;
+        };
+        let mut domains: BTreeMap<String, NeutronDomainStatus> = status
+            .domains
+            .drain(..)
+            .map(|domain| (domain.domain.clone(), domain))
+            .collect();
+        domains.insert(
+            "attach".to_string(),
+            domain_status("attach", "ready", None),
+        );
+        domains.insert(
+            "acl".to_string(),
+            domain_status_with_action(
+                "acl",
+                "degraded",
+                Some(reason.clone()),
+                Some("unchanged".to_string()),
+            ),
+        );
+        status.status = "degraded".to_string();
+        status.reason = Some(reason);
+        status.domains = domains.into_values().collect();
+        invalidated = true;
+    }
+
+    if invalidated && runtime.pending_generation.is_none() {
+        runtime.authority_state = "runtime_reconcile_requires_full_resync".to_string();
+        runtime.wal_status = "runtime_reconciled_acl_resync_required".to_string();
+    }
+    invalidated
+}
+
 fn blocked_by_unimplemented_domains(domains: &[String]) -> String {
     format!("blocked_by_unimplemented_domains:{}", domains.join(","))
 }
@@ -2113,6 +2868,8 @@ fn unimplemented_domain_reason(domain: &str) -> String {
 async fn reconcile_neutron_domains(
     state: &NeutronApiState,
     port: &NeutronPortSnapshot,
+    acl_validation_cache: &mut AclValidationCache,
+    full_resync: bool,
 ) -> DomainReconcileResult {
     let domains = normalize_managed_domains(&port.managed_domains);
     if domains.is_empty() {
@@ -2150,11 +2907,23 @@ async fn reconcile_neutron_domains(
     for domain in domains {
         match domain.as_str() {
             "attach" => statuses.push(domain_status(&domain, "ready", None)),
-            "acl" => match reconcile_neutron_acl(state, port).await {
-                Ok(()) => statuses.push(acl_domain_status_for(port)),
-                Err(e) => {
-                    let reason = format!("acl_apply_failed:{}", e);
-                    statuses.push(domain_status(&domain, "error", Some(reason.clone())));
+            "acl" => match reconcile_neutron_acl(
+                state,
+                port,
+                acl_validation_cache,
+                full_resync,
+            )
+            .await
+            {
+                Ok(outcome) => statuses.push(outcome.domain_status(port)),
+                Err(error) => {
+                    let reason = format!("acl_apply_failed:{}", error.details);
+                    statuses.push(domain_status_with_action(
+                        &domain,
+                        "error",
+                        Some(reason.clone()),
+                        Some(error.effective_action.to_string()),
+                    ));
                     errors.push(reason);
                 }
             },
@@ -2724,6 +3493,38 @@ fn recovery_domains_for_port(
     domains.into_iter().collect()
 }
 
+fn blocked_unsupported_recovery(domains: &[String]) -> Option<IntentPortRecovery> {
+    let unsupported = domains
+        .iter()
+        .filter(|domain| !matches!(domain.as_str(), "attach" | "acl"))
+        .cloned()
+        .collect::<Vec<_>>();
+    if unsupported.is_empty() {
+        return None;
+    }
+
+    let reason = format!("unsupported_recovery_domains:{}", unsupported.join(","));
+    let statuses = domains
+        .iter()
+        .map(|domain| {
+            let domain_reason = if matches!(domain.as_str(), "attach" | "acl") {
+                "blocked_by_unsupported_recovery_domain".to_string()
+            } else {
+                format!("unsupported_recovery_domain:{}", domain)
+            };
+            domain_status(domain, "blocked", Some(domain_reason))
+        })
+        .collect();
+
+    Some(IntentPortRecovery {
+        managed_domains: domains.to_vec(),
+        domains: statuses,
+        status: "blocked".to_string(),
+        reason: Some(reason),
+        ok: false,
+    })
+}
+
 fn managed_port_from_snapshot(port: &NeutronPortSnapshot) -> ManagedNeutronPort {
     ManagedNeutronPort {
         port_id: port.port_id.clone(),
@@ -2866,6 +3667,27 @@ fn ensure_ipv4_cidrs(cidrs: &[String], rule_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn canonical_acl_cidrs(
+    cidrs: &[String],
+    rule_id: &str,
+) -> Result<Vec<AclIpv4Cidr>, String> {
+    ensure_ipv4_cidrs(cidrs, rule_id)?;
+    let mut normalized = BTreeSet::new();
+    for cidr in cidrs {
+        normalized.insert(AclIpv4Cidr::parse(cidr)?);
+    }
+    Ok(normalized.into_iter().collect())
+}
+
+fn normalized_acl_direction(direction: u8) -> String {
+    match direction {
+        0 => "ingress".to_string(),
+        1 => "egress".to_string(),
+        2 => "both".to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn acl_ports(
     rule: &NeutronAclRuleSnapshot,
     proto: u8,
@@ -3006,32 +3828,373 @@ fn merge_acl_ports(
     Ok(serialize_acl_port_ranges(ranges))
 }
 
-fn cidr_group(
-    port_id: &str,
-    rule_id: &str,
-    side: &str,
-    cidrs: &[String],
-    groups: &mut Vec<AclGroupPlan>,
-) -> String {
-    if cidrs.is_empty() {
-        return "any".to_string();
+fn normalize_acl_rule(
+    rule: &NeutronAclRuleSnapshot,
+    index: usize,
+) -> Result<CanonicalAclRule, String> {
+    let rule_id = acl_rule_id(rule, index);
+    if rule
+        .ethertype
+        .as_deref()
+        .map(|ethertype| ethertype.eq_ignore_ascii_case("IPv6"))
+        .unwrap_or(false)
+    {
+        return Err(format!("rule {} uses IPv6 ethertype; unsupported", rule_id));
     }
-    let name = format!("{}{}:{}", neutron_acl_prefix(port_id), side, rule_id);
-    groups.push(AclGroupPlan {
-        name: name.clone(),
-        cidrs: cidrs.to_vec(),
-    });
-    name
+
+    let src_cidrs = canonical_acl_cidrs(&rule.src_cidrs, &rule_id)?;
+    let dst_cidrs = canonical_acl_cidrs(&rule.dst_cidrs, &rule_id)?;
+    let proto = proto_from_string(rule.protocol.as_deref().unwrap_or("any").trim())
+        .map_err(|e| format!("rule {} protocol: {}", rule_id, e))?;
+    let action = action_from_string(rule.action.as_deref().unwrap_or("allow").trim())
+        .map_err(|e| format!("rule {} action: {}", rule_id, e))?;
+    let direction = direction_from_string(rule.direction.as_deref().unwrap_or("ingress").trim())
+        .map_err(|e| format!("rule {} direction: {}", rule_id, e))?;
+    let ports = match acl_ports(rule, proto, &rule_id)? {
+        Some(ports) => parse_acl_port_ranges(&ports)?,
+        None => Vec::new(),
+    };
+    let mut directions = neutron_acl_to_datapath_directions(direction);
+    directions.sort_unstable();
+    directions.dedup();
+
+    Ok(CanonicalAclRule {
+        id: rule_id,
+        direction: normalized_acl_direction(direction),
+        priority: rule.priority,
+        directions,
+        proto,
+        action,
+        src_cidrs,
+        dst_cidrs,
+        ports,
+    })
 }
 
-fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclApplyPlan, String> {
-    if !acl.enabled
-        || !acl.status.eq_ignore_ascii_case("ready")
-        || !acl.effective_action.eq_ignore_ascii_case("enforce")
-    {
-        return Ok(AclApplyPlan::default());
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AclSelectorRelation {
+    Identical,
+    Disjoint,
+    Intersecting,
+}
+
+fn acl_selector_relation(
+    left: AclSelectorId,
+    right: AclSelectorId,
+) -> AclSelectorRelation {
+    if left == right {
+        AclSelectorRelation::Identical
+    } else if left == AclSelectorId::ANY || right == AclSelectorId::ANY {
+        AclSelectorRelation::Intersecting
+    } else {
+        AclSelectorRelation::Disjoint
+    }
+}
+
+fn acl_selector_tables(
+    rules: &[CanonicalAclRule],
+) -> (Vec<Vec<AclIpv4Cidr>>, Vec<Vec<AclIpv4Cidr>>) {
+    let mut src_selectors = BTreeSet::new();
+    let mut dst_selectors = BTreeSet::new();
+    for rule in rules {
+        if !rule.src_cidrs.is_empty() && !src_selectors.contains(&rule.src_cidrs) {
+            src_selectors.insert(rule.src_cidrs.clone());
+        }
+        if !rule.dst_cidrs.is_empty() && !dst_selectors.contains(&rule.dst_cidrs) {
+            dst_selectors.insert(rule.dst_cidrs.clone());
+        }
     }
 
+    let mut src_table = vec![Vec::new()];
+    src_table.extend(src_selectors);
+    let mut dst_table = vec![Vec::new()];
+    dst_table.extend(dst_selectors);
+    (src_table, dst_table)
+}
+
+fn acl_selector_id(
+    selector: &[AclIpv4Cidr],
+    selectors: &[Vec<AclIpv4Cidr>],
+) -> AclSelectorId {
+    if selector.is_empty() {
+        return AclSelectorId::ANY;
+    }
+    let ordinal = selectors[1..]
+        .binary_search_by(|candidate| candidate.as_slice().cmp(selector))
+        .expect("canonical ACL selector must be interned");
+    AclSelectorId(ordinal + 1)
+}
+
+fn intern_acl_rules(
+    canonical_rules: Vec<CanonicalAclRule>,
+) -> (
+    Vec<NormalizedAclRule>,
+    Vec<Vec<AclIpv4Cidr>>,
+    Vec<Vec<AclIpv4Cidr>>,
+) {
+    let (src_selectors, dst_selectors) = acl_selector_tables(&canonical_rules);
+    let rules = canonical_rules
+        .into_iter()
+        .map(|rule| NormalizedAclRule {
+            id: rule.id,
+            direction: rule.direction,
+            priority: rule.priority,
+            directions: rule.directions,
+            proto: rule.proto,
+            action: rule.action,
+            src_selector_id: acl_selector_id(&rule.src_cidrs, &src_selectors),
+            dst_selector_id: acl_selector_id(&rule.dst_cidrs, &dst_selectors),
+            ports: rule.ports,
+        })
+        .collect();
+    (rules, src_selectors, dst_selectors)
+}
+
+fn acl_selector_intervals(selector: &[AclIpv4Cidr]) -> Vec<(u32, u32)> {
+    let mut intervals = selector
+        .iter()
+        .map(|cidr| (cidr.network, cidr.end()))
+        .collect::<Vec<_>>();
+    intervals.sort_unstable();
+    let mut merged = Vec::<(u32, u32)>::new();
+    for (start, end) in intervals {
+        if let Some((_, active_end)) = merged.last_mut() {
+            if start <= *active_end {
+                *active_end = (*active_end).max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+fn acl_selector_best_overlap(
+    selectors: &[Vec<AclIpv4Cidr>],
+    first_rule_indexes: &[Option<usize>],
+) -> Option<(usize, usize)> {
+    let mut intervals = Vec::new();
+    for (selector_index, selector) in selectors.iter().enumerate().skip(1) {
+        if first_rule_indexes
+            .get(selector_index)
+            .copied()
+            .flatten()
+            .is_none()
+        {
+            continue;
+        }
+        let selector_id = AclSelectorId(selector_index);
+        for (start, end) in acl_selector_intervals(selector) {
+            intervals.push((start, end, selector_id));
+        }
+    }
+    intervals.sort_unstable();
+
+    let mut active_ends = BinaryHeap::<Reverse<(u32, AclSelectorId)>>::new();
+    let mut active_counts = BTreeMap::<AclSelectorId, usize>::new();
+    let mut active_selectors = BTreeSet::<(usize, AclSelectorId)>::new();
+    let mut best = None;
+    for (start, end, selector_id) in intervals {
+        while active_ends
+            .peek()
+            .map(|Reverse((active_end, _))| *active_end < start)
+            .unwrap_or(false)
+        {
+            let Reverse((_, expired_selector_id)) = active_ends
+                .pop()
+                .expect("active ACL interval heap cannot be empty after peek");
+            let remove_selector = {
+                let count = active_counts
+                    .get_mut(&expired_selector_id)
+                    .expect("active ACL selector must have a count");
+                *count -= 1;
+                *count == 0
+            };
+            if remove_selector {
+                active_counts.remove(&expired_selector_id);
+                let first_rule_index = first_rule_indexes[expired_selector_id.0]
+                    .expect("active ACL selector must have a first rule index");
+                active_selectors.remove(&(first_rule_index, expired_selector_id));
+            }
+        }
+
+        let first_rule_index = first_rule_indexes[selector_id.0]
+            .expect("swept ACL selector must have a first rule index");
+        if let Some((other_first_rule_index, _)) = active_selectors
+            .iter()
+            .copied()
+            .find(|(_, other_id)| *other_id != selector_id)
+        {
+            let candidate = if first_rule_index < other_first_rule_index {
+                (first_rule_index, other_first_rule_index)
+            } else {
+                (other_first_rule_index, first_rule_index)
+            };
+            best = Some(best.map_or(candidate, |current: (usize, usize)| {
+                current.min(candidate)
+            }));
+        }
+
+        let count = active_counts.entry(selector_id).or_insert(0);
+        if *count == 0 {
+            active_selectors.insert((first_rule_index, selector_id));
+        }
+        *count += 1;
+        active_ends.push(Reverse((end, selector_id)));
+    }
+    best
+}
+
+fn acl_priority_overlap_reason(
+    rules: &[NormalizedAclRule],
+    src_selectors: &[Vec<AclIpv4Cidr>],
+    dst_selectors: &[Vec<AclIpv4Cidr>],
+) -> Option<String> {
+    let mut priorities = BTreeMap::<(String, i64), String>::new();
+    for rule in rules {
+        if rule.priority < 0 {
+            return Some(format!(
+                "invalid_acl_priority:{}:{}",
+                rule.id, rule.priority
+            ));
+        }
+        let key = (rule.direction.clone(), rule.priority);
+        if let Some(first_id) = priorities.get(&key) {
+            return Some(format!(
+                "duplicate_acl_priority:{}:{}:{}:{}",
+                rule.direction, rule.priority, first_id, rule.id
+            ));
+        }
+        priorities.insert(key, rule.id.clone());
+    }
+
+    let mut ordered: Vec<&NormalizedAclRule> = rules.iter().collect();
+    ordered.sort_by(|left, right| {
+        left.direction
+            .cmp(&right.direction)
+            .then_with(|| left.priority.cmp(&right.priority))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut src_first_rule_indexes = vec![None; src_selectors.len()];
+    let mut dst_first_rule_indexes = vec![None; dst_selectors.len()];
+    for (rule_index, rule) in ordered.iter().enumerate() {
+        if rule.src_selector_id != AclSelectorId::ANY
+            && src_first_rule_indexes[rule.src_selector_id.0].is_none()
+        {
+            src_first_rule_indexes[rule.src_selector_id.0] = Some(rule_index);
+        }
+        if rule.dst_selector_id != AclSelectorId::ANY
+            && dst_first_rule_indexes[rule.dst_selector_id.0].is_none()
+        {
+            dst_first_rule_indexes[rule.dst_selector_id.0] = Some(rule_index);
+        }
+    }
+    let src_best = acl_selector_best_overlap(src_selectors, &src_first_rule_indexes);
+    let dst_best = acl_selector_best_overlap(dst_selectors, &dst_first_rule_indexes);
+    let cidr_candidate = match (src_best, dst_best) {
+        (Some(src), Some(dst)) if src <= dst => Some((src.0, src.1, "src")),
+        (Some(_), Some(dst)) => Some((dst.0, dst.1, "dst")),
+        (Some(src), None) => Some((src.0, src.1, "src")),
+        (None, Some(dst)) => Some((dst.0, dst.1, "dst")),
+        (None, None) => None,
+    };
+
+    for (left_index, left) in ordered.iter().enumerate() {
+        for (right_index, right) in ordered.iter().enumerate().skip(left_index + 1) {
+            if let Some((cidr_left_index, cidr_right_index, side)) = cidr_candidate {
+                if (left_index, right_index) == (cidr_left_index, cidr_right_index) {
+                    return Some(format!(
+                        "unsupported_acl_cidr_overlap:{}:{}:{}:{}:{}",
+                        side, left.id, left.priority, right.id, right.priority
+                    ));
+                }
+            }
+
+            let src_relation =
+                acl_selector_relation(left.src_selector_id, right.src_selector_id);
+            let dst_relation =
+                acl_selector_relation(left.dst_selector_id, right.dst_selector_id);
+
+            if !left
+                .directions
+                .iter()
+                .any(|direction| right.directions.contains(direction))
+            {
+                continue;
+            }
+            if left.proto != 0 && right.proto != 0 && left.proto != right.proto {
+                continue;
+            }
+            if src_relation == AclSelectorRelation::Disjoint {
+                continue;
+            }
+            if dst_relation == AclSelectorRelation::Disjoint {
+                continue;
+            }
+
+            let same_key = left.proto == right.proto
+                && left.src_selector_id == right.src_selector_id
+                && left.dst_selector_id == right.dst_selector_id;
+            let same_behavior = left.action == right.action && left.ports == right.ports;
+            if same_behavior || (same_key && left.action == right.action) {
+                continue;
+            }
+            return Some(format!(
+                "unsupported_acl_priority_overlap:{}:{}:{}:{}",
+                left.id, left.priority, right.id, right.priority
+            ));
+        }
+    }
+    None
+}
+
+fn force_bypass_acl_plan(acl: &NeutronAclSnapshot, reason: String) -> AclApplyPlan {
+    AclApplyPlan {
+        conntrack_enabled: Some(acl.stateful),
+        force_bypass_reason: Some(reason),
+        ..AclApplyPlan::default()
+    }
+}
+
+fn acl_runtime_limit_reason(acl: &NeutronAclSnapshot) -> Option<String> {
+    if acl.rules.len() > MAX_ACL_RULES_PER_POLICY {
+        return Some(format!(
+            "acl_rule_limit_exceeded:{}:{}",
+            acl.rules.len(),
+            MAX_ACL_RULES_PER_POLICY,
+        ));
+    }
+    for (index, rule) in acl.rules.iter().enumerate() {
+        let rule_id = acl_rule_id(rule, index);
+        for (side, members) in [("src", &rule.src_cidrs), ("dst", &rule.dst_cidrs)] {
+            if members.len() > MAX_ACL_SELECTOR_MEMBERS {
+                return Some(format!(
+                    "acl_selector_member_limit_exceeded:{}:{}:{}:{}",
+                    side,
+                    rule_id,
+                    members.len(),
+                    MAX_ACL_SELECTOR_MEMBERS,
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn acl_validation_cache_key(acl: &NeutronAclSnapshot) -> AclValidationCacheKey {
+    AclValidationCacheKey {
+        policy_id: acl.policy_id.clone(),
+        revision: acl.revision,
+        content_hash: stable_json_hash(&AclValidationHashPayload {
+            default_action: &acl.default_action,
+            rules: &acl.rules,
+        }),
+    }
+}
+
+fn validate_neutron_acl_template(
+    acl: &NeutronAclSnapshot,
+) -> Result<AclValidatedTemplate, String> {
     let default_action = normalize_default_action(&acl.default_action);
     if !matches!(default_action.as_str(), "allow" | "accept" | "pass") {
         return Err(format!(
@@ -3039,41 +4202,109 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
             acl.default_action
         ));
     }
+    if let Some(reason) = acl_runtime_limit_reason(acl) {
+        return Ok(AclValidatedTemplate::ForceBypass(reason));
+    }
 
-    let mut groups = Vec::new();
-    let mut policies_by_key = BTreeMap::<AclEffectivePolicyKey, AclPolicyPlan>::new();
+    let mut canonical_rules = Vec::new();
     for (index, rule) in acl.rules.iter().enumerate() {
-        let rule_id = acl_rule_id(rule, index);
-        if rule
-            .ethertype
-            .as_deref()
-            .map(|ethertype| ethertype.eq_ignore_ascii_case("IPv6"))
-            .unwrap_or(false)
-        {
-            return Err(format!("rule {} uses IPv6 ethertype; unsupported", rule_id));
-        }
-        ensure_ipv4_cidrs(&rule.src_cidrs, &rule_id)?;
-        ensure_ipv4_cidrs(&rule.dst_cidrs, &rule_id)?;
+        canonical_rules.push(normalize_acl_rule(rule, index)?);
+    }
+    let (rules, src_selectors, dst_selectors) = intern_acl_rules(canonical_rules);
+    if let Some(reason) = acl_priority_overlap_reason(
+        &rules,
+        &src_selectors,
+        &dst_selectors,
+    ) {
+        return Ok(AclValidatedTemplate::ForceBypass(reason));
+    }
+    Ok(AclValidatedTemplate::Ready {
+        rules,
+        src_selectors,
+        dst_selectors,
+    })
+}
 
-        let proto = proto_from_string(rule.protocol.as_deref().unwrap_or("any"))
-            .map_err(|e| format!("rule {} protocol: {}", rule_id, e))?;
-        let action = action_from_string(rule.action.as_deref().unwrap_or("allow"))
-            .map_err(|e| format!("rule {} action: {}", rule_id, e))?;
-        let direction = direction_from_string(rule.direction.as_deref().unwrap_or("ingress"))
-            .map_err(|e| format!("rule {} direction: {}", rule_id, e))?;
-        let ports = acl_ports(rule, proto, &rule_id)?;
-        let src_group = cidr_group(port_id, &rule_id, "src", &rule.src_cidrs, &mut groups);
-        let dst_group = cidr_group(port_id, &rule_id, "dst", &rule.dst_cidrs, &mut groups);
+fn cached_neutron_acl_template(
+    acl: &NeutronAclSnapshot,
+    cache: &mut AclValidationCache,
+) -> Result<AclValidatedTemplate, String> {
+    let key = acl_validation_cache_key(acl);
+    if let Some(template) = cache.entries.get(&key) {
+        cache.hits += 1;
+        return template.clone();
+    }
+    cache.misses += 1;
+    let template = validate_neutron_acl_template(acl);
+    cache.entries.insert(key, template.clone());
+    template
+}
 
-        for direction in neutron_acl_to_datapath_directions(direction) {
+fn acl_selector_registry(
+    port_id: &str,
+    side: &str,
+    selectors: &[Vec<AclIpv4Cidr>],
+) -> Vec<AclGroupPlan> {
+    let mut groups = Vec::new();
+    for (selector_index, selector) in selectors.iter().enumerate().skip(1) {
+        let selector_id = AclSelectorId(selector_index);
+        let name = format!(
+            "{}{}:selector:{}",
+            neutron_acl_prefix(port_id),
+            side,
+            selector_id.group_ordinal()
+        );
+        groups.push(AclGroupPlan {
+            name,
+            cidrs: selector.iter().map(|cidr| cidr.canonical()).collect(),
+        });
+    }
+    groups
+}
+
+fn acl_group_for_selector(
+    port_id: &str,
+    side: &str,
+    selector_id: AclSelectorId,
+) -> String {
+    if selector_id == AclSelectorId::ANY {
+        "any".to_string()
+    } else {
+        format!(
+            "{}{}:selector:{}",
+            neutron_acl_prefix(port_id),
+            side,
+            selector_id.group_ordinal(),
+        )
+    }
+}
+
+fn render_neutron_acl_plan(
+    port_id: &str,
+    acl: &NeutronAclSnapshot,
+    normalized_rules: &[NormalizedAclRule],
+    src_selectors: &[Vec<AclIpv4Cidr>],
+    dst_selectors: &[Vec<AclIpv4Cidr>],
+) -> Result<AclApplyPlan, String> {
+    let mut groups = acl_selector_registry(port_id, "src", src_selectors);
+    let mut dst_groups = acl_selector_registry(port_id, "dst", dst_selectors);
+    groups.append(&mut dst_groups);
+
+    let mut policies_by_key = BTreeMap::<AclEffectivePolicyKey, AclPolicyPlan>::new();
+    for rule in normalized_rules {
+        let ports = serialize_acl_port_ranges(rule.ports.clone());
+        let src_group = acl_group_for_selector(port_id, "src", rule.src_selector_id);
+        let dst_group = acl_group_for_selector(port_id, "dst", rule.dst_selector_id);
+
+        for direction in &rule.directions {
             let key = AclEffectivePolicyKey {
                 src_group: src_group.clone(),
                 dst_group: dst_group.clone(),
-                proto,
-                direction,
+                proto: rule.proto,
+                direction: *direction,
             };
             if let Some(existing) = policies_by_key.get_mut(&key) {
-                if existing.action != action {
+                if existing.action != rule.action {
                     return Err(format!(
                         "conflicting effective ACL actions src={} dst={} proto={} direction={} existing_action={} new_action={}",
                         key.src_group,
@@ -3081,7 +4312,7 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
                         key.proto,
                         key.direction,
                         existing.action,
-                        action
+                        rule.action
                     ));
                 }
                 existing.ports = merge_acl_ports(existing.ports.take(), ports.clone())?;
@@ -3092,9 +4323,9 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
                 AclPolicyPlan {
                     src_group: key.src_group,
                     dst_group: key.dst_group,
-                    proto,
-                    action,
-                    direction,
+                    proto: rule.proto,
+                    action: rule.action,
+                    direction: *direction,
                     ports: ports.clone(),
                 },
             );
@@ -3104,7 +4335,45 @@ fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclA
     Ok(AclApplyPlan {
         groups,
         policies: policies_by_key.into_values().collect(),
+        conntrack_enabled: Some(acl.stateful),
+        force_bypass_reason: None,
     })
+}
+
+fn translate_neutron_acl_with_cache(
+    port_id: &str,
+    acl: &NeutronAclSnapshot,
+    cache: &mut AclValidationCache,
+) -> Result<AclApplyPlan, String> {
+    if !acl.enabled
+        || !acl.status.eq_ignore_ascii_case("ready")
+        || !acl.effective_action.eq_ignore_ascii_case("enforce")
+    {
+        return Ok(AclApplyPlan {
+            conntrack_enabled: Some(acl.stateful),
+            ..AclApplyPlan::default()
+        });
+    }
+
+    match cached_neutron_acl_template(acl, cache)? {
+        AclValidatedTemplate::Ready {
+            rules,
+            src_selectors,
+            dst_selectors,
+        } => render_neutron_acl_plan(
+            port_id,
+            acl,
+            &rules,
+            &src_selectors,
+            &dst_selectors,
+        ),
+        AclValidatedTemplate::ForceBypass(reason) => Ok(force_bypass_acl_plan(acl, reason)),
+    }
+}
+
+fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclApplyPlan, String> {
+    let mut cache = AclValidationCache::default();
+    translate_neutron_acl_with_cache(port_id, acl, &mut cache)
 }
 
 async fn purge_neutron_acl(
@@ -3182,7 +4451,7 @@ async fn flush_neutron_acl_conntrack(
 ) -> Result<(), String> {
     let flushed = state
         .control_plane
-        .flush_conntrack(ifname)
+        .flush_conntrack_strict(ifname)
         .await
         .map_err(|e| e.to_string())?;
     if flushed > 0 {
@@ -3199,40 +4468,84 @@ async fn flush_neutron_acl_conntrack(
 async fn reconcile_neutron_acl(
     state: &NeutronApiState,
     port: &NeutronPortSnapshot,
-) -> Result<(), String> {
+    acl_validation_cache: &mut AclValidationCache,
+    full_resync: bool,
+) -> Result<NeutronAclReconcileOutcome, NeutronAclReconcileError> {
     if !port_manages_acl(port) {
-        return Ok(());
+        return Ok(NeutronAclReconcileOutcome::default());
     }
 
     let profile_started = Instant::now();
     let translate_started = Instant::now();
     let plan = match &port.acl {
-        Some(acl) => translate_neutron_acl(&port.port_id, acl)?,
+        Some(acl) => translate_neutron_acl_with_cache(
+            &port.port_id,
+            acl,
+            acl_validation_cache,
+        )
+        .map_err(|error| {
+            acl_reconcile_error(AclReconcileFailurePhase::BeforeQuiesce, error)
+        })?,
         None => AclApplyPlan::default(),
     };
+    let outcome = NeutronAclReconcileOutcome::from_plan(&plan);
     let translate_ms = elapsed_ms(translate_started);
+    let preserved_conntrack_enabled = if plan.conntrack_enabled.is_none() {
+        state
+            .control_plane
+            .get_config(&port.ifname)
+            .await
+            .map_err(|error| {
+                acl_reconcile_error(
+                    AclReconcileFailurePhase::BeforeQuiesce,
+                    error.to_string(),
+                )
+            })?
+            .conntrack_enabled
+            != 0
+    } else {
+        false
+    };
+    let transition = acl_runtime_transition(&plan, preserved_conntrack_enabled);
     let group_count = plan.groups.len();
     let group_cidr_count: usize = plan.groups.iter().map(|group| group.cidrs.len()).sum();
     let policy_count = plan.policies.len();
     let gate_update_mode = acl_gate_update_mode(&plan);
+    if !plan.policies.is_empty() {
+        state
+            .control_plane
+            .require_tc_acl_ready(&port.ifname)
+            .await
+            .map_err(|error| {
+                acl_reconcile_error(
+                    AclReconcileFailurePhase::BeforeQuiesce,
+                    error.to_string(),
+                )
+            })?;
+    }
     let disable_ms = if gate_update_mode == AclGateUpdateMode::DisableBeforeReplace {
         let disable_started = Instant::now();
         state
-            .control_plane
-            .update_config(
+            .registry
+            .update_neutron_acl_runtime_gate(
                 &port.ifname,
-                None,
-                None,
-                Some(false),
-                None,
-                None,
-                None,
-                None,
+                transition.quiesce.conntrack_enabled,
+                transition.quiesce.acl_enabled,
+                false,
             )
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| {
+                acl_reconcile_error(
+                    AclReconcileFailurePhase::BeforeQuiesce,
+                    error.to_string(),
+                )
+            })?;
         let elapsed = elapsed_ms(disable_started);
-        fault_injection::check("neutron.acl.after_disable").await?;
+        fault_injection::check("neutron.acl.after_disable")
+            .await
+            .map_err(|error| {
+                acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+            })?;
         elapsed
     } else {
         0
@@ -3269,14 +4582,31 @@ async fn reconcile_neutron_acl(
             &policy_specs,
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            acl_reconcile_error(
+                AclReconcileFailurePhase::AfterQuiesce,
+                error.to_string(),
+            )
+        })?;
     let replace_ms = elapsed_ms(replace_started);
-    fault_injection::check("neutron.acl.after_purge").await?;
+    fault_injection::check("neutron.acl.after_purge")
+        .await
+        .map_err(|error| {
+            acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+        })?;
     if replace_report.group_cidr_add_count > 0 {
-        fault_injection::check("neutron.acl.after_group_write").await?;
+        fault_injection::check("neutron.acl.after_group_write")
+            .await
+            .map_err(|error| {
+                acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+            })?;
     }
     if replace_report.policy_add_count > 0 {
-        fault_injection::check("neutron.acl.after_policy_write").await?;
+        fault_injection::check("neutron.acl.after_policy_write")
+            .await
+            .map_err(|error| {
+                acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+            })?;
     }
 
     let effective_reason = if port.acl.is_none() {
@@ -3288,8 +4618,29 @@ async fn reconcile_neutron_acl(
     };
     if plan.policies.is_empty() {
         let flush_started = Instant::now();
-        flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id).await?;
+        flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id)
+            .await
+            .map_err(|error| {
+                acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+            })?;
         let flush_ms = elapsed_ms(flush_started);
+        let publish_started = Instant::now();
+        state
+            .registry
+            .update_neutron_acl_runtime_gate(
+                &port.ifname,
+                transition.publish.conntrack_enabled,
+                transition.publish.acl_enabled,
+                full_resync,
+            )
+            .await
+            .map_err(|error| {
+                acl_reconcile_error(
+                    AclReconcileFailurePhase::AfterQuiesce,
+                    error.to_string(),
+                )
+            })?;
+        let publish_ms = elapsed_ms(publish_started);
         info!(
             port_id = %port.port_id,
             ifname = %port.ifname,
@@ -3311,23 +4662,42 @@ async fn reconcile_neutron_acl(
             port_set_delete_count = replace_report.port_set_delete_count,
             compact_ms = replace_report.compact_ms,
             flush_ms,
+            publish_ms,
             total_ms = elapsed_ms(profile_started),
             "neutron_acl_apply_profile"
         );
-        return Ok(());
+        return Ok(outcome);
     }
 
     let flush_started = Instant::now();
-    flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id).await?;
-    let flush_ms = elapsed_ms(flush_started);
-    fault_injection::check("neutron.acl.before_enable").await?;
-    let enable_started = Instant::now();
-    state
-        .control_plane
-        .update_config(&port.ifname, None, None, Some(true), None, None, None, None)
+    flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id)
         .await
-        .map_err(|e| e.to_string())?;
-    let enable_ms = elapsed_ms(enable_started);
+        .map_err(|error| {
+            acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+        })?;
+    let flush_ms = elapsed_ms(flush_started);
+    fault_injection::check("neutron.acl.before_enable")
+        .await
+        .map_err(|error| {
+            acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
+        })?;
+    let publish_started = Instant::now();
+    state
+        .registry
+        .update_neutron_acl_runtime_gate(
+            &port.ifname,
+            transition.publish.conntrack_enabled,
+            transition.publish.acl_enabled,
+            full_resync,
+        )
+        .await
+        .map_err(|error| {
+            acl_reconcile_error(
+                AclReconcileFailurePhase::AfterQuiesce,
+                error.to_string(),
+            )
+        })?;
+    let publish_ms = elapsed_ms(publish_started);
     info!(
         port_id = %port.port_id,
         ifname = %port.ifname,
@@ -3348,11 +4718,32 @@ async fn reconcile_neutron_acl(
         replace_ms,
         compact_ms = replace_report.compact_ms,
         flush_ms,
-        enable_ms,
+        publish_ms,
         total_ms = elapsed_ms(profile_started),
         "neutron_acl_apply_profile"
     );
-    fault_injection::check("neutron.acl.after_enable_before_commit").await
+    if let Err(error) = fault_injection::check("neutron.acl.after_enable_before_commit").await {
+        return match state
+            .registry
+            .update_neutron_acl_runtime_gate(
+                &port.ifname,
+                false,
+                false,
+                false,
+            )
+            .await
+        {
+            Ok(()) => Err(acl_reconcile_error(
+                AclReconcileFailurePhase::AfterQuiesce,
+                error,
+            )),
+            Err(disable_error) => Err(acl_reconcile_error(
+                AclReconcileFailurePhase::CompensationFailed,
+                format!("{}; acl_disable_compensation_failed:{}", error, disable_error),
+            )),
+        };
+    }
+    Ok(outcome)
 }
 
 #[allow(dead_code)]
@@ -3522,7 +4913,15 @@ fn can_skip_neutron_domain_reconcile(
     current: Option<&ManagedNeutronPort>,
     previous_status: Option<&NeutronPortStatus>,
     desired: &ManagedNeutronPort,
+    full_resync: bool,
 ) -> bool {
+    if full_resync
+        && normalize_managed_domains(&desired.managed_domains)
+            .iter()
+            .any(|domain| domain == "acl")
+    {
+        return false;
+    }
     let Some(current) = current else {
         return false;
     };
@@ -3536,6 +4935,199 @@ fn can_skip_neutron_domain_reconcile(
 mod tests {
     use super::*;
     use crate::ebpf_binary::TraceBackendKind;
+
+    #[test]
+    fn neutron_tc_acl_health_projection_is_deduplicated_and_preserves_resync() {
+        let port = ManagedNeutronPort {
+            port_id: "port-health".to_string(),
+            ifname: "tap-health".to_string(),
+            ifindex: Some(17),
+            managed_domains: vec!["acl".to_string()],
+            domain_desired_hashes: BTreeMap::new(),
+        };
+        let mut runtime = NeutronRuntimeState::default();
+        runtime.ports.insert(port.port_id.clone(), port.clone());
+        runtime.port_statuses.insert(
+            port.port_id.clone(),
+            port_runtime_status(
+                &port.port_id,
+                &port.ifname,
+                9,
+                Some("hash-9".to_string()),
+                port.managed_domains.clone(),
+                "ready",
+                None,
+                vec![domain_status_with_action(
+                    "acl",
+                    "ready",
+                    None,
+                    Some("enforce".to_string()),
+                )],
+            ),
+        );
+        let health = vec![InstanceRuntimeHealthSnapshot {
+            name: port.ifname.clone(),
+            active: true,
+            acl_ready: false,
+            xdp_ready: true,
+            readiness_reason: Some("missing_tc_egress".to_string()),
+        }];
+
+        let recovery_only = vec![InstanceRuntimeHealthSnapshot {
+            readiness_reason: Some("recovery_required".to_string()),
+            ..health[0].clone()
+        }];
+        assert!(!project_tc_acl_link_loss(&mut runtime, &recovery_only));
+        assert_eq!(
+            runtime.port_statuses.get(&port.port_id).unwrap().status,
+            "ready"
+        );
+
+        assert!(project_tc_acl_link_loss(&mut runtime, &health));
+        assert_eq!(runtime.authority_state, "runtime_degraded");
+        let status = runtime.port_statuses.get(&port.port_id).unwrap();
+        assert_eq!(status.reason.as_deref(), Some("tc_acl_link_lost"));
+        assert!(status.domains.iter().any(|domain| {
+            domain.domain == "acl"
+                && domain.status == "degraded"
+                && domain.effective_action.as_deref() == Some("bypass")
+        }));
+        assert!(!project_tc_acl_link_loss(&mut runtime, &health));
+
+        let mut resync_runtime = NeutronRuntimeState::default();
+        resync_runtime
+            .ports
+            .insert(port.port_id.clone(), port.clone());
+        resync_runtime.port_statuses.insert(
+            port.port_id.clone(),
+            port_runtime_status(
+                &port.port_id,
+                &port.ifname,
+                9,
+                Some("hash-9".to_string()),
+                port.managed_domains,
+                "degraded",
+                Some("acl_restart_replay_requires_resync".to_string()),
+                vec![domain_status_with_action(
+                    "acl",
+                    "degraded",
+                    Some("acl_restart_replay_requires_resync".to_string()),
+                    Some("unchanged".to_string()),
+                )],
+            ),
+        );
+        assert!(!project_tc_acl_link_loss(&mut resync_runtime, &health));
+        assert_eq!(
+            resync_runtime
+                .port_statuses
+                .get("port-health")
+                .unwrap()
+                .reason
+                .as_deref(),
+            Some("acl_restart_replay_requires_resync")
+        );
+    }
+
+    fn tc_health_projection_fixture(
+        status_reason: Option<String>,
+        domains: Vec<NeutronDomainStatus>,
+    ) -> (
+        NeutronRuntimeState,
+        ManagedNeutronPort,
+        Vec<InstanceRuntimeHealthSnapshot>,
+    ) {
+        let port = ManagedNeutronPort {
+            port_id: "port-health-guard".to_string(),
+            ifname: "tap-health-guard".to_string(),
+            ifindex: Some(19),
+            managed_domains: vec!["acl".to_string()],
+            domain_desired_hashes: BTreeMap::new(),
+        };
+        let mut runtime = NeutronRuntimeState::default();
+        runtime.ports.insert(port.port_id.clone(), port.clone());
+        runtime.port_statuses.insert(
+            port.port_id.clone(),
+            port_runtime_status(
+                &port.port_id,
+                &port.ifname,
+                11,
+                Some("hash-11".to_string()),
+                port.managed_domains.clone(),
+                if status_reason.is_some() {
+                    "blocked"
+                } else {
+                    "ready"
+                },
+                status_reason,
+                domains,
+            ),
+        );
+        let health = vec![InstanceRuntimeHealthSnapshot {
+            name: port.ifname.clone(),
+            active: true,
+            acl_ready: false,
+            xdp_ready: true,
+            readiness_reason: Some("missing_tc_ingress".to_string()),
+        }];
+        (runtime, port, health)
+    }
+
+    #[test]
+    fn neutron_tc_acl_health_projection_preserves_pending_generation_state() {
+        let (mut runtime, port, health) = tc_health_projection_fixture(
+            None,
+            vec![domain_status_with_action(
+                "acl",
+                "ready",
+                None,
+                Some("enforce".to_string()),
+            )],
+        );
+        runtime.pending_generation = Some(12);
+        runtime.authority_state = "applying".to_string();
+        runtime.wal_status = "intent_written".to_string();
+
+        assert!(!project_tc_acl_link_loss(&mut runtime, &health));
+        assert_eq!(runtime.pending_generation, Some(12));
+        assert_eq!(runtime.authority_state, "applying");
+        assert_eq!(runtime.wal_status, "intent_written");
+        assert_eq!(
+            runtime.port_statuses.get(&port.port_id).unwrap().status,
+            "ready"
+        );
+    }
+
+    #[test]
+    fn neutron_tc_acl_health_projection_preserves_recovery_failures() {
+        for reason in [
+            "attach_recovery_failed:link unavailable",
+            "acl_recovery_failed:map unavailable",
+        ] {
+            let (mut runtime, port, health) = tc_health_projection_fixture(
+                Some(reason.to_string()),
+                vec![domain_status_with_action(
+                    "acl",
+                    "blocked",
+                    Some(reason.to_string()),
+                    Some("unchanged".to_string()),
+                )],
+            );
+            runtime.authority_state = "blocked_recovery_required".to_string();
+            runtime.wal_status = "intent_recovery_blocked".to_string();
+
+            assert!(!project_tc_acl_link_loss(&mut runtime, &health));
+            assert_eq!(runtime.authority_state, "blocked_recovery_required");
+            assert_eq!(runtime.wal_status, "intent_recovery_blocked");
+            let status = runtime.port_statuses.get(&port.port_id).unwrap();
+            assert_eq!(status.status, "blocked");
+            assert_eq!(status.reason.as_deref(), Some(reason));
+            assert_eq!(
+                status.domains[0].reason.as_deref(),
+                Some(reason),
+                "domain recovery evidence must be preserved"
+            );
+        }
+    }
     use crate::kernel_drop_manager::KernelDropManager;
     use crate::ssl_manager::SslManager;
     use crate::trace_backend::TraceManager;
@@ -3709,6 +5301,80 @@ mod tests {
             src_port_max: None,
             dst_port_min: Some(dst_port),
             dst_port_max: Some(dst_port),
+        }
+    }
+
+    fn acl_rule_with(
+        id: &str,
+        priority: i64,
+        protocol: &str,
+        action: &str,
+        src_cidrs: &[&str],
+        dst_cidrs: &[&str],
+        dst_port: Option<u16>,
+    ) -> NeutronAclRuleSnapshot {
+        NeutronAclRuleSnapshot {
+            id: Some(id.to_string()),
+            direction: Some("egress".to_string()),
+            priority,
+            action: Some(action.to_string()),
+            ethertype: Some("IPv4".to_string()),
+            protocol: Some(protocol.to_string()),
+            src_cidrs: src_cidrs.iter().map(|value| value.to_string()).collect(),
+            dst_cidrs: dst_cidrs.iter().map(|value| value.to_string()).collect(),
+            src_port_min: None,
+            src_port_max: None,
+            dst_port_min: dst_port,
+            dst_port_max: dst_port,
+        }
+    }
+
+    fn numbered_acl_rules(count: usize) -> Vec<NeutronAclRuleSnapshot> {
+        (0..count)
+            .map(|index| {
+                acl_rule_with(
+                    &format!("rule-{}", index),
+                    index as i64,
+                    "tcp",
+                    "drop",
+                    &[],
+                    &[],
+                    None,
+                )
+            })
+            .collect()
+    }
+
+    fn numbered_acl_members(count: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| {
+                format!(
+                    "10.{}.{}.{}/32",
+                    (index >> 16) & 0xff,
+                    (index >> 8) & 0xff,
+                    index & 0xff,
+                )
+            })
+            .collect()
+    }
+
+    fn normalized_acl_rule_with_selectors(
+        id: &str,
+        priority: i64,
+        proto: u8,
+        src_selector_id: usize,
+        dst_selector_id: usize,
+    ) -> NormalizedAclRule {
+        NormalizedAclRule {
+            id: id.to_string(),
+            direction: "egress".to_string(),
+            priority,
+            directions: vec![0],
+            proto,
+            action: 1,
+            src_selector_id: AclSelectorId(src_selector_id),
+            dst_selector_id: AclSelectorId(dst_selector_id),
+            ports: Vec::new(),
         }
     }
 
@@ -4793,7 +6459,7 @@ mod tests {
             .await
             .expect("same hash pending should deduplicate");
 
-        assert!(!decision.spawn_apply);
+        assert!(decision.prepared.is_none());
         assert_eq!(decision.response.status, "pending");
         assert_eq!(decision.response.accepted_generation, 110);
         assert_eq!(decision.response.applied_generation, 109);
@@ -4836,8 +6502,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn neutron_snapshot_submit_accepts_new_snapshot_without_blocking_apply() {
-        let root = temp_root("submit-accepted");
+    async fn neutron_snapshot_submit_persists_intent_before_pending_response() {
+        let root = temp_root("submit-pending-durable");
         let state = test_neutron_state(&root);
         let snapshot = NeutronSnapshotRequest {
             schema_version: None,
@@ -4849,16 +6515,293 @@ mod tests {
 
         let decision = accept_neutron_snapshot_submit(&state, &snapshot, &ApplyScope::FullHost)
             .await
-            .expect("new snapshot should be accepted");
+            .expect("new snapshot intent should become durable pending");
 
-        assert!(decision.spawn_apply);
-        assert_eq!(decision.response.status, "accepted");
-        assert_eq!(decision.response.accepted_generation, 130);
+        assert!(decision.prepared.is_some());
+        assert_eq!(decision.response.status, "pending");
+        assert_eq!(decision.response.accepted_generation, 0);
         assert_eq!(decision.response.applied_generation, 0);
         let runtime = state.runtime.read().await;
+        assert_eq!(runtime.accepted_generation, 0);
         assert_eq!(runtime.pending_generation, Some(130));
-        assert_eq!(runtime.authority_state, "accepted");
-        assert_eq!(runtime.wal_status, "accepted_pending_intent");
+        assert_eq!(runtime.authority_state, "applying");
+        assert_eq!(runtime.wal_status, "intent_written");
+        drop(runtime);
+
+        let replay = state.wal.replay();
+        assert_eq!(replay.state.accepted_generation, 0);
+        assert_eq!(replay.state.pending_generation, Some(130));
+        assert_eq!(
+            replay
+                .pending_intent
+                .as_ref()
+                .map(|intent| intent.generation),
+            Some(130)
+        );
+        assert_eq!(
+            replay
+                .pending_intent
+                .as_ref()
+                .and_then(|intent| intent.desired_hash.as_deref()),
+            Some("hash-130")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_submit_wal_intent_failure_keeps_runtime_unaccepted() {
+        let root = temp_root("submit-intent-failure");
+        let invalid_state_path = root.join("not-a-directory");
+        std::fs::write(&invalid_state_path, b"regular file").unwrap();
+        let mut state = test_neutron_state(&root);
+        state.wal = Arc::new(NeutronWal::new(&invalid_state_path));
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 131,
+            desired_hash: Some("hash-131".to_string()),
+            host: None,
+            ports: vec![port("target-port", "tap-target", true)],
+        };
+
+        let error = accept_neutron_snapshot_submit(&state, &snapshot, &ApplyScope::FullHost)
+            .await
+            .expect_err("failed WAL intent must reject snapshot admission");
+
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code, "wal_intent_failed");
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.accepted_generation, 0);
+        assert_eq!(runtime.applied_generation, 0);
+        assert_eq!(runtime.pending_generation, None);
+        assert_eq!(runtime.authority_state, "idle");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_snapshot_commit_failure_builds_blocked_bypass_runtime() {
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "port-1".to_string(),
+            ManagedNeutronPort {
+                managed_domains: vec!["acl".to_string()],
+                ..managed("port-1", "tap-port-1")
+            },
+        );
+        let previous = NeutronRuntimeState {
+            accepted_generation: 40,
+            applied_generation: 40,
+            applied_desired_hash: Some("hash-40".to_string()),
+            authority_state: "ready".to_string(),
+            ports,
+            ..NeutronRuntimeState::default()
+        };
+        let intent = PendingNeutronIntent {
+            kind: "snapshot".to_string(),
+            generation: 41,
+            desired_hash: Some("hash-41".to_string()),
+            port_ids: vec!["port-1".to_string()],
+            affected_domains: vec!["acl".to_string(), "attach".to_string()],
+            affected_ports: vec![managed("port-1", "tap-port-1")],
+        };
+        let mut blocked_statuses = BTreeMap::new();
+        blocked_statuses.insert(
+            "port-1".to_string(),
+            port_runtime_status(
+                "port-1",
+                "tap-port-1",
+                41,
+                Some("hash-41".to_string()),
+                vec!["acl".to_string()],
+                "blocked",
+                Some("wal_commit_failed".to_string()),
+                vec![domain_status_with_action(
+                    "acl",
+                    "blocked",
+                    Some("wal_commit_failed".to_string()),
+                    Some("bypass".to_string()),
+                )],
+            ),
+        );
+
+        let blocked = build_blocked_snapshot_runtime(
+            &previous,
+            &intent,
+            blocked_statuses,
+            "commit_failed",
+        );
+
+        assert_eq!(blocked.accepted_generation, 40);
+        assert_eq!(blocked.applied_generation, 40);
+        assert_eq!(blocked.pending_generation, Some(41));
+        assert_eq!(blocked.desired_hash.as_deref(), Some("hash-41"));
+        assert_eq!(blocked.authority_state, "blocked_recovery_required");
+        assert_eq!(blocked.wal_status, "commit_failed");
+        assert_eq!(blocked.ports, previous.ports);
+        let acl = &blocked.port_statuses["port-1"].domains[0];
+        assert_eq!(acl.status, "blocked");
+        assert_eq!(acl.effective_action.as_deref(), Some("bypass"));
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_background_error_preserves_blocked_recovery() {
+        let root = temp_root("background-error-blocked");
+        let state = test_neutron_state(&root);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.accepted_generation = 40;
+            runtime.applied_generation = 40;
+            runtime.pending_generation = Some(41);
+            runtime.desired_hash = Some("hash-41".to_string());
+            runtime.authority_state = "blocked_recovery_required".to_string();
+            runtime.wal_status = "recovery_commit_failed".to_string();
+        }
+
+        mark_snapshot_background_error(
+            &state,
+            41,
+            Some("hash-41".to_string()),
+            "wal_commit_failed",
+            "commit failed".to_string(),
+        )
+        .await;
+
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.authority_state, "blocked_recovery_required");
+        assert_eq!(runtime.wal_status, "recovery_commit_failed");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_post_commit_error_keeps_durable_runtime() {
+        let root = temp_root("post-commit-final");
+        let state = test_neutron_state(&root);
+        let committed = NeutronRuntimeState {
+            accepted_generation: 501,
+            applied_generation: 501,
+            pending_generation: None,
+            desired_hash: Some("hash-501".to_string()),
+            applied_desired_hash: Some("hash-501".to_string()),
+            authority_state: "ready".to_string(),
+            wal_status: "commit_written".to_string(),
+            ..NeutronRuntimeState::default()
+        };
+        state
+            .wal
+            .append_snapshot_commit(committed.to_wal_state())
+            .expect("commit should be durable before the post-commit hook");
+
+        publish_committed_snapshot_runtime(&state, committed, 501, || async {
+            Err("after_commit_return_error".to_string())
+        })
+        .await;
+
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.accepted_generation, 501);
+        assert_eq!(runtime.applied_generation, 501);
+        assert_eq!(runtime.pending_generation, None);
+        assert_eq!(runtime.authority_state, "ready");
+        drop(runtime);
+        assert_eq!(state.wal.replay().state.applied_generation, 501);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_pending_recovery_keeps_newer_wal_commit() {
+        let root = temp_root("pending-newer-wal-commit");
+        let state = test_neutron_state(&root);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.accepted_generation = 500;
+            runtime.applied_generation = 500;
+            runtime.pending_generation = Some(501);
+            runtime.desired_hash = Some("hash-501".to_string());
+            runtime.applied_desired_hash = Some("hash-500".to_string());
+            runtime.authority_state = "applying".to_string();
+            runtime.wal_status = "intent_written".to_string();
+        }
+        let committed = NeutronRuntimeState {
+            accepted_generation: 501,
+            applied_generation: 501,
+            pending_generation: None,
+            desired_hash: Some("hash-501".to_string()),
+            applied_desired_hash: Some("hash-501".to_string()),
+            authority_state: "ready".to_string(),
+            ..NeutronRuntimeState::default()
+        };
+        state
+            .wal
+            .append_snapshot_commit(committed.to_wal_state())
+            .expect("newer commit should be durable");
+
+        let response = recover_pending_snapshot(
+            state.clone(),
+            NeutronRecoverPendingRequest {
+                expected_pending_generation: 501,
+                expected_desired_hash: Some("hash-501".to_string()),
+                mode: None,
+            },
+        )
+        .await
+        .expect("durable commit should win over stale pending RAM");
+
+        assert_eq!(response.status, "already_committed");
+        assert_eq!(response.applied_generation, 501);
+        assert_eq!(response.applied_desired_hash.as_deref(), Some("hash-501"));
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.accepted_generation, 501);
+        assert_eq!(runtime.applied_generation, 501);
+        assert_eq!(runtime.pending_generation, None);
+        assert_eq!(runtime.authority_state, "ready");
+        drop(runtime);
+        assert_eq!(state.wal.replay().state.applied_generation, 501);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_pending_recovery_rejects_mismatch_with_newer_wal_commit() {
+        let root = temp_root("pending-newer-wal-mismatch");
+        let state = test_neutron_state(&root);
+        {
+            let mut runtime = state.runtime.write().await;
+            runtime.accepted_generation = 500;
+            runtime.applied_generation = 500;
+            runtime.pending_generation = Some(501);
+            runtime.desired_hash = Some("hash-501".to_string());
+            runtime.applied_desired_hash = Some("hash-500".to_string());
+            runtime.authority_state = "applying".to_string();
+        }
+        state
+            .wal
+            .append_snapshot_commit(
+                NeutronRuntimeState {
+                    accepted_generation: 501,
+                    applied_generation: 501,
+                    desired_hash: Some("hash-501".to_string()),
+                    applied_desired_hash: Some("hash-501".to_string()),
+                    authority_state: "ready".to_string(),
+                    ..NeutronRuntimeState::default()
+                }
+                .to_wal_state(),
+            )
+            .expect("newer commit should be durable");
+
+        let error = recover_pending_snapshot(
+            state.clone(),
+            NeutronRecoverPendingRequest {
+                expected_pending_generation: 501,
+                expected_desired_hash: Some("wrong-hash".to_string()),
+                mode: None,
+            },
+        )
+        .await
+        .expect_err("mismatched recovery request must not bypass validation");
+
+        assert_eq!(error.code, "pending_desired_hash_mismatch");
+        let runtime = state.runtime.read().await;
+        assert_eq!(runtime.applied_generation, 500);
+        assert_eq!(runtime.pending_generation, Some(501));
+        drop(runtime);
+        assert_eq!(state.wal.replay().state.applied_generation, 501);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5013,7 +6956,7 @@ mod tests {
     }
 
     #[test]
-    fn port_domain_reconcile_skip_requires_ready_matching_acl_hash() {
+    fn neutron_acl_full_host_resync_republishes_after_unprojected_health_loss() {
         let mut snapshot = port("vm-port", "tap-vm", true);
         snapshot.managed_domains = vec!["acl".to_string()];
         snapshot.acl = Some(NeutronAclSnapshot {
@@ -5036,7 +6979,17 @@ mod tests {
         assert!(can_skip_neutron_domain_reconcile(
             Some(&managed),
             Some(&status),
-            &managed
+            &managed,
+            false,
+        ));
+        // The detector may already have quiesced the live gate while the
+        // projector has not yet replaced this still-ready status. A full-host
+        // authoritative resync must therefore reconcile and republish ACL.
+        assert!(!can_skip_neutron_domain_reconcile(
+            Some(&managed),
+            Some(&status),
+            &managed,
+            true,
         ));
 
         let mut changed_snapshot = snapshot.clone();
@@ -5045,7 +6998,8 @@ mod tests {
         assert!(!can_skip_neutron_domain_reconcile(
             Some(&managed),
             Some(&status),
-            &changed
+            &changed,
+            false,
         ));
 
         let error_status = port_runtime_status(
@@ -5065,8 +7019,144 @@ mod tests {
         assert!(!can_skip_neutron_domain_reconcile(
             Some(&managed),
             Some(&error_status),
-            &managed
+            &managed,
+            false,
         ));
+    }
+
+    #[test]
+    fn restart_invalidation_requires_acl_resync_without_losing_binding_or_other_hashes() {
+        let mut desired = managed_with_ifindex("vm-port", "tap-vm", 17);
+        desired.managed_domains = vec!["acl".to_string()];
+        desired
+            .domain_desired_hashes
+            .insert("acl".to_string(), "acl-hash".to_string());
+        desired
+            .domain_desired_hashes
+            .insert("future-domain".to_string(), "future-hash".to_string());
+
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            applied_desired_hash: Some("snapshot-hash".to_string()),
+            authority_state: "ready".to_string(),
+            ports: BTreeMap::from([("vm-port".to_string(), desired.clone())]),
+            port_statuses: BTreeMap::from([(
+                "vm-port".to_string(),
+                ready_status("vm-port", "tap-vm", 42),
+            )]),
+            ..Default::default()
+        };
+
+        assert!(invalidate_restarted_acl_runtime(
+            &mut runtime,
+            std::slice::from_ref(&desired),
+        ));
+
+        let restored = &runtime.ports["vm-port"];
+        assert_eq!(restored.ifname, "tap-vm");
+        assert_eq!(restored.ifindex, Some(17));
+        assert!(!restored.domain_desired_hashes.contains_key("acl"));
+        assert_eq!(
+            restored.domain_desired_hashes.get("future-domain"),
+            Some(&"future-hash".to_string())
+        );
+
+        let status = &runtime.port_statuses["vm-port"];
+        assert_eq!(status.status, "degraded");
+        let attach = status
+            .domains
+            .iter()
+            .find(|domain| domain.domain == "attach")
+            .expect("attach status");
+        assert_eq!(attach.status, "ready");
+        let acl = status
+            .domains
+            .iter()
+            .find(|domain| domain.domain == "acl")
+            .expect("ACL status");
+        assert_eq!(acl.status, "degraded");
+        assert_eq!(
+            acl.reason.as_deref(),
+            Some("acl_restart_replay_requires_resync")
+        );
+        assert_eq!(acl.effective_action.as_deref(), Some("unchanged"));
+        assert_eq!(
+            runtime.authority_state,
+            "runtime_reconcile_requires_full_resync"
+        );
+        assert!(!snapshot_generation_fully_applied(&runtime, 42));
+        assert!(!can_skip_neutron_domain_reconcile(
+            Some(restored),
+            Some(status),
+            &desired,
+            false,
+        ));
+    }
+
+    #[test]
+    fn restart_invalidation_leaves_non_acl_runtime_ready() {
+        let restored = managed_with_ifindex("vm-port", "tap-vm", 17);
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            authority_state: "ready".to_string(),
+            ports: BTreeMap::from([("vm-port".to_string(), restored.clone())]),
+            port_statuses: BTreeMap::from([(
+                "vm-port".to_string(),
+                port_runtime_status(
+                    "vm-port",
+                    "tap-vm",
+                    42,
+                    Some("snapshot-hash".to_string()),
+                    Vec::new(),
+                    "ready",
+                    None,
+                    vec![domain_status("attach", "ready", None)],
+                ),
+            )]),
+            ..Default::default()
+        };
+
+        assert!(!invalidate_restarted_acl_runtime(
+            &mut runtime,
+            std::slice::from_ref(&restored),
+        ));
+        assert_eq!(runtime.authority_state, "ready");
+        assert_eq!(runtime.port_statuses["vm-port"].status, "ready");
+    }
+
+    #[test]
+    fn restart_invalidation_preserves_pending_recovery_authority() {
+        let mut restored = managed_with_ifindex("vm-port", "tap-vm", 17);
+        restored.managed_domains = vec!["acl".to_string()];
+        restored
+            .domain_desired_hashes
+            .insert("acl".to_string(), "acl-hash".to_string());
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            pending_generation: Some(43),
+            authority_state: "blocked_recovery_required".to_string(),
+            wal_status: "intent_recovery_blocked".to_string(),
+            ports: BTreeMap::from([("vm-port".to_string(), restored.clone())]),
+            port_statuses: BTreeMap::from([(
+                "vm-port".to_string(),
+                ready_status("vm-port", "tap-vm", 42),
+            )]),
+            ..Default::default()
+        };
+
+        assert!(invalidate_restarted_acl_runtime(
+            &mut runtime,
+            std::slice::from_ref(&restored),
+        ));
+        assert_eq!(runtime.authority_state, "blocked_recovery_required");
+        assert_eq!(runtime.wal_status, "intent_recovery_blocked");
+        assert_eq!(runtime.pending_generation, Some(43));
+        assert!(!runtime.ports["vm-port"]
+            .domain_desired_hashes
+            .contains_key("acl"));
     }
 
     #[test]
@@ -5215,6 +7305,37 @@ mod tests {
     }
 
     #[test]
+    fn pending_intent_recovery_blocks_unimplemented_domains() {
+        let domains = vec![
+            "attach".to_string(),
+            "acl".to_string(),
+            "qos".to_string(),
+            "mirror".to_string(),
+        ];
+
+        let recovery = blocked_unsupported_recovery(&domains)
+            .expect("qos/mirror recovery must be rejected");
+
+        assert!(!recovery.ok);
+        assert_eq!("blocked", recovery.status);
+        assert_eq!(domains, recovery.managed_domains);
+        assert!(recovery
+            .reason
+            .as_deref()
+            .map(|reason| reason.contains("qos,mirror"))
+            .unwrap_or(false));
+        assert!(recovery.domains.iter().all(|domain| domain.status == "blocked"));
+        assert!(recovery.domains.iter().any(|domain| {
+            domain.domain == "qos"
+                && domain.reason.as_deref() == Some("unsupported_recovery_domain:qos")
+        }));
+        assert!(recovery.domains.iter().any(|domain| {
+            domain.domain == "mirror"
+                && domain.reason.as_deref() == Some("unsupported_recovery_domain:mirror")
+        }));
+    }
+
+    #[test]
     fn neutron_snapshot_plan_resolves_candidate_by_ovs_iface_id() {
         let current = BTreeMap::new();
         let local = inventory(vec![iface(
@@ -5278,9 +7399,11 @@ mod tests {
 
     #[test]
     fn neutron_acl_translator_merges_same_tuple_l4_port_rules() {
+        let mut drop_8080 = tcp_rule("drop-8080", "drop", 8080);
+        drop_8080.priority = 101;
         let acl = ready_acl(vec![
             tcp_rule("drop-18081", "drop", 18081),
-            tcp_rule("drop-8080", "drop", 8080),
+            drop_8080,
         ]);
 
         let plan = translate_neutron_acl("port-1", &acl).expect("ACL should translate");
@@ -5300,16 +7423,693 @@ mod tests {
     }
 
     #[test]
-    fn neutron_acl_translator_rejects_conflicting_actions_for_same_tuple() {
+    fn neutron_acl_translator_trims_protocol_before_parsing() {
+        let acl = ready_acl(vec![acl_rule_with(
+            "trimmed-protocol",
+            10,
+            " TCP ",
+            "drop",
+            &[],
+            &[],
+            None,
+        )]);
+
+        let plan = translate_neutron_acl("port-1", &acl)
+            .expect("protocol whitespace and case should normalize");
+
+        assert_eq!(plan.policies.len(), 1);
+        assert_eq!(plan.policies[0].proto, 6);
+        assert_eq!(plan.force_bypass_reason, None);
+    }
+
+    #[test]
+    fn neutron_acl_translator_trims_action_before_parsing() {
+        let acl = ready_acl(vec![acl_rule_with(
+            "trimmed-action",
+            10,
+            "tcp",
+            " DENY ",
+            &[],
+            &[],
+            None,
+        )]);
+
+        let plan = translate_neutron_acl("port-1", &acl)
+            .expect("action whitespace and case should normalize");
+
+        assert_eq!(plan.policies.len(), 1);
+        assert_eq!(plan.policies[0].action, 1);
+        assert_eq!(plan.force_bypass_reason, None);
+    }
+
+    #[test]
+    fn neutron_acl_translator_trims_direction_before_parsing() {
+        let mut rule = acl_rule_with(
+            "trimmed-direction",
+            10,
+            "tcp",
+            "drop",
+            &[],
+            &[],
+            None,
+        );
+        rule.direction = Some(" InGrEsS ".to_string());
+        let acl = ready_acl(vec![rule]);
+
+        let plan = translate_neutron_acl("port-1", &acl)
+            .expect("direction whitespace and case should normalize");
+
+        assert_eq!(plan.policies.len(), 1);
+        assert_eq!(plan.policies[0].direction, 1);
+        assert_eq!(plan.force_bypass_reason, None);
+    }
+
+    #[test]
+    fn neutron_acl_cidrs_match_python_strict_grammar() {
+        assert_eq!(
+            AclIpv4Cidr::parse(" 10.1.2.3/24 ")
+                .unwrap()
+                .canonical(),
+            "10.1.2.0/24"
+        );
+        assert!(AclIpv4Cidr::parse("10.1/16").is_err());
+        assert!(AclIpv4Cidr::parse("010.1.2.3/24").is_err());
+    }
+
+    #[test]
+    fn neutron_acl_runtime_limits_accept_boundary_and_force_bypass_overflow() {
+        let accepted = ready_acl(numbered_acl_rules(MAX_ACL_RULES_PER_POLICY));
+        assert_eq!(
+            translate_neutron_acl("port-1", &accepted)
+                .unwrap()
+                .force_bypass_reason,
+            None
+        );
+
+        let rejected = ready_acl(numbered_acl_rules(MAX_ACL_RULES_PER_POLICY + 1));
+        assert_eq!(
+            translate_neutron_acl("port-1", &rejected)
+                .unwrap()
+                .force_bypass_reason
+                .as_deref(),
+            Some("acl_rule_limit_exceeded:1001:1000")
+        );
+    }
+
+    #[test]
+    fn neutron_acl_selector_limit_accepts_2048_and_force_bypasses_2049() {
+        let mut accepted_rule = acl_rule_with(
+            "accepted-members",
+            10,
+            "tcp",
+            "drop",
+            &[],
+            &[],
+            None,
+        );
+        accepted_rule.src_cidrs = numbered_acl_members(MAX_ACL_SELECTOR_MEMBERS);
+        let accepted = ready_acl(vec![accepted_rule]);
+        assert_eq!(
+            translate_neutron_acl("port-1", &accepted)
+                .unwrap()
+                .force_bypass_reason,
+            None,
+        );
+
+        let mut rejected_rule = acl_rule_with(
+            "rejected-members",
+            10,
+            "tcp",
+            "drop",
+            &[],
+            &[],
+            None,
+        );
+        rejected_rule.src_cidrs = numbered_acl_members(MAX_ACL_SELECTOR_MEMBERS + 1);
+        let rejected = ready_acl(vec![rejected_rule]);
+        assert_eq!(
+            translate_neutron_acl("port-1", &rejected)
+                .unwrap()
+                .force_bypass_reason
+                .as_deref(),
+            Some("acl_selector_member_limit_exceeded:src:rejected-members:2049:2048"),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_normalized_rules_store_only_selector_ids() {
+        let rule = normalized_acl_rule_with_selectors("id-only", 10, 6, 1, 2);
+
+        assert_eq!(rule.src_selector_id, AclSelectorId(1));
+        assert_eq!(rule.dst_selector_id, AclSelectorId(2));
+    }
+
+    #[test]
+    fn neutron_acl_shared_large_selector_is_stored_once_for_1000_rules() {
+        let selector = numbered_acl_members(MAX_ACL_SELECTOR_MEMBERS)
+            .iter()
+            .map(|cidr| AclIpv4Cidr::parse(cidr).unwrap())
+            .collect::<Vec<_>>();
+        let rules = (0..MAX_ACL_RULES_PER_POLICY)
+            .map(|index| {
+                normalized_acl_rule_with_selectors(
+                    &format!("shared-{}", index),
+                    index as i64,
+                    if index % 2 == 0 { 6 } else { 17 },
+                    1,
+                    0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let template = AclValidatedTemplate::Ready {
+            rules,
+            src_selectors: vec![Vec::new(), selector.clone()],
+            dst_selectors: vec![Vec::new()],
+        };
+
+        let AclValidatedTemplate::Ready {
+            rules,
+            src_selectors,
+            dst_selectors,
+        } = template
+        else {
+            panic!("expected ready template");
+        };
+        assert_eq!(rules.len(), MAX_ACL_RULES_PER_POLICY);
+        assert!(rules.iter().all(|rule| rule.src_selector_id == AclSelectorId(1)));
+        assert_eq!(src_selectors, vec![Vec::new(), selector]);
+        assert_eq!(dst_selectors, vec![Vec::new()]);
+    }
+
+    #[test]
+    fn neutron_acl_1000_disjoint_selectors_pass_interval_sweep() {
+        let mut src_selectors = vec![Vec::new()];
+        let mut rules = Vec::new();
+        let members = numbered_acl_members(MAX_ACL_RULES_PER_POLICY);
+        for index in 0..MAX_ACL_RULES_PER_POLICY {
+            src_selectors.push(vec![AclIpv4Cidr::parse(&members[index]).unwrap()]);
+            rules.push(normalized_acl_rule_with_selectors(
+                &format!("disjoint-{}", index),
+                index as i64,
+                6,
+                index + 1,
+                0,
+            ));
+        }
+
+        assert_eq!(
+            acl_priority_overlap_reason(&rules, &src_selectors, &[Vec::new()]),
+            None,
+        );
+    }
+
+    #[test]
+    fn neutron_acl_cross_selector_nesting_keeps_stable_overlap_reason() {
+        let src_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("10.0.0.0/8").unwrap()],
+            vec![AclIpv4Cidr::parse("10.1.0.0/16").unwrap()],
+        ];
+        let rules = vec![
+            normalized_acl_rule_with_selectors("broad", 10, 6, 1, 0),
+            normalized_acl_rule_with_selectors("narrow", 20, 17, 2, 0),
+        ];
+
+        assert_eq!(
+            acl_priority_overlap_reason(&rules, &src_selectors, &[Vec::new()]),
+            Some("unsupported_acl_cidr_overlap:src:broad:10:narrow:20".to_string()),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_overlap_reason_uses_earliest_rule_pair_not_address_order() {
+        let src_selectors = vec![
+            Vec::new(),
+            vec![
+                AclIpv4Cidr::parse("10.0.0.0/8").unwrap(),
+                AclIpv4Cidr::parse("192.0.2.0/24").unwrap(),
+            ],
+            vec![AclIpv4Cidr::parse("192.0.2.128/25").unwrap()],
+            vec![AclIpv4Cidr::parse("10.1.0.0/16").unwrap()],
+        ];
+        let rules = vec![
+            normalized_acl_rule_with_selectors("first", 10, 6, 1, 0),
+            normalized_acl_rule_with_selectors("second", 20, 17, 2, 0),
+            normalized_acl_rule_with_selectors("third", 30, 1, 3, 0),
+        ];
+
+        assert_eq!(
+            acl_priority_overlap_reason(&rules, &src_selectors, &[Vec::new()]),
+            Some("unsupported_acl_cidr_overlap:src:first:10:second:20".to_string()),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_earlier_destination_pair_beats_later_source_conflict() {
+        let src_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("10.0.0.0/8").unwrap()],
+            vec![AclIpv4Cidr::parse("10.1.0.0/16").unwrap()],
+        ];
+        let dst_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("192.0.2.0/24").unwrap()],
+            vec![AclIpv4Cidr::parse("192.0.2.128/25").unwrap()],
+        ];
+        let rules = vec![
+            normalized_acl_rule_with_selectors("first", 10, 6, 1, 1),
+            normalized_acl_rule_with_selectors("second", 20, 17, 0, 2),
+            normalized_acl_rule_with_selectors("third", 30, 1, 2, 0),
+        ];
+
+        assert_eq!(
+            acl_priority_overlap_reason(&rules, &src_selectors, &dst_selectors),
+            Some("unsupported_acl_cidr_overlap:dst:first:10:second:20".to_string()),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_earlier_priority_pair_beats_later_cidr_pair() {
+        let src_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("10.0.0.0/32").unwrap()],
+            vec![AclIpv4Cidr::parse("10.0.0.0/31").unwrap()],
+        ];
+        let dst_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("192.0.2.0/24").unwrap()],
+        ];
+        let mut first = normalized_acl_rule_with_selectors("first", 10, 17, 1, 0);
+        first.action = 0;
+        let second = normalized_acl_rule_with_selectors("second", 20, 0, 0, 1);
+        let mut third = normalized_acl_rule_with_selectors("third", 30, 6, 2, 0);
+        third.action = 0;
+
+        assert_eq!(
+            acl_priority_overlap_reason(
+                &[first, second, third],
+                &src_selectors,
+                &dst_selectors,
+            ),
+            Some("unsupported_acl_priority_overlap:first:10:second:20".to_string()),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_same_rule_pair_source_cidr_overlap_beats_destination() {
+        let src_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("10.0.0.0/24").unwrap()],
+            vec![AclIpv4Cidr::parse("10.0.0.128/25").unwrap()],
+        ];
+        let dst_selectors = vec![
+            Vec::new(),
+            vec![AclIpv4Cidr::parse("192.0.2.0/24").unwrap()],
+            vec![AclIpv4Cidr::parse("192.0.2.128/25").unwrap()],
+        ];
+        let rules = vec![
+            normalized_acl_rule_with_selectors("first", 10, 6, 1, 1),
+            normalized_acl_rule_with_selectors("second", 20, 17, 2, 2),
+        ];
+
+        assert_eq!(
+            acl_priority_overlap_reason(&rules, &src_selectors, &dst_selectors),
+            Some("unsupported_acl_cidr_overlap:src:first:10:second:20".to_string()),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_selector_sweep_reactivates_multi_gap_selectors_stably() {
+        let selectors = vec![
+            Vec::new(),
+            vec![
+                AclIpv4Cidr::parse("0.0.0.0/32").unwrap(),
+                AclIpv4Cidr::parse("0.0.0.4/32").unwrap(),
+            ],
+            vec![
+                AclIpv4Cidr::parse("0.0.0.0/31").unwrap(),
+                AclIpv4Cidr::parse("0.0.0.4/31").unwrap(),
+            ],
+        ];
+        let first_rule_indexes = vec![None, Some(1), Some(0)];
+
+        assert_eq!(
+            acl_selector_best_overlap(&selectors, &first_rule_indexes),
+            Some((0, 1)),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_selector_sweep_returns_only_best_rule_pair_rank() {
+        let selectors = vec![
+            Vec::new(),
+            vec![
+                AclIpv4Cidr::parse("10.0.0.0/8").unwrap(),
+                AclIpv4Cidr::parse("192.0.2.0/24").unwrap(),
+            ],
+            vec![AclIpv4Cidr::parse("192.0.2.128/25").unwrap()],
+            vec![AclIpv4Cidr::parse("10.1.0.0/16").unwrap()],
+        ];
+        let first_rule_indexes = vec![None, Some(0), Some(1), Some(2)];
+
+        assert_eq!(
+            acl_selector_best_overlap(&selectors, &first_rule_indexes),
+            Some((0, 1)),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_selector_sweep_repeated_overlap_keeps_one_best_candidate() {
+        let mut selectors = vec![Vec::new()];
+        for member in numbered_acl_members(MAX_ACL_RULES_PER_POLICY) {
+            selectors.push(vec![
+                AclIpv4Cidr::parse("10.0.0.0/8").unwrap(),
+                AclIpv4Cidr::parse(&member).unwrap(),
+            ]);
+        }
+        let first_rule_indexes = (0..selectors.len())
+            .map(|selector_index| selector_index.checked_sub(1))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            acl_selector_best_overlap(&selectors, &first_rule_indexes),
+            Some((0, 1)),
+        );
+    }
+
+    #[test]
+    fn neutron_acl_same_selector_internal_nesting_is_accepted() {
+        let src_selectors = vec![
+            Vec::new(),
+            vec![
+                AclIpv4Cidr::parse("10.0.0.0/8").unwrap(),
+                AclIpv4Cidr::parse("10.1.0.0/16").unwrap(),
+            ],
+        ];
+        let rules = vec![
+            normalized_acl_rule_with_selectors("tcp", 10, 6, 1, 0),
+            normalized_acl_rule_with_selectors("udp", 20, 17, 1, 0),
+        ];
+
+        assert_eq!(
+            acl_priority_overlap_reason(&rules, &src_selectors, &[Vec::new()]),
+            None,
+        );
+    }
+
+    #[test]
+    fn neutron_acl_source_and_destination_selector_spaces_are_independent() {
         let acl = ready_acl(vec![
-            tcp_rule("drop-8080", "drop", 8080),
-            tcp_rule("allow-18081", "allow", 18081),
+            acl_rule_with("source", 10, "tcp", "drop", &["192.0.2.0/24"], &[], None),
+            acl_rule_with(
+                "destination",
+                20,
+                "udp",
+                "drop",
+                &[],
+                &["192.0.2.0/24"],
+                None,
+            ),
         ]);
 
-        let error = translate_neutron_acl("port-1", &acl)
-            .expect_err("mixed actions for one datapath tuple are unsupported");
+        let AclValidatedTemplate::Ready {
+            rules,
+            src_selectors,
+            dst_selectors,
+        } = validate_neutron_acl_template(&acl).unwrap()
+        else {
+            panic!("expected ready template");
+        };
+        assert_eq!(src_selectors, dst_selectors);
+        assert_eq!(src_selectors.len(), 2);
+        assert_eq!(rules[0].src_selector_id, AclSelectorId(1));
+        assert_eq!(rules[0].dst_selector_id, AclSelectorId(0));
+        assert_eq!(rules[1].src_selector_id, AclSelectorId(0));
+        assert_eq!(rules[1].dst_selector_id, AclSelectorId(1));
+    }
 
-        assert!(error.contains("conflicting effective ACL actions"));
+    #[test]
+    fn neutron_acl_validation_cache_is_content_safe_and_port_specific() {
+        let acl = ready_acl(vec![acl_rule_with(
+            "cached",
+            10,
+            "tcp",
+            "drop",
+            &["10.1.2.3/24"],
+            &[],
+            None,
+        )]);
+        let mut cache = AclValidationCache::default();
+        let first = translate_neutron_acl_with_cache("port-1", &acl, &mut cache).unwrap();
+        let second = translate_neutron_acl_with_cache("port-2", &acl, &mut cache).unwrap();
+        assert_eq!(cache.misses, 1);
+        assert_eq!(cache.hits, 1);
+        assert!(first
+            .groups
+            .iter()
+            .all(|group| group.name.starts_with("neutron:port-1:")));
+        assert!(second
+            .groups
+            .iter()
+            .all(|group| group.name.starts_with("neutron:port-2:")));
+        assert_eq!(first.groups[0].name, "neutron:port-1:src:selector:0");
+        assert_eq!(second.groups[0].name, "neutron:port-2:src:selector:0");
+
+        let mut changed_revision = acl.clone();
+        changed_revision.revision += 1;
+        translate_neutron_acl_with_cache("port-3", &changed_revision, &mut cache).unwrap();
+        assert_eq!(cache.misses, 2);
+
+        let mut changed_rules = acl;
+        changed_rules.rules[0].action = Some("allow".to_string());
+        translate_neutron_acl_with_cache("port-4", &changed_rules, &mut cache).unwrap();
+        assert_eq!(cache.misses, 3);
+    }
+
+    #[test]
+    fn neutron_acl_translator_force_bypasses_nested_cidrs() {
+        let acl = ready_acl(vec![
+            acl_rule_with("broad", 10, "tcp", "allow", &["10.0.0.0/8"], &[], None),
+            acl_rule_with("narrow", 20, "udp", "allow", &["10.1.0.0/16"], &[], None),
+        ]);
+        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        assert!(plan.groups.is_empty());
+        assert!(plan.policies.is_empty());
+        assert_eq!(
+            plan.force_bypass_reason.as_deref(),
+            Some("unsupported_acl_cidr_overlap:src:broad:10:narrow:20")
+        );
+    }
+
+    #[test]
+    fn neutron_acl_translator_reuses_canonical_cidr_groups() {
+        let acl = ready_acl(vec![
+            acl_rule_with("tcp", 10, "tcp", "drop", &["10.1.2.3/24"], &[], Some(80)),
+            acl_rule_with("udp", 20, "udp", "drop", &["10.1.2.0/24"], &[], Some(53)),
+        ]);
+        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        assert_eq!(plan.groups.len(), 1);
+        assert_eq!(plan.groups[0].cidrs, vec!["10.1.2.0/24"]);
+        assert_eq!(plan.policies[0].src_group, plan.policies[1].src_group);
+        assert_eq!(plan.force_bypass_reason, None);
+    }
+
+    #[test]
+    fn neutron_acl_translator_force_bypasses_priority_fallback_conflict() {
+        let acl = ready_acl(vec![
+            acl_rule_with("wildcard", 10, "any", "allow", &[], &[], None),
+            acl_rule_with("tcp-drop", 20, "tcp", "drop", &[], &[], None),
+        ]);
+        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        assert_eq!(
+            plan.force_bypass_reason.as_deref(),
+            Some("unsupported_acl_priority_overlap:wildcard:10:tcp-drop:20")
+        );
+    }
+
+    #[test]
+    fn neutron_acl_translator_force_bypasses_invalid_and_duplicate_priority() {
+        let negative = ready_acl(vec![acl_rule_with(
+            "negative", -1, "tcp", "drop", &[], &[], None,
+        )]);
+        assert_eq!(
+            translate_neutron_acl("port-1", &negative)
+                .unwrap()
+                .force_bypass_reason
+                .as_deref(),
+            Some("invalid_acl_priority:negative:-1")
+        );
+
+        let duplicate = ready_acl(vec![
+            acl_rule_with("first", 10, "tcp", "drop", &[], &[], None),
+            acl_rule_with("second", 10, "udp", "drop", &[], &[], None),
+        ]);
+        assert_eq!(
+            translate_neutron_acl("port-1", &duplicate)
+                .unwrap()
+                .force_bypass_reason
+                .as_deref(),
+            Some("duplicate_acl_priority:egress:10:first:second")
+        );
+    }
+
+    #[test]
+    fn neutron_acl_translator_keeps_disjoint_cidrs_separate() {
+        let acl = ready_acl(vec![
+            acl_rule_with("tcp-left", 10, "tcp", "drop", &["10.1.0.0/16"], &[], None),
+            acl_rule_with("udp-right", 20, "udp", "drop", &["10.2.0.0/16"], &[], None),
+        ]);
+        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        assert_eq!(plan.groups.len(), 2);
+        assert_eq!(plan.policies.len(), 2);
+        assert_eq!(plan.force_bypass_reason, None);
+    }
+
+    #[test]
+    fn neutron_acl_force_bypass_outcome_overrides_optimistic_snapshot() {
+        let acl = ready_acl(vec![
+            acl_rule_with("wildcard", 10, "any", "allow", &[], &[], None),
+            acl_rule_with("tcp-drop", 20, "tcp", "drop", &[], &[], None),
+        ]);
+        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        let outcome = NeutronAclReconcileOutcome::from_plan(&plan);
+        let mut snapshot = port("port-1", "tap-port-1", true);
+        snapshot.managed_domains = vec!["acl".to_string()];
+        snapshot.acl = Some(acl);
+
+        let status = outcome.domain_status(&snapshot);
+        assert_eq!(status.status, "degraded");
+        assert_eq!(status.effective_action.as_deref(), Some("bypass"));
+        assert_eq!(
+            status.reason.as_deref(),
+            Some("unsupported_acl_priority_overlap:wildcard:10:tcp-drop:20")
+        );
+    }
+
+    #[test]
+    fn neutron_acl_translator_carries_conntrack_intent() {
+        let stateful = ready_acl(vec![tcp_rule("drop-8080", "drop", 8080)]);
+        assert_eq!(
+            translate_neutron_acl("port-1", &stateful)
+                .expect("stateful ACL should translate")
+                .conntrack_enabled,
+            Some(true)
+        );
+
+        let mut stateless = stateful;
+        stateless.stateful = false;
+        assert_eq!(
+            translate_neutron_acl("port-1", &stateless)
+                .expect("stateless ACL should translate")
+                .conntrack_enabled,
+            Some(false)
+        );
+
+        assert_eq!(AclApplyPlan::default().conntrack_enabled, None);
+    }
+
+    #[test]
+    fn neutron_acl_runtime_transition_is_atomic() {
+        let policy = AclPolicyPlan {
+            src_group: "any".to_string(),
+            dst_group: "any".to_string(),
+            proto: 6,
+            action: 1,
+            direction: 1,
+            ports: Some("8080".to_string()),
+        };
+        let quiesced = AclRuntimeFeatureState {
+            conntrack_enabled: false,
+            acl_enabled: false,
+            acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
+        };
+
+        let stateful = acl_runtime_transition(
+            &AclApplyPlan {
+                groups: Vec::new(),
+                policies: vec![policy.clone()],
+                conntrack_enabled: Some(true),
+                force_bypass_reason: None,
+            },
+            false,
+        );
+        assert_eq!(stateful.quiesce, quiesced);
+        assert_eq!(
+            stateful.publish,
+            AclRuntimeFeatureState {
+                conntrack_enabled: true,
+                acl_enabled: true,
+                acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
+            }
+        );
+
+        let stateless = acl_runtime_transition(
+            &AclApplyPlan {
+                groups: Vec::new(),
+                policies: vec![policy],
+                conntrack_enabled: Some(false),
+                force_bypass_reason: None,
+            },
+            true,
+        );
+        assert_eq!(stateless.quiesce, quiesced);
+        assert_eq!(
+            stateless.publish,
+            AclRuntimeFeatureState {
+                conntrack_enabled: false,
+                acl_enabled: true,
+                acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
+            }
+        );
+
+        let empty_stateful = acl_runtime_transition(
+            &AclApplyPlan {
+                groups: Vec::new(),
+                policies: Vec::new(),
+                conntrack_enabled: Some(true),
+                force_bypass_reason: None,
+            },
+            false,
+        );
+        assert_eq!(empty_stateful.quiesce, quiesced);
+        assert_eq!(
+            empty_stateful.publish,
+            AclRuntimeFeatureState {
+                conntrack_enabled: true,
+                acl_enabled: false,
+                acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
+            }
+        );
+
+        let missing_payload = acl_runtime_transition(&AclApplyPlan::default(), true);
+        assert_eq!(missing_payload.quiesce, quiesced);
+        assert_eq!(
+            missing_payload.publish,
+            AclRuntimeFeatureState {
+                conntrack_enabled: true,
+                acl_enabled: false,
+                acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
+            }
+        );
+    }
+
+    #[test]
+    fn neutron_acl_translator_force_bypasses_conflicting_actions_for_same_tuple() {
+        let mut allow_18081 = tcp_rule("allow-18081", "allow", 18081);
+        allow_18081.priority = 101;
+        let acl = ready_acl(vec![
+            tcp_rule("drop-8080", "drop", 8080),
+            allow_18081,
+        ]);
+
+        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+
+        assert!(plan.groups.is_empty());
+        assert!(plan.policies.is_empty());
+        assert_eq!(
+            plan.force_bypass_reason.as_deref(),
+            Some("unsupported_acl_priority_overlap:drop-8080:100:allow-18081:101")
+        );
     }
 
     #[test]
@@ -5334,14 +8134,14 @@ mod tests {
         assert_eq!(
             plan.groups,
             vec![AclGroupPlan {
-                name: "neutron:port-1:src:drop-icmp".to_string(),
+                name: "neutron:port-1:src:selector:0".to_string(),
                 cidrs: vec!["10.58.159.2/32".to_string()],
             }]
         );
         assert_eq!(
             plan.policies,
             vec![AclPolicyPlan {
-                src_group: "neutron:port-1:src:drop-icmp".to_string(),
+                src_group: "neutron:port-1:src:selector:0".to_string(),
                 dst_group: "any".to_string(),
                 proto: 1,
                 action: 1,
@@ -5374,7 +8174,7 @@ mod tests {
     }
 
     #[test]
-    fn neutron_acl_gate_mode_disables_only_for_empty_policy() {
+    fn neutron_acl_gate_mode_disables_before_every_replacement() {
         assert_eq!(
             acl_gate_update_mode(&AclApplyPlan::default()),
             AclGateUpdateMode::DisableBeforeReplace
@@ -5382,23 +8182,43 @@ mod tests {
 
         let plan = AclApplyPlan {
             groups: vec![AclGroupPlan {
-                name: "neutron:port-1:src:drop-icmp".to_string(),
+                name: "neutron:port-1:src:selector:0".to_string(),
                 cidrs: vec!["10.58.159.2/32".to_string()],
             }],
             policies: vec![AclPolicyPlan {
-                src_group: "neutron:port-1:src:drop-icmp".to_string(),
+                src_group: "neutron:port-1:src:selector:0".to_string(),
                 dst_group: "any".to_string(),
                 proto: 1,
                 action: 1,
                 direction: 1,
                 ports: None,
             }],
+            conntrack_enabled: Some(true),
+            force_bypass_reason: None,
         };
 
         assert_eq!(
             acl_gate_update_mode(&plan),
-            AclGateUpdateMode::KeepCurrentUntilEnable
+            AclGateUpdateMode::DisableBeforeReplace
         );
+    }
+
+    #[test]
+    fn neutron_control_plane_exposes_strict_conntrack_flush() {
+        let _strict_flush = ControlPlane::flush_conntrack_strict;
+    }
+
+    #[test]
+    fn neutron_acl_reconcile_failure_phase_reports_the_proven_effective_action() {
+        let pre_disable = acl_reconcile_error(AclReconcileFailurePhase::BeforeQuiesce, "x");
+        assert_eq!(pre_disable.effective_action, "unchanged");
+
+        let post_disable = acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, "x");
+        assert_eq!(post_disable.effective_action, "bypass");
+
+        let compensation =
+            acl_reconcile_error(AclReconcileFailurePhase::CompensationFailed, "x");
+        assert_eq!(compensation.effective_action, "enforce");
     }
 
     #[test]

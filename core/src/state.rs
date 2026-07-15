@@ -76,6 +76,15 @@ fn default_max_port_policies() -> u32 {
     16384
 }
 
+/// Reserved `port_sets` key namespace used to persist allocator quarantine
+/// without changing the on-disk state schema. Normalized user port sets contain
+/// only numeric ranges/actions and therefore cannot collide with this prefix.
+const BITMAP_QUARANTINE_PREFIX: &str = "__aria_internal_bitmap_quarantine_v1__:";
+
+fn bitmap_quarantine_key(bitmap_idx: u32) -> String {
+    format!("{}{}", BITMAP_QUARANTINE_PREFIX, bitmap_idx)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallState {
     pub groups: HashMap<String, GroupInfo>,
@@ -144,6 +153,116 @@ impl Default for FirewallState {
 }
 
 impl FirewallState {
+    pub fn is_bitmap_index_quarantined(&self, bitmap_idx: u32) -> bool {
+        let key = bitmap_quarantine_key(bitmap_idx);
+        self.port_sets.get(&key).is_some_and(|port_set| {
+            port_set.bitmap_idx == bitmap_idx
+                && port_set.ref_count == 0
+                && port_set.ports_normalized == key
+        })
+    }
+
+    /// Persistently reserve an index whose kernel bitmap could not be proven
+    /// clean. The synthetic entry is deliberately not a normal port-set key,
+    /// so deduplication and replay never treat it as programmable policy data.
+    pub fn quarantine_bitmap_index(&mut self, bitmap_idx: u32) -> Result<(), String> {
+        if bitmap_idx >= self.max_port_policies {
+            return Err(format!(
+                "cannot quarantine bitmap index {} outside allocator limit {}",
+                bitmap_idx, self.max_port_policies
+            ));
+        }
+        let key = bitmap_quarantine_key(bitmap_idx);
+        if self
+            .port_sets
+            .iter()
+            .any(|(existing_key, port_set)| {
+                port_set.bitmap_idx == bitmap_idx && existing_key != &key
+            })
+        {
+            return Err(format!(
+                "cannot quarantine live bitmap index {}",
+                bitmap_idx
+            ));
+        }
+
+        self.free_bitmap_indices
+            .retain(|candidate| *candidate != bitmap_idx);
+        self.next_bitmap_idx = self
+            .next_bitmap_idx
+            .max(bitmap_idx.saturating_add(1));
+        self.port_sets.insert(
+            key.clone(),
+            PortSetInfo {
+                bitmap_idx,
+                ports_normalized: key,
+                ref_count: 0,
+            },
+        );
+        Ok(())
+    }
+
+    /// Make a quarantined index reusable only after kernel cleanup has been
+    /// explicitly confirmed successful.
+    pub fn release_quarantined_bitmap_index(
+        &mut self,
+        bitmap_idx: u32,
+    ) -> Result<bool, String> {
+        let key = bitmap_quarantine_key(bitmap_idx);
+        if !self.is_bitmap_index_quarantined(bitmap_idx) {
+            return Ok(false);
+        }
+        if self
+            .port_sets
+            .iter()
+            .any(|(existing_key, port_set)| {
+                port_set.bitmap_idx == bitmap_idx && existing_key != &key
+            })
+        {
+            return Err(format!(
+                "cannot release quarantined bitmap index {} while it is live",
+                bitmap_idx
+            ));
+        }
+        self.port_sets.remove(&key);
+        if !self.free_bitmap_indices.contains(&bitmap_idx) {
+            self.free_bitmap_indices.push(bitmap_idx);
+        }
+        Ok(true)
+    }
+
+    fn take_reusable_bitmap_index(&mut self) -> Option<u32> {
+        while let Some(candidate) = self.free_bitmap_indices.pop() {
+            if candidate < self.max_port_policies
+                && !self
+                    .port_sets
+                    .values()
+                    .any(|port_set| port_set.bitmap_idx == candidate)
+            {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn take_fresh_bitmap_index(&mut self) -> Option<u32> {
+        while self.next_bitmap_idx < self.max_port_policies
+            && self
+                .port_sets
+                .values()
+                .any(|port_set| port_set.bitmap_idx == self.next_bitmap_idx)
+        {
+            self.next_bitmap_idx += 1;
+        }
+        if self.next_bitmap_idx >= self.max_port_policies {
+            None
+        } else {
+            let bitmap_idx = self.next_bitmap_idx;
+            self.next_bitmap_idx += 1;
+            Some(bitmap_idx)
+        }
+    }
+
     /// Add or update a group. Returns the group ID.
     pub fn add_group(&mut self, name: &str, cidr: &str) -> Result<u32, String> {
         if name == "any" {
@@ -217,19 +336,19 @@ impl FirewallState {
                 existing_ps.ref_count += 1;
                 (Some(existing_ps.bitmap_idx), false)
             } else {
-                let idx = if let Some(recycled) = self.free_bitmap_indices.pop() {
+                let idx = if let Some(recycled) = self.take_reusable_bitmap_index() {
                     recycled
                 } else {
-                    if self.next_bitmap_idx >= self.max_port_policies {
-                        return Err(format!(
+                    self.take_fresh_bitmap_index().ok_or_else(|| {
+                        format!(
                             "Port set limit ({}) reached. Unique port combinations: {}",
                             self.max_port_policies,
-                            self.port_sets.len()
-                        ));
-                    }
-                    let idx = self.next_bitmap_idx;
-                    self.next_bitmap_idx += 1;
-                    idx
+                            self.port_sets
+                                .values()
+                                .filter(|port_set| port_set.ref_count > 0)
+                                .count()
+                        )
+                    })?
                 };
                 self.port_sets.insert(
                     normalized.clone(),
@@ -406,7 +525,7 @@ fn release_port_set(
 ) {
     let key_to_remove = port_sets
         .iter()
-        .find(|(_, ps)| ps.bitmap_idx == bitmap_idx)
+        .find(|(_, ps)| ps.bitmap_idx == bitmap_idx && ps.ref_count > 0)
         .map(|(k, _)| k.clone());
     if let Some(key) = key_to_remove {
         if let Some(ps) = port_sets.get_mut(&key) {
@@ -850,6 +969,72 @@ mod tests {
             idx3, idx1,
             "新端口集应优先复用 free_bitmap_indices 中的 idx"
         );
+    }
+
+    #[test]
+    fn quarantined_bitmap_survives_restart_and_is_not_reused() {
+        let mut state = FirewallState::default();
+        state.free_bitmap_indices.push(7);
+        state.next_bitmap_idx = 8;
+        state
+            .quarantine_bitmap_index(7)
+            .expect("quarantine recycled bitmap index");
+
+        assert!(state.is_bitmap_index_quarantined(7));
+        assert!(!state.free_bitmap_indices.contains(&7));
+
+        let json = serde_json::to_string(&state).expect("serialize quarantined allocator");
+        let mut restarted: FirewallState =
+            serde_json::from_str(&json).expect("deserialize quarantined allocator");
+        let retry = restarted
+            .apply_add_rule(1, 2, 6, 1, Some("443"), 0)
+            .expect("retry allocation");
+
+        assert_eq!(retry.bitmap_idx, Some(8));
+        assert!(restarted.is_bitmap_index_quarantined(7));
+    }
+
+    #[test]
+    fn quarantined_fresh_bitmap_advances_next_cursor_across_restart() {
+        let mut state = FirewallState::default();
+        state
+            .quarantine_bitmap_index(0)
+            .expect("quarantine fresh bitmap index");
+        assert_eq!(state.next_bitmap_idx, 1);
+
+        let json = serde_json::to_string(&state).expect("serialize fresh quarantine");
+        let mut restarted: FirewallState =
+            serde_json::from_str(&json).expect("deserialize fresh quarantine");
+        let retry = restarted
+            .apply_add_rule(1, 2, 6, 1, Some("443"), 0)
+            .expect("allocate after fresh quarantine");
+
+        assert_eq!(retry.bitmap_idx, Some(1));
+        assert!(restarted.is_bitmap_index_quarantined(0));
+    }
+
+    #[test]
+    fn confirmed_bitmap_cleanup_releases_only_the_successful_quarantine() {
+        let mut state = FirewallState::default();
+        state.free_bitmap_indices.extend([7, 8]);
+        state.next_bitmap_idx = 9;
+        state.quarantine_bitmap_index(7).unwrap();
+        state.quarantine_bitmap_index(8).unwrap();
+
+        assert!(state.release_quarantined_bitmap_index(8).unwrap());
+        assert!(state.is_bitmap_index_quarantined(7));
+        assert!(!state.is_bitmap_index_quarantined(8));
+
+        let first = state
+            .apply_add_rule(1, 2, 6, 1, Some("443"), 0)
+            .unwrap();
+        let second = state
+            .apply_add_rule(3, 4, 6, 1, Some("8443"), 0)
+            .unwrap();
+        assert_eq!(first.bitmap_idx, Some(8));
+        assert_eq!(second.bitmap_idx, Some(9));
+        assert_ne!(first.bitmap_idx, Some(7));
+        assert_ne!(second.bitmap_idx, Some(7));
     }
 
     #[test]

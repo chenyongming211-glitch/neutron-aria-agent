@@ -27,7 +27,96 @@ const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
 pub struct RuntimePinState {
     pub created_shared_runtime: bool,
     pub reused_existing_runtime: bool,
+    pub preexisting_live_links: bool,
     pub preexisting_xdp_link: bool,
+    pub preexisting_tc_ingress_link: bool,
+    pub preexisting_tc_egress_link: bool,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TcAclLinkHealth {
+    pub ingress: bool,
+    pub egress: bool,
+    pub xdp: bool,
+}
+
+impl TcAclLinkHealth {
+    pub fn new(ingress: bool, egress: bool, xdp: bool) -> Self {
+        Self {
+            ingress,
+            egress,
+            xdp,
+        }
+    }
+
+    pub fn acl_ready(self) -> bool {
+        self.ingress && self.egress
+    }
+
+    pub fn xdp_ready(self) -> bool {
+        self.xdp
+    }
+
+    pub fn missing_tc(self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.ingress {
+            missing.push("tc_ingress");
+        }
+        if !self.egress {
+            missing.push("tc_egress");
+        }
+        missing
+    }
+}
+
+fn tcx_query_contains_expected_program(
+    expected_program_id: u32,
+    attached_program_ids: &[u32],
+) -> bool {
+    attached_program_ids.contains(&expected_program_id)
+}
+
+pub(crate) fn preexisting_tc_acl_runtime_is_healthy(
+    enforcement_required: bool,
+    preexisting_live_links: bool,
+    preexisting_tc_ingress_link: bool,
+    preexisting_tc_egress_link: bool,
+    live_health: TcAclLinkHealth,
+) -> Result<bool, String> {
+    if !preexisting_live_links {
+        return Ok(false);
+    }
+    if !enforcement_required {
+        return Ok(true);
+    }
+
+    let mut invalid = Vec::new();
+    for (name, pinned, live) in [
+        (
+            "tc_ingress",
+            preexisting_tc_ingress_link,
+            live_health.ingress,
+        ),
+        (
+            "tc_egress",
+            preexisting_tc_egress_link,
+            live_health.egress,
+        ),
+    ] {
+        if !pinned {
+            invalid.push(format!("{} pin missing", name));
+        } else if !live {
+            invalid.push(format!("{} pinned/live identity mismatch", name));
+        }
+    }
+    if invalid.is_empty() {
+        Ok(true)
+    } else {
+        Err(format!(
+            "preexisting ACL/CT runtime is incomplete: {}",
+            invalid.join(", ")
+        ))
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -51,6 +140,126 @@ impl Default for AttachedLinks {
             tc_egress: LinkOwnership::Absent,
             tc_ingress: LinkOwnership::Absent,
         }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum LinkRollbackAction {
+    RemoveXdpAttachment,
+    RemoveTcLinkPin(&'static str),
+    RemoveRuntimePinPath,
+}
+
+fn rollback_link_cleanup_plan(
+    attached: &AttachedLinks,
+    remove_pin_path: bool,
+) -> Vec<LinkRollbackAction> {
+    let mut plan = Vec::new();
+    if attached.xdp == LinkOwnership::AttachedNow {
+        plan.push(LinkRollbackAction::RemoveXdpAttachment);
+    }
+    if attached.tc_egress == LinkOwnership::AttachedNow {
+        plan.push(LinkRollbackAction::RemoveTcLinkPin("tc_egress"));
+    }
+    if attached.tc_ingress == LinkOwnership::AttachedNow {
+        plan.push(LinkRollbackAction::RemoveTcLinkPin("tc_ingress"));
+    }
+    let has_claimed_existing = attached.xdp == LinkOwnership::ClaimedExisting
+        || attached.tc_egress == LinkOwnership::ClaimedExisting
+        || attached.tc_ingress == LinkOwnership::ClaimedExisting;
+    if remove_pin_path && !has_claimed_existing {
+        plan.push(LinkRollbackAction::RemoveRuntimePinPath);
+    }
+    plan
+}
+
+fn execute_rollback_cleanup_plan<F>(
+    plan: &[LinkRollbackAction],
+    mut cleanup: F,
+) -> Result<(), String>
+where
+    F: FnMut(LinkRollbackAction) -> Result<(), String>,
+{
+    let mut errors = Vec::new();
+    for action in plan {
+        if let Err(error) = cleanup(*action) {
+            errors.push(format!("{:?}: {}", action, error));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn checked_xdp_detach_output(
+    iface: &str,
+    output: std::io::Result<std::process::Output>,
+) -> Result<(), String> {
+    let output = output
+        .map_err(|error| format!("[{}] failed to spawn XDP detach command: {}", iface, error))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let detail = if stderr.is_empty() {
+        "no stderr".to_string()
+    } else {
+        stderr
+    };
+    Err(format!(
+        "[{}] XDP detach command failed with status {}: {}",
+        iface, output.status, detail
+    ))
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct XdpAttachFailure {
+    message: String,
+    attachment_may_remain: bool,
+}
+
+impl XdpAttachFailure {
+    fn safe(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            attachment_may_remain: false,
+        }
+    }
+
+    fn attachment_may_remain(&self) -> bool {
+        self.attachment_may_remain
+    }
+}
+
+impl std::fmt::Display for XdpAttachFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+fn recover_unpinned_xdp_attachment<F>(
+    pin_error: impl Into<String>,
+    detach: F,
+) -> Result<(), XdpAttachFailure>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let pin_error = pin_error.into();
+    match detach() {
+        Ok(()) => Err(XdpAttachFailure::safe(format!(
+            "XDP link pin failed: {}; newly attached XDP program detached",
+            pin_error
+        ))),
+        Err(detach_error) => Err(XdpAttachFailure {
+            message: format!(
+                "XDP link pin failed: {}; immediate XDP detach failed: {}",
+                pin_error, detach_error
+            ),
+            attachment_may_remain: true,
+        }),
     }
 }
 
@@ -86,6 +295,10 @@ enum RuntimeInventoryStatus {
 
 fn default_persisted_live_iface_active() -> bool {
     true
+}
+
+fn tc_acl_links_complete(ingress: bool, egress: bool) -> bool {
+    ingress && egress
 }
 
 impl FirewallInstance {
@@ -156,6 +369,91 @@ impl FirewallInstance {
         } else {
             format!("{}/{}_link", self.pin_path.display(), prog_name)
         }
+    }
+
+    pub fn require_tc_acl_links(&self) -> Result<(), String> {
+        let health = self.tc_acl_link_health();
+        if health.acl_ready() {
+            return Ok(());
+        }
+
+        Err(format!(
+            "missing pinned TC ACL links: {}",
+            health.missing_tc().join(", ")
+        ))
+    }
+
+    pub fn require_tc_acl_runtime(&self) -> Result<(), String> {
+        let mut missing = Vec::new();
+        for prog_name in ["tc_ingress", "tc_egress"] {
+            if !Path::new(&self.tc_link_pin_path(prog_name)).exists() {
+                missing.push(format!("{} link", prog_name));
+            }
+            if !self.pin_path.join(prog_name).exists() {
+                missing.push(format!("{} program", prog_name));
+            }
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        Err(format!(
+            "missing pinned TC ACL runtime: {}",
+            missing.join(", ")
+        ))
+    }
+
+    fn tcx_attachment_is_live(
+        &self,
+        prog_name: &str,
+        attach_type: aya::programs::tc::TcAttachType,
+    ) -> bool {
+        let Ok(program) =
+            aya::programs::SchedClassifier::from_pin(self.tc_prog_pin_path(prog_name))
+        else {
+            return false;
+        };
+        let Ok(program_info) = program.info() else {
+            return false;
+        };
+        let Ok(pinned_link) =
+            aya::programs::links::PinnedLink::from_pin(self.tc_link_pin_path(prog_name))
+        else {
+            return false;
+        };
+        let fd_link: aya::programs::links::FdLink = pinned_link.into();
+        let Ok(_tcx_link): Result<aya::programs::tc::SchedClassifierLink, _> = fd_link.try_into()
+        else {
+            return false;
+        };
+        let Ok((_revision, attached_programs)) =
+            aya::programs::SchedClassifier::query_tcx(&self.iface, attach_type)
+        else {
+            return false;
+        };
+        let attached_program_ids: Vec<u32> = attached_programs
+            .iter()
+            .map(|attached| attached.id())
+            .collect();
+        tcx_query_contains_expected_program(program_info.id(), &attached_program_ids)
+    }
+
+    pub fn xdp_link_health(&self) -> bool {
+        Path::new(&self.xdp_link_pin_path()).exists()
+    }
+
+    pub fn tc_acl_link_health(&self) -> TcAclLinkHealth {
+        TcAclLinkHealth::new(
+            self.tcx_attachment_is_live(
+                "tc_ingress",
+                aya::programs::tc::TcAttachType::Ingress,
+            ),
+            self.tcx_attachment_is_live(
+                "tc_egress",
+                aya::programs::tc::TcAttachType::Egress,
+            ),
+            self.xdp_link_health(),
+        )
     }
 
     fn pin_runtime_maps(&self, bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {
@@ -814,6 +1112,13 @@ impl FirewallInstance {
         let created_shared_runtime = self.shared_runtime && !pin_path_preexisted;
         let xdp_link_pin = self.xdp_link_pin_path();
         let preexisting_xdp_link = Path::new(&xdp_link_pin).exists();
+        let preexisting_tc_ingress_link =
+            Path::new(&self.tc_link_pin_path("tc_ingress")).exists();
+        let preexisting_tc_egress_link =
+            Path::new(&self.tc_link_pin_path("tc_egress")).exists();
+        let preexisting_live_links = preexisting_xdp_link
+            || preexisting_tc_ingress_link
+            || preexisting_tc_egress_link;
         let expected_metadata = self.expected_runtime_metadata(ebpf_path)?;
         let mut persisted_live_runtime = self.persisted_live_ifaces_active()?;
         let pinned_live_runtime = if pin_path_preexisted {
@@ -856,7 +1161,10 @@ impl FirewallInstance {
             return Ok(RuntimePinState {
                 created_shared_runtime,
                 reused_existing_runtime: false,
+                preexisting_live_links: false,
                 preexisting_xdp_link: false,
+                preexisting_tc_ingress_link: false,
+                preexisting_tc_egress_link: false,
             });
         }
         match self.validate_runtime_inventory(&expected_metadata) {
@@ -870,11 +1178,14 @@ impl FirewallInstance {
                         "repaired shared runtime optional program pins"
                     );
                 }
-                info!(instance = %self.iface, preexisting_xdp_link, live_runtime, "reusing healthy shared runtime");
+                info!(instance = %self.iface, preexisting_live_links, preexisting_xdp_link, preexisting_tc_ingress_link, preexisting_tc_egress_link, live_runtime, "reusing healthy shared runtime");
                 Ok(RuntimePinState {
                     created_shared_runtime: false,
                     reused_existing_runtime: true,
+                    preexisting_live_links,
                     preexisting_xdp_link,
+                    preexisting_tc_ingress_link,
+                    preexisting_tc_egress_link,
                 })
             }
             RuntimeInventoryStatus::StaleOrIncomplete(reason) => {
@@ -890,7 +1201,10 @@ impl FirewallInstance {
                 Ok(RuntimePinState {
                     created_shared_runtime: false,
                     reused_existing_runtime: false,
+                    preexisting_live_links: false,
                     preexisting_xdp_link: false,
+                    preexisting_tc_ingress_link: false,
+                    preexisting_tc_egress_link: false,
                 })
             }
         }
@@ -903,30 +1217,41 @@ impl FirewallInstance {
     ) -> Result<AttachedLinks, String> {
         let mut attached = AttachedLinks::default();
         let xdp_link_pin = self.xdp_link_pin_path();
-
-        if pin_state.preexisting_xdp_link {
-            attached.xdp = LinkOwnership::ClaimedExisting;
-            self.ensure_tc_runtime(&mut attached);
-            self.ensure_fq_runtime();
-            self.activate_persisted_live_iface()?;
-            info!(instance = %self.iface, edt_available = self.edt_available, "claimed preexisting live links without runtime mutation");
-            return Ok(attached);
-        }
-
         let pin_path_str = self
             .pin_path
             .to_str()
             .ok_or_else(|| format!("non-UTF-8 pin path: {}", self.pin_path.display()))?;
+
+        self.ensure_tc_runtime(&mut attached);
+
         let xdp_prog_pin = format!("{}/xdp_firewall", pin_path_str);
-        if !std::path::Path::new(&xdp_prog_pin).exists() {
-            return Err(format!(
-                "[{}] pinned XDP program missing at {}",
-                self.iface, xdp_prog_pin
-            ));
+        if pin_state.preexisting_xdp_link {
+            attached.xdp = LinkOwnership::ClaimedExisting;
+        } else if !std::path::Path::new(&xdp_prog_pin).exists() {
+            warn!(instance = %self.iface, prog_pin = %xdp_prog_pin, "pinned XDP DDoS program missing; TC ACL remains independent");
+        } else {
+            match self.attach_xdp_from_pin(&xdp_prog_pin, &xdp_link_pin) {
+                Ok(()) => attached.xdp = LinkOwnership::AttachedNow,
+                Err(error) if error.attachment_may_remain() => {
+                    attached.xdp = LinkOwnership::AttachedNow;
+                    let rollback_error = self.rollback_attached_links(&attached, false).err();
+                    return Err(match rollback_error {
+                        Some(rollback_error) => format!(
+                            "XDP attachment may remain after pin failure: {}; rollback failed: {}",
+                            error, rollback_error
+                        ),
+                        None => format!(
+                            "XDP attachment pin failed and required transaction rollback: {}",
+                            error
+                        ),
+                    });
+                }
+                Err(error) => {
+                    warn!(instance = %self.iface, error = %error, "XDP DDoS hook unavailable; TC ACL remains independent");
+                }
+            }
         }
 
-        self.attach_xdp_from_pin(&xdp_prog_pin, &xdp_link_pin)?;
-        attached.xdp = LinkOwnership::AttachedNow;
         if let Err(e) = self.activate_persisted_live_iface() {
             if let Err(rollback_err) = self.rollback_attached_links(&attached, false) {
                 warn!(instance = %self.iface, error = %rollback_err, "failed to roll back links after persisted live activation failure");
@@ -934,10 +1259,10 @@ impl FirewallInstance {
             return Err(e);
         }
 
-        self.ensure_tc_runtime(&mut attached);
         self.ensure_fq_runtime();
 
-        info!(instance = %self.iface, edt_available = self.edt_available, "interface links attached from pinned runtime");
+        let health = self.tc_acl_link_health();
+        info!(instance = %self.iface, tc_ingress = health.ingress, tc_egress = health.egress, xdp = health.xdp, edt_available = self.edt_available, "interface links attached from pinned runtime");
         Ok(attached)
     }
 
@@ -946,30 +1271,21 @@ impl FirewallInstance {
         attached: &AttachedLinks,
         remove_pin_path: bool,
     ) -> Result<(), String> {
-        if attached.xdp == LinkOwnership::AttachedNow {
-            let xdp_link_pin = self.xdp_link_pin_path();
-            if std::path::Path::new(&xdp_link_pin).exists() {
-                std::fs::remove_file(&xdp_link_pin).map_err(|e| {
-                    format!("[{}] Failed to remove pinned XDP link: {}", self.iface, e)
-                })?;
-            } else {
-                let _ = std::process::Command::new("ip")
-                    .args(["link", "set", "dev", &self.iface, "xdp", "off"])
-                    .output();
-            }
-            info!(instance = %self.iface, "rolled back newly attached XDP link");
-        }
-
-        let tc_attached_now = attached.tc_egress == LinkOwnership::AttachedNow
-            || attached.tc_ingress == LinkOwnership::AttachedNow;
-        if tc_attached_now {
-            for (prog_name, ownership) in [
-                ("tc_egress", attached.tc_egress),
-                ("tc_ingress", attached.tc_ingress),
-            ] {
-                if ownership != LinkOwnership::AttachedNow {
-                    continue;
+        let plan = rollback_link_cleanup_plan(attached, remove_pin_path);
+        execute_rollback_cleanup_plan(&plan, |action| match action {
+            LinkRollbackAction::RemoveXdpAttachment => {
+                let xdp_link_pin = self.xdp_link_pin_path();
+                if std::path::Path::new(&xdp_link_pin).exists() {
+                    std::fs::remove_file(&xdp_link_pin).map_err(|e| {
+                        format!("[{}] Failed to remove pinned XDP link: {}", self.iface, e)
+                    })?;
+                } else {
+                    self.detach_xdp_with_ip()?;
                 }
+                info!(instance = %self.iface, "rolled back newly attached XDP link");
+                Ok(())
+            }
+            LinkRollbackAction::RemoveTcLinkPin(prog_name) => {
                 let link_pin = self.tc_link_pin_path(prog_name);
                 if std::path::Path::new(&link_pin).exists() {
                     std::fs::remove_file(&link_pin).map_err(|e| {
@@ -979,18 +1295,19 @@ impl FirewallInstance {
                         )
                     })?;
                 }
+                info!(instance = %self.iface, program = %prog_name, "rolled back newly attached TC link");
+                Ok(())
             }
-            aria_core::ebpf_ops::detach_tc_egress(&self.iface);
-            info!(instance = %self.iface, "rolled back newly attached TC links");
-        }
-
-        if remove_pin_path && self.pin_path.exists() {
-            std::fs::remove_dir_all(&self.pin_path)
-                .map_err(|e| format!("[{}] Failed to remove pin directory: {}", self.iface, e))?;
-            info!(instance = %self.iface, "runtime pin directory cleaned after rollback");
-        }
-
-        Ok(())
+            LinkRollbackAction::RemoveRuntimePinPath => {
+                if self.pin_path.exists() {
+                    std::fs::remove_dir_all(&self.pin_path).map_err(|e| {
+                        format!("[{}] Failed to remove pin directory: {}", self.iface, e)
+                    })?;
+                    info!(instance = %self.iface, "runtime pin directory cleaned after rollback");
+                }
+                Ok(())
+            }
+        })
     }
 
     fn load_runtime_programs(&self, bpf: &mut aya::Ebpf) -> Result<Vec<String>, String> {
@@ -1185,26 +1502,43 @@ impl FirewallInstance {
     }
 
     /// Attach XDP from the already pinned shared runtime without loading a new eBPF object.
-    fn attach_xdp_from_pin(&self, prog_pin: &str, xdp_link_pin: &str) -> Result<(), String> {
+    fn attach_xdp_from_pin(
+        &self,
+        prog_pin: &str,
+        xdp_link_pin: &str,
+    ) -> Result<(), XdpAttachFailure> {
         let mut xdp =
             aya::programs::Xdp::from_pin(prog_pin, aya_obj::programs::XdpAttachType::Interface)
-                .map_err(|e| format!("[{}] XDP from_pin during recovery: {:?}", self.iface, e))?;
+                .map_err(|e| {
+                    XdpAttachFailure::safe(format!(
+                        "[{}] XDP from_pin during recovery: {:?}",
+                        self.iface, e
+                    ))
+                })?;
 
         let link_id = xdp
             .attach(&self.iface, aya::programs::XdpFlags::default())
-            .map_err(|e| format!("[{}] xdp.attach during recovery: {:?}", self.iface, e))?;
+            .map_err(|e| {
+                XdpAttachFailure::safe(format!(
+                    "[{}] xdp.attach during recovery: {:?}",
+                    self.iface, e
+                ))
+            })?;
 
-        match self.try_pin_xdp_link(&mut xdp, link_id, xdp_link_pin) {
-            Ok(()) => info!(instance = %self.iface, "recovered XDP link pin"),
-            Err(e) => {
-                info!(
-                    instance = %self.iface,
-                    error = %e,
-                    "XDP reattached successfully on old kernel without pinnable link"
-                )
-            }
+        if let Err(pin_error) = self.try_pin_xdp_link(&mut xdp, link_id, xdp_link_pin) {
+            return recover_unpinned_xdp_attachment(pin_error, || self.detach_xdp_with_ip());
         }
+        info!(instance = %self.iface, "recovered XDP link pin");
         Ok(())
+    }
+
+    fn detach_xdp_with_ip(&self) -> Result<(), String> {
+        checked_xdp_detach_output(
+            &self.iface,
+            std::process::Command::new("ip")
+                .args(["link", "set", "dev", &self.iface, "xdp", "off"])
+                .output(),
+        )
     }
 
     fn try_attach_tc_from_pin(
@@ -1233,75 +1567,64 @@ impl FirewallInstance {
             .attach(&self.iface, attach_type)
             .map_err(|e| format!("{} attach from pin: {:?}", prog_name, e))?;
 
-        match (|| -> Result<(), String> {
-            let tc_link = tc
-                .take_link(link_id)
-                .map_err(|e| format!("take_link: {:?}", e))?;
-            let fd_link: aya::programs::links::FdLink = tc_link
-                .try_into()
-                .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
-            let link_pin = self.tc_link_pin_path(prog_name);
-            fd_link
-                .pin(&link_pin)
-                .map_err(|e| format!("pin: {:?}", e))?;
-            Ok(())
-        })() {
-            Ok(()) => {
-                info!(instance = %self.iface, direction = %dir_str, "TC program reattached from pinned runtime")
-            }
-            Err(e) => {
-                info!(
-                    instance = %self.iface,
-                    direction = %dir_str,
-                    error = %e,
-                    "TC reattached successfully on old kernel without pinnable link"
-                )
-            }
-        }
+        let tc_link = tc
+            .take_link(link_id)
+            .map_err(|e| format!("take_link: {:?}", e))?;
+        let fd_link: aya::programs::links::FdLink = tc_link
+            .try_into()
+            .map_err(|e: aya::programs::links::LinkError| format!("FdLink: {:?}", e))?;
+        let link_pin = self.tc_link_pin_path(prog_name);
+        fd_link.pin(&link_pin).map_err(|e| format!("pin: {:?}", e))?;
+        info!(instance = %self.iface, direction = %dir_str, "TC program reattached from pinned runtime");
 
         Ok(())
     }
 
     fn detach_with_cleanup(&self, remove_pin_path: bool) -> Result<(), String> {
         let xdp_link_pin = self.xdp_link_pin_path();
+        let mut errors = Vec::new();
 
-        // Method 1: Remove pinned link (kernel 5.7+ with bpf_link)
         if std::path::Path::new(&xdp_link_pin).exists() {
-            std::fs::remove_file(&xdp_link_pin)
-                .map_err(|e| format!("[{}] Failed to remove pinned link: {}", self.iface, e))?;
-            info!(instance = %self.iface, "XDP link unpinned");
-        } else {
-            // Method 2: Use ip command to detach XDP (older kernels)
-            let _ = std::process::Command::new("ip")
-                .args(["link", "set", "dev", &self.iface, "xdp", "off"])
-                .output();
-            info!(instance = %self.iface, "XDP detached via netlink");
+            match std::fs::remove_file(&xdp_link_pin) {
+                Ok(()) => info!(instance = %self.iface, "XDP link unpinned"),
+                Err(error) => errors.push(format!(
+                    "[{}] Failed to remove pinned XDP link: {}",
+                    self.iface, error
+                )),
+            }
         }
 
         for prog_name in ["tc_egress", "tc_ingress"] {
             let link_pin = self.tc_link_pin_path(prog_name);
             if std::path::Path::new(&link_pin).exists() {
-                std::fs::remove_file(&link_pin).map_err(|e| {
-                    format!(
+                match std::fs::remove_file(&link_pin) {
+                    Ok(()) => info!(instance = %self.iface, program = %prog_name, "TC link unpinned"),
+                    Err(error) => errors.push(format!(
                         "[{}] Failed to remove pinned {} link: {}",
-                        self.iface, prog_name, e
-                    )
-                })?;
-                info!(instance = %self.iface, program = %prog_name, "TC link unpinned");
+                        self.iface, prog_name, error
+                    )),
+                }
             }
         }
 
-        // Detach TC egress
-        aria_core::ebpf_ops::detach_tc_egress(&self.iface);
-        self.cleanup_owned_fq_qdisc()?;
+        if let Err(error) = self.cleanup_owned_fq_qdisc() {
+            errors.push(error);
+        }
 
         // Clean up pinned runtime dir only for non-shared runtimes or explicit rollback.
         if remove_pin_path && self.pin_path.exists() {
-            std::fs::remove_dir_all(&self.pin_path)
-                .map_err(|e| format!("[{}] Failed to remove pin directory: {}", self.iface, e))?;
-            info!(instance = %self.iface, "pin directory cleaned");
+            match std::fs::remove_dir_all(&self.pin_path) {
+                Ok(()) => info!(instance = %self.iface, "pin directory cleaned"),
+                Err(error) => errors.push(format!(
+                    "[{}] Failed to remove pin directory: {}",
+                    self.iface, error
+                )),
+            }
         }
 
+        if !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
         info!(instance = %self.iface, "firewall instance detached");
         Ok(())
     }
@@ -1310,5 +1633,210 @@ impl FirewallInstance {
     /// until the last tap is removed by TapRegistry.
     pub fn detach(&self) -> Result<(), String> {
         self.detach_with_cleanup(!self.shared_runtime)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tc_acl_link_health_requires_both_directions_but_not_xdp() {
+        assert!(TcAclLinkHealth::new(true, true, false).acl_ready());
+        assert!(!TcAclLinkHealth::new(true, false, true).acl_ready());
+        assert!(!TcAclLinkHealth::new(false, true, true).acl_ready());
+        assert!(TcAclLinkHealth::new(true, true, true).xdp_ready());
+        assert!(!TcAclLinkHealth::new(true, true, false).xdp_ready());
+    }
+
+    #[test]
+    fn tcx_attachment_query_requires_the_expected_program_id() {
+        assert!(tcx_query_contains_expected_program(42, &[7, 42, 99]));
+        assert!(!tcx_query_contains_expected_program(42, &[]));
+        assert!(!tcx_query_contains_expected_program(42, &[7, 41, 99]));
+    }
+
+    #[test]
+    fn standalone_review_program_pin_completeness_requires_links_and_programs() {
+        let pin_path = std::env::temp_dir().join(format!(
+            "aria-standalone-runtime-health-{}",
+            std::process::id()
+        ));
+        if pin_path.exists() {
+            std::fs::remove_dir_all(&pin_path).unwrap();
+        }
+        std::fs::create_dir_all(&pin_path).unwrap();
+        let state_path = pin_path.join("state");
+        std::fs::create_dir_all(&state_path).unwrap();
+
+        let instance = FirewallInstance::new(
+            "standalone-review",
+            pin_path.clone(),
+            state_path,
+            false,
+            TraceMapMode::Legacy,
+        );
+        std::fs::write(pin_path.join("tc_ingress_link"), b"link").unwrap();
+        std::fs::write(pin_path.join("tc_egress_link"), b"link").unwrap();
+
+        let missing_programs = instance.require_tc_acl_runtime().unwrap_err();
+        assert!(missing_programs.contains("tc_ingress program"));
+        assert!(missing_programs.contains("tc_egress program"));
+
+        std::fs::write(pin_path.join("tc_ingress"), b"program").unwrap();
+        std::fs::write(pin_path.join("tc_egress"), b"program").unwrap();
+        instance.require_tc_acl_runtime().unwrap();
+
+        std::fs::remove_file(pin_path.join("tc_ingress_link")).unwrap();
+        assert!(instance
+            .require_tc_acl_runtime()
+            .unwrap_err()
+            .contains("tc_ingress link"));
+
+        std::fs::remove_dir_all(pin_path).unwrap();
+    }
+
+    #[test]
+    fn neutron_tc_acl_requires_both_direction_links() {
+        assert!(tc_acl_links_complete(true, true));
+        assert!(!tc_acl_links_complete(true, false));
+        assert!(!tc_acl_links_complete(false, true));
+        assert!(!tc_acl_links_complete(false, false));
+    }
+
+    #[test]
+    fn preexisting_acl_runtime_requires_exact_dual_tcx_identity() {
+        assert_eq!(
+            preexisting_tc_acl_runtime_is_healthy(
+                true,
+                false,
+                false,
+                false,
+                TcAclLinkHealth::new(false, false, false),
+            )
+            .unwrap(),
+            false
+        );
+        assert!(preexisting_tc_acl_runtime_is_healthy(
+            true,
+            true,
+            true,
+            true,
+            TcAclLinkHealth::new(true, true, false),
+        )
+        .unwrap());
+        let error = preexisting_tc_acl_runtime_is_healthy(
+            true,
+            true,
+            true,
+            true,
+            TcAclLinkHealth::new(true, false, false),
+        )
+        .unwrap_err();
+        assert!(error.contains("tc_egress"));
+
+        let missing_pin = preexisting_tc_acl_runtime_is_healthy(
+            true,
+            true,
+            true,
+            false,
+            TcAclLinkHealth::new(true, false, false),
+        )
+        .unwrap_err();
+        assert!(missing_pin.contains("tc_egress pin missing"));
+    }
+
+    #[test]
+    fn managed_failure_path_cleanup_plan_preserves_claimed_direction() {
+        let mixed = AttachedLinks {
+            xdp: LinkOwnership::ClaimedExisting,
+            tc_egress: LinkOwnership::ClaimedExisting,
+            tc_ingress: LinkOwnership::AttachedNow,
+        };
+
+        assert_eq!(
+            rollback_link_cleanup_plan(&mixed, true),
+            vec![LinkRollbackAction::RemoveTcLinkPin("tc_ingress")]
+        );
+
+        let reversed = AttachedLinks {
+            xdp: LinkOwnership::Absent,
+            tc_egress: LinkOwnership::AttachedNow,
+            tc_ingress: LinkOwnership::ClaimedExisting,
+        };
+        assert_eq!(
+            rollback_link_cleanup_plan(&reversed, false),
+            vec![LinkRollbackAction::RemoveTcLinkPin("tc_egress")]
+        );
+    }
+
+    #[test]
+    fn managed_failure_path_cleanup_continues_after_error() {
+        let plan = vec![
+            LinkRollbackAction::RemoveXdpAttachment,
+            LinkRollbackAction::RemoveTcLinkPin("tc_egress"),
+            LinkRollbackAction::RemoveTcLinkPin("tc_ingress"),
+            LinkRollbackAction::RemoveRuntimePinPath,
+        ];
+        let mut attempted = Vec::new();
+
+        let error = execute_rollback_cleanup_plan(&plan, |action| {
+            attempted.push(action);
+            if action == LinkRollbackAction::RemoveXdpAttachment {
+                Err("forced xdp cleanup failure".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(attempted, plan);
+        assert!(error.contains("forced xdp cleanup failure"));
+    }
+
+    #[test]
+    fn managed_failure_path_xdp_pin_failure_is_never_acknowledged() {
+        let detach_calls = std::cell::Cell::new(0);
+        let error = recover_unpinned_xdp_attachment("forced pin failure", || {
+            detach_calls.set(detach_calls.get() + 1);
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert_eq!(detach_calls.get(), 1);
+        assert!(!error.attachment_may_remain());
+        assert!(error.to_string().contains("forced pin failure"));
+        assert!(error.to_string().contains("detached"));
+
+        let error = recover_unpinned_xdp_attachment("forced pin failure", || {
+            Err("forced detach failure".to_string())
+        })
+        .unwrap_err();
+        assert!(error.attachment_may_remain());
+        assert!(error.to_string().contains("forced pin failure"));
+        assert!(error.to_string().contains("forced detach failure"));
+    }
+
+    #[test]
+    fn managed_failure_path_xdp_detach_command_failure_propagates() {
+        let spawn_error = checked_xdp_detach_output(
+            "tap-failure",
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "forced spawn failure",
+            )),
+        )
+        .unwrap_err();
+        assert!(spawn_error.contains("forced spawn failure"));
+
+        let nonzero = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "printf 'forced detach stderr' >&2; exit 23",
+            ])
+            .output();
+        let status_error = checked_xdp_detach_output("tap-failure", nonzero).unwrap_err();
+        assert!(status_error.contains("forced detach stderr"));
+        assert!(status_error.contains("23"));
     }
 }

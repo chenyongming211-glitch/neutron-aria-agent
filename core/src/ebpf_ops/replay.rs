@@ -20,6 +20,20 @@ fn init_ct_config_pinned(pin_path: &str) -> Result<(), String> {
 
 pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String> {
     let state = crate::wal::load_with_wal(state_path);
+    replay_state_from_snapshot(bpf, state_path, &state)
+}
+
+/// Replay one already-approved state snapshot into a freshly loaded eBPF object.
+///
+/// Standalone startup uses this entry point so replay and control-plane
+/// publication cannot observe different WAL snapshots during one lifecycle
+/// transaction. `replay_state` remains as the compatibility wrapper for
+/// callers that intentionally load by path.
+pub fn replay_state_from_snapshot(
+    bpf: &mut aya::Ebpf,
+    state_path: &str,
+    state: &crate::state::FirewallState,
+) -> Result<(), String> {
     let tap_id = state.tap_id;
     let has_runtime_objects = !(state.groups.is_empty()
         && state.rules.is_empty()
@@ -461,7 +475,7 @@ pub fn replay_state(bpf: &mut aya::Ebpf, state_path: &str) -> Result<(), String>
             },
             tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
             acl_active_bank: 0,
-            pad: [0; 1],
+            acl_ingress_hook: ACL_INGRESS_HOOK_TC,
         };
         match bpf
             .map_mut("TAP_CONFIG_MAP")
@@ -589,7 +603,7 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
             },
             tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
             acl_active_bank: 0,
-            pad: [0; 1],
+            acl_ingress_hook: ACL_INGRESS_HOOK_TC,
         };
         if let Err(e) = write_tap_config(runtime, tap_cfg) {
             errors.push(format!("TAP_CONFIG_MAP tap_id={}: {}", tap_id, e));

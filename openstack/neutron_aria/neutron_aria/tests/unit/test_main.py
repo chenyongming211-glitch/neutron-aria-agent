@@ -55,7 +55,7 @@ class FakeAriaAclClient(object):
             "policies": [{
                 "id": "policy-prod",
                 "name": "production-acl",
-                "default_action": "deny",
+                "default_action": "allow",
                 "stateful": True,
             }],
             "rules": [{

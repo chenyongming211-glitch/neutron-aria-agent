@@ -19,6 +19,14 @@ from neutron_aria.agent.uds_client import LocalApiTimeoutError
 
 LOG = logging.getLogger(__name__)
 
+RECOVERY_REQUIRED_AUTHORITY_STATES = frozenset((
+    "blocked_recovery_required",
+    "wal_commit_failed",
+    "wal_recovery_commit_failed",
+    "pending_recovery_commit_failed",
+    "recovered_pending_full_resync",
+))
+
 
 def _elapsed_ms(started_at):
     return int((time.time() - started_at) * 1000)
@@ -167,7 +175,7 @@ class SnapshotSynchronizer(object):
                 pending_action["generation"],
                 desired_hash=pending_action["desired_hash"],
             )
-        elif pending_action.get("action") == "block":
+        elif pending_action.get("action") in ("block", "recover"):
             recovery = self._recover_remote_pending_snapshot(pending_action)
             if recovery is None:
                 LOG.warning(
@@ -902,22 +910,22 @@ class SnapshotSynchronizer(object):
         acl_status = metadata.get("status") or "ready"
         acl_reason = metadata.get("reason") or "ready"
         acl_action = metadata.get("effective_action") or "enforce"
-        if payload.get("status") in (None, "", "not_requested"):
+        if payload.get("status") in (None, ""):
             payload["status"] = acl_status
-        if payload.get("effective_action") in (None, "", "bypass"):
+        if payload.get("effective_action") in (None, ""):
             payload["effective_action"] = acl_action
-        if payload.get("reason") in (None, "", "no_enabled_binding"):
+        if payload.get("reason") in (None, ""):
             payload["reason"] = acl_reason
 
         domains = list(payload.get("domains") or [])
         for domain_status in domains:
             if domain_status.get("domain") != "acl":
                 continue
-            if domain_status.get("status") in (None, "", "not_requested"):
+            if domain_status.get("status") in (None, ""):
                 domain_status["status"] = acl_status
-            if domain_status.get("effective_action") in (None, "", "bypass"):
+            if domain_status.get("effective_action") in (None, ""):
                 domain_status["effective_action"] = acl_action
-            if domain_status.get("reason") in (None, "", "no_enabled_binding"):
+            if domain_status.get("reason") in (None, ""):
                 domain_status["reason"] = acl_reason
             break
         else:
@@ -1020,6 +1028,14 @@ class SnapshotSynchronizer(object):
             status.get("applied_desired_hash") or
             status.get("desired_hash")
         )
+        if self._status_requires_pending_recovery(status):
+            return {
+                "action": "recover",
+                "generation": pending_generation,
+                "desired_hash": desired_hash,
+                "remote_desired_hash": remote_hash,
+                "applied_desired_hash": applied_hash,
+            }
         if remote_hash and desired_hash and remote_hash == desired_hash:
             return {
                 "action": "wait",
@@ -1035,6 +1051,12 @@ class SnapshotSynchronizer(object):
             "remote_desired_hash": remote_hash,
             "applied_desired_hash": applied_hash,
         }
+
+    def _status_requires_pending_recovery(self, status):
+        return bool(
+            self._status_has_pending_generation(status) and
+            status.get("authority_state") in RECOVERY_REQUIRED_AUTHORITY_STATES
+        )
 
     def _poll_snapshot_convergence(
         self,

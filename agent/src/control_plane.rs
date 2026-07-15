@@ -6,10 +6,13 @@ use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 
-use crate::instance::RuntimePinState;
+use crate::instance::{
+    preexisting_tc_acl_runtime_is_healthy, FirewallInstance, RuntimePinState, TcAclLinkHealth,
+};
 use crate::kernel_drop_manager::{KernelDropManager, KernelDropStatusSnapshot};
 use crate::service_chain::{self, ServiceChain};
 use crate::ssl_manager::SslManager;
+use crate::tap_registry::ManagedAttachMode;
 use crate::trace_backend::{TraceManager, TraceRuntimeStatusSnapshot};
 use aria_core::common::TapMapRuntime;
 use aria_core::ebpf_ops::TraceMapMode;
@@ -28,6 +31,7 @@ const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
 /// Per-instance in-memory state
 struct InstanceState {
     state: FirewallState,
+    runtime_health: RuntimeHealthState,
     tap_id: u32,
     ifindex: Option<u32>,
     pin_path: String,
@@ -35,6 +39,144 @@ struct InstanceState {
     wal: WalClient,
     ssl_sync_pending: bool,
     last_ssl_sync_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RuntimeHealthState {
+    acl_ready: bool,
+    xdp_ready: bool,
+    acl_error: Option<String>,
+}
+
+impl RuntimeHealthState {
+    fn readiness_reason(&self) -> Option<String> {
+        self.acl_error.clone().or_else(|| {
+            (!self.xdp_ready).then(|| "xdp_ddos_hook_unavailable".to_string())
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RuntimeHealthTransition {
+    next: RuntimeHealthState,
+    changed: bool,
+    quiesce_acl_ct: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstanceRuntimeHealthSnapshot {
+    pub name: String,
+    pub active: bool,
+    pub acl_ready: bool,
+    pub xdp_ready: bool,
+    pub readiness_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TcAclHealthChange {
+    pub instance: String,
+    pub acl_ready: bool,
+    pub xdp_ready: bool,
+    pub reason: Option<String>,
+    pub quiesced: bool,
+}
+
+fn missing_tc_reason(health: TcAclLinkHealth) -> Option<&'static str> {
+    match (health.ingress, health.egress) {
+        (false, false) => Some("missing_tc_ingress_and_egress"),
+        (false, true) => Some("missing_tc_ingress"),
+        (true, false) => Some("missing_tc_egress"),
+        (true, true) => None,
+    }
+}
+
+fn apply_tc_health_observation(
+    current: RuntimeHealthState,
+    observed: TcAclLinkHealth,
+) -> RuntimeHealthTransition {
+    let mut next = current.clone();
+    next.xdp_ready = observed.xdp_ready();
+    let retry_failed_quiesce = current
+        .acl_error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("acl_quiesce_failed:"));
+    let quiesce_acl_ct = if let Some(reason) = missing_tc_reason(observed) {
+        next.acl_ready = false;
+        next.acl_error = Some(reason.to_string());
+        current.acl_ready
+            || current.acl_error.as_deref() == Some("recovery_required")
+            || retry_failed_quiesce
+    } else if !current.acl_ready {
+        next.acl_ready = false;
+        next.acl_error = Some("recovery_required".to_string());
+        retry_failed_quiesce
+    } else {
+        next.acl_ready = true;
+        next.acl_error = None;
+        false
+    };
+    RuntimeHealthTransition {
+        changed: next != current,
+        next,
+        quiesce_acl_ct,
+    }
+}
+
+fn apply_tc_health_quiesce_result(
+    mut next: RuntimeHealthState,
+    result: Result<(), String>,
+) -> (RuntimeHealthState, bool) {
+    match result {
+        Ok(()) => (next, true),
+        Err(error) => {
+            next.acl_ready = false;
+            next.acl_error = Some(format!("acl_quiesce_failed:{}", error));
+            (next, false)
+        }
+    }
+}
+
+fn apply_recovery_publication_quiesce_result(
+    mut health: RuntimeHealthState,
+    readiness_error: ControlPlaneError,
+    quiesce_result: Result<(), String>,
+) -> (RuntimeHealthState, ControlPlaneError) {
+    health.acl_ready = false;
+    match quiesce_result {
+        Ok(()) => (health, readiness_error),
+        Err(error) => {
+            health.acl_error = Some(format!("acl_quiesce_failed:{}", error));
+            (
+                health,
+                ControlPlaneError::InstanceNotReady(format!(
+                    "{}; acl_quiesce_failed:{}",
+                    readiness_error, error
+                )),
+            )
+        }
+    }
+}
+
+fn initial_runtime_health(
+    desired_conntrack: bool,
+    desired_acl: bool,
+    health: TcAclLinkHealth,
+    enforcement_published: bool,
+) -> RuntimeHealthState {
+    let enforcement_required = desired_conntrack || desired_acl;
+    let acl_ready = !enforcement_required || (health.acl_ready() && enforcement_published);
+    let acl_error = if acl_ready {
+        None
+    } else {
+        missing_tc_reason(health)
+            .map(str::to_string)
+            .or_else(|| Some("recovery_required".to_string()))
+    };
+    RuntimeHealthState {
+        acl_ready,
+        xdp_ready: health.xdp_ready(),
+        acl_error,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -78,17 +220,125 @@ impl InstanceState {
         }
     }
 
-    /// Append a WAL entry. If append fails, attempt a full compact as fallback
-    /// to ensure the current state is persisted despite the individual write failure.
-    async fn wal_append(&mut self, entry: &WalEntry) {
-        if let Err(e) = self.wal.append(entry.clone()).await {
+    /// Publish an in-memory state only after its complete snapshot is durable.
+    /// On any serialization/compact error, `self.state` remains the previously
+    /// acknowledged allocator state.
+    async fn compact_and_publish_state(&mut self, next: FirewallState) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(&next)
+            .map_err(|error| format!("failed to serialize state for compact: {}", error))?;
+        self.wal.compact(json).await?;
+        self.state = next;
+        Ok(())
+    }
+
+    /// Strictly append a WAL entry. If append fails, a successful full compact
+    /// is the only fallback that may acknowledge durable persistence.
+    async fn wal_append_strict(&mut self, entry: &WalEntry) -> Result<(), String> {
+        if let Err(append_error) = self.wal.append(entry.clone()).await {
             error!(
                 state_path = %self.state_path,
-                error = %e,
+                error = %append_error,
                 "WAL append failed; attempting compact fallback"
             );
-            self.do_compact().await;
+            let json = serde_json::to_string_pretty(&self.state).map_err(|serialize_error| {
+                format!(
+                    "WAL append failed: {}; compact fallback serialization failed: {}",
+                    append_error, serialize_error
+                )
+            })?;
+            self.wal.compact(json).await.map_err(|compact_error| {
+                format!(
+                    "WAL append failed: {}; compact fallback failed: {}",
+                    append_error, compact_error
+                )
+            })?;
         }
+        Ok(())
+    }
+
+    /// Best-effort wrapper retained for legacy mutation paths whose public
+    /// error contract predates strict persistence acknowledgement.
+    async fn wal_append(&mut self, entry: &WalEntry) {
+        if let Err(error) = self.wal_append_strict(entry).await {
+            error!(state_path = %self.state_path, error = %error, "state persistence failed");
+        }
+    }
+
+    async fn recover_gate_persistence_failure<F>(
+        &mut self,
+        requested_conntrack: bool,
+        requested_acl: bool,
+        persistence_error: impl Into<String>,
+        mut update_kernel_gate: F,
+    ) -> ControlPlaneError
+    where
+        F: FnMut(bool, bool) -> Result<(), String>,
+    {
+        let mut errors = vec![persistence_error.into()];
+        self.state.conntrack_enabled = false;
+        self.state.acl_enabled = false;
+
+        if neutron_acl_gate_requires_tc(requested_conntrack, requested_acl) {
+            if let Err(error) = update_kernel_gate(false, false) {
+                errors.push(format!("kernel gate quiesce failed: {}", error));
+            }
+        }
+
+        if let Err(error) = self
+            .wal_append_strict(&WalEntry::UpdateConfig {
+                conntrack: Some(false),
+                monitoring: None,
+                acl: Some(false),
+                qos: None,
+                mirror: None,
+                tcprt: None,
+                ssl: None,
+            })
+            .await
+        {
+            errors.push(format!("disabled gate persistence failed: {}", error));
+        }
+
+        ControlPlaneError::PersistenceError(errors.join("; "))
+    }
+
+    async fn recover_local_config_persistence_failure<F>(
+        &mut self,
+        old_state: FirewallState,
+        attempted_enable: bool,
+        persistence_error: impl Into<String>,
+        mut restore_kernel_config: F,
+    ) -> ControlPlaneError
+    where
+        F: FnMut(&FirewallState) -> Result<(), String>,
+    {
+        let mut errors = vec![persistence_error.into()];
+        self.state = old_state;
+        if attempted_enable {
+            self.state.conntrack_enabled = false;
+            self.state.acl_enabled = false;
+        }
+
+        if let Err(error) = restore_kernel_config(&self.state) {
+            errors.push(format!("kernel config rollback failed: {}", error));
+        }
+
+        if let Err(error) = self
+            .wal_append_strict(&WalEntry::UpdateConfig {
+                conntrack: Some(self.state.conntrack_enabled),
+                monitoring: Some(self.state.monitoring_enabled),
+                acl: Some(self.state.acl_enabled),
+                qos: Some(self.state.qos_enabled),
+                mirror: Some(self.state.mirror_enabled),
+                tcprt: Some(self.state.tcprt_enabled),
+                ssl: None,
+            })
+            .await
+        {
+            errors.push(format!("rollback config persistence failed: {}", error));
+        }
+
+        ControlPlaneError::PersistenceError(errors.join("; "))
     }
 
     async fn shutdown_wal(&mut self) {
@@ -108,12 +358,104 @@ pub struct PreparedManagedInstance {
     preserve_existing_runtime: bool,
     iface_ctx_synced: bool,
     tap_config_written: bool,
+    activation: ManagedRuntimeActivation,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ManagedRuntimeActivation {
+    PreserveVerifiedLive,
+    RestoreStandalone {
+        conntrack: bool,
+        acl: bool,
+    },
+    AwaitNeutronResync {
+        require_tc_acl_links: bool,
+    },
+}
+
+fn managed_runtime_activation(
+    mode: ManagedAttachMode,
+    preexisting_live_verified: bool,
+    desired_conntrack: bool,
+    desired_acl: bool,
+) -> ManagedRuntimeActivation {
+    if preexisting_live_verified {
+        return ManagedRuntimeActivation::PreserveVerifiedLive;
+    }
+    match mode {
+        ManagedAttachMode::StandaloneRestoreAfterTcAttach => {
+            ManagedRuntimeActivation::RestoreStandalone {
+                conntrack: desired_conntrack,
+                acl: desired_acl,
+            }
+        }
+        ManagedAttachMode::NeutronResyncRequired { acl_managed } => {
+            ManagedRuntimeActivation::AwaitNeutronResync {
+                require_tc_acl_links: acl_managed,
+            }
+        }
+    }
+}
+
+fn neutron_acl_gate_requires_tc(conntrack_enabled: bool, acl_enabled: bool) -> bool {
+    conntrack_enabled || acl_enabled
+}
+
+fn neutron_acl_gate_requires_full_resync(
+    conntrack_enabled: bool,
+    acl_enabled: bool,
+    runtime_ready: bool,
+    allow_recovery_publication: bool,
+) -> bool {
+    neutron_acl_gate_requires_tc(conntrack_enabled, acl_enabled)
+        && !runtime_ready
+        && !allow_recovery_publication
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum NeutronGateHealthCommitAction {
+    ClearDisabled,
+    VerifyRecoveryPublication,
+    Preserve,
+}
+
+fn neutron_gate_health_commit_action(
+    conntrack_enabled: bool,
+    acl_enabled: bool,
+    allow_recovery_publication: bool,
+) -> NeutronGateHealthCommitAction {
+    if !neutron_acl_gate_requires_tc(conntrack_enabled, acl_enabled) {
+        NeutronGateHealthCommitAction::ClearDisabled
+    } else if allow_recovery_publication {
+        NeutronGateHealthCommitAction::VerifyRecoveryPublication
+    } else {
+        NeutronGateHealthCommitAction::Preserve
+    }
+}
+
+fn config_update_requires_tc(conntrack: Option<bool>, acl: Option<bool>) -> bool {
+    conntrack == Some(true) || acl == Some(true)
+}
+
+impl PreparedManagedInstance {
+    pub fn requires_tc_acl_links(&self) -> bool {
+        match self.activation {
+            ManagedRuntimeActivation::PreserveVerifiedLive => {
+                self.state.conntrack_enabled || self.state.acl_enabled
+            }
+            ManagedRuntimeActivation::RestoreStandalone { conntrack, acl } => conntrack || acl,
+            ManagedRuntimeActivation::AwaitNeutronResync {
+                require_tc_acl_links,
+            } => require_tc_acl_links,
+        }
+    }
 }
 
 pub struct ControlPlane {
     instances: RwLock<HashMap<String, Arc<tokio::sync::RwLock<InstanceState>>>>,
     neutron_authorities: RwLock<HashMap<String, NeutronPortAuthority>>,
     tap_id_lock: Mutex<()>,
+    runtime_lifecycle_lock: Mutex<()>,
     pub ebpf_path: String,
     pub base_pin_path: String,
     pub base_state_path: String,
@@ -157,6 +499,198 @@ struct OwnedAclPolicyRuntimeAdd {
     is_new_port_set: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TransactionCreatedPortSet {
+    bitmap_idx: u32,
+    ports_normalized: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PortSetCleanupFailure {
+    bitmap_idx: u32,
+    error: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PortSetCleanupReport {
+    cleaned_bitmap_indices: Vec<u32>,
+    failures: Vec<PortSetCleanupFailure>,
+}
+
+fn transaction_created_port_sets(
+    state: &FirewallState,
+    runtime_adds: &[OwnedAclPolicyRuntimeAdd],
+) -> Result<Vec<TransactionCreatedPortSet>, ControlPlaneError> {
+    let mut created = BTreeMap::<u32, String>::new();
+    for add in runtime_adds.iter().filter(|add| add.is_new_port_set) {
+        let Some(bitmap_idx) = add.rule.bitmap_idx else {
+            continue;
+        };
+        let ports_normalized = state
+            .port_sets
+            .values()
+            .find(|port_set| port_set.bitmap_idx == bitmap_idx)
+            .map(|port_set| port_set.ports_normalized.clone())
+            .ok_or_else(|| {
+                ControlPlaneError::ValidationError(format!(
+                    "transaction-created port set {} is missing allocation metadata",
+                    bitmap_idx
+                ))
+            })?;
+        created.insert(bitmap_idx, ports_normalized);
+    }
+    Ok(created
+        .into_iter()
+        .map(|(bitmap_idx, ports_normalized)| TransactionCreatedPortSet {
+            bitmap_idx,
+            ports_normalized,
+        })
+        .collect())
+}
+
+fn execute_transaction_port_set_cleanup<F>(
+    port_sets: &[TransactionCreatedPortSet],
+    mut cleanup: F,
+) -> PortSetCleanupReport
+where
+    F: FnMut(&TransactionCreatedPortSet) -> Result<(), String>,
+{
+    let mut report = PortSetCleanupReport::default();
+    for port_set in port_sets {
+        match cleanup(port_set) {
+            Ok(()) => report.cleaned_bitmap_indices.push(port_set.bitmap_idx),
+            Err(error) => report.failures.push(PortSetCleanupFailure {
+                bitmap_idx: port_set.bitmap_idx,
+                error,
+            }),
+        }
+    }
+    report
+}
+
+fn cleanup_port_sets(
+    port_sets: &[TransactionCreatedPortSet],
+    runtime: TapMapRuntime<'_>,
+    ebpf_path: &str,
+    cleanup_context: &str,
+) -> PortSetCleanupReport {
+    execute_transaction_port_set_cleanup(port_sets, |port_set| {
+        aria_core::ebpf_ops::delete_port_set(
+            port_set.bitmap_idx,
+            &port_set.ports_normalized,
+            runtime,
+            ebpf_path,
+        )
+        .map_err(|error| {
+            format!(
+                "cleanup {} port set {} ({}): {}",
+                cleanup_context, port_set.bitmap_idx, port_set.ports_normalized, error
+            )
+        })
+    })
+}
+
+fn cleanup_transaction_created_port_sets(
+    port_sets: &[TransactionCreatedPortSet],
+    runtime: TapMapRuntime<'_>,
+    ebpf_path: &str,
+) -> PortSetCleanupReport {
+    cleanup_port_sets(port_sets, runtime, ebpf_path, "transaction-created")
+}
+
+fn quarantine_port_set_indices(
+    state: &mut FirewallState,
+    port_sets: &[TransactionCreatedPortSet],
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for port_set in port_sets {
+        if let Err(error) = state.quarantine_bitmap_index(port_set.bitmap_idx) {
+            errors.push(format!(
+                "quarantine bitmap index {}: {}",
+                port_set.bitmap_idx, error
+            ));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn quarantine_owned_acl_released_port_set(
+    state: &mut FirewallState,
+    released_port_sets: &mut BTreeMap<u32, String>,
+    released: Option<(u32, String)>,
+) -> Result<(), String> {
+    if let Some((bitmap_idx, ports_normalized)) = released {
+        // Quarantine before recording the cleanup target. This keeps the
+        // released index out of the allocator for the rest of this diff.
+        state.quarantine_bitmap_index(bitmap_idx)?;
+        released_port_sets.insert(bitmap_idx, ports_normalized);
+    }
+    Ok(())
+}
+
+fn apply_confirmed_port_set_cleanups(
+    state: &mut FirewallState,
+    cleanup: &PortSetCleanupReport,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for bitmap_idx in &cleanup.cleaned_bitmap_indices {
+        match state.release_quarantined_bitmap_index(*bitmap_idx) {
+            Ok(true) => {}
+            Ok(false) => errors.push(format!(
+                "cleaned bitmap index {} had no durable quarantine",
+                bitmap_idx
+            )),
+            Err(error) => errors.push(format!(
+                "release cleaned bitmap index {}: {}",
+                bitmap_idx, error
+            )),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn old_state_with_failed_cleanup_quarantines(
+    old_state: &FirewallState,
+    cleanup: &PortSetCleanupReport,
+) -> Result<FirewallState, String> {
+    let mut recovery_state = old_state.clone();
+    for failure in &cleanup.failures {
+        recovery_state
+            .quarantine_bitmap_index(failure.bitmap_idx)
+            .map_err(|error| {
+                format!(
+                    "preserve failed bitmap cleanup quarantine {}: {}",
+                    failure.bitmap_idx, error
+                )
+            })?;
+    }
+    Ok(recovery_state)
+}
+
+async fn restore_old_state_after_created_cleanup(
+    state: &mut InstanceState,
+    old_state: &FirewallState,
+    created_port_sets: &[TransactionCreatedPortSet],
+    cleanup: &PortSetCleanupReport,
+) -> Result<(), String> {
+    if created_port_sets.is_empty() {
+        return Ok(());
+    }
+    let recovery_state = old_state_with_failed_cleanup_quarantines(old_state, cleanup)?;
+    state
+        .compact_and_publish_state(recovery_state)
+        .await
+        .map_err(|error| format!("restore durable old ACL allocator state: {}", error))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct OwnedAclPolicyKey {
     src_group: String,
@@ -176,6 +710,145 @@ struct ExistingOwnedAclPolicy {
     key: OwnedAclPolicyKey,
     value: OwnedAclPolicyValue,
     rule: RuleInfo,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SharedNetworkMutation {
+    Added {
+        direction: &'static str,
+        cidr: String,
+        group_id: u32,
+    },
+    Deleted {
+        direction: &'static str,
+        cidr: String,
+        group_id: u32,
+    },
+}
+
+fn execute_shared_network_rollback<F>(
+    mutations: &[SharedNetworkMutation],
+    mut rollback: F,
+) -> Result<(), String>
+where
+    F: FnMut(&SharedNetworkMutation) -> Result<(), String>,
+{
+    let mut errors = Vec::new();
+    for mutation in mutations.iter().rev() {
+        if let Err(error) = rollback(mutation) {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn apply_shared_network_mutation(
+    mutation: &SharedNetworkMutation,
+    runtime: TapMapRuntime<'_>,
+    ebpf_path: &str,
+) -> Result<(), String> {
+    match mutation {
+        SharedNetworkMutation::Added {
+            direction,
+            cidr,
+            group_id,
+        } => aria_core::ebpf_ops::add_network(direction, cidr, *group_id, runtime, ebpf_path),
+        SharedNetworkMutation::Deleted {
+            direction,
+            cidr,
+            group_id,
+        } => aria_core::ebpf_ops::delete_network(direction, cidr, *group_id, runtime, ebpf_path),
+    }
+}
+
+fn rollback_shared_network_mutations(
+    mutations: &[SharedNetworkMutation],
+    runtime: TapMapRuntime<'_>,
+    ebpf_path: &str,
+) -> Result<(), String> {
+    execute_shared_network_rollback(mutations, |mutation| match mutation {
+        SharedNetworkMutation::Added {
+            direction,
+            cidr,
+            group_id,
+        } => aria_core::ebpf_ops::delete_network(direction, cidr, *group_id, runtime, ebpf_path)
+            .map_err(|error| {
+                format!(
+                    "rollback added {} network {} group {}: {}",
+                    direction, cidr, group_id, error
+                )
+            }),
+        SharedNetworkMutation::Deleted {
+            direction,
+            cidr,
+            group_id,
+        } => aria_core::ebpf_ops::add_network(direction, cidr, *group_id, runtime, ebpf_path)
+            .map_err(|error| {
+                format!(
+                    "rollback deleted {} network {} group {}: {}",
+                    direction, cidr, group_id, error
+                )
+            }),
+    })
+}
+
+async fn rollback_owned_acl_prepublication(
+    original: ControlPlaneError,
+    mutations: &[SharedNetworkMutation],
+    created_port_sets: &[TransactionCreatedPortSet],
+    runtime: TapMapRuntime<'_>,
+    ebpf_path: &str,
+    shadow_bank: u8,
+    state: &mut InstanceState,
+    old_state: &FirewallState,
+) -> ControlPlaneError {
+    let mut rollback_errors = Vec::new();
+    if let Err(error) = rollback_shared_network_mutations(mutations, runtime, ebpf_path) {
+        rollback_errors.push(error);
+    }
+    if let Err(error) = aria_core::ebpf_ops::scrub_acl_bank(runtime, shadow_bank) {
+        rollback_errors.push(format!("scrub shadow bank {}: {}", shadow_bank, error));
+    }
+    let cleanup = cleanup_transaction_created_port_sets(created_port_sets, runtime, ebpf_path);
+    for failure in &cleanup.failures {
+        rollback_errors.push(failure.error.clone());
+    }
+    if let Err(error) = restore_old_state_after_created_cleanup(
+        state,
+        old_state,
+        created_port_sets,
+        &cleanup,
+    )
+    .await
+    {
+        rollback_errors.push(error);
+    }
+    if rollback_errors.is_empty() {
+        original
+    } else {
+        ControlPlaneError::KernelError(format!(
+            "{}; owned ACL rollback failed: {}",
+            original,
+            rollback_errors.join("; ")
+        ))
+    }
+}
+
+fn prepare_system_publication_state(
+    mut state: FirewallState,
+    iface: &str,
+    global_ssl_enabled: Option<bool>,
+) -> FirewallState {
+    state.tap_id = aria_core::common::TAP_ID_UNASSIGNED;
+    state.attached_iface = Some(iface.to_string());
+    if let Some(enabled) = global_ssl_enabled {
+        state.ssl_enabled = enabled;
+    }
+    state
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -229,8 +902,13 @@ pub enum ControlPlaneError {
     GroupInUse(String),
     ValidationError(String),
     KernelError(String),
+    PersistenceError(String),
     InstanceNotReady(String),
-    LocalWriteBlocked { instance: String, domain: String },
+    LocalWriteBlocked {
+        instance: String,
+        domain: String,
+        dependency_of: Option<String>,
+    },
 }
 
 impl std::fmt::Display for ControlPlaneError {
@@ -242,8 +920,22 @@ impl std::fmt::Display for ControlPlaneError {
             Self::GroupInUse(s) => write!(f, "Group in use: {}", s),
             Self::ValidationError(s) => write!(f, "Validation error: {}", s),
             Self::KernelError(s) => write!(f, "Kernel error: {}", s),
+            Self::PersistenceError(s) => write!(f, "Persistence error: {}", s),
             Self::InstanceNotReady(s) => write!(f, "Instance not ready: {}", s),
-            Self::LocalWriteBlocked { instance, domain } => write!(
+            Self::LocalWriteBlocked {
+                instance,
+                domain,
+                dependency_of: Some(dependency),
+            } => write!(
+                f,
+                "LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN: instance '{}' domain '{}' is managed by Neutron as a dependency of '{}'; update this domain through Neutron",
+                instance, domain, dependency
+            ),
+            Self::LocalWriteBlocked {
+                instance,
+                domain,
+                dependency_of: None,
+            } => write!(
                 f,
                 "LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN: instance '{}' domain '{}' is managed by Neutron; update this domain through Neutron",
                 instance, domain
@@ -259,12 +951,28 @@ impl ControlPlaneError {
             Self::InstanceNotFound(_) | Self::GroupNotFound(_) | Self::PolicyNotFound(_) => 404,
             Self::GroupInUse(_) | Self::LocalWriteBlocked { .. } => 409,
             Self::KernelError(_) => 500,
-            Self::InstanceNotReady(_) => 503,
+            Self::PersistenceError(_) | Self::InstanceNotReady(_) => 503,
         }
     }
 }
 
 impl ControlPlane {
+    fn tc_acl_link_health_locked(
+        instance: &str,
+        state: &InstanceState,
+        trace_map_mode: TraceMapMode,
+    ) -> Result<TcAclLinkHealth, ControlPlaneError> {
+        let iface = Self::runtime_iface_name(instance, state)?;
+        Ok(FirewallInstance::new(
+            &iface,
+            state.pin_path.clone().into(),
+            state.state_path.clone().into(),
+            instance != "system",
+            trace_map_mode,
+        )
+        .tc_acl_link_health())
+    }
+
     fn runtime_iface_name(
         instance: &str,
         state: &InstanceState,
@@ -276,6 +984,54 @@ impl ControlPlane {
         } else {
             Ok(instance.to_string())
         }
+    }
+
+    fn require_tc_acl_ready_locked(
+        instance: &str,
+        state: &InstanceState,
+        trace_map_mode: TraceMapMode,
+    ) -> Result<(), ControlPlaneError> {
+        let health = Self::tc_acl_link_health_locked(instance, state, trace_map_mode)?;
+        if health.acl_ready() {
+            Ok(())
+        } else {
+            Err(ControlPlaneError::InstanceNotReady(format!(
+                "missing live TCX ACL attachments: {}",
+                health.missing_tc().join(", ")
+            )))
+        }
+    }
+
+    fn mark_tc_acl_runtime_ready_locked(
+        instance: &str,
+        state: &mut InstanceState,
+        xdp_ready: bool,
+        trace_map_mode: TraceMapMode,
+    ) -> Result<(), ControlPlaneError> {
+        let health = match Self::tc_acl_link_health_locked(instance, state, trace_map_mode) {
+            Ok(health) => health,
+            Err(error) => {
+                state.runtime_health.acl_ready = false;
+                state.runtime_health.xdp_ready = xdp_ready;
+                state.runtime_health.acl_error = Some("recovery_required".to_string());
+                return Err(error);
+            }
+        };
+        if let Some(reason) = missing_tc_reason(health) {
+            state.runtime_health.acl_ready = false;
+            state.runtime_health.xdp_ready = xdp_ready;
+            state.runtime_health.acl_error = Some(reason.to_string());
+            return Err(ControlPlaneError::InstanceNotReady(format!(
+                "missing live TCX ACL attachments: {}",
+                health.missing_tc().join(", ")
+            )));
+        }
+        state.runtime_health = RuntimeHealthState {
+            acl_ready: true,
+            xdp_ready,
+            acl_error: None,
+        };
+        Ok(())
     }
 
     fn fq_qdisc_marker_path(state: &InstanceState) -> std::path::PathBuf {
@@ -502,10 +1258,27 @@ impl ControlPlane {
         &self,
         name: &str,
         pin_path: &str,
+        state_path: &str,
         tap_id: u32,
         ifindex: u32,
         state: &FirewallState,
+        pin_state: &RuntimePinState,
     ) -> Result<(), String> {
+        let runtime_instance = FirewallInstance::new(
+            name,
+            pin_path.to_string().into(),
+            state_path.to_string().into(),
+            true,
+            self.trace_map_mode(),
+        );
+        preexisting_tc_acl_runtime_is_healthy(
+            state.conntrack_enabled || state.acl_enabled,
+            pin_state.preexisting_live_links,
+            pin_state.preexisting_tc_ingress_link,
+            pin_state.preexisting_tc_egress_link,
+            runtime_instance.tc_acl_link_health(),
+        )?;
+
         let iface_ctx = aria_core::ebpf_ops::read_iface_ctx(pin_path, ifindex)?;
         if iface_ctx.tap_id != tap_id {
             return Err(format!(
@@ -678,6 +1451,7 @@ impl ControlPlane {
             instances: RwLock::new(HashMap::new()),
             neutron_authorities: RwLock::new(HashMap::new()),
             tap_id_lock: Mutex::new(()),
+            runtime_lifecycle_lock: Mutex::new(()),
             ebpf_path: ebpf_path.to_string(),
             base_pin_path: base_pin_path.to_string(),
             base_state_path: base_state_path.to_string(),
@@ -694,6 +1468,10 @@ impl ControlPlane {
 
     pub fn trace_map_mode(&self) -> TraceMapMode {
         self.trace_manager.map_mode()
+    }
+
+    pub(crate) async fn lock_runtime_lifecycle(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.runtime_lifecycle_lock.lock().await
     }
 
     pub fn trace_backend_name(&self) -> &'static str {
@@ -768,14 +1546,22 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let domain_name = domain.as_str();
         let authorities = self.neutron_authorities.read().await;
-        if authorities
-            .get(instance)
-            .map(|authority| authority.managed_domains.contains(domain_name))
-            .unwrap_or(false)
-        {
+        let block = authorities.get(instance).and_then(|authority| {
+            if authority.managed_domains.contains(domain_name) {
+                Some(None)
+            } else if domain == LocalWriteDomain::Conntrack
+                && authority.managed_domains.contains("acl")
+            {
+                Some(Some("acl".to_string()))
+            } else {
+                None
+            }
+        });
+        if let Some(dependency_of) = block {
             return Err(ControlPlaneError::LocalWriteBlocked {
                 instance: instance.to_string(),
                 domain: domain_name.to_string(),
+                dependency_of,
             });
         }
         Ok(())
@@ -796,6 +1582,7 @@ impl ControlPlane {
                 return Err(ControlPlaneError::LocalWriteBlocked {
                     instance: instance.to_string(),
                     domain: "acl".to_string(),
+                    dependency_of: None,
                 });
             }
         }
@@ -811,6 +1598,7 @@ impl ControlPlane {
         &self,
         name: &str,
         pin_state: &RuntimePinState,
+        mode: ManagedAttachMode,
     ) -> Result<PreparedManagedInstance, String> {
         let pin_path = self.managed_pin_path();
         let state_path = format!("{}/{}", self.base_state_path, name);
@@ -875,16 +1663,44 @@ impl ControlPlane {
         }
 
         let tap_id = state.tap_id;
-        let preserve_existing_runtime = replacing_existing || pin_state.preexisting_xdp_link;
+        let activation = managed_runtime_activation(
+            mode,
+            pin_state.preexisting_live_links,
+            state.conntrack_enabled,
+            state.acl_enabled,
+        );
+        let preserve_existing_runtime = replacing_existing || pin_state.preexisting_live_links;
         let mut iface_ctx_synced = false;
         let mut tap_config_written = false;
 
-        if pin_state.preexisting_xdp_link {
-            if let Err(e) =
-                self.validate_preexisting_live_runtime(name, &pin_path, tap_id, ifindex, &state)
-            {
+        if pin_state.preexisting_live_links {
+            if let Err(e) = self.validate_preexisting_live_runtime(
+                name,
+                &pin_path,
+                &state_path,
+                tap_id,
+                ifindex,
+                &state,
+                pin_state,
+            ) {
+                let quiesce_error = aria_core::ebpf_ops::update_acl_runtime_gate(
+                    TapMapRuntime::new(&pin_path, tap_id),
+                    false,
+                    false,
+                    aria_core::common::ACL_INGRESS_HOOK_TC,
+                )
+                .err();
                 wal.shutdown().await;
-                return Err(e);
+                return Err(match quiesce_error {
+                    Some(quiesce_error) => format!(
+                        "preexisting live runtime mismatch for {}: {}; failed to quiesce surviving ACL/CT path: {}",
+                        name, e, quiesce_error
+                    ),
+                    None => format!(
+                        "preexisting live runtime mismatch for {}: {}; ACL/CT gate quiesced",
+                        name, e
+                    ),
+                });
             }
         } else if !replacing_existing {
             if let Err(e) = aria_core::ebpf_ops::scrub_managed_runtime_state(TapMapRuntime::new(
@@ -897,16 +1713,19 @@ impl ControlPlane {
             info!(instance = %name, tap_id, "skipping pre-replay scrub while replacing existing registered instance");
         }
 
-        if !pin_state.preexisting_xdp_link {
-            if let Err(e) = aria_core::ebpf_ops::update_runtime_config(
+        if !pin_state.preexisting_live_links {
+            if let Err(e) = aria_core::ebpf_ops::write_tap_config(
                 TapMapRuntime::new(&pin_path, tap_id),
-                Some(state.conntrack_enabled),
-                Some(state.monitoring_enabled),
-                Some(state.acl_enabled),
-                Some(state.qos_enabled && !state.qos_rules.is_empty()),
-                Some(state.mirror_enabled && !state.mirror_rules.is_empty()),
-                Some(state.tcprt_enabled),
-                None,
+                aria_core::common::TapConfig {
+                    conntrack_enabled: state.conntrack_enabled as u8,
+                    monitoring_enabled: state.monitoring_enabled as u8,
+                    acl_enabled: state.acl_enabled as u8,
+                    qos_enabled: (state.qos_enabled && !state.qos_rules.is_empty()) as u8,
+                    mirror_enabled: (state.mirror_enabled && !state.mirror_rules.is_empty()) as u8,
+                    tcprt_enabled: state.tcprt_enabled as u8,
+                    acl_active_bank: aria_core::common::ACL_BANK_PRIMARY,
+                    acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
+                },
             ) {
                 Self::cleanup_failed_managed_registration(
                     name,
@@ -939,6 +1758,26 @@ impl ControlPlane {
                 return Err(e);
             }
 
+            if let Err(e) = aria_core::ebpf_ops::update_acl_runtime_gate(
+                TapMapRuntime::new(&pin_path, tap_id),
+                false,
+                false,
+                aria_core::common::ACL_INGRESS_HOOK_TC,
+            ) {
+                Self::cleanup_failed_managed_registration(
+                    name,
+                    &pin_path,
+                    tap_id,
+                    ifindex,
+                    wal,
+                    preserve_existing_runtime,
+                    iface_ctx_synced,
+                    tap_config_written,
+                )
+                .await;
+                return Err(format!("failed to quiesce managed runtime gate: {}", e));
+            }
+
             if let Err(e) =
                 aria_core::ebpf_ops::sync_iface_ctx(TapMapRuntime::new(&pin_path, tap_id), ifindex)
             {
@@ -966,7 +1805,7 @@ impl ControlPlane {
             pin_path,
             state_path,
             wal,
-            desired_ssl_enabled: if pin_state.preexisting_xdp_link {
+            desired_ssl_enabled: if pin_state.preexisting_live_links {
                 None
             } else {
                 global_ssl_enabled
@@ -974,7 +1813,46 @@ impl ControlPlane {
             preserve_existing_runtime,
             iface_ctx_synced,
             tap_config_written,
+            activation,
         })
+    }
+
+    pub async fn activate_managed_registration(
+        &self,
+        prepared: &PreparedManagedInstance,
+    ) -> Result<(), String> {
+        let runtime = TapMapRuntime::new(&prepared.pin_path, prepared.tap_id);
+        match prepared.activation {
+            ManagedRuntimeActivation::PreserveVerifiedLive => Ok(()),
+            ManagedRuntimeActivation::RestoreStandalone { conntrack, acl } => {
+                aria_core::ebpf_ops::update_acl_runtime_gate(
+                    runtime,
+                    conntrack,
+                    acl,
+                    aria_core::common::ACL_INGRESS_HOOK_TC,
+                )
+            }
+            ManagedRuntimeActivation::AwaitNeutronResync { .. } => {
+                aria_core::ebpf_ops::update_acl_runtime_gate(
+                    runtime,
+                    false,
+                    false,
+                    aria_core::common::ACL_INGRESS_HOOK_TC,
+                )
+            }
+        }
+    }
+
+    pub fn quiesce_managed_registration(
+        &self,
+        prepared: &PreparedManagedInstance,
+    ) -> Result<(), String> {
+        aria_core::ebpf_ops::update_acl_runtime_gate(
+            TapMapRuntime::new(&prepared.pin_path, prepared.tap_id),
+            false,
+            false,
+            aria_core::common::ACL_INGRESS_HOOK_TC,
+        )
     }
 
     pub async fn publish_managed_instance(&self, prepared: PreparedManagedInstance) {
@@ -987,11 +1865,32 @@ impl ControlPlane {
             state_path,
             wal,
             desired_ssl_enabled,
+            activation,
             ..
         } = prepared;
 
+        let runtime = FirewallInstance::new(
+            &name,
+            pin_path.clone().into(),
+            state_path.clone().into(),
+            true,
+            self.trace_map_mode(),
+        );
+        let link_health = runtime.tc_acl_link_health();
+        let enforcement_published = !matches!(
+            activation,
+            ManagedRuntimeActivation::AwaitNeutronResync { .. }
+        ) && runtime.require_tc_acl_runtime().is_ok();
+        let runtime_health = initial_runtime_health(
+            state.conntrack_enabled,
+            state.acl_enabled,
+            link_health,
+            enforcement_published,
+        );
+
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
+            runtime_health,
             tap_id,
             ifindex: Some(ifindex),
             pin_path,
@@ -1064,6 +1963,8 @@ impl ControlPlane {
         &self,
         pin_path: &str,
         state_path: &str,
+        approved_state: FirewallState,
+        iface: &str,
     ) -> Result<(), String> {
         let global_ssl_enabled = match self.read_ssl_global_config().await {
             Ok(enabled) => Some(enabled),
@@ -1072,21 +1973,12 @@ impl ControlPlane {
                 None
             }
         };
-        let mut state = aria_core::wal::load_with_wal(state_path);
-        let tap_id_reset = if state.tap_id != aria_core::common::TAP_ID_UNASSIGNED {
-            state.tap_id = aria_core::common::TAP_ID_UNASSIGNED;
-            true
-        } else {
-            false
-        };
+        let tap_id_reset = approved_state.tap_id != aria_core::common::TAP_ID_UNASSIGNED;
         let ssl_changed = global_ssl_enabled
-            .map(|enabled| state.ssl_enabled != enabled)
+            .map(|enabled| approved_state.ssl_enabled != enabled)
             .unwrap_or(false);
-        if let Some(enabled) = global_ssl_enabled {
-            if ssl_changed {
-                state.ssl_enabled = enabled;
-            }
-        }
+        let iface_changed = approved_state.attached_iface.as_deref() != Some(iface);
+        let state = prepare_system_publication_state(approved_state, iface, global_ssl_enabled);
         let ifindex = match state.attached_iface.as_deref() {
             Some(iface) => match Self::resolve_ifindex(iface) {
                 Ok(ifindex) => Some(ifindex),
@@ -1111,21 +2003,31 @@ impl ControlPlane {
         };
 
         // Compact on startup if WAL had replayed entries
-        if wal.entry_count() > 0 || ssl_changed || tap_id_reset {
-            match serde_json::to_string_pretty(&state) {
-                Ok(json) => {
-                    if let Err(e) = wal.compact(json).await {
-                        error!(instance = "system", error = %e, "failed to compact WAL on system register");
-                    }
-                }
-                Err(e) => {
-                    error!(instance = "system", error = %e, "failed to serialize state on system register");
-                }
-            }
+        if wal.entry_count() > 0 || ssl_changed || tap_id_reset || iface_changed {
+            let json = serde_json::to_string_pretty(&state)
+                .map_err(|e| format!("failed to serialize approved system state: {}", e))?;
+            wal.compact(json)
+                .await
+                .map_err(|e| format!("failed to persist approved system state: {}", e))?;
         }
 
         let tap_id = state.tap_id;
         let runtime = TapMapRuntime::new(pin_path, tap_id);
+        let runtime_instance = FirewallInstance::new(
+            iface,
+            pin_path.to_string().into(),
+            state_path.to_string().into(),
+            false,
+            self.trace_map_mode(),
+        );
+        let system_link_health = runtime_instance.tc_acl_link_health();
+        let enforcement_required = state.conntrack_enabled || state.acl_enabled;
+        if enforcement_required && !system_link_health.acl_ready() {
+            return Err(format!(
+                "system ACL/CT gate remains quiesced; exact live TCX validation failed: {}",
+                system_link_health.missing_tc().join(", ")
+            ));
+        }
         aria_core::ebpf_ops::update_runtime_config(
             runtime,
             Some(state.conntrack_enabled),
@@ -1136,8 +2038,15 @@ impl ControlPlane {
             Some(state.tcprt_enabled),
             None,
         )?;
+        let runtime_health = initial_runtime_health(
+            state.conntrack_enabled,
+            state.acl_enabled,
+            system_link_health,
+            false,
+        );
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
+            runtime_health,
             tap_id,
             ifindex,
             pin_path: pin_path.to_string(),
@@ -1150,6 +2059,19 @@ impl ControlPlane {
         let mut instances = self.instances.write().await;
         instances.insert("system".to_string(), instance.clone());
         drop(instances);
+
+        if enforcement_required {
+            if let Err(error) = self
+                .mark_tc_acl_runtime_ready("system", system_link_health.xdp_ready())
+                .await
+            {
+                self.unregister_instance("system").await;
+                return Err(format!(
+                    "failed to publish system TC ACL runtime health: {}",
+                    error
+                ));
+            }
+        }
 
         if let Err(e) = self.trace_manager.register_tap(pin_path, tap_id).await {
             warn!(
@@ -1244,6 +2166,214 @@ impl ControlPlane {
         let mut names: Vec<String> = instances.keys().cloned().collect();
         names.sort();
         names
+    }
+
+    fn runtime_link_health_locked(
+        &self,
+        instance: &str,
+        state: &InstanceState,
+    ) -> TcAclLinkHealth {
+        let Ok(iface) = Self::runtime_iface_name(instance, state) else {
+            return TcAclLinkHealth::new(false, false, false);
+        };
+        let runtime = FirewallInstance::new(
+            &iface,
+            state.pin_path.clone().into(),
+            state.state_path.clone().into(),
+            instance != "system",
+            self.trace_map_mode(),
+        );
+        let pinned = runtime.tc_acl_link_health();
+        let ifindex_matches = Self::resolve_ifindex(&iface)
+            .ok()
+            .is_some_and(|actual| state.ifindex.map_or(true, |expected| expected == actual));
+        TcAclLinkHealth::new(
+            ifindex_matches && pinned.ingress,
+            ifindex_matches && pinned.egress,
+            ifindex_matches && pinned.xdp,
+        )
+    }
+
+    fn runtime_xdp_health_locked(&self, instance: &str, state: &InstanceState) -> bool {
+        let Ok(iface) = Self::runtime_iface_name(instance, state) else {
+            return false;
+        };
+        let ifindex_matches = Self::resolve_ifindex(&iface)
+            .ok()
+            .is_some_and(|actual| state.ifindex.map_or(true, |expected| expected == actual));
+        if !ifindex_matches {
+            return false;
+        }
+        FirewallInstance::new(
+            &iface,
+            state.pin_path.clone().into(),
+            state.state_path.clone().into(),
+            instance != "system",
+            self.trace_map_mode(),
+        )
+        .xdp_link_health()
+    }
+
+    fn quiesce_tc_acl_runtime_locked(
+        instance: &str,
+        state: &InstanceState,
+    ) -> Result<(), String> {
+        let runtime = state.map_runtime();
+        aria_core::ebpf_ops::read_runtime_config(runtime)
+            .map_err(|error| format!("runtime gate read failed: {}", error))?;
+        if instance == "system" {
+            aria_core::ebpf_ops::update_runtime_config(
+                runtime,
+                Some(false),
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+                None,
+            )
+        } else {
+            aria_core::ebpf_ops::update_acl_runtime_gate(
+                runtime,
+                false,
+                false,
+                aria_core::common::ACL_INGRESS_HOOK_TC,
+            )
+        }
+        .map_err(|error| format!("runtime gate write failed: {}", error))
+    }
+
+    pub async fn list_instance_runtime_health(&self) -> Vec<InstanceRuntimeHealthSnapshot> {
+        let instances = self.instance_entries().await;
+        let mut snapshots = Vec::with_capacity(instances.len());
+        for (name, instance) in instances {
+            let state = instance.read().await;
+            snapshots.push(InstanceRuntimeHealthSnapshot {
+                name,
+                active: true,
+                acl_ready: state.runtime_health.acl_ready,
+                xdp_ready: state.runtime_health.xdp_ready,
+                readiness_reason: state.runtime_health.readiness_reason(),
+            });
+        }
+        snapshots.sort_by(|left, right| left.name.cmp(&right.name));
+        snapshots
+    }
+
+    pub async fn reconcile_tc_acl_health(&self) -> Vec<TcAclHealthChange> {
+        let instances = self.instance_entries().await;
+        let mut changes = Vec::new();
+
+        for (name, instance) in instances {
+            if let Some(change) = self
+                .reconcile_tc_acl_health_candidate(&name, &instance)
+                .await
+            {
+                changes.push(change);
+            }
+        }
+
+        changes.sort_by(|left, right| left.instance.cmp(&right.instance));
+        changes
+    }
+
+    async fn reconcile_tc_acl_health_candidate(
+        &self,
+        name: &str,
+        instance: &Arc<tokio::sync::RwLock<InstanceState>>,
+    ) -> Option<TcAclHealthChange> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let is_current = {
+            let instances = self.instances.read().await;
+            instances
+                .get(name)
+                .is_some_and(|current| Arc::ptr_eq(current, instance))
+        };
+        if !is_current {
+            return None;
+        }
+
+        let mut state = instance.write().await;
+        let desired_enforcement = state.state.conntrack_enabled || state.state.acl_enabled;
+        if !desired_enforcement {
+            let xdp_ready = self.runtime_xdp_health_locked(name, &state);
+            if state.runtime_health.xdp_ready == xdp_ready {
+                return None;
+            }
+            state.runtime_health.xdp_ready = xdp_ready;
+            return Some(TcAclHealthChange {
+                instance: name.to_string(),
+                acl_ready: state.runtime_health.acl_ready,
+                xdp_ready: state.runtime_health.xdp_ready,
+                reason: state.runtime_health.readiness_reason(),
+                quiesced: false,
+            });
+        }
+
+        let observed = self.runtime_link_health_locked(name, &state);
+        let transition = apply_tc_health_observation(state.runtime_health.clone(), observed);
+        if !transition.changed && !transition.quiesce_acl_ct {
+            return None;
+        }
+
+        let (next, quiesced) = if transition.quiesce_acl_ct {
+            apply_tc_health_quiesce_result(
+                transition.next,
+                Self::quiesce_tc_acl_runtime_locked(name, &state),
+            )
+        } else {
+            (transition.next, false)
+        };
+
+        if next == state.runtime_health {
+            return None;
+        }
+        state.runtime_health = next;
+        let change = TcAclHealthChange {
+            instance: name.to_string(),
+            acl_ready: state.runtime_health.acl_ready,
+            xdp_ready: state.runtime_health.xdp_ready,
+            reason: state.runtime_health.readiness_reason(),
+            quiesced,
+        };
+        if !change.acl_ready {
+            warn!(
+                instance = %change.instance,
+                reason = ?change.reason,
+                quiesced = change.quiesced,
+                "TC ACL runtime health changed"
+            );
+        } else {
+            info!(
+                instance = %change.instance,
+                xdp_ready = change.xdp_ready,
+                "runtime link health changed"
+            );
+        }
+        Some(change)
+    }
+
+    pub async fn mark_tc_acl_runtime_ready(
+        &self,
+        instance: &str,
+        xdp_ready: bool,
+    ) -> Result<(), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        let observed = self.runtime_link_health_locked(instance, &state);
+        if !observed.acl_ready() {
+            return Err(ControlPlaneError::InstanceNotReady(
+                missing_tc_reason(observed)
+                    .unwrap_or("missing_tc_ingress_and_egress")
+                    .to_string(),
+            ));
+        }
+        Self::mark_tc_acl_runtime_ready_locked(
+            instance,
+            &mut state,
+            xdp_ready,
+            self.trace_map_mode(),
+        )
     }
 
     async fn get_instance(
@@ -1407,7 +2537,7 @@ impl ControlPlane {
         })
     }
 
-    fn check_xdp_ready(pin_path: &str) -> Result<(), ControlPlaneError> {
+    fn check_runtime_maps_ready(pin_path: &str) -> Result<(), ControlPlaneError> {
         let cfg_path = format!("{}/FIREWALL_CONFIG", pin_path);
         if !std::path::Path::new(&cfg_path).exists() {
             return Err(ControlPlaneError::InstanceNotReady(
@@ -1430,9 +2560,13 @@ impl ControlPlane {
         Self::owned_acl_validate_group_specs(owner_prefix, groups)?;
         Self::owned_acl_validate_policy_specs(owner_prefix, policies)?;
 
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
+        if state.state.conntrack_enabled || state.state.acl_enabled {
+            Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
+        }
         let current_acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
             .map_err(ControlPlaneError::KernelError)?;
         let next_acl_bank = aria_core::common::acl_next_bank(current_acl_bank);
@@ -1569,9 +2703,12 @@ impl ControlPlane {
                     policy.direction,
                 )
                 .map_err(ControlPlaneError::ValidationError)?;
-            if let Some((idx, ports_normalized)) = add_result.old_port_set_released {
-                released_port_sets.insert(idx, ports_normalized);
-            }
+            quarantine_owned_acl_released_port_set(
+                &mut final_state,
+                &mut released_port_sets,
+                add_result.old_port_set_released.clone(),
+            )
+            .map_err(ControlPlaneError::ValidationError)?;
             let rule = final_state
                 .rules
                 .iter()
@@ -1603,11 +2740,14 @@ impl ControlPlane {
                     rule.direction,
                 )
                 .map_err(ControlPlaneError::ValidationError)?;
-            if let (Some(idx), Some(ports_normalized)) =
-                (remove_result.bitmap_idx, remove_result.port_set_released)
-            {
-                released_port_sets.insert(idx, ports_normalized);
-            }
+            quarantine_owned_acl_released_port_set(
+                &mut final_state,
+                &mut released_port_sets,
+                remove_result
+                    .bitmap_idx
+                    .zip(remove_result.port_set_released),
+            )
+            .map_err(ControlPlaneError::ValidationError)?;
         }
         for group in &group_deletes {
             final_state.groups.remove(&group.name);
@@ -1635,96 +2775,7 @@ impl ControlPlane {
                 )
             })
             .collect();
-
-        for (name, group_id, cidr) in &group_cidr_adds {
-            aria_core::ebpf_ops::add_network(
-                "src",
-                cidr,
-                *group_id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            )
-            .map_err(|e| ControlPlaneError::KernelError(format!("src {}: {}", name, e)))?;
-            aria_core::ebpf_ops::add_network(
-                "dst",
-                cidr,
-                *group_id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            )
-            .map_err(|e| ControlPlaneError::KernelError(format!("dst {}: {}", name, e)))?;
-        }
-
-        for (name, group_id, cidr) in &group_cidr_deletes {
-            aria_core::ebpf_ops::delete_network(
-                "src",
-                cidr,
-                *group_id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            )
-            .map_err(|e| ControlPlaneError::KernelError(format!("src {}: {}", name, e)))?;
-            aria_core::ebpf_ops::delete_network(
-                "dst",
-                cidr,
-                *group_id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            )
-            .map_err(|e| ControlPlaneError::KernelError(format!("dst {}: {}", name, e)))?;
-        }
-
-        Self::stage_acl_shadow_bank(
-            &final_state,
-            state.map_runtime(),
-            next_acl_bank,
-            &self.ebpf_path,
-            &new_port_sets_by_key,
-        )?;
-        aria_core::ebpf_ops::set_acl_active_bank(state.map_runtime(), next_acl_bank)
-            .map_err(ControlPlaneError::KernelError)?;
-
-        for (idx, ports_normalized) in &released_port_sets {
-            if let Err(e) = aria_core::ebpf_ops::delete_port_set(
-                *idx,
-                ports_normalized,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                warn!(
-                    error = %e,
-                    bitmap_idx = *idx,
-                    "failed to clean released port set after ACL shadow bank switch"
-                );
-            }
-        }
-        if let Err(e) = aria_core::ebpf_ops::scrub_acl_bank(state.map_runtime(), current_acl_bank) {
-            warn!(
-                error = %e,
-                bank = current_acl_bank,
-                "failed to scrub previous ACL shadow bank after switch"
-            );
-        }
-
-        for existing in &policy_deletes {
-            let rule = &existing.rule;
-            if let Err(e) = aria_core::monitoring::clear_rule_stats_for_policy(
-                state.map_runtime(),
-                rule.src_group_id,
-                rule.dst_group_id,
-                rule.proto,
-                rule.direction,
-            ) {
-                warn!(error = %e, "failed to clear rule stats after owned ACL diff delete");
-            }
-        }
-        for group in &group_deletes {
-            if let Err(e) =
-                aria_core::monitoring::clear_group_stats_for_id(state.map_runtime(), group.id)
-            {
-                warn!(error = %e, group_id = group.id, "failed to clear group stats after owned ACL diff delete");
-            }
-        }
+        let created_port_sets = transaction_created_port_sets(&final_state, &runtime_adds)?;
 
         if runtime_adds.is_empty()
             && policy_deletes.is_empty()
@@ -1736,16 +2787,256 @@ impl ControlPlane {
             return Ok(report);
         }
 
-        state.state = final_state;
+        // Validate the post-publication quarantine snapshot before changing
+        // durable state. This cannot fail after the created-index guard has
+        // already been acknowledged.
+        let mut durable_final_state = final_state.clone();
+        for bitmap_idx in released_port_sets.keys() {
+            durable_final_state
+                .quarantine_bitmap_index(*bitmap_idx)
+                .map_err(ControlPlaneError::ValidationError)?;
+        }
+
+        // Reserve every transaction-created index durably before the first
+        // kernel mutation. A crash or rollback-cleanup fault can therefore
+        // never expose a stale bitmap through the old free-list/next cursor.
+        if !created_port_sets.is_empty() {
+            let mut allocator_guard_state = old_state.clone();
+            quarantine_port_set_indices(&mut allocator_guard_state, &created_port_sets)
+                .map_err(ControlPlaneError::ValidationError)?;
+            state
+                .compact_and_publish_state(allocator_guard_state)
+                .await
+                .map_err(|error| {
+                    ControlPlaneError::PersistenceError(format!(
+                        "persist transaction-created bitmap quarantine before ACL staging: {}",
+                        error
+                    ))
+                })?;
+        }
+
+        let runtime_pin_path = state.pin_path.clone();
+        let runtime_tap_id = state.tap_id;
+        let runtime = TapMapRuntime::new(&runtime_pin_path, runtime_tap_id);
+        let mut applied_shared_mutations = Vec::new();
+        for (name, group_id, cidr) in &group_cidr_adds {
+            for direction in ["src", "dst"] {
+                let mutation = SharedNetworkMutation::Added {
+                    direction,
+                    cidr: cidr.clone(),
+                    group_id: *group_id,
+                };
+                if let Err(error) =
+                    apply_shared_network_mutation(&mutation, runtime, &self.ebpf_path)
+                {
+                    return Err(rollback_owned_acl_prepublication(
+                        ControlPlaneError::KernelError(format!(
+                            "{} {}: {}",
+                            direction, name, error
+                        )),
+                        &applied_shared_mutations,
+                        &created_port_sets,
+                        runtime,
+                        &self.ebpf_path,
+                        next_acl_bank,
+                        &mut state,
+                        &old_state,
+                    )
+                    .await);
+                }
+                applied_shared_mutations.push(mutation);
+            }
+        }
+
+        for (name, group_id, cidr) in &group_cidr_deletes {
+            for direction in ["src", "dst"] {
+                let mutation = SharedNetworkMutation::Deleted {
+                    direction,
+                    cidr: cidr.clone(),
+                    group_id: *group_id,
+                };
+                if let Err(error) =
+                    apply_shared_network_mutation(&mutation, runtime, &self.ebpf_path)
+                {
+                    return Err(rollback_owned_acl_prepublication(
+                        ControlPlaneError::KernelError(format!(
+                            "{} {}: {}",
+                            direction, name, error
+                        )),
+                        &applied_shared_mutations,
+                        &created_port_sets,
+                        runtime,
+                        &self.ebpf_path,
+                        next_acl_bank,
+                        &mut state,
+                        &old_state,
+                    )
+                    .await);
+                }
+                applied_shared_mutations.push(mutation);
+            }
+        }
+
+        if let Err(error) = Self::stage_acl_shadow_bank(
+            &final_state,
+            runtime,
+            next_acl_bank,
+            &self.ebpf_path,
+            &new_port_sets_by_key,
+        ) {
+            return Err(rollback_owned_acl_prepublication(
+                error,
+                &applied_shared_mutations,
+                &created_port_sets,
+                runtime,
+                &self.ebpf_path,
+                next_acl_bank,
+                &mut state,
+                &old_state,
+            )
+            .await);
+        }
+        if state.state.conntrack_enabled || state.state.acl_enabled {
+            if let Err(error) =
+                Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())
+            {
+                return Err(rollback_owned_acl_prepublication(
+                    error,
+                    &applied_shared_mutations,
+                    &created_port_sets,
+                    runtime,
+                    &self.ebpf_path,
+                    next_acl_bank,
+                    &mut state,
+                    &old_state,
+                )
+                .await);
+            }
+        }
+        if let Err(error) = aria_core::ebpf_ops::set_acl_active_bank(runtime, next_acl_bank) {
+            return Err(rollback_owned_acl_prepublication(
+                ControlPlaneError::KernelError(error),
+                &applied_shared_mutations,
+                &created_port_sets,
+                runtime,
+                &self.ebpf_path,
+                next_acl_bank,
+                &mut state,
+                &old_state,
+            )
+            .await);
+        }
+
         let compact_started = Instant::now();
-        let json = serde_json::to_string_pretty(&state.state)
-            .map_err(|e| ControlPlaneError::ValidationError(e.to_string()))?;
-        state
-            .wal
-            .compact(json)
+        if let Err(error) = state
+            .compact_and_publish_state(durable_final_state)
             .await
-            .map_err(ControlPlaneError::KernelError)?;
+        {
+            let mut recovery_errors = vec![format!("owned ACL persistence failed: {}", error)];
+            if let Err(bank_error) =
+                aria_core::ebpf_ops::set_acl_active_bank(runtime, current_acl_bank)
+            {
+                recovery_errors.push(format!("restore active bank failed: {}", bank_error));
+            }
+            if let Err(rollback_error) = rollback_shared_network_mutations(
+                &applied_shared_mutations,
+                runtime,
+                &self.ebpf_path,
+            ) {
+                recovery_errors.push(rollback_error);
+            }
+            if let Err(scrub_error) = aria_core::ebpf_ops::scrub_acl_bank(runtime, next_acl_bank) {
+                recovery_errors.push(format!(
+                    "scrub failed publication bank {}: {}",
+                    next_acl_bank, scrub_error
+                ));
+            }
+            let cleanup = cleanup_transaction_created_port_sets(
+                &created_port_sets,
+                runtime,
+                &self.ebpf_path,
+            );
+            for failure in &cleanup.failures {
+                recovery_errors.push(failure.error.clone());
+            }
+            if let Err(recovery_error) = restore_old_state_after_created_cleanup(
+                &mut state,
+                &old_state,
+                &created_port_sets,
+                &cleanup,
+            )
+            .await
+            {
+                recovery_errors.push(recovery_error);
+            }
+            return Err(ControlPlaneError::PersistenceError(
+                recovery_errors.join("; "),
+            ));
+        }
         report.compact_ms = compact_started.elapsed().as_millis();
+
+        let released_cleanup_targets = released_port_sets
+            .iter()
+            .map(|(bitmap_idx, ports_normalized)| TransactionCreatedPortSet {
+                bitmap_idx: *bitmap_idx,
+                ports_normalized: ports_normalized.clone(),
+            })
+            .collect::<Vec<_>>();
+        let released_cleanup = cleanup_port_sets(
+            &released_cleanup_targets,
+            runtime,
+            &self.ebpf_path,
+            "released",
+        );
+        if !released_cleanup.cleaned_bitmap_indices.is_empty() {
+            let mut reusable_state = state.state.clone();
+            apply_confirmed_port_set_cleanups(&mut reusable_state, &released_cleanup)
+                .map_err(ControlPlaneError::PersistenceError)?;
+            state
+                .compact_and_publish_state(reusable_state)
+                .await
+                .map_err(|error| {
+                    ControlPlaneError::PersistenceError(format!(
+                        "persist confirmed released bitmap cleanup: {}",
+                        error
+                    ))
+                })?;
+        }
+        for failure in &released_cleanup.failures {
+            warn!(
+                error = %failure.error,
+                bitmap_idx = failure.bitmap_idx,
+                "released port set remains durably quarantined after cleanup failure"
+            );
+        }
+        if let Err(e) = aria_core::ebpf_ops::scrub_acl_bank(runtime, current_acl_bank) {
+            warn!(
+                error = %e,
+                bank = current_acl_bank,
+                "failed to scrub previous ACL shadow bank after switch"
+            );
+        }
+
+        for existing in &policy_deletes {
+            let rule = &existing.rule;
+            if let Err(e) = aria_core::monitoring::clear_rule_stats_for_policy(
+                runtime,
+                rule.src_group_id,
+                rule.dst_group_id,
+                rule.proto,
+                rule.direction,
+            ) {
+                warn!(error = %e, "failed to clear rule stats after owned ACL diff delete");
+            }
+        }
+        for group in &group_deletes {
+            if let Err(e) =
+                aria_core::monitoring::clear_group_stats_for_id(runtime, group.id)
+            {
+                warn!(error = %e, group_id = group.id, "failed to clear group stats after owned ACL diff delete");
+            }
+        }
+
         Ok(report)
     }
 
@@ -1763,7 +3054,7 @@ impl ControlPlane {
     ) -> Result<u32, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         // Check if this is a new group (for rollback)
         let was_new_group = !state.state.groups.contains_key(name);
@@ -1786,15 +3077,18 @@ impl ControlPlane {
         if let Err(e) =
             aria_core::ebpf_ops::add_network("dst", cidr, id, state.map_runtime(), &self.ebpf_path)
         {
-            let _ = aria_core::ebpf_ops::delete_network(
+            let mut errors = vec![format!("dst: {}", e)];
+            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
                 "src",
                 cidr,
                 id,
                 state.map_runtime(),
                 &self.ebpf_path,
-            );
+            ) {
+                errors.push(format!("rollback src network: {}", cleanup_error));
+            }
             state.state.rollback_add_group(name, cidr, was_new_group);
-            return Err(ControlPlaneError::KernelError(format!("dst: {}", e)));
+            return Err(ControlPlaneError::KernelError(errors.join("; ")));
         }
         if let Err(e) = aria_core::ebpf_ops::add_acl_network_in_bank(
             "src",
@@ -1804,22 +3098,27 @@ impl ControlPlane {
             state.map_runtime(),
             &self.ebpf_path,
         ) {
-            let _ = aria_core::ebpf_ops::delete_network(
+            let mut errors = vec![format!("acl src: {}", e)];
+            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
                 "src",
                 cidr,
                 id,
                 state.map_runtime(),
                 &self.ebpf_path,
-            );
-            let _ = aria_core::ebpf_ops::delete_network(
+            ) {
+                errors.push(format!("rollback src network: {}", cleanup_error));
+            }
+            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
                 "dst",
                 cidr,
                 id,
                 state.map_runtime(),
                 &self.ebpf_path,
-            );
+            ) {
+                errors.push(format!("rollback dst network: {}", cleanup_error));
+            }
             state.state.rollback_add_group(name, cidr, was_new_group);
-            return Err(ControlPlaneError::KernelError(format!("acl src: {}", e)));
+            return Err(ControlPlaneError::KernelError(errors.join("; ")));
         }
         if let Err(e) = aria_core::ebpf_ops::add_acl_network_in_bank(
             "dst",
@@ -1829,30 +3128,37 @@ impl ControlPlane {
             state.map_runtime(),
             &self.ebpf_path,
         ) {
-            let _ = aria_core::ebpf_ops::delete_acl_network_in_bank(
+            let mut errors = vec![format!("acl dst: {}", e)];
+            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_acl_network_in_bank(
                 "src",
                 cidr,
                 id,
                 acl_bank,
                 state.map_runtime(),
                 &self.ebpf_path,
-            );
-            let _ = aria_core::ebpf_ops::delete_network(
+            ) {
+                errors.push(format!("rollback ACL src network: {}", cleanup_error));
+            }
+            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
                 "src",
                 cidr,
                 id,
                 state.map_runtime(),
                 &self.ebpf_path,
-            );
-            let _ = aria_core::ebpf_ops::delete_network(
+            ) {
+                errors.push(format!("rollback src network: {}", cleanup_error));
+            }
+            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
                 "dst",
                 cidr,
                 id,
                 state.map_runtime(),
                 &self.ebpf_path,
-            );
+            ) {
+                errors.push(format!("rollback dst network: {}", cleanup_error));
+            }
             state.state.rollback_add_group(name, cidr, was_new_group);
-            return Err(ControlPlaneError::KernelError(format!("acl dst: {}", e)));
+            return Err(ControlPlaneError::KernelError(errors.join("; ")));
         }
 
         state
@@ -1867,7 +3173,7 @@ impl ControlPlane {
     pub async fn delete_group(&self, instance: &str, name: &str) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let group = state
             .state
@@ -2027,7 +3333,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
@@ -2116,7 +3422,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
@@ -2269,7 +3575,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let group_id = if group_name == "default" || group_name == "any" {
             0
@@ -2360,7 +3666,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let group_id = if group_name == "default" || group_name == "any" {
             0
@@ -2500,7 +3806,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
@@ -2586,7 +3892,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
@@ -2769,6 +4075,117 @@ impl ControlPlane {
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
+    pub async fn flush_conntrack_strict(
+        &self,
+        instance: &str,
+    ) -> Result<u64, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        aria_core::ct_ops::scrub_ct_tables_strict(state.map_runtime())
+            .map_err(ControlPlaneError::KernelError)
+    }
+
+    pub async fn require_tc_acl_ready(&self, instance: &str) -> Result<(), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())
+    }
+
+    pub(crate) async fn update_neutron_acl_runtime_gate_serialized(
+        &self,
+        instance: &str,
+        conntrack_enabled: bool,
+        acl_enabled: bool,
+        allow_recovery_publication: bool,
+    ) -> Result<(), ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        if neutron_acl_gate_requires_tc(conntrack_enabled, acl_enabled) {
+            Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
+            if neutron_acl_gate_requires_full_resync(
+                conntrack_enabled,
+                acl_enabled,
+                state.runtime_health.acl_ready,
+                allow_recovery_publication,
+            ) {
+                return Err(ControlPlaneError::InstanceNotReady(
+                    "tc_acl_full_resync_required".to_string(),
+                ));
+            }
+        }
+        aria_core::ebpf_ops::update_acl_runtime_gate(
+            state.map_runtime(),
+            conntrack_enabled,
+            acl_enabled,
+            aria_core::common::ACL_INGRESS_HOOK_TC,
+        )
+        .map_err(ControlPlaneError::KernelError)?;
+
+        state.state.conntrack_enabled = conntrack_enabled;
+        state.state.acl_enabled = acl_enabled;
+        let persistence_result = state
+            .wal_append_strict(&WalEntry::UpdateConfig {
+                conntrack: Some(conntrack_enabled),
+                monitoring: None,
+                acl: Some(acl_enabled),
+                qos: None,
+                mirror: None,
+                tcprt: None,
+                ssl: None,
+            })
+            .await;
+        if let Err(persistence_error) = persistence_result {
+            let pin_path = state.pin_path.clone();
+            let tap_id = state.tap_id;
+            let recovery_error = state
+                .recover_gate_persistence_failure(
+                    conntrack_enabled,
+                    acl_enabled,
+                    persistence_error,
+                    |safe_conntrack, safe_acl| {
+                        aria_core::ebpf_ops::update_acl_runtime_gate(
+                            TapMapRuntime::new(&pin_path, tap_id),
+                            safe_conntrack,
+                            safe_acl,
+                            aria_core::common::ACL_INGRESS_HOOK_TC,
+                        )
+                    },
+                )
+                .await;
+            return Err(recovery_error);
+        }
+        match neutron_gate_health_commit_action(
+            conntrack_enabled,
+            acl_enabled,
+            allow_recovery_publication,
+        ) {
+            NeutronGateHealthCommitAction::ClearDisabled => {
+                state.runtime_health.acl_ready = true;
+                state.runtime_health.acl_error = None;
+            }
+            NeutronGateHealthCommitAction::VerifyRecoveryPublication => {
+                let xdp_ready = self.runtime_xdp_health_locked(instance, &state);
+                if let Err(readiness_error) = Self::mark_tc_acl_runtime_ready_locked(
+                    instance,
+                    &mut state,
+                    xdp_ready,
+                    self.trace_map_mode(),
+                ) {
+                    let quiesce_result = Self::quiesce_tc_acl_runtime_locked(instance, &state);
+                    let (health, error) = apply_recovery_publication_quiesce_result(
+                        state.runtime_health.clone(),
+                        readiness_error,
+                        quiesce_result,
+                    );
+                    state.runtime_health = health;
+                    return Err(error);
+                }
+            }
+            NeutronGateHealthCommitAction::Preserve => {}
+        }
+        Ok(())
+    }
+
     // ── Config ──
 
     pub async fn get_config(
@@ -2798,6 +4215,7 @@ impl ControlPlane {
         tcprt: Option<bool>,
         ssl: Option<bool>,
     ) -> Result<(), ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
         let only_ssl = ssl.is_some()
             && conntrack.is_none()
@@ -2815,7 +4233,12 @@ impl ControlPlane {
         }
 
         let mut state = inst.write().await;
-        Self::check_xdp_ready(&state.pin_path)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
+        if config_update_requires_tc(conntrack, acl) {
+            Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
+        }
+        let old_state = state.state.clone();
+        let attempted_enable = conntrack == Some(true) || acl == Some(true);
 
         // For QoS, the kernel flag = user_wants_qos && has_rules
         let kernel_qos = qos.map(|q| q && !state.state.qos_rules.is_empty());
@@ -2853,8 +4276,8 @@ impl ControlPlane {
         if let Some(t) = tcprt {
             state.state.tcprt_enabled = t;
         }
-        state
-            .wal_append(&WalEntry::UpdateConfig {
+        let persistence_result = state
+            .wal_append_strict(&WalEntry::UpdateConfig {
                 conntrack,
                 monitoring,
                 acl,
@@ -2864,6 +4287,44 @@ impl ControlPlane {
                 ssl: None,
             })
             .await;
+        if let Err(persistence_error) = persistence_result {
+            let pin_path = state.pin_path.clone();
+            let tap_id = state.tap_id;
+            let recovery_error = state
+                .recover_local_config_persistence_failure(
+                    old_state,
+                    attempted_enable,
+                    persistence_error,
+                    |safe_state| {
+                        aria_core::ebpf_ops::update_runtime_config(
+                            TapMapRuntime::new(&pin_path, tap_id),
+                            Some(safe_state.conntrack_enabled),
+                            Some(safe_state.monitoring_enabled),
+                            Some(safe_state.acl_enabled),
+                            Some(safe_state.qos_enabled && !safe_state.qos_rules.is_empty()),
+                            Some(
+                                safe_state.mirror_enabled && !safe_state.mirror_rules.is_empty(),
+                            ),
+                            Some(safe_state.tcprt_enabled),
+                            None,
+                        )
+                    },
+                )
+                .await;
+            return Err(recovery_error);
+        }
+        if attempted_enable {
+            let xdp_ready = state.runtime_health.xdp_ready;
+            Self::mark_tc_acl_runtime_ready_locked(
+                instance,
+                &mut state,
+                xdp_ready,
+                self.trace_map_mode(),
+            )?;
+        } else if !state.state.conntrack_enabled && !state.state.acl_enabled {
+            state.runtime_health.acl_ready = true;
+            state.runtime_health.acl_error = None;
+        }
         Ok(())
     }
 
@@ -3260,6 +4721,123 @@ impl ControlPlane {
 mod tests {
     use super::*;
 
+    #[test]
+    fn tc_health_loss_is_deduplicated_and_never_auto_restores_ready() {
+        let ready = RuntimeHealthState {
+            acl_ready: true,
+            xdp_ready: true,
+            acl_error: None,
+        };
+        let lost = apply_tc_health_observation(
+            ready,
+            crate::instance::TcAclLinkHealth::new(true, false, true),
+        );
+        assert!(lost.changed);
+        assert!(!lost.next.acl_ready);
+        assert_eq!(
+            lost.next.acl_error.as_deref(),
+            Some("missing_tc_egress")
+        );
+
+        let repeated = apply_tc_health_observation(
+            lost.next.clone(),
+            crate::instance::TcAclLinkHealth::new(true, false, true),
+        );
+        assert!(!repeated.changed);
+
+        let links_returned = apply_tc_health_observation(
+            lost.next,
+            crate::instance::TcAclLinkHealth::new(true, true, true),
+        );
+        assert!(!links_returned.next.acl_ready);
+        assert_eq!(
+            links_returned.next.acl_error.as_deref(),
+            Some("recovery_required")
+        );
+    }
+
+    #[test]
+    fn tc_health_loss_keeps_xdp_independent_and_disabled_acl_ready() {
+        let xdp_lost = apply_tc_health_observation(
+            RuntimeHealthState {
+                acl_ready: true,
+                xdp_ready: true,
+                acl_error: None,
+            },
+            TcAclLinkHealth::new(true, true, false),
+        );
+        assert!(xdp_lost.next.acl_ready);
+        assert!(!xdp_lost.next.xdp_ready);
+        assert!(!xdp_lost.quiesce_acl_ct);
+
+        let disabled = initial_runtime_health(
+            false,
+            false,
+            TcAclLinkHealth::new(false, false, false),
+            false,
+        );
+        assert!(disabled.acl_ready);
+        assert!(!disabled.xdp_ready);
+    }
+
+    #[test]
+    fn tc_health_loss_quiesce_failure_retries_until_success_without_reason_loss() {
+        let failed_state = RuntimeHealthState {
+            acl_ready: false,
+            xdp_ready: true,
+            acl_error: Some("acl_quiesce_failed:map unavailable".to_string()),
+        };
+
+        let missing_retry = apply_tc_health_observation(
+            failed_state.clone(),
+            TcAclLinkHealth::new(false, true, true),
+        );
+        assert!(missing_retry.quiesce_acl_ct);
+        assert_eq!(
+            missing_retry.next.acl_error.as_deref(),
+            Some("missing_tc_ingress")
+        );
+        let (missing_failed_again, quiesced) = apply_tc_health_quiesce_result(
+            missing_retry.next,
+            Err("map unavailable".to_string()),
+        );
+        assert!(!quiesced);
+        assert_eq!(missing_failed_again, failed_state);
+
+        let healthy_retry = apply_tc_health_observation(
+            failed_state.clone(),
+            TcAclLinkHealth::new(true, true, true),
+        );
+        assert!(healthy_retry.quiesce_acl_ct);
+        assert_eq!(
+            healthy_retry.next.acl_error.as_deref(),
+            Some("recovery_required")
+        );
+        let (healthy_failed_again, quiesced) = apply_tc_health_quiesce_result(
+            healthy_retry.next.clone(),
+            Err("map unavailable".to_string()),
+        );
+        assert!(!quiesced);
+        assert_eq!(healthy_failed_again, failed_state);
+
+        let (recovery_required, quiesced) =
+            apply_tc_health_quiesce_result(healthy_retry.next, Ok(()));
+        assert!(quiesced);
+        assert_eq!(
+            recovery_required.acl_error.as_deref(),
+            Some("recovery_required")
+        );
+    }
+
+    #[test]
+    fn local_config_enable_requires_dual_tc_but_disable_does_not() {
+        assert!(config_update_requires_tc(Some(true), None));
+        assert!(config_update_requires_tc(None, Some(true)));
+        assert!(!config_update_requires_tc(Some(false), Some(false)));
+        assert!(!config_update_requires_tc(None, None));
+    }
+    use crate::tap_registry::ManagedAttachMode;
+
     fn test_control_plane() -> ControlPlane {
         let base = std::env::temp_dir().join(format!(
             "aria-control-plane-domain-test-{}",
@@ -3283,6 +4861,43 @@ mod tests {
     }
 
     #[test]
+    fn standalone_review_publication_uses_approved_snapshot_not_reload() {
+        let mut approved = FirewallState::default();
+        approved.conntrack_enabled = true;
+        approved.acl_enabled = false;
+        approved.monitoring_enabled = true;
+
+        let published = prepare_system_publication_state(approved, "eth-review", Some(true));
+
+        assert!(published.conntrack_enabled);
+        assert!(!published.acl_enabled);
+        assert!(published.monitoring_enabled);
+        assert!(published.ssl_enabled);
+        assert_eq!(published.attached_iface.as_deref(), Some("eth-review"));
+        assert_eq!(published.tap_id, aria_core::common::TAP_ID_UNASSIGNED);
+    }
+
+    #[tokio::test]
+    async fn standalone_review_lifecycle_serializes_detach_and_enable() {
+        let control_plane = Arc::new(test_control_plane());
+        let held = control_plane.lock_runtime_lifecycle().await;
+        let waiter_control_plane = control_plane.clone();
+        let mut waiter = tokio::spawn(async move {
+            let _guard = waiter_control_plane.lock_runtime_lifecycle().await;
+            true
+        });
+
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiter)
+            .await
+            .is_err());
+        drop(held);
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap());
+    }
+
+    #[test]
     fn domain_authority_normalizes_neutron_domain_aliases() {
         let domains = vec![
             "aria-acl".to_string(),
@@ -3301,6 +4916,745 @@ mod tests {
         assert!(normalized.contains("mirror"));
         assert!(normalized.contains("trace"));
         assert_eq!(normalized.len(), 4);
+    }
+
+    #[test]
+    fn managed_runtime_activation_distinguishes_standalone_and_neutron() {
+        assert_eq!(
+            managed_runtime_activation(
+                ManagedAttachMode::StandaloneRestoreAfterTcAttach,
+                false,
+                true,
+                true,
+            ),
+            ManagedRuntimeActivation::RestoreStandalone {
+                conntrack: true,
+                acl: true,
+            }
+        );
+        assert_eq!(
+            managed_runtime_activation(
+                ManagedAttachMode::NeutronResyncRequired { acl_managed: true },
+                false,
+                true,
+                true,
+            ),
+            ManagedRuntimeActivation::AwaitNeutronResync {
+                require_tc_acl_links: true,
+            }
+        );
+        assert_eq!(
+            managed_runtime_activation(
+                ManagedAttachMode::NeutronResyncRequired { acl_managed: false },
+                false,
+                false,
+                false,
+            ),
+            ManagedRuntimeActivation::AwaitNeutronResync {
+                require_tc_acl_links: false,
+            }
+        );
+        assert_eq!(
+            managed_runtime_activation(
+                ManagedAttachMode::NeutronResyncRequired { acl_managed: true },
+                true,
+                true,
+                true,
+            ),
+            ManagedRuntimeActivation::PreserveVerifiedLive
+        );
+    }
+
+    #[test]
+    fn neutron_acl_gate_serialization_requires_tc_only_for_enabling_writes() {
+        assert!(!neutron_acl_gate_requires_tc(false, false));
+        assert!(neutron_acl_gate_requires_tc(true, false));
+        assert!(neutron_acl_gate_requires_tc(false, true));
+        assert!(neutron_acl_gate_requires_tc(true, true));
+        assert!(neutron_acl_gate_requires_full_resync(
+            false, true, false, false
+        ));
+        assert!(!neutron_acl_gate_requires_full_resync(
+            false, true, false, true
+        ));
+        assert!(!neutron_acl_gate_requires_full_resync(
+            false, false, false, false
+        ));
+        assert_eq!(
+            neutron_gate_health_commit_action(false, false, false),
+            NeutronGateHealthCommitAction::ClearDisabled
+        );
+        assert_eq!(
+            neutron_gate_health_commit_action(false, false, true),
+            NeutronGateHealthCommitAction::ClearDisabled
+        );
+        assert_eq!(
+            neutron_gate_health_commit_action(true, false, true),
+            NeutronGateHealthCommitAction::VerifyRecoveryPublication
+        );
+        assert_eq!(
+            neutron_gate_health_commit_action(false, true, true),
+            NeutronGateHealthCommitAction::VerifyRecoveryPublication
+        );
+        assert_eq!(
+            neutron_gate_health_commit_action(true, true, false),
+            NeutronGateHealthCommitAction::Preserve
+        );
+    }
+
+    #[test]
+    fn tc_health_reconcile_recovery_publication_failure_is_fail_closed() {
+        let failed_health = RuntimeHealthState {
+            acl_ready: false,
+            xdp_ready: true,
+            acl_error: Some("missing_tc_ingress".to_string()),
+        };
+        let readiness_error = ControlPlaneError::InstanceNotReady(
+            "missing live TCX ACL attachments: ingress".to_string(),
+        );
+        let (quiesced_health, preserved) = apply_recovery_publication_quiesce_result(
+            failed_health.clone(),
+            readiness_error,
+            Ok(()),
+        );
+        assert!(!quiesced_health.acl_ready);
+        assert_eq!(
+            quiesced_health.acl_error.as_deref(),
+            Some("missing_tc_ingress")
+        );
+        assert!(matches!(preserved, ControlPlaneError::InstanceNotReady(_)));
+        assert!(preserved
+            .to_string()
+            .contains("missing live TCX ACL attachments: ingress"));
+        assert!(!preserved.to_string().contains("acl_quiesce_failed"));
+
+        let readiness_error = ControlPlaneError::InstanceNotReady(
+            "missing live TCX ACL attachments: egress".to_string(),
+        );
+        let (failed_quiesce_health, combined) = apply_recovery_publication_quiesce_result(
+            failed_health,
+            readiness_error,
+            Err("runtime gate write failed: map unavailable".to_string()),
+        );
+        assert!(!failed_quiesce_health.acl_ready);
+        assert!(failed_quiesce_health
+            .acl_error
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("acl_quiesce_failed:")));
+        assert!(matches!(combined, ControlPlaneError::InstanceNotReady(_)));
+        assert!(combined
+            .to_string()
+            .contains("missing live TCX ACL attachments: egress"));
+        assert!(combined.to_string().contains("acl_quiesce_failed"));
+        assert!(combined.to_string().contains("map unavailable"));
+    }
+
+    async fn stopped_wal_instance_state(test_name: &str) -> InstanceState {
+        let state_path = std::env::temp_dir().join(format!(
+            "aria-managed-failure-path-{}-{}",
+            std::process::id(),
+            test_name
+        ));
+        if state_path.exists() {
+            std::fs::remove_dir_all(&state_path).unwrap();
+        }
+        let state_path_string = state_path.to_string_lossy().into_owned();
+        let wal = WalClient::open(&state_path_string).unwrap();
+        wal.shutdown().await;
+        InstanceState {
+            state: FirewallState::default(),
+            runtime_health: RuntimeHealthState {
+                acl_ready: true,
+                xdp_ready: false,
+                acl_error: None,
+            },
+            tap_id: 7,
+            ifindex: Some(11),
+            pin_path: state_path_string.clone(),
+            state_path: state_path_string,
+            wal,
+            ssl_sync_pending: false,
+            last_ssl_sync_error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn tc_health_reconcile_skips_stale_same_name_candidate_before_transition_or_quiesce() {
+        let control_plane = test_control_plane();
+        let shared_pin_path = std::env::temp_dir()
+            .join(format!(
+                "aria-tc-health-stale-candidate-{}",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned();
+
+        let mut stale_state = stopped_wal_instance_state("tc-health-stale-old").await;
+        stale_state.state.acl_enabled = true;
+        stale_state.pin_path = shared_pin_path.clone();
+        let stale = Arc::new(tokio::sync::RwLock::new(stale_state));
+
+        let mut replacement_state = stopped_wal_instance_state("tc-health-stale-current").await;
+        replacement_state.state.acl_enabled = true;
+        replacement_state.pin_path = shared_pin_path;
+        let replacement = Arc::new(tokio::sync::RwLock::new(replacement_state));
+
+        control_plane
+            .instances
+            .write()
+            .await
+            .insert("tap-reused".to_string(), replacement.clone());
+
+        let stale_change = control_plane
+            .reconcile_tc_acl_health_candidate("tap-reused", &stale)
+            .await;
+        assert!(stale_change.is_none());
+        let stale_health = stale.read().await.runtime_health.clone();
+        assert!(stale_health.acl_ready);
+        assert!(stale_health.acl_error.is_none());
+
+        let current_change = control_plane
+            .reconcile_tc_acl_health_candidate("tap-reused", &replacement)
+            .await
+            .expect("the current same-name Arc must enter health reconciliation");
+        assert!(!current_change.acl_ready);
+        assert!(!current_change.quiesced);
+        assert!(current_change
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("acl_quiesce_failed:")));
+        let current_health = replacement.read().await.runtime_health.clone();
+        assert!(!current_health.acl_ready);
+        assert!(current_health
+            .acl_error
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("acl_quiesce_failed:")));
+    }
+
+    #[tokio::test]
+    async fn managed_failure_path_strict_wal_failure_propagates() {
+        let mut state = stopped_wal_instance_state("strict-wal").await;
+        let error = state
+            .wal_append_strict(&WalEntry::UpdateConfig {
+                conntrack: Some(true),
+                monitoring: None,
+                acl: Some(true),
+                qos: None,
+                mirror: None,
+                tcprt: None,
+                ssl: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("WAL append failed"));
+        assert!(error.contains("compact fallback failed"));
+    }
+
+    #[tokio::test]
+    async fn managed_failure_path_enabling_persistence_failure_quiesces() {
+        let mut state = stopped_wal_instance_state("enable-quiesce").await;
+        state.state.conntrack_enabled = true;
+        state.state.acl_enabled = true;
+        let mut kernel_writes = Vec::new();
+
+        let error = state
+            .recover_gate_persistence_failure(true, true, "forced persistence failure", |ct, acl| {
+                kernel_writes.push((ct, acl));
+                Ok(())
+            })
+            .await;
+
+        assert_eq!(kernel_writes, vec![(false, false)]);
+        assert!(!state.state.conntrack_enabled);
+        assert!(!state.state.acl_enabled);
+        assert!(matches!(&error, ControlPlaneError::PersistenceError(_)));
+        assert!(error.to_string().contains("forced persistence failure"));
+    }
+
+    #[tokio::test]
+    async fn managed_failure_path_disabling_persistence_failure_stays_disabled() {
+        let mut state = stopped_wal_instance_state("disable-stays-disabled").await;
+        state.state.conntrack_enabled = false;
+        state.state.acl_enabled = false;
+        let mut kernel_write_count = 0;
+
+        let error = state
+            .recover_gate_persistence_failure(false, false, "forced persistence failure", |_, _| {
+                kernel_write_count += 1;
+                Ok(())
+            })
+            .await;
+
+        assert_eq!(kernel_write_count, 0);
+        assert!(!state.state.conntrack_enabled);
+        assert!(!state.state.acl_enabled);
+        assert!(matches!(error, ControlPlaneError::PersistenceError(_)));
+    }
+
+    #[tokio::test]
+    async fn managed_failure_path_kernel_quiesce_failure_stays_disabled() {
+        let mut state = stopped_wal_instance_state("kernel-quiesce-failure").await;
+        state.state.conntrack_enabled = true;
+        state.state.acl_enabled = true;
+
+        let error = state
+            .recover_gate_persistence_failure(
+                true,
+                true,
+                "forced persistence failure",
+                |ct, acl| {
+                    assert_eq!((ct, acl), (false, false));
+                    Err("forced kernel quiesce failure".to_string())
+                },
+            )
+            .await;
+
+        assert_eq!(error.status_code(), 503);
+        assert!(error.to_string().contains("forced persistence failure"));
+        assert!(error.to_string().contains("forced kernel quiesce failure"));
+        assert!(!state.state.conntrack_enabled);
+        assert!(!state.state.acl_enabled);
+    }
+
+    #[tokio::test]
+    async fn standalone_review_local_persistence_failure_is_fail_closed() {
+        let mut state = stopped_wal_instance_state("local-config-enable").await;
+        let mut old_state = FirewallState::default();
+        old_state.monitoring_enabled = true;
+        state.state = old_state.clone();
+        state.state.conntrack_enabled = true;
+        state.state.acl_enabled = true;
+        state.state.monitoring_enabled = false;
+        let mut kernel_states = Vec::new();
+
+        let error = state
+            .recover_local_config_persistence_failure(
+                old_state,
+                true,
+                "forced local persistence failure",
+                |safe_state| {
+                    kernel_states.push((
+                        safe_state.conntrack_enabled,
+                        safe_state.acl_enabled,
+                        safe_state.monitoring_enabled,
+                    ));
+                    Ok(())
+                },
+            )
+            .await;
+
+        assert_eq!(kernel_states, vec![(false, false, true)]);
+        assert!(!state.state.conntrack_enabled);
+        assert!(!state.state.acl_enabled);
+        assert!(state.state.monitoring_enabled);
+        assert_eq!(error.status_code(), 503);
+        assert!(error.to_string().contains("forced local persistence failure"));
+        assert!(error.to_string().contains("compact fallback failed"));
+    }
+
+    #[test]
+    fn standalone_review_bank_rollback_attempts_all_shared_mutations() {
+        let mutations = vec![
+            SharedNetworkMutation::Added {
+                direction: "src",
+                cidr: "10.0.0.0/24".to_string(),
+                group_id: 7,
+            },
+            SharedNetworkMutation::Deleted {
+                direction: "dst",
+                cidr: "10.0.1.0/24".to_string(),
+                group_id: 8,
+            },
+        ];
+        let mut attempted = Vec::new();
+
+        let error = execute_shared_network_rollback(&mutations, |mutation| {
+            attempted.push((*mutation).clone());
+            if attempted.len() == 1 {
+                Err("forced first rollback failure".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            attempted,
+            vec![mutations[1].clone(), mutations[0].clone()]
+        );
+        assert!(error.contains("forced first rollback failure"));
+    }
+
+    #[test]
+    fn standalone_review_port_set_rollback_cleans_recycled_bitmap() {
+        let mut baseline = FirewallState::default();
+        baseline.free_bitmap_indices.push(7);
+        baseline.next_bitmap_idx = 8;
+        let mut staged = baseline.clone();
+        let add = staged
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("80"), 0)
+            .unwrap();
+        let rule = staged.rules.last().unwrap().clone();
+        let runtime_adds = vec![OwnedAclPolicyRuntimeAdd {
+            rule,
+            is_new_port_set: add.is_new_port_set,
+        }];
+        let created = transaction_created_port_sets(&staged, &runtime_adds).unwrap();
+        let mut cleaned = Vec::new();
+
+        let cleanup = execute_transaction_port_set_cleanup(&created, |port_set| {
+            cleaned.push(port_set.clone());
+            Ok(())
+        });
+
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].bitmap_idx, 7);
+        assert_eq!(cleaned, created);
+        assert_eq!(cleanup.cleaned_bitmap_indices, vec![7]);
+        assert!(cleanup.failures.is_empty());
+        let mut retry = baseline;
+        let retry_add = retry
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .unwrap();
+        assert_eq!(retry_add.bitmap_idx, Some(7));
+        assert!(retry_add.is_new_port_set);
+    }
+
+    #[test]
+    fn standalone_review_port_set_cleanup_attempts_every_created_set() {
+        let created = vec![
+            TransactionCreatedPortSet {
+                bitmap_idx: 7,
+                ports_normalized: "80:1".to_string(),
+            },
+            TransactionCreatedPortSet {
+                bitmap_idx: 8,
+                ports_normalized: "443:1".to_string(),
+            },
+        ];
+        let mut attempted = Vec::new();
+
+        let cleanup = execute_transaction_port_set_cleanup(&created, |port_set| {
+            attempted.push(port_set.clone());
+            if attempted.len() == 1 {
+                Err("forced first bitmap cleanup failure".to_string())
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(attempted, created);
+        assert_eq!(cleanup.cleaned_bitmap_indices, vec![8]);
+        assert_eq!(cleanup.failures.len(), 1);
+        assert_eq!(cleanup.failures[0].bitmap_idx, 7);
+        assert!(cleanup.failures[0]
+            .error
+            .contains("forced first bitmap cleanup failure"));
+    }
+
+    #[test]
+    fn standalone_review_failed_cleanup_quarantine_survives_retry_and_restart() {
+        let created = vec![
+            TransactionCreatedPortSet {
+                bitmap_idx: 7,
+                ports_normalized: "80:1".to_string(),
+            },
+            TransactionCreatedPortSet {
+                bitmap_idx: 8,
+                ports_normalized: "443:1".to_string(),
+            },
+        ];
+        let cleanup = execute_transaction_port_set_cleanup(&created, |port_set| {
+            if port_set.bitmap_idx == 7 {
+                Err("forced durable quarantine".to_string())
+            } else {
+                Ok(())
+            }
+        });
+
+        let mut guarded = FirewallState::default();
+        guarded.free_bitmap_indices.extend([7, 8]);
+        guarded.next_bitmap_idx = 9;
+        quarantine_port_set_indices(&mut guarded, &created).unwrap();
+        apply_confirmed_port_set_cleanups(&mut guarded, &cleanup).unwrap();
+
+        let json = serde_json::to_string(&guarded).unwrap();
+        let mut restarted: FirewallState = serde_json::from_str(&json).unwrap();
+        let first_retry = restarted
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("8443"), 0)
+            .unwrap();
+        let second_retry = restarted
+            .apply_add_rule(3, 4, libc::IPPROTO_TCP as u8, 1, Some("9443"), 0)
+            .unwrap();
+
+        assert_eq!(cleanup.failures[0].bitmap_idx, 7);
+        assert!(restarted.is_bitmap_index_quarantined(7));
+        assert_eq!(first_retry.bitmap_idx, Some(8));
+        assert_eq!(second_retry.bitmap_idx, Some(9));
+    }
+
+    #[test]
+    fn standalone_review_rollback_recovery_persists_only_failed_cleanup_quarantine() {
+        let mut old_state = FirewallState::default();
+        old_state.free_bitmap_indices.extend([7, 8]);
+        old_state.next_bitmap_idx = 9;
+        let cleanup = PortSetCleanupReport {
+            cleaned_bitmap_indices: vec![8],
+            failures: vec![PortSetCleanupFailure {
+                bitmap_idx: 7,
+                error: "forced rollback cleanup failure".to_string(),
+            }],
+        };
+
+        let recovered = old_state_with_failed_cleanup_quarantines(&old_state, &cleanup).unwrap();
+        let json = serde_json::to_string(&recovered).unwrap();
+        let mut restarted: FirewallState = serde_json::from_str(&json).unwrap();
+        let first_retry = restarted
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("8443"), 0)
+            .unwrap();
+        let second_retry = restarted
+            .apply_add_rule(3, 4, libc::IPPROTO_TCP as u8, 1, Some("9443"), 0)
+            .unwrap();
+
+        assert!(restarted.is_bitmap_index_quarantined(7));
+        assert!(!restarted.is_bitmap_index_quarantined(8));
+        assert_eq!(first_retry.bitmap_idx, Some(8));
+        assert_eq!(second_retry.bitmap_idx, Some(9));
+    }
+
+    #[test]
+    fn standalone_review_same_diff_release_is_quarantined_before_later_allocation() {
+        let mut old_state = FirewallState::default();
+        let old_add = old_state
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("80"), 0)
+            .unwrap();
+        let released_idx = old_add.bitmap_idx.unwrap();
+        assert_eq!(released_idx, 0);
+
+        let mut final_state = old_state.clone();
+        let mut released_port_sets = BTreeMap::new();
+        let mut runtime_adds = Vec::new();
+
+        // This is the earlier BTreeMap-sorted policy update. It allocates a
+        // fresh bitmap and releases the old policy's index.
+        let early_update = final_state
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .unwrap();
+        quarantine_owned_acl_released_port_set(
+            &mut final_state,
+            &mut released_port_sets,
+            early_update.old_port_set_released.clone(),
+        )
+        .unwrap();
+        runtime_adds.push(OwnedAclPolicyRuntimeAdd {
+            rule: final_state
+                .rules
+                .iter()
+                .find(|rule| rule.src_group_id == 1 && rule.dst_group_id == 2)
+                .unwrap()
+                .clone(),
+            is_new_port_set: early_update.is_new_port_set,
+        });
+
+        // This later sorted policy must not consume the just-released index.
+        let later_add = final_state
+            .apply_add_rule(3, 4, libc::IPPROTO_TCP as u8, 1, Some("8443"), 0)
+            .unwrap();
+        quarantine_owned_acl_released_port_set(
+            &mut final_state,
+            &mut released_port_sets,
+            later_add.old_port_set_released.clone(),
+        )
+        .unwrap();
+        runtime_adds.push(OwnedAclPolicyRuntimeAdd {
+            rule: final_state
+                .rules
+                .iter()
+                .find(|rule| rule.src_group_id == 3 && rule.dst_group_id == 4)
+                .unwrap()
+                .clone(),
+            is_new_port_set: later_add.is_new_port_set,
+        });
+
+        assert_ne!(later_add.bitmap_idx, Some(released_idx));
+        assert_eq!(later_add.bitmap_idx, Some(2));
+        assert_eq!(released_port_sets.len(), 1);
+        assert!(final_state.is_bitmap_index_quarantined(released_idx));
+
+        let created = transaction_created_port_sets(&final_state, &runtime_adds).unwrap();
+        assert_eq!(
+            created
+                .iter()
+                .map(|port_set| port_set.bitmap_idx)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let mut allocator_guard = old_state.clone();
+        quarantine_port_set_indices(&mut allocator_guard, &created)
+            .expect("created guard must not collide with the live old bitmap index");
+
+        let mut durable_final_state = final_state.clone();
+        durable_final_state
+            .quarantine_bitmap_index(released_idx)
+            .expect("same-index quarantine must be idempotent");
+        let cleanup = PortSetCleanupReport {
+            cleaned_bitmap_indices: vec![released_idx],
+            failures: Vec::new(),
+        };
+        apply_confirmed_port_set_cleanups(&mut durable_final_state, &cleanup).unwrap();
+        let after_cleanup = durable_final_state
+            .apply_add_rule(5, 6, libc::IPPROTO_TCP as u8, 1, Some("9443"), 0)
+            .unwrap();
+        assert_eq!(after_cleanup.bitmap_idx, Some(released_idx));
+    }
+
+    #[test]
+    fn standalone_review_same_diff_normalized_port_dedup_keeps_release_quarantined() {
+        let mut final_state = FirewallState::default();
+        final_state
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("80"), 0)
+            .unwrap();
+        let early_update = final_state
+            .apply_add_rule(1, 2, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .unwrap();
+        let mut released_port_sets = BTreeMap::new();
+        quarantine_owned_acl_released_port_set(
+            &mut final_state,
+            &mut released_port_sets,
+            early_update.old_port_set_released,
+        )
+        .unwrap();
+
+        let same_ports_later = final_state
+            .apply_add_rule(3, 4, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .unwrap();
+
+        assert_eq!(same_ports_later.bitmap_idx, early_update.bitmap_idx);
+        assert!(!same_ports_later.is_new_port_set);
+        assert_eq!(released_port_sets.len(), 1);
+        assert!(final_state.is_bitmap_index_quarantined(0));
+    }
+
+    #[test]
+    fn standalone_review_bank_map_helpers_use_required_maps_without_xdp_sentinel() {
+        let pin_dir = std::env::temp_dir().join(format!(
+            "aria-xdp-independent-bank-maps-{}",
+            std::process::id()
+        ));
+        if pin_dir.exists() {
+            std::fs::remove_dir_all(&pin_dir).unwrap();
+        }
+        std::fs::create_dir_all(&pin_dir).unwrap();
+        let pin_path = pin_dir.to_string_lossy().into_owned();
+        let runtime = TapMapRuntime::new(&pin_path, 17);
+
+        let failures = vec![
+            (
+                "bank network add",
+                aria_core::ebpf_ops::add_acl_network_in_bank(
+                    "src",
+                    "10.0.0.0/24",
+                    7,
+                    1,
+                    runtime,
+                    "/tmp/unused-ebpf",
+                )
+                .unwrap_err(),
+                "ACL_SRC_IPV4_TRIE",
+            ),
+            (
+                "bank network delete",
+                aria_core::ebpf_ops::delete_acl_network_in_bank(
+                    "dst",
+                    "10.0.1.0/24",
+                    8,
+                    1,
+                    runtime,
+                    "/tmp/unused-ebpf",
+                )
+                .unwrap_err(),
+                "ACL_DST_IPV4_TRIE",
+            ),
+            (
+                "bank policy add",
+                aria_core::ebpf_ops::add_policy_in_bank(
+                    7,
+                    8,
+                    libc::IPPROTO_TCP as u8,
+                    1,
+                    None,
+                    None,
+                    false,
+                    0,
+                    1,
+                    runtime,
+                    "/tmp/unused-ebpf",
+                )
+                .unwrap_err(),
+                "POLICY_TABLE",
+            ),
+            (
+                "bank policy delete",
+                aria_core::ebpf_ops::delete_policy_in_bank(
+                    7,
+                    8,
+                    libc::IPPROTO_TCP as u8,
+                    0,
+                    1,
+                    runtime,
+                    "/tmp/unused-ebpf",
+                )
+                .unwrap_err(),
+                "POLICY_TABLE",
+            ),
+        ];
+        std::fs::remove_dir_all(&pin_dir).unwrap();
+
+        for (operation, error, required_map) in failures {
+            assert!(
+                error.contains(required_map),
+                "{} must fail on its required map, got: {}",
+                operation,
+                error
+            );
+            assert!(
+                !error.contains("Firewall not started"),
+                "{} must not use XDP as an ACL runtime sentinel: {}",
+                operation,
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_review_bank_rollback_port_set_cleanup_requires_map_without_xdp() {
+        let pin_dir = std::env::temp_dir().join(format!(
+            "aria-xdp-independent-port-cleanup-{}",
+            std::process::id()
+        ));
+        if pin_dir.exists() {
+            std::fs::remove_dir_all(&pin_dir).unwrap();
+        }
+        std::fs::create_dir_all(&pin_dir).unwrap();
+        let pin_path = pin_dir.to_string_lossy().into_owned();
+        let result = aria_core::ebpf_ops::delete_port_set(
+            9,
+            "80:1",
+            TapMapRuntime::new(&pin_path, 17),
+            "/tmp/unused-ebpf",
+        );
+        std::fs::remove_dir_all(&pin_dir).unwrap();
+
+        let error = result.expect_err(
+            "port-set rollback must not silently succeed when XDP and PORT_BITMAP_POOL are absent",
+        );
+        assert!(
+            error.contains("PORT_BITMAP_POOL"),
+            "port-set rollback must fail on its required map, got: {}",
+            error
+        );
+        assert!(!error.contains("Firewall not started"));
     }
 
     #[test]
@@ -3345,6 +5699,34 @@ mod tests {
             .is_err());
         assert!(cp
             .ensure_local_group_write_allowed("tap-vm", "local-qos-group")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn domain_authority_blocks_conntrack_as_acl_dependency() {
+        let cp = test_control_plane();
+        cp.mark_neutron_port_authority(
+            "tap-vm",
+            "port-vm",
+            &["acl".to_string()],
+            7,
+        )
+        .await;
+
+        let error = cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Conntrack)
+            .await
+            .expect_err("ACL authority must protect its CT dependency");
+
+        assert_eq!(error.status_code(), 409);
+        assert!(error.to_string().contains("dependency of 'acl'"));
+        assert!(cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Qos)
+            .await
+            .is_ok());
+        assert!(cp
+            .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Trace)
             .await
             .is_ok());
     }

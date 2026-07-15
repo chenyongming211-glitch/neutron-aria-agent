@@ -1,7 +1,8 @@
 # 07. Transaction, WAL, And Snapshot Apply Detail Plan
 
-Status: stage-one implementation package; WAL/state semantics are partially
-implemented and covered by Python tests plus Rust test-source checks.
+Status: stage-one implementation package; snapshot intent/commit crash
+consistency is implemented for the current `attach + acl` scope. WAL lifecycle
+management (compaction/rotation) remains separate follow-up work.
 
 ## Goal
 
@@ -32,7 +33,7 @@ affected-port set. Its Rust minimum design and tests are recorded separately in
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Rust WAL intent/commit | partial | Host-level Neutron WAL exists with snapshot/delete intent and commit semantics. |
+| Rust WAL intent/commit | implemented for snapshot crash consistency | Snapshot admission fsyncs intent before returning `pending`; commit is final before post-commit hooks; pre-commit failure restores attach topology and scrubs ACL to bypass. Delete and WAL lifecycle hardening retain separate backlog items. |
 | Python local transaction state | partial | Snapshot/delete prepare and commit state exists. |
 | Timeout recovery | partial | Python can query status after timeout and decide whether to converge. Stale local pending snapshot records are cleared only when datapath status proves a newer committed generation. |
 | Idempotent generation handling | partial | Same generation replay and desired hash behavior exist in Rust side. |
@@ -40,20 +41,23 @@ affected-port set. Its Rust minimum design and tests are recorded separately in
 
 ## Transaction Boundary
 
-Snapshot apply must follow this high-level order:
+Snapshot apply follows this high-level order:
 
 ```text
 1. Validate schema, host, authority, generation, and supported domains.
 2. Acquire single-writer apply lock.
-3. Write WAL snapshot intent.
-4. Perform Neutron-managed preflight.
-5. Attach or reconcile runtime in inert/bypass mode.
-6. Apply groups/address-sets.
-7. Apply runtime foundations such as conntrack and monitoring as required.
-8. Apply ACL/QoS domains.
+3. Perform Neutron-managed preflight and build the bounded transaction plan.
+4. Write and fsync the WAL snapshot intent.
+5. Publish only `pending_generation`/`intent_written` and return `pending`;
+   accepted/applied remain on the last commit.
+6. Move the same apply lock and prepared transaction into background apply.
+7. Attach or reconcile runtime in inert/bypass mode.
+8. Apply groups/address-sets and the requested ACL domain.
 9. Compute per-port and per-domain status.
-10. Write WAL commit.
-11. Publish accepted/applied/status state.
+10. Write and fsync the WAL commit.
+11. Immediately publish accepted/applied/status RAM state.
+12. Run fallible post-commit observation hooks; a return-error is a warning,
+    not a transaction rollback.
 ```
 
 If any mandatory step before WAL commit fails, the generation must not be
@@ -83,8 +87,9 @@ Rules:
 - Same generation with same desired hash is idempotent.
 - Same generation with different desired hash is a conflict and must be rejected
   or classified as error.
-- `accepted_generation` means schema/authority/WAL/classification succeeded; it
-  does not mean every domain is ready.
+- `accepted_generation` advances only after the classified WAL commit is
+  durable; an intent-only `pending` response does not advance it. It does not
+  mean every domain is ready.
 - Feature readiness must be tracked per domain.
 
 ## Timeout Recovery
@@ -109,6 +114,31 @@ On datapath restart:
 - preserve local standalone state separately from Neutron-managed state;
 - wait for full resync when recovery cannot prove correctness.
 
+A successfully claimed interface proves only that attach and the tap-local
+runtime replay/validation succeeded. The tap-local WAL does not share the
+Neutron ACL desired hash, so restart recovery does not use attach success as
+proof that ACL is current:
+
+- `attach` remains `ready`;
+- managed ACL becomes `degraded` with
+  `effective_action=unchanged` and
+  `reason=acl_restart_replay_requires_resync`;
+- only the ACL entry in `domain_desired_hashes` is removed;
+- authority becomes `runtime_reconcile_requires_full_resync`;
+- same-generation and same-hash shortcuts are disabled until full resync
+  executes and commits ACL reconcile.
+
+If an unresolved pending recovery already exists, its pending generation,
+authority, and WAL status take precedence. Restart invalidation still removes
+the ACL skip hash and marks ACL degraded, but does not overwrite the stronger
+recovery classification.
+
+The invalidated state is appended to the Neutron WAL before RAM publication.
+If that append fails, RAM still publishes the invalidated hash/status with
+`authority_state=wal_runtime_reconcile_commit_failed` and
+`wal_status=commit_failed`. The next restart repeats recovery from the older
+WAL, while the current process cannot skip ACL using false-ready metadata.
+
 On Python agent restart:
 
 - load pending snapshot/delete state;
@@ -117,6 +147,78 @@ On Python agent restart:
 - clear stale local pending snapshot state only when UDS status has already
   advanced to a newer applied generation with no runtime pending transaction;
 - otherwise mark degraded and trigger full resync when allowed.
+
+For a runtime pending state whose authority is
+`blocked_recovery_required`, `wal_commit_failed`,
+`wal_recovery_commit_failed`, `pending_recovery_commit_failed`, or
+`recovered_pending_full_resync`, Python calls the exact recover-pending
+generation/hash before same-hash convergence waiting.
+After successful recovery it re-reads status and submits above the refreshed
+generation floor. Recovery failure leaves the local pending record intact and
+the agent degraded.
+
+## Snapshot Commit Failure Boundary
+
+If datapath mutation succeeds but the snapshot cannot commit, the current
+implementation does not attempt an ACL policy preimage rollback. It uses the
+approved availability-first boundary:
+
+- recover or retain the last committed attach topology where possible;
+- scrub affected Neutron-owned ACL state;
+- classify every affected ACL domain as `blocked` with
+  `effective_action=bypass`;
+- keep accepted/applied on the last committed generation;
+- retain the failed generation/hash as pending and set
+  `authority_state=blocked_recovery_required`;
+- refuse later snapshot mutation until explicit pending recovery succeeds.
+
+The blocked classification is appended to WAL when storage permits. If that
+second append also fails, RAM remains blocked with
+`wal_status=recovery_commit_failed`, and the original durable intent drives
+startup recovery.
+
+## ACL Update And Conntrack Boundary
+
+Neutron ACL replacement uses the approved availability-first sequence:
+
+1. derive the desired per-tap CT mode from `NeutronAclSnapshot.stateful`;
+2. atomically write `conntrack=false, acl=false` to the tap config;
+3. replace and activate the desired ACL bank while CT lookup/create is
+   quiesced;
+4. strictly clear both `CT_TABLE_V4` and `CT_TABLE_V6` for the tap;
+5. atomically publish the desired CT mode and final ACL gate in one tap-config
+   write.
+
+The final state is `conntrack=true, acl=true` for a non-empty stateful policy
+and `conntrack=false, acl=true` for a non-empty stateless policy. Empty or
+bypass ACL keeps `acl=false` but still publishes the snapshot's stateful CT
+mode. A missing ACL payload preserves the CT mode read before quiesce.
+
+Quiescing both flags is required because monitoring or TCP-RT can otherwise
+create CT entries while the ACL gate alone is disabled. A strict flush followed
+by a separate ACL-only enable would leave a traffic race in which such an entry
+could be recreated between those operations.
+
+Missing or invalid map pins, iterator errors, and entry-removal errors all fail
+strict CT clear. An error after gate disable returns ACL `error` with
+`effective_action=bypass` and does not enable enforcement. Translation or
+pre-quiesce failure leaves the previous gate/CT state untouched and reports
+`effective_action=unchanged`. The general management `ct_flush` retains its
+legacy lenient behavior; only the Neutron ACL transaction requires strict
+clearing. A post-publication compensation disables CT and ACL together; if
+that compensation fails, status reports the still-provable enforced action.
+
+## Durable Commit Finality
+
+Once snapshot commit fsync succeeds, that commit is final. RAM is published
+before `neutron.snapshot.after_commit`; a return-error at that hook is logged
+and the committed success response is retained. A process-exit action still
+terminates the process, and restart rebuilds RAM from WAL.
+
+Recover-pending replays WAL under the apply lock before constructing a rollback
+state. If a valid WAL commit is newer than RAM and no unresolved intent
+supersedes it, recovery refreshes RAM and returns `already_committed`; it does
+not append the older RAM generation over the durable commit.
 
 ## Local Write Gate Interaction
 
@@ -215,7 +317,9 @@ Rust side:
 | --- | --- |
 | WAL append fails before intent | Request fails; do not modify accepted generation. |
 | WAL intent exists but apply fails | Domain or transaction status degraded/error; no false ready. |
-| WAL commit fails | Apply result must not be reported as committed. |
+| WAL commit fails after datapath mutation | Restore attach where possible, scrub affected ACL to bypass, retain prior accepted/applied, and require pending recovery. |
+| WAL commit succeeds, post-commit return-error fires | Keep committed WAL/RAM state and report the classified success; log the hook error. |
+| Recover-pending sees newer valid WAL commit than RAM | Refresh RAM and return `already_committed`; do not append a rollback. |
 | Same generation, different desired hash | `generation_hash_conflict` stable error. |
 | Older generation | `stale_generation` stable status reason. |
 | Client timeout | Python marks pending and reconciles with status; timeout is not authority release. |
@@ -233,6 +337,10 @@ Rust side:
 | Same generation with different hash | Rejected or classified as conflict. |
 | Older generation after newer commit | Rejected. |
 | WAL append failure | No accepted/applied generation is advanced. |
+| WAL commit failure after ACL mutation | Affected ACL is scrubbed and reported `blocked/bypass`; prior committed generations remain authoritative. |
+| Return-error after WAL commit | WAL and RAM retain the new committed generation. |
+| Stale RAM pending with newer WAL commit | Recover-pending returns `already_committed` without regressing WAL. |
+| Blocked same-hash remote pending | Python recovers the exact pending generation/hash before submitting a fresh full snapshot. |
 | UDS timeout with later convergence | Python commits local transaction only after status proves match. |
 | UDS timeout without convergence | Python remains pending/degraded and schedules resync. |
 | Stale Python pending with newer datapath generation | Python clears stale pending state, records the clear reason, and full-resyncs at a generation above the datapath floor. |

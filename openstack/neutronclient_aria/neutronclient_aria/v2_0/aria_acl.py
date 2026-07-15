@@ -1,6 +1,8 @@
 from __future__ import absolute_import
 from __future__ import print_function
 
+import argparse
+
 from neutronclient.common import extension
 
 
@@ -10,6 +12,21 @@ def _bool(value):
     if value is None:
         return None
     return str(value).lower() in ("1", "true", "yes", "on")
+
+
+def _protocol(value):
+    normalized = str(value).strip().lower()
+    if normalized in ("any", "tcp", "udp", "icmp"):
+        return normalized
+    try:
+        number = int(normalized)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            "protocol must be any/tcp/udp/icmp or 0..255"
+        )
+    if number < 0 or number > 255:
+        raise argparse.ArgumentTypeError("protocol number must be in 0..255")
+    return str(number)
 
 
 class _AriaAclCommandMixin(object):
@@ -145,7 +162,7 @@ class AriaAclPolicyCreate(_AriaAclCreate):
     def add_known_arguments(self, parser):
         self._add_project_arguments(parser)
         parser.add_argument("--name", default="")
-        parser.add_argument("--default-action", choices=["allow", "deny"], default="allow")
+        parser.add_argument("--default-action", choices=["allow"], default="allow")
         parser.add_argument("--stateful", choices=["true", "false"], default=None)
         self._add_enabled(parser)
 
@@ -172,7 +189,7 @@ class AriaAclPolicyUpdate(_AriaAclUpdate):
 
     def add_known_arguments(self, parser):
         parser.add_argument("--name")
-        parser.add_argument("--default-action", choices=["allow", "deny"])
+        parser.add_argument("--default-action", choices=["allow"])
         parser.add_argument("--stateful", choices=["true", "false"])
         self._add_enabled(parser)
 
@@ -234,17 +251,15 @@ class AriaAclRuleCreate(_AriaAclCreate):
         parser.add_argument("--direction", choices=["ingress", "egress"], required=True)
         parser.add_argument("--priority", type=int, required=True)
         parser.add_argument("--action", choices=["allow", "deny", "drop"], required=True)
-        parser.add_argument("--protocol")
+        parser.add_argument("--protocol", type=_protocol)
         parser.add_argument("--src-cidr")
         parser.add_argument("--dst-cidr")
         parser.add_argument("--src-address-set-id")
         parser.add_argument("--dst-address-set-id")
-        parser.add_argument("--src-port-min", type=int)
-        parser.add_argument("--src-port-max", type=int)
         parser.add_argument("--dst-port-min", type=int)
         parser.add_argument("--dst-port-max", type=int)
         parser.add_argument("--dst-port", type=int)
-        parser.add_argument("--ethertype")
+        parser.add_argument("--ethertype", choices=["IPv4"])
         self._add_enabled(parser)
 
     def args2body(self, parsed_args):
@@ -257,8 +272,7 @@ class AriaAclRuleCreate(_AriaAclCreate):
         })
         optional_fields = (
             "protocol", "src_cidr", "dst_cidr", "src_address_set_id",
-            "dst_address_set_id", "src_port_min", "src_port_max",
-            "dst_port_min", "dst_port_max", "ethertype",
+            "dst_address_set_id", "dst_port_min", "dst_port_max", "ethertype",
         )
         for field in optional_fields:
             value = getattr(parsed_args, field, None)
@@ -284,17 +298,15 @@ class AriaAclRuleUpdate(_AriaAclUpdate):
         parser.add_argument("--direction", choices=["ingress", "egress"])
         parser.add_argument("--priority", type=int)
         parser.add_argument("--action", choices=["allow", "deny", "drop"])
-        parser.add_argument("--protocol")
+        parser.add_argument("--protocol", type=_protocol)
         parser.add_argument("--src-cidr")
         parser.add_argument("--dst-cidr")
         parser.add_argument("--src-address-set-id")
         parser.add_argument("--dst-address-set-id")
-        parser.add_argument("--src-port-min", type=int)
-        parser.add_argument("--src-port-max", type=int)
         parser.add_argument("--dst-port-min", type=int)
         parser.add_argument("--dst-port-max", type=int)
         parser.add_argument("--dst-port", type=int)
-        parser.add_argument("--ethertype")
+        parser.add_argument("--ethertype", choices=["IPv4"])
         self._add_enabled(parser)
 
     def args2body(self, parsed_args):
@@ -302,7 +314,7 @@ class AriaAclRuleUpdate(_AriaAclUpdate):
         for field in (
             "direction", "priority", "action", "protocol", "src_cidr",
             "dst_cidr", "src_address_set_id", "dst_address_set_id",
-            "src_port_min", "src_port_max", "dst_port_min", "dst_port_max",
+            "dst_port_min", "dst_port_max",
             "ethertype",
         ):
             value = getattr(parsed_args, field, None)

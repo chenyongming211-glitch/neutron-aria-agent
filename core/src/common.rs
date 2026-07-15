@@ -15,6 +15,13 @@ unsafe impl Pod for PolicyKey {}
 
 pub const ACL_BANK_PRIMARY: u8 = 0;
 pub const ACL_BANK_SHADOW: u8 = 1;
+pub const ACL_INGRESS_HOOK_XDP: u8 = 0;
+pub const ACL_INGRESS_HOOK_TC: u8 = 1;
+
+#[inline(always)]
+pub fn normalize_acl_ingress_hook(_value: u8) -> u8 {
+    ACL_INGRESS_HOOK_TC
+}
 
 #[inline]
 pub fn normalize_acl_bank(bank: u8) -> u8 {
@@ -96,6 +103,10 @@ pub struct CtValue {
 }
 unsafe impl Pod for CtValue {}
 
+pub const CT_FLAG_SEEN_REPLY: u8 = 1;
+pub const CT_FLAG_POLICY_HIT: u8 = 1 << 1;
+pub const CT_FLAG_ACL_EVALUATED: u8 = 1 << 2;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct CtConfig {
@@ -109,12 +120,15 @@ unsafe impl Pod for CtConfig {}
 // --- Conntrack contract telemetry ---
 
 pub const CT_CONTRACT_HOOK_TC_INGRESS: u8 = 1;
+pub const CT_CONTRACT_HOOK_TC_EGRESS: u8 = 2;
 
 pub const CT_CONTRACT_FAMILY_IPV4: u8 = 4;
 pub const CT_CONTRACT_FAMILY_IPV6: u8 = 6;
 
+pub const CT_CONTRACT_REASON_CT_HIT: u8 = 0;
 pub const CT_CONTRACT_REASON_CT_MISS: u8 = 1;
 pub const CT_CONTRACT_REASON_CT_DISABLED: u8 = 2;
+pub const CT_CONTRACT_REASON_STALE_BANK: u8 = 3;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -351,7 +365,7 @@ pub struct TapConfig {
     pub mirror_enabled: u8,
     pub tcprt_enabled: u8,
     pub acl_active_bank: u8,
-    pub pad: [u8; 1],
+    pub acl_ingress_hook: u8,
 }
 unsafe impl Pod for TapConfig {}
 
@@ -365,7 +379,7 @@ impl From<FirewallConfig> for TapConfig {
             mirror_enabled: value.mirror_enabled,
             tcprt_enabled: value.tcprt_enabled,
             acl_active_bank: ACL_BANK_PRIMARY,
-            pad: [0; 1],
+            acl_ingress_hook: ACL_INGRESS_HOOK_TC,
         }
     }
 }
@@ -432,8 +446,19 @@ pub struct SslWriteScratch {
 unsafe impl Pod for SslWriteScratch {}
 
 #[cfg(test)]
+#[path = "../../ebpf/src/common.rs"]
+mod ebpf_common_contract;
+
+#[cfg(test)]
 mod tests {
-    use super::{acl_banked_tap_id, acl_next_bank, CtValue, PolicyKey, SslErrorEvent, TapConfig};
+    use super::ebpf_common_contract::{
+        ct_acl_bank_is_current, ct_acl_cache_is_current, CtValue as EbpfCtValue,
+        CT_FLAG_ACL_EVALUATED, CT_FLAG_POLICY_HIT,
+    };
+    use super::{
+        acl_banked_tap_id, acl_next_bank, normalize_acl_ingress_hook, CtValue, PolicyKey,
+        SslErrorEvent, TapConfig, ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP,
+    };
 
     #[test]
     fn ssl_error_event_layout_matches_ebpf() {
@@ -448,12 +473,55 @@ mod tests {
     }
 
     #[test]
+    fn acl_ingress_hook_byte_is_abi_only_and_normalizes_to_tc() {
+        assert_eq!(core::mem::size_of::<TapConfig>(), 8);
+        assert_eq!(ACL_INGRESS_HOOK_XDP, 0);
+        assert_eq!(ACL_INGRESS_HOOK_TC, 1);
+        assert_eq!(normalize_acl_ingress_hook(0), ACL_INGRESS_HOOK_TC);
+        assert_eq!(normalize_acl_ingress_hook(1), ACL_INGRESS_HOOK_TC);
+        assert_eq!(normalize_acl_ingress_hook(255), ACL_INGRESS_HOOK_TC);
+    }
+
+    #[test]
     fn acl_shadow_bank_helpers_encode_bank_without_touching_group_ids() {
         assert_eq!(acl_banked_tap_id(7, 0), 14);
         assert_eq!(acl_banked_tap_id(7, 1), 15);
         assert_eq!(acl_next_bank(0), 1);
         assert_eq!(acl_next_bank(1), 0);
         assert_eq!(acl_next_bank(42), 1);
+    }
+
+    #[test]
+    fn tc_ct_bank_accepts_only_current_bank_when_acl_is_active() {
+        assert!(ct_acl_bank_is_current(0, 1, 0));
+        assert!(ct_acl_bank_is_current(1, 1, 1));
+        assert!(!ct_acl_bank_is_current(1, 1, 0));
+    }
+
+    #[test]
+    fn tc_ct_cache_requires_acl_evaluation_when_acl_turns_on() {
+        assert!(ct_acl_cache_is_current(0, 0, 0, 0));
+        assert!(!ct_acl_cache_is_current(0, 0, 1, 0));
+        assert!(ct_acl_cache_is_current(
+            CT_FLAG_ACL_EVALUATED,
+            0,
+            1,
+            0,
+        ));
+        assert!(!ct_acl_cache_is_current(
+            CT_FLAG_ACL_EVALUATED,
+            0,
+            1,
+            1,
+        ));
+    }
+
+    #[test]
+    fn ct_policy_hit_uses_an_unused_flag_without_layout_change() {
+        assert_eq!(CT_FLAG_POLICY_HIT, 2);
+        assert_eq!(CT_FLAG_ACL_EVALUATED, 4);
+        assert_eq!(core::mem::size_of::<EbpfCtValue>(), 40);
+        assert_eq!(core::mem::size_of::<CtValue>(), 40);
     }
 }
 

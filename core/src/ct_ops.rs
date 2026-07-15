@@ -128,7 +128,12 @@ fn scrub_ct_table_v4_strict(pin_path: &str, tap_id: u32) -> Result<u64, String> 
 
     let keys: Vec<CtKey4> = map
         .iter()
-        .filter_map(|item| item.ok().map(|(k, _)| k))
+        .map(|item| {
+            item.map(|(key, _)| key)
+                .map_err(|e| format!("iterate CT_TABLE_V4: {:?}", e))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|key| key.tap_id == tap_id)
         .collect();
     let count = keys.len() as u64;
@@ -148,7 +153,12 @@ fn scrub_ct_table_v6_strict(pin_path: &str, tap_id: u32) -> Result<u64, String> 
 
     let keys: Vec<CtKey6> = map
         .iter()
-        .filter_map(|item| item.ok().map(|(k, _)| k))
+        .map(|item| {
+            item.map(|(key, _)| key)
+                .map_err(|e| format!("iterate CT_TABLE_V6: {:?}", e))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .filter(|key| key.tap_id == tap_id)
         .collect();
     let count = keys.len() as u64;
@@ -192,4 +202,26 @@ pub fn init_ct_config(bpf: &mut aya::Ebpf) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn strict_ct_scrub_rejects_missing_pins_while_lenient_flush_stays_compatible() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let pin_path = std::env::temp_dir()
+            .join(format!("aria-missing-ct-{}-{}", std::process::id(), nonce));
+        let pin_path = pin_path.to_string_lossy().to_string();
+        let runtime = TapMapRuntime::new(&pin_path, 4242);
+
+        assert_eq!(ct_flush(runtime), Ok(0));
+        let error = scrub_ct_tables_strict(runtime).expect_err("missing CT pins must fail");
+        assert!(error.contains("open CT_TABLE_V4"), "{error}");
+    }
 }

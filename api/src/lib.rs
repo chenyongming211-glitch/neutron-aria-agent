@@ -37,20 +37,9 @@ pub const NEUTRON_UDS_BODY_MAX_BYTES: u64 = 1_048_576;
 pub const NEUTRON_UDS_TIMEOUT_MS: u64 = 3_000;
 pub const NEUTRON_UDS_ERROR_CODES_HASH: &str = "v0.9-neutron-errors-2";
 pub const NEUTRON_UDS_PEER_AUTH_POLICY: &str = "filesystem_permissions_then_peercred";
-pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-2";
+pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-3";
 pub const NEUTRON_ATTACH_AUTHORITY: &str = "neutron_snapshot";
-pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &[
-    "attach",
-    "acl",
-    "qos",
-    "mirror",
-    "config",
-    "conntrack",
-    "tcprt",
-    "trace",
-    "drops",
-    "ssl",
-];
+pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &["attach", "acl"];
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[schema(example = json!({
@@ -329,7 +318,7 @@ pub struct NeutronPortStatus {
     "supports_full_snapshot": true,
     "supports_port_scoped_snapshot": true,
     "supports_port_delete": true,
-    "supported_domains": ["attach", "acl", "qos", "mirror"]
+    "supported_domains": ["attach", "acl"]
 }))]
 pub struct NeutronCapabilitiesResponse {
     /// Local UDS API version.
@@ -383,7 +372,7 @@ pub struct NeutronCapabilitiesResponse {
     pub peer_auth_policy: String,
     /// Stable hash/version for capability drift detection.
     #[serde(default)]
-    #[schema(example = "v0.9-neutron-capabilities-2")]
+    #[schema(example = "v0.9-neutron-capabilities-3")]
     pub capability_hash: String,
 }
 
@@ -602,15 +591,29 @@ pub struct HealthResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[schema(example = json!({
     "name": "eth0",
-    "active": true
+    "active": true,
+    "acl_ready": true,
+    "xdp_ready": false,
+    "readiness_reason": "xdp_ddos_hook_unavailable"
 }))]
 pub struct InstanceInfo {
     /// Managed instance or tap name.
     #[schema(example = "eth0")]
     pub name: String,
-    /// Whether the instance currently has active data plane programs attached.
+    /// Whether the instance remains registered, independently of link health.
     #[schema(example = true)]
     pub active: bool,
+    /// Whether desired ACL/CT enforcement has a complete dual-TC runtime and published gate.
+    #[serde(default)]
+    #[schema(example = true)]
+    pub acl_ready: bool,
+    /// Whether the independent XDP link is currently present.
+    #[serde(default)]
+    #[schema(example = false)]
+    pub xdp_ready: bool,
+    /// Stable runtime readiness reason when either independent health dimension is degraded.
+    #[serde(default)]
+    pub readiness_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -2097,6 +2100,27 @@ pub fn direction_from_string(direction: &str) -> Result<u8, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instance_info_reports_acl_and_xdp_health_independently() {
+        let value = serde_json::to_value(InstanceInfo {
+            name: "tap0".to_string(),
+            active: true,
+            acl_ready: true,
+            xdp_ready: false,
+            readiness_reason: Some("xdp_ddos_hook_unavailable".to_string()),
+        })
+        .unwrap();
+        assert_eq!(value["acl_ready"], true);
+        assert_eq!(value["xdp_ready"], false);
+
+        let legacy: InstanceInfo =
+            serde_json::from_value(serde_json::json!({"name": "tap0", "active": true}))
+                .unwrap();
+        assert!(!legacy.acl_ready);
+        assert!(!legacy.xdp_ready);
+        assert_eq!(legacy.readiness_reason, None);
+    }
 
     #[test]
     fn neutron_contract_capabilities_are_stable() {

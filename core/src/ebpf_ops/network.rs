@@ -68,11 +68,6 @@ fn add_network_impl(
     pin_path: &str,
     acl: bool,
 ) -> Result<(), String> {
-    let prog_path = format!("{}/xdp_firewall", pin_path);
-    if !std::path::Path::new(&prog_path).exists() {
-        return Err("Firewall not started. Run 'system start' first.".to_string());
-    }
-
     let (ip, prefix_len) = parse_cidr(cidr)?;
 
     match ip {
@@ -132,11 +127,6 @@ fn delete_network_impl(
     pin_path: &str,
     acl: bool,
 ) -> Result<(), String> {
-    let prog_path = format!("{}/xdp_firewall", pin_path);
-    if !std::path::Path::new(&prog_path).exists() {
-        return Err("Firewall not started. Run 'system start' first.".to_string());
-    }
-
     let (ip, prefix_len) = parse_cidr(cidr)?;
 
     match ip {
@@ -144,22 +134,20 @@ fn delete_network_impl(
             let map_name = network_map_name(direction, false, acl)?;
             let key = tap_lpm_key_v4(lpm_tap_id, v4.octets(), prefix_len);
             let mut lpm_map = open_pinned_lpm_v4(pin_path, map_name)?;
-            match lpm_map.remove(&key) {
-                Ok(()) => info!(cidr = %cidr, map = %map_name, "deleted IPv4 network"),
-                Err(_) => {
-                    info!(cidr = %cidr, map = %map_name, "IPv4 network not present during delete")
-                }
+            let context = format!("LPM delete {}", map_name);
+            match classify_map_delete(lpm_map.remove(&key), &context)? {
+                true => info!(cidr = %cidr, map = %map_name, "deleted IPv4 network"),
+                false => info!(cidr = %cidr, map = %map_name, "IPv4 network not present during delete"),
             }
         }
         IpAddr::V6(v6) => {
             let map_name = network_map_name(direction, true, acl)?;
             let key = tap_lpm_key_v6(lpm_tap_id, v6.octets(), prefix_len);
             let mut lpm_map = open_pinned_lpm_v6(pin_path, map_name)?;
-            match lpm_map.remove(&key) {
-                Ok(()) => info!(cidr = %cidr, map = %map_name, "deleted IPv6 network"),
-                Err(_) => {
-                    info!(cidr = %cidr, map = %map_name, "IPv6 network not present during delete")
-                }
+            let context = format!("LPM delete {}", map_name);
+            match classify_map_delete(lpm_map.remove(&key), &context)? {
+                true => info!(cidr = %cidr, map = %map_name, "deleted IPv6 network"),
+                false => info!(cidr = %cidr, map = %map_name, "IPv6 network not present during delete"),
             }
         }
     }

@@ -27,6 +27,7 @@ fn prom_escape(s: &str) -> String {
 fn ct_contract_hook_to_string(hook: u8) -> &'static str {
     match hook {
         aria_core::common::CT_CONTRACT_HOOK_TC_INGRESS => "tc_ingress",
+        aria_core::common::CT_CONTRACT_HOOK_TC_EGRESS => "tc_egress",
         _ => "unknown",
     }
 }
@@ -41,8 +42,10 @@ fn ct_contract_family_to_string(family: u8) -> &'static str {
 
 fn ct_contract_reason_to_string(reason: u8) -> &'static str {
     match reason {
+        aria_core::common::CT_CONTRACT_REASON_CT_HIT => "ct_hit",
         aria_core::common::CT_CONTRACT_REASON_CT_MISS => "ct_miss",
         aria_core::common::CT_CONTRACT_REASON_CT_DISABLED => "ct_disabled",
+        aria_core::common::CT_CONTRACT_REASON_STALE_BANK => "stale_bank",
         _ => "unknown",
     }
 }
@@ -386,9 +389,9 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
             yield Ok::<_, std::convert::Infallible>(chunk);
         }
 
-        let _ = writeln!(out, "# HELP aria_ct_contract_packets_total Packets handled through conntrack-contract fallback");
+        let _ = writeln!(out, "# HELP aria_ct_contract_packets_total Diagnostic TC conntrack decisions; routine ct_hit, ct_miss, and ct_disabled reasons require a matching Trace filter");
         let _ = writeln!(out, "# TYPE aria_ct_contract_packets_total counter");
-        let _ = writeln!(out, "# HELP aria_ct_contract_bytes_total Bytes handled through conntrack-contract fallback");
+        let _ = writeln!(out, "# HELP aria_ct_contract_bytes_total Diagnostic bytes for TC conntrack decisions; routine ct_hit, ct_miss, and ct_disabled reasons require a matching Trace filter");
         let _ = writeln!(out, "# TYPE aria_ct_contract_bytes_total counter");
 
         for inst in &instances {
@@ -657,4 +660,37 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
         )],
         Body::from_stream(stream),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ct_contract_hook_to_string, ct_contract_reason_to_string};
+
+    #[test]
+    fn tc_ct_contract_metric_labels_are_exact() {
+        assert_eq!(
+            ct_contract_hook_to_string(aria_core::common::CT_CONTRACT_HOOK_TC_INGRESS),
+            "tc_ingress"
+        );
+        assert_eq!(
+            ct_contract_hook_to_string(aria_core::common::CT_CONTRACT_HOOK_TC_EGRESS),
+            "tc_egress"
+        );
+        assert_eq!(
+            ct_contract_reason_to_string(aria_core::common::CT_CONTRACT_REASON_CT_HIT),
+            "ct_hit"
+        );
+        assert_eq!(
+            ct_contract_reason_to_string(aria_core::common::CT_CONTRACT_REASON_CT_MISS),
+            "ct_miss"
+        );
+        assert_eq!(
+            ct_contract_reason_to_string(aria_core::common::CT_CONTRACT_REASON_CT_DISABLED),
+            "ct_disabled"
+        );
+        assert_eq!(
+            ct_contract_reason_to_string(aria_core::common::CT_CONTRACT_REASON_STALE_BANK),
+            "stale_bank"
+        );
+    }
 }

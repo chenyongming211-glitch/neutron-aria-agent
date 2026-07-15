@@ -656,6 +656,7 @@ fn read_peercred(_stream: &tokio::net::UnixStream) -> Result<UnixPeerCred, Strin
 #[tokio::main]
 async fn main() {
     const SSL_RECONCILE_INTERVAL_SECS: u64 = 15;
+    const TC_ACL_HEALTH_INTERVAL_SECS: u64 = 10;
 
     // Root privilege check
     if unsafe { libc::geteuid() } != 0 {
@@ -858,6 +859,19 @@ async fn main() {
         }
     });
 
+    let tc_health_cp = control_plane.clone();
+    let tc_acl_health_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            TC_ACL_HEALTH_INTERVAL_SECS,
+        ));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let _ = tc_health_cp.reconcile_tc_acl_health().await;
+        }
+    });
+
     let ssl_reconcile_cp = control_plane.clone();
     let ssl_reconcile_task = tokio::spawn(async move {
         let mut interval =
@@ -878,14 +892,16 @@ async fn main() {
         }
     });
 
-    let neutron_task = neutron_listener.map(|listener| {
-        let router = neutron_api::build_router(
+    let neutron_runtime = neutron_listener.map(|listener| {
+        let runtime = neutron_api::build_router(
             registry.clone(),
             control_plane.clone(),
             config.ovs_bridge.clone(),
         );
+        let router = runtime.router;
+        let background = runtime.background;
         let neutron_peer_auth = neutron_peer_auth.clone();
-        tokio::spawn(async move {
+        let server = tokio::spawn(async move {
             info!(socket_path = %neutron_socket_path, "Neutron UDS API server listening");
             let listener = listener.tap_io(move |stream: &mut tokio::net::UnixStream| {
                 neutron_peer_auth.audit_and_enforce(stream);
@@ -893,7 +909,8 @@ async fn main() {
             if let Err(e) = axum::serve(listener, router).await {
                 error!(error = %e, "Neutron UDS API server stopped with error");
             }
-        })
+        });
+        (server, background)
     });
 
     info!("aria-agent running");
@@ -914,10 +931,12 @@ async fn main() {
         task.abort();
     }
     http_task.abort();
-    if let Some(task) = neutron_task {
-        task.abort();
+    if let Some((server, background)) = neutron_runtime {
+        server.abort();
+        background.abort().await;
     }
     compact_task.abort();
+    tc_acl_health_task.abort();
     ssl_reconcile_task.abort();
 
     // Final compact: ensure WAL is flushed to snapshot
