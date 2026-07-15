@@ -627,27 +627,7 @@ impl ApiClient {
         self.parse_response(resp).await
     }
 
-    // ── Drop Reason Profiler ──
-
-    pub async fn list_drops(&self, instance: &str) -> Result<DropStatsResponse, String> {
-        let resp = self
-            .client
-            .get(self.url(&format!("/api/v1/{}/stats/drops", instance)))
-            .send()
-            .await
-            .map_err(|e| self.connection_error(e))?;
-        self.parse_response(resp).await
-    }
-
-    pub async fn flush_drops(&self, instance: &str) -> Result<DropFlushResponse, String> {
-        let resp = self
-            .client
-            .delete(self.url(&format!("/api/v1/{}/stats/drops", instance)))
-            .send()
-            .await
-            .map_err(|e| self.connection_error(e))?;
-        self.parse_response(resp).await
-    }
+    // ── Kernel Drop Observability ──
 
     pub async fn list_kernel_drops(
         &self,

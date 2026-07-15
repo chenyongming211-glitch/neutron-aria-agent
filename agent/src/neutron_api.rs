@@ -4371,11 +4371,6 @@ fn translate_neutron_acl_with_cache(
     }
 }
 
-fn translate_neutron_acl(port_id: &str, acl: &NeutronAclSnapshot) -> Result<AclApplyPlan, String> {
-    let mut cache = AclValidationCache::default();
-    translate_neutron_acl_with_cache(port_id, acl, &mut cache)
-}
-
 async fn purge_neutron_acl(
     state: &NeutronApiState,
     ifname: &str,
@@ -4935,6 +4930,14 @@ fn can_skip_neutron_domain_reconcile(
 mod tests {
     use super::*;
     use crate::ebpf_binary::TraceBackendKind;
+
+    fn translate_neutron_acl_for_test(
+        port_id: &str,
+        acl: &NeutronAclSnapshot,
+    ) -> Result<AclApplyPlan, String> {
+        let mut cache = AclValidationCache::default();
+        translate_neutron_acl_with_cache(port_id, acl, &mut cache)
+    }
 
     #[test]
     fn neutron_tc_acl_health_projection_is_deduplicated_and_preserves_resync() {
@@ -7406,7 +7409,8 @@ mod tests {
             drop_8080,
         ]);
 
-        let plan = translate_neutron_acl("port-1", &acl).expect("ACL should translate");
+        let plan =
+            translate_neutron_acl_for_test("port-1", &acl).expect("ACL should translate");
 
         assert_eq!(plan.groups, Vec::new());
         assert_eq!(
@@ -7434,7 +7438,7 @@ mod tests {
             None,
         )]);
 
-        let plan = translate_neutron_acl("port-1", &acl)
+        let plan = translate_neutron_acl_for_test("port-1", &acl)
             .expect("protocol whitespace and case should normalize");
 
         assert_eq!(plan.policies.len(), 1);
@@ -7454,7 +7458,7 @@ mod tests {
             None,
         )]);
 
-        let plan = translate_neutron_acl("port-1", &acl)
+        let plan = translate_neutron_acl_for_test("port-1", &acl)
             .expect("action whitespace and case should normalize");
 
         assert_eq!(plan.policies.len(), 1);
@@ -7476,7 +7480,7 @@ mod tests {
         rule.direction = Some(" InGrEsS ".to_string());
         let acl = ready_acl(vec![rule]);
 
-        let plan = translate_neutron_acl("port-1", &acl)
+        let plan = translate_neutron_acl_for_test("port-1", &acl)
             .expect("direction whitespace and case should normalize");
 
         assert_eq!(plan.policies.len(), 1);
@@ -7500,7 +7504,7 @@ mod tests {
     fn neutron_acl_runtime_limits_accept_boundary_and_force_bypass_overflow() {
         let accepted = ready_acl(numbered_acl_rules(MAX_ACL_RULES_PER_POLICY));
         assert_eq!(
-            translate_neutron_acl("port-1", &accepted)
+            translate_neutron_acl_for_test("port-1", &accepted)
                 .unwrap()
                 .force_bypass_reason,
             None
@@ -7508,7 +7512,7 @@ mod tests {
 
         let rejected = ready_acl(numbered_acl_rules(MAX_ACL_RULES_PER_POLICY + 1));
         assert_eq!(
-            translate_neutron_acl("port-1", &rejected)
+            translate_neutron_acl_for_test("port-1", &rejected)
                 .unwrap()
                 .force_bypass_reason
                 .as_deref(),
@@ -7530,7 +7534,7 @@ mod tests {
         accepted_rule.src_cidrs = numbered_acl_members(MAX_ACL_SELECTOR_MEMBERS);
         let accepted = ready_acl(vec![accepted_rule]);
         assert_eq!(
-            translate_neutron_acl("port-1", &accepted)
+            translate_neutron_acl_for_test("port-1", &accepted)
                 .unwrap()
                 .force_bypass_reason,
             None,
@@ -7548,7 +7552,7 @@ mod tests {
         rejected_rule.src_cidrs = numbered_acl_members(MAX_ACL_SELECTOR_MEMBERS + 1);
         let rejected = ready_acl(vec![rejected_rule]);
         assert_eq!(
-            translate_neutron_acl("port-1", &rejected)
+            translate_neutron_acl_for_test("port-1", &rejected)
                 .unwrap()
                 .force_bypass_reason
                 .as_deref(),
@@ -7892,7 +7896,7 @@ mod tests {
             acl_rule_with("broad", 10, "tcp", "allow", &["10.0.0.0/8"], &[], None),
             acl_rule_with("narrow", 20, "udp", "allow", &["10.1.0.0/16"], &[], None),
         ]);
-        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        let plan = translate_neutron_acl_for_test("port-1", &acl).unwrap();
         assert!(plan.groups.is_empty());
         assert!(plan.policies.is_empty());
         assert_eq!(
@@ -7907,7 +7911,7 @@ mod tests {
             acl_rule_with("tcp", 10, "tcp", "drop", &["10.1.2.3/24"], &[], Some(80)),
             acl_rule_with("udp", 20, "udp", "drop", &["10.1.2.0/24"], &[], Some(53)),
         ]);
-        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        let plan = translate_neutron_acl_for_test("port-1", &acl).unwrap();
         assert_eq!(plan.groups.len(), 1);
         assert_eq!(plan.groups[0].cidrs, vec!["10.1.2.0/24"]);
         assert_eq!(plan.policies[0].src_group, plan.policies[1].src_group);
@@ -7920,7 +7924,7 @@ mod tests {
             acl_rule_with("wildcard", 10, "any", "allow", &[], &[], None),
             acl_rule_with("tcp-drop", 20, "tcp", "drop", &[], &[], None),
         ]);
-        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        let plan = translate_neutron_acl_for_test("port-1", &acl).unwrap();
         assert_eq!(
             plan.force_bypass_reason.as_deref(),
             Some("unsupported_acl_priority_overlap:wildcard:10:tcp-drop:20")
@@ -7933,7 +7937,7 @@ mod tests {
             "negative", -1, "tcp", "drop", &[], &[], None,
         )]);
         assert_eq!(
-            translate_neutron_acl("port-1", &negative)
+            translate_neutron_acl_for_test("port-1", &negative)
                 .unwrap()
                 .force_bypass_reason
                 .as_deref(),
@@ -7945,7 +7949,7 @@ mod tests {
             acl_rule_with("second", 10, "udp", "drop", &[], &[], None),
         ]);
         assert_eq!(
-            translate_neutron_acl("port-1", &duplicate)
+            translate_neutron_acl_for_test("port-1", &duplicate)
                 .unwrap()
                 .force_bypass_reason
                 .as_deref(),
@@ -7959,7 +7963,7 @@ mod tests {
             acl_rule_with("tcp-left", 10, "tcp", "drop", &["10.1.0.0/16"], &[], None),
             acl_rule_with("udp-right", 20, "udp", "drop", &["10.2.0.0/16"], &[], None),
         ]);
-        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        let plan = translate_neutron_acl_for_test("port-1", &acl).unwrap();
         assert_eq!(plan.groups.len(), 2);
         assert_eq!(plan.policies.len(), 2);
         assert_eq!(plan.force_bypass_reason, None);
@@ -7971,7 +7975,7 @@ mod tests {
             acl_rule_with("wildcard", 10, "any", "allow", &[], &[], None),
             acl_rule_with("tcp-drop", 20, "tcp", "drop", &[], &[], None),
         ]);
-        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        let plan = translate_neutron_acl_for_test("port-1", &acl).unwrap();
         let outcome = NeutronAclReconcileOutcome::from_plan(&plan);
         let mut snapshot = port("port-1", "tap-port-1", true);
         snapshot.managed_domains = vec!["acl".to_string()];
@@ -7990,7 +7994,7 @@ mod tests {
     fn neutron_acl_translator_carries_conntrack_intent() {
         let stateful = ready_acl(vec![tcp_rule("drop-8080", "drop", 8080)]);
         assert_eq!(
-            translate_neutron_acl("port-1", &stateful)
+            translate_neutron_acl_for_test("port-1", &stateful)
                 .expect("stateful ACL should translate")
                 .conntrack_enabled,
             Some(true)
@@ -7999,7 +8003,7 @@ mod tests {
         let mut stateless = stateful;
         stateless.stateful = false;
         assert_eq!(
-            translate_neutron_acl("port-1", &stateless)
+            translate_neutron_acl_for_test("port-1", &stateless)
                 .expect("stateless ACL should translate")
                 .conntrack_enabled,
             Some(false)
@@ -8102,7 +8106,7 @@ mod tests {
             allow_18081,
         ]);
 
-        let plan = translate_neutron_acl("port-1", &acl).unwrap();
+        let plan = translate_neutron_acl_for_test("port-1", &acl).unwrap();
 
         assert!(plan.groups.is_empty());
         assert!(plan.policies.is_empty());
@@ -8129,7 +8133,8 @@ mod tests {
             dst_port_max: None,
         }]);
 
-        let plan = translate_neutron_acl("port-1", &acl).expect("ACL should translate");
+        let plan =
+            translate_neutron_acl_for_test("port-1", &acl).expect("ACL should translate");
 
         assert_eq!(
             plan.groups,
@@ -8168,7 +8173,8 @@ mod tests {
             rules: Vec::new(),
         };
 
-        let error = translate_neutron_acl("port-1", &acl).expect_err("default deny is guarded");
+        let error = translate_neutron_acl_for_test("port-1", &acl)
+            .expect_err("default deny is guarded");
 
         assert!(error.contains("default_action deny is unsupported"));
     }

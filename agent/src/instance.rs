@@ -297,10 +297,6 @@ fn default_persisted_live_iface_active() -> bool {
     true
 }
 
-fn tc_acl_links_complete(ingress: bool, egress: bool) -> bool {
-    ingress && egress
-}
-
 impl FirewallInstance {
     fn fq_qdisc_marker_path(&self) -> PathBuf {
         self.state_path.join(FQ_QDISC_MARKER)
@@ -1694,14 +1690,6 @@ mod tests {
             .contains("tc_ingress link"));
 
         std::fs::remove_dir_all(pin_path).unwrap();
-    }
-
-    #[test]
-    fn neutron_tc_acl_requires_both_direction_links() {
-        assert!(tc_acl_links_complete(true, true));
-        assert!(!tc_acl_links_complete(true, false));
-        assert!(!tc_acl_links_complete(false, true));
-        assert!(!tc_acl_links_complete(false, false));
     }
 
     #[test]

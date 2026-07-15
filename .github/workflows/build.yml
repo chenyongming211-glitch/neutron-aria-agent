@@ -35,6 +35,9 @@ jobs:
       - name: Check repository text policy
         run: python3 ci/check_blocked_terms.py
 
+      - name: Check Rust warning hygiene contracts
+        run: python3 ci/check_rust_warning_hygiene.py
+
       - name: Test neutron-aria Python adapter
         run: |
           PYTHONPATH=openstack/neutron_aria \
@@ -135,7 +138,7 @@ jobs:
           fi
 
           if [[ "${rust_required}" != "true" ]]; then
-            if printf '%s\n' "${changed_files:-}" | grep -Eq '^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|\.cargo/|agent/|api/|core/|ebpf/|user/|config/|tools/|Dockerfile\.builder|aria-agent\.service|aria-firewall\.service|aria-firewall\.spec|install\.sh)'; then
+            if printf '%s\n' "${changed_files:-}" | grep -Eq '^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|\.cargo/|abi/|agent/|api/|core/|ebpf/|user/|config/|tools/|Dockerfile\.builder|aria-agent\.service|aria-firewall\.service|aria-firewall\.spec|install\.sh)'; then
               rust_required=true
             fi
           fi
@@ -149,8 +152,9 @@ jobs:
 
       - name: Install Rust nightly (eBPF)
         if: steps.rust_changes.outputs.rust_required == 'true'
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-14
           components: rust-src
 
       - name: Install Rust stable (userspace)
@@ -163,29 +167,45 @@ jobs:
         if: steps.rust_changes.outputs.rust_required == 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm-dev clang libelf-dev libbpf-dev musl-tools
+          sudo apt-get install -y llvm-dev clang libelf-dev libbpf-dev musl-tools zstd
 
       - name: Cache cargo
         if: steps.rust_changes.outputs.rust_required == 'true'
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/bin/bpf-linker
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: Install bpf-linker
         if: steps.rust_changes.outputs.rust_required == 'true'
         run: |
-          command -v bpf-linker >/dev/null 2>&1 || cargo +nightly install bpf-linker
+          set -euo pipefail
+          version="0.10.4"
+          checksum="4dda77daab6c5f120a468e6d3ede2498f5bd47ece712172cfb7290176d93d015"
+          archive="$(mktemp)"
+          install_dir="${RUNNER_TEMP}/bpf-linker-bin"
+          trap 'rm -f "${archive}"' EXIT
+          curl --fail --location --retry 3 --retry-all-errors \
+            "https://github.com/aya-rs/bpf-linker/releases/download/v${version}/bpf-linker-x86_64-unknown-linux-musl.tar.zst" \
+            --output "${archive}"
+          printf '%s  %s\n' "${checksum}" "${archive}" | sha256sum --check --strict
+          mkdir -p "${install_dir}"
+          tar --zstd --extract --file "${archive}" --directory "${install_dir}"
+          test -x "${install_dir}/bpf-linker"
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+          "${install_dir}/bpf-linker" --version
 
       - name: Test aria-agent Neutron attach authority
         if: steps.rust_changes.outputs.rust_required == 'true'
+        env:
+          RUSTFLAGS: -D warnings
         run: |
           python3 ci/check_neutron_stage1.py --require-rust --rust-toolchain stable
+          cargo +stable test --locked -p aria-ebpf-abi --features aya-pod
           cargo +stable test --locked -p aria-agent neutron_acl_
           cargo +stable test --locked -p aria-agent neutron_tc_acl_
           cargo +stable test --locked -p aria-agent neutron_acl_runtime_transition_is_atomic
@@ -202,7 +222,7 @@ jobs:
           cargo +stable test --locked -p aria-agent tc_ct_contract_metric_labels_are_exact
           cargo +stable test --locked -p aria-core acl_ingress_hook_
           cargo +stable test --locked -p aria-core tap_runtime_config_
-          cargo +stable test --locked -p aria-core tc_ct_
+          cargo +stable test --locked -p aria-ebpf-abi tc_ct_
           cargo +stable test --locked -p aria-core map_delete_
           cargo +stable test --locked -p aria-core quarantined_
           cargo +stable test --locked -p aria-core confirmed_bitmap_cleanup_
@@ -211,10 +231,11 @@ jobs:
 
       - name: Build eBPF
         if: steps.rust_changes.outputs.rust_required == 'true'
+        env:
+          RUSTFLAGS: -D warnings
         run: |
-          export LD_LIBRARY_PATH="$(rustc +nightly --print sysroot)/lib:${LD_LIBRARY_PATH:-}"
           cd ebpf
-          cargo +nightly build --release --target bpfel-unknown-none -Z build-std=core --target-dir target
+          cargo +nightly-2026-07-14 build --release --target bpfel-unknown-none -Z build-std=core --target-dir target
           echo "=== eBPF output candidates ==="
           find target -type f \( -name "libebpf_firewall.so" -o -name "ebpf-firewall" \) \
             -printf '%s %p\n' 2>/dev/null | sort -nr
@@ -238,10 +259,14 @@ jobs:
 
       - name: Build userspace (static)
         if: steps.rust_changes.outputs.rust_required == 'true'
+        env:
+          RUSTFLAGS: -D warnings
         run: cargo +stable build --release -p ariactl --target x86_64-unknown-linux-musl
 
       - name: Build agent (static)
         if: steps.rust_changes.outputs.rust_required == 'true'
+        env:
+          RUSTFLAGS: -D warnings
         run: cargo +stable build --release -p aria-agent --target x86_64-unknown-linux-musl
 
       - name: Verify static binaries

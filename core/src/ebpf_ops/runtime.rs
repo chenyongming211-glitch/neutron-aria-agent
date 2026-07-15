@@ -328,6 +328,7 @@ pub fn update_firewall_config(
         mirror_enabled: mir,
         tcprt_enabled: tcprt,
         ssl_enabled: ssl,
+        _pad: [0; 1],
     };
     map.insert(&0u32, &cfg, 0)
         .map_err(|e| format!("FIREWALL_CONFIG insert: {:?}", e))?;
@@ -496,6 +497,7 @@ mod tests {
             mirror_enabled: 0,
             tcprt_enabled: 0,
             ssl_enabled: 0,
+            _pad: [0; 1],
         };
         assert_eq!(
             required_firewall_config(Ok(existing), true, "full initialization")
@@ -573,5 +575,6 @@ pub fn read_runtime_config(runtime: TapMapRuntime<'_>) -> Result<FirewallConfig,
         mirror_enabled: tap_cfg.mirror_enabled,
         tcprt_enabled: tap_cfg.tcprt_enabled,
         ssl_enabled: global.ssl_enabled,
+        _pad: [0; 1],
     })
 }
