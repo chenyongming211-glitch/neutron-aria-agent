@@ -5,7 +5,7 @@ on:
     branches: [main, 'v*']
     tags: ['v*']
   pull_request:
-    branches: [main]
+    branches: [main, v0.9-neutron-agent]
   workflow_dispatch:
     inputs:
       publish_artifacts:
@@ -34,6 +34,12 @@ jobs:
 
       - name: Check repository text policy
         run: python3 ci/check_blocked_terms.py
+
+      - name: Check build workflow contracts
+        run: |
+          python3 ci/check_build_workflow_contract.py
+          python3 -m unittest ci.test_rust_build_required
+          python3 -m unittest ci.test_rust_warning_hygiene
 
       - name: Check Rust warning hygiene contracts
         run: python3 ci/check_rust_warning_hygiene.py
@@ -118,14 +124,15 @@ jobs:
             rust_required=true
           elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
             git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
-            changed_files="$(git diff --name-only "origin/${{ github.base_ref }}" "$GITHUB_SHA")"
+            changed_files="$(git diff --name-only --no-renames "origin/${{ github.base_ref }}" "$GITHUB_SHA")"
           elif [[ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
-            changed_files="$(git diff --name-only "${{ github.event.before }}" "$GITHUB_SHA" || true)"
-            if [[ -z "${changed_files}" ]]; then
-              changed_files="$(git diff --name-only HEAD~1 HEAD || true)"
+            if ! changed_files="$(git diff --name-only --no-renames "${{ github.event.before }}" "$GITHUB_SHA")"; then
+              echo "Changed files could not be collected for the full push; requiring Rust/eBPF build as fail-closed."
+              rust_required=true
             fi
           else
-            changed_files="$(git diff --name-only HEAD~1 HEAD || true)"
+            echo "Push base is unavailable; requiring Rust/eBPF build as fail-closed."
+            rust_required=true
           fi
 
           if [[ "${rust_required}" != "true" ]]; then
@@ -133,14 +140,11 @@ jobs:
             printf '%s\n' "${changed_files:-}"
             if [[ -z "${changed_files:-}" ]]; then
               echo "Changed files could not be determined; requiring Rust/eBPF build as fail-closed."
-              rust_required=true
             fi
-          fi
-
-          if [[ "${rust_required}" != "true" ]]; then
-            if printf '%s\n' "${changed_files:-}" | grep -Eq '^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|\.cargo/|abi/|agent/|api/|core/|ebpf/|user/|config/|tools/|Dockerfile\.builder|aria-agent\.service|aria-firewall\.service|aria-firewall\.spec|install\.sh)'; then
-              rust_required=true
-            fi
+            rust_required="$(
+              printf '%s\n' "${changed_files:-}" |
+                python3 ci/rust_build_required.py
+            )"
           fi
 
           echo "rust_required=${rust_required}" >> "$GITHUB_OUTPUT"

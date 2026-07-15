@@ -38,7 +38,14 @@ def verify_pod_layouts(source: str) -> None:
     pod_block = re.search(r"impl_aya_pod!\((.*?)\n    \);", source, re.DOTALL)
     if pod_block is None:
         raise AssertionError("abi/src/lib.rs must contain the aya::Pod implementation list")
-    pod_types = re.findall(r"\b([A-Z]\w+)\s*,", pod_block.group(1))
+    pod_types = [
+        entry.strip() for entry in pod_block.group(1).split(",") if entry.strip()
+    ]
+    if not pod_types:
+        raise AssertionError("abi/src/lib.rs aya::Pod implementation list must not be empty")
+    for pod_type in pod_types:
+        if re.fullmatch(r"[A-Z]\w*", pod_type) is None:
+            raise AssertionError(f"unsupported aya::Pod type expression: {pod_type}")
 
     for pod_type in pod_types:
         struct = re.search(
@@ -48,6 +55,20 @@ def verify_pod_layouts(source: str) -> None:
         )
         if struct is None:
             raise AssertionError(f"aya::Pod type {pod_type} has no struct definition")
+
+        adjacent_attributes = re.search(
+            r"(?P<attributes>(?:^[ \t]*#\[[^\n]+\][ \t]*\n)+)\Z",
+            source[: struct.start()],
+            re.MULTILINE,
+        )
+        if adjacent_attributes is None or not re.search(
+            r"^[ \t]*#\[repr\(C\)\][ \t]*$",
+            adjacent_attributes.group("attributes"),
+            re.MULTILINE,
+        ):
+            raise AssertionError(
+                f"aya::Pod type {pod_type} must have adjacent #[repr(C)]"
+            )
 
         offset = 0
         struct_alignment = 1
