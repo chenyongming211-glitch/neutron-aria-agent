@@ -32,8 +32,12 @@ RUST_REQUIRED_PREFIXES = (
     "tools/",
     "user/",
 )
-KNOWN_NON_RUST_PREFIXES = ("docs/", "openstack/")
+KNOWN_NON_RUST_PREFIXES = ("docs/",)
 KNOWN_NON_RUST_FILES = frozenset({"README.md", "LICENSE"})
+OPENSTACK_NON_RUST_SUFFIXES = (".py", ".pyi", ".txt", ".md", ".rst")
+OPENSTACK_NON_RUST_FILES = frozenset(
+    {"MANIFEST.in", "pyproject.toml", "setup.cfg", "tox.ini"}
+)
 
 
 def _normalized_path(value: object) -> str | None:
@@ -47,6 +51,17 @@ def _normalized_path(value: object) -> str | None:
     if path == ".." or path.startswith("../") or "/../" in path:
         return None
     return path
+
+
+def _known_non_rust_path(path: str) -> bool:
+    if path in KNOWN_NON_RUST_FILES or path.startswith(KNOWN_NON_RUST_PREFIXES):
+        return True
+    if not path.startswith("openstack/"):
+        return False
+    name = path.rsplit("/", 1)[-1]
+    return name in OPENSTACK_NON_RUST_FILES or name.endswith(
+        OPENSTACK_NON_RUST_SUFFIXES
+    )
 
 
 def rust_build_required(paths: Iterable[str] | None) -> bool:
@@ -63,7 +78,7 @@ def rust_build_required(paths: Iterable[str] | None) -> bool:
 
         if path in RUST_REQUIRED_FILES or path.startswith(RUST_REQUIRED_PREFIXES):
             return True
-        if path in KNOWN_NON_RUST_FILES or path.startswith(KNOWN_NON_RUST_PREFIXES):
+        if _known_non_rust_path(path):
             continue
         return True
 

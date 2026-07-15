@@ -31,6 +31,26 @@ class RustBuildRequiredTests(unittest.TestCase):
                 ["openstack/neutron_aria/neutron_aria/agent.py"],
                 False,
             ),
+            (
+                "OpenStack requirements input",
+                ["openstack/neutron_aria/requirements.txt"],
+                False,
+            ),
+            (
+                "OpenStack unknown input fails closed",
+                ["openstack/unclassified/new-input.xyz"],
+                True,
+            ),
+            (
+                "OpenStack nested Rust source requires Rust",
+                ["openstack/neutron_aria/native/src/lib.rs"],
+                True,
+            ),
+            (
+                "OpenStack nested Cargo manifest requires Rust",
+                ["openstack/neutron_aria/native/Cargo.toml"],
+                True,
+            ),
             ("docs-only input", ["docs/operator-guide.md"], False),
             ("empty input fails closed", [], True),
             ("unknown input fails closed", ["unclassified/new-input.xyz"], True),
