@@ -1115,6 +1115,10 @@ class SnapshotSynchronizer(object):
             raise LocalApiError(reason)
         if pending_state != "pending":
             return {}
+        try:
+            _strict_scalar(status.get("authority_state"), "string")
+        except ValueError:
+            raise LocalApiError("authority_state is invalid")
 
         remote_hash = status.get("desired_hash")
         applied_hash = (
@@ -1146,9 +1150,18 @@ class SnapshotSynchronizer(object):
         }
 
     def _status_requires_pending_recovery(self, status):
+        if not isinstance(status, dict):
+            return False
+        try:
+            authority_state = _strict_scalar(
+                status.get("authority_state"),
+                "string",
+            )
+        except ValueError:
+            return False
         return bool(
             self._status_has_pending_generation(status) and
-            status.get("authority_state") in RECOVERY_REQUIRED_AUTHORITY_STATES
+            authority_state in RECOVERY_REQUIRED_AUTHORITY_STATES
         )
 
     def _poll_snapshot_convergence(
@@ -1617,7 +1630,13 @@ class SnapshotSynchronizer(object):
             )
         except ValueError:
             return "failed", "snapshot generation is invalid"
-        authority_state = status.get("authority_state")
+        try:
+            authority_state = _strict_scalar(
+                status.get("authority_state"),
+                "string",
+            )
+        except ValueError:
+            return "failed", "authority_state is invalid"
         if authority_state in TERMINAL_FAILURE_AUTHORITY_STATES:
             return (
                 "failed",

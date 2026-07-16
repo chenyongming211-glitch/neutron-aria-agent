@@ -273,6 +273,7 @@ class TimeoutNotConvergedLocalClient(FakeLocalClient):
             "pending_generation": (
                 self.snapshots[-1]["generation"] if self.snapshots else None
             ),
+            "authority_state": "ready",
             "managed_ports": [],
             "active_instances": [],
         }
@@ -590,6 +591,7 @@ class AcceptedNotConvergedLocalClient(FakeLocalClient):
             "pending_generation": snapshot["generation"],
             "desired_hash": snapshot.get("desired_hash"),
             "applied_desired_hash": None,
+            "authority_state": "ready",
             "managed_ports": [],
             "active_instances": [],
         }
@@ -634,6 +636,7 @@ class AcceptedSlowPendingThenConvergedLocalClient(FakeLocalClient):
                 "pending_generation": snapshot["generation"],
                 "desired_hash": snapshot.get("desired_hash"),
                 "applied_desired_hash": None,
+                "authority_state": "ready",
                 "managed_ports": [],
                 "active_instances": [],
             }
@@ -972,6 +975,62 @@ class EventLoopTestCase(unittest.TestCase):
                 self.assertEqual(11, action["generation"])
                 self.assertEqual("hash-11", action["remote_desired_hash"])
 
+    def test_remote_pending_action_rejects_malformed_authority_state(self):
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        for authority_state in ([], {}, True, 1, "", None):
+            with self.subTest(authority_state=authority_state):
+                status = {
+                    "accepted_generation": 10,
+                    "applied_generation": 10,
+                    "pending_generation": 11,
+                    "desired_hash": "hash-11",
+                    "applied_desired_hash": "hash-10",
+                    "authority_state": authority_state,
+                }
+                try:
+                    sync._remote_pending_action({}, status, "hash-11")
+                except LocalApiError as exc:
+                    self.assertIn("authority_state", str(exc))
+                except TypeError as exc:
+                    self.fail("malformed authority_state raised TypeError: %s" % exc)
+                else:
+                    self.fail("malformed authority_state did not fail closed")
+
+    def test_pending_recovery_helper_rejects_malformed_authority_state(self):
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        invalid_values = ([], {}, True, 1, "", None)
+        noncanonical_values = (
+            "BLOCKED_RECOVERY_REQUIRED",
+            " blocked_recovery_required",
+            "blocked_recovery_required ",
+        )
+        for authority_state in invalid_values + noncanonical_values:
+            with self.subTest(authority_state=authority_state):
+                status = {
+                    "pending_generation": 11,
+                    "authority_state": authority_state,
+                }
+                try:
+                    requires_recovery = sync._status_requires_pending_recovery(
+                        status
+                    )
+                except TypeError as exc:
+                    self.fail("malformed authority_state raised TypeError: %s" % exc)
+
+                self.assertFalse(requires_recovery)
+
     def test_remote_pending_action_rejects_invalid_pending_generation(self):
         sync = SnapshotSynchronizer(
             "ostack2",
@@ -1152,6 +1211,7 @@ class EventLoopTestCase(unittest.TestCase):
             "pending_generation": 10,
             "desired_hash": "different-hash",
             "applied_desired_hash": "old-hash",
+            "authority_state": "ready",
             "managed_ports": [],
             "active_instances": [],
         })
@@ -1187,6 +1247,7 @@ class EventLoopTestCase(unittest.TestCase):
             "pending_generation": 10,
             "desired_hash": "different-hash",
             "applied_desired_hash": "old-hash",
+            "authority_state": "ready",
             "managed_ports": [],
             "active_instances": [],
         })
@@ -2258,6 +2319,34 @@ class EventLoopTestCase(unittest.TestCase):
 
                 self.assertEqual("failed", verdict)
                 self.assertIn("applied_generation", reason)
+
+    def test_terminal_status_rejects_malformed_authority_state(self):
+        snapshot = _ready_acl_snapshot()
+        port_id = snapshot["ports"][0]["port_id"]
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        malformed_values = ([], {}, True, 1, "", None)
+        noncanonical_values = ("READY", " ready", "ready ")
+        for authority_state in malformed_values + noncanonical_values:
+            with self.subTest(authority_state=authority_state):
+                status = _terminal_status_for_snapshot(snapshot)
+                status["authority_state"] = authority_state
+                try:
+                    verdict, reason = sync._snapshot_status_verdict(
+                        snapshot,
+                        set([port_id]),
+                        status,
+                    )
+                except TypeError as exc:
+                    self.fail("malformed authority_state raised TypeError: %s" % exc)
+
+                self.assertEqual("failed", verdict)
+                self.assertIn("authority_state", reason)
 
     def test_terminal_status_requires_strict_affected_port_generation(self):
         snapshot = _ready_acl_snapshot()
