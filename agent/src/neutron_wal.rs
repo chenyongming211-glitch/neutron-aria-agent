@@ -579,8 +579,143 @@ mod tests {
         })
     }
 
+    fn neutron_wal_baseline_state(generation: u64) -> NeutronWalState {
+        let mut ports = BTreeMap::new();
+        ports.insert("p1".to_string(), managed("p1", "tap-p1"));
+        let mut port_statuses = BTreeMap::new();
+        port_statuses.insert("p1".to_string(), port_status("p1", "tap-p1", generation));
+        NeutronWalState {
+            accepted_generation: generation,
+            applied_generation: generation,
+            desired_hash: Some(format!("hash-{}", generation)),
+            applied_desired_hash: Some(format!("hash-{}", generation)),
+            authority_state: "ready".to_string(),
+            ports,
+            port_statuses,
+            ..NeutronWalState::default()
+        }
+    }
+
+    fn protected_inventory_resolver_state(
+        baseline: &NeutronWalState,
+        generation: u64,
+    ) -> NeutronWalState {
+        let mut state = baseline.clone();
+        state.accepted_generation = generation;
+        state.pending_generation = Some(generation);
+        state.desired_hash = Some(format!("hash-{}", generation));
+        state.authority_state = "blocked_recovery_required".to_string();
+        state.recovery_cause = Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string());
+        state.status_hash = None;
+        state
+    }
+
+    fn append_wal_value(root: &Path, value: &serde_json::Value) {
+        let path = root.join(WAL_FILE);
+        let mut raw = fs::read_to_string(&path).unwrap_or_default();
+        raw.push_str(&serde_json::to_string(value).expect("WAL value should serialize"));
+        raw.push('\n');
+        fs::write(path, raw).expect("WAL fixture should be appendable");
+    }
+
+    fn hashless_snapshot_commit_for_state(state: NeutronWalState) -> serde_json::Value {
+        let mut value = serde_json::to_value(NeutronWalEntry::SnapshotCommit { state }).unwrap();
+        value["state"]
+            .as_object_mut()
+            .expect("snapshot commit state should be an object")
+            .remove("status_hash");
+        value
+    }
+
+    fn hashless_delete_commit_for_state(state: NeutronWalState) -> serde_json::Value {
+        let mut value = serde_json::to_value(NeutronWalEntry::DeleteCommit { state }).unwrap();
+        value["state"]
+            .as_object_mut()
+            .expect("delete commit state should be an object")
+            .remove("status_hash");
+        value
+    }
+
+    fn append_protected_inventory_intent(wal: &NeutronWal, generation: u64) {
+        wal.append_snapshot_intent(
+            generation,
+            Some(format!("hash-{}", generation)),
+            Vec::new(),
+            vec!["acl".to_string()],
+            Vec::new(),
+            Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string()),
+        )
+        .expect("protected inventory intent should be durable");
+    }
+
+    fn assert_protected_inventory_intent_survives(
+        replay: &NeutronWalReplay,
+        baseline: &NeutronWalState,
+        generation: u64,
+        case: &str,
+    ) {
+        assert_eq!("intent_without_commit", replay.status, "{}", case);
+        assert_eq!(1, replay.failures, "{}", case);
+        assert_eq!(
+            baseline.accepted_generation, replay.state.accepted_generation,
+            "{}",
+            case
+        );
+        assert_eq!(
+            baseline.applied_generation, replay.state.applied_generation,
+            "{}",
+            case
+        );
+        assert_eq!(
+            baseline.applied_desired_hash, replay.state.applied_desired_hash,
+            "{}",
+            case
+        );
+        assert_eq!(baseline.ports, replay.state.ports, "{}", case);
+        assert_eq!(
+            baseline.port_statuses, replay.state.port_statuses,
+            "{}",
+            case
+        );
+        assert_eq!(
+            baseline.recovery_cause, replay.state.recovery_cause,
+            "{}",
+            case
+        );
+        assert_eq!(
+            Some(generation),
+            replay.state.pending_generation,
+            "{}",
+            case
+        );
+        assert_eq!(
+            Some(format!("hash-{}", generation)),
+            replay.state.desired_hash,
+            "{}",
+            case
+        );
+        assert_eq!(
+            "wal_intent_without_commit", replay.state.authority_state,
+            "{}",
+            case
+        );
+        let pending = replay
+            .pending_intent
+            .as_ref()
+            .unwrap_or_else(|| panic!("verified protected intent must remain pending: {}", case));
+        assert_eq!(generation, pending.generation, "{}", case);
+        assert!(pending.port_ids.is_empty(), "{}", case);
+        assert!(pending.affected_ports.is_empty(), "{}", case);
+        assert_eq!(
+            Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE),
+            pending.recovery_cause.as_deref(),
+            "{}",
+            case
+        );
+    }
+
     #[test]
-    fn replay_restores_last_committed_state() {
+    fn neutron_wal_ordinary_snapshot_intent_resolves_with_status_hashed_cause_free_commit() {
         let root = temp_state_path();
         let wal = NeutronWal::new(&root);
         wal.append_snapshot_intent(
@@ -614,6 +749,47 @@ mod tests {
         );
         assert!(replay.state.status_hash.is_some());
         assert!(replay.state.ports.contains_key("p1"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_ordinary_snapshot_intent_resolves_with_hashless_cause_free_commit() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        wal.append_snapshot_intent(
+            92,
+            Some("hash-92".to_string()),
+            vec!["p1".to_string()],
+            vec!["acl".to_string()],
+            vec![managed("p1", "tap-p1")],
+            None,
+        )
+        .unwrap();
+        let committed = neutron_wal_baseline_state(92);
+        let legacy_commit = hashless_snapshot_commit_for_state(committed.clone());
+        assert!(legacy_commit["state"].get("recovery_cause").is_none());
+        assert!(legacy_commit["state"].get("status_hash").is_none());
+        append_wal_value(&root, &legacy_commit);
+
+        let replay = wal.replay();
+
+        assert_eq!("replayed", replay.status);
+        assert_eq!(0, replay.failures);
+        assert!(replay.pending_intent.is_none());
+        assert_eq!(
+            committed.accepted_generation,
+            replay.state.accepted_generation
+        );
+        assert_eq!(
+            committed.applied_generation,
+            replay.state.applied_generation
+        );
+        assert_eq!(
+            committed.applied_desired_hash,
+            replay.state.applied_desired_hash
+        );
+        assert_eq!(committed.ports, replay.state.ports);
+        assert_eq!(committed.port_statuses, replay.state.port_statuses);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -893,6 +1069,247 @@ mod tests {
             assert!(replay.pending_intent.is_none(), "{}", case);
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn neutron_wal_protected_inventory_intent_survives_invalid_status_hash_commit() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let baseline = neutron_wal_baseline_state(80);
+        wal.append_snapshot_commit(baseline.clone()).unwrap();
+        append_protected_inventory_intent(&wal, 81);
+
+        let mut invalid = protected_inventory_resolver_state(&baseline, 81);
+        invalid.status_hash = Some("0".repeat(64));
+        let invalid_commit =
+            serde_json::to_value(NeutronWalEntry::SnapshotCommit { state: invalid }).unwrap();
+        append_wal_value(&root, &invalid_commit);
+
+        let replay = wal.replay();
+
+        assert_protected_inventory_intent_survives(&replay, &baseline, 81, "invalid_status_hash");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_protected_inventory_intent_rejects_hashless_cause_free_commit() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let baseline = neutron_wal_baseline_state(82);
+        wal.append_snapshot_commit(baseline.clone()).unwrap();
+        append_protected_inventory_intent(&wal, 83);
+
+        let mut cause_free = protected_inventory_resolver_state(&baseline, 83);
+        cause_free.recovery_cause = None;
+        let mut legacy_commit =
+            serde_json::to_value(NeutronWalEntry::SnapshotCommit { state: cause_free }).unwrap();
+        legacy_commit["state"]
+            .as_object_mut()
+            .expect("legacy commit state should be an object")
+            .remove("status_hash");
+        assert!(legacy_commit["state"].get("recovery_cause").is_none());
+        assert!(legacy_commit["state"].get("status_hash").is_none());
+        append_wal_value(&root, &legacy_commit);
+
+        let replay = wal.replay();
+
+        assert_protected_inventory_intent_survives(&replay, &baseline, 83, "hashless_cause_free");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_protected_inventory_intent_rejects_status_hashed_cause_free_commit() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let baseline = neutron_wal_baseline_state(84);
+        wal.append_snapshot_commit(baseline.clone()).unwrap();
+        append_protected_inventory_intent(&wal, 85);
+
+        let mut cause_free = protected_inventory_resolver_state(&baseline, 85);
+        cause_free.recovery_cause = None;
+        wal.append_snapshot_commit(cause_free).unwrap();
+
+        let replay = wal.replay();
+
+        assert_protected_inventory_intent_survives(
+            &replay,
+            &baseline,
+            85,
+            "status_hashed_cause_free",
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_protected_inventory_intent_rejects_closure_invariant_mutations() {
+        let baseline = neutron_wal_baseline_state(86);
+        let expected = protected_inventory_resolver_state(&baseline, 87);
+
+        let mut recovery_cause = expected.clone();
+        recovery_cause.recovery_cause = Some("operator_override".to_string());
+        let mut accepted_generation = expected.clone();
+        accepted_generation.accepted_generation = 88;
+        let mut pending_generation = expected.clone();
+        pending_generation.pending_generation = Some(88);
+        let mut desired_hash = expected.clone();
+        desired_hash.desired_hash = Some("hash-tampered".to_string());
+        let mut authority_state = expected.clone();
+        authority_state.authority_state = "ready".to_string();
+        let mut applied_generation = expected.clone();
+        applied_generation.applied_generation = baseline.applied_generation + 1;
+        let mut applied_desired_hash = expected.clone();
+        applied_desired_hash.applied_desired_hash = Some("hash-tampered-applied".to_string());
+        let mut ports = expected.clone();
+        ports
+            .ports
+            .get_mut("p1")
+            .expect("baseline port should exist")
+            .ifindex = Some(99);
+        let mut port_statuses = expected;
+        port_statuses
+            .port_statuses
+            .get_mut("p1")
+            .expect("baseline port status should exist")
+            .reason = Some("tampered_status".to_string());
+
+        for (case, changed) in [
+            ("recovery_cause", recovery_cause),
+            ("accepted_generation", accepted_generation),
+            ("pending_generation", pending_generation),
+            ("desired_hash", desired_hash),
+            ("authority_state", authority_state),
+            ("applied_generation", applied_generation),
+            ("applied_desired_hash", applied_desired_hash),
+            ("ports", ports),
+            ("port_statuses", port_statuses),
+        ] {
+            let root = temp_state_path();
+            let wal = NeutronWal::new(&root);
+            wal.append_snapshot_commit(baseline.clone()).unwrap();
+            append_protected_inventory_intent(&wal, 87);
+            wal.append_snapshot_commit(changed).unwrap();
+
+            let raw = fs::read_to_string(root.join(WAL_FILE)).unwrap();
+            let resolver: serde_json::Value = serde_json::from_str(
+                raw.lines()
+                    .last()
+                    .expect("mutated resolver commit should be present"),
+            )
+            .unwrap();
+            let resolver_state: NeutronWalState =
+                serde_json::from_value(resolver["state"].clone()).unwrap();
+            assert!(resolver_state.status_hash_valid().unwrap(), "{}", case);
+
+            let replay = wal.replay();
+
+            assert_protected_inventory_intent_survives(&replay, &baseline, 87, case);
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn neutron_wal_matching_protected_inventory_commit_resolves_intent() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let baseline = neutron_wal_baseline_state(88);
+        wal.append_snapshot_commit(baseline.clone()).unwrap();
+        append_protected_inventory_intent(&wal, 89);
+        wal.append_snapshot_commit(protected_inventory_resolver_state(&baseline, 89))
+            .unwrap();
+
+        let replay = wal.replay();
+
+        assert_eq!(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE, replay.status);
+        assert_eq!(0, replay.failures);
+        assert!(replay.pending_intent.is_none());
+        assert_eq!(89, replay.state.accepted_generation);
+        assert_eq!(baseline.applied_generation, replay.state.applied_generation);
+        assert_eq!(
+            baseline.applied_desired_hash,
+            replay.state.applied_desired_hash
+        );
+        assert_eq!(baseline.ports, replay.state.ports);
+        assert_eq!(baseline.port_statuses, replay.state.port_statuses);
+        assert_eq!(Some(89), replay.state.pending_generation);
+        assert_eq!(Some("hash-89"), replay.state.desired_hash.as_deref());
+        assert_eq!(
+            Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE),
+            replay.state.recovery_cause.as_deref()
+        );
+        assert!(replay.state.status_hash.is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_standalone_cause_free_commits_remain_replayable() {
+        let legacy_root = temp_state_path();
+        write_wal_value(&legacy_root, &hashless_snapshot_commit(90));
+        let legacy_replay = NeutronWal::new(&legacy_root).replay();
+        assert_eq!("replayed", legacy_replay.status);
+        assert_eq!(0, legacy_replay.failures);
+        assert_eq!(90, legacy_replay.state.applied_generation);
+
+        let hashed_root = temp_state_path();
+        let hashed_wal = NeutronWal::new(&hashed_root);
+        let hashed = neutron_wal_baseline_state(91);
+        hashed_wal.append_snapshot_commit(hashed.clone()).unwrap();
+        let hashed_replay = hashed_wal.replay();
+        assert_eq!("replayed", hashed_replay.status);
+        assert_eq!(0, hashed_replay.failures);
+        assert_eq!(
+            hashed.applied_generation,
+            hashed_replay.state.applied_generation
+        );
+        assert_eq!(hashed.ports, hashed_replay.state.ports);
+        assert_eq!(hashed.port_statuses, hashed_replay.state.port_statuses);
+
+        let _ = fs::remove_dir_all(legacy_root);
+        let _ = fs::remove_dir_all(hashed_root);
+    }
+
+    #[test]
+    fn neutron_wal_delete_intent_resolves_with_hashless_cause_free_delete_commit() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let baseline = neutron_wal_baseline_state(93);
+        wal.append_snapshot_commit(baseline.clone()).unwrap();
+        wal.append_delete_intent(
+            "p1".to_string(),
+            baseline.accepted_generation,
+            vec!["attach".to_string(), "acl".to_string()],
+            managed("p1", "tap-p1"),
+        )
+        .unwrap();
+
+        let mut committed = baseline.clone();
+        committed.ports.remove("p1");
+        committed.port_statuses.remove("p1");
+        committed.status_hash = None;
+        let legacy_commit = hashless_delete_commit_for_state(committed.clone());
+        assert!(legacy_commit["state"].get("recovery_cause").is_none());
+        assert!(legacy_commit["state"].get("status_hash").is_none());
+        append_wal_value(&root, &legacy_commit);
+
+        let replay = wal.replay();
+
+        assert_eq!("replayed", replay.status);
+        assert_eq!(0, replay.failures);
+        assert!(replay.pending_intent.is_none());
+        assert_eq!(
+            committed.accepted_generation,
+            replay.state.accepted_generation
+        );
+        assert_eq!(
+            committed.applied_generation,
+            replay.state.applied_generation
+        );
+        assert_eq!(
+            committed.applied_desired_hash,
+            replay.state.applied_desired_hash
+        );
+        assert!(replay.state.ports.is_empty());
+        assert!(replay.state.port_statuses.is_empty());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

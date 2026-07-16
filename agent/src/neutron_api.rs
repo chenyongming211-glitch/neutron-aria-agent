@@ -7573,6 +7573,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn neutron_wal_rejected_cause_free_closer_startup_skips_datapath_reconcile() {
+        let root = temp_root("protected-intent-rejected-closer-startup");
+        let initial = test_neutron_state(&root);
+        let previous = committed_runtime(155);
+        initial
+            .wal
+            .append_snapshot_commit(previous.to_wal_state())
+            .expect("committed baseline should be durable");
+        append_hashed_inventory_snapshot_intent(
+            &initial,
+            156,
+            Some("hash-156".to_string()),
+            Vec::new(),
+            vec!["acl".to_string()],
+            Vec::new(),
+        );
+
+        let mut cause_free_closer = previous.clone();
+        cause_free_closer.accepted_generation = 156;
+        cause_free_closer.pending_generation = Some(156);
+        cause_free_closer.desired_hash = Some("hash-156".to_string());
+        cause_free_closer.authority_state = "blocked_recovery_required".to_string();
+        cause_free_closer.wal_status = "legacy_cause_free_closer".to_string();
+        cause_free_closer.recovery_cause = None;
+        initial
+            .wal
+            .append_snapshot_commit(cause_free_closer.to_wal_state())
+            .expect("cause-free closer should be structurally valid and status-hashed");
+
+        let wal_path = initial
+            .registry
+            .base_state_path
+            .join("neutron-snapshot.wal");
+        let wal_before_restart =
+            std::fs::read_to_string(&wal_path).expect("startup WAL should be readable");
+        let raw_closer: serde_json::Value = serde_json::from_str(
+            wal_before_restart
+                .lines()
+                .last()
+                .expect("cause-free closer should be the latest entry"),
+        )
+        .expect("cause-free closer should be valid JSON");
+        assert!(raw_closer["state"]["status_hash"].as_str().is_some());
+        assert!(raw_closer["state"].get("recovery_cause").is_none());
+        drop(initial);
+
+        let restarted = test_neutron_state(&root);
+        let registry_port_path = restarted.registry.base_state_path.join("tap-committed");
+        assert!(!registry_port_path.exists());
+        assert!(restarted.registry.list().await.is_empty());
+
+        restarted.recover_incomplete_wal_intent().await;
+        let wal_after_recovery =
+            std::fs::read_to_string(&wal_path).expect("recovery WAL should be readable");
+        restarted.reconcile_committed_runtime().await;
+        let wal_after_reconcile =
+            std::fs::read_to_string(&wal_path).expect("reconciled WAL should be readable");
+
+        assert_ne!(
+            wal_after_recovery, wal_before_restart,
+            "rejected closer must leave the protected intent available for startup recovery"
+        );
+        assert_eq!(
+            wal_after_reconcile, wal_after_recovery,
+            "protected startup recovery must return before registry/datapath reconciliation"
+        );
+        assert!(!registry_port_path.exists());
+        assert!(restarted.registry.list().await.is_empty());
+        let runtime = restarted.runtime.read().await;
+        assert_eq!(runtime.accepted_generation, 156);
+        assert_eq!(runtime.applied_generation, previous.applied_generation);
+        assert_eq!(runtime.applied_desired_hash, previous.applied_desired_hash);
+        assert_eq!(runtime.ports, previous.ports);
+        assert_eq!(runtime.port_statuses, previous.port_statuses);
+        assert_eq!(runtime.pending_generation, Some(156));
+        assert_eq!(runtime.desired_hash.as_deref(), Some("hash-156"));
+        assert_eq!(runtime.authority_state, "blocked_recovery_required");
+        assert_eq!(
+            runtime.recovery_cause.as_deref(),
+            Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+        );
+        assert_eq!(runtime.wal_status, INVENTORY_UNAVAILABLE_RECOVERY_CAUSE);
+        assert_eq!(runtime.wal_replay_failures, 1);
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn neutron_wal_inventory_unavailable_commit_failure_preserves_intent_cause() {
         let root = temp_root("inventory-unavailable-commit-failure-cause");
         let mut state = test_neutron_state(&root);
