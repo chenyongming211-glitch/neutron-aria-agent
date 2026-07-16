@@ -169,6 +169,29 @@ impl NeutronWalState {
     }
 }
 
+fn is_protected_inventory_intent(intent: &PendingNeutronIntent) -> bool {
+    intent.kind == "snapshot"
+        && intent.recovery_cause.as_deref() == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+}
+
+fn protected_inventory_snapshot_commit_valid(
+    state: &NeutronWalState,
+    intent: &PendingNeutronIntent,
+    baseline: &NeutronWalState,
+) -> Result<bool, String> {
+    Ok(state.status_hash.is_some()
+        && state.status_hash_valid()?
+        && state.recovery_cause.as_deref() == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+        && state.accepted_generation == intent.generation
+        && state.pending_generation == Some(intent.generation)
+        && state.desired_hash == intent.desired_hash
+        && state.authority_state == "blocked_recovery_required"
+        && state.applied_generation == baseline.applied_generation
+        && state.applied_desired_hash == baseline.applied_desired_hash
+        && state.ports == baseline.ports
+        && state.port_statuses == baseline.port_statuses)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum NeutronWalEntry {
@@ -305,6 +328,31 @@ impl NeutronWal {
                         affected_ports,
                         recovery_cause: None,
                     });
+                }
+                NeutronWalEntry::SnapshotCommit { state }
+                    if pending_intent
+                        .as_ref()
+                        .map_or(false, is_protected_inventory_intent) =>
+                {
+                    let intent = pending_intent
+                        .as_ref()
+                        .expect("protected inventory intent guard requires a pending intent");
+                    match protected_inventory_snapshot_commit_valid(&state, intent, &replay.state) {
+                        Ok(true) => {
+                            replay.state = state;
+                            pending_intent = None;
+                        }
+                        Ok(false) | Err(_) => {
+                            replay.failures += 1;
+                        }
+                    }
+                }
+                NeutronWalEntry::DeleteCommit { .. }
+                    if pending_intent
+                        .as_ref()
+                        .map_or(false, is_protected_inventory_intent) =>
+                {
+                    replay.failures += 1;
                 }
                 NeutronWalEntry::SnapshotCommit { state }
                 | NeutronWalEntry::DeleteCommit { state } => {
