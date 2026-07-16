@@ -33,6 +33,7 @@ use crate::neutron_wal::{NeutronWal, NeutronWalState, PendingNeutronIntent};
 use crate::tap_registry::TapRegistry;
 
 const NEUTRON_TC_ACL_HEALTH_INTERVAL_SECS: u64 = 10;
+const INVENTORY_UNAVAILABLE_RECOVERY_CAUSE: &str = "inventory_unavailable";
 
 #[derive(Clone)]
 pub(crate) struct NeutronApiState {
@@ -56,6 +57,7 @@ struct NeutronRuntimeState {
     ports: BTreeMap<String, ManagedNeutronPort>,
     port_statuses: BTreeMap<String, NeutronPortStatus>,
     wal_status: String,
+    recovery_cause: Option<String>,
     wal_replay_failures: u64,
 }
 
@@ -90,6 +92,7 @@ struct SnapshotPlan {
     update: Vec<NeutronPortSnapshot>,
     detach: Vec<ManagedNeutronPort>,
     ignored: Vec<NeutronPortApplyResult>,
+    inventory_error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -561,6 +564,9 @@ impl NeutronApiState {
         let _guard = self.apply_lock.lock().await;
         let (ports, generation, desired_hash) = {
             let runtime = self.runtime.read().await;
+            if runtime.recovery_cause.as_deref() == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE) {
+                return;
+            }
             (
                 runtime.ports.values().cloned().collect::<Vec<_>>(),
                 runtime.applied_generation,
@@ -904,6 +910,7 @@ impl NeutronRuntimeState {
             ports: state.ports,
             port_statuses: state.port_statuses,
             wal_status,
+            recovery_cause: state.recovery_cause,
             wal_replay_failures,
         }
     }
@@ -918,6 +925,7 @@ impl NeutronRuntimeState {
             authority_state: self.authority_state.clone(),
             ports: self.ports.clone(),
             port_statuses: self.port_statuses.clone(),
+            recovery_cause: self.recovery_cause.clone(),
             status_hash: None,
         }
     }
@@ -1219,7 +1227,13 @@ fn recover_pending_runtime(
     request: &NeutronRecoverPendingRequest,
 ) -> Result<NeutronRuntimeState, SnapshotApplyError> {
     validate_pending_recovery_identity(runtime, request)?;
-    if runtime.applied_generation == 0 {
+    let inventory_empty_baseline = runtime.applied_generation == 0
+        && runtime.authority_state == "blocked_recovery_required"
+        && runtime.wal_status == INVENTORY_UNAVAILABLE_RECOVERY_CAUSE
+        && runtime.applied_desired_hash.is_none()
+        && runtime.ports.is_empty()
+        && runtime.port_statuses.is_empty();
+    if runtime.applied_generation == 0 && !inventory_empty_baseline {
         return Err(SnapshotApplyError {
             status: StatusCode::CONFLICT,
             code: "no_applied_snapshot_to_restore",
@@ -1243,6 +1257,7 @@ fn recover_pending_runtime(
     next_runtime.desired_hash = runtime.applied_desired_hash.clone();
     next_runtime.authority_state = "recovered_pending_full_resync_required".to_string();
     next_runtime.wal_status = "pending_recovered_to_last_applied".to_string();
+    next_runtime.recovery_cause = None;
     Ok(next_runtime)
 }
 
@@ -1905,7 +1920,6 @@ async fn apply_snapshot_runtime_transaction(
     transaction: SnapshotApplyTransaction,
 ) -> SnapshotRuntimeApplyOutcome {
     let profile_started = Instant::now();
-    let mut next_ports = current_ports;
     let SnapshotApplyTransaction { scope, plan, .. } = transaction;
     let full_resync = matches!(&scope, ApplyScope::FullHost);
     let scope_name = apply_scope_name(&scope);
@@ -1915,6 +1929,7 @@ async fn apply_snapshot_runtime_transaction(
         update,
         detach,
         ignored,
+        inventory_error,
     } = plan;
     let detach_count = detach.len();
     let update_count = update.len();
@@ -1931,8 +1946,33 @@ async fn apply_snapshot_runtime_transaction(
         ignored_count,
         "neutron_snapshot_runtime_apply_start"
     );
-    let mut next_statuses = port_status_seed_for_scope(&runtime_before_apply, &scope);
     let mut results = ignored;
+    if let Some(reason) = inventory_error {
+        results.push(transaction_result(
+            "snapshot",
+            "",
+            "ignore",
+            "error",
+            Some(reason.as_str()),
+        ));
+        let previous_applied_generation = runtime_before_apply.applied_generation;
+        let mut next_runtime = runtime_before_apply.clone();
+        next_runtime.accepted_generation = generation;
+        next_runtime.desired_hash = requested_hash;
+        next_runtime.pending_generation = Some(generation);
+        next_runtime.authority_state = "blocked_recovery_required".to_string();
+        next_runtime.wal_status = INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string();
+        next_runtime.recovery_cause = Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string());
+        return SnapshotRuntimeApplyOutcome {
+            next_runtime,
+            previous_applied_generation,
+            results,
+            has_error: true,
+        };
+    }
+
+    let mut next_ports = current_ports;
+    let mut next_statuses = port_status_seed_for_scope(&runtime_before_apply, &scope);
     let mut acl_validation_cache = AclValidationCache::default();
 
     for port in detach {
@@ -2454,6 +2494,9 @@ fn snapshot_has_runtime_drift_for_scope(
     scope: ApplyScope,
 ) -> bool {
     let plan = build_snapshot_plan_for_scope(current, snapshot, inventory, scope);
+    if plan.inventory_error.is_some() {
+        return true;
+    }
     if !plan.attach.is_empty() || !plan.detach.is_empty() {
         return true;
     }
@@ -2637,6 +2680,7 @@ fn build_snapshot_commit_runtime(
     next_runtime.ports = next_ports;
     next_runtime.port_statuses = next_statuses;
     next_runtime.wal_status = "commit_written".to_string();
+    next_runtime.recovery_cause = None;
     if has_error {
         next_runtime.pending_generation = Some(generation);
         next_runtime.authority_state = "partial".to_string();
@@ -4756,6 +4800,10 @@ fn build_snapshot_plan_for_scope(
     inventory: &LocalInterfaceInventory,
     scope: ApplyScope,
 ) -> SnapshotPlan {
+    let inventory_error = inventory
+        .ovs_error
+        .as_ref()
+        .map(|details| format!("ovsdb_unavailable:{}", details));
     let mut desired = BTreeMap::new();
     let mut ignored = Vec::new();
     let mut scoped_target_seen = false;
@@ -4851,6 +4899,7 @@ fn build_snapshot_plan_for_scope(
         update,
         detach,
         ignored,
+        inventory_error,
     }
 }
 
@@ -5948,6 +5997,7 @@ mod tests {
             update: Vec::new(),
             detach: Vec::new(),
             ignored: Vec::new(),
+            inventory_error: None,
         };
 
         let error = build_snapshot_transaction_from_plan(
@@ -6166,6 +6216,7 @@ mod tests {
                 status: "error".to_string(),
                 reason: Some("tap_missing".to_string()),
             }],
+            inventory_error: None,
         };
         let transaction = build_snapshot_transaction_from_plan(
             ApplyScope::SinglePort("target-port".to_string()),
@@ -8031,6 +8082,10 @@ mod tests {
         assert!(plan.attach.is_empty());
         assert!(plan.update.is_empty());
         assert!(plan.detach.is_empty());
+        assert_eq!(
+            plan.inventory_error.as_deref(),
+            Some("ovsdb_unavailable:permission denied")
+        );
         assert_eq!(plan.ignored.len(), 1);
         assert_eq!(
             plan.ignored[0].reason.as_deref(),

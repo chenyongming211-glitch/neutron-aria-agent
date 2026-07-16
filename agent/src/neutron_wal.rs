@@ -45,6 +45,8 @@ pub(crate) struct NeutronWalState {
     pub(crate) ports: BTreeMap<String, ManagedNeutronPort>,
     #[serde(default)]
     pub(crate) port_statuses: BTreeMap<String, NeutronPortStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery_cause: Option<String>,
     #[serde(default)]
     pub(crate) status_hash: Option<String>,
 }
@@ -59,6 +61,8 @@ struct NeutronWalStatusHashPayload<'a> {
     authority_state: &'a str,
     ports: &'a BTreeMap<String, ManagedNeutronPort>,
     port_statuses: &'a BTreeMap<String, NeutronPortStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_cause: Option<&'a str>,
 }
 
 impl NeutronWalState {
@@ -72,6 +76,7 @@ impl NeutronWalState {
             authority_state: &self.authority_state,
             ports: &self.ports,
             port_statuses: &self.port_statuses,
+            recovery_cause: self.recovery_cause.as_deref(),
         };
         let bytes = serde_json::to_vec(&payload)
             .map_err(|e| format!("serialize Neutron WAL status hash payload: {}", e))?;
@@ -90,7 +95,7 @@ impl NeutronWalState {
 
     fn status_hash_valid(&self) -> Result<bool, String> {
         let Some(expected) = self.status_hash.as_ref() else {
-            return Ok(true);
+            return Ok(self.recovery_cause.is_none());
         };
         Ok(expected == &self.compute_status_hash()?)
     }
@@ -239,6 +244,8 @@ impl NeutronWal {
             replay.pending_intent = Some(intent);
         } else if replay.failures > 0 {
             replay.status = "replayed_with_errors".to_string();
+        } else if let Some(cause) = replay.state.recovery_cause.as_ref() {
+            replay.status = cause.clone();
         } else if replay.replayed > 0 {
             replay.status = "replayed".to_string();
         }
