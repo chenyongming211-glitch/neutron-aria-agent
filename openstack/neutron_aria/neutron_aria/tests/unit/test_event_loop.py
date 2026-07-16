@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+import copy
 import shutil
 import tempfile
 import unittest
@@ -90,6 +91,31 @@ def _terminal_status_for_snapshot(snapshot, authority_state="ready"):
         "port_statuses": port_statuses,
         "active_instances": [port["ifname"] for port in managed_ports],
     }
+
+
+def _ready_acl_snapshot(
+    port_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    generation=1,
+    desired_hash="hash-1",
+    scope=None,
+):
+    snapshot = {
+        "generation": generation,
+        "desired_hash": desired_hash,
+        "ports": [{
+            "port_id": port_id,
+            "eligible": True,
+            "managed_domains": ["acl"],
+            "acl": {
+                "enabled": True,
+                "status": "ready",
+                "effective_action": "enforce",
+            },
+        }],
+    }
+    if scope is not None:
+        snapshot["scope"] = scope
+    return snapshot
 
 
 class FakeOvsReader(object):
@@ -199,6 +225,7 @@ class AdvancedGenerationLocalClient(FakeLocalClient):
             "generation": 3,
             "accepted_generation": 3,
             "applied_generation": 3,
+            "pending_generation": None,
             "managed_ports": [],
             "active_instances": [],
         }
@@ -243,6 +270,9 @@ class TimeoutNotConvergedLocalClient(FakeLocalClient):
     def status(self):
         return {
             "generation": 0,
+            "pending_generation": (
+                self.snapshots[-1]["generation"] if self.snapshots else None
+            ),
             "managed_ports": [],
             "active_instances": [],
         }
@@ -422,6 +452,7 @@ class RecoveringRemotePendingClient(FakeLocalClient):
                 "generation": self.pending_status.get("applied_generation"),
                 "accepted_generation": self.pending_status.get("applied_generation"),
                 "applied_generation": self.pending_status.get("applied_generation"),
+                "pending_generation": None,
                 "desired_hash": self.pending_status.get("applied_desired_hash"),
                 "applied_desired_hash": self.pending_status.get("applied_desired_hash"),
                 "managed_ports": [],
@@ -463,6 +494,7 @@ class SameGenerationMissingManagedClient(FakeLocalClient):
             "generation": self.generation,
             "accepted_generation": self.generation,
             "applied_generation": self.generation,
+            "pending_generation": None,
             "desired_hash": self.desired_hash,
             "applied_desired_hash": self.desired_hash,
             "managed_ports": [],
@@ -544,7 +576,12 @@ class AcceptedNotConvergedLocalClient(FakeLocalClient):
 
     def status(self):
         if not self.snapshots:
-            return {"generation": 0, "managed_ports": [], "active_instances": []}
+            return {
+                "generation": 0,
+                "pending_generation": None,
+                "managed_ports": [],
+                "active_instances": [],
+            }
         snapshot = self.snapshots[-1]
         return {
             "generation": snapshot["generation"],
@@ -577,7 +614,12 @@ class AcceptedSlowPendingThenConvergedLocalClient(FakeLocalClient):
 
     def status(self):
         if not self.snapshots:
-            return {"generation": 0, "managed_ports": [], "active_instances": []}
+            return {
+                "generation": 0,
+                "pending_generation": None,
+                "managed_ports": [],
+                "active_instances": [],
+            }
         self.status_calls += 1
         snapshot = self.snapshots[-1]
         port_ids = [
@@ -938,19 +980,44 @@ class EventLoopTestCase(unittest.TestCase):
             FakeLocalClient(),
             managed_domains=["acl"],
         )
-        for pending_generation in ("malformed", -1):
+        missing = object()
+        for pending_generation in (
+            missing,
+            "0",
+            "11",
+            True,
+            False,
+            0.0,
+            11.0,
+            -1,
+            "malformed",
+        ):
             with self.subTest(pending_generation=pending_generation):
+                status = {
+                    "accepted_generation": 10,
+                    "applied_generation": 10,
+                    "desired_hash": "hash-11",
+                    "applied_desired_hash": "hash-10",
+                    "authority_state": "ready",
+                }
+                if pending_generation is not missing:
+                    status["pending_generation"] = pending_generation
                 with self.assertRaises(LocalApiError) as ctx:
-                    sync._remote_pending_action({}, {
-                        "accepted_generation": 10,
-                        "applied_generation": 10,
-                        "pending_generation": pending_generation,
-                        "desired_hash": "hash-11",
-                        "applied_desired_hash": "hash-10",
-                        "authority_state": "ready",
-                    }, "hash-11")
+                    sync._remote_pending_action({}, status, "hash-11")
 
                 self.assertIn("pending_generation", str(ctx.exception))
+
+        for pending_generation in (None, 0):
+            with self.subTest(pending_generation=pending_generation):
+                action = sync._remote_pending_action({}, {
+                    "accepted_generation": 10,
+                    "applied_generation": 10,
+                    "pending_generation": pending_generation,
+                    "desired_hash": "hash-11",
+                    "applied_desired_hash": "hash-10",
+                    "authority_state": "ready",
+                }, "hash-11")
+                self.assertEqual({}, action)
 
         action = sync._remote_pending_action({}, {
             "accepted_generation": 10,
@@ -1532,9 +1599,21 @@ class EventLoopTestCase(unittest.TestCase):
                 finally:
                     shutil.rmtree(state_dir)
 
-    def test_restart_rejects_falsey_invalid_pending_before_stale_clear(self):
+    def test_restart_rejects_invalid_pending_before_stale_clear(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-        for pending_generation in (False, 0.0, ""):
+        missing = object()
+        for pending_generation in (
+            missing,
+            "0",
+            "3",
+            True,
+            False,
+            0.0,
+            3.0,
+            -1,
+            "",
+            "malformed",
+        ):
             with self.subTest(pending_generation=pending_generation):
                 state_dir = tempfile.mkdtemp()
                 try:
@@ -1558,7 +1637,6 @@ class EventLoopTestCase(unittest.TestCase):
                         "generation": prepared["generation"] + 1,
                         "accepted_generation": prepared["generation"] + 1,
                         "applied_generation": prepared["generation"] + 1,
-                        "pending_generation": pending_generation,
                         "desired_hash": "different-hash",
                         "applied_desired_hash": "different-hash",
                         "authority_state": "ready",
@@ -1566,6 +1644,8 @@ class EventLoopTestCase(unittest.TestCase):
                         "port_statuses": [],
                         "active_instances": [],
                     }
+                    if pending_generation is not missing:
+                        status["pending_generation"] = pending_generation
                     sync = SnapshotSynchronizer(
                         "ostack2",
                         StaticPortSource([]),
@@ -1651,6 +1731,129 @@ class EventLoopTestCase(unittest.TestCase):
         finally:
             shutil.rmtree(state_dir)
 
+    def test_restart_stale_clear_rejects_malformed_applied_identity(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        missing = object()
+        cases = (
+            ("generation_missing", missing, "different-hash"),
+            ("generation_true", True, "different-hash"),
+            ("generation_false", False, "different-hash"),
+            ("generation_float", 2.0, "different-hash"),
+            ("generation_fractional", 2.9, "different-hash"),
+            ("generation_string", "2", "different-hash"),
+            ("generation_negative", -1, "different-hash"),
+            ("hash_missing", 2, missing),
+            ("hash_none", 2, None),
+            ("hash_empty", 2, ""),
+            ("hash_dict", 2, {"hash": "different"}),
+            ("hash_list", 2, ["different"]),
+            ("hash_numeric", 2, 7),
+        )
+        for label, applied_generation, applied_hash in cases:
+            with self.subTest(label=label):
+                state_dir = tempfile.mkdtemp()
+                try:
+                    store = SnapshotStateStore(state_dir)
+                    prepared = store.prepare_snapshot({
+                        "generation": 0,
+                        "host": "ostack2",
+                        "ports": [{
+                            "port_id": port_id,
+                            "eligible": True,
+                            "managed_domains": ["acl"],
+                            "acl": {
+                                "enabled": True,
+                                "status": "ready",
+                                "effective_action": "enforce",
+                            },
+                        }],
+                    })
+                    newer_generation = prepared["generation"] + 1
+                    status = {
+                        "generation": newer_generation,
+                        "accepted_generation": newer_generation,
+                        "pending_generation": None,
+                        "desired_hash": "different-hash",
+                        "authority_state": "ready",
+                        "managed_ports": [],
+                        "port_statuses": [],
+                        "active_instances": [],
+                    }
+                    if applied_generation is not missing:
+                        status["applied_generation"] = applied_generation
+                    if applied_hash is not missing:
+                        status["applied_desired_hash"] = applied_hash
+                    sync = SnapshotSynchronizer(
+                        "ostack2",
+                        StaticPortSource([]),
+                        FakeOvsReader(),
+                        FixedStatusLocalClient(status),
+                        managed_domains=["acl"],
+                        state_store=SnapshotStateStore(state_dir),
+                    )
+
+                    result = sync.recover_pending_state()
+                    state = SnapshotStateStore(state_dir).to_dict()
+
+                    self.assertEqual([], result["recovered"])
+                    self.assertEqual(
+                        prepared["generation"],
+                        state["pending_generation"],
+                    )
+                    self.assertEqual(None, state["last_cleared_pending_generation"])
+                    self.assertEqual(0, state["last_generation"])
+                    self.assertTrue(sync.runtime_status.degraded)
+                    self.assertFalse(sync.runtime_status.ready)
+                finally:
+                    shutil.rmtree(state_dir)
+
+    def test_restart_stale_clear_accepts_typed_newer_identity(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            store = SnapshotStateStore(state_dir)
+            prepared = store.prepare_snapshot({
+                "generation": 0,
+                "host": "ostack2",
+                "ports": [],
+            })
+            newer_generation = prepared["generation"] + 1
+            status = {
+                "generation": newer_generation,
+                "accepted_generation": newer_generation,
+                "applied_generation": newer_generation,
+                "pending_generation": None,
+                "desired_hash": "different-hash",
+                "applied_desired_hash": "different-hash",
+                "authority_state": "ready",
+                "managed_ports": [],
+                "port_statuses": [],
+                "active_instances": [],
+            }
+            sync = SnapshotSynchronizer(
+                "ostack2",
+                StaticPortSource([]),
+                FakeOvsReader(),
+                FixedStatusLocalClient(status),
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+            )
+
+            result = sync.recover_pending_state()
+            state = SnapshotStateStore(state_dir).to_dict()
+
+            self.assertEqual(["stale_snapshot"], result["recovered"])
+            self.assertEqual(None, state["pending_generation"])
+            self.assertEqual(
+                prepared["generation"],
+                state["last_cleared_pending_generation"],
+            )
+            self.assertEqual(
+                "remote_generation_advanced",
+                state["last_cleared_pending_reason"],
+            )
+        finally:
+            shutil.rmtree(state_dir)
+
     def test_pending_snapshot_hash_mismatch_blocks_restart_resync(self):
         state_dir = tempfile.mkdtemp()
         try:
@@ -1677,6 +1880,7 @@ class EventLoopTestCase(unittest.TestCase):
             second_client = FixedStatusLocalClient({
                 "generation": pending["generation"],
                 "applied_generation": pending["generation"],
+                "pending_generation": None,
                 "desired_hash": "different",
                 "applied_desired_hash": "different",
                 "managed_ports": [],
@@ -2019,6 +2223,277 @@ class EventLoopTestCase(unittest.TestCase):
                 self.assertIn(port_id, reason)
                 self.assertIn(reason_fragment, reason)
 
+    def test_terminal_status_requires_strict_global_applied_generation(self):
+        snapshot = _ready_acl_snapshot()
+        port_id = snapshot["ports"][0]["port_id"]
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        valid_status = _terminal_status_for_snapshot(snapshot)
+        verdict, reason = sync._snapshot_status_verdict(
+            snapshot,
+            set([port_id]),
+            valid_status,
+        )
+        self.assertEqual(("ready", None), (verdict, reason))
+
+        missing = object()
+        for value in (True, False, 1.0, 1.9, "1", -1, missing):
+            with self.subTest(applied_generation=value):
+                status = _terminal_status_for_snapshot(snapshot)
+                if value is missing:
+                    del status["applied_generation"]
+                else:
+                    status["applied_generation"] = value
+
+                verdict, reason = sync._snapshot_status_verdict(
+                    snapshot,
+                    set([port_id]),
+                    status,
+                )
+
+                self.assertEqual("failed", verdict)
+                self.assertIn("applied_generation", reason)
+
+    def test_terminal_status_requires_strict_affected_port_generation(self):
+        snapshot = _ready_acl_snapshot()
+        port_id = snapshot["ports"][0]["port_id"]
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        missing = object()
+        for value in (True, False, 1.0, 1.9, "1", -1, missing):
+            with self.subTest(port_generation=value):
+                status = _terminal_status_for_snapshot(snapshot)
+                runtime_port = status["port_statuses"][0]
+                if value is missing:
+                    del runtime_port["generation"]
+                else:
+                    runtime_port["generation"] = value
+
+                verdict, reason = sync._snapshot_status_verdict(
+                    snapshot,
+                    set([port_id]),
+                    status,
+                )
+
+                self.assertEqual("failed", verdict)
+                self.assertIn(port_id, reason)
+                self.assertIn("generation", reason)
+
+    def test_terminal_status_requires_string_hash_identity(self):
+        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        invalid_hashes = (None, "", 1, True, {"hash": "bad"}, ["hash"])
+        for value in invalid_hashes:
+            with self.subTest(field="snapshot.desired_hash", value=value):
+                snapshot = _ready_acl_snapshot(desired_hash=value)
+                status = _terminal_status_for_snapshot(snapshot)
+
+                verdict, reason = sync._snapshot_status_verdict(
+                    snapshot,
+                    set([port_id]),
+                    status,
+                )
+
+                self.assertEqual("failed", verdict)
+                self.assertIn("snapshot desired_hash", reason)
+
+        snapshot = _ready_acl_snapshot()
+        for field, path in (
+            ("applied_desired_hash", ()),
+            ("desired_hash", ("port_statuses", 0)),
+        ):
+            for value in invalid_hashes:
+                with self.subTest(field=field, value=value):
+                    status = _terminal_status_for_snapshot(snapshot)
+                    target = status
+                    for part in path:
+                        target = target[part]
+                    target[field] = value
+
+                    verdict, reason = sync._snapshot_status_verdict(
+                        snapshot,
+                        set([port_id]),
+                        status,
+                    )
+
+                    self.assertEqual("failed", verdict)
+                    self.assertIn("desired_hash", reason)
+
+    def test_terminal_status_rejects_duplicate_port_rows_in_any_order(self):
+        snapshot = _ready_acl_snapshot()
+        port_id = snapshot["ports"][0]["port_id"]
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        base_status = _terminal_status_for_snapshot(snapshot)
+        ready_row = copy.deepcopy(base_status["port_statuses"][0])
+        degraded_row = copy.deepcopy(ready_row)
+        degraded_row["status"] = "degraded"
+        degraded_row["domains"][0]["status"] = "degraded"
+        degraded_row["domains"][0]["effective_action"] = "bypass"
+
+        for rows in (
+            [degraded_row, ready_row],
+            [ready_row, degraded_row],
+        ):
+            with self.subTest(order=[row["status"] for row in rows]):
+                status = copy.deepcopy(base_status)
+                status["port_statuses"] = copy.deepcopy(rows)
+
+                verdict, reason = sync._snapshot_status_verdict(
+                    snapshot,
+                    set([port_id]),
+                    status,
+                )
+
+                self.assertEqual("failed", verdict)
+                self.assertIn("duplicate", reason)
+                self.assertIn(port_id, reason)
+
+    def test_terminal_status_rejects_duplicate_domain_rows_in_any_order(self):
+        snapshot = _ready_acl_snapshot()
+        port_id = snapshot["ports"][0]["port_id"]
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        base_status = _terminal_status_for_snapshot(snapshot)
+        ready_domain = copy.deepcopy(
+            base_status["port_statuses"][0]["domains"][0]
+        )
+        degraded_domain = copy.deepcopy(ready_domain)
+        degraded_domain["status"] = "degraded"
+        degraded_domain["effective_action"] = "bypass"
+
+        for domains in (
+            [degraded_domain, ready_domain],
+            [ready_domain, degraded_domain],
+        ):
+            with self.subTest(order=[row["status"] for row in domains]):
+                status = copy.deepcopy(base_status)
+                status["port_statuses"][0]["domains"] = copy.deepcopy(domains)
+
+                verdict, reason = sync._snapshot_status_verdict(
+                    snapshot,
+                    set([port_id]),
+                    status,
+                )
+
+                self.assertEqual("failed", verdict)
+                self.assertIn("duplicate", reason)
+                self.assertIn("domain", reason)
+
+    def test_terminal_status_rejects_malformed_runtime_collections(self):
+        snapshot = _ready_acl_snapshot()
+        port_id = snapshot["ports"][0]["port_id"]
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        base_status = _terminal_status_for_snapshot(snapshot)
+        malformed_collections = (
+            {"bad": "row"},
+            "bad",
+            (copy.deepcopy(base_status["port_statuses"][0]),),
+            [None],
+            [1],
+            [[]],
+        )
+        for value in malformed_collections:
+            with self.subTest(collection="port_statuses", value=value):
+                status = copy.deepcopy(base_status)
+                status["port_statuses"] = value
+
+                verdict, reason = sync._snapshot_status_verdict(
+                    snapshot,
+                    set([port_id]),
+                    status,
+                )
+
+                self.assertEqual("failed", verdict)
+                self.assertIn("port status", reason)
+
+        domain_collections = (
+            {"bad": "row"},
+            "bad",
+            (copy.deepcopy(base_status["port_statuses"][0]["domains"][0]),),
+            [None],
+            [1],
+            [[]],
+        )
+        for value in domain_collections:
+            with self.subTest(collection="domains", value=value):
+                status = copy.deepcopy(base_status)
+                status["port_statuses"][0]["domains"] = value
+
+                verdict, reason = sync._snapshot_status_verdict(
+                    snapshot,
+                    set([port_id]),
+                    status,
+                )
+
+                self.assertEqual("failed", verdict)
+                self.assertIn("domain", reason)
+
+    def test_terminal_status_rejects_duplicate_or_malformed_managed_rows(self):
+        snapshot = _ready_acl_snapshot()
+        port_id = snapshot["ports"][0]["port_id"]
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        base_status = _terminal_status_for_snapshot(snapshot)
+        managed_row = base_status["managed_ports"][0]
+        values = (
+            [copy.deepcopy(managed_row), copy.deepcopy(managed_row)],
+            {"bad": "row"},
+            "bad",
+            (copy.deepcopy(managed_row),),
+            [None],
+        )
+        for value in values:
+            with self.subTest(managed_ports=value):
+                status = copy.deepcopy(base_status)
+                status["managed_ports"] = value
+
+                verdict, reason = sync._snapshot_status_verdict(
+                    snapshot,
+                    set([port_id]),
+                    status,
+                )
+
+                self.assertEqual("failed", verdict)
+                self.assertIn("managed port", reason)
+
     def test_scoped_snapshot_rejects_stale_target_port_status_identity(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         snapshot = {
@@ -2132,21 +2607,8 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertIn(unaffected_port, reason)
 
     def test_snapshot_status_parses_pending_generation_fail_closed(self):
-        port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-        snapshot = {
-            "generation": 2,
-            "desired_hash": "hash-2",
-            "ports": [{
-                "port_id": port_id,
-                "eligible": True,
-                "managed_domains": ["acl"],
-                "acl": {
-                    "enabled": True,
-                    "status": "ready",
-                    "effective_action": "enforce",
-                },
-            }],
-        }
+        snapshot = _ready_acl_snapshot(generation=2, desired_hash="hash-2")
+        port_id = snapshot["ports"][0]["port_id"]
         sync = SnapshotSynchronizer(
             "ostack2",
             StaticPortSource([]),
@@ -2154,16 +2616,28 @@ class EventLoopTestCase(unittest.TestCase):
             FakeLocalClient(),
             managed_domains=["acl"],
         )
+        missing = object()
         cases = (
-            ("malformed", "failed"),
+            (missing, "failed"),
+            ("0", "failed"),
+            ("3", "failed"),
+            (True, "failed"),
+            (False, "failed"),
+            (0.0, "failed"),
+            (3.0, "failed"),
             (-1, "failed"),
+            ("malformed", "failed"),
+            (None, "ready"),
+            (0, "ready"),
             (3, "pending"),
-            ("3", "pending"),
         )
         for pending_generation, expected_verdict in cases:
             with self.subTest(pending_generation=pending_generation):
                 status = _terminal_status_for_snapshot(snapshot)
-                status["pending_generation"] = pending_generation
+                if pending_generation is missing:
+                    del status["pending_generation"]
+                else:
+                    status["pending_generation"] = pending_generation
 
                 verdict, reason = sync._snapshot_status_verdict(
                     snapshot,
@@ -2172,7 +2646,8 @@ class EventLoopTestCase(unittest.TestCase):
                 )
 
                 self.assertEqual(expected_verdict, verdict)
-                self.assertIn("pending generation", reason)
+                if expected_verdict != "ready":
+                    self.assertIn("pending generation", reason)
 
     def test_full_resync_materializes_not_requested_acl_without_source_or_index(self):
         port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

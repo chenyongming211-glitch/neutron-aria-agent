@@ -37,12 +37,66 @@ TERMINAL_FAILURE_AUTHORITY_STATES = RECOVERY_REQUIRED_AUTHORITY_STATES.union((
 ))
 
 
+try:
+    _INTEGER_TYPES = (int, long)
+    _STRING_TYPES = (basestring,)
+except NameError:
+    _INTEGER_TYPES = (int,)
+    _STRING_TYPES = (str,)
+
+
 def _elapsed_ms(started_at):
     return int((time.time() - started_at) * 1000)
 
 
 def _status_token(value):
     return str(value or "").strip().lower()
+
+
+def _strict_scalar(value, scalar_type, allow_none=False):
+    if value is None and allow_none:
+        return None
+    if scalar_type == "integer":
+        if (
+            isinstance(value, bool) or
+            not isinstance(value, _INTEGER_TYPES) or
+            value < 0
+        ):
+            raise ValueError("expected a non-negative integer")
+        return value
+    if scalar_type == "string":
+        if not isinstance(value, _STRING_TYPES) or not value:
+            raise ValueError("expected a non-empty string")
+        return value
+    raise ValueError("unsupported scalar type")
+
+
+def _unique_row_index(rows, identity_key, collection_name, normalize=None):
+    if not isinstance(rows, list):
+        return None, "%s must be a list" % collection_name
+    index = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return None, "%s contains a non-object row" % collection_name
+        try:
+            identity = _strict_scalar(row.get(identity_key), "string")
+        except ValueError:
+            return (
+                None,
+                "%s contains an invalid %s" % (
+                    collection_name,
+                    identity_key,
+                ),
+            )
+        if normalize is not None:
+            identity = normalize(identity)
+        if identity in index:
+            return (
+                None,
+                "duplicate %s row for %s" % (collection_name, identity),
+            )
+        index[identity] = row
+    return index, None
 
 
 def _acl_index_profile(acl_index):
@@ -1399,43 +1453,37 @@ class SnapshotSynchronizer(object):
         return max(generations or [0])
 
     def _applied_generation_from_status(self, status):
-        if not status:
-            return 0
-        for key in ("applied_generation", "generation"):
-            if key in status and status.get(key) is not None:
-                try:
-                    return int(status.get(key))
-                except (TypeError, ValueError):
-                    return 0
-        return 0
+        if not isinstance(status, dict):
+            return None
+        try:
+            return _strict_scalar(status.get("applied_generation"), "integer")
+        except ValueError:
+            return None
 
     def _status_has_pending_generation(self, status):
         return self._pending_generation_status(status)[0] == "pending"
 
     def _pending_generation_status(self, status):
-        if not status or status.get("pending_generation") is None:
-            return "none", 0, None
-        value = status.get("pending_generation")
-        if isinstance(value, (bool, float)):
+        if not isinstance(status, dict) or "pending_generation" not in status:
             return (
                 "failed",
                 None,
-                "pending_generation (pending generation) is invalid",
+                "pending_generation (pending generation) is missing",
             )
         try:
-            generation = int(value)
-        except (TypeError, ValueError):
+            generation = _strict_scalar(
+                status.get("pending_generation"),
+                "integer",
+                allow_none=True,
+            )
+        except ValueError:
             return (
                 "failed",
                 None,
                 "pending_generation (pending generation) is invalid",
             )
-        if generation < 0:
-            return (
-                "failed",
-                None,
-                "pending_generation (pending generation) cannot be negative",
-            )
+        if generation is None:
+            return "none", 0, None
         if generation == 0:
             return "none", 0, None
         return "pending", generation, None
@@ -1506,33 +1554,50 @@ class SnapshotSynchronizer(object):
 
     def _pending_snapshot_hash_mismatch(self, pending, status):
         status_generation = self._applied_generation_from_status(status)
-        status_hash = (
-            status.get("applied_desired_hash") or
-            status.get("desired_hash")
-        )
+        if status_generation is None:
+            return False
+        try:
+            pending_generation = _strict_scalar(
+                pending.get("generation"),
+                "integer",
+            )
+            status_hash = _strict_scalar(
+                status.get("applied_desired_hash"),
+                "string",
+            )
+            pending_hash = _strict_scalar(
+                pending.get("desired_hash"),
+                "string",
+            )
+        except ValueError:
+            return False
         return bool(
-            status_generation >= int(pending["generation"]) and
-            status_hash and
-            pending.get("desired_hash") and
-            status_hash != pending.get("desired_hash")
+            status_generation >= pending_generation and
+            status_hash != pending_hash
         )
 
     def _pending_snapshot_is_stale(self, pending, status):
         try:
             status_generation = self._applied_generation_from_status(status)
-            pending_generation = int(pending.get("generation") or 0)
-        except (TypeError, ValueError):
+            pending_generation = _strict_scalar(
+                pending.get("generation"),
+                "integer",
+            )
+            _strict_scalar(
+                status.get("applied_desired_hash"),
+                "string",
+            )
+            _strict_scalar(pending.get("desired_hash"), "string")
+        except ValueError:
+            return False
+        if status_generation is None:
             return False
         if status_generation <= pending_generation:
             return False
         pending_state, _, _ = self._pending_generation_status(status)
         if pending_state != "none":
             return False
-        status_hash = (
-            status.get("applied_desired_hash") or
-            status.get("desired_hash")
-        )
-        return bool(status_hash and pending.get("desired_hash"))
+        return True
 
     def _status_converged(self, snapshot, projected_port_ids, status):
         return self._snapshot_status_verdict(
@@ -1540,10 +1605,18 @@ class SnapshotSynchronizer(object):
         )[0] == "ready"
 
     def _snapshot_status_verdict(self, snapshot, projected_port_ids, status):
-        if not status:
+        if status is None:
             return "pending", "status is unavailable"
+        if not isinstance(status, dict):
+            return "failed", "status payload is invalid"
 
-        expected_generation = int(snapshot["generation"])
+        try:
+            expected_generation = _strict_scalar(
+                snapshot.get("generation"),
+                "integer",
+            )
+        except ValueError:
+            return "failed", "snapshot generation is invalid"
         authority_state = status.get("authority_state")
         if authority_state in TERMINAL_FAILURE_AUTHORITY_STATES:
             return (
@@ -1557,17 +1630,13 @@ class SnapshotSynchronizer(object):
         if pending_state == "pending":
             return "pending", "pending generation remains"
 
-        applied_value = status.get("applied_generation")
         try:
-            applied_generation = (
-                int(applied_value) if applied_value is not None else None
+            applied_generation = _strict_scalar(
+                status.get("applied_generation"),
+                "integer",
             )
-        except (TypeError, ValueError):
+        except ValueError:
             return "failed", "applied_generation is invalid"
-        if applied_generation is None:
-            if self._generation_floor_from_status(status) < expected_generation:
-                return "pending", "applied generation has not reached target"
-            return "failed", "applied_generation is missing"
         if applied_generation < expected_generation:
             return "pending", "applied generation has not reached target"
         if applied_generation != expected_generation:
@@ -1579,12 +1648,20 @@ class SnapshotSynchronizer(object):
                 ),
             )
 
-        expected_hash = snapshot.get("desired_hash")
-        applied_hash = status.get("applied_desired_hash")
-        if not expected_hash:
-            return "failed", "snapshot desired_hash is missing"
-        if not applied_hash:
-            return "failed", "applied_desired_hash is missing"
+        try:
+            expected_hash = _strict_scalar(
+                snapshot.get("desired_hash"),
+                "string",
+            )
+        except ValueError:
+            return "failed", "snapshot desired_hash is invalid"
+        try:
+            applied_hash = _strict_scalar(
+                status.get("applied_desired_hash"),
+                "string",
+            )
+        except ValueError:
+            return "failed", "applied_desired_hash is invalid"
         if applied_hash != expected_hash:
             return "failed", "applied desired hash does not match snapshot"
         if authority_state != "ready":
@@ -1621,13 +1698,14 @@ class SnapshotSynchronizer(object):
         if not evidence_port_ids:
             return "ready", None
 
-        managed = status.get("managed_ports")
-        if managed is None:
-            return "failed", "managed port evidence is missing"
-        managed_port_ids = set(
-            port.get("port_id") for port in managed
-            if port.get("port_id")
+        managed_ports, reason = _unique_row_index(
+            status.get("managed_ports"),
+            "port_id",
+            "managed port evidence",
         )
+        if reason is not None:
+            return "failed", reason
+        managed_port_ids = set(managed_ports)
         missing_managed = sorted(evidence_port_ids - managed_port_ids)
         if missing_managed:
             return (
@@ -1635,17 +1713,30 @@ class SnapshotSynchronizer(object):
                 "projected ports are not managed: %s" % missing_managed,
             )
 
-        port_statuses = dict(
-            (port.get("port_id"), port)
-            for port in status.get("port_statuses") or []
-            if port.get("port_id")
+        port_statuses, reason = _unique_row_index(
+            status.get("port_statuses"),
+            "port_id",
+            "port status evidence",
         )
+        if reason is not None:
+            return "failed", reason
         missing_statuses = sorted(evidence_port_ids - set(port_statuses))
         if missing_statuses:
             return (
                 "failed",
                 "runtime status is missing for ports %s" % missing_statuses,
             )
+        runtime_domains_by_port = {}
+        for port_id in sorted(evidence_port_ids):
+            runtime_domains, reason = _unique_row_index(
+                port_statuses[port_id].get("domains"),
+                "domain",
+                "domain status evidence for port %s" % port_id,
+                normalize=_status_token,
+            )
+            if reason is not None:
+                return "failed", reason
+            runtime_domains_by_port[port_id] = runtime_domains
         if not validated_port_ids:
             return "ready", None
         for port_id in sorted(validated_port_ids):
@@ -1654,8 +1745,11 @@ class SnapshotSynchronizer(object):
             snapshot_port = snapshot_ports.get(port_id)
             if snapshot_port is not None:
                 try:
-                    port_generation = int(runtime_port.get("generation"))
-                except (TypeError, ValueError):
+                    port_generation = _strict_scalar(
+                        runtime_port.get("generation"),
+                        "integer",
+                    )
+                except ValueError:
                     return (
                         "failed",
                         "port %s generation is invalid" % port_id,
@@ -1669,11 +1763,15 @@ class SnapshotSynchronizer(object):
                             expected_generation,
                         ),
                     )
-                port_hash = runtime_port.get("desired_hash")
-                if not port_hash:
+                try:
+                    port_hash = _strict_scalar(
+                        runtime_port.get("desired_hash"),
+                        "string",
+                    )
+                except ValueError:
                     return (
                         "failed",
-                        "port %s desired hash is missing" % port_id,
+                        "port %s desired_hash is invalid" % port_id,
                     )
                 if port_hash != expected_hash:
                     return (
@@ -1686,11 +1784,7 @@ class SnapshotSynchronizer(object):
                 required_domains = list(
                     snapshot_port.get("managed_domains") or []
                 )
-            runtime_domains = dict(
-                (_status_token(domain.get("domain")), domain)
-                for domain in runtime_port.get("domains") or []
-                if domain.get("domain")
-            )
+            runtime_domains = runtime_domains_by_port[port_id]
             expects_not_requested = False
             for domain in required_domains:
                 domain_name = _status_token(domain)

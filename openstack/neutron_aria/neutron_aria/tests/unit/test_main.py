@@ -43,7 +43,12 @@ class FakeLocalClient(object):
 
     def status(self):
         if not self.snapshots:
-            return {"generation": 0, "managed_ports": [], "active_instances": []}
+            return {
+                "generation": 0,
+                "pending_generation": None,
+                "managed_ports": [],
+                "active_instances": [],
+            }
 
         snapshot = self.snapshots[-1]
         managed_ports = []
