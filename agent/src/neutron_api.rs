@@ -679,6 +679,28 @@ impl NeutronApiState {
             return;
         };
         let _guard = self.apply_lock.lock().await;
+        if intent.recovery_cause.as_deref() == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE) {
+            let mut next_runtime = {
+                let runtime = self.runtime.read().await;
+                runtime.clone()
+            };
+            next_runtime.accepted_generation = intent.generation;
+            next_runtime.pending_generation = Some(intent.generation);
+            next_runtime.desired_hash = intent.desired_hash.clone();
+            next_runtime.authority_state = "blocked_recovery_required".to_string();
+            next_runtime.wal_status = INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string();
+            next_runtime.recovery_cause = Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string());
+
+            let commit_result = self.wal.append_snapshot_commit(next_runtime.to_wal_state());
+            {
+                let mut runtime = self.runtime.write().await;
+                *runtime = next_runtime;
+            }
+            if let Err(e) = commit_result {
+                warn!(error = %e, "failed to commit inventory-blocked Neutron WAL recovery state");
+            }
+            return;
+        }
         let current_ports = {
             let runtime = self.runtime.read().await;
             runtime.ports.clone()
@@ -1546,7 +1568,12 @@ async fn accept_neutron_snapshot_submit(
         scope.clone(),
     )
     .map_err(snapshot_scope_apply_error)?;
-    let recovery_port_ids = if transaction.plan.inventory_error.is_some() {
+    let recovery_cause = transaction
+        .plan
+        .inventory_error
+        .is_some()
+        .then(|| INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string());
+    let recovery_port_ids = if recovery_cause.is_some() {
         Vec::new()
     } else {
         transaction.requested_port_ids.clone()
@@ -1558,6 +1585,7 @@ async fn accept_neutron_snapshot_submit(
         port_ids: recovery_port_ids,
         affected_domains: transaction.affected_domains.clone(),
         affected_ports: transaction.affected_ports.clone(),
+        recovery_cause,
     };
     let preflight_ms = elapsed_ms(preflight_started);
     let wal_intent_started = Instant::now();
@@ -1569,6 +1597,7 @@ async fn accept_neutron_snapshot_submit(
             intent.port_ids.clone(),
             intent.affected_domains.clone(),
             intent.affected_ports.clone(),
+            intent.recovery_cause.clone(),
         )
         .map_err(|details| SnapshotApplyError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -1725,14 +1754,23 @@ async fn recover_failed_snapshot_transaction(
         );
     }
 
-    let mut blocked = build_blocked_snapshot_runtime(
-        previous,
-        intent,
-        blocked_statuses,
-        "commit_failed",
-    );
+    let inventory_unavailable =
+        intent.recovery_cause.as_deref() == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE);
+    let wal_status = if inventory_unavailable {
+        INVENTORY_UNAVAILABLE_RECOVERY_CAUSE
+    } else {
+        "commit_failed"
+    };
+    let mut blocked =
+        build_blocked_snapshot_runtime(previous, intent, blocked_statuses, wal_status);
+    if inventory_unavailable {
+        blocked.accepted_generation = intent.generation;
+        blocked.recovery_cause = Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string());
+    }
     if let Err(error) = state.wal.append_snapshot_commit(blocked.to_wal_state()) {
-        blocked.wal_status = "recovery_commit_failed".to_string();
+        if !inventory_unavailable {
+            blocked.wal_status = "recovery_commit_failed".to_string();
+        }
         warn!(
             generation = intent.generation,
             desired_hash = ?intent.desired_hash,
@@ -6572,9 +6610,10 @@ mod tests {
             .append_snapshot_intent(
                 snapshot.generation,
                 snapshot.desired_hash.clone(),
-                transaction.requested_port_ids.clone(),
+                Vec::new(),
                 transaction.affected_domains.clone(),
                 transaction.affected_ports.clone(),
+                Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string()),
             )
             .expect("inventory-failed snapshot intent should be durable");
 

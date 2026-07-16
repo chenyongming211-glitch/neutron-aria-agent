@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 const WAL_FILE: &str = "neutron-snapshot.wal";
+const INVENTORY_UNAVAILABLE_RECOVERY_CAUSE: &str = "inventory_unavailable";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct NeutronWalReplay {
@@ -25,6 +26,7 @@ pub(crate) struct PendingNeutronIntent {
     pub(crate) port_ids: Vec<String>,
     pub(crate) affected_domains: Vec<String>,
     pub(crate) affected_ports: Vec<ManagedNeutronPort>,
+    pub(crate) recovery_cause: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,6 +65,72 @@ struct NeutronWalStatusHashPayload<'a> {
     port_statuses: &'a BTreeMap<String, NeutronPortStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recovery_cause: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct NeutronWalSnapshotIntentHashPayload<'a> {
+    generation: u64,
+    desired_hash: &'a Option<String>,
+    port_ids: &'a [String],
+    affected_domains: &'a [String],
+    affected_ports: &'a [ManagedNeutronPort],
+    recovery_cause: &'a str,
+}
+
+fn compute_snapshot_intent_hash(
+    generation: u64,
+    desired_hash: &Option<String>,
+    port_ids: &[String],
+    affected_domains: &[String],
+    affected_ports: &[ManagedNeutronPort],
+    recovery_cause: &str,
+) -> Result<String, String> {
+    let payload = NeutronWalSnapshotIntentHashPayload {
+        generation,
+        desired_hash,
+        port_ids,
+        affected_domains,
+        affected_ports,
+        recovery_cause,
+    };
+    let bytes = serde_json::to_vec(&payload)
+        .map_err(|e| format!("serialize Neutron WAL snapshot intent hash payload: {}", e))?;
+    let digest = Sha256::digest(bytes);
+    Ok(digest
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<Vec<_>>()
+        .join(""))
+}
+
+fn snapshot_intent_integrity_valid(
+    generation: u64,
+    desired_hash: &Option<String>,
+    port_ids: &[String],
+    affected_domains: &[String],
+    affected_ports: &[ManagedNeutronPort],
+    recovery_cause: Option<&str>,
+    intent_hash: Option<&str>,
+) -> Result<bool, String> {
+    match (recovery_cause, intent_hash) {
+        (None, None) => Ok(true),
+        (Some(cause), Some(expected_hash))
+            if cause == INVENTORY_UNAVAILABLE_RECOVERY_CAUSE
+                && port_ids.is_empty()
+                && affected_ports.is_empty() =>
+        {
+            let actual_hash = compute_snapshot_intent_hash(
+                generation,
+                desired_hash,
+                port_ids,
+                affected_domains,
+                affected_ports,
+                cause,
+            )?;
+            Ok(expected_hash == actual_hash.as_str())
+        }
+        _ => Ok(false),
+    }
 }
 
 impl NeutronWalState {
@@ -113,6 +181,10 @@ enum NeutronWalEntry {
         affected_domains: Vec<String>,
         #[serde(default)]
         affected_ports: Vec<ManagedNeutronPort>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recovery_cause: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intent_hash: Option<String>,
     },
     SnapshotCommit {
         state: NeutronWalState,
@@ -183,7 +255,24 @@ impl NeutronWal {
                     mut port_ids,
                     affected_domains,
                     affected_ports,
+                    recovery_cause,
+                    intent_hash,
                 } => {
+                    match snapshot_intent_integrity_valid(
+                        generation,
+                        &desired_hash,
+                        &port_ids,
+                        &affected_domains,
+                        &affected_ports,
+                        recovery_cause.as_deref(),
+                        intent_hash.as_deref(),
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) | Err(_) => {
+                            replay.failures += 1;
+                            continue;
+                        }
+                    }
                     if port_ids.is_empty() {
                         port_ids = affected_ports
                             .iter()
@@ -197,6 +286,7 @@ impl NeutronWal {
                         port_ids,
                         affected_domains,
                         affected_ports,
+                        recovery_cause,
                     });
                 }
                 NeutronWalEntry::DeleteIntent {
@@ -213,6 +303,7 @@ impl NeutronWal {
                         port_ids: vec![port_id],
                         affected_domains,
                         affected_ports,
+                        recovery_cause: None,
                     });
                 }
                 NeutronWalEntry::SnapshotCommit { state }
@@ -260,13 +351,39 @@ impl NeutronWal {
         port_ids: Vec<String>,
         affected_domains: Vec<String>,
         affected_ports: Vec<ManagedNeutronPort>,
+        recovery_cause: Option<String>,
     ) -> Result<(), String> {
+        let intent_hash = match recovery_cause.as_deref() {
+            None => None,
+            Some(cause)
+                if cause == INVENTORY_UNAVAILABLE_RECOVERY_CAUSE
+                    && port_ids.is_empty()
+                    && affected_ports.is_empty() =>
+            {
+                Some(compute_snapshot_intent_hash(
+                    generation,
+                    &desired_hash,
+                    &port_ids,
+                    &affected_domains,
+                    &affected_ports,
+                    cause,
+                )?)
+            }
+            Some(cause) => {
+                return Err(format!(
+                    "invalid Neutron snapshot intent recovery cause or scope: {}",
+                    cause
+                ));
+            }
+        };
         self.append(&NeutronWalEntry::SnapshotIntent {
             generation,
             desired_hash,
             port_ids,
             affected_domains,
             affected_ports,
+            recovery_cause,
+            intent_hash,
         })
     }
 
@@ -472,6 +589,7 @@ mod tests {
             vec!["p1".to_string()],
             vec!["acl".to_string()],
             vec![managed("p1", "tap-p1")],
+            None,
         )
         .unwrap();
         let mut ports = BTreeMap::new();
@@ -509,6 +627,7 @@ mod tests {
             vec!["p1".to_string()],
             vec!["acl".to_string(), "qos".to_string()],
             vec![managed("p1", "tap-p1")],
+            None,
         )
         .unwrap();
 
@@ -567,6 +686,7 @@ mod tests {
             vec!["p1".to_string()],
             vec!["acl".to_string()],
             vec![managed("p1", "tap-p1")],
+            None,
         )
         .unwrap();
 
@@ -834,6 +954,7 @@ mod tests {
             vec!["p2".to_string()],
             vec!["attach".to_string(), "acl".to_string()],
             vec![managed("p2", "tap-p2")],
+            None,
         )
         .unwrap();
 
@@ -885,6 +1006,7 @@ mod tests {
                 "qos".to_string(),
             ],
             vec![managed("p1", "tap-p1")],
+            None,
         )
         .unwrap();
 
@@ -929,6 +1051,7 @@ mod tests {
             vec!["p1".to_string()],
             vec!["acl".to_string(), "mirror".to_string(), "qos".to_string()],
             vec![managed("p1", "tap-p1")],
+            None,
         )
         .unwrap();
 
