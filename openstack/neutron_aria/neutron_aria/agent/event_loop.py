@@ -24,8 +24,13 @@ RECOVERY_REQUIRED_AUTHORITY_STATES = frozenset((
     "blocked_recovery_required",
     "wal_commit_failed",
     "wal_recovery_commit_failed",
+    "wal_runtime_reconcile_commit_failed",
     "pending_recovery_commit_failed",
     "recovered_pending_full_resync",
+    "partial",
+    "degraded",
+    "runtime_degraded",
+    "wal_intent_without_commit",
 ))
 TERMINAL_FAILURE_AUTHORITY_STATES = RECOVERY_REQUIRED_AUTHORITY_STATES.union((
     "runtime_degraded",

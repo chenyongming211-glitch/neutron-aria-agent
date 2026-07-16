@@ -959,19 +959,34 @@ class EventLoopTestCase(unittest.TestCase):
         )
         for authority_state in (
             "blocked_recovery_required",
+            "wal_commit_failed",
+            "wal_recovery_commit_failed",
+            "wal_runtime_reconcile_commit_failed",
             "pending_recovery_commit_failed",
+            "recovered_pending_full_resync",
+            "partial",
+            "degraded",
+            "runtime_degraded",
+            "wal_intent_without_commit",
         ):
             with self.subTest(authority_state=authority_state):
-                action = sync._remote_pending_action({}, {
+                status = {
                     "accepted_generation": 10,
                     "applied_generation": 10,
                     "pending_generation": 11,
                     "desired_hash": "hash-11",
                     "applied_desired_hash": "hash-10",
                     "authority_state": authority_state,
-                }, "hash-11")
+                }
+                action = sync._remote_pending_action({}, status, "hash-11")
 
-                self.assertEqual("recover", action["action"])
+                self.assertEqual(
+                    (True, "recover"),
+                    (
+                        sync._status_requires_pending_recovery(status),
+                        action["action"],
+                    ),
+                )
                 self.assertEqual(11, action["generation"])
                 self.assertEqual("hash-11", action["remote_desired_hash"])
 
