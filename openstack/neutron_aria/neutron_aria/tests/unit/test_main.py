@@ -58,27 +58,47 @@ class FakeLocalClient(object):
                 if domain == "acl":
                     acl = port.get("acl") or {}
                     domain_status = acl.get("status") or "ready"
+                    domain_reason = acl.get("reason")
                     effective_action = (
                         acl.get("effective_action") or
                         ("enforce" if domain_status == "ready" else "bypass")
                     )
                 else:
                     domain_status = "ready"
+                    domain_reason = None
                     effective_action = None
                 domains.append({
                     "domain": domain,
                     "status": domain_status,
-                    "reason": None,
+                    "reason": domain_reason,
                     "effective_action": effective_action,
                 })
+            port_status = "ready"
+            port_reason = None
+            for terminal_status in (
+                "error",
+                "blocked",
+                "degraded",
+                "unsupported",
+                "detached",
+                "not_requested",
+            ):
+                matching = [
+                    domain for domain in domains
+                    if domain.get("status") == terminal_status
+                ]
+                if matching:
+                    port_status = terminal_status
+                    port_reason = matching[0].get("reason")
+                    break
             managed_ports.append({"port_id": port_id, "ifname": ifname})
             port_statuses.append({
                 "port_id": port_id,
                 "ifname": ifname,
                 "generation": snapshot["generation"],
                 "desired_hash": snapshot.get("desired_hash"),
-                "status": "ready",
-                "reason": None,
+                "status": port_status,
+                "reason": port_reason,
                 "managed_domains": list(port.get("managed_domains") or []),
                 "domains": domains,
             })

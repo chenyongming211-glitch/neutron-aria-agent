@@ -3,6 +3,7 @@ from __future__ import absolute_import
 import logging
 import time
 
+from neutron_aria.agent.effective_acl import EffectiveAclIndex
 from neutron_aria.agent.effective_acl import REVISION_NEWER
 from neutron_aria.agent.effective_acl import REVISION_UNKNOWN
 from neutron_aria.agent.inventory import PortCandidateBuilder
@@ -362,6 +363,8 @@ class SnapshotSynchronizer(object):
     def _load_acl_index(self):
         if self.acl_source is not None:
             self.acl_index = self.acl_source.load_index()
+        if self.acl_index is None and "acl" in self.managed_domains:
+            self.acl_index = EffectiveAclIndex()
         return self.acl_index
 
     def _log_acl_delivery_profile(self, **fields):
@@ -435,6 +438,20 @@ class SnapshotSynchronizer(object):
         snapshot = self.state_store.pending_snapshot()
         if snapshot:
             status = self.local_client.status()
+            pending_state, _, pending_reason = self._pending_generation_status(status)
+            if pending_state == "failed":
+                self.runtime_status.mark_degraded(
+                    "pending_snapshot_unresolved",
+                    pending_reason,
+                )
+                LOG.warning(
+                    "pending_snapshot_status_invalid host=%s generation=%s "
+                    "error=%s",
+                    self.host,
+                    snapshot["generation"],
+                    pending_reason,
+                )
+                raise LocalApiError(pending_reason)
             if self._pending_snapshot_hash_mismatch(snapshot, status):
                 if self._pending_snapshot_is_stale(snapshot, status):
                     cleared = self.state_store.clear_pending_snapshot(
@@ -1037,11 +1054,12 @@ class SnapshotSynchronizer(object):
     def _remote_pending_action(self, snapshot, status, desired_hash):
         if status is None:
             return {}
-        try:
-            pending_generation = int(status.get("pending_generation") or 0)
-        except (TypeError, ValueError):
-            pending_generation = 0
-        if pending_generation <= 0:
+        pending_state, pending_generation, reason = (
+            self._pending_generation_status(status)
+        )
+        if pending_state == "failed":
+            raise LocalApiError(reason)
+        if pending_state != "pending":
             return {}
 
         remote_hash = status.get("desired_hash")
@@ -1392,12 +1410,35 @@ class SnapshotSynchronizer(object):
         return 0
 
     def _status_has_pending_generation(self, status):
-        if not status:
-            return False
+        return self._pending_generation_status(status)[0] == "pending"
+
+    def _pending_generation_status(self, status):
+        if not status or status.get("pending_generation") is None:
+            return "none", 0, None
+        value = status.get("pending_generation")
+        if isinstance(value, (bool, float)):
+            return (
+                "failed",
+                None,
+                "pending_generation (pending generation) is invalid",
+            )
         try:
-            return int(status.get("pending_generation") or 0) > 0
+            generation = int(value)
         except (TypeError, ValueError):
-            return False
+            return (
+                "failed",
+                None,
+                "pending_generation (pending generation) is invalid",
+            )
+        if generation < 0:
+            return (
+                "failed",
+                None,
+                "pending_generation (pending generation) cannot be negative",
+            )
+        if generation == 0:
+            return "none", 0, None
+        return "pending", generation, None
 
     def _accepted_convergence_attempts(self):
         return max(self.timeout_convergence_attempts, 60)
@@ -1451,6 +1492,8 @@ class SnapshotSynchronizer(object):
         )
 
     def _pending_snapshot_converged(self, pending, status):
+        if pending.get("projected_port_ids") and self.managed_domains:
+            return False
         snapshot = {
             "generation": pending["generation"],
             "desired_hash": pending["desired_hash"],
@@ -1482,7 +1525,8 @@ class SnapshotSynchronizer(object):
             return False
         if status_generation <= pending_generation:
             return False
-        if status.get("pending_generation"):
+        pending_state, _, _ = self._pending_generation_status(status)
+        if pending_state != "none":
             return False
         status_hash = (
             status.get("applied_desired_hash") or
@@ -1507,7 +1551,10 @@ class SnapshotSynchronizer(object):
                 "authority_state is %s" % (authority_state or "missing"),
             )
 
-        if self._status_has_pending_generation(status):
+        pending_state, _, pending_reason = self._pending_generation_status(status)
+        if pending_state == "failed":
+            return "failed", pending_reason
+        if pending_state == "pending":
             return "pending", "pending generation remains"
 
         applied_value = status.get("applied_generation")
@@ -1550,7 +1597,28 @@ class SnapshotSynchronizer(object):
         projected_port_ids = set(
             port_id for port_id in projected_port_ids or [] if port_id
         )
-        if not projected_port_ids:
+        snapshot_ports = dict(
+            (port.get("port_id"), port)
+            for port in snapshot.get("ports") or []
+            if port.get("port_id")
+        )
+        if (snapshot.get("scope") or {}).get("type") == "port":
+            affected_port_ids = set(
+                port_id for port_id, port in snapshot_ports.items()
+                if port.get("eligible") or port.get("managed_domains")
+            )
+            missing_projected = sorted(affected_port_ids - projected_port_ids)
+            if missing_projected:
+                return (
+                    "failed",
+                    "affected scoped ports are not projected: %s" %
+                    missing_projected,
+                )
+            validated_port_ids = affected_port_ids
+        else:
+            validated_port_ids = projected_port_ids
+        evidence_port_ids = projected_port_ids
+        if not evidence_port_ids:
             return "ready", None
 
         managed = status.get("managed_ports")
@@ -1560,29 +1628,58 @@ class SnapshotSynchronizer(object):
             port.get("port_id") for port in managed
             if port.get("port_id")
         )
-        missing_managed = sorted(projected_port_ids - managed_port_ids)
+        missing_managed = sorted(evidence_port_ids - managed_port_ids)
         if missing_managed:
             return (
                 "failed",
                 "projected ports are not managed: %s" % missing_managed,
             )
 
-        snapshot_ports = dict(
-            (port.get("port_id"), port)
-            for port in snapshot.get("ports") or []
-            if port.get("port_id")
-        )
         port_statuses = dict(
             (port.get("port_id"), port)
             for port in status.get("port_statuses") or []
             if port.get("port_id")
         )
-        for port_id in sorted(projected_port_ids):
+        missing_statuses = sorted(evidence_port_ids - set(port_statuses))
+        if missing_statuses:
+            return (
+                "failed",
+                "runtime status is missing for ports %s" % missing_statuses,
+            )
+        if not validated_port_ids:
+            return "ready", None
+        for port_id in sorted(validated_port_ids):
             runtime_port = port_statuses.get(port_id)
-            if runtime_port is None:
-                return "failed", "runtime status is missing for port %s" % port_id
 
             snapshot_port = snapshot_ports.get(port_id)
+            if snapshot_port is not None:
+                try:
+                    port_generation = int(runtime_port.get("generation"))
+                except (TypeError, ValueError):
+                    return (
+                        "failed",
+                        "port %s generation is invalid" % port_id,
+                    )
+                if port_generation != expected_generation:
+                    return (
+                        "failed",
+                        "port %s generation %s does not match %s" % (
+                            port_id,
+                            port_generation,
+                            expected_generation,
+                        ),
+                    )
+                port_hash = runtime_port.get("desired_hash")
+                if not port_hash:
+                    return (
+                        "failed",
+                        "port %s desired hash is missing" % port_id,
+                    )
+                if port_hash != expected_hash:
+                    return (
+                        "failed",
+                        "port %s desired hash does not match snapshot" % port_id,
+                    )
             if snapshot_port is None:
                 required_domains = list(self.managed_domains)
             else:
@@ -1651,15 +1748,7 @@ class SnapshotSynchronizer(object):
         if snapshot_port is not None and "acl" in snapshot_port:
             desired_acl = snapshot_port.get("acl") or {}
         if desired_acl is None:
-            if runtime_status != "ready" or runtime_action == "bypass":
-                return (
-                    "failed",
-                    "acl runtime status/action is %s/%s" % (
-                        runtime_status or "missing",
-                        runtime_action or "missing",
-                    ),
-                )
-            return "ready", None
+            return "failed", "desired acl evidence is missing"
 
         desired_status = _status_token(desired_acl.get("status") or "ready")
         desired_action = _status_token(desired_acl.get("effective_action"))
