@@ -371,6 +371,19 @@ mod tests {
         }
     }
 
+    fn hashless_snapshot_commit(generation: u64) -> serde_json::Value {
+        serde_json::json!({
+            "type": "snapshot_commit",
+            "state": {
+                "accepted_generation": generation,
+                "applied_generation": generation,
+                "authority_state": "ready",
+                "ports": {},
+                "port_statuses": {}
+            }
+        })
+    }
+
     #[test]
     fn replay_restores_last_committed_state() {
         let root = temp_state_path();
@@ -732,21 +745,12 @@ mod tests {
     }
 
     #[test]
-    fn hashless_legacy_commit_accepts_no_cause_and_rejects_injected_recovery_cause() {
+    fn hashless_legacy_commit_without_recovery_cause_replays() {
         let root = temp_state_path();
         let wal = NeutronWal::new(&root);
         fs::create_dir_all(&root).unwrap();
         let path = root.join(WAL_FILE);
-        let legacy = serde_json::json!({
-            "type": "snapshot_commit",
-            "state": {
-                "accepted_generation": 62,
-                "applied_generation": 62,
-                "authority_state": "ready",
-                "ports": {},
-                "port_statuses": {}
-            }
-        });
+        let legacy = hashless_snapshot_commit(62);
         let legacy_raw = format!("{}\n", serde_json::to_string(&legacy).unwrap());
         assert!(!legacy_raw.contains(r#""recovery_cause""#));
         assert!(!legacy_raw.contains(r#""status_hash""#));
@@ -756,8 +760,16 @@ mod tests {
         assert_eq!("replayed", legacy_replay.status);
         assert_eq!(0, legacy_replay.failures);
         assert_eq!(62, legacy_replay.state.applied_generation);
+        let _ = fs::remove_dir_all(root);
+    }
 
-        let mut injected = legacy;
+    #[test]
+    fn hashless_commit_with_injected_inventory_recovery_cause_is_rejected() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join(WAL_FILE);
+        let mut injected = hashless_snapshot_commit(63);
         injected["state"]["recovery_cause"] =
             serde_json::Value::String("inventory_unavailable".to_string());
         let injected_raw = format!("{}\n", serde_json::to_string(&injected).unwrap());

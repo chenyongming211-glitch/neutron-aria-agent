@@ -6456,6 +6456,12 @@ mod tests {
         assert_eq!(replay.state.authority_state, "blocked_recovery_required");
         assert_eq!(replay.state.ports, previous.ports);
         assert_eq!(replay.state.port_statuses, previous.port_statuses);
+        let wal_path = state
+            .registry
+            .base_state_path
+            .join("neutron-snapshot.wal");
+        let wal_before_reconcile =
+            std::fs::read_to_string(&wal_path).expect("blocked WAL should be readable");
 
         let restarted = NeutronRuntimeState::from_wal_state(
             replay.state.clone(),
@@ -6469,7 +6475,13 @@ mod tests {
             *runtime = restarted;
         }
         state.reconcile_committed_runtime().await;
-        {
+        let wal_after_reconcile =
+            std::fs::read_to_string(&wal_path).expect("reconciled WAL should be readable");
+        assert_eq!(
+            wal_after_reconcile, wal_before_reconcile,
+            "background reconciliation must not append or rewrite inventory-blocked WAL"
+        );
+        let runtime_after_reconcile = {
             let runtime = state.runtime.read().await;
             assert_eq!(
                 runtime.accepted_generation,
@@ -6496,7 +6508,26 @@ mod tests {
                 runtime.wal_replay_failures,
                 before_reconcile.wal_replay_failures
             );
-        }
+            runtime.clone()
+        };
+        state
+            .wal
+            .append_snapshot_commit(runtime_after_reconcile.to_wal_state())
+            .expect("restarted inventory cause should remain persistable");
+        let recommitted_raw =
+            std::fs::read_to_string(&wal_path).expect("recommitted WAL should be readable");
+        assert!(
+            recommitted_raw
+                .lines()
+                .last()
+                .is_some_and(|line| line.contains(r#""recovery_cause":"inventory_unavailable""#)),
+            "runtime round-trip must persist the inventory cause again"
+        );
+        let replay_after_recommit = state.wal.replay();
+        assert_eq!(replay_after_recommit.status, "inventory_unavailable");
+        assert_eq!(replay_after_recommit.state.accepted_generation, 91);
+        assert_eq!(replay_after_recommit.state.applied_generation, 90);
+        assert_eq!(replay_after_recommit.state.pending_generation, Some(91));
 
         let recovered = recover_pending_snapshot(
             state.clone(),
@@ -6515,6 +6546,7 @@ mod tests {
             "recovered_pending_full_resync_required"
         );
         let recovered_replay = state.wal.replay();
+        assert_eq!(recovered_replay.status, "replayed");
         assert_eq!(recovered_replay.state.applied_generation, 90);
         assert_eq!(recovered_replay.state.pending_generation, None);
         assert_eq!(
@@ -6523,6 +6555,27 @@ mod tests {
         );
         assert_eq!(recovered_replay.state.ports, previous.ports);
         assert_eq!(recovered_replay.state.port_statuses, previous.port_statuses);
+        let recovered_raw =
+            std::fs::read_to_string(&wal_path).expect("recovered WAL should be readable");
+        let last_entry: serde_json::Value = serde_json::from_str(
+            recovered_raw
+                .lines()
+                .last()
+                .expect("recovery must append a final commit"),
+        )
+        .expect("final WAL entry should be valid JSON");
+        assert_eq!(
+            last_entry.get("type").and_then(serde_json::Value::as_str),
+            Some("snapshot_commit")
+        );
+        let recovered_state = last_entry
+            .get("state")
+            .and_then(serde_json::Value::as_object)
+            .expect("final snapshot commit should carry state");
+        assert!(
+            !recovered_state.contains_key("recovery_cause"),
+            "successful recovery must omit the cleared inventory cause"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -6573,6 +6626,50 @@ mod tests {
         assert_eq!(restarted.pending_generation, Some(101));
         assert_eq!(restarted.ports, previous.ports);
         assert_eq!(restarted.port_statuses, previous.port_statuses);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_authoritative_success_clears_inventory_recovery_cause() {
+        let root = temp_root("inventory-cause-cleared-by-success");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(110);
+        let outage = inventory_snapshot(111, Vec::new());
+        let outage_transaction = build_snapshot_apply_transaction(
+            &previous.ports,
+            &outage,
+            &unavailable_inventory("connection reset"),
+            ApplyScope::FullHost,
+        )
+        .expect("inventory outage should remain a valid transaction");
+        let outage_outcome = apply_snapshot_runtime_transaction(
+            &state,
+            outage.generation,
+            outage.desired_hash.clone(),
+            previous.ports.clone(),
+            previous.clone(),
+            outage_transaction,
+        )
+        .await;
+
+        let successful = build_snapshot_commit_runtime(
+            &outage_outcome.next_runtime,
+            112,
+            Some("hash-112".to_string()),
+            previous.ports.clone(),
+            previous.port_statuses.clone(),
+            false,
+        );
+        assert_eq!(successful.accepted_generation, 112);
+        assert_eq!(successful.applied_generation, 112);
+        assert_eq!(successful.pending_generation, None);
+        assert_eq!(successful.authority_state, "ready");
+        let serialized = serde_json::to_string(&successful.to_wal_state())
+            .expect("successful runtime state should serialize");
+        assert!(
+            !serialized.contains(r#""recovery_cause""#),
+            "a later authoritative success must omit the cleared inventory cause"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
