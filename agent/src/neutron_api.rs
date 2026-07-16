@@ -1187,7 +1187,16 @@ async fn recover_pending_snapshot(
         *runtime = refreshed;
         return Ok(response);
     }
-    let next_runtime = recover_pending_runtime(&runtime, &request)?;
+    let next_runtime = if runtime.applied_generation == 0 {
+        let replay_runtime = NeutronRuntimeState::from_wal_state(
+            replay.state,
+            replay.status,
+            replay.failures,
+        );
+        recover_pending_runtime(&replay_runtime, &request)?
+    } else {
+        recover_pending_runtime(&runtime, &request)?
+    };
     if let Err(e) = state
         .wal
         .append_snapshot_commit(next_runtime.to_wal_state())
@@ -1537,11 +1546,16 @@ async fn accept_neutron_snapshot_submit(
         scope.clone(),
     )
     .map_err(snapshot_scope_apply_error)?;
+    let recovery_port_ids = if transaction.plan.inventory_error.is_some() {
+        Vec::new()
+    } else {
+        transaction.requested_port_ids.clone()
+    };
     let intent = PendingNeutronIntent {
         kind: "snapshot".to_string(),
         generation: snapshot.generation,
         desired_hash: requested_hash.clone(),
-        port_ids: transaction.requested_port_ids.clone(),
+        port_ids: recovery_port_ids,
         affected_domains: transaction.affected_domains.clone(),
         affected_ports: transaction.affected_ports.clone(),
     };
@@ -7592,6 +7606,64 @@ mod tests {
             "recovered_pending_full_resync_required"
         );
         assert_eq!(recovered.wal_status, "pending_recovered_to_last_applied");
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_inventory_unavailable_clean_wal_allows_live_cold_start_recovery() {
+        let root = temp_root("inventory-unavailable-live-clean-wal");
+        let state = test_neutron_state(&root);
+        let snapshot = inventory_snapshot(1, Vec::new());
+        let transaction = build_snapshot_apply_transaction(
+            &BTreeMap::new(),
+            &snapshot,
+            &unavailable_inventory("connection refused"),
+            ApplyScope::FullHost,
+        )
+        .expect("inventory outage should produce a blocked transaction");
+        let outcome = apply_snapshot_runtime_transaction(
+            &state,
+            snapshot.generation,
+            snapshot.desired_hash.clone(),
+            BTreeMap::new(),
+            NeutronRuntimeState::default(),
+            transaction,
+        )
+        .await;
+        state
+            .wal
+            .append_snapshot_commit(outcome.next_runtime.to_wal_state())
+            .expect("inventory-blocked state should be durable");
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = outcome.next_runtime;
+        }
+
+        let recovered = recover_pending_snapshot(
+            state.clone(),
+            NeutronRecoverPendingRequest {
+                expected_pending_generation: 1,
+                expected_desired_hash: Some("hash-1".to_string()),
+                mode: None,
+            },
+        )
+        .await
+        .expect("a clean durable inventory cause should authorize empty-baseline recovery");
+
+        assert_eq!(recovered.status, "recovered");
+        assert_eq!(recovered.applied_generation, 0);
+        assert_eq!(recovered.desired_hash, None);
+        assert_eq!(recovered.applied_desired_hash, None);
+        assert_eq!(
+            recovered.authority_state,
+            "recovered_pending_full_resync_required"
+        );
+        assert_eq!(recovered.wal_status, "pending_recovered_to_last_applied");
+        let replay = state.wal.replay();
+        assert_eq!(replay.status, "replayed");
+        assert_eq!(replay.failures, 0);
+        assert_eq!(replay.state.pending_generation, None);
+        assert_eq!(replay.state.recovery_cause, None);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
