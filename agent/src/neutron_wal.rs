@@ -347,6 +347,16 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[derive(Serialize)]
+    struct TestSnapshotIntentHashPayload<'a> {
+        generation: u64,
+        desired_hash: &'a Option<String>,
+        port_ids: &'a [String],
+        affected_domains: &'a [String],
+        affected_ports: &'a [ManagedNeutronPort],
+        recovery_cause: &'a str,
+    }
+
     fn temp_state_path() -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -376,6 +386,67 @@ mod tests {
             managed_domains: vec!["acl".to_string()],
             domains: Vec::new(),
         }
+    }
+
+    fn test_snapshot_intent_hash(
+        generation: u64,
+        desired_hash: &Option<String>,
+        port_ids: &[String],
+        affected_domains: &[String],
+        affected_ports: &[ManagedNeutronPort],
+        recovery_cause: &str,
+    ) -> String {
+        let payload = TestSnapshotIntentHashPayload {
+            generation,
+            desired_hash,
+            port_ids,
+            affected_domains,
+            affected_ports,
+            recovery_cause,
+        };
+        let bytes = serde_json::to_vec(&payload).expect("intent hash payload should serialize");
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{:02x}", byte))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn hashed_snapshot_intent(
+        generation: u64,
+        desired_hash: Option<String>,
+        port_ids: Vec<String>,
+        affected_domains: Vec<String>,
+        affected_ports: Vec<ManagedNeutronPort>,
+        recovery_cause: &str,
+    ) -> serde_json::Value {
+        let intent_hash = test_snapshot_intent_hash(
+            generation,
+            &desired_hash,
+            &port_ids,
+            &affected_domains,
+            &affected_ports,
+            recovery_cause,
+        );
+        serde_json::json!({
+            "type": "snapshot_intent",
+            "generation": generation,
+            "desired_hash": desired_hash,
+            "port_ids": port_ids,
+            "affected_domains": affected_domains,
+            "affected_ports": affected_ports,
+            "recovery_cause": recovery_cause,
+            "intent_hash": intent_hash,
+        })
+    }
+
+    fn write_wal_value(root: &Path, value: &serde_json::Value) {
+        fs::create_dir_all(root).expect("WAL root should be creatable");
+        let raw = format!(
+            "{}\n",
+            serde_json::to_string(value).expect("WAL value should serialize")
+        );
+        fs::write(root.join(WAL_FILE), raw).expect("WAL fixture should be writable");
     }
 
     fn hashless_snapshot_commit(generation: u64) -> serde_json::Value {
@@ -456,6 +527,252 @@ mod tests {
         );
         assert_eq!(vec![managed("p1", "tap-p1")], intent.affected_ports);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_hashless_snapshot_intent_without_recovery_cause_replays() {
+        let root = temp_state_path();
+        let legacy = serde_json::json!({
+            "type": "snapshot_intent",
+            "generation": 9,
+            "desired_hash": "hash-9",
+            "port_ids": ["p1"],
+            "affected_domains": ["acl"],
+            "affected_ports": [managed("p1", "tap-p1")],
+        });
+        let legacy_raw = serde_json::to_string(&legacy).unwrap();
+        assert!(!legacy_raw.contains(r#""recovery_cause""#));
+        assert!(!legacy_raw.contains(r#""intent_hash""#));
+        write_wal_value(&root, &legacy);
+
+        let replay = NeutronWal::new(&root).replay();
+
+        assert_eq!("intent_without_commit", replay.status);
+        assert_eq!(0, replay.failures);
+        let intent = replay
+            .pending_intent
+            .expect("legacy snapshot intent should remain replayable");
+        assert_eq!(9, intent.generation);
+        assert_eq!(vec!["p1".to_string()], intent.port_ids);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn normal_snapshot_intent_omits_recovery_fields_and_replays() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        wal.append_snapshot_intent(
+            10,
+            Some("hash-10".to_string()),
+            vec!["p1".to_string()],
+            vec!["acl".to_string()],
+            vec![managed("p1", "tap-p1")],
+        )
+        .unwrap();
+
+        let raw = fs::read_to_string(root.join(WAL_FILE)).unwrap();
+        let written: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        assert!(written.get("recovery_cause").is_none());
+        assert!(written.get("intent_hash").is_none());
+
+        let replay = wal.replay();
+        assert_eq!("intent_without_commit", replay.status);
+        assert_eq!(0, replay.failures);
+        assert_eq!(
+            Some(10),
+            replay
+                .pending_intent
+                .as_ref()
+                .map(|intent| intent.generation)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_rejects_hashed_inventory_intent_with_tampered_recovery_cause() {
+        let valid = hashed_snapshot_intent(
+            70,
+            Some("hash-70".to_string()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            "inventory_unavailable",
+        );
+        let valid_root = temp_state_path();
+        write_wal_value(&valid_root, &valid);
+        let valid_replay = NeutronWal::new(&valid_root).replay();
+        assert_eq!("intent_without_commit", valid_replay.status);
+        assert_eq!(0, valid_replay.failures);
+        let _ = fs::remove_dir_all(valid_root);
+
+        let mut tampered = valid;
+        tampered["recovery_cause"] = serde_json::Value::String("inventory_timeout".to_string());
+        let root = temp_state_path();
+        write_wal_value(&root, &tampered);
+
+        let replay = NeutronWal::new(&root).replay();
+
+        assert_eq!("replayed_with_errors", replay.status);
+        assert_eq!(1, replay.failures);
+        assert!(replay.pending_intent.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_rejects_hashed_inventory_intent_when_authority_field_changes() {
+        let valid = hashed_snapshot_intent(
+            71,
+            Some("hash-71".to_string()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            "inventory_unavailable",
+        );
+        let valid_root = temp_state_path();
+        write_wal_value(&valid_root, &valid);
+        let valid_replay = NeutronWal::new(&valid_root).replay();
+        assert_eq!("intent_without_commit", valid_replay.status);
+        assert_eq!(0, valid_replay.failures);
+        let _ = fs::remove_dir_all(valid_root);
+
+        let mut changed_generation = valid.clone();
+        changed_generation["generation"] = serde_json::json!(72);
+        let mut changed_desired_hash = valid.clone();
+        changed_desired_hash["desired_hash"] = serde_json::json!("hash-tampered");
+        let mut changed_port_ids = valid.clone();
+        changed_port_ids["port_ids"] = serde_json::json!(["p1"]);
+        let mut changed_domains = valid.clone();
+        changed_domains["affected_domains"] = serde_json::json!(["acl", "qos"]);
+        let mut changed_ports = valid;
+        changed_ports["affected_ports"] = serde_json::json!([managed("p1", "tap-p1")]);
+
+        for (case, tampered) in [
+            ("generation", changed_generation),
+            ("desired_hash", changed_desired_hash),
+            ("port_ids", changed_port_ids),
+            ("affected_domains", changed_domains),
+            ("affected_ports", changed_ports),
+        ] {
+            let root = temp_state_path();
+            write_wal_value(&root, &tampered);
+            let replay = NeutronWal::new(&root).replay();
+
+            assert_eq!("replayed_with_errors", replay.status, "{}", case);
+            assert_eq!(1, replay.failures, "{}", case);
+            assert!(replay.pending_intent.is_none(), "{}", case);
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn replay_rejects_recovery_cause_injected_into_legacy_snapshot_intent() {
+        let root = temp_state_path();
+        let mut legacy = serde_json::json!({
+            "type": "snapshot_intent",
+            "generation": 73,
+            "desired_hash": "hash-73",
+            "port_ids": [],
+            "affected_domains": ["acl"],
+            "affected_ports": [],
+        });
+        write_wal_value(&root, &legacy);
+        let legacy_replay = NeutronWal::new(&root).replay();
+        assert_eq!("intent_without_commit", legacy_replay.status);
+        assert_eq!(0, legacy_replay.failures);
+
+        legacy["recovery_cause"] = serde_json::Value::String("inventory_unavailable".to_string());
+        assert!(legacy.get("intent_hash").is_none());
+        write_wal_value(&root, &legacy);
+
+        let replay = NeutronWal::new(&root).replay();
+
+        assert_eq!("replayed_with_errors", replay.status);
+        assert_eq!(1, replay.failures);
+        assert!(replay.pending_intent.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_rejects_self_consistent_unknown_snapshot_intent_cause() {
+        let root = temp_state_path();
+        let unknown = hashed_snapshot_intent(
+            74,
+            Some("hash-74".to_string()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            "operator_override",
+        );
+        let hash = unknown
+            .get("intent_hash")
+            .and_then(serde_json::Value::as_str)
+            .expect("unknown cause fixture should still carry a computed hash");
+        assert!(!hash.is_empty());
+        write_wal_value(&root, &unknown);
+
+        let replay = NeutronWal::new(&root).replay();
+
+        assert_eq!("replayed_with_errors", replay.status);
+        assert_eq!(1, replay.failures);
+        assert!(replay.pending_intent.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_rejects_intent_hash_without_recovery_cause() {
+        let root = temp_state_path();
+        let hash_only = serde_json::json!({
+            "type": "snapshot_intent",
+            "generation": 75,
+            "desired_hash": "hash-75",
+            "port_ids": [],
+            "affected_domains": ["acl"],
+            "affected_ports": [],
+            "intent_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        });
+        assert!(hash_only.get("recovery_cause").is_none());
+        write_wal_value(&root, &hash_only);
+
+        let replay = NeutronWal::new(&root).replay();
+
+        assert_eq!("replayed_with_errors", replay.status);
+        assert_eq!(1, replay.failures);
+        assert!(replay.pending_intent.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replay_rejects_hashed_inventory_intent_with_nonempty_recovery_scope() {
+        let nonempty_port_ids = hashed_snapshot_intent(
+            76,
+            Some("hash-76".to_string()),
+            vec!["p1".to_string()],
+            Vec::new(),
+            Vec::new(),
+            "inventory_unavailable",
+        );
+        let nonempty_affected_ports = hashed_snapshot_intent(
+            77,
+            Some("hash-77".to_string()),
+            Vec::new(),
+            Vec::new(),
+            vec![managed("p1", "tap-p1")],
+            "inventory_unavailable",
+        );
+
+        for (case, invalid) in [
+            ("port_ids", nonempty_port_ids),
+            ("affected_ports", nonempty_affected_ports),
+        ] {
+            let root = temp_state_path();
+            write_wal_value(&root, &invalid);
+            let replay = NeutronWal::new(&root).replay();
+
+            assert_eq!("replayed_with_errors", replay.status, "{}", case);
+            assert_eq!(1, replay.failures, "{}", case);
+            assert!(replay.pending_intent.is_none(), "{}", case);
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
