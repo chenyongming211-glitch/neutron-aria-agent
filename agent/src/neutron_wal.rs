@@ -701,4 +701,143 @@ mod tests {
         );
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn replay_rejects_tampered_inventory_recovery_cause_without_new_status_hash() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        wal.append_snapshot_commit(NeutronWalState {
+            accepted_generation: 60,
+            applied_generation: 60,
+            authority_state: "ready".to_string(),
+            ..NeutronWalState::default()
+        })
+        .unwrap();
+        let path = root.join(WAL_FILE);
+        let raw = fs::read_to_string(&path).unwrap();
+        let tampered = raw.replacen(
+            r#""authority_state":"ready""#,
+            r#""authority_state":"ready","recovery_cause":"inventory_unavailable""#,
+            1,
+        );
+        assert_ne!(raw, tampered);
+        fs::write(&path, tampered).unwrap();
+
+        let replay = wal.replay();
+
+        assert_eq!("replayed_with_errors", replay.status);
+        assert_eq!(1, replay.failures);
+        assert_eq!(0, replay.state.applied_generation);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hashless_legacy_commit_accepts_no_cause_and_rejects_injected_recovery_cause() {
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join(WAL_FILE);
+        let legacy = serde_json::json!({
+            "type": "snapshot_commit",
+            "state": {
+                "accepted_generation": 62,
+                "applied_generation": 62,
+                "authority_state": "ready",
+                "ports": {},
+                "port_statuses": {}
+            }
+        });
+        let legacy_raw = format!("{}\n", serde_json::to_string(&legacy).unwrap());
+        assert!(!legacy_raw.contains(r#""recovery_cause""#));
+        assert!(!legacy_raw.contains(r#""status_hash""#));
+        fs::write(&path, legacy_raw).unwrap();
+
+        let legacy_replay = wal.replay();
+        assert_eq!("replayed", legacy_replay.status);
+        assert_eq!(0, legacy_replay.failures);
+        assert_eq!(62, legacy_replay.state.applied_generation);
+
+        let mut injected = legacy;
+        injected["state"]["recovery_cause"] =
+            serde_json::Value::String("inventory_unavailable".to_string());
+        let injected_raw = format!("{}\n", serde_json::to_string(&injected).unwrap());
+        assert!(injected_raw.contains(r#""recovery_cause":"inventory_unavailable""#));
+        assert!(!injected_raw.contains(r#""status_hash""#));
+        fs::write(&path, injected_raw).unwrap();
+
+        let injected_replay = wal.replay();
+        assert_eq!("replayed_with_errors", injected_replay.status);
+        assert_eq!(1, injected_replay.failures);
+        assert_eq!(0, injected_replay.state.applied_generation);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_snapshot_commit_without_recovery_cause_omits_field_and_replays() {
+        #[derive(serde::Serialize)]
+        struct LegacyStatusHashPayload<'a> {
+            accepted_generation: u64,
+            applied_generation: u64,
+            pending_generation: Option<u64>,
+            desired_hash: &'a Option<String>,
+            applied_desired_hash: &'a Option<String>,
+            authority_state: &'a str,
+            ports: &'a BTreeMap<String, ManagedNeutronPort>,
+            port_statuses: &'a BTreeMap<String, NeutronPortStatus>,
+        }
+
+        let root = temp_state_path();
+        let wal = NeutronWal::new(&root);
+        let mut ports = BTreeMap::new();
+        ports.insert("p1".to_string(), managed("p1", "tap-p1"));
+        let mut port_statuses = BTreeMap::new();
+        port_statuses.insert("p1".to_string(), port_status("p1", "tap-p1", 61));
+        let state = NeutronWalState {
+            accepted_generation: 61,
+            applied_generation: 61,
+            desired_hash: Some("hash-61".to_string()),
+            applied_desired_hash: Some("hash-61".to_string()),
+            authority_state: "ready".to_string(),
+            ports,
+            port_statuses,
+            ..NeutronWalState::default()
+        };
+        let legacy_payload = LegacyStatusHashPayload {
+            accepted_generation: state.accepted_generation,
+            applied_generation: state.applied_generation,
+            pending_generation: state.pending_generation,
+            desired_hash: &state.desired_hash,
+            applied_desired_hash: &state.applied_desired_hash,
+            authority_state: &state.authority_state,
+            ports: &state.ports,
+            port_statuses: &state.port_statuses,
+        };
+        let bytes = serde_json::to_vec(&legacy_payload).unwrap();
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(bytes);
+        let legacy_hash = digest
+            .iter()
+            .map(|byte| format!("{:02x}", byte))
+            .collect::<Vec<_>>()
+            .join("");
+        wal.append_snapshot_commit(state).unwrap();
+
+        let raw = fs::read_to_string(root.join(WAL_FILE)).unwrap();
+        assert!(!raw.contains(r#""recovery_cause""#));
+        let entry: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(
+            entry["state"]["status_hash"].as_str(),
+            Some(legacy_hash.as_str())
+        );
+        let replay = wal.replay();
+        assert_eq!("replayed", replay.status);
+        assert_eq!(0, replay.failures);
+        assert_eq!(61, replay.state.applied_generation);
+        assert_eq!(
+            Some("hash-61"),
+            replay.state.applied_desired_hash.as_deref()
+        );
+        assert_eq!(1, replay.state.ports.len());
+        assert_eq!(1, replay.state.port_statuses.len());
+        let _ = fs::remove_dir_all(root);
+    }
 }

@@ -5262,6 +5262,53 @@ mod tests {
         }
     }
 
+    fn unavailable_inventory(details: &str) -> LocalInterfaceInventory {
+        LocalInterfaceInventory {
+            ovs_bridge: "br-int".to_string(),
+            ovs_error: Some(details.to_string()),
+            by_iface_id: BTreeMap::new(),
+            by_name: BTreeMap::new(),
+        }
+    }
+
+    fn committed_runtime(generation: u64) -> NeutronRuntimeState {
+        let port = ManagedNeutronPort {
+            managed_domains: vec!["acl".to_string()],
+            ..managed("committed-port", "tap-committed")
+        };
+        let mut ports = BTreeMap::new();
+        ports.insert(port.port_id.clone(), port);
+        let mut port_statuses = BTreeMap::new();
+        port_statuses.insert(
+            "committed-port".to_string(),
+            ready_status("committed-port", "tap-committed", generation),
+        );
+        NeutronRuntimeState {
+            accepted_generation: generation,
+            applied_generation: generation,
+            desired_hash: Some(format!("hash-{}", generation)),
+            applied_desired_hash: Some(format!("hash-{}", generation)),
+            authority_state: "ready".to_string(),
+            ports,
+            port_statuses,
+            wal_status: "commit_written".to_string(),
+            ..NeutronRuntimeState::default()
+        }
+    }
+
+    fn inventory_snapshot(
+        generation: u64,
+        ports: Vec<NeutronPortSnapshot>,
+    ) -> NeutronSnapshotRequest {
+        NeutronSnapshotRequest {
+            schema_version: None,
+            generation,
+            desired_hash: Some(format!("hash-{}", generation)),
+            host: None,
+            ports,
+        }
+    }
+
     async fn response_json_value(
         response: axum::response::Response,
     ) -> (StatusCode, serde_json::Value) {
@@ -6157,6 +6204,378 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn neutron_snapshot_transaction_ovsdb_unavailable_preserves_committed_runtime() {
+        let root = temp_root("inventory-unavailable-transaction");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(80);
+        let current_ports = previous.ports.clone();
+        let snapshot = inventory_snapshot(
+            81,
+            vec![NeutronPortSnapshot {
+                managed_domains: vec!["acl".to_string()],
+                ..port("committed-port", "tap-committed", true)
+            }],
+        );
+        let local = unavailable_inventory("permission denied");
+        let transaction = build_snapshot_apply_transaction(
+            &current_ports,
+            &snapshot,
+            &local,
+            ApplyScope::FullHost,
+        )
+        .expect("inventory failure remains a valid transaction plan");
+
+        let outcome = apply_snapshot_runtime_transaction(
+            &state,
+            snapshot.generation,
+            snapshot.desired_hash.clone(),
+            current_ports,
+            previous.clone(),
+            transaction,
+        )
+        .await;
+
+        assert!(
+            outcome.has_error,
+            "inventory loss must fail the transaction"
+        );
+        assert_eq!(outcome.previous_applied_generation, 80);
+        assert!(outcome.results.iter().any(|result| {
+            result.port_id == "snapshot"
+                && result.ifname.is_empty()
+                && result.action == "ignore"
+                && result.status == "error"
+                && result.reason.as_deref() == Some("ovsdb_unavailable:permission denied")
+        }));
+        assert!(outcome.results.iter().any(|result| {
+            result.port_id == "committed-port"
+                && result.status == "ignored"
+                && result.reason.as_deref() == Some("ovsdb_unavailable:permission denied")
+        }));
+        assert_eq!(outcome.next_runtime.accepted_generation, 81);
+        assert_eq!(
+            outcome.next_runtime.desired_hash.as_deref(),
+            Some("hash-81")
+        );
+        assert_eq!(outcome.next_runtime.pending_generation, Some(81));
+        assert_eq!(
+            outcome.next_runtime.authority_state,
+            "blocked_recovery_required"
+        );
+        assert_eq!(outcome.next_runtime.wal_status, "inventory_unavailable");
+        assert_eq!(outcome.next_runtime.applied_generation, 80);
+        assert_eq!(
+            outcome.next_runtime.applied_desired_hash,
+            previous.applied_desired_hash
+        );
+        assert_eq!(outcome.next_runtime.ports, previous.ports);
+        assert_eq!(outcome.next_runtime.port_statuses, previous.port_statuses);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_transaction_empty_snapshot_ovsdb_unavailable_preserves_committed_runtime(
+    ) {
+        let root = temp_root("inventory-unavailable-empty-transaction");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(82);
+        let current_ports = previous.ports.clone();
+        let snapshot = inventory_snapshot(83, Vec::new());
+        let local = unavailable_inventory("database offline");
+        let transaction = build_snapshot_apply_transaction(
+            &current_ports,
+            &snapshot,
+            &local,
+            ApplyScope::FullHost,
+        )
+        .expect("empty snapshot still carries transaction-level inventory authority");
+
+        let outcome = apply_snapshot_runtime_transaction(
+            &state,
+            snapshot.generation,
+            snapshot.desired_hash.clone(),
+            current_ports,
+            previous.clone(),
+            transaction,
+        )
+        .await;
+
+        assert!(
+            outcome.has_error,
+            "empty bodies must not hide inventory loss"
+        );
+        assert_eq!(outcome.results.len(), 1);
+        assert_eq!(outcome.results[0].port_id, "snapshot");
+        assert_eq!(outcome.results[0].status, "error");
+        assert_eq!(
+            outcome.results[0].reason.as_deref(),
+            Some("ovsdb_unavailable:database offline")
+        );
+        assert_eq!(outcome.next_runtime.accepted_generation, 83);
+        assert_eq!(
+            outcome.next_runtime.desired_hash.as_deref(),
+            Some("hash-83")
+        );
+        assert_eq!(outcome.next_runtime.pending_generation, Some(83));
+        assert_eq!(
+            outcome.next_runtime.authority_state,
+            "blocked_recovery_required"
+        );
+        assert_eq!(outcome.next_runtime.wal_status, "inventory_unavailable");
+        assert_eq!(outcome.next_runtime.applied_generation, 82);
+        assert_eq!(
+            outcome.next_runtime.applied_desired_hash,
+            previous.applied_desired_hash
+        );
+        assert_eq!(outcome.next_runtime.ports, previous.ports);
+        assert_eq!(outcome.next_runtime.port_statuses, previous.port_statuses);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_transaction_authoritative_ignored_ports_commit() {
+        let root = temp_root("authoritative-ignored-ports");
+        let state = test_neutron_state(&root);
+        let mut dhcp = port("dhcp-port", "tap-dhcp", true);
+        dhcp.device_owner = Some("network:dhcp".to_string());
+        let mut direct = port("direct-port", "tap-direct", true);
+        direct.device_owner = Some("compute:nova".to_string());
+        direct.vif_type = Some("ovs".to_string());
+        direct.vnic_type = Some("direct".to_string());
+        let mut router = port("router-port", "tap-router", true);
+        router.device_owner = Some("network:router_interface".to_string());
+        let snapshot = inventory_snapshot(84, vec![dhcp, direct, router]);
+        let local = inventory(Vec::new());
+        let transaction = build_snapshot_apply_transaction(
+            &BTreeMap::new(),
+            &snapshot,
+            &local,
+            ApplyScope::FullHost,
+        )
+        .expect("authoritative ignored ports remain a valid transaction");
+
+        let outcome = apply_snapshot_runtime_transaction(
+            &state,
+            snapshot.generation,
+            snapshot.desired_hash.clone(),
+            BTreeMap::new(),
+            NeutronRuntimeState::default(),
+            transaction,
+        )
+        .await;
+
+        assert!(!outcome.has_error);
+        assert_eq!(outcome.results.len(), 3);
+        assert!(outcome
+            .results
+            .iter()
+            .all(|result| result.action == "ignore" && result.status == "ignored"));
+        assert!(outcome.results.iter().any(|result| {
+            result.port_id == "dhcp-port"
+                && result.reason.as_deref() == Some("not_applicable_device_owner:network:dhcp")
+        }));
+        assert!(outcome.results.iter().any(|result| {
+            result.port_id == "direct-port"
+                && result.reason.as_deref() == Some("unsupported_vnic_type:direct")
+        }));
+        assert!(outcome.results.iter().any(|result| {
+            result.port_id == "router-port"
+                && result.reason.as_deref()
+                    == Some("not_applicable_device_owner:network:router_interface")
+        }));
+        assert_eq!(outcome.next_runtime.accepted_generation, 84);
+        assert_eq!(outcome.next_runtime.applied_generation, 84);
+        assert_eq!(outcome.next_runtime.pending_generation, None);
+        assert_eq!(outcome.next_runtime.authority_state, "ready");
+        assert!(outcome.next_runtime.ports.is_empty());
+        assert!(outcome.next_runtime.port_statuses.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_ovsdb_unavailable_wal_commit_and_recovery_preserve_last_applied() {
+        let root = temp_root("inventory-unavailable-wal-recovery");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(90);
+        state
+            .wal
+            .append_snapshot_commit(previous.to_wal_state())
+            .expect("baseline commit should be durable");
+        let snapshot = inventory_snapshot(
+            91,
+            vec![NeutronPortSnapshot {
+                managed_domains: vec!["acl".to_string()],
+                ..port("committed-port", "tap-committed", true)
+            }],
+        );
+        let local = unavailable_inventory("connection refused");
+        let transaction = build_snapshot_apply_transaction(
+            &previous.ports,
+            &snapshot,
+            &local,
+            ApplyScope::FullHost,
+        )
+        .expect("inventory failure should produce a durable transaction");
+        state
+            .wal
+            .append_snapshot_intent(
+                snapshot.generation,
+                snapshot.desired_hash.clone(),
+                transaction.requested_port_ids.clone(),
+                transaction.affected_domains.clone(),
+                transaction.affected_ports.clone(),
+            )
+            .expect("inventory-failed snapshot intent should be durable");
+
+        let outcome = apply_snapshot_runtime_transaction(
+            &state,
+            snapshot.generation,
+            snapshot.desired_hash.clone(),
+            previous.ports.clone(),
+            previous.clone(),
+            transaction,
+        )
+        .await;
+        state
+            .wal
+            .append_snapshot_commit(outcome.next_runtime.to_wal_state())
+            .expect("blocked inventory state should be durable");
+
+        let replay = state.wal.replay();
+        assert_eq!(replay.status, "inventory_unavailable");
+        assert_eq!(replay.failures, 0);
+        assert_eq!(replay.state.accepted_generation, 91);
+        assert_eq!(replay.state.applied_generation, 90);
+        assert_eq!(replay.state.pending_generation, Some(91));
+        assert_eq!(replay.state.desired_hash.as_deref(), Some("hash-91"));
+        assert_eq!(
+            replay.state.applied_desired_hash,
+            previous.applied_desired_hash
+        );
+        assert_eq!(replay.state.authority_state, "blocked_recovery_required");
+        assert_eq!(replay.state.ports, previous.ports);
+        assert_eq!(replay.state.port_statuses, previous.port_statuses);
+
+        let restarted = NeutronRuntimeState::from_wal_state(
+            replay.state.clone(),
+            replay.status.clone(),
+            replay.failures,
+        );
+        assert_eq!(restarted.wal_status, "inventory_unavailable");
+        let before_reconcile = restarted.clone();
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = restarted;
+        }
+        state.reconcile_committed_runtime().await;
+        {
+            let runtime = state.runtime.read().await;
+            assert_eq!(
+                runtime.accepted_generation,
+                before_reconcile.accepted_generation
+            );
+            assert_eq!(
+                runtime.applied_generation,
+                before_reconcile.applied_generation
+            );
+            assert_eq!(
+                runtime.pending_generation,
+                before_reconcile.pending_generation
+            );
+            assert_eq!(runtime.desired_hash, before_reconcile.desired_hash);
+            assert_eq!(
+                runtime.applied_desired_hash,
+                before_reconcile.applied_desired_hash
+            );
+            assert_eq!(runtime.authority_state, before_reconcile.authority_state);
+            assert_eq!(runtime.wal_status, before_reconcile.wal_status);
+            assert_eq!(runtime.ports, before_reconcile.ports);
+            assert_eq!(runtime.port_statuses, before_reconcile.port_statuses);
+            assert_eq!(
+                runtime.wal_replay_failures,
+                before_reconcile.wal_replay_failures
+            );
+        }
+
+        let recovered = recover_pending_snapshot(
+            state.clone(),
+            NeutronRecoverPendingRequest {
+                expected_pending_generation: 91,
+                expected_desired_hash: Some("hash-91".to_string()),
+                mode: None,
+            },
+        )
+        .await
+        .expect("inventory-only pending state should roll back to the last applied snapshot");
+        assert_eq!(recovered.applied_generation, 90);
+        assert_eq!(recovered.desired_hash.as_deref(), Some("hash-90"));
+        assert_eq!(
+            recovered.authority_state,
+            "recovered_pending_full_resync_required"
+        );
+        let recovered_replay = state.wal.replay();
+        assert_eq!(recovered_replay.state.applied_generation, 90);
+        assert_eq!(recovered_replay.state.pending_generation, None);
+        assert_eq!(
+            recovered_replay.state.desired_hash.as_deref(),
+            Some("hash-90")
+        );
+        assert_eq!(recovered_replay.state.ports, previous.ports);
+        assert_eq!(recovered_replay.state.port_statuses, previous.port_statuses);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_inventory_unavailable_wal_round_trip_rehydrates_status() {
+        let root = temp_root("inventory-unavailable-wal-round-trip");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(100);
+        let snapshot = inventory_snapshot(101, Vec::new());
+        let local = unavailable_inventory("transaction timed out");
+        let transaction = build_snapshot_apply_transaction(
+            &previous.ports,
+            &snapshot,
+            &local,
+            ApplyScope::FullHost,
+        )
+        .expect("empty outage snapshot should retain transaction authority");
+        let outcome = apply_snapshot_runtime_transaction(
+            &state,
+            snapshot.generation,
+            snapshot.desired_hash.clone(),
+            previous.ports.clone(),
+            previous.clone(),
+            transaction,
+        )
+        .await;
+        state
+            .wal
+            .append_snapshot_commit(outcome.next_runtime.to_wal_state())
+            .expect("inventory recovery cause should commit through the runtime API");
+
+        let raw =
+            std::fs::read_to_string(state.registry.base_state_path.join("neutron-snapshot.wal"))
+                .expect("WAL text should be readable");
+        assert!(
+            raw.contains(r#""recovery_cause":"inventory_unavailable""#),
+            "typed recovery cause must be explicit in the WAL JSON"
+        );
+        let replay = state.wal.replay();
+        assert_eq!(replay.status, "inventory_unavailable");
+        assert_eq!(replay.failures, 0);
+        assert_eq!(replay.state.applied_generation, 100);
+        assert_eq!(replay.state.pending_generation, Some(101));
+        let restarted =
+            NeutronRuntimeState::from_wal_state(replay.state, replay.status, replay.failures);
+        assert_eq!(restarted.wal_status, "inventory_unavailable");
+        assert_eq!(restarted.applied_generation, 100);
+        assert_eq!(restarted.pending_generation, Some(101));
+        assert_eq!(restarted.ports, previous.ports);
+        assert_eq!(restarted.port_statuses, previous.port_statuses);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn neutron_snapshot_preflight_scoped_rejects_mismatch_before_idempotency() {
         let snapshot = NeutronSnapshotRequest {
@@ -6288,6 +6707,33 @@ mod tests {
         assert!(full_host_response.is_none());
         assert_eq!(scoped_response.status, "noop");
         assert_eq!(scoped_response.applied_generation, 61);
+    }
+
+    #[test]
+    fn neutron_snapshot_same_generation_noop_rejects_ovsdb_unavailable() {
+        let previous = committed_runtime(62);
+        let snapshot = inventory_snapshot(
+            62,
+            vec![NeutronPortSnapshot {
+                managed_domains: vec!["acl".to_string()],
+                ..port("committed-port", "tap-committed", true)
+            }],
+        );
+        let local = unavailable_inventory("connection refused");
+
+        let response = snapshot_early_response_for_scope(
+            &ApplyScope::FullHost,
+            &previous,
+            &snapshot,
+            &local,
+            &snapshot.desired_hash,
+        )
+        .expect("inventory failure must enter the transaction path, not return an error");
+
+        assert!(
+            response.is_none(),
+            "non-authoritative inventory must not produce a same-generation noop"
+        );
     }
 
     #[test]
@@ -6893,6 +7339,101 @@ mod tests {
         let error = result.err().unwrap();
 
         assert_eq!(error.code, "pending_desired_hash_mismatch");
+    }
+
+    #[test]
+    fn neutron_snapshot_inventory_unavailable_cold_start_recovers_empty_baseline() {
+        let runtime = NeutronRuntimeState {
+            accepted_generation: 1,
+            applied_generation: 0,
+            pending_generation: Some(1),
+            desired_hash: Some("hash-1".to_string()),
+            applied_desired_hash: None,
+            authority_state: "blocked_recovery_required".to_string(),
+            ports: BTreeMap::new(),
+            port_statuses: BTreeMap::new(),
+            wal_status: "inventory_unavailable".to_string(),
+            ..NeutronRuntimeState::default()
+        };
+
+        let recovered = recover_pending_runtime(
+            &runtime,
+            &NeutronRecoverPendingRequest {
+                expected_pending_generation: 1,
+                expected_desired_hash: Some("hash-1".to_string()),
+                mode: None,
+            },
+        )
+        .expect("the exact inventory-only cold-start state can restore the empty baseline");
+
+        assert_eq!(recovered.accepted_generation, 0);
+        assert_eq!(recovered.applied_generation, 0);
+        assert_eq!(recovered.pending_generation, None);
+        assert_eq!(recovered.desired_hash, None);
+        assert_eq!(recovered.applied_desired_hash, None);
+        assert!(recovered.ports.is_empty());
+        assert!(recovered.port_statuses.is_empty());
+        assert_eq!(
+            recovered.authority_state,
+            "recovered_pending_full_resync_required"
+        );
+        assert_eq!(recovered.wal_status, "pending_recovered_to_last_applied");
+    }
+
+    #[test]
+    fn neutron_snapshot_generic_cold_start_partial_remains_unrecoverable() {
+        let exact_inventory_state = NeutronRuntimeState {
+            accepted_generation: 1,
+            applied_generation: 0,
+            pending_generation: Some(1),
+            desired_hash: Some("hash-1".to_string()),
+            applied_desired_hash: None,
+            authority_state: "blocked_recovery_required".to_string(),
+            ports: BTreeMap::new(),
+            port_statuses: BTreeMap::new(),
+            wal_status: "inventory_unavailable".to_string(),
+            ..NeutronRuntimeState::default()
+        };
+
+        let mut wrong_cause = exact_inventory_state.clone();
+        wrong_cause.wal_status = "commit_written".to_string();
+        let mut wrong_authority = exact_inventory_state.clone();
+        wrong_authority.authority_state = "partial".to_string();
+        let mut nonempty_applied_hash = exact_inventory_state.clone();
+        nonempty_applied_hash.applied_desired_hash = Some("unexpected-baseline".to_string());
+        let mut nonempty_ports = exact_inventory_state.clone();
+        nonempty_ports.ports.insert(
+            "unexpected-port".to_string(),
+            managed("unexpected-port", "tap-unexpected"),
+        );
+        let mut nonempty_statuses = exact_inventory_state;
+        nonempty_statuses.port_statuses.insert(
+            "unexpected-port".to_string(),
+            ready_status("unexpected-port", "tap-unexpected", 0),
+        );
+
+        for (case, runtime) in [
+            ("blocked with a generic WAL status", wrong_cause),
+            ("partial authority with inventory status", wrong_authority),
+            ("non-empty applied hash", nonempty_applied_hash),
+            ("non-empty committed ports", nonempty_ports),
+            ("non-empty committed statuses", nonempty_statuses),
+        ] {
+            let error = recover_pending_runtime(
+                &runtime,
+                &NeutronRecoverPendingRequest {
+                    expected_pending_generation: 1,
+                    expected_desired_hash: Some("hash-1".to_string()),
+                    mode: None,
+                },
+            )
+            .expect_err(case);
+
+            assert_eq!(error.code, "no_applied_snapshot_to_restore", "{}", case);
+            assert_eq!(error.status, StatusCode::CONFLICT, "{}", case);
+            assert_eq!(runtime.applied_generation, 0, "{}", case);
+            assert_eq!(runtime.pending_generation, Some(1), "{}", case);
+        }
     }
 
     #[test]
