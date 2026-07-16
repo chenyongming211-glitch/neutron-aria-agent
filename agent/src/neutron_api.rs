@@ -7311,7 +7311,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn neutron_snapshot_inventory_unavailable_admission_writes_hashed_cause_intent() {
+    async fn neutron_wal_inventory_unavailable_admission_writes_hashed_cause_intent() {
         let root = temp_root("inventory-unavailable-hashed-intent");
         let mut state = test_neutron_state(&root);
         state.ovs_bridge = "br-int-definitely-missing-txn029-hash".to_string();
@@ -7392,7 +7392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn neutron_snapshot_inventory_unavailable_restart_chain_preserves_intent_cause() {
+    async fn neutron_wal_inventory_unavailable_restart_chain_preserves_intent_cause() {
         let root = temp_root("inventory-unavailable-restart-chain");
         let initial = test_neutron_state(&root);
         let previous = committed_runtime(150);
@@ -7534,7 +7534,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn neutron_snapshot_inventory_unavailable_commit_failure_preserves_intent_cause() {
+    async fn neutron_wal_inventory_unavailable_commit_failure_preserves_intent_cause() {
         let root = temp_root("inventory-unavailable-commit-failure-cause");
         let mut state = test_neutron_state(&root);
         state.ovs_bridge = "br-int-definitely-missing-txn029-commit".to_string();
