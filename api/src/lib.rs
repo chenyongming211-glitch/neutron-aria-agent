@@ -40,6 +40,9 @@ pub const NEUTRON_UDS_PEER_AUTH_POLICY: &str = "filesystem_permissions_then_peer
 pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-3";
 pub const NEUTRON_ATTACH_AUTHORITY: &str = "neutron_snapshot";
 pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &["attach", "acl"];
+pub const NEUTRON_STATUS_SCHEMA_VERSION_MIN: u32 = 1;
+pub const NEUTRON_STATUS_SCHEMA_VERSION_MAX: u32 = 1;
+pub const NEUTRON_STATUS_CONTRACT_HASH: &str = "v0.9-neutron-status-1";
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[schema(example = json!({
@@ -311,6 +314,96 @@ pub struct NeutronPortStatus {
     pub domains: Vec<NeutronDomainStatus>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusTransactionState {
+    Idle,
+    Pending,
+    Classified,
+    Blocked,
+    Recovery,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusOverallReadiness {
+    Ready,
+    Degraded,
+    Blocked,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusRequiredAction {
+    None,
+    Poll,
+    RecoverPending,
+    FullResync,
+    Operator,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusRecoveryCause {
+    InventoryUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusDomainState {
+    Ready,
+    NotRequested,
+    Degraded,
+    Blocked,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusEffectiveAction {
+    Enforce,
+    Bypass,
+    Unchanged,
+    Cleanup,
+    NoOp,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusSupportDisposition {
+    Supported,
+    Unsupported,
+    Unknown,
+    NotApplicable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NeutronStatusDomainEvidence {
+    pub domain: String,
+    pub status: NeutronStatusDomainState,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub effective_action: Option<NeutronStatusEffectiveAction>,
+    pub support_disposition: NeutronStatusSupportDisposition,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NeutronStatusPortEvidence {
+    pub port_id: String,
+    pub ifname: String,
+    pub generation: u64,
+    #[serde(default)]
+    pub desired_hash: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub managed_domains: Vec<String>,
+    #[serde(default)]
+    pub domains: Vec<NeutronStatusDomainEvidence>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[schema(example = json!({
     "api_version": "v1",
@@ -336,6 +429,18 @@ pub struct NeutronCapabilitiesResponse {
     #[serde(default)]
     #[schema(example = 1)]
     pub schema_version_max: u32,
+    /// Minimum supported Status response schema version.
+    #[serde(default)]
+    #[schema(example = 1)]
+    pub status_schema_version_min: u32,
+    /// Maximum supported Status response schema version.
+    #[serde(default)]
+    #[schema(example = 1)]
+    pub status_schema_version_max: u32,
+    /// Stable hash/version for the independent Status response vocabulary.
+    #[serde(default)]
+    #[schema(example = "v0.9-neutron-status-1")]
+    pub status_contract_hash: String,
     /// Authority model for attach/detach operations.
     #[schema(example = "neutron_snapshot")]
     pub attach_authority: String,
@@ -383,6 +488,9 @@ impl NeutronCapabilitiesResponse {
             contract_version: NEUTRON_UDS_CONTRACT_VERSION.to_string(),
             schema_version_min: NEUTRON_UDS_SCHEMA_VERSION_MIN,
             schema_version_max: NEUTRON_UDS_SCHEMA_VERSION_MAX,
+            status_schema_version_min: NEUTRON_STATUS_SCHEMA_VERSION_MIN,
+            status_schema_version_max: NEUTRON_STATUS_SCHEMA_VERSION_MAX,
+            status_contract_hash: NEUTRON_STATUS_CONTRACT_HASH.to_string(),
             attach_authority: NEUTRON_ATTACH_AUTHORITY.to_string(),
             supports_full_snapshot: true,
             supports_port_scoped_snapshot: true,
@@ -448,6 +556,38 @@ pub struct NeutronStatusResponse {
     #[serde(default)]
     pub port_statuses: Vec<NeutronPortStatus>,
     /// All active aria-agent instances, including those outside Neutron authority.
+    pub active_instances: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NeutronStatusV1Response {
+    pub status_schema_version: u32,
+    pub status_contract_hash: String,
+    pub transaction_state: NeutronStatusTransactionState,
+    pub overall_readiness: NeutronStatusOverallReadiness,
+    pub required_action: NeutronStatusRequiredAction,
+    pub recovery_cause: Option<NeutronStatusRecoveryCause>,
+    pub last_classified_generation: u64,
+    pub generation: u64,
+    #[serde(default)]
+    pub accepted_generation: u64,
+    #[serde(default)]
+    pub applied_generation: u64,
+    #[serde(default)]
+    pub pending_generation: Option<u64>,
+    #[serde(default)]
+    pub desired_hash: Option<String>,
+    #[serde(default)]
+    pub applied_desired_hash: Option<String>,
+    #[serde(default)]
+    pub wal_status: String,
+    #[serde(default)]
+    pub wal_replay_failures: u64,
+    #[serde(default)]
+    pub authority_state: String,
+    pub managed_ports: Vec<ManagedNeutronPort>,
+    #[serde(default)]
+    pub port_statuses: Vec<NeutronStatusPortEvidence>,
     pub active_instances: Vec<String>,
 }
 
@@ -2100,6 +2240,160 @@ pub fn direction_from_string(direction: &str) -> Result<u8, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+    use std::collections::BTreeSet;
+    use std::sync::OnceLock;
+
+    const STATUS_V1_SCENARIOS_JSON: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../docs/neutron-status-contract-v1-scenarios.json"
+    ));
+
+    static STATUS_V1_SCENARIOS: OnceLock<Value> = OnceLock::new();
+
+    fn rust_status_v1_scenario_ids() -> &'static [&'static str] {
+        &[
+            "full-classified-ready",
+            "scoped-classified-ready",
+            "classified-degraded-terminal",
+            "classified-degraded-full-resync",
+            "pending-poll",
+            "blocked-recoverable-inventory",
+            "blocked-operator",
+            "recovery-full-resync",
+            "generation-zero-inventory-recovery",
+            "restart-classified-routing",
+        ]
+    }
+
+    fn shared_status_v1_scenarios() -> &'static Value {
+        STATUS_V1_SCENARIOS.get_or_init(|| {
+            let fixture: Value = serde_json::from_str(STATUS_V1_SCENARIOS_JSON)
+                .expect("shared Status V1 scenarios must be valid JSON");
+            assert_eq!(
+                fixture
+                    .get("fixture_schema_version")
+                    .and_then(Value::as_u64),
+                Some(1),
+                "shared Status V1 fixture schema must be version 1"
+            );
+
+            let scenarios = fixture
+                .get("scenarios")
+                .and_then(Value::as_array)
+                .expect("shared Status V1 scenarios must be an array");
+            let mut fixture_ids = BTreeSet::new();
+            for scenario in scenarios {
+                let id = scenario
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .expect("every shared Status V1 scenario must have a string id");
+                assert!(
+                    fixture_ids.insert(id),
+                    "shared Status V1 scenario id must be unique: {id}"
+                );
+            }
+
+            let producer_ids = rust_status_v1_scenario_ids();
+            assert_eq!(
+                producer_ids.len(),
+                10,
+                "Rust Status V1 producer selection must contain exactly ten ids"
+            );
+            assert_eq!(
+                producer_ids.iter().copied().collect::<BTreeSet<_>>().len(),
+                producer_ids.len(),
+                "Rust Status V1 producer ids must be unique"
+            );
+            for id in producer_ids {
+                assert!(
+                    fixture_ids.contains(id),
+                    "Rust Status V1 producer scenario must exist: {id}"
+                );
+            }
+            drop(fixture_ids);
+
+            fixture
+        })
+    }
+
+    fn shared_status_v1_scenario(id: &str) -> &'static Value {
+        let matches = shared_status_v1_scenarios()
+            .get("scenarios")
+            .and_then(Value::as_array)
+            .expect("shared Status V1 scenarios must be an array")
+            .iter()
+            .filter(|scenario| scenario.get("id").and_then(Value::as_str) == Some(id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matches.len(),
+            1,
+            "shared Status V1 scenario id must match exactly once: {id}"
+        );
+        matches[0]
+    }
+
+    fn assert_json_matches_fixture(
+        scenario_id: &str,
+        expected: &Value,
+        actual: &Value,
+    ) -> Result<(), String> {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "{scenario_id}: expected exact shared Status V1 payload\nexpected: {expected}\n  actual: {actual}"
+            ))
+        }
+    }
+
+    fn normalize_pre_v1_managed_port_defaults(expected: &Value, actual: &mut Value) {
+        // The shared fixture omits these legacy Serde defaults; remove only their
+        // null/empty encodings so the exact comparison isolates Status V1 drift.
+        let Some(expected_ports) = expected.get("managed_ports").and_then(Value::as_array) else {
+            return;
+        };
+        let Some(actual_ports) = actual
+            .get_mut("managed_ports")
+            .and_then(Value::as_array_mut)
+        else {
+            return;
+        };
+
+        for actual_port in actual_ports {
+            let Some(actual_object) = actual_port.as_object_mut() else {
+                continue;
+            };
+            let Some(port_id) = actual_object
+                .get("port_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let Some(expected_object) = expected_ports
+                .iter()
+                .find(|port| port.get("port_id").and_then(Value::as_str) == Some(port_id.as_str()))
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+
+            if !expected_object.contains_key("ifindex")
+                && actual_object.get("ifindex").is_some_and(Value::is_null)
+            {
+                actual_object.remove("ifindex");
+            }
+            if !expected_object.contains_key("domain_desired_hashes")
+                && actual_object
+                    .get("domain_desired_hashes")
+                    .and_then(Value::as_object)
+                    .is_some_and(serde_json::Map::is_empty)
+            {
+                actual_object.remove("domain_desired_hashes");
+            }
+        }
+    }
 
     #[test]
     fn instance_info_reports_acl_and_xdp_health_independently() {
@@ -2151,6 +2445,169 @@ mod tests {
         assert_eq!(capabilities.error_codes_hash, NEUTRON_UDS_ERROR_CODES_HASH);
         assert_eq!(capabilities.peer_auth_policy, NEUTRON_UDS_PEER_AUTH_POLICY);
         assert_eq!(capabilities.capability_hash, NEUTRON_UDS_CAPABILITY_HASH);
+    }
+
+    #[test]
+    fn neutron_contract_status_v1_capabilities_serialize_shared_metadata() {
+        let fixture = shared_status_v1_scenarios();
+        let declared_contract = fixture
+            .get("status_contract")
+            .and_then(Value::as_object)
+            .expect("shared Status V1 contract declaration must be an object");
+        let fixture_capabilities = shared_status_v1_scenario("full-classified-ready")
+            .get("capabilities")
+            .and_then(Value::as_object)
+            .expect("full classified-ready capabilities must be an object");
+
+        assert_eq!(
+            fixture_capabilities.get("status_schema_version_min"),
+            declared_contract.get("version"),
+            "Status V1 capability minimum must match the shared contract version"
+        );
+        assert_eq!(
+            fixture_capabilities.get("status_schema_version_max"),
+            declared_contract.get("version"),
+            "Status V1 capability maximum must match the shared contract version"
+        );
+        assert_eq!(
+            fixture_capabilities.get("status_contract_hash"),
+            declared_contract.get("hash"),
+            "Status V1 capability hash must match the shared contract hash"
+        );
+
+        let actual = serde_json::to_value(NeutronCapabilitiesResponse::current())
+            .expect("current Neutron capabilities must serialize");
+        assert_eq!(
+            actual.get("contract_version"),
+            fixture_capabilities.get("contract_version"),
+            "additive Status V1 metadata must not change the global contract version"
+        );
+        assert_eq!(
+            actual.get("contract_version").and_then(Value::as_str),
+            Some(NEUTRON_UDS_CONTRACT_VERSION)
+        );
+        assert_eq!(
+            actual.get("capability_hash").and_then(Value::as_str),
+            Some(NEUTRON_UDS_CAPABILITY_HASH),
+            "additive Status V1 metadata must not change the global capability hash"
+        );
+        assert_eq!(
+            NEUTRON_UDS_CAPABILITY_HASH, "v0.9-neutron-capabilities-3",
+            "the additive Status V1 rollout must retain the pre-V1 capability hash"
+        );
+
+        let mut mismatches = Vec::new();
+        for field in [
+            "status_schema_version_min",
+            "status_schema_version_max",
+            "status_contract_hash",
+        ] {
+            if actual.get(field) != fixture_capabilities.get(field) {
+                mismatches.push(format!(
+                    "{field}: expected {:?}, got {:?}",
+                    fixture_capabilities.get(field),
+                    actual.get(field)
+                ));
+            }
+        }
+        let mut legacy_payload = actual.clone();
+        let legacy_object = legacy_payload
+            .as_object_mut()
+            .expect("serialized Neutron capabilities must be an object");
+        for field in [
+            "status_schema_version_min",
+            "status_schema_version_max",
+            "status_contract_hash",
+        ] {
+            legacy_object.remove(field);
+        }
+        let legacy_decoded: NeutronCapabilitiesResponse = serde_json::from_value(legacy_payload)
+            .expect("capabilities without Status V1 metadata must remain decodable");
+        assert_eq!(legacy_decoded.status_schema_version_min, 0);
+        assert_eq!(legacy_decoded.status_schema_version_max, 0);
+        assert!(legacy_decoded.status_contract_hash.is_empty());
+        assert!(
+            mismatches.is_empty(),
+            "current capabilities do not advertise the shared Status V1 metadata:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    #[test]
+    fn neutron_contract_status_v1_response_serialization_matches_shared_scenarios() {
+        let mut mismatches = Vec::new();
+        let legacy_expected = shared_status_v1_scenario("legacy-v0-ready")
+            .get("status")
+            .expect("legacy V0 scenario must include a status response");
+        let legacy_decoded: NeutronStatusResponse = serde_json::from_value(legacy_expected.clone())
+            .expect("legacy V0 status must remain decodable through the legacy response type");
+        let legacy_row: &NeutronPortStatus = legacy_decoded
+            .port_statuses
+            .first()
+            .expect("legacy V0 status must retain its legacy nested row type");
+        assert_eq!(legacy_row.port_id, "legacy-port");
+
+        for id in rust_status_v1_scenario_ids() {
+            let expected = shared_status_v1_scenario(id)
+                .get("status")
+                .filter(|status| status.is_object())
+                .unwrap_or_else(|| {
+                    panic!("Rust Status V1 producer scenario must have status: {id}")
+                });
+            for field in [
+                "status_schema_version",
+                "status_contract_hash",
+                "transaction_state",
+                "overall_readiness",
+                "required_action",
+                "recovery_cause",
+                "last_classified_generation",
+            ] {
+                assert!(
+                    expected.get(field).is_some(),
+                    "Rust Status V1 producer scenario {id} must declare {field}"
+                );
+            }
+            assert_eq!(
+                expected.get("generation"),
+                expected.get("applied_generation"),
+                "Status V1 generation must remain an applied_generation alias: {id}"
+            );
+            for port_status in expected
+                .get("port_statuses")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("Status V1 port_statuses must be an array: {id}"))
+            {
+                for domain in port_status
+                    .get("domains")
+                    .and_then(Value::as_array)
+                    .unwrap_or_else(|| panic!("Status V1 domains must be an array: {id}"))
+                {
+                    assert!(
+                        domain.get("support_disposition").is_some(),
+                        "Status V1 domain evidence must include support_disposition: {id}"
+                    );
+                }
+            }
+
+            let decoded: NeutronStatusV1Response = serde_json::from_value(expected.clone())
+                .unwrap_or_else(|error| {
+                    panic!("shared Status V1 response must deserialize for {id}: {error}")
+                });
+            let mut actual = serde_json::to_value(decoded).unwrap_or_else(|error| {
+                panic!("shared Status V1 response must reserialize for {id}: {error}")
+            });
+            normalize_pre_v1_managed_port_defaults(expected, &mut actual);
+            if let Err(mismatch) = assert_json_matches_fixture(id, expected, &actual) {
+                mismatches.push(mismatch);
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "Neutron Status V1 response serialization drifted from the shared scenarios:\n{}",
+            mismatches.join("\n\n")
+        );
     }
 
     #[test]

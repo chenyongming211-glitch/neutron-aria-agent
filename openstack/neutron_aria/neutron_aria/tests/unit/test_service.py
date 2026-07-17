@@ -8,6 +8,8 @@ from neutron_aria.agent.service import EVENTS_WITHOUT_RESYNC_REASON
 from neutron_aria.agent.service import EVENT_IDLE_POLL_INTERVAL
 from neutron_aria.agent.event_merge import EventMerger
 from neutron_aria.agent.status import AgentRuntimeStatus
+from neutron_aria.agent.uds_client import LocalApiContractError
+from neutron_aria.tests.unit.status_contract_scenarios import status_scenario
 
 
 class FakeClock(object):
@@ -724,6 +726,68 @@ class AgentServiceTestCase(unittest.TestCase):
         service.initialize()
 
         self.assertEqual(EVENT_IDLE_POLL_INTERVAL, service.sleep_interval())
+
+
+class StatusContractServiceRedTestCase(unittest.TestCase):
+    def test_scoped_contract_error_never_falls_back_to_full_resync(self):
+        scenario = status_scenario("unknown-v1-contract")
+        clock = FakeClock()
+        sync = FakeSynchronizer()
+        sync.scoped_exception = LocalApiContractError(
+            "unsupported status contract scenario %s" % scenario["id"]
+        )
+        merger = EventMerger(clock=clock)
+        service = AgentService(
+            sync,
+            full_resync_enabled=True,
+            report_interval=5,
+            resync_interval=60,
+            event_merger=merger,
+            event_merge_interval=0.2,
+            incremental_rpc_enabled=True,
+            clock=clock,
+        )
+        service.initialize()
+        initial_resync_calls = sync.resync_calls
+        initial_heartbeat_calls = sync.heartbeat_calls
+        initial_delete_calls = list(sync.delete_calls)
+        merger.record_port_update(
+            "p1",
+            binding_host="ostack2.bj159.net",
+            revision_number=8,
+        )
+        clock.advance(0.2)
+
+        result = service.run_once()
+        decisions = result["events"]["decisions"]
+
+        self.assertEqual(1, len(sync.scoped_calls))
+        self.assertEqual(initial_resync_calls, sync.resync_calls)
+        self.assertEqual(initial_delete_calls, sync.delete_calls)
+        self.assertEqual(initial_heartbeat_calls + 1, sync.heartbeat_calls)
+        self.assertEqual(None, result["snapshot"])
+        self.assertEqual(None, result["response"])
+        self.assertTrue(result["status"]["degraded"])
+        self.assertFalse(result["status"]["ready"])
+        self.assertEqual(
+            "blocked",
+            scenario["expected_python"]["publish_readiness"],
+        )
+        self.assertEqual("local_api_contract_error", result["status"]["reason"])
+        self.assertIn(scenario["id"], result["status"]["last_error"])
+        self.assertTrue(result["heartbeat"]["ok"])
+        self.assertTrue(result["heartbeat"]["status"]["degraded"])
+        self.assertEqual(1, len(decisions))
+        self.assertEqual(
+            "blocked_contract_error",
+            decisions[0]["incremental_action"],
+        )
+        self.assertEqual(
+            "local_api_contract_error",
+            decisions[0]["incremental_reason"],
+        )
+        self.assertIn(scenario["id"], decisions[0]["incremental_error"])
+        self.assertFalse(result.get("resync_attempted", False))
 
 
 if __name__ == "__main__":

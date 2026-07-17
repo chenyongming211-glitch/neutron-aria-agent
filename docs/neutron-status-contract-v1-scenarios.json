@@ -1,0 +1,1667 @@
+{
+  "fixture_schema_version": 1,
+  "status_contract": {
+    "version": 1,
+    "hash": "v0.9-neutron-status-1",
+    "transaction_states": [
+      "idle",
+      "pending",
+      "classified",
+      "blocked",
+      "recovery"
+    ],
+    "overall_readiness": [
+      "ready",
+      "degraded",
+      "blocked",
+      "unknown"
+    ],
+    "required_actions": [
+      "none",
+      "poll",
+      "recover_pending",
+      "full_resync",
+      "operator"
+    ],
+    "recovery_causes": [
+      null,
+      "inventory_unavailable"
+    ],
+    "domain_statuses": [
+      "ready",
+      "not_requested",
+      "degraded",
+      "blocked"
+    ],
+    "effective_actions": [
+      "enforce",
+      "bypass",
+      "unchanged",
+      "cleanup",
+      "no_op"
+    ],
+    "support_dispositions": [
+      "supported",
+      "unsupported",
+      "unknown",
+      "not_applicable"
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "full-classified-ready",
+      "minimum_scenario": 1,
+      "description": "A full snapshot is exactly classified ready and may update both durable tracks.",
+      "capabilities": {
+        "api_version": "v1",
+        "contract_version": "2026-06-v0.9",
+        "schema_version_min": 1,
+        "schema_version_max": 1,
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl", "qos"],
+        "mandatory_domains": [],
+        "status_schema_version_min": 1,
+        "status_schema_version_max": 1,
+        "status_contract_hash": "v0.9-neutron-status-1"
+      },
+      "request_context": {
+        "scope": {"type": "full_host"},
+        "expected_generation": 42,
+        "expected_desired_hash": "hash-ready-42",
+        "projected_port_ids": ["port-a"],
+        "snapshot": {
+          "generation": 42,
+          "desired_hash": "hash-ready-42",
+          "ports": [
+            {
+              "port_id": "port-a",
+              "ifname": "tap-port-a",
+              "eligible": true,
+              "managed_domains": ["acl"],
+              "acl": {"enabled": true, "status": "ready", "effective_action": "enforce"}
+            }
+          ]
+        }
+      },
+      "status": {
+        "status_schema_version": 1,
+        "status_contract_hash": "v0.9-neutron-status-1",
+        "transaction_state": "classified",
+        "overall_readiness": "ready",
+        "required_action": "none",
+        "recovery_cause": null,
+        "last_classified_generation": 42,
+        "generation": 42,
+        "accepted_generation": 42,
+        "applied_generation": 42,
+        "pending_generation": null,
+        "desired_hash": "hash-ready-42",
+        "applied_desired_hash": "hash-ready-42",
+        "wal_status": "committed",
+        "wal_replay_failures": 0,
+        "authority_state": "ready",
+        "managed_ports": [
+          {"port_id": "port-a", "ifname": "tap-port-a", "managed_domains": ["acl"]}
+        ],
+        "port_statuses": [
+          {
+            "port_id": "port-a",
+            "ifname": "tap-port-a",
+            "generation": 42,
+            "desired_hash": "hash-ready-42",
+            "status": "ready",
+            "reason": null,
+            "managed_domains": ["acl"],
+            "domains": [
+              {
+                "domain": "acl",
+                "status": "ready",
+                "reason": null,
+                "effective_action": "enforce",
+                "support_disposition": "supported"
+              }
+            ]
+          }
+        ],
+        "active_instances": ["tap-port-a"]
+      },
+      "expected_projection": {
+        "transaction_state": "classified",
+        "overall_readiness": "ready",
+        "required_action": "none",
+        "recovery_cause": null,
+        "last_classified_generation": 42
+      },
+      "expected_python": {
+        "decoder": "v1",
+        "decision": "feature_ready",
+        "record_classified": true,
+        "record_feature_ready": true,
+        "clear_matching_pending": true,
+        "mark_ready": true,
+        "publish_readiness": "ready",
+        "mutating_calls": [],
+        "error_type": null
+      }
+    },
+    {
+      "id": "scoped-classified-ready",
+      "minimum_scenario": 2,
+      "description": "A scoped update is ready while an unaffected port retains older exact evidence.",
+      "capabilities": {
+        "api_version": "v1",
+        "contract_version": "2026-06-v0.9",
+        "schema_version_min": 1,
+        "schema_version_max": 1,
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl", "qos"],
+        "mandatory_domains": [],
+        "status_schema_version_min": 1,
+        "status_schema_version_max": 1,
+        "status_contract_hash": "v0.9-neutron-status-1"
+      },
+      "request_context": {
+        "scope": {"type": "port", "port_id": "port-a"},
+        "expected_generation": 43,
+        "expected_desired_hash": "hash-scoped-43",
+        "affected_port_ids": ["port-a"],
+        "projected_port_ids": ["port-a", "port-b"],
+        "snapshot": {
+          "generation": 43,
+          "desired_hash": "hash-scoped-43",
+          "scope": {"type": "port", "port_id": "port-a"},
+          "ports": [
+            {
+              "port_id": "port-a",
+              "ifname": "tap-port-a",
+              "eligible": true,
+              "managed_domains": ["acl"],
+              "acl": {"enabled": true, "status": "ready", "effective_action": "enforce"}
+            }
+          ]
+        }
+      },
+      "status": {
+        "status_schema_version": 1,
+        "status_contract_hash": "v0.9-neutron-status-1",
+        "transaction_state": "classified",
+        "overall_readiness": "ready",
+        "required_action": "none",
+        "recovery_cause": null,
+        "last_classified_generation": 43,
+        "generation": 43,
+        "accepted_generation": 43,
+        "applied_generation": 43,
+        "pending_generation": null,
+        "desired_hash": "hash-scoped-43",
+        "applied_desired_hash": "hash-scoped-43",
+        "wal_status": "committed",
+        "wal_replay_failures": 0,
+        "authority_state": "ready",
+        "managed_ports": [
+          {"port_id": "port-a", "ifname": "tap-port-a", "managed_domains": ["acl"]},
+          {"port_id": "port-b", "ifname": "tap-port-b", "managed_domains": ["acl"]}
+        ],
+        "port_statuses": [
+          {
+            "port_id": "port-a",
+            "ifname": "tap-port-a",
+            "generation": 43,
+            "desired_hash": "hash-scoped-43",
+            "status": "ready",
+            "reason": null,
+            "managed_domains": ["acl"],
+            "domains": [
+              {"domain": "acl", "status": "ready", "reason": null, "effective_action": "enforce", "support_disposition": "supported"}
+            ]
+          },
+          {
+            "port_id": "port-b",
+            "ifname": "tap-port-b",
+            "generation": 42,
+            "desired_hash": "hash-ready-42",
+            "status": "ready",
+            "reason": null,
+            "managed_domains": ["acl"],
+            "domains": [
+              {"domain": "acl", "status": "ready", "reason": null, "effective_action": "enforce", "support_disposition": "supported"}
+            ]
+          }
+        ],
+        "active_instances": ["tap-port-a", "tap-port-b"]
+      },
+      "expected_projection": {
+        "transaction_state": "classified",
+        "overall_readiness": "ready",
+        "required_action": "none",
+        "recovery_cause": null,
+        "last_classified_generation": 43
+      },
+      "expected_python": {
+        "decoder": "v1",
+        "decision": "feature_ready",
+        "record_classified": true,
+        "record_feature_ready": true,
+        "clear_matching_pending": true,
+        "mark_ready": true,
+        "publish_readiness": "ready",
+        "mutating_calls": [],
+        "error_type": null
+      }
+    },
+    {
+      "id": "classified-degraded-terminal",
+      "minimum_scenario": 3,
+      "description": "A terminal degraded generation advances only classified state and preserves ready history.",
+      "capabilities": {
+        "api_version": "v1",
+        "contract_version": "2026-06-v0.9",
+        "schema_version_min": 1,
+        "schema_version_max": 1,
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl", "qos"],
+        "mandatory_domains": [],
+        "status_schema_version_min": 1,
+        "status_schema_version_max": 1,
+        "status_contract_hash": "v0.9-neutron-status-1"
+      },
+      "pre_status": {
+        "status_schema_version": 1,
+        "status_contract_hash": "v0.9-neutron-status-1",
+        "transaction_state": "classified",
+        "overall_readiness": "ready",
+        "required_action": "none",
+        "recovery_cause": null,
+        "last_classified_generation": 43,
+        "generation": 43,
+        "accepted_generation": 43,
+        "applied_generation": 43,
+        "pending_generation": null,
+        "desired_hash": "ready-hash-43",
+        "applied_desired_hash": "ready-hash-43",
+        "wal_status": "committed",
+        "wal_replay_failures": 0,
+        "authority_state": "ready",
+        "managed_ports": [
+          {"port_id": "port-old", "ifname": "tap-port-old", "managed_domains": ["acl"]}
+        ],
+        "port_statuses": [
+          {
+            "port_id": "port-old",
+            "ifname": "tap-port-old",
+            "generation": 43,
+            "desired_hash": "ready-hash-43",
+            "status": "ready",
+            "reason": null,
+            "managed_domains": ["acl"],
+            "domains": [
+              {"domain": "acl", "status": "ready", "reason": null, "effective_action": "enforce", "support_disposition": "supported"}
+            ]
+          }
+        ],
+        "active_instances": ["tap-port-old"]
+      },
+      "request_context": {
+        "scope": {"type": "full_host"},
+        "expected_generation": 44,
+        "expected_desired_hash": "8e641b03d6fbeb52d42ebccf592addbe2f288990e5373e5a128d55a80fb84506",
+        "projected_port_ids": ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+        "feature_ready_generation_before": 43,
+        "feature_ready_generation_by_domain_before": {"acl": 43},
+        "feature_ready_projected_port_ids_before": ["port-old"]
+      },
+      "status": {
+        "status_schema_version": 1,
+        "status_contract_hash": "v0.9-neutron-status-1",
+        "transaction_state": "classified",
+        "overall_readiness": "degraded",
+        "required_action": "none",
+        "recovery_cause": null,
+        "last_classified_generation": 44,
+        "generation": 44,
+        "accepted_generation": 44,
+        "applied_generation": 44,
+        "pending_generation": null,
+        "desired_hash": "8e641b03d6fbeb52d42ebccf592addbe2f288990e5373e5a128d55a80fb84506",
+        "applied_desired_hash": "8e641b03d6fbeb52d42ebccf592addbe2f288990e5373e5a128d55a80fb84506",
+        "wal_status": "committed_degraded",
+        "wal_replay_failures": 0,
+        "authority_state": "runtime_degraded",
+        "managed_ports": [
+          {"port_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "ifname": "", "managed_domains": ["acl"]}
+        ],
+        "port_statuses": [
+          {
+            "port_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "ifname": "",
+            "generation": 44,
+            "desired_hash": "8e641b03d6fbeb52d42ebccf592addbe2f288990e5373e5a128d55a80fb84506",
+            "status": "degraded",
+            "reason": "acl_not_supported",
+            "managed_domains": ["acl"],
+            "domains": [
+              {"domain": "acl", "status": "degraded", "reason": "acl_not_supported", "effective_action": "bypass", "support_disposition": "unsupported"}
+            ]
+          }
+        ],
+        "active_instances": []
+      },
+      "expected_projection": {
+        "transaction_state": "classified",
+        "overall_readiness": "degraded",
+        "required_action": "none",
+        "recovery_cause": null,
+        "last_classified_generation": 44
+      },
+      "expected_python": {
+        "decoder": "v1",
+        "decision": "classified_degraded",
+        "record_classified": true,
+        "record_feature_ready": false,
+        "clear_matching_pending": true,
+        "mark_ready": false,
+        "publish_readiness": "degraded",
+        "mutating_calls": [],
+        "error_type": null
+      }
+    },
+    {
+      "id": "classified-degraded-full-resync",
+      "minimum_scenario": 4,
+      "description": "Runtime damage on a classified baseline preserves both tracks and requires a compatible full resync.",
+      "capabilities": {
+        "api_version": "v1",
+        "contract_version": "2026-06-v0.9",
+        "schema_version_min": 1,
+        "schema_version_max": 1,
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl", "qos"],
+        "mandatory_domains": [],
+        "status_schema_version_min": 1,
+        "status_schema_version_max": 1,
+        "status_contract_hash": "v0.9-neutron-status-1"
+      },
+      "request_context": {
+        "expected_generation": 42,
+        "expected_desired_hash": "hash-ready-42",
+        "projected_port_ids": ["port-a"]
+      },
+      "status": {
+        "status_schema_version": 1,
+        "status_contract_hash": "v0.9-neutron-status-1",
+        "transaction_state": "classified",
+        "overall_readiness": "degraded",
+        "required_action": "full_resync",
+        "recovery_cause": null,
+        "last_classified_generation": 42,
+        "generation": 42,
+        "accepted_generation": 42,
+        "applied_generation": 42,
+        "pending_generation": null,
+        "desired_hash": "hash-ready-42",
+        "applied_desired_hash": "hash-ready-42",
+        "wal_status": "runtime_rebuild_required",
+        "wal_replay_failures": 0,
+        "authority_state": "runtime_degraded",
+        "managed_ports": [
+          {"port_id": "port-a", "ifname": "tap-port-a", "managed_domains": ["acl"]}
+        ],
+        "port_statuses": [
+          {
+            "port_id": "port-a",
+            "ifname": "tap-port-a",
+            "generation": 42,
+            "desired_hash": "hash-ready-42",
+            "status": "degraded",
+            "reason": "runtime_rebuild_required",
+            "managed_domains": ["acl"],
+            "domains": [
+              {"domain": "acl", "status": "degraded", "reason": "runtime_rebuild_required", "effective_action": "unchanged", "support_disposition": "supported"}
+            ]
+          }
+        ],
+        "active_instances": ["tap-port-a"]
+      },
+      "expected_projection": {
+        "transaction_state": "classified",
+        "overall_readiness": "degraded",
+        "required_action": "full_resync",
+        "recovery_cause": null,
+        "last_classified_generation": 42
+      },
+      "expected_python": {
+        "decoder": "v1",
+        "decision": "full_resync",
+        "record_classified": false,
+        "record_feature_ready": false,
+        "clear_matching_pending": false,
+        "mark_ready": false,
+        "publish_readiness": "degraded",
+        "mutating_calls": ["put_full_snapshot"],
+        "error_type": null
+      }
+    },
+    {
+      "id": "pending-poll",
+      "minimum_scenario": 5,
+      "description": "An active apply with complete pending identity is read-only and polled.",
+      "capabilities": {
+        "api_version": "v1",
+        "contract_version": "2026-06-v0.9",
+        "schema_version_min": 1,
+        "schema_version_max": 1,
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl", "qos"],
+        "mandatory_domains": [],
+        "status_schema_version_min": 1,
+        "status_schema_version_max": 1,
+        "status_contract_hash": "v0.9-neutron-status-1"
+      },
+      "request_context": {
+        "expected_generation": 45,
+        "expected_desired_hash": "hash-pending-45"
+      },
+      "status": {
+        "status_schema_version": 1,
+        "status_contract_hash": "v0.9-neutron-status-1",
+        "transaction_state": "pending",
+        "overall_readiness": "unknown",
+        "required_action": "poll",
+        "recovery_cause": null,
+        "last_classified_generation": 42,
+        "generation": 42,
+        "accepted_generation": 42,
+        "applied_generation": 42,
+        "pending_generation": 45,
+        "desired_hash": "hash-pending-45",
+        "applied_desired_hash": "hash-ready-42",
+        "wal_status": "apply_pending",
+        "wal_replay_failures": 0,
+        "authority_state": "applying",
+        "managed_ports": [],
+        "port_statuses": [],
+        "active_instances": []
+      },
+      "expected_projection": {
+        "transaction_state": "pending",
+        "overall_readiness": "unknown",
+        "required_action": "poll",
+        "recovery_cause": null,
+        "last_classified_generation": 42
+      },
+      "expected_python": {
+        "decoder": "v1",
+        "decision": "poll",
+        "record_classified": false,
+        "record_feature_ready": false,
+        "clear_matching_pending": false,
+        "mark_ready": false,
+        "publish_readiness": "unknown",
+        "mutating_calls": [],
+        "public_mutating_calls": [],
+        "error_type": null
+      }
+    },
+    {
+      "id": "blocked-recoverable-inventory",
+      "minimum_scenario": 6,
+      "description": "A protected pending inventory failure permits only exact recover-pending.",
+      "capabilities": {
+        "api_version": "v1",
+        "contract_version": "2026-06-v0.9",
+        "schema_version_min": 1,
+        "schema_version_max": 1,
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl", "qos"],
+        "mandatory_domains": [],
+        "status_schema_version_min": 1,
+        "status_schema_version_max": 1,
+        "status_contract_hash": "v0.9-neutron-status-1"
+      },
+      "request_context": {
+        "expected_pending_generation": 45,
+        "expected_desired_hash": "hash-pending-45"
+      },
+      "status": {
+        "status_schema_version": 1,
+        "status_contract_hash": "v0.9-neutron-status-1",
+        "transaction_state": "blocked",
+        "overall_readiness": "blocked",
+        "required_action": "recover_pending",
+        "recovery_cause": "inventory_unavailable",
+        "last_classified_generation": 42,
+        "generation": 42,
+        "accepted_generation": 45,
+        "applied_generation": 42,
+        "pending_generation": 45,
+        "desired_hash": "hash-pending-45",
+        "applied_desired_hash": "hash-ready-42",
+        "wal_status": "inventory_barrier_pending",
+        "wal_replay_failures": 0,
+        "authority_state": "blocked_recovery_required",
+        "managed_ports": [
+          {"port_id": "port-a", "ifname": "tap-port-a", "managed_domains": ["acl"]}
+        ],
+        "port_statuses": [
+          {
+            "port_id": "port-a",
+            "ifname": "tap-port-a",
+            "generation": 42,
+            "desired_hash": "hash-ready-42",
+            "status": "ready",
+            "reason": null,
+            "managed_domains": ["acl"],
+            "domains": [
+              {"domain": "acl", "status": "ready", "reason": null, "effective_action": "enforce", "support_disposition": "supported"}
+            ]
+          }
+        ],
+        "active_instances": ["tap-port-a"]
+      },
+      "expected_projection": {
+        "transaction_state": "blocked",
+        "overall_readiness": "blocked",
+        "required_action": "recover_pending",
+        "recovery_cause": "inventory_unavailable",
+        "last_classified_generation": 42
+      },
+      "expected_python": {
+        "decoder": "v1",
+        "decision": "recover_pending",
+        "record_classified": false,
+        "record_feature_ready": false,
+        "clear_matching_pending": false,
+        "mark_ready": false,
+        "publish_readiness": "blocked",
+        "mutating_calls": ["recover_pending"],
+        "public_mutating_calls": ["recover_pending", "put_full_snapshot"],
+        "error_type": null
+      }
+    },
+    {
+      "id": "blocked-operator",
+      "minimum_scenario": 7,
+      "description": "WAL or contract uncertainty is operator-only and makes no write.",
+      "capabilities": {
+        "api_version": "v1",
+        "contract_version": "2026-06-v0.9",
+        "schema_version_min": 1,
+        "schema_version_max": 1,
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl", "qos"],
+        "mandatory_domains": [],
+        "status_schema_version_min": 1,
+        "status_schema_version_max": 1,
+        "status_contract_hash": "v0.9-neutron-status-1"
+      },
+      "request_context": {
+        "expected_pending_generation": 45,
+        "expected_desired_hash": "hash-pending-45"
+      },
+      "status": {
+        "status_schema_version": 1,
+        "status_contract_hash": "v0.9-neutron-status-1",
+        "transaction_state": "blocked",
+        "overall_readiness": "blocked",
+        "required_action": "operator",
+        "recovery_cause": null,
+        "last_classified_generation": 42,
+        "generation": 42,
+        "accepted_generation": 45,
+        "applied_generation": 42,
+        "pending_generation": 45,
+        "desired_hash": "hash-pending-45",
+        "applied_desired_hash": "hash-ready-42",
+        "wal_status": "wal_replay_uncertain",
+        "wal_replay_failures": 1,
+        "authority_state": "wal_commit_failed",
+        "managed_ports": [],
+        "port_statuses": [],
+        "active_instances": []
+      },
+      "expected_projection": {
+        "transaction_state": "blocked",
+        "overall_readiness": "blocked",
+        "required_action": "operator",
+        "recovery_cause": null,
+        "last_classified_generation": 42
+      },
+      "expected_python": {
+        "decoder": "v1",
+        "decision": "blocked_operator",
+        "record_classified": false,
+        "record_feature_ready": false,
+        "clear_matching_pending": false,
+        "mark_ready": false,
+        "publish_readiness": "blocked",
+        "mutating_calls": [],
+        "public_mutating_calls": [],
+        "error_type": null
+      }
+    },
+    {
+      "id": "recovery-full-resync",
+      "minimum_scenario": 8,
+      "description": "Rollback restored the applied baseline and only a newer full snapshot may become ready.",
+      "capabilities": {
+        "api_version": "v1",
+        "contract_version": "2026-06-v0.9",
+        "schema_version_min": 1,
+        "schema_version_max": 1,
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl", "qos"],
+        "mandatory_domains": [],
+        "status_schema_version_min": 1,
+        "status_schema_version_max": 1,
+        "status_contract_hash": "v0.9-neutron-status-1"
+      },
+      "request_context": {
+        "restored_generation": 42,
+        "restored_desired_hash": "hash-ready-42"
+      },
+      "status": {
+        "status_schema_version": 1,
+        "status_contract_hash": "v0.9-neutron-status-1",
+        "transaction_state": "recovery",
+        "overall_readiness": "degraded",
+        "required_action": "full_resync",
+        "recovery_cause": null,
+        "last_classified_generation": 42,
+        "generation": 42,
+        "accepted_generation": 42,
+        "applied_generation": 42,
+        "pending_generation": null,
+        "desired_hash": "hash-ready-42",
+        "applied_desired_hash": "hash-ready-42",
+        "wal_status": "recovered_pending_full_resync_required",
+        "wal_replay_failures": 0,
+        "authority_state": "recovered_pending_full_resync_required",
+        "managed_ports": [
+          {"port_id": "port-a", "ifname": "tap-port-a", "managed_domains": ["acl"]}
+        ],
+        "port_statuses": [
+          {
+            "port_id": "port-a",
+            "ifname": "tap-port-a",
+            "generation": 42,
+            "desired_hash": "hash-ready-42",
+            "status": "ready",
+            "reason": null,
+            "managed_domains": ["acl"],
+            "domains": [
+              {"domain": "acl", "status": "ready", "reason": null, "effective_action": "enforce", "support_disposition": "supported"}
+            ]
+          }
+        ],
+        "active_instances": ["tap-port-a"]
+      },
+      "expected_projection": {
+        "transaction_state": "recovery",
+        "overall_readiness": "degraded",
+        "required_action": "full_resync",
+        "recovery_cause": null,
+        "last_classified_generation": 42
+      },
+      "expected_python": {
+        "decoder": "v1",
+        "decision": "recovered_full_resync",
+        "record_classified": true,
+        "record_feature_ready": false,
+        "clear_matching_pending": true,
+        "mark_ready": false,
+        "publish_readiness": "degraded",
+        "mutating_calls": ["put_full_snapshot"],
+        "error_type": null
+      }
+    },
+    {
+      "id": "generation-zero-inventory-recovery",
+      "minimum_scenario": 9,
+      "description": "The narrow empty-baseline exception permits exact inventory-unavailable recovery.",
+      "capabilities": {
+        "api_version": "v1",
+        "contract_version": "2026-06-v0.9",
+        "schema_version_min": 1,
+        "schema_version_max": 1,
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl", "qos"],
+        "mandatory_domains": [],
+        "status_schema_version_min": 1,
+        "status_schema_version_max": 1,
+        "status_contract_hash": "v0.9-neutron-status-1"
+      },
+      "request_context": {
+        "expected_pending_generation": 1,
+        "expected_desired_hash": "hash-pending-1"
+      },
+      "status": {
+        "status_schema_version": 1,
+        "status_contract_hash": "v0.9-neutron-status-1",
+        "transaction_state": "blocked",
+        "overall_readiness": "blocked",
+        "required_action": "recover_pending",
+        "recovery_cause": "inventory_unavailable",
+        "last_classified_generation": 0,
+        "generation": 0,
+        "accepted_generation": 1,
+        "applied_generation": 0,
+        "pending_generation": 1,
+        "desired_hash": "hash-pending-1",
+        "applied_desired_hash": null,
+        "wal_status": "inventory_barrier_pending",
+        "wal_replay_failures": 0,
+        "authority_state": "blocked_recovery_required",
+        "managed_ports": [],
+        "port_statuses": [],
+        "active_instances": []
+      },
+      "negative_cases": [
+        {
+          "id": "null-recovery-cause",
+          "status_overrides": {"recovery_cause": null},
+          "expected_python": {"decision": "blocked_operator", "mutating_calls": []}
+        },
+        {
+          "id": "nonempty-managed-evidence",
+          "status_overrides": {
+            "managed_ports": [
+              {"port_id": "port-a", "ifname": "tap-port-a", "managed_domains": ["acl"]}
+            ]
+          },
+          "expected_python": {"decision": "blocked_operator", "mutating_calls": []}
+        },
+        {
+          "id": "nonempty-status-evidence",
+          "status_overrides": {
+            "port_statuses": [
+              {
+                "port_id": "port-a",
+                "ifname": "tap-port-a",
+                "generation": 0,
+                "desired_hash": null,
+                "status": "ready",
+                "reason": null,
+                "managed_domains": [],
+                "domains": []
+              }
+            ]
+          },
+          "expected_python": {"decision": "blocked_operator", "mutating_calls": []}
+        },
+        {
+          "id": "nonempty-applied-hash",
+          "status_overrides": {"applied_desired_hash": "hash-applied-0"},
+          "expected_python": {"decision": "blocked_operator", "mutating_calls": []}
+        },
+        {
+          "id": "nonzero-applied-generation",
+          "status_overrides": {"applied_generation": 1},
+          "expected_python": {"decision": "blocked_operator", "mutating_calls": []}
+        },
+        {
+          "id": "missing-pending-identity",
+          "status_overrides": {"pending_generation": null},
+          "expected_python": {"decision": "blocked_operator", "mutating_calls": []}
+        },
+        {
+          "id": "missing-pending-hash",
+          "status_overrides": {"desired_hash": null},
+          "expected_python": {"decision": "blocked_operator", "mutating_calls": []}
+        },
+        {
+          "id": "mismatched-pending-generation",
+          "status_overrides": {"pending_generation": 2},
+          "expected_python": {"decision": "blocked_operator", "mutating_calls": []}
+        },
+        {
+          "id": "mismatched-pending-hash",
+          "status_overrides": {"desired_hash": "hash-pending-other"},
+          "expected_python": {"decision": "blocked_operator", "mutating_calls": []}
+        }
+      ],
+      "contract_error_cases": [
+        {
+          "id": "unknown-on-wire-recovery-cause",
+          "status_overrides": {"recovery_cause": "inventory_timeout"},
+          "expected_python": {
+            "decision": "contract_error",
+            "mutating_calls": [],
+            "error_type": "LocalApiContractError"
+          }
+        }
+      ],
+      "expected_projection": {
+        "transaction_state": "blocked",
+        "overall_readiness": "blocked",
+        "required_action": "recover_pending",
+        "recovery_cause": "inventory_unavailable",
+        "last_classified_generation": 0
+      },
+      "expected_python": {
+        "decoder": "v1",
+        "decision": "recover_pending",
+        "record_classified": false,
+        "record_feature_ready": false,
+        "clear_matching_pending": false,
+        "mark_ready": false,
+        "publish_readiness": "blocked",
+        "mutating_calls": ["recover_pending"],
+        "public_mutating_calls": ["recover_pending", "put_full_snapshot"],
+        "error_type": null
+      }
+    },
+    {
+      "id": "legacy-v0-ready",
+      "minimum_scenario": 10,
+      "description": "A metadata-free legacy response is accepted only with the complete TXN-028 ready shape.",
+      "capabilities": {
+        "api_version": "v1",
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl"]
+      },
+      "request_context": {
+        "expected_generation": 40,
+        "expected_desired_hash": "legacy-hash-40",
+        "projected_port_ids": ["legacy-port"]
+      },
+      "status": {
+        "generation": 40,
+        "accepted_generation": 40,
+        "applied_generation": 40,
+        "pending_generation": null,
+        "desired_hash": "legacy-hash-40",
+        "applied_desired_hash": "legacy-hash-40",
+        "wal_status": "committed",
+        "wal_replay_failures": 0,
+        "authority_state": "ready",
+        "managed_ports": [
+          {"port_id": "legacy-port", "ifname": "tap-legacy", "managed_domains": ["acl"]}
+        ],
+        "port_statuses": [
+          {
+            "port_id": "legacy-port",
+            "ifname": "tap-legacy",
+            "generation": 40,
+            "desired_hash": "legacy-hash-40",
+            "status": "ready",
+            "reason": null,
+            "managed_domains": ["acl"],
+            "domains": [
+              {"domain": "acl", "status": "ready", "reason": null, "effective_action": "enforce"}
+            ]
+          }
+        ],
+        "active_instances": ["tap-legacy"]
+      },
+      "legacy_decoding_cases": [
+        {
+          "id": "idle",
+          "status_overrides": {
+            "generation": 0,
+            "accepted_generation": 0,
+            "applied_generation": 0,
+            "pending_generation": null,
+            "desired_hash": null,
+            "applied_desired_hash": null,
+            "authority_state": "idle",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": []
+          },
+          "expected_projection": {
+            "transaction_state": "idle",
+            "overall_readiness": "unknown",
+            "required_action": "full_resync",
+            "recovery_cause": null,
+            "last_classified_generation": 0
+          }
+        },
+        {
+          "id": "applying",
+          "status_overrides": {
+            "generation": 40,
+            "accepted_generation": 40,
+            "applied_generation": 40,
+            "pending_generation": 41,
+            "desired_hash": "legacy-hash-41",
+            "applied_desired_hash": "legacy-hash-40",
+            "authority_state": "applying",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": []
+          },
+          "expected_projection": {
+            "transaction_state": "pending",
+            "overall_readiness": "unknown",
+            "required_action": "poll",
+            "recovery_cause": null,
+            "last_classified_generation": 40
+          }
+        },
+        {
+          "id": "accepted",
+          "status_overrides": {
+            "generation": 40,
+            "accepted_generation": 41,
+            "applied_generation": 40,
+            "pending_generation": 41,
+            "desired_hash": "legacy-hash-41",
+            "applied_desired_hash": "legacy-hash-40",
+            "authority_state": "accepted",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": []
+          },
+          "expected_projection": {
+            "transaction_state": "pending",
+            "overall_readiness": "unknown",
+            "required_action": "poll",
+            "recovery_cause": null,
+            "last_classified_generation": 40
+          }
+        },
+        {
+          "id": "runtime-degraded-baseline",
+          "status_overrides": {
+            "pending_generation": null,
+            "authority_state": "runtime_degraded"
+          },
+          "expected_projection": {
+            "transaction_state": "classified",
+            "overall_readiness": "degraded",
+            "required_action": "full_resync",
+            "recovery_cause": null,
+            "last_classified_generation": 40
+          }
+        },
+        {
+          "id": "degraded-baseline",
+          "status_overrides": {
+            "pending_generation": null,
+            "authority_state": "degraded"
+          },
+          "expected_projection": {
+            "transaction_state": "classified",
+            "overall_readiness": "degraded",
+            "required_action": "full_resync",
+            "recovery_cause": null,
+            "last_classified_generation": 40
+          }
+        },
+        {
+          "id": "runtime-degraded-pending",
+          "status_overrides": {
+            "accepted_generation": 41,
+            "pending_generation": 41,
+            "desired_hash": "legacy-hash-41",
+            "authority_state": "runtime_degraded"
+          },
+          "expected_projection": {
+            "transaction_state": "blocked",
+            "overall_readiness": "blocked",
+            "required_action": "operator",
+            "recovery_cause": null,
+            "last_classified_generation": 40
+          }
+        },
+        {
+          "id": "degraded-pending",
+          "status_overrides": {
+            "accepted_generation": 41,
+            "pending_generation": 41,
+            "desired_hash": "legacy-hash-41",
+            "authority_state": "degraded"
+          },
+          "expected_projection": {
+            "transaction_state": "blocked",
+            "overall_readiness": "blocked",
+            "required_action": "operator",
+            "recovery_cause": null,
+            "last_classified_generation": 40
+          }
+        },
+        {
+          "id": "partial-recoverable",
+          "status_overrides": {
+            "accepted_generation": 41,
+            "pending_generation": 41,
+            "desired_hash": "legacy-hash-41",
+            "authority_state": "partial"
+          },
+          "expected_projection": {
+            "transaction_state": "blocked",
+            "overall_readiness": "blocked",
+            "required_action": "recover_pending",
+            "recovery_cause": null,
+            "last_classified_generation": 40
+          }
+        },
+        {
+          "id": "blocked-recovery-required",
+          "status_overrides": {
+            "accepted_generation": 40,
+            "pending_generation": 41,
+            "desired_hash": "legacy-hash-41",
+            "authority_state": "blocked_recovery_required"
+          },
+          "expected_projection": {
+            "transaction_state": "blocked",
+            "overall_readiness": "blocked",
+            "required_action": "recover_pending",
+            "recovery_cause": null,
+            "last_classified_generation": 40
+          }
+        },
+        {
+          "id": "recovered-pending-full-resync",
+          "status_overrides": {
+            "accepted_generation": 40,
+            "pending_generation": 41,
+            "desired_hash": "legacy-hash-41",
+            "authority_state": "recovered_pending_full_resync"
+          },
+          "expected_projection": {
+            "transaction_state": "blocked",
+            "overall_readiness": "blocked",
+            "required_action": "recover_pending",
+            "recovery_cause": null,
+            "last_classified_generation": 40
+          }
+        },
+        {
+          "id": "recovered-full-resync",
+          "status_overrides": {
+            "pending_generation": null,
+            "authority_state": "recovered_pending_full_resync_required"
+          },
+          "expected_projection": {
+            "transaction_state": "recovery",
+            "overall_readiness": "degraded",
+            "required_action": "full_resync",
+            "recovery_cause": null,
+            "last_classified_generation": 40
+          }
+        }
+      ],
+      "expected_projection": {
+        "transaction_state": "classified",
+        "overall_readiness": "ready",
+        "required_action": "none",
+        "recovery_cause": null,
+        "last_classified_generation": 40
+      },
+      "expected_python": {
+        "decoder": "legacy_v0",
+        "decision": "feature_ready",
+        "record_classified": true,
+        "record_feature_ready": true,
+        "clear_matching_pending": true,
+        "mark_ready": true,
+        "publish_readiness": "ready",
+        "mutating_calls": [],
+        "error_type": null
+      }
+    },
+    {
+      "id": "legacy-v0-unknown-authority",
+      "minimum_scenario": 11,
+      "description": "A complete legacy identity with an unknown authority token is a no-write contract error.",
+      "capabilities": {
+        "api_version": "v1",
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl"]
+      },
+      "request_context": {
+        "expected_generation": 40,
+        "expected_desired_hash": "legacy-hash-40"
+      },
+      "status": {
+        "generation": 40,
+        "accepted_generation": 40,
+        "applied_generation": 40,
+        "pending_generation": null,
+        "desired_hash": "legacy-hash-40",
+        "applied_desired_hash": "legacy-hash-40",
+        "wal_status": "committed",
+        "wal_replay_failures": 0,
+        "authority_state": "ready_after_replay",
+        "managed_ports": [],
+        "port_statuses": [],
+        "active_instances": []
+      },
+      "expected_projection": null,
+      "expected_python": {
+        "decoder": "legacy_v0",
+        "decision": "contract_error",
+        "record_classified": false,
+        "record_feature_ready": false,
+        "clear_matching_pending": false,
+        "mark_ready": false,
+        "publish_readiness": "blocked",
+        "mutating_calls": [],
+        "error_type": "LocalApiContractError"
+      }
+    },
+    {
+      "id": "unknown-v1-contract",
+      "minimum_scenario": 12,
+      "description": "Unknown Status V1 metadata or closed vocabulary is a typed no-write contract error.",
+      "capabilities": {
+        "api_version": "v1",
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl"],
+        "status_schema_version_min": 1,
+        "status_schema_version_max": 1,
+        "status_contract_hash": "v0.9-neutron-status-1"
+      },
+      "cases": [
+        {
+          "id": "unknown-capability-version",
+          "capabilities": {
+            "api_version": "v1",
+            "attach_authority": "neutron_snapshot",
+            "supports_full_snapshot": true,
+            "supports_port_scoped_snapshot": true,
+            "supports_port_delete": true,
+            "supported_domains": ["attach", "acl"],
+            "status_schema_version_min": 2,
+            "status_schema_version_max": 2,
+            "status_contract_hash": "v0.9-neutron-status-1"
+          },
+          "status": {
+            "status_schema_version": 2,
+            "status_contract_hash": "v0.9-neutron-status-1",
+            "transaction_state": "classified",
+            "overall_readiness": "ready",
+            "required_action": "none",
+            "recovery_cause": null,
+            "last_classified_generation": 42,
+            "generation": 42,
+            "accepted_generation": 42,
+            "applied_generation": 42,
+            "pending_generation": null,
+            "desired_hash": "hash-ready-42",
+            "applied_desired_hash": "hash-ready-42",
+            "wal_status": "committed",
+            "wal_replay_failures": 0,
+            "authority_state": "ready",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": []
+          }
+        },
+        {
+          "id": "unknown-capability-hash",
+          "capabilities": {
+            "api_version": "v1",
+            "attach_authority": "neutron_snapshot",
+            "supports_full_snapshot": true,
+            "supports_port_scoped_snapshot": true,
+            "supports_port_delete": true,
+            "supported_domains": ["attach", "acl"],
+            "status_schema_version_min": 1,
+            "status_schema_version_max": 1,
+            "status_contract_hash": "v0.9-neutron-status-unknown"
+          },
+          "status": {
+            "status_schema_version": 1,
+            "status_contract_hash": "v0.9-neutron-status-unknown",
+            "transaction_state": "classified",
+            "overall_readiness": "ready",
+            "required_action": "none",
+            "recovery_cause": null,
+            "last_classified_generation": 42,
+            "generation": 42,
+            "accepted_generation": 42,
+            "applied_generation": 42,
+            "pending_generation": null,
+            "desired_hash": "hash-ready-42",
+            "applied_desired_hash": "hash-ready-42",
+            "wal_status": "committed",
+            "wal_replay_failures": 0,
+            "authority_state": "ready",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": []
+          }
+        },
+        {
+          "id": "response-version-mismatch",
+          "status": {
+            "status_schema_version": 2,
+            "status_contract_hash": "v0.9-neutron-status-1",
+            "transaction_state": "classified",
+            "overall_readiness": "ready",
+            "required_action": "none",
+            "recovery_cause": null,
+            "last_classified_generation": 42,
+            "generation": 42,
+            "accepted_generation": 42,
+            "applied_generation": 42,
+            "pending_generation": null,
+            "desired_hash": "hash-ready-42",
+            "applied_desired_hash": "hash-ready-42",
+            "wal_status": "committed",
+            "wal_replay_failures": 0,
+            "authority_state": "ready",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": []
+          }
+        },
+        {
+          "id": "response-hash-mismatch",
+          "status": {
+            "status_schema_version": 1,
+            "status_contract_hash": "v0.9-neutron-status-other",
+            "transaction_state": "classified",
+            "overall_readiness": "ready",
+            "required_action": "none",
+            "recovery_cause": null,
+            "last_classified_generation": 42,
+            "generation": 42,
+            "accepted_generation": 42,
+            "applied_generation": 42,
+            "pending_generation": null,
+            "desired_hash": "hash-ready-42",
+            "applied_desired_hash": "hash-ready-42",
+            "wal_status": "committed",
+            "wal_replay_failures": 0,
+            "authority_state": "ready",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": []
+          }
+        },
+        {
+          "id": "response-missing-v1-metadata",
+          "status": {
+            "generation": 42,
+            "accepted_generation": 42,
+            "applied_generation": 42,
+            "pending_generation": null,
+            "desired_hash": "hash-ready-42",
+            "applied_desired_hash": "hash-ready-42",
+            "wal_status": "committed",
+            "wal_replay_failures": 0,
+            "authority_state": "ready",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": []
+          }
+        },
+        {
+          "id": "unknown-state",
+          "status": {
+            "status_schema_version": 1,
+            "status_contract_hash": "v0.9-neutron-status-1",
+            "transaction_state": "settled",
+            "overall_readiness": "ready",
+            "required_action": "none",
+            "recovery_cause": null,
+            "last_classified_generation": 42,
+            "generation": 42,
+            "accepted_generation": 42,
+            "applied_generation": 42,
+            "pending_generation": null,
+            "desired_hash": "hash-ready-42",
+            "applied_desired_hash": "hash-ready-42",
+            "wal_status": "committed",
+            "wal_replay_failures": 0,
+            "authority_state": "ready",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": []
+          }
+        },
+        {
+          "id": "unknown-readiness",
+          "status": {
+            "status_schema_version": 1,
+            "status_contract_hash": "v0.9-neutron-status-1",
+            "transaction_state": "classified",
+            "overall_readiness": "healthy",
+            "required_action": "none",
+            "recovery_cause": null,
+            "last_classified_generation": 42,
+            "generation": 42,
+            "accepted_generation": 42,
+            "applied_generation": 42,
+            "pending_generation": null,
+            "desired_hash": "hash-ready-42",
+            "applied_desired_hash": "hash-ready-42",
+            "wal_status": "committed",
+            "wal_replay_failures": 0,
+            "authority_state": "ready",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": []
+          }
+        },
+        {
+          "id": "unknown-action",
+          "status": {
+            "status_schema_version": 1,
+            "status_contract_hash": "v0.9-neutron-status-1",
+            "transaction_state": "blocked",
+            "overall_readiness": "blocked",
+            "required_action": "retry",
+            "recovery_cause": null,
+            "last_classified_generation": 42,
+            "generation": 42,
+            "accepted_generation": 45,
+            "applied_generation": 42,
+            "pending_generation": 45,
+            "desired_hash": "hash-pending-45",
+            "applied_desired_hash": "hash-ready-42",
+            "wal_status": "blocked",
+            "wal_replay_failures": 0,
+            "authority_state": "blocked",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": []
+          }
+        },
+        {
+          "id": "invalid-state-readiness-action-combination",
+          "status": {
+            "status_schema_version": 1,
+            "status_contract_hash": "v0.9-neutron-status-1",
+            "transaction_state": "classified",
+            "overall_readiness": "ready",
+            "required_action": "full_resync",
+            "recovery_cause": null,
+            "last_classified_generation": 42,
+            "generation": 42,
+            "accepted_generation": 42,
+            "applied_generation": 42,
+            "pending_generation": null,
+            "desired_hash": "hash-ready-42",
+            "applied_desired_hash": "hash-ready-42",
+            "wal_status": "committed",
+            "wal_replay_failures": 0,
+            "authority_state": "ready",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": []
+          }
+        },
+        {
+          "id": "unknown-recovery-cause",
+          "status": {
+            "status_schema_version": 1,
+            "status_contract_hash": "v0.9-neutron-status-1",
+            "transaction_state": "blocked",
+            "overall_readiness": "blocked",
+            "required_action": "recover_pending",
+            "recovery_cause": "inventory_timeout",
+            "last_classified_generation": 42,
+            "generation": 42,
+            "accepted_generation": 45,
+            "applied_generation": 42,
+            "pending_generation": 45,
+            "desired_hash": "hash-pending-45",
+            "applied_desired_hash": "hash-ready-42",
+            "wal_status": "blocked",
+            "wal_replay_failures": 0,
+            "authority_state": "blocked_recovery_required",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": []
+          }
+        }
+      ],
+      "status": null,
+      "expected_projection": null,
+      "expected_python": {
+        "decoder": "v1",
+        "decision": "contract_error",
+        "record_classified": false,
+        "record_feature_ready": false,
+        "clear_matching_pending": false,
+        "mark_ready": false,
+        "publish_readiness": "blocked",
+        "mutating_calls": [],
+        "error_type": "LocalApiContractError"
+      }
+    },
+    {
+      "id": "ready-invalid-evidence",
+      "minimum_scenario": 13,
+      "description": "A ready label never overrides invalid identity, domain, support, or duplicate-row evidence.",
+      "capabilities": {
+        "api_version": "v1",
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl"],
+        "status_schema_version_min": 1,
+        "status_schema_version_max": 1,
+        "status_contract_hash": "v0.9-neutron-status-1"
+      },
+      "request_context": {
+        "expected_generation": 42,
+        "expected_desired_hash": "hash-ready-42",
+        "projected_port_ids": ["port-a"]
+      },
+      "base_status": {
+        "status_schema_version": 1,
+        "status_contract_hash": "v0.9-neutron-status-1",
+        "transaction_state": "classified",
+        "overall_readiness": "ready",
+        "required_action": "none",
+        "recovery_cause": null,
+        "last_classified_generation": 42,
+        "generation": 42,
+        "accepted_generation": 42,
+        "applied_generation": 42,
+        "pending_generation": null,
+        "desired_hash": "hash-ready-42",
+        "applied_desired_hash": "hash-ready-42",
+        "wal_status": "committed",
+        "wal_replay_failures": 0,
+        "authority_state": "ready",
+        "managed_ports": [
+          {"port_id": "port-a", "ifname": "tap-port-a", "managed_domains": ["acl"]}
+        ],
+        "port_statuses": [
+          {
+            "port_id": "port-a",
+            "ifname": "tap-port-a",
+            "generation": 42,
+            "desired_hash": "hash-ready-42",
+            "status": "ready",
+            "reason": null,
+            "managed_domains": ["acl"],
+            "domains": [
+              {"domain": "acl", "status": "ready", "reason": null, "effective_action": "enforce", "support_disposition": "supported"}
+            ]
+          }
+        ],
+        "active_instances": ["tap-port-a"]
+      },
+      "cases": [
+        {"id": "alias-generation-mismatch", "mutation": {"op": "replace", "path": ["generation"], "value": 41}},
+        {"id": "accepted-generation-mismatch", "mutation": {"op": "replace", "path": ["accepted_generation"], "value": 41}},
+        {"id": "applied-generation-mismatch", "mutation": {"op": "replace", "path": ["applied_generation"], "value": 41}},
+        {"id": "last-classified-generation-mismatch", "mutation": {"op": "replace", "path": ["last_classified_generation"], "value": 41}},
+        {"id": "desired-hash-mismatch", "mutation": {"op": "replace", "path": ["desired_hash"], "value": "hash-ready-other"}},
+        {"id": "applied-desired-hash-mismatch", "mutation": {"op": "replace", "path": ["applied_desired_hash"], "value": "hash-ready-other"}},
+        {"id": "missing-managed-row", "mutation": {"op": "remove", "path": ["managed_ports", 0]}},
+        {"id": "missing-status-row", "mutation": {"op": "remove", "path": ["port_statuses", 0]}},
+        {"id": "duplicate-managed-row", "mutation": {"op": "append_copy", "path": ["managed_ports"], "index": 0}},
+        {"id": "duplicate-status-row", "mutation": {"op": "append_copy", "path": ["port_statuses"], "index": 0}},
+        {"id": "duplicate-domain-row", "mutation": {"op": "append_copy", "path": ["port_statuses", 0, "domains"], "index": 0}},
+        {"id": "unknown-domain-status", "mutation": {"op": "replace", "path": ["port_statuses", 0, "domains", 0, "status"], "value": "warming"}},
+        {"id": "unsupported-ready-domain", "mutation": {"op": "replace", "path": ["port_statuses", 0, "domains", 0, "support_disposition"], "value": "unsupported"}}
+      ],
+      "status": null,
+      "expected_projection": null,
+      "expected_python": {
+        "decoder": "v1",
+        "decision": "reject_ready",
+        "record_classified": false,
+        "record_feature_ready": false,
+        "clear_matching_pending": false,
+        "mark_ready": false,
+        "publish_readiness": "blocked",
+        "mutating_calls": [],
+        "error_type": "LocalApiContractError"
+      }
+    },
+    {
+      "id": "restart-classified-routing",
+      "minimum_scenario": 14,
+      "description": "Restart routing follows classified projected IDs while feature-ready history remains unchanged.",
+      "capabilities": {
+        "api_version": "v1",
+        "contract_version": "2026-06-v0.9",
+        "schema_version_min": 1,
+        "schema_version_max": 1,
+        "attach_authority": "neutron_snapshot",
+        "supports_full_snapshot": true,
+        "supports_port_scoped_snapshot": true,
+        "supports_port_delete": true,
+        "supported_domains": ["attach", "acl", "qos"],
+        "mandatory_domains": [],
+        "status_schema_version_min": 1,
+        "status_schema_version_max": 1,
+        "status_contract_hash": "v0.9-neutron-status-1"
+      },
+      "request_context": {
+        "classified_projected_port_ids": ["port-a", "port-c"],
+        "feature_ready_projected_port_ids": ["port-a", "port-b"],
+        "update_port_id": "port-c",
+        "delete_port_id": "port-c",
+        "removed_port_id": "port-b"
+      },
+      "durable_state": {
+        "schema_version": 1,
+        "last_generation": 49,
+        "last_desired_hash": "ready-hash-49",
+        "last_projected_port_ids": ["port-a", "port-b"],
+        "last_classified_generation": 50,
+        "last_classified_desired_hash": "classified-hash-50",
+        "last_classified_projected_port_ids": ["port-a", "port-c"],
+        "last_feature_ready_generation": 49,
+        "last_feature_ready_desired_hash": "ready-hash-49",
+        "last_feature_ready_projected_port_ids": ["port-a", "port-b"],
+        "last_feature_ready_generation_by_domain": {"acl": 49},
+        "pending_generation": null,
+        "pending_desired_hash": null,
+        "pending_snapshot_ports": 0,
+        "pending_projected_port_ids": [],
+        "pending_since": null
+      },
+      "status": {
+        "status_schema_version": 1,
+        "status_contract_hash": "v0.9-neutron-status-1",
+        "transaction_state": "classified",
+        "overall_readiness": "degraded",
+        "required_action": "none",
+        "recovery_cause": null,
+        "last_classified_generation": 50,
+        "generation": 50,
+        "accepted_generation": 50,
+        "applied_generation": 50,
+        "pending_generation": null,
+        "desired_hash": "classified-hash-50",
+        "applied_desired_hash": "classified-hash-50",
+        "wal_status": "committed_degraded",
+        "wal_replay_failures": 0,
+        "authority_state": "runtime_degraded",
+        "managed_ports": [
+          {"port_id": "port-a", "ifname": "tap-port-a", "managed_domains": ["acl"]},
+          {"port_id": "port-c", "ifname": "tap-port-c", "managed_domains": ["acl"]}
+        ],
+        "port_statuses": [
+          {
+            "port_id": "port-a",
+            "ifname": "tap-port-a",
+            "generation": 50,
+            "desired_hash": "classified-hash-50",
+            "status": "degraded",
+            "reason": "acl_not_supported",
+            "managed_domains": ["acl"],
+            "domains": [
+              {"domain": "acl", "status": "degraded", "reason": "acl_not_supported", "effective_action": "bypass", "support_disposition": "unsupported"}
+            ]
+          },
+          {
+            "port_id": "port-c",
+            "ifname": "tap-port-c",
+            "generation": 50,
+            "desired_hash": "classified-hash-50",
+            "status": "degraded",
+            "reason": "acl_not_supported",
+            "managed_domains": ["acl"],
+            "domains": [
+              {"domain": "acl", "status": "degraded", "reason": "acl_not_supported", "effective_action": "bypass", "support_disposition": "unsupported"}
+            ]
+          }
+        ],
+        "active_instances": ["tap-port-a", "tap-port-c"]
+      },
+      "expected_projection": {
+        "transaction_state": "classified",
+        "overall_readiness": "degraded",
+        "required_action": "none",
+        "recovery_cause": null,
+        "last_classified_generation": 50
+      },
+      "expected_python": {
+        "decoder": "v1",
+        "decision": "classified_degraded",
+        "record_classified": true,
+        "record_feature_ready": false,
+        "clear_matching_pending": true,
+        "mark_ready": false,
+        "publish_readiness": "degraded",
+        "mutating_calls": [],
+        "error_type": null,
+        "restart_routes": {
+          "port-c-update": "local_port_update",
+          "port-c-delete": "delete_local",
+          "port-b-delete": "ignore"
+        }
+      }
+    }
+  ]
+}

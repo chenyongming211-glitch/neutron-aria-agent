@@ -15,6 +15,8 @@ class AgentRuntimeStatus(object):
         self.reason = "not_synced"
         self.last_error = None
         self.last_generation = 0
+        self.last_classified_generation = 0
+        self.last_feature_ready_generation_by_domain = {}
         self.last_submitted_generation = 0
         self.accepted_generation = 0
         self.applied_generation = 0
@@ -47,12 +49,18 @@ class AgentRuntimeStatus(object):
         port_statuses=None,
         accepted_generation=None,
         applied_generation=None,
+        feature_ready_generation_by_domain=None,
     ):
         self.ready = True
         self.degraded = False
         self.reason = "ready"
         self.last_error = None
         self.last_generation = generation
+        self.last_classified_generation = generation
+        if feature_ready_generation_by_domain is not None:
+            self.last_feature_ready_generation_by_domain = (
+                self._generation_by_domain(feature_ready_generation_by_domain)
+            )
         self.last_submitted_generation = generation
         self.accepted_generation = self._int_or_default(accepted_generation, generation)
         self.applied_generation = self._int_or_default(applied_generation, generation)
@@ -64,6 +72,74 @@ class AgentRuntimeStatus(object):
         self.last_port_statuses = list(port_statuses or [])
         self.domain_counts = self._domain_counts(self.last_port_statuses)
         self.degraded_reasons = self._degraded_reasons(self.last_port_statuses)
+        self.updated_at = time.time()
+
+    def mark_classified_degraded(
+        self,
+        generation,
+        snapshot_ports,
+        managed_ports,
+        desired_hash=None,
+        managed_ports_detail=None,
+        port_statuses=None,
+        accepted_generation=None,
+        applied_generation=None,
+        reason="classified_degraded",
+        error=None,
+    ):
+        self.ready = False
+        self.degraded = True
+        self.reason = reason
+        self.last_error = None if error is None else str(error)
+        self.last_classified_generation = generation
+        self.last_submitted_generation = generation
+        self.accepted_generation = self._int_or_default(accepted_generation, generation)
+        self.applied_generation = self._int_or_default(applied_generation, generation)
+        self.generation_lag = max(0, int(generation) - int(self.applied_generation))
+        self.last_snapshot_ports = snapshot_ports
+        self.last_managed_ports = managed_ports
+        self.last_managed_ports_detail = list(managed_ports_detail or [])
+        self.last_port_statuses = list(port_statuses or [])
+        self.domain_counts = self._domain_counts(self.last_port_statuses)
+        self.degraded_reasons = self._degraded_reasons(self.last_port_statuses)
+        self.updated_at = time.time()
+
+    def hydrate_durable_history(
+        self,
+        history=None,
+        last_classified_generation=None,
+    ):
+        payload = dict(history or {})
+        if last_classified_generation is None:
+            last_classified_generation = payload.get(
+                "last_classified_generation",
+                self.last_classified_generation,
+            )
+        self.last_classified_generation = self._int_or_default(
+            last_classified_generation,
+            self.last_classified_generation,
+        )
+
+        feature_ready_generation = payload.get(
+            "last_feature_ready_generation",
+            payload.get("generation", self.last_generation),
+        )
+        self.last_generation = self._int_or_default(
+            feature_ready_generation,
+            self.last_generation,
+        )
+        self.last_desired_hash = payload.get(
+            "last_feature_ready_desired_hash",
+            payload.get("desired_hash", self.last_desired_hash),
+        )
+        generation_by_domain = payload.get(
+            "last_feature_ready_generation_by_domain",
+            payload.get("generation_by_domain"),
+        )
+        if generation_by_domain is not None:
+            self.last_feature_ready_generation_by_domain = (
+                self._generation_by_domain(generation_by_domain)
+            )
         self.updated_at = time.time()
 
     def mark_degraded(self, reason, error):
@@ -121,6 +197,10 @@ class AgentRuntimeStatus(object):
             "reason": self.reason,
             "last_error": self.last_error,
             "last_generation": self.last_generation,
+            "last_classified_generation": self.last_classified_generation,
+            "last_feature_ready_generation_by_domain": dict(
+                self.last_feature_ready_generation_by_domain
+            ),
             "last_submitted_generation": self.last_submitted_generation,
             "accepted_generation": self.accepted_generation,
             "applied_generation": self.applied_generation,
@@ -150,6 +230,14 @@ class AgentRuntimeStatus(object):
             return int(value)
         except (TypeError, ValueError):
             return int(default or 0)
+
+    def _generation_by_domain(self, generations):
+        result = {}
+        for domain, generation in dict(generations or {}).items():
+            if not isinstance(domain, str) or not domain:
+                continue
+            result[domain] = self._int_or_default(generation, 0)
+        return result
 
     def _domain_counts(self, port_statuses):
         counts = {}

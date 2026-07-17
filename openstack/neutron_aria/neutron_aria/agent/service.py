@@ -10,6 +10,7 @@ from neutron_aria.agent.projection import ACTION_DELETE_LOCAL
 from neutron_aria.agent.projection import ACTION_FULL_RESYNC
 from neutron_aria.agent.projection import ACTION_IGNORE
 from neutron_aria.agent.projection import REASON_LOCAL_PORT_UPDATE
+from neutron_aria.agent.uds_client import LocalApiContractError
 
 
 LOG = logging.getLogger(__name__)
@@ -370,6 +371,24 @@ class AgentService(object):
                 revision_number=event.get("revision_number"),
                 allow_revisionless=allow_revisionless,
             )
+        except LocalApiContractError as exc:
+            LOG.warning(
+                "port_scoped_apply_contract_error host=%s port_id=%s error=%s",
+                getattr(self.synchronizer, "host", ""),
+                port_id,
+                exc,
+            )
+            self.synchronizer.runtime_status.mark_degraded(
+                "local_api_contract_error",
+                exc,
+            )
+            decision["incremental_action"] = "blocked_contract_error"
+            decision["incremental_reason"] = "local_api_contract_error"
+            decision["incremental_error"] = str(exc)
+            return {
+                "snapshot": None,
+                "response": None,
+            }
         except Exception as exc:
             LOG.warning(
                 "port_scoped_apply_fallback host=%s port_id=%s error=%s",

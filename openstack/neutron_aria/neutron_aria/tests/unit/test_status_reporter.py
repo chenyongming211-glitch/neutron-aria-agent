@@ -12,6 +12,7 @@ from neutron_aria.agent.status_reporter import NeutronStatusReporter
 from neutron_aria.agent.status_reporter import StatusReportError
 from neutron_aria.agent.status_reporter import build_neutron_status_reporter
 from neutron_aria.agent.status_reporter import report_state_topic
+from neutron_aria.tests.unit.status_contract_scenarios import status_scenario
 
 
 class FakeReportStateApi(object):
@@ -396,6 +397,49 @@ class StatusReporterTestCase(unittest.TestCase):
 
         self.assertEqual(1, len(report_state.calls))
         self.assertEqual(1, len(aria_acl_api.statuses))
+
+
+class StatusContractStatusReporterRedTestCase(unittest.TestCase):
+    def test_classified_degraded_heartbeat_preserves_feature_ready_domain_history(self):
+        scenario = status_scenario("restart-classified-routing")
+        history = scenario["durable_state"][
+            "last_feature_ready_generation_by_domain"
+        ]
+        api = FakeReportStateApi()
+        runtime_status = AgentRuntimeStatus("ostack2")
+        try:
+            runtime_status.mark_ready(
+                generation=scenario["durable_state"]["last_feature_ready_generation"],
+                snapshot_ports=2,
+                managed_ports=2,
+                desired_hash=scenario["durable_state"][
+                    "last_feature_ready_desired_hash"
+                ],
+                feature_ready_generation_by_domain=history,
+            )
+        except TypeError as exc:
+            self.fail(
+                "mark_ready lacks feature-ready domain history: %s" % exc
+            )
+        runtime_status.mark_degraded(
+            "classified_degraded",
+            "acl_not_supported",
+        )
+        reporter = NeutronStatusReporter(api, context="ctx", host="ostack2")
+
+        agent_state = reporter.report(runtime_status)
+        configurations = agent_state["configurations"]
+
+        self.assertFalse(configurations["ready"])
+        self.assertTrue(configurations["degraded"])
+        self.assertEqual(
+            scenario["durable_state"]["last_feature_ready_generation"],
+            configurations["last_generation"],
+        )
+        self.assertEqual(
+            history,
+            configurations["last_feature_ready_generation_by_domain"],
+        )
 
 
 if __name__ == "__main__":

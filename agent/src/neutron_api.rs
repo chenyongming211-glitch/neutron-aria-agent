@@ -2,8 +2,12 @@ use aria_api::{
     action_from_string, direction_from_string, proto_from_string, ManagedNeutronPort,
     NeutronAclRuleSnapshot, NeutronAclSnapshot, NeutronCapabilitiesResponse, NeutronDeleteResponse,
     NeutronDomainStatus, NeutronPortApplyResult, NeutronPortSnapshot, NeutronPortStatus,
-    NeutronSnapshotRequest, NeutronSnapshotResponse, NeutronStatusResponse,
-    NEUTRON_UDS_BODY_MAX_BYTES, NEUTRON_UDS_SCHEMA_VERSION_MAX, NEUTRON_UDS_SCHEMA_VERSION_MIN,
+    NeutronSnapshotRequest, NeutronSnapshotResponse, NeutronStatusDomainEvidence,
+    NeutronStatusDomainState, NeutronStatusEffectiveAction, NeutronStatusOverallReadiness,
+    NeutronStatusPortEvidence, NeutronStatusRecoveryCause, NeutronStatusRequiredAction,
+    NeutronStatusSupportDisposition, NeutronStatusTransactionState, NeutronStatusV1Response,
+    NEUTRON_STATUS_CONTRACT_HASH, NEUTRON_STATUS_SCHEMA_VERSION_MAX, NEUTRON_UDS_BODY_MAX_BYTES,
+    NEUTRON_UDS_SCHEMA_VERSION_MAX, NEUTRON_UDS_SCHEMA_VERSION_MIN,
 };
 use axum::{
     extract::DefaultBodyLimit,
@@ -1390,8 +1394,620 @@ async fn get_neutron_capabilities() -> impl IntoResponse {
     Json(NeutronCapabilitiesResponse::current())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum StatusV1EvidenceClass {
+    Ready,
+    TerminalDegraded,
+    FullResync,
+    Blocked,
+}
+
+struct NeutronStatusV1Projection {
+    transaction_state: NeutronStatusTransactionState,
+    overall_readiness: NeutronStatusOverallReadiness,
+    required_action: NeutronStatusRequiredAction,
+    recovery_cause: Option<NeutronStatusRecoveryCause>,
+    last_classified_generation: u64,
+    port_statuses: Vec<NeutronStatusPortEvidence>,
+}
+
+struct ProjectedStatusV1PortRow {
+    evidence: NeutronStatusPortEvidence,
+    domain_class: StatusV1EvidenceClass,
+    domain_names: BTreeSet<String>,
+    domains_valid: bool,
+}
+
+fn status_v1_reason_requires_full_resync(reason: Option<&str>) -> bool {
+    matches!(
+        reason,
+        Some("runtime_rebuild_required")
+            | Some("acl_restart_replay_requires_resync")
+            | Some("tc_acl_link_lost")
+    )
+}
+
+fn status_v1_effective_action(action: Option<&str>) -> Option<NeutronStatusEffectiveAction> {
+    match action {
+        Some("enforce") => Some(NeutronStatusEffectiveAction::Enforce),
+        Some("bypass") => Some(NeutronStatusEffectiveAction::Bypass),
+        Some("unchanged") => Some(NeutronStatusEffectiveAction::Unchanged),
+        Some("cleanup") => Some(NeutronStatusEffectiveAction::Cleanup),
+        Some("no_op") => Some(NeutronStatusEffectiveAction::NoOp),
+        Some(_) | None => None,
+    }
+}
+
+fn status_v1_reason_is_unsupported(reason: Option<&str>) -> bool {
+    reason.is_some_and(|reason| {
+        reason == "acl_not_supported"
+            || reason.starts_with("acl_rule_limit_exceeded:")
+            || reason.starts_with("acl_selector_member_limit_exceeded:")
+            || reason.starts_with("unsupported_acl_")
+            || reason.starts_with("invalid_acl_priority:")
+            || reason.starts_with("duplicate_acl_priority:")
+            || reason.ends_with("_transaction_not_implemented")
+            || reason.starts_with("blocked_by_unimplemented_domains:")
+            || reason.starts_with("unsupported_recovery_domain:")
+    })
+}
+
+fn status_v1_support_disposition(
+    domain: &str,
+    status: &str,
+    reason: Option<&str>,
+) -> NeutronStatusSupportDisposition {
+    if domain == "acl" && status == "not_requested" {
+        NeutronStatusSupportDisposition::NotApplicable
+    } else if status == "unsupported" || status_v1_reason_is_unsupported(reason) {
+        NeutronStatusSupportDisposition::Unsupported
+    } else if status_v1_reason_requires_full_resync(reason)
+        || matches!((domain, status), ("attach", "ready") | ("acl", "ready"))
+    {
+        NeutronStatusSupportDisposition::Supported
+    } else {
+        NeutronStatusSupportDisposition::Unknown
+    }
+}
+
+fn status_v1_normalized_unique_domains(domains: &[String]) -> Option<Vec<String>> {
+    let normalized = normalize_managed_domains(domains);
+    (normalized.len() == domains.len()).then_some(normalized)
+}
+
+fn project_status_v1_domain(
+    domain: &NeutronDomainStatus,
+) -> (NeutronStatusDomainEvidence, StatusV1EvidenceClass) {
+    let normalized_names = normalize_managed_domains(std::slice::from_ref(&domain.domain));
+    let domain_name_valid = normalized_names.len() == 1;
+    let domain_name = normalized_names
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| domain.domain.clone());
+    let action = status_v1_effective_action(domain.effective_action.as_deref());
+    let action_valid = domain.effective_action.is_none() || action.is_some();
+    let support = status_v1_support_disposition(
+        &domain_name,
+        domain.status.as_str(),
+        domain.reason.as_deref(),
+    );
+
+    let (status, mut evidence_class) = match domain.status.as_str() {
+        "ready" => {
+            let valid = match domain_name.as_str() {
+                "acl" => {
+                    action == Some(NeutronStatusEffectiveAction::Enforce)
+                        && support == NeutronStatusSupportDisposition::Supported
+                }
+                "attach" => {
+                    action.is_none() && support == NeutronStatusSupportDisposition::Supported
+                }
+                _ => false,
+            };
+            (
+                NeutronStatusDomainState::Ready,
+                if valid {
+                    StatusV1EvidenceClass::Ready
+                } else {
+                    StatusV1EvidenceClass::Blocked
+                },
+            )
+        }
+        "not_requested" => {
+            let valid = domain_name == "acl"
+                && matches!(
+                    action,
+                    Some(NeutronStatusEffectiveAction::Bypass)
+                        | Some(NeutronStatusEffectiveAction::NoOp)
+                )
+                && support == NeutronStatusSupportDisposition::NotApplicable;
+            (
+                NeutronStatusDomainState::NotRequested,
+                if valid {
+                    StatusV1EvidenceClass::Ready
+                } else {
+                    StatusV1EvidenceClass::Blocked
+                },
+            )
+        }
+        "degraded" | "unsupported" => {
+            let terminal = domain_name == "acl"
+                && matches!(
+                    action,
+                    Some(NeutronStatusEffectiveAction::Bypass)
+                        | Some(NeutronStatusEffectiveAction::Unchanged)
+                );
+            let evidence_class = if !terminal {
+                StatusV1EvidenceClass::Blocked
+            } else if status_v1_reason_requires_full_resync(domain.reason.as_deref()) {
+                StatusV1EvidenceClass::FullResync
+            } else {
+                StatusV1EvidenceClass::TerminalDegraded
+            };
+            (NeutronStatusDomainState::Degraded, evidence_class)
+        }
+        "blocked" | "error" | "recovered" | "detached" => (
+            NeutronStatusDomainState::Blocked,
+            StatusV1EvidenceClass::Blocked,
+        ),
+        _ => (
+            NeutronStatusDomainState::Blocked,
+            StatusV1EvidenceClass::Blocked,
+        ),
+    };
+
+    if !domain_name_valid || !action_valid {
+        evidence_class = StatusV1EvidenceClass::Blocked;
+    }
+
+    (
+        NeutronStatusDomainEvidence {
+            domain: domain_name,
+            status,
+            reason: domain.reason.clone(),
+            effective_action: action,
+            support_disposition: support,
+        },
+        evidence_class,
+    )
+}
+
+fn project_status_v1_port_row(status: &NeutronPortStatus) -> ProjectedStatusV1PortRow {
+    let mut domain_class = StatusV1EvidenceClass::Ready;
+    let mut domain_names = BTreeSet::new();
+    let mut domains_valid = true;
+    let mut domains = Vec::with_capacity(status.domains.len());
+    for domain in &status.domains {
+        let (evidence, evidence_class) = project_status_v1_domain(domain);
+        if evidence.domain.trim().is_empty() || !domain_names.insert(evidence.domain.clone()) {
+            domains_valid = false;
+        }
+        domain_class = domain_class.max(evidence_class);
+        domains.push(evidence);
+    }
+    if !domains_valid {
+        domain_class = StatusV1EvidenceClass::Blocked;
+    }
+
+    ProjectedStatusV1PortRow {
+        evidence: NeutronStatusPortEvidence {
+            port_id: status.port_id.clone(),
+            ifname: status.ifname.clone(),
+            generation: status.generation,
+            desired_hash: status.desired_hash.clone(),
+            status: status.status.clone(),
+            reason: status.reason.clone(),
+            managed_domains: status.managed_domains.clone(),
+            domains,
+        },
+        domain_class,
+        domain_names,
+        domains_valid,
+    }
+}
+
+fn status_v1_port_top_level_class(
+    status: &NeutronPortStatus,
+    projected: &ProjectedStatusV1PortRow,
+) -> StatusV1EvidenceClass {
+    match status.status.as_str() {
+        "ready" if projected.domain_class == StatusV1EvidenceClass::Ready => {
+            StatusV1EvidenceClass::Ready
+        }
+        "not_requested"
+            if projected.evidence.domains.len() == 1
+                && projected.evidence.domains[0].domain == "acl"
+                && projected.evidence.domains[0].status
+                    == NeutronStatusDomainState::NotRequested
+                && matches!(
+                    projected.evidence.domains[0].effective_action,
+                    Some(NeutronStatusEffectiveAction::Bypass)
+                        | Some(NeutronStatusEffectiveAction::NoOp)
+                )
+                && projected.evidence.domains[0].support_disposition
+                    == NeutronStatusSupportDisposition::NotApplicable =>
+        {
+            StatusV1EvidenceClass::Ready
+        }
+        "degraded" | "unsupported"
+            if matches!(
+                projected.domain_class,
+                StatusV1EvidenceClass::TerminalDegraded | StatusV1EvidenceClass::FullResync
+            ) =>
+        {
+            if projected.domain_class == StatusV1EvidenceClass::FullResync
+                || status_v1_reason_requires_full_resync(status.reason.as_deref())
+            {
+                StatusV1EvidenceClass::FullResync
+            } else {
+                StatusV1EvidenceClass::TerminalDegraded
+            }
+        }
+        _ => StatusV1EvidenceClass::Blocked,
+    }
+}
+
+fn status_v1_allows_empty_ifname(
+    status: &NeutronPortStatus,
+    projected: &ProjectedStatusV1PortRow,
+    status_domains: &[String],
+) -> bool {
+    if !matches!(status.status.as_str(), "degraded" | "unsupported")
+        || status_domains.len() != 1
+        || status_domains[0] != "acl"
+        || projected.evidence.domains.len() != 1
+    {
+        return false;
+    }
+
+    let acl = &projected.evidence.domains[0];
+    acl.domain == "acl"
+        && acl.status == NeutronStatusDomainState::Degraded
+        && acl.effective_action == Some(NeutronStatusEffectiveAction::Bypass)
+        && acl.support_disposition == NeutronStatusSupportDisposition::Unsupported
+}
+
+fn project_status_v1_detached_tombstone(
+    runtime: &NeutronRuntimeState,
+    status_map_key: &str,
+    status: &NeutronPortStatus,
+) -> Option<NeutronStatusPortEvidence> {
+    if status_map_key.is_empty()
+        || status_map_key != status.port_id.as_str()
+        || status.ifname.is_empty()
+        || status.status != "detached"
+        || status.generation == 0
+        || status.generation > runtime.applied_generation
+    {
+        return None;
+    }
+    let desired_hash = status
+        .desired_hash
+        .as_deref()
+        .filter(|hash| !hash.trim().is_empty())?;
+    if status.generation == runtime.applied_generation
+        && runtime.applied_desired_hash.as_deref() != Some(desired_hash)
+    {
+        return None;
+    }
+
+    let managed_domains = status_v1_normalized_unique_domains(&status.managed_domains)?;
+    let managed_domain_set = managed_domains.iter().cloned().collect::<BTreeSet<_>>();
+    let mut domain_names = BTreeSet::new();
+    let mut domains = Vec::with_capacity(status.domains.len());
+    for domain in &status.domains {
+        let normalized = status_v1_normalized_unique_domains(std::slice::from_ref(&domain.domain))?;
+        let domain_name = normalized.into_iter().next()?;
+        if !domain_names.insert(domain_name.clone())
+            || !managed_domain_set.contains(&domain_name)
+            || domain.status != "detached"
+            || domain.effective_action.is_some()
+        {
+            return None;
+        }
+        domains.push(NeutronStatusDomainEvidence {
+            domain: domain_name,
+            status: NeutronStatusDomainState::NotRequested,
+            reason: domain.reason.clone(),
+            effective_action: Some(NeutronStatusEffectiveAction::Cleanup),
+            support_disposition: NeutronStatusSupportDisposition::NotApplicable,
+        });
+    }
+
+    Some(NeutronStatusPortEvidence {
+        port_id: status.port_id.clone(),
+        ifname: status.ifname.clone(),
+        generation: status.generation,
+        desired_hash: status.desired_hash.clone(),
+        status: status.status.clone(),
+        reason: status.reason.clone(),
+        managed_domains,
+        domains,
+    })
+}
+
+fn project_status_v1_ports(
+    runtime: &NeutronRuntimeState,
+) -> (Vec<NeutronStatusPortEvidence>, StatusV1EvidenceClass) {
+    let mut projected_rows = Vec::with_capacity(runtime.port_statuses.len());
+    let mut aggregate = StatusV1EvidenceClass::Ready;
+
+    for (managed_key, managed) in &runtime.ports {
+        let Some(status) = runtime.port_statuses.get(managed_key) else {
+            aggregate = StatusV1EvidenceClass::Blocked;
+            continue;
+        };
+        let mut projected = project_status_v1_port_row(status);
+        let managed_domains = status_v1_normalized_unique_domains(&managed.managed_domains);
+        let status_domains = status_v1_normalized_unique_domains(&status.managed_domains);
+        let top_level_class = status_v1_port_top_level_class(status, &projected);
+        let mut ifname_valid =
+            managed.ifname.as_str() == status.ifname.as_str() && !managed.ifname.is_empty();
+
+        let mut valid = !managed_key.is_empty()
+            && managed_key.as_str() == managed.port_id.as_str()
+            && status.port_id.as_str() == managed_key.as_str()
+            && projected.domains_valid
+            && status.generation > 0
+            && status.generation <= runtime.applied_generation
+            && status
+                .desired_hash
+                .as_deref()
+                .is_some_and(|hash| !hash.trim().is_empty());
+
+        match (&managed_domains, &status_domains) {
+            (Some(managed_domains), Some(status_domains)) if managed_domains == status_domains => {
+                if managed.ifname.as_str() == status.ifname.as_str()
+                    && managed.ifname.is_empty()
+                    && status_v1_allows_empty_ifname(status, &projected, status_domains)
+                {
+                    ifname_valid = true;
+                }
+                let status_domain_set = status_domains.iter().cloned().collect::<BTreeSet<_>>();
+                if !status_domain_set
+                    .iter()
+                    .all(|domain| projected.domain_names.contains(domain))
+                    || projected
+                        .domain_names
+                        .iter()
+                        .any(|domain| domain != "attach" && !status_domain_set.contains(domain))
+                {
+                    valid = false;
+                }
+                projected.evidence.managed_domains = status_domains.clone();
+                projected
+                    .evidence
+                    .domains
+                    .retain(|domain| status_domain_set.contains(&domain.domain));
+            }
+            _ => valid = false,
+        }
+
+        valid = valid && ifname_valid;
+
+        if status.generation == runtime.applied_generation
+            && status.desired_hash != runtime.applied_desired_hash
+        {
+            valid = false;
+        }
+        if valid && top_level_class != StatusV1EvidenceClass::Blocked {
+            aggregate = aggregate.max(top_level_class);
+        } else {
+            aggregate = StatusV1EvidenceClass::Blocked;
+        }
+        projected_rows.push(projected.evidence);
+    }
+
+    for (status_key, status) in &runtime.port_statuses {
+        if runtime.ports.contains_key(status_key) {
+            continue;
+        }
+        match project_status_v1_detached_tombstone(runtime, status_key, status) {
+            Some(tombstone) => projected_rows.push(tombstone),
+            None => {
+                projected_rows.push(project_status_v1_port_row(status).evidence);
+                aggregate = StatusV1EvidenceClass::Blocked;
+            }
+        }
+    }
+
+    projected_rows.sort_by(|left, right| left.port_id.cmp(&right.port_id));
+    (projected_rows, aggregate)
+}
+
+fn status_v1_has_complete_pending_identity(runtime: &NeutronRuntimeState) -> bool {
+    let Some(pending_generation) = runtime.pending_generation else {
+        return false;
+    };
+    pending_generation > 0
+        && (runtime.accepted_generation == runtime.applied_generation
+            || runtime.accepted_generation == pending_generation)
+        && pending_generation >= runtime.applied_generation
+        && (pending_generation != runtime.applied_generation || runtime.applied_generation > 0)
+        && runtime
+            .desired_hash
+            .as_deref()
+            .is_some_and(|hash| !hash.trim().is_empty())
+        && (runtime.applied_generation == 0
+            || runtime
+                .applied_desired_hash
+                .as_deref()
+                .is_some_and(|hash| !hash.trim().is_empty()))
+        && (pending_generation != runtime.applied_generation
+            || runtime.desired_hash == runtime.applied_desired_hash)
+}
+
+fn status_v1_has_classified_identity(runtime: &NeutronRuntimeState) -> bool {
+    runtime.pending_generation.is_none()
+        && runtime.accepted_generation == runtime.applied_generation
+        && runtime.desired_hash == runtime.applied_desired_hash
+        && if runtime.applied_generation == 0 {
+            runtime.desired_hash.is_none() && runtime.applied_desired_hash.is_none()
+        } else {
+            runtime
+                .applied_desired_hash
+                .as_deref()
+                .is_some_and(|hash| !hash.trim().is_empty())
+        }
+}
+
+fn status_v1_is_generation_zero_inventory_recovery(runtime: &NeutronRuntimeState) -> bool {
+    runtime.recovery_cause.as_deref() == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+        && status_v1_has_complete_pending_identity(runtime)
+        && runtime
+            .pending_generation
+            .is_some_and(|pending| pending > 0 && pending == runtime.accepted_generation)
+        && runtime.applied_generation == 0
+        && runtime.applied_desired_hash.is_none()
+        && runtime.ports.is_empty()
+        && runtime.port_statuses.is_empty()
+}
+
+fn project_neutron_status_v1(runtime: &NeutronRuntimeState) -> NeutronStatusV1Projection {
+    let (port_statuses, evidence_class) = project_status_v1_ports(runtime);
+    let operator_blocked = || -> (
+        NeutronStatusTransactionState,
+        NeutronStatusOverallReadiness,
+        NeutronStatusRequiredAction,
+        Option<NeutronStatusRecoveryCause>,
+    ) {
+        (
+            NeutronStatusTransactionState::Blocked,
+            NeutronStatusOverallReadiness::Blocked,
+            NeutronStatusRequiredAction::Operator,
+            None,
+        )
+    };
+    let unknown_recovery_cause = runtime
+        .recovery_cause
+        .as_deref()
+        .is_some_and(|cause| cause != INVENTORY_UNAVAILABLE_RECOVERY_CAUSE);
+    let idle = runtime.accepted_generation == 0
+        && runtime.applied_generation == 0
+        && runtime.pending_generation.is_none()
+        && runtime.desired_hash.is_none()
+        && runtime.applied_desired_hash.is_none()
+        && runtime.ports.is_empty()
+        && runtime.port_statuses.is_empty()
+        && runtime.recovery_cause.is_none()
+        && matches!(runtime.authority_state.as_str(), "" | "idle");
+
+    let (transaction_state, overall_readiness, required_action, recovery_cause) =
+        if runtime.wal_replay_failures > 0 || unknown_recovery_cause {
+            operator_blocked()
+        } else if idle {
+            (
+                NeutronStatusTransactionState::Idle,
+                NeutronStatusOverallReadiness::Unknown,
+                NeutronStatusRequiredAction::FullResync,
+                None,
+            )
+        } else if runtime.pending_generation.is_some() {
+            if !status_v1_has_complete_pending_identity(runtime) {
+                operator_blocked()
+            } else if runtime.recovery_cause.as_deref()
+                == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+            {
+                let protected_inventory_identity =
+                    runtime.pending_generation == Some(runtime.accepted_generation);
+                let allowed_baseline = protected_inventory_identity
+                    && (runtime.applied_generation > 0
+                        || status_v1_is_generation_zero_inventory_recovery(runtime));
+                if allowed_baseline && runtime.authority_state == "blocked_recovery_required" {
+                    (
+                        NeutronStatusTransactionState::Blocked,
+                        NeutronStatusOverallReadiness::Blocked,
+                        NeutronStatusRequiredAction::RecoverPending,
+                        Some(NeutronStatusRecoveryCause::InventoryUnavailable),
+                    )
+                } else {
+                    operator_blocked()
+                }
+            } else if runtime.recovery_cause.is_some() {
+                operator_blocked()
+            } else {
+                match runtime.authority_state.as_str() {
+                    "applying" | "accepted" => (
+                        NeutronStatusTransactionState::Pending,
+                        NeutronStatusOverallReadiness::Unknown,
+                        NeutronStatusRequiredAction::Poll,
+                        None,
+                    ),
+                    "partial" | "blocked_recovery_required" | "recovered_pending_full_resync"
+                        if runtime.applied_generation > 0 =>
+                    {
+                        (
+                            NeutronStatusTransactionState::Blocked,
+                            NeutronStatusOverallReadiness::Blocked,
+                            NeutronStatusRequiredAction::RecoverPending,
+                            None,
+                        )
+                    }
+                    _ => operator_blocked(),
+                }
+            }
+        } else if runtime.recovery_cause.is_some() {
+            operator_blocked()
+        } else if runtime.authority_state == "recovered_pending_full_resync_required"
+            && status_v1_has_classified_identity(runtime)
+            && evidence_class != StatusV1EvidenceClass::Blocked
+        {
+            (
+                NeutronStatusTransactionState::Recovery,
+                NeutronStatusOverallReadiness::Degraded,
+                NeutronStatusRequiredAction::FullResync,
+                None,
+            )
+        } else if runtime.applied_generation > 0 && status_v1_has_classified_identity(runtime) {
+            match (runtime.authority_state.as_str(), evidence_class) {
+                ("ready", StatusV1EvidenceClass::Ready) => (
+                    NeutronStatusTransactionState::Classified,
+                    NeutronStatusOverallReadiness::Ready,
+                    NeutronStatusRequiredAction::None,
+                    None,
+                ),
+                ("ready" | "runtime_degraded", StatusV1EvidenceClass::TerminalDegraded) => (
+                    NeutronStatusTransactionState::Classified,
+                    NeutronStatusOverallReadiness::Degraded,
+                    NeutronStatusRequiredAction::None,
+                    None,
+                ),
+                ("ready" | "runtime_degraded", StatusV1EvidenceClass::FullResync) => (
+                    NeutronStatusTransactionState::Classified,
+                    NeutronStatusOverallReadiness::Degraded,
+                    NeutronStatusRequiredAction::FullResync,
+                    None,
+                ),
+                (
+                    "runtime_reconcile_requires_full_resync" | "degraded",
+                    StatusV1EvidenceClass::Ready
+                    | StatusV1EvidenceClass::TerminalDegraded
+                    | StatusV1EvidenceClass::FullResync,
+                ) => (
+                    NeutronStatusTransactionState::Classified,
+                    NeutronStatusOverallReadiness::Degraded,
+                    NeutronStatusRequiredAction::FullResync,
+                    None,
+                ),
+                _ => operator_blocked(),
+            }
+        } else {
+            operator_blocked()
+        };
+
+    NeutronStatusV1Projection {
+        transaction_state,
+        overall_readiness,
+        required_action,
+        recovery_cause,
+        last_classified_generation: runtime.applied_generation,
+        port_statuses,
+    }
+}
+
 async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoResponse {
     let runtime = state.runtime.read().await;
+    let projection = project_neutron_status_v1(&runtime);
     let managed_ports = runtime.ports.values().cloned().collect();
     let generation = runtime.applied_generation;
     let accepted_generation = runtime.accepted_generation;
@@ -1406,10 +2022,16 @@ async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoRe
     } else {
         runtime.authority_state.clone()
     };
-    let port_statuses = runtime.port_statuses.values().cloned().collect();
     drop(runtime);
 
-    Json(NeutronStatusResponse {
+    Json(NeutronStatusV1Response {
+        status_schema_version: NEUTRON_STATUS_SCHEMA_VERSION_MAX,
+        status_contract_hash: NEUTRON_STATUS_CONTRACT_HASH.to_string(),
+        transaction_state: projection.transaction_state,
+        overall_readiness: projection.overall_readiness,
+        required_action: projection.required_action,
+        recovery_cause: projection.recovery_cause,
+        last_classified_generation: projection.last_classified_generation,
         generation,
         accepted_generation,
         applied_generation,
@@ -1420,7 +2042,7 @@ async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoRe
         wal_replay_failures,
         authority_state,
         managed_ports,
-        port_statuses,
+        port_statuses: projection.port_statuses,
         active_instances: state.registry.list().await,
     })
 }
@@ -5094,6 +5716,111 @@ fn can_skip_neutron_domain_reconcile(
 mod tests {
     use super::*;
     use crate::ebpf_binary::TraceBackendKind;
+    use std::sync::{Arc, OnceLock};
+
+    const STATUS_V1_SCENARIOS_JSON: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../docs/neutron-status-contract-v1-scenarios.json"
+    ));
+
+    static STATUS_V1_SCENARIOS: OnceLock<Value> = OnceLock::new();
+
+    #[derive(Deserialize)]
+    struct StatusV1RuntimeSeed {
+        accepted_generation: u64,
+        applied_generation: u64,
+        pending_generation: Option<u64>,
+        desired_hash: Option<String>,
+        applied_desired_hash: Option<String>,
+        authority_state: String,
+        wal_status: String,
+        wal_replay_failures: u64,
+        recovery_cause: Option<String>,
+        managed_ports: Vec<ManagedNeutronPort>,
+        port_statuses: Vec<NeutronPortStatus>,
+    }
+
+    fn rust_status_v1_scenario_ids() -> &'static [&'static str] {
+        &[
+            "full-classified-ready",
+            "scoped-classified-ready",
+            "classified-degraded-terminal",
+            "classified-degraded-full-resync",
+            "pending-poll",
+            "blocked-recoverable-inventory",
+            "blocked-operator",
+            "recovery-full-resync",
+            "generation-zero-inventory-recovery",
+            "restart-classified-routing",
+        ]
+    }
+
+    fn shared_status_v1_scenarios() -> &'static Value {
+        STATUS_V1_SCENARIOS.get_or_init(|| {
+            let fixture: Value = serde_json::from_str(STATUS_V1_SCENARIOS_JSON)
+                .expect("shared Status V1 scenarios must be valid JSON");
+            assert_eq!(
+                fixture
+                    .get("fixture_schema_version")
+                    .and_then(Value::as_u64),
+                Some(1),
+                "shared Status V1 fixture schema must be version 1"
+            );
+
+            let scenarios = fixture
+                .get("scenarios")
+                .and_then(Value::as_array)
+                .expect("shared Status V1 scenarios must be an array");
+            let mut fixture_ids = BTreeSet::new();
+            for scenario in scenarios {
+                let id = scenario
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .expect("every shared Status V1 scenario must have a string id");
+                assert!(
+                    fixture_ids.insert(id),
+                    "shared Status V1 scenario id must be unique: {id}"
+                );
+            }
+
+            let producer_ids = rust_status_v1_scenario_ids();
+            assert_eq!(
+                producer_ids.len(),
+                10,
+                "Rust Status V1 producer selection must contain exactly ten ids"
+            );
+            assert_eq!(
+                producer_ids.iter().copied().collect::<BTreeSet<_>>().len(),
+                producer_ids.len(),
+                "Rust Status V1 producer ids must be unique"
+            );
+            for id in producer_ids {
+                assert!(
+                    fixture_ids.contains(id),
+                    "Rust Status V1 producer scenario must exist: {id}"
+                );
+            }
+            drop(fixture_ids);
+
+            fixture
+        })
+    }
+
+    fn shared_status_v1_scenario(id: &str) -> &'static Value {
+        let matches = shared_status_v1_scenarios()
+            .get("scenarios")
+            .and_then(Value::as_array)
+            .expect("shared Status V1 scenarios must be an array")
+            .iter()
+            .filter(|scenario| scenario.get("id").and_then(Value::as_str) == Some(id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matches.len(),
+            1,
+            "shared Status V1 scenario id must match exactly once: {id}"
+        );
+        matches[0]
+    }
 
     #[derive(Serialize)]
     struct TestSnapshotIntentHashPayload<'a> {
@@ -5308,7 +6035,6 @@ mod tests {
     use crate::kernel_drop_manager::KernelDropManager;
     use crate::ssl_manager::SslManager;
     use crate::trace_backend::TraceManager;
-    use std::sync::Arc;
 
     fn managed(port_id: &str, ifname: &str) -> ManagedNeutronPort {
         ManagedNeutronPort {
@@ -5682,6 +6408,320 @@ mod tests {
         }
     }
 
+    fn status_v1_runtime_seed(id: &str) -> StatusV1RuntimeSeed {
+        let status = shared_status_v1_scenario(id)
+            .get("status")
+            .filter(|status| status.is_object())
+            .unwrap_or_else(|| panic!("Rust Status V1 producer scenario must have status: {id}"));
+        for field in [
+            "accepted_generation",
+            "applied_generation",
+            "pending_generation",
+            "desired_hash",
+            "applied_desired_hash",
+            "authority_state",
+            "wal_status",
+            "wal_replay_failures",
+            "recovery_cause",
+            "managed_ports",
+            "port_statuses",
+        ] {
+            assert!(
+                status.get(field).is_some(),
+                "Rust Status V1 runtime seed {id} must explicitly declare {field}"
+            );
+        }
+        serde_json::from_value(status.clone())
+            .unwrap_or_else(|error| panic!("Status V1 runtime seed must decode for {id}: {error}"))
+    }
+
+    fn runtime_from_status_v1_seed(seed: StatusV1RuntimeSeed) -> NeutronRuntimeState {
+        let StatusV1RuntimeSeed {
+            accepted_generation,
+            applied_generation,
+            pending_generation,
+            desired_hash,
+            applied_desired_hash,
+            authority_state,
+            wal_status,
+            wal_replay_failures,
+            recovery_cause,
+            managed_ports,
+            port_statuses,
+        } = seed;
+
+        let mut ports = BTreeMap::new();
+        for port in managed_ports {
+            let port_id = port.port_id.clone();
+            assert!(
+                ports.insert(port_id.clone(), port).is_none(),
+                "Status V1 runtime seed contains duplicate managed port id: {port_id}"
+            );
+        }
+        let mut statuses = BTreeMap::new();
+        for status in port_statuses {
+            let port_id = status.port_id.clone();
+            assert!(
+                statuses.insert(port_id.clone(), status).is_none(),
+                "Status V1 runtime seed contains duplicate port status id: {port_id}"
+            );
+        }
+
+        NeutronRuntimeState {
+            accepted_generation,
+            applied_generation,
+            pending_generation,
+            desired_hash,
+            applied_desired_hash,
+            authority_state,
+            ports,
+            port_statuses: statuses,
+            wal_status,
+            recovery_cause,
+            wal_replay_failures,
+        }
+    }
+
+    async fn status_v1_json_for_runtime(id: &str, runtime: NeutronRuntimeState) -> Value {
+        let root = temp_root(&format!("status-v1-{id}"));
+        let state = test_neutron_state(&root);
+        {
+            let mut stored_runtime = state.runtime.write().await;
+            *stored_runtime = runtime;
+        }
+        let response = get_neutron_status(State(state)).await.into_response();
+        let (status, value) = response_json_value(response).await;
+        std::fs::remove_dir_all(&root).expect("Status V1 temporary root should be removable");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "Status V1 handler must return HTTP 200 for {id}: {value}"
+        );
+        value
+    }
+
+    fn expected_status_v1_projection(id: &str) -> &'static Value {
+        let fixture = shared_status_v1_scenarios();
+        let contract = fixture
+            .get("status_contract")
+            .and_then(Value::as_object)
+            .expect("shared Status V1 contract declaration must be an object");
+        let scenario = shared_status_v1_scenario(id);
+        let status = scenario
+            .get("status")
+            .filter(|status| status.is_object())
+            .unwrap_or_else(|| panic!("Rust Status V1 producer scenario must have status: {id}"));
+        assert_eq!(
+            status.get("status_schema_version"),
+            contract.get("version"),
+            "Status V1 response schema must match the shared declaration: {id}"
+        );
+        assert_eq!(
+            status.get("status_contract_hash"),
+            contract.get("hash"),
+            "Status V1 response hash must match the shared declaration: {id}"
+        );
+
+        let projection = scenario
+            .get("expected_projection")
+            .filter(|projection| projection.is_object())
+            .unwrap_or_else(|| panic!("Rust Status V1 producer projection must exist: {id}"));
+        for field in [
+            "transaction_state",
+            "overall_readiness",
+            "required_action",
+            "recovery_cause",
+            "last_classified_generation",
+        ] {
+            assert!(
+                projection.get(field).is_some(),
+                "Status V1 expected projection {id} must declare {field}"
+            );
+        }
+        projection
+    }
+
+    fn canonicalized_managed_ports(value: Option<&Value>, context: &str) -> Result<Value, String> {
+        let rows = value
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{context}: managed_ports must be an array"))?;
+        let mut canonical = Vec::with_capacity(rows.len());
+        for row in rows {
+            let object = row
+                .as_object()
+                .ok_or_else(|| format!("{context}: managed port row must be an object"))?;
+            let mut required = serde_json::Map::new();
+            for field in ["port_id", "ifname", "managed_domains"] {
+                required.insert(
+                    field.to_string(),
+                    object.get(field).cloned().ok_or_else(|| {
+                        format!("{context}: managed port row must include {field}")
+                    })?,
+                );
+            }
+            canonical.push(Value::Object(required));
+        }
+        canonical.sort_by(|left, right| {
+            left.get("port_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .cmp(
+                    right
+                        .get("port_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+        });
+        Ok(Value::Array(canonical))
+    }
+
+    fn canonicalized_port_statuses(value: Option<&Value>, context: &str) -> Result<Value, String> {
+        let mut rows = value
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| format!("{context}: port_statuses must be an array"))?;
+        for row in &mut rows {
+            let object = row
+                .as_object_mut()
+                .ok_or_else(|| format!("{context}: port status row must be an object"))?;
+            let domains = object
+                .get_mut("domains")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| format!("{context}: port status domains must be an array"))?;
+            domains.sort_by(|left, right| {
+                left.get("domain")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .cmp(
+                        right
+                            .get("domain")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    )
+            });
+        }
+        rows.sort_by(|left, right| {
+            left.get("port_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .cmp(
+                    right
+                        .get("port_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+        });
+        Ok(Value::Array(rows))
+    }
+
+    fn status_v1_projection_field_mismatches(
+        id: &str,
+        expected: &Value,
+        actual: &Value,
+    ) -> Vec<String> {
+        let expected_status = shared_status_v1_scenario(id)
+            .get("status")
+            .expect("Rust Status V1 producer status must exist");
+        let mut mismatches = Vec::new();
+        for field in ["status_schema_version", "status_contract_hash"] {
+            if actual.get(field) != expected_status.get(field) {
+                mismatches.push(format!(
+                    "{field}: expected {:?}, got {:?}",
+                    expected_status.get(field),
+                    actual.get(field)
+                ));
+            }
+        }
+        for field in [
+            "transaction_state",
+            "overall_readiness",
+            "required_action",
+            "recovery_cause",
+            "last_classified_generation",
+        ] {
+            if actual.get(field) != expected.get(field) {
+                mismatches.push(format!(
+                    "{field}: expected {:?}, got {:?}",
+                    expected.get(field),
+                    actual.get(field)
+                ));
+            }
+        }
+        mismatches
+    }
+
+    fn assert_status_v1_projection(
+        id: &str,
+        expected: &Value,
+        actual: &Value,
+    ) -> Result<(), String> {
+        let expected_status = shared_status_v1_scenario(id)
+            .get("status")
+            .expect("Rust Status V1 producer status must exist");
+        let mut mismatches = status_v1_projection_field_mismatches(id, expected, actual);
+
+        for field in [
+            "generation",
+            "accepted_generation",
+            "applied_generation",
+            "pending_generation",
+            "desired_hash",
+            "applied_desired_hash",
+            "wal_status",
+            "wal_replay_failures",
+            "authority_state",
+        ] {
+            if actual.get(field) != expected_status.get(field) {
+                mismatches.push(format!(
+                    "{field}: expected {:?}, got {:?}",
+                    expected_status.get(field),
+                    actual.get(field)
+                ));
+            }
+        }
+        if actual.get("generation") != actual.get("applied_generation") {
+            mismatches.push(format!(
+                "generation alias mismatch: generation {:?}, applied_generation {:?}",
+                actual.get("generation"),
+                actual.get("applied_generation")
+            ));
+        }
+
+        match (
+            canonicalized_managed_ports(expected_status.get("managed_ports"), id),
+            canonicalized_managed_ports(actual.get("managed_ports"), id),
+        ) {
+            (Ok(expected_ports), Ok(actual_ports)) if expected_ports != actual_ports => {
+                mismatches.push(format!(
+                    "managed_ports: expected {expected_ports}, got {actual_ports}"
+                ));
+            }
+            (Err(error), _) | (_, Err(error)) => mismatches.push(error),
+            _ => {}
+        }
+
+        match (
+            canonicalized_port_statuses(expected_status.get("port_statuses"), id),
+            canonicalized_port_statuses(actual.get("port_statuses"), id),
+        ) {
+            (Ok(expected_statuses), Ok(actual_statuses))
+                if expected_statuses != actual_statuses =>
+            {
+                mismatches.push(format!(
+                    "port_statuses: expected {expected_statuses}, got {actual_statuses}"
+                ));
+            }
+            (Err(error), _) | (_, Err(error)) => mismatches.push(error),
+            _ => {}
+        }
+
+        if mismatches.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("{id}:\n{}", mismatches.join("\n")))
+        }
+    }
+
     fn inventory_snapshot(
         generation: u64,
         ports: Vec<NeutronPortSnapshot>,
@@ -5704,6 +6744,1315 @@ mod tests {
             .expect("response body should be readable");
         let value = serde_json::from_slice(body.as_ref()).expect("response should be json");
         (status, value)
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_runtime_projection_matches_shared_scenarios() {
+        let mut mismatches = Vec::new();
+
+        for id in rust_status_v1_scenario_ids() {
+            let runtime = runtime_from_status_v1_seed(status_v1_runtime_seed(id));
+            let actual = status_v1_json_for_runtime(id, runtime).await;
+            let expected = expected_status_v1_projection(id);
+            if let Err(mismatch) = assert_status_v1_projection(id, expected, &actual) {
+                mismatches.push(mismatch);
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "Neutron runtime projection drifted from the shared Status V1 scenarios:\n{}",
+            mismatches.join("\n\n")
+        );
+    }
+
+    #[test]
+    fn neutron_snapshot_status_v1_restart_projection_hides_supplemental_attach() {
+        let mut restored = managed_with_ifindex("restart-port", "tap-restart", 17);
+        restored.managed_domains = vec!["acl".to_string()];
+        restored
+            .domain_desired_hashes
+            .insert("acl".to_string(), "acl-hash".to_string());
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            desired_hash: Some("hash-42".to_string()),
+            applied_desired_hash: Some("hash-42".to_string()),
+            authority_state: "ready".to_string(),
+            ports: BTreeMap::from([("restart-port".to_string(), restored.clone())]),
+            port_statuses: BTreeMap::from([(
+                "restart-port".to_string(),
+                ready_status("restart-port", "tap-restart", 42),
+            )]),
+            wal_status: "commit_written".to_string(),
+            ..Default::default()
+        };
+
+        assert!(invalidate_restarted_acl_runtime(
+            &mut runtime,
+            std::slice::from_ref(&restored),
+        ));
+        assert!(runtime.port_statuses["restart-port"]
+            .domains
+            .iter()
+            .any(|domain| domain.domain == "attach" && domain.status == "ready"));
+
+        let projection = project_neutron_status_v1(&runtime);
+
+        assert_eq!(
+            projection.transaction_state,
+            NeutronStatusTransactionState::Classified
+        );
+        assert_eq!(
+            projection.overall_readiness,
+            NeutronStatusOverallReadiness::Degraded
+        );
+        assert_eq!(
+            projection.required_action,
+            NeutronStatusRequiredAction::FullResync
+        );
+        assert_eq!(projection.port_statuses.len(), 1);
+        let wire_row = &projection.port_statuses[0];
+        assert_eq!(wire_row.managed_domains, vec!["acl".to_string()]);
+        assert_eq!(
+            wire_row
+                .domains
+                .iter()
+                .map(|domain| domain.domain.as_str())
+                .collect::<Vec<_>>(),
+            vec!["acl"]
+        );
+        assert!(runtime.port_statuses["restart-port"]
+            .domains
+            .iter()
+            .any(|domain| domain.domain == "attach" && domain.status == "ready"));
+    }
+
+    #[test]
+    fn neutron_snapshot_status_v1_empty_ifname_exception_is_exact() {
+        let positive =
+            runtime_from_status_v1_seed(status_v1_runtime_seed("classified-degraded-terminal"));
+        let positive_projection = project_neutron_status_v1(&positive);
+        assert_eq!(
+            positive_projection.transaction_state,
+            NeutronStatusTransactionState::Classified
+        );
+        assert_eq!(
+            positive_projection.overall_readiness,
+            NeutronStatusOverallReadiness::Degraded
+        );
+        assert_eq!(
+            positive_projection.required_action,
+            NeutronStatusRequiredAction::None
+        );
+
+        let mut exact_unsupported_full_resync =
+            runtime_from_status_v1_seed(status_v1_runtime_seed("classified-degraded-terminal"));
+        exact_unsupported_full_resync
+            .port_statuses
+            .values_mut()
+            .next()
+            .expect("terminal-degraded scenario must contain a status row")
+            .reason = Some("acl_restart_replay_requires_resync".to_string());
+        let exact_unsupported_projection =
+            project_neutron_status_v1(&exact_unsupported_full_resync);
+        assert_eq!(
+            exact_unsupported_projection.transaction_state,
+            NeutronStatusTransactionState::Classified
+        );
+        assert_eq!(
+            exact_unsupported_projection.overall_readiness,
+            NeutronStatusOverallReadiness::Degraded
+        );
+        assert_eq!(
+            exact_unsupported_projection.required_action,
+            NeutronStatusRequiredAction::FullResync
+        );
+
+        let mut full_resync =
+            runtime_from_status_v1_seed(status_v1_runtime_seed("classified-degraded-full-resync"));
+        let port_id = full_resync
+            .ports
+            .keys()
+            .next()
+            .expect("full-resync scenario must contain a managed port")
+            .clone();
+        full_resync
+            .ports
+            .get_mut(&port_id)
+            .expect("managed port must remain addressable")
+            .ifname
+            .clear();
+        full_resync
+            .port_statuses
+            .get_mut(&port_id)
+            .expect("port status must remain addressable")
+            .ifname
+            .clear();
+
+        let blocked = project_neutron_status_v1(&full_resync);
+
+        assert_eq!(
+            blocked.transaction_state,
+            NeutronStatusTransactionState::Blocked
+        );
+        assert_eq!(
+            blocked.overall_readiness,
+            NeutronStatusOverallReadiness::Blocked
+        );
+        assert_eq!(
+            blocked.required_action,
+            NeutronStatusRequiredAction::Operator
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_real_admission_polls_with_baseline_accepted_generation() {
+        let root = temp_root("status-v1-real-admission-pending-identity");
+        let state = test_neutron_state(&root);
+        let baseline = committed_runtime(42);
+        state
+            .wal
+            .append_snapshot_commit(baseline.to_wal_state())
+            .expect("classified baseline should be durable before admission");
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = baseline.clone();
+        }
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 45,
+            desired_hash: Some("hash-pending-45".to_string()),
+            host: None,
+            ports: vec![port("committed-port", "tap-committed", true)],
+        };
+
+        let decision = accept_neutron_snapshot_submit(&state, &snapshot, &ApplyScope::FullHost)
+            .await
+            .expect("newer snapshot intent should be admitted");
+        assert_eq!(decision.response.status, "pending");
+        assert_eq!(decision.response.accepted_generation, 42);
+        assert_eq!(decision.response.applied_generation, 42);
+        let prepared = decision
+            .prepared
+            .expect("admission must retain a prepared transaction until apply");
+        assert_eq!(prepared.intent.generation, 45);
+        assert_eq!(
+            prepared.intent.desired_hash.as_deref(),
+            Some("hash-pending-45")
+        );
+        assert_eq!(prepared.runtime_before_apply.accepted_generation, 42);
+        assert_eq!(prepared.runtime_before_apply.applied_generation, 42);
+
+        {
+            let runtime = state.runtime.read().await;
+            assert_eq!(runtime.accepted_generation, 42);
+            assert_eq!(runtime.applied_generation, 42);
+            assert_eq!(runtime.pending_generation, Some(45));
+            assert_eq!(runtime.desired_hash.as_deref(), Some("hash-pending-45"));
+            assert_eq!(runtime.applied_desired_hash, baseline.applied_desired_hash);
+            assert_eq!(runtime.authority_state, "applying");
+            assert_eq!(runtime.wal_status, "intent_written");
+        }
+
+        let response = get_neutron_status(State(state.clone()))
+            .await
+            .into_response();
+        let (status, actual) = response_json_value(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(actual["accepted_generation"], serde_json::json!(42));
+        assert_eq!(actual["applied_generation"], serde_json::json!(42));
+        assert_eq!(actual["pending_generation"], serde_json::json!(45));
+        assert_eq!(actual["desired_hash"], serde_json::json!("hash-pending-45"));
+        let mismatches = status_v1_expected_projection_mismatches(
+            "real-admission-baseline-accepted",
+            &actual,
+            "pending",
+            "unknown",
+            "poll",
+            None,
+            42,
+        );
+
+        drop(prepared);
+        std::fs::remove_dir_all(&root)
+            .expect("real admission Status V1 temporary root should be removable");
+        assert!(
+            mismatches.is_empty(),
+            "real admitted B/B/N intent must remain poll-only without rewriting accepted:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_real_wal_recovery_keeps_baseline_accepted_generation() {
+        let root = temp_root("status-v1-real-wal-recovery-pending-identity");
+        let initial = test_neutron_state(&root);
+        let baseline = committed_runtime(52);
+        initial
+            .wal
+            .append_snapshot_commit(baseline.to_wal_state())
+            .expect("classified baseline should be durable before the intent");
+        initial
+            .wal
+            .append_snapshot_intent(
+                55,
+                Some("hash-recovery-55".to_string()),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .expect("ordinary cause-free snapshot intent should be durable");
+        drop(initial);
+
+        let restarted = test_neutron_state(&root);
+        let replayed_intent = restarted
+            .pending_recovery
+            .as_ref()
+            .expect("restart must retain the unmatched non-inventory intent");
+        assert_eq!(replayed_intent.kind, "snapshot");
+        assert_eq!(replayed_intent.generation, 55);
+        assert_eq!(replayed_intent.recovery_cause, None);
+        {
+            let runtime = restarted.runtime.read().await;
+            assert_eq!(runtime.accepted_generation, 52);
+            assert_eq!(runtime.applied_generation, 52);
+            assert_eq!(runtime.pending_generation, Some(55));
+            assert_eq!(runtime.authority_state, "wal_intent_without_commit");
+        }
+
+        restarted.recover_incomplete_wal_intent().await;
+        {
+            let runtime = restarted.runtime.read().await;
+            assert_eq!(runtime.accepted_generation, 52);
+            assert_eq!(runtime.applied_generation, 52);
+            assert_eq!(runtime.pending_generation, Some(55));
+            assert_eq!(runtime.desired_hash.as_deref(), Some("hash-recovery-55"));
+            assert_eq!(runtime.applied_desired_hash, baseline.applied_desired_hash);
+            assert_eq!(runtime.authority_state, "blocked_recovery_required");
+            assert_eq!(runtime.wal_status, "intent_recovery_blocked");
+            assert_eq!(runtime.recovery_cause, None);
+        }
+
+        let response = get_neutron_status(State(restarted.clone()))
+            .await
+            .into_response();
+        let (status, actual) = response_json_value(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(actual["accepted_generation"], serde_json::json!(52));
+        assert_eq!(actual["applied_generation"], serde_json::json!(52));
+        assert_eq!(actual["pending_generation"], serde_json::json!(55));
+        assert_eq!(
+            actual["desired_hash"],
+            serde_json::json!("hash-recovery-55")
+        );
+        let mismatches = status_v1_expected_projection_mismatches(
+            "real-wal-recovery-baseline-accepted",
+            &actual,
+            "blocked",
+            "blocked",
+            "recover_pending",
+            None,
+            52,
+        );
+
+        std::fs::remove_dir_all(&root)
+            .expect("real WAL recovery Status V1 temporary root should be removable");
+        assert!(
+            mismatches.is_empty(),
+            "real recovered B/B/N intent must remain recoverable without rewriting accepted:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_projection_prioritizes_uncertainty_over_pending_and_recovery(
+    ) {
+        let expected = expected_status_v1_projection("blocked-operator");
+        let mut mismatches = Vec::new();
+
+        let mut uncertain_seed = status_v1_runtime_seed("pending-poll");
+        uncertain_seed.wal_replay_failures = 1;
+        let uncertain = status_v1_json_for_runtime(
+            "wal-uncertainty-over-pending",
+            runtime_from_status_v1_seed(uncertain_seed),
+        )
+        .await;
+        let uncertain_mismatches =
+            status_v1_projection_field_mismatches("blocked-operator", expected, &uncertain);
+        if !uncertain_mismatches.is_empty() {
+            mismatches.push(format!(
+                "wal uncertainty must normalize ahead of pending:\n{}",
+                uncertain_mismatches.join("\n")
+            ));
+        }
+
+        let mut recognized_recovery_seed =
+            status_v1_runtime_seed("blocked-recoverable-inventory");
+        recognized_recovery_seed.wal_replay_failures = 1;
+        let recognized_recovery = status_v1_json_for_runtime(
+            "wal-uncertainty-over-recognized-recovery",
+            runtime_from_status_v1_seed(recognized_recovery_seed),
+        )
+        .await;
+        let recognized_recovery_mismatches = status_v1_projection_field_mismatches(
+            "blocked-operator",
+            expected,
+            &recognized_recovery,
+        );
+        if !recognized_recovery_mismatches.is_empty() {
+            mismatches.push(format!(
+                "WAL uncertainty must normalize ahead of recognized recovery:\n{}",
+                recognized_recovery_mismatches.join("\n")
+            ));
+        }
+
+        let mut unknown_cause_seed = status_v1_runtime_seed("blocked-recoverable-inventory");
+        unknown_cause_seed.recovery_cause = Some("inventory_timeout".to_string());
+        let unknown_cause = status_v1_json_for_runtime(
+            "unknown-recovery-cause",
+            runtime_from_status_v1_seed(unknown_cause_seed),
+        )
+        .await;
+        let unknown_cause_mismatches =
+            status_v1_projection_field_mismatches("blocked-operator", expected, &unknown_cause);
+        if !unknown_cause_mismatches.is_empty() {
+            mismatches.push(format!(
+                "unknown recovery cause must normalize to operator-only blocked:\n{}",
+                unknown_cause_mismatches.join("\n")
+            ));
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "Status V1 projection precedence is not fail-closed:\n{}",
+            mismatches.join("\n\n")
+        );
+    }
+
+    fn status_v1_expected_projection_mismatches(
+        label: &str,
+        actual: &Value,
+        transaction_state: &str,
+        overall_readiness: &str,
+        required_action: &str,
+        recovery_cause: Option<&str>,
+        last_classified_generation: u64,
+    ) -> Vec<String> {
+        let expected_recovery_cause = recovery_cause
+            .map(|cause| Value::String(cause.to_string()))
+            .unwrap_or(Value::Null);
+        let expected = [
+            (
+                "transaction_state",
+                Value::String(transaction_state.to_string()),
+            ),
+            (
+                "overall_readiness",
+                Value::String(overall_readiness.to_string()),
+            ),
+            (
+                "required_action",
+                Value::String(required_action.to_string()),
+            ),
+            ("recovery_cause", expected_recovery_cause),
+            (
+                "last_classified_generation",
+                Value::Number(last_classified_generation.into()),
+            ),
+        ];
+        let mut mismatches = Vec::new();
+        for (field, expected_value) in expected {
+            if actual.get(field) != Some(&expected_value) {
+                mismatches.push(format!(
+                    "{label}.{field}: expected {expected_value}, got {:?}",
+                    actual.get(field)
+                ));
+            }
+        }
+        mismatches
+    }
+
+    fn status_v1_ready_runtime(
+        port_id: &str,
+        ifname: &str,
+        generation: u64,
+        domain: &str,
+    ) -> NeutronRuntimeState {
+        let managed_port = ManagedNeutronPort {
+            managed_domains: vec![domain.to_string()],
+            ..managed(port_id, ifname)
+        };
+        let domain_status = if domain == "acl" {
+            domain_status_with_action("acl", "ready", None, Some("enforce".to_string()))
+        } else {
+            domain_status(domain, "ready", None)
+        };
+        let mut ports = BTreeMap::new();
+        ports.insert(port_id.to_string(), managed_port);
+        let mut statuses = BTreeMap::new();
+        statuses.insert(
+            port_id.to_string(),
+            port_runtime_status(
+                port_id,
+                ifname,
+                generation,
+                Some(format!("hash-{generation}")),
+                vec![domain.to_string()],
+                "ready",
+                None,
+                vec![domain_status],
+            ),
+        );
+        build_snapshot_commit_runtime(
+            &NeutronRuntimeState::default(),
+            generation,
+            Some(format!("hash-{generation}")),
+            ports,
+            statuses,
+            false,
+        )
+    }
+
+    fn status_v1_runtime_with_raw_port_evidence(
+        label: &str,
+        generation: u64,
+        status: &str,
+        reason: &str,
+        effective_action: &str,
+    ) -> NeutronRuntimeState {
+        let port_id = format!("port-{label}");
+        let ifname = format!("tap-{label}");
+        let managed_port = ManagedNeutronPort {
+            managed_domains: vec!["acl".to_string()],
+            ..managed(&port_id, &ifname)
+        };
+        let mut ports = BTreeMap::new();
+        ports.insert(port_id.clone(), managed_port);
+        let mut statuses = BTreeMap::new();
+        statuses.insert(
+            port_id.clone(),
+            port_runtime_status(
+                &port_id,
+                &ifname,
+                generation,
+                Some(format!("hash-{generation}")),
+                vec!["acl".to_string()],
+                status,
+                Some(reason.to_string()),
+                vec![domain_status_with_action(
+                    "acl",
+                    status,
+                    Some(reason.to_string()),
+                    Some(effective_action.to_string()),
+                )],
+            ),
+        );
+        build_snapshot_commit_runtime(
+            &NeutronRuntimeState::default(),
+            generation,
+            Some(format!("hash-{generation}")),
+            ports,
+            statuses,
+            false,
+        )
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_real_terminal_degraded_commit_stays_classified() {
+        let generation = 60;
+        let desired_hash = format!("hash-{generation}");
+        let port_snapshot = NeutronPortSnapshot {
+            managed_domains: vec!["acl".to_string()],
+            ..port("terminal-degraded", "tap-terminal-degraded", true)
+        };
+        let plan = AclApplyPlan {
+            force_bypass_reason: Some("acl_rule_limit_exceeded:1001:1000".to_string()),
+            ..AclApplyPlan::default()
+        };
+        let outcome = NeutronAclReconcileOutcome::from_plan(&plan);
+        let domains = vec![outcome.domain_status(&port_snapshot)];
+        let (port_status, port_reason) = successful_port_status(&domains);
+        let managed_port = ManagedNeutronPort {
+            managed_domains: vec!["acl".to_string()],
+            ..managed(&port_snapshot.port_id, &port_snapshot.ifname)
+        };
+        let mut ports = BTreeMap::new();
+        ports.insert(managed_port.port_id.clone(), managed_port);
+        let mut statuses = BTreeMap::new();
+        statuses.insert(
+            port_snapshot.port_id.clone(),
+            port_runtime_status(
+                &port_snapshot.port_id,
+                &port_snapshot.ifname,
+                generation,
+                Some(desired_hash.clone()),
+                vec!["acl".to_string()],
+                &port_status,
+                port_reason,
+                domains,
+            ),
+        );
+        let runtime = build_snapshot_commit_runtime(
+            &NeutronRuntimeState::default(),
+            generation,
+            Some(desired_hash.clone()),
+            ports,
+            statuses,
+            false,
+        );
+
+        let committed_status = runtime
+            .port_statuses
+            .get(&port_snapshot.port_id)
+            .expect("terminal-degraded commit must retain its port evidence");
+        assert_eq!(runtime.authority_state, "ready");
+        assert_eq!(runtime.pending_generation, None);
+        assert_eq!(runtime.accepted_generation, generation);
+        assert_eq!(runtime.applied_generation, generation);
+        assert_eq!(runtime.desired_hash.as_deref(), Some(desired_hash.as_str()));
+        assert_eq!(
+            runtime.applied_desired_hash.as_deref(),
+            Some(desired_hash.as_str())
+        );
+        assert_eq!(committed_status.status, "degraded");
+        assert_eq!(
+            committed_status.reason.as_deref(),
+            Some("acl_rule_limit_exceeded:1001:1000")
+        );
+        assert!(committed_status.domains.iter().any(|domain| {
+            domain.domain == "acl"
+                && domain.status == "degraded"
+                && domain.effective_action.as_deref() == Some("bypass")
+        }));
+
+        let actual = status_v1_json_for_runtime("real-terminal-degraded", runtime).await;
+        let mut mismatches = status_v1_expected_projection_mismatches(
+            "real-terminal-degraded",
+            &actual,
+            "classified",
+            "degraded",
+            "none",
+            None,
+            generation,
+        );
+        if actual.get("overall_readiness").and_then(Value::as_str) == Some("ready") {
+            mismatches.push(
+                "real-terminal-degraded: terminal-degraded evidence must never emit ready"
+                    .to_string(),
+            );
+        }
+        assert!(
+            mismatches.is_empty(),
+            "authority_state=ready + port degraded + ACL degraded/bypass real commit did not stay classified:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_rebuild_reasons_are_exact_and_severity_gated() {
+        let cases = [
+            (
+                "exact-runtime-rebuild-required",
+                "degraded",
+                "runtime_rebuild_required",
+                "unchanged",
+                "classified",
+                "degraded",
+                "full_resync",
+            ),
+            (
+                "exact-acl-restart-replay",
+                "degraded",
+                "acl_restart_replay_requires_resync",
+                "unchanged",
+                "classified",
+                "degraded",
+                "full_resync",
+            ),
+            (
+                "exact-tc-acl-link-lost",
+                "degraded",
+                "tc_acl_link_lost",
+                "bypass",
+                "classified",
+                "degraded",
+                "full_resync",
+            ),
+            (
+                "diagnostic-substring-is-not-owned",
+                "degraded",
+                "acl_apply_failed:operator requested full_resync manually",
+                "bypass",
+                "classified",
+                "degraded",
+                "none",
+            ),
+            (
+                "raw-blocked-outranks-owned-reason",
+                "blocked",
+                "runtime_rebuild_required",
+                "unchanged",
+                "blocked",
+                "blocked",
+                "operator",
+            ),
+            (
+                "raw-error-outranks-owned-reason",
+                "error",
+                "acl_restart_replay_requires_resync",
+                "unchanged",
+                "blocked",
+                "blocked",
+                "operator",
+            ),
+            (
+                "raw-recovered-outranks-owned-reason",
+                "recovered",
+                "tc_acl_link_lost",
+                "unchanged",
+                "blocked",
+                "blocked",
+                "operator",
+            ),
+        ];
+        let mut mismatches = Vec::new();
+
+        for (
+            index,
+            (
+                label,
+                raw_status,
+                reason,
+                effective_action,
+                expected_state,
+                expected_readiness,
+                expected_action,
+            ),
+        ) in cases.into_iter().enumerate()
+        {
+            let generation = 70 + index as u64;
+            let runtime = status_v1_runtime_with_raw_port_evidence(
+                label,
+                generation,
+                raw_status,
+                reason,
+                effective_action,
+            );
+            let actual = status_v1_json_for_runtime(label, runtime).await;
+            mismatches.extend(status_v1_expected_projection_mismatches(
+                label,
+                &actual,
+                expected_state,
+                expected_readiness,
+                expected_action,
+                None,
+                generation,
+            ));
+
+            let expected_port_id = format!("port-{label}");
+            let returned_row = actual
+                .get("port_statuses")
+                .and_then(Value::as_array)
+                .and_then(|rows| {
+                    rows.iter().find(|row| {
+                        row.get("port_id").and_then(Value::as_str)
+                            == Some(expected_port_id.as_str())
+                    })
+                });
+            match returned_row {
+                Some(row) => {
+                    if row.get("reason").and_then(Value::as_str) != Some(reason) {
+                        mismatches.push(format!(
+                            "{label}: top-level reason expected {reason}, got {:?}",
+                            row.get("reason")
+                        ));
+                    }
+                    match row
+                        .get("domains")
+                        .and_then(Value::as_array)
+                        .and_then(|domains| domains.first())
+                    {
+                        Some(domain) => {
+                            for (field, expected) in [
+                                ("reason", reason),
+                                ("effective_action", effective_action),
+                            ] {
+                                if domain.get(field).and_then(Value::as_str) != Some(expected) {
+                                    mismatches.push(format!(
+                                        "{label}: domain {field} expected {expected}, got {:?}",
+                                        domain.get(field)
+                                    ));
+                                }
+                            }
+                        }
+                        None => mismatches.push(format!(
+                            "{label}: projected reason evidence must retain an ACL domain row"
+                        )),
+                    }
+                }
+                None => mismatches.push(format!(
+                    "{label}: projected reason evidence must retain port {expected_port_id}"
+                )),
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "Status V1 rebuild reasons were not exact and severity-gated:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_detached_tombstones_are_diagnostic_only() {
+        let detached_port = ManagedNeutronPort {
+            managed_domains: vec!["acl".to_string()],
+            ..managed("detached-port", "tap-detached")
+        };
+        let mut previous_ports = BTreeMap::new();
+        previous_ports.insert(detached_port.port_id.clone(), detached_port.clone());
+        let mut previous_statuses = BTreeMap::new();
+        previous_statuses.insert(
+            detached_port.port_id.clone(),
+            ready_status(&detached_port.port_id, &detached_port.ifname, 80),
+        );
+        let previous = build_snapshot_commit_runtime(
+            &NeutronRuntimeState::default(),
+            80,
+            Some("hash-80".to_string()),
+            previous_ports,
+            previous_statuses,
+            false,
+        );
+
+        let mut detached_statuses = BTreeMap::new();
+        detached_statuses.insert(
+            detached_port.port_id.clone(),
+            port_runtime_status(
+                &detached_port.port_id,
+                &detached_port.ifname,
+                81,
+                Some("hash-81".to_string()),
+                detached_port.managed_domains.clone(),
+                "detached",
+                None,
+                domain_statuses_for(&detached_port.managed_domains, "detached", None),
+            ),
+        );
+        let detached_runtime = build_snapshot_commit_runtime(
+            &previous,
+            81,
+            Some("hash-81".to_string()),
+            BTreeMap::new(),
+            detached_statuses,
+            false,
+        );
+
+        let ready_port = ManagedNeutronPort {
+            managed_domains: vec!["acl".to_string()],
+            ..managed("ready-port", "tap-ready")
+        };
+        let mut scoped_ports = BTreeMap::new();
+        scoped_ports.insert(ready_port.port_id.clone(), ready_port.clone());
+        let mut scoped_statuses = port_status_seed_for_scope(
+            &detached_runtime,
+            &ApplyScope::SinglePort(ready_port.port_id.clone()),
+        );
+        scoped_statuses.insert(
+            ready_port.port_id.clone(),
+            ready_status(&ready_port.port_id, &ready_port.ifname, 82),
+        );
+        let scoped_runtime = build_snapshot_commit_runtime(
+            &detached_runtime,
+            82,
+            Some("hash-82".to_string()),
+            scoped_ports,
+            scoped_statuses,
+            false,
+        );
+
+        let mut orphan_runtime = scoped_runtime.clone();
+        orphan_runtime.port_statuses.insert(
+            "orphan-port".to_string(),
+            ready_status("orphan-port", "tap-orphan", 82),
+        );
+
+        let mut mismatches = Vec::new();
+        if !detached_runtime.ports.is_empty() {
+            mismatches.push(
+                "full-host-detach setup: detached port must be absent from runtime.ports"
+                    .to_string(),
+            );
+        }
+        match detached_runtime.port_statuses.get("detached-port") {
+            Some(status)
+                if status.status == "detached"
+                    && status
+                        .domains
+                        .iter()
+                        .all(|domain| domain.status == "detached") => {}
+            other => mismatches.push(format!(
+                "full-host-detach setup: expected raw detached tombstone, got {other:?}"
+            )),
+        }
+        match scoped_runtime.port_statuses.get("detached-port") {
+            Some(status)
+                if status.generation == 81
+                    && status.desired_hash.as_deref() == Some("hash-81") => {}
+            other => mismatches.push(format!(
+                "scoped-preserved setup: expected older generation-81 tombstone, got {other:?}"
+            )),
+        }
+
+        let cases = [
+            (
+                "full-host-detach",
+                detached_runtime,
+                "classified",
+                "ready",
+                "none",
+                81,
+                true,
+            ),
+            (
+                "scoped-preserved-detach",
+                scoped_runtime,
+                "classified",
+                "ready",
+                "none",
+                82,
+                true,
+            ),
+            (
+                "non-detached-orphan",
+                orphan_runtime,
+                "blocked",
+                "blocked",
+                "operator",
+                82,
+                false,
+            ),
+        ];
+
+        for (
+            label,
+            runtime,
+            expected_state,
+            expected_readiness,
+            expected_action,
+            expected_generation,
+            check_tombstone,
+        ) in cases
+        {
+            let actual = status_v1_json_for_runtime(label, runtime).await;
+            mismatches.extend(status_v1_expected_projection_mismatches(
+                label,
+                &actual,
+                expected_state,
+                expected_readiness,
+                expected_action,
+                None,
+                expected_generation,
+            ));
+
+            match (
+                actual.get("managed_ports").and_then(Value::as_array),
+                actual.get("port_statuses").and_then(Value::as_array),
+            ) {
+                (Some(managed_rows), Some(status_rows)) => {
+                    for managed_row in managed_rows {
+                        let Some(port_id) = managed_row.get("port_id").and_then(Value::as_str)
+                        else {
+                            mismatches.push(format!(
+                                "{label}: managed row is missing a string port_id: {managed_row}"
+                            ));
+                            continue;
+                        };
+                        let matching_rows = status_rows
+                            .iter()
+                            .filter(|row| {
+                                row.get("port_id").and_then(Value::as_str) == Some(port_id)
+                            })
+                            .count();
+                        if matching_rows != 1 {
+                            mismatches.push(format!(
+                                "{label}: managed port {port_id} must have exactly one status row, got {matching_rows}"
+                            ));
+                        }
+                    }
+
+                    if check_tombstone {
+                        let tombstones = status_rows
+                            .iter()
+                            .filter(|row| {
+                                row.get("port_id").and_then(Value::as_str)
+                                    == Some("detached-port")
+                            })
+                            .collect::<Vec<_>>();
+                        if tombstones.len() != 1 {
+                            mismatches.push(format!(
+                                "{label}: expected exactly one detached diagnostic row, got {}",
+                                tombstones.len()
+                            ));
+                        } else {
+                            let tombstone = tombstones[0];
+                            if tombstone.get("status").and_then(Value::as_str)
+                                != Some("detached")
+                            {
+                                mismatches.push(format!(
+                                    "{label}: tombstone top-level status must remain detached, got {:?}",
+                                    tombstone.get("status")
+                                ));
+                            }
+                            match tombstone.get("domains").and_then(Value::as_array) {
+                                Some(domains) if !domains.is_empty() => {
+                                    for domain in domains {
+                                        for (field, expected) in [
+                                            ("status", "not_requested"),
+                                            ("effective_action", "cleanup"),
+                                            ("support_disposition", "not_applicable"),
+                                        ] {
+                                            if domain.get(field).and_then(Value::as_str)
+                                                != Some(expected)
+                                            {
+                                                mismatches.push(format!(
+                                                    "{label}: tombstone domain {field} expected {expected}, got {:?}",
+                                                    domain.get(field)
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                                other => mismatches.push(format!(
+                                    "{label}: tombstone must retain normalized domain evidence, got {other:?}"
+                                )),
+                            }
+                        }
+                    }
+                }
+                other => mismatches.push(format!(
+                    "{label}: managed_ports and port_statuses must both be arrays, got {other:?}"
+                )),
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "detached tombstone handling was not narrow and diagnostic-only:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_rejects_malformed_identity_and_row_matrix() {
+        struct MatrixCase {
+            label: &'static str,
+            runtime: NeutronRuntimeState,
+            expected_state: &'static str,
+            expected_readiness: &'static str,
+            expected_action: &'static str,
+            expected_generation: u64,
+            historical_control: bool,
+        }
+
+        let base = status_v1_ready_runtime("matrix-port", "tap-matrix", 90, "acl");
+        let blocked_case = |label: &'static str, runtime: NeutronRuntimeState| MatrixCase {
+            label,
+            runtime,
+            expected_state: "blocked",
+            expected_readiness: "blocked",
+            expected_action: "operator",
+            expected_generation: 90,
+            historical_control: false,
+        };
+
+        let mut generation_zero_pending = runtime_from_status_v1_seed(
+            status_v1_runtime_seed("generation-zero-inventory-recovery"),
+        );
+        generation_zero_pending.accepted_generation = 0;
+        generation_zero_pending.pending_generation = Some(0);
+
+        let mut middle_pending_generation =
+            runtime_from_status_v1_seed(status_v1_runtime_seed("pending-poll"));
+        middle_pending_generation.accepted_generation = 43;
+
+        let mut baseline_accepted_inventory =
+            runtime_from_status_v1_seed(status_v1_runtime_seed("blocked-recoverable-inventory"));
+        baseline_accepted_inventory.accepted_generation =
+            baseline_accepted_inventory.applied_generation;
+
+        let mut same_generation_pending_hash_mismatch = base.clone();
+        same_generation_pending_hash_mismatch.accepted_generation =
+            same_generation_pending_hash_mismatch.applied_generation;
+        same_generation_pending_hash_mismatch.pending_generation =
+            Some(same_generation_pending_hash_mismatch.applied_generation);
+        same_generation_pending_hash_mismatch.desired_hash =
+            Some("hash-pending-mismatch".to_string());
+        same_generation_pending_hash_mismatch.recovery_cause = None;
+        same_generation_pending_hash_mismatch.authority_state =
+            "blocked_recovery_required".to_string();
+
+        let mut managed_map_key_mismatch = base.clone();
+        let managed_row = managed_map_key_mismatch
+            .ports
+            .remove("matrix-port")
+            .expect("matrix baseline must contain its managed row");
+        managed_map_key_mismatch
+            .ports
+            .insert("managed-map-alias".to_string(), managed_row);
+
+        let mut status_map_key_mismatch = base.clone();
+        let status_row = status_map_key_mismatch
+            .port_statuses
+            .remove("matrix-port")
+            .expect("matrix baseline must contain its status row");
+        status_map_key_mismatch
+            .port_statuses
+            .insert("status-map-alias".to_string(), status_row);
+
+        let mut status_embedded_id_mismatch = base.clone();
+        status_embedded_id_mismatch
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .port_id = "embedded-status-alias".to_string();
+
+        let mut zero_row_generation = base.clone();
+        zero_row_generation
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .generation = 0;
+
+        let mut future_row_generation = base.clone();
+        future_row_generation
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .generation = 91;
+
+        let mut null_row_hash = base.clone();
+        null_row_hash
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .desired_hash = None;
+
+        let mut blank_row_hash = base.clone();
+        blank_row_hash
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .desired_hash = Some("   ".to_string());
+
+        let mut current_row_hash_mismatch = base.clone();
+        current_row_hash_mismatch
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .desired_hash = Some("hash-current-mismatch".to_string());
+
+        let mut ready_with_degraded_domain = base.clone();
+        ready_with_degraded_domain
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .domains[0]
+            .status = "degraded".to_string();
+
+        let mut ready_with_blocked_domain = base.clone();
+        ready_with_blocked_domain
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .domains[0]
+            .status = "blocked".to_string();
+
+        let mut attach_not_requested =
+            status_v1_ready_runtime("matrix-attach", "tap-matrix-attach", 90, "attach");
+        let attach_status = attach_not_requested
+            .port_statuses
+            .get_mut("matrix-attach")
+            .expect("attach matrix baseline must contain its status row");
+        attach_status.status = "not_requested".to_string();
+        attach_status.domains[0].status = "not_requested".to_string();
+
+        let mut degraded_without_degraded_domain = base.clone();
+        degraded_without_degraded_domain
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .status = "degraded".to_string();
+
+        let mut unsupported_without_degraded_domain = base.clone();
+        unsupported_without_degraded_domain
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .status = "unsupported".to_string();
+
+        let mut non_detached_orphan = base.clone();
+        non_detached_orphan.port_statuses.insert(
+            "matrix-orphan".to_string(),
+            ready_status("matrix-orphan", "tap-matrix-orphan", 90),
+        );
+
+        let scoped_target = ManagedNeutronPort {
+            managed_domains: vec!["acl".to_string()],
+            ..managed("matrix-port", "tap-matrix")
+        };
+        let scoped_older = ManagedNeutronPort {
+            managed_domains: vec!["acl".to_string()],
+            ..managed("matrix-old", "tap-matrix-old")
+        };
+        let mut scoped_previous_ports = BTreeMap::new();
+        scoped_previous_ports.insert(scoped_target.port_id.clone(), scoped_target.clone());
+        scoped_previous_ports.insert(scoped_older.port_id.clone(), scoped_older.clone());
+        let mut scoped_previous_statuses = BTreeMap::new();
+        scoped_previous_statuses.insert(
+            scoped_target.port_id.clone(),
+            ready_status(&scoped_target.port_id, &scoped_target.ifname, 89),
+        );
+        scoped_previous_statuses.insert(
+            scoped_older.port_id.clone(),
+            ready_status(&scoped_older.port_id, &scoped_older.ifname, 89),
+        );
+        let scoped_previous = build_snapshot_commit_runtime(
+            &NeutronRuntimeState::default(),
+            89,
+            Some("hash-89".to_string()),
+            scoped_previous_ports.clone(),
+            scoped_previous_statuses,
+            false,
+        );
+        let mut scoped_next_statuses = port_status_seed_for_scope(
+            &scoped_previous,
+            &ApplyScope::SinglePort(scoped_target.port_id.clone()),
+        );
+        scoped_next_statuses.insert(
+            scoped_target.port_id.clone(),
+            ready_status(&scoped_target.port_id, &scoped_target.ifname, 90),
+        );
+        let historical_scoped_control = build_snapshot_commit_runtime(
+            &scoped_previous,
+            90,
+            Some("hash-90".to_string()),
+            scoped_previous_ports,
+            scoped_next_statuses,
+            false,
+        );
+
+        let cases = vec![
+            MatrixCase {
+                label: "generation-zero-pending-zero",
+                runtime: generation_zero_pending,
+                expected_state: "blocked",
+                expected_readiness: "blocked",
+                expected_action: "operator",
+                expected_generation: 0,
+                historical_control: false,
+            },
+            MatrixCase {
+                label: "middle-pending-generation",
+                runtime: middle_pending_generation,
+                expected_state: "blocked",
+                expected_readiness: "blocked",
+                expected_action: "operator",
+                expected_generation: 42,
+                historical_control: false,
+            },
+            MatrixCase {
+                label: "inventory-recovery-with-baseline-accepted",
+                runtime: baseline_accepted_inventory,
+                expected_state: "blocked",
+                expected_readiness: "blocked",
+                expected_action: "operator",
+                expected_generation: 42,
+                historical_control: false,
+            },
+            blocked_case(
+                "same-generation-pending-hash-mismatch",
+                same_generation_pending_hash_mismatch,
+            ),
+            blocked_case("managed-map-key-mismatch", managed_map_key_mismatch),
+            blocked_case("status-map-key-mismatch", status_map_key_mismatch),
+            blocked_case("status-embedded-id-mismatch", status_embedded_id_mismatch),
+            blocked_case("managed-row-generation-zero", zero_row_generation),
+            blocked_case("managed-row-generation-future", future_row_generation),
+            blocked_case("managed-row-hash-null", null_row_hash),
+            blocked_case("managed-row-hash-blank", blank_row_hash),
+            blocked_case(
+                "current-generation-row-hash-mismatch",
+                current_row_hash_mismatch,
+            ),
+            blocked_case("ready-with-degraded-domain", ready_with_degraded_domain),
+            blocked_case("ready-with-blocked-domain", ready_with_blocked_domain),
+            blocked_case("attach-not-requested", attach_not_requested),
+            blocked_case(
+                "degraded-without-terminal-degraded-domain",
+                degraded_without_degraded_domain,
+            ),
+            blocked_case(
+                "unsupported-without-terminal-degraded-domain",
+                unsupported_without_degraded_domain,
+            ),
+            blocked_case("non-detached-extra-status-row", non_detached_orphan),
+            MatrixCase {
+                label: "older-scoped-row-with-historical-hash",
+                runtime: historical_scoped_control,
+                expected_state: "classified",
+                expected_readiness: "ready",
+                expected_action: "none",
+                expected_generation: 90,
+                historical_control: true,
+            },
+        ];
+        let mut mismatches = Vec::new();
+
+        for case in cases {
+            let actual = status_v1_json_for_runtime(case.label, case.runtime).await;
+            mismatches.extend(status_v1_expected_projection_mismatches(
+                case.label,
+                &actual,
+                case.expected_state,
+                case.expected_readiness,
+                case.expected_action,
+                None,
+                case.expected_generation,
+            ));
+
+            if case.historical_control {
+                let historical_rows = actual
+                    .get("port_statuses")
+                    .and_then(Value::as_array)
+                    .map(|rows| {
+                        rows.iter()
+                            .filter(|row| {
+                                row.get("port_id").and_then(Value::as_str) == Some("matrix-old")
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                match historical_rows {
+                    Some(rows)
+                        if rows.len() == 1
+                            && rows[0].get("generation").and_then(Value::as_u64) == Some(89)
+                            && rows[0].get("desired_hash").and_then(Value::as_str)
+                                == Some("hash-89") => {}
+                    other => mismatches.push(format!(
+                        "{}: older scoped row and historical hash must be preserved, got {other:?}",
+                        case.label
+                    )),
+                }
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "Status V1 accepted a malformed identity/row/top-level matrix or rejected the scoped control:\n{}",
+            mismatches.join("\n")
+        );
     }
 
     fn ready_acl(rules: Vec<NeutronAclRuleSnapshot>) -> NeutronAclSnapshot {

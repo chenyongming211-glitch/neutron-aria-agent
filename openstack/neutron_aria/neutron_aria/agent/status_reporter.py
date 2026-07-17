@@ -73,12 +73,29 @@ class NeutronStatusReporter(object):
             payload.get("last_event_decisions") or [],
         )
         configurations = dict(self.configurations)
+        feature_ready_generation_by_domain = dict(
+            payload.get("last_feature_ready_generation_by_domain") or {}
+        )
+        configured_domains = configurations.get("managed_domains")
+        if configured_domains is not None:
+            configured_domains = set(configured_domains)
+            feature_ready_generation_by_domain = {
+                domain: generation
+                for domain, generation in feature_ready_generation_by_domain.items()
+                if domain in configured_domains
+            }
         configurations.update({
             "ready": payload.get("ready"),
             "degraded": payload.get("degraded"),
             "reason": payload.get("reason"),
             "last_error": payload.get("last_error"),
             "last_generation": payload.get("last_generation"),
+            "last_classified_generation": payload.get(
+                "last_classified_generation"
+            ),
+            "last_feature_ready_generation_by_domain": (
+                feature_ready_generation_by_domain
+            ),
             "last_submitted_generation": payload.get("last_submitted_generation"),
             "accepted_generation": payload.get("accepted_generation"),
             "applied_generation": payload.get("applied_generation"),
