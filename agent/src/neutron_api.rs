@@ -1186,9 +1186,49 @@ async fn recover_pending_snapshot(
     }
 
     let _guard = state.apply_lock.lock().await;
-    let replay = state.wal.replay();
+    let mut replay = state.wal.replay();
     let mut runtime = state.runtime.write().await;
     validate_pending_recovery_identity(&runtime, &request)?;
+    let mut inventory_recovery = runtime.recovery_cause.as_deref()
+        == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+        && runtime.wal_status == INVENTORY_UNAVAILABLE_RECOVERY_CAUSE
+        && runtime.authority_state == "blocked_recovery_required";
+    if replay
+        .pending_intent
+        .as_ref()
+        .and_then(|intent| intent.recovery_cause.as_deref())
+        == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+    {
+        if !inventory_recovery {
+            return Err(SnapshotApplyError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "pending_recovery_commit_failed",
+                details: "protected inventory intent requires a typed blocked live state"
+                    .to_string(),
+            });
+        }
+        let intent = replay
+            .pending_intent
+            .as_ref()
+            .expect("protected inventory recovery requires a pending intent");
+        let verified = state
+            .wal
+            .append_verified_protected_inventory_commit(intent, runtime.to_wal_state())
+            .map_err(|e| SnapshotApplyError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "pending_recovery_commit_failed",
+                details: e,
+            })?;
+        let verified_runtime = NeutronRuntimeState::from_wal_state(
+            verified.state.clone(),
+            verified.status.clone(),
+            verified.failures,
+        );
+        validate_pending_recovery_identity(&verified_runtime, &request)?;
+        *runtime = verified_runtime;
+        replay = verified;
+        inventory_recovery = true;
+    }
     if replay.pending_intent.is_none()
         && wal_state_newer_than_runtime(&replay.state, &runtime)
     {
@@ -1223,8 +1263,10 @@ async fn recover_pending_snapshot(
         .wal
         .append_snapshot_commit(next_runtime.to_wal_state())
     {
-        runtime.authority_state = "pending_recovery_commit_failed".to_string();
-        runtime.wal_status = "commit_failed".to_string();
+        if !inventory_recovery {
+            runtime.authority_state = "pending_recovery_commit_failed".to_string();
+            runtime.wal_status = "commit_failed".to_string();
+        }
         return Err(SnapshotApplyError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "pending_recovery_commit_failed",
@@ -8116,6 +8158,100 @@ mod tests {
             wal_before_startup
         );
         drop(restarted);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_wal_inventory_recovery_phase_two_failure_preserves_retry_state() {
+        let root = temp_root("inventory-recovery-phase-two-retry");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(210);
+        state
+            .wal
+            .append_snapshot_commit(previous.to_wal_state())
+            .expect("committed baseline should be durable");
+        let intent = PendingNeutronIntent {
+            kind: "snapshot".to_string(),
+            generation: 211,
+            desired_hash: Some("hash-211".to_string()),
+            port_ids: Vec::new(),
+            affected_domains: vec!["acl".to_string()],
+            affected_ports: Vec::new(),
+            recovery_cause: Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string()),
+        };
+        state
+            .wal
+            .append_snapshot_intent(
+                intent.generation,
+                intent.desired_hash.clone(),
+                intent.port_ids.clone(),
+                intent.affected_domains.clone(),
+                intent.affected_ports.clone(),
+                intent.recovery_cause.clone(),
+            )
+            .expect("protected inventory intent should be durable");
+        let mut blocked = previous.clone();
+        blocked.accepted_generation = intent.generation;
+        blocked.pending_generation = Some(intent.generation);
+        blocked.desired_hash = intent.desired_hash.clone();
+        blocked.authority_state = "blocked_recovery_required".to_string();
+        blocked.wal_status = INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string();
+        blocked.recovery_cause = Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string());
+        state
+            .wal
+            .append_verified_protected_inventory_commit(&intent, blocked.to_wal_state())
+            .expect("phase-one typed barrier should be durable");
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = blocked.clone();
+        }
+
+        let state_path = state.registry.base_state_path.clone();
+        let backup_path = root.join("state-phase-two-backup");
+        let wal_path = state_path.join("neutron-snapshot.wal");
+        let mut replacement = WalParentReplacement::install(&state_path, &backup_path);
+        let error = recover_pending_snapshot(
+            state.clone(),
+            NeutronRecoverPendingRequest {
+                expected_pending_generation: intent.generation,
+                expected_desired_hash: intent.desired_hash.clone(),
+                mode: None,
+            },
+        )
+        .await
+        .expect_err("phase-two WAL failure must remain recoverable");
+        replacement.restore();
+
+        assert_eq!(error.code, "pending_recovery_commit_failed");
+        {
+            let runtime = state.runtime.read().await;
+            assert_eq!(runtime.to_wal_state(), blocked.to_wal_state());
+            assert_eq!(runtime.wal_status, INVENTORY_UNAVAILABLE_RECOVERY_CAUSE);
+            assert_eq!(runtime.wal_replay_failures, 0);
+        }
+        let barrier_replay = state.wal.replay();
+        assert_eq!(barrier_replay.status, INVENTORY_UNAVAILABLE_RECOVERY_CAUSE);
+        assert_eq!(barrier_replay.failures, 0);
+        assert!(barrier_replay.pending_intent.is_none());
+        let mut barrier_state = barrier_replay.state;
+        assert!(barrier_state.status_hash.take().is_some());
+        assert_eq!(barrier_state, blocked.to_wal_state());
+
+        let recovered = recover_pending_snapshot(
+            state.clone(),
+            NeutronRecoverPendingRequest {
+                expected_pending_generation: intent.generation,
+                expected_desired_hash: intent.desired_hash.clone(),
+                mode: None,
+            },
+        )
+        .await
+        .expect("phase-two recovery should succeed after WAL access is restored");
+
+        assert_eq!(recovered.status, "recovered");
+        assert_recovered_replay(&state.wal.replay(), &previous);
+        assert_two_stage_recovery_wal(&wal_path, 4, intent.generation, 210);
+        drop(state);
         let _ = std::fs::remove_dir_all(root);
     }
 

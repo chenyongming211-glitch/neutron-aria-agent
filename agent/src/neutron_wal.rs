@@ -441,6 +441,61 @@ impl NeutronWal {
         })
     }
 
+    pub(crate) fn append_verified_protected_inventory_commit(
+        &self,
+        expected_intent: &PendingNeutronIntent,
+        state: NeutronWalState,
+    ) -> Result<NeutronWalReplay, String> {
+        let before = self.replay();
+        if before.failures != 0 {
+            return Err(format!(
+                "cannot resolve protected inventory intent with {} WAL replay failures",
+                before.failures
+            ));
+        }
+        if !is_protected_inventory_intent(expected_intent) {
+            return Err("expected intent is not a protected inventory intent".to_string());
+        }
+        let Some(actual_intent) = before.pending_intent.as_ref() else {
+            return Err("protected inventory intent is no longer pending".to_string());
+        };
+        if actual_intent != expected_intent {
+            return Err("protected inventory intent changed before commit".to_string());
+        }
+
+        let state = state.with_status_hash()?;
+        if !protected_inventory_snapshot_commit_valid(&state, actual_intent, &before.state)? {
+            return Err(
+                "live blocked state does not match the protected inventory intent and baseline"
+                    .to_string(),
+            );
+        }
+        self.append(&NeutronWalEntry::SnapshotCommit {
+            state: state.clone(),
+        })?;
+
+        let after = self.replay();
+        if after.failures != 0 {
+            return Err(format!(
+                "protected inventory commit replayed with {} failures",
+                after.failures
+            ));
+        }
+        if after.pending_intent.is_some() {
+            return Err("protected inventory intent remained pending after commit".to_string());
+        }
+        if after.status != INVENTORY_UNAVAILABLE_RECOVERY_CAUSE {
+            return Err(format!(
+                "protected inventory commit replayed with unexpected status {}",
+                after.status
+            ));
+        }
+        if after.state != state {
+            return Err("protected inventory commit replayed a different state".to_string());
+        }
+        Ok(after)
+    }
+
     pub(crate) fn append_delete_intent(
         &self,
         port_id: String,
