@@ -4966,6 +4966,50 @@ mod tests {
     }
 
     #[test]
+    fn managed_projection_replay_mode_follows_attach_mode() {
+        assert_eq!(
+            managed_group_projection_mode(ManagedAttachMode::StandaloneRestoreAfterTcAttach),
+            aria_core::ebpf_ops::GroupProjectionMode::StandaloneCompatibility
+        );
+        assert_eq!(
+            managed_group_projection_mode(ManagedAttachMode::NeutronResyncRequired {
+                acl_managed: false,
+            }),
+            aria_core::ebpf_ops::GroupProjectionMode::StandaloneCompatibility
+        );
+        assert_eq!(
+            managed_group_projection_mode(ManagedAttachMode::NeutronResyncRequired {
+                acl_managed: true,
+            }),
+            aria_core::ebpf_ops::GroupProjectionMode::Managed
+        );
+    }
+
+    #[test]
+    fn managed_projection_inventory_handoff_preserves_closed_results() {
+        assert_eq!(
+            preexisting_projection_verification(aria_core::ebpf_ops::ProjectionDrift::Clean),
+            Ok(true)
+        );
+        assert_eq!(
+            preexisting_projection_verification(
+                aria_core::ebpf_ops::ProjectionDrift::RepairRequired(
+                    aria_core::ebpf_ops::ProjectionRepairPlan {
+                        general_mutations: Vec::new(),
+                    },
+                ),
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            preexisting_projection_verification(aria_core::ebpf_ops::ProjectionDrift::Fatal(
+                "unknown runtime entry".to_string(),
+            )),
+            Err("unknown runtime entry".to_string())
+        );
+    }
+
+    #[test]
     fn neutron_acl_gate_serialization_requires_tc_only_for_enabling_writes() {
         assert!(!neutron_acl_gate_requires_tc(false, false));
         assert!(neutron_acl_gate_requires_tc(true, false));

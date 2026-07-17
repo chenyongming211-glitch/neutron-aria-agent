@@ -21,6 +21,16 @@ PYTHON_TEST_ROOT = os.path.join(
 
 RUST_TESTS = [
     ["test", "--locked", "-p", "aria-core", "acl_projection_"],
+    ["test", "--locked", "-p", "aria-core", "managed_projection_replay_"],
+    ["test", "--locked", "-p", "aria-core", "managed_projection_inventory_"],
+    ["test", "--locked", "-p", "aria-agent", "managed_projection_replay_mode_"],
+    [
+        "test",
+        "--locked",
+        "-p",
+        "aria-agent",
+        "managed_projection_inventory_handoff_",
+    ],
     ["test", "--locked", "-p", "aria-api", "neutron_contract"],
     ["test", "--locked", "-p", "aria-agent", "neutron_wal"],
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_plan"],
@@ -2476,9 +2486,60 @@ def check_rust_uds_contract_source():
 
 def check_rust_stage_one_tests_present():
     print("==> checking Rust stage-one test sources")
-    projection_test = ["test", "--locked", "-p", "aria-core", "acl_projection_"]
-    if projection_test not in RUST_TESTS:
-        raise SystemExit("ERROR: managed ACL projection Rust test is not in Stage 1")
+    projection_tests = (
+        ["test", "--locked", "-p", "aria-core", "acl_projection_"],
+        ["test", "--locked", "-p", "aria-core", "managed_projection_replay_"],
+        ["test", "--locked", "-p", "aria-core", "managed_projection_inventory_"],
+        ["test", "--locked", "-p", "aria-agent", "managed_projection_replay_mode_"],
+        [
+            "test",
+            "--locked",
+            "-p",
+            "aria-agent",
+            "managed_projection_inventory_handoff_",
+        ],
+    )
+    for projection_test in projection_tests:
+        if projection_test not in RUST_TESTS:
+            raise SystemExit(
+                "ERROR: managed ACL projection Rust test %s is not in Stage 1"
+                % projection_test[-1]
+            )
+    projection_test_sources = (
+        (
+            _read_repo_text(os.path.join("core", "tests", "acl_projection_contract.rs")),
+            "managed_projection_replay_",
+            2,
+        ),
+        (
+            _read_repo_text(os.path.join("core", "tests", "acl_projection_contract.rs")),
+            "managed_projection_inventory_",
+            3,
+        ),
+        (
+            _read_repo_text(os.path.join("agent", "src", "control_plane.rs")),
+            "managed_projection_replay_mode_",
+            1,
+        ),
+        (
+            _read_repo_text(os.path.join("agent", "src", "control_plane.rs")),
+            "managed_projection_inventory_handoff_",
+            1,
+        ),
+    )
+    for projection_test_source, prefix, minimum in projection_test_sources:
+        projection_test_code = _blank_rust_non_code(projection_test_source)
+        count = len(
+            re.findall(
+                r"#\s*\[\s*test\s*\]\s*fn\s+%s" % re.escape(prefix),
+                projection_test_code,
+            )
+        )
+        if count < minimum:
+            raise SystemExit(
+                "ERROR: Stage 1 Rust filter %s has %d tests, expected at least %d"
+                % (prefix, count, minimum)
+            )
     _run_rust_function_body_parser_self_tests()
     _run_acl_map_helper_contract_mutation_self_tests()
     _run_acl_delete_semantics_mutation_self_tests()
@@ -2499,12 +2560,402 @@ def check_rust_stage_one_tests_present():
     main_source = _read_repo_text(os.path.join("agent", "src", "main.rs"))
     system_manager_source = _read_repo_text(os.path.join("agent", "src", "system_manager.rs"))
     replay_source = _read_repo_text(os.path.join("core", "src", "ebpf_ops", "replay.rs"))
+    inventory_source = _read_repo_text(
+        os.path.join("core", "src", "ebpf_ops", "inventory.rs")
+    )
     ebpf_ops_source = _read_repo_text(CORE_EBPF_OPS_PATH)
     ebpf_runtime_source = _read_repo_text(CORE_EBPF_RUNTIME_PATH)
     state_source = _read_repo_text(CORE_STATE_PATH)
     network_source = _read_repo_text(CORE_EBPF_NETWORK_PATH)
     policy_source = _read_repo_text(CORE_EBPF_POLICY_PATH)
     tap_registry_source = _read_repo_text(os.path.join("agent", "src", "tap_registry.rs"))
+
+    for source, function_name, binding in (
+        (replay_source, "replay_state_from_snapshot_with_mode", "group_entries"),
+        (
+            replay_source,
+            "replay_state_to_pinned_maps_from_snapshot_with_mode",
+            "group_entries",
+        ),
+        (inventory_source, "validate_pinned_runtime_state_with_mode", "expected_entries"),
+    ):
+        body = _rust_function_body(source, function_name)
+        if body is None or not re.search(
+            r"\blet\s+%s\s*=\s*(?:match\s+)?build_runtime_group_map_entries\s*\(\s*state\s*,\s*mode\s*\)"
+            % re.escape(binding),
+            body,
+        ):
+            raise SystemExit(
+                "ERROR: %s must bind the shared runtime group projection builder"
+                % function_name
+            )
+        if source == replay_source:
+            writer = (
+                "write_fresh_runtime_group_entries"
+                if function_name == "replay_state_from_snapshot_with_mode"
+                else "write_pinned_runtime_group_entries"
+            )
+            if writer not in body or "&%s" % binding not in body:
+                raise SystemExit(
+                    "ERROR: %s must publish the bound projection through %s"
+                    % (function_name, writer)
+                )
+            if "state.groups" in body:
+                raise SystemExit(
+                    "ERROR: mode-aware replay must not publish groups outside the shared projection"
+                )
+        elif "state.groups" in body:
+            raise SystemExit(
+                "ERROR: mode-aware inventory must not rebuild network expectations directly from groups"
+            )
+
+    fresh_writer_body_raw = _rust_function_body_raw(
+        replay_source, "write_fresh_runtime_group_entries"
+    )
+    for field, ipv4_map, ipv6_map, tap_scope in (
+        ("general_src", "SRC_IPV4_TRIE", "SRC_IPV6_TRIE", "tap_id"),
+        ("general_dst", "DST_IPV4_TRIE", "DST_IPV6_TRIE", "tap_id"),
+        ("acl_src", "ACL_SRC_IPV4_TRIE", "ACL_SRC_IPV6_TRIE", "acl_tap_id"),
+        ("acl_dst", "ACL_DST_IPV4_TRIE", "ACL_DST_IPV6_TRIE", "acl_tap_id"),
+    ):
+        if fresh_writer_body_raw is None or not re.search(
+            r"write_fresh_group_maps\s*\(\s*bpf\s*,\s*\"%s\"\s*,\s*\"%s\"\s*,\s*%s\s*,\s*&group_entries\.%s"
+            % (ipv4_map, ipv6_map, tap_scope, field),
+            fresh_writer_body_raw,
+        ):
+            raise SystemExit(
+                "ERROR: fresh replay field %s must publish to %s/%s at %s"
+                % (field, ipv4_map, ipv6_map, tap_scope)
+            )
+
+    pinned_writer_body_raw = _rust_function_body_raw(
+        replay_source, "write_pinned_runtime_group_entries"
+    )
+    for field, direction, acl in (
+        ("general_src", "src", "false"),
+        ("general_dst", "dst", "false"),
+        ("acl_src", "src", "true"),
+        ("acl_dst", "dst", "true"),
+    ):
+        if pinned_writer_body_raw is None or not re.search(
+            r"write_pinned_group_entries\s*\(\s*runtime\s*,\s*&group_entries\.%s\s*,\s*\"%s\"\s*,\s*%s"
+            % (field, direction, acl),
+            pinned_writer_body_raw,
+        ):
+            raise SystemExit(
+                "ERROR: pinned replay field %s must publish direction=%s acl=%s"
+                % (field, direction, acl)
+            )
+    for source, function_name, delegate, mode in (
+        (
+            replay_source,
+            "replay_state_from_snapshot",
+            "replay_state_from_snapshot_with_mode",
+            "GroupProjectionMode::StandaloneCompatibility",
+        ),
+        (
+            replay_source,
+            "replay_state_to_pinned_maps",
+            "replay_state_to_pinned_maps_from_snapshot_with_mode",
+            "GroupProjectionMode::StandaloneCompatibility",
+        ),
+        (
+            replay_source,
+            "replay_managed_state_to_pinned_maps",
+            "replay_state_to_pinned_maps_from_snapshot_with_mode",
+            "GroupProjectionMode::Managed",
+        ),
+        (
+            inventory_source,
+            "validate_pinned_runtime_state",
+            "validate_pinned_runtime_state_with_mode",
+            "GroupProjectionMode::StandaloneCompatibility",
+        ),
+        (
+            inventory_source,
+            "validate_managed_pinned_runtime_state",
+            "validate_pinned_runtime_state_with_mode",
+            "GroupProjectionMode::Managed",
+        ),
+    ):
+        body = _rust_function_body(source, function_name)
+        if body is None or not re.search(
+            r"\b%s\s*\([^;{}]*%s\s*\)" % (re.escape(delegate), re.escape(mode)),
+            body,
+        ):
+            raise SystemExit(
+                "ERROR: %s must delegate through %s with %s"
+                % (function_name, delegate, mode)
+            )
+
+    inventory_mode_body = _rust_function_body(
+        inventory_source, "validate_pinned_runtime_state_with_mode"
+    )
+    for required_call in (
+        "capture_runtime_group_map_entries",
+        "validate_strict_pinned_runtime_state",
+        "classify_managed_inventory_capture",
+    ):
+        if inventory_mode_body is None or required_call not in inventory_mode_body:
+            raise SystemExit(
+                "ERROR: mode-aware inventory must preserve %s" % required_call
+            )
+    strict_index = inventory_mode_body.find("validate_strict_pinned_runtime_state")
+    classify_index = inventory_mode_body.find("classify_managed_inventory_capture")
+    if strict_index < 0 or classify_index < 0 or strict_index > classify_index:
+        raise SystemExit(
+            "ERROR: strict non-projection inventory must be captured before drift classification"
+        )
+    if not re.search(
+        r"\blet\s+strict_result\s*=\s*validate_strict_pinned_runtime_state\s*\(",
+        inventory_mode_body,
+    ) or not re.search(
+        r"\bclassify_managed_inventory_capture\s*\(\s*state\s*,\s*&captured\s*,\s*strict_result\s*\)",
+        inventory_mode_body,
+    ):
+        raise SystemExit(
+            "ERROR: mode-aware inventory must pass the real strict result into drift classification"
+        )
+    for mode, classifier, arguments in (
+        (
+            "GroupProjectionMode::StandaloneCompatibility",
+            "classify_standalone_inventory_capture",
+            r"&captured\s*,\s*&expected_entries\s*,\s*strict_result",
+        ),
+        (
+            "GroupProjectionMode::Managed",
+            "classify_managed_inventory_capture",
+            r"state\s*,\s*&captured\s*,\s*strict_result",
+        ),
+    ):
+        if not re.search(
+            r"\b%s\s*=>\s*%s\s*\(\s*%s\s*\)"
+            % (re.escape(mode), classifier, arguments),
+            inventory_mode_body,
+        ):
+            raise SystemExit(
+                "ERROR: inventory mode %s must select %s" % (mode, classifier)
+            )
+
+    standalone_classifier_body = _rust_function_body(
+        inventory_source, "classify_standalone_inventory_capture"
+    )
+    for field in ("general_src", "general_dst", "acl_src", "acl_dst"):
+        if (
+            standalone_classifier_body is None
+            or "expected_entries.%s" % field not in standalone_classifier_body
+            or "captured.%s" % field not in standalone_classifier_body
+        ):
+            raise SystemExit(
+                "ERROR: standalone inventory must compare expected and captured field %s"
+                % field
+            )
+    if standalone_classifier_body is None or "strict_result" not in standalone_classifier_body:
+        raise SystemExit(
+            "ERROR: standalone inventory must preserve strict validation failures"
+        )
+
+    capture_inventory_body = _rust_function_body(
+        inventory_source, "capture_runtime_group_map_entries"
+    )
+    capture_inventory_body_raw = _rust_function_body_raw(
+        inventory_source, "capture_runtime_group_map_entries"
+    )
+    if (
+        capture_inventory_body is None
+        or "actual_tap_config.acl_active_bank" not in capture_inventory_body
+        or "ACL_BANK_SHADOW" not in capture_inventory_body
+        or "normalize_acl_bank" in capture_inventory_body
+    ):
+        raise SystemExit(
+            "ERROR: runtime projection capture must reject invalid raw ACL bank values"
+        )
+    if not re.search(
+        r"\blet\s+active_acl_lpm_tap_id\s*=\s*acl_banked_tap_id\s*\(\s*tap_id\s*,\s*actual_tap_config\.acl_active_bank\s*\)",
+        capture_inventory_body,
+    ):
+        raise SystemExit(
+            "ERROR: runtime projection capture must scope ACL reads to the active bank"
+        )
+    for field, ipv4_map, ipv6_map, tap_scope in (
+        ("general_src", "SRC_IPV4_TRIE", "SRC_IPV6_TRIE", "tap_id"),
+        ("general_dst", "DST_IPV4_TRIE", "DST_IPV6_TRIE", "tap_id"),
+        (
+            "acl_src",
+            "ACL_SRC_IPV4_TRIE",
+            "ACL_SRC_IPV6_TRIE",
+            "active_acl_lpm_tap_id",
+        ),
+        (
+            "acl_dst",
+            "ACL_DST_IPV4_TRIE",
+            "ACL_DST_IPV6_TRIE",
+            "active_acl_lpm_tap_id",
+        ),
+    ):
+        if capture_inventory_body_raw is None or not re.search(
+            r"\b%s\s*:\s*collect_runtime_network_entries\s*\(\s*pin_path\s*,\s*\"%s\"\s*,\s*\"%s\"\s*,\s*%s\s*\)"
+            % (field, ipv4_map, ipv6_map, tap_scope),
+            capture_inventory_body_raw,
+        ):
+            raise SystemExit(
+                "ERROR: runtime projection field %s must read %s and %s at %s"
+                % (field, ipv4_map, ipv6_map, tap_scope)
+            )
+
+    strict_inventory_body = _rust_function_body(
+        inventory_source, "validate_strict_pinned_runtime_state"
+    )
+    for required_call in (
+        "open_pinned_tap_config",
+        "acl_active_bank",
+        "acl_ingress_hook",
+        "open_pinned_policy_table",
+        "open_pinned_port_pool",
+        "list_qos_rules",
+        "list_mirror_rules",
+        "list_global_mirrors",
+    ):
+        if strict_inventory_body is None or required_call not in strict_inventory_body:
+            raise SystemExit(
+                "ERROR: strict runtime inventory must validate %s" % required_call
+            )
+    if not re.search(
+        r"actual_tap_config\.acl_active_bank\s*>\s*ACL_BANK_SHADOW",
+        strict_inventory_body or "",
+    ) or not re.search(
+        r"actual_tap_config\.acl_ingress_hook\s*!=\s*expected_tap_config\.acl_ingress_hook",
+        strict_inventory_body or "",
+    ):
+        raise SystemExit(
+            "ERROR: strict TAP_CONFIG inventory must reject invalid bank and ingress-hook drift"
+        )
+    strict_inventory_body_raw = _rust_function_body_raw(
+        inventory_source, "validate_strict_pinned_runtime_state"
+    )
+    for map_name, expected, actual in (
+        ("POLICY_TABLE", "expected_policy", "actual_policy"),
+        ("PORT_BITMAP_POOL", "expected_ports", "actual_ports"),
+        ("QOS_CONFIG", "expected_qos", "actual_qos"),
+        ("MIRROR_POLICY", "expected_policy_mirror", "actual_policy_mirror"),
+        ("MIRROR_GLOBAL", "expected_global_mirror", "actual_global_mirror"),
+    ):
+        if strict_inventory_body_raw is None or not re.search(
+            r"validate_entry_set\s*\(\s*\"%s\"\s*,[\s\S]{0,240}?\b%s\s*,\s*%s\s*,?\s*\)\s*\?"
+            % (map_name, expected, actual),
+            strict_inventory_body_raw,
+        ):
+            raise SystemExit(
+                "ERROR: strict runtime inventory must propagate %s comparison" % map_name
+            )
+
+    validate_live_body = _rust_function_body(
+        control_plane_source, "validate_preexisting_live_runtime"
+    )
+    if (
+        validate_live_body is None
+        or "validate_managed_pinned_runtime_state" not in validate_live_body
+        or "validate_pinned_runtime_state" not in validate_live_body
+    ):
+        raise SystemExit(
+            "ERROR: preexisting runtime validation must preserve standalone and managed inventory"
+        )
+    validate_live_code = _blank_rust_non_code(validate_live_body or "")
+    if not re.search(r"\bmatch\s+projection_mode\b", validate_live_code):
+        raise SystemExit(
+            "ERROR: preexisting runtime inventory must select validator by projection mode"
+        )
+    for mode, validator in (
+        (
+            "GroupProjectionMode::StandaloneCompatibility",
+            "validate_pinned_runtime_state",
+        ),
+        (
+            "GroupProjectionMode::Managed",
+            "validate_managed_pinned_runtime_state",
+        ),
+    ):
+        if not re.search(
+            r"\b%s\s*=>\s*%s\s*\(" % (re.escape(mode), validator),
+            validate_live_code,
+        ):
+            raise SystemExit(
+                "ERROR: projection mode %s must select %s" % (mode, validator)
+            )
+    validation_steps = (
+        "preexisting_tc_acl_runtime_is_healthy",
+        "read_iface_ctx",
+        "read_runtime_config",
+        "validate_managed_pinned_runtime_state",
+    )
+    validation_positions = [validate_live_body.find(step) for step in validation_steps]
+    if any(position < 0 for position in validation_positions) or validation_positions != sorted(
+        validation_positions
+    ):
+        raise SystemExit(
+            "ERROR: preexisting runtime validation order must be tc-link, iface, config, inventory"
+        )
+    prepare_managed_body = _rust_function_body(
+        control_plane_source, "prepare_managed_registration"
+    )
+    for replay_entrypoint in (
+        "replay_state_to_pinned_maps",
+        "replay_managed_state_to_pinned_maps",
+    ):
+        if prepare_managed_body is None or replay_entrypoint not in prepare_managed_body:
+            raise SystemExit(
+                "ERROR: managed registration must select replay entry point %s"
+                % replay_entrypoint
+            )
+    prepare_managed_code = _blank_rust_non_code(prepare_managed_body or "")
+    if not re.search(
+        r"\blet\s+projection_mode\s*=\s*managed_group_projection_mode\s*\(\s*mode\s*\)",
+        prepare_managed_code,
+    ) or not re.search(
+        r"\bmatch\s+projection_mode\b",
+        prepare_managed_code,
+    ):
+        raise SystemExit(
+            "ERROR: managed registration must select replay through attach-mode projection mapping"
+        )
+    if not re.search(
+        r"\bvalidate_preexisting_live_runtime\s*\([\s\S]*?projection_mode\s*,?\s*\)",
+        prepare_managed_code,
+    ):
+        raise SystemExit(
+            "ERROR: preexisting runtime validation must receive the selected projection mode"
+        )
+    if not re.search(
+        r"\blet\s+projection_drift\s*=\s*self\.validate_preexisting_live_runtime\s*\([\s\S]*?projection_mode\s*,?\s*\)",
+        prepare_managed_code,
+    ) or not re.search(
+        r"\bpreexisting_live_verified\s*=\s*match\s+preexisting_projection_verification\s*\(\s*projection_drift\s*\)",
+        prepare_managed_code,
+    ):
+        raise SystemExit(
+            "ERROR: managed registration must preserve structured inventory into verification"
+        )
+    if not re.search(
+        r"managed_runtime_activation\s*\(\s*mode\s*,\s*preexisting_live_verified\s*,",
+        prepare_managed_code,
+    ):
+        raise SystemExit(
+            "ERROR: managed activation must consume structured preexisting verification"
+        )
+    for mode, replay_entrypoint in (
+        (
+            "GroupProjectionMode::StandaloneCompatibility",
+            "replay_state_to_pinned_maps",
+        ),
+        ("GroupProjectionMode::Managed", "replay_managed_state_to_pinned_maps"),
+    ):
+        if not re.search(
+            r"\b%s\s*=>\s*%s\s*\(" % (re.escape(mode), replay_entrypoint),
+            prepare_managed_code,
+        ):
+            raise SystemExit(
+                "ERROR: projection mode %s must select %s" % (mode, replay_entrypoint)
+            )
 
     for term in (
         "const TC_ACL_HEALTH_INTERVAL_SECS: u64 = 10;",

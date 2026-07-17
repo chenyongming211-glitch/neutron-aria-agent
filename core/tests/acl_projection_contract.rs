@@ -1,7 +1,9 @@
 use aria_core::ebpf_ops::{
+    build_runtime_group_map_entries, classify_managed_inventory_capture,
     compile_managed_group_projection, plan_projection_drift, CanonicalNetwork, CapturedProjection,
-    GeneralProjectionDisposition, GeneralProjectionExclusionReason, ManagedGroupProjection,
-    ProjectionDirection, ProjectionDrift, ProjectionEntry, ProjectionMutation,
+    GeneralProjectionDisposition, GeneralProjectionExclusionReason, GroupProjectionMode,
+    ManagedGroupProjection, ProjectionDirection, ProjectionDrift, ProjectionEntry,
+    ProjectionMutation, RuntimeNetworkEntry,
 };
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
 use std::collections::BTreeSet;
@@ -78,6 +80,13 @@ fn entries(entries: &[ProjectionEntry]) -> BTreeSet<(String, u32)> {
     entries
         .iter()
         .map(|entry| (entry.network.to_string(), entry.group_id))
+        .collect()
+}
+
+fn runtime_entries(entries: &[RuntimeNetworkEntry]) -> BTreeSet<(String, u8, u32)> {
+    entries
+        .iter()
+        .map(|entry| (entry.address.to_string(), entry.prefix_len, entry.group_id))
         .collect()
 }
 
@@ -397,6 +406,247 @@ fn acl_projection_reports_exact_winner_and_most_specific_cover_deterministically
         exact_high.disposition,
         GeneralProjectionDisposition::Included
     );
+}
+
+#[test]
+fn managed_projection_replay_standalone_mode_preserves_all_group_compatibility() {
+    let mut state = FirewallState::default();
+    insert_group(&mut state, "zero", 0, &["203.0.113.9/24"]);
+    insert_group(&mut state, "acl", 10, &["10.0.0.7/24"]);
+    insert_group(&mut state, "unused", 20, &["2001:db8::7/64"]);
+    state.rules.push(acl_rule(10, 0));
+
+    let projected =
+        build_runtime_group_map_entries(&state, GroupProjectionMode::StandaloneCompatibility)
+            .expect("standalone compatibility projection compiles");
+    let expected = BTreeSet::from([
+        ("10.0.0.7".to_string(), 24, 10),
+        ("2001:db8::7".to_string(), 64, 20),
+        ("203.0.113.9".to_string(), 24, 0),
+    ]);
+
+    assert_eq!(runtime_entries(&projected.general_src), expected);
+    assert_eq!(runtime_entries(&projected.general_dst), expected);
+    assert_eq!(runtime_entries(&projected.acl_src), expected);
+    assert_eq!(runtime_entries(&projected.acl_dst), expected);
+}
+
+#[test]
+fn managed_projection_replay_mode_uses_conflict_aware_directional_entries() {
+    let mut state = FirewallState::default();
+    insert_group(&mut state, "acl-src", 10, &["10.0.0.7/32"]);
+    insert_group(&mut state, "acl-dst", 11, &["2001:db8::7/64"]);
+    insert_group(&mut state, "local", 20, &["10.0.0.0/24"]);
+    insert_group(&mut state, "unused", 30, &["192.0.2.9/24"]);
+    state.rules.push(acl_rule(10, 11));
+
+    let projected = build_runtime_group_map_entries(&state, GroupProjectionMode::Managed)
+        .expect("managed runtime projection compiles");
+
+    assert_eq!(
+        runtime_entries(&projected.acl_src),
+        BTreeSet::from([("10.0.0.7".to_string(), 32, 10)])
+    );
+    assert_eq!(
+        runtime_entries(&projected.acl_dst),
+        BTreeSet::from([("2001:db8::".to_string(), 64, 11)])
+    );
+    assert_eq!(
+        runtime_entries(&projected.general_src),
+        BTreeSet::from([
+            ("10.0.0.0".to_string(), 24, 20),
+            ("192.0.2.0".to_string(), 24, 30),
+            ("2001:db8::".to_string(), 64, 11),
+        ])
+    );
+    assert_eq!(
+        runtime_entries(&projected.general_dst),
+        runtime_entries(&projected.general_src)
+    );
+    assert!(!runtime_entries(&projected.general_src).contains(&("10.0.0.7".to_string(), 32, 10,)));
+}
+
+#[test]
+fn managed_projection_inventory_expected_sets_match_the_managed_compiler() {
+    let mut state = FirewallState::default();
+    insert_group(&mut state, "src", 1, &["10.0.0.9/24"]);
+    insert_group(&mut state, "dst", 2, &["2001:db8::9/64"]);
+    insert_group(&mut state, "local", 3, &["192.0.2.9/24"]);
+    state.rules.push(acl_rule(1, 2));
+
+    let compiled = compile(&state);
+    let expected = build_runtime_group_map_entries(&state, GroupProjectionMode::Managed)
+        .expect("managed inventory projection compiles");
+
+    let general: BTreeSet<(String, u8, u32)> = compiled
+        .general
+        .iter()
+        .map(|entry| {
+            (
+                entry.network.network_address().to_string(),
+                entry.network.prefix_len(),
+                entry.group_id,
+            )
+        })
+        .collect();
+    let acl_src: BTreeSet<(String, u8, u32)> = compiled
+        .acl_src
+        .iter()
+        .map(|entry| {
+            (
+                entry.network.network_address().to_string(),
+                entry.network.prefix_len(),
+                entry.group_id,
+            )
+        })
+        .collect();
+    let acl_dst: BTreeSet<(String, u8, u32)> = compiled
+        .acl_dst
+        .iter()
+        .map(|entry| {
+            (
+                entry.network.network_address().to_string(),
+                entry.network.prefix_len(),
+                entry.group_id,
+            )
+        })
+        .collect();
+
+    assert_eq!(runtime_entries(&expected.general_src), general);
+    assert_eq!(runtime_entries(&expected.general_dst), general);
+    assert_eq!(runtime_entries(&expected.acl_src), acl_src);
+    assert_eq!(runtime_entries(&expected.acl_dst), acl_dst);
+}
+
+#[test]
+fn managed_projection_inventory_classifies_legacy_then_converges_to_clean() {
+    let mut exact_state = FirewallState::default();
+    insert_group(&mut exact_state, "acl", 10, &["10.0.0.0/24"]);
+    insert_group(&mut exact_state, "local", 20, &["10.0.0.0/24"]);
+    exact_state.rules.push(acl_rule(10, 0));
+    let exact = compile(&exact_state);
+
+    let mut replaced = CapturedProjection::from(&exact);
+    replaced.acl_src = vec![entry("10.0.0.0/24", 20)];
+    assert!(matches!(
+        classify_managed_inventory_capture(&exact_state, &replaced, Ok(())),
+        ProjectionDrift::RepairRequired(_)
+    ));
+
+    let mut missing = CapturedProjection::from(&exact);
+    missing.acl_src.clear();
+    assert!(matches!(
+        classify_managed_inventory_capture(&exact_state, &missing, Ok(())),
+        ProjectionDrift::RepairRequired(_)
+    ));
+
+    let mut destination_state = FirewallState::default();
+    insert_group(
+        &mut destination_state,
+        "acl-destination",
+        11,
+        &["2001:db8::/64"],
+    );
+    insert_group(
+        &mut destination_state,
+        "local-destination-alias",
+        21,
+        &["2001:db8::/64"],
+    );
+    destination_state.rules.push(acl_rule(0, 11));
+    let destination = compile(&destination_state);
+    let mut destination_missing = CapturedProjection::from(&destination);
+    destination_missing.acl_dst.clear();
+    assert!(matches!(
+        classify_managed_inventory_capture(&destination_state, &destination_missing, Ok(())),
+        ProjectionDrift::RepairRequired(_)
+    ));
+
+    let mut specific_state = FirewallState::default();
+    insert_group(&mut specific_state, "acl", 10, &["10.0.0.0/24"]);
+    insert_group(&mut specific_state, "local", 20, &["10.0.0.7/32"]);
+    specific_state.rules.push(acl_rule(10, 0));
+    let specific = compile(&specific_state);
+    let mut more_specific = CapturedProjection::from(&specific);
+    more_specific.acl_src.push(entry("10.0.0.7/32", 20));
+    assert!(matches!(
+        classify_managed_inventory_capture(&specific_state, &more_specific, Ok(())),
+        ProjectionDrift::RepairRequired(_)
+    ));
+
+    let mut general_alias = CapturedProjection::from(&exact);
+    general_alias.general_src = vec![entry("10.0.0.0/24", 10)];
+    assert!(matches!(
+        classify_managed_inventory_capture(&exact_state, &general_alias, Ok(())),
+        ProjectionDrift::RepairRequired(_)
+    ));
+
+    let mut general_missing = CapturedProjection::from(&exact);
+    general_missing.general_dst.clear();
+    assert!(matches!(
+        classify_managed_inventory_capture(&exact_state, &general_missing, Ok(())),
+        ProjectionDrift::RepairRequired(_)
+    ));
+
+    assert!(matches!(
+        classify_managed_inventory_capture(&exact_state, &CapturedProjection::from(&exact), Ok(())),
+        ProjectionDrift::Clean
+    ));
+}
+
+#[test]
+fn managed_projection_inventory_keeps_unknown_and_non_projection_drift_fatal() {
+    let mut state = FirewallState::default();
+    insert_group(&mut state, "acl", 10, &["10.0.0.0/24"]);
+    insert_group(&mut state, "local", 20, &["10.0.0.0/24"]);
+    state.rules.push(acl_rule(10, 0));
+    let compiled = compile(&state);
+
+    let mut unknown_acl_destination_key = CapturedProjection::from(&compiled);
+    unknown_acl_destination_key
+        .acl_dst
+        .push(entry("203.0.113.0/24", 10));
+    assert!(matches!(
+        classify_managed_inventory_capture(&state, &unknown_acl_destination_key, Ok(())),
+        ProjectionDrift::Fatal(_)
+    ));
+
+    let mut unknown_general_value = CapturedProjection::from(&compiled);
+    unknown_general_value.general_dst = vec![entry("10.0.0.0/24", 999)];
+    assert!(matches!(
+        classify_managed_inventory_capture(&state, &unknown_general_value, Ok(())),
+        ProjectionDrift::Fatal(_)
+    ));
+
+    let mut repairable = CapturedProjection::from(&compiled);
+    repairable.acl_src = vec![entry("10.0.0.0/24", 20)];
+    assert!(matches!(
+        classify_managed_inventory_capture(&state, &repairable, Ok(())),
+        ProjectionDrift::RepairRequired(_)
+    ));
+    for strict_error in [
+        "POLICY_TABLE drift",
+        "TAP_CONFIG_MAP drift",
+        "TC link drift",
+    ] {
+        match classify_managed_inventory_capture(
+            &state,
+            &CapturedProjection::from(&compiled),
+            Err(strict_error.to_string()),
+        ) {
+            ProjectionDrift::Fatal(message) => {
+                assert!(message.contains(strict_error), "{message}")
+            }
+            other => panic!("non-projection drift must dominate clean, got {other:?}"),
+        }
+        match classify_managed_inventory_capture(&state, &repairable, Err(strict_error.to_string()))
+        {
+            ProjectionDrift::Fatal(message) => {
+                assert!(message.contains(strict_error), "{message}")
+            }
+            other => panic!("non-projection drift must dominate repair, got {other:?}"),
+        }
+    }
 }
 
 #[test]
