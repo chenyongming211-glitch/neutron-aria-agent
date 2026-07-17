@@ -223,7 +223,7 @@ fn collect_persisted_groups(
     let mut persisted: Vec<_> = state.groups.iter().collect();
     persisted.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
 
-    let mut groups = BTreeMap::new();
+    let mut groups: BTreeMap<u32, PersistedGroup> = BTreeMap::new();
     for (map_key, group) in persisted {
         if group.id == 0 {
             continue;
