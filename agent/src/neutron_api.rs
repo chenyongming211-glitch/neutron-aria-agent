@@ -1169,6 +1169,12 @@ async fn post_neutron_recover_pending(
     }
 }
 
+fn is_typed_inventory_recovery(runtime: &NeutronRuntimeState) -> bool {
+    runtime.recovery_cause.as_deref() == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+        && runtime.wal_status == INVENTORY_UNAVAILABLE_RECOVERY_CAUSE
+        && runtime.authority_state == "blocked_recovery_required"
+}
+
 async fn recover_pending_snapshot(
     state: NeutronApiState,
     request: NeutronRecoverPendingRequest,
@@ -1189,17 +1195,17 @@ async fn recover_pending_snapshot(
     let mut replay = state.wal.replay();
     let mut runtime = state.runtime.write().await;
     validate_pending_recovery_identity(&runtime, &request)?;
-    let mut inventory_recovery = runtime.recovery_cause.as_deref()
-        == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
-        && runtime.wal_status == INVENTORY_UNAVAILABLE_RECOVERY_CAUSE
-        && runtime.authority_state == "blocked_recovery_required";
-    if replay
+    let protected_inventory_intent = replay
         .pending_intent
         .as_ref()
         .and_then(|intent| intent.recovery_cause.as_deref())
-        == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
-    {
-        if !inventory_recovery {
+        == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE);
+    let inventory_recovery = protected_inventory_intent
+        || runtime.recovery_cause.as_deref() == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+        || replay.state.recovery_cause.as_deref()
+            == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE);
+    if protected_inventory_intent {
+        if !is_typed_inventory_recovery(&runtime) {
             return Err(SnapshotApplyError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 code: "pending_recovery_commit_failed",
@@ -1227,7 +1233,13 @@ async fn recover_pending_snapshot(
         validate_pending_recovery_identity(&verified_runtime, &request)?;
         *runtime = verified_runtime;
         replay = verified;
-        inventory_recovery = true;
+    }
+    if inventory_recovery && !is_typed_inventory_recovery(&runtime) {
+        return Err(SnapshotApplyError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "pending_recovery_commit_failed",
+            details: "inventory recovery requires a clean typed blocked live state".to_string(),
+        });
     }
     if replay.pending_intent.is_none()
         && wal_state_newer_than_runtime(&replay.state, &runtime)
@@ -1259,10 +1271,19 @@ async fn recover_pending_snapshot(
     } else {
         recover_pending_runtime(&runtime, &request)?
     };
-    if let Err(e) = state
-        .wal
-        .append_snapshot_commit(next_runtime.to_wal_state())
-    {
+    let commit_result = if inventory_recovery {
+        state
+            .wal
+            .append_snapshot_commit_after_verified_inventory_barrier(
+                runtime.to_wal_state(),
+                next_runtime.to_wal_state(),
+            )
+    } else {
+        state
+            .wal
+            .append_snapshot_commit(next_runtime.to_wal_state())
+    };
+    if let Err(e) = commit_result {
         if !inventory_recovery {
             runtime.authority_state = "pending_recovery_commit_failed".to_string();
             runtime.wal_status = "commit_failed".to_string();

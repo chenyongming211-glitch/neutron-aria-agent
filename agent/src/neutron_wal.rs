@@ -496,6 +496,36 @@ impl NeutronWal {
         Ok(after)
     }
 
+    pub(crate) fn append_snapshot_commit_after_verified_inventory_barrier(
+        &self,
+        blocked_state: NeutronWalState,
+        next_state: NeutronWalState,
+    ) -> Result<(), String> {
+        let blocked_state = blocked_state.with_status_hash()?;
+        let replay = self.replay();
+        if replay.failures != 0 {
+            return Err(format!(
+                "cannot continue inventory recovery with {} WAL replay failures",
+                replay.failures
+            ));
+        }
+        if replay.pending_intent.is_some() {
+            return Err("inventory recovery barrier still has a pending intent".to_string());
+        }
+        if replay.status != INVENTORY_UNAVAILABLE_RECOVERY_CAUSE {
+            return Err(format!(
+                "inventory recovery barrier replayed with unexpected status {}",
+                replay.status
+            ));
+        }
+        if replay.state != blocked_state {
+            return Err("inventory recovery barrier does not match live blocked state".to_string());
+        }
+        self.append(&NeutronWalEntry::SnapshotCommit {
+            state: next_state.with_status_hash()?,
+        })
+    }
+
     pub(crate) fn append_delete_intent(
         &self,
         port_id: String,
