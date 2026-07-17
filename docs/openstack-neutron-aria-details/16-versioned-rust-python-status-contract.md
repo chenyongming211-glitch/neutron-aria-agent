@@ -1,8 +1,9 @@
 # Versioned Rust-Python Status Contract
 
-Status: approved and implemented on the Batch 2C branch. Local Python and
-static verification is complete; final Rust/eBPF verification remains owned by
-the required GitHub Actions build before merge.
+Status: implemented and verified on the Batch 2C branch. GitHub Actions Build
+[`29599301028`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29599301028)
+passed at exact implementation head
+`3c61187db25f557fcf2bff3fcd765f3d9ea0a5ce`.
 
 Batch: 2C, after `REVIEW-TXN-028` and `REVIEW-TXN-029`, before
 `REVIEW-ACL-046`.
@@ -339,9 +340,9 @@ The shared artifact records the wire payload and expected Python decision. Rust
 also has focused unit tests that construct internal runtime states and prove
 they project to the artifact's stable state/readiness/action.
 
-## Implementation Sequence After Approval
+## Approved Implementation Sequence
 
-No step below is authorized until the user approves this design.
+The approved implementation followed this sequence:
 
 1. RED: add the shared scenario artifact and failing Python contract/client,
    dual-track state migration, event-loop, restart, scoped/delete routing, and
@@ -402,6 +403,11 @@ regressions described above. The 14-scenario vocabulary, Rust WAL shape,
 recover-pending route contract, and unrelated ACL backlog remain unchanged.
 
 Local Python, static-contract, warning-hygiene, and change-detection gates are
-green. Per repository policy, the final Rust tests, eBPF builds, static binary
-checks, and warning verification must pass on GitHub Actions before this PR is
-marked ready to merge.
+green. GitHub Actions Build
+[`29599301028`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29599301028)
+then passed the Rust authority tests, eBPF build and artifact discovery,
+userspace and agent static builds, and static-binary verification at exact
+implementation head `3c61187db25f557fcf2bff3fcd765f3d9ea0a5ce`. It produced no
+project Rust/eBPF warning. The only workflow annotation was GitHub's platform
+notice that Node 20 actions were forced to run on Node 24. Batch 2C is complete;
+`REVIEW-ACL-046` has not started.

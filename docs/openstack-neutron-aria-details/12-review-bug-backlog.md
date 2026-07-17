@@ -706,8 +706,8 @@ Round 3 (contract / status / CT / CI):
 Keep the remaining work in narrow reviewable batches. Implementation batches
 start with a failing regression or fault-injection test, change one invariant,
 and pass the maintained-branch GitHub Build before the next batch starts. Batch
-2C followed that design-first gate and is now awaiting final hosted verification
-before the next batch starts.
+2C followed that design-first gate and passed its final hosted implementation
+verification before the next batch started.
 
 1. **Completed — Restore the merge gate:** `REVIEW-CI-002`,
    `REVIEW-CI-003`, and `REVIEW-CI-004` are fixed. The maintained v0.9 PR
@@ -717,14 +717,18 @@ before the next batch starts.
    `REVIEW-TXN-029` are fixed. Python requires complete terminal identity and
    domain evidence; Rust preserves non-authoritative inventory failures through
    a verified two-stage WAL recovery sequence with a fresh phase-2 replay gate.
-3. **Implemented; hosted verification pending — Versioned Rust-Python status
-   contract (Batch 2C):** the approved design in
+3. **Completed — Versioned Rust-Python status contract (Batch 2C):** the
+   approved design in
    `16-versioned-rust-python-status-contract.md` now has one shared 14-scenario
    artifact, typed Rust projection, strict Python V1/Legacy adapters, durable
    classified-versus-feature-ready tracks, action gating, and a Stage 1 drift
-   checker. Local Python/static gates and independent review are green. Final
-   Rust/eBPF/static-binary verification remains pending on the current GitHub
-   Actions head; `REVIEW-ACL-046` has not started.
+   checker. Local Python/static gates and independent review are green. GitHub
+   Actions Build
+   [`29599301028`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29599301028)
+   passed Rust authority tests, eBPF compilation, userspace/agent static builds,
+   binary verification, and warning gates at exact implementation head
+   `3c61187db25f557fcf2bff3fcd765f3d9ea0a5ce`; `REVIEW-ACL-046` has not
+   started.
 4. **After Batch 2C — Isolate ACL selector ownership:** `REVIEW-ACL-046`.
    Split general group and ACL selector publication, stage only ACL-referenced
    groups, reject or canonicalize selector conflicts, and publish with CT
