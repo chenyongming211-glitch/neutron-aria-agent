@@ -8,6 +8,10 @@ from neutron_aria.agent.uds_client import LocalApiContractError
 from neutron_aria.agent.uds_client import LocalApiResponseError
 from neutron_aria.agent.uds_client import LocalApiTimeoutError
 from neutron_aria.agent.uds_client import LocalClient
+from neutron_aria.tests.unit.status_contract_scenarios import load_status_contract_fixture
+from neutron_aria.tests.unit.status_contract_scenarios import status_scenario
+from neutron_aria.tests.unit.status_contract_scenarios import status_scenario_cases
+from neutron_aria.tests.unit.status_contract_scenarios import status_scenario_contract_error_cases
 
 
 class FakeResponse(object):
@@ -352,6 +356,420 @@ class UdsClientTestCase(unittest.TestCase):
             client.put_snapshot,
             {"generation": 12, "host": "ostack2", "ports": []},
         )
+
+
+class StatusContractUdsClientRedTestCase(unittest.TestCase):
+    def setUp(self):
+        FakeConnection.requests = []
+        FakeConnection.responses = []
+
+    def _client(self):
+        return LocalClient(
+            "/tmp/aria-agent.sock",
+            timeout=1.0,
+            connection_factory=FakeConnection,
+        )
+
+    def _response(self, body):
+        FakeConnection.responses.append(FakeResponse(200, "OK", body))
+
+    def _capture_contract_error(self, callback):
+        try:
+            callback()
+        except LocalApiContractError as exc:
+            return exc
+        return None
+
+    def test_shared_fixture_has_stable_complete_minimum_scenario_set(self):
+        fixture = load_status_contract_fixture()
+        scenarios = fixture["scenarios"]
+
+        self.assertEqual(1, fixture["fixture_schema_version"])
+        self.assertEqual(1, fixture["status_contract"]["version"])
+        self.assertEqual(
+            "v0.9-neutron-status-1",
+            fixture["status_contract"]["hash"],
+        )
+        self.assertEqual(list(range(1, 15)), [
+            scenario["minimum_scenario"] for scenario in scenarios
+        ])
+        self.assertEqual(14, len(set(
+            scenario["id"] for scenario in scenarios
+        )))
+        for scenario in scenarios:
+            self.assertIn("capabilities", scenario)
+            self.assertIn("status", scenario)
+            self.assertIn("expected_projection", scenario)
+            self.assertIn("expected_python", scenario)
+
+    def test_every_valid_v1_status_preserves_projection_and_decision_tuple(self):
+        scenario_ids = [
+            "full-classified-ready",
+            "scoped-classified-ready",
+            "classified-degraded-terminal",
+            "classified-degraded-full-resync",
+            "pending-poll",
+            "blocked-recoverable-inventory",
+            "blocked-operator",
+            "recovery-full-resync",
+            "generation-zero-inventory-recovery",
+            "restart-classified-routing",
+        ]
+        decision_by_tuple = {
+            ("classified", "ready", "none"): "feature_ready",
+            ("classified", "degraded", "none"): "classified_degraded",
+            ("classified", "degraded", "full_resync"): "full_resync",
+            ("pending", "unknown", "poll"): "poll",
+            ("blocked", "blocked", "recover_pending"): "recover_pending",
+            ("blocked", "blocked", "operator"): "blocked_operator",
+            ("recovery", "degraded", "full_resync"): "recovered_full_resync",
+        }
+        for scenario_id in scenario_ids:
+            FakeConnection.requests = []
+            FakeConnection.responses = []
+            scenario = status_scenario(scenario_id)
+            client = self._client()
+            self._response(scenario["capabilities"])
+            self._response(scenario["status"])
+
+            client.capabilities(required_domains=["acl"])
+            status = client.status()
+
+            with self.subTest(scenario=scenario_id):
+                for key, value in scenario["expected_projection"].items():
+                    self.assertEqual(value, status[key])
+                decision = decision_by_tuple[
+                    (
+                        status["transaction_state"],
+                        status["overall_readiness"],
+                        status["required_action"],
+                    )
+                ]
+                self.assertEqual(
+                    scenario["expected_python"]["decision"],
+                    decision,
+                )
+
+    def test_capabilities_reject_unknown_status_version_or_hash(self):
+        cases = status_scenario_cases("unknown-v1-contract")[:2]
+        for case in cases:
+            FakeConnection.requests = []
+            FakeConnection.responses = []
+            client = self._client()
+            self._response(case["capabilities"])
+
+            with self.subTest(case=case["id"]):
+                self.assertRaises(LocalApiContractError, client.capabilities)
+                self.assertEqual(1, len(FakeConnection.requests))
+
+    def test_v1_status_rejects_negotiated_version_or_hash_mismatch(self):
+        scenario = status_scenario("unknown-v1-contract")
+        cases = status_scenario_cases("unknown-v1-contract")[2:5]
+        for case in cases:
+            FakeConnection.requests = []
+            FakeConnection.responses = []
+            client = self._client()
+            self._response(scenario["capabilities"])
+            self._response(case["status"])
+            client.capabilities()
+
+            with self.subTest(case=case["id"]):
+                self.assertRaises(LocalApiContractError, client.status)
+                self.assertEqual(2, len(FakeConnection.requests))
+
+    def test_v1_status_rejects_unknown_closed_vocabulary(self):
+        scenario = status_scenario("unknown-v1-contract")
+        cases = status_scenario_cases("unknown-v1-contract")[5:]
+        for case in cases:
+            FakeConnection.requests = []
+            FakeConnection.responses = []
+            client = self._client()
+            self._response(scenario["capabilities"])
+            self._response(case["status"])
+            client.capabilities()
+
+            with self.subTest(case=case["id"]):
+                self.assertRaises(LocalApiContractError, client.status)
+                self.assertEqual(2, len(FakeConnection.requests))
+
+    def test_unknown_v1_token_blocks_snapshot_delete_and_recover_writes(self):
+        scenario = status_scenario("unknown-v1-contract")
+        unknown = status_scenario_cases("unknown-v1-contract")[5]
+        client = self._client()
+        self._response(scenario["capabilities"])
+        self._response(unknown["status"])
+        client.capabilities()
+
+        status_error = self._capture_contract_error(client.status)
+        requests_after_status = len(FakeConnection.requests)
+        self._response({"generation": 43, "results": []})
+        self._response({"port_id": "port-a", "status": "ok"})
+        self._response({"status": "recovered"})
+        write_errors = [
+            self._capture_contract_error(lambda: client.put_snapshot({
+                "generation": 43,
+                "host": "ostack2",
+                "ports": [],
+            })),
+            self._capture_contract_error(lambda: client.delete_port("port-a")),
+            self._capture_contract_error(lambda: client.recover_pending_snapshot(
+                43,
+                "hash-ready-43",
+            )),
+        ]
+
+        self.assertIsInstance(status_error, LocalApiContractError)
+        self.assertTrue(all(
+            isinstance(error, LocalApiContractError) for error in write_errors
+        ))
+        self.assertEqual(requests_after_status, len(FakeConnection.requests))
+
+    def test_generation_zero_unknown_cause_is_typed_and_latches_every_write(self):
+        scenario = status_scenario("generation-zero-inventory-recovery")
+        case = status_scenario_contract_error_cases(scenario["id"])[0]
+        closed_vocabulary_case = [
+            item for item in status_scenario_cases("unknown-v1-contract")
+            if item["id"] == "unknown-recovery-cause"
+        ][0]
+        context = scenario["request_context"]
+        client = self._client()
+        self._response(scenario["capabilities"])
+        self._response(case["status"])
+        client.capabilities(required_domains=["acl"])
+
+        status_error = self._capture_contract_error(client.status)
+        requests_after_status = len(FakeConnection.requests)
+        self._response({"generation": 2, "results": []})
+        self._response(scenario["capabilities"])
+        self._response({"generation": 2, "results": []})
+        self._response({"port_id": "port-a", "status": "ok"})
+        self._response({"status": "recovered"})
+        snapshot = {
+            "generation": 2,
+            "host": "ostack2",
+            "ports": [{"port_id": "port-a", "ifname": "tap-port-a"}],
+        }
+        write_errors = [
+            self._capture_contract_error(lambda: client.put_snapshot(snapshot)),
+            self._capture_contract_error(lambda: client.put_port_snapshot(
+                "port-a",
+                snapshot,
+                required_domains=["acl"],
+            )),
+            self._capture_contract_error(lambda: client.delete_port("port-a")),
+            self._capture_contract_error(lambda: client.recover_pending_snapshot(
+                context["expected_pending_generation"],
+                context["expected_desired_hash"],
+            )),
+        ]
+
+        self.assertEqual("contract_error", case["expected_python"]["decision"])
+        self.assertEqual(
+            closed_vocabulary_case["status"]["recovery_cause"],
+            case["status"]["recovery_cause"],
+        )
+        self.assertEqual(
+            closed_vocabulary_case["expected_python"]["error_type"],
+            case["expected_python"]["error_type"],
+        )
+        self.assertIsInstance(status_error, LocalApiContractError)
+        self.assertTrue(all(
+            isinstance(error, LocalApiContractError) for error in write_errors
+        ))
+        self.assertEqual(requests_after_status, len(FakeConnection.requests))
+
+    def test_capability_contract_error_closes_snapshot_delete_and_recover_writes(self):
+        for case in status_scenario_cases("unknown-v1-contract")[:2]:
+            FakeConnection.requests = []
+            FakeConnection.responses = []
+            client = self._client()
+            self._response(case["capabilities"])
+            self._response({"generation": 43, "results": []})
+            self._response({"port_id": "port-a", "status": "ok"})
+            self._response({"status": "recovered"})
+
+            capability_error = self._capture_contract_error(
+                lambda: client.capabilities(required_domains=["acl"])
+            )
+            requests_after_capabilities = len(FakeConnection.requests)
+            write_errors = [
+                self._capture_contract_error(lambda: client.put_snapshot({
+                    "generation": 43,
+                    "host": "ostack2",
+                    "ports": [],
+                })),
+                self._capture_contract_error(lambda: client.delete_port("port-a")),
+                self._capture_contract_error(lambda: client.recover_pending_snapshot(
+                    43,
+                    "hash-ready-43",
+                )),
+            ]
+
+            with self.subTest(case=case["id"]):
+                self.assertIsInstance(
+                    capability_error,
+                    LocalApiContractError,
+                )
+                self.assertTrue(all(
+                    isinstance(error, LocalApiContractError)
+                    for error in write_errors
+                ))
+                self.assertEqual(
+                    requests_after_capabilities,
+                    len(FakeConnection.requests),
+                )
+
+    def test_v1_ready_rejects_invalid_identity_domain_support_or_duplicates(self):
+        scenario = status_scenario("ready-invalid-evidence")
+        baseline_client = self._client()
+        self._response(scenario["capabilities"])
+        self._response(scenario["base_status"])
+        baseline_client.capabilities()
+        baseline = baseline_client.status()
+
+        self.assertEqual("classified", baseline.get("transaction_state"))
+        self.assertEqual("ready", baseline.get("overall_readiness"))
+        self.assertEqual("none", baseline.get("required_action"))
+        for case in status_scenario_cases("ready-invalid-evidence"):
+            FakeConnection.requests = []
+            FakeConnection.responses = []
+            client = self._client()
+            self._response(scenario["capabilities"])
+            self._response(case["status"])
+            client.capabilities()
+
+            with self.subTest(case=case["id"]):
+                self.assertIn("mutation", case)
+                self.assertNotIn("status_overrides", case)
+                self.assertRaises(LocalApiContractError, client.status)
+                self.assertEqual(2, len(FakeConnection.requests))
+
+    def test_legacy_v0_adapter_normalizes_only_bounded_ready_authority(self):
+        scenario = status_scenario("legacy-v0-ready")
+        client = self._client()
+        self._response(scenario["capabilities"])
+        self._response(scenario["status"])
+
+        client.capabilities(required_domains=["acl"])
+        status = client.status()
+
+        for key, value in scenario["expected_projection"].items():
+            self.assertEqual(value, status.get(key))
+
+    def test_legacy_v0_adapter_maps_every_recognized_authority_case(self):
+        scenario = status_scenario("legacy-v0-ready")
+        for case in scenario["legacy_decoding_cases"]:
+            FakeConnection.requests = []
+            FakeConnection.responses = []
+            client = self._client()
+            status_payload = dict(scenario["status"])
+            status_payload.update(case["status_overrides"])
+            self._response(scenario["capabilities"])
+            self._response(status_payload)
+            client.capabilities(required_domains=["acl"])
+
+            status = client.status()
+
+            with self.subTest(case=case["id"]):
+                for key, value in case["expected_projection"].items():
+                    self.assertEqual(value, status.get(key))
+
+    def test_legacy_unknown_authority_is_typed_error_and_blocks_all_writes(self):
+        scenario = status_scenario("legacy-v0-unknown-authority")
+        client = self._client()
+        self._response(scenario["capabilities"])
+        self._response(scenario["status"])
+        client.capabilities(required_domains=["acl"])
+
+        status_error = self._capture_contract_error(client.status)
+        requests_after_status = len(FakeConnection.requests)
+        self._response({"generation": 41, "results": []})
+        self._response({"status": "recovered"})
+        self._response({"port_id": "legacy-port", "status": "ok"})
+        write_errors = [
+            self._capture_contract_error(lambda: client.put_snapshot({
+                "generation": 41,
+                "host": "ostack2",
+                "ports": [],
+            })),
+            self._capture_contract_error(lambda: client.recover_pending_snapshot(
+                41,
+                "legacy-hash-41",
+            )),
+            self._capture_contract_error(lambda: client.delete_port("legacy-port")),
+        ]
+
+        self.assertIsInstance(status_error, LocalApiContractError)
+        self.assertTrue(all(
+            isinstance(error, LocalApiContractError) for error in write_errors
+        ))
+        self.assertEqual(requests_after_status, len(FakeConnection.requests))
+        self.assertEqual(["GET", "GET"], [
+            request["method"] for request in FakeConnection.requests
+        ])
+
+    def test_contract_latch_reopens_only_after_valid_supported_status(self):
+        scenario = status_scenario("unknown-v1-contract")
+        mismatch = status_scenario_cases("unknown-v1-contract")[2]
+        valid = status_scenario("full-classified-ready")
+        client = self._client()
+        self._response(scenario["capabilities"])
+        self._response(mismatch["status"])
+        self._response(scenario["capabilities"])
+        self._response(valid["status"])
+        self._response({"generation": 43, "results": []})
+        self._response({"generation": 999, "results": []})
+
+        client.capabilities()
+        mismatch_error = self._capture_contract_error(client.status)
+        client.capabilities()
+        requests_before_write = len(FakeConnection.requests)
+        blocked_write_error = self._capture_contract_error(lambda: client.put_snapshot({
+            "generation": 43,
+            "host": "ostack2",
+            "ports": [],
+        }))
+        requests_after_blocked_write = len(FakeConnection.requests)
+        valid_status = client.status()
+        reopened_response = client.put_snapshot({
+            "generation": 43,
+            "host": "ostack2",
+            "ports": [],
+        })
+
+        self.assertIsInstance(mismatch_error, LocalApiContractError)
+        self.assertIsInstance(blocked_write_error, LocalApiContractError)
+        self.assertEqual(requests_before_write, requests_after_blocked_write)
+        self.assertEqual(
+            valid["expected_projection"]["transaction_state"],
+            valid_status.get("transaction_state"),
+        )
+        self.assertEqual(43, reopened_response.get("generation"))
+        self.assertEqual(
+            requests_after_blocked_write + 2,
+            len(FakeConnection.requests),
+        )
+
+    def test_self_declared_valid_v1_still_requires_handshake_before_write(self):
+        scenario = status_scenario("full-classified-ready")
+        client = self._client()
+        self._response(scenario["status"])
+        self._response({"generation": 43, "results": []})
+
+        status = client.status()
+        requests_before_write = len(FakeConnection.requests)
+        write_error = self._capture_contract_error(lambda: client.put_snapshot({
+            "generation": 43,
+            "host": "ostack2",
+            "ports": [],
+        }))
+
+        self.assertEqual(
+            scenario["expected_projection"]["transaction_state"],
+            status["transaction_state"],
+        )
+        self.assertIsInstance(write_error, LocalApiContractError)
+        self.assertEqual(requests_before_write, len(FakeConnection.requests))
 
 
 if __name__ == "__main__":

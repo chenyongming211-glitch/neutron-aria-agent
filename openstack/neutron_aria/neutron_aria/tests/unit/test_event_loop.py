@@ -1,6 +1,8 @@
 from __future__ import absolute_import
 
 import copy
+import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -9,11 +11,15 @@ from neutron_aria.agent.effective_acl import EffectiveAclIndex
 from neutron_aria.agent.event_loop import SnapshotSynchronizer
 from neutron_aria.agent.neutron_client import StaticPortSource
 from neutron_aria.agent.ovsdb import OvsInterface
+from neutron_aria.agent.state import InMemorySnapshotStateStore
 from neutron_aria.agent.state import SnapshotStateStore
 from neutron_aria.agent.status_reporter import StatusReportError
+from neutron_aria.agent.uds_client import LocalApiContractError
 from neutron_aria.agent.uds_client import LocalApiError
 from neutron_aria.agent.uds_client import LocalApiTimeoutError
 from neutron_aria.agent.uds_client import LocalApiTransportError
+from neutron_aria.tests.unit.status_contract_scenarios import status_scenario
+from neutron_aria.tests.unit.status_contract_scenarios import status_scenario_negative_cases
 
 
 def _terminal_status_for_snapshot(snapshot, authority_state="ready"):
@@ -697,6 +703,148 @@ class FailingStatusReporter(object):
         raise StatusReportError("rabbit down")
 
 
+class FixtureStatusLocalClient(FakeLocalClient):
+    def __init__(self, scenario):
+        FakeLocalClient.__init__(self)
+        self.scenario = copy.deepcopy(scenario)
+
+    def capabilities(self, required_domains=None):
+        self.capability_calls.append(list(required_domains or []))
+        return copy.deepcopy(self.scenario["capabilities"])
+
+    def status(self):
+        if self.snapshots or self.port_snapshots:
+            return copy.deepcopy(self.scenario["status"])
+        return copy.deepcopy(self.scenario.get("pre_status"))
+
+
+class ContractErrorStatusLocalClient(FakeLocalClient):
+    def __init__(self, scenario):
+        FakeLocalClient.__init__(self)
+        self.scenario = copy.deepcopy(scenario)
+        self.recoveries = []
+
+    def capabilities(self, required_domains=None):
+        self.capability_calls.append(list(required_domains or []))
+        return copy.deepcopy(self.scenario["capabilities"])
+
+    def status(self):
+        raise LocalApiContractError(
+            "unsupported status contract scenario %s" % self.scenario["id"]
+        )
+
+    def recover_pending_snapshot(self, expected_generation, expected_desired_hash=None):
+        self.recoveries.append({
+            "expected_generation": expected_generation,
+            "expected_desired_hash": expected_desired_hash,
+        })
+        return {"status": "recovered"}
+
+
+class PublicV1ActionLocalClient(FakeLocalClient):
+    def __init__(self, scenario, status=None):
+        FakeLocalClient.__init__(self)
+        self.capabilities_payload = copy.deepcopy(scenario["capabilities"])
+        self.initial_status = copy.deepcopy(status or scenario["status"])
+        self.recoveries = []
+        self.mutating_calls = []
+        self.recovered = False
+
+    def capabilities(self, required_domains=None):
+        self.capability_calls.append(list(required_domains or []))
+        return copy.deepcopy(self.capabilities_payload)
+
+    def status(self):
+        if self.snapshots:
+            status = _terminal_status_for_snapshot(self.snapshots[-1])
+            status.update({
+                "status_schema_version": 1,
+                "status_contract_hash": "v0.9-neutron-status-1",
+                "transaction_state": "classified",
+                "overall_readiness": "ready",
+                "required_action": "none",
+                "recovery_cause": None,
+                "last_classified_generation": self.snapshots[-1]["generation"],
+                "wal_status": "diagnostic_after_apply",
+                "wal_replay_failures": 0,
+            })
+            for port_status in status["port_statuses"]:
+                for domain in port_status.get("domains") or []:
+                    domain["support_disposition"] = (
+                        "not_applicable"
+                        if domain.get("status") == "not_requested"
+                        else "supported"
+                    )
+            return status
+        if self.recovered:
+            applied_generation = self.initial_status["applied_generation"]
+            applied_hash = self.initial_status.get("applied_desired_hash")
+            return {
+                "status_schema_version": 1,
+                "status_contract_hash": "v0.9-neutron-status-1",
+                "transaction_state": "recovery",
+                "overall_readiness": "degraded",
+                "required_action": "full_resync",
+                "recovery_cause": None,
+                "last_classified_generation": applied_generation,
+                "generation": applied_generation,
+                "accepted_generation": applied_generation,
+                "applied_generation": applied_generation,
+                "pending_generation": None,
+                "desired_hash": applied_hash,
+                "applied_desired_hash": applied_hash,
+                "wal_status": "recovered_pending_full_resync_required",
+                "wal_replay_failures": 0,
+                "authority_state": "recovered_pending_full_resync_required",
+                "managed_ports": copy.deepcopy(
+                    self.initial_status.get("managed_ports") or []
+                ),
+                "port_statuses": copy.deepcopy(
+                    self.initial_status.get("port_statuses") or []
+                ),
+                "active_instances": copy.deepcopy(
+                    self.initial_status.get("active_instances") or []
+                ),
+            }
+        return copy.deepcopy(self.initial_status)
+
+    def recover_pending_snapshot(
+        self,
+        expected_generation,
+        expected_desired_hash=None,
+    ):
+        call = {
+            "expected_generation": expected_generation,
+            "expected_desired_hash": expected_desired_hash,
+        }
+        self.recoveries.append(call)
+        self.mutating_calls.append("recover_pending")
+        self.recovered = True
+        return {
+            "status": "recovered",
+            "recovered_generation": expected_generation,
+            "applied_generation": self.initial_status["applied_generation"],
+            "desired_hash": self.initial_status.get("applied_desired_hash"),
+        }
+
+    def put_snapshot(self, snapshot):
+        self.mutating_calls.append("put_full_snapshot")
+        return FakeLocalClient.put_snapshot(self, snapshot)
+
+    def put_port_snapshot(self, port_id, snapshot, required_domains=None):
+        self.mutating_calls.append("put_port_snapshot")
+        return FakeLocalClient.put_port_snapshot(
+            self,
+            port_id,
+            snapshot,
+            required_domains=required_domains,
+        )
+
+    def delete_port(self, port_id):
+        self.mutating_calls.append("delete_port")
+        return FakeLocalClient.delete_port(self, port_id)
+
+
 class EventLoopTestCase(unittest.TestCase):
     def test_full_resync_builds_and_submits_snapshot(self):
         port_source = StaticPortSource([{
@@ -881,6 +1029,221 @@ class EventLoopTestCase(unittest.TestCase):
             self.assertEqual(
                 first_result["snapshot"]["desired_hash"],
                 second_result["snapshot"]["desired_hash"],
+            )
+        finally:
+            shutil.rmtree(state_dir)
+
+
+    def _target_port_source(self):
+        return StaticPortSource([{
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "network_id": "net-a",
+            "revision_number": 8,
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+
+    def _baseline_snapshot(self):
+        return {
+            "host": "ostack2",
+            "ports": [{
+                "port_id": "port-old",
+                "ifname": "tap-port-old",
+                "eligible": True,
+                "managed_domains": ["acl"],
+            }],
+        }
+
+    def _red_contract_error_is_not_generation_floor_absence_or_continued_submit(self):
+        scenario = status_scenario("unknown-v1-contract")
+        local_client = ContractErrorStatusLocalClient(scenario)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            self._target_port_source(),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+        )
+
+        result = sync.safe_full_resync()
+
+        self.assertEqual([], local_client.snapshots)
+        self.assertEqual([], local_client.port_snapshots)
+        self.assertEqual([], local_client.recoveries)
+        self.assertEqual(None, sync.state_store.pending_snapshot())
+        self.assertTrue(result["status"]["degraded"])
+        self.assertIn("status contract", result["status"]["last_error"])
+
+    def _red_classified_degraded_records_only_classification_and_ready_heartbeat_history(self):
+        scenario = status_scenario("classified-degraded-terminal")
+        state_dir = tempfile.mkdtemp()
+        try:
+            store = SnapshotStateStore(state_dir)
+            baseline = store.prepare_snapshot_at_generation(
+                self._baseline_snapshot(),
+                scenario["request_context"]["feature_ready_generation_before"],
+                desired_hash="ready-hash-43",
+            )
+            try:
+                store.commit_snapshot(
+                    baseline["generation"],
+                    baseline["desired_hash"],
+                    snapshot_ports=1,
+                    managed_ports=1,
+                    feature_ready_domains=["acl"],
+                )
+            except TypeError as exc:
+                self.fail(
+                    "commit_snapshot lacks feature_ready_domains: %s" % exc
+                )
+            local_client = FixtureStatusLocalClient(scenario)
+            status_reporter = FakeStatusReporter()
+            acl_index = EffectiveAclIndex(
+                policies=[{
+                    "id": "policy-degraded",
+                    "default_action": "allow",
+                }],
+                bindings=[{
+                    "id": "binding-degraded",
+                    "policy_id": "policy-degraded",
+                    "target_type": "port",
+                    "target_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                }],
+            )
+            sync = SnapshotSynchronizer(
+                "ostack2",
+                self._target_port_source(),
+                FakeOvsReader(),
+                local_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+                status_reporter=status_reporter,
+                acl_index=acl_index,
+            )
+            try:
+                sync.runtime_status.mark_ready(
+                    scenario["request_context"]["feature_ready_generation_before"],
+                    1,
+                    1,
+                    desired_hash="ready-hash-43",
+                    managed_ports_detail=scenario["pre_status"]["managed_ports"],
+                    port_statuses=scenario["pre_status"]["port_statuses"],
+                    feature_ready_generation_by_domain={"acl": 43},
+                )
+            except TypeError as exc:
+                self.fail(
+                    "mark_ready lacks feature-ready domain history: %s" % exc
+                )
+
+            result = sync.safe_full_resync()
+            state = SnapshotStateStore(state_dir).to_dict()
+            submitted = local_client.snapshots[0]
+            submitted_acl = submitted["ports"][0]["acl"]
+
+            self.assertEqual(
+                scenario["request_context"]["expected_desired_hash"],
+                submitted["desired_hash"],
+            )
+            self.assertEqual(True, submitted_acl["enabled"])
+            self.assertEqual("ready", submitted_acl["status"])
+            self.assertEqual("enforce", submitted_acl["effective_action"])
+            self.assertEqual("policy-degraded", submitted_acl["policy_id"])
+            self.assertEqual("binding-degraded", submitted_acl["binding_id"])
+            self.assertEqual(
+                scenario["status"]["last_classified_generation"],
+                state.get("last_classified_generation"),
+            )
+            self.assertEqual(
+                scenario["request_context"]["projected_port_ids"],
+                state.get("last_classified_projected_port_ids"),
+            )
+            self.assertEqual(
+                scenario["request_context"]["feature_ready_generation_before"],
+                state.get("last_feature_ready_generation"),
+            )
+            self.assertEqual(
+                scenario["request_context"]["feature_ready_projected_port_ids_before"],
+                state.get("last_feature_ready_projected_port_ids"),
+            )
+            self.assertEqual(None, SnapshotStateStore(state_dir).pending_snapshot())
+            self.assertEqual(
+                scenario["request_context"]["feature_ready_generation_before"],
+                sync.runtime_status.last_generation,
+            )
+            self.assertFalse(sync.runtime_status.ready)
+            self.assertTrue(sync.runtime_status.degraded)
+            self.assertEqual(1, len(status_reporter.statuses))
+            self.assertEqual(
+                scenario["request_context"]["feature_ready_generation_before"],
+                status_reporter.statuses[0]["last_generation"],
+            )
+            self.assertEqual(
+                {"acl": scenario["request_context"]["feature_ready_generation_before"]},
+                status_reporter.statuses[0].get(
+                    "last_feature_ready_generation_by_domain"
+                ),
+            )
+            self.assertEqual("degraded", scenario["expected_python"]["publish_readiness"])
+            self.assertTrue(result["status"]["degraded"])
+        finally:
+            shutil.rmtree(state_dir)
+
+    def _red_restart_routes_from_classified_ids_without_changing_ready_history(self):
+        scenario = status_scenario("restart-classified-routing")
+        state_dir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(state_dir, "snapshot-state.json")
+            with open(path, "w") as stream:
+                json.dump(scenario["durable_state"], stream, sort_keys=True)
+                stream.write("\n")
+            sync = SnapshotSynchronizer(
+                "ostack2",
+                StaticPortSource([]),
+                FakeOvsReader(),
+                FixtureStatusLocalClient(scenario),
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+            )
+            context = scenario["request_context"]
+
+            update = sync.decide_port_update(
+                context["update_port_id"],
+                binding_host="ostack2",
+                revision_number=51,
+            ).to_dict()
+            delete = sync.decide_port_delete(
+                context["delete_port_id"],
+            ).to_dict()
+            removed_delete = sync.decide_port_delete(
+                context["removed_port_id"],
+            ).to_dict()
+            state = sync.state_store.to_dict()
+
+            self.assertEqual(
+                set(context["classified_projected_port_ids"]),
+                sync.projected_port_ids,
+            )
+            self.assertEqual(
+                scenario["expected_python"]["restart_routes"]["port-c-update"],
+                update["reason"],
+            )
+            self.assertEqual(
+                scenario["expected_python"]["restart_routes"]["port-c-delete"],
+                delete["action"],
+            )
+            self.assertEqual(
+                scenario["expected_python"]["restart_routes"]["port-b-delete"],
+                removed_delete["action"],
+            )
+            self.assertEqual(
+                context["feature_ready_projected_port_ids"],
+                state["last_feature_ready_projected_port_ids"],
+            )
+            self.assertEqual(
+                scenario["durable_state"]["last_feature_ready_generation_by_domain"],
+                state["last_feature_ready_generation_by_domain"],
             )
         finally:
             shutil.rmtree(state_dir)
@@ -3821,6 +4184,274 @@ class EventLoopTestCase(unittest.TestCase):
             self.assertFalse(sync.has_projected_port("port-1"))
         finally:
             shutil.rmtree(state_dir)
+
+
+class StatusContractEventLoopRedTestCase(unittest.TestCase):
+    _target_port_source = EventLoopTestCase._target_port_source
+    _baseline_snapshot = EventLoopTestCase._baseline_snapshot
+    test_contract_error_is_not_generation_floor_absence_or_continued_submit = (
+        EventLoopTestCase._red_contract_error_is_not_generation_floor_absence_or_continued_submit
+    )
+    test_classified_degraded_records_only_classification_and_ready_heartbeat_history = (
+        EventLoopTestCase._red_classified_degraded_records_only_classification_and_ready_heartbeat_history
+    )
+    test_restart_routes_from_classified_ids_without_changing_ready_history = (
+        EventLoopTestCase._red_restart_routes_from_classified_ids_without_changing_ready_history
+    )
+
+    def _synchronizer(self, local_client=None, **overrides):
+        options = {
+            "timeout_convergence_attempts": 1,
+            "timeout_convergence_interval": 0,
+            "sleeper": lambda _seconds: None,
+        }
+        options.update(overrides)
+        return SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client or FakeLocalClient(),
+            managed_domains=["acl"],
+            **options
+        )
+
+    def _assert_no_mutating_calls(self, local_client):
+        self.assertEqual([], local_client.snapshots)
+        self.assertEqual([], local_client.port_snapshots)
+        self.assertEqual([], local_client.deleted_ports)
+        self.assertEqual([], local_client.recoveries)
+        self.assertEqual([], local_client.mutating_calls)
+
+    def _state_store_with_expected_pending(self, scenario):
+        context = scenario["request_context"]
+        state_store = InMemorySnapshotStateStore()
+        state_store.prepare_snapshot_at_generation(
+            {"host": "ostack2", "ports": []},
+            context["expected_pending_generation"],
+            desired_hash=context["expected_desired_hash"],
+        )
+        return state_store
+
+    def _v1_control_projection(self, status):
+        return tuple(status.get(key) for key in (
+            "transaction_state",
+            "overall_readiness",
+            "required_action",
+            "recovery_cause",
+        ))
+
+    def test_full_and_scoped_ready_validate_exact_evidence(self):
+        sync = self._synchronizer()
+        for scenario_id in (
+            "full-classified-ready",
+            "scoped-classified-ready",
+        ):
+            scenario = status_scenario(scenario_id)
+            context = scenario["request_context"]
+            verdict, reason = sync._snapshot_status_verdict(
+                context["snapshot"],
+                context["projected_port_ids"],
+                scenario["status"],
+            )
+
+            with self.subTest(scenario=scenario_id):
+                self.assertEqual("ready", verdict, reason)
+                self.assertEqual(
+                    "feature_ready",
+                    scenario["expected_python"]["decision"],
+                )
+
+        scoped = status_scenario("scoped-classified-ready")
+        unaffected = [
+            row for row in scoped["status"]["port_statuses"]
+            if row["port_id"] == "port-b"
+        ][0]
+        self.assertLess(
+            unaffected["generation"],
+            scoped["request_context"]["expected_generation"],
+        )
+        self.assertEqual("hash-ready-42", unaffected["desired_hash"])
+
+    def test_public_v1_poll_and_operator_are_diagnostic_independent_no_write(self):
+        variants = [
+            ("pending-poll", "fixture-diagnostics", {}),
+            (
+                "pending-poll",
+                "recovery-looking-diagnostics",
+                {
+                    "authority_state": "blocked_recovery_required",
+                    "wal_status": "inventory_barrier_pending",
+                },
+            ),
+            ("blocked-operator", "fixture-diagnostics", {}),
+            (
+                "blocked-operator",
+                "ready-looking-diagnostics",
+                {
+                    "authority_state": "ready",
+                    "wal_status": "committed",
+                },
+            ),
+        ]
+        for scenario_id, variant, diagnostic_updates in variants:
+            scenario = status_scenario(scenario_id)
+            status = copy.deepcopy(scenario["status"])
+            status.update(diagnostic_updates)
+            local_client = PublicV1ActionLocalClient(scenario, status=status)
+            sync = self._synchronizer(local_client)
+
+            sync.safe_full_resync()
+
+            with self.subTest(scenario=scenario_id, variant=variant):
+                self.assertEqual(
+                    self._v1_control_projection(scenario["status"]),
+                    self._v1_control_projection(status),
+                )
+                if diagnostic_updates:
+                    self.assertNotEqual(
+                        (
+                            scenario["status"].get("authority_state"),
+                            scenario["status"].get("wal_status"),
+                        ),
+                        (status.get("authority_state"), status.get("wal_status")),
+                    )
+                self.assertIn(
+                    scenario["expected_python"]["decision"],
+                    ("poll", "blocked_operator"),
+                )
+                self.assertEqual(
+                    [],
+                    scenario["expected_python"]["public_mutating_calls"],
+                )
+                self._assert_no_mutating_calls(local_client)
+
+    def test_public_v1_recovery_requires_local_exact_identity_then_fresh_newer_full_snapshot(self):
+        for scenario_id in (
+            "blocked-recoverable-inventory",
+            "generation-zero-inventory-recovery",
+        ):
+            scenario = status_scenario(scenario_id)
+            status = copy.deepcopy(scenario["status"])
+            status.update({
+                "authority_state": "ready",
+                "wal_status": "diagnostic_only",
+            })
+            local_client = PublicV1ActionLocalClient(scenario, status=status)
+            state_store = self._state_store_with_expected_pending(scenario)
+            local_pending_before = copy.deepcopy(
+                state_store.pending_snapshot()
+            )
+            sync = self._synchronizer(
+                local_client,
+                state_store=state_store,
+            )
+
+            result = sync.safe_full_resync()
+            context = scenario["request_context"]
+            expected_recovery = {
+                "expected_generation": context["expected_pending_generation"],
+                "expected_desired_hash": context["expected_desired_hash"],
+            }
+
+            with self.subTest(scenario=scenario_id):
+                self.assertEqual(
+                    self._v1_control_projection(scenario["status"]),
+                    self._v1_control_projection(status),
+                )
+                self.assertNotEqual(
+                    (
+                        scenario["status"].get("authority_state"),
+                        scenario["status"].get("wal_status"),
+                    ),
+                    (status.get("authority_state"), status.get("wal_status")),
+                )
+                self.assertFalse(hasattr(local_client, "scenario"))
+                self.assertEqual(
+                    context["expected_pending_generation"],
+                    local_pending_before["generation"],
+                )
+                self.assertEqual(
+                    context["expected_desired_hash"],
+                    local_pending_before["desired_hash"],
+                )
+                self.assertEqual(
+                    (
+                        local_pending_before["generation"],
+                        local_pending_before["desired_hash"],
+                    ),
+                    (status["pending_generation"], status["desired_hash"]),
+                )
+                self.assertEqual([expected_recovery], local_client.recoveries)
+                self.assertEqual(
+                    scenario["expected_python"]["public_mutating_calls"],
+                    local_client.mutating_calls,
+                )
+                self.assertEqual(1, len(local_client.snapshots))
+                self.assertEqual([], local_client.port_snapshots)
+                self.assertEqual([], local_client.deleted_ports)
+                fresh_generation = local_client.snapshots[0]["generation"]
+                self.assertGreater(
+                    fresh_generation,
+                    max(
+                        context["expected_pending_generation"],
+                        status["last_classified_generation"],
+                        status["applied_generation"],
+                    ),
+                )
+                self.assertEqual(
+                    fresh_generation,
+                    (result.get("snapshot") or {}).get("generation"),
+                )
+                self.assertEqual(None, state_store.pending_snapshot())
+
+    def test_generation_zero_recovery_rejects_each_missing_gate_without_write(self):
+        scenario = status_scenario("generation-zero-inventory-recovery")
+        for case in status_scenario_negative_cases(scenario["id"]):
+            state_store = self._state_store_with_expected_pending(scenario)
+            local_pending_before = copy.deepcopy(
+                state_store.pending_snapshot()
+            )
+            local_client = PublicV1ActionLocalClient(
+                scenario,
+                status=case["status"],
+            )
+            sync = self._synchronizer(
+                local_client,
+                state_store=state_store,
+            )
+
+            sync.safe_full_resync()
+
+            with self.subTest(case=case["id"], assertion="no-writes"):
+                self.assertEqual(
+                    "blocked_operator",
+                    case["expected_python"]["decision"],
+                )
+                self.assertEqual([], case["expected_python"]["mutating_calls"])
+                self._assert_no_mutating_calls(local_client)
+
+            if case["id"] in (
+                "mismatched-pending-generation",
+                "mismatched-pending-hash",
+            ):
+                with self.subTest(
+                    case=case["id"],
+                    assertion="local-pending-preserved",
+                ):
+                    self.assertNotEqual(
+                        (
+                            local_pending_before["generation"],
+                            local_pending_before["desired_hash"],
+                        ),
+                        (
+                            case["status"].get("pending_generation"),
+                            case["status"].get("desired_hash"),
+                        ),
+                    )
+                    self.assertEqual(
+                        local_pending_before,
+                        state_store.pending_snapshot(),
+                    )
 
 
 if __name__ == "__main__":
