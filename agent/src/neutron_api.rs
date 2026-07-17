@@ -6734,6 +6734,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn neutron_snapshot_status_v1_real_admission_polls_with_baseline_accepted_generation() {
+        let root = temp_root("status-v1-real-admission-pending-identity");
+        let state = test_neutron_state(&root);
+        let baseline = committed_runtime(42);
+        state
+            .wal
+            .append_snapshot_commit(baseline.to_wal_state())
+            .expect("classified baseline should be durable before admission");
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = baseline.clone();
+        }
+        let snapshot = NeutronSnapshotRequest {
+            schema_version: None,
+            generation: 45,
+            desired_hash: Some("hash-pending-45".to_string()),
+            host: None,
+            ports: vec![port("committed-port", "tap-committed", true)],
+        };
+
+        let decision = accept_neutron_snapshot_submit(&state, &snapshot, &ApplyScope::FullHost)
+            .await
+            .expect("newer snapshot intent should be admitted");
+        assert_eq!(decision.response.status, "pending");
+        assert_eq!(decision.response.accepted_generation, 42);
+        assert_eq!(decision.response.applied_generation, 42);
+        let prepared = decision
+            .prepared
+            .expect("admission must retain a prepared transaction until apply");
+        assert_eq!(prepared.intent.generation, 45);
+        assert_eq!(
+            prepared.intent.desired_hash.as_deref(),
+            Some("hash-pending-45")
+        );
+        assert_eq!(prepared.runtime_before_apply.accepted_generation, 42);
+        assert_eq!(prepared.runtime_before_apply.applied_generation, 42);
+
+        {
+            let runtime = state.runtime.read().await;
+            assert_eq!(runtime.accepted_generation, 42);
+            assert_eq!(runtime.applied_generation, 42);
+            assert_eq!(runtime.pending_generation, Some(45));
+            assert_eq!(runtime.desired_hash.as_deref(), Some("hash-pending-45"));
+            assert_eq!(runtime.applied_desired_hash, baseline.applied_desired_hash);
+            assert_eq!(runtime.authority_state, "applying");
+            assert_eq!(runtime.wal_status, "intent_written");
+        }
+
+        let response = get_neutron_status(State(state.clone()))
+            .await
+            .into_response();
+        let (status, actual) = response_json_value(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(actual["accepted_generation"], serde_json::json!(42));
+        assert_eq!(actual["applied_generation"], serde_json::json!(42));
+        assert_eq!(actual["pending_generation"], serde_json::json!(45));
+        assert_eq!(actual["desired_hash"], serde_json::json!("hash-pending-45"));
+        let mismatches = status_v1_expected_projection_mismatches(
+            "real-admission-baseline-accepted",
+            &actual,
+            "pending",
+            "unknown",
+            "poll",
+            None,
+            42,
+        );
+
+        drop(prepared);
+        std::fs::remove_dir_all(&root)
+            .expect("real admission Status V1 temporary root should be removable");
+        assert!(
+            mismatches.is_empty(),
+            "real admitted B/B/N intent must remain poll-only without rewriting accepted:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_real_wal_recovery_keeps_baseline_accepted_generation() {
+        let root = temp_root("status-v1-real-wal-recovery-pending-identity");
+        let initial = test_neutron_state(&root);
+        let baseline = committed_runtime(52);
+        initial
+            .wal
+            .append_snapshot_commit(baseline.to_wal_state())
+            .expect("classified baseline should be durable before the intent");
+        initial
+            .wal
+            .append_snapshot_intent(
+                55,
+                Some("hash-recovery-55".to_string()),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .expect("ordinary cause-free snapshot intent should be durable");
+        drop(initial);
+
+        let restarted = test_neutron_state(&root);
+        let replayed_intent = restarted
+            .pending_recovery
+            .as_ref()
+            .expect("restart must retain the unmatched non-inventory intent");
+        assert_eq!(replayed_intent.kind, "snapshot");
+        assert_eq!(replayed_intent.generation, 55);
+        assert_eq!(replayed_intent.recovery_cause, None);
+        {
+            let runtime = restarted.runtime.read().await;
+            assert_eq!(runtime.accepted_generation, 52);
+            assert_eq!(runtime.applied_generation, 52);
+            assert_eq!(runtime.pending_generation, Some(55));
+            assert_eq!(runtime.authority_state, "wal_intent_without_commit");
+        }
+
+        restarted.recover_incomplete_wal_intent().await;
+        {
+            let runtime = restarted.runtime.read().await;
+            assert_eq!(runtime.accepted_generation, 52);
+            assert_eq!(runtime.applied_generation, 52);
+            assert_eq!(runtime.pending_generation, Some(55));
+            assert_eq!(runtime.desired_hash.as_deref(), Some("hash-recovery-55"));
+            assert_eq!(runtime.applied_desired_hash, baseline.applied_desired_hash);
+            assert_eq!(runtime.authority_state, "blocked_recovery_required");
+            assert_eq!(runtime.wal_status, "intent_recovery_blocked");
+            assert_eq!(runtime.recovery_cause, None);
+        }
+
+        let response = get_neutron_status(State(restarted.clone()))
+            .await
+            .into_response();
+        let (status, actual) = response_json_value(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(actual["accepted_generation"], serde_json::json!(52));
+        assert_eq!(actual["applied_generation"], serde_json::json!(52));
+        assert_eq!(actual["pending_generation"], serde_json::json!(55));
+        assert_eq!(
+            actual["desired_hash"],
+            serde_json::json!("hash-recovery-55")
+        );
+        let mismatches = status_v1_expected_projection_mismatches(
+            "real-wal-recovery-baseline-accepted",
+            &actual,
+            "blocked",
+            "blocked",
+            "recover_pending",
+            None,
+            52,
+        );
+
+        std::fs::remove_dir_all(&root)
+            .expect("real WAL recovery Status V1 temporary root should be removable");
+        assert!(
+            mismatches.is_empty(),
+            "real recovered B/B/N intent must remain recoverable without rewriting accepted:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    #[tokio::test]
     async fn neutron_snapshot_status_v1_projection_prioritizes_uncertainty_over_pending_and_recovery(
     ) {
         let expected = expected_status_v1_projection("blocked-operator");
@@ -7441,6 +7601,15 @@ mod tests {
         generation_zero_pending.accepted_generation = 0;
         generation_zero_pending.pending_generation = Some(0);
 
+        let mut middle_pending_generation =
+            runtime_from_status_v1_seed(status_v1_runtime_seed("pending-poll"));
+        middle_pending_generation.accepted_generation = 43;
+
+        let mut baseline_accepted_inventory =
+            runtime_from_status_v1_seed(status_v1_runtime_seed("blocked-recoverable-inventory"));
+        baseline_accepted_inventory.accepted_generation =
+            baseline_accepted_inventory.applied_generation;
+
         let mut managed_map_key_mismatch = base.clone();
         let managed_row = managed_map_key_mismatch
             .ports
@@ -7599,6 +7768,24 @@ mod tests {
                 expected_readiness: "blocked",
                 expected_action: "operator",
                 expected_generation: 0,
+                historical_control: false,
+            },
+            MatrixCase {
+                label: "middle-pending-generation",
+                runtime: middle_pending_generation,
+                expected_state: "blocked",
+                expected_readiness: "blocked",
+                expected_action: "operator",
+                expected_generation: 42,
+                historical_control: false,
+            },
+            MatrixCase {
+                label: "inventory-recovery-with-baseline-accepted",
+                runtime: baseline_accepted_inventory,
+                expected_state: "blocked",
+                expected_readiness: "blocked",
+                expected_action: "operator",
+                expected_generation: 42,
                 historical_control: false,
             },
             blocked_case("managed-map-key-mismatch", managed_map_key_mismatch),

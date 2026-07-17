@@ -485,7 +485,7 @@
         "recovery_cause": null,
         "last_classified_generation": 42,
         "generation": 42,
-        "accepted_generation": 45,
+        "accepted_generation": 42,
         "applied_generation": 42,
         "pending_generation": 45,
         "desired_hash": "hash-pending-45",
@@ -950,7 +950,7 @@
           "id": "applying",
           "status_overrides": {
             "generation": 40,
-            "accepted_generation": 41,
+            "accepted_generation": 40,
             "applied_generation": 40,
             "pending_generation": 41,
             "desired_hash": "legacy-hash-41",
@@ -1069,7 +1069,7 @@
         {
           "id": "blocked-recovery-required",
           "status_overrides": {
-            "accepted_generation": 41,
+            "accepted_generation": 40,
             "pending_generation": 41,
             "desired_hash": "legacy-hash-41",
             "authority_state": "blocked_recovery_required"
@@ -1085,7 +1085,7 @@
         {
           "id": "recovered-pending-full-resync",
           "status_overrides": {
-            "accepted_generation": 41,
+            "accepted_generation": 40,
             "pending_generation": 41,
             "desired_hash": "legacy-hash-41",
             "authority_state": "recovered_pending_full_resync"
