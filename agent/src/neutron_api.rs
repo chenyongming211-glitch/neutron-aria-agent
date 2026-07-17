@@ -1647,6 +1647,26 @@ fn status_v1_port_top_level_class(
     }
 }
 
+fn status_v1_allows_empty_ifname(
+    status: &NeutronPortStatus,
+    projected: &ProjectedStatusV1PortRow,
+    status_domains: &[String],
+) -> bool {
+    if !matches!(status.status.as_str(), "degraded" | "unsupported")
+        || status_domains.len() != 1
+        || status_domains[0] != "acl"
+        || projected.evidence.domains.len() != 1
+    {
+        return false;
+    }
+
+    let acl = &projected.evidence.domains[0];
+    acl.domain == "acl"
+        && acl.status == NeutronStatusDomainState::Degraded
+        && acl.effective_action == Some(NeutronStatusEffectiveAction::Bypass)
+        && acl.support_disposition == NeutronStatusSupportDisposition::Unsupported
+}
+
 fn project_status_v1_detached_tombstone(
     runtime: &NeutronRuntimeState,
     status_map_key: &str,
@@ -1721,17 +1741,12 @@ fn project_status_v1_ports(
         let managed_domains = status_v1_normalized_unique_domains(&managed.managed_domains);
         let status_domains = status_v1_normalized_unique_domains(&status.managed_domains);
         let top_level_class = status_v1_port_top_level_class(status, &projected);
-        let ifname_valid = managed.ifname.as_str() == status.ifname.as_str()
-            && (!managed.ifname.is_empty()
-                || matches!(
-                    top_level_class,
-                    StatusV1EvidenceClass::TerminalDegraded | StatusV1EvidenceClass::FullResync
-                ));
+        let mut ifname_valid =
+            managed.ifname.as_str() == status.ifname.as_str() && !managed.ifname.is_empty();
 
         let mut valid = !managed_key.is_empty()
             && managed_key.as_str() == managed.port_id.as_str()
             && status.port_id.as_str() == managed_key.as_str()
-            && ifname_valid
             && projected.domains_valid
             && status.generation > 0
             && status.generation <= runtime.applied_generation
@@ -1742,6 +1757,12 @@ fn project_status_v1_ports(
 
         match (&managed_domains, &status_domains) {
             (Some(managed_domains), Some(status_domains)) if managed_domains == status_domains => {
+                if managed.ifname.as_str() == status.ifname.as_str()
+                    && managed.ifname.is_empty()
+                    && status_v1_allows_empty_ifname(status, &projected, status_domains)
+                {
+                    ifname_valid = true;
+                }
                 let status_domain_set = status_domains.iter().cloned().collect::<BTreeSet<_>>();
                 if !status_domain_set
                     .iter()
@@ -1754,9 +1775,15 @@ fn project_status_v1_ports(
                     valid = false;
                 }
                 projected.evidence.managed_domains = status_domains.clone();
+                projected
+                    .evidence
+                    .domains
+                    .retain(|domain| status_domain_set.contains(&domain.domain));
             }
             _ => valid = false,
         }
+
+        valid = valid && ifname_valid;
 
         if status.generation == runtime.applied_generation
             && status.desired_hash != runtime.applied_desired_hash
@@ -6736,6 +6763,146 @@ mod tests {
             mismatches.is_empty(),
             "Neutron runtime projection drifted from the shared Status V1 scenarios:\n{}",
             mismatches.join("\n\n")
+        );
+    }
+
+    #[test]
+    fn neutron_snapshot_status_v1_restart_projection_hides_supplemental_attach() {
+        let mut restored = managed_with_ifindex("restart-port", "tap-restart", 17);
+        restored.managed_domains = vec!["acl".to_string()];
+        restored
+            .domain_desired_hashes
+            .insert("acl".to_string(), "acl-hash".to_string());
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 42,
+            applied_generation: 42,
+            desired_hash: Some("hash-42".to_string()),
+            applied_desired_hash: Some("hash-42".to_string()),
+            authority_state: "ready".to_string(),
+            ports: BTreeMap::from([("restart-port".to_string(), restored.clone())]),
+            port_statuses: BTreeMap::from([(
+                "restart-port".to_string(),
+                ready_status("restart-port", "tap-restart", 42),
+            )]),
+            wal_status: "commit_written".to_string(),
+            ..Default::default()
+        };
+
+        assert!(invalidate_restarted_acl_runtime(
+            &mut runtime,
+            std::slice::from_ref(&restored),
+        ));
+        assert!(runtime.port_statuses["restart-port"]
+            .domains
+            .iter()
+            .any(|domain| domain.domain == "attach" && domain.status == "ready"));
+
+        let projection = project_neutron_status_v1(&runtime);
+
+        assert_eq!(
+            projection.transaction_state,
+            NeutronStatusTransactionState::Classified
+        );
+        assert_eq!(
+            projection.overall_readiness,
+            NeutronStatusOverallReadiness::Degraded
+        );
+        assert_eq!(
+            projection.required_action,
+            NeutronStatusRequiredAction::FullResync
+        );
+        assert_eq!(projection.port_statuses.len(), 1);
+        let wire_row = &projection.port_statuses[0];
+        assert_eq!(wire_row.managed_domains, vec!["acl".to_string()]);
+        assert_eq!(
+            wire_row
+                .domains
+                .iter()
+                .map(|domain| domain.domain.as_str())
+                .collect::<Vec<_>>(),
+            vec!["acl"]
+        );
+        assert!(runtime.port_statuses["restart-port"]
+            .domains
+            .iter()
+            .any(|domain| domain.domain == "attach" && domain.status == "ready"));
+    }
+
+    #[test]
+    fn neutron_snapshot_status_v1_empty_ifname_exception_is_exact() {
+        let positive =
+            runtime_from_status_v1_seed(status_v1_runtime_seed("classified-degraded-terminal"));
+        let positive_projection = project_neutron_status_v1(&positive);
+        assert_eq!(
+            positive_projection.transaction_state,
+            NeutronStatusTransactionState::Classified
+        );
+        assert_eq!(
+            positive_projection.overall_readiness,
+            NeutronStatusOverallReadiness::Degraded
+        );
+        assert_eq!(
+            positive_projection.required_action,
+            NeutronStatusRequiredAction::None
+        );
+
+        let mut exact_unsupported_full_resync =
+            runtime_from_status_v1_seed(status_v1_runtime_seed("classified-degraded-terminal"));
+        exact_unsupported_full_resync
+            .port_statuses
+            .values_mut()
+            .next()
+            .expect("terminal-degraded scenario must contain a status row")
+            .reason = Some("acl_restart_replay_requires_resync".to_string());
+        let exact_unsupported_projection =
+            project_neutron_status_v1(&exact_unsupported_full_resync);
+        assert_eq!(
+            exact_unsupported_projection.transaction_state,
+            NeutronStatusTransactionState::Classified
+        );
+        assert_eq!(
+            exact_unsupported_projection.overall_readiness,
+            NeutronStatusOverallReadiness::Degraded
+        );
+        assert_eq!(
+            exact_unsupported_projection.required_action,
+            NeutronStatusRequiredAction::FullResync
+        );
+
+        let mut full_resync =
+            runtime_from_status_v1_seed(status_v1_runtime_seed("classified-degraded-full-resync"));
+        let port_id = full_resync
+            .ports
+            .keys()
+            .next()
+            .expect("full-resync scenario must contain a managed port")
+            .clone();
+        full_resync
+            .ports
+            .get_mut(&port_id)
+            .expect("managed port must remain addressable")
+            .ifname
+            .clear();
+        full_resync
+            .port_statuses
+            .get_mut(&port_id)
+            .expect("port status must remain addressable")
+            .ifname
+            .clear();
+
+        let blocked = project_neutron_status_v1(&full_resync);
+
+        assert_eq!(
+            blocked.transaction_state,
+            NeutronStatusTransactionState::Blocked
+        );
+        assert_eq!(
+            blocked.overall_readiness,
+            NeutronStatusOverallReadiness::Blocked
+        );
+        assert_eq!(
+            blocked.required_action,
+            NeutronStatusRequiredAction::Operator
         );
     }
 

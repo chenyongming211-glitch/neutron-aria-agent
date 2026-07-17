@@ -239,7 +239,7 @@ class SnapshotSynchronizer(object):
         snapshot_acl_profile = _snapshot_acl_profile(snapshot)
 
         phase_started = time.time()
-        remote_status = self._remote_status()
+        remote_status = self._pre_submit_remote_status("full-host snapshot")
         remote_status_ms = _elapsed_ms(phase_started)
         generation_floor = self._generation_floor_from_status(remote_status)
 
@@ -286,7 +286,9 @@ class SnapshotSynchronizer(object):
                     "remote snapshot generation %s is still pending" %
                     pending_action.get("generation")
                 )
-            remote_status = self._remote_status()
+            remote_status = self._pre_submit_remote_status(
+                "post-recovery full-host snapshot"
+            )
             if pending_action.get("normalized_control"):
                 self._realign_after_pending_recovery(
                     pending_action,
@@ -519,7 +521,16 @@ class SnapshotSynchronizer(object):
                 "heartbeat": heartbeat,
             }
         except LocalApiError as exc:
-            if self.runtime_status.reason != "stale_pending_snapshot_requires_operator":
+            preserves_pending_metadata_reason = (
+                self.runtime_status.reason ==
+                "pending_snapshot_metadata_invalid" and
+                self.runtime_status.last_error == str(exc)
+            )
+            if (
+                self.runtime_status.reason !=
+                "stale_pending_snapshot_requires_operator" and
+                not preserves_pending_metadata_reason
+            ):
                 self.runtime_status.mark_degraded("local_api_degraded", exc)
             heartbeat = self.report_status()
             LOG.warning(
@@ -584,6 +595,20 @@ class SnapshotSynchronizer(object):
         recovered = []
         snapshot = self.state_store.pending_snapshot()
         if snapshot:
+            metadata_reason = self._pending_restart_metadata_reason(snapshot)
+            if metadata_reason is not None:
+                self.runtime_status.mark_degraded(
+                    "pending_snapshot_metadata_invalid",
+                    metadata_reason,
+                )
+                LOG.warning(
+                    "pending_snapshot_metadata_invalid host=%s "
+                    "generation=%s error=%s",
+                    self.host,
+                    snapshot["generation"],
+                    metadata_reason,
+                )
+                raise LocalApiError(metadata_reason)
             status = self.local_client.status()
             normalized_control = None
             normalized_control_keys = (
@@ -672,14 +697,18 @@ class SnapshotSynchronizer(object):
                         status.get("applied_desired_hash") or status.get("desired_hash"),
                     )
                     raise LocalApiError(self.runtime_status.last_error)
-            if snapshot is None:
-                pass
-            else:
+            if snapshot is not None:
                 restart_snapshot = {
                     "generation": snapshot["generation"],
                     "desired_hash": snapshot["desired_hash"],
                     "snapshot_ports": snapshot.get("snapshot_ports") or 0,
-                    "scope": {"type": "restart"},
+                    "scope": {
+                        "type": "restart",
+                        "pending_scope": snapshot.get("scope"),
+                        "affected_port_ids": list(
+                            snapshot.get("affected_port_ids") or []
+                        ),
+                    },
                     "ports": [],
                 }
                 verdict, reason = self._snapshot_status_verdict(
@@ -1786,7 +1815,9 @@ class SnapshotSynchronizer(object):
             "required_action",
         )
         if status is None:
-            return {}
+            raise LocalApiError(
+                "current status is unavailable before %s" % operation
+            )
         if not any(key in status for key in normalized_control_keys):
             return {}
         pending_action = self._remote_pending_action(
@@ -1806,7 +1837,12 @@ class SnapshotSynchronizer(object):
 
     def _pre_submit_remote_status(self, operation):
         try:
-            return self._remote_status()
+            status = self.local_client.status()
+            if status is None:
+                raise LocalApiError(
+                    "current status is unavailable before %s" % operation
+                )
+            return status
         except LocalApiContractError:
             raise
         except Exception as exc:
@@ -1816,7 +1852,36 @@ class SnapshotSynchronizer(object):
                 operation,
                 exc,
             )
-            return None
+            raise
+
+    def _pending_restart_metadata_reason(self, pending):
+        scope = pending.get("scope")
+        affected_port_ids = pending.get("affected_port_ids")
+        if scope not in ("full_host", "port"):
+            return "pending snapshot scope metadata is missing or invalid"
+        if not isinstance(affected_port_ids, list):
+            return "pending affected port metadata is missing or invalid"
+        normalized = []
+        for port_id in affected_port_ids:
+            if (
+                not isinstance(port_id, _STRING_TYPES) or
+                not port_id.strip() or
+                port_id.strip() != port_id
+            ):
+                return "pending affected port metadata is invalid"
+            normalized.append(port_id)
+        if len(normalized) != len(set(normalized)):
+            return "pending affected port metadata contains duplicates"
+        projected_port_ids = set(
+            port_id for port_id in pending.get("projected_port_ids") or []
+            if port_id
+        )
+        affected = set(normalized)
+        if scope == "full_host" and affected != projected_port_ids:
+            return "full-host pending affected ports do not match projection"
+        if scope == "port" and not affected:
+            return "scoped pending affected ports are empty"
+        return None
 
     def _status_requires_pending_recovery(self, status):
         if not isinstance(status, dict):
@@ -2636,6 +2701,7 @@ class SnapshotSynchronizer(object):
             if port.get("port_id")
         )
         removed_scoped_port_ids = set()
+        restart_affected_port_ids = set()
         scope = snapshot.get("scope") or {}
         if scope.get("type") == "port":
             if is_v1:
@@ -2664,6 +2730,16 @@ class SnapshotSynchronizer(object):
                         missing_projected,
                     )
                 validated_port_ids = affected_port_ids
+        elif scope.get("type") == "restart":
+            restart_affected_port_ids = set(
+                port_id for port_id in scope.get("affected_port_ids") or []
+                if port_id
+            )
+            if scope.get("pending_scope") == "port":
+                removed_scoped_port_ids = (
+                    restart_affected_port_ids - projected_port_ids
+                )
+            validated_port_ids = projected_port_ids
         else:
             validated_port_ids = projected_port_ids
         evidence_port_ids = projected_port_ids
@@ -2690,6 +2766,23 @@ class SnapshotSynchronizer(object):
                 "failed",
                 "projected ports are not managed: %s" % missing_managed,
             )
+        allows_unaffected_managed_ports = (
+            scope.get("type") == "port" or
+            (
+                scope.get("type") == "restart" and
+                scope.get("pending_scope") == "port"
+            )
+        )
+        if not allows_unaffected_managed_ports:
+            unexpected_managed = sorted(
+                managed_port_ids - evidence_port_ids
+            )
+            if unexpected_managed:
+                return (
+                    "failed",
+                    "full-host status retains unprojected managed ports: %s" %
+                    unexpected_managed,
+                )
 
         port_statuses, reason = _unique_row_index(
             status.get("port_statuses"),
@@ -2698,6 +2791,45 @@ class SnapshotSynchronizer(object):
         )
         if reason is not None:
             return "failed", reason
+        restart_current_affected_port_ids = (
+            restart_affected_port_ids & projected_port_ids
+        )
+        missing_affected_statuses = sorted(
+            restart_current_affected_port_ids - set(port_statuses)
+        )
+        if missing_affected_statuses:
+            return (
+                "failed",
+                "runtime status is missing for affected ports %s" %
+                missing_affected_statuses,
+            )
+        for port_id in sorted(restart_current_affected_port_ids):
+            runtime_port = port_statuses[port_id]
+            try:
+                port_generation = _strict_scalar(
+                    runtime_port.get("generation"),
+                    "integer",
+                )
+                port_hash = _strict_scalar(
+                    runtime_port.get("desired_hash"),
+                    "string",
+                )
+            except ValueError:
+                return "failed", "port %s identity is invalid" % port_id
+            if port_generation != expected_generation:
+                return (
+                    "failed",
+                    "port %s generation %s does not match %s" % (
+                        port_id,
+                        port_generation,
+                        expected_generation,
+                    ),
+                )
+            if port_hash != expected_hash:
+                return (
+                    "failed",
+                    "port %s desired hash does not match snapshot" % port_id,
+                )
         for port_id in sorted(removed_scoped_port_ids):
             tombstone = port_statuses.get(port_id)
             if tombstone is None:
@@ -2811,7 +2943,10 @@ class SnapshotSynchronizer(object):
             runtime_port = port_statuses.get(port_id)
 
             snapshot_port = snapshot_ports.get(port_id)
-            requires_current_identity = snapshot_port is not None
+            requires_current_identity = (
+                snapshot_port is not None or
+                port_id in restart_affected_port_ids
+            )
             if requires_current_identity:
                 try:
                     port_generation = _strict_scalar(

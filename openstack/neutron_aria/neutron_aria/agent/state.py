@@ -67,6 +67,8 @@ def _state_defaults():
         "pending_desired_hash": None,
         "pending_snapshot_ports": 0,
         "pending_projected_port_ids": [],
+        "pending_scope": None,
+        "pending_affected_port_ids": None,
         "pending_since": None,
         "last_snapshot_ports": 0,
         "last_managed_ports": 0,
@@ -146,6 +148,13 @@ def _scoped_projected_port_ids(snapshot, current_projected_port_ids):
     return sorted(projected)
 
 
+def _affected_port_ids(snapshot):
+    return sorted(set(
+        port.get("port_id") for port in snapshot.get("ports") or []
+        if port.get("port_id")
+    ))
+
+
 class SnapshotStateStore(object):
     """Durable local transaction state for neutron-aria-agent snapshots."""
 
@@ -179,6 +188,10 @@ class SnapshotStateStore(object):
         self._state["pending_desired_hash"] = desired_hash
         self._state["pending_snapshot_ports"] = len(snapshot.get("ports") or [])
         self._state["pending_projected_port_ids"] = _projected_port_ids(snapshot)
+        self._state["pending_scope"] = "full_host"
+        self._state["pending_affected_port_ids"] = list(
+            self._state["pending_projected_port_ids"]
+        )
         self._state["pending_since"] = _now()
         self._state["updated_at"] = _now()
         self._write()
@@ -204,6 +217,10 @@ class SnapshotStateStore(object):
         self._state["pending_desired_hash"] = desired_hash
         self._state["pending_snapshot_ports"] = len(snapshot.get("ports") or [])
         self._state["pending_projected_port_ids"] = _projected_port_ids(snapshot)
+        self._state["pending_scope"] = "full_host"
+        self._state["pending_affected_port_ids"] = list(
+            self._state["pending_projected_port_ids"]
+        )
         self._state["pending_since"] = _now()
         self._state["updated_at"] = _now()
         self._write()
@@ -245,6 +262,8 @@ class SnapshotStateStore(object):
             len(projected_port_ids)
         )
         self._state["pending_projected_port_ids"] = projected_port_ids
+        self._state["pending_scope"] = "port"
+        self._state["pending_affected_port_ids"] = _affected_port_ids(snapshot)
         self._state["pending_since"] = _now()
         self._state["updated_at"] = _now()
         self._write()
@@ -265,6 +284,8 @@ class SnapshotStateStore(object):
         self._state["pending_desired_hash"] = None
         self._state["pending_snapshot_ports"] = 0
         self._state["pending_projected_port_ids"] = []
+        self._state["pending_scope"] = None
+        self._state["pending_affected_port_ids"] = None
         self._state["pending_since"] = None
 
     def _clear_pending_if_matches(self, generation, desired_hash):
@@ -542,6 +563,10 @@ class SnapshotStateStore(object):
             "snapshot_ports": _int_value(self._state.get("pending_snapshot_ports")),
             "projected_port_ids": list(
                 self._state.get("pending_projected_port_ids") or []
+            ),
+            "scope": self._state.get("pending_scope"),
+            "affected_port_ids": copy.deepcopy(
+                self._state.get("pending_affected_port_ids")
             ),
             "pending_since": self._state.get("pending_since"),
         }

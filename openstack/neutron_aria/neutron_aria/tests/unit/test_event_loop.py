@@ -394,6 +394,8 @@ class DeleteTimeoutNotConvergedLocalClient(FakeLocalClient):
         raise LocalApiTimeoutError("timed out")
 
     def status(self):
+        if not self.deleted_ports:
+            return FakeLocalClient.status(self)
         return {
             "generation": 1,
             "managed_ports": [{"port_id": self.deleted_ports[-1]}],
@@ -844,6 +846,23 @@ class PublicV1ActionLocalClient(FakeLocalClient):
     def delete_port(self, port_id):
         self.mutating_calls.append("delete_port")
         return FakeLocalClient.delete_port(self, port_id)
+
+
+class PreSubmitStatusUnavailableLocalClient(PublicV1ActionLocalClient):
+    def status(self):
+        raise LocalApiTimeoutError("pre-submit status unavailable")
+
+
+class PreSubmitNoneStatusLocalClient(PublicV1ActionLocalClient):
+    def status(self):
+        return None
+
+
+class PostRecoveryStatusUnavailableLocalClient(PublicV1ActionLocalClient):
+    def status(self):
+        if self.recovered:
+            raise LocalApiTimeoutError("post-recovery status unavailable")
+        return copy.deepcopy(self.initial_status)
 
 
 class EventLoopTestCase(unittest.TestCase):
@@ -5330,7 +5349,15 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
     def test_decoded_legacy_operator_cannot_finalize_exact_pending_on_restart(self):
         state_store = InMemorySnapshotStateStore()
         state_store.prepare_snapshot_at_generation(
-            {"host": "ostack2", "ports": []},
+            {
+                "host": "ostack2",
+                "ports": [{
+                    "port_id": "legacy-port",
+                    "ifname": "tap-legacy",
+                    "eligible": True,
+                    "managed_domains": ["acl"],
+                }],
+            },
             40,
             desired_hash="legacy-hash-40",
         )
@@ -5594,26 +5621,45 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
     def test_restart_accepts_bounded_historical_scoped_rows_without_write(self):
         scenario = status_scenario("scoped-classified-ready")
         state_store = InMemorySnapshotStateStore()
-        pending_snapshot = copy.deepcopy(
-            scenario["request_context"]["snapshot"]
-        )
-        pending_snapshot["ports"].append({
-            "port_id": "port-b",
-            "ifname": "tap-port-b",
-            "eligible": True,
-            "managed_domains": ["acl"],
-            "acl": {
-                "enabled": True,
-                "status": "ready",
-                "effective_action": "enforce",
+        baseline = state_store.prepare_snapshot_at_generation(
+            {
+                "host": "ostack2",
+                "ports": [{
+                    "port_id": "port-b",
+                    "ifname": "tap-port-b",
+                    "eligible": True,
+                    "managed_domains": ["acl"],
+                }],
             },
-        })
-        state_store.prepare_snapshot_at_generation(
-            pending_snapshot,
-            scenario["request_context"]["expected_generation"],
-            desired_hash=scenario["request_context"]["expected_desired_hash"],
+            42,
+            desired_hash="hash-ready-42",
         )
-        local_client = PublicV1ActionLocalClient(scenario)
+        state_store.commit_snapshot(
+            baseline["generation"],
+            baseline["desired_hash"],
+            snapshot_ports=1,
+            managed_ports=1,
+            feature_ready_domains=["acl"],
+        )
+        scoped = state_store.prepare_scoped_snapshot(
+            copy.deepcopy(scenario["request_context"]["snapshot"]),
+            minimum_generation=42,
+        )
+        self.assertEqual(
+            scenario["request_context"]["expected_generation"],
+            scoped["generation"],
+        )
+        status = copy.deepcopy(scenario["status"])
+        status.update({
+            "desired_hash": scoped["desired_hash"],
+            "applied_desired_hash": scoped["desired_hash"],
+        })
+        affected = next(
+            row for row in status["port_statuses"]
+            if row["port_id"] == "port-a"
+        )
+        affected["desired_hash"] = scoped["desired_hash"]
+        local_client = PublicV1ActionLocalClient(scenario, status=status)
         sync = SnapshotSynchronizer(
             "ostack2",
             StaticPortSource([]),
@@ -5636,6 +5682,500 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             sync.projected_port_ids,
         )
         self.assertEqual([], local_client.mutating_calls)
+
+    def test_restart_rejects_historical_identity_for_scoped_affected_port(self):
+        scenario = status_scenario("scoped-classified-ready")
+        state_store = self._state_store_with_projected_port(
+            port_id="port-b",
+            generation=42,
+            desired_hash="hash-ready-42",
+        )
+        scoped = state_store.prepare_scoped_snapshot(
+            copy.deepcopy(scenario["request_context"]["snapshot"]),
+            minimum_generation=42,
+        )
+        stale_status = copy.deepcopy(scenario["status"])
+        stale_status.update({
+            "desired_hash": scoped["desired_hash"],
+            "applied_desired_hash": scoped["desired_hash"],
+        })
+        affected = next(
+            row for row in stale_status["port_statuses"]
+            if row["port_id"] == "port-a"
+        )
+        affected["generation"] = 42
+        affected["desired_hash"] = "hash-ready-42"
+        pending_before = copy.deepcopy(state_store.pending_snapshot())
+        feature_ready_before = copy.deepcopy(state_store.feature_ready_history())
+        local_client = PublicV1ActionLocalClient(
+            scenario,
+            status=stale_status,
+        )
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        result = sync.recover_pending_state()
+
+        self.assertEqual([], result["recovered"])
+        self.assertEqual(pending_before, state_store.pending_snapshot())
+        self.assertEqual(feature_ready_before, state_store.feature_ready_history())
+        self.assertFalse(sync.runtime_status.ready)
+        self.assertEqual([], local_client.mutating_calls)
+
+    def test_restart_scoped_removal_accepts_absent_target_tombstone(self):
+        scenario = status_scenario("scoped-classified-ready")
+        state_store = InMemorySnapshotStateStore()
+        baseline = state_store.prepare_snapshot_at_generation(
+            {
+                "host": "ostack2",
+                "ports": [{
+                    "port_id": port_id,
+                    "ifname": "tap-%s" % port_id,
+                    "eligible": True,
+                    "managed_domains": ["acl"],
+                } for port_id in ("port-a", "port-b")],
+            },
+            42,
+            desired_hash="hash-ready-42",
+        )
+        state_store.commit_snapshot(
+            baseline["generation"],
+            baseline["desired_hash"],
+            snapshot_ports=2,
+            managed_ports=2,
+            feature_ready_domains=["acl"],
+        )
+        scoped = state_store.prepare_scoped_snapshot({
+            "host": "ostack2",
+            "scope": {"type": "port", "port_id": "port-a"},
+            "ports": [{
+                "port_id": "port-a",
+                "ifname": "tap-port-a",
+                "eligible": False,
+                "managed_domains": [],
+            }],
+        })
+        status = copy.deepcopy(scenario["status"])
+        status.update({
+            "desired_hash": scoped["desired_hash"],
+            "applied_desired_hash": scoped["desired_hash"],
+            "managed_ports": [
+                row for row in status["managed_ports"]
+                if row["port_id"] == "port-b"
+            ],
+            "port_statuses": [
+                row for row in status["port_statuses"]
+                if row["port_id"] == "port-b"
+            ],
+            "active_instances": ["tap-port-b"],
+        })
+        local_client = PublicV1ActionLocalClient(scenario, status=status)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        result = sync.recover_pending_state()
+
+        self.assertEqual(["snapshot"], result["recovered"])
+        self.assertEqual(None, state_store.pending_snapshot())
+        self.assertEqual(set(("port-b",)), sync.projected_port_ids)
+        self.assertEqual([], local_client.mutating_calls)
+
+    def test_restart_rejects_historical_identity_for_full_host_port(self):
+        scenario = status_scenario("scoped-classified-ready")
+        state_store = InMemorySnapshotStateStore()
+        full_snapshot = copy.deepcopy(scenario["request_context"]["snapshot"])
+        full_snapshot.pop("scope", None)
+        full_snapshot["ports"].append({
+            "port_id": "port-b",
+            "ifname": "tap-port-b",
+            "eligible": True,
+            "managed_domains": ["acl"],
+            "acl": {
+                "enabled": True,
+                "status": "ready",
+                "effective_action": "enforce",
+            },
+        })
+        state_store.prepare_snapshot_at_generation(
+            full_snapshot,
+            scenario["request_context"]["expected_generation"],
+            desired_hash=scenario["request_context"]["expected_desired_hash"],
+        )
+        pending_before = copy.deepcopy(state_store.pending_snapshot())
+        local_client = PublicV1ActionLocalClient(scenario)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        result = sync.recover_pending_state()
+
+        self.assertEqual([], result["recovered"])
+        self.assertEqual(pending_before, state_store.pending_snapshot())
+        self.assertFalse(sync.runtime_status.ready)
+        self.assertEqual([], local_client.mutating_calls)
+
+    def test_restart_full_host_rejects_historical_extra_managed_port(self):
+        scenario = status_scenario("scoped-classified-ready")
+        state_store = InMemorySnapshotStateStore()
+        baseline = state_store.prepare_snapshot_at_generation(
+            {
+                "host": "ostack2",
+                "ports": [{
+                    "port_id": "port-b",
+                    "ifname": "tap-port-b",
+                    "eligible": True,
+                    "managed_domains": ["acl"],
+                }],
+            },
+            42,
+            desired_hash="hash-ready-42",
+        )
+        state_store.commit_snapshot(
+            baseline["generation"],
+            baseline["desired_hash"],
+            snapshot_ports=1,
+            managed_ports=1,
+            feature_ready_domains=["acl"],
+        )
+        state_store.prepare_snapshot_at_generation(
+            copy.deepcopy(scenario["request_context"]["snapshot"]),
+            scenario["request_context"]["expected_generation"],
+            desired_hash=scenario["request_context"]["expected_desired_hash"],
+        )
+        pending_before = copy.deepcopy(state_store.pending_snapshot())
+        feature_ready_before = copy.deepcopy(state_store.feature_ready_history())
+        local_client = PublicV1ActionLocalClient(scenario)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        result = sync.recover_pending_state()
+
+        self.assertEqual([], result["recovered"])
+        self.assertEqual(pending_before, state_store.pending_snapshot())
+        self.assertEqual(feature_ready_before, state_store.feature_ready_history())
+        self.assertFalse(sync.runtime_status.ready)
+        self.assertEqual([], local_client.mutating_calls)
+
+    def test_restart_legacy_pending_without_scope_metadata_fails_closed(self):
+        scenario = status_scenario("full-classified-ready")
+        state_store = InMemorySnapshotStateStore()
+        state_store.prepare_snapshot_at_generation(
+            copy.deepcopy(scenario["request_context"]["snapshot"]),
+            scenario["request_context"]["expected_generation"],
+            desired_hash=scenario["request_context"]["expected_desired_hash"],
+        )
+        state_store._state.pop("pending_scope", None)
+        state_store._state.pop("pending_affected_port_ids", None)
+        pending_before = copy.deepcopy(state_store.pending_snapshot())
+        feature_ready_before = copy.deepcopy(state_store.feature_ready_history())
+        local_client = PublicV1ActionLocalClient(scenario)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        with self.assertRaises(LocalApiError):
+            sync.recover_pending_state()
+
+        self.assertEqual(pending_before, state_store.pending_snapshot())
+        self.assertEqual(feature_ready_before, state_store.feature_ready_history())
+        self.assertFalse(sync.runtime_status.ready)
+        self.assertEqual([], local_client.mutating_calls)
+
+    def test_full_resync_legacy_pending_without_metadata_makes_no_mutation(self):
+        scenario = status_scenario("full-classified-ready")
+        state_store = InMemorySnapshotStateStore()
+        state_store.prepare_snapshot_at_generation(
+            copy.deepcopy(scenario["request_context"]["snapshot"]),
+            scenario["request_context"]["expected_generation"],
+            desired_hash=scenario["request_context"]["expected_desired_hash"],
+        )
+        state_store._state.pop("pending_scope", None)
+        state_store._state.pop("pending_affected_port_ids", None)
+        pending_before = copy.deepcopy(state_store.pending_snapshot())
+        feature_ready_before = copy.deepcopy(state_store.feature_ready_history())
+        local_client = PublicV1ActionLocalClient(scenario)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        with self.assertRaises(LocalApiError):
+            sync.full_resync()
+
+        self.assertEqual([], local_client.mutating_calls)
+        self.assertEqual([], local_client.snapshots)
+        self.assertEqual(pending_before, state_store.pending_snapshot())
+        self.assertEqual(feature_ready_before, state_store.feature_ready_history())
+        self.assertFalse(sync.runtime_status.ready)
+
+    def test_safe_full_resync_legacy_pending_without_metadata_preserves_reason(self):
+        scenario = status_scenario("full-classified-ready")
+        state_store = InMemorySnapshotStateStore()
+        state_store.prepare_snapshot_at_generation(
+            copy.deepcopy(scenario["request_context"]["snapshot"]),
+            scenario["request_context"]["expected_generation"],
+            desired_hash=scenario["request_context"]["expected_desired_hash"],
+        )
+        state_store._state.pop("pending_scope", None)
+        state_store._state.pop("pending_affected_port_ids", None)
+        pending_before = copy.deepcopy(state_store.pending_snapshot())
+        local_client = PublicV1ActionLocalClient(scenario)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        result = sync.safe_full_resync()
+
+        self.assertEqual([], local_client.mutating_calls)
+        self.assertEqual([], local_client.snapshots)
+        self.assertEqual(pending_before, state_store.pending_snapshot())
+        self.assertEqual(
+            "pending_snapshot_metadata_invalid",
+            result["status"]["reason"],
+        )
+        self.assertEqual(
+            "pending_snapshot_metadata_invalid",
+            sync.runtime_status.reason,
+        )
+        self.assertEqual(
+            "pending snapshot scope metadata is missing or invalid",
+            result["status"]["last_error"],
+        )
+        self.assertEqual(
+            result["status"]["last_error"],
+            sync.runtime_status.last_error,
+        )
+
+    def test_restart_legacy_pending_metadata_cannot_be_cleared_as_stale(self):
+        scenario = status_scenario("full-classified-ready")
+        state_store = InMemorySnapshotStateStore()
+        state_store.prepare_snapshot_at_generation(
+            {"host": "ostack2", "ports": []},
+            42,
+            desired_hash="hash-local-42",
+        )
+        state_store._state.pop("pending_scope", None)
+        state_store._state.pop("pending_affected_port_ids", None)
+        pending_before = copy.deepcopy(state_store.pending_snapshot())
+        advanced_status = copy.deepcopy(scenario["status"])
+        advanced_status.update({
+            "last_classified_generation": 43,
+            "generation": 43,
+            "accepted_generation": 43,
+            "applied_generation": 43,
+            "desired_hash": "hash-remote-43",
+            "applied_desired_hash": "hash-remote-43",
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": [],
+        })
+        local_client = PublicV1ActionLocalClient(
+            scenario,
+            status=advanced_status,
+        )
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        with self.assertRaises(LocalApiError):
+            sync.recover_pending_state()
+
+        self.assertEqual(pending_before, state_store.pending_snapshot())
+        self.assertFalse(sync.runtime_status.ready)
+        self.assertEqual([], local_client.mutating_calls)
+
+    def test_full_host_pre_submit_status_failure_makes_no_mutation(self):
+        scenario = status_scenario("full-classified-ready")
+        state_store = InMemorySnapshotStateStore()
+        pending_before = copy.deepcopy(state_store.pending_snapshot())
+        local_client = PreSubmitStatusUnavailableLocalClient(scenario)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        error = None
+        try:
+            sync.full_resync()
+        except LocalApiError as exc:
+            error = exc
+
+        self.assertIsInstance(error, LocalApiTimeoutError)
+        self.assertEqual([], local_client.mutating_calls)
+        self.assertEqual([], local_client.snapshots)
+        self.assertEqual(pending_before, state_store.pending_snapshot())
+
+    def test_scoped_pre_submit_status_failure_makes_no_mutation(self):
+        target_port = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        scenario = status_scenario("full-classified-ready")
+        state_store = self._state_store_with_projected_port(target_port)
+        pending_before = copy.deepcopy(state_store.pending_snapshot())
+        projected_before = set(state_store.last_projected_port_ids())
+        local_client = PreSubmitStatusUnavailableLocalClient(scenario)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            self._target_port_source(),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+            acl_index=self._terminal_degraded_acl_index(),
+        )
+
+        error = None
+        try:
+            sync.apply_port_scoped_snapshot(
+                target_port,
+                binding_host="ostack2",
+                revision_number=8,
+                allow_revisionless=True,
+            )
+        except LocalApiError as exc:
+            error = exc
+
+        self.assertIsInstance(error, LocalApiTimeoutError)
+        self.assertEqual([], local_client.mutating_calls)
+        self.assertEqual([], local_client.port_snapshots)
+        self.assertEqual(pending_before, state_store.pending_snapshot())
+        self.assertEqual(projected_before, sync.projected_port_ids)
+
+    def test_delete_pre_submit_status_failure_makes_no_mutation(self):
+        target_port = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        scenario = status_scenario("full-classified-ready")
+        state_store = self._state_store_with_projected_port(target_port)
+        pending_before = copy.deepcopy(state_store.pending_delete())
+        projected_before = set(state_store.last_projected_port_ids())
+        local_client = PreSubmitStatusUnavailableLocalClient(scenario)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        with self.assertRaises(LocalApiTimeoutError):
+            sync.delete_port(target_port, reason="status-unavailable")
+
+        self.assertEqual([], local_client.mutating_calls)
+        self.assertEqual([], local_client.deleted_ports)
+        self.assertEqual(pending_before, state_store.pending_delete())
+        self.assertEqual(projected_before, sync.projected_port_ids)
+
+    def test_pre_submit_action_gate_rejects_missing_status_defensively(self):
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+
+        with self.assertRaises(LocalApiError):
+            sync._pre_submit_action_gate("snapshot", {}, None, None)
+
+    def test_full_host_pre_submit_none_status_makes_no_mutation(self):
+        scenario = status_scenario("full-classified-ready")
+        state_store = InMemorySnapshotStateStore()
+        pending_before = copy.deepcopy(state_store.pending_snapshot())
+        local_client = PreSubmitNoneStatusLocalClient(scenario)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        error = None
+        try:
+            sync.full_resync()
+        except Exception as exc:
+            error = exc
+
+        self.assertEqual([], local_client.mutating_calls)
+        self.assertEqual([], local_client.snapshots)
+        self.assertEqual(pending_before, state_store.pending_snapshot())
+        self.assertIsInstance(error, LocalApiError)
+
+    def test_full_host_post_recovery_status_failure_prevents_new_write(self):
+        scenario = status_scenario("blocked-recoverable-inventory")
+        state_store = InMemorySnapshotStateStore()
+        state_store.prepare_snapshot_at_generation(
+            {"host": "ostack2", "ports": []},
+            scenario["request_context"]["expected_pending_generation"],
+            desired_hash=scenario["request_context"]["expected_desired_hash"],
+        )
+        pending_before = copy.deepcopy(state_store.pending_snapshot())
+        local_client = PostRecoveryStatusUnavailableLocalClient(scenario)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        error = None
+        try:
+            sync.full_resync()
+        except LocalApiError as exc:
+            error = exc
+
+        self.assertIsInstance(error, LocalApiTimeoutError)
+        self.assertIn("post-recovery status unavailable", str(error))
+        self.assertEqual(["recover_pending"], local_client.mutating_calls)
+        self.assertEqual([], local_client.snapshots)
+        self.assertEqual(pending_before, state_store.pending_snapshot())
 
     def test_event_target_rejects_whitespace_padded_historical_hash(self):
         scenario = status_scenario("scoped-classified-ready")
@@ -6951,10 +7491,60 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             self.assertEqual(1, len(raw_client.snapshots))
             self.assertTrue(raw_result["status"]["ready"])
 
-    def test_actual_decoded_legacy_ready_restart_updates_domain_history(self):
+    def test_actual_decoded_legacy_empty_full_host_restart_advances_ready_history(self):
         state_store = InMemorySnapshotStateStore()
         state_store.prepare_snapshot_at_generation(
             {"host": "ostack2", "ports": []},
+            40,
+            desired_hash="legacy-hash-40",
+        )
+        decoded_ready = self._actual_decoded_legacy_status(
+            clear_runtime_evidence=True,
+        )
+        local_client = PublicV1ActionLocalClient(
+            status_scenario("legacy-v0-ready"),
+            status=decoded_ready,
+        )
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        recovered = sync.recover_pending_state()
+
+        self.assertEqual(["snapshot"], recovered["recovered"])
+        self.assertEqual(None, state_store.pending_snapshot())
+        self.assertEqual({
+            "last_classified_generation": 40,
+            "last_feature_ready_generation": 40,
+            "last_feature_ready_desired_hash": "legacy-hash-40",
+            "last_feature_ready_projected_port_ids": [],
+            "last_feature_ready_generation_by_domain": {"acl": 40},
+        }, state_store.feature_ready_history())
+        self.assertTrue(sync.runtime_status.ready)
+        self.assertEqual([], local_client.mutating_calls)
+
+    def test_actual_decoded_legacy_ready_restart_with_managed_port_stays_pending(self):
+        state_store = InMemorySnapshotStateStore()
+        state_store.prepare_snapshot_at_generation(
+            {
+                "host": "ostack2",
+                "ports": [{
+                    "port_id": "legacy-port",
+                    "ifname": "tap-legacy",
+                    "eligible": True,
+                    "managed_domains": ["acl"],
+                    "acl": {
+                        "enabled": True,
+                        "status": "ready",
+                        "effective_action": "enforce",
+                    },
+                }],
+            },
             40,
             desired_hash="legacy-hash-40",
         )
@@ -6971,27 +7561,15 @@ class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
             managed_domains=["acl"],
             state_store=state_store,
         )
+        pending_before = copy.deepcopy(state_store.pending_snapshot())
+        feature_ready_before = copy.deepcopy(state_store.feature_ready_history())
 
         recovered = sync.recover_pending_state()
-        durable = state_store.to_dict()
-        runtime = sync.runtime_status.to_dict()
 
-        self.assertEqual(["snapshot"], recovered["recovered"])
-        self.assertEqual(None, state_store.pending_snapshot())
-        self.assertEqual(40, durable["last_classified_generation"])
-        self.assertEqual(40, durable["last_feature_ready_generation"])
-        with self.subTest(track="durable"):
-            self.assertEqual(
-                {"acl": 40},
-                durable["last_feature_ready_generation_by_domain"],
-            )
-        self.assertTrue(runtime["ready"])
-        self.assertEqual(40, runtime["last_classified_generation"])
-        with self.subTest(track="runtime"):
-            self.assertEqual(
-                {"acl": 40},
-                runtime["last_feature_ready_generation_by_domain"],
-            )
+        self.assertEqual([], recovered["recovered"])
+        self.assertEqual(pending_before, state_store.pending_snapshot())
+        self.assertEqual(feature_ready_before, state_store.feature_ready_history())
+        self.assertFalse(sync.runtime_status.ready)
         self.assertEqual([], local_client.mutating_calls)
 
 

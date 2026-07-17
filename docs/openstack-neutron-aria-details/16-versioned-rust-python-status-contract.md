@@ -1,7 +1,8 @@
 # Versioned Rust-Python Status Contract
 
-Status: proposed for user review. This document does not authorize RED tests or
-production changes.
+Status: approved and implemented on the Batch 2C branch. Local Python and
+static verification is complete; final Rust/eBPF verification remains owned by
+the required GitHub Actions build before merge.
 
 Batch: 2C, after `REVIEW-TXN-028` and `REVIEW-TXN-029`, before
 `REVIEW-ACL-046`.
@@ -380,9 +381,9 @@ No step below is authorized until the user approves this design.
 - Do not close or partially repair `REVIEW-DOC-022` without explicit scope
   approval.
 
-## Approval Gate
+## Approval and Implementation Record
 
-Approval must explicitly cover:
+The approved implementation scope covered:
 
 1. the independent schema/hash and additive rollout;
 2. the transaction/readiness/action vocabulary and exact generation-0
@@ -394,5 +395,13 @@ Approval must explicitly cover:
 5. the Python-first legacy compatibility window;
 6. the single shared scenario artifact and RED-first implementation sequence.
 
-Until that approval is received, this branch remains design-only: no fixture,
-test, Rust, Python, or contract artifact implementation changes are allowed.
+Approval was received before the shared Python and Rust RED phases. The branch
+now contains the shared fixture, Rust projection, Python compatibility and
+dual-track state handling, drift checker, and review-driven fail-closed
+regressions described above. The 14-scenario vocabulary, Rust WAL shape,
+recover-pending route contract, and unrelated ACL backlog remain unchanged.
+
+Local Python, static-contract, warning-hygiene, and change-detection gates are
+green. Per repository policy, the final Rust tests, eBPF builds, static binary
+checks, and warning verification must pass on GitHub Actions before this PR is
+marked ready to merge.
