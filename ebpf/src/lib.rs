@@ -1,8 +1,7 @@
 #![no_std]
 #![no_main]
-#![allow(dead_code)]
 
-use aya_ebpf::bindings::{__sk_buff, xdp_md};
+use aya_ebpf::bindings::__sk_buff;
 use aya_ebpf::helpers::bpf_ktime_get_ns;
 use aya_ebpf::macros::{classifier, uprobe, uretprobe, xdp};
 use aya_ebpf::maps::lpm_trie::Key;
@@ -31,11 +30,11 @@ use common::{
     CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_EGRESS, CT_CONTRACT_HOOK_TC_INGRESS,
     CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_HIT, CT_CONTRACT_REASON_CT_MISS,
     CT_CONTRACT_REASON_STALE_BANK, DIR_EGRESS, DIR_INGRESS, DROP_QOS_EGRESS, DROP_QOS_INGRESS,
-    FLAG_ACL_ON, FLAG_CT_HIT, FLAG_CT_STALE_BANK, FLAG_IS_FORWARD,
-    FLAG_MIRROR_ON, FLAG_POLICY_HIT, FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP,
-    TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL,
-    TRACE_RESULT_DROP_ACL_DEFAULT, TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_QOS,
-    TRACE_RESULT_PASS, TRACE_TC_DROP, TRACE_TC_EGRESS, TRACE_TC_INGRESS, XDP_PASS,
+    FLAG_ACL_ON, FLAG_CT_HIT, FLAG_CT_STALE_BANK, FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_POLICY_HIT,
+    FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP, TAP_ID_UNASSIGNED,
+    TRACE_RESULT_DROP_ACL, TRACE_RESULT_DROP_ACL_DEFAULT, TRACE_RESULT_DROP_ACL_PORT,
+    TRACE_RESULT_DROP_QOS, TRACE_RESULT_PASS, TRACE_TC_DROP, TRACE_TC_EGRESS, TRACE_TC_INGRESS,
+    XDP_PASS,
 };
 use conntrack::{CtLookupResult, CtMissReason};
 use maps::{
@@ -96,7 +95,7 @@ unsafe fn try_xdp_firewall(
     let p = &mut *pipe;
     // Future independent DDoS processing belongs before this boundary.
     p.action = XDP_PASS;
-    return Ok(XDP_PASS);
+    Ok(XDP_PASS)
 }
 
 // --- TC Egress ---
@@ -326,12 +325,6 @@ unsafe fn resolve_tap_id_for_ifindex(ifindex: u32) -> u32 {
     } else {
         TAP_ID_UNASSIGNED
     }
-}
-
-#[inline(always)]
-unsafe fn load_runtime_ctx_xdp(ctx: &XdpContext, p: &mut PipelineCtx) {
-    let xdp = ctx.as_ptr() as *const xdp_md;
-    p.tap_id = resolve_tap_id_for_ifindex((*xdp).ingress_ifindex);
 }
 
 #[inline(always)]
@@ -583,13 +576,6 @@ unsafe fn load_acl_packet_ids_v6(info: &parser::PacketInfo, p: &mut PipelineCtx)
     p.matched_bank = bank;
     p.src_id = lookup_ipv6(&ACL_SRC_IPV6_TRIE, lpm_tap_id, info.src_ip_v6).unwrap_or(0);
     p.dst_id = lookup_ipv6(&ACL_DST_IPV6_TRIE, lpm_tap_id, info.dst_ip_v6).unwrap_or(0);
-}
-
-#[inline(always)]
-unsafe fn should_create_ct(p: &PipelineCtx) -> bool {
-    (p.flags & FLAG_ACL_ON) != 0
-        || stats::monitoring_enabled(p.tap_id)
-        || tcprt::tcprt_enabled(p.tap_id)
 }
 
 #[inline(always)]

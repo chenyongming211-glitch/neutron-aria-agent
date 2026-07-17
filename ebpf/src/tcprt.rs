@@ -33,13 +33,17 @@ unsafe fn init_tcprt_value(val: *mut TcpRtValue, now: u64, tcp_seq: u32, from_in
     (*val).pad = [0; 2];
     (*val).last_seq = tcp_seq;
     (*val).last_payload_len = 0;
+    (*val)._pad_last_payload_len = [0; 2];
     (*val).prev_seq = 0;
     (*val).prev_payload_len = 0;
+    (*val)._pad_prev_payload_len = [0; 2];
     (*val).last_resp_seq = 0;
     (*val).last_resp_payload_len = 0;
+    (*val)._pad_last_resp_payload_len = [0; 2];
     (*val).prev_resp_seq = 0;
     (*val).prev_resp_payload_len = 0;
     (*val)._pad2 = [0; 6];
+    (*val)._pad3 = [0; 4];
     (*val).fin_ts = 0;
     (*val).rst_ts = 0;
     (*val).close_ts = 0;

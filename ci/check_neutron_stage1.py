@@ -56,6 +56,7 @@ CORE_COMMON_PATH = os.path.join("core", "src", "common.rs")
 CORE_STATE_PATH = os.path.join("core", "src", "state.rs")
 CORE_EBPF_OPS_PATH = os.path.join("core", "src", "ebpf_ops.rs")
 CORE_EBPF_RUNTIME_PATH = os.path.join("core", "src", "ebpf_ops", "runtime.rs")
+EBPF_ABI_PATH = os.path.join("abi", "src", "lib.rs")
 EBPF_COMMON_PATH = os.path.join("ebpf", "src", "common.rs")
 EBPF_CONNTRACK_PATH = os.path.join("ebpf", "src", "conntrack.rs")
 EBPF_RUNTIME_PATH = os.path.join("ebpf", "src", "runtime.rs")
@@ -902,7 +903,7 @@ def check_rust_stage_one_tests_present():
     neutron_api_source = _read_repo_text(RUST_NEUTRON_API_PATH)
     wal_source = _read_repo_text(RUST_NEUTRON_WAL_PATH)
     openapi_source = _read_repo_text(RUST_OPENAPI_PATH)
-    ebpf_common_source = _read_repo_text(EBPF_COMMON_PATH)
+    abi_common_source = _read_repo_text(EBPF_ABI_PATH)
     ebpf_conntrack_source = _read_repo_text(EBPF_CONNTRACK_PATH)
     build_workflow_source = _read_repo_text(BUILD_WORKFLOW_PATH)
     control_plane_source = _read_repo_text(os.path.join("agent", "src", "control_plane.rs"))
@@ -1000,7 +1001,7 @@ def check_rust_stage_one_tests_present():
         "ct_acl_cache_is_current",
         "tc_ct_cache_requires_acl_evaluation_when_acl_turns_on",
     ):
-        if term not in ebpf_common_source and term not in _read_repo_text(CORE_COMMON_PATH):
+        if term not in abi_common_source:
             raise SystemExit("ERROR: CT-only to ACL enable guard missing %s" % term)
     if ebpf_conntrack_source.count("ct_acl_cache_is_current(") != 4:
         raise SystemExit(
@@ -1967,7 +1968,7 @@ def check_rust_stage_one_tests_present():
 
     policy_key_match = re.search(
         r"(?:pub\s+)?struct\s+PolicyKey\s*\{(?P<body>.*?)\n\}",
-        ebpf_common_source,
+        abi_common_source,
         re.DOTALL,
     )
     if not policy_key_match:
@@ -2028,14 +2029,21 @@ def check_ebpf_acl_ingress_boundary():
     if _has_acl_ingress_hook_definition(runtime_source):
         raise SystemExit("ERROR: eBPF runtime must not expose acl_ingress_hook")
 
-    for path in (CORE_COMMON_PATH, EBPF_COMMON_PATH):
-        common_source = _read_repo_text(path)
-        missing = _missing_acl_ingress_abi(common_source)
-        if missing:
-            raise SystemExit(
-                "ERROR: %s compatibility ABI missing %s"
-                % (path, ", ".join(missing))
-            )
+    abi_source = _read_repo_text(EBPF_ABI_PATH)
+    missing = _missing_acl_ingress_abi(abi_source)
+    if missing:
+        raise SystemExit(
+            "ERROR: %s compatibility ABI missing %s"
+            % (EBPF_ABI_PATH, ", ".join(missing))
+        )
+
+    expected_reexports = {
+        CORE_COMMON_PATH: "pub use aria_ebpf_abi::userspace::*;",
+        EBPF_COMMON_PATH: "pub use aria_ebpf_abi::*;",
+    }
+    for path, expected in expected_reexports.items():
+        if expected not in _read_repo_text(path):
+            raise SystemExit("ERROR: %s must re-export the shared eBPF ABI" % path)
 
 
 def check_p3_rust_scoped_plan_boundary():

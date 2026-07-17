@@ -9,5 +9,6 @@ authors.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
+aria-ebpf-abi = { path = "../abi", default-features = false }
 aya-ebpf = "0.1"
 network-types.workspace = true

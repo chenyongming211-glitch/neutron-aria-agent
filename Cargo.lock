@@ -133,6 +133,7 @@ dependencies = [
 name = "aria-core"
 version = "0.1.0"
 dependencies = [
+ "aria-ebpf-abi",
  "aya",
  "fslock",
  "libc",
@@ -140,6 +141,13 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "aria-ebpf-abi"
+version = "0.1.0"
+dependencies = [
+ "aya",
 ]
 
 [[package]]
@@ -544,6 +552,7 @@ dependencies = [
 name = "ebpf-firewall"
 version = "0.1.0"
 dependencies = [
+ "aria-ebpf-abi",
  "aya-ebpf",
  "network-types",
 ]

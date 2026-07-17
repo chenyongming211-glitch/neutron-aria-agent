@@ -1,5 +1,5 @@
 [workspace]
-members = ["user", "ebpf", "core", "agent", "api"]
+members = ["user", "ebpf", "core", "agent", "api", "abi"]
 resolver = "2"
 
 [workspace.package]

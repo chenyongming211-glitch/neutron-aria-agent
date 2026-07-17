@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+aria-ebpf-abi = { path = "../abi", features = ["aya-pod"] }
 aya.workspace = true
 serde.workspace = true
 serde_json.workspace = true

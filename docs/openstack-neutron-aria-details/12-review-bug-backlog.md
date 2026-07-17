@@ -9,7 +9,9 @@ Batch 4 closed 2026-07-11; priority/overlap Batch 5 closure recorded
 code/CI implementation passed on 2026-07-14. Batch 6 is now likely-fixed while
 privileged standalone system/tap and managed-Neutron runtime evidence remains
 pending. The separate fragment defect and independent XDP hook-health status
-defect remain open.
+defect remain open. A full-code independent re-verification at
+`dc5d56106472c205a432c98be369c5c51bfdc0d8` was recorded 2026-07-15; its
+merge-gate and truthful-readiness batches closed 2026-07-17.
 
 Scope rule:
 
@@ -17,6 +19,74 @@ Scope rule:
 - Do not use this backlog to add new ACL/QoS/Mirror product features.
 - Prefer API/config validation and narrowly scoped tests over new behavior.
 - Record-only updates are allowed without expanding product scope.
+
+## 2026-07-15 Full-Code Independent Re-Verification (Historical Snapshot)
+
+This section records the verdicts at `dc5d561`. The current register below
+supersedes this dated snapshot after later fixes; older dated counts remain
+audit history. The reviewed tree was
+`codex/rust-ebpf-warning-cleanup` at `dc5d561`. The pass traced Python-to-UDS
+state transitions, Rust snapshot commit flow, ACL/CT datapath keys, northbound
+validation, and CI gates. No local Cargo command was run.
+
+### Confirmed blockers at the time
+
+| ID | Severity | Re-verification verdict | Root-cause fix boundary |
+| --- | --- | --- | --- |
+| `REVIEW-TXN-028` | P1 | Post-apply status failure can false-commit. A `pending` submit followed by `LocalApiError` from status reproduced `ready=true`, local pending cleared, and generation committed. A status with matching generation/hash but `runtime_degraded` or ACL `degraded/bypass` is also accepted. Explicit pending/non-converged status is already polled and correctly fails; that branch is not the bug. | Make `_status_after_apply()` return a verified terminal status or raise. Commit projection/state and call `mark_ready()` only after authority and requested domains prove terminal ready. On status failure or exhausted polling, retain pending and mark degraded. |
+| `REVIEW-TXN-029` | P1 | OVSDB/`ovs-vsctl` failure becomes a non-authoritative empty inventory; eligible ports become `ignored`, but success checks only look for `error`. The transaction can advance applied generation/hash, clear pending, write WAL commit, and report ready while the old datapath remains. | Preserve the existing no-detach behavior for non-authoritative inventory, but promote `ovsdb_unavailable` to a retriable transaction-level degraded/blocked result. Do not advance applied/hash or clear pending; preserve prior ports and statuses. Keep normal DHCP/SR-IOV/not-applicable ignores legal. |
+| `REVIEW-ACL-046` | P1 | **Reopened.** The earlier risk classification lacked a demonstrated enforcement path. Non-`neutron:*` local groups are allowed and are written into active ACL LPM banks; shadow staging also replays every group. Same or more-specific local CIDRs return a local group ID while the Neutron policy key expects its selector ID, so a selector deny can miss and default PASS. This is LPM namespace interference, not allocator ID collision. | Separate ACL selector maps from QoS/Mirror/general group maps. Stage only group IDs referenced by the final ACL rule set. Exact/overlapping selector conflicts must be rejected or canonicalized. Publish the repair with a bank switch or strict CT scrub. |
+| `REVIEW-ACL-057` | P1 | Standalone/direct policy add, update, and delete mutate the active ACL bank in place without bank rotation or CT invalidation. CT freshness only checks the bank, so an established/default-PASS flow can continue through a newly added deny and refresh its lifetime indefinitely. Managed-Neutron replacement is not affected because it switches bank and strictly scrubs CT. | Route all direct/batch policy mutations through a complete shadow-bank publish transaction. Stage final state, atomically switch bank, and leave the old bank active on failure. Alternatively quiesce CT, strictly scrub, mutate, and atomically restore, but never mutate while old CT decisions can be recreated. |
+| `REVIEW-ACL-056` | P1 | Reconfirmed. IPv4 parsing ignores fragment offset and interprets non-first-fragment payload bytes as TCP/UDP ports; those values enter ACL evaluation and ordinary CT keys. IPv6 already avoids L4 parsing for non-first fragments. Passing one later fragment does not by itself prove successful reassembly when the first fragment was dropped, but the ACL/CT semantics and cache pollution are still incorrect. | Expose first/non-first fragment metadata for both families, never read L4 bytes from non-first fragments, and keep them out of ordinary five-tuple CT. For port-dependent policy, use an explicit fail-closed interim action or a fragment-decision cache keyed by address/protocol/fragment ID/direction/bank. |
+| `REVIEW-CI-002` | P1 | Pull requests targeting `v0.9-neutron-agent` do not trigger Build because `pull_request.branches` contains only `main`. The successful `dc5d561` build was manually dispatched, so it is not a merge gate. | Include the maintained v0.9 target branch (or the intended `v*` branch set) in PR triggers, add a workflow contract check, and require the Build check in branch protection before runtime fixes are merged. |
+
+### Confirmed additional defects and guard gaps
+
+| ID | Severity | Re-verification verdict | Required fix |
+| --- | --- | --- | --- |
+| `REVIEW-ACL-058` | P2, P1 impact | Write-time validation accepts legacy short IPv4 forms such as `10.1/16`, missing/disabled/empty/invalid address sets, and cross-project address-set references. Runtime strict parsing degrades invalid input to bypass; a valid cross-project set can compile directly to enforce. Current write policy is admin-only, which reduces exposure but not correctness impact. | Use the same strict canonical IPv4 parser at every repository create/update boundary. Resolve address-set references transactionally and require existence, enabled state, valid non-empty IPv4 members, and matching project before mutation. Keep runtime validation as defense in depth. |
+| `REVIEW-ACL-059` | P2 | On standalone policy replacement/delete, a bitmap index is released to the reusable pool before kernel bitmap cleanup is proven. Cleanup failure is only logged, so a later policy can reuse an index containing stale port bits. The trigger requires a kernel cleanup fault. | Quarantine the index until `delete_port_set` succeeds; on failure keep it unavailable and return degraded/error. Add fault tests proving no reuse until confirmed cleanup. |
+| `REVIEW-OPS-037` | P2 | Snapshot admission holds the global apply mutex while two synchronous `Command::output()` `ovs-vsctl` calls run with no timeout. A hung OVS command blocks the async executor thread and every later apply. | Gather inventory before the mutation lock where safe, or use bounded `spawn_blocking`/async process execution with kill-on-timeout. Revalidate inventory identity after acquiring the lock. |
+| `REVIEW-ACL-060` | P2 | Neutron list methods accept `sorts`, `limit`, `marker`, and `page_reverse` but discard them. DB implementations fetch entire tables; SQL address-set listing performs one member query per row. | Push filters, stable sorting, marker, direction, fields, and limit into repositories. Batch-load address-set members. Add forward/reverse pagination and large-list query-count tests. |
+| `REVIEW-ACL-061` | P2 | Duplicate enabled rule-priority and binding-target checks read first and insert/update in a later transaction, while migration indexes are non-unique. Concurrent writers can both pass validation and commit a conflicting state. | Enforce the invariant in the database with an appropriate uniqueness strategy for enabled rows, map conflicts to HTTP 409, and retain preflight checks only for friendly errors. Add concurrent writer tests. |
+| `REVIEW-ACL-062` | P2 | Multi-direction (`direction=both`) handlers roll back already-applied directions with `let _ = ...`; a rollback failure is discarded and the API returns only the second-direction error, leaving a partial rule. The same pattern appears in policy/QoS/Mirror flows. | Use one transactional helper that records every apply and compensation result. If compensation fails, return a compound error and mark recovery required; add second-direction plus rollback-failure injection tests. |
+| `REVIEW-CLI-001` | P2 | Rust client methods interpolate instance/group/chain names directly into URL paths. Server-side group validation only reserves `any`, so names containing `/`, `?`, or `#` can be created but become ambiguous or unreachable through the client. | Build URLs with path-segment encoding, not string formatting. Add create/get/delete round trips for reserved URI characters, or reject such names consistently at every write surface. |
+| `REVIEW-CI-003` | P2 | Rust-change detection includes Rust source directories but not `.github/workflows/` or `ci/`. A change to toolchains, warning flags, linker installation, or Rust guard scripts can skip the Rust/eBPF build. | Treat workflow and Rust-related CI script changes as Rust-required, or default to Rust builds for all PRs to maintained release branches. Add a table-driven detector self-test. |
+| `REVIEW-CI-004` | P3 | The new Pod-layout guard proves explicit field/tail padding but does not require `#[repr(C)]`; removing it from `PolicyKey` still passes the checker. All current Pod structs do have `repr(C)`, so this is a prevention gap, not an observed ABI regression. | Parse or structurally inspect each `aya::Pod` type and require an adjacent `#[repr(C)]`; keep size/alignment assertions in the ABI crate for userspace CI. |
+| `REVIEW-DOC-022` | P2 | Runtime and Python client implement `POST /api/v1/neutron/snapshot/recover-pending`, but `docs/neutron-uds-contract.json` and the Stage 1 required-route set omit it. Contract consumers and CI can drift from the recovery API. | Add the route, request/response/error schema, and compatibility behavior to the JSON contract; require the route and client/server parity in Stage 1. |
+
+Existing items `REVIEW-ACL-036` (scoped prepare overwrites unresolved pending),
+`REVIEW-ACL-045` (orphan cleanup does not use the full managed-runtime scrub),
+and `REVIEW-OPS-019` (unbounded Neutron WAL) remain open and were not assigned
+duplicate IDs. The pending overwrite was reproduced directly; orphan residual
+maps still require privileged runtime evidence, so its existing P2 status is
+retained rather than escalated.
+
+### Direct evidence and corrected non-findings
+
+The read-only Python/source probes produced these stable observations:
+
+```text
+FALSE_READY pending True None 1
+SCOPED_OVERWRITE <old-hash> <new-hash> True
+WRITE_ACCEPTED 10.1/16 missing-set
+RUNTIME_RESULT degraded bypass invalid_acl_ipv4_cidr,...address_set_missing
+POD_GUARD_ACCEPTS_MISSING_REPR_C True
+RUST_CHANGE .github/workflows/build.yml False
+RUST_CHANGE ci/check_rust_warning_hygiene.py False
+```
+
+- No semantic or layout regression was found in the `dc5d561` ABI extraction
+  itself. Current CI compiled it with zero Rust warning lines; `REVIEW-CI-004`
+  records only the missing future guard.
+- The local/Neutron group defect is not duplicate numeric allocation; all
+  groups share one allocator. It is a selector-map namespace and value-aliasing
+  defect.
+- A normal explicit pending response whose status remains non-converged is
+  polled and fails safely. `REVIEW-TXN-028` is limited to unavailable status or
+  a generation/hash match whose authority/domain outcome is not ready.
+- `REVIEW-ACL-055` remains likely-fixed pending its three privileged runtime
+  summaries; this pass did not reopen the Batch 6 implementation.
 
 ## 2026-07-12 Source Re-Verification And Classification
 
@@ -318,7 +388,6 @@ Existing bug/risk IDs reused instead of duplicated:
 | RISK-SEC-002 | high | privileged management API | open | `aria-agent` requires root and the HTTP management router has no authentication layer. The packaged address is loopback-only, which is the current safety boundary, but `listen_addr` has no validation preventing a non-loopback bind. | Keep the packaged listener on loopback or a protected namespace; reject non-loopback binds unless an explicit unsafe/secured mode is configured, and document the root-process blast radius. |
 | RISK-BOUNDARY-001 | high | ACL failure semantics | open | ACL degraded/not-requested paths intentionally use `effective_action=bypass` so OVS forwarding continues. This is availability-first behavior, not a code bug, but becomes a security defect if operators or northbound consumers interpret Aria ACL as fail-closed enforcement or Security Group replacement. | Keep the OVS-enhancement boundary in API/docs/runbooks, alert on degraded+bypass ports, and require acceptance checks to inspect domain status and `effective_action` rather than connectivity alone. |
 | REVIEW-ACL-032 | medium | RPC delivery and observability | reclassified-risk | RPC notify failure or notifier initialization fallback can delay ACL convergence until periodic full resync. Periodic full resync is the documented lost-RPC/drift fallback, so this is not a correctness bug while that fallback and its latency objective remain enabled; silent no-op initialization is still an observability risk. | Alert or expose status when the notifier falls back to no-op, test periodic recovery, and define the maximum acceptable convergence delay. Reopen as a bug only if production disables or violates the fallback contract. |
-| REVIEW-ACL-046 | medium | domain authority boundary | reclassified-risk | `ensure_local_group_write_allowed` intentionally blocks `neutron:*` group names while allowing non-Neutron groups, and existing authority tests encode that selected-domain behavior. No evidence currently shows a non-Neutron group mutation changing effective Neutron ACL rules. | Document the selected-domain coexistence boundary and add an isolation test proving non-Neutron groups cannot alter Neutron-owned enforcement. Reopen as a bug if cross-domain map interference is reproduced. |
 | DEBT-MAINT-001 | medium | source modularity | open | `agent/src/neutron_api.rs` is about 5.4k lines and `agent/src/control_plane.rs` about 3.4k lines. Snapshot transactions, ACL translation, status projection, recovery, and control-plane mutation are concentrated in large modules. This is maintainability and review-risk debt, not a reproduced behavior bug. | Split along existing contract boundaries without changing behavior: snapshot transaction/recovery, ACL translator/executor, status projection, and domain authority. Preserve focused contract tests during extraction. |
 | DEBT-CI-001 | medium | verification breadth | open | CI runs Python/stage gates, selected Rust Neutron tests, eBPF and static builds, but has no full Rust workspace test job and no dedicated clippy, rustfmt, Python linter, or shellcheck gate. | Add separate CI jobs for full workspace tests and static analysis; keep the existing targeted gates for fast contract feedback. Follow the repository rule that Rust compilation remains in GitHub Actions rather than local development runs. |
 | DEBT-ACL-001 | medium | legacy local ACL durability | open | Standalone/local add/delete group and policy paths mutate in-memory/kernel ACL state and then call the legacy best-effort `wal_append` wrapper. If both append and compact fallback fail, the API can still acknowledge a mutation that is not durable across restart. This pre-existing local API debt is separate from the strict managed-Neutron replacement transaction and from `REVIEW-ACL-055`. | Move local ACL mutations to a strict durable acknowledgement contract with rollback or explicit degraded/error reporting. Add append/compact failure injection for add/delete group and policy, including bitmap allocator state. |
@@ -328,7 +397,7 @@ Existing bug/risk IDs reused instead of duplicated:
 
 ## REVIEW Item Register
 
-This register retains all 63 stable `REVIEW-*` IDs. Use the `Status` column,
+This register retains all 77 stable `REVIEW-*` IDs. Use the `Status` column,
 not the ID prefix, to decide whether an item is an active defect, fixed,
 verification-only, risk-classified, or closed.
 
@@ -381,7 +450,7 @@ verification-only, risk-classified, or closed.
 | REVIEW-ACL-043 | P3 | priority=0 rejected as missing | fixed | `_require()` uses falsy `not obj.get(field)`, so rule `priority=0` fails validation while effective compile accepts 0. | Use explicit missing checks for numeric fields; add create/update unit tests for priority 0. |
 | REVIEW-ACL-044 | P2 | Metadata-only ACL flips bank without WAL | open | `replace_owned_acl` stages/switches ACL banks even when group/policy diffs are empty, then early-returns without `state.state` update or `wal.compact`. Metadata-only hash changes (revision/name) force reconcile via domain hash. | Skip bank flip on true no-op, or persist bank/state whenever the active bank changes. Add metadata-only reconcile test asserting no unsynced bank flip. |
 | REVIEW-ACL-045 | P2 | Orphan reconcile skips map scrub | open | `TapRegistry::reconcile_neutron_runtime` orphan cleanup only removes link pins / live-iface markers. It does not `detach`, `unregister_instance`, or `scrub_managed_runtime_state`. | Scrub orphaned tap-scoped maps (or full detach path) during orphan reconcile; add residual-map assertion test. Distinct from `REVIEW-ACL-035` hash-skip. |
-| REVIEW-ACL-046 | P2 | Selected-domain group authority | reclassified-risk | `ensure_local_group_write_allowed` intentionally blocks `neutron:*` names while allowing non-Neutron groups, and the authority unit test explicitly expects that coexistence behavior. No current evidence demonstrates that non-Neutron group writes change effective Neutron ACL enforcement. | Document the authority/isolation boundary and add a cross-domain isolation test. Reopen as a bug only if non-Neutron writes are shown to alter Neutron-owned enforcement. |
+| REVIEW-ACL-046 | P1 | Cross-domain ACL selector isolation | open | Reopened 2026-07-15 with a complete enforcement path. Non-`neutron:*` local groups are allowed on an ACL-managed tap and are written to active ACL LPM banks; shadow staging also replays all groups. An exact or more-specific local CIDR returns the local group ID instead of the Neutron selector ID, so selector-specific deny can miss and default PASS. The allocator itself remains globally unique. | Isolate ACL selector maps from general group maps and stage only ACL-referenced groups. Reject or canonicalize conflicting selectors. Publish the repair with bank rotation or strict CT scrub and cover exact/more-specific local CIDR interference. |
 | REVIEW-ACL-047 | P2 | Translator ignores rule priority | fixed | Numeric priority remains northbound metadata and is not added to eBPF `PolicyKey`. Python preflight and Rust direct-UDS validation now reject priority-dependent CIDR/specificity overlaps with stable reasons; canonical-equivalent CIDR groups are reused. A classified direct-UDS rejection reports real `degraded/bypass` only after the empty owned-ACL transaction succeeds. | Fixed with Python and Rust overlap/canonicalization/outcome regression tests, persistent Stage 1/2 static guards, and the documented priority-independent acceptance boundary. QoS/Mirror are unchanged. Distinct from `REVIEW-ACL-009`. |
 | REVIEW-TXN-027 | P2 | Delete detach succeeds / WAL commit fails | open | `apply_delete_neutron_port` can detach and purge, then fail `append_delete_commit` (or after-detach fault) and return `detached: true` with `status=error` while runtime/WAL still diverge. | Roll back or durable-mark blocked recovery; do not report detached success without durable commit. Add after-detach-before-commit fault tests. Distinct from `REVIEW-ACL-023`. |
 | REVIEW-ACL-048 | P1 | Status projection overwrites bypass→enforce | fixed | `_port_statuses_from_status` replaces UDS `effective_action` values of `bypass` (and empty) with snapshot metadata defaulting to `enforce` when `acl_enabled` is true. Northbound `aria_acl_port_statuses` can report enforce while datapath bypassed. | Never overwrite a concrete UDS runtime `effective_action`/`status`; treat UDS as runtime truth. Add unit tests for UDS bypass + snapshot enforce. |
@@ -393,6 +462,20 @@ verification-only, risk-classified, or closed.
 | REVIEW-ACL-054 | P2 | stateful=false still uses XDP CT fast-path | fixed | Rust now carries `NeutronAclSnapshot.stateful` as per-apply CT intent. Non-empty stateful policy publishes `conntrack=true,acl=true`; non-empty stateless policy publishes `conntrack=false,acl=true`. The existing eBPF per-tap CT guards therefore skip lookup and create for stateless ACL. Empty/bypass publishes ACL off with snapshot CT intent, while a missing ACL payload preserves the prior CT mode. | Fixed with translator intent and atomic runtime-transition tests covering stateful, stateless, empty, and missing-payload paths. |
 | REVIEW-ACL-055 | P1 | Split ACL/CT hooks and incomplete all-mode TC recovery | likely-fixed | The all-mode implementation keeps XDP ACL/CT-neutral, makes TC ingress/egress the only ACL/CT authorities, invalidates CT-only cache entries when ACL becomes active, requires exact dual TCX identity before pinned-runtime reuse, preserves the eight-byte ABI as compatibility only, propagates map-read failures, and quiesces restart recovery until the appropriate authority is ready. Final code and CI are green at `89b81e94ac7a6aaaf98295132a9b09d556b99796`. | Preserve passing privileged summaries for standalone `MODE=system`, standalone `MODE=tap`, and managed Neutron using the guarded smoke scripts. Only then change this row to `fixed`. Complete code Build: [29297316622](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29297316622). |
 | REVIEW-ACL-056 | P1 | Fragment-safe ACL/CT key semantics | open | IPv4 non-first fragments are parsed as if payload bytes were TCP/UDP ports, while IPv6 non-first fragments use zero ports. Port ACL and CT keys can diverge across fragments. | A separate design must define fragment allow/drop/reassembly semantics before implementation. Do not treat Batch 6 TC unification as a parser fix. |
+| REVIEW-TXN-028 | P1 | Post-apply status false commit | fixed | Python now commits full or scoped projection/state only after terminal status exactly matches `accepted_generation`, `applied_generation`, `desired_hash`, and `applied_desired_hash`, reports `authority_state=ready`, and proves every requested domain ready. Validation failure preserves the prior committed identity and leaves the pending snapshot unresolved. The `safe_full_resync()` path publishes degraded; scoped failure can still leave runtime readiness unchanged and remains separately tracked by `REVIEW-ACL-037`. | Fixed through RED `e593a48` and production commit `8e14944` with strict terminal-identity regressions; exact-head Build [29547730124](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29547730124) passed. |
+| REVIEW-TXN-029 | P1 | Non-authoritative OVS inventory false commit | fixed | Rust treats OVS inventory failure as transaction-level missing authority: the protected pending intent carries the typed `inventory_unavailable` cause, the applied baseline is preserved, and no attach/update/detach work runs. Recovery exact-validates the protected intent and live typed state, durably commits and verifies the blocked barrier, then requires a fresh replay with zero failures, no pending intent, the typed inventory status, and an exact barrier-state match immediately before the cause-free rollback append. Corrupt, missing, unreadable, or changed lineage therefore fails closed without changing WAL or RAM. Legitimate authoritative per-port ignores remain legal. | RED `3112a75` produced only the two intended failures in Build [29548531843](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29548531843). Fresh-replay RED `fc22f45` produced only its intended failure (37/38 passed) in Build [29550329874](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29550329874). Production commits `6236bbd` and `f74aaf4` passed all 38 focused `neutron_wal` tests, including baseline, generation-0, phase-2 retry, corrupt-tail, and restart coverage, in exact-head Build [29550671826](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29550671826). |
+| REVIEW-ACL-057 | P1 | Direct ACL mutation leaves same-bank CT valid | open | Standalone/direct add, update, and delete mutate the active ACL bank. CT validity is bank-based, so existing PASS decisions remain current after a rule becomes deny and active traffic refreshes them. | Use a full shadow-bank publish transaction for every direct/batch policy mutation, or quiesce and strictly scrub CT before an atomic mutation. Add live-flow add-deny/delete-allow regressions. |
+| REVIEW-ACL-058 | P2 | Northbound CIDR and address-set reference validation | open | Write paths accept short/noncanonical IPv4, missing/disabled/empty/invalid address sets, and cross-project references. Runtime may degrade to bypass, while a valid cross-project set can enforce another project's selectors. Writes are currently admin-only, limiting exposure but not the invariant violation. | Share strict canonical validation across all repositories; resolve references before mutation and require same project, enabled state, valid non-empty IPv4 membership, and supported limits. |
+| REVIEW-ACL-059 | P2 | Standalone bitmap reuse before cleanup proof | open | Standalone policy replacement/delete releases a port-bitmap index before kernel cleanup is confirmed. Cleanup failure only logs a warning, allowing later reuse with stale bits. | Quarantine released indices until confirmed kernel cleanup; propagate failure and add cleanup-fault/reuse tests. |
+| REVIEW-OPS-037 | P2 | Blocking OVS discovery under apply mutex | open | Snapshot admission holds the global async apply mutex while synchronous, unbounded `ovs-vsctl` subprocesses run. A hung command blocks the executor and all snapshot applies. | Use bounded process execution outside the mutation critical section where possible, revalidate after locking, and kill timed-out subprocesses. |
+| REVIEW-ACL-060 | P2 | ACL list pagination and N+1 queries | open | Service list methods discard sort/limit/marker/page_reverse/fields, repositories fetch entire tables, and SQL address-set conversion queries members once per row. | Implement stable repository pagination/filtering/field projection and batch member loading; add ordering, reverse-page, marker, limit, and query-count tests. |
+| REVIEW-ACL-061 | P2 | Duplicate rule/binding write race | open | Duplicate priority and binding-target validation queries before a later write transaction, and database indexes are non-unique. Concurrent writers can both pass and commit conflicts. | Enforce the invariant at the database layer, map conflicts to 409, and add concurrent create/update tests. |
+| REVIEW-ACL-062 | P2 | Multi-direction compensation errors discarded | open | `direction=both` policy/QoS/Mirror handlers ignore rollback failures after a later direction fails, so the caller sees only the original error while partial state can remain. | Centralize multi-direction mutation and compensation, return compound failures, persist recovery-required state, and add rollback fault injection. |
+| REVIEW-CLI-001 | P2 | Dynamic path segments are not encoded | open | Rust client APIs concatenate instance, group, and chain names into URL paths. Names containing URI delimiters can be created but become ambiguous or unreachable. | Use a URL builder with per-segment percent encoding, or reject the same reserved characters consistently on every write surface. Add reserved-character round trips. |
+| REVIEW-CI-002 | P1 | v0.9 pull requests miss Build workflow | fixed | Build now triggers for pull requests targeting `main` and `v0.9-neutron-agent`; `check_build_workflow_contract.py` enforces the maintained target and detector invocation. GitHub branch protection for `v0.9-neutron-agent` is strict and requires the `build` check. | Fixed in `a7e742c`. PR #3 Builds are automatically triggered by the `pull_request` event; closure Build [29550671826](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29550671826) passed. |
+| REVIEW-CI-003 | P2 | Rust change detector omits workflow and CI inputs | fixed | `rust_build_required.py` treats `.github/workflows/` and `ci/` as Rust-required, evaluates the full PR base-to-head path set with rename detection disabled, and fails closed for empty, malformed, or unknown paths. | Fixed in `a7e742c` and `e44537f` with table-driven detector tests and workflow contract coverage; closure Build [29550671826](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29550671826) passed. |
+| REVIEW-CI-004 | P3 | Pod layout guard does not require repr(C) | fixed | `verify_pod_layouts()` now requires adjacent `#[repr(C)]` for every type in `impl_aya_pod!` while retaining implicit-field and tail-padding checks. | Fixed in `a7e742c` with mutation tests that remove `repr(C)` from `PolicyKey` and the final Pod declaration; warning-hygiene contracts passed in closure Build [29550671826](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29550671826). |
+| REVIEW-DOC-022 | P2 | Recover-pending route absent from UDS contract | open | Server and Python client implement `POST /api/v1/neutron/snapshot/recover-pending`, but the JSON contract and Stage 1 required route set omit it. | Document request/response/errors and make Stage 1 verify server/client/contract route parity. |
 | REVIEW-DOC-021 | P2 | Capabilities advertise unimplemented domains | fixed | `NEUTRON_SUPPORTED_DOMAINS` / `neutron-uds-contract.json` / capabilities response list qos/mirror/config/ct/… while reconcile only implements `attach`+`acl`. Stage-1 CI even requires qos/mirror in supported_domains. | Split advertised vs implemented domains; shrink supported set or mark planned and reject managed_domains that are unimplemented. |
 | REVIEW-OPS-035 | P2 | Transaction smoke can pass with zero ports | open | `neutron_aria_transaction_state_smoke.sh` defaults `MIN_MANAGED_PORTS=0` and skips pending-delete / migration-source checks when no managed port exists, still exiting success. | Require `MIN_MANAGED_PORTS>=1` for release gates, or fail when skip paths are taken. |
 | REVIEW-OPS-036 | P3 | XDP pinned-path health can false-pass | open | `FirewallInstance::xdp_link_health` currently treats existence of `xdp_link` as ready without proving that the pinned link is still attached to the expected interface/program. A detached-but-still-pinned XDP link can therefore be claimed or reported as `xdp_ready=true`. This does not affect ACL/CT because those paths are TC-only, and no DDoS enforcement is advertised yet. | Before the XDP DDoS domain becomes operational, replace the path-only signal with exact live link/program/interface identity or report unknown/not-ready when exact validation is unavailable. Add detached-but-pinned runtime coverage. Keep this independent from `REVIEW-ACL-055`. |
@@ -618,29 +701,65 @@ Round 3 (contract / status / CT / CI):
   separately because XDP is ACL/CT-neutral and the DDoS domain is not yet
   implemented.
 
-## Active Fix Order After Batch 6
+## Delivery Status and Remaining Fix Order After 2026-07-17 Closure
 
-1. `REVIEW-ACL-056`: define fragment allow/drop/reassembly and ACL/CT key semantics before parser implementation.
-2. `REVIEW-OPS-019`: bound Neutron WAL growth and restart replay cost.
-3. `REVIEW-ACL-055` evidence closure: run and preserve guarded standalone system/tap and managed-Neutron summaries; do not reopen implementation scope unless a smoke fails.
-4. `REVIEW-OPS-036`: replace path-only XDP hook health before implementing or advertising the DDoS domain; keep it independent from TC ACL closure.
-5. `REVIEW-ACL-025` / `REVIEW-ACL-026` / `REVIEW-ACL-044`: owned-ACL durable ordering and no-op bank flips.
-6. `REVIEW-ACL-023` / `REVIEW-TXN-024` / `REVIEW-TXN-027` / `REVIEW-ACL-045`: detach/delete/orphan convergence.
-7. `REVIEW-ACL-036` / `REVIEW-ACL-037` / `REVIEW-ACL-028` / `REVIEW-ACL-008` / `REVIEW-ACL-033` / `REVIEW-ACL-004`: Python pending/status consistency.
-8. `REVIEW-TXN-026`: gate accept until startup recovery completes.
-9. `REVIEW-ACL-038` / `REVIEW-ACL-040` / `REVIEW-ACL-041` / `REVIEW-ACL-042`: client/DB/CLI correctness.
-10. `REVIEW-ACL-007`: first-install package rollback hygiene.
-11. `REVIEW-ACL-003`: make address-set parent/member writes transactional.
-12. `REVIEW-OPS-027` / `REVIEW-OPS-034` / `REVIEW-OPS-035` / `REVIEW-CI-001`: ops/CI hardening.
-13. `REVIEW-ACL-010` / `REVIEW-ACL-013` / `REVIEW-ACL-015` / `REVIEW-ACL-017`: smoke/projection/rollback polish.
-14. `REVIEW-DOC-020`: align domain-status detail documentation with current DTOs.
-15. `REVIEW-ACL-011` / `REVIEW-ACL-014` / `REVIEW-ACL-005`: release hygiene and coverage.
+Keep the remaining work in narrow reviewable batches. Implementation batches
+start with a failing regression or fault-injection test, change one invariant,
+and pass the maintained-branch GitHub Build before the next batch starts. Batch
+2C is design-first: its contract must be approved before any RED or production
+code is submitted.
 
-Risk follow-up is tracked separately from active bug fixing:
+1. **Completed — Restore the merge gate:** `REVIEW-CI-002`,
+   `REVIEW-CI-003`, and `REVIEW-CI-004` are fixed. The maintained v0.9 PR
+   trigger, required `build` check, fail-closed Rust change detector, and
+   `repr(C)` Pod guard are active.
+2. **Completed — Make readiness truthful:** `REVIEW-TXN-028` and
+   `REVIEW-TXN-029` are fixed. Python requires complete terminal identity and
+   domain evidence; Rust preserves non-authoritative inventory failures through
+   a verified two-stage WAL recovery sequence with a fresh phase-2 replay gate.
+3. **Next — Define the versioned Rust-Python status contract (Batch 2C):**
+   use a separate branch and Draft PR. Define shared success, degraded, blocked,
+   and recovery scenarios. Submit the written design for user approval before
+   adding RED tests or production code; implement only after that approval.
+4. **After Batch 2C — Isolate ACL selector ownership:** `REVIEW-ACL-046`.
+   Split general group and ACL selector publication, stage only ACL-referenced
+   groups, reject or canonicalize selector conflicts, and publish with CT
+   invalidation. Prove exact and more-specific local CIDRs cannot change
+   Neutron deny enforcement.
+5. **Unify direct ACL publication:** `REVIEW-ACL-057`, followed by
+   `REVIEW-ACL-059`. Move standalone add/update/delete/batch to one shadow-bank
+   transaction and quarantine bitmap indices until kernel cleanup is proven.
+   Prove existing allowed flows see a newly added deny without manual flush.
+6. **Define and implement fragment semantics:** `REVIEW-ACL-056`. Land parser
+   metadata and non-first-fragment CT exclusion only after choosing the
+   fail-closed interim behavior versus a fragment-decision cache. Cover raw
+   fixtures, out-of-order fragments, both TC directions, IPv4/IPv6 parity, and
+   a privileged smoke.
+7. **Reject invalid desired state at write time:** `REVIEW-ACL-058` and
+   `REVIEW-ACL-061`. Share strict CIDR parsing, validate address-set existence,
+   state, members, limits, and project, then enforce duplicate invariants in
+   the database and return deterministic 400/409 errors.
+8. **Close transaction and recovery debt:** `REVIEW-OPS-019`,
+   `REVIEW-ACL-025`, `REVIEW-ACL-026`, `REVIEW-ACL-044`,
+   `REVIEW-ACL-023`, `REVIEW-TXN-024`, `REVIEW-TXN-027`, and
+   `REVIEW-ACL-045`. Add bounded WAL checkpoint/compaction, durable ACL bank
+   ordering, rollback, and full orphan scrub before lower-severity API work.
+9. **Remove apply-loop stalls and pending corruption:** `REVIEW-OPS-037`,
+   `REVIEW-ACL-036`, `REVIEW-ACL-037`, `REVIEW-ACL-028`,
+   `REVIEW-ACL-008`, and `REVIEW-ACL-033`. Bound OVS subprocesses and make all
+   full/scoped/delete status transitions share the same pending/commit rules.
+10. **Finish API/client correctness:** `REVIEW-ACL-060`,
+   `REVIEW-ACL-062`, `REVIEW-CLI-001`, `REVIEW-DOC-022`, then the existing
+   pagination/DB/CLI items `REVIEW-ACL-038`, `REVIEW-ACL-040`-
+   `REVIEW-ACL-042`. Preserve stable ordering and surface compensation errors.
+11. **Complete evidence and lower-risk hardening:** close
+    `REVIEW-ACL-055` only after the three privileged summaries pass; retain
+    `REVIEW-OPS-036` for XDP hook identity before advertising DDoS. Then handle
+    package, smoke, projection, documentation, and release-hygiene P3 items.
+
+Risk follow-up remains separate from active bug fixing:
 
 - `REVIEW-ACL-032`: expose notifier fallback and bound periodic convergence.
-- `REVIEW-ACL-046`: document selected-domain authority and prove cross-domain
-  isolation.
 
 Verification and closure follow-up:
 

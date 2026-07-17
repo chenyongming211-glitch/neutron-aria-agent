@@ -3,6 +3,7 @@ from __future__ import absolute_import
 import logging
 import time
 
+from neutron_aria.agent.effective_acl import EffectiveAclIndex
 from neutron_aria.agent.effective_acl import REVISION_NEWER
 from neutron_aria.agent.effective_acl import REVISION_UNKNOWN
 from neutron_aria.agent.inventory import PortCandidateBuilder
@@ -23,13 +24,84 @@ RECOVERY_REQUIRED_AUTHORITY_STATES = frozenset((
     "blocked_recovery_required",
     "wal_commit_failed",
     "wal_recovery_commit_failed",
+    "wal_runtime_reconcile_commit_failed",
     "pending_recovery_commit_failed",
     "recovered_pending_full_resync",
+    "partial",
+    "degraded",
+    "runtime_degraded",
+    "wal_intent_without_commit",
 ))
+TERMINAL_FAILURE_AUTHORITY_STATES = RECOVERY_REQUIRED_AUTHORITY_STATES.union((
+    "runtime_degraded",
+    "degraded",
+    "blocked",
+    "error",
+    "unsupported",
+    "detached",
+))
+
+
+try:
+    _INTEGER_TYPES = (int, long)
+    _STRING_TYPES = (basestring,)
+except NameError:
+    _INTEGER_TYPES = (int,)
+    _STRING_TYPES = (str,)
 
 
 def _elapsed_ms(started_at):
     return int((time.time() - started_at) * 1000)
+
+
+def _status_token(value):
+    return str(value or "").strip().lower()
+
+
+def _strict_scalar(value, scalar_type, allow_none=False):
+    if value is None and allow_none:
+        return None
+    if scalar_type == "integer":
+        if (
+            isinstance(value, bool) or
+            not isinstance(value, _INTEGER_TYPES) or
+            value < 0
+        ):
+            raise ValueError("expected a non-negative integer")
+        return value
+    if scalar_type == "string":
+        if not isinstance(value, _STRING_TYPES) or not value:
+            raise ValueError("expected a non-empty string")
+        return value
+    raise ValueError("unsupported scalar type")
+
+
+def _unique_row_index(rows, identity_key, collection_name, normalize=None):
+    if not isinstance(rows, list):
+        return None, "%s must be a list" % collection_name
+    index = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            return None, "%s contains a non-object row" % collection_name
+        try:
+            identity = _strict_scalar(row.get(identity_key), "string")
+        except ValueError:
+            return (
+                None,
+                "%s contains an invalid %s" % (
+                    collection_name,
+                    identity_key,
+                ),
+            )
+        if normalize is not None:
+            identity = normalize(identity)
+        if identity in index:
+            return (
+                None,
+                "duplicate %s row for %s" % (collection_name, identity),
+            )
+        index[identity] = row
+    return index, None
 
 
 def _acl_index_profile(acl_index):
@@ -350,6 +422,8 @@ class SnapshotSynchronizer(object):
     def _load_acl_index(self):
         if self.acl_source is not None:
             self.acl_index = self.acl_source.load_index()
+        if self.acl_index is None and "acl" in self.managed_domains:
+            self.acl_index = EffectiveAclIndex()
         return self.acl_index
 
     def _log_acl_delivery_profile(self, **fields):
@@ -423,6 +497,20 @@ class SnapshotSynchronizer(object):
         snapshot = self.state_store.pending_snapshot()
         if snapshot:
             status = self.local_client.status()
+            pending_state, _, pending_reason = self._pending_generation_status(status)
+            if pending_state == "failed":
+                self.runtime_status.mark_degraded(
+                    "pending_snapshot_unresolved",
+                    pending_reason,
+                )
+                LOG.warning(
+                    "pending_snapshot_status_invalid host=%s generation=%s "
+                    "error=%s",
+                    self.host,
+                    snapshot["generation"],
+                    pending_reason,
+                )
+                raise LocalApiError(pending_reason)
             if self._pending_snapshot_hash_mismatch(snapshot, status):
                 if self._pending_snapshot_is_stale(snapshot, status):
                     cleared = self.state_store.clear_pending_snapshot(
@@ -964,7 +1052,16 @@ class SnapshotSynchronizer(object):
             status = self.local_client.status()
         except LocalApiError:
             return None
-        if not self._status_converged(snapshot, projected_port_ids, status):
+        verdict, reason = self._snapshot_status_verdict(
+            snapshot,
+            projected_port_ids,
+            status,
+        )
+        if verdict == "failed":
+            raise LocalApiError(
+                "pending snapshot failed terminal-ready validation: %s" % reason
+            )
+        if verdict != "ready":
             return None
         LOG.warning(
             "snapshot_pending_already_converged host=%s generation=%s "
@@ -1016,12 +1113,17 @@ class SnapshotSynchronizer(object):
     def _remote_pending_action(self, snapshot, status, desired_hash):
         if status is None:
             return {}
-        try:
-            pending_generation = int(status.get("pending_generation") or 0)
-        except (TypeError, ValueError):
-            pending_generation = 0
-        if pending_generation <= 0:
+        pending_state, pending_generation, reason = (
+            self._pending_generation_status(status)
+        )
+        if pending_state == "failed":
+            raise LocalApiError(reason)
+        if pending_state != "pending":
             return {}
+        try:
+            _strict_scalar(status.get("authority_state"), "string")
+        except ValueError:
+            raise LocalApiError("authority_state is invalid")
 
         remote_hash = status.get("desired_hash")
         applied_hash = (
@@ -1053,9 +1155,18 @@ class SnapshotSynchronizer(object):
         }
 
     def _status_requires_pending_recovery(self, status):
+        if not isinstance(status, dict):
+            return False
+        try:
+            authority_state = _strict_scalar(
+                status.get("authority_state"),
+                "string",
+            )
+        except ValueError:
+            return False
         return bool(
             self._status_has_pending_generation(status) and
-            status.get("authority_state") in RECOVERY_REQUIRED_AUTHORITY_STATES
+            authority_state in RECOVERY_REQUIRED_AUTHORITY_STATES
         )
 
     def _poll_snapshot_convergence(
@@ -1085,10 +1196,12 @@ class SnapshotSynchronizer(object):
                     exc,
                 )
             else:
-                if (
-                    self._status_converged(snapshot, projected_port_ids, status) or
-                    self._status_transaction_committed(snapshot, status)
-                ):
+                verdict, reason = self._snapshot_status_verdict(
+                    snapshot,
+                    projected_port_ids,
+                    status,
+                )
+                if verdict == "ready":
                     LOG.warning(
                         "snapshot_convergence_reached host=%s generation=%s "
                         "attempt=%s projected_ports=%s managed_ports=%s "
@@ -1114,8 +1227,16 @@ class SnapshotSynchronizer(object):
                         status_poll_total_ms=_elapsed_ms(poll_started),
                     )
                     return status
+                if verdict == "failed":
+                    raise LocalApiError(
+                        "snapshot status failed terminal-ready validation: %s" %
+                        reason
+                    )
                 last_error = LocalApiTimeoutError(
-                    "status did not converge for generation %s" % snapshot["generation"]
+                    "status did not converge for generation %s: %s" % (
+                        snapshot["generation"],
+                        reason,
+                    )
                 )
                 LOG.warning(
                     "snapshot_convergence_not_reached host=%s generation=%s "
@@ -1193,10 +1314,12 @@ class SnapshotSynchronizer(object):
                     exc,
                 )
             else:
-                if (
-                    self._status_converged(snapshot, projected_port_ids, status) or
-                    self._status_transaction_committed(snapshot, status)
-                ):
+                verdict, reason = self._snapshot_status_verdict(
+                    snapshot,
+                    projected_port_ids,
+                    status,
+                )
+                if verdict == "ready":
                     LOG.warning(
                         "snapshot_timeout_converged host=%s generation=%s "
                         "attempt=%s projected_ports=%s managed_ports=%s",
@@ -1228,8 +1351,16 @@ class SnapshotSynchronizer(object):
                         "port_statuses": status.get("port_statuses") or [],
                         "recovered_after_timeout": True,
                     }
+                if verdict == "failed":
+                    raise LocalApiError(
+                        "snapshot status failed terminal-ready validation: %s" %
+                        reason
+                    )
                 last_error = LocalApiTimeoutError(
-                    "status did not converge for generation %s" % snapshot["generation"]
+                    "status did not converge for generation %s: %s" % (
+                        snapshot["generation"],
+                        reason,
+                    )
                 )
                 LOG.warning(
                     "snapshot_timeout_not_converged host=%s generation=%s "
@@ -1340,23 +1471,40 @@ class SnapshotSynchronizer(object):
         return max(generations or [0])
 
     def _applied_generation_from_status(self, status):
-        if not status:
-            return 0
-        for key in ("applied_generation", "generation"):
-            if key in status and status.get(key) is not None:
-                try:
-                    return int(status.get(key))
-                except (TypeError, ValueError):
-                    return 0
-        return 0
+        if not isinstance(status, dict):
+            return None
+        try:
+            return _strict_scalar(status.get("applied_generation"), "integer")
+        except ValueError:
+            return None
 
     def _status_has_pending_generation(self, status):
-        if not status:
-            return False
+        return self._pending_generation_status(status)[0] == "pending"
+
+    def _pending_generation_status(self, status):
+        if not isinstance(status, dict) or "pending_generation" not in status:
+            return (
+                "failed",
+                None,
+                "pending_generation (pending generation) is missing",
+            )
         try:
-            return int(status.get("pending_generation") or 0) > 0
-        except (TypeError, ValueError):
-            return False
+            generation = _strict_scalar(
+                status.get("pending_generation"),
+                "integer",
+                allow_none=True,
+            )
+        except ValueError:
+            return (
+                "failed",
+                None,
+                "pending_generation (pending generation) is invalid",
+            )
+        if generation is None:
+            return "none", 0, None
+        if generation == 0:
+            return "none", 0, None
+        return "pending", generation, None
 
     def _accepted_convergence_attempts(self):
         return max(self.timeout_convergence_attempts, 60)
@@ -1371,21 +1519,33 @@ class SnapshotSynchronizer(object):
                 snapshot["generation"],
                 exc,
             )
-            return None
-        if (
-            self._status_converged(snapshot, projected_port_ids, status) or
-            self._status_transaction_committed(snapshot, status)
-        ):
+            raise LocalApiError(
+                "post-apply status unavailable for generation %s: %s" % (
+                    snapshot["generation"],
+                    exc,
+                )
+            )
+        verdict, reason = self._snapshot_status_verdict(
+            snapshot,
+            projected_port_ids,
+            status,
+        )
+        if verdict == "ready":
             return status
         LOG.warning(
             "post_apply_status_not_converged host=%s generation=%s "
-            "response_status=%s status_generation=%s",
+            "response_status=%s status_generation=%s verdict=%s reason=%s",
             self.host,
             snapshot["generation"],
             response.get("status"),
             status.get("generation"),
+            verdict,
+            reason,
         )
-        if response.get("status") in ("accepted", "pending"):
+        if (
+            verdict == "pending" and
+            response.get("status") in ("accepted", "pending")
+        ):
             return self._poll_snapshot_convergence(
                 snapshot,
                 projected_port_ids,
@@ -1393,9 +1553,13 @@ class SnapshotSynchronizer(object):
                 failure_phase="accepted_status_failed",
                 attempts=self._accepted_convergence_attempts(),
             )
-        return None
+        raise LocalApiError(
+            "post-apply status failed terminal-ready validation: %s" % reason
+        )
 
     def _pending_snapshot_converged(self, pending, status):
+        if pending.get("projected_port_ids") and self.managed_domains:
+            return False
         snapshot = {
             "generation": pending["generation"],
             "desired_hash": pending["desired_hash"],
@@ -1408,72 +1572,366 @@ class SnapshotSynchronizer(object):
 
     def _pending_snapshot_hash_mismatch(self, pending, status):
         status_generation = self._applied_generation_from_status(status)
-        status_hash = (
-            status.get("applied_desired_hash") or
-            status.get("desired_hash")
-        )
+        if status_generation is None:
+            return False
+        try:
+            pending_generation = _strict_scalar(
+                pending.get("generation"),
+                "integer",
+            )
+            status_hash = _strict_scalar(
+                status.get("applied_desired_hash"),
+                "string",
+            )
+            pending_hash = _strict_scalar(
+                pending.get("desired_hash"),
+                "string",
+            )
+        except ValueError:
+            return False
         return bool(
-            status_generation >= int(pending["generation"]) and
-            status_hash and
-            pending.get("desired_hash") and
-            status_hash != pending.get("desired_hash")
+            status_generation >= pending_generation and
+            status_hash != pending_hash
         )
 
     def _pending_snapshot_is_stale(self, pending, status):
         try:
             status_generation = self._applied_generation_from_status(status)
-            pending_generation = int(pending.get("generation") or 0)
-        except (TypeError, ValueError):
+            pending_generation = _strict_scalar(
+                pending.get("generation"),
+                "integer",
+            )
+            _strict_scalar(
+                status.get("applied_desired_hash"),
+                "string",
+            )
+            _strict_scalar(pending.get("desired_hash"), "string")
+        except ValueError:
+            return False
+        if status_generation is None:
             return False
         if status_generation <= pending_generation:
             return False
-        if status.get("pending_generation"):
+        pending_state, _, _ = self._pending_generation_status(status)
+        if pending_state != "none":
             return False
-        status_hash = (
-            status.get("applied_desired_hash") or
-            status.get("desired_hash")
-        )
-        return bool(status_hash and pending.get("desired_hash"))
+        return True
 
     def _status_converged(self, snapshot, projected_port_ids, status):
-        if self._status_has_pending_generation(status):
-            return False
-        status_generation = self._applied_generation_from_status(status)
-        if status_generation < int(snapshot["generation"]):
-            return False
-        status_hash = (
-            status.get("applied_desired_hash") or
-            status.get("desired_hash")
+        return self._snapshot_status_verdict(
+            snapshot, projected_port_ids, status,
+        )[0] == "ready"
+
+    def _snapshot_status_verdict(self, snapshot, projected_port_ids, status):
+        if status is None:
+            return "pending", "status is unavailable"
+        if not isinstance(status, dict):
+            return "failed", "status payload is invalid"
+
+        try:
+            expected_generation = _strict_scalar(
+                snapshot.get("generation"),
+                "integer",
+            )
+        except ValueError:
+            return "failed", "snapshot generation is invalid"
+        try:
+            authority_state = _strict_scalar(
+                status.get("authority_state"),
+                "string",
+            )
+        except ValueError:
+            return "failed", "authority_state is invalid"
+        if authority_state in TERMINAL_FAILURE_AUTHORITY_STATES:
+            return (
+                "failed",
+                "authority_state is %s" % (authority_state or "missing"),
+            )
+
+        pending_state, _, pending_reason = self._pending_generation_status(status)
+        if pending_state == "failed":
+            return "failed", pending_reason
+        if pending_state == "pending":
+            return "pending", "pending generation remains"
+
+        try:
+            applied_generation = _strict_scalar(
+                status.get("applied_generation"),
+                "integer",
+            )
+        except ValueError:
+            return "failed", "applied_generation is invalid"
+        if applied_generation < expected_generation:
+            return "pending", "applied generation has not reached target"
+        if applied_generation != expected_generation:
+            return (
+                "failed",
+                "applied generation %s does not match %s" % (
+                    applied_generation,
+                    expected_generation,
+                ),
+            )
+        try:
+            accepted_generation = _strict_scalar(
+                status.get("accepted_generation"),
+                "integer",
+            )
+        except ValueError:
+            return "failed", "accepted_generation is invalid"
+        if accepted_generation != expected_generation:
+            return (
+                "failed",
+                "accepted_generation %s does not match applied target %s" % (
+                    accepted_generation,
+                    expected_generation,
+                ),
+            )
+
+        try:
+            expected_hash = _strict_scalar(
+                snapshot.get("desired_hash"),
+                "string",
+            )
+        except ValueError:
+            return "failed", "snapshot desired_hash is invalid"
+        try:
+            status_hash = _strict_scalar(
+                status.get("desired_hash"),
+                "string",
+            )
+        except ValueError:
+            return "failed", "desired_hash is invalid"
+        if status_hash != expected_hash:
+            return "failed", "desired_hash does not match snapshot"
+        try:
+            applied_hash = _strict_scalar(
+                status.get("applied_desired_hash"),
+                "string",
+            )
+        except ValueError:
+            return "failed", "applied_desired_hash is invalid"
+        if applied_hash != expected_hash:
+            return "failed", "applied desired hash does not match snapshot"
+        if authority_state != "ready":
+            return (
+                "failed",
+                "authority_state is %s, not ready" %
+                (authority_state or "missing"),
+            )
+
+        projected_port_ids = set(
+            port_id for port_id in projected_port_ids or [] if port_id
         )
-        if status_hash and snapshot.get("desired_hash") and status_hash != snapshot.get("desired_hash"):
-            return False
-
-        if not projected_port_ids:
-            return True
-
-        managed = status.get("managed_ports")
-        if managed is None:
-            return False
-        managed_port_ids = set(
-            port.get("port_id") for port in managed
+        snapshot_ports = dict(
+            (port.get("port_id"), port)
+            for port in snapshot.get("ports") or []
             if port.get("port_id")
         )
-        return projected_port_ids.issubset(managed_port_ids)
+        if (snapshot.get("scope") or {}).get("type") == "port":
+            affected_port_ids = set(
+                port_id for port_id, port in snapshot_ports.items()
+                if port.get("eligible") or port.get("managed_domains")
+            )
+            missing_projected = sorted(affected_port_ids - projected_port_ids)
+            if missing_projected:
+                return (
+                    "failed",
+                    "affected scoped ports are not projected: %s" %
+                    missing_projected,
+                )
+            validated_port_ids = affected_port_ids
+        else:
+            validated_port_ids = projected_port_ids
+        evidence_port_ids = projected_port_ids
+        if not evidence_port_ids:
+            return "ready", None
 
-    def _status_transaction_committed(self, snapshot, status):
-        if self._status_has_pending_generation(status):
-            return False
-        status_generation = self._applied_generation_from_status(status)
-        if status_generation < int(snapshot["generation"]):
-            return False
-        expected_hash = snapshot.get("desired_hash")
-        if not expected_hash:
-            return False
-        status_hash = (
-            status.get("applied_desired_hash") or
-            status.get("desired_hash")
+        managed_ports, reason = _unique_row_index(
+            status.get("managed_ports"),
+            "port_id",
+            "managed port evidence",
         )
-        return bool(status_hash and status_hash == expected_hash)
+        if reason is not None:
+            return "failed", reason
+        managed_port_ids = set(managed_ports)
+        missing_managed = sorted(evidence_port_ids - managed_port_ids)
+        if missing_managed:
+            return (
+                "failed",
+                "projected ports are not managed: %s" % missing_managed,
+            )
+
+        port_statuses, reason = _unique_row_index(
+            status.get("port_statuses"),
+            "port_id",
+            "port status evidence",
+        )
+        if reason is not None:
+            return "failed", reason
+        missing_statuses = sorted(evidence_port_ids - set(port_statuses))
+        if missing_statuses:
+            return (
+                "failed",
+                "runtime status is missing for ports %s" % missing_statuses,
+            )
+        runtime_domains_by_port = {}
+        for port_id in sorted(evidence_port_ids):
+            runtime_domains, reason = _unique_row_index(
+                port_statuses[port_id].get("domains"),
+                "domain",
+                "domain status evidence for port %s" % port_id,
+                normalize=_status_token,
+            )
+            if reason is not None:
+                return "failed", reason
+            runtime_domains_by_port[port_id] = runtime_domains
+        if not validated_port_ids:
+            return "ready", None
+        for port_id in sorted(validated_port_ids):
+            runtime_port = port_statuses.get(port_id)
+
+            snapshot_port = snapshot_ports.get(port_id)
+            if snapshot_port is not None:
+                try:
+                    port_generation = _strict_scalar(
+                        runtime_port.get("generation"),
+                        "integer",
+                    )
+                except ValueError:
+                    return (
+                        "failed",
+                        "port %s generation is invalid" % port_id,
+                    )
+                if port_generation != expected_generation:
+                    return (
+                        "failed",
+                        "port %s generation %s does not match %s" % (
+                            port_id,
+                            port_generation,
+                            expected_generation,
+                        ),
+                    )
+                try:
+                    port_hash = _strict_scalar(
+                        runtime_port.get("desired_hash"),
+                        "string",
+                    )
+                except ValueError:
+                    return (
+                        "failed",
+                        "port %s desired_hash is invalid" % port_id,
+                    )
+                if port_hash != expected_hash:
+                    return (
+                        "failed",
+                        "port %s desired hash does not match snapshot" % port_id,
+                    )
+            if snapshot_port is None:
+                required_domains = list(self.managed_domains)
+            else:
+                required_domains = list(
+                    snapshot_port.get("managed_domains") or []
+                )
+            runtime_domains = runtime_domains_by_port[port_id]
+            expects_not_requested = False
+            for domain in required_domains:
+                domain_name = _status_token(domain)
+                runtime_domain = runtime_domains.get(domain_name)
+                if runtime_domain is None:
+                    return (
+                        "failed",
+                        "runtime status is missing for port %s domain %s" % (
+                            port_id,
+                            domain_name,
+                        ),
+                    )
+                domain_verdict, reason = self._domain_status_verdict(
+                    domain_name,
+                    snapshot_port,
+                    runtime_domain,
+                )
+                if domain_verdict == "failed":
+                    return "failed", "port %s %s" % (port_id, reason)
+                if domain_verdict == "not_requested":
+                    expects_not_requested = True
+
+            runtime_port_status = _status_token(runtime_port.get("status"))
+            expected_port_status = (
+                "not_requested" if expects_not_requested else "ready"
+            )
+            if runtime_port_status != expected_port_status:
+                return (
+                    "failed",
+                    "port %s runtime status %s does not match %s" % (
+                        port_id,
+                        runtime_port_status or "missing",
+                        expected_port_status,
+                    ),
+                )
+
+        return "ready", None
+
+    def _domain_status_verdict(self, domain, snapshot_port, runtime_domain):
+        runtime_status = _status_token(runtime_domain.get("status"))
+        runtime_action = _status_token(runtime_domain.get("effective_action"))
+
+        if domain != "acl":
+            if runtime_status != "ready":
+                return (
+                    "failed",
+                    "domain %s runtime status is %s" % (
+                        domain,
+                        runtime_status or "missing",
+                    ),
+                )
+            return "ready", None
+
+        desired_acl = None
+        if snapshot_port is not None and "acl" in snapshot_port:
+            desired_acl = snapshot_port.get("acl") or {}
+        if desired_acl is None:
+            return "failed", "desired acl evidence is missing"
+
+        desired_status = _status_token(desired_acl.get("status") or "ready")
+        desired_action = _status_token(desired_acl.get("effective_action"))
+        desired_enabled = desired_acl.get("enabled") is not False
+        if (
+            desired_status == "not_requested" and
+            not desired_enabled and
+            desired_action in ("", "bypass")
+        ):
+            if runtime_status == "not_requested" and runtime_action == "bypass":
+                return "not_requested", None
+            return (
+                "failed",
+                "acl runtime status/action is %s/%s for not-requested desired ACL" % (
+                    runtime_status or "missing",
+                    runtime_action or "missing",
+                ),
+            )
+
+        if (
+            desired_status == "ready" and
+            desired_enabled and
+            desired_action in ("", "enforce")
+        ):
+            if runtime_status == "ready" and runtime_action == "enforce":
+                return "ready", None
+            return (
+                "failed",
+                "acl runtime status/action is %s/%s for ready desired ACL" % (
+                    runtime_status or "missing",
+                    runtime_action or "missing",
+                ),
+            )
+
+        return (
+            "failed",
+            "desired acl is not terminal-ready: %s/%s" % (
+                desired_status or "missing",
+                desired_action or "missing",
+            ),
+        )
 
     def _delete_status_converged(self, port_id, status):
         managed = status.get("managed_ports")
