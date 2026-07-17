@@ -40,6 +40,9 @@ pub const NEUTRON_UDS_PEER_AUTH_POLICY: &str = "filesystem_permissions_then_peer
 pub const NEUTRON_UDS_CAPABILITY_HASH: &str = "v0.9-neutron-capabilities-3";
 pub const NEUTRON_ATTACH_AUTHORITY: &str = "neutron_snapshot";
 pub const NEUTRON_SUPPORTED_DOMAINS: &[&str] = &["attach", "acl"];
+pub const NEUTRON_STATUS_SCHEMA_VERSION_MIN: u32 = 1;
+pub const NEUTRON_STATUS_SCHEMA_VERSION_MAX: u32 = 1;
+pub const NEUTRON_STATUS_CONTRACT_HASH: &str = "v0.9-neutron-status-1";
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[schema(example = json!({
@@ -311,6 +314,96 @@ pub struct NeutronPortStatus {
     pub domains: Vec<NeutronDomainStatus>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusTransactionState {
+    Idle,
+    Pending,
+    Classified,
+    Blocked,
+    Recovery,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusOverallReadiness {
+    Ready,
+    Degraded,
+    Blocked,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusRequiredAction {
+    None,
+    Poll,
+    RecoverPending,
+    FullResync,
+    Operator,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusRecoveryCause {
+    InventoryUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusDomainState {
+    Ready,
+    NotRequested,
+    Degraded,
+    Blocked,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusEffectiveAction {
+    Enforce,
+    Bypass,
+    Unchanged,
+    Cleanup,
+    NoOp,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutronStatusSupportDisposition {
+    Supported,
+    Unsupported,
+    Unknown,
+    NotApplicable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NeutronStatusDomainEvidence {
+    pub domain: String,
+    pub status: NeutronStatusDomainState,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub effective_action: Option<NeutronStatusEffectiveAction>,
+    pub support_disposition: NeutronStatusSupportDisposition,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NeutronStatusPortEvidence {
+    pub port_id: String,
+    pub ifname: String,
+    pub generation: u64,
+    #[serde(default)]
+    pub desired_hash: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub managed_domains: Vec<String>,
+    #[serde(default)]
+    pub domains: Vec<NeutronStatusDomainEvidence>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[schema(example = json!({
     "api_version": "v1",
@@ -336,6 +429,18 @@ pub struct NeutronCapabilitiesResponse {
     #[serde(default)]
     #[schema(example = 1)]
     pub schema_version_max: u32,
+    /// Minimum supported Status response schema version.
+    #[serde(default)]
+    #[schema(example = 1)]
+    pub status_schema_version_min: u32,
+    /// Maximum supported Status response schema version.
+    #[serde(default)]
+    #[schema(example = 1)]
+    pub status_schema_version_max: u32,
+    /// Stable hash/version for the independent Status response vocabulary.
+    #[serde(default)]
+    #[schema(example = "v0.9-neutron-status-1")]
+    pub status_contract_hash: String,
     /// Authority model for attach/detach operations.
     #[schema(example = "neutron_snapshot")]
     pub attach_authority: String,
@@ -383,6 +488,9 @@ impl NeutronCapabilitiesResponse {
             contract_version: NEUTRON_UDS_CONTRACT_VERSION.to_string(),
             schema_version_min: NEUTRON_UDS_SCHEMA_VERSION_MIN,
             schema_version_max: NEUTRON_UDS_SCHEMA_VERSION_MAX,
+            status_schema_version_min: NEUTRON_STATUS_SCHEMA_VERSION_MIN,
+            status_schema_version_max: NEUTRON_STATUS_SCHEMA_VERSION_MAX,
+            status_contract_hash: NEUTRON_STATUS_CONTRACT_HASH.to_string(),
             attach_authority: NEUTRON_ATTACH_AUTHORITY.to_string(),
             supports_full_snapshot: true,
             supports_port_scoped_snapshot: true,
@@ -448,6 +556,38 @@ pub struct NeutronStatusResponse {
     #[serde(default)]
     pub port_statuses: Vec<NeutronPortStatus>,
     /// All active aria-agent instances, including those outside Neutron authority.
+    pub active_instances: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NeutronStatusV1Response {
+    pub status_schema_version: u32,
+    pub status_contract_hash: String,
+    pub transaction_state: NeutronStatusTransactionState,
+    pub overall_readiness: NeutronStatusOverallReadiness,
+    pub required_action: NeutronStatusRequiredAction,
+    pub recovery_cause: Option<NeutronStatusRecoveryCause>,
+    pub last_classified_generation: u64,
+    pub generation: u64,
+    #[serde(default)]
+    pub accepted_generation: u64,
+    #[serde(default)]
+    pub applied_generation: u64,
+    #[serde(default)]
+    pub pending_generation: Option<u64>,
+    #[serde(default)]
+    pub desired_hash: Option<String>,
+    #[serde(default)]
+    pub applied_desired_hash: Option<String>,
+    #[serde(default)]
+    pub wal_status: String,
+    #[serde(default)]
+    pub wal_replay_failures: u64,
+    #[serde(default)]
+    pub authority_state: String,
+    pub managed_ports: Vec<ManagedNeutronPort>,
+    #[serde(default)]
+    pub port_statuses: Vec<NeutronStatusPortEvidence>,
     pub active_instances: Vec<String>,
 }
 
@@ -2370,6 +2510,22 @@ mod tests {
                 ));
             }
         }
+        let mut legacy_payload = actual.clone();
+        let legacy_object = legacy_payload
+            .as_object_mut()
+            .expect("serialized Neutron capabilities must be an object");
+        for field in [
+            "status_schema_version_min",
+            "status_schema_version_max",
+            "status_contract_hash",
+        ] {
+            legacy_object.remove(field);
+        }
+        let legacy_decoded: NeutronCapabilitiesResponse = serde_json::from_value(legacy_payload)
+            .expect("capabilities without Status V1 metadata must remain decodable");
+        assert_eq!(legacy_decoded.status_schema_version_min, 0);
+        assert_eq!(legacy_decoded.status_schema_version_max, 0);
+        assert!(legacy_decoded.status_contract_hash.is_empty());
         assert!(
             mismatches.is_empty(),
             "current capabilities do not advertise the shared Status V1 metadata:\n{}",
@@ -2380,6 +2536,16 @@ mod tests {
     #[test]
     fn neutron_contract_status_v1_response_serialization_matches_shared_scenarios() {
         let mut mismatches = Vec::new();
+        let legacy_expected = shared_status_v1_scenario("legacy-v0-ready")
+            .get("status")
+            .expect("legacy V0 scenario must include a status response");
+        let legacy_decoded: NeutronStatusResponse = serde_json::from_value(legacy_expected.clone())
+            .expect("legacy V0 status must remain decodable through the legacy response type");
+        let legacy_row: &NeutronPortStatus = legacy_decoded
+            .port_statuses
+            .first()
+            .expect("legacy V0 status must retain its legacy nested row type");
+        assert_eq!(legacy_row.port_id, "legacy-port");
 
         for id in rust_status_v1_scenario_ids() {
             let expected = shared_status_v1_scenario(id)
@@ -2424,7 +2590,7 @@ mod tests {
                 }
             }
 
-            let decoded: NeutronStatusResponse = serde_json::from_value(expected.clone())
+            let decoded: NeutronStatusV1Response = serde_json::from_value(expected.clone())
                 .unwrap_or_else(|error| {
                     panic!("shared Status V1 response must deserialize for {id}: {error}")
                 });

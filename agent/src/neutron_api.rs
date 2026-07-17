@@ -2,8 +2,12 @@ use aria_api::{
     action_from_string, direction_from_string, proto_from_string, ManagedNeutronPort,
     NeutronAclRuleSnapshot, NeutronAclSnapshot, NeutronCapabilitiesResponse, NeutronDeleteResponse,
     NeutronDomainStatus, NeutronPortApplyResult, NeutronPortSnapshot, NeutronPortStatus,
-    NeutronSnapshotRequest, NeutronSnapshotResponse, NeutronStatusResponse,
-    NEUTRON_UDS_BODY_MAX_BYTES, NEUTRON_UDS_SCHEMA_VERSION_MAX, NEUTRON_UDS_SCHEMA_VERSION_MIN,
+    NeutronSnapshotRequest, NeutronSnapshotResponse, NeutronStatusDomainEvidence,
+    NeutronStatusDomainState, NeutronStatusEffectiveAction, NeutronStatusOverallReadiness,
+    NeutronStatusPortEvidence, NeutronStatusRecoveryCause, NeutronStatusRequiredAction,
+    NeutronStatusSupportDisposition, NeutronStatusTransactionState, NeutronStatusV1Response,
+    NEUTRON_STATUS_CONTRACT_HASH, NEUTRON_STATUS_SCHEMA_VERSION_MAX, NEUTRON_UDS_BODY_MAX_BYTES,
+    NEUTRON_UDS_SCHEMA_VERSION_MAX, NEUTRON_UDS_SCHEMA_VERSION_MIN,
 };
 use axum::{
     extract::DefaultBodyLimit,
@@ -1390,8 +1394,587 @@ async fn get_neutron_capabilities() -> impl IntoResponse {
     Json(NeutronCapabilitiesResponse::current())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum StatusV1EvidenceClass {
+    Ready,
+    TerminalDegraded,
+    FullResync,
+    Blocked,
+}
+
+struct NeutronStatusV1Projection {
+    transaction_state: NeutronStatusTransactionState,
+    overall_readiness: NeutronStatusOverallReadiness,
+    required_action: NeutronStatusRequiredAction,
+    recovery_cause: Option<NeutronStatusRecoveryCause>,
+    last_classified_generation: u64,
+    port_statuses: Vec<NeutronStatusPortEvidence>,
+}
+
+struct ProjectedStatusV1PortRow {
+    evidence: NeutronStatusPortEvidence,
+    domain_class: StatusV1EvidenceClass,
+    domain_names: BTreeSet<String>,
+    domains_valid: bool,
+}
+
+fn status_v1_reason_requires_full_resync(reason: Option<&str>) -> bool {
+    matches!(
+        reason,
+        Some("runtime_rebuild_required")
+            | Some("acl_restart_replay_requires_resync")
+            | Some("tc_acl_link_lost")
+    )
+}
+
+fn status_v1_effective_action(action: Option<&str>) -> Option<NeutronStatusEffectiveAction> {
+    match action {
+        Some("enforce") => Some(NeutronStatusEffectiveAction::Enforce),
+        Some("bypass") => Some(NeutronStatusEffectiveAction::Bypass),
+        Some("unchanged") => Some(NeutronStatusEffectiveAction::Unchanged),
+        Some("cleanup") => Some(NeutronStatusEffectiveAction::Cleanup),
+        Some("no_op") => Some(NeutronStatusEffectiveAction::NoOp),
+        Some(_) | None => None,
+    }
+}
+
+fn status_v1_reason_is_unsupported(reason: Option<&str>) -> bool {
+    reason.is_some_and(|reason| {
+        reason == "acl_not_supported"
+            || reason.starts_with("acl_rule_limit_exceeded:")
+            || reason.starts_with("acl_selector_member_limit_exceeded:")
+            || reason.starts_with("unsupported_acl_")
+            || reason.starts_with("invalid_acl_priority:")
+            || reason.starts_with("duplicate_acl_priority:")
+            || reason.ends_with("_transaction_not_implemented")
+            || reason.starts_with("blocked_by_unimplemented_domains:")
+            || reason.starts_with("unsupported_recovery_domain:")
+    })
+}
+
+fn status_v1_support_disposition(
+    domain: &str,
+    status: &str,
+    reason: Option<&str>,
+) -> NeutronStatusSupportDisposition {
+    if domain == "acl" && status == "not_requested" {
+        NeutronStatusSupportDisposition::NotApplicable
+    } else if status == "unsupported" || status_v1_reason_is_unsupported(reason) {
+        NeutronStatusSupportDisposition::Unsupported
+    } else if status_v1_reason_requires_full_resync(reason)
+        || matches!((domain, status), ("attach", "ready") | ("acl", "ready"))
+    {
+        NeutronStatusSupportDisposition::Supported
+    } else {
+        NeutronStatusSupportDisposition::Unknown
+    }
+}
+
+fn status_v1_normalized_unique_domains(domains: &[String]) -> Option<Vec<String>> {
+    let normalized = normalize_managed_domains(domains);
+    (normalized.len() == domains.len()).then_some(normalized)
+}
+
+fn project_status_v1_domain(
+    domain: &NeutronDomainStatus,
+) -> (NeutronStatusDomainEvidence, StatusV1EvidenceClass) {
+    let normalized_names = normalize_managed_domains(std::slice::from_ref(&domain.domain));
+    let domain_name_valid = normalized_names.len() == 1;
+    let domain_name = normalized_names
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| domain.domain.clone());
+    let action = status_v1_effective_action(domain.effective_action.as_deref());
+    let action_valid = domain.effective_action.is_none() || action.is_some();
+    let support = status_v1_support_disposition(
+        &domain_name,
+        domain.status.as_str(),
+        domain.reason.as_deref(),
+    );
+
+    let (status, mut evidence_class) = match domain.status.as_str() {
+        "ready" => {
+            let valid = match domain_name.as_str() {
+                "acl" => {
+                    action == Some(NeutronStatusEffectiveAction::Enforce)
+                        && support == NeutronStatusSupportDisposition::Supported
+                }
+                "attach" => {
+                    action.is_none() && support == NeutronStatusSupportDisposition::Supported
+                }
+                _ => false,
+            };
+            (
+                NeutronStatusDomainState::Ready,
+                if valid {
+                    StatusV1EvidenceClass::Ready
+                } else {
+                    StatusV1EvidenceClass::Blocked
+                },
+            )
+        }
+        "not_requested" => {
+            let valid = domain_name == "acl"
+                && matches!(
+                    action,
+                    Some(NeutronStatusEffectiveAction::Bypass)
+                        | Some(NeutronStatusEffectiveAction::NoOp)
+                )
+                && support == NeutronStatusSupportDisposition::NotApplicable;
+            (
+                NeutronStatusDomainState::NotRequested,
+                if valid {
+                    StatusV1EvidenceClass::Ready
+                } else {
+                    StatusV1EvidenceClass::Blocked
+                },
+            )
+        }
+        "degraded" | "unsupported" => {
+            let terminal = domain_name == "acl"
+                && matches!(
+                    action,
+                    Some(NeutronStatusEffectiveAction::Bypass)
+                        | Some(NeutronStatusEffectiveAction::Unchanged)
+                );
+            let evidence_class = if !terminal {
+                StatusV1EvidenceClass::Blocked
+            } else if status_v1_reason_requires_full_resync(domain.reason.as_deref()) {
+                StatusV1EvidenceClass::FullResync
+            } else {
+                StatusV1EvidenceClass::TerminalDegraded
+            };
+            (NeutronStatusDomainState::Degraded, evidence_class)
+        }
+        "blocked" | "error" | "recovered" | "detached" => (
+            NeutronStatusDomainState::Blocked,
+            StatusV1EvidenceClass::Blocked,
+        ),
+        _ => (
+            NeutronStatusDomainState::Blocked,
+            StatusV1EvidenceClass::Blocked,
+        ),
+    };
+
+    if !domain_name_valid || !action_valid {
+        evidence_class = StatusV1EvidenceClass::Blocked;
+    }
+
+    (
+        NeutronStatusDomainEvidence {
+            domain: domain_name,
+            status,
+            reason: domain.reason.clone(),
+            effective_action: action,
+            support_disposition: support,
+        },
+        evidence_class,
+    )
+}
+
+fn project_status_v1_port_row(status: &NeutronPortStatus) -> ProjectedStatusV1PortRow {
+    let mut domain_class = StatusV1EvidenceClass::Ready;
+    let mut domain_names = BTreeSet::new();
+    let mut domains_valid = true;
+    let mut domains = Vec::with_capacity(status.domains.len());
+    for domain in &status.domains {
+        let (evidence, evidence_class) = project_status_v1_domain(domain);
+        if evidence.domain.trim().is_empty() || !domain_names.insert(evidence.domain.clone()) {
+            domains_valid = false;
+        }
+        domain_class = domain_class.max(evidence_class);
+        domains.push(evidence);
+    }
+    if !domains_valid {
+        domain_class = StatusV1EvidenceClass::Blocked;
+    }
+
+    ProjectedStatusV1PortRow {
+        evidence: NeutronStatusPortEvidence {
+            port_id: status.port_id.clone(),
+            ifname: status.ifname.clone(),
+            generation: status.generation,
+            desired_hash: status.desired_hash.clone(),
+            status: status.status.clone(),
+            reason: status.reason.clone(),
+            managed_domains: status.managed_domains.clone(),
+            domains,
+        },
+        domain_class,
+        domain_names,
+        domains_valid,
+    }
+}
+
+fn status_v1_port_top_level_class(
+    status: &NeutronPortStatus,
+    projected: &ProjectedStatusV1PortRow,
+) -> StatusV1EvidenceClass {
+    match status.status.as_str() {
+        "ready" if projected.domain_class == StatusV1EvidenceClass::Ready => {
+            StatusV1EvidenceClass::Ready
+        }
+        "not_requested"
+            if projected.evidence.domains.len() == 1
+                && projected.evidence.domains[0].domain == "acl"
+                && projected.evidence.domains[0].status
+                    == NeutronStatusDomainState::NotRequested
+                && matches!(
+                    projected.evidence.domains[0].effective_action,
+                    Some(NeutronStatusEffectiveAction::Bypass)
+                        | Some(NeutronStatusEffectiveAction::NoOp)
+                )
+                && projected.evidence.domains[0].support_disposition
+                    == NeutronStatusSupportDisposition::NotApplicable =>
+        {
+            StatusV1EvidenceClass::Ready
+        }
+        "degraded" | "unsupported"
+            if matches!(
+                projected.domain_class,
+                StatusV1EvidenceClass::TerminalDegraded | StatusV1EvidenceClass::FullResync
+            ) =>
+        {
+            if projected.domain_class == StatusV1EvidenceClass::FullResync
+                || status_v1_reason_requires_full_resync(status.reason.as_deref())
+            {
+                StatusV1EvidenceClass::FullResync
+            } else {
+                StatusV1EvidenceClass::TerminalDegraded
+            }
+        }
+        _ => StatusV1EvidenceClass::Blocked,
+    }
+}
+
+fn project_status_v1_detached_tombstone(
+    runtime: &NeutronRuntimeState,
+    status_map_key: &str,
+    status: &NeutronPortStatus,
+) -> Option<NeutronStatusPortEvidence> {
+    if status_map_key.is_empty()
+        || status_map_key != status.port_id.as_str()
+        || status.ifname.is_empty()
+        || status.status != "detached"
+        || status.generation == 0
+        || status.generation > runtime.applied_generation
+    {
+        return None;
+    }
+    let desired_hash = status
+        .desired_hash
+        .as_deref()
+        .filter(|hash| !hash.trim().is_empty())?;
+    if status.generation == runtime.applied_generation
+        && runtime.applied_desired_hash.as_deref() != Some(desired_hash)
+    {
+        return None;
+    }
+
+    let managed_domains = status_v1_normalized_unique_domains(&status.managed_domains)?;
+    let managed_domain_set = managed_domains.iter().cloned().collect::<BTreeSet<_>>();
+    let mut domain_names = BTreeSet::new();
+    let mut domains = Vec::with_capacity(status.domains.len());
+    for domain in &status.domains {
+        let normalized = status_v1_normalized_unique_domains(std::slice::from_ref(&domain.domain))?;
+        let domain_name = normalized.into_iter().next()?;
+        if !domain_names.insert(domain_name.clone())
+            || !managed_domain_set.contains(&domain_name)
+            || domain.status != "detached"
+            || domain.effective_action.is_some()
+        {
+            return None;
+        }
+        domains.push(NeutronStatusDomainEvidence {
+            domain: domain_name,
+            status: NeutronStatusDomainState::NotRequested,
+            reason: domain.reason.clone(),
+            effective_action: Some(NeutronStatusEffectiveAction::Cleanup),
+            support_disposition: NeutronStatusSupportDisposition::NotApplicable,
+        });
+    }
+
+    Some(NeutronStatusPortEvidence {
+        port_id: status.port_id.clone(),
+        ifname: status.ifname.clone(),
+        generation: status.generation,
+        desired_hash: status.desired_hash.clone(),
+        status: status.status.clone(),
+        reason: status.reason.clone(),
+        managed_domains,
+        domains,
+    })
+}
+
+fn project_status_v1_ports(
+    runtime: &NeutronRuntimeState,
+) -> (Vec<NeutronStatusPortEvidence>, StatusV1EvidenceClass) {
+    let mut projected_rows = Vec::with_capacity(runtime.port_statuses.len());
+    let mut aggregate = StatusV1EvidenceClass::Ready;
+
+    for (managed_key, managed) in &runtime.ports {
+        let Some(status) = runtime.port_statuses.get(managed_key) else {
+            aggregate = StatusV1EvidenceClass::Blocked;
+            continue;
+        };
+        let mut projected = project_status_v1_port_row(status);
+        let managed_domains = status_v1_normalized_unique_domains(&managed.managed_domains);
+        let status_domains = status_v1_normalized_unique_domains(&status.managed_domains);
+        let top_level_class = status_v1_port_top_level_class(status, &projected);
+        let ifname_valid = managed.ifname.as_str() == status.ifname.as_str()
+            && (!managed.ifname.is_empty()
+                || matches!(
+                    top_level_class,
+                    StatusV1EvidenceClass::TerminalDegraded | StatusV1EvidenceClass::FullResync
+                ));
+
+        let mut valid = !managed_key.is_empty()
+            && managed_key.as_str() == managed.port_id.as_str()
+            && status.port_id.as_str() == managed_key.as_str()
+            && ifname_valid
+            && projected.domains_valid
+            && status.generation > 0
+            && status.generation <= runtime.applied_generation
+            && status
+                .desired_hash
+                .as_deref()
+                .is_some_and(|hash| !hash.trim().is_empty());
+
+        match (&managed_domains, &status_domains) {
+            (Some(managed_domains), Some(status_domains)) if managed_domains == status_domains => {
+                let status_domain_set = status_domains.iter().cloned().collect::<BTreeSet<_>>();
+                if !status_domain_set
+                    .iter()
+                    .all(|domain| projected.domain_names.contains(domain))
+                    || projected
+                        .domain_names
+                        .iter()
+                        .any(|domain| domain != "attach" && !status_domain_set.contains(domain))
+                {
+                    valid = false;
+                }
+                projected.evidence.managed_domains = status_domains.clone();
+            }
+            _ => valid = false,
+        }
+
+        if status.generation == runtime.applied_generation
+            && status.desired_hash != runtime.applied_desired_hash
+        {
+            valid = false;
+        }
+        if valid && top_level_class != StatusV1EvidenceClass::Blocked {
+            aggregate = aggregate.max(top_level_class);
+        } else {
+            aggregate = StatusV1EvidenceClass::Blocked;
+        }
+        projected_rows.push(projected.evidence);
+    }
+
+    for (status_key, status) in &runtime.port_statuses {
+        if runtime.ports.contains_key(status_key) {
+            continue;
+        }
+        match project_status_v1_detached_tombstone(runtime, status_key, status) {
+            Some(tombstone) => projected_rows.push(tombstone),
+            None => {
+                projected_rows.push(project_status_v1_port_row(status).evidence);
+                aggregate = StatusV1EvidenceClass::Blocked;
+            }
+        }
+    }
+
+    projected_rows.sort_by(|left, right| left.port_id.cmp(&right.port_id));
+    (projected_rows, aggregate)
+}
+
+fn status_v1_has_complete_pending_identity(runtime: &NeutronRuntimeState) -> bool {
+    let Some(pending_generation) = runtime.pending_generation else {
+        return false;
+    };
+    pending_generation > 0
+        && pending_generation == runtime.accepted_generation
+        && pending_generation >= runtime.applied_generation
+        && (pending_generation != runtime.applied_generation || runtime.applied_generation > 0)
+        && runtime
+            .desired_hash
+            .as_deref()
+            .is_some_and(|hash| !hash.trim().is_empty())
+        && (runtime.applied_generation == 0
+            || runtime
+                .applied_desired_hash
+                .as_deref()
+                .is_some_and(|hash| !hash.trim().is_empty()))
+}
+
+fn status_v1_has_classified_identity(runtime: &NeutronRuntimeState) -> bool {
+    runtime.pending_generation.is_none()
+        && runtime.accepted_generation == runtime.applied_generation
+        && runtime.desired_hash == runtime.applied_desired_hash
+        && if runtime.applied_generation == 0 {
+            runtime.desired_hash.is_none() && runtime.applied_desired_hash.is_none()
+        } else {
+            runtime
+                .applied_desired_hash
+                .as_deref()
+                .is_some_and(|hash| !hash.trim().is_empty())
+        }
+}
+
+fn status_v1_is_generation_zero_inventory_recovery(runtime: &NeutronRuntimeState) -> bool {
+    runtime.recovery_cause.as_deref() == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+        && status_v1_has_complete_pending_identity(runtime)
+        && runtime
+            .pending_generation
+            .is_some_and(|pending| pending > 0 && pending == runtime.accepted_generation)
+        && runtime.applied_generation == 0
+        && runtime.applied_desired_hash.is_none()
+        && runtime.ports.is_empty()
+        && runtime.port_statuses.is_empty()
+}
+
+fn project_neutron_status_v1(runtime: &NeutronRuntimeState) -> NeutronStatusV1Projection {
+    let (port_statuses, evidence_class) = project_status_v1_ports(runtime);
+    let operator_blocked = || -> (
+        NeutronStatusTransactionState,
+        NeutronStatusOverallReadiness,
+        NeutronStatusRequiredAction,
+        Option<NeutronStatusRecoveryCause>,
+    ) {
+        (
+            NeutronStatusTransactionState::Blocked,
+            NeutronStatusOverallReadiness::Blocked,
+            NeutronStatusRequiredAction::Operator,
+            None,
+        )
+    };
+    let unknown_recovery_cause = runtime
+        .recovery_cause
+        .as_deref()
+        .is_some_and(|cause| cause != INVENTORY_UNAVAILABLE_RECOVERY_CAUSE);
+    let idle = runtime.accepted_generation == 0
+        && runtime.applied_generation == 0
+        && runtime.pending_generation.is_none()
+        && runtime.desired_hash.is_none()
+        && runtime.applied_desired_hash.is_none()
+        && runtime.ports.is_empty()
+        && runtime.port_statuses.is_empty()
+        && runtime.recovery_cause.is_none()
+        && matches!(runtime.authority_state.as_str(), "" | "idle");
+
+    let (transaction_state, overall_readiness, required_action, recovery_cause) =
+        if runtime.wal_replay_failures > 0 || unknown_recovery_cause {
+            operator_blocked()
+        } else if idle {
+            (
+                NeutronStatusTransactionState::Idle,
+                NeutronStatusOverallReadiness::Unknown,
+                NeutronStatusRequiredAction::FullResync,
+                None,
+            )
+        } else if runtime.pending_generation.is_some() {
+            if !status_v1_has_complete_pending_identity(runtime) {
+                operator_blocked()
+            } else if runtime.recovery_cause.as_deref()
+                == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+            {
+                let allowed_baseline = runtime.applied_generation > 0
+                    || status_v1_is_generation_zero_inventory_recovery(runtime);
+                if allowed_baseline && runtime.authority_state == "blocked_recovery_required" {
+                    (
+                        NeutronStatusTransactionState::Blocked,
+                        NeutronStatusOverallReadiness::Blocked,
+                        NeutronStatusRequiredAction::RecoverPending,
+                        Some(NeutronStatusRecoveryCause::InventoryUnavailable),
+                    )
+                } else {
+                    operator_blocked()
+                }
+            } else if runtime.recovery_cause.is_some() {
+                operator_blocked()
+            } else {
+                match runtime.authority_state.as_str() {
+                    "applying" | "accepted" => (
+                        NeutronStatusTransactionState::Pending,
+                        NeutronStatusOverallReadiness::Unknown,
+                        NeutronStatusRequiredAction::Poll,
+                        None,
+                    ),
+                    "partial" | "blocked_recovery_required" | "recovered_pending_full_resync"
+                        if runtime.applied_generation > 0 =>
+                    {
+                        (
+                            NeutronStatusTransactionState::Blocked,
+                            NeutronStatusOverallReadiness::Blocked,
+                            NeutronStatusRequiredAction::RecoverPending,
+                            None,
+                        )
+                    }
+                    _ => operator_blocked(),
+                }
+            }
+        } else if runtime.recovery_cause.is_some() {
+            operator_blocked()
+        } else if runtime.authority_state == "recovered_pending_full_resync_required"
+            && status_v1_has_classified_identity(runtime)
+            && evidence_class != StatusV1EvidenceClass::Blocked
+        {
+            (
+                NeutronStatusTransactionState::Recovery,
+                NeutronStatusOverallReadiness::Degraded,
+                NeutronStatusRequiredAction::FullResync,
+                None,
+            )
+        } else if runtime.applied_generation > 0 && status_v1_has_classified_identity(runtime) {
+            match (runtime.authority_state.as_str(), evidence_class) {
+                ("ready", StatusV1EvidenceClass::Ready) => (
+                    NeutronStatusTransactionState::Classified,
+                    NeutronStatusOverallReadiness::Ready,
+                    NeutronStatusRequiredAction::None,
+                    None,
+                ),
+                ("ready" | "runtime_degraded", StatusV1EvidenceClass::TerminalDegraded) => (
+                    NeutronStatusTransactionState::Classified,
+                    NeutronStatusOverallReadiness::Degraded,
+                    NeutronStatusRequiredAction::None,
+                    None,
+                ),
+                ("ready" | "runtime_degraded", StatusV1EvidenceClass::FullResync) => (
+                    NeutronStatusTransactionState::Classified,
+                    NeutronStatusOverallReadiness::Degraded,
+                    NeutronStatusRequiredAction::FullResync,
+                    None,
+                ),
+                (
+                    "runtime_reconcile_requires_full_resync" | "degraded",
+                    StatusV1EvidenceClass::Ready
+                    | StatusV1EvidenceClass::TerminalDegraded
+                    | StatusV1EvidenceClass::FullResync,
+                ) => (
+                    NeutronStatusTransactionState::Classified,
+                    NeutronStatusOverallReadiness::Degraded,
+                    NeutronStatusRequiredAction::FullResync,
+                    None,
+                ),
+                _ => operator_blocked(),
+            }
+        } else {
+            operator_blocked()
+        };
+
+    NeutronStatusV1Projection {
+        transaction_state,
+        overall_readiness,
+        required_action,
+        recovery_cause,
+        last_classified_generation: runtime.applied_generation,
+        port_statuses,
+    }
+}
+
 async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoResponse {
     let runtime = state.runtime.read().await;
+    let projection = project_neutron_status_v1(&runtime);
     let managed_ports = runtime.ports.values().cloned().collect();
     let generation = runtime.applied_generation;
     let accepted_generation = runtime.accepted_generation;
@@ -1406,10 +1989,16 @@ async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoRe
     } else {
         runtime.authority_state.clone()
     };
-    let port_statuses = runtime.port_statuses.values().cloned().collect();
     drop(runtime);
 
-    Json(NeutronStatusResponse {
+    Json(NeutronStatusV1Response {
+        status_schema_version: NEUTRON_STATUS_SCHEMA_VERSION_MAX,
+        status_contract_hash: NEUTRON_STATUS_CONTRACT_HASH.to_string(),
+        transaction_state: projection.transaction_state,
+        overall_readiness: projection.overall_readiness,
+        required_action: projection.required_action,
+        recovery_cause: projection.recovery_cause,
+        last_classified_generation: projection.last_classified_generation,
         generation,
         accepted_generation,
         applied_generation,
@@ -1420,7 +2009,7 @@ async fn get_neutron_status(State(state): State<NeutronApiState>) -> impl IntoRe
         wal_replay_failures,
         authority_state,
         managed_ports,
-        port_statuses,
+        port_statuses: projection.port_statuses,
         active_instances: state.registry.list().await,
     })
 }
