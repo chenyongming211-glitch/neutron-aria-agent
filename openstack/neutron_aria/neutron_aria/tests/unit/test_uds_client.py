@@ -184,6 +184,11 @@ class UdsClientTestCase(unittest.TestCase):
         self.assertRaises(LocalApiContractError, self.client.capabilities)
 
     def test_put_snapshot_serializes_json_body(self):
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities())
+        )
+        self.client.capabilities(required_domains=["acl"])
+        FakeConnection.requests = []
         FakeConnection.responses.append(FakeResponse(200, "OK", {
             "generation": 12,
             "results": [],
@@ -199,6 +204,11 @@ class UdsClientTestCase(unittest.TestCase):
         self.assertEqual(12, json.loads(request["body"])["generation"])
 
     def test_recover_pending_snapshot_serializes_json_body(self):
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities())
+        )
+        self.client.capabilities(required_domains=["acl"])
+        FakeConnection.requests = []
         FakeConnection.responses.append(FakeResponse(200, "OK", {
             "status": "recovered",
             "recovered_generation": 380,
@@ -225,6 +235,11 @@ class UdsClientTestCase(unittest.TestCase):
             max_request_bytes=16,
             connection_factory=FakeConnection,
         )
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities())
+        )
+        client.capabilities(required_domains=["acl"])
+        FakeConnection.requests = []
 
         self.assertRaises(
             LocalApiContractError,
@@ -234,6 +249,11 @@ class UdsClientTestCase(unittest.TestCase):
         self.assertEqual([], FakeConnection.requests)
 
     def test_put_snapshot_maps_plain_text_413_to_body_too_large_error(self):
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities())
+        )
+        self.client.capabilities(required_domains=["acl"])
+        FakeConnection.requests = []
         FakeConnection.responses.append(
             FakeResponse(413, "Payload Too Large", "request entity too large")
         )
@@ -330,6 +350,11 @@ class UdsClientTestCase(unittest.TestCase):
         self.assertEqual("internal failure", ctx.exception.body["error"])
 
     def test_delete_port_url_quotes_port_id(self):
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities())
+        )
+        self.client.capabilities(required_domains=["acl"])
+        FakeConnection.requests = []
         FakeConnection.responses.append(FakeResponse(200, "OK", {
             "port_id": "port/with/slash",
             "ifname": None,
@@ -351,6 +376,13 @@ class UdsClientTestCase(unittest.TestCase):
             timeout=1.0,
             connection_factory=TimeoutConnection,
         )
+        client.connection_factory = FakeConnection
+        FakeConnection.responses.append(
+            FakeResponse(200, "OK", self._capabilities())
+        )
+        client.capabilities(required_domains=["acl"])
+        FakeConnection.requests = []
+        client.connection_factory = TimeoutConnection
 
         self.assertRaises(
             LocalApiTimeoutError,
@@ -794,6 +826,13 @@ class StatusContractPythonGreenFocusedUdsTestCase(unittest.TestCase):
         except LocalApiContractError as exc:
             return None, exc
 
+    def _capture_exception(self, callback):
+        try:
+            callback()
+        except Exception as exc:
+            return exc
+        return None
+
     def _snapshot(self, generation=43):
         return {
             "generation": generation,
@@ -1003,6 +1042,15 @@ class StatusContractPythonGreenFocusedUdsTestCase(unittest.TestCase):
         tombstone["ifname"] = ""
         empty_ifname["port_statuses"].append(tombstone)
         invalid_statuses.append(("empty-tombstone-ifname", empty_ifname))
+
+        whitespace_ifname = copy.deepcopy(scenario["status"])
+        tombstone = self._normalized_tombstone(whitespace_ifname)
+        tombstone["ifname"] = "   "
+        whitespace_ifname["port_statuses"].append(tombstone)
+        invalid_statuses.append((
+            "whitespace-tombstone-ifname",
+            whitespace_ifname,
+        ))
 
         current_hash_mismatch = copy.deepcopy(scenario["status"])
         tombstone = self._normalized_tombstone(
@@ -1282,6 +1330,331 @@ class StatusContractPythonGreenFocusedUdsTestCase(unittest.TestCase):
                 self.assertIsInstance(status_error, LocalApiContractError)
                 self.assertIsInstance(write_error, LocalApiContractError)
                 self.assertEqual(requests_before, requests_after)
+
+    def test_classified_generation_zero_and_broad_empty_ifname_are_rejected(self):
+        ready = status_scenario("full-classified-ready")
+        generation_zero = copy.deepcopy(ready["status"])
+        generation_zero.update({
+            "last_classified_generation": 0,
+            "generation": 0,
+            "accepted_generation": 0,
+            "applied_generation": 0,
+            "pending_generation": None,
+            "desired_hash": None,
+            "applied_desired_hash": None,
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": [],
+        })
+
+        rebuild = status_scenario("classified-degraded-full-resync")
+        broad_empty_ifname = copy.deepcopy(rebuild["status"])
+        broad_empty_ifname["managed_ports"][0]["ifname"] = ""
+        broad_empty_ifname["port_statuses"][0]["ifname"] = ""
+
+        for label, capabilities, payload in (
+            (
+                "classified-generation-zero",
+                ready["capabilities"],
+                generation_zero,
+            ),
+            (
+                "full-resync-supported-empty-ifname",
+                rebuild["capabilities"],
+                broad_empty_ifname,
+            ),
+        ):
+            client, _decoded, status_error = self._decode(
+                capabilities,
+                payload,
+            )
+            write_error, requests_before, requests_after = (
+                self._assert_latched_write(client)
+            )
+            with self.subTest(invalid=label):
+                self.assertIsInstance(status_error, LocalApiContractError)
+                self.assertIsInstance(write_error, LocalApiContractError)
+                self.assertEqual(requests_before, requests_after)
+
+    def test_unreadable_contract_responses_and_validator_errors_latch_writes(self):
+        scenario = status_scenario("full-classified-ready")
+
+        class RawResponse(object):
+            def __init__(self, payload):
+                self.status = 200
+                self.reason = "OK"
+                self.payload = payload
+
+            def read(self, _size):
+                return self.payload
+
+        def assert_contract_failure(label, endpoint, response, max_bytes=None):
+            FakeConnection.requests = []
+            FakeConnection.responses = []
+            client = self._client()
+            if endpoint == "status":
+                self._response(copy.deepcopy(scenario["capabilities"]))
+                client.capabilities(required_domains=["acl"])
+            if max_bytes is not None:
+                client.max_response_bytes = max_bytes
+            FakeConnection.responses.append(response)
+            if endpoint == "status":
+                callback = client.status
+            else:
+                callback = lambda: client.capabilities(
+                    required_domains=["acl"]
+                )
+            error = self._capture_exception(callback)
+            client.max_response_bytes = 1048576
+            write_error, requests_before, requests_after = (
+                self._assert_latched_write(client)
+            )
+            with self.subTest(case=label):
+                self.assertIsInstance(error, LocalApiContractError)
+                self.assertIsInstance(write_error, LocalApiContractError)
+                self.assertEqual(requests_before, requests_after)
+
+        for endpoint in ("capabilities", "status"):
+            assert_contract_failure(
+                "malformed-%s-json" % endpoint,
+                endpoint,
+                FakeResponse(200, "OK", "{bad-json"),
+            )
+            assert_contract_failure(
+                "oversized-%s" % endpoint,
+                endpoint,
+                FakeResponse(
+                    200,
+                    "OK",
+                    copy.deepcopy(
+                        scenario[
+                            "status" if endpoint == "status" else "capabilities"
+                        ]
+                    ),
+                ),
+                max_bytes=8,
+            )
+            assert_contract_failure(
+                "invalid-utf8-%s" % endpoint,
+                endpoint,
+                RawResponse(b"\xff"),
+            )
+
+        nested_payload = copy.deepcopy(scenario["capabilities"])
+        nested_payload["supported_domains"] = [{}]
+        assert_contract_failure(
+            "nested-capabilities-type",
+            "capabilities",
+            FakeResponse(200, "OK", nested_payload),
+        )
+
+        timeout_client = LocalClient(
+            "/tmp/aria-agent.sock",
+            timeout=1.0,
+            connection_factory=TimeoutConnection,
+        )
+        timeout_error = self._capture_exception(
+            lambda: timeout_client.capabilities(required_domains=["acl"])
+        )
+        self.assertIsInstance(timeout_error, LocalApiTimeoutError)
+        self.assertNotIsInstance(timeout_error, LocalApiContractError)
+
+        FakeConnection.requests = []
+        FakeConnection.responses = [FakeResponse(503, "Unavailable", "not-json")]
+        response_client = self._client()
+        response_error = self._capture_exception(
+            lambda: response_client.capabilities(required_domains=["acl"])
+        )
+        self.assertIsInstance(response_error, LocalApiResponseError)
+        self.assertNotIsInstance(response_error, LocalApiContractError)
+
+    def test_fresh_client_requires_handshake_before_every_mutation(self):
+        direct_mutations = [
+            (
+                "full-snapshot",
+                lambda client: client.put_snapshot(self._snapshot()),
+                {"generation": 43, "results": []},
+                "PUT",
+            ),
+            (
+                "delete-port",
+                lambda client: client.delete_port("port-a"),
+                {"port_id": "port-a", "status": "not_found"},
+                "DELETE",
+            ),
+            (
+                "recover-pending",
+                lambda client: client.recover_pending_snapshot(
+                    43,
+                    "hash-pending-43",
+                ),
+                {"status": "recovered", "recovered_generation": 43},
+                "POST",
+            ),
+        ]
+
+        for label, mutate, response, _method in direct_mutations:
+            FakeConnection.requests = []
+            FakeConnection.responses = []
+            client = self._client()
+            self._response(response)
+
+            _value, error = self._capture(lambda: mutate(client))
+
+            with self.subTest(fresh=label):
+                self.assertIsInstance(error, LocalApiContractError)
+                self.assertEqual([], FakeConnection.requests)
+
+        for scenario_id in ("full-classified-ready", "legacy-v0-ready"):
+            scenario = status_scenario(scenario_id)
+            for label, mutate, response, method in direct_mutations:
+                FakeConnection.requests = []
+                FakeConnection.responses = []
+                client = self._client()
+                self._response(copy.deepcopy(scenario["capabilities"]))
+                self._response(response)
+
+                client.capabilities(required_domains=["acl"])
+                value, error = self._capture(lambda: mutate(client))
+
+                with self.subTest(handshake=scenario_id, mutation=label):
+                    self.assertEqual(None, error)
+                    self.assertIsNotNone(value)
+                    self.assertEqual(
+                        ["GET", method],
+                        [request["method"] for request in FakeConnection.requests],
+                    )
+
+        scoped = status_scenario("full-classified-ready")
+        FakeConnection.requests = []
+        FakeConnection.responses = []
+        client = self._client()
+        self._response(copy.deepcopy(scoped["capabilities"]))
+        self._response({"generation": 43, "results": []})
+
+        response, error = self._capture(lambda: client.put_port_snapshot(
+            "port-a",
+            {
+                "generation": 43,
+                "host": "ostack2",
+                "ports": [{"port_id": "port-a", "ifname": "tap-port-a"}],
+            },
+            required_domains=["acl"],
+        ))
+
+        self.assertEqual(None, error)
+        self.assertEqual(43, response["generation"])
+        self.assertEqual(
+            ["GET", "PUT"],
+            [request["method"] for request in FakeConnection.requests],
+        )
+
+    def test_recover_pending_validates_present_v1_diagnostics_before_post(self):
+        scenario = status_scenario("blocked-recoverable-inventory")
+        generation_zero = copy.deepcopy(scenario["status"])
+        generation_zero.update({
+            "last_classified_generation": 0,
+            "generation": 0,
+            "applied_generation": 0,
+            "applied_desired_hash": None,
+            "managed_ports": [],
+            "port_statuses": [],
+            "active_instances": [],
+        })
+        managed_only = copy.deepcopy(scenario["status"])
+        managed_only["port_statuses"] = []
+        status_only = copy.deepcopy(scenario["status"])
+        status_only["managed_ports"] = []
+
+        for label, payload in (
+            ("generation-zero-empty", generation_zero),
+            ("managed-only", managed_only),
+            ("status-only", status_only),
+        ):
+            _client, decoded, error = self._decode(
+                scenario["capabilities"],
+                payload,
+            )
+            with self.subTest(valid=label):
+                self.assertEqual(None, error)
+                self.assertEqual("recover_pending", decoded["required_action"])
+
+        invalid_cases = []
+        unknown_port_status = copy.deepcopy(scenario["status"])
+        unknown_port_status["port_statuses"][0]["status"] = "mystery"
+        invalid_cases.append(("port-status", unknown_port_status))
+
+        unknown_domain_status = copy.deepcopy(scenario["status"])
+        unknown_domain_status["port_statuses"][0]["domains"][0][
+            "status"
+        ] = "mystery"
+        invalid_cases.append(("domain-status", unknown_domain_status))
+
+        unknown_action = copy.deepcopy(scenario["status"])
+        unknown_action["port_statuses"][0]["domains"][0][
+            "effective_action"
+        ] = "mystery"
+        invalid_cases.append(("effective-action", unknown_action))
+
+        unknown_support = copy.deepcopy(scenario["status"])
+        unknown_support["port_statuses"][0]["domains"][0][
+            "support_disposition"
+        ] = "mystery"
+        invalid_cases.append(("support-disposition", unknown_support))
+
+        malformed_managed = copy.deepcopy(scenario["status"])
+        malformed_managed["managed_ports"] = [{}]
+        invalid_cases.append(("managed-row", malformed_managed))
+
+        for label, payload in invalid_cases:
+            client, _decoded, status_error = self._decode(
+                scenario["capabilities"],
+                payload,
+            )
+            requests_before = len(FakeConnection.requests)
+            self._response({"status": "recovered"})
+            _value, recovery_error = self._capture(
+                lambda: client.recover_pending_snapshot(
+                    payload["pending_generation"],
+                    payload["desired_hash"],
+                )
+            )
+            requests_after = len(FakeConnection.requests)
+            FakeConnection.responses = []
+
+            with self.subTest(invalid=label):
+                self.assertIsInstance(status_error, LocalApiContractError)
+                self.assertIsInstance(recovery_error, LocalApiContractError)
+                self.assertEqual(requests_before, requests_after)
+
+    def test_historical_row_hash_must_be_trimmed_and_latches_writes(self):
+        scenario = status_scenario("scoped-classified-ready")
+
+        _client, decoded, positive_error = self._decode(
+            scenario["capabilities"],
+            copy.deepcopy(scenario["status"]),
+        )
+        self.assertEqual(None, positive_error)
+        self.assertEqual("classified", decoded["transaction_state"])
+
+        padded = copy.deepcopy(scenario["status"])
+        older_row = next(
+            row for row in padded["port_statuses"]
+            if row["generation"] < padded["applied_generation"]
+        )
+        older_row["desired_hash"] = " %s " % older_row["desired_hash"]
+
+        client, _decoded, status_error = self._decode(
+            scenario["capabilities"],
+            padded,
+        )
+        write_error, requests_before, requests_after = (
+            self._assert_latched_write(client)
+        )
+
+        self.assertIsInstance(status_error, LocalApiContractError)
+        self.assertIsInstance(write_error, LocalApiContractError)
+        self.assertEqual(requests_before, requests_after)
 
 
 if __name__ == "__main__":

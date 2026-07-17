@@ -49,6 +49,80 @@ def _int_value(value, default=0):
         return default
 
 
+def _state_defaults():
+    """Return a fresh state payload with legacy and explicit track fields."""
+    return {
+        "schema_version": STATE_SCHEMA_VERSION,
+        "last_generation": 0,
+        "last_desired_hash": None,
+        "last_projected_port_ids": [],
+        "last_classified_generation": 0,
+        "last_classified_desired_hash": None,
+        "last_classified_projected_port_ids": [],
+        "last_feature_ready_generation": 0,
+        "last_feature_ready_desired_hash": None,
+        "last_feature_ready_projected_port_ids": [],
+        "last_feature_ready_generation_by_domain": {},
+        "pending_generation": None,
+        "pending_desired_hash": None,
+        "pending_snapshot_ports": 0,
+        "pending_projected_port_ids": [],
+        "pending_since": None,
+        "last_snapshot_ports": 0,
+        "last_managed_ports": 0,
+        "last_committed_at": None,
+        "pending_delete_port_id": None,
+        "pending_delete_reason": None,
+        "pending_delete_since": None,
+        "last_deleted_port_id": None,
+        "last_delete_committed_at": None,
+        "last_cleared_pending_generation": None,
+        "last_cleared_pending_desired_hash": None,
+        "last_cleared_pending_reason": None,
+        "last_cleared_pending_at": None,
+        "updated_at": None,
+    }
+
+
+def _normalize_state(payload):
+    """Migrate version-1 legacy state into the two explicit live tracks."""
+    payload = payload or {}
+    legacy_generation = payload.get(
+        "last_generation",
+        payload.get("last_feature_ready_generation", 0),
+    )
+    legacy_desired_hash = payload.get(
+        "last_desired_hash",
+        payload.get("last_feature_ready_desired_hash"),
+    )
+    legacy_projected_port_ids = list(
+        payload.get(
+            "last_projected_port_ids",
+            payload.get("last_feature_ready_projected_port_ids") or [],
+        ) or []
+    )
+
+    payload.setdefault("last_classified_generation", legacy_generation)
+    payload.setdefault("last_classified_desired_hash", legacy_desired_hash)
+    payload.setdefault(
+        "last_classified_projected_port_ids",
+        list(legacy_projected_port_ids),
+    )
+    payload.setdefault("last_feature_ready_generation", legacy_generation)
+    payload.setdefault("last_feature_ready_desired_hash", legacy_desired_hash)
+    payload.setdefault(
+        "last_feature_ready_projected_port_ids",
+        list(legacy_projected_port_ids),
+    )
+    payload.setdefault("last_feature_ready_generation_by_domain", {})
+
+    defaults = _state_defaults()
+    for key, value in defaults.items():
+        if key not in payload:
+            payload[key] = copy.deepcopy(value)
+    return payload
+
+
 def _projected_port_ids(snapshot):
     ports = snapshot.get("ports") or []
     return sorted([
@@ -80,13 +154,23 @@ class SnapshotStateStore(object):
         self.path = os.path.join(self.state_dir, filename)
         self._state = self._load()
 
-    def prepare_snapshot(self, snapshot, minimum_generation=0):
+    def prepare_snapshot(
+        self,
+        snapshot,
+        minimum_generation=0,
+        force_new_generation=False,
+    ):
         minimum_generation = _int_value(minimum_generation)
         desired_hash = desired_snapshot_hash(snapshot)
         pending_generation = _int_value(self._state.get("pending_generation"))
         pending_hash = self._state.get("pending_desired_hash")
-        generation = self._select_generation(desired_hash, minimum_generation)
+        generation = self._select_generation(
+            desired_hash,
+            minimum_generation,
+            force_new_generation=force_new_generation,
+        )
         reused_pending = bool(
+            not force_new_generation and
             pending_generation and
             pending_hash == desired_hash and
             pending_generation == generation
@@ -129,20 +213,30 @@ class SnapshotStateStore(object):
             "reused_pending": reused_pending,
         }
 
-    def prepare_scoped_snapshot(self, snapshot, minimum_generation=0):
+    def prepare_scoped_snapshot(
+        self,
+        snapshot,
+        minimum_generation=0,
+        force_new_generation=False,
+    ):
         minimum_generation = _int_value(minimum_generation)
         desired_hash = desired_snapshot_hash(snapshot)
         pending_generation = _int_value(self._state.get("pending_generation"))
         pending_hash = self._state.get("pending_desired_hash")
-        generation = self._select_generation(desired_hash, minimum_generation)
+        generation = self._select_generation(
+            desired_hash,
+            minimum_generation,
+            force_new_generation=force_new_generation,
+        )
         reused_pending = bool(
+            not force_new_generation and
             pending_generation and
             pending_hash == desired_hash and
             pending_generation == generation
         )
         projected_port_ids = _scoped_projected_port_ids(
             snapshot,
-            self._state.get("last_projected_port_ids") or [],
+            self._state.get("last_classified_projected_port_ids") or [],
         )
         self._state["pending_generation"] = generation
         self._state["pending_desired_hash"] = desired_hash
@@ -160,35 +254,127 @@ class SnapshotStateStore(object):
             "reused_pending": reused_pending,
         }
 
-    def commit_snapshot(self, generation, desired_hash, snapshot_ports=0, managed_ports=0):
-        generation = _int_value(generation)
-        self._state["last_generation"] = generation
-        self._state["last_desired_hash"] = desired_hash
-        self._state["last_snapshot_ports"] = int(snapshot_ports or 0)
-        self._state["last_managed_ports"] = int(managed_ports or 0)
-        self._state["last_projected_port_ids"] = list(
-            self._state.get("pending_projected_port_ids") or []
-        )
-        self._state["last_committed_at"] = _now()
-        if (
+    def _pending_matches(self, generation, desired_hash):
+        return bool(
             _int_value(self._state.get("pending_generation")) == generation and
             self._state.get("pending_desired_hash") == desired_hash
-        ):
-            self._state["pending_generation"] = None
-            self._state["pending_desired_hash"] = None
-            self._state["pending_snapshot_ports"] = 0
-            self._state["pending_projected_port_ids"] = []
-            self._state["pending_since"] = None
-        self._state["updated_at"] = _now()
-        self._write()
+        )
 
-    def clear_pending_snapshot(self, reason=None):
-        pending = self.pending_snapshot()
+    def _clear_pending_fields(self):
         self._state["pending_generation"] = None
         self._state["pending_desired_hash"] = None
         self._state["pending_snapshot_ports"] = 0
         self._state["pending_projected_port_ids"] = []
         self._state["pending_since"] = None
+
+    def _clear_pending_if_matches(self, generation, desired_hash):
+        if not self._pending_matches(generation, desired_hash):
+            return False
+        self._clear_pending_fields()
+        return True
+
+    def _update_classified_track(
+        self,
+        generation,
+        desired_hash,
+        projected_port_ids,
+    ):
+        self._state["last_classified_generation"] = generation
+        self._state["last_classified_desired_hash"] = desired_hash
+        self._state["last_classified_projected_port_ids"] = list(
+            projected_port_ids or []
+        )
+
+    def _update_feature_ready_track(
+        self,
+        generation,
+        desired_hash,
+        projected_port_ids,
+        feature_ready_domains=None,
+    ):
+        self._state["last_feature_ready_generation"] = generation
+        self._state["last_feature_ready_desired_hash"] = desired_hash
+        self._state["last_feature_ready_projected_port_ids"] = list(
+            projected_port_ids or []
+        )
+        history = dict(
+            self._state.get("last_feature_ready_generation_by_domain") or {}
+        )
+        for domain in feature_ready_domains or []:
+            if domain:
+                history[domain] = generation
+        self._state["last_feature_ready_generation_by_domain"] = history
+
+    def _update_legacy_ready_aliases(
+        self,
+        generation,
+        desired_hash,
+        projected_port_ids,
+    ):
+        self._state["last_generation"] = generation
+        self._state["last_desired_hash"] = desired_hash
+        self._state["last_projected_port_ids"] = list(projected_port_ids or [])
+
+    def commit_snapshot(
+        self,
+        generation,
+        desired_hash,
+        snapshot_ports=0,
+        managed_ports=0,
+        feature_ready_domains=None,
+    ):
+        generation = _int_value(generation)
+        projected_port_ids = list(
+            self._state.get("pending_projected_port_ids") or []
+        )
+        self._update_classified_track(
+            generation,
+            desired_hash,
+            projected_port_ids,
+        )
+        self._update_feature_ready_track(
+            generation,
+            desired_hash,
+            projected_port_ids,
+            feature_ready_domains=feature_ready_domains,
+        )
+        self._update_legacy_ready_aliases(
+            generation,
+            desired_hash,
+            projected_port_ids,
+        )
+        self._state["last_snapshot_ports"] = int(snapshot_ports or 0)
+        self._state["last_managed_ports"] = int(managed_ports or 0)
+        self._state["last_committed_at"] = _now()
+        self._clear_pending_if_matches(generation, desired_hash)
+        self._state["updated_at"] = _now()
+        self._write()
+
+    def commit_classified_snapshot(
+        self,
+        generation,
+        desired_hash,
+        snapshot_ports=0,
+        managed_ports=0,
+    ):
+        generation = _int_value(generation)
+        projected_port_ids = list(
+            self._state.get("pending_projected_port_ids") or []
+        )
+        self._update_classified_track(
+            generation,
+            desired_hash,
+            projected_port_ids,
+        )
+        self._state["last_snapshot_ports"] = int(snapshot_ports or 0)
+        self._state["last_managed_ports"] = int(managed_ports or 0)
+        self._clear_pending_if_matches(generation, desired_hash)
+        self._state["updated_at"] = _now()
+        self._write()
+
+    def clear_pending_snapshot(self, reason=None):
+        pending = self.pending_snapshot()
+        self._clear_pending_fields()
         if pending:
             self._state["last_cleared_pending_generation"] = pending["generation"]
             self._state["last_cleared_pending_desired_hash"] = pending["desired_hash"]
@@ -198,31 +384,125 @@ class SnapshotStateStore(object):
         self._write()
         return pending
 
-    def commit_scoped_snapshot(self, generation, desired_hash, managed_ports=0):
+    def commit_scoped_snapshot(
+        self,
+        generation,
+        desired_hash,
+        managed_ports=0,
+        feature_ready_domains=None,
+    ):
         generation = _int_value(generation)
-        self._state["last_generation"] = generation
-        self._state["last_desired_hash"] = desired_hash
+        if self._pending_matches(generation, desired_hash):
+            projected_port_ids = list(
+                self._state.get("pending_projected_port_ids") or []
+            )
+        else:
+            projected_port_ids = list(
+                self._state.get("last_classified_projected_port_ids") or []
+            )
+        self._update_classified_track(
+            generation,
+            desired_hash,
+            projected_port_ids,
+        )
+        self._update_feature_ready_track(
+            generation,
+            desired_hash,
+            projected_port_ids,
+            feature_ready_domains=feature_ready_domains,
+        )
+        self._update_legacy_ready_aliases(
+            generation,
+            desired_hash,
+            projected_port_ids,
+        )
         self._state["last_snapshot_ports"] = (
             _int_value(self._state.get("pending_snapshot_ports")) or
             _int_value(self._state.get("last_snapshot_ports"))
         )
         self._state["last_managed_ports"] = int(managed_ports or 0)
-        self._state["last_projected_port_ids"] = list(
-            self._state.get("pending_projected_port_ids") or
-            self._state.get("last_projected_port_ids") or []
-        )
         self._state["last_committed_at"] = _now()
-        if (
-            _int_value(self._state.get("pending_generation")) == generation and
-            self._state.get("pending_desired_hash") == desired_hash
-        ):
-            self._state["pending_generation"] = None
-            self._state["pending_desired_hash"] = None
-            self._state["pending_snapshot_ports"] = 0
-            self._state["pending_projected_port_ids"] = []
-            self._state["pending_since"] = None
+        self._clear_pending_if_matches(generation, desired_hash)
         self._state["updated_at"] = _now()
         self._write()
+
+    def commit_classified_scoped_snapshot(
+        self,
+        generation,
+        desired_hash,
+        managed_ports=0,
+    ):
+        generation = _int_value(generation)
+        if self._pending_matches(generation, desired_hash):
+            projected_port_ids = list(
+                self._state.get("pending_projected_port_ids") or []
+            )
+        else:
+            projected_port_ids = list(
+                self._state.get("last_classified_projected_port_ids") or []
+            )
+        self._update_classified_track(
+            generation,
+            desired_hash,
+            projected_port_ids,
+        )
+        self._state["last_snapshot_ports"] = (
+            _int_value(self._state.get("pending_snapshot_ports")) or
+            _int_value(self._state.get("last_snapshot_ports"))
+        )
+        self._state["last_managed_ports"] = int(managed_ports or 0)
+        self._clear_pending_if_matches(generation, desired_hash)
+        self._state["updated_at"] = _now()
+        self._write()
+
+    def realign_classified_snapshot(
+        self,
+        generation,
+        desired_hash,
+        projected_port_ids,
+        recovered_pending_generation=None,
+        recovered_pending_desired_hash=None,
+    ):
+        generation = _int_value(generation)
+        self._update_classified_track(
+            generation,
+            desired_hash,
+            projected_port_ids,
+        )
+        recovered_pending_generation = _int_value(
+            recovered_pending_generation
+        )
+        if (
+            recovered_pending_generation and
+            recovered_pending_desired_hash is not None
+        ):
+            self._clear_pending_if_matches(
+                recovered_pending_generation,
+                recovered_pending_desired_hash,
+            )
+        self._state["updated_at"] = _now()
+        self._write()
+
+    def feature_ready_history(self):
+        return copy.deepcopy({
+            "last_classified_generation": _int_value(
+                self._state.get("last_classified_generation")
+            ),
+            "last_feature_ready_generation": _int_value(
+                self._state.get("last_feature_ready_generation")
+            ),
+            "last_feature_ready_desired_hash": self._state.get(
+                "last_feature_ready_desired_hash"
+            ),
+            "last_feature_ready_projected_port_ids": list(
+                self._state.get("last_feature_ready_projected_port_ids") or []
+            ),
+            "last_feature_ready_generation_by_domain": dict(
+                self._state.get(
+                    "last_feature_ready_generation_by_domain"
+                ) or {}
+            ),
+        })
 
     def prepare_delete(self, port_id, reason=None):
         self._state["pending_delete_port_id"] = port_id
@@ -241,10 +521,11 @@ class SnapshotStateStore(object):
             self._state["pending_delete_reason"] = None
             self._state["pending_delete_since"] = None
         projected = [
-            projected for projected in self._state.get("last_projected_port_ids") or []
+            projected for projected in
+            self._state.get("last_classified_projected_port_ids") or []
             if projected != port_id
         ]
-        self._state["last_projected_port_ids"] = projected
+        self._state["last_classified_projected_port_ids"] = projected
         self._state["last_deleted_port_id"] = port_id
         self._state["last_delete_committed_at"] = _now()
         self._state["updated_at"] = _now()
@@ -276,32 +557,64 @@ class SnapshotStateStore(object):
         }
 
     def last_projected_port_ids(self):
-        return list(self._state.get("last_projected_port_ids") or [])
+        return list(
+            self._state.get("last_classified_projected_port_ids") or []
+        )
 
     def to_dict(self):
         return copy.deepcopy(self._state)
 
-    def _select_generation(self, desired_hash, minimum_generation=0):
+    def _select_generation(
+        self,
+        desired_hash,
+        minimum_generation=0,
+        force_new_generation=False,
+    ):
         minimum_generation = _int_value(minimum_generation)
         pending_generation = _int_value(self._state.get("pending_generation"))
         pending_hash = self._state.get("pending_desired_hash")
+        classified_generation = _int_value(
+            self._state.get("last_classified_generation")
+        )
+        classified_hash = self._state.get("last_classified_desired_hash")
+        feature_ready_generation = _int_value(
+            self._state.get("last_feature_ready_generation")
+        )
+        feature_ready_hash = self._state.get(
+            "last_feature_ready_desired_hash"
+        )
+        generation_floor = max(
+            classified_generation,
+            feature_ready_generation,
+            pending_generation,
+            minimum_generation,
+        )
+
+        if force_new_generation:
+            return generation_floor + 1
+
         if (
             pending_generation and
             pending_hash == desired_hash and
-            pending_generation >= minimum_generation
+            pending_generation >= generation_floor
         ):
             return pending_generation
 
-        last_generation = _int_value(self._state.get("last_generation"))
-        last_hash = self._state.get("last_desired_hash")
         if (
-            last_generation and
-            last_hash == desired_hash and
-            last_generation >= minimum_generation
+            classified_generation and
+            classified_hash == desired_hash and
+            classified_generation >= generation_floor
         ):
-            return last_generation
+            return classified_generation
 
-        return max(last_generation, pending_generation, minimum_generation) + 1
+        if (
+            feature_ready_generation and
+            feature_ready_hash == desired_hash and
+            feature_ready_generation >= generation_floor
+        ):
+            return feature_ready_generation
+
+        return generation_floor + 1
 
     def _load(self):
         try:
@@ -311,29 +624,7 @@ class SnapshotStateStore(object):
             if exc.errno != errno.ENOENT:
                 raise
             payload = {}
-        payload.setdefault("schema_version", STATE_SCHEMA_VERSION)
-        payload.setdefault("last_generation", 0)
-        payload.setdefault("last_desired_hash", None)
-        payload.setdefault("pending_generation", None)
-        payload.setdefault("pending_desired_hash", None)
-        payload.setdefault("pending_snapshot_ports", 0)
-        payload.setdefault("pending_projected_port_ids", [])
-        payload.setdefault("pending_since", None)
-        payload.setdefault("last_snapshot_ports", 0)
-        payload.setdefault("last_managed_ports", 0)
-        payload.setdefault("last_projected_port_ids", [])
-        payload.setdefault("last_committed_at", None)
-        payload.setdefault("pending_delete_port_id", None)
-        payload.setdefault("pending_delete_reason", None)
-        payload.setdefault("pending_delete_since", None)
-        payload.setdefault("last_deleted_port_id", None)
-        payload.setdefault("last_delete_committed_at", None)
-        payload.setdefault("last_cleared_pending_generation", None)
-        payload.setdefault("last_cleared_pending_desired_hash", None)
-        payload.setdefault("last_cleared_pending_reason", None)
-        payload.setdefault("last_cleared_pending_at", None)
-        payload.setdefault("updated_at", None)
-        return payload
+        return _normalize_state(payload)
 
     def _write(self):
         try:
@@ -370,30 +661,7 @@ class InMemorySnapshotStateStore(SnapshotStateStore):
         self._state = self._load()
 
     def _load(self):
-        payload = {}
-        payload.setdefault("schema_version", STATE_SCHEMA_VERSION)
-        payload.setdefault("last_generation", 0)
-        payload.setdefault("last_desired_hash", None)
-        payload.setdefault("pending_generation", None)
-        payload.setdefault("pending_desired_hash", None)
-        payload.setdefault("pending_snapshot_ports", 0)
-        payload.setdefault("pending_projected_port_ids", [])
-        payload.setdefault("pending_since", None)
-        payload.setdefault("last_snapshot_ports", 0)
-        payload.setdefault("last_managed_ports", 0)
-        payload.setdefault("last_projected_port_ids", [])
-        payload.setdefault("last_committed_at", None)
-        payload.setdefault("pending_delete_port_id", None)
-        payload.setdefault("pending_delete_reason", None)
-        payload.setdefault("pending_delete_since", None)
-        payload.setdefault("last_deleted_port_id", None)
-        payload.setdefault("last_delete_committed_at", None)
-        payload.setdefault("last_cleared_pending_generation", None)
-        payload.setdefault("last_cleared_pending_desired_hash", None)
-        payload.setdefault("last_cleared_pending_reason", None)
-        payload.setdefault("last_cleared_pending_at", None)
-        payload.setdefault("updated_at", None)
-        return payload
+        return _normalize_state({})
 
     def _write(self):
         return None
