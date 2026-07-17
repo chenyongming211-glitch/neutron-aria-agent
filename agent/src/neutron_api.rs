@@ -8256,6 +8256,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn neutron_wal_inventory_recovery_rejects_corrupt_nonzero_barrier_replay() {
+        let root = temp_root("inventory-recovery-corrupt-nonzero-barrier");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(220);
+        state
+            .wal
+            .append_snapshot_commit(previous.to_wal_state())
+            .expect("committed baseline should be durable");
+        let intent = PendingNeutronIntent {
+            kind: "snapshot".to_string(),
+            generation: 221,
+            desired_hash: Some("hash-221".to_string()),
+            port_ids: Vec::new(),
+            affected_domains: vec!["acl".to_string()],
+            affected_ports: Vec::new(),
+            recovery_cause: Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string()),
+        };
+        state
+            .wal
+            .append_snapshot_intent(
+                intent.generation,
+                intent.desired_hash.clone(),
+                intent.port_ids.clone(),
+                intent.affected_domains.clone(),
+                intent.affected_ports.clone(),
+                intent.recovery_cause.clone(),
+            )
+            .expect("protected inventory intent should be durable");
+        let mut blocked = previous.clone();
+        blocked.accepted_generation = intent.generation;
+        blocked.pending_generation = Some(intent.generation);
+        blocked.desired_hash = intent.desired_hash.clone();
+        blocked.authority_state = "blocked_recovery_required".to_string();
+        blocked.wal_status = INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string();
+        blocked.recovery_cause = Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE.to_string());
+        state
+            .wal
+            .append_verified_protected_inventory_commit(&intent, blocked.to_wal_state())
+            .expect("phase-one typed barrier should be durable");
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = blocked.clone();
+        }
+
+        let wal_path = state
+            .registry
+            .base_state_path
+            .join("neutron-snapshot.wal");
+        let mut wal_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&wal_path)
+            .expect("WAL should be appendable for corruption fixture");
+        use std::io::Write as _;
+        wal_file
+            .write_all(b"{malformed-wal-tail\n")
+            .expect("corrupt WAL fixture should be written");
+        wal_file
+            .sync_all()
+            .expect("corrupt WAL fixture should be durable");
+        drop(wal_file);
+        let wal_before_recovery = std::fs::read(&wal_path).expect("WAL should be readable");
+        let replay_before = state.wal.replay();
+        assert_eq!(replay_before.status, "replayed_with_errors");
+        assert_eq!(replay_before.failures, 1);
+        assert_eq!(
+            replay_before.state.recovery_cause.as_deref(),
+            Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+        );
+
+        let request = NeutronRecoverPendingRequest {
+            expected_pending_generation: intent.generation,
+            expected_desired_hash: intent.desired_hash.clone(),
+            mode: None,
+        };
+        let error = recover_pending_snapshot(state.clone(), request.clone())
+            .await
+            .expect_err("corrupt barrier replay must veto phase-two recovery");
+
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code, "pending_recovery_commit_failed");
+        assert_eq!(
+            std::fs::read(&wal_path).expect("WAL should remain readable"),
+            wal_before_recovery
+        );
+        {
+            let runtime = state.runtime.read().await;
+            assert_eq!(runtime.to_wal_state(), blocked.to_wal_state());
+            assert_eq!(runtime.wal_status, INVENTORY_UNAVAILABLE_RECOVERY_CAUSE);
+            assert_eq!(runtime.wal_replay_failures, 0);
+        }
+        let replay_after = state.wal.replay();
+        assert_eq!(replay_after.status, "replayed_with_errors");
+        assert_eq!(replay_after.failures, 1);
+        assert_eq!(
+            replay_after.state.recovery_cause.as_deref(),
+            Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
+        );
+
+        drop(state);
+        let restarted = test_neutron_state(&root);
+        assert!(restarted.pending_recovery.is_none());
+        {
+            let runtime = restarted.runtime.read().await;
+            assert_eq!(runtime.to_wal_state(), blocked.to_wal_state());
+            assert_eq!(runtime.wal_status, "replayed_with_errors");
+            assert_eq!(runtime.wal_replay_failures, 1);
+        }
+        let restart_error = recover_pending_snapshot(restarted.clone(), request)
+            .await
+            .expect_err("restart must not route corrupt inventory recovery generically");
+        assert_eq!(restart_error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(restart_error.code, "pending_recovery_commit_failed");
+        assert_eq!(
+            std::fs::read(&wal_path).expect("WAL should remain readable"),
+            wal_before_recovery
+        );
+        {
+            let runtime = restarted.runtime.read().await;
+            assert_eq!(runtime.to_wal_state(), blocked.to_wal_state());
+            assert_eq!(runtime.wal_status, "replayed_with_errors");
+            assert_eq!(runtime.wal_replay_failures, 1);
+        }
+        drop(restarted);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn neutron_snapshot_submit_wal_intent_failure_keeps_runtime_unaccepted() {
         let root = temp_root("submit-intent-failure");
         let invalid_state_path = root.join("not-a-directory");
