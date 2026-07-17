@@ -20,6 +20,7 @@ PYTHON_TEST_ROOT = os.path.join(
 
 
 RUST_TESTS = [
+    ["test", "--locked", "-p", "aria-core", "acl_projection_"],
     ["test", "--locked", "-p", "aria-api", "neutron_contract"],
     ["test", "--locked", "-p", "aria-agent", "neutron_wal"],
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_plan"],
@@ -2475,6 +2476,9 @@ def check_rust_uds_contract_source():
 
 def check_rust_stage_one_tests_present():
     print("==> checking Rust stage-one test sources")
+    projection_test = ["test", "--locked", "-p", "aria-core", "acl_projection_"]
+    if projection_test not in RUST_TESTS:
+        raise SystemExit("ERROR: managed ACL projection Rust test is not in Stage 1")
     _run_rust_function_body_parser_self_tests()
     _run_acl_map_helper_contract_mutation_self_tests()
     _run_acl_delete_semantics_mutation_self_tests()
@@ -2485,6 +2489,11 @@ def check_rust_stage_one_tests_present():
     abi_common_source = _read_repo_text(EBPF_ABI_PATH)
     ebpf_conntrack_source = _read_repo_text(EBPF_CONNTRACK_PATH)
     build_workflow_source = _read_repo_text(BUILD_WORKFLOW_PATH)
+    if (
+        "python3 ci/check_neutron_stage1.py --require-rust --rust-toolchain stable"
+        not in build_workflow_source
+    ):
+        raise SystemExit("ERROR: hosted Stage 1 Rust entry point is missing")
     control_plane_source = _read_repo_text(os.path.join("agent", "src", "control_plane.rs"))
     instance_source = _read_repo_text(os.path.join("agent", "src", "instance.rs"))
     main_source = _read_repo_text(os.path.join("agent", "src", "main.rs"))
@@ -3798,13 +3807,13 @@ def check_tc_acl_datapath_smoke_contract():
 
 
 def run_rust_tests(require_rust, toolchain):
+    if not require_rust:
+        print("SKIP: Rust stage-one contract tests require --require-rust")
+        return
     cargo = shutil.which("cargo")
     if not cargo:
         message = "cargo not found; Rust 04/07 contract tests were not executed"
-        if require_rust:
-            raise SystemExit("ERROR: %s" % message)
-        print("SKIP: %s" % message)
-        return
+        raise SystemExit("ERROR: %s" % message)
     for cmd in RUST_TESTS:
         prefix = [cargo]
         if toolchain:
@@ -3819,7 +3828,7 @@ def main():
     parser.add_argument(
         "--require-rust",
         action="store_true",
-        help="fail when cargo is unavailable instead of skipping Rust checks",
+        help="run Rust checks and fail when cargo is unavailable",
     )
     parser.add_argument(
         "--rust-toolchain",

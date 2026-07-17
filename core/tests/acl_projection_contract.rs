@@ -1,0 +1,506 @@
+use aria_core::ebpf_ops::{
+    compile_managed_group_projection, plan_projection_drift, CanonicalNetwork, CapturedProjection,
+    ManagedGroupProjection, ProjectionDirection, ProjectionDrift, ProjectionEntry,
+    ProjectionMutation,
+};
+use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
+use std::collections::BTreeSet;
+
+fn insert_group(state: &mut FirewallState, key: &str, id: u32, cidrs: &[&str]) {
+    state.groups.insert(
+        key.to_string(),
+        GroupInfo {
+            id,
+            name: key.to_string(),
+            cidrs: cidrs.iter().map(|cidr| (*cidr).to_string()).collect(),
+        },
+    );
+    state.next_group_id = state.next_group_id.max(id.saturating_add(1));
+}
+
+fn acl_rule(src_group_id: u32, dst_group_id: u32) -> RuleInfo {
+    RuleInfo {
+        name: Some(format!("acl-{src_group_id}-{dst_group_id}")),
+        src_group_id,
+        dst_group_id,
+        proto: 6,
+        action: 1,
+        ports: None,
+        bitmap_idx: None,
+        direction: 0,
+    }
+}
+
+fn qos_reference(name: &str, group_id: u32) -> QosRuleInfo {
+    QosRuleInfo {
+        group_name: name.to_string(),
+        group_id,
+        direction: 0,
+        rate_bps: 1_000_000,
+        burst_bytes: 64_000,
+        priority: 1,
+        mode: 0,
+    }
+}
+
+fn mirror_reference(name: &str, group_id: u32) -> MirrorRuleInfo {
+    MirrorRuleInfo {
+        src_group_name: name.to_string(),
+        src_group_id: group_id,
+        dst_group_name: "any".to_string(),
+        dst_group_id: 0,
+        proto: 0,
+        direction: 0,
+        target_iface: "mirror0".to_string(),
+        target_ifindex: 42,
+        is_global: false,
+    }
+}
+
+fn compile(state: &FirewallState) -> ManagedGroupProjection {
+    compile_managed_group_projection(state)
+        .unwrap_or_else(|error| panic!("projection should compile: {error}"))
+}
+
+fn compile_error(state: &FirewallState) -> String {
+    match compile_managed_group_projection(state) {
+        Ok(_) => panic!("projection unexpectedly compiled"),
+        Err(error) => error,
+    }
+}
+
+fn entry(cidr: &str, group_id: u32) -> ProjectionEntry {
+    ProjectionEntry::parse(cidr, group_id).expect("valid projection entry")
+}
+
+fn entries(entries: &[ProjectionEntry]) -> BTreeSet<(String, u32)> {
+    entries
+        .iter()
+        .map(|entry| (entry.network.to_string(), entry.group_id))
+        .collect()
+}
+
+fn has_entry(entries: &[ProjectionEntry], cidr: &str, group_id: u32) -> bool {
+    let expected = CanonicalNetwork::parse(cidr).expect("valid expected CIDR");
+    entries
+        .iter()
+        .any(|entry| entry.network == expected && entry.group_id == group_id)
+}
+
+#[test]
+fn acl_projection_uses_directional_rule_references_and_omits_group_zero() {
+    let mut state = FirewallState::default();
+    insert_group(&mut state, "src", 1, &["10.0.0.1/24"]);
+    insert_group(&mut state, "dst", 2, &["10.0.0.2/24"]);
+    insert_group(&mut state, "unused", 3, &["192.0.2.0/24"]);
+    state
+        .rules
+        .extend([acl_rule(1, 2), acl_rule(0, 2), acl_rule(1, 0)]);
+
+    let compiled = compile(&state);
+
+    assert_eq!(
+        entries(&compiled.acl_src),
+        entries(&[entry("10.0.0.0/24", 1)])
+    );
+    assert_eq!(
+        entries(&compiled.acl_dst),
+        entries(&[entry("10.0.0.0/24", 2)])
+    );
+    assert!(!compiled
+        .acl_src
+        .iter()
+        .chain(&compiled.acl_dst)
+        .any(|projected| projected.group_id == 0 || projected.group_id == 3));
+}
+
+#[test]
+fn acl_projection_is_reference_driven_instead_of_name_driven() {
+    let mut state = FirewallState::default();
+    insert_group(&mut state, "plain-local-name", 7, &["198.51.100.3/24"]);
+    state.rules.push(acl_rule(7, 0));
+
+    let compiled = compile(&state);
+
+    assert!(has_entry(&compiled.acl_src, "198.51.100.0/24", 7));
+    assert!(compiled.acl_dst.is_empty());
+}
+
+#[test]
+fn acl_projection_rejects_missing_duplicate_and_invalid_group_state() {
+    let mut missing = FirewallState::default();
+    missing.rules.push(acl_rule(41, 0));
+    let error = compile_error(&missing);
+    assert!(
+        error.to_ascii_lowercase().contains("missing") && error.contains("41"),
+        "{error}"
+    );
+
+    let mut duplicate = FirewallState::default();
+    insert_group(&mut duplicate, "duplicate-a", 7, &["10.0.0.0/24"]);
+    insert_group(&mut duplicate, "duplicate-b", 7, &["10.1.0.0/24"]);
+    duplicate.rules.push(acl_rule(7, 0));
+    let error = compile_error(&duplicate);
+    assert!(
+        error.to_ascii_lowercase().contains("duplicate") && error.contains('7'),
+        "{error}"
+    );
+
+    let mut invalid = FirewallState::default();
+    insert_group(&mut invalid, "invalid", 9, &["not-a-cidr"]);
+    let error = compile_error(&invalid);
+    assert!(
+        error.to_ascii_lowercase().contains("invalid") && error.contains("not-a-cidr"),
+        "{error}"
+    );
+}
+
+#[test]
+fn acl_projection_canonicalizes_ipv4_and_ipv6_host_bits_before_deduplication() {
+    let mut state = FirewallState::default();
+    insert_group(
+        &mut state,
+        "selector",
+        1,
+        &[
+            "10.0.0.1/24",
+            "10.0.0.254/24",
+            "2001:db8::1/64",
+            "2001:db8::ffff/64",
+        ],
+    );
+    state.rules.push(acl_rule(1, 0));
+
+    let compiled = compile(&state);
+
+    assert_eq!(compiled.acl_src.len(), 2);
+    assert!(has_entry(&compiled.acl_src, "10.0.0.0/24", 1));
+    assert!(has_entry(&compiled.acl_src, "2001:db8::/64", 1));
+}
+
+#[test]
+fn acl_projection_allows_same_owner_nesting_and_rejects_cross_owner_overlap() {
+    let mut same_owner = FirewallState::default();
+    insert_group(
+        &mut same_owner,
+        "selector",
+        1,
+        &[
+            "10.0.0.0/24",
+            "10.0.0.10/32",
+            "2001:db8::/64",
+            "2001:db8::10/128",
+        ],
+    );
+    same_owner.rules.push(acl_rule(1, 0));
+    assert_eq!(compile(&same_owner).acl_src.len(), 4);
+
+    let mut exact = FirewallState::default();
+    insert_group(&mut exact, "first", 1, &["10.0.0.1/24"]);
+    insert_group(&mut exact, "second", 2, &["10.0.0.2/24"]);
+    exact.rules.extend([acl_rule(1, 0), acl_rule(2, 0)]);
+    let error = compile_error(&exact);
+    assert!(
+        error.to_ascii_lowercase().contains("overlap")
+            || error.to_ascii_lowercase().contains("canonical"),
+        "{error}"
+    );
+
+    let mut nested = FirewallState::default();
+    insert_group(&mut nested, "broad", 3, &["2001:db8::/64"]);
+    insert_group(&mut nested, "narrow", 4, &["2001:db8::10/128"]);
+    nested.rules.extend([acl_rule(3, 0), acl_rule(4, 0)]);
+    let error = compile_error(&nested);
+    assert!(error.to_ascii_lowercase().contains("overlap"), "{error}");
+}
+
+#[test]
+fn acl_projection_general_precedence_handles_exact_and_specificity_cases() {
+    let mut exact = FirewallState::default();
+    insert_group(&mut exact, "acl", 10, &["10.0.0.0/24"]);
+    insert_group(&mut exact, "local", 20, &["10.0.0.0/24"]);
+    exact.rules.push(acl_rule(10, 0));
+    let compiled = compile(&exact);
+    assert!(has_entry(&compiled.acl_src, "10.0.0.0/24", 10));
+    assert!(has_entry(&compiled.general, "10.0.0.0/24", 20));
+    assert!(!has_entry(&compiled.general, "10.0.0.0/24", 10));
+
+    let mut broader_general = FirewallState::default();
+    insert_group(&mut broader_general, "acl", 10, &["10.0.0.10/32"]);
+    insert_group(&mut broader_general, "local", 20, &["10.0.0.0/24"]);
+    broader_general.rules.push(acl_rule(10, 0));
+    let compiled = compile(&broader_general);
+    assert!(!has_entry(&compiled.general, "10.0.0.10/32", 10));
+    assert!(has_entry(&compiled.acl_src, "10.0.0.10/32", 10));
+
+    let mut more_specific_general = FirewallState::default();
+    insert_group(&mut more_specific_general, "acl", 10, &["10.0.0.0/24"]);
+    insert_group(&mut more_specific_general, "local", 20, &["10.0.0.10/32"]);
+    more_specific_general.rules.push(acl_rule(10, 0));
+    let compiled = compile(&more_specific_general);
+    assert!(has_entry(&compiled.general, "10.0.0.0/24", 10));
+    assert!(has_entry(&compiled.general, "10.0.0.10/32", 20));
+}
+
+#[test]
+fn acl_projection_retains_non_conflicting_acl_only_general_observability() {
+    let mut state = FirewallState::default();
+    insert_group(&mut state, "acl", 10, &["10.0.0.0/24"]);
+    insert_group(&mut state, "local", 20, &["192.0.2.0/24"]);
+    state.rules.push(acl_rule(10, 0));
+
+    let compiled = compile(&state);
+
+    assert!(has_entry(&compiled.general, "10.0.0.0/24", 10));
+    assert!(has_entry(&compiled.general, "192.0.2.0/24", 20));
+}
+
+#[test]
+fn acl_projection_qos_and_mirror_refs_make_acl_groups_general_domain() {
+    let mut state = FirewallState::default();
+    insert_group(&mut state, "acl-qos", 30, &["10.1.0.0/24"]);
+    insert_group(&mut state, "local-qos", 20, &["10.1.0.0/24"]);
+    insert_group(&mut state, "acl-mirror", 40, &["10.2.0.0/24"]);
+    insert_group(&mut state, "local-mirror", 35, &["10.2.0.0/24"]);
+    state.rules.push(acl_rule(30, 40));
+    state.qos_rules.push(qos_reference("acl-qos", 30));
+    state.mirror_rules.push(mirror_reference("acl-mirror", 40));
+
+    let compiled = compile(&state);
+
+    assert!(has_entry(&compiled.general, "10.1.0.0/24", 30));
+    assert!(has_entry(&compiled.general, "10.2.0.0/24", 40));
+    assert!(has_entry(&compiled.acl_src, "10.1.0.0/24", 30));
+    assert!(has_entry(&compiled.acl_dst, "10.2.0.0/24", 40));
+}
+
+#[test]
+fn acl_projection_highest_id_exact_winner_is_insertion_order_independent() {
+    fn alias_state(order: &[(&str, u32)]) -> FirewallState {
+        let mut state = FirewallState::default();
+        for (name, id) in order {
+            insert_group(&mut state, name, *id, &["198.51.100.7/24"]);
+        }
+        state
+    }
+
+    let forward = compile(&alias_state(&[("low", 3), ("high", 9), ("middle", 5)]));
+    let reverse = compile(&alias_state(&[("middle", 5), ("high", 9), ("low", 3)]));
+
+    assert_eq!(forward, reverse);
+    assert_eq!(
+        entries(&forward.general),
+        entries(&[entry("198.51.100.0/24", 9)])
+    );
+}
+
+#[test]
+fn acl_projection_drift_recognizes_exact_more_specific_missing_and_general_legacy() {
+    let mut exact_state = FirewallState::default();
+    insert_group(&mut exact_state, "acl", 10, &["10.0.0.0/24"]);
+    insert_group(&mut exact_state, "local", 20, &["10.0.0.0/24"]);
+    exact_state.rules.push(acl_rule(10, 0));
+    let exact = compile(&exact_state);
+
+    let mut replaced = CapturedProjection::from(&exact);
+    replaced.acl_src = vec![entry("10.0.0.0/24", 20)];
+    assert!(matches!(
+        plan_projection_drift(&replaced, &exact, &exact),
+        ProjectionDrift::RepairRequired(_)
+    ));
+
+    let mut missing = CapturedProjection::from(&exact);
+    missing.acl_src.clear();
+    assert!(matches!(
+        plan_projection_drift(&missing, &exact, &exact),
+        ProjectionDrift::RepairRequired(_)
+    ));
+
+    let mut specific_state = FirewallState::default();
+    insert_group(&mut specific_state, "acl", 10, &["10.0.0.0/24"]);
+    insert_group(&mut specific_state, "local", 20, &["10.0.0.10/32"]);
+    specific_state.rules.push(acl_rule(10, 0));
+    let specific = compile(&specific_state);
+    let mut more_specific = CapturedProjection::from(&specific);
+    more_specific.acl_src.push(entry("10.0.0.10/32", 20));
+    assert!(matches!(
+        plan_projection_drift(&more_specific, &specific, &specific),
+        ProjectionDrift::RepairRequired(_)
+    ));
+
+    let mut excluded_state = FirewallState::default();
+    insert_group(&mut excluded_state, "acl", 10, &["2001:db8::10/128"]);
+    insert_group(&mut excluded_state, "local", 20, &["2001:db8::/64"]);
+    excluded_state.rules.push(acl_rule(10, 0));
+    let excluded = compile(&excluded_state);
+    let mut legacy_general = CapturedProjection::from(&excluded);
+    legacy_general
+        .general_src
+        .push(entry("2001:db8::10/128", 10));
+    legacy_general
+        .general_dst
+        .push(entry("2001:db8::10/128", 10));
+    match plan_projection_drift(&legacy_general, &excluded, &excluded) {
+        ProjectionDrift::RepairRequired(plan) => {
+            let deleted_directions: BTreeSet<ProjectionDirection> = plan
+                .general_mutations
+                .iter()
+                .filter_map(|mutation| match mutation {
+                    ProjectionMutation::Deleted {
+                        direction,
+                        entry: removed,
+                    } if removed == &entry("2001:db8::10/128", 10) => Some(*direction),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                deleted_directions,
+                BTreeSet::from([ProjectionDirection::Src, ProjectionDirection::Dst])
+            );
+        }
+        other => panic!("known general legacy entry must be repairable, got {other:?}"),
+    }
+
+    let mut exact_general_alias = CapturedProjection::from(&exact);
+    exact_general_alias.general_src = vec![entry("10.0.0.0/24", 10)];
+    exact_general_alias.general_dst = vec![entry("10.0.0.0/24", 10)];
+    match plan_projection_drift(&exact_general_alias, &exact, &exact) {
+        ProjectionDrift::RepairRequired(plan) => {
+            let replaced_directions: BTreeSet<ProjectionDirection> = plan
+                .general_mutations
+                .iter()
+                .filter_map(|mutation| match mutation {
+                    ProjectionMutation::Replaced {
+                        direction,
+                        network,
+                        old_group_id: 10,
+                        new_group_id: 20,
+                    } if network == &CanonicalNetwork::parse("10.0.0.0/24").unwrap() => {
+                        Some(*direction)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                replaced_directions,
+                BTreeSet::from([ProjectionDirection::Src, ProjectionDirection::Dst])
+            );
+        }
+        other => panic!("known exact general alias must be repairable, got {other:?}"),
+    }
+
+    let mut exact_general_missing = CapturedProjection::from(&exact);
+    exact_general_missing.general_src.clear();
+    exact_general_missing.general_dst.clear();
+    match plan_projection_drift(&exact_general_missing, &exact, &exact) {
+        ProjectionDrift::RepairRequired(plan) => {
+            let added_directions: BTreeSet<ProjectionDirection> = plan
+                .general_mutations
+                .iter()
+                .filter_map(|mutation| match mutation {
+                    ProjectionMutation::Added {
+                        direction,
+                        entry: added,
+                    } if added == &entry("10.0.0.0/24", 20) => Some(*direction),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                added_directions,
+                BTreeSet::from([ProjectionDirection::Src, ProjectionDirection::Dst])
+            );
+        }
+        other => panic!("known exact general deletion must be repairable, got {other:?}"),
+    }
+}
+
+#[test]
+fn acl_projection_drift_distinguishes_clean_and_fatal_runtime() {
+    let mut state = FirewallState::default();
+    insert_group(&mut state, "acl", 10, &["10.0.0.0/24"]);
+    state.rules.push(acl_rule(10, 0));
+    let committed = compile(&state);
+
+    let clean = CapturedProjection::from(&committed);
+    assert!(matches!(
+        plan_projection_drift(&clean, &committed, &committed),
+        ProjectionDrift::Clean
+    ));
+
+    let mut unknown = CapturedProjection::from(&committed);
+    unknown.acl_src.push(entry("203.0.113.0/24", 999));
+    match plan_projection_drift(&unknown, &committed, &committed) {
+        ProjectionDrift::Fatal(message) => assert!(
+            message.contains("999") || message.to_ascii_lowercase().contains("unknown"),
+            "{message}"
+        ),
+        other => panic!("unknown runtime key/value must be fatal, got {other:?}"),
+    }
+
+    let mut unknown_value = CapturedProjection::from(&committed);
+    unknown_value.acl_src = vec![entry("10.0.0.0/24", 999)];
+    assert!(matches!(
+        plan_projection_drift(&unknown_value, &committed, &committed),
+        ProjectionDrift::Fatal(_)
+    ));
+
+    let mut unexplained_missing = CapturedProjection::from(&committed);
+    unexplained_missing.acl_src.clear();
+    assert!(matches!(
+        plan_projection_drift(&unexplained_missing, &committed, &committed),
+        ProjectionDrift::Fatal(_)
+    ));
+}
+
+#[test]
+fn acl_projection_drift_classifies_committed_then_repairs_directly_to_proposed() {
+    let mut committed_state = FirewallState::default();
+    insert_group(&mut committed_state, "acl", 10, &["10.0.0.0/24"]);
+    insert_group(&mut committed_state, "local", 20, &["10.0.0.0/24"]);
+    committed_state.rules.push(acl_rule(10, 0));
+    let committed = compile(&committed_state);
+
+    let mut captured = CapturedProjection::from(&committed);
+    captured.acl_src = vec![entry("10.0.0.0/24", 20)];
+
+    let mut proposed_state = committed_state;
+    proposed_state.groups.remove("local");
+    proposed_state
+        .groups
+        .get_mut("acl")
+        .expect("ACL group exists")
+        .cidrs = vec!["10.0.1.0/24".to_string()];
+    let proposed = compile(&proposed_state);
+    assert!(has_entry(&proposed.acl_src, "10.0.1.0/24", 10));
+
+    match plan_projection_drift(&captured, &committed, &proposed) {
+        ProjectionDrift::RepairRequired(plan) => {
+            let deleted_directions: BTreeSet<ProjectionDirection> = plan
+                .general_mutations
+                .iter()
+                .filter_map(|mutation| match mutation {
+                    ProjectionMutation::Deleted {
+                        direction,
+                        entry: removed,
+                    } if removed == &entry("10.0.0.0/24", 20) => Some(*direction),
+                    _ => None,
+                })
+                .collect();
+            let added_directions: BTreeSet<ProjectionDirection> = plan
+                .general_mutations
+                .iter()
+                .filter_map(|mutation| match mutation {
+                    ProjectionMutation::Added {
+                        direction,
+                        entry: added,
+                    } if added == &entry("10.0.1.0/24", 10) => Some(*direction),
+                    _ => None,
+                })
+                .collect();
+            let both = BTreeSet::from([ProjectionDirection::Src, ProjectionDirection::Dst]);
+            assert_eq!(deleted_directions, both);
+            assert_eq!(added_directions, both);
+        }
+        other => panic!("legacy drift plus proposed change must repair, got {other:?}"),
+    }
+}
