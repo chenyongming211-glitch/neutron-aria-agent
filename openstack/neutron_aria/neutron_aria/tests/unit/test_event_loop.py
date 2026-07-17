@@ -217,6 +217,41 @@ class FakeLocalClient(object):
         }
 
 
+class TerminalIdentityMismatchLocalClient(FakeLocalClient):
+    def __init__(self):
+        FakeLocalClient.__init__(self)
+        self.terminal_status_updates = {}
+        self._terminal_status_mutation_armed = False
+
+    def set_terminal_status_updates(self, **updates):
+        self.terminal_status_updates = dict(updates)
+
+    def put_snapshot(self, snapshot):
+        response = FakeLocalClient.put_snapshot(self, snapshot)
+        self._terminal_status_mutation_armed = bool(
+            self.terminal_status_updates
+        )
+        return response
+
+    def put_port_snapshot(self, port_id, snapshot, required_domains=None):
+        response = FakeLocalClient.put_port_snapshot(
+            self,
+            port_id,
+            snapshot,
+            required_domains=required_domains,
+        )
+        self._terminal_status_mutation_armed = bool(
+            self.terminal_status_updates
+        )
+        return response
+
+    def status(self):
+        status = FakeLocalClient.status(self)
+        if self._terminal_status_mutation_armed:
+            status.update(copy.deepcopy(self.terminal_status_updates))
+        return status
+
+
 class AdvancedGenerationLocalClient(FakeLocalClient):
     def status(self):
         if self.snapshots:
@@ -1338,6 +1373,49 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertGreater(local_client.status_calls, 1)
         self.assertEqual(set([port_id]), sync.projected_port_ids)
 
+    def test_full_resync_keeps_prior_state_when_accepted_generation_mismatches(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            neutron_ports = [{
+                "id": port_id,
+                "network_id": "net-1",
+                "revision_number": 7,
+                "device_owner": "compute:nova",
+                "binding:host_id": "ostack2",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+            }]
+            local_client = TerminalIdentityMismatchLocalClient()
+            sync = SnapshotSynchronizer(
+                "ostack2",
+                StaticPortSource(neutron_ports),
+                FakeOvsReader(),
+                local_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+            )
+            baseline = sync.full_resync()
+            baseline_hash = baseline["snapshot"]["desired_hash"]
+            local_client.set_terminal_status_updates(accepted_generation=3)
+            neutron_ports[0]["revision_number"] = 8
+
+            with self.assertRaises(LocalApiError) as ctx:
+                sync.full_resync()
+
+            state = SnapshotStateStore(state_dir).to_dict()
+            self.assertIn("accepted_generation", str(ctx.exception))
+            self.assertEqual(2, state["pending_generation"])
+            self.assertEqual(1, state["last_generation"])
+            self.assertEqual(baseline_hash, state["last_desired_hash"])
+            self.assertEqual([port_id], state["last_projected_port_ids"])
+            self.assertEqual(7, sync.projection_index.port(port_id).revision_number)
+            self.assertEqual(1, sync.runtime_status.last_generation)
+            self.assertEqual(baseline_hash, sync.runtime_status.last_desired_hash)
+            self.assertEqual(1, sync.runtime_status.accepted_generation)
+        finally:
+            shutil.rmtree(state_dir)
+
     def test_full_resync_keeps_pending_when_post_apply_status_is_unavailable(self):
         state_dir = tempfile.mkdtemp()
         try:
@@ -2335,6 +2413,45 @@ class EventLoopTestCase(unittest.TestCase):
                 self.assertEqual("failed", verdict)
                 self.assertIn("applied_generation", reason)
 
+    def test_terminal_status_requires_strict_accepted_generation(self):
+        snapshot = _ready_acl_snapshot()
+        port_id = snapshot["ports"][0]["port_id"]
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        missing = object()
+        expected_generation = snapshot["generation"]
+        for value in (
+            True,
+            False,
+            1.0,
+            1.9,
+            "1",
+            -1,
+            expected_generation - 1,
+            expected_generation + 1,
+            missing,
+        ):
+            with self.subTest(accepted_generation=value):
+                status = _terminal_status_for_snapshot(snapshot)
+                if value is missing:
+                    del status["accepted_generation"]
+                else:
+                    status["accepted_generation"] = value
+
+                verdict, reason = sync._snapshot_status_verdict(
+                    snapshot,
+                    set([port_id]),
+                    status,
+                )
+
+                self.assertEqual("failed", verdict)
+                self.assertIn("accepted_generation", reason)
+
     def test_terminal_status_rejects_malformed_authority_state(self):
         snapshot = _ready_acl_snapshot()
         port_id = snapshot["ports"][0]["port_id"]
@@ -2419,6 +2536,7 @@ class EventLoopTestCase(unittest.TestCase):
 
         snapshot = _ready_acl_snapshot()
         for field, path in (
+            ("desired_hash", ()),
             ("applied_desired_hash", ()),
             ("desired_hash", ("port_statuses", 0)),
         ):
@@ -2438,6 +2556,26 @@ class EventLoopTestCase(unittest.TestCase):
 
                     self.assertEqual("failed", verdict)
                     self.assertIn("desired_hash", reason)
+
+        missing_status_hash = _terminal_status_for_snapshot(snapshot)
+        del missing_status_hash["desired_hash"]
+        verdict, reason = sync._snapshot_status_verdict(
+            snapshot,
+            set([port_id]),
+            missing_status_hash,
+        )
+        self.assertEqual("failed", verdict)
+        self.assertIn("desired_hash", reason)
+
+        mismatched_status_hash = _terminal_status_for_snapshot(snapshot)
+        mismatched_status_hash["desired_hash"] = "different-hash"
+        verdict, reason = sync._snapshot_status_verdict(
+            snapshot,
+            set([port_id]),
+            mismatched_status_hash,
+        )
+        self.assertEqual("failed", verdict)
+        self.assertIn("desired_hash", reason)
 
     def test_terminal_status_rejects_duplicate_port_rows_in_any_order(self):
         snapshot = _ready_acl_snapshot()
@@ -3157,6 +3295,55 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertEqual(7, sync.projection_index.port(port_id).revision_number)
         self.assertFalse(sync.runtime_status.degraded)
         self.assertEqual("ready", sync.runtime_status.reason)
+
+    def test_scoped_snapshot_keeps_prior_state_when_status_hash_mismatches(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            port_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            neutron_ports = [{
+                "id": port_id,
+                "network_id": "net-1",
+                "revision_number": 7,
+                "device_owner": "compute:nova",
+                "binding:host_id": "ostack2",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+            }]
+            local_client = TerminalIdentityMismatchLocalClient()
+            sync = SnapshotSynchronizer(
+                "ostack2",
+                StaticPortSource(neutron_ports),
+                FakeOvsReader(),
+                local_client,
+                managed_domains=["acl"],
+                state_store=SnapshotStateStore(state_dir),
+            )
+            baseline = sync.full_resync()
+            baseline_hash = baseline["snapshot"]["desired_hash"]
+            local_client.set_terminal_status_updates(
+                desired_hash="mismatched-status-hash",
+            )
+            neutron_ports[0]["revision_number"] = 8
+
+            with self.assertRaises(LocalApiError) as ctx:
+                sync.apply_port_scoped_snapshot(
+                    port_id,
+                    binding_host="ostack2",
+                    revision_number=8,
+                )
+
+            state = SnapshotStateStore(state_dir).to_dict()
+            self.assertIn("desired_hash", str(ctx.exception))
+            self.assertEqual(2, state["pending_generation"])
+            self.assertEqual(1, state["last_generation"])
+            self.assertEqual(baseline_hash, state["last_desired_hash"])
+            self.assertEqual([port_id], state["last_projected_port_ids"])
+            self.assertEqual(7, sync.projection_index.port(port_id).revision_number)
+            self.assertEqual(1, sync.runtime_status.last_generation)
+            self.assertEqual(baseline_hash, sync.runtime_status.last_desired_hash)
+            self.assertEqual(1, sync.runtime_status.accepted_generation)
+        finally:
+            shutil.rmtree(state_dir)
 
     def test_apply_port_scoped_snapshot_keeps_prior_state_when_status_fails(self):
         state_dir = tempfile.mkdtemp()
