@@ -41,6 +41,7 @@ or an explicitly approved later phase.
 | `14-logging-level-governance.md` | Record Rust/Python agent logging-level governance, noisy-log demotion, SSL reconcile gating, and Kolla log routing cleanup. |
 | `15-acl-operator-ux-backlog.md` | Track read-only ACL operator UX improvements such as policy-with-rules and effective-port inspection commands. |
 | `16-versioned-rust-python-status-contract.md` | Define the independently versioned status projection, stable transaction/readiness/action vocabulary, rolling compatibility, and shared Rust-Python scenarios. |
+| `17-acl-selector-ownership-isolation.md` | Define rule-derived managed ACL selectors, conflict-aware general identity, ownership lifecycle, legacy-bank repair, replay/inventory migration, and CT-safe publication for `REVIEW-ACL-046`. |
 
 ## Refinement Order
 
@@ -69,6 +70,9 @@ or an explicitly approved later phase.
 14. Versioned Rust-Python status contract, after transaction truthfulness and
     before further ACL correctness work, so both runtimes share one recovery
     decision vocabulary and scenario source.
+15. ACL selector ownership isolation, after the status contract and before
+    direct ACL transaction unification, so managed ACL LPM maps are derived
+    only from final rule references and cannot shadow local general identity.
 
 ## Dependency Map
 
@@ -136,6 +140,11 @@ or an explicitly approved later phase.
   -> 05 truthful readiness and degraded projection
   -> 07 exact pending recovery identity and action
   -> 09 scoped failure must not bypass contract errors
+
+17 ACL selector ownership isolation
+  -> 08 hosted Rust/eBPF warning and release gates
+  -> 12 REVIEW-ACL-046 closure and privileged exact/more-specific evidence
+  -> REVIEW-ACL-057 direct ACL transaction adoption of the same projection
 ```
 
 ## Gate Mapping
@@ -155,6 +164,7 @@ or an explicitly approved later phase.
 | QoS next-phase entry | 11 | Q0 evidence is refreshed; QoS remains deferred until Q1/Q2 status and authority gates are accepted and Q4 decides shaping, policing-only, or unsupported/degraded behavior. |
 | ACL delivery performance | 07, 09, 10, 13 | 100/200-rule ACL changes must avoid duplicate generation churn, expose per-phase timing, prefer port-scoped/diff apply, and keep full-resync rollback. |
 | Logging governance | 06, 08, 09, 13, 14 | Production logs keep state transitions and failures visible while demoting high-frequency success paths, disabling non-product SSL noise in OpenStack mode, and avoiding duplicate Kolla log writes. |
+| ACL selector isolation | 08, 12, 17 | Managed ACL maps contain only direction-specific final-rule selectors; conflict-aware general identity and legacy repair prevent cross-domain shadowing before strict CT-safe publication. |
 
 ## Stage-One Verification
 
