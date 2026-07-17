@@ -4454,5 +4454,313 @@ class StatusContractEventLoopRedTestCase(unittest.TestCase):
                     )
 
 
+class StatusContractPythonGreenFocusedEventLoopTestCase(unittest.TestCase):
+    def _terminal_degraded_snapshot(self, scenario):
+        port_id = scenario["request_context"]["projected_port_ids"][0]
+        return {
+            "generation": scenario["request_context"]["expected_generation"],
+            "desired_hash": scenario["request_context"]["expected_desired_hash"],
+            "ports": [{
+                "port_id": port_id,
+                "ifname": "",
+                "eligible": True,
+                "managed_domains": ["acl"],
+                "acl": {
+                    "enabled": True,
+                    "status": "ready",
+                    "effective_action": "enforce",
+                },
+            }],
+        }
+
+    def _target_port_source(self):
+        return StaticPortSource([{
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "network_id": "net-a",
+            "revision_number": 8,
+            "device_owner": "compute:nova",
+            "binding:host_id": "ostack2",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+        }])
+
+    def _terminal_degraded_acl_index(self):
+        return EffectiveAclIndex(
+            policies=[{
+                "id": "policy-degraded",
+                "default_action": "allow",
+            }],
+            bindings=[{
+                "id": "binding-degraded",
+                "policy_id": "policy-degraded",
+                "target_type": "port",
+                "target_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            }],
+        )
+
+    def test_real_terminal_degraded_with_ready_authority_classifies_without_ready_commit(self):
+        scenario = status_scenario("classified-degraded-terminal")
+        scenario["status"]["authority_state"] = "ready"
+        state_store = InMemorySnapshotStateStore()
+        baseline = state_store.prepare_snapshot_at_generation(
+            {
+                "host": "ostack2",
+                "ports": [{
+                    "port_id": "port-old",
+                    "ifname": "tap-port-old",
+                    "eligible": True,
+                    "managed_domains": ["acl"],
+                }],
+            },
+            scenario["request_context"]["feature_ready_generation_before"],
+            desired_hash="ready-hash-43",
+        )
+        state_store.commit_snapshot(
+            baseline["generation"],
+            baseline["desired_hash"],
+            snapshot_ports=1,
+            managed_ports=1,
+        )
+        local_client = FixtureStatusLocalClient(scenario)
+        status_reporter = FakeStatusReporter()
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            self._target_port_source(),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+            status_reporter=status_reporter,
+            acl_index=self._terminal_degraded_acl_index(),
+        )
+
+        result = sync.safe_full_resync()
+        state = state_store.to_dict()
+
+        self.assertEqual(
+            scenario["status"]["last_classified_generation"],
+            state.get("last_classified_generation"),
+        )
+        self.assertEqual(
+            scenario["request_context"]["feature_ready_generation_before"],
+            state.get("last_feature_ready_generation"),
+        )
+        self.assertEqual("ready-hash-43", state.get("last_feature_ready_desired_hash"))
+        self.assertEqual(None, state_store.pending_snapshot())
+        self.assertFalse(result["status"]["ready"])
+        self.assertTrue(result["status"]["degraded"])
+        self.assertEqual(
+            scenario["request_context"]["feature_ready_generation_before"],
+            result["status"]["last_generation"],
+        )
+        self.assertEqual(1, len(local_client.snapshots))
+        self.assertEqual([], local_client.port_snapshots)
+        self.assertEqual([], local_client.deleted_ports)
+        self.assertEqual([], getattr(local_client, "recoveries", []))
+        self.assertEqual(1, len(status_reporter.statuses))
+
+    def test_classified_degraded_none_ignores_all_diagnostic_reason_shapes(self):
+        scenario = status_scenario("classified-degraded-terminal")
+        snapshot = self._terminal_degraded_snapshot(scenario)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        for label, reason in (
+            ("contains-full-resync", "operator requested full_resync manually"),
+            ("exact-rebuild-token", "runtime_rebuild_required"),
+            ("unrelated", "diagnostic text only"),
+        ):
+            status = copy.deepcopy(scenario["status"])
+            status["authority_state"] = "ready"
+            status["wal_status"] = "diagnostic_only"
+            status["port_statuses"][0]["reason"] = reason
+            status["port_statuses"][0]["domains"][0]["reason"] = reason
+
+            verdict, details = sync._snapshot_status_verdict(
+                snapshot,
+                set(scenario["request_context"]["projected_port_ids"]),
+                status,
+            )
+
+            with self.subTest(label=label):
+                self.assertEqual("classified_degraded", verdict, details)
+                self.assertEqual("none", status["required_action"])
+
+    def test_classified_degraded_full_resync_forces_newer_generation_independent_of_reason(self):
+        scenario = status_scenario("classified-degraded-full-resync")
+        status = copy.deepcopy(scenario["status"])
+        status["wal_status"] = "diagnostic_only"
+        status["port_statuses"][0]["reason"] = "unrelated diagnostic"
+        status["port_statuses"][0]["domains"][0]["reason"] = (
+            "unrelated diagnostic"
+        )
+        local_client = PublicV1ActionLocalClient(scenario, status=status)
+
+        class SameGenerationUnlessForcedStateStore(InMemorySnapshotStateStore):
+            def __init__(self, generation):
+                InMemorySnapshotStateStore.__init__(self)
+                self.generation = generation
+                self.force_new_generation_requests = []
+
+            def prepare_snapshot(
+                self,
+                snapshot,
+                minimum_generation=0,
+                force_new_generation=False,
+            ):
+                self.force_new_generation_requests.append(force_new_generation)
+                generation = self.generation + 1 if force_new_generation else self.generation
+                prepared = self.prepare_snapshot_at_generation(snapshot, generation)
+                prepared["reused_pending"] = False
+                return prepared
+
+        state_store = SameGenerationUnlessForcedStateStore(
+            status["last_classified_generation"]
+        )
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            local_client,
+            managed_domains=["acl"],
+            state_store=state_store,
+        )
+
+        result = sync.safe_full_resync()
+
+        self.assertEqual(["put_full_snapshot"], local_client.mutating_calls)
+        self.assertGreater(
+            result["snapshot"]["generation"],
+            status["last_classified_generation"],
+        )
+        self.assertIn(True, state_store.force_new_generation_requests)
+
+    def test_rebuild_looking_reason_cannot_make_unsafe_port_status_classified(self):
+        scenario = status_scenario("classified-degraded-terminal")
+        snapshot = self._terminal_degraded_snapshot(scenario)
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        for port_status in ("blocked", "error", "recovered"):
+            status = copy.deepcopy(scenario["status"])
+            status["authority_state"] = "ready"
+            status["port_statuses"][0]["status"] = port_status
+            status["port_statuses"][0]["reason"] = "runtime_rebuild_required"
+            status["port_statuses"][0]["domains"][0]["reason"] = (
+                "runtime_rebuild_required"
+            )
+
+            verdict, details = sync._snapshot_status_verdict(
+                snapshot,
+                set(scenario["request_context"]["projected_port_ids"]),
+                status,
+            )
+
+            with self.subTest(port_status=port_status):
+                self.assertEqual("failed", verdict, details)
+
+    def test_tombstones_are_diagnostic_only_and_cannot_replace_target_evidence(self):
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+            managed_domains=["acl"],
+        )
+        v1_scenario = status_scenario("full-classified-ready")
+        projected_port_ids = set(
+            v1_scenario["request_context"]["projected_port_ids"]
+        )
+        v1_status = copy.deepcopy(v1_scenario["status"])
+        tombstone = copy.deepcopy(v1_status["port_statuses"][0])
+        tombstone.update({
+            "port_id": "port-detached",
+            "ifname": "tap-port-detached",
+            "generation": v1_status["applied_generation"] - 1,
+            "desired_hash": "hash-detached-history",
+            "status": "detached",
+            "reason": "port_removed",
+        })
+        for domain in tombstone["domains"]:
+            domain.update({
+                "status": "not_requested",
+                "reason": "port_removed",
+                "effective_action": "cleanup",
+                "support_disposition": "not_applicable",
+            })
+        v1_status["port_statuses"].append(tombstone)
+
+        verdict, details = sync._snapshot_status_verdict(
+            v1_scenario["request_context"]["snapshot"],
+            projected_port_ids,
+            v1_status,
+        )
+
+        self.assertEqual("ready", verdict, details)
+        self.assertEqual({"port-a"}, projected_port_ids)
+        self.assertNotIn("port-detached", projected_port_ids)
+
+        missing_target = copy.deepcopy(v1_status)
+        missing_target["port_statuses"] = [tombstone]
+        verdict, details = sync._snapshot_status_verdict(
+            v1_scenario["request_context"]["snapshot"],
+            projected_port_ids,
+            missing_target,
+        )
+        self.assertEqual("failed", verdict)
+        self.assertIn("port-a", details)
+
+        legacy_scenario = status_scenario("legacy-v0-ready")
+        legacy_status = copy.deepcopy(legacy_scenario["status"])
+        raw_detached = copy.deepcopy(legacy_status["port_statuses"][0])
+        raw_detached.update({
+            "port_id": "legacy-detached",
+            "ifname": "tap-legacy-detached",
+            "generation": legacy_status["applied_generation"] - 1,
+            "desired_hash": "legacy-hash-detached",
+            "status": "detached",
+            "reason": "port_removed",
+        })
+        for domain in raw_detached["domains"]:
+            domain.update({
+                "status": "detached",
+                "reason": "port_removed",
+                "effective_action": None,
+            })
+            domain.pop("support_disposition", None)
+        legacy_status["port_statuses"].append(raw_detached)
+        legacy_snapshot = {
+            "generation": 40,
+            "desired_hash": "legacy-hash-40",
+            "ports": [{
+                "port_id": "legacy-port",
+                "ifname": "tap-legacy",
+                "eligible": True,
+                "managed_domains": ["acl"],
+                "acl": {
+                    "enabled": True,
+                    "status": "ready",
+                    "effective_action": "enforce",
+                },
+            }],
+        }
+
+        verdict, details = sync._snapshot_status_verdict(
+            legacy_snapshot,
+            set(legacy_scenario["request_context"]["projected_port_ids"]),
+            legacy_status,
+        )
+
+        self.assertEqual("ready", verdict, details)
+
+
 if __name__ == "__main__":
     unittest.main()

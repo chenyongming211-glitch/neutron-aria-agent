@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+import copy
 import json
 import socket
 import unittest
@@ -770,6 +771,517 @@ class StatusContractUdsClientRedTestCase(unittest.TestCase):
         )
         self.assertIsInstance(write_error, LocalApiContractError)
         self.assertEqual(requests_before_write, len(FakeConnection.requests))
+
+
+class StatusContractPythonGreenFocusedUdsTestCase(unittest.TestCase):
+    def setUp(self):
+        FakeConnection.requests = []
+        FakeConnection.responses = []
+
+    def _client(self):
+        return LocalClient(
+            "/tmp/aria-agent.sock",
+            timeout=1.0,
+            connection_factory=FakeConnection,
+        )
+
+    def _response(self, body):
+        FakeConnection.responses.append(FakeResponse(200, "OK", body))
+
+    def _capture(self, callback):
+        try:
+            return callback(), None
+        except LocalApiContractError as exc:
+            return None, exc
+
+    def _snapshot(self, generation=43):
+        return {
+            "generation": generation,
+            "host": "ostack2",
+            "ports": [],
+        }
+
+    def _decode(self, capabilities, status):
+        FakeConnection.requests = []
+        FakeConnection.responses = []
+        client = self._client()
+        self._response(copy.deepcopy(capabilities))
+        self._response(copy.deepcopy(status))
+        client.capabilities(required_domains=["acl"])
+        decoded, error = self._capture(client.status)
+        return client, decoded, error
+
+    def _normalized_tombstone(self, status, current_generation=False):
+        tombstone = copy.deepcopy(status["port_statuses"][0])
+        tombstone["port_id"] = "port-detached"
+        tombstone["ifname"] = "tap-port-detached"
+        if current_generation:
+            tombstone["generation"] = status["applied_generation"]
+            tombstone["desired_hash"] = status["applied_desired_hash"]
+        else:
+            tombstone["generation"] = status["applied_generation"] - 1
+            tombstone["desired_hash"] = "hash-detached-history"
+        tombstone["status"] = "detached"
+        tombstone["reason"] = "port_removed"
+        for domain in tombstone["domains"]:
+            domain["status"] = "not_requested"
+            domain["reason"] = "port_removed"
+            domain["effective_action"] = "cleanup"
+            domain["support_disposition"] = "not_applicable"
+        return tombstone
+
+    def _raw_legacy_tombstone(self, status):
+        tombstone = copy.deepcopy(status["port_statuses"][0])
+        tombstone["port_id"] = "legacy-detached"
+        tombstone["ifname"] = "tap-legacy-detached"
+        tombstone["generation"] = status["applied_generation"] - 1
+        tombstone["desired_hash"] = "legacy-hash-detached"
+        tombstone["status"] = "detached"
+        tombstone["reason"] = "port_removed"
+        for domain in tombstone["domains"]:
+            domain["status"] = "detached"
+            domain["reason"] = "port_removed"
+            domain["effective_action"] = None
+            domain.pop("support_disposition", None)
+        return tombstone
+
+    def _assert_latched_write(self, client):
+        requests_before = len(FakeConnection.requests)
+        self._response({"generation": 999, "results": []})
+        _response, error = self._capture(
+            lambda: client.put_snapshot(self._snapshot())
+        )
+        requests_after = len(FakeConnection.requests)
+        FakeConnection.responses = []
+        return error, requests_before, requests_after
+
+    def test_initial_v1_and_legacy_handshakes_authorize_normal_writes(self):
+        scenarios = [
+            status_scenario("full-classified-ready"),
+            status_scenario("legacy-v0-ready"),
+        ]
+        for scenario in scenarios:
+            FakeConnection.requests = []
+            FakeConnection.responses = []
+            client = self._client()
+            self._response(copy.deepcopy(scenario["capabilities"]))
+            self._response({"generation": 43, "results": []})
+
+            client.capabilities(required_domains=["acl"])
+            response = client.put_snapshot(self._snapshot())
+
+            with self.subTest(scenario=scenario["id"]):
+                self.assertEqual(43, response["generation"])
+                self.assertEqual(["GET", "PUT"], [
+                    request["method"] for request in FakeConnection.requests
+                ])
+
+    def test_latch_reopens_only_after_fresh_handshake_then_valid_status(self):
+        valid = status_scenario("full-classified-ready")
+        mismatch = status_scenario_cases("unknown-v1-contract")[2]
+        client = self._client()
+        issues = []
+
+        self._response(copy.deepcopy(valid["capabilities"]))
+        client.capabilities(required_domains=["acl"])
+        self._response(copy.deepcopy(mismatch["status"]))
+        _value, mismatch_error = self._capture(client.status)
+
+        self._response(copy.deepcopy(valid["status"]))
+        _status_before_handshake, status_before_handshake_error = self._capture(
+            client.status
+        )
+        pre_error, pre_before, pre_after = self._assert_latched_write(client)
+
+        self._response(copy.deepcopy(valid["capabilities"]))
+        _capabilities, handshake_error = self._capture(
+            lambda: client.capabilities(required_domains=["acl"])
+        )
+        handshake_only_error, handshake_before, handshake_after = (
+            self._assert_latched_write(client)
+        )
+
+        self._response(copy.deepcopy(valid["status"]))
+        decoded, valid_status_error = self._capture(client.status)
+        reopened_before = len(FakeConnection.requests)
+        self._response({"generation": 43, "results": []})
+        reopened, reopened_error = self._capture(
+            lambda: client.put_snapshot(self._snapshot())
+        )
+
+        if not isinstance(mismatch_error, LocalApiContractError):
+            issues.append("mismatched status did not latch")
+        if status_before_handshake_error is not None:
+            issues.append("valid status before handshake was not readable")
+        if not isinstance(pre_error, LocalApiContractError):
+            issues.append("valid status before handshake reopened writes")
+        if pre_before != pre_after:
+            issues.append("pre-handshake blocked write reached transport")
+        if handshake_error is not None:
+            issues.append("fresh exact handshake failed")
+        if not isinstance(handshake_only_error, LocalApiContractError):
+            issues.append("fresh handshake alone reopened writes")
+        if handshake_before != handshake_after:
+            issues.append("handshake-only blocked write reached transport")
+        if valid_status_error is not None:
+            issues.append("post-handshake valid status failed")
+        if decoded is None or decoded.get("transaction_state") != "classified":
+            issues.append("post-handshake status was not decoded")
+        if reopened_error is not None or reopened is None:
+            issues.append("valid handshake/status sequence did not reopen")
+        if len(FakeConnection.requests) != reopened_before + 1:
+            issues.append("reopened write did not issue exactly one request")
+
+        self.assertEqual([], issues)
+
+    def test_self_declared_v1_without_handshake_remains_read_only(self):
+        scenario = status_scenario("full-classified-ready")
+        client = self._client()
+        self._response(copy.deepcopy(scenario["status"]))
+
+        decoded, status_error = self._capture(client.status)
+        write_error, requests_before, requests_after = self._assert_latched_write(
+            client
+        )
+
+        self.assertEqual("classified", decoded.get("transaction_state"))
+        self.assertEqual(None, status_error)
+        self.assertIsInstance(write_error, LocalApiContractError)
+        self.assertEqual(requests_before, requests_after)
+
+    def test_v1_tombstone_is_narrow_and_invalid_orphans_latch_writes(self):
+        scenario = status_scenario("full-classified-ready")
+        valid_statuses = []
+        for current_generation in (False, True):
+            payload = copy.deepcopy(scenario["status"])
+            payload["port_statuses"].append(self._normalized_tombstone(
+                payload,
+                current_generation=current_generation,
+            ))
+            valid_statuses.append((
+                "current" if current_generation else "historical",
+                payload,
+            ))
+
+        for label, payload in valid_statuses:
+            _client, decoded, error = self._decode(
+                scenario["capabilities"],
+                payload,
+            )
+            with self.subTest(valid_tombstone=label):
+                self.assertEqual(None, error)
+                self.assertEqual("ready", decoded["overall_readiness"])
+                self.assertEqual(1, len(decoded["managed_ports"]))
+                self.assertTrue(any(
+                    row.get("port_id") == "port-a" and
+                    row.get("status") == "ready"
+                    for row in decoded["port_statuses"]
+                ))
+                self.assertTrue(any(
+                    row.get("port_id") == "port-detached" and
+                    row.get("status") == "detached"
+                    for row in decoded["port_statuses"]
+                ))
+
+        invalid_statuses = []
+
+        cleanup_projected = copy.deepcopy(scenario["status"])
+        cleanup_projected["port_statuses"][0]["domains"][0].update({
+            "status": "not_requested",
+            "effective_action": "cleanup",
+            "support_disposition": "not_applicable",
+        })
+        invalid_statuses.append(("cleanup-projected", cleanup_projected))
+
+        missing_projected = copy.deepcopy(scenario["status"])
+        tombstone = self._normalized_tombstone(missing_projected)
+        missing_projected["port_statuses"] = [tombstone]
+        invalid_statuses.append(("missing-projected", missing_projected))
+
+        empty_ifname = copy.deepcopy(scenario["status"])
+        tombstone = self._normalized_tombstone(empty_ifname)
+        tombstone["ifname"] = ""
+        empty_ifname["port_statuses"].append(tombstone)
+        invalid_statuses.append(("empty-tombstone-ifname", empty_ifname))
+
+        current_hash_mismatch = copy.deepcopy(scenario["status"])
+        tombstone = self._normalized_tombstone(
+            current_hash_mismatch,
+            current_generation=True,
+        )
+        tombstone["desired_hash"] = "hash-current-mismatch"
+        current_hash_mismatch["port_statuses"].append(tombstone)
+        invalid_statuses.append((
+            "current-tombstone-hash-mismatch",
+            current_hash_mismatch,
+        ))
+
+        duplicate_managed_domain = copy.deepcopy(scenario["status"])
+        tombstone = self._normalized_tombstone(duplicate_managed_domain)
+        tombstone["managed_domains"] = ["acl", "acl"]
+        duplicate_managed_domain["port_statuses"].append(tombstone)
+        invalid_statuses.append((
+            "duplicate-tombstone-managed-domain",
+            duplicate_managed_domain,
+        ))
+
+        duplicate_status_domain = copy.deepcopy(scenario["status"])
+        tombstone = self._normalized_tombstone(duplicate_status_domain)
+        tombstone["domains"].append(copy.deepcopy(tombstone["domains"][0]))
+        duplicate_status_domain["port_statuses"].append(tombstone)
+        invalid_statuses.append((
+            "duplicate-tombstone-status-domain",
+            duplicate_status_domain,
+        ))
+
+        tombstone_domain_set_mismatch = copy.deepcopy(scenario["status"])
+        tombstone = self._normalized_tombstone(tombstone_domain_set_mismatch)
+        tombstone["domains"][0]["domain"] = "attach"
+        tombstone_domain_set_mismatch["port_statuses"].append(tombstone)
+        invalid_statuses.append((
+            "tombstone-domain-set-mismatch",
+            tombstone_domain_set_mismatch,
+        ))
+
+        non_detached_orphan = copy.deepcopy(scenario["status"])
+        orphan = copy.deepcopy(non_detached_orphan["port_statuses"][0])
+        orphan["port_id"] = "port-orphan-degraded"
+        orphan["ifname"] = "tap-port-orphan-degraded"
+        orphan["status"] = "degraded"
+        orphan["domains"][0].update({
+            "status": "degraded",
+            "effective_action": "bypass",
+            "support_disposition": "unsupported",
+        })
+        non_detached_orphan["port_statuses"].append(orphan)
+        invalid_statuses.append(("non-detached-orphan", non_detached_orphan))
+
+        extra_ready = copy.deepcopy(scenario["status"])
+        orphan = copy.deepcopy(extra_ready["port_statuses"][0])
+        orphan["port_id"] = "port-orphan-ready"
+        orphan["ifname"] = "tap-port-orphan-ready"
+        extra_ready["port_statuses"].append(orphan)
+        invalid_statuses.append(("extra-ready-orphan", extra_ready))
+
+        managed_detached = copy.deepcopy(scenario["status"])
+        managed_detached["port_statuses"][0].update({
+            "status": "detached",
+            "reason": "port_removed",
+        })
+        managed_detached["port_statuses"][0]["domains"][0].update({
+            "status": "not_requested",
+            "reason": "port_removed",
+            "effective_action": "cleanup",
+            "support_disposition": "not_applicable",
+        })
+        invalid_statuses.append(("managed-raw-detached", managed_detached))
+
+        for label, payload in invalid_statuses:
+            client, _decoded, status_error = self._decode(
+                scenario["capabilities"],
+                payload,
+            )
+            write_error, requests_before, requests_after = (
+                self._assert_latched_write(client)
+            )
+            with self.subTest(invalid_tombstone=label):
+                self.assertIsInstance(status_error, LocalApiContractError)
+                self.assertIsInstance(write_error, LocalApiContractError)
+                self.assertEqual(requests_before, requests_after)
+
+    def test_legacy_raw_detached_extra_row_preserves_ready_subset(self):
+        scenario = status_scenario("legacy-v0-ready")
+        payload = copy.deepcopy(scenario["status"])
+        payload["port_statuses"].append(self._raw_legacy_tombstone(payload))
+
+        _client, decoded, error = self._decode(
+            scenario["capabilities"],
+            payload,
+        )
+
+        self.assertEqual(None, error)
+        for key, value in scenario["expected_projection"].items():
+            self.assertEqual(value, decoded.get(key))
+        self.assertTrue(any(
+            row.get("port_id") == "legacy-detached" and
+            row.get("status") == "detached"
+            for row in decoded["port_statuses"]
+        ))
+
+    def test_classified_row_hash_and_top_level_matrix(self):
+        scenario = status_scenario("full-classified-ready")
+        positive_cases = [
+            ("current-row", copy.deepcopy(scenario["status"])),
+            (
+                "older-scoped-row",
+                copy.deepcopy(status_scenario("scoped-classified-ready")["status"]),
+            ),
+        ]
+        valid_tombstone = copy.deepcopy(scenario["status"])
+        valid_tombstone["port_statuses"].append(
+            self._normalized_tombstone(valid_tombstone)
+        )
+        positive_cases.append(("valid-tombstone", valid_tombstone))
+
+        for label, payload in positive_cases:
+            _client, decoded, error = self._decode(
+                scenario["capabilities"],
+                payload,
+            )
+            with self.subTest(positive=label):
+                self.assertEqual(None, error)
+                self.assertEqual("classified", decoded["transaction_state"])
+
+        negative_cases = []
+
+        zero_generation = copy.deepcopy(scenario["status"])
+        zero_generation["port_statuses"][0]["generation"] = 0
+        negative_cases.append(("zero-generation", zero_generation))
+
+        empty_port_id = copy.deepcopy(scenario["status"])
+        empty_port_id["managed_ports"][0]["port_id"] = ""
+        empty_port_id["port_statuses"][0]["port_id"] = ""
+        negative_cases.append(("empty-port-id", empty_port_id))
+
+        future_generation = copy.deepcopy(scenario["status"])
+        future_generation["port_statuses"][0]["generation"] = 43
+        negative_cases.append(("future-generation", future_generation))
+
+        empty_hash = copy.deepcopy(scenario["status"])
+        empty_hash["port_statuses"][0]["desired_hash"] = " "
+        negative_cases.append(("empty-row-hash", empty_hash))
+
+        current_hash_mismatch = copy.deepcopy(scenario["status"])
+        current_hash_mismatch["port_statuses"][0]["desired_hash"] = (
+            "hash-current-mismatch"
+        )
+        negative_cases.append(("current-row-hash-mismatch", current_hash_mismatch))
+
+        ifname_mismatch = copy.deepcopy(scenario["status"])
+        ifname_mismatch["port_statuses"][0]["ifname"] = "tap-other"
+        negative_cases.append(("ifname-mismatch", ifname_mismatch))
+
+        managed_domain_mismatch = copy.deepcopy(scenario["status"])
+        managed_domain_mismatch["port_statuses"][0]["managed_domains"] = [
+            "attach"
+        ]
+        negative_cases.append(("managed-domain-mismatch", managed_domain_mismatch))
+
+        missing_domain = copy.deepcopy(scenario["status"])
+        missing_domain["port_statuses"][0]["domains"] = []
+        negative_cases.append(("missing-domain", missing_domain))
+
+        extra_domain = copy.deepcopy(scenario["status"])
+        domain = copy.deepcopy(extra_domain["port_statuses"][0]["domains"][0])
+        domain.update({
+            "domain": "attach",
+            "effective_action": "no_op",
+            "support_disposition": "supported",
+        })
+        extra_domain["port_statuses"][0]["domains"].append(domain)
+        negative_cases.append(("extra-domain", extra_domain))
+
+        duplicate_domain = copy.deepcopy(scenario["status"])
+        duplicate_domain["port_statuses"][0]["domains"].append(copy.deepcopy(
+            duplicate_domain["port_statuses"][0]["domains"][0]
+        ))
+        negative_cases.append(("duplicate-domain", duplicate_domain))
+
+        severity_mismatch = copy.deepcopy(scenario["status"])
+        severity_mismatch["port_statuses"][0]["domains"][0].update({
+            "status": "degraded",
+            "effective_action": "bypass",
+            "support_disposition": "unsupported",
+        })
+        negative_cases.append(("top-level-domain-severity", severity_mismatch))
+
+        managed_detached = copy.deepcopy(scenario["status"])
+        managed_detached["port_statuses"][0]["status"] = "detached"
+        negative_cases.append(("managed-detached", managed_detached))
+
+        invalid_orphan = copy.deepcopy(scenario["status"])
+        orphan = copy.deepcopy(invalid_orphan["port_statuses"][0])
+        orphan["port_id"] = "port-orphan"
+        orphan["ifname"] = "tap-port-orphan"
+        invalid_orphan["port_statuses"].append(orphan)
+        negative_cases.append(("invalid-orphan", invalid_orphan))
+
+        for port_state in ("blocked", "error", "recovered"):
+            unsafe = copy.deepcopy(scenario["status"])
+            unsafe["port_statuses"][0].update({
+                "status": port_state,
+                "reason": "runtime_rebuild_required",
+            })
+            unsafe["port_statuses"][0]["domains"][0].update({
+                "status": "blocked",
+                "reason": "runtime_rebuild_required",
+                "effective_action": "unchanged",
+                "support_disposition": "supported",
+            })
+            negative_cases.append((port_state + "-rebuild-reason", unsafe))
+
+        for label, payload in negative_cases:
+            _client, _decoded, error = self._decode(
+                scenario["capabilities"],
+                payload,
+            )
+            with self.subTest(negative=label):
+                self.assertIsInstance(error, LocalApiContractError)
+
+    def test_pending_identity_accepts_two_lineages_and_rejects_ambiguity(self):
+        pending = status_scenario("pending-poll")
+        inventory = status_scenario("blocked-recoverable-inventory")
+
+        same_generation = copy.deepcopy(pending["status"])
+        same_generation["pending_generation"] = same_generation[
+            "applied_generation"
+        ]
+        same_generation["desired_hash"] = same_generation[
+            "applied_desired_hash"
+        ]
+
+        valid_cases = [
+            ("intent-lineage", copy.deepcopy(pending["status"])),
+            ("committed-lineage", copy.deepcopy(inventory["status"])),
+            ("same-generation-matching-hash", same_generation),
+        ]
+        for label, payload in valid_cases:
+            _client, decoded, error = self._decode(
+                pending["capabilities"],
+                payload,
+            )
+            with self.subTest(valid=label):
+                self.assertEqual(None, error)
+                self.assertIsNotNone(decoded.get("pending_generation"))
+
+        middle_generation = copy.deepcopy(pending["status"])
+        middle_generation["accepted_generation"] = 43
+
+        same_generation_mismatch = copy.deepcopy(same_generation)
+        same_generation_mismatch["desired_hash"] = "hash-same-generation-drift"
+
+        inventory_intent_lineage = copy.deepcopy(inventory["status"])
+        inventory_intent_lineage["accepted_generation"] = (
+            inventory_intent_lineage["applied_generation"]
+        )
+
+        invalid_cases = [
+            ("middle-generation", middle_generation),
+            ("same-generation-hash-mismatch", same_generation_mismatch),
+            ("inventory-requires-accepted-pending", inventory_intent_lineage),
+        ]
+        for label, payload in invalid_cases:
+            client, _decoded, status_error = self._decode(
+                pending["capabilities"],
+                payload,
+            )
+            write_error, requests_before, requests_after = (
+                self._assert_latched_write(client)
+            )
+            with self.subTest(invalid=label):
+                self.assertIsInstance(status_error, LocalApiContractError)
+                self.assertIsInstance(write_error, LocalApiContractError)
+                self.assertEqual(requests_before, requests_after)
 
 
 if __name__ == "__main__":
