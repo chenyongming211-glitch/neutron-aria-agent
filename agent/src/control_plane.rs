@@ -32,10 +32,42 @@ const WAL_COMPACT_THRESHOLD: u64 = 1000;
 pub const MANAGED_SHARED_PIN_NAMESPACE: &str = "global-v2";
 const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ManagedAclPublicationMode {
+    StandaloneCompatibility,
+    NeutronAttachOwnedStandaloneAcl,
+    ManagedAcl,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ManagedProjectionHealth {
+    Unverified,
+    RepairRequired,
+    Verified,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct ManagedAclLifecycle {
+    publication_mode: ManagedAclPublicationMode,
+    projection_health: ManagedProjectionHealth,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ManagedAclPromotionAction {
+    Preserve,
+    Promote {
+        next_mode: ManagedAclPublicationMode,
+        next_health: ManagedProjectionHealth,
+        quiesce_acl_ct: bool,
+    },
+}
+
 /// Per-instance in-memory state
 struct InstanceState {
     state: FirewallState,
     runtime_health: RuntimeHealthState,
+    managed_acl_publication_mode: ManagedAclPublicationMode,
+    managed_projection_health: ManagedProjectionHealth,
     tap_id: u32,
     ifindex: Option<u32>,
     pin_path: String,
@@ -362,6 +394,7 @@ pub struct PreparedManagedInstance {
     preserve_existing_runtime: bool,
     iface_ctx_synced: bool,
     tap_config_written: bool,
+    managed_acl_lifecycle: ManagedAclLifecycle,
     activation: ManagedRuntimeActivation,
 }
 
@@ -397,6 +430,98 @@ fn preexisting_projection_verification(drift: ProjectionDrift) -> Result<bool, S
         ProjectionDrift::RepairRequired(_) => Ok(false),
         ProjectionDrift::Fatal(error) => Err(error),
     }
+}
+
+fn managed_acl_registration_lifecycle(
+    mode: ManagedAttachMode,
+    projection_drift: Option<ProjectionDrift>,
+    gate_disposition: Option<RuntimeGateDisposition>,
+) -> Result<ManagedAclLifecycle, String> {
+    let publication_mode = match mode {
+        ManagedAttachMode::StandaloneRestoreAfterTcAttach => {
+            ManagedAclPublicationMode::StandaloneCompatibility
+        }
+        ManagedAttachMode::NeutronResyncRequired { acl_managed: false } => {
+            ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl
+        }
+        ManagedAttachMode::NeutronResyncRequired { acl_managed: true } => {
+            ManagedAclPublicationMode::ManagedAcl
+        }
+    };
+    let projection_health = match projection_drift {
+        None => ManagedProjectionHealth::Unverified,
+        Some(ProjectionDrift::Clean) => {
+            if gate_disposition == Some(RuntimeGateDisposition::Desired) {
+                ManagedProjectionHealth::Verified
+            } else {
+                ManagedProjectionHealth::Unverified
+            }
+        }
+        Some(ProjectionDrift::RepairRequired(_)) => ManagedProjectionHealth::RepairRequired,
+        Some(ProjectionDrift::Fatal(error)) => return Err(error),
+    };
+    Ok(ManagedAclLifecycle {
+        publication_mode,
+        projection_health,
+    })
+}
+
+pub(crate) fn managed_acl_promotion_action(
+    current_mode: ManagedAclPublicationMode,
+    current_health: ManagedProjectionHealth,
+    requested_mode: ManagedAttachMode,
+) -> ManagedAclPromotionAction {
+    match requested_mode {
+        ManagedAttachMode::NeutronResyncRequired { acl_managed: true }
+            if current_mode != ManagedAclPublicationMode::ManagedAcl =>
+        {
+            ManagedAclPromotionAction::Promote {
+                next_mode: ManagedAclPublicationMode::ManagedAcl,
+                next_health: ManagedProjectionHealth::Unverified,
+                quiesce_acl_ct: true,
+            }
+        }
+        ManagedAttachMode::NeutronResyncRequired { acl_managed: false }
+            if current_mode == ManagedAclPublicationMode::StandaloneCompatibility =>
+        {
+            ManagedAclPromotionAction::Promote {
+                next_mode: ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl,
+                next_health: current_health,
+                quiesce_acl_ct: false,
+            }
+        }
+        _ => ManagedAclPromotionAction::Preserve,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn managed_acl_ownership_after_detach(
+    _publication_mode: ManagedAclPublicationMode,
+    _projection_health: ManagedProjectionHealth,
+) -> Option<(ManagedAclPublicationMode, ManagedProjectionHealth)> {
+    None
+}
+
+pub(crate) fn managed_neutron_authority_confirmation_allowed(
+    instance_exists: bool,
+    current_publication_mode: Option<ManagedAclPublicationMode>,
+    required_publication_mode: Option<ManagedAclPublicationMode>,
+    current_projection_health: Option<ManagedProjectionHealth>,
+    required_projection_health: Option<ManagedProjectionHealth>,
+) -> bool {
+    let neutron_owned = matches!(
+        current_publication_mode,
+        Some(ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl)
+            | Some(ManagedAclPublicationMode::ManagedAcl)
+    );
+    instance_exists
+        && neutron_owned
+        && required_publication_mode
+            .map(|required| current_publication_mode == Some(required))
+            .unwrap_or(true)
+        && required_projection_health
+            .map(|required| current_projection_health == Some(required))
+            .unwrap_or(true)
 }
 
 struct PreexistingRuntimeValidation {
@@ -1550,6 +1675,74 @@ impl ControlPlane {
         self.runtime_lifecycle_lock.lock().await
     }
 
+    pub(crate) async fn managed_projection_health(
+        &self,
+        instance: &str,
+    ) -> Option<ManagedProjectionHealth> {
+        let instance = {
+            let instances = self.instances.read().await;
+            instances.get(instance).cloned()
+        }?;
+        let state = instance.read().await;
+        (state.managed_acl_publication_mode == ManagedAclPublicationMode::ManagedAcl)
+            .then_some(state.managed_projection_health)
+    }
+
+    /// Promote ACL ownership while the caller holds the runtime lifecycle lock.
+    ///
+    /// This helper must not reacquire that lock. Registry callers additionally
+    /// hold the per-interface lock, preserving iface -> lifecycle -> instance.
+    pub(crate) async fn promote_managed_acl_ownership_serialized(
+        &self,
+        instance: &str,
+        requested_mode: ManagedAttachMode,
+    ) -> Result<(), String> {
+        let instance_state = self
+            .get_instance(instance)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut state = instance_state.write().await;
+        let action = managed_acl_promotion_action(
+            state.managed_acl_publication_mode,
+            state.managed_projection_health,
+            requested_mode,
+        );
+        let ManagedAclPromotionAction::Promote {
+            next_mode,
+            next_health,
+            quiesce_acl_ct,
+        } = action
+        else {
+            return Ok(());
+        };
+
+        if quiesce_acl_ct {
+            aria_core::ebpf_ops::update_acl_runtime_gate(
+                state.map_runtime(),
+                false,
+                false,
+                aria_core::common::ACL_INGRESS_HOOK_TC,
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to quiesce ACL/CT while promoting managed ACL ownership for {}: {}",
+                    instance, error
+                )
+            })?;
+        }
+
+        state.managed_acl_publication_mode = next_mode;
+        state.managed_projection_health = next_health;
+        info!(
+            instance = %instance,
+            publication_mode = ?next_mode,
+            projection_health = ?next_health,
+            quiesced = quiesce_acl_ct,
+            "promoted managed ACL ownership"
+        );
+        Ok(())
+    }
+
     pub fn trace_backend_name(&self) -> &'static str {
         self.trace_manager.backend().as_str()
     }
@@ -1596,6 +1789,46 @@ impl ControlPlane {
             managed_domains = ?authority.managed_domains,
             "marked Neutron port authority"
         );
+    }
+
+    pub(crate) async fn mark_neutron_port_authority_if_current(
+        &self,
+        instance: &str,
+        port_id: &str,
+        managed_domains: &[String],
+        generation: u64,
+        required_publication_mode: Option<ManagedAclPublicationMode>,
+        required_projection_health: Option<ManagedProjectionHealth>,
+    ) -> bool {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let instance_state = {
+            let instances = self.instances.read().await;
+            instances.get(instance).cloned()
+        };
+        let (current_publication_mode, current_projection_health) = match &instance_state {
+            Some(instance_state) => {
+                let state = instance_state.read().await;
+                (
+                    Some(state.managed_acl_publication_mode),
+                    (state.managed_acl_publication_mode == ManagedAclPublicationMode::ManagedAcl)
+                        .then_some(state.managed_projection_health),
+                )
+            }
+            None => (None, None),
+        };
+        if !managed_neutron_authority_confirmation_allowed(
+            instance_state.is_some(),
+            current_publication_mode,
+            required_publication_mode,
+            current_projection_health,
+            required_projection_health,
+        ) {
+            return false;
+        }
+
+        self.mark_neutron_port_authority(instance, port_id, managed_domains, generation)
+            .await;
+        true
     }
 
     pub async fn clear_neutron_port_authority(&self, instance: &str) {
@@ -1679,6 +1912,7 @@ impl ControlPlane {
         let pin_path = self.managed_pin_path();
         let state_path = format!("{}/{}", self.base_state_path, name);
         let projection_mode = managed_group_projection_mode(mode);
+        let mut managed_acl_lifecycle = managed_acl_registration_lifecycle(mode, None, None)?;
         let ifindex = Self::resolve_ifindex(name)?;
         let global_ssl_enabled = match self.read_ssl_global_config().await {
             Ok(enabled) => Some(enabled),
@@ -1758,6 +1992,7 @@ impl ControlPlane {
             );
             let gate_disposition = preexisting_validation.gate_disposition;
             let projection_drift = preexisting_validation.projection_drift;
+            let lifecycle_projection_drift = projection_drift.clone();
             preexisting_live_verified = match preexisting_projection_verification(projection_drift)
             {
                 Ok(projection_verified) => {
@@ -1784,6 +2019,17 @@ impl ControlPlane {
                     });
                 }
             };
+            managed_acl_lifecycle = managed_acl_registration_lifecycle(
+                mode,
+                Some(lifecycle_projection_drift),
+                gate_disposition,
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to classify managed ACL lifecycle for {}: {}",
+                    name, error
+                )
+            })?;
 
             if !preexisting_live_verified {
                 if let Err(e) = aria_core::ebpf_ops::update_acl_runtime_gate(
@@ -1923,6 +2169,7 @@ impl ControlPlane {
             preserve_existing_runtime,
             iface_ctx_synced,
             tap_config_written,
+            managed_acl_lifecycle,
             activation,
         })
     }
@@ -1975,6 +2222,7 @@ impl ControlPlane {
             state_path,
             wal,
             desired_ssl_enabled,
+            managed_acl_lifecycle,
             activation,
             ..
         } = prepared;
@@ -2001,6 +2249,8 @@ impl ControlPlane {
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             runtime_health,
+            managed_acl_publication_mode: managed_acl_lifecycle.publication_mode,
+            managed_projection_health: managed_acl_lifecycle.projection_health,
             tap_id,
             ifindex: Some(ifindex),
             pin_path,
@@ -2157,6 +2407,8 @@ impl ControlPlane {
         let instance = Arc::new(tokio::sync::RwLock::new(InstanceState {
             state,
             runtime_health,
+            managed_acl_publication_mode: ManagedAclPublicationMode::StandaloneCompatibility,
+            managed_projection_health: ManagedProjectionHealth::Unverified,
             tap_id,
             ifindex,
             pin_path: pin_path.to_string(),
@@ -2222,8 +2474,11 @@ impl ControlPlane {
     pub async fn unregister_instance(&self, name: &str) {
         // Compact before removing
         self.compact_instance(name).await;
-        let mut instances = self.instances.write().await;
-        if let Some(inst) = instances.remove(name) {
+        let removed = {
+            let mut instances = self.instances.write().await;
+            instances.remove(name)
+        };
+        if let Some(inst) = removed {
             let mut state = inst.write().await;
             let tap_id = state.tap_id;
             let ifindex = state.ifindex;
@@ -2265,9 +2520,10 @@ impl ControlPlane {
             }
             state.shutdown_wal().await;
             info!(instance = %name, tap_id, ifindex = ?ifindex, "unregistered instance");
-            return;
+        } else {
+            info!(instance = %name, "unregistered instance");
         }
-        info!(instance = %name, "unregistered instance");
+        self.clear_neutron_port_authority(name).await;
     }
 
     /// List all registered instance names
@@ -5327,6 +5583,8 @@ mod tests {
                 xdp_ready: false,
                 acl_error: None,
             },
+            managed_acl_publication_mode: ManagedAclPublicationMode::StandaloneCompatibility,
+            managed_projection_health: ManagedProjectionHealth::Unverified,
             tap_id: 7,
             ifindex: Some(11),
             pin_path: state_path_string.clone(),

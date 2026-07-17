@@ -30,7 +30,8 @@ use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use tracing::{error, info, warn};
 
 use crate::control_plane::{
-    ControlPlane, InstanceRuntimeHealthSnapshot, OwnedAclGroupSpec, OwnedAclPolicySpec,
+    ControlPlane, InstanceRuntimeHealthSnapshot, ManagedAclPublicationMode,
+    ManagedProjectionHealth, OwnedAclGroupSpec, OwnedAclPolicySpec,
 };
 use crate::fault_injection;
 use crate::neutron_wal::{NeutronWal, NeutronWalState, PendingNeutronIntent};
@@ -553,12 +554,18 @@ impl NeutronApiState {
             )
         };
         for port in ports {
+            let required_publication_mode = normalize_managed_domains(&port.managed_domains)
+                .iter()
+                .any(|domain| domain == "acl")
+                .then_some(ManagedAclPublicationMode::ManagedAcl);
             self.control_plane
-                .mark_neutron_port_authority(
+                .mark_neutron_port_authority_if_current(
                     &port.ifname,
                     &port.port_id,
                     &port.managed_domains,
                     generation,
+                    required_publication_mode,
+                    None,
                 )
                 .await;
         }
@@ -869,11 +876,7 @@ impl NeutronApiState {
         let should_detach = intent.kind == "delete" || !committed_before_intent;
         if attached_for_recovery && should_detach {
             match self.registry.detach(&port.ifname).await {
-                Ok(()) => {
-                    self.control_plane
-                        .clear_neutron_port_authority(&port.ifname)
-                        .await;
-                }
+                Ok(()) => {}
                 Err(e) => {
                     let reason = format!("detach_recovery_failed:{}", e);
                     statuses.push(domain_status("attach", "blocked", Some(reason.clone())));
@@ -2746,10 +2749,6 @@ async fn apply_snapshot_runtime_transaction(
                         domain_statuses_for(&port.managed_domains, "detached", None),
                     ),
                 );
-                state
-                    .control_plane
-                    .clear_neutron_port_authority(&port.ifname)
-                    .await;
                 results.push(NeutronPortApplyResult {
                     port_id: port.port_id,
                     ifname: port.ifname,
@@ -2813,21 +2812,73 @@ async fn apply_snapshot_runtime_transaction(
         let managed = managed_port_from_snapshot(&port);
         let previous_managed = next_ports.get(&port.port_id).cloned();
         let previous_status = runtime_before_apply.port_statuses.get(&port.port_id);
+        if let Err(error) = state
+            .registry
+            .attach_neutron(&port.ifname, port_manages_acl(&port))
+            .await
+        {
+            let reason = format!("managed_acl_ownership_sync_failed:{}", error);
+            next_statuses.insert(
+                managed.port_id.clone(),
+                port_runtime_status(
+                    &managed.port_id,
+                    &managed.ifname,
+                    generation,
+                    requested_hash.clone(),
+                    managed.managed_domains.clone(),
+                    "error",
+                    Some(reason.clone()),
+                    domain_statuses_for(&managed.managed_domains, "error", Some(reason.clone())),
+                ),
+            );
+            results.push(NeutronPortApplyResult {
+                port_id: managed.port_id,
+                ifname: managed.ifname,
+                action: "update".to_string(),
+                status: "error".to_string(),
+                reason: Some(reason),
+            });
+            info!(
+                generation,
+                desired_hash = ?requested_hash,
+                port_id = %port.port_id,
+                ifname = %port.ifname,
+                action = "update",
+                status = "error",
+                total_ms = elapsed_ms(port_started),
+                "neutron_port_apply_profile"
+            );
+            continue;
+        }
+        let projection_health = state
+            .control_plane
+            .managed_projection_health(&managed.ifname)
+            .await;
+        let requires_managed_acl = normalize_managed_domains(&managed.managed_domains)
+            .iter()
+            .any(|domain| domain == "acl");
+        let required_publication_mode =
+            requires_managed_acl.then_some(ManagedAclPublicationMode::ManagedAcl);
+        let required_projection_health =
+            requires_managed_acl.then_some(ManagedProjectionHealth::Verified);
         if can_skip_neutron_domain_reconcile(
             previous_managed.as_ref(),
             previous_status,
             &managed,
             full_resync,
-        ) {
-            state
-                .control_plane
-                .mark_neutron_port_authority(
-                    &managed.ifname,
-                    &managed.port_id,
-                    &managed.managed_domains,
-                    generation,
-                )
-                .await;
+            projection_health,
+        ) && state
+            .control_plane
+            .mark_neutron_port_authority_if_current(
+                &managed.ifname,
+                &managed.port_id,
+                &managed.managed_domains,
+                generation,
+                required_publication_mode,
+                required_projection_health,
+            )
+            .await
+        {
             let domains = previous_status
                 .map(|status| status.domains.clone())
                 .filter(|domains| !domains.is_empty())
@@ -2867,24 +2918,34 @@ async fn apply_snapshot_runtime_transaction(
             );
             continue;
         }
-        let domain_result = reconcile_neutron_domains(
-            state,
-            &port,
-            &mut acl_validation_cache,
-            full_resync,
-        )
-        .await;
-        let domain_ms = elapsed_ms(port_started);
-        if domain_result.ok {
-            state
+        let mut domain_result =
+            reconcile_neutron_domains(state, &port, &mut acl_validation_cache, full_resync).await;
+        if domain_result.ok
+            && !state
                 .control_plane
-                .mark_neutron_port_authority(
+                .mark_neutron_port_authority_if_current(
                     &managed.ifname,
                     &managed.port_id,
                     &managed.managed_domains,
                     generation,
+                    required_publication_mode,
+                    None,
                 )
-                .await;
+                .await
+        {
+            let reason = "managed_instance_detached_during_authority_commit".to_string();
+            domain_result = DomainReconcileResult {
+                domains: domain_statuses_for(
+                    &managed.managed_domains,
+                    "error",
+                    Some(reason.clone()),
+                ),
+                ok: false,
+                reason: Some(reason),
+            };
+        }
+        let domain_ms = elapsed_ms(port_started);
+        if domain_result.ok {
             let (port_status, port_reason) = successful_port_status(&domain_result.domains);
             next_ports.insert(managed.port_id.clone(), managed.clone());
             next_statuses.insert(
@@ -2991,25 +3052,38 @@ async fn apply_snapshot_runtime_transaction(
                     continue;
                 }
                 let managed = managed_port_from_snapshot(port);
+                let required_publication_mode =
+                    port_manages_acl(port).then_some(ManagedAclPublicationMode::ManagedAcl);
                 let domain_started = Instant::now();
-                let domain_result = reconcile_neutron_domains(
-                    state,
-                    port,
-                    &mut acl_validation_cache,
-                    full_resync,
-                )
-                .await;
-                let domain_ms = elapsed_ms(domain_started);
-                if domain_result.ok {
-                    state
+                let mut domain_result =
+                    reconcile_neutron_domains(state, port, &mut acl_validation_cache, full_resync)
+                        .await;
+                if domain_result.ok
+                    && !state
                         .control_plane
-                        .mark_neutron_port_authority(
+                        .mark_neutron_port_authority_if_current(
                             &managed.ifname,
                             &managed.port_id,
                             &managed.managed_domains,
                             generation,
+                            required_publication_mode,
+                            None,
                         )
-                        .await;
+                        .await
+                {
+                    let reason = "managed_instance_detached_during_authority_commit".to_string();
+                    domain_result = DomainReconcileResult {
+                        domains: domain_statuses_for(
+                            &managed.managed_domains,
+                            "error",
+                            Some(reason.clone()),
+                        ),
+                        ok: false,
+                        reason: Some(reason),
+                    };
+                }
+                let domain_ms = elapsed_ms(domain_started);
+                if domain_result.ok {
                     let (port_status, port_reason) = successful_port_status(&domain_result.domains);
                     next_ports.insert(managed.port_id.clone(), managed.clone());
                     next_statuses.insert(
@@ -3063,10 +3137,6 @@ async fn apply_snapshot_runtime_transaction(
                             "failed to detach after Neutron domain apply failure"
                         );
                     }
-                    state
-                        .control_plane
-                        .clear_neutron_port_authority(&port.ifname)
-                        .await;
                     next_statuses.insert(
                         managed.port_id.clone(),
                         port_runtime_status(
@@ -3871,10 +3941,6 @@ async fn apply_delete_neutron_port(
                 let mut runtime = state.runtime.write().await;
                 *runtime = next_runtime;
             }
-            state
-                .control_plane
-                .clear_neutron_port_authority(&port.ifname)
-                .await;
             (
                 StatusCode::OK,
                 NeutronDeleteResponse {
@@ -5695,11 +5761,12 @@ fn can_skip_neutron_domain_reconcile(
     previous_status: Option<&NeutronPortStatus>,
     desired: &ManagedNeutronPort,
     full_resync: bool,
+    projection_health: Option<ManagedProjectionHealth>,
 ) -> bool {
-    if full_resync
-        && normalize_managed_domains(&desired.managed_domains)
-            .iter()
-            .any(|domain| domain == "acl")
+    let manages_acl = normalize_managed_domains(&desired.managed_domains)
+        .iter()
+        .any(|domain| domain == "acl");
+    if manages_acl && (full_resync || projection_health != Some(ManagedProjectionHealth::Verified))
     {
         return false;
     }
@@ -11510,6 +11577,7 @@ mod tests {
             Some(&status),
             &managed,
             false,
+            Some(ManagedProjectionHealth::Verified),
         ));
         // The detector may already have quiesced the live gate while the
         // projector has not yet replaced this still-ready status. A full-host
@@ -11519,6 +11587,7 @@ mod tests {
             Some(&status),
             &managed,
             true,
+            Some(ManagedProjectionHealth::Verified),
         ));
 
         let mut changed_snapshot = snapshot.clone();
@@ -11529,6 +11598,7 @@ mod tests {
             Some(&status),
             &changed,
             false,
+            Some(ManagedProjectionHealth::Verified),
         ));
 
         let error_status = port_runtime_status(
@@ -11550,6 +11620,7 @@ mod tests {
             Some(&error_status),
             &managed,
             false,
+            Some(ManagedProjectionHealth::Verified),
         ));
     }
 
@@ -11620,6 +11691,7 @@ mod tests {
             Some(status),
             &desired,
             false,
+            Some(ManagedProjectionHealth::Unverified),
         ));
     }
 

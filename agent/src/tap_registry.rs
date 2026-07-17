@@ -271,24 +271,27 @@ impl TapRegistry {
     }
 
     async fn attach_with_mode(&self, iface: &str, mode: ManagedAttachMode) -> Result<(), String> {
-        // Idempotent check
-        {
+        // This fast presence read is advisory only. Existing registrations may
+        // still require an ownership promotion under the serialized locks.
+        let _existing_registration = {
             let instances = self.instances.read().await;
-            if instances.contains_key(iface) {
-                return Ok(());
-            }
-        }
+            instances.contains_key(iface)
+        };
 
         let iface_lock = self.get_iface_lock(iface).await;
         let _guard = iface_lock.lock().await;
         let _runtime_guard = self.control_plane.lock_runtime_lifecycle().await;
 
         // Re-check after acquiring lock
-        {
+        let already_attached = {
             let instances = self.instances.read().await;
-            if instances.contains_key(iface) {
-                return Ok(());
-            }
+            instances.contains_key(iface)
+        };
+        if already_attached {
+            return self
+                .control_plane
+                .promote_managed_acl_ownership_serialized(iface, mode)
+                .await;
         }
 
         let known_live_runtime = {
@@ -483,9 +486,7 @@ impl TapRegistry {
             instances.remove(iface);
         }
 
-        if instance_exists {
-            self.control_plane.unregister_instance(iface).await;
-        }
+        self.control_plane.unregister_instance(iface).await;
 
         let should_cleanup_shared_runtime = {
             let instances = self.instances.read().await;
@@ -532,7 +533,8 @@ mod tests {
     use super::*;
     use crate::control_plane::{
         managed_acl_ownership_after_detach, managed_acl_promotion_action,
-        ManagedAclPromotionAction, ManagedAclPublicationMode, ManagedProjectionHealth,
+        managed_neutron_authority_confirmation_allowed, ManagedAclPromotionAction,
+        ManagedAclPublicationMode, ManagedProjectionHealth,
     };
 
     #[derive(Default)]
@@ -642,5 +644,83 @@ mod tests {
                 publication_mode, projection_health
             );
         }
+    }
+
+    #[test]
+    fn managed_acl_ownership_authority_confirmation_rejects_detached_instance() {
+        assert!(!managed_neutron_authority_confirmation_allowed(
+            false,
+            Some(ManagedAclPublicationMode::ManagedAcl),
+            Some(ManagedAclPublicationMode::ManagedAcl),
+            Some(ManagedProjectionHealth::Verified),
+            Some(ManagedProjectionHealth::Verified),
+        ));
+        assert!(!managed_neutron_authority_confirmation_allowed(
+            false, None, None, None, None,
+        ));
+    }
+
+    #[test]
+    fn managed_acl_ownership_authority_confirmation_revalidates_projection_health() {
+        assert!(!managed_neutron_authority_confirmation_allowed(
+            true,
+            Some(ManagedAclPublicationMode::ManagedAcl),
+            Some(ManagedAclPublicationMode::ManagedAcl),
+            Some(ManagedProjectionHealth::Unverified),
+            Some(ManagedProjectionHealth::Verified),
+        ));
+        assert!(!managed_neutron_authority_confirmation_allowed(
+            true,
+            Some(ManagedAclPublicationMode::ManagedAcl),
+            Some(ManagedAclPublicationMode::ManagedAcl),
+            None,
+            Some(ManagedProjectionHealth::Verified),
+        ));
+        assert!(managed_neutron_authority_confirmation_allowed(
+            true,
+            Some(ManagedAclPublicationMode::ManagedAcl),
+            Some(ManagedAclPublicationMode::ManagedAcl),
+            Some(ManagedProjectionHealth::Verified),
+            Some(ManagedProjectionHealth::Verified),
+        ));
+        assert!(!managed_neutron_authority_confirmation_allowed(
+            true,
+            Some(ManagedAclPublicationMode::StandaloneCompatibility),
+            None,
+            None,
+            None,
+        ));
+        assert!(managed_neutron_authority_confirmation_allowed(
+            true,
+            Some(ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl),
+            None,
+            None,
+            None,
+        ));
+        assert!(managed_neutron_authority_confirmation_allowed(
+            true,
+            Some(ManagedAclPublicationMode::ManagedAcl),
+            None,
+            Some(ManagedProjectionHealth::Unverified),
+            None,
+        ));
+    }
+
+    #[test]
+    fn managed_acl_ownership_authority_confirmation_revalidates_publication_mode() {
+        assert!(!managed_neutron_authority_confirmation_allowed(
+            true,
+            Some(ManagedAclPublicationMode::StandaloneCompatibility),
+            Some(ManagedAclPublicationMode::ManagedAcl),
+            Some(ManagedProjectionHealth::Unverified),
+            None,
+        ));
+        assert!(managed_neutron_authority_confirmation_allowed(
+            true,
+            Some(ManagedAclPublicationMode::ManagedAcl),
+            Some(ManagedAclPublicationMode::ManagedAcl),
+            Some(ManagedProjectionHealth::Unverified),
+            None,
+        ));
     }
 }

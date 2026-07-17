@@ -2565,7 +2565,7 @@ def check_rust_stage_one_tests_present():
         (
             _read_repo_text(os.path.join("agent", "src", "tap_registry.rs")),
             "managed_acl_ownership_",
-            3,
+            6,
         ),
     )
     for projection_test_source, prefix, minimum in projection_test_sources:
@@ -2715,6 +2715,55 @@ def check_rust_stage_one_tests_present():
     ):
         raise SystemExit(
             "ERROR: managed detach must clear attach state and ACL authority unconditionally"
+        )
+
+    authority_confirmation_body = _rust_function_body(
+        control_plane_source, "mark_neutron_port_authority_if_current"
+    )
+    authority_confirmation_policy_body = _rust_function_body(
+        control_plane_source, "managed_neutron_authority_confirmation_allowed"
+    )
+    if authority_confirmation_body is None or not all(
+        marker in authority_confirmation_body
+        for marker in (
+            "lock_runtime_lifecycle",
+            "managed_neutron_authority_confirmation_allowed",
+            "mark_neutron_port_authority",
+            "required_publication_mode",
+        )
+    ):
+        raise SystemExit(
+            "ERROR: Neutron authority publication must revalidate current attach under lifecycle lock"
+        )
+    if authority_confirmation_policy_body is None or not all(
+        marker in authority_confirmation_policy_body
+        for marker in (
+            "Some(ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl)",
+            "Some(ManagedAclPublicationMode::ManagedAcl)",
+        )
+    ):
+        raise SystemExit(
+            "ERROR: Neutron authority publication must reject standalone-compatible replacement instances"
+        )
+    update_skip_index = update_body.find("can_skip_neutron_domain_reconcile")
+    authority_confirmation_index = update_body.find(
+        "mark_neutron_port_authority_if_current"
+    )
+    if (
+        update_skip_index < 0
+        or authority_confirmation_index < update_skip_index
+        or update_body.count("mark_neutron_port_authority_if_current") < 3
+        or re.search(
+            r"\.\s*mark_neutron_port_authority\s*\(",
+            _blank_rust_non_code(neutron_api_source),
+        )
+    ):
+        raise SystemExit(
+            "ERROR: managed apply must confirm current authority after evaluating projection health"
+        )
+    if "clear_neutron_port_authority" in _blank_rust_non_code(neutron_api_source):
+        raise SystemExit(
+            "ERROR: Neutron detach must use the registry's serialized authority cleanup"
         )
 
     for source, function_name, binding in (
