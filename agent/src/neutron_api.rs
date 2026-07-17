@@ -7614,6 +7614,17 @@ mod tests {
         baseline_accepted_inventory.accepted_generation =
             baseline_accepted_inventory.applied_generation;
 
+        let mut same_generation_pending_hash_mismatch = base.clone();
+        same_generation_pending_hash_mismatch.accepted_generation =
+            same_generation_pending_hash_mismatch.applied_generation;
+        same_generation_pending_hash_mismatch.pending_generation =
+            Some(same_generation_pending_hash_mismatch.applied_generation);
+        same_generation_pending_hash_mismatch.desired_hash =
+            Some("hash-pending-mismatch".to_string());
+        same_generation_pending_hash_mismatch.recovery_cause = None;
+        same_generation_pending_hash_mismatch.authority_state =
+            "blocked_recovery_required".to_string();
+
         let mut managed_map_key_mismatch = base.clone();
         let managed_row = managed_map_key_mismatch
             .ports
@@ -7792,6 +7803,10 @@ mod tests {
                 expected_generation: 42,
                 historical_control: false,
             },
+            blocked_case(
+                "same-generation-pending-hash-mismatch",
+                same_generation_pending_hash_mismatch,
+            ),
             blocked_case("managed-map-key-mismatch", managed_map_key_mismatch),
             blocked_case("status-map-key-mismatch", status_map_key_mismatch),
             blocked_case("status-embedded-id-mismatch", status_embedded_id_mismatch),
