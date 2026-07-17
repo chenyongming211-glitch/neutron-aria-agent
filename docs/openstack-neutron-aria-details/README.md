@@ -40,6 +40,7 @@ or an explicitly approved later phase.
 | `13-acl-delivery-performance-optimization.md` | Detail ACL strategy delivery performance optimization after the 2026-07-07 200-rule convergence probe. |
 | `14-logging-level-governance.md` | Record Rust/Python agent logging-level governance, noisy-log demotion, SSL reconcile gating, and Kolla log routing cleanup. |
 | `15-acl-operator-ux-backlog.md` | Track read-only ACL operator UX improvements such as policy-with-rules and effective-port inspection commands. |
+| `16-versioned-rust-python-status-contract.md` | Define the independently versioned status projection, stable transaction/readiness/action vocabulary, rolling compatibility, and shared Rust-Python scenarios. |
 
 ## Refinement Order
 
@@ -65,6 +66,9 @@ or an explicitly approved later phase.
 13. ACL operator UX backlog, after core ACL correctness and smoke coverage are
     stable, to improve read-only troubleshooting without changing datapath
     behavior.
+14. Versioned Rust-Python status contract, after transaction truthfulness and
+    before further ACL correctness work, so both runtimes share one recovery
+    decision vocabulary and scenario source.
 
 ## Dependency Map
 
@@ -126,6 +130,12 @@ or an explicitly approved later phase.
 15 ACL operator UX backlog
   -> 02 aria_acl plugin/client read-side commands
   -> 05 status/heartbeat effective port inspection
+
+16 Versioned Rust-Python status contract
+  -> 04 independent status schema and compatibility handshake
+  -> 05 truthful readiness and degraded projection
+  -> 07 exact pending recovery identity and action
+  -> 09 scoped failure must not bypass contract errors
 ```
 
 ## Gate Mapping

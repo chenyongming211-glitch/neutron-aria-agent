@@ -717,10 +717,12 @@ code is submitted.
    `REVIEW-TXN-029` are fixed. Python requires complete terminal identity and
    domain evidence; Rust preserves non-authoritative inventory failures through
    a verified two-stage WAL recovery sequence with a fresh phase-2 replay gate.
-3. **Next — Define the versioned Rust-Python status contract (Batch 2C):**
-   use a separate branch and Draft PR. Define shared success, degraded, blocked,
-   and recovery scenarios. Submit the written design for user approval before
-   adding RED tests or production code; implement only after that approval.
+3. **Design gate — Versioned Rust-Python status contract (Batch 2C):**
+   the independent design is recorded in
+   `16-versioned-rust-python-status-contract.md`. It defines shared success,
+   degraded, blocked, and recovery scenarios plus the rolling compatibility
+   boundary. It is awaiting explicit user approval; no RED tests or production
+   code are authorized yet.
 4. **After Batch 2C — Isolate ACL selector ownership:** `REVIEW-ACL-046`.
    Split general group and ACL selector publication, stage only ACL-referenced
    groups, reject or canonicalize selector conflicts, and publish with CT
