@@ -32,6 +32,9 @@ RUST_TESTS = [
         "managed_projection_inventory_handoff_",
     ],
     ["test", "--locked", "-p", "aria-agent", "managed_projection_health_"],
+    ["test", "--locked", "-p", "aria-agent", "managed_acl_shadow_"],
+    ["test", "--locked", "-p", "aria-agent", "managed_general_delta_"],
+    ["test", "--locked", "-p", "aria-agent", "managed_projection_repair_"],
     ["test", "--locked", "-p", "aria-agent", "managed_acl_ownership_"],
     ["test", "--locked", "-p", "aria-api", "neutron_contract"],
     ["test", "--locked", "-p", "aria-agent", "neutron_wal"],
@@ -2527,6 +2530,9 @@ def check_rust_stage_one_tests_present():
             "managed_projection_inventory_handoff_",
         ],
         ["test", "--locked", "-p", "aria-agent", "managed_projection_health_"],
+        ["test", "--locked", "-p", "aria-agent", "managed_acl_shadow_"],
+        ["test", "--locked", "-p", "aria-agent", "managed_general_delta_"],
+        ["test", "--locked", "-p", "aria-agent", "managed_projection_repair_"],
         ["test", "--locked", "-p", "aria-agent", "managed_acl_ownership_"],
     )
     for projection_test in projection_tests:
@@ -2561,6 +2567,22 @@ def check_rust_stage_one_tests_present():
             + _read_repo_text(os.path.join("agent", "src", "neutron_api.rs")),
             "managed_projection_health_",
             12,
+        ),
+        (
+            _read_repo_text(os.path.join("agent", "src", "control_plane.rs")),
+            "managed_acl_shadow_",
+            3,
+        ),
+        (
+            _read_repo_text(os.path.join("agent", "src", "control_plane.rs")),
+            "managed_general_delta_",
+            8,
+        ),
+        (
+            _read_repo_text(os.path.join("agent", "src", "control_plane.rs"))
+            + _read_repo_text(os.path.join("agent", "src", "neutron_api.rs")),
+            "managed_projection_repair_",
+            6,
         ),
         (
             _read_repo_text(os.path.join("agent", "src", "tap_registry.rs")),
@@ -4279,6 +4301,369 @@ def check_rust_stage_one_tests_present():
             raise SystemExit("ERROR: OpenAPI exclusion test missing %s" % path)
 
 
+def check_managed_acl_publication_transaction_contract():
+    print("==> checking managed ACL publication transaction contract")
+    control_plane_source = _read_repo_text(
+        os.path.join("agent", "src", "control_plane.rs")
+    )
+    inventory_source = _read_repo_text(
+        os.path.join("core", "src", "ebpf_ops", "inventory.rs")
+    )
+
+    shadow_body = _rust_function_body(control_plane_source, "stage_acl_shadow_bank")
+    shadow_plan_body = _rust_function_body(
+        control_plane_source, "managed_acl_shadow_network_plan"
+    )
+    if shadow_body is None:
+        raise SystemExit("ERROR: managed ACL shadow staging helper is missing")
+    if (
+        re.search(r"\bstate\s*\.\s*groups\b", shadow_body)
+        or "managed_acl_shadow_network_plan" not in shadow_body
+        or shadow_plan_body is None
+    ):
+        raise SystemExit(
+            "ERROR: managed ACL shadow staging still iterates the raw all-group state"
+        )
+    if re.search(r"\bstate\s*\.\s*groups\b", shadow_plan_body) or not all(
+        marker in shadow_plan_body
+        for marker in ("projection.acl_src", "projection.acl_dst")
+    ):
+        raise SystemExit(
+            "ERROR: managed ACL shadow staging must consume directional compiled projection entries"
+        )
+
+    mutation_body = _rust_item_body(
+        control_plane_source, "enum", "SharedNetworkMutation"
+    )
+    if mutation_body is None or not all(
+        marker in mutation_body
+        for marker in (
+            "Replaced",
+            "direction",
+            "cidr",
+            "old_group_id",
+            "new_group_id",
+        )
+    ):
+        raise SystemExit(
+            "ERROR: managed general replacement must retain its complete old/new preimage"
+        )
+    apply_body = _rust_function_body(
+        control_plane_source, "apply_shared_network_mutation"
+    )
+    compensation_body = _rust_function_body(
+        control_plane_source, "shared_network_compensation"
+    )
+    replaced_apply_start = (
+        apply_body.find("SharedNetworkMutation::Replaced") if apply_body else -1
+    )
+    replaced_apply_end = (
+        apply_body.find("SharedNetworkMutation::", replaced_apply_start + 1)
+        if replaced_apply_start >= 0 else -1
+    )
+    replaced_apply = (
+        apply_body[replaced_apply_start:]
+        if replaced_apply_start >= 0 and replaced_apply_end < 0
+        else apply_body[replaced_apply_start:replaced_apply_end]
+        if replaced_apply_start >= 0
+        else ""
+    )
+    if (
+        apply_body is None
+        or "add_network" not in replaced_apply
+        or "new_group_id" not in replaced_apply
+        or "delete_network" in replaced_apply
+        or compensation_body is None
+        or not all(
+            marker in compensation_body
+            for marker in ("SharedNetworkMutation::Replaced", "old_group_id", "new_group_id")
+        )
+    ):
+        raise SystemExit(
+            "ERROR: managed general replacement apply/rollback must upsert new then restore old"
+        )
+
+    compensation_item = _rust_item_body(
+        control_plane_source, "enum", "ManagedAclPublicationCompensation"
+    )
+    failure_phase_item = _rust_item_body(
+        control_plane_source, "enum", "ManagedAclPublicationFailurePhase"
+    )
+    compensation_plan_body = _rust_function_body(
+        control_plane_source, "managed_acl_publication_compensations"
+    )
+    compensation_execute_body = _rust_function_body(
+        control_plane_source, "execute_managed_acl_publication_compensations"
+    )
+    if (
+        compensation_item is None
+        or not all(
+            marker in compensation_item
+            for marker in ("RestoreActiveBank", "RestoreGeneral")
+        )
+        or failure_phase_item is None
+        or not all(
+            marker in failure_phase_item
+            for marker in ("General", "Shadow", "VerifyTc", "SwitchBank", "Persist")
+        )
+        or compensation_plan_body is None
+        or not all(
+            marker in compensation_plan_body
+            for marker in (
+                "ManagedAclPublicationFailurePhase::Persist",
+                "mutations.iter().rev()",
+                "shared_network_compensation",
+            )
+        )
+        or compensation_execute_body is None
+        or ".iter()" not in compensation_execute_body
+    ):
+        raise SystemExit(
+            "ERROR: managed ACL failure compensation must restore bank and every general preimage"
+        )
+
+    group_rollback_body = _rust_function_body(
+        control_plane_source, "rollback_group_deletes"
+    )
+    if (
+        group_rollback_body is None
+        or "group_delete_rollback_restores_acl_bank" not in group_rollback_body
+    ):
+        raise SystemExit(
+            "ERROR: managed group-delete rollback must not restore the active ACL bank"
+        )
+
+    decision_body = _rust_function_body(
+        control_plane_source, "managed_acl_publication_decision"
+    )
+    if decision_body is None or not all(
+        marker in decision_body
+        for marker in (
+            "ProjectionDrift::Clean",
+            "ProjectionDrift::RepairRequired",
+            "ProjectionDrift::Fatal",
+            "ManagedProjectionHealth::Unverified",
+        )
+    ):
+        raise SystemExit(
+            "ERROR: managed projection publication decision must distinguish clean, repair, and fatal drift"
+        )
+
+    step_item = _rust_item_body(
+        control_plane_source, "enum", "ManagedAclPublicationStep"
+    )
+    step_plan_body = _rust_function_body(
+        control_plane_source, "managed_acl_publication_steps"
+    )
+    if step_item is None or not all(
+        marker in step_item
+        for marker in (
+            "InvalidateProjectionHealth",
+            "ApplyGeneral",
+            "StageShadow",
+            "VerifyTc",
+            "SwitchBank",
+            "Persist",
+        )
+    ):
+        raise SystemExit("ERROR: managed ACL publication step vocabulary is incomplete")
+    if step_plan_body is None:
+        raise SystemExit("ERROR: managed ACL publication step planner is missing")
+    projection_conversion_body = _rust_function_body(
+        control_plane_source, "shared_network_mutation_from_projection"
+    )
+    if projection_conversion_body is None or not all(
+        marker in projection_conversion_body
+        for marker in (
+            "ProjectionMutation::Added",
+            "ProjectionMutation::Deleted",
+            "ProjectionMutation::Replaced",
+            "old_group_id",
+            "new_group_id",
+        )
+    ):
+        raise SystemExit(
+            "ERROR: proposed projection mutations must retain complete shared-map preimages"
+        )
+    planned_step_positions = [
+        step_plan_body.find(marker)
+        for marker in (
+            "ManagedAclPublicationStep::InvalidateProjectionHealth",
+            "ManagedAclPublicationStep::ApplyGeneral",
+            "ManagedAclPublicationStep::StageShadow",
+            "ManagedAclPublicationStep::VerifyTc",
+            "ManagedAclPublicationStep::SwitchBank",
+            "ManagedAclPublicationStep::Persist",
+        )
+    ]
+    if (
+        "ManagedAclPublicationDecision::Noop" not in step_plan_body
+        or "repair_plan" not in step_plan_body
+        or "shared_network_mutation_from_projection" not in step_plan_body
+        or any(position < 0 for position in planned_step_positions)
+        or planned_step_positions != sorted(planned_step_positions)
+    ):
+        raise SystemExit(
+            "ERROR: managed ACL publication steps must order health, general, shadow, verify, switch, persist"
+        )
+
+    proposed_drift_body = _rust_function_body(
+        inventory_source, "plan_managed_pinned_projection"
+    )
+    if proposed_drift_body is None or not all(
+        marker in proposed_drift_body
+        for marker in (
+            "capture_runtime_group_map_entries",
+            "validate_strict_pinned_runtime_state",
+            "compile_managed_group_projection",
+            "plan_projection_drift",
+            "proposed",
+        )
+    ):
+        raise SystemExit(
+            "ERROR: pinned managed drift planning must classify committed capture directly to proposed projection"
+        )
+    if not re.search(
+        r"plan_projection_drift\s*\([^;]*\bproposed\b",
+        proposed_drift_body,
+        re.DOTALL,
+    ):
+        raise SystemExit(
+            "ERROR: pinned managed drift planner must pass proposed projection as its third input"
+        )
+
+    replace_body = _rust_function_body(control_plane_source, "replace_owned_acl")
+    publication_body = _rust_function_body(
+        control_plane_source, "publish_acl_projection_locked"
+    )
+    if (
+        replace_body is None
+        or "publish_acl_projection_locked" not in replace_body
+        or publication_body is None
+    ):
+        raise SystemExit(
+            "ERROR: owned ACL replace must use one locked projection publication helper"
+        )
+    if "lock_runtime_lifecycle" in publication_body:
+        raise SystemExit(
+            "ERROR: locked projection publication helper must not reacquire the lifecycle lock"
+        )
+    if "ManagedProjectionHealth::Verified" in publication_body:
+        raise SystemExit(
+            "ERROR: projection publication must remain unverified until the caller's strict flush"
+        )
+    drift_check = publication_body.find("plan_managed_pinned_projection")
+    decision = publication_body.find("managed_acl_publication_decision")
+    no_op = publication_body.find("ManagedAclPublicationDecision::Noop")
+    step_plan = publication_body.find("managed_acl_publication_steps")
+    if not (0 <= drift_check < decision < no_op < step_plan):
+        raise SystemExit(
+            "ERROR: managed projection drift and no-op decision must precede one publication step plan"
+        )
+    for marker in (
+        "ManagedAclPublicationStep::InvalidateProjectionHealth",
+        "managed_projection_health = ManagedProjectionHealth::Unverified",
+        "ManagedAclPublicationStep::ApplyGeneral",
+        "apply_shared_network_mutation",
+        "ManagedAclPublicationStep::StageShadow",
+        "Self::stage_acl_shadow_bank",
+        "ManagedAclPublicationStep::VerifyTc",
+        "Self::require_tc_acl_ready_locked",
+        "ManagedAclPublicationStep::SwitchBank",
+        "aria_core::ebpf_ops::set_acl_active_bank",
+        "ManagedAclPublicationStep::Persist",
+    ):
+        if marker not in publication_body:
+            raise SystemExit(
+                "ERROR: locked managed ACL publication helper is missing %s" % marker
+            )
+    prepublication_rollback_body = _rust_function_body(
+        control_plane_source, "rollback_owned_acl_prepublication"
+    )
+    if (
+        prepublication_rollback_body is None
+        or "managed_acl_publication_compensations" not in prepublication_rollback_body
+        or "managed_acl_publication_compensations" not in publication_body
+    ):
+        raise SystemExit(
+            "ERROR: shadow and persistence failures must use the shared complete compensation plan"
+        )
+    general_arm_start = publication_body.find("ManagedAclPublicationStep::ApplyGeneral")
+    shadow_arm_start = publication_body.find("ManagedAclPublicationStep::StageShadow")
+    shadow_arm_end = publication_body.find(
+        "ManagedAclPublicationStep::VerifyTc", shadow_arm_start + 1
+    )
+    verify_arm_start = shadow_arm_end
+    switch_arm_start = publication_body.find(
+        "ManagedAclPublicationStep::SwitchBank", verify_arm_start + 1
+    )
+    persist_arm_start = publication_body.find("ManagedAclPublicationStep::Persist")
+    general_arm = (
+        publication_body[general_arm_start:shadow_arm_start]
+        if 0 <= general_arm_start < shadow_arm_start
+        else ""
+    )
+    shadow_arm = (
+        publication_body[shadow_arm_start:shadow_arm_end]
+        if 0 <= shadow_arm_start < shadow_arm_end
+        else ""
+    )
+    verify_arm = (
+        publication_body[verify_arm_start:switch_arm_start]
+        if 0 <= verify_arm_start < switch_arm_start
+        else ""
+    )
+    switch_arm = (
+        publication_body[switch_arm_start:persist_arm_start]
+        if 0 <= switch_arm_start < persist_arm_start
+        else ""
+    )
+    persist_arm = publication_body[persist_arm_start:] if persist_arm_start >= 0 else ""
+    for arm, phase, label in (
+        (general_arm, "General", "general-map"),
+        (shadow_arm, "Shadow", "shadow"),
+        (verify_arm, "VerifyTc", "TC verification"),
+        (switch_arm, "SwitchBank", "bank switch"),
+    ):
+        if (
+            "ManagedAclPublicationFailurePhase::%s" % phase not in arm
+            or "rollback_owned_acl_prepublication" not in arm
+        ):
+            raise SystemExit(
+                "ERROR: %s failure must dispatch the pre-switch compensation phase"
+                % label
+            )
+    if not all(
+        marker in persist_arm
+        for marker in (
+            "ManagedAclPublicationFailurePhase::Persist",
+            "managed_acl_publication_compensations",
+            "execute_managed_acl_publication_compensations",
+        )
+    ):
+        raise SystemExit(
+            "ERROR: persistence failure must restore the old bank and every general preimage"
+        )
+
+    neutron_api_source = _read_repo_text(
+        os.path.join("agent", "src", "neutron_api.rs")
+    )
+    reconcile_body = _rust_function_body(neutron_api_source, "reconcile_neutron_acl")
+    replace = reconcile_body.find(".replace_owned_acl(") if reconcile_body else -1
+    strict_flush = (
+        reconcile_body.find("flush_neutron_acl_conntrack", replace)
+        if reconcile_body else -1
+    )
+    gate_publish = (
+        reconcile_body.find(".update_neutron_acl_runtime_gate(", strict_flush)
+        if reconcile_body else -1
+    )
+    if not (0 <= replace < strict_flush < gate_publish):
+        raise SystemExit(
+            "ERROR: managed ACL publication must remain replace then strict flush then gate publish"
+        )
+
+
 def check_ebpf_acl_ingress_boundary():
     print("==> checking eBPF ACL ingress boundary")
     _run_acl_ingress_parser_self_tests()
@@ -4513,6 +4898,7 @@ def main():
     check_rust_uds_contract_source()
     check_status_v1_contract()
     check_rust_stage_one_tests_present()
+    check_managed_acl_publication_transaction_contract()
     check_p3_rust_scoped_plan_boundary()
     run([sys.executable, os.path.join("ci", "check_tc_acl_datapath.py")])
     check_ebpf_acl_ingress_boundary()

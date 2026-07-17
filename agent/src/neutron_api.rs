@@ -12828,6 +12828,20 @@ mod tests {
     }
 
     #[test]
+    fn managed_projection_repair_fatal_after_quiesce_keeps_gate_in_bypass() {
+        let transition = acl_runtime_transition(&AclApplyPlan::default(), true);
+        let error = acl_reconcile_error(
+            AclReconcileFailurePhase::AfterQuiesce,
+            "unknown active selector",
+        );
+
+        assert!(!transition.quiesce.conntrack_enabled);
+        assert!(!transition.quiesce.acl_enabled);
+        assert_eq!(error.effective_action, "bypass");
+        assert!(error.details.contains("unknown active selector"));
+    }
+
+    #[test]
     fn domain_authority_neutron_acl_purge_includes_foreign_acl_policies() {
         let mut group_names_by_id = BTreeMap::new();
         group_names_by_id.insert(

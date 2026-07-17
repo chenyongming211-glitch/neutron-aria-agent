@@ -6248,6 +6248,402 @@ mod tests {
             .is_ok());
     }
 
+    fn managed_acl_shadow_fixture() -> aria_core::ebpf_ops::ManagedGroupProjection {
+        let mut state = FirewallState::default();
+        for (name, id, cidrs) in [
+            ("acl-source", 10, vec!["10.0.0.0/24"]),
+            ("acl-destination", 11, vec!["2001:db8::/64"]),
+            ("local-exact", 20, vec!["10.0.0.0/24"]),
+            ("local-more-specific", 30, vec!["10.0.0.7/32"]),
+        ] {
+            state.groups.insert(
+                name.to_string(),
+                GroupInfo {
+                    id,
+                    name: name.to_string(),
+                    cidrs: cidrs.into_iter().map(str::to_string).collect(),
+                },
+            );
+        }
+        state.rules.push(RuleInfo {
+            name: None,
+            src_group_id: 10,
+            dst_group_id: 11,
+            proto: libc::IPPROTO_TCP as u8,
+            action: 0,
+            ports: None,
+            bitmap_idx: None,
+            direction: 0,
+        });
+
+        aria_core::ebpf_ops::compile_managed_group_projection(&state)
+            .expect("managed shadow fixture must compile")
+    }
+
+    #[test]
+    fn managed_acl_shadow_uses_direction_specific_projection_entries() {
+        let projection = managed_acl_shadow_fixture();
+        let writes: BTreeSet<_> = managed_acl_shadow_network_plan(&projection)
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            writes,
+            BTreeSet::from([
+                ("src", "10.0.0.0/24".to_string(), 10),
+                ("dst", "2001:db8::/64".to_string(), 11),
+            ])
+        );
+    }
+
+    #[test]
+    fn managed_acl_shadow_excludes_exact_local_alias() {
+        let writes = managed_acl_shadow_network_plan(&managed_acl_shadow_fixture());
+
+        assert!(writes.iter().all(|(_, _, group_id)| *group_id != 20));
+    }
+
+    #[test]
+    fn managed_acl_shadow_excludes_more_specific_local_alias() {
+        let writes = managed_acl_shadow_network_plan(&managed_acl_shadow_fixture());
+
+        assert!(writes.iter().all(|(_, _, group_id)| *group_id != 30));
+    }
+
+    fn managed_replacement(direction: &'static str) -> SharedNetworkMutation {
+        SharedNetworkMutation::Replaced {
+            direction,
+            cidr: "10.0.0.0/24".to_string(),
+            old_group_id: 41,
+            new_group_id: 71,
+        }
+    }
+
+    fn managed_replacement_compensations(
+        mutations: &[SharedNetworkMutation],
+    ) -> Vec<ManagedAclPublicationCompensation> {
+        managed_acl_publication_compensations(
+            mutations,
+            ManagedAclPublicationFailurePhase::General,
+        )
+    }
+
+    fn managed_expected_restore(direction: &'static str) -> SharedNetworkMutation {
+        SharedNetworkMutation::Replaced {
+            direction,
+            cidr: "10.0.0.0/24".to_string(),
+            old_group_id: 71,
+            new_group_id: 41,
+        }
+    }
+
+    fn managed_expected_general_restore(
+        direction: &'static str,
+    ) -> ManagedAclPublicationCompensation {
+        ManagedAclPublicationCompensation::RestoreGeneral(managed_expected_restore(direction))
+    }
+
+    fn managed_publication_step_counts(
+        decision: &ManagedAclPublicationDecision,
+        general_mutations: Vec<SharedNetworkMutation>,
+    ) -> (usize, usize, usize) {
+        let steps = managed_acl_publication_steps(decision, general_mutations);
+        let general_writes = steps
+            .iter()
+            .filter(|step| matches!(step, ManagedAclPublicationStep::ApplyGeneral(_)))
+            .count();
+        let shadow_stages = steps
+            .iter()
+            .filter(|step| matches!(step, ManagedAclPublicationStep::StageShadow))
+            .count();
+        let bank_switches = steps
+            .iter()
+            .filter(|step| matches!(step, ManagedAclPublicationStep::SwitchBank))
+            .count();
+        (general_writes, shadow_stages, bank_switches)
+    }
+
+    #[test]
+    fn managed_general_delta_replacement_compensation_upserts_old_value() {
+        assert_eq!(
+            shared_network_compensation(&managed_replacement("src")),
+            managed_expected_restore("src")
+        );
+    }
+
+    #[test]
+    fn managed_general_delta_source_only_failure_restores_preimage() {
+        assert_eq!(
+            managed_replacement_compensations(&[managed_replacement("src")]),
+            vec![managed_expected_general_restore("src")]
+        );
+    }
+
+    #[test]
+    fn managed_general_delta_destination_failure_restores_source_preimage() {
+        let applied_before_destination_failure = vec![managed_replacement("src")];
+
+        assert_eq!(
+            managed_replacement_compensations(&applied_before_destination_failure),
+            vec![managed_expected_general_restore("src")]
+        );
+    }
+
+    #[test]
+    fn managed_general_delta_shadow_failure_restores_both_preimages() {
+        let applied = vec![managed_replacement("src"), managed_replacement("dst")];
+
+        assert_eq!(
+            managed_acl_publication_compensations(
+                &applied,
+                ManagedAclPublicationFailurePhase::Shadow,
+            ),
+            vec![
+                managed_expected_general_restore("dst"),
+                managed_expected_general_restore("src")
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_general_delta_persistence_failure_restores_both_preimages() {
+        let applied = vec![managed_replacement("src"), managed_replacement("dst")];
+
+        assert_eq!(
+            managed_acl_publication_compensations(
+                &applied,
+                ManagedAclPublicationFailurePhase::Persist,
+            ),
+            vec![
+                ManagedAclPublicationCompensation::RestoreActiveBank,
+                managed_expected_general_restore("dst"),
+                managed_expected_general_restore("src")
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_general_delta_compensation_failure_attempts_every_preimage() {
+        let applied = vec![managed_replacement("src"), managed_replacement("dst")];
+        let compensations = managed_acl_publication_compensations(
+            &applied,
+            ManagedAclPublicationFailurePhase::Persist,
+        );
+        let mut attempted = Vec::new();
+
+        let error = execute_managed_acl_publication_compensations(&compensations, |compensation| {
+            attempted.push(compensation.clone());
+            if attempted.len() == 1 {
+                Err("forced bank compensation failure".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("one failed compensation must remain visible");
+
+        assert_eq!(
+            attempted,
+            vec![
+                ManagedAclPublicationCompensation::RestoreActiveBank,
+                managed_expected_general_restore("dst"),
+                managed_expected_general_restore("src")
+            ]
+        );
+        assert!(error.contains("forced bank compensation failure"));
+    }
+
+    #[test]
+    fn managed_general_delta_general_compensation_failure_attempts_every_preimage() {
+        let applied = vec![managed_replacement("src"), managed_replacement("dst")];
+        let compensations = managed_acl_publication_compensations(
+            &applied,
+            ManagedAclPublicationFailurePhase::Shadow,
+        );
+        let mut attempted = Vec::new();
+
+        let error = execute_managed_acl_publication_compensations(&compensations, |compensation| {
+            attempted.push(compensation.clone());
+            if attempted.len() == 1 {
+                Err("forced destination compensation failure".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("one failed preimage restore must remain visible");
+
+        assert_eq!(
+            attempted,
+            vec![
+                managed_expected_general_restore("dst"),
+                managed_expected_general_restore("src")
+            ]
+        );
+        assert!(error.contains("forced destination compensation failure"));
+    }
+
+    #[test]
+    fn managed_general_delta_managed_group_delete_rollback_is_general_only() {
+        assert!(!group_delete_rollback_restores_acl_bank(
+            ManagedAclPublicationMode::ManagedAcl
+        ));
+        assert!(group_delete_rollback_restores_acl_bank(
+            ManagedAclPublicationMode::StandaloneCompatibility
+        ));
+        assert!(group_delete_rollback_restores_acl_bank(
+            ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl
+        ));
+    }
+
+    #[test]
+    fn managed_projection_repair_verified_invalidates_before_first_mutation() {
+        let decision = managed_acl_publication_decision(ProjectionDrift::Clean, true)
+            .expect("a real ACL change must publish");
+
+        assert!(matches!(
+            &decision,
+            ManagedAclPublicationDecision::Publish {
+                selector_repair_performed: false,
+                repair_plan: None,
+                pre_mutation_health: ManagedProjectionHealth::Unverified,
+            }
+        ));
+        let semantic_mutation = SharedNetworkMutation::Added {
+            direction: "src",
+            cidr: "198.51.100.0/24".to_string(),
+            group_id: 88,
+        };
+        let steps = managed_acl_publication_steps(&decision, vec![semantic_mutation.clone()]);
+        assert!(matches!(
+            steps.first(),
+            Some(ManagedAclPublicationStep::InvalidateProjectionHealth)
+        ));
+        assert_eq!(
+            steps.get(1),
+            Some(&ManagedAclPublicationStep::ApplyGeneral(semantic_mutation))
+        );
+    }
+
+    #[test]
+    fn managed_projection_repair_clean_equal_reconcile_is_noop() {
+        let decision = managed_acl_publication_decision(ProjectionDrift::Clean, false)
+            .expect("clean inventory must be accepted");
+
+        assert_eq!(decision, ManagedAclPublicationDecision::Noop);
+        assert!(managed_acl_publication_steps(&decision, Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn managed_projection_repair_equal_drift_returns_one_publication() {
+        let repair_plan = aria_core::ebpf_ops::ProjectionRepairPlan {
+            general_mutations: Vec::new(),
+        };
+        let decision = managed_acl_publication_decision(
+            ProjectionDrift::RepairRequired(repair_plan.clone()),
+            false,
+        )
+        .expect("explainable equal drift must publish once");
+
+        assert_eq!(
+            decision,
+            ManagedAclPublicationDecision::Publish {
+                selector_repair_performed: true,
+                repair_plan: Some(repair_plan),
+                pre_mutation_health: ManagedProjectionHealth::Unverified,
+            }
+        );
+        assert_eq!(
+            managed_publication_step_counts(&decision, Vec::new()),
+            (0, 1, 1)
+        );
+        assert_eq!(
+            managed_acl_publication_decision(ProjectionDrift::Clean, false)
+                .expect("the repaired next equal snapshot must be clean"),
+            ManagedAclPublicationDecision::Noop
+        );
+    }
+
+    #[test]
+    fn managed_projection_repair_and_real_change_share_one_transaction() {
+        let repair_plan = aria_core::ebpf_ops::ProjectionRepairPlan {
+            general_mutations: vec![
+                aria_core::ebpf_ops::ProjectionMutation::Replaced {
+                    direction: aria_core::ebpf_ops::ProjectionDirection::Src,
+                    network: aria_core::ebpf_ops::CanonicalNetwork::parse("10.0.0.0/24")
+                        .expect("valid test CIDR"),
+                    old_group_id: 41,
+                    new_group_id: 71,
+                },
+                aria_core::ebpf_ops::ProjectionMutation::Replaced {
+                    direction: aria_core::ebpf_ops::ProjectionDirection::Dst,
+                    network: aria_core::ebpf_ops::CanonicalNetwork::parse("10.0.0.0/24")
+                        .expect("valid test CIDR"),
+                    old_group_id: 42,
+                    new_group_id: 72,
+                },
+            ],
+        };
+
+        let decision = managed_acl_publication_decision(
+            ProjectionDrift::RepairRequired(repair_plan.clone()),
+            true,
+        )
+        .expect("repair plus desired change must remain one publication");
+        assert_eq!(
+            decision,
+            ManagedAclPublicationDecision::Publish {
+                selector_repair_performed: true,
+                repair_plan: Some(repair_plan),
+                pre_mutation_health: ManagedProjectionHealth::Unverified,
+            }
+        );
+        assert_eq!(
+            managed_publication_step_counts(
+                &decision,
+                vec![SharedNetworkMutation::Added {
+                    direction: "src",
+                    cidr: "203.0.113.0/24".to_string(),
+                    group_id: 999,
+                }],
+            ),
+            (2, 1, 1)
+        );
+        let applied: Vec<_> = managed_acl_publication_steps(&decision, Vec::new())
+            .into_iter()
+            .filter_map(|step| match step {
+                ManagedAclPublicationStep::ApplyGeneral(mutation) => Some(mutation),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            applied,
+            vec![
+                SharedNetworkMutation::Replaced {
+                    direction: "src",
+                    cidr: "10.0.0.0/24".to_string(),
+                    old_group_id: 41,
+                    new_group_id: 71,
+                },
+                SharedNetworkMutation::Replaced {
+                    direction: "dst",
+                    cidr: "10.0.0.0/24".to_string(),
+                    old_group_id: 42,
+                    new_group_id: 72,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_projection_repair_fatal_capture_aborts_before_publication() {
+        let error = managed_acl_publication_decision(
+            ProjectionDrift::Fatal("unknown active selector".to_string()),
+            true,
+        )
+        .expect_err("unknown runtime drift must fail closed");
+
+        assert!(error.contains("unknown active selector"));
+    }
+
     #[test]
     fn domain_authority_exclusive_acl_replace_claims_foreign_rules() {
         let state = FirewallState::default();
