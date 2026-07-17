@@ -1806,6 +1806,8 @@ fn status_v1_has_complete_pending_identity(runtime: &NeutronRuntimeState) -> boo
                 .applied_desired_hash
                 .as_deref()
                 .is_some_and(|hash| !hash.trim().is_empty()))
+        && (pending_generation != runtime.applied_generation
+            || runtime.desired_hash == runtime.applied_desired_hash)
 }
 
 fn status_v1_has_classified_identity(runtime: &NeutronRuntimeState) -> bool {
