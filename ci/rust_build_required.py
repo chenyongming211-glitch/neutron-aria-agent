@@ -16,6 +16,7 @@ RUST_REQUIRED_FILES = frozenset(
         "aria-agent.service",
         "aria-firewall.service",
         "aria-firewall.spec",
+        "docs/neutron-status-contract-v1-scenarios.json",
         "install.sh",
     }
 )

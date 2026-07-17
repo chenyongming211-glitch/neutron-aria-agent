@@ -51,6 +51,11 @@ class RustBuildRequiredTests(unittest.TestCase):
                 ["openstack/neutron_aria/native/Cargo.toml"],
                 True,
             ),
+            (
+                "Status V1 scenario fixture requires Rust",
+                ["docs/neutron-status-contract-v1-scenarios.json"],
+                True,
+            ),
             ("docs-only input", ["docs/operator-guide.md"], False),
             ("empty input fails closed", [], True),
             ("unknown input fails closed", ["unclassified/new-input.xyz"], True),

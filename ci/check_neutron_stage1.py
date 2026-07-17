@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -45,6 +46,101 @@ SMOKE_SYNTAX = sorted(
 ) + [STANDALONE_TC_ACL_SMOKE_PATH]
 
 UDS_CONTRACT_PATH = os.path.join("docs", "neutron-uds-contract.json")
+STATUS_V1_SCENARIOS_PATH = "docs/neutron-status-contract-v1-scenarios.json"
+EXPECTED_STATUS_V1_SCHEMA_VERSION = 1
+EXPECTED_STATUS_V1_CONTRACT_HASH = "v0.9-neutron-status-1"
+EXPECTED_STATUS_V1_VOCABULARY = (
+    (
+        "transaction_states",
+        ("idle", "pending", "classified", "blocked", "recovery"),
+    ),
+    (
+        "overall_readiness",
+        ("ready", "degraded", "blocked", "unknown"),
+    ),
+    (
+        "required_actions",
+        ("none", "poll", "recover_pending", "full_resync", "operator"),
+    ),
+    ("recovery_causes", (None, "inventory_unavailable")),
+    (
+        "domain_statuses",
+        ("ready", "not_requested", "degraded", "blocked"),
+    ),
+    (
+        "effective_actions",
+        ("enforce", "bypass", "unchanged", "cleanup", "no_op"),
+    ),
+    (
+        "support_dispositions",
+        ("supported", "unsupported", "unknown", "not_applicable"),
+    ),
+)
+EXPECTED_STATUS_V1_TRIPLES = frozenset((
+    ("idle", "unknown", "full_resync"),
+    ("pending", "unknown", "poll"),
+    ("classified", "ready", "none"),
+    ("classified", "degraded", "none"),
+    ("classified", "degraded", "full_resync"),
+    ("blocked", "blocked", "recover_pending"),
+    ("blocked", "blocked", "operator"),
+    ("recovery", "degraded", "full_resync"),
+))
+EXPECTED_STATUS_V1_SCENARIO_IDS = (
+    "full-classified-ready",
+    "scoped-classified-ready",
+    "classified-degraded-terminal",
+    "classified-degraded-full-resync",
+    "pending-poll",
+    "blocked-recoverable-inventory",
+    "blocked-operator",
+    "recovery-full-resync",
+    "generation-zero-inventory-recovery",
+    "legacy-v0-ready",
+    "legacy-v0-unknown-authority",
+    "unknown-v1-contract",
+    "ready-invalid-evidence",
+    "restart-classified-routing",
+)
+EXPECTED_STATUS_V1_NULL_PROJECTION_IDS = frozenset((
+    "legacy-v0-unknown-authority",
+    "unknown-v1-contract",
+    "ready-invalid-evidence",
+))
+EXPECTED_STATUS_V1_INVENTORY_RECOVERY_IDS = frozenset((
+    "blocked-recoverable-inventory",
+    "generation-zero-inventory-recovery",
+))
+EXPECTED_RUST_STATUS_V1_PRODUCER_IDS = (
+    "full-classified-ready",
+    "scoped-classified-ready",
+    "classified-degraded-terminal",
+    "classified-degraded-full-resync",
+    "pending-poll",
+    "blocked-recoverable-inventory",
+    "blocked-operator",
+    "recovery-full-resync",
+    "generation-zero-inventory-recovery",
+    "restart-classified-routing",
+)
+EXPECTED_STATUS_CAPABILITY_FIELDS = (
+    "status_schema_version_min",
+    "status_schema_version_max",
+    "status_contract_hash",
+)
+EXPECTED_STATUS_RESPONSE_FIELDS = (
+    "status_schema_version",
+    "status_contract_hash",
+)
+STATUS_V1_RUST_ENUMS = (
+    ("transaction_states", "NeutronStatusTransactionState"),
+    ("overall_readiness", "NeutronStatusOverallReadiness"),
+    ("required_actions", "NeutronStatusRequiredAction"),
+    ("recovery_causes", "NeutronStatusRecoveryCause"),
+    ("domain_statuses", "NeutronStatusDomainState"),
+    ("effective_actions", "NeutronStatusEffectiveAction"),
+    ("support_dispositions", "NeutronStatusSupportDisposition"),
+)
 P3_RUST_SCOPED_PLAN_PATH = os.path.join(
     "docs", "openstack-neutron-aria-details", "10-rust-scoped-apply.md"
 )
@@ -246,8 +342,21 @@ def _rust_function_body_raw(source, function_name):
     )
     if not match:
         return None
-    opening = code.find("{", match.end())
+    parameter_depth = 1
+    header_index = match.end()
+    while header_index < len(code) and parameter_depth:
+        if code[header_index] == "(":
+            parameter_depth += 1
+        elif code[header_index] == ")":
+            parameter_depth -= 1
+        header_index += 1
+    if parameter_depth:
+        return None
+    opening = code.find("{", header_index)
     if opening < 0:
+        return None
+    declaration_tail = code[header_index:opening]
+    if ";" in declaration_tail or "}" in declaration_tail:
         return None
     depth = 1
     index = opening + 1
@@ -260,6 +369,1261 @@ def _rust_function_body_raw(source, function_name):
     if depth:
         return None
     return source[opening + 1:index - 1]
+
+
+def _rust_snake_case_unit_enum_values(source, enum_name):
+    """Return proven snake-case wire values for a simple public unit enum."""
+    code = _blank_rust_non_code(source)
+    declarations = list(re.finditer(
+        r"\bpub\s+enum\s+%s\b" % re.escape(enum_name), code
+    ))
+    if len(declarations) != 1:
+        raise ValueError(
+            "expected exactly one public Rust enum %s, found %s"
+            % (enum_name, len(declarations))
+        )
+
+    declaration = declarations[0]
+    opening = code.find("{", declaration.end())
+    if opening < 0 or code[declaration.end():opening].strip():
+        raise ValueError("Rust enum %s has an unsupported declaration" % enum_name)
+
+    depth = 1
+    index = opening + 1
+    while index < len(code) and depth:
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+        index += 1
+    if depth:
+        raise ValueError("Rust enum %s has an unbalanced body" % enum_name)
+    closing = index - 1
+
+    attribute_region = re.search(
+        r"(?P<attributes>(?:#\s*\[[^\[\]]*\]\s*)+)$",
+        code[:declaration.start()],
+        re.DOTALL,
+    )
+    if not attribute_region:
+        raise ValueError("Rust enum %s has no contiguous outer attributes" % enum_name)
+    attribute_start = attribute_region.start("attributes")
+    attributes_code = attribute_region.group("attributes")
+    serde_attribute_count = 0
+    serde_attributes = 0
+    for attribute in re.finditer(r"#\s*\[[^\[\]]*\]\s*", attributes_code, re.DOTALL):
+        absolute_start = attribute_start + attribute.start()
+        absolute_end = attribute_start + attribute.end()
+        raw_attribute = source[absolute_start:absolute_end]
+        if re.match(r"#\s*\[\s*serde\b", attribute.group(0)):
+            serde_attribute_count += 1
+        if re.fullmatch(
+            r'#\s*\[\s*serde\s*\(\s*rename_all\s*=\s*"snake_case"\s*\)\s*\]\s*',
+            raw_attribute,
+            re.DOTALL,
+        ):
+            serde_attributes += 1
+    if serde_attribute_count != 1 or serde_attributes != 1:
+        raise ValueError(
+            "Rust enum %s must have exactly one snake_case serde attribute"
+            % enum_name
+        )
+
+    body = code[opening + 1:closing]
+    entries = body.split(",")
+    if entries and not entries[-1].strip():
+        entries.pop()
+    if not entries or any(not entry.strip() for entry in entries):
+        raise ValueError("Rust enum %s has an empty or malformed variant" % enum_name)
+
+    values = []
+    for entry in entries:
+        variant = entry.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variant):
+            raise ValueError(
+                "Rust enum %s has a non-unit or unsupported variant %r"
+                % (enum_name, variant)
+            )
+        value = "".join(
+            ("_" if index and char.isupper() else "") + char.lower()
+            for index, char in enumerate(variant)
+        )
+        values.append(value)
+    if len(set(values)) != len(values):
+        raise ValueError("Rust enum %s has duplicate wire values" % enum_name)
+    return tuple(values)
+
+
+def _rust_ordinary_string_literals(text):
+    """Blank comments and return ordinary, unescaped Rust string literals."""
+    output = []
+    values = []
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index + 2)
+            if end < 0:
+                output.extend(" " for _ in text[index:])
+                break
+            output.extend(" " for _ in text[index:end])
+            output.append("\n")
+            index = end + 1
+            continue
+        if text.startswith("/*", index):
+            depth = 1
+            end = index + 2
+            while end < len(text) and depth:
+                if text.startswith("/*", end):
+                    depth += 1
+                    end += 2
+                elif text.startswith("*/", end):
+                    depth -= 1
+                    end += 2
+                else:
+                    end += 1
+            if depth:
+                raise ValueError("unterminated Rust block comment")
+            output.extend("\n" if char == "\n" else " " for char in text[index:end])
+            index = end
+            continue
+        if text[index] == '"':
+            end = index + 1
+            while end < len(text) and text[end] != '"':
+                if text[end] == "\\" or text[end] == "\n":
+                    raise ValueError("unsupported Rust string literal escape or newline")
+                end += 1
+            if end >= len(text):
+                raise ValueError("unterminated Rust string literal")
+            values.append(text[index + 1:end])
+            output.append("__RUST_STRING__")
+            index = end + 1
+            continue
+        output.append(text[index])
+        index += 1
+    return "".join(output), tuple(values)
+
+
+def _rust_returned_string_slice(source, function_name):
+    code = _blank_rust_non_code(source)
+    declarations = re.findall(
+        r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+%s\b"
+        % re.escape(function_name),
+        code,
+    )
+    if len(declarations) != 1:
+        raise ValueError(
+            "expected exactly one Rust function %s, found %s"
+            % (function_name, len(declarations))
+        )
+    body = _rust_function_body_raw(source, function_name)
+    if body is None:
+        raise ValueError("Rust function %s was not found" % function_name)
+    code, values = _rust_ordinary_string_literals(body)
+    if not re.fullmatch(
+        r"\s*&\s*\[\s*__RUST_STRING__"
+        r"(?:\s*,\s*__RUST_STRING__)*\s*,?\s*\]\s*",
+        code,
+        re.DOTALL,
+    ):
+        raise ValueError(
+            "Rust function %s must return one ordinary string slice literal"
+            % function_name
+        )
+    if len(set(values)) != len(values):
+        raise ValueError("Rust function %s returns duplicate strings" % function_name)
+    return values
+
+
+def _expect_status_parser_rejection(callback, description):
+    try:
+        callback()
+    except ValueError:
+        return
+    raise SystemExit("ERROR: Status V1 parser accepted %s" % description)
+
+
+def _run_status_v1_rust_parser_self_tests():
+    formatted_enum = """
+        // #[serde(rename_all = "snake_case")] pub enum Example { Fake }
+        #[derive(Clone, Copy)]
+        /* a harmless formatting comment */
+        #[serde(rename_all = "snake_case")]
+        pub enum Example {
+            Ready,
+            FullResync,
+            NoOp,
+        }
+    """
+    if _rust_snake_case_unit_enum_values(formatted_enum, "Example") != (
+        "ready", "full_resync", "no_op",
+    ):
+        raise SystemExit("ERROR: Status V1 enum parser rejected harmless formatting")
+    consecutive_capitals = _rust_snake_case_unit_enum_values(
+        formatted_enum.replace("Ready,", "NOOp,", 1).replace(
+            "NoOp,", "Other,", 1
+        ),
+        "Example",
+    )
+    if consecutive_capitals[0] != "n_o_op":
+        raise SystemExit(
+            "ERROR: Status V1 enum parser expected Serde wire value 'n_o_op', got %r"
+            % consecutive_capitals[0]
+        )
+    _expect_status_parser_rejection(
+        lambda: _rust_snake_case_unit_enum_values(
+            "// #[serde(rename_all = \"snake_case\")] pub enum Example { Ready }",
+            "Example",
+        ),
+        "a comment-only Rust enum",
+    )
+    _expect_status_parser_rejection(
+        lambda: _rust_snake_case_unit_enum_values(
+            formatted_enum.replace(
+                '#[serde(rename_all = "snake_case")]\n        pub enum',
+                '#[serde(rename_all = "camelCase")]\n        pub enum',
+                1,
+            ),
+            "Example",
+        ),
+        "a changed serde rename_all mode",
+    )
+    _expect_status_parser_rejection(
+        lambda: _rust_snake_case_unit_enum_values(
+            formatted_enum.replace(
+                '        #[serde(rename_all = "snake_case")]\n', "", 1
+            ),
+            "Example",
+        ),
+        "a missing serde rename_all attribute",
+    )
+    _expect_status_parser_rejection(
+        lambda: _rust_snake_case_unit_enum_values(
+            formatted_enum.replace("Ready,", "Ready(u8),", 1), "Example"
+        ),
+        "a tuple enum variant",
+    )
+    _expect_status_parser_rejection(
+        lambda: _rust_snake_case_unit_enum_values(
+            formatted_enum.replace("Ready,", '#[serde(rename = "ready_now")] Ready,', 1),
+            "Example",
+        ),
+        "a per-variant serde rename",
+    )
+
+    formatted_slice = """
+        fn rust_status_v1_scenario_ids() -> &'static [&'static str] {
+            &[
+                "full-classified-ready",
+                // "comment-only-fake",
+                /* "block-comment-fake", */
+                "pending-poll",
+            ]
+        }
+    """
+    if _rust_returned_string_slice(
+        formatted_slice, "rust_status_v1_scenario_ids"
+    ) != ("full-classified-ready", "pending-poll"):
+        raise SystemExit("ERROR: Status V1 string inventory parser rejected comments")
+    array_parameter_slice = """
+        fn rust_status_v1_scenario_ids(
+            _marker: [u8; 4],
+        ) -> &'static [&'static str] {
+            &["full-classified-ready"]
+        }
+    """
+    try:
+        array_parameter_values = _rust_returned_string_slice(
+            array_parameter_slice, "rust_status_v1_scenario_ids"
+        )
+    except ValueError:
+        array_parameter_values = None
+    if array_parameter_values != ("full-classified-ready",):
+        raise SystemExit(
+            "ERROR: Status V1 string inventory parser rejected array parameter syntax"
+        )
+    _expect_status_parser_rejection(
+        lambda: _rust_returned_string_slice(
+            "// fn rust_status_v1_scenario_ids() { &[\"fake\"] }",
+            "rust_status_v1_scenario_ids",
+        ),
+        "a comment-only Rust producer inventory",
+    )
+    bodyless_inventory = """
+        trait FakeInventory {
+            fn rust_status_v1_scenario_ids() -> &'static [&'static str];
+        }
+        const UNRELATED: () = {
+            &[
+                "full-classified-ready",
+                "scoped-classified-ready",
+            ]
+        };
+    """
+    _expect_status_parser_rejection(
+        lambda: _rust_returned_string_slice(
+            bodyless_inventory,
+            "rust_status_v1_scenario_ids",
+        ),
+        "a bodyless Rust producer declaration followed by an unrelated block",
+    )
+    _expect_status_parser_rejection(
+        lambda: _rust_returned_string_slice(
+            formatted_slice.replace(
+                '&[\n                "full-classified-ready",',
+                'let ids = &["computed"];\n            &[\n                "full-classified-ready",',
+                1,
+            ),
+            "rust_status_v1_scenario_ids",
+        ),
+        "a computed Rust producer inventory",
+    )
+    _expect_status_parser_rejection(
+        lambda: _rust_ordinary_string_literals('/* unterminated'),
+        "an unterminated Rust block comment",
+    )
+    print("Status V1 Rust parser mutation self-tests: OK (13 scenarios)")
+
+
+def _status_v1_exact_integer_matches(value, expected):
+    return type(value) is int and value == expected
+
+
+def _run_status_v1_exact_integer_mutation_self_tests():
+    if not _status_v1_exact_integer_matches(1, 1):
+        raise SystemExit("ERROR: Status V1 checker rejected an exact integer")
+    for label, value in (("boolean", True), ("float", 1.0)):
+        if _status_v1_exact_integer_matches(value, 1):
+            raise SystemExit(
+                "ERROR: Status V1 checker accepted a %s as an exact integer"
+                % label
+            )
+    print("Status V1 exact-integer mutation self-tests: OK (3 scenarios)")
+
+
+def _status_v1_validated_fixture_path(
+    declared_path,
+    root=ROOT,
+    realpath=os.path.realpath,
+    isfile=os.path.isfile,
+):
+    if type(declared_path) is not str:
+        return None, ["Status V1 scenario artifact path must be an exact string"]
+    if declared_path != STATUS_V1_SCENARIOS_PATH:
+        return None, [
+            "Status V1 scenario artifact path expected %r, got %r"
+            % (STATUS_V1_SCENARIOS_PATH, declared_path)
+        ]
+
+    root_realpath = realpath(root)
+    declared_realpath = realpath(
+        os.path.join(root, *declared_path.split("/"))
+    )
+    try:
+        contained = os.path.commonpath(
+            (root_realpath, declared_realpath)
+        ) == root_realpath
+    except ValueError:
+        contained = False
+    if not contained:
+        return None, [
+            "Status V1 scenario artifact must stay inside the repository"
+        ]
+    if not isfile(declared_realpath):
+        return None, ["Status V1 scenario artifact does not exist as a regular file"]
+    return declared_realpath, []
+
+
+def _run_status_v1_fixture_path_mutation_self_tests():
+    canonicalization_calls = []
+
+    def forbidden_realpath(path):
+        canonicalization_calls.append(path)
+        raise AssertionError("wrong fixture paths must not be canonicalized")
+
+    for declared_path in (True, "docs/not-the-status-fixture.json"):
+        path, errors = _status_v1_validated_fixture_path(
+            declared_path,
+            root="/repo",
+            realpath=forbidden_realpath,
+            isfile=lambda unused: True,
+        )
+        if path is not None or not errors or canonicalization_calls:
+            raise SystemExit(
+                "ERROR: Status V1 checker canonicalized a wrong fixture path"
+            )
+
+    approved_joined_path = os.path.join(
+        "/repo", *STATUS_V1_SCENARIOS_PATH.split("/")
+    )
+
+    def outside_realpath(path):
+        if path == "/repo":
+            return "/repo"
+        if path == approved_joined_path:
+            return "/outside/status-fixture.json"
+        raise AssertionError("unexpected canonicalization path %r" % path)
+
+    path, errors = _status_v1_validated_fixture_path(
+        STATUS_V1_SCENARIOS_PATH,
+        root="/repo",
+        realpath=outside_realpath,
+        isfile=lambda unused: True,
+    )
+    if path is not None or not errors:
+        raise SystemExit(
+            "ERROR: Status V1 checker accepted an outside-repository fixture"
+        )
+
+    path, errors = _status_v1_validated_fixture_path(
+        STATUS_V1_SCENARIOS_PATH,
+        root="/repo",
+        realpath=lambda value: value,
+        isfile=lambda unused: False,
+    )
+    if path is not None or not errors:
+        raise SystemExit("ERROR: Status V1 checker accepted a missing fixture")
+
+    path, errors = _status_v1_validated_fixture_path(
+        STATUS_V1_SCENARIOS_PATH,
+        root="/repo",
+        realpath=lambda value: value,
+        isfile=lambda unused: True,
+    )
+    if path != approved_joined_path or errors:
+        raise SystemExit("ERROR: Status V1 checker rejected the approved fixture path")
+
+    open_calls = []
+    close_calls = []
+    fstat_calls = []
+    fdopen_calls = []
+    nofollow_flag = 0x100000
+    directory_flag = 0x200000
+
+    def recording_open(path, flags, dir_fd=None):
+        descriptor = 100 + len(open_calls)
+        open_calls.append((path, flags, dir_fd, descriptor))
+        return descriptor
+
+    class FakeOpenedFile(object):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    def recording_fdopen(descriptor, mode, encoding=None):
+        fdopen_calls.append((descriptor, mode, encoding))
+        return FakeOpenedFile()
+
+    class RegularFileStat(object):
+        st_mode = stat.S_IFREG | 0o600
+
+    def recording_fstat(descriptor):
+        fstat_calls.append(descriptor)
+        return RegularFileStat()
+
+    with _status_v1_open_repo_relative(
+        STATUS_V1_SCENARIOS_PATH,
+        "r",
+        encoding="utf-8",
+        root="/repo",
+        open_fn=recording_open,
+        fdopen_fn=recording_fdopen,
+        close_fn=close_calls.append,
+        fstat_fn=recording_fstat,
+        supports_dir_fd=True,
+        nofollow_flag=nofollow_flag,
+        directory_flag=directory_flag,
+    ):
+        pass
+    expected_components = (
+        ("/repo", None),
+        ("docs", 100),
+        ("neutron-status-contract-v1-scenarios.json", 101),
+    )
+    actual_components = tuple(
+        (path, dir_fd) for path, unused_flags, dir_fd, unused_fd in open_calls
+    )
+    flags_are_safe = (
+        len(open_calls) == 3
+        and all(flags & nofollow_flag for unused, flags, unused_dir, unused_fd in open_calls)
+        and all(open_calls[index][1] & directory_flag for index in (0, 1))
+        and not open_calls[2][1] & directory_flag
+    )
+    if (
+        actual_components != expected_components
+        or not flags_are_safe
+        or fstat_calls != [102]
+        or fdopen_calls != [(102, "r", "utf-8")]
+        or close_calls != [101, 100]
+    ):
+        raise SystemExit(
+            "ERROR: Status V1 repository opener did not use anchored no-follow traversal"
+        )
+
+    try:
+        _status_v1_open_repo_relative(
+            STATUS_V1_SCENARIOS_PATH,
+            "r",
+            encoding="utf-8",
+            root="/repo",
+            open_fn=recording_open,
+            fdopen_fn=recording_fdopen,
+            close_fn=close_calls.append,
+            fstat_fn=recording_fstat,
+            supports_dir_fd=True,
+            nofollow_flag=None,
+            directory_flag=directory_flag,
+        )
+    except OSError:
+        pass
+    else:
+        raise SystemExit(
+            "ERROR: Status V1 repository opener accepted missing no-follow support"
+        )
+
+    class DirectoryStat(object):
+        st_mode = stat.S_IFDIR | 0o700
+
+    try:
+        _status_v1_open_repo_relative(
+            STATUS_V1_SCENARIOS_PATH,
+            "r",
+            encoding="utf-8",
+            root="/repo",
+            open_fn=lambda path, flags, dir_fd=None: 200,
+            fdopen_fn=lambda descriptor, mode, encoding=None: FakeOpenedFile(),
+            close_fn=lambda descriptor: None,
+            fstat_fn=lambda descriptor: DirectoryStat(),
+            supports_dir_fd=True,
+            nofollow_flag=nofollow_flag,
+            directory_flag=directory_flag,
+        )
+    except OSError:
+        pass
+    else:
+        raise SystemExit(
+            "ERROR: Status V1 repository opener accepted a non-regular descriptor"
+        )
+    print("Status V1 fixture-path mutation self-tests: OK (8 scenarios)")
+
+
+def _status_v1_open_repo_relative(
+    relative_path,
+    mode,
+    encoding=None,
+    root=ROOT,
+    open_fn=os.open,
+    fdopen_fn=os.fdopen,
+    close_fn=os.close,
+    fstat_fn=os.fstat,
+    supports_dir_fd=None,
+    nofollow_flag=getattr(os, "O_NOFOLLOW", None),
+    directory_flag=getattr(os, "O_DIRECTORY", None),
+):
+    if supports_dir_fd is None:
+        supports_dir_fd = os.open in getattr(os, "supports_dir_fd", ())
+    if (
+        nofollow_flag is None
+        or directory_flag is None
+        or not supports_dir_fd
+    ):
+        raise OSError(
+            "repository-relative no-follow file access is unavailable"
+        )
+    if type(relative_path) is not str:
+        raise OSError("repository-relative path must be an exact string")
+    components = relative_path.split("/")
+    if not components or any(
+        component in ("", ".", "..") for component in components
+    ):
+        raise OSError("repository-relative path contains an unsafe component")
+
+    close_on_exec = getattr(os, "O_CLOEXEC", 0)
+    read_flags = os.O_RDONLY | close_on_exec | nofollow_flag
+    directory_flags = read_flags | directory_flag
+    directory_descriptors = []
+    file_descriptor = None
+    try:
+        current_descriptor = open_fn(root, directory_flags)
+        directory_descriptors.append(current_descriptor)
+        for component in components[:-1]:
+            current_descriptor = open_fn(
+                component,
+                directory_flags,
+                dir_fd=current_descriptor,
+            )
+            directory_descriptors.append(current_descriptor)
+        file_descriptor = open_fn(
+            components[-1],
+            read_flags,
+            dir_fd=current_descriptor,
+        )
+        if not stat.S_ISREG(fstat_fn(file_descriptor).st_mode):
+            raise OSError("repository-relative descriptor is not a regular file")
+        handle = fdopen_fn(file_descriptor, mode, encoding=encoding)
+        file_descriptor = None
+        return handle
+    finally:
+        if file_descriptor is not None:
+            close_fn(file_descriptor)
+        for descriptor in reversed(directory_descriptors):
+            close_fn(descriptor)
+
+
+class _StatusV1DuplicateJsonKey(ValueError):
+    pass
+
+
+def _status_v1_json_object_without_duplicate_keys(pairs):
+    value = {}
+    for key, member in pairs:
+        if key in value:
+            raise _StatusV1DuplicateJsonKey(
+                "duplicate JSON object key %r" % key
+            )
+        value[key] = member
+    return value
+
+
+def _status_v1_load_json_object(path, label, opener=open, loader=None):
+    try:
+        with opener(path, "r", encoding="utf-8") as handle:
+            if loader is None:
+                value = json.load(
+                    handle,
+                    object_pairs_hook=_status_v1_json_object_without_duplicate_keys,
+                )
+            else:
+                value = loader(handle)
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        _StatusV1DuplicateJsonKey,
+    ) as error:
+        return {}, [
+            "%s could not be loaded (%s): %s"
+            % (label, type(error).__name__, error)
+        ]
+    if not isinstance(value, dict):
+        return {}, ["%s root must be an object" % label]
+    return value, []
+
+
+def _run_status_v1_json_loading_mutation_self_tests():
+    class FakeHandle(object):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    def fake_open(unused_path, unused_mode, encoding=None):
+        return FakeHandle()
+
+    class RawJsonHandle(FakeHandle):
+        def read(self):
+            return '{"status_contract":{"hash":"first","hash":"second"}}'
+
+    def duplicate_json_open(unused_path, unused_mode, encoding=None):
+        return RawJsonHandle()
+
+    failures = (
+        (
+            "missing file",
+            lambda unused_path, unused_mode, encoding=None: (_ for _ in ()).throw(
+                FileNotFoundError("missing fixture")
+            ),
+            lambda unused_handle: {},
+        ),
+        (
+            "invalid JSON",
+            fake_open,
+            lambda unused_handle: (_ for _ in ()).throw(
+                json.JSONDecodeError("invalid JSON", "{", 1)
+            ),
+        ),
+        (
+            "invalid Unicode",
+            fake_open,
+            lambda unused_handle: (_ for _ in ()).throw(
+                UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            ),
+        ),
+    )
+    for description, opener, loader in failures:
+        value, errors = _status_v1_load_json_object(
+            "/unused/status.json",
+            "Status V1 mutation",
+            opener=opener,
+            loader=loader,
+        )
+        if value or not errors:
+            raise SystemExit(
+                "ERROR: Status V1 loader accepted %s" % description
+            )
+
+    value, errors = _status_v1_load_json_object(
+        "/unused/status.json",
+        "Status V1 mutation",
+        opener=fake_open,
+        loader=lambda unused_handle: [],
+    )
+    if value or not errors:
+        raise SystemExit("ERROR: Status V1 loader accepted a non-object root")
+
+    value, errors = _status_v1_load_json_object(
+        "/unused/status.json",
+        "Status V1 mutation",
+        opener=duplicate_json_open,
+    )
+    if value or not errors:
+        raise SystemExit("ERROR: Status V1 loader accepted a duplicate object key")
+
+    expected = {"valid": True}
+    value, errors = _status_v1_load_json_object(
+        "/unused/status.json",
+        "Status V1 mutation",
+        opener=fake_open,
+        loader=lambda unused_handle: expected,
+    )
+    if value != expected or errors:
+        raise SystemExit("ERROR: Status V1 loader rejected an object root")
+    print("Status V1 JSON-loading mutation self-tests: OK (6 scenarios)")
+
+
+def _status_v1_has_duplicates(values):
+    for index, value in enumerate(values):
+        for previous in values[:index]:
+            if value == previous:
+                return True
+    return False
+
+
+def _status_v1_python_triples_contract_errors(
+    python_triples,
+    vocabulary,
+    frozenset_factory=frozenset,
+):
+    if not isinstance(python_triples, (tuple, list, set, frozenset)):
+        return ["Python Status V1 triples must be a collection"]
+
+    triples = tuple(python_triples)
+    malformed_triples = [
+        triple
+        for triple in triples
+        if not (
+            isinstance(triple, tuple)
+            and len(triple) == 3
+            and all(type(value) is str for value in triple)
+        )
+    ]
+    if malformed_triples:
+        return [
+            "Python Status V1 contains malformed triples %r"
+            % malformed_triples
+        ]
+
+    errors = []
+    actual_triples = frozenset_factory(triples)
+    if actual_triples != EXPECTED_STATUS_V1_TRIPLES:
+        errors.append(
+            "Python Status V1 triples expected %r, got %r"
+            % (EXPECTED_STATUS_V1_TRIPLES, actual_triples)
+        )
+    for index, name in enumerate(
+        ("transaction_states", "overall_readiness", "required_actions")
+    ):
+        actual = frozenset_factory(triple[index] for triple in triples)
+        expected = frozenset(vocabulary[name])
+        if actual != expected:
+            errors.append(
+                "Python Status V1 %s column expected %r, got %r"
+                % (name, expected, actual)
+            )
+    return errors
+
+
+def _status_v1_python_vocabulary_contract_errors(
+    name,
+    actual,
+    expected_values,
+    frozenset_factory=frozenset,
+):
+    if not isinstance(actual, (tuple, list, set, frozenset)):
+        return ["Python Status V1 %s must be a collection" % name]
+
+    values = tuple(actual)
+    allow_none = None in expected_values
+    malformed = [
+        value
+        for value in values
+        if not (
+            type(value) is str
+            or (allow_none and value is None)
+        )
+    ]
+    if malformed:
+        return [
+            "Python Status V1 %s contains malformed values %r"
+            % (name, malformed)
+        ]
+
+    expected = frozenset(expected_values)
+    actual_values = frozenset_factory(values)
+    if actual_values != expected:
+        return [
+            "Python Status V1 %s expected %r, got %r"
+            % (name, expected, actual_values)
+        ]
+    return []
+
+
+def _status_v1_python_metadata_contract_errors(uds_client, vocabulary):
+    errors = []
+    schema_version = getattr(uds_client, "NEUTRON_STATUS_SCHEMA_VERSION", None)
+    if not _status_v1_exact_integer_matches(
+        schema_version,
+        EXPECTED_STATUS_V1_SCHEMA_VERSION,
+    ):
+        errors.append(
+            "Python Status V1 schema expected %r, got %r"
+            % (
+                EXPECTED_STATUS_V1_SCHEMA_VERSION,
+                schema_version,
+            )
+        )
+    contract_hash = getattr(uds_client, "NEUTRON_STATUS_CONTRACT_HASH", None)
+    if (
+        type(contract_hash) is not str
+        or contract_hash != EXPECTED_STATUS_V1_CONTRACT_HASH
+    ):
+        errors.append(
+            "Python Status V1 hash expected %r, got %r"
+            % (
+                EXPECTED_STATUS_V1_CONTRACT_HASH,
+                contract_hash,
+            )
+        )
+    capability_fields = getattr(
+        uds_client, "_STATUS_CONTRACT_CAPABILITY_FIELDS", None
+    )
+    if (
+        type(capability_fields) is not tuple
+        or not all(type(field) is str for field in capability_fields)
+    ):
+        errors.append(
+            "Python Status V1 capability fields must be an exact tuple of strings, got %r"
+            % (capability_fields,)
+        )
+    elif capability_fields != EXPECTED_STATUS_CAPABILITY_FIELDS:
+        errors.append(
+            "Python Status V1 capability fields expected %r, got %r"
+            % (
+                EXPECTED_STATUS_CAPABILITY_FIELDS,
+                capability_fields,
+            )
+        )
+    response_fields = getattr(
+        uds_client, "_STATUS_CONTRACT_RESPONSE_FIELDS", None
+    )
+    if (
+        type(response_fields) is not tuple
+        or not all(type(field) is str for field in response_fields)
+    ):
+        errors.append(
+            "Python Status V1 response fields must be an exact tuple of strings, got %r"
+            % (response_fields,)
+        )
+    elif response_fields != EXPECTED_STATUS_RESPONSE_FIELDS:
+        errors.append(
+            "Python Status V1 response fields expected %r, got %r"
+            % (
+                EXPECTED_STATUS_RESPONSE_FIELDS,
+                response_fields,
+            )
+        )
+
+    errors.extend(_status_v1_python_triples_contract_errors(
+        getattr(uds_client, "_STATUS_V1_TRIPLES", None),
+        vocabulary,
+    ))
+    python_vocabulary = (
+        (
+            "recovery_causes",
+            getattr(uds_client, "_STATUS_V1_RECOVERY_CAUSES", None),
+        ),
+        (
+            "domain_statuses",
+            getattr(uds_client, "_STATUS_V1_DOMAIN_STATES", None),
+        ),
+        (
+            "effective_actions",
+            getattr(uds_client, "_STATUS_V1_EFFECTIVE_ACTIONS", None),
+        ),
+        (
+            "support_dispositions",
+            getattr(uds_client, "_STATUS_V1_SUPPORT_DISPOSITIONS", None),
+        ),
+    )
+    for name, actual in python_vocabulary:
+        errors.extend(_status_v1_python_vocabulary_contract_errors(
+            name,
+            actual,
+            vocabulary[name],
+        ))
+    return errors
+
+
+def _run_status_v1_shape_mutation_self_tests():
+    vocabulary = dict(EXPECTED_STATUS_V1_VOCABULARY)
+    duplicate_unhashable = [{"same": [1]}, {"same": [1]}]
+    if not _status_v1_has_duplicates(duplicate_unhashable):
+        raise SystemExit(
+            "ERROR: Status V1 checker missed duplicate unhashable JSON values"
+        )
+    if _status_v1_has_duplicates([{"value": 1}, {"value": 2}]):
+        raise SystemExit(
+            "ERROR: Status V1 checker invented duplicate unhashable JSON values"
+        )
+
+    conversion_calls = []
+
+    def forbidden_frozenset(values):
+        conversion_calls.append(values)
+        raise AssertionError("malformed values must not reach frozenset")
+
+    triple_errors = _status_v1_python_triples_contract_errors(
+        (("idle", "unknown", "full_resync"), {"invalid": "shape"}),
+        dict(EXPECTED_STATUS_V1_VOCABULARY),
+        frozenset_factory=forbidden_frozenset,
+    )
+    if not triple_errors or conversion_calls:
+        raise SystemExit(
+            "ERROR: Status V1 checker converted malformed Python triples"
+        )
+
+    vocabulary_errors = _status_v1_python_vocabulary_contract_errors(
+        "domain_statuses",
+        ["ready", {"invalid": "shape"}],
+        dict(EXPECTED_STATUS_V1_VOCABULARY)["domain_statuses"],
+        frozenset_factory=forbidden_frozenset,
+    )
+    if not vocabulary_errors or conversion_calls:
+        raise SystemExit(
+            "ERROR: Status V1 checker converted malformed Python vocabulary"
+        )
+
+    class PythonMetadata(object):
+        pass
+
+    def valid_python_metadata():
+        metadata = PythonMetadata()
+        metadata.NEUTRON_STATUS_SCHEMA_VERSION = EXPECTED_STATUS_V1_SCHEMA_VERSION
+        metadata.NEUTRON_STATUS_CONTRACT_HASH = EXPECTED_STATUS_V1_CONTRACT_HASH
+        metadata._STATUS_CONTRACT_CAPABILITY_FIELDS = (
+            EXPECTED_STATUS_CAPABILITY_FIELDS
+        )
+        metadata._STATUS_CONTRACT_RESPONSE_FIELDS = EXPECTED_STATUS_RESPONSE_FIELDS
+        metadata._STATUS_V1_TRIPLES = EXPECTED_STATUS_V1_TRIPLES
+        metadata._STATUS_V1_RECOVERY_CAUSES = frozenset(
+            vocabulary["recovery_causes"]
+        )
+        metadata._STATUS_V1_DOMAIN_STATES = frozenset(
+            vocabulary["domain_statuses"]
+        )
+        metadata._STATUS_V1_EFFECTIVE_ACTIONS = frozenset(
+            vocabulary["effective_actions"]
+        )
+        metadata._STATUS_V1_SUPPORT_DISPOSITIONS = frozenset(
+            vocabulary["support_dispositions"]
+        )
+        return metadata
+
+    metadata_mutations = []
+    missing_capabilities = valid_python_metadata()
+    del missing_capabilities._STATUS_CONTRACT_CAPABILITY_FIELDS
+    metadata_mutations.append(("missing capability fields", missing_capabilities))
+    none_responses = valid_python_metadata()
+    none_responses._STATUS_CONTRACT_RESPONSE_FIELDS = None
+    metadata_mutations.append(("None response fields", none_responses))
+    list_capabilities = valid_python_metadata()
+    list_capabilities._STATUS_CONTRACT_CAPABILITY_FIELDS = list(
+        EXPECTED_STATUS_CAPABILITY_FIELDS
+    )
+    metadata_mutations.append(("non-tuple capability fields", list_capabilities))
+    malformed_responses = valid_python_metadata()
+    malformed_responses._STATUS_CONTRACT_RESPONSE_FIELDS = (
+        "status_schema_version", {"invalid": "shape"},
+    )
+    metadata_mutations.append(("non-string response field", malformed_responses))
+    missing_triples = valid_python_metadata()
+    del missing_triples._STATUS_V1_TRIPLES
+    metadata_mutations.append(("missing triple inventory", missing_triples))
+    for description, metadata in metadata_mutations:
+        try:
+            metadata_errors = _status_v1_python_metadata_contract_errors(
+                metadata,
+                vocabulary,
+            )
+        except (AttributeError, TypeError) as error:
+            raise SystemExit(
+                "ERROR: Status V1 Python metadata checker raised %s for %s"
+                % (type(error).__name__, description)
+            )
+        if not metadata_errors:
+            raise SystemExit(
+                "ERROR: Status V1 Python metadata checker accepted %s"
+                % description
+            )
+    print("Status V1 shape mutation self-tests: OK (9 scenarios)")
+
+
+def _status_v1_projection_contract_errors(scenario_id, projection, vocabulary):
+    scenario_id_is_string = type(scenario_id) is str
+    errors = []
+    if not scenario_id_is_string:
+        errors.append(
+            "Status V1 scenario id must be an exact string, got %r" % scenario_id
+        )
+    if projection is None:
+        if (
+            scenario_id_is_string
+            and scenario_id in EXPECTED_STATUS_V1_NULL_PROJECTION_IDS
+        ):
+            return errors
+        errors.append(
+            "Status V1 scenario %r must declare expected_projection"
+            % scenario_id
+        )
+        return errors
+    if not isinstance(projection, dict):
+        errors.append(
+            "Status V1 scenario %r expected_projection must be an object or null"
+            % scenario_id
+        )
+        return errors
+
+    if (
+        scenario_id_is_string
+        and scenario_id in EXPECTED_STATUS_V1_NULL_PROJECTION_IDS
+    ):
+        errors.append(
+            "Status V1 scenario %r must keep expected_projection null"
+            % scenario_id
+        )
+    projection_fields = (
+        "transaction_state", "overall_readiness", "required_action",
+    )
+    projection_vocabularies = (
+        vocabulary["transaction_states"],
+        vocabulary["overall_readiness"],
+        vocabulary["required_actions"],
+    )
+    present = tuple(field in projection for field in projection_fields)
+    if not all(present):
+        errors.append(
+            "Status V1 scenario %r has an incomplete projection triple"
+            % scenario_id
+        )
+    else:
+        triple = tuple(projection[field] for field in projection_fields)
+        triple_valid = True
+        for field, actual, allowed in zip(
+            projection_fields, triple, projection_vocabularies
+        ):
+            if not isinstance(actual, str) or actual not in allowed:
+                triple_valid = False
+                errors.append(
+                    "Status V1 scenario %r projection %s has unknown value %r"
+                    % (scenario_id, field, actual)
+                )
+        if triple_valid and triple not in EXPECTED_STATUS_V1_TRIPLES:
+            errors.append(
+                "Status V1 scenario %r has unapproved projection triple %r"
+                % (scenario_id, triple)
+            )
+    if "recovery_cause" not in projection:
+        errors.append(
+            "Status V1 scenario %r projection is missing recovery_cause"
+            % scenario_id
+        )
+    elif projection["recovery_cause"] not in vocabulary["recovery_causes"]:
+        errors.append(
+            "Status V1 scenario %r projection has unknown recovery_cause %r"
+            % (scenario_id, projection["recovery_cause"])
+        )
+    else:
+        expected_cause = (
+            "inventory_unavailable"
+            if (
+                scenario_id_is_string
+                and scenario_id in EXPECTED_STATUS_V1_INVENTORY_RECOVERY_IDS
+            )
+            else None
+        )
+        if projection["recovery_cause"] != expected_cause:
+            errors.append(
+                "Status V1 scenario %r projection recovery_cause expected %r, got %r"
+                % (scenario_id, expected_cause, projection["recovery_cause"])
+            )
+    classified_generation = projection.get("last_classified_generation")
+    if (
+        type(classified_generation) is not int or
+        classified_generation < 0
+    ):
+        errors.append(
+            "Status V1 scenario %r last_classified_generation must be a non-negative integer"
+            % scenario_id
+        )
+    return errors
+
+
+def _status_v1_scenario_contract_errors(scenario, vocabulary):
+    if "expected_projection" not in scenario:
+        return [
+            "Status V1 scenario %r is missing expected_projection"
+            % scenario.get("id")
+        ]
+    return _status_v1_projection_contract_errors(
+        scenario.get("id"),
+        scenario["expected_projection"],
+        vocabulary,
+    )
+
+
+def _run_status_v1_projection_mutation_self_tests():
+    vocabulary = dict(EXPECTED_STATUS_V1_VOCABULARY)
+    safe = {
+        "transaction_state": "classified",
+        "overall_readiness": "ready",
+        "required_action": "none",
+        "recovery_cause": None,
+        "last_classified_generation": 42,
+    }
+    if _status_v1_projection_contract_errors("safe", safe, vocabulary):
+        raise SystemExit("ERROR: Status V1 checker rejected a valid projection")
+    if not _status_v1_projection_contract_errors(
+        "full-classified-ready", None, vocabulary
+    ):
+        raise SystemExit(
+            "ERROR: Status V1 checker accepted a missing required projection"
+        )
+    for scenario_id in (
+        "legacy-v0-unknown-authority",
+        "unknown-v1-contract",
+        "ready-invalid-evidence",
+    ):
+        if _status_v1_projection_contract_errors(
+            scenario_id, None, vocabulary
+        ):
+            raise SystemExit(
+                "ERROR: Status V1 checker rejected an intentional null projection"
+            )
+    if not _status_v1_scenario_contract_errors(
+        {"id": "legacy-v0-unknown-authority"},
+        vocabulary,
+    ):
+        raise SystemExit(
+            "ERROR: Status V1 checker accepted a missing expected_projection member"
+        )
+    if not _status_v1_projection_contract_errors(
+        "missing-triple", {"recovery_cause": None}, vocabulary
+    ):
+        raise SystemExit("ERROR: Status V1 checker accepted a missing projection triple")
+    unknown_cause = dict(safe)
+    unknown_cause["recovery_cause"] = "operator_required"
+    if not _status_v1_projection_contract_errors(
+        "unknown-cause", unknown_cause, vocabulary
+    ):
+        raise SystemExit("ERROR: Status V1 checker accepted an unknown recovery cause")
+    missing_inventory_cause = dict(safe)
+    missing_inventory_cause.update({
+        "transaction_state": "blocked",
+        "overall_readiness": "blocked",
+        "required_action": "recover_pending",
+    })
+    if not _status_v1_projection_contract_errors(
+        "blocked-recoverable-inventory",
+        missing_inventory_cause,
+        vocabulary,
+    ):
+        raise SystemExit(
+            "ERROR: Status V1 checker accepted missing inventory recovery cause"
+        )
+    unexpected_inventory_cause = dict(safe)
+    unexpected_inventory_cause["recovery_cause"] = "inventory_unavailable"
+    if not _status_v1_projection_contract_errors(
+        "full-classified-ready",
+        unexpected_inventory_cause,
+        vocabulary,
+    ):
+        raise SystemExit(
+            "ERROR: Status V1 checker accepted inventory cause on unrelated scenario"
+        )
+    for label, generation in (
+        ("boolean", True),
+        ("negative", -1),
+    ):
+        malformed_generation = dict(safe)
+        malformed_generation["last_classified_generation"] = generation
+        if not _status_v1_projection_contract_errors(
+            "full-classified-ready",
+            malformed_generation,
+            vocabulary,
+        ):
+            raise SystemExit(
+                "ERROR: Status V1 checker accepted %s classified generation"
+                % label
+            )
+    missing_generation = dict(safe)
+    missing_generation.pop("last_classified_generation")
+    if not _status_v1_projection_contract_errors(
+        "full-classified-ready", missing_generation, vocabulary
+    ):
+        raise SystemExit(
+            "ERROR: Status V1 checker accepted missing classified generation"
+        )
+    generation_zero_recovery = dict(missing_inventory_cause)
+    generation_zero_recovery["recovery_cause"] = "inventory_unavailable"
+    generation_zero_recovery["last_classified_generation"] = 0
+    if _status_v1_projection_contract_errors(
+        "generation-zero-inventory-recovery",
+        generation_zero_recovery,
+        vocabulary,
+    ):
+        raise SystemExit(
+            "ERROR: Status V1 checker rejected valid generation-zero projection"
+        )
+    unhashable_triple = dict(safe)
+    unhashable_triple["transaction_state"] = {"invalid": "shape"}
+    try:
+        unhashable_errors = _status_v1_projection_contract_errors(
+            "full-classified-ready", unhashable_triple, vocabulary
+        )
+    except TypeError:
+        raise SystemExit(
+            "ERROR: Status V1 projection checker raised TypeError for malformed shape"
+        )
+    if not unhashable_errors:
+        raise SystemExit(
+            "ERROR: Status V1 checker accepted an unhashable projection value"
+        )
+    unhashable_scenario_id = ["invalid", "scenario", "id"]
+    try:
+        unhashable_id_errors = _status_v1_projection_contract_errors(
+            unhashable_scenario_id, safe, vocabulary
+        )
+    except TypeError:
+        raise SystemExit(
+            "ERROR: Status V1 projection checker raised TypeError for an unhashable scenario ID"
+        )
+    if not unhashable_id_errors:
+        raise SystemExit(
+            "ERROR: Status V1 checker accepted an unhashable scenario ID"
+        )
+    print("Status V1 projection mutation self-tests: OK (16 scenarios)")
 
 
 def _acl_map_helper_contract_errors(source, function_name, required_map_openers):
@@ -680,6 +2044,221 @@ def check_uds_contract_artifact():
                 "ERROR: phase_status %s expected %r, got %r"
                 % (name, status, phase_status.get(name))
             )
+
+
+def check_status_v1_contract():
+    print("==> checking versioned Status V1 contract")
+    _run_status_v1_rust_parser_self_tests()
+    _run_status_v1_exact_integer_mutation_self_tests()
+    _run_status_v1_fixture_path_mutation_self_tests()
+    _run_status_v1_json_loading_mutation_self_tests()
+    _run_status_v1_shape_mutation_self_tests()
+    _run_status_v1_projection_mutation_self_tests()
+
+    python_root = os.path.join(ROOT, "openstack", "neutron_aria")
+    if python_root not in sys.path:
+        sys.path.insert(0, python_root)
+    from neutron_aria.agent import uds_client
+
+    errors = []
+    contract, contract_load_errors = _status_v1_load_json_object(
+        UDS_CONTRACT_PATH,
+        "UDS contract",
+        opener=_status_v1_open_repo_relative,
+    )
+    errors.extend(contract_load_errors)
+    fixture_path, fixture_path_errors = _status_v1_validated_fixture_path(
+        contract.get("status_contract_scenarios_path")
+    )
+    errors.extend(fixture_path_errors)
+    fixture = {}
+    if fixture_path is not None:
+        fixture, fixture_load_errors = _status_v1_load_json_object(
+            STATUS_V1_SCENARIOS_PATH,
+            "Status V1 fixture",
+            opener=_status_v1_open_repo_relative,
+        )
+        errors.extend(fixture_load_errors)
+
+    expected_contract_fields = {
+        "status_schema_version_min": EXPECTED_STATUS_V1_SCHEMA_VERSION,
+        "status_schema_version_max": EXPECTED_STATUS_V1_SCHEMA_VERSION,
+        "status_contract_hash": EXPECTED_STATUS_V1_CONTRACT_HASH,
+        "status_contract_scenarios_path": STATUS_V1_SCENARIOS_PATH,
+    }
+    for field, expected in expected_contract_fields.items():
+        actual = contract.get(field)
+        if field in (
+            "status_schema_version_min", "status_schema_version_max",
+        ):
+            matches = _status_v1_exact_integer_matches(actual, expected)
+        else:
+            matches = actual == expected
+        if not matches:
+            errors.append(
+                "UDS contract %s expected %r, got %r" % (field, expected, actual)
+            )
+
+    vocabulary = dict(EXPECTED_STATUS_V1_VOCABULARY)
+    expected_fixture_root_keys = {
+        "fixture_schema_version", "status_contract", "scenarios",
+    }
+    if not isinstance(fixture, dict):
+        errors.append("Status V1 fixture root must be an object")
+        fixture_status = {}
+        scenarios = []
+    else:
+        if set(fixture) != expected_fixture_root_keys:
+            errors.append(
+                "Status V1 fixture root keys expected %r, got %r"
+                % (sorted(expected_fixture_root_keys), sorted(fixture))
+            )
+        if not _status_v1_exact_integer_matches(
+            fixture.get("fixture_schema_version"), 1
+        ):
+            errors.append(
+                "Status V1 fixture_schema_version expected 1, got %r"
+                % fixture.get("fixture_schema_version")
+            )
+        fixture_status = fixture.get("status_contract")
+        scenarios = fixture.get("scenarios")
+
+    expected_fixture_contract_keys = {"version", "hash"}.union(vocabulary)
+    if not isinstance(fixture_status, dict):
+        errors.append("Status V1 fixture status_contract must be an object")
+        fixture_status = {}
+    elif set(fixture_status) != expected_fixture_contract_keys:
+        errors.append(
+            "Status V1 fixture contract keys expected %r, got %r"
+            % (sorted(expected_fixture_contract_keys), sorted(fixture_status))
+        )
+
+    if not _status_v1_exact_integer_matches(
+        fixture_status.get("version"), EXPECTED_STATUS_V1_SCHEMA_VERSION
+    ):
+        errors.append(
+            "Status V1 fixture version expected %r, got %r"
+            % (
+                EXPECTED_STATUS_V1_SCHEMA_VERSION,
+                fixture_status.get("version"),
+            )
+        )
+    if fixture_status.get("hash") != EXPECTED_STATUS_V1_CONTRACT_HASH:
+        errors.append(
+            "Status V1 fixture hash expected %r, got %r"
+            % (EXPECTED_STATUS_V1_CONTRACT_HASH, fixture_status.get("hash"))
+        )
+    for name, expected in EXPECTED_STATUS_V1_VOCABULARY:
+        actual = fixture_status.get(name)
+        if not isinstance(actual, list):
+            errors.append("Status V1 fixture %s must be an array" % name)
+            continue
+        if _status_v1_has_duplicates(actual):
+            errors.append("Status V1 fixture %s contains duplicate values" % name)
+        if tuple(actual) != expected:
+            errors.append(
+                "Status V1 fixture %s expected %r, got %r"
+                % (name, expected, tuple(actual))
+            )
+
+    errors.extend(_status_v1_python_metadata_contract_errors(
+        uds_client,
+        vocabulary,
+    ))
+
+    api_source = _read_repo_text(RUST_API_PATH)
+    neutron_api_source = _read_repo_text(RUST_NEUTRON_API_PATH)
+    try:
+        rust_min = _rust_int_const(api_source, "NEUTRON_STATUS_SCHEMA_VERSION_MIN")
+        rust_max = _rust_int_const(api_source, "NEUTRON_STATUS_SCHEMA_VERSION_MAX")
+        rust_hash = _rust_string_const(api_source, "NEUTRON_STATUS_CONTRACT_HASH")
+    except SystemExit as error:
+        errors.append(str(error))
+    else:
+        for name, actual, expected in (
+            ("minimum schema version", rust_min, EXPECTED_STATUS_V1_SCHEMA_VERSION),
+            ("maximum schema version", rust_max, EXPECTED_STATUS_V1_SCHEMA_VERSION),
+            ("contract hash", rust_hash, EXPECTED_STATUS_V1_CONTRACT_HASH),
+        ):
+            if actual != expected:
+                errors.append(
+                    "Rust Status V1 %s expected %r, got %r"
+                    % (name, expected, actual)
+                )
+
+    for vocabulary_name, enum_name in STATUS_V1_RUST_ENUMS:
+        expected = vocabulary[vocabulary_name]
+        if vocabulary_name == "recovery_causes":
+            expected = tuple(value for value in expected if value is not None)
+        try:
+            actual = _rust_snake_case_unit_enum_values(api_source, enum_name)
+        except ValueError as error:
+            errors.append(str(error))
+            continue
+        if actual != expected:
+            errors.append(
+                "Rust enum %s expected %r, got %r"
+                % (enum_name, expected, actual)
+            )
+
+    for source_name, source in (
+        (RUST_API_PATH, api_source),
+        (RUST_NEUTRON_API_PATH, neutron_api_source),
+    ):
+        try:
+            actual = _rust_returned_string_slice(
+                source, "rust_status_v1_scenario_ids"
+            )
+        except ValueError as error:
+            errors.append("%s: %s" % (source_name, error))
+            continue
+        if actual != EXPECTED_RUST_STATUS_V1_PRODUCER_IDS:
+            errors.append(
+                "%s Rust producer IDs expected %r, got %r"
+                % (source_name, EXPECTED_RUST_STATUS_V1_PRODUCER_IDS, actual)
+            )
+
+    if not isinstance(scenarios, list):
+        errors.append("Status V1 fixture scenarios must be an array")
+        scenarios = []
+    scenario_ids = []
+    minimum_scenarios = []
+    for index, scenario in enumerate(scenarios):
+        if not isinstance(scenario, dict):
+            errors.append("Status V1 scenario %s must be an object" % (index + 1))
+            continue
+        scenario_ids.append(scenario.get("id"))
+        minimum_scenario = scenario.get("minimum_scenario")
+        minimum_scenarios.append(minimum_scenario)
+        if not _status_v1_exact_integer_matches(minimum_scenario, index + 1):
+            errors.append(
+                "Status V1 scenario %r minimum_scenario expected exact integer %r, got %r"
+                % (scenario.get("id"), index + 1, minimum_scenario)
+            )
+        errors.extend(_status_v1_scenario_contract_errors(
+            scenario,
+            vocabulary,
+        ))
+
+    if tuple(scenario_ids) != EXPECTED_STATUS_V1_SCENARIO_IDS:
+        errors.append(
+            "Status V1 scenario IDs expected %r, got %r"
+            % (EXPECTED_STATUS_V1_SCENARIO_IDS, tuple(scenario_ids))
+        )
+    if _status_v1_has_duplicates(scenario_ids):
+        errors.append("Status V1 scenario IDs must be unique")
+    expected_minimums = tuple(range(1, len(EXPECTED_STATUS_V1_SCENARIO_IDS) + 1))
+    if tuple(minimum_scenarios) != expected_minimums:
+        errors.append(
+            "Status V1 minimum_scenario values expected %r, got %r"
+            % (expected_minimums, tuple(minimum_scenarios))
+        )
+
+    if errors:
+        raise SystemExit(
+            "ERROR: Status V1 contract drift:\n- " + "\n- ".join(errors)
+        )
+    print("Status V1 contract: OK (4 sources, 14 scenarios)")
 
 
 def check_packaged_ini_contract():
@@ -2254,6 +3833,7 @@ def main():
     check_documented_ini_contract()
     check_uds_contract_artifact()
     check_rust_uds_contract_source()
+    check_status_v1_contract()
     check_rust_stage_one_tests_present()
     check_p3_rust_scoped_plan_boundary()
     run([sys.executable, os.path.join("ci", "check_tc_acl_datapath.py")])
