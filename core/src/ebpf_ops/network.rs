@@ -1,5 +1,91 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CanonicalNetwork {
+    network: IpAddr,
+    prefix_len: u8,
+}
+
+impl CanonicalNetwork {
+    pub fn parse(cidr: &str) -> Result<Self, String> {
+        let (ip, prefix_len) = parse_cidr(cidr)?;
+        Self::from_ip(ip, prefix_len)
+    }
+
+    pub fn from_ip(ip: IpAddr, prefix_len: u8) -> Result<Self, String> {
+        let network = match ip {
+            IpAddr::V4(ip) => {
+                if prefix_len > 32 {
+                    return Err("IPv4 prefix must be <= 32".to_string());
+                }
+                let address = u32::from_be_bytes(ip.octets());
+                IpAddr::V4(std::net::Ipv4Addr::from(address & ipv4_mask(prefix_len)))
+            }
+            IpAddr::V6(ip) => {
+                if prefix_len > 128 {
+                    return Err("IPv6 prefix must be <= 128".to_string());
+                }
+                let address = u128::from_be_bytes(ip.octets());
+                IpAddr::V6(std::net::Ipv6Addr::from(address & ipv6_mask(prefix_len)))
+            }
+        };
+        Ok(Self {
+            network,
+            prefix_len,
+        })
+    }
+
+    pub fn network_address(self) -> IpAddr {
+        self.network
+    }
+
+    pub fn prefix_len(self) -> u8 {
+        self.prefix_len
+    }
+
+    pub fn contains(&self, other: &Self) -> bool {
+        match (self.network, other.network) {
+            (IpAddr::V4(network), IpAddr::V4(other_network)) => {
+                self.prefix_len <= other.prefix_len
+                    && (u32::from_be_bytes(other_network.octets()) & ipv4_mask(self.prefix_len))
+                        == u32::from_be_bytes(network.octets())
+            }
+            (IpAddr::V6(network), IpAddr::V6(other_network)) => {
+                self.prefix_len <= other.prefix_len
+                    && (u128::from_be_bytes(other_network.octets()) & ipv6_mask(self.prefix_len))
+                        == u128::from_be_bytes(network.octets())
+            }
+            _ => false,
+        }
+    }
+
+    pub fn overlaps(&self, other: &Self) -> bool {
+        self.contains(other) || other.contains(self)
+    }
+}
+
+impl std::fmt::Display for CanonicalNetwork {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}/{}", self.network, self.prefix_len)
+    }
+}
+
+fn ipv4_mask(prefix_len: u8) -> u32 {
+    if prefix_len == 0 {
+        0
+    } else {
+        u32::MAX << (32 - u32::from(prefix_len))
+    }
+}
+
+fn ipv6_mask(prefix_len: u8) -> u128 {
+    if prefix_len == 0 {
+        0
+    } else {
+        u128::MAX << (128 - u32::from(prefix_len))
+    }
+}
+
 pub fn parse_cidr(cidr: &str) -> Result<(IpAddr, u8), String> {
     let parts: Vec<&str> = cidr.split('/').collect();
     if parts.len() != 2 {

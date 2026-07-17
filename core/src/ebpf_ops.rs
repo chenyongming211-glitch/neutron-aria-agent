@@ -16,6 +16,7 @@ mod attach;
 mod inventory;
 mod network;
 mod policy;
+mod projection;
 mod replay;
 mod runtime;
 mod scrub;
@@ -31,11 +32,18 @@ pub use inventory::{
 };
 pub use network::{
     add_acl_network_in_bank, add_network, delete_acl_network_in_bank, delete_network, parse_cidr,
+    CanonicalNetwork,
 };
 pub(crate) use policy::stored_policy_action;
 pub use policy::{
     add_policy, add_policy_in_bank, delete_policy, delete_policy_in_bank, delete_port_set,
     parse_ports, validate_policy_ports,
+};
+pub use projection::{
+    compile_managed_group_projection, plan_projection_drift, CapturedProjection,
+    GeneralProjectionCandidate, GeneralProjectionDisposition, GeneralProjectionExclusionReason,
+    ManagedGroupProjection, ProjectionDirection, ProjectionDrift, ProjectionEntry,
+    ProjectionMutation, ProjectionRepairPlan,
 };
 pub use replay::{replay_state, replay_state_from_snapshot, replay_state_to_pinned_maps};
 pub use runtime::{
