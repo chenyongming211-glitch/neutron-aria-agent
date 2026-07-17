@@ -1671,6 +1671,21 @@ class SnapshotSynchronizer(object):
                     expected_generation,
                 ),
             )
+        try:
+            accepted_generation = _strict_scalar(
+                status.get("accepted_generation"),
+                "integer",
+            )
+        except ValueError:
+            return "failed", "accepted_generation is invalid"
+        if accepted_generation != expected_generation:
+            return (
+                "failed",
+                "accepted_generation %s does not match applied target %s" % (
+                    accepted_generation,
+                    expected_generation,
+                ),
+            )
 
         try:
             expected_hash = _strict_scalar(
@@ -1679,6 +1694,15 @@ class SnapshotSynchronizer(object):
             )
         except ValueError:
             return "failed", "snapshot desired_hash is invalid"
+        try:
+            status_hash = _strict_scalar(
+                status.get("desired_hash"),
+                "string",
+            )
+        except ValueError:
+            return "failed", "desired_hash is invalid"
+        if status_hash != expected_hash:
+            return "failed", "desired_hash does not match snapshot"
         try:
             applied_hash = _strict_scalar(
                 status.get("applied_desired_hash"),

@@ -1398,7 +1398,7 @@ class EventLoopTestCase(unittest.TestCase):
             baseline = sync.full_resync()
             baseline_hash = baseline["snapshot"]["desired_hash"]
             local_client.set_terminal_status_updates(accepted_generation=3)
-            neutron_ports[0]["revision_number"] = 8
+            neutron_ports[0]["binding:vif_type"] = "binding_failed"
 
             with self.assertRaises(LocalApiError) as ctx:
                 sync.full_resync()
