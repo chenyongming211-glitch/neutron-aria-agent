@@ -5094,6 +5094,111 @@ fn can_skip_neutron_domain_reconcile(
 mod tests {
     use super::*;
     use crate::ebpf_binary::TraceBackendKind;
+    use std::sync::{Arc, OnceLock};
+
+    const STATUS_V1_SCENARIOS_JSON: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../docs/neutron-status-contract-v1-scenarios.json"
+    ));
+
+    static STATUS_V1_SCENARIOS: OnceLock<Value> = OnceLock::new();
+
+    #[derive(Deserialize)]
+    struct StatusV1RuntimeSeed {
+        accepted_generation: u64,
+        applied_generation: u64,
+        pending_generation: Option<u64>,
+        desired_hash: Option<String>,
+        applied_desired_hash: Option<String>,
+        authority_state: String,
+        wal_status: String,
+        wal_replay_failures: u64,
+        recovery_cause: Option<String>,
+        managed_ports: Vec<ManagedNeutronPort>,
+        port_statuses: Vec<NeutronPortStatus>,
+    }
+
+    fn rust_status_v1_scenario_ids() -> &'static [&'static str] {
+        &[
+            "full-classified-ready",
+            "scoped-classified-ready",
+            "classified-degraded-terminal",
+            "classified-degraded-full-resync",
+            "pending-poll",
+            "blocked-recoverable-inventory",
+            "blocked-operator",
+            "recovery-full-resync",
+            "generation-zero-inventory-recovery",
+            "restart-classified-routing",
+        ]
+    }
+
+    fn shared_status_v1_scenarios() -> &'static Value {
+        STATUS_V1_SCENARIOS.get_or_init(|| {
+            let fixture: Value = serde_json::from_str(STATUS_V1_SCENARIOS_JSON)
+                .expect("shared Status V1 scenarios must be valid JSON");
+            assert_eq!(
+                fixture
+                    .get("fixture_schema_version")
+                    .and_then(Value::as_u64),
+                Some(1),
+                "shared Status V1 fixture schema must be version 1"
+            );
+
+            let scenarios = fixture
+                .get("scenarios")
+                .and_then(Value::as_array)
+                .expect("shared Status V1 scenarios must be an array");
+            let mut fixture_ids = BTreeSet::new();
+            for scenario in scenarios {
+                let id = scenario
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .expect("every shared Status V1 scenario must have a string id");
+                assert!(
+                    fixture_ids.insert(id),
+                    "shared Status V1 scenario id must be unique: {id}"
+                );
+            }
+
+            let producer_ids = rust_status_v1_scenario_ids();
+            assert_eq!(
+                producer_ids.len(),
+                10,
+                "Rust Status V1 producer selection must contain exactly ten ids"
+            );
+            assert_eq!(
+                producer_ids.iter().copied().collect::<BTreeSet<_>>().len(),
+                producer_ids.len(),
+                "Rust Status V1 producer ids must be unique"
+            );
+            for id in producer_ids {
+                assert!(
+                    fixture_ids.contains(id),
+                    "Rust Status V1 producer scenario must exist: {id}"
+                );
+            }
+            drop(fixture_ids);
+
+            fixture
+        })
+    }
+
+    fn shared_status_v1_scenario(id: &str) -> &'static Value {
+        let matches = shared_status_v1_scenarios()
+            .get("scenarios")
+            .and_then(Value::as_array)
+            .expect("shared Status V1 scenarios must be an array")
+            .iter()
+            .filter(|scenario| scenario.get("id").and_then(Value::as_str) == Some(id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matches.len(),
+            1,
+            "shared Status V1 scenario id must match exactly once: {id}"
+        );
+        matches[0]
+    }
 
     #[derive(Serialize)]
     struct TestSnapshotIntentHashPayload<'a> {
@@ -5308,7 +5413,6 @@ mod tests {
     use crate::kernel_drop_manager::KernelDropManager;
     use crate::ssl_manager::SslManager;
     use crate::trace_backend::TraceManager;
-    use std::sync::Arc;
 
     fn managed(port_id: &str, ifname: &str) -> ManagedNeutronPort {
         ManagedNeutronPort {
@@ -5682,6 +5786,320 @@ mod tests {
         }
     }
 
+    fn status_v1_runtime_seed(id: &str) -> StatusV1RuntimeSeed {
+        let status = shared_status_v1_scenario(id)
+            .get("status")
+            .filter(|status| status.is_object())
+            .unwrap_or_else(|| panic!("Rust Status V1 producer scenario must have status: {id}"));
+        for field in [
+            "accepted_generation",
+            "applied_generation",
+            "pending_generation",
+            "desired_hash",
+            "applied_desired_hash",
+            "authority_state",
+            "wal_status",
+            "wal_replay_failures",
+            "recovery_cause",
+            "managed_ports",
+            "port_statuses",
+        ] {
+            assert!(
+                status.get(field).is_some(),
+                "Rust Status V1 runtime seed {id} must explicitly declare {field}"
+            );
+        }
+        serde_json::from_value(status.clone())
+            .unwrap_or_else(|error| panic!("Status V1 runtime seed must decode for {id}: {error}"))
+    }
+
+    fn runtime_from_status_v1_seed(seed: StatusV1RuntimeSeed) -> NeutronRuntimeState {
+        let StatusV1RuntimeSeed {
+            accepted_generation,
+            applied_generation,
+            pending_generation,
+            desired_hash,
+            applied_desired_hash,
+            authority_state,
+            wal_status,
+            wal_replay_failures,
+            recovery_cause,
+            managed_ports,
+            port_statuses,
+        } = seed;
+
+        let mut ports = BTreeMap::new();
+        for port in managed_ports {
+            let port_id = port.port_id.clone();
+            assert!(
+                ports.insert(port_id.clone(), port).is_none(),
+                "Status V1 runtime seed contains duplicate managed port id: {port_id}"
+            );
+        }
+        let mut statuses = BTreeMap::new();
+        for status in port_statuses {
+            let port_id = status.port_id.clone();
+            assert!(
+                statuses.insert(port_id.clone(), status).is_none(),
+                "Status V1 runtime seed contains duplicate port status id: {port_id}"
+            );
+        }
+
+        NeutronRuntimeState {
+            accepted_generation,
+            applied_generation,
+            pending_generation,
+            desired_hash,
+            applied_desired_hash,
+            authority_state,
+            ports,
+            port_statuses: statuses,
+            wal_status,
+            recovery_cause,
+            wal_replay_failures,
+        }
+    }
+
+    async fn status_v1_json_for_runtime(id: &str, runtime: NeutronRuntimeState) -> Value {
+        let root = temp_root(&format!("status-v1-{id}"));
+        let state = test_neutron_state(&root);
+        {
+            let mut stored_runtime = state.runtime.write().await;
+            *stored_runtime = runtime;
+        }
+        let response = get_neutron_status(State(state)).await.into_response();
+        let (status, value) = response_json_value(response).await;
+        std::fs::remove_dir_all(&root).expect("Status V1 temporary root should be removable");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "Status V1 handler must return HTTP 200 for {id}: {value}"
+        );
+        value
+    }
+
+    fn expected_status_v1_projection(id: &str) -> &'static Value {
+        let fixture = shared_status_v1_scenarios();
+        let contract = fixture
+            .get("status_contract")
+            .and_then(Value::as_object)
+            .expect("shared Status V1 contract declaration must be an object");
+        let scenario = shared_status_v1_scenario(id);
+        let status = scenario
+            .get("status")
+            .filter(|status| status.is_object())
+            .unwrap_or_else(|| panic!("Rust Status V1 producer scenario must have status: {id}"));
+        assert_eq!(
+            status.get("status_schema_version"),
+            contract.get("version"),
+            "Status V1 response schema must match the shared declaration: {id}"
+        );
+        assert_eq!(
+            status.get("status_contract_hash"),
+            contract.get("hash"),
+            "Status V1 response hash must match the shared declaration: {id}"
+        );
+
+        let projection = scenario
+            .get("expected_projection")
+            .filter(|projection| projection.is_object())
+            .unwrap_or_else(|| panic!("Rust Status V1 producer projection must exist: {id}"));
+        for field in [
+            "transaction_state",
+            "overall_readiness",
+            "required_action",
+            "recovery_cause",
+            "last_classified_generation",
+        ] {
+            assert!(
+                projection.get(field).is_some(),
+                "Status V1 expected projection {id} must declare {field}"
+            );
+        }
+        projection
+    }
+
+    fn canonicalized_managed_ports(value: Option<&Value>, context: &str) -> Result<Value, String> {
+        let rows = value
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{context}: managed_ports must be an array"))?;
+        let mut canonical = Vec::with_capacity(rows.len());
+        for row in rows {
+            let object = row
+                .as_object()
+                .ok_or_else(|| format!("{context}: managed port row must be an object"))?;
+            let mut required = serde_json::Map::new();
+            for field in ["port_id", "ifname", "managed_domains"] {
+                required.insert(
+                    field.to_string(),
+                    object.get(field).cloned().ok_or_else(|| {
+                        format!("{context}: managed port row must include {field}")
+                    })?,
+                );
+            }
+            canonical.push(Value::Object(required));
+        }
+        canonical.sort_by(|left, right| {
+            left.get("port_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .cmp(
+                    right
+                        .get("port_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+        });
+        Ok(Value::Array(canonical))
+    }
+
+    fn canonicalized_port_statuses(value: Option<&Value>, context: &str) -> Result<Value, String> {
+        let mut rows = value
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| format!("{context}: port_statuses must be an array"))?;
+        for row in &mut rows {
+            let object = row
+                .as_object_mut()
+                .ok_or_else(|| format!("{context}: port status row must be an object"))?;
+            let domains = object
+                .get_mut("domains")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| format!("{context}: port status domains must be an array"))?;
+            domains.sort_by(|left, right| {
+                left.get("domain")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .cmp(
+                        right
+                            .get("domain")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    )
+            });
+        }
+        rows.sort_by(|left, right| {
+            left.get("port_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .cmp(
+                    right
+                        .get("port_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+        });
+        Ok(Value::Array(rows))
+    }
+
+    fn status_v1_projection_field_mismatches(
+        id: &str,
+        expected: &Value,
+        actual: &Value,
+    ) -> Vec<String> {
+        let expected_status = shared_status_v1_scenario(id)
+            .get("status")
+            .expect("Rust Status V1 producer status must exist");
+        let mut mismatches = Vec::new();
+        for field in ["status_schema_version", "status_contract_hash"] {
+            if actual.get(field) != expected_status.get(field) {
+                mismatches.push(format!(
+                    "{field}: expected {:?}, got {:?}",
+                    expected_status.get(field),
+                    actual.get(field)
+                ));
+            }
+        }
+        for field in [
+            "transaction_state",
+            "overall_readiness",
+            "required_action",
+            "recovery_cause",
+            "last_classified_generation",
+        ] {
+            if actual.get(field) != expected.get(field) {
+                mismatches.push(format!(
+                    "{field}: expected {:?}, got {:?}",
+                    expected.get(field),
+                    actual.get(field)
+                ));
+            }
+        }
+        mismatches
+    }
+
+    fn assert_status_v1_projection(
+        id: &str,
+        expected: &Value,
+        actual: &Value,
+    ) -> Result<(), String> {
+        let expected_status = shared_status_v1_scenario(id)
+            .get("status")
+            .expect("Rust Status V1 producer status must exist");
+        let mut mismatches = status_v1_projection_field_mismatches(id, expected, actual);
+
+        for field in [
+            "generation",
+            "accepted_generation",
+            "applied_generation",
+            "pending_generation",
+            "desired_hash",
+            "applied_desired_hash",
+            "wal_status",
+            "wal_replay_failures",
+            "authority_state",
+        ] {
+            if actual.get(field) != expected_status.get(field) {
+                mismatches.push(format!(
+                    "{field}: expected {:?}, got {:?}",
+                    expected_status.get(field),
+                    actual.get(field)
+                ));
+            }
+        }
+        if actual.get("generation") != actual.get("applied_generation") {
+            mismatches.push(format!(
+                "generation alias mismatch: generation {:?}, applied_generation {:?}",
+                actual.get("generation"),
+                actual.get("applied_generation")
+            ));
+        }
+
+        match (
+            canonicalized_managed_ports(expected_status.get("managed_ports"), id),
+            canonicalized_managed_ports(actual.get("managed_ports"), id),
+        ) {
+            (Ok(expected_ports), Ok(actual_ports)) if expected_ports != actual_ports => {
+                mismatches.push(format!(
+                    "managed_ports: expected {expected_ports}, got {actual_ports}"
+                ));
+            }
+            (Err(error), _) | (_, Err(error)) => mismatches.push(error),
+            _ => {}
+        }
+
+        match (
+            canonicalized_port_statuses(expected_status.get("port_statuses"), id),
+            canonicalized_port_statuses(actual.get("port_statuses"), id),
+        ) {
+            (Ok(expected_statuses), Ok(actual_statuses))
+                if expected_statuses != actual_statuses =>
+            {
+                mismatches.push(format!(
+                    "port_statuses: expected {expected_statuses}, got {actual_statuses}"
+                ));
+            }
+            (Err(error), _) | (_, Err(error)) => mismatches.push(error),
+            _ => {}
+        }
+
+        if mismatches.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("{id}:\n{}", mismatches.join("\n")))
+        }
+    }
+
     fn inventory_snapshot(
         generation: u64,
         ports: Vec<NeutronPortSnapshot>,
@@ -5704,6 +6122,91 @@ mod tests {
             .expect("response body should be readable");
         let value = serde_json::from_slice(body.as_ref()).expect("response should be json");
         (status, value)
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_runtime_projection_matches_shared_scenarios() {
+        let mut mismatches = Vec::new();
+
+        for id in rust_status_v1_scenario_ids() {
+            let runtime = runtime_from_status_v1_seed(status_v1_runtime_seed(id));
+            let actual = status_v1_json_for_runtime(id, runtime).await;
+            let expected = expected_status_v1_projection(id);
+            if let Err(mismatch) = assert_status_v1_projection(id, expected, &actual) {
+                mismatches.push(mismatch);
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "Neutron runtime projection drifted from the shared Status V1 scenarios:\n{}",
+            mismatches.join("\n\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_projection_prioritizes_uncertainty_over_pending_and_recovery(
+    ) {
+        let expected = expected_status_v1_projection("blocked-operator");
+        let mut mismatches = Vec::new();
+
+        let mut uncertain_seed = status_v1_runtime_seed("pending-poll");
+        uncertain_seed.wal_replay_failures = 1;
+        let uncertain = status_v1_json_for_runtime(
+            "wal-uncertainty-over-pending",
+            runtime_from_status_v1_seed(uncertain_seed),
+        )
+        .await;
+        let uncertain_mismatches =
+            status_v1_projection_field_mismatches("blocked-operator", expected, &uncertain);
+        if !uncertain_mismatches.is_empty() {
+            mismatches.push(format!(
+                "wal uncertainty must normalize ahead of pending:\n{}",
+                uncertain_mismatches.join("\n")
+            ));
+        }
+
+        let mut recognized_recovery_seed =
+            status_v1_runtime_seed("blocked-recoverable-inventory");
+        recognized_recovery_seed.wal_replay_failures = 1;
+        let recognized_recovery = status_v1_json_for_runtime(
+            "wal-uncertainty-over-recognized-recovery",
+            runtime_from_status_v1_seed(recognized_recovery_seed),
+        )
+        .await;
+        let recognized_recovery_mismatches = status_v1_projection_field_mismatches(
+            "blocked-operator",
+            expected,
+            &recognized_recovery,
+        );
+        if !recognized_recovery_mismatches.is_empty() {
+            mismatches.push(format!(
+                "WAL uncertainty must normalize ahead of recognized recovery:\n{}",
+                recognized_recovery_mismatches.join("\n")
+            ));
+        }
+
+        let mut unknown_cause_seed = status_v1_runtime_seed("blocked-recoverable-inventory");
+        unknown_cause_seed.recovery_cause = Some("inventory_timeout".to_string());
+        let unknown_cause = status_v1_json_for_runtime(
+            "unknown-recovery-cause",
+            runtime_from_status_v1_seed(unknown_cause_seed),
+        )
+        .await;
+        let unknown_cause_mismatches =
+            status_v1_projection_field_mismatches("blocked-operator", expected, &unknown_cause);
+        if !unknown_cause_mismatches.is_empty() {
+            mismatches.push(format!(
+                "unknown recovery cause must normalize to operator-only blocked:\n{}",
+                unknown_cause_mismatches.join("\n")
+            ));
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "Status V1 projection precedence is not fail-closed:\n{}",
+            mismatches.join("\n\n")
+        );
     }
 
     fn ready_acl(rules: Vec<NeutronAclRuleSnapshot>) -> NeutronAclSnapshot {
