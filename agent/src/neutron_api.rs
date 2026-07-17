@@ -11384,6 +11384,106 @@ mod tests {
         assert_eq!(reason.as_deref(), Some("no_enabled_binding"));
     }
 
+    fn managed_projection_health_skip_fixture(
+        managed_domains: Vec<String>,
+    ) -> (ManagedNeutronPort, NeutronPortStatus) {
+        let mut managed = managed("vm-port", "tap-vm");
+        managed.managed_domains = managed_domains.clone();
+        managed.domain_desired_hashes = managed_domains
+            .iter()
+            .map(|domain| (domain.clone(), format!("{}-hash", domain)))
+            .collect();
+        let status = port_runtime_status(
+            "vm-port",
+            "tap-vm",
+            1,
+            Some("snapshot-hash".to_string()),
+            managed_domains.clone(),
+            "ready",
+            None,
+            domain_statuses_for(&managed_domains, "ready", None),
+        );
+        (managed, status)
+    }
+
+    #[test]
+    fn managed_projection_health_verified_acl_may_skip_equal_scoped_reconcile() {
+        let (managed, status) = managed_projection_health_skip_fixture(vec!["acl".to_string()]);
+
+        assert!(can_skip_neutron_domain_reconcile(
+            Some(&managed),
+            Some(&status),
+            &managed,
+            false,
+            Some(crate::control_plane::ManagedProjectionHealth::Verified),
+        ));
+    }
+
+    #[test]
+    fn managed_projection_health_unverified_acl_cannot_skip_equal_reconcile() {
+        let (managed, status) = managed_projection_health_skip_fixture(vec!["acl".to_string()]);
+
+        assert!(!can_skip_neutron_domain_reconcile(
+            Some(&managed),
+            Some(&status),
+            &managed,
+            false,
+            Some(crate::control_plane::ManagedProjectionHealth::Unverified),
+        ));
+    }
+
+    #[test]
+    fn managed_projection_health_missing_acl_evidence_cannot_skip_equal_reconcile() {
+        let (managed, status) = managed_projection_health_skip_fixture(vec!["acl".to_string()]);
+
+        assert!(!can_skip_neutron_domain_reconcile(
+            Some(&managed),
+            Some(&status),
+            &managed,
+            false,
+            None,
+        ));
+    }
+
+    #[test]
+    fn managed_projection_health_repair_required_acl_cannot_skip_equal_reconcile() {
+        let (managed, status) = managed_projection_health_skip_fixture(vec!["acl".to_string()]);
+
+        assert!(!can_skip_neutron_domain_reconcile(
+            Some(&managed),
+            Some(&status),
+            &managed,
+            false,
+            Some(crate::control_plane::ManagedProjectionHealth::RepairRequired),
+        ));
+    }
+
+    #[test]
+    fn managed_projection_health_full_resync_cannot_skip_even_when_verified() {
+        let (managed, status) = managed_projection_health_skip_fixture(vec!["acl".to_string()]);
+
+        assert!(!can_skip_neutron_domain_reconcile(
+            Some(&managed),
+            Some(&status),
+            &managed,
+            true,
+            Some(crate::control_plane::ManagedProjectionHealth::Verified),
+        ));
+    }
+
+    #[test]
+    fn managed_projection_health_non_acl_skip_does_not_require_acl_evidence() {
+        let (managed, status) = managed_projection_health_skip_fixture(vec!["qos".to_string()]);
+
+        assert!(can_skip_neutron_domain_reconcile(
+            Some(&managed),
+            Some(&status),
+            &managed,
+            false,
+            None,
+        ));
+    }
+
     #[test]
     fn neutron_acl_full_host_resync_republishes_after_unprojected_health_loss() {
         let mut snapshot = port("vm-port", "tap-vm", true);

@@ -530,6 +530,10 @@ impl TapRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control_plane::{
+        managed_acl_ownership_after_detach, managed_acl_promotion_action,
+        ManagedAclPromotionAction, ManagedAclPublicationMode, ManagedProjectionHealth,
+    };
 
     #[derive(Default)]
     struct TestManagedTransactionState {
@@ -576,5 +580,67 @@ mod tests {
         assert_eq!(state.rollback_count, 1);
         assert_eq!(state.release_count, 1);
         assert_eq!(state.abort_count, 1);
+    }
+
+    #[test]
+    fn managed_acl_ownership_existing_standalone_attach_promotes_to_managed_unverified() {
+        for publication_mode in [
+            ManagedAclPublicationMode::StandaloneCompatibility,
+            ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl,
+        ] {
+            let action = managed_acl_promotion_action(
+                publication_mode,
+                ManagedProjectionHealth::Unverified,
+                ManagedAttachMode::NeutronResyncRequired { acl_managed: true },
+            );
+
+            assert_eq!(
+                action,
+                ManagedAclPromotionAction::Promote {
+                    next_mode: ManagedAclPublicationMode::ManagedAcl,
+                    next_health: ManagedProjectionHealth::Unverified,
+                    quiesce_acl_ct: true,
+                },
+                "an existing {:?} attach must not swallow managed ACL promotion",
+                publication_mode
+            );
+        }
+    }
+
+    #[test]
+    fn managed_acl_ownership_repeated_managed_attach_preserves_verified_idempotence() {
+        let action = managed_acl_promotion_action(
+            ManagedAclPublicationMode::ManagedAcl,
+            ManagedProjectionHealth::Verified,
+            ManagedAttachMode::NeutronResyncRequired { acl_managed: true },
+        );
+
+        assert_eq!(action, ManagedAclPromotionAction::Preserve);
+    }
+
+    #[test]
+    fn managed_acl_ownership_detach_clears_attach_and_acl_ownership() {
+        for (publication_mode, projection_health) in [
+            (
+                ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl,
+                ManagedProjectionHealth::Unverified,
+            ),
+            (
+                ManagedAclPublicationMode::ManagedAcl,
+                ManagedProjectionHealth::RepairRequired,
+            ),
+            (
+                ManagedAclPublicationMode::ManagedAcl,
+                ManagedProjectionHealth::Verified,
+            ),
+        ] {
+            let remaining = managed_acl_ownership_after_detach(publication_mode, projection_health);
+
+            assert_eq!(
+                remaining, None,
+                "detach must clear both attach and ACL ownership from {:?}/{:?}",
+                publication_mode, projection_health
+            );
+        }
     }
 }

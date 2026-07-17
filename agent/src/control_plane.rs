@@ -5120,6 +5120,111 @@ mod tests {
     }
 
     #[test]
+    fn managed_projection_health_fresh_managed_replay_starts_unverified() {
+        let lifecycle = managed_acl_registration_lifecycle(
+            ManagedAttachMode::NeutronResyncRequired { acl_managed: true },
+            None,
+            None,
+        )
+        .expect("fresh managed replay must have a lifecycle state");
+
+        assert_eq!(
+            lifecycle.publication_mode,
+            ManagedAclPublicationMode::ManagedAcl
+        );
+        assert_eq!(
+            lifecycle.projection_health,
+            ManagedProjectionHealth::Unverified
+        );
+    }
+
+    #[test]
+    fn managed_projection_health_attach_owned_standalone_starts_unverified() {
+        let lifecycle = managed_acl_registration_lifecycle(
+            ManagedAttachMode::NeutronResyncRequired { acl_managed: false },
+            None,
+            None,
+        )
+        .expect("Neutron-owned standalone-compatible attach must have lifecycle state");
+
+        assert_eq!(
+            lifecycle.publication_mode,
+            ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl
+        );
+        assert_eq!(
+            lifecycle.projection_health,
+            ManagedProjectionHealth::Unverified
+        );
+    }
+
+    #[test]
+    fn managed_projection_health_promotion_starts_unverified() {
+        let action = managed_acl_promotion_action(
+            ManagedAclPublicationMode::StandaloneCompatibility,
+            ManagedProjectionHealth::Unverified,
+            ManagedAttachMode::NeutronResyncRequired { acl_managed: true },
+        );
+
+        assert_eq!(
+            action,
+            ManagedAclPromotionAction::Promote {
+                next_mode: ManagedAclPublicationMode::ManagedAcl,
+                next_health: ManagedProjectionHealth::Unverified,
+                quiesce_acl_ct: true,
+            }
+        );
+    }
+
+    #[test]
+    fn managed_projection_health_preexisting_exact_desired_runtime_is_verified() {
+        let lifecycle = managed_acl_registration_lifecycle(
+            ManagedAttachMode::NeutronResyncRequired { acl_managed: true },
+            Some(aria_core::ebpf_ops::ProjectionDrift::Clean),
+            Some(aria_core::ebpf_ops::RuntimeGateDisposition::Desired),
+        )
+        .expect("exact preexisting managed runtime must be accepted");
+
+        assert_eq!(
+            lifecycle.projection_health,
+            ManagedProjectionHealth::Verified
+        );
+    }
+
+    #[test]
+    fn managed_projection_health_preexisting_quiesced_clean_runtime_is_unverified() {
+        let lifecycle = managed_acl_registration_lifecycle(
+            ManagedAttachMode::NeutronResyncRequired { acl_managed: true },
+            Some(aria_core::ebpf_ops::ProjectionDrift::Clean),
+            Some(aria_core::ebpf_ops::RuntimeGateDisposition::ManagedQuiesced),
+        )
+        .expect("clean but quiesced managed runtime must await resync");
+
+        assert_eq!(
+            lifecycle.projection_health,
+            ManagedProjectionHealth::Unverified
+        );
+    }
+
+    #[test]
+    fn managed_projection_health_preexisting_repairable_runtime_requires_repair() {
+        let lifecycle = managed_acl_registration_lifecycle(
+            ManagedAttachMode::NeutronResyncRequired { acl_managed: true },
+            Some(aria_core::ebpf_ops::ProjectionDrift::RepairRequired(
+                aria_core::ebpf_ops::ProjectionRepairPlan {
+                    general_mutations: Vec::new(),
+                },
+            )),
+            Some(aria_core::ebpf_ops::RuntimeGateDisposition::ManagedQuiesced),
+        )
+        .expect("explainable managed drift must be admitted for repair");
+
+        assert_eq!(
+            lifecycle.projection_health,
+            ManagedProjectionHealth::RepairRequired
+        );
+    }
+
+    #[test]
     fn neutron_acl_gate_serialization_requires_tc_only_for_enabling_writes() {
         assert!(!neutron_acl_gate_requires_tc(false, false));
         assert!(neutron_acl_gate_requires_tc(true, false));

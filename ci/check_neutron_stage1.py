@@ -31,6 +31,8 @@ RUST_TESTS = [
         "aria-agent",
         "managed_projection_inventory_handoff_",
     ],
+    ["test", "--locked", "-p", "aria-agent", "managed_projection_health_"],
+    ["test", "--locked", "-p", "aria-agent", "managed_acl_ownership_"],
     ["test", "--locked", "-p", "aria-api", "neutron_contract"],
     ["test", "--locked", "-p", "aria-agent", "neutron_wal"],
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_plan"],
@@ -298,6 +300,32 @@ def _rust_function_body(source, function_name):
     match = re.search(
         r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+%s(?:\s*<[^>{}]*>)?\s*\("
         % re.escape(function_name),
+        code,
+    )
+    if not match:
+        return None
+    opening = code.find("{", match.end())
+    if opening < 0:
+        return None
+    depth = 1
+    index = opening + 1
+    while index < len(code) and depth:
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+        index += 1
+    if depth:
+        return None
+    return code[opening + 1:index - 1]
+
+
+def _rust_item_body(source, item_kind, item_name):
+    """Extract a Rust struct or enum body after blanking comments and literals."""
+    code = _blank_rust_non_code(source)
+    match = re.search(
+        r"\b(?:pub(?:\s*\([^)]*\))?\s+)?%s\s+%s\b"
+        % (re.escape(item_kind), re.escape(item_name)),
         code,
     )
     if not match:
@@ -2498,6 +2526,8 @@ def check_rust_stage_one_tests_present():
             "aria-agent",
             "managed_projection_inventory_handoff_",
         ],
+        ["test", "--locked", "-p", "aria-agent", "managed_projection_health_"],
+        ["test", "--locked", "-p", "aria-agent", "managed_acl_ownership_"],
     )
     for projection_test in projection_tests:
         if projection_test not in RUST_TESTS:
@@ -2525,6 +2555,17 @@ def check_rust_stage_one_tests_present():
             _read_repo_text(os.path.join("agent", "src", "control_plane.rs")),
             "managed_projection_inventory_handoff_",
             1,
+        ),
+        (
+            _read_repo_text(os.path.join("agent", "src", "control_plane.rs"))
+            + _read_repo_text(os.path.join("agent", "src", "neutron_api.rs")),
+            "managed_projection_health_",
+            12,
+        ),
+        (
+            _read_repo_text(os.path.join("agent", "src", "tap_registry.rs")),
+            "managed_acl_ownership_",
+            3,
         ),
     )
     for projection_test_source, prefix, minimum in projection_test_sources:
@@ -2569,6 +2610,112 @@ def check_rust_stage_one_tests_present():
     network_source = _read_repo_text(CORE_EBPF_NETWORK_PATH)
     policy_source = _read_repo_text(CORE_EBPF_POLICY_PATH)
     tap_registry_source = _read_repo_text(os.path.join("agent", "src", "tap_registry.rs"))
+
+    instance_state_body = _rust_item_body(
+        control_plane_source, "struct", "InstanceState"
+    )
+    if instance_state_body is None or not all(
+        re.search(pattern, instance_state_body)
+        for pattern in (
+            r"\b\w+\s*:\s*ManagedAclPublicationMode\b",
+            r"\b\w+\s*:\s*ManagedProjectionHealth\b",
+        )
+    ):
+        raise SystemExit(
+            "ERROR: managed ACL lifecycle state must be stored in InstanceState"
+        )
+
+    skip_body = _rust_function_body(
+        neutron_api_source, "can_skip_neutron_domain_reconcile"
+    )
+    if skip_body is None or "ManagedProjectionHealth::Verified" not in skip_body:
+        raise SystemExit(
+            "ERROR: managed ACL reconcile skip must require verified projection health"
+        )
+
+    apply_body = _rust_function_body(
+        neutron_api_source, "apply_snapshot_runtime_transaction"
+    )
+    update_index = -1 if apply_body is None else apply_body.find("for port in update")
+    update_body = "" if update_index < 0 else apply_body[update_index:]
+    attach_index = update_body.find(".attach_neutron")
+    health_match = re.search(
+        r"\.\s*\w*projection_health\w*\s*\(", update_body
+    )
+    skip_index = update_body.find("can_skip_neutron_domain_reconcile")
+    if (
+        attach_index < 0
+        or health_match is None
+        or skip_index < 0
+        or not attach_index < health_match.start() < skip_index
+    ):
+        raise SystemExit(
+            "ERROR: managed update must synchronize ownership and projection health before skip"
+        )
+
+    attach_body = _rust_function_body(tap_registry_source, "attach_with_mode")
+    iface_lock_index = -1 if attach_body is None else attach_body.find("get_iface_lock")
+    iface_guard_match = (
+        None
+        if attach_body is None or iface_lock_index < 0
+        else re.search(
+            r"\.\s*lock\s*\(\s*\)\s*\.\s*await\b",
+            attach_body[iface_lock_index:],
+        )
+    )
+    iface_guard_index = (
+        -1
+        if iface_guard_match is None
+        else iface_lock_index + iface_guard_match.start()
+    )
+    lifecycle_lock_index = (
+        -1 if attach_body is None else attach_body.find("lock_runtime_lifecycle")
+    )
+    promotion_match = (
+        None
+        if attach_body is None
+        else re.search(r"\b\w*promot\w*_serialized\s*\(", attach_body)
+    )
+    if (
+        attach_body is None
+        or iface_lock_index < 0
+        or iface_guard_index < iface_lock_index
+        or lifecycle_lock_index < iface_guard_index
+        or "return Ok(())" in attach_body[:iface_lock_index]
+        or promotion_match is None
+        or promotion_match.start() < lifecycle_lock_index
+    ):
+        raise SystemExit(
+            "ERROR: idempotent managed attach must serialize ownership promotion after iface/lifecycle locks"
+        )
+
+    detach_body = _rust_function_body(tap_registry_source, "detach")
+    unregister_body = _rust_function_body(control_plane_source, "unregister_instance")
+    authority_clear_index = (
+        -1
+        if unregister_body is None
+        else unregister_body.find("clear_neutron_port_authority")
+    )
+    instance_remove_index = (
+        -1 if unregister_body is None else unregister_body.find("instances.remove")
+    )
+    early_return_index = (
+        -1 if unregister_body is None else unregister_body.find("return")
+    )
+    if (
+        detach_body is None
+        or re.search(
+            r"\bif\s+instance_exists\s*\{\s*self\s*\.\s*control_plane\s*\.\s*unregister_instance\s*\(",
+            detach_body,
+        )
+        or unregister_body is None
+        or authority_clear_index < 0
+        or instance_remove_index < 0
+        or (early_return_index >= 0 and early_return_index < authority_clear_index)
+    ):
+        raise SystemExit(
+            "ERROR: managed detach must clear attach state and ACL authority unconditionally"
+        )
 
     for source, function_name, binding in (
         (replay_source, "replay_state_from_snapshot_with_mode", "group_entries"),
