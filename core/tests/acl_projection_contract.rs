@@ -1,10 +1,11 @@
 use aria_core::ebpf_ops::{
     compile_managed_group_projection, plan_projection_drift, CanonicalNetwork, CapturedProjection,
-    ManagedGroupProjection, ProjectionDirection, ProjectionDrift, ProjectionEntry,
-    ProjectionMutation,
+    GeneralProjectionDisposition, GeneralProjectionExclusionReason, ManagedGroupProjection,
+    ProjectionDirection, ProjectionDrift, ProjectionEntry, ProjectionMutation,
 };
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
 use std::collections::BTreeSet;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 fn insert_group(state: &mut FirewallState, key: &str, id: u32, cidrs: &[&str]) {
     state.groups.insert(
@@ -291,6 +292,110 @@ fn acl_projection_highest_id_exact_winner_is_insertion_order_independent() {
     assert_eq!(
         entries(&forward.general),
         entries(&[entry("198.51.100.0/24", 9)])
+    );
+}
+
+#[test]
+fn acl_projection_canonical_network_checked_constructor_preserves_invariants() {
+    assert_eq!(
+        CanonicalNetwork::from_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 255)), 24).unwrap(),
+        CanonicalNetwork::parse("10.0.0.0/24").unwrap()
+    );
+    assert_eq!(
+        CanonicalNetwork::from_ip(IpAddr::V6("2001:db8::ffff".parse().unwrap()), 64).unwrap(),
+        CanonicalNetwork::parse("2001:db8::/64").unwrap()
+    );
+    assert_eq!(
+        CanonicalNetwork::parse("203.0.113.7/0")
+            .unwrap()
+            .to_string(),
+        "0.0.0.0/0"
+    );
+    assert!(CanonicalNetwork::from_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 33).is_err());
+    assert!(CanonicalNetwork::from_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 129).is_err());
+}
+
+#[test]
+fn acl_projection_reports_cross_domain_cover_independently_of_group_id() {
+    let mut state = FirewallState::default();
+    insert_group(&mut state, "higher-id-acl", 50, &["10.0.0.7/24"]);
+    insert_group(&mut state, "lower-id-local", 20, &["10.0.0.9/24"]);
+    state.rules.push(acl_rule(50, 0));
+
+    let compiled = compile(&state);
+    let acl_candidate = compiled
+        .general_candidates
+        .iter()
+        .find(|candidate| candidate.stable_group_identity == "higher-id-acl")
+        .expect("ACL candidate metadata exists");
+
+    assert!(has_entry(&compiled.general, "10.0.0.0/24", 20));
+    assert!(matches!(
+        &acl_candidate.disposition,
+        GeneralProjectionDisposition::Excluded(
+            GeneralProjectionExclusionReason::CoveredByGeneralDomain { covering }
+        ) if covering == &entry("10.0.0.0/24", 20)
+    ));
+}
+
+#[test]
+fn acl_projection_reports_exact_winner_and_most_specific_cover_deterministically() {
+    fn state_with_order(order: &[(&str, u32, &str)]) -> FirewallState {
+        let mut state = FirewallState::default();
+        for (name, id, cidr) in order {
+            insert_group(&mut state, name, *id, &[*cidr]);
+        }
+        state.rules.push(acl_rule(30, 0));
+        state
+    }
+
+    let forward = compile(&state_with_order(&[
+        ("acl", 30, "10.0.1.9/32"),
+        ("broad", 10, "10.0.0.0/16"),
+        ("specific", 20, "10.0.1.0/24"),
+        ("exact-low", 3, "192.0.2.1/24"),
+        ("exact-high", 9, "192.0.2.200/24"),
+    ]));
+    let reverse = compile(&state_with_order(&[
+        ("exact-high", 9, "192.0.2.200/24"),
+        ("exact-low", 3, "192.0.2.1/24"),
+        ("specific", 20, "10.0.1.0/24"),
+        ("broad", 10, "10.0.0.0/16"),
+        ("acl", 30, "10.0.1.9/32"),
+    ]));
+    assert_eq!(forward, reverse);
+
+    let acl_candidate = forward
+        .general_candidates
+        .iter()
+        .find(|candidate| candidate.stable_group_identity == "acl")
+        .expect("ACL candidate metadata exists");
+    assert!(matches!(
+        &acl_candidate.disposition,
+        GeneralProjectionDisposition::Excluded(
+            GeneralProjectionExclusionReason::CoveredByGeneralDomain { covering }
+        ) if covering == &entry("10.0.1.0/24", 20)
+    ));
+
+    let exact_low = forward
+        .general_candidates
+        .iter()
+        .find(|candidate| candidate.stable_group_identity == "exact-low")
+        .expect("low exact candidate metadata exists");
+    assert!(matches!(
+        &exact_low.disposition,
+        GeneralProjectionDisposition::Excluded(
+            GeneralProjectionExclusionReason::ExactKeyLost { winner }
+        ) if winner == &entry("192.0.2.0/24", 9)
+    ));
+    let exact_high = forward
+        .general_candidates
+        .iter()
+        .find(|candidate| candidate.stable_group_identity == "exact-high")
+        .expect("high exact candidate metadata exists");
+    assert_eq!(
+        exact_high.disposition,
+        GeneralProjectionDisposition::Included
     );
 }
 
