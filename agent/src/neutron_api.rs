@@ -6209,6 +6209,888 @@ mod tests {
         );
     }
 
+    fn status_v1_expected_projection_mismatches(
+        label: &str,
+        actual: &Value,
+        transaction_state: &str,
+        overall_readiness: &str,
+        required_action: &str,
+        recovery_cause: Option<&str>,
+        last_classified_generation: u64,
+    ) -> Vec<String> {
+        let expected_recovery_cause = recovery_cause
+            .map(|cause| Value::String(cause.to_string()))
+            .unwrap_or(Value::Null);
+        let expected = [
+            (
+                "transaction_state",
+                Value::String(transaction_state.to_string()),
+            ),
+            (
+                "overall_readiness",
+                Value::String(overall_readiness.to_string()),
+            ),
+            (
+                "required_action",
+                Value::String(required_action.to_string()),
+            ),
+            ("recovery_cause", expected_recovery_cause),
+            (
+                "last_classified_generation",
+                Value::Number(last_classified_generation.into()),
+            ),
+        ];
+        let mut mismatches = Vec::new();
+        for (field, expected_value) in expected {
+            if actual.get(field) != Some(&expected_value) {
+                mismatches.push(format!(
+                    "{label}.{field}: expected {expected_value}, got {:?}",
+                    actual.get(field)
+                ));
+            }
+        }
+        mismatches
+    }
+
+    fn status_v1_ready_runtime(
+        port_id: &str,
+        ifname: &str,
+        generation: u64,
+        domain: &str,
+    ) -> NeutronRuntimeState {
+        let managed_port = ManagedNeutronPort {
+            managed_domains: vec![domain.to_string()],
+            ..managed(port_id, ifname)
+        };
+        let domain_status = if domain == "acl" {
+            domain_status_with_action("acl", "ready", None, Some("enforce".to_string()))
+        } else {
+            domain_status(domain, "ready", None)
+        };
+        let mut ports = BTreeMap::new();
+        ports.insert(port_id.to_string(), managed_port);
+        let mut statuses = BTreeMap::new();
+        statuses.insert(
+            port_id.to_string(),
+            port_runtime_status(
+                port_id,
+                ifname,
+                generation,
+                Some(format!("hash-{generation}")),
+                vec![domain.to_string()],
+                "ready",
+                None,
+                vec![domain_status],
+            ),
+        );
+        build_snapshot_commit_runtime(
+            &NeutronRuntimeState::default(),
+            generation,
+            Some(format!("hash-{generation}")),
+            ports,
+            statuses,
+            false,
+        )
+    }
+
+    fn status_v1_runtime_with_raw_port_evidence(
+        label: &str,
+        generation: u64,
+        status: &str,
+        reason: &str,
+        effective_action: &str,
+    ) -> NeutronRuntimeState {
+        let port_id = format!("port-{label}");
+        let ifname = format!("tap-{label}");
+        let managed_port = ManagedNeutronPort {
+            managed_domains: vec!["acl".to_string()],
+            ..managed(&port_id, &ifname)
+        };
+        let mut ports = BTreeMap::new();
+        ports.insert(port_id.clone(), managed_port);
+        let mut statuses = BTreeMap::new();
+        statuses.insert(
+            port_id.clone(),
+            port_runtime_status(
+                &port_id,
+                &ifname,
+                generation,
+                Some(format!("hash-{generation}")),
+                vec!["acl".to_string()],
+                status,
+                Some(reason.to_string()),
+                vec![domain_status_with_action(
+                    "acl",
+                    status,
+                    Some(reason.to_string()),
+                    Some(effective_action.to_string()),
+                )],
+            ),
+        );
+        build_snapshot_commit_runtime(
+            &NeutronRuntimeState::default(),
+            generation,
+            Some(format!("hash-{generation}")),
+            ports,
+            statuses,
+            false,
+        )
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_real_terminal_degraded_commit_stays_classified() {
+        let generation = 60;
+        let desired_hash = format!("hash-{generation}");
+        let port_snapshot = NeutronPortSnapshot {
+            managed_domains: vec!["acl".to_string()],
+            ..port("terminal-degraded", "tap-terminal-degraded", true)
+        };
+        let plan = AclApplyPlan {
+            force_bypass_reason: Some("acl_rule_limit_exceeded:1001:1000".to_string()),
+            ..AclApplyPlan::default()
+        };
+        let outcome = NeutronAclReconcileOutcome::from_plan(&plan);
+        let domains = vec![outcome.domain_status(&port_snapshot)];
+        let (port_status, port_reason) = successful_port_status(&domains);
+        let managed_port = ManagedNeutronPort {
+            managed_domains: vec!["acl".to_string()],
+            ..managed(&port_snapshot.port_id, &port_snapshot.ifname)
+        };
+        let mut ports = BTreeMap::new();
+        ports.insert(managed_port.port_id.clone(), managed_port);
+        let mut statuses = BTreeMap::new();
+        statuses.insert(
+            port_snapshot.port_id.clone(),
+            port_runtime_status(
+                &port_snapshot.port_id,
+                &port_snapshot.ifname,
+                generation,
+                Some(desired_hash.clone()),
+                vec!["acl".to_string()],
+                &port_status,
+                port_reason,
+                domains,
+            ),
+        );
+        let runtime = build_snapshot_commit_runtime(
+            &NeutronRuntimeState::default(),
+            generation,
+            Some(desired_hash.clone()),
+            ports,
+            statuses,
+            false,
+        );
+
+        let committed_status = runtime
+            .port_statuses
+            .get(&port_snapshot.port_id)
+            .expect("terminal-degraded commit must retain its port evidence");
+        assert_eq!(runtime.authority_state, "ready");
+        assert_eq!(runtime.pending_generation, None);
+        assert_eq!(runtime.accepted_generation, generation);
+        assert_eq!(runtime.applied_generation, generation);
+        assert_eq!(runtime.desired_hash.as_deref(), Some(desired_hash.as_str()));
+        assert_eq!(
+            runtime.applied_desired_hash.as_deref(),
+            Some(desired_hash.as_str())
+        );
+        assert_eq!(committed_status.status, "degraded");
+        assert_eq!(
+            committed_status.reason.as_deref(),
+            Some("acl_rule_limit_exceeded:1001:1000")
+        );
+        assert!(committed_status.domains.iter().any(|domain| {
+            domain.domain == "acl"
+                && domain.status == "degraded"
+                && domain.effective_action.as_deref() == Some("bypass")
+        }));
+
+        let actual = status_v1_json_for_runtime("real-terminal-degraded", runtime).await;
+        let mut mismatches = status_v1_expected_projection_mismatches(
+            "real-terminal-degraded",
+            &actual,
+            "classified",
+            "degraded",
+            "none",
+            None,
+            generation,
+        );
+        if actual.get("overall_readiness").and_then(Value::as_str) == Some("ready") {
+            mismatches.push(
+                "real-terminal-degraded: terminal-degraded evidence must never emit ready"
+                    .to_string(),
+            );
+        }
+        assert!(
+            mismatches.is_empty(),
+            "authority_state=ready + port degraded + ACL degraded/bypass real commit did not stay classified:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_rebuild_reasons_are_exact_and_severity_gated() {
+        let cases = [
+            (
+                "exact-runtime-rebuild-required",
+                "degraded",
+                "runtime_rebuild_required",
+                "unchanged",
+                "classified",
+                "degraded",
+                "full_resync",
+            ),
+            (
+                "exact-acl-restart-replay",
+                "degraded",
+                "acl_restart_replay_requires_resync",
+                "unchanged",
+                "classified",
+                "degraded",
+                "full_resync",
+            ),
+            (
+                "exact-tc-acl-link-lost",
+                "degraded",
+                "tc_acl_link_lost",
+                "bypass",
+                "classified",
+                "degraded",
+                "full_resync",
+            ),
+            (
+                "diagnostic-substring-is-not-owned",
+                "degraded",
+                "acl_apply_failed:operator requested full_resync manually",
+                "bypass",
+                "classified",
+                "degraded",
+                "none",
+            ),
+            (
+                "raw-blocked-outranks-owned-reason",
+                "blocked",
+                "runtime_rebuild_required",
+                "unchanged",
+                "blocked",
+                "blocked",
+                "operator",
+            ),
+            (
+                "raw-error-outranks-owned-reason",
+                "error",
+                "acl_restart_replay_requires_resync",
+                "unchanged",
+                "blocked",
+                "blocked",
+                "operator",
+            ),
+            (
+                "raw-recovered-outranks-owned-reason",
+                "recovered",
+                "tc_acl_link_lost",
+                "unchanged",
+                "blocked",
+                "blocked",
+                "operator",
+            ),
+        ];
+        let mut mismatches = Vec::new();
+
+        for (
+            index,
+            (
+                label,
+                raw_status,
+                reason,
+                effective_action,
+                expected_state,
+                expected_readiness,
+                expected_action,
+            ),
+        ) in cases.into_iter().enumerate()
+        {
+            let generation = 70 + index as u64;
+            let runtime = status_v1_runtime_with_raw_port_evidence(
+                label,
+                generation,
+                raw_status,
+                reason,
+                effective_action,
+            );
+            let actual = status_v1_json_for_runtime(label, runtime).await;
+            mismatches.extend(status_v1_expected_projection_mismatches(
+                label,
+                &actual,
+                expected_state,
+                expected_readiness,
+                expected_action,
+                None,
+                generation,
+            ));
+
+            let expected_port_id = format!("port-{label}");
+            let returned_row = actual
+                .get("port_statuses")
+                .and_then(Value::as_array)
+                .and_then(|rows| {
+                    rows.iter().find(|row| {
+                        row.get("port_id").and_then(Value::as_str)
+                            == Some(expected_port_id.as_str())
+                    })
+                });
+            match returned_row {
+                Some(row) => {
+                    if row.get("reason").and_then(Value::as_str) != Some(reason) {
+                        mismatches.push(format!(
+                            "{label}: top-level reason expected {reason}, got {:?}",
+                            row.get("reason")
+                        ));
+                    }
+                    match row
+                        .get("domains")
+                        .and_then(Value::as_array)
+                        .and_then(|domains| domains.first())
+                    {
+                        Some(domain) => {
+                            for (field, expected) in [
+                                ("reason", reason),
+                                ("effective_action", effective_action),
+                            ] {
+                                if domain.get(field).and_then(Value::as_str) != Some(expected) {
+                                    mismatches.push(format!(
+                                        "{label}: domain {field} expected {expected}, got {:?}",
+                                        domain.get(field)
+                                    ));
+                                }
+                            }
+                        }
+                        None => mismatches.push(format!(
+                            "{label}: projected reason evidence must retain an ACL domain row"
+                        )),
+                    }
+                }
+                None => mismatches.push(format!(
+                    "{label}: projected reason evidence must retain port {expected_port_id}"
+                )),
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "Status V1 rebuild reasons were not exact and severity-gated:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_detached_tombstones_are_diagnostic_only() {
+        let detached_port = ManagedNeutronPort {
+            managed_domains: vec!["acl".to_string()],
+            ..managed("detached-port", "tap-detached")
+        };
+        let mut previous_ports = BTreeMap::new();
+        previous_ports.insert(detached_port.port_id.clone(), detached_port.clone());
+        let mut previous_statuses = BTreeMap::new();
+        previous_statuses.insert(
+            detached_port.port_id.clone(),
+            ready_status(&detached_port.port_id, &detached_port.ifname, 80),
+        );
+        let previous = build_snapshot_commit_runtime(
+            &NeutronRuntimeState::default(),
+            80,
+            Some("hash-80".to_string()),
+            previous_ports,
+            previous_statuses,
+            false,
+        );
+
+        let mut detached_statuses = BTreeMap::new();
+        detached_statuses.insert(
+            detached_port.port_id.clone(),
+            port_runtime_status(
+                &detached_port.port_id,
+                &detached_port.ifname,
+                81,
+                Some("hash-81".to_string()),
+                detached_port.managed_domains.clone(),
+                "detached",
+                None,
+                domain_statuses_for(&detached_port.managed_domains, "detached", None),
+            ),
+        );
+        let detached_runtime = build_snapshot_commit_runtime(
+            &previous,
+            81,
+            Some("hash-81".to_string()),
+            BTreeMap::new(),
+            detached_statuses,
+            false,
+        );
+
+        let ready_port = ManagedNeutronPort {
+            managed_domains: vec!["acl".to_string()],
+            ..managed("ready-port", "tap-ready")
+        };
+        let mut scoped_ports = BTreeMap::new();
+        scoped_ports.insert(ready_port.port_id.clone(), ready_port.clone());
+        let mut scoped_statuses = port_status_seed_for_scope(
+            &detached_runtime,
+            &ApplyScope::SinglePort(ready_port.port_id.clone()),
+        );
+        scoped_statuses.insert(
+            ready_port.port_id.clone(),
+            ready_status(&ready_port.port_id, &ready_port.ifname, 82),
+        );
+        let scoped_runtime = build_snapshot_commit_runtime(
+            &detached_runtime,
+            82,
+            Some("hash-82".to_string()),
+            scoped_ports,
+            scoped_statuses,
+            false,
+        );
+
+        let mut orphan_runtime = scoped_runtime.clone();
+        orphan_runtime.port_statuses.insert(
+            "orphan-port".to_string(),
+            ready_status("orphan-port", "tap-orphan", 82),
+        );
+
+        let mut mismatches = Vec::new();
+        if !detached_runtime.ports.is_empty() {
+            mismatches.push(
+                "full-host-detach setup: detached port must be absent from runtime.ports"
+                    .to_string(),
+            );
+        }
+        match detached_runtime.port_statuses.get("detached-port") {
+            Some(status)
+                if status.status == "detached"
+                    && status
+                        .domains
+                        .iter()
+                        .all(|domain| domain.status == "detached") => {}
+            other => mismatches.push(format!(
+                "full-host-detach setup: expected raw detached tombstone, got {other:?}"
+            )),
+        }
+        match scoped_runtime.port_statuses.get("detached-port") {
+            Some(status)
+                if status.generation == 81
+                    && status.desired_hash.as_deref() == Some("hash-81") => {}
+            other => mismatches.push(format!(
+                "scoped-preserved setup: expected older generation-81 tombstone, got {other:?}"
+            )),
+        }
+
+        let cases = [
+            (
+                "full-host-detach",
+                detached_runtime,
+                "classified",
+                "ready",
+                "none",
+                81,
+                true,
+            ),
+            (
+                "scoped-preserved-detach",
+                scoped_runtime,
+                "classified",
+                "ready",
+                "none",
+                82,
+                true,
+            ),
+            (
+                "non-detached-orphan",
+                orphan_runtime,
+                "blocked",
+                "blocked",
+                "operator",
+                82,
+                false,
+            ),
+        ];
+
+        for (
+            label,
+            runtime,
+            expected_state,
+            expected_readiness,
+            expected_action,
+            expected_generation,
+            check_tombstone,
+        ) in cases
+        {
+            let actual = status_v1_json_for_runtime(label, runtime).await;
+            mismatches.extend(status_v1_expected_projection_mismatches(
+                label,
+                &actual,
+                expected_state,
+                expected_readiness,
+                expected_action,
+                None,
+                expected_generation,
+            ));
+
+            match (
+                actual.get("managed_ports").and_then(Value::as_array),
+                actual.get("port_statuses").and_then(Value::as_array),
+            ) {
+                (Some(managed_rows), Some(status_rows)) => {
+                    for managed_row in managed_rows {
+                        let Some(port_id) = managed_row.get("port_id").and_then(Value::as_str)
+                        else {
+                            mismatches.push(format!(
+                                "{label}: managed row is missing a string port_id: {managed_row}"
+                            ));
+                            continue;
+                        };
+                        let matching_rows = status_rows
+                            .iter()
+                            .filter(|row| {
+                                row.get("port_id").and_then(Value::as_str) == Some(port_id)
+                            })
+                            .count();
+                        if matching_rows != 1 {
+                            mismatches.push(format!(
+                                "{label}: managed port {port_id} must have exactly one status row, got {matching_rows}"
+                            ));
+                        }
+                    }
+
+                    if check_tombstone {
+                        let tombstones = status_rows
+                            .iter()
+                            .filter(|row| {
+                                row.get("port_id").and_then(Value::as_str)
+                                    == Some("detached-port")
+                            })
+                            .collect::<Vec<_>>();
+                        if tombstones.len() != 1 {
+                            mismatches.push(format!(
+                                "{label}: expected exactly one detached diagnostic row, got {}",
+                                tombstones.len()
+                            ));
+                        } else {
+                            let tombstone = tombstones[0];
+                            if tombstone.get("status").and_then(Value::as_str)
+                                != Some("detached")
+                            {
+                                mismatches.push(format!(
+                                    "{label}: tombstone top-level status must remain detached, got {:?}",
+                                    tombstone.get("status")
+                                ));
+                            }
+                            match tombstone.get("domains").and_then(Value::as_array) {
+                                Some(domains) if !domains.is_empty() => {
+                                    for domain in domains {
+                                        for (field, expected) in [
+                                            ("status", "not_requested"),
+                                            ("effective_action", "cleanup"),
+                                            ("support_disposition", "not_applicable"),
+                                        ] {
+                                            if domain.get(field).and_then(Value::as_str)
+                                                != Some(expected)
+                                            {
+                                                mismatches.push(format!(
+                                                    "{label}: tombstone domain {field} expected {expected}, got {:?}",
+                                                    domain.get(field)
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                                other => mismatches.push(format!(
+                                    "{label}: tombstone must retain normalized domain evidence, got {other:?}"
+                                )),
+                            }
+                        }
+                    }
+                }
+                other => mismatches.push(format!(
+                    "{label}: managed_ports and port_statuses must both be arrays, got {other:?}"
+                )),
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "detached tombstone handling was not narrow and diagnostic-only:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_status_v1_rejects_malformed_identity_and_row_matrix() {
+        struct MatrixCase {
+            label: &'static str,
+            runtime: NeutronRuntimeState,
+            expected_state: &'static str,
+            expected_readiness: &'static str,
+            expected_action: &'static str,
+            expected_generation: u64,
+            historical_control: bool,
+        }
+
+        let base = status_v1_ready_runtime("matrix-port", "tap-matrix", 90, "acl");
+        let blocked_case = |label: &'static str, runtime: NeutronRuntimeState| MatrixCase {
+            label,
+            runtime,
+            expected_state: "blocked",
+            expected_readiness: "blocked",
+            expected_action: "operator",
+            expected_generation: 90,
+            historical_control: false,
+        };
+
+        let mut generation_zero_pending = runtime_from_status_v1_seed(
+            status_v1_runtime_seed("generation-zero-inventory-recovery"),
+        );
+        generation_zero_pending.accepted_generation = 0;
+        generation_zero_pending.pending_generation = Some(0);
+
+        let mut managed_map_key_mismatch = base.clone();
+        let managed_row = managed_map_key_mismatch
+            .ports
+            .remove("matrix-port")
+            .expect("matrix baseline must contain its managed row");
+        managed_map_key_mismatch
+            .ports
+            .insert("managed-map-alias".to_string(), managed_row);
+
+        let mut status_map_key_mismatch = base.clone();
+        let status_row = status_map_key_mismatch
+            .port_statuses
+            .remove("matrix-port")
+            .expect("matrix baseline must contain its status row");
+        status_map_key_mismatch
+            .port_statuses
+            .insert("status-map-alias".to_string(), status_row);
+
+        let mut status_embedded_id_mismatch = base.clone();
+        status_embedded_id_mismatch
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .port_id = "embedded-status-alias".to_string();
+
+        let mut zero_row_generation = base.clone();
+        zero_row_generation
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .generation = 0;
+
+        let mut future_row_generation = base.clone();
+        future_row_generation
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .generation = 91;
+
+        let mut null_row_hash = base.clone();
+        null_row_hash
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .desired_hash = None;
+
+        let mut blank_row_hash = base.clone();
+        blank_row_hash
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .desired_hash = Some("   ".to_string());
+
+        let mut current_row_hash_mismatch = base.clone();
+        current_row_hash_mismatch
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .desired_hash = Some("hash-current-mismatch".to_string());
+
+        let mut ready_with_degraded_domain = base.clone();
+        ready_with_degraded_domain
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .domains[0]
+            .status = "degraded".to_string();
+
+        let mut ready_with_blocked_domain = base.clone();
+        ready_with_blocked_domain
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .domains[0]
+            .status = "blocked".to_string();
+
+        let mut attach_not_requested =
+            status_v1_ready_runtime("matrix-attach", "tap-matrix-attach", 90, "attach");
+        let attach_status = attach_not_requested
+            .port_statuses
+            .get_mut("matrix-attach")
+            .expect("attach matrix baseline must contain its status row");
+        attach_status.status = "not_requested".to_string();
+        attach_status.domains[0].status = "not_requested".to_string();
+
+        let mut degraded_without_degraded_domain = base.clone();
+        degraded_without_degraded_domain
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .status = "degraded".to_string();
+
+        let mut unsupported_without_degraded_domain = base.clone();
+        unsupported_without_degraded_domain
+            .port_statuses
+            .get_mut("matrix-port")
+            .expect("matrix baseline must contain its status row")
+            .status = "unsupported".to_string();
+
+        let mut non_detached_orphan = base.clone();
+        non_detached_orphan.port_statuses.insert(
+            "matrix-orphan".to_string(),
+            ready_status("matrix-orphan", "tap-matrix-orphan", 90),
+        );
+
+        let scoped_target = ManagedNeutronPort {
+            managed_domains: vec!["acl".to_string()],
+            ..managed("matrix-port", "tap-matrix")
+        };
+        let scoped_older = ManagedNeutronPort {
+            managed_domains: vec!["acl".to_string()],
+            ..managed("matrix-old", "tap-matrix-old")
+        };
+        let mut scoped_previous_ports = BTreeMap::new();
+        scoped_previous_ports.insert(scoped_target.port_id.clone(), scoped_target.clone());
+        scoped_previous_ports.insert(scoped_older.port_id.clone(), scoped_older.clone());
+        let mut scoped_previous_statuses = BTreeMap::new();
+        scoped_previous_statuses.insert(
+            scoped_target.port_id.clone(),
+            ready_status(&scoped_target.port_id, &scoped_target.ifname, 89),
+        );
+        scoped_previous_statuses.insert(
+            scoped_older.port_id.clone(),
+            ready_status(&scoped_older.port_id, &scoped_older.ifname, 89),
+        );
+        let scoped_previous = build_snapshot_commit_runtime(
+            &NeutronRuntimeState::default(),
+            89,
+            Some("hash-89".to_string()),
+            scoped_previous_ports.clone(),
+            scoped_previous_statuses,
+            false,
+        );
+        let mut scoped_next_statuses = port_status_seed_for_scope(
+            &scoped_previous,
+            &ApplyScope::SinglePort(scoped_target.port_id.clone()),
+        );
+        scoped_next_statuses.insert(
+            scoped_target.port_id.clone(),
+            ready_status(&scoped_target.port_id, &scoped_target.ifname, 90),
+        );
+        let historical_scoped_control = build_snapshot_commit_runtime(
+            &scoped_previous,
+            90,
+            Some("hash-90".to_string()),
+            scoped_previous_ports,
+            scoped_next_statuses,
+            false,
+        );
+
+        let cases = vec![
+            MatrixCase {
+                label: "generation-zero-pending-zero",
+                runtime: generation_zero_pending,
+                expected_state: "blocked",
+                expected_readiness: "blocked",
+                expected_action: "operator",
+                expected_generation: 0,
+                historical_control: false,
+            },
+            blocked_case("managed-map-key-mismatch", managed_map_key_mismatch),
+            blocked_case("status-map-key-mismatch", status_map_key_mismatch),
+            blocked_case("status-embedded-id-mismatch", status_embedded_id_mismatch),
+            blocked_case("managed-row-generation-zero", zero_row_generation),
+            blocked_case("managed-row-generation-future", future_row_generation),
+            blocked_case("managed-row-hash-null", null_row_hash),
+            blocked_case("managed-row-hash-blank", blank_row_hash),
+            blocked_case(
+                "current-generation-row-hash-mismatch",
+                current_row_hash_mismatch,
+            ),
+            blocked_case("ready-with-degraded-domain", ready_with_degraded_domain),
+            blocked_case("ready-with-blocked-domain", ready_with_blocked_domain),
+            blocked_case("attach-not-requested", attach_not_requested),
+            blocked_case(
+                "degraded-without-terminal-degraded-domain",
+                degraded_without_degraded_domain,
+            ),
+            blocked_case(
+                "unsupported-without-terminal-degraded-domain",
+                unsupported_without_degraded_domain,
+            ),
+            blocked_case("non-detached-extra-status-row", non_detached_orphan),
+            MatrixCase {
+                label: "older-scoped-row-with-historical-hash",
+                runtime: historical_scoped_control,
+                expected_state: "classified",
+                expected_readiness: "ready",
+                expected_action: "none",
+                expected_generation: 90,
+                historical_control: true,
+            },
+        ];
+        let mut mismatches = Vec::new();
+
+        for case in cases {
+            let actual = status_v1_json_for_runtime(case.label, case.runtime).await;
+            mismatches.extend(status_v1_expected_projection_mismatches(
+                case.label,
+                &actual,
+                case.expected_state,
+                case.expected_readiness,
+                case.expected_action,
+                None,
+                case.expected_generation,
+            ));
+
+            if case.historical_control {
+                let historical_rows = actual
+                    .get("port_statuses")
+                    .and_then(Value::as_array)
+                    .map(|rows| {
+                        rows.iter()
+                            .filter(|row| {
+                                row.get("port_id").and_then(Value::as_str) == Some("matrix-old")
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                match historical_rows {
+                    Some(rows)
+                        if rows.len() == 1
+                            && rows[0].get("generation").and_then(Value::as_u64) == Some(89)
+                            && rows[0].get("desired_hash").and_then(Value::as_str)
+                                == Some("hash-89") => {}
+                    other => mismatches.push(format!(
+                        "{}: older scoped row and historical hash must be preserved, got {other:?}",
+                        case.label
+                    )),
+                }
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "Status V1 accepted a malformed identity/row/top-level matrix or rejected the scoped control:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
     fn ready_acl(rules: Vec<NeutronAclRuleSnapshot>) -> NeutronAclSnapshot {
         NeutronAclSnapshot {
             enabled: true,
