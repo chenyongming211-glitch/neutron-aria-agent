@@ -15,7 +15,11 @@ use crate::ssl_manager::SslManager;
 use crate::tap_registry::ManagedAttachMode;
 use crate::trace_backend::{TraceManager, TraceRuntimeStatusSnapshot};
 use aria_core::common::TapMapRuntime;
-use aria_core::ebpf_ops::TraceMapMode;
+use aria_core::ebpf_ops::{
+    classify_runtime_gate_state, replay_managed_state_to_pinned_maps, replay_state_to_pinned_maps,
+    validate_managed_pinned_runtime_state, validate_pinned_runtime_state, GroupProjectionMode,
+    ProjectionDrift, RuntimeGateDisposition, TraceMapMode,
+};
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
 use aria_core::wal::{WalClient, WalEntry};
 
@@ -371,6 +375,42 @@ enum ManagedRuntimeActivation {
     AwaitNeutronResync {
         require_tc_acl_links: bool,
     },
+}
+
+fn managed_group_projection_mode(mode: ManagedAttachMode) -> GroupProjectionMode {
+    match mode {
+        ManagedAttachMode::StandaloneRestoreAfterTcAttach => {
+            GroupProjectionMode::StandaloneCompatibility
+        }
+        ManagedAttachMode::NeutronResyncRequired { acl_managed: true } => {
+            GroupProjectionMode::Managed
+        }
+        ManagedAttachMode::NeutronResyncRequired { acl_managed: false } => {
+            GroupProjectionMode::StandaloneCompatibility
+        }
+    }
+}
+
+fn preexisting_projection_verification(drift: ProjectionDrift) -> Result<bool, String> {
+    match drift {
+        ProjectionDrift::Clean => Ok(true),
+        ProjectionDrift::RepairRequired(_) => Ok(false),
+        ProjectionDrift::Fatal(error) => Err(error),
+    }
+}
+
+struct PreexistingRuntimeValidation {
+    projection_drift: ProjectionDrift,
+    gate_disposition: Option<RuntimeGateDisposition>,
+}
+
+impl PreexistingRuntimeValidation {
+    fn fatal(error: String) -> Self {
+        Self {
+            projection_drift: ProjectionDrift::Fatal(error),
+            gate_disposition: None,
+        }
+    }
 }
 
 fn managed_runtime_activation(
@@ -1263,7 +1303,8 @@ impl ControlPlane {
         ifindex: u32,
         state: &FirewallState,
         pin_state: &RuntimePinState,
-    ) -> Result<(), String> {
+        projection_mode: GroupProjectionMode,
+    ) -> PreexistingRuntimeValidation {
         let runtime_instance = FirewallInstance::new(
             name,
             pin_path.to_string().into(),
@@ -1271,24 +1312,32 @@ impl ControlPlane {
             true,
             self.trace_map_mode(),
         );
-        preexisting_tc_acl_runtime_is_healthy(
+        if let Err(error) = preexisting_tc_acl_runtime_is_healthy(
             state.conntrack_enabled || state.acl_enabled,
             pin_state.preexisting_live_links,
             pin_state.preexisting_tc_ingress_link,
             pin_state.preexisting_tc_egress_link,
             runtime_instance.tc_acl_link_health(),
-        )?;
+        ) {
+            return PreexistingRuntimeValidation::fatal(error);
+        }
 
-        let iface_ctx = aria_core::ebpf_ops::read_iface_ctx(pin_path, ifindex)?;
+        let iface_ctx = match aria_core::ebpf_ops::read_iface_ctx(pin_path, ifindex) {
+            Ok(iface_ctx) => iface_ctx,
+            Err(error) => return PreexistingRuntimeValidation::fatal(error),
+        };
         if iface_ctx.tap_id != tap_id {
-            return Err(format!(
+            return PreexistingRuntimeValidation::fatal(format!(
                 "preexisting live runtime mismatch for {}: IFACE_CTX_MAP ifindex {} points to tap_id {}, expected {}",
                 name, ifindex, iface_ctx.tap_id, tap_id
             ));
         }
 
         let runtime = TapMapRuntime::new(pin_path, tap_id);
-        let actual = aria_core::ebpf_ops::read_runtime_config(runtime)?;
+        let actual = match aria_core::ebpf_ops::read_runtime_config(runtime) {
+            Ok(actual) => actual,
+            Err(error) => return PreexistingRuntimeValidation::fatal(error),
+        };
         let expected = Self::expected_runtime_flags(state);
         let actual_flags = (
             actual.conntrack_enabled,
@@ -1300,21 +1349,48 @@ impl ControlPlane {
             actual.ssl_enabled,
         );
 
-        if actual_flags != expected {
-            return Err(format!(
+        let actual_non_gate = (
+            actual.monitoring_enabled,
+            actual.qos_enabled,
+            actual.mirror_enabled,
+            actual.tcprt_enabled,
+            actual.ssl_enabled,
+        );
+        let expected_non_gate = (expected.1, expected.3, expected.4, expected.5, expected.6);
+        if actual_non_gate != expected_non_gate {
+            return PreexistingRuntimeValidation::fatal(format!(
                 "preexisting live runtime mismatch for {}: actual flags {:?}, expected {:?}; detach and reattach to rebuild safely",
                 name, actual_flags, expected
             ));
         }
 
-        aria_core::ebpf_ops::validate_pinned_runtime_state(runtime, state).map_err(|e| {
-            format!(
-                "preexisting live runtime mismatch for {}: {}; detach and reattach to rebuild safely",
-                name, e
-            )
-        })?;
+        let gate_disposition = match classify_runtime_gate_state(
+            projection_mode,
+            actual.conntrack_enabled,
+            actual.acl_enabled,
+            expected.0,
+            expected.2,
+        ) {
+            Ok(disposition) => disposition,
+            Err(error) => {
+                return PreexistingRuntimeValidation::fatal(format!(
+                    "preexisting live runtime mismatch for {}: {}; actual flags {:?}, expected {:?}",
+                    name, error, actual_flags, expected
+                ));
+            }
+        };
 
-        Ok(())
+        let projection_drift = match projection_mode {
+            GroupProjectionMode::StandaloneCompatibility => validate_pinned_runtime_state(
+                runtime, state,
+            )
+            .map_or_else(ProjectionDrift::Fatal, |()| ProjectionDrift::Clean),
+            GroupProjectionMode::Managed => validate_managed_pinned_runtime_state(runtime, state),
+        };
+        PreexistingRuntimeValidation {
+            projection_drift,
+            gate_disposition: Some(gate_disposition),
+        }
     }
 
     async fn cleanup_failed_managed_registration(
@@ -1602,6 +1678,7 @@ impl ControlPlane {
     ) -> Result<PreparedManagedInstance, String> {
         let pin_path = self.managed_pin_path();
         let state_path = format!("{}/{}", self.base_state_path, name);
+        let projection_mode = managed_group_projection_mode(mode);
         let ifindex = Self::resolve_ifindex(name)?;
         let global_ssl_enabled = match self.read_ssl_global_config().await {
             Ok(enabled) => Some(enabled),
@@ -1663,18 +1740,13 @@ impl ControlPlane {
         }
 
         let tap_id = state.tap_id;
-        let activation = managed_runtime_activation(
-            mode,
-            pin_state.preexisting_live_links,
-            state.conntrack_enabled,
-            state.acl_enabled,
-        );
+        let mut preexisting_live_verified = false;
         let preserve_existing_runtime = replacing_existing || pin_state.preexisting_live_links;
         let mut iface_ctx_synced = false;
         let mut tap_config_written = false;
 
         if pin_state.preexisting_live_links {
-            if let Err(e) = self.validate_preexisting_live_runtime(
+            let preexisting_validation = self.validate_preexisting_live_runtime(
                 name,
                 &pin_path,
                 &state_path,
@@ -1682,25 +1754,51 @@ impl ControlPlane {
                 ifindex,
                 &state,
                 pin_state,
-            ) {
-                let quiesce_error = aria_core::ebpf_ops::update_acl_runtime_gate(
+                projection_mode,
+            );
+            let gate_disposition = preexisting_validation.gate_disposition;
+            let projection_drift = preexisting_validation.projection_drift;
+            preexisting_live_verified = match preexisting_projection_verification(projection_drift)
+            {
+                Ok(projection_verified) => {
+                    projection_verified && gate_disposition == Some(RuntimeGateDisposition::Desired)
+                }
+                Err(e) => {
+                    let quiesce_error = aria_core::ebpf_ops::update_acl_runtime_gate(
+                        TapMapRuntime::new(&pin_path, tap_id),
+                        false,
+                        false,
+                        aria_core::common::ACL_INGRESS_HOOK_TC,
+                    )
+                    .err();
+                    wal.shutdown().await;
+                    return Err(match quiesce_error {
+                        Some(quiesce_error) => format!(
+                            "preexisting live runtime mismatch for {}: {}; failed to quiesce surviving ACL/CT path: {}",
+                            name, e, quiesce_error
+                        ),
+                        None => format!(
+                            "preexisting live runtime mismatch for {}: {}; ACL/CT gate quiesced",
+                            name, e
+                        ),
+                    });
+                }
+            };
+
+            if !preexisting_live_verified {
+                if let Err(e) = aria_core::ebpf_ops::update_acl_runtime_gate(
                     TapMapRuntime::new(&pin_path, tap_id),
                     false,
                     false,
                     aria_core::common::ACL_INGRESS_HOOK_TC,
-                )
-                .err();
-                wal.shutdown().await;
-                return Err(match quiesce_error {
-                    Some(quiesce_error) => format!(
-                        "preexisting live runtime mismatch for {}: {}; failed to quiesce surviving ACL/CT path: {}",
-                        name, e, quiesce_error
-                    ),
-                    None => format!(
-                        "preexisting live runtime mismatch for {}: {}; ACL/CT gate quiesced",
+                ) {
+                    wal.shutdown().await;
+                    return Err(format!(
+                        "preexisting live runtime for {} requires projection repair but failed to quiesce ACL/CT: {}",
                         name, e
-                    ),
-                });
+                    ));
+                }
+                info!(instance = %name, tap_id, "quiesced repairable preexisting ACL projection pending Neutron resync");
             }
         } else if !replacing_existing {
             if let Err(e) = aria_core::ebpf_ops::scrub_managed_runtime_state(TapMapRuntime::new(
@@ -1712,6 +1810,13 @@ impl ControlPlane {
         } else {
             info!(instance = %name, tap_id, "skipping pre-replay scrub while replacing existing registered instance");
         }
+
+        let activation = managed_runtime_activation(
+            mode,
+            preexisting_live_verified,
+            state.conntrack_enabled,
+            state.acl_enabled,
+        );
 
         if !pin_state.preexisting_live_links {
             if let Err(e) = aria_core::ebpf_ops::write_tap_config(
@@ -1742,8 +1847,13 @@ impl ControlPlane {
             }
             tap_config_written = tap_id != aria_core::common::TAP_ID_UNASSIGNED;
 
-            if let Err(e) = aria_core::ebpf_ops::replay_state_to_pinned_maps(&pin_path, &state_path)
-            {
+            let replay_result = match projection_mode {
+                GroupProjectionMode::StandaloneCompatibility =>
+                    replay_state_to_pinned_maps(&pin_path, &state_path),
+                GroupProjectionMode::Managed =>
+                    replay_managed_state_to_pinned_maps(&pin_path, &state_path, &state),
+            };
+            if let Err(e) = replay_result {
                 Self::cleanup_failed_managed_registration(
                     name,
                     &pin_path,

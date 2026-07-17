@@ -3,7 +3,7 @@ use crate::common::{
     FirewallConfig, FlowStatsValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue, IfaceCtx,
     MirrorConfig, MirrorKey, MirrorStatsValue, PolicyKey, PolicyValue, PortKey, QosConfig, QosKey,
     QosStatsValue, RuleStatsValue, TapConfig, TapMapRuntime, TokenBucket, ACL_BANK_PRIMARY,
-    ACL_INGRESS_HOOK_TC, TAP_ID_UNASSIGNED,
+    ACL_BANK_SHADOW, ACL_INGRESS_HOOK_TC, TAP_ID_UNASSIGNED,
 };
 use crate::state::FirewallState;
 use aya::maps::lpm_trie::Key;
@@ -26,9 +26,10 @@ pub use attach::{
     ensure_fq_qdisc, setup_fq_qdisc, FqQdiscState,
 };
 pub use inventory::{
-    critical_network_map_names, show_stats, validate_pinned_runtime_state, TraceMapMode,
-    ALL_MAP_NAMES, CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES, SSL_MAP_NAMES,
-    STREAM_CRITICAL_NETWORK_MAP_NAMES,
+    classify_managed_inventory_capture, classify_runtime_gate_state, critical_network_map_names,
+    show_stats, validate_managed_pinned_runtime_state, validate_pinned_runtime_state,
+    RuntimeGateDisposition, TraceMapMode, ALL_MAP_NAMES, CRITICAL_NETWORK_MAP_NAMES,
+    NETWORK_MAP_NAMES, SSL_MAP_NAMES, STREAM_CRITICAL_NETWORK_MAP_NAMES,
 };
 pub use network::{
     add_acl_network_in_bank, add_network, delete_acl_network_in_bank, delete_network, parse_cidr,
@@ -45,7 +46,11 @@ pub use projection::{
     ManagedGroupProjection, ProjectionDirection, ProjectionDrift, ProjectionEntry,
     ProjectionMutation, ProjectionRepairPlan,
 };
-pub use replay::{replay_state, replay_state_from_snapshot, replay_state_to_pinned_maps};
+pub use replay::{
+    build_runtime_group_map_entries, collect_standalone_runtime_group_map_entries,
+    replay_managed_state_to_pinned_maps, replay_state, replay_state_from_snapshot,
+    replay_state_to_pinned_maps, GroupProjectionMode, RuntimeGroupMapEntries, RuntimeNetworkEntry,
+};
 pub use runtime::{
     clear_iface_ctx, delete_tap_config, read_acl_active_bank, read_firewall_config, read_iface_ctx,
     read_runtime_config, set_acl_active_bank, sync_iface_ctx, update_acl_runtime_gate,

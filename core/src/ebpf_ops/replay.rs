@@ -1,5 +1,244 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GroupProjectionMode {
+    StandaloneCompatibility,
+    Managed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RuntimeNetworkEntry {
+    pub address: IpAddr,
+    pub prefix_len: u8,
+    pub group_id: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeGroupMapEntries {
+    pub general_src: Vec<RuntimeNetworkEntry>,
+    pub general_dst: Vec<RuntimeNetworkEntry>,
+    pub acl_src: Vec<RuntimeNetworkEntry>,
+    pub acl_dst: Vec<RuntimeNetworkEntry>,
+}
+
+pub fn collect_standalone_runtime_group_map_entries(
+    state: &FirewallState,
+) -> (RuntimeGroupMapEntries, Vec<String>) {
+    let mut entries = Vec::new();
+    let mut errors = Vec::new();
+    for (name, group) in &state.groups {
+        for cidr in &group.cidrs {
+            match parse_cidr(cidr) {
+                Ok((address, prefix_len)) => entries.push(RuntimeNetworkEntry {
+                    address,
+                    prefix_len,
+                    group_id: group.id,
+                }),
+                Err(error) => errors.push(format!("group '{}' cidr '{}': {}", name, cidr, error)),
+            }
+        }
+    }
+    (
+        RuntimeGroupMapEntries {
+            general_src: entries.clone(),
+            general_dst: entries.clone(),
+            acl_src: entries.clone(),
+            acl_dst: entries,
+        },
+        errors,
+    )
+}
+
+pub fn build_runtime_group_map_entries(
+    state: &FirewallState,
+    mode: GroupProjectionMode,
+) -> Result<RuntimeGroupMapEntries, String> {
+    match mode {
+        GroupProjectionMode::StandaloneCompatibility => {
+            let (entries, errors) = collect_standalone_runtime_group_map_entries(state);
+            if errors.is_empty() {
+                Ok(entries)
+            } else {
+                Err(errors.join("; "))
+            }
+        }
+        GroupProjectionMode::Managed => {
+            let projection = compile_managed_group_projection(state)?;
+            let general = projection
+                .general
+                .iter()
+                .map(|entry| RuntimeNetworkEntry {
+                    address: entry.network.network_address(),
+                    prefix_len: entry.network.prefix_len(),
+                    group_id: entry.group_id,
+                })
+                .collect::<Vec<_>>();
+            let acl_src = projection
+                .acl_src
+                .iter()
+                .map(|entry| RuntimeNetworkEntry {
+                    address: entry.network.network_address(),
+                    prefix_len: entry.network.prefix_len(),
+                    group_id: entry.group_id,
+                })
+                .collect();
+            let acl_dst = projection
+                .acl_dst
+                .iter()
+                .map(|entry| RuntimeNetworkEntry {
+                    address: entry.network.network_address(),
+                    prefix_len: entry.network.prefix_len(),
+                    group_id: entry.group_id,
+                })
+                .collect();
+            Ok(RuntimeGroupMapEntries {
+                general_src: general.clone(),
+                general_dst: general,
+                acl_src,
+                acl_dst,
+            })
+        }
+    }
+}
+
+fn write_fresh_group_maps(
+    bpf: &mut aya::Ebpf,
+    ipv4_map_name: &str,
+    ipv6_map_name: &str,
+    lpm_tap_id: u32,
+    entries: &[RuntimeNetworkEntry],
+    errors: &mut Vec<String>,
+) {
+    match bpf
+        .map_mut(ipv4_map_name)
+        .ok_or_else(|| format!("{} not found", ipv4_map_name))
+        .and_then(|map| {
+            LpmTrie::<_, [u8; 8], u32>::try_from(map).map_err(|error| format!("{:?}", error))
+        }) {
+        Ok(mut map) => {
+            for entry in entries {
+                let IpAddr::V4(address) = entry.address else {
+                    continue;
+                };
+                let key = tap_lpm_key_v4(lpm_tap_id, address.octets(), entry.prefix_len);
+                if let Err(error) = map.insert(&key, &entry.group_id, 0) {
+                    errors.push(format!(
+                        "{} id={}: {:?}",
+                        ipv4_map_name, entry.group_id, error
+                    ));
+                }
+            }
+        }
+        Err(error) => errors.push(format!("{}: {}", ipv4_map_name, error)),
+    }
+
+    match bpf
+        .map_mut(ipv6_map_name)
+        .ok_or_else(|| format!("{} not found", ipv6_map_name))
+        .and_then(|map| {
+            LpmTrie::<_, [u8; 20], u32>::try_from(map).map_err(|error| format!("{:?}", error))
+        }) {
+        Ok(mut map) => {
+            for entry in entries {
+                let IpAddr::V6(address) = entry.address else {
+                    continue;
+                };
+                let key = tap_lpm_key_v6(lpm_tap_id, address.octets(), entry.prefix_len);
+                if let Err(error) = map.insert(&key, &entry.group_id, 0) {
+                    errors.push(format!(
+                        "{} id={}: {:?}",
+                        ipv6_map_name, entry.group_id, error
+                    ));
+                }
+            }
+        }
+        Err(error) => errors.push(format!("{}: {}", ipv6_map_name, error)),
+    }
+}
+
+fn write_fresh_runtime_group_entries(
+    bpf: &mut aya::Ebpf,
+    tap_id: u32,
+    group_entries: &RuntimeGroupMapEntries,
+    errors: &mut Vec<String>,
+) {
+    let acl_tap_id = acl_banked_tap_id(tap_id, ACL_BANK_PRIMARY);
+    write_fresh_group_maps(
+        bpf,
+        "SRC_IPV4_TRIE",
+        "SRC_IPV6_TRIE",
+        tap_id,
+        &group_entries.general_src,
+        errors,
+    );
+    write_fresh_group_maps(
+        bpf,
+        "DST_IPV4_TRIE",
+        "DST_IPV6_TRIE",
+        tap_id,
+        &group_entries.general_dst,
+        errors,
+    );
+    write_fresh_group_maps(
+        bpf,
+        "ACL_SRC_IPV4_TRIE",
+        "ACL_SRC_IPV6_TRIE",
+        acl_tap_id,
+        &group_entries.acl_src,
+        errors,
+    );
+    write_fresh_group_maps(
+        bpf,
+        "ACL_DST_IPV4_TRIE",
+        "ACL_DST_IPV6_TRIE",
+        acl_tap_id,
+        &group_entries.acl_dst,
+        errors,
+    );
+}
+
+fn write_pinned_group_entries(
+    runtime: TapMapRuntime<'_>,
+    entries: &[RuntimeNetworkEntry],
+    direction: &str,
+    acl: bool,
+    errors: &mut Vec<String>,
+) {
+    for entry in entries {
+        let cidr = format!("{}/{}", entry.address, entry.prefix_len);
+        let result = if acl {
+            add_acl_network_in_bank(
+                direction,
+                &cidr,
+                entry.group_id,
+                ACL_BANK_PRIMARY,
+                runtime,
+                "",
+            )
+        } else {
+            add_network(direction, &cidr, entry.group_id, runtime, "")
+        };
+        if let Err(error) = result {
+            let map_scope = if acl { "ACL group" } else { "group" };
+            errors.push(format!(
+                "{} ID {} cidr '{}' {}: {}",
+                map_scope, entry.group_id, cidr, direction, error
+            ));
+        }
+    }
+}
+
+fn write_pinned_runtime_group_entries(
+    runtime: TapMapRuntime<'_>,
+    group_entries: &RuntimeGroupMapEntries,
+    errors: &mut Vec<String>,
+) {
+    write_pinned_group_entries(runtime, &group_entries.general_src, "src", false, errors);
+    write_pinned_group_entries(runtime, &group_entries.general_dst, "dst", false, errors);
+    write_pinned_group_entries(runtime, &group_entries.acl_src, "src", true, errors);
+    write_pinned_group_entries(runtime, &group_entries.acl_dst, "dst", true, errors);
+}
+
 fn init_ct_config_pinned(pin_path: &str) -> Result<(), String> {
     let map_path = format!("{}/CT_CONFIG", pin_path);
     let map_data =
@@ -34,8 +273,39 @@ pub fn replay_state_from_snapshot(
     state_path: &str,
     state: &crate::state::FirewallState,
 ) -> Result<(), String> {
+    replay_state_from_snapshot_with_mode(
+        bpf,
+        state_path,
+        state,
+        GroupProjectionMode::StandaloneCompatibility,
+    )
+}
+
+fn replay_state_from_snapshot_with_mode(
+    bpf: &mut aya::Ebpf,
+    state_path: &str,
+    state: &crate::state::FirewallState,
+    mode: GroupProjectionMode,
+) -> Result<(), String> {
+    let mut projection_errors = Vec::new();
+    let group_entries = match build_runtime_group_map_entries(state, mode) {
+        Ok(entries) => entries,
+        Err(error) if mode == GroupProjectionMode::StandaloneCompatibility => {
+            let (entries, parse_errors) = collect_standalone_runtime_group_map_entries(state);
+            projection_errors = if parse_errors.is_empty() {
+                vec![error]
+            } else {
+                parse_errors
+            };
+            entries
+        }
+        Err(error) => return Err(error),
+    };
     let tap_id = state.tap_id;
-    let has_runtime_objects = !(state.groups.is_empty()
+    let has_runtime_objects = !(group_entries.general_src.is_empty()
+        && group_entries.general_dst.is_empty()
+        && group_entries.acl_src.is_empty()
+        && group_entries.acl_dst.is_empty()
         && state.rules.is_empty()
         && state.qos_rules.is_empty()
         && state.mirror_rules.is_empty());
@@ -43,7 +313,7 @@ pub fn replay_state_from_snapshot(
 
     info!(
         state_path = %state_path,
-        groups = state.groups.len(),
+        group_entries = group_entries.general_src.len(),
         rules = state.rules.len(),
         qos_rules = state.qos_rules.len(),
         mirror_rules = state.mirror_rules.len(),
@@ -67,180 +337,12 @@ pub fn replay_state_from_snapshot(
         }
     }
 
-    let mut errors: Vec<String> = Vec::new();
-    let mut group_count: u32 = 0;
+    let mut errors = projection_errors;
+    let group_count = group_entries.general_src.len() as u32;
     let mut rule_count: u32 = 0;
     let mut bitmap_count: u32 = 0;
 
-    let mut src_ipv4: Vec<([u8; 4], u8, u32)> = Vec::new();
-    let mut dst_ipv4: Vec<([u8; 4], u8, u32)> = Vec::new();
-    let mut src_ipv6: Vec<([u8; 16], u8, u32)> = Vec::new();
-    let mut dst_ipv6: Vec<([u8; 16], u8, u32)> = Vec::new();
-
-    for (name, group) in &state.groups {
-        for cidr in &group.cidrs {
-            match parse_cidr(cidr) {
-                Ok((IpAddr::V4(v4), prefix)) => {
-                    src_ipv4.push((v4.octets(), prefix, group.id));
-                    dst_ipv4.push((v4.octets(), prefix, group.id));
-                    group_count += 1;
-                }
-                Ok((IpAddr::V6(v6), prefix)) => {
-                    src_ipv6.push((v6.octets(), prefix, group.id));
-                    dst_ipv6.push((v6.octets(), prefix, group.id));
-                    group_count += 1;
-                }
-                Err(e) => {
-                    errors.push(format!("group '{}' cidr '{}': {}", name, cidr, e));
-                }
-            }
-        }
-    }
-
-    {
-        match bpf
-            .map_mut("SRC_IPV4_TRIE")
-            .ok_or_else(|| "SRC_IPV4_TRIE not found".to_string())
-            .and_then(|m| LpmTrie::<_, [u8; 8], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
-        {
-            Ok(mut map) => {
-                for (octets, prefix, id) in &src_ipv4 {
-                    let key = tap_lpm_key_v4(tap_id, *octets, *prefix);
-                    if let Err(e) = map.insert(&key, id, 0) {
-                        errors.push(format!("SRC_IPV4_TRIE id={}: {:?}", id, e));
-                    }
-                }
-            }
-            Err(e) => errors.push(format!("SRC_IPV4_TRIE: {}", e)),
-        }
-    }
-
-    {
-        match bpf
-            .map_mut("DST_IPV4_TRIE")
-            .ok_or_else(|| "DST_IPV4_TRIE not found".to_string())
-            .and_then(|m| LpmTrie::<_, [u8; 8], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
-        {
-            Ok(mut map) => {
-                for (octets, prefix, id) in &dst_ipv4 {
-                    let key = tap_lpm_key_v4(tap_id, *octets, *prefix);
-                    if let Err(e) = map.insert(&key, id, 0) {
-                        errors.push(format!("DST_IPV4_TRIE id={}: {:?}", id, e));
-                    }
-                }
-            }
-            Err(e) => errors.push(format!("DST_IPV4_TRIE: {}", e)),
-        }
-    }
-
-    {
-        match bpf
-            .map_mut("SRC_IPV6_TRIE")
-            .ok_or_else(|| "SRC_IPV6_TRIE not found".to_string())
-            .and_then(|m| LpmTrie::<_, [u8; 20], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
-        {
-            Ok(mut map) => {
-                for (octets, prefix, id) in &src_ipv6 {
-                    let key = tap_lpm_key_v6(tap_id, *octets, *prefix);
-                    if let Err(e) = map.insert(&key, id, 0) {
-                        errors.push(format!("SRC_IPV6_TRIE id={}: {:?}", id, e));
-                    }
-                }
-            }
-            Err(e) => errors.push(format!("SRC_IPV6_TRIE: {}", e)),
-        }
-    }
-
-    {
-        match bpf
-            .map_mut("DST_IPV6_TRIE")
-            .ok_or_else(|| "DST_IPV6_TRIE not found".to_string())
-            .and_then(|m| LpmTrie::<_, [u8; 20], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
-        {
-            Ok(mut map) => {
-                for (octets, prefix, id) in &dst_ipv6 {
-                    let key = tap_lpm_key_v6(tap_id, *octets, *prefix);
-                    if let Err(e) = map.insert(&key, id, 0) {
-                        errors.push(format!("DST_IPV6_TRIE id={}: {:?}", id, e));
-                    }
-                }
-            }
-            Err(e) => errors.push(format!("DST_IPV6_TRIE: {}", e)),
-        }
-    }
-
-    let acl_tap_id = acl_banked_tap_id(tap_id, 0);
-    {
-        match bpf
-            .map_mut("ACL_SRC_IPV4_TRIE")
-            .ok_or_else(|| "ACL_SRC_IPV4_TRIE not found".to_string())
-            .and_then(|m| LpmTrie::<_, [u8; 8], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
-        {
-            Ok(mut map) => {
-                for (octets, prefix, id) in &src_ipv4 {
-                    let key = tap_lpm_key_v4(acl_tap_id, *octets, *prefix);
-                    if let Err(e) = map.insert(&key, id, 0) {
-                        errors.push(format!("ACL_SRC_IPV4_TRIE id={}: {:?}", id, e));
-                    }
-                }
-            }
-            Err(e) => errors.push(format!("ACL_SRC_IPV4_TRIE: {}", e)),
-        }
-    }
-
-    {
-        match bpf
-            .map_mut("ACL_DST_IPV4_TRIE")
-            .ok_or_else(|| "ACL_DST_IPV4_TRIE not found".to_string())
-            .and_then(|m| LpmTrie::<_, [u8; 8], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
-        {
-            Ok(mut map) => {
-                for (octets, prefix, id) in &dst_ipv4 {
-                    let key = tap_lpm_key_v4(acl_tap_id, *octets, *prefix);
-                    if let Err(e) = map.insert(&key, id, 0) {
-                        errors.push(format!("ACL_DST_IPV4_TRIE id={}: {:?}", id, e));
-                    }
-                }
-            }
-            Err(e) => errors.push(format!("ACL_DST_IPV4_TRIE: {}", e)),
-        }
-    }
-
-    {
-        match bpf
-            .map_mut("ACL_SRC_IPV6_TRIE")
-            .ok_or_else(|| "ACL_SRC_IPV6_TRIE not found".to_string())
-            .and_then(|m| LpmTrie::<_, [u8; 20], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
-        {
-            Ok(mut map) => {
-                for (octets, prefix, id) in &src_ipv6 {
-                    let key = tap_lpm_key_v6(acl_tap_id, *octets, *prefix);
-                    if let Err(e) = map.insert(&key, id, 0) {
-                        errors.push(format!("ACL_SRC_IPV6_TRIE id={}: {:?}", id, e));
-                    }
-                }
-            }
-            Err(e) => errors.push(format!("ACL_SRC_IPV6_TRIE: {}", e)),
-        }
-    }
-
-    {
-        match bpf
-            .map_mut("ACL_DST_IPV6_TRIE")
-            .ok_or_else(|| "ACL_DST_IPV6_TRIE not found".to_string())
-            .and_then(|m| LpmTrie::<_, [u8; 20], u32>::try_from(m).map_err(|e| format!("{:?}", e)))
-        {
-            Ok(mut map) => {
-                for (octets, prefix, id) in &dst_ipv6 {
-                    let key = tap_lpm_key_v6(acl_tap_id, *octets, *prefix);
-                    if let Err(e) = map.insert(&key, id, 0) {
-                        errors.push(format!("ACL_DST_IPV6_TRIE id={}: {:?}", id, e));
-                    }
-                }
-            }
-            Err(e) => errors.push(format!("ACL_DST_IPV6_TRIE: {}", e)),
-        }
-    }
+    write_fresh_runtime_group_entries(bpf, tap_id, &group_entries, &mut errors);
 
     {
         let mut written_bitmaps: HashSet<u32> = HashSet::new();
@@ -529,9 +631,53 @@ pub fn replay_state_from_snapshot(
 
 pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(), String> {
     let state = crate::wal::load_with_wal(state_path);
+    replay_state_to_pinned_maps_from_snapshot_with_mode(
+        pin_path,
+        state_path,
+        &state,
+        GroupProjectionMode::StandaloneCompatibility,
+    )
+}
+
+pub fn replay_managed_state_to_pinned_maps(
+    pin_path: &str,
+    state_path: &str,
+    state: &FirewallState,
+) -> Result<(), String> {
+    replay_state_to_pinned_maps_from_snapshot_with_mode(
+        pin_path,
+        state_path,
+        state,
+        GroupProjectionMode::Managed,
+    )
+}
+
+fn replay_state_to_pinned_maps_from_snapshot_with_mode(
+    pin_path: &str,
+    state_path: &str,
+    state: &FirewallState,
+    mode: GroupProjectionMode,
+) -> Result<(), String> {
+    let mut projection_errors = Vec::new();
+    let group_entries = match build_runtime_group_map_entries(state, mode) {
+        Ok(entries) => entries,
+        Err(error) if mode == GroupProjectionMode::StandaloneCompatibility => {
+            let (entries, parse_errors) = collect_standalone_runtime_group_map_entries(state);
+            projection_errors = if parse_errors.is_empty() {
+                vec![error]
+            } else {
+                parse_errors
+            };
+            entries
+        }
+        Err(error) => return Err(error),
+    };
     let tap_id = state.tap_id;
     let runtime = TapMapRuntime::new(pin_path, tap_id);
-    let has_runtime_objects = !(state.groups.is_empty()
+    let has_runtime_objects = !(group_entries.general_src.is_empty()
+        && group_entries.general_dst.is_empty()
+        && group_entries.acl_src.is_empty()
+        && group_entries.acl_dst.is_empty()
         && state.rules.is_empty()
         && state.qos_rules.is_empty()
         && state.mirror_rules.is_empty());
@@ -540,7 +686,7 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
     info!(
         state_path = %state_path,
         pin_path = %pin_path,
-        groups = state.groups.len(),
+        group_entries = group_entries.general_src.len(),
         rules = state.rules.len(),
         qos_rules = state.qos_rules.len(),
         mirror_rules = state.mirror_rules.len(),
@@ -565,8 +711,8 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
         }
     }
 
-    let mut errors: Vec<String> = Vec::new();
-    let mut group_count: u32 = 0;
+    let mut errors = projection_errors;
+    let group_count = group_entries.general_src.len() as u32;
     let mut rule_count: u32 = 0;
     let mut bitmap_count: u32 = 0;
 
@@ -611,30 +757,7 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
         }
     }
 
-    for (name, group) in &state.groups {
-        for cidr in &group.cidrs {
-            let mut failed = false;
-            if let Err(e) = add_network("src", cidr, group.id, runtime, "") {
-                errors.push(format!("group '{}' cidr '{}' src: {}", name, cidr, e));
-                failed = true;
-            }
-            if let Err(e) = add_network("dst", cidr, group.id, runtime, "") {
-                errors.push(format!("group '{}' cidr '{}' dst: {}", name, cidr, e));
-                failed = true;
-            }
-            if let Err(e) = add_acl_network_in_bank("src", cidr, group.id, 0, runtime, "") {
-                errors.push(format!("group '{}' cidr '{}' acl src: {}", name, cidr, e));
-                failed = true;
-            }
-            if let Err(e) = add_acl_network_in_bank("dst", cidr, group.id, 0, runtime, "") {
-                errors.push(format!("group '{}' cidr '{}' acl dst: {}", name, cidr, e));
-                failed = true;
-            }
-            if !failed {
-                group_count += 1;
-            }
-        }
-    }
+    write_pinned_runtime_group_entries(runtime, &group_entries, &mut errors);
 
     let mut written_bitmaps: HashSet<u32> = HashSet::new();
     for rule in &valid_rules {

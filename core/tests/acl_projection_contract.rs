@@ -1,9 +1,10 @@
 use aria_core::ebpf_ops::{
     build_runtime_group_map_entries, classify_managed_inventory_capture,
+    classify_runtime_gate_state, collect_standalone_runtime_group_map_entries,
     compile_managed_group_projection, plan_projection_drift, CanonicalNetwork, CapturedProjection,
     GeneralProjectionDisposition, GeneralProjectionExclusionReason, GroupProjectionMode,
     ManagedGroupProjection, ProjectionDirection, ProjectionDrift, ProjectionEntry,
-    ProjectionMutation, RuntimeNetworkEntry,
+    ProjectionMutation, RuntimeGateDisposition, RuntimeNetworkEntry,
 };
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
 use std::collections::BTreeSet;
@@ -432,6 +433,34 @@ fn managed_projection_replay_standalone_mode_preserves_all_group_compatibility()
 }
 
 #[test]
+fn managed_projection_replay_standalone_parse_errors_preserve_valid_entries() {
+    let mut state = FirewallState::default();
+    insert_group(
+        &mut state,
+        "mixed",
+        10,
+        &["10.0.0.7/24", "not-a-cidr", "2001:db8::7/64"],
+    );
+
+    let (projected, errors) = collect_standalone_runtime_group_map_entries(&state);
+    let expected = BTreeSet::from([
+        ("10.0.0.7".to_string(), 24, 10),
+        ("2001:db8::7".to_string(), 64, 10),
+    ]);
+
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("group 'mixed' cidr 'not-a-cidr'"));
+    assert_eq!(runtime_entries(&projected.general_src), expected);
+    assert_eq!(runtime_entries(&projected.general_dst), expected);
+    assert_eq!(runtime_entries(&projected.acl_src), expected);
+    assert_eq!(runtime_entries(&projected.acl_dst), expected);
+    assert!(
+        build_runtime_group_map_entries(&state, GroupProjectionMode::StandaloneCompatibility,)
+            .is_err()
+    );
+}
+
+#[test]
 fn managed_projection_replay_mode_uses_conflict_aware_directional_entries() {
     let mut state = FirewallState::default();
     insert_group(&mut state, "acl-src", 10, &["10.0.0.7/32"]);
@@ -516,6 +545,27 @@ fn managed_projection_inventory_expected_sets_match_the_managed_compiler() {
     assert_eq!(runtime_entries(&expected.general_dst), general);
     assert_eq!(runtime_entries(&expected.acl_src), acl_src);
     assert_eq!(runtime_entries(&expected.acl_dst), acl_dst);
+}
+
+#[test]
+fn managed_projection_inventory_gate_state_keeps_quiesced_restart_unverified() {
+    assert_eq!(
+        classify_runtime_gate_state(GroupProjectionMode::Managed, 1, 1, 1, 1,),
+        Ok(RuntimeGateDisposition::Desired)
+    );
+    assert_eq!(
+        classify_runtime_gate_state(GroupProjectionMode::Managed, 0, 0, 1, 1,),
+        Ok(RuntimeGateDisposition::ManagedQuiesced)
+    );
+    assert_eq!(
+        classify_runtime_gate_state(GroupProjectionMode::Managed, 0, 0, 0, 1,),
+        Ok(RuntimeGateDisposition::ManagedQuiesced)
+    );
+    assert!(
+        classify_runtime_gate_state(GroupProjectionMode::StandaloneCompatibility, 0, 0, 1, 1,)
+            .is_err()
+    );
+    assert!(classify_runtime_gate_state(GroupProjectionMode::Managed, 0, 1, 1, 1,).is_err());
 }
 
 #[test]

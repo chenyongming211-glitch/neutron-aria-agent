@@ -2581,7 +2581,7 @@ def check_rust_stage_one_tests_present():
     ):
         body = _rust_function_body(source, function_name)
         if body is None or not re.search(
-            r"\blet\s+%s\s*=\s*(?:match\s+)?build_runtime_group_map_entries\s*\(\s*state\s*,\s*mode\s*\)"
+            r"\blet\s+%s\s*=\s*(?:match\s+)?build_runtime_group_map_entries\s*\(\s*state\s*,\s*mode\s*,?\s*\)"
             % re.escape(binding),
             body,
         ):
@@ -2603,6 +2603,14 @@ def check_rust_stage_one_tests_present():
             if "state.groups" in body:
                 raise SystemExit(
                     "ERROR: mode-aware replay must not publish groups outside the shared projection"
+                )
+            if (
+                "GroupProjectionMode::StandaloneCompatibility" not in body
+                or "collect_standalone_runtime_group_map_entries" not in body
+                or "projection_errors" not in body
+            ):
+                raise SystemExit(
+                    "ERROR: mode-aware replay must preserve standalone valid-entry replay when persisted CIDRs are invalid"
                 )
         elif "state.groups" in body:
             raise SystemExit(
@@ -2680,7 +2688,7 @@ def check_rust_stage_one_tests_present():
     ):
         body = _rust_function_body(source, function_name)
         if body is None or not re.search(
-            r"\b%s\s*\([^;{}]*%s\s*\)" % (re.escape(delegate), re.escape(mode)),
+            r"\b%s\s*\([^;{}]*%s\s*,?\s*\)" % (re.escape(delegate), re.escape(mode)),
             body,
         ):
             raise SystemExit(
@@ -2710,7 +2718,7 @@ def check_rust_stage_one_tests_present():
         r"\blet\s+strict_result\s*=\s*validate_strict_pinned_runtime_state\s*\(",
         inventory_mode_body,
     ) or not re.search(
-        r"\bclassify_managed_inventory_capture\s*\(\s*state\s*,\s*&captured\s*,\s*strict_result\s*\)",
+        r"\bclassify_managed_inventory_capture\s*\(\s*state\s*,\s*&captured\s*,\s*strict_result\s*,?\s*\)",
         inventory_mode_body,
     ):
         raise SystemExit(
@@ -2729,7 +2737,7 @@ def check_rust_stage_one_tests_present():
         ),
     ):
         if not re.search(
-            r"\b%s\s*=>\s*%s\s*\(\s*%s\s*\)"
+            r"\b%s\s*=>\s*\{?\s*%s\s*\(\s*%s\s*,?\s*\)\s*\}?"
             % (re.escape(mode), classifier, arguments),
             inventory_mode_body,
         ):
@@ -2771,7 +2779,7 @@ def check_rust_stage_one_tests_present():
             "ERROR: runtime projection capture must reject invalid raw ACL bank values"
         )
     if not re.search(
-        r"\blet\s+active_acl_lpm_tap_id\s*=\s*acl_banked_tap_id\s*\(\s*tap_id\s*,\s*actual_tap_config\.acl_active_bank\s*\)",
+        r"\blet\s+active_acl_lpm_tap_id\s*=\s*acl_banked_tap_id\s*\(\s*tap_id\s*,\s*actual_tap_config\.acl_active_bank\s*,?\s*\)",
         capture_inventory_body,
     ):
         raise SystemExit(
@@ -2794,7 +2802,7 @@ def check_rust_stage_one_tests_present():
         ),
     ):
         if capture_inventory_body_raw is None or not re.search(
-            r"\b%s\s*:\s*collect_runtime_network_entries\s*\(\s*pin_path\s*,\s*\"%s\"\s*,\s*\"%s\"\s*,\s*%s\s*\)"
+            r"\b%s\s*:\s*collect_runtime_network_entries\s*\(\s*pin_path\s*,\s*\"%s\"\s*,\s*\"%s\"\s*,\s*%s\s*,?\s*\)"
             % (field, ipv4_map, ipv6_map, tap_scope),
             capture_inventory_body_raw,
         ):
@@ -2808,6 +2816,7 @@ def check_rust_stage_one_tests_present():
     )
     for required_call in (
         "open_pinned_tap_config",
+        "classify_runtime_gate_state",
         "acl_active_bank",
         "acl_ingress_hook",
         "open_pinned_policy_table",
@@ -2861,6 +2870,10 @@ def check_rust_stage_one_tests_present():
             "ERROR: preexisting runtime validation must preserve standalone and managed inventory"
         )
     validate_live_code = _blank_rust_non_code(validate_live_body or "")
+    if "classify_runtime_gate_state" not in validate_live_code:
+        raise SystemExit(
+            "ERROR: preexisting runtime validation must classify desired versus managed-quiesced gate"
+        )
     if not re.search(r"\bmatch\s+projection_mode\b", validate_live_code):
         raise SystemExit(
             "ERROR: preexisting runtime inventory must select validator by projection mode"
@@ -2876,7 +2889,7 @@ def check_rust_stage_one_tests_present():
         ),
     ):
         if not re.search(
-            r"\b%s\s*=>\s*%s\s*\(" % (re.escape(mode), validator),
+            r"\b%s\s*=>\s*\{?\s*%s\s*\(" % (re.escape(mode), validator),
             validate_live_code,
         ):
             raise SystemExit(
@@ -2926,10 +2939,19 @@ def check_rust_stage_one_tests_present():
             "ERROR: preexisting runtime validation must receive the selected projection mode"
         )
     if not re.search(
-        r"\blet\s+projection_drift\s*=\s*self\.validate_preexisting_live_runtime\s*\([\s\S]*?projection_mode\s*,?\s*\)",
+        r"\blet\s+preexisting_validation\s*=\s*self\.validate_preexisting_live_runtime\s*\([\s\S]*?projection_mode\s*,?\s*\)",
+        prepare_managed_code,
+    ) or not re.search(
+        r"\blet\s+gate_disposition\s*=\s*preexisting_validation\.gate_disposition\s*;",
+        prepare_managed_code,
+    ) or not re.search(
+        r"\blet\s+projection_drift\s*=\s*preexisting_validation\.projection_drift\s*;",
         prepare_managed_code,
     ) or not re.search(
         r"\bpreexisting_live_verified\s*=\s*match\s+preexisting_projection_verification\s*\(\s*projection_drift\s*\)",
+        prepare_managed_code,
+    ) or not re.search(
+        r"gate_disposition\s*==\s*Some\s*\(\s*RuntimeGateDisposition::Desired\s*\)",
         prepare_managed_code,
     ):
         raise SystemExit(
@@ -2950,7 +2972,7 @@ def check_rust_stage_one_tests_present():
         ("GroupProjectionMode::Managed", "replay_managed_state_to_pinned_maps"),
     ):
         if not re.search(
-            r"\b%s\s*=>\s*%s\s*\(" % (re.escape(mode), replay_entrypoint),
+            r"\b%s\s*=>\s*\{?\s*%s\s*\(" % (re.escape(mode), replay_entrypoint),
             prepare_managed_code,
         ):
             raise SystemExit(

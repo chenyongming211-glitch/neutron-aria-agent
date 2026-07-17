@@ -1,5 +1,30 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeGateDisposition {
+    Desired,
+    ManagedQuiesced,
+}
+
+pub fn classify_runtime_gate_state(
+    mode: GroupProjectionMode,
+    actual_conntrack: u8,
+    actual_acl: u8,
+    expected_conntrack: u8,
+    expected_acl: u8,
+) -> Result<RuntimeGateDisposition, String> {
+    if actual_conntrack == expected_conntrack && actual_acl == expected_acl {
+        return Ok(RuntimeGateDisposition::Desired);
+    }
+    if mode == GroupProjectionMode::Managed && actual_conntrack == 0 && actual_acl == 0 {
+        return Ok(RuntimeGateDisposition::ManagedQuiesced);
+    }
+    Err(format!(
+        "runtime gate drift: actual conntrack={} acl={}, expected conntrack={} acl={}",
+        actual_conntrack, actual_acl, expected_conntrack, expected_acl,
+    ))
+}
+
 fn summarize_entries(entries: &BTreeSet<String>) -> String {
     if entries.is_empty() {
         return "none".to_string();
@@ -36,81 +61,208 @@ fn validate_entry_set(
     ))
 }
 
-fn collect_lpm_entries_v4(
-    pin_path: &str,
+fn runtime_network_prefix(
     map_name: &str,
-    tap_id: u32,
-) -> Result<BTreeSet<String>, String> {
-    let map = open_pinned_lpm_v4(pin_path, map_name)?;
-    let tap_prefix = tap_id.to_be_bytes();
-    let mut entries = BTreeSet::new();
-    for item in map.iter() {
-        let (key, value) = item.map_err(|e| format!("iterate {}: {:?}", map_name, e))?;
-        let data = key.data();
-        if data[..4] == tap_prefix {
-            entries.insert(format_lpm_entry_v4(&key, value));
-        }
-    }
-    Ok(entries)
-}
-
-fn collect_lpm_entries_v6(
-    pin_path: &str,
-    map_name: &str,
-    tap_id: u32,
-) -> Result<BTreeSet<String>, String> {
-    let map = open_pinned_lpm_v6(pin_path, map_name)?;
-    let tap_prefix = tap_id.to_be_bytes();
-    let mut entries = BTreeSet::new();
-    for item in map.iter() {
-        let (key, value) = item.map_err(|e| format!("iterate {}: {:?}", map_name, e))?;
-        let data = key.data();
-        if data[..4] == tap_prefix {
-            entries.insert(format_lpm_entry_v6(&key, value));
-        }
-    }
-    Ok(entries)
-}
-
-fn format_lpm_entry_v4(key: &Key<[u8; 8]>, value: u32) -> String {
-    let data = key.data();
-    format!(
-        "prefix_len={} tap_id={} ip={:?}=>{}",
-        key.prefix_len(),
-        u32::from_be_bytes(data[..4].try_into().unwrap()),
-        &data[4..],
-        value,
-    )
-}
-
-fn format_lpm_entry_v6(key: &Key<[u8; 20]>, value: u32) -> String {
-    let data = key.data();
-    format!(
-        "prefix_len={} tap_id={} ip={:?}=>{}",
-        key.prefix_len(),
-        u32::from_be_bytes(data[..4].try_into().unwrap()),
-        &data[4..],
-        value,
-    )
-}
-
-pub fn validate_pinned_runtime_state(
-    runtime: TapMapRuntime<'_>,
-    state: &FirewallState,
-) -> Result<(), String> {
-    if runtime.tap_id == TAP_ID_UNASSIGNED {
-        return Ok(());
-    }
-    if state.tap_id != runtime.tap_id {
+    total_prefix_len: u32,
+    address_bits: u32,
+) -> Result<u8, String> {
+    if total_prefix_len < TAP_LPM_PREFIX_BITS
+        || total_prefix_len > TAP_LPM_PREFIX_BITS + address_bits
+    {
         return Err(format!(
-            "state tap_id {} does not match runtime tap_id {}",
-            state.tap_id, runtime.tap_id
+            "{} contains invalid prefix_len {}, expected {}..={}",
+            map_name,
+            total_prefix_len,
+            TAP_LPM_PREFIX_BITS,
+            TAP_LPM_PREFIX_BITS + address_bits,
         ));
     }
+    Ok((total_prefix_len - TAP_LPM_PREFIX_BITS) as u8)
+}
 
+fn collect_runtime_network_entries(
+    pin_path: &str,
+    ipv4_map_name: &str,
+    ipv6_map_name: &str,
+    tap_id: u32,
+) -> Result<Vec<ProjectionEntry>, String> {
+    let tap_prefix = tap_id.to_be_bytes();
+    let mut entries = Vec::new();
+
+    let ipv4_map = open_pinned_lpm_v4(pin_path, ipv4_map_name)?;
+    for item in ipv4_map.iter() {
+        let (key, group_id) =
+            item.map_err(|error| format!("iterate {}: {:?}", ipv4_map_name, error))?;
+        let prefix_len = runtime_network_prefix(ipv4_map_name, key.prefix_len(), 32)?;
+        let data = key.data();
+        if data[..4] != tap_prefix {
+            continue;
+        }
+        let address = IpAddr::V4(std::net::Ipv4Addr::from(
+            <[u8; 4]>::try_from(&data[4..]).expect("IPv4 LPM key has a fixed address width"),
+        ));
+        entries.push(ProjectionEntry {
+            network: CanonicalNetwork::from_ip(address, prefix_len)?,
+            group_id,
+        });
+    }
+
+    let ipv6_map = open_pinned_lpm_v6(pin_path, ipv6_map_name)?;
+    for item in ipv6_map.iter() {
+        let (key, group_id) =
+            item.map_err(|error| format!("iterate {}: {:?}", ipv6_map_name, error))?;
+        let prefix_len = runtime_network_prefix(ipv6_map_name, key.prefix_len(), 128)?;
+        let data = key.data();
+        if data[..4] != tap_prefix {
+            continue;
+        }
+        let address = IpAddr::V6(std::net::Ipv6Addr::from(
+            <[u8; 16]>::try_from(&data[4..]).expect("IPv6 LPM key has a fixed address width"),
+        ));
+        entries.push(ProjectionEntry {
+            network: CanonicalNetwork::from_ip(address, prefix_len)?,
+            group_id,
+        });
+    }
+
+    entries.sort();
+    Ok(entries)
+}
+
+fn capture_runtime_group_map_entries(
+    runtime: TapMapRuntime<'_>,
+) -> Result<CapturedProjection, String> {
     let pin_path = runtime.pin_path;
     let tap_id = runtime.tap_id;
+    let tap_config_map = open_pinned_tap_config(pin_path)?;
+    let actual_tap_config = tap_config_map
+        .get(&tap_id, 0)
+        .map_err(|error| format!("read TAP_CONFIG_MAP for tap_id {}: {:?}", tap_id, error))?;
+    if actual_tap_config.acl_active_bank > ACL_BANK_SHADOW {
+        return Err(format!(
+            "TAP_CONFIG_MAP contains invalid raw ACL bank {} for tap_id {}",
+            actual_tap_config.acl_active_bank, tap_id,
+        ));
+    }
+    let active_acl_lpm_tap_id = acl_banked_tap_id(tap_id, actual_tap_config.acl_active_bank);
 
+    Ok(CapturedProjection {
+        general_src: collect_runtime_network_entries(
+            pin_path,
+            "SRC_IPV4_TRIE",
+            "SRC_IPV6_TRIE",
+            tap_id,
+        )?,
+        general_dst: collect_runtime_network_entries(
+            pin_path,
+            "DST_IPV4_TRIE",
+            "DST_IPV6_TRIE",
+            tap_id,
+        )?,
+        acl_src: collect_runtime_network_entries(
+            pin_path,
+            "ACL_SRC_IPV4_TRIE",
+            "ACL_SRC_IPV6_TRIE",
+            active_acl_lpm_tap_id,
+        )?,
+        acl_dst: collect_runtime_network_entries(
+            pin_path,
+            "ACL_DST_IPV4_TRIE",
+            "ACL_DST_IPV6_TRIE",
+            active_acl_lpm_tap_id,
+        )?,
+    })
+}
+
+fn runtime_entries_as_projection(
+    entries: &[RuntimeNetworkEntry],
+) -> Result<BTreeSet<ProjectionEntry>, String> {
+    entries
+        .iter()
+        .map(|entry| {
+            Ok(ProjectionEntry {
+                network: CanonicalNetwork::from_ip(entry.address, entry.prefix_len)?,
+                group_id: entry.group_id,
+            })
+        })
+        .collect()
+}
+
+fn validate_projection_entry_set(
+    label: &str,
+    expected: &[RuntimeNetworkEntry],
+    captured: &[ProjectionEntry],
+) -> Result<(), String> {
+    let expected = runtime_entries_as_projection(expected)?;
+    let captured: BTreeSet<ProjectionEntry> = captured.iter().copied().collect();
+    if expected == captured {
+        return Ok(());
+    }
+    Err(format!(
+        "{} drift: expected={:?} captured={:?}",
+        label, expected, captured,
+    ))
+}
+
+fn classify_standalone_inventory_capture(
+    captured: &CapturedProjection,
+    expected_entries: &RuntimeGroupMapEntries,
+    strict_result: Result<(), String>,
+) -> ProjectionDrift {
+    if let Err(error) = strict_result {
+        return ProjectionDrift::Fatal(error);
+    }
+    for result in [
+        validate_projection_entry_set(
+            "standalone general source",
+            &expected_entries.general_src,
+            &captured.general_src,
+        ),
+        validate_projection_entry_set(
+            "standalone general destination",
+            &expected_entries.general_dst,
+            &captured.general_dst,
+        ),
+        validate_projection_entry_set(
+            "standalone ACL source",
+            &expected_entries.acl_src,
+            &captured.acl_src,
+        ),
+        validate_projection_entry_set(
+            "standalone ACL destination",
+            &expected_entries.acl_dst,
+            &captured.acl_dst,
+        ),
+    ] {
+        if let Err(error) = result {
+            return ProjectionDrift::Fatal(error);
+        }
+    }
+    ProjectionDrift::Clean
+}
+
+pub fn classify_managed_inventory_capture(
+    state: &FirewallState,
+    captured: &CapturedProjection,
+    strict_result: Result<(), String>,
+) -> ProjectionDrift {
+    if let Err(error) = strict_result {
+        return ProjectionDrift::Fatal(error);
+    }
+    let committed = match compile_managed_group_projection(state) {
+        Ok(projection) => projection,
+        Err(error) => return ProjectionDrift::Fatal(error),
+    };
+    plan_projection_drift(captured, &committed, &committed)
+}
+
+fn validate_strict_pinned_runtime_state(
+    runtime: TapMapRuntime<'_>,
+    state: &FirewallState,
+    mode: GroupProjectionMode,
+) -> Result<(), String> {
+    let pin_path = runtime.pin_path;
+    let tap_id = runtime.tap_id;
     let expected_tap_config = TapConfig {
         conntrack_enabled: if state.conntrack_enabled { 1 } else { 0 },
         monitoring_enabled: if state.monitoring_enabled { 1 } else { 0 },
@@ -126,109 +278,39 @@ pub fn validate_pinned_runtime_state(
             0
         },
         tcprt_enabled: if state.tcprt_enabled { 1 } else { 0 },
-        acl_active_bank: 0,
+        acl_active_bank: ACL_BANK_PRIMARY,
         acl_ingress_hook: ACL_INGRESS_HOOK_TC,
     };
     let tap_config_map = open_pinned_tap_config(pin_path)?;
     let actual_tap_config = tap_config_map
         .get(&tap_id, 0)
-        .map_err(|e| format!("read TAP_CONFIG_MAP for tap_id {}: {:?}", tap_id, e))?;
-    let active_acl_bank = normalize_acl_bank(actual_tap_config.acl_active_bank);
-    if actual_tap_config.conntrack_enabled != expected_tap_config.conntrack_enabled
-        || actual_tap_config.monitoring_enabled != expected_tap_config.monitoring_enabled
-        || actual_tap_config.acl_enabled != expected_tap_config.acl_enabled
+        .map_err(|error| format!("read TAP_CONFIG_MAP for tap_id {}: {:?}", tap_id, error))?;
+    if actual_tap_config.acl_active_bank > ACL_BANK_SHADOW {
+        return Err(format!(
+            "TAP_CONFIG_MAP contains invalid raw ACL bank {} for tap_id {}",
+            actual_tap_config.acl_active_bank, tap_id,
+        ));
+    }
+    classify_runtime_gate_state(
+        mode,
+        actual_tap_config.conntrack_enabled,
+        actual_tap_config.acl_enabled,
+        expected_tap_config.conntrack_enabled,
+        expected_tap_config.acl_enabled,
+    )
+    .map_err(|error| format!("TAP_CONFIG_MAP drift for tap_id {}: {}", tap_id, error))?;
+    if actual_tap_config.monitoring_enabled != expected_tap_config.monitoring_enabled
         || actual_tap_config.qos_enabled != expected_tap_config.qos_enabled
         || actual_tap_config.mirror_enabled != expected_tap_config.mirror_enabled
         || actual_tap_config.tcprt_enabled != expected_tap_config.tcprt_enabled
+        || actual_tap_config.acl_ingress_hook != expected_tap_config.acl_ingress_hook
     {
         return Err(format!(
             "TAP_CONFIG_MAP drift for tap_id {}: actual={:?} expected={:?}",
             tap_id, actual_tap_config, expected_tap_config
         ));
     }
-
-    let mut expected_src_ipv4 = BTreeSet::new();
-    let mut expected_dst_ipv4 = BTreeSet::new();
-    let mut expected_src_ipv6 = BTreeSet::new();
-    let mut expected_dst_ipv6 = BTreeSet::new();
-    for (name, group) in &state.groups {
-        for cidr in &group.cidrs {
-            let (ip, prefix) =
-                parse_cidr(cidr).map_err(|e| format!("group '{}' cidr '{}': {}", name, cidr, e))?;
-            match ip {
-                IpAddr::V4(v4) => {
-                    expected_src_ipv4.insert(format_lpm_entry_v4(
-                        &tap_lpm_key_v4(tap_id, v4.octets(), prefix),
-                        group.id,
-                    ));
-                    expected_dst_ipv4.insert(format_lpm_entry_v4(
-                        &tap_lpm_key_v4(tap_id, v4.octets(), prefix),
-                        group.id,
-                    ));
-                }
-                IpAddr::V6(v6) => {
-                    expected_src_ipv6.insert(format_lpm_entry_v6(
-                        &tap_lpm_key_v6(tap_id, v6.octets(), prefix),
-                        group.id,
-                    ));
-                    expected_dst_ipv6.insert(format_lpm_entry_v6(
-                        &tap_lpm_key_v6(tap_id, v6.octets(), prefix),
-                        group.id,
-                    ));
-                }
-            }
-        }
-    }
-
-    validate_entry_set(
-        "SRC_IPV4_TRIE",
-        tap_id,
-        expected_src_ipv4.clone(),
-        collect_lpm_entries_v4(pin_path, "SRC_IPV4_TRIE", tap_id)?,
-    )?;
-    validate_entry_set(
-        "DST_IPV4_TRIE",
-        tap_id,
-        expected_dst_ipv4.clone(),
-        collect_lpm_entries_v4(pin_path, "DST_IPV4_TRIE", tap_id)?,
-    )?;
-    validate_entry_set(
-        "SRC_IPV6_TRIE",
-        tap_id,
-        expected_src_ipv6.clone(),
-        collect_lpm_entries_v6(pin_path, "SRC_IPV6_TRIE", tap_id)?,
-    )?;
-    validate_entry_set(
-        "DST_IPV6_TRIE",
-        tap_id,
-        expected_dst_ipv6.clone(),
-        collect_lpm_entries_v6(pin_path, "DST_IPV6_TRIE", tap_id)?,
-    )?;
-    let active_acl_lpm_tap_id = acl_banked_tap_id(tap_id, active_acl_bank);
-    validate_entry_set(
-        "ACL_SRC_IPV4_TRIE",
-        active_acl_lpm_tap_id,
-        expected_src_ipv4.clone(),
-        collect_lpm_entries_v4(pin_path, "ACL_SRC_IPV4_TRIE", active_acl_lpm_tap_id)?,
-    )?;
-    validate_entry_set(
-        "ACL_DST_IPV4_TRIE",
-        active_acl_lpm_tap_id,
-        expected_dst_ipv4.clone(),
-        collect_lpm_entries_v4(pin_path, "ACL_DST_IPV4_TRIE", active_acl_lpm_tap_id)?,
-    )?;
-    validate_entry_set(
-        "ACL_SRC_IPV6_TRIE",
-        active_acl_lpm_tap_id,
-        expected_src_ipv6.clone(),
-        collect_lpm_entries_v6(pin_path, "ACL_SRC_IPV6_TRIE", active_acl_lpm_tap_id)?,
-    )?;
-    validate_entry_set(
-        "ACL_DST_IPV6_TRIE",
-        active_acl_lpm_tap_id,
-        expected_dst_ipv6.clone(),
-        collect_lpm_entries_v6(pin_path, "ACL_DST_IPV6_TRIE", active_acl_lpm_tap_id)?,
-    )?;
+    let active_acl_bank = actual_tap_config.acl_active_bank;
 
     let mut expected_policy = BTreeSet::new();
     let mut expected_ports = BTreeSet::new();
@@ -375,6 +457,69 @@ pub fn validate_pinned_runtime_state(
     )?;
 
     Ok(())
+}
+
+fn validate_pinned_runtime_state_with_mode(
+    runtime: TapMapRuntime<'_>,
+    state: &FirewallState,
+    mode: GroupProjectionMode,
+) -> ProjectionDrift {
+    if runtime.tap_id == TAP_ID_UNASSIGNED {
+        return match mode {
+            GroupProjectionMode::StandaloneCompatibility => ProjectionDrift::Clean,
+            GroupProjectionMode::Managed => ProjectionDrift::Fatal(
+                "managed runtime inventory requires an assigned tap_id".to_string(),
+            ),
+        };
+    }
+    if state.tap_id != runtime.tap_id {
+        return ProjectionDrift::Fatal(format!(
+            "state tap_id {} does not match runtime tap_id {}",
+            state.tap_id, runtime.tap_id,
+        ));
+    }
+    let expected_entries = match build_runtime_group_map_entries(state, mode) {
+        Ok(entries) => entries,
+        Err(error) => return ProjectionDrift::Fatal(error),
+    };
+    let captured = match capture_runtime_group_map_entries(runtime) {
+        Ok(entries) => entries,
+        Err(error) => return ProjectionDrift::Fatal(error),
+    };
+    let strict_result = validate_strict_pinned_runtime_state(runtime, state, mode);
+    match mode {
+        GroupProjectionMode::StandaloneCompatibility => {
+            classify_standalone_inventory_capture(&captured, &expected_entries, strict_result)
+        }
+        GroupProjectionMode::Managed => {
+            classify_managed_inventory_capture(state, &captured, strict_result)
+        }
+    }
+}
+
+pub fn validate_pinned_runtime_state(
+    runtime: TapMapRuntime<'_>,
+    state: &FirewallState,
+) -> Result<(), String> {
+    match validate_pinned_runtime_state_with_mode(
+        runtime,
+        state,
+        GroupProjectionMode::StandaloneCompatibility,
+    ) {
+        ProjectionDrift::Clean => Ok(()),
+        ProjectionDrift::RepairRequired(_) => Err(
+            "standalone runtime inventory unexpectedly requires managed projection repair"
+                .to_string(),
+        ),
+        ProjectionDrift::Fatal(error) => Err(error),
+    }
+}
+
+pub fn validate_managed_pinned_runtime_state(
+    runtime: TapMapRuntime<'_>,
+    state: &FirewallState,
+) -> ProjectionDrift {
+    validate_pinned_runtime_state_with_mode(runtime, state, GroupProjectionMode::Managed)
 }
 
 pub const NETWORK_MAP_NAMES: &[&str] = &[
