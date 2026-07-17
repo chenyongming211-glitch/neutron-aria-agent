@@ -1793,7 +1793,8 @@ fn status_v1_has_complete_pending_identity(runtime: &NeutronRuntimeState) -> boo
         return false;
     };
     pending_generation > 0
-        && pending_generation == runtime.accepted_generation
+        && (runtime.accepted_generation == runtime.applied_generation
+            || runtime.accepted_generation == pending_generation)
         && pending_generation >= runtime.applied_generation
         && (pending_generation != runtime.applied_generation || runtime.applied_generation > 0)
         && runtime
@@ -1878,8 +1879,11 @@ fn project_neutron_status_v1(runtime: &NeutronRuntimeState) -> NeutronStatusV1Pr
             } else if runtime.recovery_cause.as_deref()
                 == Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE)
             {
-                let allowed_baseline = runtime.applied_generation > 0
-                    || status_v1_is_generation_zero_inventory_recovery(runtime);
+                let protected_inventory_identity =
+                    runtime.pending_generation == Some(runtime.accepted_generation);
+                let allowed_baseline = protected_inventory_identity
+                    && (runtime.applied_generation > 0
+                        || status_v1_is_generation_zero_inventory_recovery(runtime));
                 if allowed_baseline && runtime.authority_state == "blocked_recovery_required" {
                     (
                         NeutronStatusTransactionState::Blocked,
