@@ -35,6 +35,8 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "managed_acl_shadow_"],
     ["test", "--locked", "-p", "aria-agent", "managed_general_delta_"],
     ["test", "--locked", "-p", "aria-agent", "managed_projection_repair_"],
+    ["test", "--locked", "-p", "aria-agent", "managed_local_group_projection_"],
+    ["test", "--locked", "-p", "aria-agent", "managed_dual_use_group_"],
     ["test", "--locked", "-p", "aria-agent", "managed_acl_ownership_"],
     ["test", "--locked", "-p", "aria-api", "neutron_contract"],
     ["test", "--locked", "-p", "aria-agent", "neutron_wal"],
@@ -2347,6 +2349,2060 @@ def _run_managed_acl_shadow_mutation_self_tests():
     print("Managed ACL shadow projection mutation self-tests: OK (25 scenarios)")
 
 
+def _rust_function_body_from_blanked(code, function_name):
+    """Extract a Rust function body from source already blanked by the caller."""
+    match = re.search(
+        r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+%s"
+        r"(?:\s*<[^>{}]*>)?\s*\(" % re.escape(function_name),
+        code,
+    )
+    if not match:
+        return None
+    opening = code.find("{", match.end())
+    if opening < 0:
+        return None
+    return _rust_braced_body_at(code, opening)
+
+
+def _rust_utoipa_attribute_prefix_from_blanked(code, function_name):
+    """Return the nearest utoipa::path attribute before a Rust function."""
+    function = re.search(
+        r"\bpub\s+async\s+fn\s+%s\s*\(" % re.escape(function_name), code
+    )
+    if not function:
+        return None
+    marker = code.rfind("utoipa", 0, function.start())
+    opening = code.rfind("#[", 0, marker)
+    if marker < 0 or opening < 0:
+        return None
+    prefix = code[opening:function.start()]
+    return None if re.search(r"\bpub\s+async\s+fn\b", prefix) else prefix
+
+
+def _rust_parenthesized_body_at(code, opening):
+    """Extract a parenthesized expression from already blanked source code."""
+    if opening < 0 or opening >= len(code) or code[opening] != "(":
+        return None
+    depth = 1
+    index = opening + 1
+    while index < len(code) and depth:
+        if code[index] == "(":
+            depth += 1
+        elif code[index] == ")":
+            depth -= 1
+        index += 1
+    return None if depth else code[opening + 1:index - 1]
+
+
+def _rust_split_top_level_arguments(arguments):
+    """Split already-blanked Rust call arguments without splitting nested calls."""
+    items = []
+    start = 0
+    delimiters = {"(": ")", "[": "]", "{": "}"}
+    stack = []
+    for index, char in enumerate(arguments):
+        if char in delimiters:
+            stack.append(delimiters[char])
+        elif stack and char == stack[-1]:
+            stack.pop()
+        elif char == "," and not stack:
+            item = arguments[start:index].strip()
+            if item:
+                items.append(item)
+            start = index + 1
+    tail = arguments[start:].strip()
+    if tail:
+        items.append(tail)
+    return items
+
+
+def _rust_position_is_inside_loop(code, position):
+    """Return whether position is nested in a Rust for/while/loop block."""
+    stack = []
+    for index, char in enumerate(code[:position]):
+        if char == "{":
+            prefix = code[max(0, index - 240):index]
+            stack.append(
+                bool(
+                    re.search(
+                        r"(?:\bfor\s+[^{};]+\s+in\s+[^{};]+|"
+                        r"\bwhile\s+[^{};]+|\bloop)\s*$",
+                        prefix,
+                    )
+                )
+            )
+        elif char == "}" and stack:
+            stack.pop()
+    return any(stack)
+
+
+def _managed_cross_domain_group_mutation_contract_errors(
+    control_plane_source,
+    groups_handler_source,
+    qos_handler_source,
+    mirror_handler_source,
+):
+    """Return Task 5 contract violations in stable, user-facing priority order."""
+    control_code = _blank_rust_non_code(control_plane_source)
+    handler_codes = {
+        "groups": _blank_rust_non_code(groups_handler_source),
+        "qos": _blank_rust_non_code(qos_handler_source),
+        "mirror": _blank_rust_non_code(mirror_handler_source),
+    }
+    wrapper_specs = {
+        "add_group": {
+            "standalone": "add_group_standalone_locked",
+            "order": "GeneralThenDomain",
+            "planner": r"\blet\s+domain_operations\s*=\s*Vec\s*::\s*new\s*\(\s*\)",
+            "final_uses_domain": False,
+            "direction_source": None,
+        },
+        "delete_group": {
+            "standalone": "delete_group_standalone_locked",
+            "order": "GeneralThenDomain",
+            "planner": r"\blet\s+domain_operations\s*=\s*Vec\s*::\s*new\s*\(\s*\)",
+            "final_uses_domain": False,
+            "direction_source": None,
+        },
+        "add_qos": {
+            "standalone": "add_qos_standalone_locked",
+            "order": "GeneralThenDomain",
+            "planner": (
+                r"\blet\s+domain_operations\s*=\s*"
+                r"plan_managed_local_qos_upserts\s*\([^;]*"
+                r"\bdirection_plans\b[^;]*\)"
+            ),
+            "final_uses_domain": True,
+            "direction_source": (
+                r"\blet\s+direction_plans\s*=\s*"
+                r"managed_qos_direction_plans\s*\(\s*direction\s*,\s*mode\s*\)"
+            ),
+        },
+        "delete_qos": {
+            "standalone": "delete_qos_standalone_locked",
+            "order": "DomainThenGeneral",
+            "planner": (
+                r"\blet\s+domain_operations\s*=\s*"
+                r"plan_managed_local_qos_delete\s*\([^;]*\bdirections\b[^;]*\)"
+            ),
+            "final_uses_domain": True,
+            "direction_source": (
+                r"\blet\s+directions\s*=\s*requested_directions\s*"
+                r"\(\s*direction\s*\)"
+            ),
+        },
+        "add_mirror": {
+            "standalone": "add_mirror_standalone_locked",
+            "order": "GeneralThenDomain",
+            "planner": (
+                r"\blet\s+domain_operations\s*=\s*"
+                r"plan_managed_local_mirror_upserts\s*\([^;]*\bdirections\b[^;]*\)"
+            ),
+            "final_uses_domain": True,
+            "direction_source": (
+                r"\blet\s+directions\s*=\s*requested_directions\s*"
+                r"\(\s*direction\s*\)"
+            ),
+        },
+        "delete_mirror": {
+            "standalone": "delete_mirror_standalone_locked",
+            "order": "DomainThenGeneral",
+            "planner": (
+                r"\blet\s+domain_operations\s*=\s*"
+                r"plan_managed_local_mirror_delete\s*\([^;]*\bdirections\b[^;]*\)"
+            ),
+            "final_uses_domain": True,
+            "direction_source": (
+                r"\blet\s+directions\s*=\s*requested_directions\s*"
+                r"\(\s*direction\s*\)"
+            ),
+        },
+    }
+    bodies = {
+        name: _rust_function_body_from_blanked(control_code, name)
+        for name in wrapper_specs
+    }
+    errors = []
+    active_acl_access = re.compile(
+        r"\b(?:read_acl_active_bank|add_acl_network_in_bank|"
+        r"delete_acl_network_in_bank|set_acl_active_bank|stage_acl_shadow_bank)\s*\("
+    )
+    if any(
+        bodies[name] and active_acl_access.search(bodies[name])
+        for name in ("add_group", "delete_group")
+    ):
+        errors.append("managed local group add/delete still mutates the active ACL bank")
+
+    missing = [name for name, body in bodies.items() if body is None]
+    if missing:
+        errors.append(
+            "managed cross-domain mutation functions are missing: %s"
+            % ", ".join(missing)
+        )
+
+    lifecycle_pattern = re.compile(
+        r"\blet\s+(?P<guard>_?[A-Za-z][A-Za-z0-9_]*)\s*=\s*"
+        r"self\s*\.\s*lock_runtime_lifecycle\s*\(\s*\)\s*\.\s*await\s*;"
+    )
+    write_lock_pattern = re.compile(r"\.\s*write\s*\(\s*\)\s*\.\s*await\b")
+    plan_pattern = re.compile(
+        r"\bmanaged_general_state_mutations\s*\(\s*&\s*old_state\s*,"
+        r"\s*&\s*final_state\s*\)"
+    )
+    executor_pattern = re.compile(
+        r"\bexecute_managed_local_projection_transaction\s*\("
+    )
+    direct_managed_write = re.compile(
+        active_acl_access.pattern
+        + r"|\baria_core\s*::\s*ebpf_ops\s*::\s*(?:add|delete)_network\s*\("
+        + r"|\bapply_shared_network_mutation\s*\("
+        + r"|\baria_core\s*::\s*(?:qos_ops|mirror_ops)\s*::\s*\w+\s*\("
+    )
+    delegated_helpers = {"apply": set(), "compensate": set()}
+    snapshot_factories = {"persist": set(), "restore": set()}
+    for name, spec in wrapper_specs.items():
+        standalone_helper = spec["standalone"]
+        body = bodies[name]
+        if body is None:
+            continue
+        lifecycle = lifecycle_pattern.search(body)
+        instance = body.find("get_instance")
+        write_lock = write_lock_pattern.search(body)
+        if (
+            lifecycle is None
+            or instance < 0
+            or write_lock is None
+            or not lifecycle.start() < instance < write_lock.start()
+        ):
+            errors.append(
+                "managed %s must acquire lifecycle then instance write lock" % name
+            )
+        elif re.search(
+            r"\b(?:std\s*::\s*mem\s*::\s*)?drop\s*\(\s*%s\s*\)"
+            % re.escape(lifecycle.group("guard")),
+            body[lifecycle.end():],
+        ):
+            errors.append("managed %s must hold the lifecycle guard to return" % name)
+
+        standalone_call = body.find(standalone_helper)
+        admission = body.find("managed_local_projection_admission")
+        dispatch_region = body[:admission] if admission >= 0 else ""
+        explicit_modes = all(
+            marker in body
+            for marker in (
+                "managed_acl_publication_mode",
+                "ManagedAclPublicationMode::StandaloneCompatibility",
+                "ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl",
+                "ManagedAclPublicationMode::ManagedAcl",
+            )
+        )
+        if (
+            not explicit_modes
+            or standalone_call < 0
+            or admission < 0
+            or standalone_call > admission
+            or "ManagedAclPublicationMode::StandaloneCompatibility" not in dispatch_region
+            or "ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl" not in dispatch_region
+        ):
+            errors.append(
+                "%s must explicitly dispatch both standalone modes before managed admission"
+                % name
+            )
+
+        if admission >= 0 and write_lock is not None:
+            before_admission = body[write_lock.end():admission]
+            if (
+                "state.state" in before_admission
+                or re.search(r"\bwal_append\s*\(", before_admission)
+                or direct_managed_write.search(before_admission)
+                or re.search(
+                    r"\b(?:compact_and_publish_state|persist_managed_local_projection_state)\s*\(",
+                    before_admission,
+                )
+            ):
+                errors.append(
+                    "managed %s must reject before state, WAL, or kernel effects" % name
+                )
+
+        old_state = re.search(r"\blet\s+(?:mut\s+)?old_state\b", body)
+        final_state = re.search(r"\blet\s+(?:mut\s+)?final_state\b", body)
+        plans = list(plan_pattern.finditer(body))
+        executors = list(executor_pattern.finditer(body))
+        domain_planner = re.search(spec["planner"], body)
+        direction_source = (
+            re.search(spec["direction_source"], body)
+            if spec["direction_source"] is not None
+            else None
+        )
+        if spec["direction_source"] is not None:
+            planner_statement_end = (
+                body.find(";", domain_planner.start())
+                if domain_planner is not None
+                else -1
+            )
+            planner_statement = (
+                body[domain_planner.start():planner_statement_end]
+                if planner_statement_end >= 0
+                else ""
+            )
+            if (
+                direction_source is None
+                or domain_planner is None
+                or direction_source.start() > domain_planner.start()
+                or "&old_state" not in re.sub(r"\s+", "", planner_statement)
+            ):
+                errors.append(
+                    "managed %s must feed expanded directions and old_state to its full planner"
+                    % name
+                )
+        order_pattern = re.compile(
+            r"\blet\s+projection_order\s*=\s*"
+            r"ManagedLocalProjectionOrder\s*::\s*%s\s*;"
+            % spec["order"]
+        )
+        projection_order = order_pattern.search(body)
+        merge_bindings = list(
+            re.finditer(
+                r"\blet\s+operations\s*=\s*"
+                r"merge_managed_local_projection_operations\s*\(",
+                body,
+            )
+        )
+        merge_arguments = None
+        if len(merge_bindings) == 1:
+            opening = body.find("(", merge_bindings[0].start())
+            merge_arguments = _rust_parenthesized_body_at(body, opening)
+        merge_items = (
+            _rust_split_top_level_arguments(merge_arguments)
+            if merge_arguments is not None
+            else []
+        )
+        normalized_merge_items = [re.sub(r"\s+", "", item) for item in merge_items]
+        operations_assignments = re.findall(
+            r"\b(?:let\s+(?:mut\s+)?)?operations\s*=", body
+        )
+        ordered = (
+            admission >= 0
+            and old_state is not None
+            and final_state is not None
+            and domain_planner is not None
+            and projection_order is not None
+            and len(plans) == 1
+            and len(merge_bindings) == 1
+            and len(executors) == 1
+            and admission
+            < old_state.start()
+            < domain_planner.start()
+            < final_state.start()
+            < plans[0].start()
+            < projection_order.start()
+            < merge_bindings[0].start()
+            < executors[0].start()
+        )
+        if not ordered:
+            errors.append(
+                "%s must plan old_state to final_state before one shared executor call"
+                % name
+            )
+        if (
+            len(merge_bindings) != 1
+            or len(operations_assignments) != 1
+            or normalized_merge_items
+            != ["projection_order", "general_mutations", "domain_operations"]
+        ):
+            errors.append(
+                "%s operations must come only from the ordered general/domain merge"
+                % name
+            )
+        if spec["final_uses_domain"] and final_state is not None:
+            final_statement_end = body.find(";", final_state.start())
+            final_statement = body[
+                final_state.start():
+                final_statement_end if final_statement_end >= 0 else len(body)
+            ]
+            if "domain_operations" not in final_statement:
+                errors.append(
+                    "managed %s must build final_state from the planned domain operations"
+                    % name
+                )
+        persist_binding = re.search(
+            r"\blet\s+persist_final_state\s*=\s*"
+            r"(?P<factory>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            body,
+        )
+        restore_binding = re.search(
+            r"\blet\s+restore_old_state\s*=\s*"
+            r"(?P<factory>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            body,
+        )
+        apply_binding = re.search(
+            r"\blet\s+apply_projection_operation\s*=\s*"
+            r"(?P<factory>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            body,
+        )
+        compensate_binding = re.search(
+            r"\blet\s+compensate_projection_receipt\s*=\s*"
+            r"(?P<factory>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            body,
+        )
+        health_binding = re.search(
+            r"\blet\s+(?:mut\s+)?set_projection_health\s*=\s*"
+            r"\|\s*health\s*\|\s*\{\s*"
+            r"state\s*\.\s*managed_projection_health\s*=\s*health\s*;\s*\}\s*;",
+            body,
+        )
+        health_assignments = re.findall(
+            r"\bstate\s*\.\s*managed_projection_health\s*=", body
+        )
+        if (
+            health_binding is None
+            or len(health_assignments) != 1
+            or not executors
+            or health_binding.start() > executors[0].start()
+        ):
+            errors.append(
+                "managed %s must bind its real projection-health setter" % name
+            )
+        operation_bindings_valid = (
+            apply_binding is not None
+            and compensate_binding is not None
+            and executors
+            and merge_bindings
+            and merge_bindings[0].start()
+            < apply_binding.start()
+            < compensate_binding.start()
+            < executors[0].start()
+        )
+        if operation_bindings_valid:
+            delegated_helpers["apply"].add(apply_binding.group("factory"))
+            delegated_helpers["compensate"].add(
+                compensate_binding.group("factory")
+            )
+        else:
+            errors.append(
+                "%s must bind shared apply and compensation receipt closures"
+                % name
+            )
+
+        snapshot_bindings_valid = False
+        if persist_binding is not None and restore_binding is not None:
+            persist_arguments = _rust_parenthesized_body_at(
+                body, body.find("(", persist_binding.start())
+            )
+            restore_arguments = _rust_parenthesized_body_at(
+                body, body.find("(", restore_binding.start())
+            )
+            snapshot_bindings_valid = (
+                persist_arguments is not None
+                and restore_arguments is not None
+                and re.search(r"&\s*final_state\b", persist_arguments)
+                and re.search(r"&\s*old_state\b", restore_arguments)
+                and executors
+                and merge_bindings
+                and merge_bindings[0].start()
+                < persist_binding.start()
+                < restore_binding.start()
+                < executors[0].start()
+            )
+            if snapshot_bindings_valid:
+                snapshot_factories["persist"].add(
+                    persist_binding.group("factory")
+                )
+                snapshot_factories["restore"].add(
+                    restore_binding.group("factory")
+                )
+        if not snapshot_bindings_valid:
+            errors.append(
+                "%s persistence and restore closures must capture final_state and old_state"
+                % name
+            )
+
+        if len(executors) != 1:
+            errors.append("%s must call the shared executor exactly once" % name)
+        else:
+            executor_arguments = _rust_parenthesized_body_at(
+                body, body.find("(", executors[0].start())
+            )
+            executor_items = (
+                _rust_split_top_level_arguments(executor_arguments)
+                if executor_arguments is not None
+                else []
+            )
+            normalized_executor_items = [
+                re.sub(r"\s+", "", item) for item in executor_items
+            ]
+            if (
+                len(normalized_executor_items) != 6
+                or normalized_executor_items[0] != "&operations"
+                or normalized_executor_items[1] != "set_projection_health"
+                or normalized_executor_items[2] != "apply_projection_operation"
+                or normalized_executor_items[3] != "persist_final_state"
+                or normalized_executor_items[4] != "compensate_projection_receipt"
+                or normalized_executor_items[5] != "restore_old_state"
+            ):
+                errors.append(
+                    "%s must pass planned operations and final/old snapshot closures to one executor"
+                    % name
+                )
+            state_publish = re.search(
+                r"\bstate\s*\.\s*state\s*=\s*final_state\s*;", body
+            )
+            executor_to_publish = (
+                body[executors[0].start():state_publish.start()]
+                if state_publish is not None
+                and executors[0].start() < state_publish.start()
+                else ""
+            )
+            if state_publish is None or not re.search(
+                r"\.\s*await(?:\s*\.\s*map_err\s*\([^;]+\))?\s*\?\s*;",
+                executor_to_publish,
+            ):
+                errors.append(
+                    "managed %s must publish final_state only after executor success"
+                    % name
+                )
+
+        if direct_managed_write.search(body):
+            errors.append("managed %s must not bypass the shared executor" % name)
+        if re.search(r"\bcompact_and_publish_state\s*\(", body):
+            errors.append(
+                "managed %s must leave persistence to the shared executor"
+                % name
+            )
+
+        if name in ("add_group", "delete_group"):
+            validation = body.find("validate_managed_group_mutation")
+            if (
+                old_state is None
+                or not executors
+                or validation < 0
+                or not old_state.start() < validation < executors[0].start()
+            ):
+                errors.append(
+                    "managed %s must validate ACL references before execution" % name
+                )
+        if name in ("delete_qos", "delete_mirror") and plans:
+            retention = body.find("reconcile_retained_owned_groups")
+            if final_state is None or not final_state.start() < retention < plans[0].start():
+                errors.append(
+                    "managed %s must reconcile retained groups before projection planning"
+                    % name
+                )
+
+    admission_body = _rust_function_body_from_blanked(
+        control_code, "managed_local_projection_admission"
+    )
+    if admission_body is None or not all(
+        marker in admission_body
+        for marker in (
+            "ManagedAclPublicationMode::ManagedAcl",
+            "ManagedProjectionHealth::Verified",
+            "ManagedProjectionHealth::Unverified",
+            "ManagedProjectionHealth::RepairRequired",
+            "ControlPlaneError::InstanceNotReady",
+        )
+    ):
+        errors.append(
+            "managed admission must accept only Verified managed projection health"
+        )
+
+    validation_body = _rust_function_body_from_blanked(
+        control_code, "validate_managed_group_mutation"
+    )
+    if validation_body is None or not all(
+        marker in validation_body
+        for marker in ("rules", "src_group_id", "dst_group_id", "GroupInUse")
+    ):
+        errors.append("managed group mutation must validate ACL references by group ID")
+
+    projection_body = _rust_function_body_from_blanked(
+        control_code, "managed_general_state_mutations"
+    )
+    projection_flow = re.search(
+        r"\blet\s+(\w+)\s*=\s*compile_managed_group_projection\s*"
+        r"\(\s*old_state\s*\)[\s\S]*?"
+        r"\blet\s+(\w+)\s*=\s*compile_managed_group_projection\s*"
+        r"\(\s*final_state\s*\)[\s\S]*?"
+        r"\bmanaged_general_projection_mutations\s*"
+        r"\(\s*&\s*\1\s*,\s*&\s*\2\s*,?\s*\)",
+        projection_body or "",
+    )
+    if (
+        projection_body is None
+        or projection_body.count("compile_managed_group_projection") != 2
+        or projection_flow is None
+    ):
+        errors.append(
+            "managed projection delta must compare exact old_state and final_state projections"
+        )
+
+    directions_body = _rust_function_body_from_blanked(
+        control_code, "requested_directions"
+    )
+    direction_two_expands = directions_body is not None and (
+        re.search(
+            r"\b2\s*=>[\s\S]{0,120}\bvec!\s*\[\s*0\s*,\s*1\s*\]",
+            directions_body,
+        )
+        or re.search(
+            r"\bdirection\s*==\s*2[\s\S]{0,120}"
+            r"\bvec!\s*\[\s*0\s*,\s*1\s*\]",
+            directions_body,
+        )
+    )
+    if not direction_two_expands:
+        errors.append("requested direction 2 must expand to ingress and egress")
+
+    qos_plan_body = _rust_function_body_from_blanked(
+        control_code, "managed_qos_direction_plans"
+    )
+    qos_plan_compact = re.sub(r"\s+", "", qos_plan_body or "")
+    downgrade_markers = (
+        "ifdirection==0&&mode==1{0}else{mode}",
+        "ifmode==1&&direction==0{0}else{mode}",
+        "(0,1)=>0",
+    )
+    if (
+        qos_plan_body is None
+        or not re.search(
+            r"\brequested_directions\s*\(\s*direction\s*\)", qos_plan_body
+        )
+        or "effective_mode" not in qos_plan_body
+        or not any(marker in qos_plan_compact for marker in downgrade_markers)
+    ):
+        errors.append(
+            "QoS direction planning must preserve both-direction mode semantics"
+        )
+    qos_upsert_plan_body = _rust_function_body_from_blanked(
+        control_code, "plan_managed_local_qos_upserts"
+    )
+    if (
+        qos_upsert_plan_body is None
+        or "old_state" not in qos_upsert_plan_body
+        or "direction_plans" not in qos_upsert_plan_body
+        or "ManagedLocalDomainOperation::EnsureFqQdisc" not in qos_upsert_plan_body
+        or "ManagedLocalDomainOperation::QosUpsert" not in qos_upsert_plan_body
+        or qos_upsert_plan_body.find("ManagedLocalDomainOperation::EnsureFqQdisc")
+        > qos_upsert_plan_body.find("ManagedLocalDomainOperation::QosUpsert")
+    ):
+        errors.append(
+            "QoS full planner must ensure qdisc before ordered domain upserts"
+        )
+
+    standalone_markers = {
+        "add_group": ("add_network", "add_acl_network_in_bank", "wal_append"),
+        "delete_group": ("delete_network", "delete_acl_network_in_bank", "wal_append"),
+        "add_qos": ("qos_ops", "add_qos_rule", "wal_append"),
+        "delete_qos": ("qos_ops", "delete_qos_rule", "wal_append"),
+        "add_mirror": ("mirror_ops", "add_mirror", "wal_append"),
+        "delete_mirror": ("mirror_ops", "delete_mirror", "wal_append"),
+    }
+    for name, spec in wrapper_specs.items():
+        helper = spec["standalone"]
+        helper_body = _rust_function_body_from_blanked(control_code, helper)
+        if helper_body is None:
+            errors.append("standalone helper %s is missing" % helper)
+        else:
+            if "execute_managed_local_projection_transaction" in helper_body:
+                errors.append(
+                    "standalone helper %s must not use the managed executor" % helper
+                )
+            if not all(marker in helper_body for marker in standalone_markers[name]):
+                errors.append(
+                    "standalone helper %s must retain legacy kernel and WAL writes"
+                    % helper
+                )
+
+    executor_body = _rust_function_body_from_blanked(
+        control_code, "execute_managed_local_projection_transaction"
+    )
+    compensation_name = "execute_managed_local_projection_compensations"
+    if executor_body is None:
+        errors.append("shared managed local projection executor is missing")
+    else:
+        health = executor_body.find("ManagedProjectionHealth::Unverified")
+        apply = re.search(r"\bapply\s*\(", executor_body)
+        persist = re.search(r"\bpersist\s*\(\s*\)", executor_body)
+        receipt_journal = re.search(
+            r"\bOk\s*\(\s*(\w+)\s*\)\s*=>\s*(?:\{\s*)?"
+            r"applied\s*\.\s*push\s*"
+            r"\(\s*\1\s*\)",
+            executor_body,
+        )
+        compensations = list(
+            re.finditer(r"\b%s\s*\(" % compensation_name, executor_body)
+        )
+        persist_failure = re.search(
+            r"\bif\s+let\s+Err\s*\(\s*\w+\s*\)\s*=\s*"
+            r"persist\s*\(\s*\)\s*\.\s*await\s*\{",
+            executor_body,
+        )
+        persist_failure_body = None
+        if persist_failure is not None:
+            persist_failure_body = _rust_braced_body_at(
+                executor_body, executor_body.find("{", persist_failure.start())
+            )
+        durable_restores = list(
+            re.finditer(r"\brestore_durable\s*\(\s*\)", executor_body)
+        )
+        durable_restore = re.search(
+            r"\blet\s+(\w+)\s*=\s*restore_durable\s*\(\s*\)"
+            r"\s*\.\s*await[^;]*;",
+            persist_failure_body or "",
+        )
+        if (
+            executor_body.count("ManagedProjectionHealth::Unverified") != 1
+            or "ManagedProjectionHealth::Verified" in executor_body
+        ):
+            errors.append(
+                "shared executor must set health exactly once to Unverified and never Verified"
+            )
+        if (
+            health < 0
+            or apply is None
+            or persist is None
+            or not health < apply.start() < persist.start()
+            or not re.search(r"\bfor\s+\w+\s+in\s+operations\b", executor_body)
+        ):
+            errors.append(
+                "shared executor must journal and apply the kernel plan before persistence"
+            )
+        if receipt_journal is None:
+            errors.append(
+                "shared executor must journal apply receipts rather than requested operations"
+            )
+        if (
+            len(compensations) != 2
+            or apply is None
+            or persist is None
+            or not apply.start() < compensations[0].start() < persist.start()
+        ):
+            errors.append(
+                "kernel partial failure must compensate every applied operation"
+            )
+        if (
+            len(compensations) != 2
+            or persist is None
+            or persist_failure_body is None
+            or durable_restore is None
+            or compensation_name not in persist_failure_body
+        ):
+            errors.append(
+                "persistence failure must restore durable old state after compensation"
+            )
+        compensation_arguments = []
+        for compensation in compensations:
+            arguments = _rust_parenthesized_body_at(
+                executor_body, executor_body.find("(", compensation.start())
+            )
+            compensation_arguments.append(
+                _rust_split_top_level_arguments(arguments or "")
+            )
+        if len(compensation_arguments) != 2 or any(
+            not arguments
+            or re.sub(r"\s+", "", arguments[0]) != "&applied"
+            for arguments in compensation_arguments
+        ):
+            errors.append(
+                "both rollback paths must compensate the applied receipt journal"
+            )
+        if (
+            len(durable_restores) != 1
+            or durable_restore is None
+            or not re.search(
+                r"\btransaction_failure\s*\([^;]*\b%s\b"
+                % re.escape(durable_restore.group(1) if durable_restore else ""),
+                (persist_failure_body or "")[durable_restore.start() if durable_restore else 0:],
+            )
+        ):
+            errors.append("durable restore failure must remain visible to the caller")
+        if direct_managed_write.search(executor_body):
+            errors.append("shared executor must not mutate the active ACL bank directly")
+
+    for kind in ("apply", "compensate"):
+        helpers = delegated_helpers[kind]
+        if len(helpers) != 1:
+            errors.append("managed wrappers must share one %s receipt helper" % kind)
+            continue
+        helper = next(iter(helpers))
+        helper_body = _rust_function_body_from_blanked(control_code, helper)
+        if helper_body is None:
+            errors.append("managed %s receipt helper %s is missing" % (kind, helper))
+            continue
+        if active_acl_access.search(helper_body):
+            errors.append(
+                "managed %s receipt helper must not mutate the active ACL bank" % kind
+            )
+        if kind == "apply" and not all(
+            marker in helper_body
+            for marker in (
+                "ManagedLocalProjectionOperation::General",
+                "ManagedLocalProjectionOperation::Domain",
+                "ManagedLocalProjectionReceipt::General",
+                "ManagedLocalProjectionReceipt::Domain",
+                "apply_managed_local_domain_operation",
+            )
+        ):
+            errors.append(
+                "managed apply helper must return general or domain receipts"
+            )
+        if kind == "compensate" and not all(
+            marker in helper_body
+            for marker in (
+                "ManagedLocalProjectionReceipt::General",
+                "ManagedLocalProjectionReceipt::Domain",
+                "compensate_managed_local_domain_receipt",
+            )
+        ):
+            errors.append(
+                "managed compensation helper must consume general or domain receipts"
+            )
+
+    for kind, state_name in (("persist", "final_state"), ("restore", "old_state")):
+        factories = snapshot_factories[kind]
+        if len(factories) != 1:
+            errors.append("managed wrappers must share one %s snapshot factory" % kind)
+            continue
+        factory = next(iter(factories))
+        factory_body = _rust_function_body_from_blanked(control_code, factory)
+        if (
+            factory_body is None
+            or state_name not in factory_body
+            or "serde_json" not in factory_body
+            or not re.search(r"\bwal\s*\.\s*clone\s*\(", factory_body)
+            or not re.search(r"\bwal\s*\.\s*compact\s*\(", factory_body)
+        ):
+            errors.append(
+                "managed %s snapshot factory must serialize %s and compact a cloned WAL"
+                % (kind, state_name)
+            )
+
+    fq_receipt_helper = "managed_local_fq_qdisc_apply_receipt"
+    fq_receipt_body = _rust_function_body_from_blanked(
+        control_code, fq_receipt_helper
+    )
+    fq_cleanup_derivation = re.search(
+        r"\blet\s+(?P<derived>\w+)\s*=\s*(?P<requested>\w+)\s*&&\s*"
+        r"matches!\s*\(\s*(?P<state>\w+)\s*,\s*"
+        r"FqQdiscState\s*::\s*InstalledNow\s*\)\s*;",
+        fq_receipt_body or "",
+    )
+    fq_receipt_fields = None
+    if fq_receipt_body is not None:
+        fq_receipt_marker = fq_receipt_body.find(
+            "ManagedLocalDomainReceipt::FqQdisc"
+        )
+        fq_receipt_opening = fq_receipt_body.find("{", fq_receipt_marker)
+        if fq_receipt_marker >= 0 and fq_receipt_opening >= 0:
+            fq_receipt_fields = _rust_braced_body_at(
+                fq_receipt_body, fq_receipt_opening
+            )
+    if fq_cleanup_derivation is None or fq_receipt_fields is None:
+        errors.append(
+            "managed FQ receipt cleanup must derive from the actual ensure result"
+        )
+    else:
+        state_name = fq_cleanup_derivation.group("state")
+        derived_name = fq_cleanup_derivation.group("derived")
+        state_field = re.search(
+            r"\bstate\s*(?::\s*(\w+))?\s*,", fq_receipt_fields
+        )
+        cleanup_field = re.search(
+            r"\bcleanup_on_rollback\s*(?::\s*(\w+))?\s*,",
+            fq_receipt_fields,
+        )
+        if (
+            state_field is None
+            or (state_field.group(1) or "state") != state_name
+            or cleanup_field is None
+            or (cleanup_field.group(1) or "cleanup_on_rollback") != derived_name
+        ):
+            errors.append(
+                "managed FQ receipt cleanup must derive from the actual ensure result"
+            )
+
+    domain_apply_body = _rust_function_body_from_blanked(
+        control_code, "apply_managed_local_domain_operation"
+    )
+    if domain_apply_body is None or not all(
+        marker in domain_apply_body
+        for marker in (
+            "ManagedLocalDomainOperation",
+            "ManagedLocalDomainReceipt",
+            "EnsureFqQdisc",
+            "cleanup_on_rollback",
+            "FqQdiscState::InstalledNow",
+            "build_managed_local_domain_receipt",
+            "apply_managed_local_projection_operation_transactionally",
+            fq_receipt_helper,
+            "mark_owned_fq_qdisc",
+            "rollback_installed_fq_qdisc",
+        )
+    ):
+        errors.append(
+            "managed domain apply must return QoS and qdisc ownership receipts"
+        )
+    elif active_acl_access.search(domain_apply_body):
+        errors.append("managed domain apply must not mutate the active ACL bank")
+
+    ensure_state = re.search(
+        r"\blet\s+(?P<state>\w+)\s*=\s*ensure_fq_qdisc\s*"
+        r"\([^;]*\)\s*\?\s*;",
+        domain_apply_body or "",
+    )
+    fq_receipt_call = re.search(
+        r"\b%s\s*\(" % re.escape(fq_receipt_helper),
+        domain_apply_body or "",
+    )
+    fq_receipt_arguments = None
+    if fq_receipt_call is not None:
+        fq_receipt_arguments = _rust_parenthesized_body_at(
+            domain_apply_body,
+            domain_apply_body.find("(", fq_receipt_call.start()),
+        )
+    fq_receipt_items = _rust_split_top_level_arguments(
+        fq_receipt_arguments or ""
+    )
+    if (
+        ensure_state is None
+        or len(fq_receipt_items) != 2
+        or re.sub(r"\s+", "", fq_receipt_items[0])
+        != ensure_state.group("state")
+        or re.sub(r"\s+", "", fq_receipt_items[1])
+        not in ("cleanup_on_rollback", "*cleanup_on_rollback")
+    ):
+        errors.append(
+            "managed FQ receipt cleanup must derive from the actual ensure result"
+        )
+
+    marker_failure = re.search(
+        r"\bif\s+let\s+Err\s*\(\s*(?P<error>\w+)\s*\)\s*=\s*"
+        r"mark_owned_fq_qdisc\s*\([^;{]*\)\s*\{",
+        domain_apply_body or "",
+    )
+    marker_failure_body = None
+    if marker_failure is not None:
+        marker_failure_body = _rust_braced_body_at(
+            domain_apply_body,
+            domain_apply_body.find("{", marker_failure.start()),
+        )
+    marker_rollback = re.search(
+        r"\brollback_installed_fq_qdisc\s*\(", marker_failure_body or ""
+    )
+    marker_return = re.search(
+        r"\breturn\s+Err\s*\(\s*%s\s*\)"
+        % re.escape(marker_failure.group("error") if marker_failure else ""),
+        marker_failure_body or "",
+    )
+    if (
+        marker_failure_body is None
+        or marker_rollback is None
+        or marker_return is None
+        or marker_rollback.start() > marker_return.start()
+    ):
+        errors.append(
+            "managed FQ marker failure must roll back the installed qdisc before returning"
+        )
+
+    transactional_apply_body = _rust_function_body_from_blanked(
+        control_code, "apply_managed_local_projection_operation_transactionally"
+    )
+    if transactional_apply_body is None:
+        errors.append("managed domain current-operation rollback helper is missing")
+    else:
+        raw_apply_match = re.search(r"\braw_apply\s*\(", transactional_apply_body)
+        apply_error_match = re.search(
+            r"\bErr\s*\(\s*(?P<error>\w+)\s*\)\s*=>",
+            transactional_apply_body,
+        )
+        compensation_binding = re.search(
+            r"\blet\s+(?P<error>\w+)\s*=\s*compensate\s*"
+            r"\(\s*&?\s*receipt\s*\)\s*"
+            r"(?:\.\s*await\s*)?\.\s*err\s*\(\s*\)\s*;",
+            transactional_apply_body,
+        )
+        failure_match = re.search(
+            r"\bdomain_apply_failure\s*\(", transactional_apply_body
+        )
+        raw_apply = raw_apply_match.start() if raw_apply_match else -1
+        apply_error = apply_error_match.start() if apply_error_match else -1
+        compensate = compensation_binding.start() if compensation_binding else -1
+        failure = failure_match.start() if failure_match else -1
+        failure_arguments = None
+        if failure_match is not None:
+            failure_arguments = _rust_parenthesized_body_at(
+                transactional_apply_body,
+                transactional_apply_body.find("(", failure_match.start()),
+            )
+        normalized_failure_arguments = re.sub(
+            r"\s+", "", failure_arguments or ""
+        )
+        apply_error_name = (
+            apply_error_match.group("error") if apply_error_match else ""
+        )
+        compensation_error_name = (
+            compensation_binding.group("error") if compensation_binding else ""
+        )
+        if (
+            min(raw_apply, apply_error, compensate, failure) < 0
+            or not raw_apply < apply_error < compensate < failure
+            or "receipt" not in transactional_apply_body
+            or transactional_apply_body.count("compensate(") != 1
+            or apply_error_name not in normalized_failure_arguments
+            or compensation_error_name not in normalized_failure_arguments
+        ):
+            errors.append(
+                "managed domain apply failure must compensate its current receipt"
+            )
+        if active_acl_access.search(transactional_apply_body):
+            errors.append(
+                "managed domain transactional apply must not mutate the active ACL bank"
+            )
+
+    domain_raw_body = _rust_function_body_from_blanked(
+        control_code, "apply_managed_local_domain_raw"
+    )
+    domain_receipt_body = _rust_function_body_from_blanked(
+        control_code, "build_managed_local_domain_receipt"
+    )
+    if domain_raw_body is None or domain_receipt_body is None:
+        errors.append("managed domain apply must separate preimage receipt from raw writes")
+    elif active_acl_access.search(domain_raw_body) or active_acl_access.search(
+        domain_receipt_body
+    ):
+        errors.append("managed domain delegated helpers must not mutate the active ACL bank")
+    else:
+        def operation_arm(marker, following_markers):
+            start = domain_receipt_body.find(marker)
+            if start < 0:
+                return ""
+            ends = [
+                domain_receipt_body.find(next_marker, start + len(marker))
+                for next_marker in following_markers
+            ]
+            ends = [end for end in ends if end >= 0]
+            return domain_receipt_body[start:min(ends) if ends else None]
+
+        def replacement_receipt_preserves_preimage(
+            arm, receipt_marker, require_target_ifindex=False
+        ):
+            receipt = arm.find(receipt_marker)
+            opening = arm.find("{", receipt)
+            fields = (
+                _rust_braced_body_at(arm, opening)
+                if receipt >= 0 and opening >= 0
+                else None
+            )
+            if fields is None:
+                return False
+            applied = re.search(r"\bapplied\s*:\s*([^,}\n]+)", fields)
+            previous = re.search(r"\bprevious\s*:\s*([^,}\n]+)", fields)
+            if applied is None or "rule" not in applied.group(1) or previous is None:
+                return False
+            previous_expression = re.sub(r"\s+", "", previous.group(1))
+            if previous_expression.startswith("None") or previous_expression in (
+                "Option::None",
+                "Default::default()",
+            ):
+                return False
+            return not require_target_ifindex or "target_ifindex" in arm
+
+        qos_arm = operation_arm(
+            "ManagedLocalDomainOperation::QosUpsert",
+            (
+                "ManagedLocalDomainOperation::QosDelete",
+                "ManagedLocalDomainOperation::MirrorUpsert",
+            ),
+        )
+        mirror_arm = operation_arm(
+            "ManagedLocalDomainOperation::MirrorUpsert",
+            ("ManagedLocalDomainOperation::MirrorDelete",),
+        )
+        if (
+            not replacement_receipt_preserves_preimage(
+                qos_arm, "ManagedLocalDomainReceipt::QosUpsert"
+            )
+            or not replacement_receipt_preserves_preimage(
+                mirror_arm,
+                "ManagedLocalDomainReceipt::MirrorUpsert",
+                require_target_ifindex=True,
+            )
+            or "ManagedLocalDomainOperation::QosDelete" not in domain_receipt_body
+            or "ManagedLocalDomainReceipt::QosDelete" not in domain_receipt_body
+            or "ManagedLocalDomainOperation::MirrorDelete" not in domain_receipt_body
+            or "ManagedLocalDomainReceipt::MirrorDelete" not in domain_receipt_body
+        ):
+            errors.append(
+                "managed domain receipts must preserve QoS and Mirror preimages"
+            )
+
+    domain_compensation_body = _rust_function_body_from_blanked(
+        control_code, "managed_local_domain_compensation_operations"
+    )
+    if domain_compensation_body is None or not all(
+        marker in domain_compensation_body
+        for marker in (
+            "ManagedLocalDomainReceipt",
+            "FqQdisc",
+            "cleanup_on_rollback",
+            "FqQdiscState::InstalledNow",
+            "FqQdiscState::AlreadyPresent",
+            "CleanupOwnedFqQdisc",
+            "QosUpsert",
+            "QosDelete",
+            "MirrorUpsert",
+            "MirrorDelete",
+            "previous",
+            "src_group_id",
+            "dst_group_id",
+            "target_ifindex",
+        )
+    ):
+        errors.append(
+            "managed domain compensation must derive qdisc cleanup from its receipt"
+        )
+    elif active_acl_access.search(domain_compensation_body):
+        errors.append("managed domain compensation must not mutate the active ACL bank")
+
+    compensation_body = _rust_function_body_from_blanked(
+        control_code, compensation_name
+    )
+    compensation_collects_errors = re.search(
+        r"\bErr\s*\(\s*(\w+)\s*\)[\s\S]*?"
+        r"\b\w+\s*\.\s*push\s*\(\s*\1\s*\)",
+        compensation_body or "",
+    )
+    if (
+        compensation_body is None
+        or not re.search(r"\.\s*iter\s*\(\s*\)\s*\.\s*rev\s*\(\s*\)", compensation_body)
+        or compensation_collects_errors is None
+        or re.search(r"\breturn\s+Err\s*\(", compensation_body or "")
+        or re.search(
+            r"\bcompensate\s*\([^;]*\)\s*(?:\.\s*await\s*)?\?",
+            compensation_body or "",
+        )
+    ):
+        errors.append(
+            "compensation must run in reverse and attempt every applied operation"
+        )
+    retained_body = _rust_function_body_from_blanked(
+        control_code, "reconcile_retained_owned_groups"
+    )
+    if retained_body is None or not all(
+        marker in retained_body
+        for marker in (
+            "groups",
+            "rules",
+            "qos_rules",
+            "mirror_rules",
+            "src_group_id",
+            "dst_group_id",
+        )
+    ):
+        errors.append(
+            "retained owned groups must follow ACL, QoS, and both Mirror references"
+        )
+    replace_body = _rust_function_body_from_blanked(control_code, "replace_owned_acl")
+    if replace_body is None:
+        errors.append("owned ACL replace function is missing")
+    else:
+        removal = replace_body.find("final_state.groups.remove")
+        retention = replace_body.find("reconcile_retained_owned_groups")
+        plan = plan_pattern.search(replace_body)
+        if (
+            removal < 0
+            or retention < 0
+            or plan is None
+            or not removal < retention < plan.start()
+        ):
+            errors.append(
+                "owned ACL replace must reconcile retention after removals and before projection"
+            )
+
+    status_body = _rust_function_body_from_blanked(control_code, "status_code")
+    if status_body is None or not re.search(
+        r"(?:GroupInUse[\s\S]*LocalWriteBlocked|LocalWriteBlocked[\s\S]*GroupInUse)"
+        r"[\s\S]*=>\s*409\b",
+        status_body,
+    ):
+        errors.append("managed local-write conflicts must retain HTTP 409 mapping")
+    if status_body is None or not re.search(
+        r"InstanceNotReady[\s\S]*=>\s*503\b", status_body
+    ):
+        errors.append("managed projection not-ready must retain HTTP 503 mapping")
+
+    handler_specs = (
+        ("groups", "add_group", None),
+        ("groups", "delete_group", None),
+        ("qos", "add_qos", "delete_qos"),
+        ("qos", "delete_qos", None),
+        ("mirror", "add_mirror", "delete_mirror"),
+        ("mirror", "delete_mirror", None),
+    )
+    for kind, name, rollback in handler_specs:
+        code = handler_codes[kind]
+        body = _rust_function_body_from_blanked(code, name)
+        if body is None:
+            errors.append("managed mutation handler %s is missing" % name)
+            continue
+        calls = list(re.finditer(r"\bcp\s*\.\s*%s\s*\(" % name, body))
+        error_branch_valid = False
+        arguments = None
+        if len(calls) == 1:
+            call = calls[0]
+            opening = body.find("(", call.start())
+            arguments = _rust_parenthesized_body_at(body, opening)
+            closing = opening + len(arguments) + 1 if arguments is not None else -1
+            binding = re.search(
+                r"\bif\s+let\s+Err\s*\(\s*(\w+)\s*\)\s*=\s*$",
+                body[max(0, call.start() - 160):call.start()],
+            )
+            await_and_block = (
+                re.match(r"\s*\.\s*await\s*\{", body[closing + 1:])
+                if closing >= 0
+                else None
+            )
+            if binding is not None and await_and_block is not None:
+                block_opening = body.find("{", closing + 1)
+                error_body = _rust_braced_body_at(body, block_opening) or ""
+                error_branch_valid = bool(
+                    re.search(
+                        r"\breturn\s+Err\s*\(\s*err_response\s*\(\s*%s\s*\)\s*\)"
+                        % re.escape(binding.group(1)),
+                        error_body,
+                    )
+                )
+            if not error_branch_valid and await_and_block is not None:
+                match_binding = re.search(
+                    r"\bmatch\s*$",
+                    body[max(0, call.start() - 80):call.start()],
+                )
+                if match_binding is not None:
+                    block_opening = body.find("{", closing + 1)
+                    match_body = _rust_braced_body_at(body, block_opening) or ""
+                    match_error = re.search(
+                        r"\bErr\s*\(\s*(\w+)\s*\)\s*=>"
+                        r"[\s\S]{0,240}?\berr_response\s*\(\s*\1\s*\)",
+                        match_body,
+                    )
+                    error_branch_valid = match_error is not None
+        if len(calls) != 1 or not error_branch_valid:
+            errors.append(
+                "managed mutation handler %s must return its exact ControlPlane error"
+                % name
+            )
+        attribute = _rust_utoipa_attribute_prefix_from_blanked(code, name)
+        for status in (409, 503):
+            if attribute is None or not re.search(
+                r"\bstatus\s*=\s*%d\b" % status, attribute
+            ):
+                errors.append(
+                    "managed mutation handler %s must document HTTP %d" % (name, status)
+                )
+        if calls and _rust_position_is_inside_loop(body, calls[0].start()):
+            errors.append(
+                "managed %s handler must not loop around its ControlPlane call" % name
+            )
+        if kind in ("qos", "mirror") and calls:
+            if (
+                arguments is None
+                or not re.search(r"\bdirection\b", arguments)
+                or re.search(r"\*\s*dir\b", arguments)
+                or (rollback and re.search(r"\bcp\s*\.\s*%s\s*\(" % rollback, body))
+            ):
+                errors.append(
+                    "managed %s handler must submit one raw-direction ControlPlane transaction"
+                    % name
+                )
+    return errors
+
+
+def _run_managed_cross_domain_group_mutation_self_tests():
+    def wrapper(name, standalone, parameters, order, planning):
+        return r"""
+        pub async fn %s(&self, instance: &str%s) {
+            let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+            let instance = self.get_instance(instance).await?;
+            let mut state = instance.write().await;
+            match state.managed_acl_publication_mode {
+                ManagedAclPublicationMode::StandaloneCompatibility
+                | ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl => {
+                    return self.%s(&mut state).await;
+                }
+                ManagedAclPublicationMode::ManagedAcl => {}
+            }
+            managed_local_projection_admission(
+                state.managed_acl_publication_mode,
+                state.managed_projection_health,
+            )?;
+            let old_state = state.state.clone();
+%s
+            let general_mutations =
+                managed_general_state_mutations(&old_state, &final_state)?;
+            let projection_order = ManagedLocalProjectionOrder::%s;
+            let operations = merge_managed_local_projection_operations(
+                projection_order,
+                general_mutations,
+                domain_operations,
+            );
+            let apply_projection_operation =
+                managed_local_projection_apply(runtime, ebpf_path);
+            let compensate_projection_receipt =
+                managed_local_projection_compensate(runtime, ebpf_path);
+            let persist_final_state =
+                managed_local_projection_persist(&state.wal, &final_state);
+            let restore_old_state =
+                managed_local_projection_restore(&state.wal, &old_state);
+            let mut set_projection_health = |health| {
+                state.managed_projection_health = health;
+            };
+            execute_managed_local_projection_transaction(
+                &operations,
+                set_projection_health,
+                apply_projection_operation,
+                persist_final_state,
+                compensate_projection_receipt,
+                restore_old_state,
+            ).await?;
+            state.state = final_state;
+            Ok(())
+        }
+        """ % (name, parameters, standalone, planning, order)
+
+    shared = r"""
+        fn managed_local_projection_admission(
+            mode: ManagedAclPublicationMode,
+            health: ManagedProjectionHealth,
+        ) -> Result<(), ControlPlaneError> {
+            if mode == ManagedAclPublicationMode::ManagedAcl {
+                match health {
+                    ManagedProjectionHealth::Verified => {}
+                    ManagedProjectionHealth::Unverified
+                    | ManagedProjectionHealth::RepairRequired => {
+                        return Err(ControlPlaneError::InstanceNotReady("projection".into()));
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn managed_general_state_mutations(old_state: &State, final_state: &State) {
+            let committed_projection = compile_managed_group_projection(old_state)?;
+            let proposed_projection = compile_managed_group_projection(final_state)?;
+            managed_general_projection_mutations(
+                &committed_projection,
+                &proposed_projection,
+            )
+        }
+
+        fn validate_managed_group_mutation(state: &State, group_id: u32) {
+            if state.rules.iter().any(|rule| {
+                rule.src_group_id == group_id || rule.dst_group_id == group_id
+            }) {
+                return Err(ControlPlaneError::GroupInUse("ACL reference".into()));
+            }
+            Ok(())
+        }
+
+        fn requested_directions(direction: u8) {
+            match direction {
+                0 => Ok(vec![0]),
+                1 => Ok(vec![1]),
+                2 => Ok(vec![0, 1]),
+                _ => Err(ControlPlaneError::InvalidDirection(direction)),
+            }
+        }
+
+        fn managed_qos_direction_plans(direction: u8, mode: u8) {
+            requested_directions(direction)?
+                .into_iter()
+                .map(|direction| {
+                    let effective_mode = if direction == 0 && mode == 1 { 0 } else { mode };
+                    ManagedQosDirectionPlan { direction, effective_mode }
+                })
+                .collect()
+        }
+
+        fn plan_managed_local_qos_upserts(
+            old_state: &State,
+            direction_plans: &[ManagedQosDirectionPlan],
+        ) {
+            let mut operations = Vec::new();
+            if direction_plans.iter().any(|plan| plan.effective_mode == 1) {
+                operations.push(ManagedLocalDomainOperation::EnsureFqQdisc {
+                    cleanup_on_rollback: !old_state.qos_rules.iter().any(|rule| rule.mode == 1),
+                });
+            }
+            for plan in direction_plans {
+                operations.push(ManagedLocalDomainOperation::QosUpsert(
+                    materialize_qos_rule(old_state, plan),
+                ));
+            }
+            operations
+        }
+
+        fn managed_local_projection_apply(runtime: Runtime, ebpf_path: Path) {
+            move |operation: &ManagedLocalProjectionOperation| {
+                match operation {
+                    ManagedLocalProjectionOperation::General(mutation) => {
+                        apply_shared_network_mutation(mutation, runtime, ebpf_path)?;
+                        Ok(ManagedLocalProjectionReceipt::General(mutation.clone()))
+                    }
+                    ManagedLocalProjectionOperation::Domain(operation) => {
+                        let receipt = apply_managed_local_domain_operation(operation)?;
+                        Ok(ManagedLocalProjectionReceipt::Domain(receipt))
+                    }
+                }
+            }
+        }
+
+        fn managed_local_fq_qdisc_apply_receipt(
+            state: FqQdiscState,
+            cleanup_on_rollback: bool,
+        ) {
+            let cleanup_on_rollback = cleanup_on_rollback
+                && matches!(state, FqQdiscState::InstalledNow);
+            ManagedLocalDomainReceipt::FqQdisc {
+                state,
+                cleanup_on_rollback,
+            }
+        }
+
+        fn apply_managed_local_domain_operation(operation: &ManagedLocalDomainOperation) {
+            if let ManagedLocalDomainOperation::EnsureFqQdisc {
+                cleanup_on_rollback,
+            } = operation {
+                let state = ensure_fq_qdisc()?;
+                if matches!(state, FqQdiscState::InstalledNow) {
+                    if let Err(marker_error) = mark_owned_fq_qdisc() {
+                        rollback_installed_fq_qdisc();
+                        return Err(marker_error);
+                    }
+                }
+                let receipt: ManagedLocalDomainReceipt =
+                    managed_local_fq_qdisc_apply_receipt(
+                        state,
+                        *cleanup_on_rollback,
+                    );
+                return Ok(receipt);
+            }
+            let receipt = build_managed_local_domain_receipt(operation)?;
+            apply_managed_local_projection_operation_transactionally(
+                operation,
+                receipt,
+                apply_managed_local_domain_raw,
+                compensate_managed_local_domain_receipt,
+            )
+        }
+
+        fn apply_managed_local_projection_operation_transactionally(
+            operation: &ManagedLocalDomainOperation,
+            receipt: ManagedLocalDomainReceipt,
+            mut raw_apply: impl RawApply,
+            mut compensate: impl Compensation,
+        ) {
+            match raw_apply(operation, &receipt) {
+                Ok(()) => Ok(receipt),
+                Err(apply_error) => {
+                    let compensation_error = compensate(&receipt).err();
+                    Err(domain_apply_failure(apply_error, compensation_error))
+                }
+            }
+        }
+
+        fn build_managed_local_domain_receipt(operation: &ManagedLocalDomainOperation) {
+            match operation {
+                ManagedLocalDomainOperation::QosUpsert(rule) => {
+                    Ok(ManagedLocalDomainReceipt::QosUpsert {
+                        applied: rule.clone(), previous: previous_qos_rule,
+                    })
+                }
+                ManagedLocalDomainOperation::QosDelete { group_id, direction } => {
+                    Ok(ManagedLocalDomainReceipt::QosDelete { deleted: old_rule })
+                }
+                ManagedLocalDomainOperation::MirrorUpsert(rule) => {
+                    let target_ifindex = rule.target_ifindex;
+                    Ok(ManagedLocalDomainReceipt::MirrorUpsert {
+                        applied: rule.clone(), previous: previous_rule_with_target_ifindex,
+                    })
+                }
+                ManagedLocalDomainOperation::MirrorDelete {
+                    src_group_id, dst_group_id, proto, direction, is_global,
+                } => {
+                    let _ = (src_group_id, dst_group_id, proto, direction, is_global);
+                    Ok(ManagedLocalDomainReceipt::MirrorDelete {
+                        deleted: old_mirror_rule,
+                    })
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        fn apply_managed_local_domain_raw(
+            operation: &ManagedLocalDomainOperation,
+            receipt: &ManagedLocalDomainReceipt,
+        ) {
+            match operation {
+                ManagedLocalDomainOperation::QosUpsert(rule) => aria_core::qos_ops::add_qos_rule(rule),
+                ManagedLocalDomainOperation::QosDelete { group_id, direction } => {
+                    aria_core::qos_ops::delete_qos_rule(group_id, direction)
+                }
+                ManagedLocalDomainOperation::MirrorUpsert(rule) => {
+                    aria_core::mirror_ops::add_mirror_rule(rule)
+                }
+                ManagedLocalDomainOperation::MirrorDelete { .. } => {
+                    aria_core::mirror_ops::delete_mirror_rule(receipt)
+                }
+                ManagedLocalDomainOperation::CleanupOwnedFqQdisc => cleanup_owned_fq_qdisc(),
+                ManagedLocalDomainOperation::EnsureFqQdisc { .. } => unreachable!(),
+            }
+        }
+
+        fn managed_local_domain_compensation_operations(receipt: &ManagedLocalDomainReceipt) {
+            match receipt {
+                ManagedLocalDomainReceipt::FqQdisc {
+                    state: FqQdiscState::InstalledNow,
+                    cleanup_on_rollback: true,
+                } => vec![ManagedLocalDomainOperation::CleanupOwnedFqQdisc],
+                ManagedLocalDomainReceipt::FqQdisc {
+                    state: FqQdiscState::AlreadyPresent,
+                    cleanup_on_rollback: false,
+                } => Vec::new(),
+                ManagedLocalDomainReceipt::QosUpsert { applied, previous } => previous
+                    .clone()
+                    .map(ManagedLocalDomainOperation::QosUpsert)
+                    .into_iter()
+                    .chain((previous.is_none()).then(|| ManagedLocalDomainOperation::QosDelete {
+                        group_id: applied.group_id,
+                        direction: applied.direction,
+                    }))
+                    .collect(),
+                ManagedLocalDomainReceipt::QosDelete { deleted } => {
+                    vec![ManagedLocalDomainOperation::QosUpsert(deleted.clone())]
+                }
+                ManagedLocalDomainReceipt::MirrorUpsert { applied, previous } => previous
+                    .clone()
+                    .map(ManagedLocalDomainOperation::MirrorUpsert)
+                    .into_iter()
+                    .chain((previous.is_none()).then(|| {
+                        let _target_ifindex = applied.target_ifindex;
+                        ManagedLocalDomainOperation::MirrorDelete {
+                            src_group_id: applied.src_group_id,
+                            dst_group_id: applied.dst_group_id,
+                            proto: applied.proto,
+                            direction: applied.direction,
+                            is_global: applied.is_global,
+                        }
+                    }))
+                    .collect(),
+                ManagedLocalDomainReceipt::MirrorDelete { deleted } => {
+                    vec![ManagedLocalDomainOperation::MirrorUpsert(deleted.clone())]
+                }
+                _ => Vec::new(),
+            }
+        }
+
+        fn compensate_managed_local_domain_receipt(receipt: &ManagedLocalDomainReceipt) {
+            for operation in managed_local_domain_compensation_operations(receipt) {
+                apply_managed_local_domain_raw(&operation, receipt)?;
+            }
+            Ok(())
+        }
+
+        fn managed_local_projection_compensate(runtime: Runtime, ebpf_path: Path) {
+            move |receipt: &ManagedLocalProjectionReceipt| {
+                match receipt {
+                    ManagedLocalProjectionReceipt::General(mutation) => {
+                        apply_shared_network_mutation(
+                            &shared_network_compensation(mutation), runtime, ebpf_path,
+                        )
+                    }
+                    ManagedLocalProjectionReceipt::Domain(receipt) => {
+                        compensate_managed_local_domain_receipt(receipt)
+                    }
+                }
+            }
+        }
+
+        fn managed_local_projection_persist(wal: &Wal, final_state: &State) {
+            let wal = wal.clone();
+            let snapshot = serde_json::to_string_pretty(final_state)?;
+            let durable_final_state = final_state.clone();
+            move || wal.compact(snapshot.clone(), durable_final_state.clone())
+        }
+
+        fn managed_local_projection_restore(wal: &Wal, old_state: &State) {
+            let wal = wal.clone();
+            let snapshot = serde_json::to_string_pretty(old_state)?;
+            let durable_old_state = old_state.clone();
+            move || wal.compact(snapshot.clone(), durable_old_state.clone())
+        }
+
+        async fn execute_managed_local_projection_compensations(
+            applied: &[Operation],
+            mut compensate: impl Compensation,
+        ) {
+            let mut compensation_errors = Vec::new();
+            for operation in applied.iter().rev() {
+                if let Err(error) = compensate(operation).await {
+                    compensation_errors.push(error);
+                }
+            }
+            compensation_errors
+        }
+
+        async fn execute_managed_local_projection_transaction(
+            operations: &[Operation],
+            mut set_health: impl SetHealth,
+            mut apply: impl Apply,
+            mut persist: impl Persist,
+            mut compensate: impl Compensation,
+            mut restore_durable: impl RestoreDurable,
+        ) {
+            set_health(ManagedProjectionHealth::Unverified);
+            let mut applied = Vec::new();
+            for operation in operations {
+                match apply(operation).await {
+                    Ok(applied_operation) => applied.push(applied_operation),
+                    Err(error) => {
+                        let compensation_errors =
+                            execute_managed_local_projection_compensations(
+                                &applied,
+                                &mut compensate,
+                            ).await;
+                        return Err(transaction_failure(error, compensation_errors));
+                    }
+                }
+            }
+            if let Err(error) = persist().await {
+                let compensation_errors = execute_managed_local_projection_compensations(
+                    &applied,
+                    &mut compensate,
+                ).await;
+                let restore_error = restore_durable().await.err();
+                return Err(transaction_failure(
+                    error,
+                    compensation_errors,
+                    restore_error,
+                ));
+            }
+            Ok(())
+        }
+
+        fn reconcile_retained_owned_groups(old_state: &State, final_state: &mut State) {
+            let _ = (
+                &old_state.groups,
+                &final_state.groups,
+                &final_state.rules,
+                &final_state.qos_rules,
+                &final_state.mirror_rules,
+            );
+            let referenced = final_state.rules.iter().any(|rule| {
+                rule.src_group_id == group_id || rule.dst_group_id == group_id
+            }) || final_state.mirror_rules.iter().any(|rule| {
+                rule.src_group_id == group_id || rule.dst_group_id == group_id
+            });
+        }
+
+        async fn add_group_standalone_locked(state: &mut State) {
+            aria_core::ebpf_ops::add_network();
+            aria_core::ebpf_ops::add_acl_network_in_bank();
+            state.wal_append(entry).await;
+        }
+        async fn delete_group_standalone_locked(state: &mut State) {
+            aria_core::ebpf_ops::delete_network();
+            aria_core::ebpf_ops::delete_acl_network_in_bank();
+            state.wal_append(entry).await;
+        }
+        async fn add_qos_standalone_locked(state: &mut State) {
+            aria_core::qos_ops::add_qos_rule();
+            state.wal_append(entry).await;
+        }
+        async fn delete_qos_standalone_locked(state: &mut State) {
+            aria_core::qos_ops::delete_qos_rule();
+            state.wal_append(entry).await;
+        }
+        async fn add_mirror_standalone_locked(state: &mut State) {
+            aria_core::mirror_ops::add_mirror_rule();
+            state.wal_append(entry).await;
+        }
+        async fn delete_mirror_standalone_locked(state: &mut State) {
+            aria_core::mirror_ops::delete_mirror_rule();
+            state.wal_append(entry).await;
+        }
+    """
+    wrappers = (
+        wrapper(
+            "add_group",
+            "add_group_standalone_locked",
+            ", group_id: u32",
+            "GeneralThenDomain",
+            """            let domain_operations = Vec::new();
+            let final_state = proposed_group_add(&old_state)?;
+            validate_managed_group_mutation(&final_state, group_id)?;""",
+        )
+        + wrapper(
+            "delete_group",
+            "delete_group_standalone_locked",
+            ", group_id: u32",
+            "GeneralThenDomain",
+            """            let domain_operations = Vec::new();
+            let final_state = proposed_group_delete(&old_state)?;
+            validate_managed_group_mutation(&final_state, group_id)?;""",
+        )
+        + wrapper(
+            "add_qos",
+            "add_qos_standalone_locked",
+            ", direction: u8, mode: u8",
+            "GeneralThenDomain",
+            """            let direction_plans = managed_qos_direction_plans(direction, mode)?;
+            let domain_operations = plan_managed_local_qos_upserts(
+                &old_state, group_id, rate_bps, burst_bytes, priority, &direction_plans,
+            )?;
+            let final_state = proposed_qos_add(&old_state, &domain_operations)?;""",
+        )
+        + wrapper(
+            "delete_qos",
+            "delete_qos_standalone_locked",
+            ", direction: u8",
+            "DomainThenGeneral",
+            """            let directions = requested_directions(direction)?;
+            let domain_operations = plan_managed_local_qos_delete(
+                &old_state, group_id, &directions,
+            )?;
+            let mut final_state = proposed_qos_delete(&old_state, &domain_operations)?;
+            reconcile_retained_owned_groups(&old_state, &mut final_state);""",
+        )
+        + wrapper(
+            "add_mirror",
+            "add_mirror_standalone_locked",
+            ", direction: u8",
+            "GeneralThenDomain",
+            """            let directions = requested_directions(direction)?;
+            let domain_operations = plan_managed_local_mirror_upserts(
+                &old_state, src_id, dst_id, proto, target_ifindex, &directions,
+            )?;
+            let final_state = proposed_mirror_add(&old_state, &domain_operations)?;""",
+        )
+        + wrapper(
+            "delete_mirror",
+            "delete_mirror_standalone_locked",
+            ", direction: u8",
+            "DomainThenGeneral",
+            """            let directions = requested_directions(direction)?;
+            let domain_operations = plan_managed_local_mirror_delete(
+                &old_state, src_id, dst_id, proto, &directions,
+            )?;
+            let mut final_state = proposed_mirror_delete(&old_state, &domain_operations)?;
+            reconcile_retained_owned_groups(&old_state, &mut final_state);""",
+        )
+    )
+    tail = r"""
+        pub async fn replace_owned_acl(&self) {
+            let old_state = state.state.clone();
+            let mut final_state = proposed_owned_state(&old_state)?;
+            for group in &group_deletes {
+                final_state.groups.remove(&group.name);
+            }
+            reconcile_retained_owned_groups(&old_state, &mut final_state);
+            let mutations = managed_general_state_mutations(&old_state, &final_state)?;
+        }
+
+        fn status_code(&self) -> u16 {
+            match self {
+                Self::GroupInUse(_) | Self::LocalWriteBlocked { .. } => 409,
+                Self::InstanceNotReady(_) => 503,
+                _ => 500,
+            }
+        }
+    """
+    safe_control = shared + wrappers + tail
+    def handlers(specs):
+        return "".join(
+            r"""
+        #[utoipa::path(responses((status = 409), (status = 503)))]
+        pub async fn %s(State(cp): State<AppState>) {
+            if let Err(e) = cp.%s(%s).await {
+                return Err(err_response(e));
+            }
+            Ok(())
+        }
+        """ % (name, name, arguments)
+            for name, arguments in specs
+        )
+
+    safe_groups = handlers((
+        ("add_group", "&instance, group_id"),
+        ("delete_group", "&instance, group_id"),
+    ))
+    safe_qos = handlers((
+        ("add_qos", "&instance, direction, mode"),
+        ("delete_qos", "&instance, direction"),
+    ))
+    safe_mirror = handlers((
+        ("add_mirror", "&instance, direction"),
+        ("delete_mirror", "&instance, direction"),
+    ))
+    def mutate(source, old, new, count=1):
+        if source.count(old) < count:
+            raise SystemExit("ERROR: Task 5 mutation fixture anchor is missing: " + old)
+        return source.replace(old, new, count)
+
+    safe_errors = _managed_cross_domain_group_mutation_contract_errors(
+        safe_control, safe_groups, safe_qos, safe_mirror
+    )
+    if safe_errors:
+        raise SystemExit(
+            "ERROR: managed cross-domain checker rejected safe source: %s" % safe_errors
+        )
+
+    executor_call = """            execute_managed_local_projection_transaction(
+                &operations,
+                set_projection_health,
+                apply_projection_operation,
+                persist_final_state,
+                compensate_projection_receipt,
+                restore_old_state,
+            ).await?;"""
+    plan_call = """            let general_mutations =
+                managed_general_state_mutations(&old_state, &final_state)?;"""
+    kernel_compensation = """                        let compensation_errors =
+                            execute_managed_local_projection_compensations(
+                                &applied,
+                                &mut compensate,
+                            ).await;"""
+    def case(label, expected, **changed):
+        sources = dict(
+            control=safe_control,
+            groups=safe_groups,
+            qos=safe_qos,
+            mirror=safe_mirror,
+        )
+        sources.update(changed)
+        return label, sources["control"], sources["groups"], sources["qos"], sources["mirror"], expected
+
+    def control_case(label, expected, old, new):
+        return case(label, expected, control=mutate(safe_control, old, new))
+
+    kernel_error = "kernel partial failure must compensate every applied operation"
+    plan_error = "add_group must plan old_state to final_state before one shared executor call"
+    mutants = [
+        control_case(
+            "direct active ACL writer",
+            "managed local group add/delete still mutates the active ACL bank",
+            executor_call,
+            "            add_acl_network_in_bank(direction, cidr)?;\n" + executor_call,
+        ),
+        control_case(
+            "partial second-direction failure skips compensation",
+            kernel_error,
+            kernel_compensation,
+            "                        let compensation_errors = Vec::new();",
+        ),
+        control_case(
+            "all kernel compensation removed",
+            kernel_error,
+            "execute_managed_local_projection_compensations(\n"
+            "                                &applied,\n"
+            "                                &mut compensate,\n"
+            "                            ).await",
+            "Vec::new()",
+        ),
+        control_case(
+            "compensation stops at first error",
+            "compensation must run in reverse and attempt every applied operation",
+            "compensation_errors.push(error);",
+            "return Err(error);",
+        ),
+        control_case(
+            "apply receipt is discarded",
+            "shared executor must journal apply receipts rather than requested operations",
+            "Ok(applied_operation) => applied.push(applied_operation)",
+            "Ok(_applied_operation) => applied.push(operation)",
+        ),
+        control_case(
+            "persist rollback omits durable restore",
+            "persistence failure must restore durable old state",
+            "let restore_error = restore_durable().await.err();",
+            "let restore_error = None;",
+        ),
+        control_case(
+            "durable restore failure is swallowed",
+            "durable restore failure must remain visible to the caller",
+            "restore_error,\n                ));",
+            "None,\n                ));",
+        ),
+        control_case(
+            "direction two is written directly",
+            "requested direction 2 must expand to ingress and egress",
+            "2 => Ok(vec![0, 1]),",
+            "2 => Ok(vec![direction]),",
+        ),
+        control_case(
+            "QoS ingress shaping downgrade lost",
+            "QoS direction planning must preserve both-direction mode semantics",
+            "let effective_mode = if direction == 0 && mode == 1 { 0 } else { mode };",
+            "let effective_mode = mode;",
+        ),
+        control_case(
+            "FQ receipt drops InstalledNow ownership",
+            "managed FQ receipt cleanup must derive from the actual ensure result",
+            """            let cleanup_on_rollback = cleanup_on_rollback
+                && matches!(state, FqQdiscState::InstalledNow);""",
+            "            let cleanup_on_rollback = false;",
+        ),
+        control_case(
+            "FQ marker failure skips rollback",
+            "managed FQ marker failure must roll back the installed qdisc before returning",
+            """                    if let Err(marker_error) = mark_owned_fq_qdisc() {
+                        rollback_installed_fq_qdisc();
+                        return Err(marker_error);
+                    }""",
+            """                    if let Err(marker_error) = mark_owned_fq_qdisc() {
+                        return Err(marker_error);
+                    }
+                    if matches!(state, FqQdiscState::AlreadyPresent) {
+                        rollback_installed_fq_qdisc();
+                    }""",
+        ),
+        control_case(
+            "QoS replacement drops previous rule",
+            "managed domain receipts must preserve QoS and Mirror preimages",
+            "applied: rule.clone(), previous: previous_qos_rule,",
+            "applied: rule.clone(), previous: None,",
+        ),
+        control_case(
+            "Mirror replacement drops previous rule",
+            "managed domain receipts must preserve QoS and Mirror preimages",
+            "applied: rule.clone(), previous: previous_rule_with_target_ifindex,",
+            "applied: rule.clone(), previous: None,",
+        ),
+        control_case(
+            "current-operation compensation result is discarded",
+            "managed domain apply failure must compensate its current receipt",
+            "let compensation_error = compensate(&receipt).err();",
+            "let compensation_error = None;\n"
+            "                    let _ignored = compensate(&receipt);",
+        ),
+        control_case(
+            "standalone dispatch missing",
+            "add_group must explicitly dispatch both standalone modes before managed admission",
+            "return self.add_group_standalone_locked(&mut state).await;",
+            "return Ok(());",
+        ),
+        case(
+            "projection plan runs after executor",
+            plan_error,
+            control=mutate(safe_control, plan_call, "").replace(
+                executor_call, executor_call + "\n" + plan_call, 1
+            ),
+        ),
+        control_case(
+            "same-state projection delta",
+            plan_error,
+            "managed_general_state_mutations(&old_state, &final_state)?;",
+            "managed_general_state_mutations(&old_state, &old_state)?;",
+        ),
+        control_case(
+            "executor called twice",
+            "add_group must call the shared executor exactly once",
+            executor_call,
+            executor_call + "\n" + executor_call,
+        ),
+        control_case(
+            "executor restores Verified",
+            "shared executor must set health exactly once to Unverified and never Verified",
+            "set_health(ManagedProjectionHealth::Unverified);",
+            "set_health(ManagedProjectionHealth::Verified);",
+        ),
+        control_case(
+            "standalone helper uses managed executor",
+            "standalone helper add_group_standalone_locked must not use the managed executor",
+            "            aria_core::ebpf_ops::add_network();",
+            "            execute_managed_local_projection_transaction(state).await;",
+        ),
+        control_case(
+            "QoS delete bypasses direction expansion",
+            "managed delete_qos must feed expanded directions and old_state to its full planner",
+            "let directions = requested_directions(direction)?;",
+            "let directions = vec![direction];",
+        ),
+        control_case(
+            "group-ID validation bypass",
+            "managed add_group must validate ACL references before execution",
+            "validate_managed_group_mutation(&final_state, group_id)?;",
+            "let _ = group_id;",
+        ),
+        case(
+            "retained helper ignores Mirror",
+            "retained owned groups must follow ACL, QoS, and both Mirror references",
+            control=mutate(
+                safe_control, "mirror_rules", "ignored_mirrors", count=2
+            ),
+        ),
+        control_case(
+            "owned retention precedes removal",
+            "owned ACL replace must reconcile retention after removals and before projection",
+            """            for group in &group_deletes {
+                final_state.groups.remove(&group.name);
+            }
+            reconcile_retained_owned_groups(&old_state, &mut final_state);""",
+            """            reconcile_retained_owned_groups(&old_state, &mut final_state);
+            for group in &group_deletes {
+                final_state.groups.remove(&group.name);
+            }""",
+        ),
+        case(
+            "handler expands both directions itself",
+            "managed add_qos handler must not loop around its ControlPlane call",
+            qos=mutate(
+                safe_qos,
+                "            if let Err(e) = cp.add_qos(&instance, direction, mode).await {\n"
+                "                return Err(err_response(e));\n"
+                "            }",
+                "            for direction in directions {\n"
+                "                if let Err(e) = cp.add_qos(&instance, direction, mode).await {\n"
+                "                    return Err(err_response(e));\n"
+                "                }\n"
+                "            }",
+            ),
+        ),
+        case(
+            "missing handler 409",
+            "managed mutation handler add_group must document HTTP 409",
+            groups=mutate(safe_groups, "(status = 409)", "(status = 500)"),
+        ),
+        case(
+            "missing handler 503",
+            "managed mutation handler add_group must document HTTP 503",
+            groups=mutate(safe_groups, "(status = 503)", "(status = 500)"),
+        ),
+        case(
+            "handler remaps ControlPlane error",
+            "managed mutation handler add_group must return its exact ControlPlane error",
+            groups=mutate(
+                safe_groups,
+                "return Err(err_response(e));",
+                "return Err(err_response("
+                "ControlPlaneError::KernelError(e.to_string())));",
+            ),
+        ),
+    ]
+    for label, control, groups, qos, mirror, expected in mutants:
+        errors = _managed_cross_domain_group_mutation_contract_errors(
+            control, groups, qos, mirror
+        )
+        if not any(expected in error for error in errors):
+            raise SystemExit(
+                "ERROR: managed cross-domain checker accepted %s mutation: %s"
+                % (label, errors)
+            )
+    print(
+        "Managed cross-domain group mutation self-tests: OK (%d scenarios)"
+        % (len(mutants) + 1)
+    )
+
+
 def _run_acl_ingress_parser_self_tests():
     comment_only = """
         // fn acl_ingress_hook(tap_id: u32) -> u8 { 0 }
@@ -3007,6 +5063,14 @@ def check_rust_stage_one_tests_present():
         ["test", "--locked", "-p", "aria-agent", "managed_acl_shadow_"],
         ["test", "--locked", "-p", "aria-agent", "managed_general_delta_"],
         ["test", "--locked", "-p", "aria-agent", "managed_projection_repair_"],
+        [
+            "test",
+            "--locked",
+            "-p",
+            "aria-agent",
+            "managed_local_group_projection_",
+        ],
+        ["test", "--locked", "-p", "aria-agent", "managed_dual_use_group_"],
         ["test", "--locked", "-p", "aria-agent", "managed_acl_ownership_"],
     )
     for projection_test in projection_tests:
@@ -3059,6 +5123,16 @@ def check_rust_stage_one_tests_present():
             6,
         ),
         (
+            _read_repo_text(os.path.join("agent", "src", "control_plane.rs")),
+            "managed_local_group_projection_",
+            6,
+        ),
+        (
+            _read_repo_text(os.path.join("agent", "src", "control_plane.rs")),
+            "managed_dual_use_group_",
+            13,
+        ),
+        (
             _read_repo_text(os.path.join("agent", "src", "tap_registry.rs")),
             "managed_acl_ownership_",
             6,
@@ -3068,7 +5142,8 @@ def check_rust_stage_one_tests_present():
         projection_test_code = _blank_rust_non_code(projection_test_source)
         count = len(
             re.findall(
-                r"#\s*\[\s*test\s*\]\s*fn\s+%s" % re.escape(prefix),
+                r"#\s*\[\s*(?:tokio\s*::\s*)?test\s*\]\s*"
+                r"(?:async\s+)?fn\s+%s" % re.escape(prefix),
                 projection_test_code,
             )
         )
@@ -3082,6 +5157,7 @@ def check_rust_stage_one_tests_present():
     _run_acl_delete_semantics_mutation_self_tests()
     _run_owned_acl_release_quarantine_mutation_self_tests()
     _run_managed_acl_shadow_mutation_self_tests()
+    _run_managed_cross_domain_group_mutation_self_tests()
     neutron_api_source = _read_repo_text(RUST_NEUTRON_API_PATH)
     wal_source = _read_repo_text(RUST_NEUTRON_WAL_PATH)
     openapi_source = _read_repo_text(RUST_OPENAPI_PATH)
@@ -5216,6 +7292,18 @@ def check_managed_acl_publication_transaction_contract():
         )
 
 
+def check_managed_cross_domain_group_mutation_contract():
+    print("==> checking managed cross-domain group mutation contract")
+    errors = _managed_cross_domain_group_mutation_contract_errors(
+        _read_repo_text(os.path.join("agent", "src", "control_plane.rs")),
+        _read_repo_text(os.path.join("agent", "src", "api_handlers", "groups.rs")),
+        _read_repo_text(os.path.join("agent", "src", "api_handlers", "qos.rs")),
+        _read_repo_text(os.path.join("agent", "src", "api_handlers", "mirror.rs")),
+    )
+    if errors:
+        raise SystemExit("ERROR: " + errors[0])
+
+
 def check_ebpf_acl_ingress_boundary():
     print("==> checking eBPF ACL ingress boundary")
     _run_acl_ingress_parser_self_tests()
@@ -5451,6 +7539,7 @@ def main():
     check_status_v1_contract()
     check_rust_stage_one_tests_present()
     check_managed_acl_publication_transaction_contract()
+    check_managed_cross_domain_group_mutation_contract()
     check_p3_rust_scoped_plan_boundary()
     run([sys.executable, os.path.join("ci", "check_tc_acl_datapath.py")])
     check_ebpf_acl_ingress_boundary()

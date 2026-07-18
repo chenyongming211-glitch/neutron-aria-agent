@@ -7047,6 +7047,1284 @@ mod tests {
         assert!(error.contains("unknown active selector"));
     }
 
+    fn managed_cross_domain_insert_group(
+        state: &mut FirewallState,
+        name: &str,
+        group_id: u32,
+        cidrs: &[&str],
+    ) {
+        state.groups.insert(
+            name.to_string(),
+            GroupInfo {
+                id: group_id,
+                name: name.to_string(),
+                cidrs: cidrs.iter().map(|cidr| (*cidr).to_string()).collect(),
+            },
+        );
+        state.next_group_id = state.next_group_id.max(group_id.saturating_add(1));
+    }
+
+    fn managed_cross_domain_acl_rule(group_id: u32) -> RuleInfo {
+        RuleInfo {
+            name: None,
+            src_group_id: group_id,
+            dst_group_id: 0,
+            proto: libc::IPPROTO_TCP as u8,
+            action: 0,
+            ports: None,
+            bitmap_idx: None,
+            direction: 0,
+        }
+    }
+
+    fn managed_cross_domain_qos_reference(name: &str, group_id: u32) -> QosRuleInfo {
+        QosRuleInfo {
+            group_name: name.to_string(),
+            group_id,
+            direction: 0,
+            rate_bps: 1_000_000,
+            burst_bytes: 64_000,
+            priority: 1,
+            mode: 0,
+        }
+    }
+
+    fn managed_cross_domain_mirror_reference(name: &str, group_id: u32) -> MirrorRuleInfo {
+        MirrorRuleInfo {
+            src_group_name: name.to_string(),
+            src_group_id: group_id,
+            dst_group_name: "any".to_string(),
+            dst_group_id: 0,
+            proto: 0,
+            direction: 0,
+            target_iface: "mirror0".to_string(),
+            target_ifindex: 42,
+            is_global: false,
+        }
+    }
+
+    fn managed_cross_domain_projection(
+        state: &FirewallState,
+    ) -> aria_core::ebpf_ops::ManagedGroupProjection {
+        aria_core::ebpf_ops::compile_managed_group_projection(state)
+            .expect("managed cross-domain fixture must compile")
+    }
+
+    fn managed_cross_domain_has_projection_entry(
+        entries: &[aria_core::ebpf_ops::ProjectionEntry],
+        cidr: &str,
+        group_id: u32,
+    ) -> bool {
+        let network = aria_core::ebpf_ops::CanonicalNetwork::parse(cidr)
+            .expect("test projection CIDR must be valid");
+        entries
+            .iter()
+            .any(|entry| entry.network == network && entry.group_id == group_id)
+    }
+
+    fn managed_cross_domain_replacements(
+        cidr: &str,
+        old_group_id: u32,
+        new_group_id: u32,
+    ) -> Vec<SharedNetworkMutation> {
+        vec![
+            SharedNetworkMutation::Replaced {
+                direction: "src",
+                cidr: cidr.to_string(),
+                old_group_id,
+                new_group_id,
+            },
+            SharedNetworkMutation::Replaced {
+                direction: "dst",
+                cidr: cidr.to_string(),
+                old_group_id,
+                new_group_id,
+            },
+        ]
+    }
+
+    fn managed_cross_domain_exact_alias_fixture(
+        acl_name: &str,
+        acl_group_id: u32,
+        local_group_id: u32,
+    ) -> FirewallState {
+        let mut state = FirewallState::default();
+        managed_cross_domain_insert_group(&mut state, acl_name, acl_group_id, &["10.0.0.0/24"]);
+        managed_cross_domain_insert_group(
+            &mut state,
+            "local-exact",
+            local_group_id,
+            &["10.0.0.0/24"],
+        );
+        state
+            .rules
+            .push(managed_cross_domain_acl_rule(acl_group_id));
+        state
+    }
+
+    #[test]
+    fn managed_local_group_projection_rejects_acl_referenced_id_regardless_of_name() {
+        let mut state = FirewallState::default();
+        managed_cross_domain_insert_group(&mut state, "ordinary-local-name", 30, &["10.0.0.0/24"]);
+        state.rules.push(managed_cross_domain_acl_rule(30));
+
+        let error = validate_managed_group_mutation(&state, 30)
+            .expect_err("an ACL-referenced group ID must reject local CIDR mutation");
+
+        assert!(matches!(error, ControlPlaneError::GroupInUse(_)));
+        assert!(!state
+            .groups
+            .get("ordinary-local-name")
+            .expect("fixture group exists")
+            .name
+            .starts_with("neutron:"));
+    }
+
+    #[test]
+    fn managed_local_group_projection_unreferenced_add_delete_is_general_only() {
+        let mut committed = FirewallState::default();
+        managed_cross_domain_insert_group(
+            &mut committed,
+            "ordinary-acl-selector",
+            30,
+            &["10.0.0.0/24"],
+        );
+        committed.rules.push(managed_cross_domain_acl_rule(30));
+
+        let mut with_local = committed.clone();
+        managed_cross_domain_insert_group(
+            &mut with_local,
+            "local-general-only",
+            40,
+            &["192.0.2.0/24"],
+        );
+        validate_managed_group_mutation(&with_local, 40)
+            .expect("an ACL-unreferenced group ID must remain locally mutable");
+        let add_mutations = managed_general_state_mutations(&committed, &with_local)
+            .expect("valid local add must produce a general delta");
+        assert_eq!(
+            add_mutations,
+            vec![
+                SharedNetworkMutation::Added {
+                    direction: "src",
+                    cidr: "192.0.2.0/24".to_string(),
+                    group_id: 40,
+                },
+                SharedNetworkMutation::Added {
+                    direction: "dst",
+                    cidr: "192.0.2.0/24".to_string(),
+                    group_id: 40,
+                },
+            ]
+        );
+        let committed_projection = managed_cross_domain_projection(&committed);
+        let with_local_projection = managed_cross_domain_projection(&with_local);
+        assert_eq!(committed_projection.acl_src, with_local_projection.acl_src);
+        assert_eq!(committed_projection.acl_dst, with_local_projection.acl_dst);
+
+        let delete_mutations = managed_general_state_mutations(&with_local, &committed)
+            .expect("valid local delete must produce a general delta");
+        assert_eq!(
+            delete_mutations,
+            vec![
+                SharedNetworkMutation::Deleted {
+                    direction: "src",
+                    cidr: "192.0.2.0/24".to_string(),
+                    group_id: 40,
+                },
+                SharedNetworkMutation::Deleted {
+                    direction: "dst",
+                    cidr: "192.0.2.0/24".to_string(),
+                    group_id: 40,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_local_group_projection_exact_winner_uses_replaced_preimages() {
+        let mut committed = FirewallState::default();
+        managed_cross_domain_insert_group(
+            &mut committed,
+            "ordinary-acl-selector",
+            30,
+            &["10.0.0.0/24"],
+        );
+        committed.rules.push(managed_cross_domain_acl_rule(30));
+
+        let mut with_local_winner = committed.clone();
+        managed_cross_domain_insert_group(
+            &mut with_local_winner,
+            "local-exact-winner",
+            40,
+            &["10.0.0.0/24"],
+        );
+        let add_mutations = managed_general_state_mutations(&committed, &with_local_winner)
+            .expect("exact local winner add must compile");
+        let delete_mutations = managed_general_state_mutations(&with_local_winner, &committed)
+            .expect("exact local winner delete must compile");
+
+        assert_eq!(
+            add_mutations,
+            managed_cross_domain_replacements("10.0.0.0/24", 30, 40)
+        );
+        assert_eq!(
+            delete_mutations,
+            managed_cross_domain_replacements("10.0.0.0/24", 40, 30)
+        );
+        assert_eq!(
+            shared_network_compensation(&add_mutations[0]),
+            delete_mutations[0]
+        );
+        assert_eq!(
+            shared_network_compensation(&add_mutations[1]),
+            delete_mutations[1]
+        );
+
+        let committed_projection = managed_cross_domain_projection(&committed);
+        let local_projection = managed_cross_domain_projection(&with_local_winner);
+        assert_eq!(committed_projection.acl_src, local_projection.acl_src);
+        assert_eq!(committed_projection.acl_dst, local_projection.acl_dst);
+    }
+
+    #[test]
+    fn managed_local_group_projection_unready_rejects_before_effects() {
+        for health in [
+            ManagedProjectionHealth::Unverified,
+            ManagedProjectionHealth::RepairRequired,
+        ] {
+            let error =
+                managed_local_projection_admission(ManagedAclPublicationMode::ManagedAcl, health)
+                    .expect_err("non-verified managed projection must reject local mutation");
+            assert_eq!(error.status_code(), 503);
+        }
+
+        managed_local_projection_admission(
+            ManagedAclPublicationMode::ManagedAcl,
+            ManagedProjectionHealth::Verified,
+        )
+        .expect("verified managed projection may plan one local mutation");
+        managed_local_projection_admission(
+            ManagedAclPublicationMode::StandaloneCompatibility,
+            ManagedProjectionHealth::Unverified,
+        )
+        .expect("standalone compatibility keeps its existing direct mutation path");
+    }
+
+    #[tokio::test]
+    async fn managed_local_group_projection_partial_general_failure_compensates_applied_in_reverse()
+    {
+        let mutations = managed_cross_domain_replacements("10.0.0.0/24", 20, 30);
+        let trace = std::cell::RefCell::new(vec!["health:verified"]);
+        let compensation_attempts = std::cell::RefCell::new(Vec::new());
+        let durable_restore_attempted = std::cell::Cell::new(false);
+
+        let error = execute_managed_local_projection_transaction(
+            &mutations,
+            |health| match health {
+                ManagedProjectionHealth::Unverified => trace.borrow_mut().push("health:unverified"),
+                ManagedProjectionHealth::RepairRequired => {
+                    trace.borrow_mut().push("health:repair-required")
+                }
+                ManagedProjectionHealth::Verified => trace.borrow_mut().push("health:verified"),
+            },
+            |mutation| {
+                trace.borrow_mut().push(match mutation {
+                    SharedNetworkMutation::Replaced {
+                        direction: "src", ..
+                    } => "apply:src",
+                    SharedNetworkMutation::Replaced {
+                        direction: "dst", ..
+                    } => "apply:dst",
+                    _ => "apply:unexpected",
+                });
+                if matches!(
+                    mutation,
+                    SharedNetworkMutation::Replaced {
+                        direction: "dst",
+                        ..
+                    }
+                ) {
+                    std::future::ready(Err("forced destination general apply failure".to_string()))
+                } else {
+                    std::future::ready(Ok(mutation.clone()))
+                }
+            },
+            || {
+                trace.borrow_mut().push("persist");
+                std::future::ready(Ok(()))
+            },
+            |mutation| {
+                compensation_attempts
+                    .borrow_mut()
+                    .push(shared_network_compensation(mutation));
+                trace.borrow_mut().push(match mutation {
+                    SharedNetworkMutation::Replaced {
+                        direction: "src", ..
+                    } => "compensate:src",
+                    SharedNetworkMutation::Replaced {
+                        direction: "dst", ..
+                    } => "compensate:dst",
+                    _ => "compensate:unexpected",
+                });
+                std::future::ready(Ok(()))
+            },
+            || {
+                durable_restore_attempted.set(true);
+                trace.borrow_mut().push("restore-durable");
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .expect_err("second-direction failure must abort the shared transaction");
+
+        assert!(error.contains("forced destination general apply failure"));
+        assert_eq!(
+            trace.into_inner(),
+            vec![
+                "health:verified",
+                "health:unverified",
+                "apply:src",
+                "apply:dst",
+                "compensate:src",
+            ]
+        );
+        assert_eq!(
+            compensation_attempts.into_inner(),
+            vec![SharedNetworkMutation::Replaced {
+                direction: "src",
+                cidr: "10.0.0.0/24".to_string(),
+                old_group_id: 30,
+                new_group_id: 20,
+            }]
+        );
+        assert!(!durable_restore_attempted.get());
+    }
+
+    #[tokio::test]
+    async fn managed_local_group_projection_success_never_runs_compensation_or_durable_restore() {
+        let mutations = vec![SharedNetworkMutation::Added {
+            direction: "src",
+            cidr: "198.51.100.0/24".to_string(),
+            group_id: 70,
+        }];
+        let health_trace = std::cell::RefCell::new(vec![ManagedProjectionHealth::Verified]);
+        let phase_trace = std::cell::RefCell::new(Vec::new());
+        let compensation_attempted = std::cell::Cell::new(false);
+        let durable_restore_attempted = std::cell::Cell::new(false);
+
+        execute_managed_local_projection_transaction(
+            &mutations,
+            |health| health_trace.borrow_mut().push(health),
+            |mutation| {
+                phase_trace.borrow_mut().push("apply");
+                std::future::ready(Ok::<SharedNetworkMutation, String>(mutation.clone()))
+            },
+            || {
+                phase_trace.borrow_mut().push("persist");
+                std::future::ready(Ok::<(), String>(()))
+            },
+            |_receipt| {
+                compensation_attempted.set(true);
+                std::future::ready(Ok::<(), String>(()))
+            },
+            || {
+                durable_restore_attempted.set(true);
+                std::future::ready(Ok::<(), String>(()))
+            },
+        )
+        .await
+        .expect("a fully applied and persisted transaction must succeed");
+
+        assert_eq!(phase_trace.into_inner(), vec!["apply", "persist"]);
+        assert!(!compensation_attempted.get());
+        assert!(!durable_restore_attempted.get());
+        assert_eq!(
+            health_trace.into_inner(),
+            vec![
+                ManagedProjectionHealth::Verified,
+                ManagedProjectionHealth::Unverified,
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_dual_use_group_reference_count_transitions_change_only_first_and_last() {
+        let zero =
+            managed_cross_domain_exact_alias_fixture("neutron:port-1:src:selector:0", 30, 20);
+        let mut one = zero.clone();
+        one.qos_rules.push(managed_cross_domain_qos_reference(
+            "neutron:port-1:src:selector:0",
+            30,
+        ));
+        let mut two = one.clone();
+        two.mirror_rules.push(managed_cross_domain_mirror_reference(
+            "neutron:port-1:src:selector:0",
+            30,
+        ));
+        let mut back_to_one = two.clone();
+        back_to_one.qos_rules.clear();
+        let mut back_to_zero = back_to_one.clone();
+        back_to_zero.mirror_rules.clear();
+
+        assert_eq!(
+            managed_general_state_mutations(&zero, &one).expect("0 to 1 must compile"),
+            managed_cross_domain_replacements("10.0.0.0/24", 20, 30)
+        );
+        assert!(managed_general_state_mutations(&one, &two)
+            .expect("1 to 2 must compile")
+            .is_empty());
+        assert!(managed_general_state_mutations(&two, &back_to_one)
+            .expect("2 to 1 must compile")
+            .is_empty());
+        assert_eq!(
+            managed_general_state_mutations(&back_to_one, &back_to_zero)
+                .expect("1 to 0 must compile"),
+            managed_cross_domain_replacements("10.0.0.0/24", 30, 20)
+        );
+    }
+
+    #[test]
+    fn managed_dual_use_group_owned_selector_removal_retains_until_final_reference() {
+        let owner_prefix = "neutron:port-1:";
+        let owned_name = "neutron:port-1:src:selector:0";
+        let old = {
+            let mut state = managed_cross_domain_exact_alias_fixture(owned_name, 30, 20);
+            state
+                .qos_rules
+                .push(managed_cross_domain_qos_reference(owned_name, 30));
+            state
+                .mirror_rules
+                .push(managed_cross_domain_mirror_reference(owned_name, 30));
+            state
+        };
+
+        let mut after_acl_remove = old.clone();
+        after_acl_remove.rules.clear();
+        after_acl_remove.groups.remove(owned_name);
+        reconcile_retained_owned_groups(&old, &mut after_acl_remove, owner_prefix)
+            .expect("external references must retain removed owned group data");
+        let retained = after_acl_remove
+            .groups
+            .get(owned_name)
+            .expect("dual-used owned group must remain persisted");
+        assert_eq!(retained.id, 30);
+        assert_eq!(retained.cidrs, vec!["10.0.0.0/24".to_string()]);
+        let retained_projection = managed_cross_domain_projection(&after_acl_remove);
+        assert!(retained_projection.acl_src.is_empty());
+        assert!(managed_cross_domain_has_projection_entry(
+            &retained_projection.general,
+            "10.0.0.0/24",
+            30,
+        ));
+
+        let mut one_reference = after_acl_remove.clone();
+        one_reference.qos_rules.clear();
+        reconcile_retained_owned_groups(&after_acl_remove, &mut one_reference, owner_prefix)
+            .expect("one remaining external reference must retain the group");
+        assert!(one_reference.groups.contains_key(owned_name));
+
+        let mut no_references = one_reference.clone();
+        no_references.mirror_rules.clear();
+        reconcile_retained_owned_groups(&one_reference, &mut no_references, owner_prefix)
+            .expect("last external reference removal must garbage-collect retained group");
+        assert!(!no_references.groups.contains_key(owned_name));
+        assert_eq!(
+            managed_general_state_mutations(&one_reference, &no_references)
+                .expect("retained-owned GC must compile"),
+            managed_cross_domain_replacements("10.0.0.0/24", 30, 20)
+        );
+    }
+
+    #[test]
+    fn managed_dual_use_group_mirror_destination_only_retains_owned_selector() {
+        let owner_prefix = "neutron:port-1:";
+        let owned_name = "neutron:port-1:dst:selector:0";
+        let zero = managed_cross_domain_exact_alias_fixture(owned_name, 30, 20);
+        let mut dual_used = zero.clone();
+        let mut destination_reference = managed_cross_domain_mirror_reference("any", 0);
+        destination_reference.dst_group_name = owned_name.to_string();
+        destination_reference.dst_group_id = 30;
+        dual_used.mirror_rules.push(destination_reference);
+
+        assert_eq!(
+            managed_general_state_mutations(&zero, &dual_used)
+                .expect("a destination-only Mirror reference must promote general identity"),
+            managed_cross_domain_replacements("10.0.0.0/24", 20, 30)
+        );
+
+        let mut after_acl_remove = dual_used.clone();
+        after_acl_remove.rules.clear();
+        after_acl_remove.groups.remove(owned_name);
+        reconcile_retained_owned_groups(&dual_used, &mut after_acl_remove, owner_prefix)
+            .expect("a destination-only Mirror reference must retain removed owned data");
+
+        assert_eq!(after_acl_remove.groups[owned_name].id, 30);
+        assert!(managed_cross_domain_has_projection_entry(
+            &managed_cross_domain_projection(&after_acl_remove).general,
+            "10.0.0.0/24",
+            30,
+        ));
+    }
+
+    #[test]
+    fn managed_dual_use_group_last_explicit_reference_never_collects_acl_referenced_group() {
+        let owned_name = "neutron:port-1:src:selector:0";
+        let old = {
+            let mut state = managed_cross_domain_exact_alias_fixture(owned_name, 30, 20);
+            state
+                .qos_rules
+                .push(managed_cross_domain_qos_reference(owned_name, 30));
+            state
+        };
+        let mut final_state = old.clone();
+        final_state.qos_rules.clear();
+
+        reconcile_retained_owned_groups(&old, &mut final_state, "neutron:port-1:")
+            .expect("removing the last explicit reference must preserve an ACL-owned group");
+
+        assert!(final_state.groups.contains_key(owned_name));
+        assert!(final_state
+            .rules
+            .iter()
+            .any(|rule| rule.src_group_id == 30 || rule.dst_group_id == 30));
+        assert_eq!(
+            managed_general_state_mutations(&old, &final_state)
+                .expect("last explicit reference removal must only demote general identity"),
+            managed_cross_domain_replacements("10.0.0.0/24", 30, 20)
+        );
+    }
+
+    #[test]
+    fn managed_dual_use_group_acl_cidr_update_changes_shared_general_identity() {
+        let owned_name = "neutron:port-1:src:selector:0";
+        let mut old = FirewallState::default();
+        managed_cross_domain_insert_group(&mut old, owned_name, 30, &["10.0.0.0/24"]);
+        old.rules.push(managed_cross_domain_acl_rule(30));
+        old.qos_rules
+            .push(managed_cross_domain_qos_reference(owned_name, 30));
+
+        let mut updated = old.clone();
+        updated
+            .groups
+            .get_mut(owned_name)
+            .expect("owned fixture group exists")
+            .cidrs = vec!["10.0.1.0/24".to_string()];
+        reconcile_retained_owned_groups(&old, &mut updated, "neutron:port-1:")
+            .expect("dual-use CIDR update must preserve shared identity");
+
+        assert_eq!(updated.groups[owned_name].id, 30);
+        assert_eq!(
+            managed_general_state_mutations(&old, &updated)
+                .expect("dual-use CIDR update must compile"),
+            vec![
+                SharedNetworkMutation::Added {
+                    direction: "src",
+                    cidr: "10.0.1.0/24".to_string(),
+                    group_id: 30,
+                },
+                SharedNetworkMutation::Deleted {
+                    direction: "src",
+                    cidr: "10.0.0.0/24".to_string(),
+                    group_id: 30,
+                },
+                SharedNetworkMutation::Added {
+                    direction: "dst",
+                    cidr: "10.0.1.0/24".to_string(),
+                    group_id: 30,
+                },
+                SharedNetworkMutation::Deleted {
+                    direction: "dst",
+                    cidr: "10.0.0.0/24".to_string(),
+                    group_id: 30,
+                },
+            ]
+        );
+        let projection = managed_cross_domain_projection(&updated);
+        assert!(managed_cross_domain_has_projection_entry(
+            &projection.acl_src,
+            "10.0.1.0/24",
+            30,
+        ));
+        assert!(managed_cross_domain_has_projection_entry(
+            &projection.general,
+            "10.0.1.0/24",
+            30,
+        ));
+    }
+
+    #[test]
+    fn managed_dual_use_group_direction_two_qos_plan_preserves_direction_semantics() {
+        assert_eq!(
+            ControlPlane::requested_directions(2)
+                .expect("direction 2 must be a valid both-direction request"),
+            vec![0, 1]
+        );
+
+        let plans = managed_qos_direction_plans(2, 1)
+            .expect("both-direction shaping must produce one plan per direction");
+        assert_eq!(
+            plans
+                .iter()
+                .map(|plan| (plan.direction, plan.effective_mode))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (1, 1)]
+        );
+    }
+
+    #[test]
+    fn managed_dual_use_group_merge_orders_general_and_both_direction_domain_operations() {
+        let plans = managed_qos_direction_plans(2, 1)
+            .expect("both-direction shaping must produce domain plans");
+        let mut add_domain = vec![ManagedLocalDomainOperation::EnsureFqQdisc {
+            cleanup_on_rollback: true,
+        }];
+        add_domain.extend(plans.iter().map(|plan| {
+            let mut rule = managed_cross_domain_qos_reference("dual-use", 30);
+            rule.direction = plan.direction;
+            rule.mode = plan.effective_mode;
+            ManagedLocalDomainOperation::QosUpsert(rule)
+        }));
+        let delete_domain = plans
+            .iter()
+            .map(|plan| ManagedLocalDomainOperation::QosDelete {
+                group_id: 30,
+                direction: plan.direction,
+            })
+            .collect::<Vec<_>>();
+        let expected_add_general = managed_cross_domain_replacements("10.0.0.0/24", 20, 30);
+        let add_merged = merge_managed_local_projection_operations(
+            ManagedLocalProjectionOrder::GeneralThenDomain,
+            managed_cross_domain_replacements("10.0.0.0/24", 20, 30),
+            add_domain,
+        );
+
+        assert_eq!(add_merged.len(), 5);
+        match &add_merged[0] {
+            ManagedLocalProjectionOperation::General(actual) => {
+                assert_eq!(actual, &expected_add_general[0]);
+            }
+            _ => panic!("add must start with the source general operation"),
+        }
+        match &add_merged[1] {
+            ManagedLocalProjectionOperation::General(actual) => {
+                assert_eq!(actual, &expected_add_general[1]);
+            }
+            _ => panic!("add must apply the destination general operation second"),
+        }
+        match &add_merged[2] {
+            ManagedLocalProjectionOperation::Domain(
+                ManagedLocalDomainOperation::EnsureFqQdisc {
+                    cleanup_on_rollback,
+                },
+            ) => assert!(*cleanup_on_rollback),
+            _ => panic!("FQ preparation must precede every direction-specific QoS add"),
+        }
+        match (&add_merged[3], &add_merged[4]) {
+            (
+                ManagedLocalProjectionOperation::Domain(ManagedLocalDomainOperation::QosUpsert(
+                    ingress,
+                )),
+                ManagedLocalProjectionOperation::Domain(ManagedLocalDomainOperation::QosUpsert(
+                    egress,
+                )),
+            ) => {
+                assert_eq!((ingress.direction, ingress.mode), (0, 0));
+                assert_eq!((egress.direction, egress.mode), (1, 1));
+            }
+            _ => panic!("both direction-specific QoS add plans must follow general operations"),
+        }
+
+        let expected_delete_general = managed_cross_domain_replacements("10.0.0.0/24", 30, 20);
+        let delete_merged = merge_managed_local_projection_operations(
+            ManagedLocalProjectionOrder::DomainThenGeneral,
+            managed_cross_domain_replacements("10.0.0.0/24", 30, 20),
+            delete_domain,
+        );
+
+        assert_eq!(delete_merged.len(), 4);
+        match (&delete_merged[0], &delete_merged[1]) {
+            (
+                ManagedLocalProjectionOperation::Domain(ManagedLocalDomainOperation::QosDelete {
+                    group_id: first_group,
+                    direction: first_direction,
+                }),
+                ManagedLocalProjectionOperation::Domain(ManagedLocalDomainOperation::QosDelete {
+                    group_id: second_group,
+                    direction: second_direction,
+                }),
+            ) => {
+                assert_eq!((*first_group, *first_direction), (30, 0));
+                assert_eq!((*second_group, *second_direction), (30, 1));
+            }
+            _ => panic!("both direction-specific QoS deletes must precede general operations"),
+        }
+        match &delete_merged[2] {
+            ManagedLocalProjectionOperation::General(actual) => {
+                assert_eq!(actual, &expected_delete_general[0]);
+            }
+            _ => panic!("delete must demote source general identity after domain cleanup"),
+        }
+        match &delete_merged[3] {
+            ManagedLocalProjectionOperation::General(actual) => {
+                assert_eq!(actual, &expected_delete_general[1]);
+            }
+            _ => panic!("delete must demote destination general identity last"),
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_dual_use_group_compensation_helper_is_reverse_attempt_all_and_visible() {
+        let applied = managed_cross_domain_replacements("10.0.0.0/24", 20, 30);
+        let attempts = std::cell::RefCell::new(Vec::new());
+
+        let errors = execute_managed_local_projection_compensations(&applied, |mutation| {
+            let compensation = shared_network_compensation(mutation);
+            let fail = matches!(
+                &compensation,
+                SharedNetworkMutation::Replaced {
+                    direction: "dst",
+                    ..
+                }
+            );
+            attempts.borrow_mut().push(compensation);
+            if fail {
+                std::future::ready(Err("forced destination compensation failure".to_string()))
+            } else {
+                std::future::ready(Ok(()))
+            }
+        })
+        .await;
+
+        assert_eq!(
+            errors,
+            vec!["forced destination compensation failure".to_string()]
+        );
+        assert_eq!(
+            attempts.into_inner(),
+            applied
+                .iter()
+                .rev()
+                .map(shared_network_compensation)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_dual_use_group_qos_receipt_restores_previous_rule_after_later_failure() {
+        let mut previous = managed_cross_domain_qos_reference("dual-use", 30);
+        previous.direction = 1;
+        previous.rate_bps = 1_000_000;
+        previous.burst_bytes = 64_000;
+        previous.mode = 0;
+        let mut replacement = previous.clone();
+        replacement.rate_bps = 8_000_000;
+        replacement.burst_bytes = 256_000;
+        replacement.mode = 1;
+        let mut later = replacement.clone();
+        later.direction = 0;
+        later.mode = 0;
+        let operations = vec![
+            ManagedLocalProjectionOperation::Domain(ManagedLocalDomainOperation::EnsureFqQdisc {
+                cleanup_on_rollback: true,
+            }),
+            ManagedLocalProjectionOperation::Domain(ManagedLocalDomainOperation::QosUpsert(
+                replacement.clone(),
+            )),
+            ManagedLocalProjectionOperation::Domain(ManagedLocalDomainOperation::QosUpsert(later)),
+        ];
+        let compensation_operations = std::cell::RefCell::new(Vec::new());
+        let persist_attempted = std::cell::Cell::new(false);
+        let durable_restore_attempted = std::cell::Cell::new(false);
+
+        let error = execute_managed_local_projection_transaction(
+            &operations,
+            |_health| {},
+            |operation| match operation {
+                ManagedLocalProjectionOperation::Domain(
+                    ManagedLocalDomainOperation::EnsureFqQdisc {
+                        cleanup_on_rollback,
+                    },
+                ) => std::future::ready(Ok(ManagedLocalDomainReceipt::FqQdisc {
+                    state: aria_core::ebpf_ops::FqQdiscState::InstalledNow,
+                    cleanup_on_rollback: *cleanup_on_rollback,
+                })),
+                ManagedLocalProjectionOperation::Domain(
+                    ManagedLocalDomainOperation::QosUpsert(applied),
+                ) if applied.direction == 1 => {
+                    std::future::ready(Ok(ManagedLocalDomainReceipt::QosUpsert {
+                        applied: applied.clone(),
+                        previous: Some(previous.clone()),
+                    }))
+                }
+                ManagedLocalProjectionOperation::Domain(
+                    ManagedLocalDomainOperation::QosUpsert(_),
+                ) => std::future::ready(Err("forced later QoS apply failure".to_string())),
+                _ => std::future::ready(Err("unexpected non-QoS operation".to_string())),
+            },
+            || {
+                persist_attempted.set(true);
+                std::future::ready(Ok::<(), String>(()))
+            },
+            |receipt| {
+                compensation_operations
+                    .borrow_mut()
+                    .extend(managed_local_domain_compensation_operations(receipt));
+                std::future::ready(Ok::<(), String>(()))
+            },
+            || {
+                durable_restore_attempted.set(true);
+                std::future::ready(Ok::<(), String>(()))
+            },
+        )
+        .await
+        .expect_err("a later domain failure must compensate the applied QoS receipt");
+
+        assert!(error.contains("forced later QoS apply failure"));
+        assert!(!persist_attempted.get());
+        assert!(!durable_restore_attempted.get());
+        let compensation_operations = compensation_operations.into_inner();
+        assert_eq!(compensation_operations.len(), 2);
+        match &compensation_operations[0] {
+            ManagedLocalDomainOperation::QosUpsert(restored) => {
+                assert_eq!(restored.group_id, previous.group_id);
+                assert_eq!(restored.direction, previous.direction);
+                assert_eq!(restored.rate_bps, previous.rate_bps);
+                assert_eq!(restored.burst_bytes, previous.burst_bytes);
+                assert_eq!(restored.priority, previous.priority);
+                assert_eq!(restored.mode, previous.mode);
+            }
+            _ => panic!("QoS replacement compensation must restore the complete prior rule"),
+        }
+        assert!(matches!(
+            &compensation_operations[1],
+            ManagedLocalDomainOperation::CleanupOwnedFqQdisc
+        ));
+
+        let delete_compensation =
+            managed_local_domain_compensation_operations(&ManagedLocalDomainReceipt::QosDelete {
+                deleted: previous.clone(),
+            });
+        assert_eq!(delete_compensation.len(), 1);
+        match &delete_compensation[0] {
+            ManagedLocalDomainOperation::QosUpsert(restored) => {
+                assert_eq!(restored.group_id, previous.group_id);
+                assert_eq!(restored.direction, previous.direction);
+                assert_eq!(restored.rate_bps, previous.rate_bps);
+                assert_eq!(restored.burst_bytes, previous.burst_bytes);
+                assert_eq!(restored.priority, previous.priority);
+                assert_eq!(restored.mode, previous.mode);
+            }
+            _ => panic!("QoS delete compensation must restore the complete deleted rule"),
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_dual_use_group_mirror_receipt_restores_previous_rule_after_later_failure() {
+        let mut previous = managed_cross_domain_mirror_reference("dual-use", 30);
+        previous.proto = libc::IPPROTO_TCP as u8;
+        previous.direction = 1;
+        previous.target_iface = "mirror-old".to_string();
+        previous.target_ifindex = 42;
+        let mut replacement = previous.clone();
+        replacement.target_iface = "mirror-new".to_string();
+        replacement.target_ifindex = 84;
+        let mut later = replacement.clone();
+        later.direction = 0;
+        let operations = vec![
+            ManagedLocalProjectionOperation::Domain(ManagedLocalDomainOperation::MirrorUpsert(
+                replacement,
+            )),
+            ManagedLocalProjectionOperation::Domain(ManagedLocalDomainOperation::MirrorUpsert(
+                later,
+            )),
+        ];
+        let compensation_operations = std::cell::RefCell::new(Vec::new());
+        let persist_attempted = std::cell::Cell::new(false);
+        let durable_restore_attempted = std::cell::Cell::new(false);
+
+        let error = execute_managed_local_projection_transaction(
+            &operations,
+            |_health| {},
+            |operation| match operation {
+                ManagedLocalProjectionOperation::Domain(
+                    ManagedLocalDomainOperation::MirrorUpsert(applied),
+                ) if applied.direction == 1 => {
+                    std::future::ready(Ok(ManagedLocalDomainReceipt::MirrorUpsert {
+                        applied: applied.clone(),
+                        previous: Some(previous.clone()),
+                    }))
+                }
+                ManagedLocalProjectionOperation::Domain(
+                    ManagedLocalDomainOperation::MirrorUpsert(_),
+                ) => std::future::ready(Err("forced later Mirror apply failure".to_string())),
+                _ => std::future::ready(Err("unexpected non-Mirror operation".to_string())),
+            },
+            || {
+                persist_attempted.set(true);
+                std::future::ready(Ok::<(), String>(()))
+            },
+            |receipt| {
+                compensation_operations
+                    .borrow_mut()
+                    .extend(managed_local_domain_compensation_operations(receipt));
+                std::future::ready(Ok::<(), String>(()))
+            },
+            || {
+                durable_restore_attempted.set(true);
+                std::future::ready(Ok::<(), String>(()))
+            },
+        )
+        .await
+        .expect_err("a later domain failure must compensate the applied Mirror receipt");
+
+        assert!(error.contains("forced later Mirror apply failure"));
+        assert!(!persist_attempted.get());
+        assert!(!durable_restore_attempted.get());
+        let compensation_operations = compensation_operations.into_inner();
+        assert_eq!(compensation_operations.len(), 1);
+        match &compensation_operations[0] {
+            ManagedLocalDomainOperation::MirrorUpsert(restored) => {
+                assert_eq!(restored.src_group_name, previous.src_group_name);
+                assert_eq!(restored.src_group_id, previous.src_group_id);
+                assert_eq!(restored.dst_group_name, previous.dst_group_name);
+                assert_eq!(restored.dst_group_id, previous.dst_group_id);
+                assert_eq!(restored.proto, previous.proto);
+                assert_eq!(restored.direction, previous.direction);
+                assert_eq!(restored.target_iface, previous.target_iface);
+                assert_eq!(restored.target_ifindex, previous.target_ifindex);
+                assert_eq!(restored.is_global, previous.is_global);
+            }
+            _ => panic!("Mirror replacement compensation must restore the complete prior rule"),
+        }
+
+        let delete_compensation = managed_local_domain_compensation_operations(
+            &ManagedLocalDomainReceipt::MirrorDelete {
+                deleted: previous.clone(),
+            },
+        );
+        assert_eq!(delete_compensation.len(), 1);
+        match &delete_compensation[0] {
+            ManagedLocalDomainOperation::MirrorUpsert(restored) => {
+                assert_eq!(restored.src_group_name, previous.src_group_name);
+                assert_eq!(restored.src_group_id, previous.src_group_id);
+                assert_eq!(restored.dst_group_name, previous.dst_group_name);
+                assert_eq!(restored.dst_group_id, previous.dst_group_id);
+                assert_eq!(restored.proto, previous.proto);
+                assert_eq!(restored.direction, previous.direction);
+                assert_eq!(restored.target_iface, previous.target_iface);
+                assert_eq!(restored.target_ifindex, previous.target_ifindex);
+                assert_eq!(restored.is_global, previous.is_global);
+            }
+            _ => panic!("Mirror delete compensation must restore the complete deleted rule"),
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_dual_use_group_current_domain_apply_failure_compensates_its_receipt() {
+        let mut previous_qos = managed_cross_domain_qos_reference("dual-use", 30);
+        previous_qos.direction = 1;
+        previous_qos.mode = 0;
+        let mut replacement_qos = previous_qos.clone();
+        replacement_qos.rate_bps = 8_000_000;
+        replacement_qos.burst_bytes = 256_000;
+        replacement_qos.mode = 1;
+        let qos_operation = ManagedLocalDomainOperation::QosUpsert(replacement_qos.clone());
+        let qos_trace = std::cell::RefCell::new(Vec::new());
+        let qos_compensation = std::cell::RefCell::new(Vec::new());
+
+        let qos_result = apply_managed_local_projection_operation_transactionally(
+            &qos_operation,
+            ManagedLocalDomainReceipt::QosUpsert {
+                applied: replacement_qos,
+                previous: Some(previous_qos.clone()),
+            },
+            |_operation| {
+                qos_trace.borrow_mut().push("raw-write:qos");
+                std::future::ready(Err("raw QoS apply failed after write".to_string()))
+            },
+            |receipt| {
+                qos_trace.borrow_mut().push("compensate:qos");
+                qos_compensation
+                    .borrow_mut()
+                    .extend(managed_local_domain_compensation_operations(receipt));
+                std::future::ready(Err("QoS current-operation compensation failed".to_string()))
+            },
+        )
+        .await;
+        let qos_error = match qos_result {
+            Ok(_) => panic!("a raw QoS apply failure must remain visible"),
+            Err(error) => error,
+        };
+
+        assert!(qos_error.contains("raw QoS apply failed after write"));
+        assert!(qos_error.contains("QoS current-operation compensation failed"));
+        assert_eq!(
+            qos_trace.into_inner(),
+            vec!["raw-write:qos", "compensate:qos"]
+        );
+        let qos_compensation = qos_compensation.into_inner();
+        assert_eq!(qos_compensation.len(), 1);
+        match &qos_compensation[0] {
+            ManagedLocalDomainOperation::QosUpsert(restored) => {
+                assert_eq!(restored.group_id, previous_qos.group_id);
+                assert_eq!(restored.direction, previous_qos.direction);
+                assert_eq!(restored.rate_bps, previous_qos.rate_bps);
+                assert_eq!(restored.burst_bytes, previous_qos.burst_bytes);
+                assert_eq!(restored.priority, previous_qos.priority);
+                assert_eq!(restored.mode, previous_qos.mode);
+            }
+            _ => panic!("current QoS replacement failure must restore its preimage"),
+        }
+
+        let mut previous_mirror = managed_cross_domain_mirror_reference("dual-use", 30);
+        previous_mirror.proto = libc::IPPROTO_TCP as u8;
+        previous_mirror.direction = 1;
+        previous_mirror.target_iface = "mirror-old".to_string();
+        previous_mirror.target_ifindex = 42;
+        let mut replacement_mirror = previous_mirror.clone();
+        replacement_mirror.target_iface = "mirror-new".to_string();
+        replacement_mirror.target_ifindex = 84;
+        let mirror_operation =
+            ManagedLocalDomainOperation::MirrorUpsert(replacement_mirror.clone());
+        let mirror_trace = std::cell::RefCell::new(Vec::new());
+        let mirror_compensation = std::cell::RefCell::new(Vec::new());
+
+        let mirror_result = apply_managed_local_projection_operation_transactionally(
+            &mirror_operation,
+            ManagedLocalDomainReceipt::MirrorUpsert {
+                applied: replacement_mirror,
+                previous: Some(previous_mirror.clone()),
+            },
+            |_operation| {
+                mirror_trace.borrow_mut().push("raw-write:mirror");
+                std::future::ready(Err("raw Mirror apply failed after write".to_string()))
+            },
+            |receipt| {
+                mirror_trace.borrow_mut().push("compensate:mirror");
+                mirror_compensation
+                    .borrow_mut()
+                    .extend(managed_local_domain_compensation_operations(receipt));
+                std::future::ready(Err(
+                    "Mirror current-operation compensation failed".to_string()
+                ))
+            },
+        )
+        .await;
+        let mirror_error = match mirror_result {
+            Ok(_) => panic!("a raw Mirror apply failure must remain visible"),
+            Err(error) => error,
+        };
+
+        assert!(mirror_error.contains("raw Mirror apply failed after write"));
+        assert!(mirror_error.contains("Mirror current-operation compensation failed"));
+        assert_eq!(
+            mirror_trace.into_inner(),
+            vec!["raw-write:mirror", "compensate:mirror"]
+        );
+        let mirror_compensation = mirror_compensation.into_inner();
+        assert_eq!(mirror_compensation.len(), 1);
+        match &mirror_compensation[0] {
+            ManagedLocalDomainOperation::MirrorUpsert(restored) => {
+                assert_eq!(restored.src_group_name, previous_mirror.src_group_name);
+                assert_eq!(restored.src_group_id, previous_mirror.src_group_id);
+                assert_eq!(restored.dst_group_name, previous_mirror.dst_group_name);
+                assert_eq!(restored.dst_group_id, previous_mirror.dst_group_id);
+                assert_eq!(restored.proto, previous_mirror.proto);
+                assert_eq!(restored.direction, previous_mirror.direction);
+                assert_eq!(restored.target_iface, previous_mirror.target_iface);
+                assert_eq!(restored.target_ifindex, previous_mirror.target_ifindex);
+                assert_eq!(restored.is_global, previous_mirror.is_global);
+            }
+            _ => panic!("current Mirror replacement failure must restore its preimage"),
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_dual_use_group_fq_receipt_cleans_only_qdisc_installed_by_transaction() {
+        for (state, cleanup_requested, cleanup_expected) in [
+            (aria_core::ebpf_ops::FqQdiscState::InstalledNow, true, true),
+            (
+                aria_core::ebpf_ops::FqQdiscState::InstalledNow,
+                false,
+                false,
+            ),
+            (
+                aria_core::ebpf_ops::FqQdiscState::AlreadyPresent,
+                true,
+                false,
+            ),
+        ] {
+            let receipt = managed_local_fq_qdisc_apply_receipt(state, cleanup_requested);
+            match receipt {
+                ManagedLocalDomainReceipt::FqQdisc {
+                    state: receipt_state,
+                    cleanup_on_rollback,
+                } => {
+                    assert_eq!(receipt_state, state);
+                    assert_eq!(cleanup_on_rollback, cleanup_expected);
+                }
+                _ => panic!("FQ apply helper must return its actual ownership receipt"),
+            }
+        }
+
+        let mut applied = managed_cross_domain_qos_reference("dual-use", 30);
+        applied.direction = 1;
+        applied.mode = 1;
+        let operations = vec![
+            ManagedLocalProjectionOperation::Domain(ManagedLocalDomainOperation::EnsureFqQdisc {
+                cleanup_on_rollback: true,
+            }),
+            ManagedLocalProjectionOperation::Domain(ManagedLocalDomainOperation::QosUpsert(
+                applied,
+            )),
+        ];
+        let compensation_operations = std::cell::RefCell::new(Vec::new());
+        let persist_attempted = std::cell::Cell::new(false);
+        let durable_restore_attempted = std::cell::Cell::new(false);
+
+        let error = execute_managed_local_projection_transaction(
+            &operations,
+            |_health| {},
+            |operation| match operation {
+                ManagedLocalProjectionOperation::Domain(
+                    ManagedLocalDomainOperation::EnsureFqQdisc {
+                        cleanup_on_rollback,
+                    },
+                ) => std::future::ready(Ok(ManagedLocalDomainReceipt::FqQdisc {
+                    state: aria_core::ebpf_ops::FqQdiscState::InstalledNow,
+                    cleanup_on_rollback: *cleanup_on_rollback,
+                })),
+                ManagedLocalProjectionOperation::Domain(
+                    ManagedLocalDomainOperation::QosUpsert(_),
+                ) => std::future::ready(Err("forced QoS apply after FQ prepare".to_string())),
+                _ => std::future::ready(Err("unexpected non-FQ/QoS operation".to_string())),
+            },
+            || {
+                persist_attempted.set(true);
+                std::future::ready(Ok::<(), String>(()))
+            },
+            |receipt| {
+                compensation_operations
+                    .borrow_mut()
+                    .extend(managed_local_domain_compensation_operations(receipt));
+                std::future::ready(Ok::<(), String>(()))
+            },
+            || {
+                durable_restore_attempted.set(true);
+                std::future::ready(Ok::<(), String>(()))
+            },
+        )
+        .await
+        .expect_err("QoS failure after FQ preparation must compensate the FQ receipt");
+
+        assert!(error.contains("forced QoS apply after FQ prepare"));
+        assert!(!persist_attempted.get());
+        assert!(!durable_restore_attempted.get());
+        let compensation_operations = compensation_operations.into_inner();
+        assert_eq!(compensation_operations.len(), 1);
+        assert!(matches!(
+            &compensation_operations[0],
+            ManagedLocalDomainOperation::CleanupOwnedFqQdisc
+        ));
+
+        let repaired_with_old_shaping = ManagedLocalDomainReceipt::FqQdisc {
+            state: aria_core::ebpf_ops::FqQdiscState::InstalledNow,
+            cleanup_on_rollback: false,
+        };
+        let preexisting = ManagedLocalDomainReceipt::FqQdisc {
+            state: aria_core::ebpf_ops::FqQdiscState::AlreadyPresent,
+            cleanup_on_rollback: false,
+        };
+        for receipt in [&repaired_with_old_shaping, &preexisting] {
+            let compensation = managed_local_domain_compensation_operations(receipt);
+            assert!(compensation.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_dual_use_group_persistence_failure_reuses_applied_journal_and_stays_unverified(
+    ) {
+        let mutations = managed_cross_domain_replacements("10.0.0.0/24", 20, 30);
+        let health_trace = std::cell::RefCell::new(vec![ManagedProjectionHealth::Verified]);
+        let applied = std::cell::RefCell::new(Vec::new());
+        let compensation_attempts = std::cell::RefCell::new(Vec::new());
+        let phase_trace = std::cell::RefCell::new(Vec::new());
+
+        let error = execute_managed_local_projection_transaction(
+            &mutations,
+            |health| health_trace.borrow_mut().push(health),
+            |mutation| {
+                applied.borrow_mut().push(mutation.clone());
+                std::future::ready(Ok(mutation.clone()))
+            },
+            || {
+                phase_trace.borrow_mut().push("persist");
+                std::future::ready(Err("forced persistence failure".to_string()))
+            },
+            |mutation| {
+                let compensation = shared_network_compensation(mutation);
+                let fail = matches!(
+                    &compensation,
+                    SharedNetworkMutation::Replaced {
+                        direction: "dst",
+                        ..
+                    }
+                );
+                phase_trace.borrow_mut().push(match &compensation {
+                    SharedNetworkMutation::Replaced {
+                        direction: "src", ..
+                    } => "compensate:src",
+                    SharedNetworkMutation::Replaced {
+                        direction: "dst", ..
+                    } => "compensate:dst",
+                    _ => "compensate:unexpected",
+                });
+                compensation_attempts.borrow_mut().push(compensation);
+                if fail {
+                    std::future::ready(Err("forced destination compensation failure".to_string()))
+                } else {
+                    std::future::ready(Ok(()))
+                }
+            },
+            || {
+                phase_trace.borrow_mut().push("restore-durable");
+                std::future::ready(Err("forced durable restore failure".to_string()))
+            },
+        )
+        .await
+        .expect_err("persistence failure must abort the shared transaction");
+
+        assert!(error.contains("forced persistence failure"));
+        assert!(error.contains("forced destination compensation failure"));
+        assert!(error.contains("forced durable restore failure"));
+        assert_eq!(
+            compensation_attempts.into_inner(),
+            applied
+                .borrow()
+                .iter()
+                .rev()
+                .map(shared_network_compensation)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            phase_trace.into_inner(),
+            vec![
+                "persist",
+                "compensate:dst",
+                "compensate:src",
+                "restore-durable",
+            ]
+        );
+        assert_eq!(
+            health_trace.into_inner(),
+            vec![
+                ManagedProjectionHealth::Verified,
+                ManagedProjectionHealth::Unverified,
+            ]
+        );
+    }
+
     #[test]
     fn domain_authority_exclusive_acl_replace_claims_foreign_rules() {
         let state = FirewallState::default();
