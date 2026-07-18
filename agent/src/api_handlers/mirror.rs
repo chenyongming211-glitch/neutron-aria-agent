@@ -69,6 +69,8 @@ pub async fn list_mirror(
         (status = 201, description = "Mirror rule created", body = MessageResponse),
         (status = 400, description = "Validation error", body = aria_api::ApiError),
         (status = 404, description = "Instance or group not found", body = aria_api::ApiError),
+        (status = 409, description = "Write conflicts with managed state", body = aria_api::ApiError),
+        (status = 503, description = "Managed mutation is temporarily unavailable", body = aria_api::ApiError),
         (status = 500, description = "Internal server error", body = aria_api::ApiError)
     )
 )]
@@ -93,33 +95,18 @@ pub async fn add_mirror(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
 
-    let directions: Vec<u8> = if direction == 2 {
-        vec![0, 1]
-    } else {
-        vec![direction]
-    };
-    let mut applied: Vec<u8> = Vec::new();
-
-    for dir in &directions {
-        if let Err(e) = cp
-            .add_mirror(
-                &instance,
-                &req.src_group,
-                &req.dst_group,
-                proto,
-                *dir,
-                &req.target,
-            )
-            .await
-        {
-            for prev_dir in &applied {
-                let _ = cp
-                    .delete_mirror(&instance, &req.src_group, &req.dst_group, proto, *prev_dir)
-                    .await;
-            }
-            return Err(err_response(e));
-        }
-        applied.push(*dir);
+    if let Err(e) = cp
+        .add_mirror(
+            &instance,
+            &req.src_group,
+            &req.dst_group,
+            proto,
+            direction,
+            &req.target,
+        )
+        .await
+    {
+        return Err(err_response(e));
     }
 
     let dir_label = if direction == 2 {
@@ -152,6 +139,8 @@ pub async fn add_mirror(
         (status = 200, description = "Mirror rule deleted", body = MessageResponse),
         (status = 400, description = "Validation error", body = aria_api::ApiError),
         (status = 404, description = "Instance or mirror rule not found", body = aria_api::ApiError),
+        (status = 409, description = "Write conflicts with managed state", body = aria_api::ApiError),
+        (status = 503, description = "Managed mutation is temporarily unavailable", body = aria_api::ApiError),
         (status = 500, description = "Internal server error", body = aria_api::ApiError)
     )
 )]

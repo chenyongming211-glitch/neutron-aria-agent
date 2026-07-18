@@ -67,6 +67,8 @@ pub async fn list_qos(
         (status = 201, description = "QoS rule created or updated", body = MessageResponse),
         (status = 400, description = "Validation error", body = ApiError),
         (status = 404, description = "Instance or group not found", body = ApiError),
+        (status = 409, description = "Write conflicts with managed state", body = ApiError),
+        (status = 503, description = "Managed mutation is temporarily unavailable", body = ApiError),
         (status = 500, description = "Internal server error", body = ApiError)
     )
 )]
@@ -109,39 +111,20 @@ pub async fn add_qos(
         }
     };
 
-    let directions: Vec<u8> = if direction == 2 {
-        vec![0, 1]
-    } else {
-        vec![direction]
-    };
-    let mut applied: Vec<u8> = Vec::new();
-    let mut shaping_downgraded = false;
-
-    for dir in &directions {
-        let effective_mode = if *dir == 0 && mode == 1 {
-            shaping_downgraded = true;
-            0
-        } else {
-            mode
-        };
-        if let Err(e) = cp
-            .add_qos(
-                &instance,
-                &req.group,
-                *dir,
-                rate_bps,
-                burst_bytes,
-                req.priority,
-                effective_mode,
-            )
-            .await
-        {
-            for prev_dir in &applied {
-                let _ = cp.delete_qos(&instance, &req.group, *prev_dir).await;
-            }
-            return Err(err_response(e));
-        }
-        applied.push(*dir);
+    let shaping_downgraded = mode == 1 && matches!(direction, 0 | 2);
+    if let Err(e) = cp
+        .add_qos(
+            &instance,
+            &req.group,
+            direction,
+            rate_bps,
+            burst_bytes,
+            req.priority,
+            mode,
+        )
+        .await
+    {
+        return Err(err_response(e));
     }
 
     let dir_label = if direction == 2 {
@@ -170,6 +153,8 @@ pub async fn add_qos(
         (status = 200, description = "QoS rule deleted", body = MessageResponse),
         (status = 400, description = "Validation error", body = ApiError),
         (status = 404, description = "Instance or group not found", body = ApiError),
+        (status = 409, description = "Write conflicts with managed state", body = ApiError),
+        (status = 503, description = "Managed mutation is temporarily unavailable", body = ApiError),
         (status = 500, description = "Internal server error", body = ApiError)
     )
 )]

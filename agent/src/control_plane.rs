@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
@@ -16,9 +18,10 @@ use crate::tap_registry::ManagedAttachMode;
 use crate::trace_backend::{TraceManager, TraceRuntimeStatusSnapshot};
 use aria_core::common::TapMapRuntime;
 use aria_core::ebpf_ops::{
-    classify_runtime_gate_state, replay_managed_state_to_pinned_maps, replay_state_to_pinned_maps,
-    validate_managed_pinned_runtime_state, validate_pinned_runtime_state, GroupProjectionMode,
-    ProjectionDrift, RuntimeGateDisposition, TraceMapMode,
+    classify_runtime_gate_state, compile_managed_group_projection, ensure_fq_qdisc,
+    replay_managed_state_to_pinned_maps, replay_state_to_pinned_maps,
+    validate_managed_pinned_runtime_state, validate_pinned_runtime_state, FqQdiscState,
+    GroupProjectionMode, ProjectionDrift, RuntimeGateDisposition, TraceMapMode,
 };
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
 use aria_core::wal::{WalClient, WalEntry};
@@ -86,9 +89,9 @@ struct RuntimeHealthState {
 
 impl RuntimeHealthState {
     fn readiness_reason(&self) -> Option<String> {
-        self.acl_error.clone().or_else(|| {
-            (!self.xdp_ready).then(|| "xdp_ddos_hook_unavailable".to_string())
-        })
+        self.acl_error
+            .clone()
+            .or_else(|| (!self.xdp_ready).then(|| "xdp_ddos_hook_unavailable".to_string()))
     }
 }
 
@@ -401,13 +404,8 @@ pub struct PreparedManagedInstance {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ManagedRuntimeActivation {
     PreserveVerifiedLive,
-    RestoreStandalone {
-        conntrack: bool,
-        acl: bool,
-    },
-    AwaitNeutronResync {
-        require_tc_acl_links: bool,
-    },
+    RestoreStandalone { conntrack: bool, acl: bool },
+    AwaitNeutronResync { require_tc_acl_links: bool },
 }
 
 fn managed_group_projection_mode(mode: ManagedAttachMode) -> GroupProjectionMode {
@@ -922,6 +920,133 @@ enum SharedNetworkMutation {
     },
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ManagedLocalProjectionOrder {
+    GeneralThenDomain,
+    DomainThenGeneral,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct ManagedQosDirectionPlan {
+    direction: u8,
+    effective_mode: u8,
+}
+
+#[derive(Clone, Debug)]
+enum ManagedLocalDomainOperation {
+    EnsureFqQdisc {
+        cleanup_on_rollback: bool,
+    },
+    CleanupOwnedFqQdisc,
+    QosUpsert(QosRuleInfo),
+    QosDelete {
+        group_id: u32,
+        direction: u8,
+    },
+    MirrorUpsert(MirrorRuleInfo),
+    MirrorDelete {
+        src_group_id: u32,
+        dst_group_id: u32,
+        proto: u8,
+        direction: u8,
+        is_global: bool,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum ManagedLocalDomainReceipt {
+    FqQdisc {
+        state: FqQdiscState,
+        cleanup_on_rollback: bool,
+    },
+    QosUpsert {
+        applied: QosRuleInfo,
+        previous: Option<QosRuleInfo>,
+    },
+    QosDelete {
+        deleted: QosRuleInfo,
+    },
+    MirrorUpsert {
+        applied: MirrorRuleInfo,
+        previous: Option<MirrorRuleInfo>,
+    },
+    MirrorDelete {
+        deleted: MirrorRuleInfo,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum ManagedLocalProjectionOperation {
+    General(SharedNetworkMutation),
+    Domain(ManagedLocalDomainOperation),
+}
+
+#[derive(Clone, Debug)]
+enum ManagedLocalProjectionReceipt {
+    General(SharedNetworkMutation),
+    Domain(ManagedLocalDomainReceipt),
+}
+
+#[derive(Clone, Debug)]
+struct ManagedLocalProjectionRuntime {
+    instance: String,
+    pin_path: String,
+    state_path: String,
+    ebpf_path: String,
+    tap_id: u32,
+    attached_iface: Option<String>,
+    qos_enabled: bool,
+    mirror_enabled: bool,
+}
+
+impl ManagedLocalProjectionRuntime {
+    fn map_runtime(&self) -> TapMapRuntime<'_> {
+        TapMapRuntime::new(&self.pin_path, self.tap_id)
+    }
+
+    fn iface(&self) -> Result<String, String> {
+        if self.instance == "system" {
+            self.attached_iface.clone().ok_or_else(|| {
+                "system interface is not attached for managed local projection".to_string()
+            })
+        } else {
+            Ok(self.instance.clone())
+        }
+    }
+}
+
+type ManagedLocalFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ManagedLocalProjectionFailureKind {
+    Kernel,
+    Persistence,
+}
+
+#[derive(Debug)]
+struct ManagedLocalProjectionFailure {
+    kind: ManagedLocalProjectionFailureKind,
+    message: String,
+}
+
+impl ManagedLocalProjectionFailure {
+    #[cfg(test)]
+    fn contains(&self, pattern: &str) -> bool {
+        self.message.contains(pattern)
+    }
+
+    fn into_control_plane_error(self) -> ControlPlaneError {
+        match self.kind {
+            ManagedLocalProjectionFailureKind::Kernel => {
+                ControlPlaneError::KernelError(self.message)
+            }
+            ManagedLocalProjectionFailureKind::Persistence => {
+                ControlPlaneError::PersistenceError(self.message)
+            }
+        }
+    }
+}
+
 fn shared_network_compensation(mutation: &SharedNetworkMutation) -> SharedNetworkMutation {
     match mutation {
         SharedNetworkMutation::Added {
@@ -1231,6 +1356,911 @@ fn apply_shared_network_mutation(
     }
 }
 
+fn managed_local_projection_admission(
+    mode: ManagedAclPublicationMode,
+    health: ManagedProjectionHealth,
+) -> Result<(), ControlPlaneError> {
+    match mode {
+        ManagedAclPublicationMode::ManagedAcl => match health {
+            ManagedProjectionHealth::Verified => Ok(()),
+            ManagedProjectionHealth::Unverified => Err(ControlPlaneError::InstanceNotReady(
+                "managed ACL projection is unverified".to_string(),
+            )),
+            ManagedProjectionHealth::RepairRequired => Err(ControlPlaneError::InstanceNotReady(
+                "managed ACL projection requires repair".to_string(),
+            )),
+        },
+        ManagedAclPublicationMode::StandaloneCompatibility
+        | ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl => Ok(()),
+    }
+}
+
+fn validate_managed_group_mutation(
+    state: &FirewallState,
+    group_id: u32,
+) -> Result<(), ControlPlaneError> {
+    if state
+        .rules
+        .iter()
+        .any(|rule| rule.src_group_id == group_id || rule.dst_group_id == group_id)
+    {
+        return Err(ControlPlaneError::GroupInUse(format!(
+            "group ID {} is referenced by a managed ACL rule",
+            group_id
+        )));
+    }
+    Ok(())
+}
+
+fn managed_general_state_mutations(
+    old_state: &FirewallState,
+    final_state: &FirewallState,
+) -> Result<Vec<SharedNetworkMutation>, ControlPlaneError> {
+    let committed_projection =
+        compile_managed_group_projection(old_state).map_err(ControlPlaneError::ValidationError)?;
+    let proposed_projection = compile_managed_group_projection(final_state)
+        .map_err(ControlPlaneError::ValidationError)?;
+    Ok(managed_general_projection_mutations(
+        &committed_projection,
+        &proposed_projection,
+    ))
+}
+
+fn managed_qos_direction_plans(
+    direction: u8,
+    mode: u8,
+) -> Result<Vec<ManagedQosDirectionPlan>, ControlPlaneError> {
+    ControlPlane::requested_directions(direction).map(|directions| {
+        directions
+            .into_iter()
+            .map(|direction| ManagedQosDirectionPlan {
+                direction,
+                effective_mode: if direction == 0 && mode == 1 { 0 } else { mode },
+            })
+            .collect()
+    })
+}
+
+fn requested_directions(direction: u8) -> Result<Vec<u8>, ControlPlaneError> {
+    match direction {
+        0 => Ok(vec![0]),
+        1 => Ok(vec![1]),
+        2 => Ok(vec![0, 1]),
+        _ => Err(ControlPlaneError::ValidationError(format!(
+            "Invalid direction '{}': must be ingress, egress, or both",
+            direction
+        ))),
+    }
+}
+
+fn merge_managed_local_projection_operations(
+    order: ManagedLocalProjectionOrder,
+    general: Vec<SharedNetworkMutation>,
+    domain: Vec<ManagedLocalDomainOperation>,
+) -> Vec<ManagedLocalProjectionOperation> {
+    let general = general
+        .into_iter()
+        .map(ManagedLocalProjectionOperation::General);
+    let domain = domain
+        .into_iter()
+        .map(ManagedLocalProjectionOperation::Domain);
+    match order {
+        ManagedLocalProjectionOrder::GeneralThenDomain => general.chain(domain).collect(),
+        ManagedLocalProjectionOrder::DomainThenGeneral => domain.chain(general).collect(),
+    }
+}
+
+fn reconcile_retained_owned_groups(
+    old_state: &FirewallState,
+    final_state: &mut FirewallState,
+    owner_prefix: &str,
+) -> Result<Vec<u32>, ControlPlaneError> {
+    let mut removed_group_ids = Vec::new();
+    let has_acl_reference = |state: &FirewallState, group_id: u32| {
+        state
+            .rules
+            .iter()
+            .any(|rule| rule.src_group_id == group_id || rule.dst_group_id == group_id)
+    };
+    let has_explicit_general_reference = |state: &FirewallState, group_id: u32| {
+        state.qos_rules.iter().any(|rule| rule.group_id == group_id)
+            || state
+                .mirror_rules
+                .iter()
+                .any(|rule| rule.src_group_id == group_id || rule.dst_group_id == group_id)
+    };
+
+    for old_group in old_state
+        .groups
+        .values()
+        .filter(|group| group.name.starts_with(owner_prefix))
+    {
+        let final_acl_reference = has_acl_reference(final_state, old_group.id);
+        let final_explicit_reference = has_explicit_general_reference(final_state, old_group.id);
+        if final_acl_reference || final_explicit_reference {
+            final_state
+                .groups
+                .entry(old_group.name.clone())
+                .or_insert_with(|| old_group.clone());
+            continue;
+        }
+
+        let was_retained_only = !has_acl_reference(old_state, old_group.id)
+            && has_explicit_general_reference(old_state, old_group.id);
+        if was_retained_only && final_state.groups.remove(&old_group.name).is_some() {
+            removed_group_ids.push(old_group.id);
+        }
+    }
+    Ok(removed_group_ids)
+}
+
+fn clear_removed_retained_owned_group_stats(removed_group_ids: &[u32], runtime: TapMapRuntime<'_>) {
+    for group_id in removed_group_ids {
+        if let Err(error) = aria_core::monitoring::clear_group_stats_for_id(runtime, *group_id) {
+            warn!(
+                error = %error,
+                group_id,
+                "failed to clear retained-owned group stats after final reference removal"
+            );
+        }
+    }
+}
+
+fn plan_managed_local_qos_upserts(
+    old_state: &FirewallState,
+    group_name: &str,
+    group_id: u32,
+    rate_bps: u64,
+    burst_bytes: u64,
+    priority: u8,
+    direction_plans: &[ManagedQosDirectionPlan],
+) -> Result<Vec<ManagedLocalDomainOperation>, ControlPlaneError> {
+    let mut operations = Vec::new();
+    if direction_plans.iter().any(|plan| plan.effective_mode == 1) {
+        operations.push(ManagedLocalDomainOperation::EnsureFqQdisc {
+            cleanup_on_rollback: !old_state.qos_rules.iter().any(|rule| rule.mode == 1),
+        });
+    }
+    operations.extend(direction_plans.iter().map(|plan| {
+        ManagedLocalDomainOperation::QosUpsert(QosRuleInfo {
+            group_name: group_name.to_string(),
+            group_id,
+            direction: plan.direction,
+            rate_bps,
+            burst_bytes,
+            priority,
+            mode: plan.effective_mode,
+        })
+    }));
+    Ok(operations)
+}
+
+fn plan_managed_local_qos_delete(
+    old_state: &FirewallState,
+    group_id: u32,
+    directions: &[u8],
+) -> Result<Vec<ManagedLocalDomainOperation>, ControlPlaneError> {
+    let operations = directions
+        .iter()
+        .filter(|direction| {
+            old_state
+                .qos_rules
+                .iter()
+                .any(|rule| rule.group_id == group_id && rule.direction == **direction)
+        })
+        .map(|direction| ManagedLocalDomainOperation::QosDelete {
+            group_id,
+            direction: *direction,
+        })
+        .collect::<Vec<_>>();
+    if operations.is_empty() {
+        return Err(ControlPlaneError::PolicyNotFound(format!(
+            "QoS rule not found for group ID {}",
+            group_id
+        )));
+    }
+    Ok(operations)
+}
+
+fn resolve_managed_mirror_target_ifindex(target_iface: &str) -> Result<u32, ControlPlaneError> {
+    aria_core::mirror_ops::resolve_ifindex(target_iface).map_err(ControlPlaneError::ValidationError)
+}
+
+fn plan_managed_local_mirror_upserts(
+    old_state: &FirewallState,
+    src_group_name: &str,
+    src_group_id: u32,
+    dst_group_name: &str,
+    dst_group_id: u32,
+    proto: u8,
+    target_iface: &str,
+    target_ifindex: u32,
+    directions: &[u8],
+) -> Result<Vec<ManagedLocalDomainOperation>, ControlPlaneError> {
+    let _ = old_state;
+    let is_global = src_group_id == 0 && dst_group_id == 0 && proto == 0;
+    Ok(directions
+        .iter()
+        .map(|direction| {
+            ManagedLocalDomainOperation::MirrorUpsert(MirrorRuleInfo {
+                src_group_name: src_group_name.to_string(),
+                src_group_id,
+                dst_group_name: dst_group_name.to_string(),
+                dst_group_id,
+                proto,
+                direction: *direction,
+                target_iface: target_iface.to_string(),
+                target_ifindex,
+                is_global,
+            })
+        })
+        .collect())
+}
+
+fn plan_managed_local_mirror_delete(
+    old_state: &FirewallState,
+    src_group_id: u32,
+    dst_group_id: u32,
+    proto: u8,
+    directions: &[u8],
+) -> Result<Vec<ManagedLocalDomainOperation>, ControlPlaneError> {
+    let is_global = src_group_id == 0 && dst_group_id == 0 && proto == 0;
+    let operations = directions
+        .iter()
+        .filter(|direction| {
+            old_state.mirror_rules.iter().any(|rule| {
+                rule.direction == **direction
+                    && if is_global {
+                        rule.is_global
+                    } else {
+                        !rule.is_global
+                            && rule.src_group_id == src_group_id
+                            && rule.dst_group_id == dst_group_id
+                            && rule.proto == proto
+                    }
+            })
+        })
+        .map(|direction| ManagedLocalDomainOperation::MirrorDelete {
+            src_group_id,
+            dst_group_id,
+            proto,
+            direction: *direction,
+            is_global,
+        })
+        .collect::<Vec<_>>();
+    if operations.is_empty() {
+        return Err(ControlPlaneError::PolicyNotFound(
+            "Mirror rule not found".to_string(),
+        ));
+    }
+    Ok(operations)
+}
+
+fn clear_managed_mirror_stats_after_delete(
+    instance: &str,
+    src_group_id: u32,
+    dst_group_id: u32,
+    proto: u8,
+    is_global: bool,
+    directions: &[u8],
+    runtime: TapMapRuntime<'_>,
+) {
+    for direction in directions {
+        let clear_result = if is_global {
+            aria_core::mirror_ops::clear_global_mirror_stats(*direction, runtime)
+        } else {
+            aria_core::mirror_ops::clear_mirror_rule_stats(
+                src_group_id,
+                dst_group_id,
+                proto,
+                *direction,
+                runtime,
+            )
+        };
+        if let Err(error) = clear_result {
+            warn!(
+                instance,
+                src_group_id,
+                dst_group_id,
+                proto,
+                direction,
+                is_global,
+                error = %error,
+                "failed to clear mirror stats after delete"
+            );
+        }
+    }
+}
+
+fn managed_local_state_after_domain_operations(
+    old_state: &FirewallState,
+    operations: &[ManagedLocalDomainOperation],
+) -> Result<FirewallState, ControlPlaneError> {
+    let mut final_state = old_state.clone();
+    for operation in operations {
+        match operation {
+            ManagedLocalDomainOperation::EnsureFqQdisc { .. }
+            | ManagedLocalDomainOperation::CleanupOwnedFqQdisc => {}
+            ManagedLocalDomainOperation::QosUpsert(rule) => {
+                final_state.qos_rules.retain(|existing| {
+                    existing.group_id != rule.group_id || existing.direction != rule.direction
+                });
+                final_state.qos_rules.push(rule.clone());
+            }
+            ManagedLocalDomainOperation::QosDelete {
+                group_id,
+                direction,
+            } => final_state.qos_rules.retain(|existing| {
+                existing.group_id != *group_id || existing.direction != *direction
+            }),
+            ManagedLocalDomainOperation::MirrorUpsert(rule) => {
+                if rule.is_global {
+                    final_state.mirror_rules.retain(|existing| {
+                        !(existing.is_global && existing.direction == rule.direction)
+                    });
+                } else {
+                    final_state.mirror_rules.retain(|existing| {
+                        existing.is_global
+                            || existing.src_group_id != rule.src_group_id
+                            || existing.dst_group_id != rule.dst_group_id
+                            || existing.proto != rule.proto
+                            || existing.direction != rule.direction
+                    });
+                }
+                final_state.mirror_rules.push(rule.clone());
+            }
+            ManagedLocalDomainOperation::MirrorDelete {
+                src_group_id,
+                dst_group_id,
+                proto,
+                direction,
+                is_global,
+            } => final_state.mirror_rules.retain(|existing| {
+                if *is_global {
+                    !(existing.is_global && existing.direction == *direction)
+                } else {
+                    existing.is_global
+                        || existing.src_group_id != *src_group_id
+                        || existing.dst_group_id != *dst_group_id
+                        || existing.proto != *proto
+                        || existing.direction != *direction
+                }
+            }),
+        }
+    }
+    Ok(final_state)
+}
+
+fn managed_local_fq_qdisc_apply_receipt(
+    state: FqQdiscState,
+    cleanup_on_rollback: bool,
+) -> ManagedLocalDomainReceipt {
+    let cleanup_on_rollback = cleanup_on_rollback && matches!(state, FqQdiscState::InstalledNow);
+    ManagedLocalDomainReceipt::FqQdisc {
+        state,
+        cleanup_on_rollback,
+    }
+}
+
+fn build_managed_local_domain_receipt(
+    operation: &ManagedLocalDomainOperation,
+    old_state: &FirewallState,
+) -> Result<ManagedLocalDomainReceipt, String> {
+    match operation {
+        ManagedLocalDomainOperation::QosUpsert(rule) => {
+            let previous_qos_rule = old_state
+                .qos_rules
+                .iter()
+                .find(|existing| {
+                    existing.group_id == rule.group_id && existing.direction == rule.direction
+                })
+                .cloned();
+            Ok(ManagedLocalDomainReceipt::QosUpsert {
+                applied: rule.clone(),
+                previous: previous_qos_rule,
+            })
+        }
+        ManagedLocalDomainOperation::QosDelete {
+            group_id,
+            direction,
+        } => old_state
+            .qos_rules
+            .iter()
+            .find(|rule| rule.group_id == *group_id && rule.direction == *direction)
+            .cloned()
+            .map(|deleted| ManagedLocalDomainReceipt::QosDelete { deleted })
+            .ok_or_else(|| {
+                format!(
+                    "missing QoS preimage for group ID {} direction {}",
+                    group_id, direction
+                )
+            }),
+        ManagedLocalDomainOperation::MirrorUpsert(rule) => {
+            let previous_rule_with_target_ifindex = old_state
+                .mirror_rules
+                .iter()
+                .find(|existing| {
+                    if rule.is_global {
+                        existing.is_global && existing.direction == rule.direction
+                    } else {
+                        !existing.is_global
+                            && existing.src_group_id == rule.src_group_id
+                            && existing.dst_group_id == rule.dst_group_id
+                            && existing.proto == rule.proto
+                            && existing.direction == rule.direction
+                    }
+                })
+                .cloned();
+            Ok(ManagedLocalDomainReceipt::MirrorUpsert {
+                applied: rule.clone(),
+                previous: previous_rule_with_target_ifindex,
+            })
+        }
+        ManagedLocalDomainOperation::MirrorDelete {
+            src_group_id,
+            dst_group_id,
+            proto,
+            direction,
+            is_global,
+        } => old_state
+            .mirror_rules
+            .iter()
+            .find(|rule| {
+                if *is_global {
+                    rule.is_global && rule.direction == *direction
+                } else {
+                    !rule.is_global
+                        && rule.src_group_id == *src_group_id
+                        && rule.dst_group_id == *dst_group_id
+                        && rule.proto == *proto
+                        && rule.direction == *direction
+                }
+            })
+            .cloned()
+            .map(|deleted| ManagedLocalDomainReceipt::MirrorDelete { deleted })
+            .ok_or_else(|| "missing Mirror preimage for managed delete".to_string()),
+        ManagedLocalDomainOperation::EnsureFqQdisc { .. }
+        | ManagedLocalDomainOperation::CleanupOwnedFqQdisc => {
+            Err("FQ qdisc operations do not use QoS/Mirror preimage receipts".to_string())
+        }
+    }
+}
+
+fn apply_managed_local_domain_raw(
+    operation: &ManagedLocalDomainOperation,
+    runtime: &ManagedLocalProjectionRuntime,
+) -> Result<(), String> {
+    match operation {
+        ManagedLocalDomainOperation::QosUpsert(rule) => aria_core::qos_ops::add_qos_rule(
+            rule.group_id,
+            rule.direction,
+            rule.rate_bps,
+            rule.burst_bytes,
+            rule.priority,
+            rule.mode,
+            runtime.map_runtime(),
+            runtime.qos_enabled,
+        ),
+        ManagedLocalDomainOperation::QosDelete {
+            group_id,
+            direction,
+        } => aria_core::qos_ops::delete_qos_rule(
+            *group_id,
+            *direction,
+            runtime.map_runtime(),
+            runtime.qos_enabled,
+        ),
+        ManagedLocalDomainOperation::MirrorUpsert(rule) => {
+            if rule.is_global {
+                aria_core::mirror_ops::add_global_mirror(
+                    rule.direction,
+                    rule.target_ifindex,
+                    runtime.map_runtime(),
+                    runtime.mirror_enabled,
+                )
+            } else {
+                aria_core::mirror_ops::add_mirror_rule(
+                    rule.src_group_id,
+                    rule.dst_group_id,
+                    rule.proto,
+                    rule.direction,
+                    rule.target_ifindex,
+                    runtime.map_runtime(),
+                    runtime.mirror_enabled,
+                )
+            }
+        }
+        ManagedLocalDomainOperation::MirrorDelete {
+            src_group_id,
+            dst_group_id,
+            proto,
+            direction,
+            is_global,
+        } => {
+            if *is_global {
+                aria_core::mirror_ops::delete_global_mirror(
+                    *direction,
+                    runtime.map_runtime(),
+                    runtime.mirror_enabled,
+                )
+            } else {
+                aria_core::mirror_ops::delete_mirror_rule(
+                    *src_group_id,
+                    *dst_group_id,
+                    *proto,
+                    *direction,
+                    runtime.map_runtime(),
+                    runtime.mirror_enabled,
+                )
+            }
+        }
+        ManagedLocalDomainOperation::CleanupOwnedFqQdisc => {
+            let iface = runtime.iface()?;
+            aria_core::ebpf_ops::cleanup_root_qdisc(&iface)?;
+            let marker_path = ControlPlane::fq_qdisc_marker_path(&runtime.state_path);
+            match fs::remove_file(&marker_path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(format!(
+                    "failed to remove FQ qdisc ownership marker {}: {}",
+                    marker_path.display(),
+                    error
+                )),
+            }
+        }
+        ManagedLocalDomainOperation::EnsureFqQdisc { .. } => {
+            Err("FQ qdisc ensure must use its ownership-aware apply path".to_string())
+        }
+    }
+}
+
+fn domain_apply_failure(apply_error: String, compensation_error: Option<String>) -> String {
+    match compensation_error {
+        Some(compensation_error) => format!(
+            "{}; current-operation compensation failed: {}",
+            apply_error, compensation_error
+        ),
+        None => apply_error,
+    }
+}
+
+fn mark_owned_fq_qdisc(state_path: &str, iface: &str) -> Result<(), ControlPlaneError> {
+    ControlPlane::mark_owned_fq_qdisc(state_path, iface)
+}
+
+fn rollback_installed_fq_qdisc(
+    instance: &str,
+    iface: &str,
+    state_path: &str,
+) -> Result<(), String> {
+    ControlPlane::rollback_installed_fq_qdisc(instance, iface, state_path)
+}
+
+async fn apply_managed_local_projection_operation_transactionally<
+    O,
+    R,
+    RawApply,
+    RawApplyFuture,
+    Compensate,
+    CompensateFuture,
+>(
+    operation: &O,
+    receipt: R,
+    mut raw_apply: RawApply,
+    mut compensate: Compensate,
+) -> Result<R, String>
+where
+    RawApply: FnMut(&O) -> RawApplyFuture,
+    RawApplyFuture: Future<Output = Result<(), String>>,
+    Compensate: FnMut(&R) -> CompensateFuture,
+    CompensateFuture: Future<Output = Result<(), String>>,
+{
+    match raw_apply(operation).await {
+        Ok(()) => Ok(receipt),
+        Err(apply_error) => {
+            let compensation_error = compensate(&receipt).await.err();
+            Err(domain_apply_failure(apply_error, compensation_error))
+        }
+    }
+}
+
+fn managed_local_domain_compensation_operations(
+    receipt: &ManagedLocalDomainReceipt,
+) -> Vec<ManagedLocalDomainOperation> {
+    match receipt {
+        ManagedLocalDomainReceipt::FqQdisc {
+            state: FqQdiscState::InstalledNow,
+            cleanup_on_rollback: true,
+        } => vec![ManagedLocalDomainOperation::CleanupOwnedFqQdisc],
+        ManagedLocalDomainReceipt::FqQdisc {
+            state: FqQdiscState::InstalledNow,
+            cleanup_on_rollback: false,
+        }
+        | ManagedLocalDomainReceipt::FqQdisc {
+            state: FqQdiscState::AlreadyPresent,
+            cleanup_on_rollback: _,
+        } => Vec::new(),
+        ManagedLocalDomainReceipt::QosUpsert { applied, previous } => previous
+            .clone()
+            .map(ManagedLocalDomainOperation::QosUpsert)
+            .into_iter()
+            .chain(
+                previous
+                    .is_none()
+                    .then(|| ManagedLocalDomainOperation::QosDelete {
+                        group_id: applied.group_id,
+                        direction: applied.direction,
+                    }),
+            )
+            .collect(),
+        ManagedLocalDomainReceipt::QosDelete { deleted } => {
+            vec![ManagedLocalDomainOperation::QosUpsert(deleted.clone())]
+        }
+        ManagedLocalDomainReceipt::MirrorUpsert { applied, previous } => {
+            let _target_ifindex = applied.target_ifindex;
+            previous
+                .clone()
+                .map(ManagedLocalDomainOperation::MirrorUpsert)
+                .into_iter()
+                .chain(
+                    previous
+                        .is_none()
+                        .then(|| ManagedLocalDomainOperation::MirrorDelete {
+                            src_group_id: applied.src_group_id,
+                            dst_group_id: applied.dst_group_id,
+                            proto: applied.proto,
+                            direction: applied.direction,
+                            is_global: applied.is_global,
+                        }),
+                )
+                .collect()
+        }
+        ManagedLocalDomainReceipt::MirrorDelete { deleted } => {
+            vec![ManagedLocalDomainOperation::MirrorUpsert(deleted.clone())]
+        }
+    }
+}
+
+fn compensate_managed_local_domain_receipt(
+    receipt: &ManagedLocalDomainReceipt,
+    runtime: &ManagedLocalProjectionRuntime,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for operation in managed_local_domain_compensation_operations(receipt) {
+        if let Err(error) = apply_managed_local_domain_raw(&operation, runtime) {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+async fn apply_managed_local_domain_operation(
+    operation: &ManagedLocalDomainOperation,
+    runtime: &ManagedLocalProjectionRuntime,
+    old_state: &FirewallState,
+) -> Result<ManagedLocalDomainReceipt, String> {
+    if let ManagedLocalDomainOperation::EnsureFqQdisc {
+        cleanup_on_rollback,
+    } = operation
+    {
+        let iface = runtime.iface()?;
+        let state = ensure_fq_qdisc(&iface)?;
+        if matches!(state, FqQdiscState::InstalledNow) {
+            if let Err(marker_error) = mark_owned_fq_qdisc(&runtime.state_path, &iface) {
+                let marker_error = marker_error.to_string();
+                let rollback_error =
+                    rollback_installed_fq_qdisc(&runtime.instance, &iface, &runtime.state_path)
+                        .err();
+                let marker_error = domain_apply_failure(marker_error, rollback_error);
+                return Err(marker_error);
+            }
+        }
+        return Ok(managed_local_fq_qdisc_apply_receipt(
+            state,
+            *cleanup_on_rollback,
+        ));
+    }
+
+    let receipt: ManagedLocalDomainReceipt =
+        build_managed_local_domain_receipt(operation, old_state)?;
+    apply_managed_local_projection_operation_transactionally(
+        operation,
+        receipt,
+        |operation| std::future::ready(apply_managed_local_domain_raw(operation, runtime)),
+        |receipt| std::future::ready(compensate_managed_local_domain_receipt(receipt, runtime)),
+    )
+    .await
+}
+
+fn managed_local_projection_apply(
+    runtime: ManagedLocalProjectionRuntime,
+    old_state: &FirewallState,
+) -> impl FnMut(
+    &ManagedLocalProjectionOperation,
+) -> ManagedLocalFuture<Result<ManagedLocalProjectionReceipt, String>> {
+    let old_state = Arc::new(old_state.clone());
+    move |operation| {
+        let operation = operation.clone();
+        let runtime = runtime.clone();
+        let old_state = Arc::clone(&old_state);
+        Box::pin(async move {
+            match operation {
+                ManagedLocalProjectionOperation::General(mutation) => {
+                    apply_shared_network_mutation(
+                        &mutation,
+                        runtime.map_runtime(),
+                        &runtime.ebpf_path,
+                    )?;
+                    Ok(ManagedLocalProjectionReceipt::General(mutation))
+                }
+                ManagedLocalProjectionOperation::Domain(operation) => {
+                    let receipt =
+                        apply_managed_local_domain_operation(&operation, &runtime, &old_state)
+                            .await?;
+                    Ok(ManagedLocalProjectionReceipt::Domain(receipt))
+                }
+            }
+        })
+    }
+}
+
+fn managed_local_projection_compensate(
+    runtime: ManagedLocalProjectionRuntime,
+) -> impl FnMut(&ManagedLocalProjectionReceipt) -> ManagedLocalFuture<Result<(), String>> {
+    move |receipt| {
+        let receipt = receipt.clone();
+        let runtime = runtime.clone();
+        Box::pin(async move {
+            match receipt {
+                ManagedLocalProjectionReceipt::General(mutation) => apply_shared_network_mutation(
+                    &shared_network_compensation(&mutation),
+                    runtime.map_runtime(),
+                    &runtime.ebpf_path,
+                ),
+                ManagedLocalProjectionReceipt::Domain(receipt) => {
+                    compensate_managed_local_domain_receipt(&receipt, &runtime)
+                }
+            }
+        })
+    }
+}
+
+fn managed_local_projection_persist(
+    wal: &WalClient,
+    final_state: &FirewallState,
+) -> Result<impl FnMut() -> ManagedLocalFuture<Result<(), String>>, ControlPlaneError> {
+    let wal = wal.clone();
+    let snapshot = serde_json::to_string_pretty(final_state).map_err(|error| {
+        ControlPlaneError::PersistenceError(format!(
+            "failed to serialize managed local final state: {}",
+            error
+        ))
+    })?;
+    Ok(move || {
+        let wal = wal.clone();
+        let snapshot = snapshot.clone();
+        Box::pin(async move { wal.compact(snapshot).await })
+    })
+}
+
+fn managed_local_projection_restore(
+    wal: &WalClient,
+    old_state: &FirewallState,
+) -> Result<impl FnMut() -> ManagedLocalFuture<Result<(), String>>, ControlPlaneError> {
+    let wal = wal.clone();
+    let snapshot = serde_json::to_string_pretty(old_state).map_err(|error| {
+        ControlPlaneError::PersistenceError(format!(
+            "failed to serialize managed local rollback state: {}",
+            error
+        ))
+    })?;
+    Ok(move || {
+        let wal = wal.clone();
+        let snapshot = snapshot.clone();
+        Box::pin(async move { wal.compact(snapshot).await })
+    })
+}
+
+async fn execute_managed_local_projection_compensations<R, Compensate, CompensateFuture>(
+    applied: &[R],
+    mut compensate: Compensate,
+) -> Vec<String>
+where
+    Compensate: FnMut(&R) -> CompensateFuture,
+    CompensateFuture: Future<Output = Result<(), String>>,
+{
+    let mut compensation_errors = Vec::new();
+    for receipt in applied.iter().rev() {
+        if let Err(error) = compensate(receipt).await {
+            compensation_errors.push(error);
+        }
+    }
+    compensation_errors
+}
+
+fn transaction_failure(
+    kind: ManagedLocalProjectionFailureKind,
+    error: String,
+    compensation_errors: Vec<String>,
+    restore_error: Option<String>,
+) -> ManagedLocalProjectionFailure {
+    let mut errors = vec![error];
+    errors.extend(compensation_errors);
+    if let Some(restore_error) = restore_error {
+        errors.push(restore_error);
+    }
+    ManagedLocalProjectionFailure {
+        kind,
+        message: errors.join("; "),
+    }
+}
+
+async fn execute_managed_local_projection_transaction<
+    O,
+    R,
+    SetHealth,
+    Apply,
+    ApplyFuture,
+    Persist,
+    PersistFuture,
+    Compensate,
+    CompensateFuture,
+    RestoreDurable,
+    RestoreDurableFuture,
+>(
+    operations: &[O],
+    mut set_health: SetHealth,
+    mut apply: Apply,
+    mut persist: Persist,
+    mut compensate: Compensate,
+    mut restore_durable: RestoreDurable,
+) -> Result<(), ManagedLocalProjectionFailure>
+where
+    SetHealth: FnMut(ManagedProjectionHealth),
+    Apply: FnMut(&O) -> ApplyFuture,
+    ApplyFuture: Future<Output = Result<R, String>>,
+    Persist: FnMut() -> PersistFuture,
+    PersistFuture: Future<Output = Result<(), String>>,
+    Compensate: FnMut(&R) -> CompensateFuture,
+    CompensateFuture: Future<Output = Result<(), String>>,
+    RestoreDurable: FnMut() -> RestoreDurableFuture,
+    RestoreDurableFuture: Future<Output = Result<(), String>>,
+{
+    set_health(ManagedProjectionHealth::Unverified);
+    let mut applied = Vec::new();
+    for operation in operations {
+        match apply(operation).await {
+            Ok(receipt) => applied.push(receipt),
+            Err(error) => {
+                let compensation_errors =
+                    execute_managed_local_projection_compensations(&applied, &mut compensate).await;
+                return Err(transaction_failure(
+                    ManagedLocalProjectionFailureKind::Kernel,
+                    error,
+                    compensation_errors,
+                    None,
+                ));
+            }
+        }
+    }
+    if let Err(error) = persist().await {
+        let compensation_errors =
+            execute_managed_local_projection_compensations(&applied, &mut compensate).await;
+        let restore_error = restore_durable().await.err();
+        return Err(transaction_failure(
+            ManagedLocalProjectionFailureKind::Persistence,
+            error,
+            compensation_errors,
+            restore_error,
+        ));
+    }
+    Ok(())
+}
+
 fn apply_managed_acl_publication_compensation(
     compensation: &ManagedAclPublicationCompensation,
     runtime: TapMapRuntime<'_>,
@@ -1494,12 +2524,12 @@ impl ControlPlane {
         Ok(())
     }
 
-    fn fq_qdisc_marker_path(state: &InstanceState) -> std::path::PathBuf {
-        Path::new(&state.state_path).join(FQ_QDISC_MARKER)
+    fn fq_qdisc_marker_path(state_path: &str) -> std::path::PathBuf {
+        Path::new(state_path).join(FQ_QDISC_MARKER)
     }
 
-    fn mark_owned_fq_qdisc(state: &InstanceState, iface: &str) -> Result<(), ControlPlaneError> {
-        let marker_path = Self::fq_qdisc_marker_path(state);
+    fn mark_owned_fq_qdisc(state_path: &str, iface: &str) -> Result<(), ControlPlaneError> {
+        let marker_path = Self::fq_qdisc_marker_path(state_path);
         fs::write(&marker_path, b"owned\n").map_err(|e| {
             ControlPlaneError::KernelError(format!(
                 "[{}] failed to persist FQ qdisc ownership marker {}: {}",
@@ -1510,29 +2540,33 @@ impl ControlPlane {
         })
     }
 
-    fn rollback_installed_fq_qdisc(instance: &str, state: &InstanceState) {
-        let Ok(iface) = Self::runtime_iface_name(instance, state) else {
-            return;
-        };
+    fn rollback_installed_fq_qdisc(
+        instance: &str,
+        iface: &str,
+        state_path: &str,
+    ) -> Result<(), String> {
+        aria_core::ebpf_ops::cleanup_root_qdisc(iface).map_err(|error| {
+            format!(
+                "[{}] failed to roll back FQ qdisc on {}: {}",
+                instance, iface, error
+            )
+        })?;
 
-        if let Err(e) = aria_core::ebpf_ops::cleanup_root_qdisc(&iface) {
-            warn!(instance = %instance, iface = %iface, error = %e, "failed to roll back FQ qdisc after QoS add failure");
-        }
-
-        let marker_path = Self::fq_qdisc_marker_path(state);
-        if let Err(e) = fs::remove_file(&marker_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                warn!(instance = %instance, iface = %iface, path = %marker_path.display(), error = %e, "failed to remove FQ qdisc marker after QoS add failure");
-            }
+        let marker_path = Self::fq_qdisc_marker_path(state_path);
+        match fs::remove_file(&marker_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "[{}] failed to remove FQ qdisc marker {} after rollback: {}",
+                instance,
+                marker_path.display(),
+                error
+            )),
         }
     }
 
-    fn requested_directions(direction: u8) -> Vec<u8> {
-        if direction == 2 {
-            vec![0, 1]
-        } else {
-            vec![direction]
-        }
+    fn requested_directions(direction: u8) -> Result<Vec<u8>, ControlPlaneError> {
+        requested_directions(direction)
     }
 
     fn owned_acl_group_name_by_id(state: &FirewallState, id: u32) -> String {
@@ -1791,10 +2825,10 @@ impl ControlPlane {
         };
 
         let projection_drift = match projection_mode {
-            GroupProjectionMode::StandaloneCompatibility => validate_pinned_runtime_state(
-                runtime, state,
-            )
-            .map_or_else(ProjectionDrift::Fatal, |()| ProjectionDrift::Clean),
+            GroupProjectionMode::StandaloneCompatibility => {
+                validate_pinned_runtime_state(runtime, state)
+                    .map_or_else(ProjectionDrift::Fatal, |()| ProjectionDrift::Clean)
+            }
             GroupProjectionMode::Managed => validate_managed_pinned_runtime_state(runtime, state),
         };
         PreexistingRuntimeValidation {
@@ -2387,10 +3421,12 @@ impl ControlPlane {
             tap_config_written = tap_id != aria_core::common::TAP_ID_UNASSIGNED;
 
             let replay_result = match projection_mode {
-                GroupProjectionMode::StandaloneCompatibility =>
-                    replay_state_to_pinned_maps(&pin_path, &state_path),
-                GroupProjectionMode::Managed =>
-                    replay_managed_state_to_pinned_maps(&pin_path, &state_path, &state),
+                GroupProjectionMode::StandaloneCompatibility => {
+                    replay_state_to_pinned_maps(&pin_path, &state_path)
+                }
+                GroupProjectionMode::Managed => {
+                    replay_managed_state_to_pinned_maps(&pin_path, &state_path, &state)
+                }
             };
             if let Err(e) = replay_result {
                 Self::cleanup_failed_managed_registration(
@@ -2827,11 +3863,7 @@ impl ControlPlane {
         names
     }
 
-    fn runtime_link_health_locked(
-        &self,
-        instance: &str,
-        state: &InstanceState,
-    ) -> TcAclLinkHealth {
+    fn runtime_link_health_locked(&self, instance: &str, state: &InstanceState) -> TcAclLinkHealth {
         let Ok(iface) = Self::runtime_iface_name(instance, state) else {
             return TcAclLinkHealth::new(false, false, false);
         };
@@ -2873,10 +3905,7 @@ impl ControlPlane {
         .xdp_link_health()
     }
 
-    fn quiesce_tc_acl_runtime_locked(
-        instance: &str,
-        state: &InstanceState,
-    ) -> Result<(), String> {
+    fn quiesce_tc_acl_runtime_locked(instance: &str, state: &InstanceState) -> Result<(), String> {
         let runtime = state.map_runtime();
         aria_core::ebpf_ops::read_runtime_config(runtime)
             .map_err(|error| format!("runtime gate read failed: {}", error))?;
@@ -3660,6 +4689,15 @@ impl ControlPlane {
         for group in &group_deletes {
             final_state.groups.remove(&group.name);
         }
+        let _removed_retained_group_ids =
+            reconcile_retained_owned_groups(&old_state, &mut final_state, owner_prefix)?;
+        group_deletes.retain(|group| !final_state.groups.contains_key(&group.name));
+        group_cidr_deletes.retain(|(name, _, cidr)| {
+            !final_state
+                .groups
+                .get(name)
+                .is_some_and(|group| group.cidrs.contains(cidr))
+        });
 
         let mut report = OwnedAclReconcileReport {
             group_delete_count: group_deletes.len(),
@@ -3691,14 +4729,9 @@ impl ControlPlane {
             && group_cidr_deletes.is_empty()
             && group_deletes.is_empty()
             && released_port_sets.is_empty());
-        let committed_projection =
-            aria_core::ebpf_ops::compile_managed_group_projection(&old_state)
-                .map_err(ControlPlaneError::ValidationError)?;
-        let proposed_projection =
-            aria_core::ebpf_ops::compile_managed_group_projection(&final_state)
-                .map_err(ControlPlaneError::ValidationError)?;
-        let clean_semantic_mutations =
-            managed_general_projection_mutations(&committed_projection, &proposed_projection);
+        let clean_semantic_mutations = managed_general_state_mutations(&old_state, &final_state)?;
+        let proposed_projection = compile_managed_group_projection(&final_state)
+            .map_err(ControlPlaneError::ValidationError)?;
         let publication_performed = self
             .publish_acl_projection_locked(
                 instance,
@@ -3781,9 +4814,7 @@ impl ControlPlane {
             }
         }
         for group in &group_deletes {
-            if let Err(e) =
-                aria_core::monitoring::clear_group_stats_for_id(runtime, group.id)
-            {
+            if let Err(e) = aria_core::monitoring::clear_group_stats_for_id(runtime, group.id) {
                 warn!(error = %e, group_id = group.id, "failed to clear group stats after owned ACL diff delete");
             }
         }
@@ -3791,44 +4822,91 @@ impl ControlPlane {
         Ok(report)
     }
 
-    pub async fn list_groups(&self, instance: &str) -> Result<Vec<GroupInfo>, ControlPlaneError> {
-        let inst = self.get_instance(instance).await?;
-        let state = inst.read().await;
-        Ok(state.state.groups.values().cloned().collect())
+    async fn managed_local_owner_prefix_snapshot(&self, instance: &str) -> Option<String> {
+        let authorities = self.neutron_authorities.read().await;
+        authorities
+            .get(instance)
+            .map(|authority| format!("neutron:{}:", authority.port_id))
     }
 
-    pub async fn add_group(
+    fn require_managed_local_owner_prefix(
+        instance: &str,
+        owner_prefix: Option<String>,
+    ) -> Result<String, ControlPlaneError> {
+        owner_prefix.ok_or_else(|| {
+            ControlPlaneError::InstanceNotReady(format!(
+                "managed ACL authority is unavailable for instance '{}'",
+                instance
+            ))
+        })
+    }
+
+    fn managed_local_projection_runtime(
         &self,
         instance: &str,
+        state: &InstanceState,
+    ) -> ManagedLocalProjectionRuntime {
+        ManagedLocalProjectionRuntime {
+            instance: instance.to_string(),
+            pin_path: state.pin_path.clone(),
+            state_path: state.state_path.clone(),
+            ebpf_path: self.ebpf_path.clone(),
+            tap_id: state.tap_id,
+            attached_iface: state.state.attached_iface.clone(),
+            qos_enabled: state.state.qos_enabled,
+            mirror_enabled: state.state.mirror_enabled,
+        }
+    }
+
+    fn cleanup_owned_fq_qdisc_if_unused(instance: &str, state: &InstanceState) {
+        if state.state.qos_rules.iter().any(|rule| rule.mode == 1) {
+            return;
+        }
+        let marker_path = Self::fq_qdisc_marker_path(&state.state_path);
+        if !marker_path.exists() {
+            return;
+        }
+        let Ok(iface) = Self::runtime_iface_name(instance, state) else {
+            return;
+        };
+        if let Err(error) = aria_core::ebpf_ops::cleanup_root_qdisc(&iface) {
+            warn!(instance = %instance, iface = %iface, error = %error,
+                "failed to remove owned fq qdisc after last shaping rule deleted");
+            return;
+        }
+        if let Err(error) = fs::remove_file(&marker_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                warn!(instance = %instance, path = %marker_path.display(), error = %error,
+                    "failed to remove fq qdisc ownership marker");
+            }
+        }
+    }
+
+    async fn add_group_standalone_locked(
+        &self,
+        state: &mut InstanceState,
         name: &str,
         cidr: &str,
     ) -> Result<u32, ControlPlaneError> {
-        let inst = self.get_instance(instance).await?;
-        let mut state = inst.write().await;
         Self::check_runtime_maps_ready(&state.pin_path)?;
-
-        // Check if this is a new group (for rollback)
         let was_new_group = !state.state.groups.contains_key(name);
-
-        // Modify in-memory state
         let id = state
             .state
             .add_group(name, cidr)
-            .map_err(|e| ControlPlaneError::ValidationError(e))?;
+            .map_err(ControlPlaneError::ValidationError)?;
         let acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
             .map_err(ControlPlaneError::KernelError)?;
 
-        // Write to kernel maps
-        if let Err(e) =
+        if let Err(error) =
             aria_core::ebpf_ops::add_network("src", cidr, id, state.map_runtime(), &self.ebpf_path)
         {
             state.state.rollback_add_group(name, cidr, was_new_group);
-            return Err(ControlPlaneError::KernelError(format!("src: {}", e)));
+            return Err(ControlPlaneError::KernelError(format!("src: {}", error)));
         }
-        if let Err(e) =
+        if let Err(error) =
             aria_core::ebpf_ops::add_network("dst", cidr, id, state.map_runtime(), &self.ebpf_path)
         {
-            let mut errors = vec![format!("dst: {}", e)];
+            let mut errors = vec![format!("dst: {}", error)];
             if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
                 "src",
                 cidr,
@@ -3841,7 +4919,7 @@ impl ControlPlane {
             state.state.rollback_add_group(name, cidr, was_new_group);
             return Err(ControlPlaneError::KernelError(errors.join("; ")));
         }
-        if let Err(e) = aria_core::ebpf_ops::add_acl_network_in_bank(
+        if let Err(error) = aria_core::ebpf_ops::add_acl_network_in_bank(
             "src",
             cidr,
             id,
@@ -3849,29 +4927,22 @@ impl ControlPlane {
             state.map_runtime(),
             &self.ebpf_path,
         ) {
-            let mut errors = vec![format!("acl src: {}", e)];
-            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
-                "src",
-                cidr,
-                id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                errors.push(format!("rollback src network: {}", cleanup_error));
-            }
-            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
-                "dst",
-                cidr,
-                id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                errors.push(format!("rollback dst network: {}", cleanup_error));
+            let mut errors = vec![format!("acl src: {}", error)];
+            for direction in ["src", "dst"] {
+                if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
+                    direction,
+                    cidr,
+                    id,
+                    state.map_runtime(),
+                    &self.ebpf_path,
+                ) {
+                    errors.push(format!("rollback {} network: {}", direction, cleanup_error));
+                }
             }
             state.state.rollback_add_group(name, cidr, was_new_group);
             return Err(ControlPlaneError::KernelError(errors.join("; ")));
         }
-        if let Err(e) = aria_core::ebpf_ops::add_acl_network_in_bank(
+        if let Err(error) = aria_core::ebpf_ops::add_acl_network_in_bank(
             "dst",
             cidr,
             id,
@@ -3879,7 +4950,7 @@ impl ControlPlane {
             state.map_runtime(),
             &self.ebpf_path,
         ) {
-            let mut errors = vec![format!("acl dst: {}", e)];
+            let mut errors = vec![format!("acl dst: {}", error)];
             if let Err(cleanup_error) = aria_core::ebpf_ops::delete_acl_network_in_bank(
                 "src",
                 cidr,
@@ -3890,23 +4961,16 @@ impl ControlPlane {
             ) {
                 errors.push(format!("rollback ACL src network: {}", cleanup_error));
             }
-            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
-                "src",
-                cidr,
-                id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                errors.push(format!("rollback src network: {}", cleanup_error));
-            }
-            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
-                "dst",
-                cidr,
-                id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                errors.push(format!("rollback dst network: {}", cleanup_error));
+            for direction in ["src", "dst"] {
+                if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
+                    direction,
+                    cidr,
+                    id,
+                    state.map_runtime(),
+                    &self.ebpf_path,
+                ) {
+                    errors.push(format!("rollback {} network: {}", direction, cleanup_error));
+                }
             }
             state.state.rollback_add_group(name, cidr, was_new_group);
             return Err(ControlPlaneError::KernelError(errors.join("; ")));
@@ -3921,95 +4985,78 @@ impl ControlPlane {
         Ok(id)
     }
 
-    pub async fn delete_group(&self, instance: &str, name: &str) -> Result<(), ControlPlaneError> {
-        let inst = self.get_instance(instance).await?;
-        let mut state = inst.write().await;
+    async fn delete_group_standalone_locked(
+        &self,
+        state: &mut InstanceState,
+        name: &str,
+    ) -> Result<(), ControlPlaneError> {
         Self::check_runtime_maps_ready(&state.pin_path)?;
-
         let group = state
             .state
             .groups
             .get(name)
             .ok_or_else(|| ControlPlaneError::GroupNotFound(name.to_string()))?
             .clone();
-
-        // Check if group is referenced by any rule
-        for rule in &state.state.rules {
-            if rule.src_group_id == group.id || rule.dst_group_id == group.id {
-                return Err(ControlPlaneError::GroupInUse(format!(
-                    "Group '{}' is referenced by a policy",
-                    name
-                )));
-            }
+        if state
+            .state
+            .rules
+            .iter()
+            .any(|rule| rule.src_group_id == group.id || rule.dst_group_id == group.id)
+        {
+            return Err(ControlPlaneError::GroupInUse(format!(
+                "Group '{}' is referenced by a policy",
+                name
+            )));
+        }
+        if state
+            .state
+            .qos_rules
+            .iter()
+            .any(|rule| rule.group_id == group.id)
+        {
+            return Err(ControlPlaneError::GroupInUse(format!(
+                "Group '{}' is referenced by a QoS rule",
+                name
+            )));
+        }
+        if state
+            .state
+            .mirror_rules
+            .iter()
+            .any(|rule| rule.src_group_id == group.id || rule.dst_group_id == group.id)
+        {
+            return Err(ControlPlaneError::GroupInUse(format!(
+                "Group '{}' is referenced by a mirror rule",
+                name
+            )));
         }
 
-        // Also check QoS rules
-        for qos in &state.state.qos_rules {
-            if qos.group_id == group.id {
-                return Err(ControlPlaneError::GroupInUse(format!(
-                    "Group '{}' is referenced by a QoS rule",
-                    name
-                )));
-            }
-        }
-
-        // Also check mirror rules
-        for mr in &state.state.mirror_rules {
-            if mr.src_group_id == group.id || mr.dst_group_id == group.id {
-                return Err(ControlPlaneError::GroupInUse(format!(
-                    "Group '{}' is referenced by a mirror rule",
-                    name
-                )));
-            }
-        }
-
-        // Delete from kernel
         let mut errors = Vec::new();
-        let mut deleted_networks: Vec<(&'static str, String)> = Vec::new();
+        let mut deleted_networks = Vec::new();
         let acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
             .map_err(ControlPlaneError::KernelError)?;
         for cidr in &group.cidrs {
-            match aria_core::ebpf_ops::delete_network(
-                "src",
-                cidr,
-                group.id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                Ok(()) => deleted_networks.push(("src", cidr.clone())),
-                Err(e) => errors.push(format!("src {}: {}", cidr, e)),
-            }
-            match aria_core::ebpf_ops::delete_network(
-                "dst",
-                cidr,
-                group.id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                Ok(()) => deleted_networks.push(("dst", cidr.clone())),
-                Err(e) => errors.push(format!("dst {}: {}", cidr, e)),
-            }
-            match aria_core::ebpf_ops::delete_acl_network_in_bank(
-                "src",
-                cidr,
-                group.id,
-                acl_bank,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                Ok(()) => {}
-                Err(e) => errors.push(format!("acl src {}: {}", cidr, e)),
-            }
-            match aria_core::ebpf_ops::delete_acl_network_in_bank(
-                "dst",
-                cidr,
-                group.id,
-                acl_bank,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                Ok(()) => {}
-                Err(e) => errors.push(format!("acl dst {}: {}", cidr, e)),
+            for direction in ["src", "dst"] {
+                match aria_core::ebpf_ops::delete_network(
+                    direction,
+                    cidr,
+                    group.id,
+                    state.map_runtime(),
+                    &self.ebpf_path,
+                ) {
+                    Ok(()) => deleted_networks.push((direction, cidr.clone())),
+                    Err(error) => errors.push(format!("{} {}: {}", direction, cidr, error)),
+                }
+                if let Err(error) = aria_core::ebpf_ops::delete_acl_network_in_bank(
+                    direction,
+                    cidr,
+                    group.id,
+                    acl_bank,
+                    state.map_runtime(),
+                    &self.ebpf_path,
+                ) {
+                    errors.push(format!("acl {} {}: {}", direction, cidr, error));
+                }
             }
         }
         if !errors.is_empty() {
@@ -4020,13 +5067,10 @@ impl ControlPlane {
                 group.id,
                 &deleted_networks,
             );
-            let error = match rollback {
-                Ok(()) => errors.join("; "),
-                Err(rollback_err) => {
-                    format!("{}; rollback failed: {}", errors.join("; "), rollback_err)
-                }
-            };
-            return Err(ControlPlaneError::KernelError(error));
+            if let Err(rollback_error) = rollback {
+                errors.push(format!("rollback failed: {}", rollback_error));
+            }
+            return Err(ControlPlaneError::KernelError(errors.join("; ")));
         }
 
         state.state.groups.remove(name);
@@ -4035,8 +5079,157 @@ impl ControlPlane {
                 name: name.to_string(),
             })
             .await;
+        if let Err(error) =
+            aria_core::monitoring::clear_group_stats_for_id(state.map_runtime(), group.id)
+        {
+            warn!(error = %error, group_id = group.id, "failed to clear group stats after group delete");
+        }
+        Ok(())
+    }
 
-        // Clear stale GROUP_STATS entries so the deleted group no longer appears in API responses.
+    pub async fn list_groups(&self, instance: &str) -> Result<Vec<GroupInfo>, ControlPlaneError> {
+        let inst = self.get_instance(instance).await?;
+        let state = inst.read().await;
+        Ok(state.state.groups.values().cloned().collect())
+    }
+
+    pub async fn add_group(
+        &self,
+        instance: &str,
+        name: &str,
+        cidr: &str,
+    ) -> Result<u32, ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let owner_prefix = self.managed_local_owner_prefix_snapshot(instance).await;
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        match state.managed_acl_publication_mode {
+            ManagedAclPublicationMode::StandaloneCompatibility
+            | ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl => {
+                return self
+                    .add_group_standalone_locked(&mut state, name, cidr)
+                    .await;
+            }
+            ManagedAclPublicationMode::ManagedAcl => {}
+        }
+        managed_local_projection_admission(
+            state.managed_acl_publication_mode,
+            state.managed_projection_health,
+        )?;
+        let _owner_prefix = Self::require_managed_local_owner_prefix(instance, owner_prefix)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
+        let old_state = state.state.clone();
+        let domain_operations = Vec::new();
+        let mut final_state = old_state.clone();
+        let id = final_state
+            .add_group(name, cidr)
+            .map_err(ControlPlaneError::ValidationError)?;
+        validate_managed_group_mutation(&final_state, id)?;
+        let general_mutations = managed_general_state_mutations(&old_state, &final_state)?;
+        let projection_order = ManagedLocalProjectionOrder::GeneralThenDomain;
+        let operations = merge_managed_local_projection_operations(
+            projection_order,
+            general_mutations,
+            domain_operations,
+        );
+        let runtime = self.managed_local_projection_runtime(instance, &state);
+        let apply_projection_operation =
+            managed_local_projection_apply(runtime.clone(), &old_state);
+        let compensate_projection_receipt = managed_local_projection_compensate(runtime);
+        let persist_final_state = managed_local_projection_persist(&state.wal, &final_state)?;
+        let restore_old_state = managed_local_projection_restore(&state.wal, &old_state)?;
+        let set_projection_health = |health| {
+            state.managed_projection_health = health;
+        };
+        execute_managed_local_projection_transaction(
+            &operations,
+            set_projection_health,
+            apply_projection_operation,
+            persist_final_state,
+            compensate_projection_receipt,
+            restore_old_state,
+        )
+        .await
+        .map_err(ManagedLocalProjectionFailure::into_control_plane_error)?;
+        state.state = final_state;
+        Ok(id)
+    }
+
+    pub async fn delete_group(&self, instance: &str, name: &str) -> Result<(), ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let owner_prefix = self.managed_local_owner_prefix_snapshot(instance).await;
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        match state.managed_acl_publication_mode {
+            ManagedAclPublicationMode::StandaloneCompatibility
+            | ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl => {
+                return self.delete_group_standalone_locked(&mut state, name).await;
+            }
+            ManagedAclPublicationMode::ManagedAcl => {}
+        }
+        managed_local_projection_admission(
+            state.managed_acl_publication_mode,
+            state.managed_projection_health,
+        )?;
+        let _owner_prefix = Self::require_managed_local_owner_prefix(instance, owner_prefix)?;
+        Self::check_runtime_maps_ready(&state.pin_path)?;
+        let old_state = state.state.clone();
+        let group = old_state
+            .groups
+            .get(name)
+            .ok_or_else(|| ControlPlaneError::GroupNotFound(name.to_string()))?
+            .clone();
+        validate_managed_group_mutation(&old_state, group.id)?;
+        if old_state
+            .qos_rules
+            .iter()
+            .any(|rule| rule.group_id == group.id)
+        {
+            return Err(ControlPlaneError::GroupInUse(format!(
+                "Group '{}' is referenced by a QoS rule",
+                name
+            )));
+        }
+        if old_state
+            .mirror_rules
+            .iter()
+            .any(|rule| rule.src_group_id == group.id || rule.dst_group_id == group.id)
+        {
+            return Err(ControlPlaneError::GroupInUse(format!(
+                "Group '{}' is referenced by a mirror rule",
+                name
+            )));
+        }
+        let domain_operations = Vec::new();
+        let mut final_state = old_state.clone();
+        final_state.groups.remove(name);
+        let general_mutations = managed_general_state_mutations(&old_state, &final_state)?;
+        let projection_order = ManagedLocalProjectionOrder::GeneralThenDomain;
+        let operations = merge_managed_local_projection_operations(
+            projection_order,
+            general_mutations,
+            domain_operations,
+        );
+        let runtime = self.managed_local_projection_runtime(instance, &state);
+        let apply_projection_operation =
+            managed_local_projection_apply(runtime.clone(), &old_state);
+        let compensate_projection_receipt = managed_local_projection_compensate(runtime);
+        let persist_final_state = managed_local_projection_persist(&state.wal, &final_state)?;
+        let restore_old_state = managed_local_projection_restore(&state.wal, &old_state)?;
+        let set_projection_health = |health| {
+            state.managed_projection_health = health;
+        };
+        execute_managed_local_projection_transaction(
+            &operations,
+            set_projection_health,
+            apply_projection_operation,
+            persist_final_state,
+            compensate_projection_receipt,
+            restore_old_state,
+        )
+        .await
+        .map_err(ManagedLocalProjectionFailure::into_control_plane_error)?;
+        state.state = final_state;
         if let Err(e) =
             aria_core::monitoring::clear_group_stats_for_id(state.map_runtime(), group.id)
         {
@@ -4179,7 +5372,7 @@ impl ControlPlane {
         let src_id = self.resolve_group_id(&state.state, src_group)?;
         let dst_id = self.resolve_group_id(&state.state, dst_group)?;
 
-        let target_directions = Self::requested_directions(direction);
+        let target_directions = Self::requested_directions(direction)?;
         let matching_rules: Vec<RuleInfo> = target_directions
             .iter()
             .filter_map(|dir| {
@@ -4309,6 +5502,222 @@ impl ControlPlane {
 
     // ── QoS ──
 
+    async fn add_qos_standalone_locked(
+        &self,
+        instance: &str,
+        state: &mut InstanceState,
+        group_name: &str,
+        direction: u8,
+        rate_bps: u64,
+        burst_bytes: u64,
+        priority: u8,
+        mode: u8,
+    ) -> Result<(), ControlPlaneError> {
+        Self::check_runtime_maps_ready(&state.pin_path)?;
+        let group_id = if group_name == "default" || group_name == "any" {
+            0
+        } else {
+            state
+                .state
+                .groups
+                .get(group_name)
+                .map(|group| group.id)
+                .ok_or_else(|| ControlPlaneError::GroupNotFound(group_name.to_string()))?
+        };
+        let direction_plans = managed_qos_direction_plans(direction, mode)?;
+        let mut applied = Vec::<QosRuleInfo>::new();
+
+        for plan in direction_plans {
+            let mut installed_fq = None;
+            if plan.effective_mode == 1 {
+                let iface = Self::runtime_iface_name(instance, state)?;
+                match aria_core::ebpf_ops::ensure_fq_qdisc(&iface) {
+                    Ok(aria_core::ebpf_ops::FqQdiscState::InstalledNow) => {
+                        if let Err(marker_error) =
+                            Self::mark_owned_fq_qdisc(&state.state_path, &iface)
+                        {
+                            let rollback_error = Self::rollback_installed_fq_qdisc(
+                                instance,
+                                &iface,
+                                &state.state_path,
+                            )
+                            .err();
+                            return Err(ControlPlaneError::KernelError(domain_apply_failure(
+                                marker_error.to_string(),
+                                rollback_error,
+                            )));
+                        }
+                        installed_fq = Some(iface);
+                    }
+                    Ok(aria_core::ebpf_ops::FqQdiscState::AlreadyPresent) => {}
+                    Err(error) => {
+                        return Err(ControlPlaneError::KernelError(format!(
+                            "failed to prepare FQ qdisc for QoS shaping: {}",
+                            error
+                        )));
+                    }
+                }
+            }
+
+            let apply_result = aria_core::qos_ops::add_qos_rule(
+                group_id,
+                plan.direction,
+                rate_bps,
+                burst_bytes,
+                priority,
+                plan.effective_mode,
+                state.map_runtime(),
+                state.state.qos_enabled,
+            );
+            if let Err(error) = apply_result {
+                let mut errors = vec![error];
+                for previous in applied.iter().rev() {
+                    if let Err(rollback_error) = aria_core::qos_ops::delete_qos_rule(
+                        previous.group_id,
+                        previous.direction,
+                        state.map_runtime(),
+                        state.state.qos_enabled,
+                    ) {
+                        errors.push(format!(
+                            "rollback QoS direction {}: {}",
+                            previous.direction, rollback_error
+                        ));
+                        continue;
+                    }
+                    state.state.qos_rules.retain(|rule| {
+                        rule.group_id != previous.group_id || rule.direction != previous.direction
+                    });
+                    state
+                        .wal_append(&WalEntry::DeleteQos {
+                            group_id: previous.group_id,
+                            direction: previous.direction,
+                        })
+                        .await;
+                }
+                if let Some(iface) = installed_fq {
+                    if let Err(rollback_error) =
+                        Self::rollback_installed_fq_qdisc(instance, &iface, &state.state_path)
+                    {
+                        errors.push(rollback_error);
+                    }
+                }
+                return Err(ControlPlaneError::KernelError(errors.join("; ")));
+            }
+
+            state
+                .state
+                .qos_rules
+                .retain(|rule| rule.group_id != group_id || rule.direction != plan.direction);
+            let rule = QosRuleInfo {
+                group_name: group_name.to_string(),
+                group_id,
+                direction: plan.direction,
+                rate_bps,
+                burst_bytes,
+                priority,
+                mode: plan.effective_mode,
+            };
+            state.state.qos_rules.push(rule.clone());
+            state
+                .wal_append(&WalEntry::AddQos {
+                    group_name: rule.group_name.clone(),
+                    group_id: rule.group_id,
+                    direction: rule.direction,
+                    rate_bps: rule.rate_bps,
+                    burst_bytes: rule.burst_bytes,
+                    priority: rule.priority,
+                    mode: rule.mode,
+                })
+                .await;
+            applied.push(rule);
+        }
+        Ok(())
+    }
+
+    async fn delete_qos_standalone_locked(
+        &self,
+        instance: &str,
+        state: &mut InstanceState,
+        group_name: &str,
+        direction: u8,
+    ) -> Result<(), ControlPlaneError> {
+        Self::check_runtime_maps_ready(&state.pin_path)?;
+        let group_id = if group_name == "default" || group_name == "any" {
+            0
+        } else {
+            state
+                .state
+                .groups
+                .get(group_name)
+                .map(|group| group.id)
+                .ok_or_else(|| ControlPlaneError::GroupNotFound(group_name.to_string()))?
+        };
+        let target_directions = Self::requested_directions(direction)?;
+        let matching_rules = target_directions
+            .iter()
+            .filter_map(|direction| {
+                state
+                    .state
+                    .qos_rules
+                    .iter()
+                    .find(|rule| rule.group_id == group_id && rule.direction == *direction)
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        if matching_rules.is_empty() {
+            return Err(ControlPlaneError::PolicyNotFound(format!(
+                "QoS rule not found: group={}, direction={}",
+                group_name, direction
+            )));
+        }
+
+        let mut deleted_rules = Vec::new();
+        for rule in &matching_rules {
+            if let Err(error) = aria_core::qos_ops::delete_qos_rule(
+                rule.group_id,
+                rule.direction,
+                state.map_runtime(),
+                state.state.qos_enabled,
+            ) {
+                let rollback = Self::rollback_qos_deletes(
+                    state.map_runtime(),
+                    &deleted_rules,
+                    state.state.qos_enabled,
+                );
+                let error = match rollback {
+                    Ok(()) => error,
+                    Err(rollback_error) => {
+                        format!("{}; rollback failed: {}", error, rollback_error)
+                    }
+                };
+                return Err(ControlPlaneError::KernelError(error));
+            }
+            deleted_rules.push(rule.clone());
+        }
+
+        for rule in &matching_rules {
+            state.state.qos_rules.retain(|existing| {
+                existing.group_id != rule.group_id || existing.direction != rule.direction
+            });
+            state
+                .wal_append(&WalEntry::DeleteQos {
+                    group_id: rule.group_id,
+                    direction: rule.direction,
+                })
+                .await;
+            if let Err(error) = aria_core::monitoring::clear_qos_stats_for_rule(
+                state.map_runtime(),
+                rule.group_id,
+                rule.direction,
+            ) {
+                warn!(error = %error, group_id = rule.group_id, direction = rule.direction,
+                    "failed to clear qos stats after qos rule delete");
+            }
+        }
+        Self::cleanup_owned_fq_qdisc_if_unused(instance, state);
+        Ok(())
+    }
+
     pub async fn list_qos(&self, instance: &str) -> Result<Vec<QosRuleInfo>, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
@@ -4325,88 +5734,84 @@ impl ControlPlane {
         priority: u8,
         mode: u8,
     ) -> Result<(), ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let owner_prefix = self.managed_local_owner_prefix_snapshot(instance).await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        match state.managed_acl_publication_mode {
+            ManagedAclPublicationMode::StandaloneCompatibility
+            | ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl => {
+                return self
+                    .add_qos_standalone_locked(
+                        instance,
+                        &mut state,
+                        group_name,
+                        direction,
+                        rate_bps,
+                        burst_bytes,
+                        priority,
+                        mode,
+                    )
+                    .await;
+            }
+            ManagedAclPublicationMode::ManagedAcl => {}
+        }
+        managed_local_projection_admission(
+            state.managed_acl_publication_mode,
+            state.managed_projection_health,
+        )?;
+        let _owner_prefix = Self::require_managed_local_owner_prefix(instance, owner_prefix)?;
         Self::check_runtime_maps_ready(&state.pin_path)?;
-
+        let old_state = state.state.clone();
         let group_id = if group_name == "default" || group_name == "any" {
             0
         } else {
-            state
-                .state
+            old_state
                 .groups
                 .get(group_name)
-                .map(|g| g.id)
+                .map(|group| group.id)
                 .ok_or_else(|| ControlPlaneError::GroupNotFound(group_name.to_string()))?
         };
-
-        let fq_state = if mode == 1 {
-            let iface = Self::runtime_iface_name(instance, &state)?;
-            match aria_core::ebpf_ops::ensure_fq_qdisc(&iface) {
-                Ok(aria_core::ebpf_ops::FqQdiscState::InstalledNow) => {
-                    Self::mark_owned_fq_qdisc(&state, &iface)?;
-                    Some(aria_core::ebpf_ops::FqQdiscState::InstalledNow)
-                }
-                Ok(aria_core::ebpf_ops::FqQdiscState::AlreadyPresent) => {
-                    Some(aria_core::ebpf_ops::FqQdiscState::AlreadyPresent)
-                }
-                Err(e) => {
-                    return Err(ControlPlaneError::KernelError(format!(
-                        "[{}] failed to prepare FQ qdisc for QoS shaping: {}",
-                        iface, e
-                    )));
-                }
-            }
-        } else {
-            None
+        let direction_plans = managed_qos_direction_plans(direction, mode)?;
+        let domain_operations = plan_managed_local_qos_upserts(
+            &old_state,
+            group_name,
+            group_id,
+            rate_bps,
+            burst_bytes,
+            priority,
+            &direction_plans,
+        )?;
+        let final_state =
+            managed_local_state_after_domain_operations(&old_state, &domain_operations)?;
+        let general_mutations = managed_general_state_mutations(&old_state, &final_state)?;
+        let projection_order = ManagedLocalProjectionOrder::GeneralThenDomain;
+        let operations = merge_managed_local_projection_operations(
+            projection_order,
+            general_mutations,
+            domain_operations,
+        );
+        let runtime = self.managed_local_projection_runtime(instance, &state);
+        let apply_projection_operation =
+            managed_local_projection_apply(runtime.clone(), &old_state);
+        let compensate_projection_receipt = managed_local_projection_compensate(runtime);
+        let persist_final_state = managed_local_projection_persist(&state.wal, &final_state)?;
+        let restore_old_state = managed_local_projection_restore(&state.wal, &old_state)?;
+        let set_projection_health = |health| {
+            state.managed_projection_health = health;
         };
-
-        // Write to kernel
-        if let Err(e) = aria_core::qos_ops::add_qos_rule(
-            group_id,
-            direction,
-            rate_bps,
-            burst_bytes,
-            priority,
-            mode,
-            state.map_runtime(),
-            state.state.qos_enabled,
-        ) {
-            if matches!(
-                fq_state,
-                Some(aria_core::ebpf_ops::FqQdiscState::InstalledNow)
-            ) {
-                Self::rollback_installed_fq_qdisc(instance, &state);
-            }
-            return Err(ControlPlaneError::KernelError(e));
-        }
-
-        // Update in-memory state
-        state
-            .state
-            .qos_rules
-            .retain(|r| !(r.group_id == group_id && r.direction == direction));
-        state.state.qos_rules.push(QosRuleInfo {
-            group_name: group_name.to_string(),
-            group_id,
-            direction,
-            rate_bps,
-            burst_bytes,
-            priority,
-            mode,
-        });
-
-        state
-            .wal_append(&WalEntry::AddQos {
-                group_name: group_name.to_string(),
-                group_id,
-                direction,
-                rate_bps,
-                burst_bytes,
-                priority,
-                mode,
-            })
-            .await;
+        execute_managed_local_projection_transaction(
+            &operations,
+            set_projection_health,
+            apply_projection_operation,
+            persist_final_state,
+            compensate_projection_receipt,
+            restore_old_state,
+        )
+        .await
+        .map_err(ManagedLocalProjectionFailure::into_control_plane_error)?;
+        state.state = final_state;
+        Self::cleanup_owned_fq_qdisc_if_unused(instance, &state);
         Ok(())
     }
 
@@ -4416,105 +5821,80 @@ impl ControlPlane {
         group_name: &str,
         direction: u8,
     ) -> Result<(), ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let owner_prefix = self.managed_local_owner_prefix_snapshot(instance).await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        match state.managed_acl_publication_mode {
+            ManagedAclPublicationMode::StandaloneCompatibility
+            | ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl => {
+                return self
+                    .delete_qos_standalone_locked(instance, &mut state, group_name, direction)
+                    .await;
+            }
+            ManagedAclPublicationMode::ManagedAcl => {}
+        }
+        managed_local_projection_admission(
+            state.managed_acl_publication_mode,
+            state.managed_projection_health,
+        )?;
+        let owner_prefix = Self::require_managed_local_owner_prefix(instance, owner_prefix)?;
         Self::check_runtime_maps_ready(&state.pin_path)?;
-
+        let old_state = state.state.clone();
         let group_id = if group_name == "default" || group_name == "any" {
             0
         } else {
-            state
-                .state
+            old_state
                 .groups
                 .get(group_name)
-                .map(|g| g.id)
+                .map(|group| group.id)
                 .ok_or_else(|| ControlPlaneError::GroupNotFound(group_name.to_string()))?
         };
-
-        let target_directions = Self::requested_directions(direction);
-        let matching_rules: Vec<QosRuleInfo> = target_directions
-            .iter()
-            .filter_map(|dir| {
-                state
-                    .state
-                    .qos_rules
-                    .iter()
-                    .find(|r| r.group_id == group_id && r.direction == *dir)
-                    .cloned()
-            })
-            .collect();
-        if matching_rules.is_empty() {
-            return Err(ControlPlaneError::PolicyNotFound(format!(
-                "QoS rule not found: group={}, direction={}",
-                group_name, direction
-            )));
-        }
-
-        let mut deleted_rules: Vec<QosRuleInfo> = Vec::new();
-        for rule in &matching_rules {
-            if let Err(e) = aria_core::qos_ops::delete_qos_rule(
-                rule.group_id,
-                rule.direction,
+        let directions = requested_directions(direction)?;
+        let domain_operations = plan_managed_local_qos_delete(&old_state, group_id, &directions)?;
+        let mut final_state =
+            managed_local_state_after_domain_operations(&old_state, &domain_operations)?;
+        let removed_retained_group_ids =
+            reconcile_retained_owned_groups(&old_state, &mut final_state, &owner_prefix)?;
+        let general_mutations = managed_general_state_mutations(&old_state, &final_state)?;
+        let projection_order = ManagedLocalProjectionOrder::DomainThenGeneral;
+        let operations = merge_managed_local_projection_operations(
+            projection_order,
+            general_mutations,
+            domain_operations,
+        );
+        let runtime = self.managed_local_projection_runtime(instance, &state);
+        let apply_projection_operation =
+            managed_local_projection_apply(runtime.clone(), &old_state);
+        let compensate_projection_receipt = managed_local_projection_compensate(runtime);
+        let persist_final_state = managed_local_projection_persist(&state.wal, &final_state)?;
+        let restore_old_state = managed_local_projection_restore(&state.wal, &old_state)?;
+        let set_projection_health = |health| {
+            state.managed_projection_health = health;
+        };
+        execute_managed_local_projection_transaction(
+            &operations,
+            set_projection_health,
+            apply_projection_operation,
+            persist_final_state,
+            compensate_projection_receipt,
+            restore_old_state,
+        )
+        .await
+        .map_err(ManagedLocalProjectionFailure::into_control_plane_error)?;
+        state.state = final_state;
+        clear_removed_retained_owned_group_stats(&removed_retained_group_ids, state.map_runtime());
+        for deleted_direction in directions {
+            if let Err(error) = aria_core::monitoring::clear_qos_stats_for_rule(
                 state.map_runtime(),
-                state.state.qos_enabled,
+                group_id,
+                deleted_direction,
             ) {
-                let rollback = Self::rollback_qos_deletes(
-                    state.map_runtime(),
-                    &deleted_rules,
-                    state.state.qos_enabled,
-                );
-                let error = match rollback {
-                    Ok(()) => e,
-                    Err(rollback_err) => format!("{}; rollback failed: {}", e, rollback_err),
-                };
-                return Err(ControlPlaneError::KernelError(error));
-            }
-            deleted_rules.push(rule.clone());
-        }
-
-        for rule in &matching_rules {
-            state
-                .state
-                .qos_rules
-                .retain(|r| !(r.group_id == rule.group_id && r.direction == rule.direction));
-            state
-                .wal_append(&WalEntry::DeleteQos {
-                    group_id: rule.group_id,
-                    direction: rule.direction,
-                })
-                .await;
-
-            // Clear stale QOS_STATS entries so deleted rules no longer appear in API responses.
-            if let Err(e) = aria_core::monitoring::clear_qos_stats_for_rule(
-                state.map_runtime(),
-                rule.group_id,
-                rule.direction,
-            ) {
-                warn!(error = %e, group_id = rule.group_id, direction = rule.direction,
+                warn!(error = %error, group_id, direction = deleted_direction,
                     "failed to clear qos stats after qos rule delete");
             }
         }
-
-        // If no shaping rules remain, clean up the owned fq qdisc.
-        let has_shaping = state.state.qos_rules.iter().any(|r| r.mode == 1);
-        if !has_shaping {
-            let marker_path = Self::fq_qdisc_marker_path(&state);
-            if marker_path.exists() {
-                if let Ok(iface) = Self::runtime_iface_name(instance, &state) {
-                    if let Err(e) = aria_core::ebpf_ops::cleanup_root_qdisc(&iface) {
-                        warn!(instance = %instance, iface = %iface, error = %e,
-                            "failed to remove owned fq qdisc after last shaping rule deleted");
-                    }
-                }
-                if let Err(e) = fs::remove_file(&marker_path) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        warn!(instance = %instance, path = %marker_path.display(), error = %e,
-                            "failed to remove fq qdisc ownership marker");
-                    }
-                }
-            }
-        }
-
+        Self::cleanup_owned_fq_qdisc_if_unused(instance, &state);
         Ok(())
     }
 
@@ -4538,6 +5918,259 @@ impl ControlPlane {
 
     // ── Mirror ──
 
+    async fn add_mirror_standalone_locked(
+        &self,
+        state: &mut InstanceState,
+        src_group: &str,
+        dst_group: &str,
+        proto: u8,
+        direction: u8,
+        target_iface: &str,
+    ) -> Result<(), ControlPlaneError> {
+        Self::check_runtime_maps_ready(&state.pin_path)?;
+        let src_id = self.resolve_group_id(&state.state, src_group)?;
+        let dst_id = self.resolve_group_id(&state.state, dst_group)?;
+        let target_ifindex = aria_core::mirror_ops::resolve_ifindex(target_iface)
+            .map_err(ControlPlaneError::ValidationError)?;
+        let is_global = src_id == 0 && dst_id == 0 && proto == 0;
+        let directions = requested_directions(direction)?;
+        let mut applied = Vec::<MirrorRuleInfo>::new();
+
+        for direction in directions {
+            let result = if is_global {
+                aria_core::mirror_ops::add_global_mirror(
+                    direction,
+                    target_ifindex,
+                    state.map_runtime(),
+                    state.state.mirror_enabled,
+                )
+            } else {
+                aria_core::mirror_ops::add_mirror_rule(
+                    src_id,
+                    dst_id,
+                    proto,
+                    direction,
+                    target_ifindex,
+                    state.map_runtime(),
+                    state.state.mirror_enabled,
+                )
+            };
+            if let Err(error) = result {
+                let mut errors = vec![error];
+                for previous in applied.iter().rev() {
+                    let rollback = if previous.is_global {
+                        aria_core::mirror_ops::delete_global_mirror(
+                            previous.direction,
+                            state.map_runtime(),
+                            state.state.mirror_enabled,
+                        )
+                    } else {
+                        aria_core::mirror_ops::delete_mirror_rule(
+                            previous.src_group_id,
+                            previous.dst_group_id,
+                            previous.proto,
+                            previous.direction,
+                            state.map_runtime(),
+                            state.state.mirror_enabled,
+                        )
+                    };
+                    if let Err(rollback_error) = rollback {
+                        errors.push(format!(
+                            "rollback Mirror direction {}: {}",
+                            previous.direction, rollback_error
+                        ));
+                        continue;
+                    }
+                    if previous.is_global {
+                        state.state.mirror_rules.retain(|rule| {
+                            !(rule.is_global && rule.direction == previous.direction)
+                        });
+                    } else {
+                        state.state.mirror_rules.retain(|rule| {
+                            rule.is_global
+                                || rule.src_group_id != previous.src_group_id
+                                || rule.dst_group_id != previous.dst_group_id
+                                || rule.proto != previous.proto
+                                || rule.direction != previous.direction
+                        });
+                    }
+                    state
+                        .wal_append(&WalEntry::DeleteMirror {
+                            src_group_id: previous.src_group_id,
+                            dst_group_id: previous.dst_group_id,
+                            proto: previous.proto,
+                            direction: previous.direction,
+                            is_global: previous.is_global,
+                        })
+                        .await;
+                }
+                return Err(ControlPlaneError::KernelError(errors.join("; ")));
+            }
+
+            if is_global {
+                state
+                    .state
+                    .mirror_rules
+                    .retain(|rule| !(rule.is_global && rule.direction == direction));
+            } else {
+                state.state.mirror_rules.retain(|rule| {
+                    rule.is_global
+                        || rule.src_group_id != src_id
+                        || rule.dst_group_id != dst_id
+                        || rule.proto != proto
+                        || rule.direction != direction
+                });
+            }
+            let rule = MirrorRuleInfo {
+                src_group_name: src_group.to_string(),
+                src_group_id: src_id,
+                dst_group_name: dst_group.to_string(),
+                dst_group_id: dst_id,
+                proto,
+                direction,
+                target_iface: target_iface.to_string(),
+                target_ifindex,
+                is_global,
+            };
+            state.state.mirror_rules.push(rule.clone());
+            state
+                .wal_append(&WalEntry::AddMirror {
+                    src_group_name: rule.src_group_name.clone(),
+                    src_group_id: rule.src_group_id,
+                    dst_group_name: rule.dst_group_name.clone(),
+                    dst_group_id: rule.dst_group_id,
+                    proto: rule.proto,
+                    direction: rule.direction,
+                    target_iface: rule.target_iface.clone(),
+                    target_ifindex: rule.target_ifindex,
+                    is_global: rule.is_global,
+                })
+                .await;
+            applied.push(rule);
+        }
+        Ok(())
+    }
+
+    async fn delete_mirror_standalone_locked(
+        &self,
+        state: &mut InstanceState,
+        src_group: &str,
+        dst_group: &str,
+        proto: u8,
+        direction: u8,
+    ) -> Result<(), ControlPlaneError> {
+        Self::check_runtime_maps_ready(&state.pin_path)?;
+        let src_id = self.resolve_group_id(&state.state, src_group)?;
+        let dst_id = self.resolve_group_id(&state.state, dst_group)?;
+        let is_global = src_id == 0 && dst_id == 0 && proto == 0;
+        let target_directions = Self::requested_directions(direction)?;
+        let matching_rules = target_directions
+            .iter()
+            .filter_map(|direction| {
+                state
+                    .state
+                    .mirror_rules
+                    .iter()
+                    .find(|rule| {
+                        if is_global {
+                            rule.is_global && rule.direction == *direction
+                        } else {
+                            !rule.is_global
+                                && rule.src_group_id == src_id
+                                && rule.dst_group_id == dst_id
+                                && rule.proto == proto
+                                && rule.direction == *direction
+                        }
+                    })
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        if matching_rules.is_empty() {
+            return Err(ControlPlaneError::PolicyNotFound(
+                "Mirror rule not found".to_string(),
+            ));
+        }
+
+        let mut deleted_rules = Vec::new();
+        for rule in &matching_rules {
+            let result = if rule.is_global {
+                aria_core::mirror_ops::delete_global_mirror(
+                    rule.direction,
+                    state.map_runtime(),
+                    state.state.mirror_enabled,
+                )
+            } else {
+                aria_core::mirror_ops::delete_mirror_rule(
+                    rule.src_group_id,
+                    rule.dst_group_id,
+                    rule.proto,
+                    rule.direction,
+                    state.map_runtime(),
+                    state.state.mirror_enabled,
+                )
+            };
+            if let Err(error) = result {
+                let rollback = Self::rollback_mirror_deletes(
+                    state.map_runtime(),
+                    &deleted_rules,
+                    state.state.mirror_enabled,
+                );
+                let error = match rollback {
+                    Ok(()) => error,
+                    Err(rollback_error) => {
+                        format!("{}; rollback failed: {}", error, rollback_error)
+                    }
+                };
+                return Err(ControlPlaneError::KernelError(error));
+            }
+            deleted_rules.push(rule.clone());
+        }
+
+        for rule in &matching_rules {
+            if rule.is_global {
+                state.state.mirror_rules.retain(|existing| {
+                    !(existing.is_global && existing.direction == rule.direction)
+                });
+            } else {
+                state.state.mirror_rules.retain(|existing| {
+                    existing.is_global
+                        || existing.src_group_id != rule.src_group_id
+                        || existing.dst_group_id != rule.dst_group_id
+                        || existing.proto != rule.proto
+                        || existing.direction != rule.direction
+                });
+            }
+            state
+                .wal_append(&WalEntry::DeleteMirror {
+                    src_group_id: rule.src_group_id,
+                    dst_group_id: rule.dst_group_id,
+                    proto: rule.proto,
+                    direction: rule.direction,
+                    is_global: rule.is_global,
+                })
+                .await;
+            let clear_result = if rule.is_global {
+                aria_core::mirror_ops::clear_global_mirror_stats(
+                    rule.direction,
+                    state.map_runtime(),
+                )
+            } else {
+                aria_core::mirror_ops::clear_mirror_rule_stats(
+                    rule.src_group_id,
+                    rule.dst_group_id,
+                    rule.proto,
+                    rule.direction,
+                    state.map_runtime(),
+                )
+            };
+            if let Err(error) = clear_result {
+                warn!(error = %error, direction = rule.direction,
+                    "failed to clear mirror stats after delete");
+            }
+        }
+        Ok(())
+    }
+
     pub async fn list_mirror(
         &self,
         instance: &str,
@@ -4556,81 +6189,77 @@ impl ControlPlane {
         direction: u8,
         target_iface: &str,
     ) -> Result<(), ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let owner_prefix = self.managed_local_owner_prefix_snapshot(instance).await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        match state.managed_acl_publication_mode {
+            ManagedAclPublicationMode::StandaloneCompatibility
+            | ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl => {
+                return self
+                    .add_mirror_standalone_locked(
+                        &mut state,
+                        src_group,
+                        dst_group,
+                        proto,
+                        direction,
+                        target_iface,
+                    )
+                    .await;
+            }
+            ManagedAclPublicationMode::ManagedAcl => {}
+        }
+        managed_local_projection_admission(
+            state.managed_acl_publication_mode,
+            state.managed_projection_health,
+        )?;
+        let _owner_prefix = Self::require_managed_local_owner_prefix(instance, owner_prefix)?;
         Self::check_runtime_maps_ready(&state.pin_path)?;
-
-        let src_id = self.resolve_group_id(&state.state, src_group)?;
-        let dst_id = self.resolve_group_id(&state.state, dst_group)?;
-
-        let target_ifindex = aria_core::mirror_ops::resolve_ifindex(target_iface)
-            .map_err(|e| ControlPlaneError::ValidationError(e))?;
-
-        let is_global = src_id == 0 && dst_id == 0 && proto == 0;
-
-        if is_global {
-            if let Err(e) = aria_core::mirror_ops::add_global_mirror(
-                direction,
-                target_ifindex,
-                state.map_runtime(),
-                state.state.mirror_enabled,
-            ) {
-                return Err(ControlPlaneError::KernelError(e));
-            }
-        } else {
-            if let Err(e) = aria_core::mirror_ops::add_mirror_rule(
-                src_id,
-                dst_id,
-                proto,
-                direction,
-                target_ifindex,
-                state.map_runtime(),
-                state.state.mirror_enabled,
-            ) {
-                return Err(ControlPlaneError::KernelError(e));
-            }
-        }
-
-        // Update in-memory state
-        if is_global {
-            state
-                .state
-                .mirror_rules
-                .retain(|r| !(r.is_global && r.direction == direction));
-        } else {
-            state.state.mirror_rules.retain(|r| {
-                !(r.src_group_id == src_id
-                    && r.dst_group_id == dst_id
-                    && r.proto == proto
-                    && r.direction == direction
-                    && !r.is_global)
-            });
-        }
-        state.state.mirror_rules.push(MirrorRuleInfo {
-            src_group_name: src_group.to_string(),
-            src_group_id: src_id,
-            dst_group_name: dst_group.to_string(),
-            dst_group_id: dst_id,
+        let old_state = state.state.clone();
+        let src_id = self.resolve_group_id(&old_state, src_group)?;
+        let dst_id = self.resolve_group_id(&old_state, dst_group)?;
+        let directions = requested_directions(direction)?;
+        let target_ifindex = resolve_managed_mirror_target_ifindex(target_iface)?;
+        let domain_operations = plan_managed_local_mirror_upserts(
+            &old_state,
+            src_group,
+            src_id,
+            dst_group,
+            dst_id,
             proto,
-            direction,
-            target_iface: target_iface.to_string(),
+            target_iface,
             target_ifindex,
-            is_global,
-        });
-
-        state
-            .wal_append(&WalEntry::AddMirror {
-                src_group_name: src_group.to_string(),
-                src_group_id: src_id,
-                dst_group_name: dst_group.to_string(),
-                dst_group_id: dst_id,
-                proto,
-                direction,
-                target_iface: target_iface.to_string(),
-                target_ifindex,
-                is_global,
-            })
-            .await;
+            &directions,
+        )?;
+        let final_state =
+            managed_local_state_after_domain_operations(&old_state, &domain_operations)?;
+        let general_mutations = managed_general_state_mutations(&old_state, &final_state)?;
+        let projection_order = ManagedLocalProjectionOrder::GeneralThenDomain;
+        let operations = merge_managed_local_projection_operations(
+            projection_order,
+            general_mutations,
+            domain_operations,
+        );
+        let runtime = self.managed_local_projection_runtime(instance, &state);
+        let apply_projection_operation =
+            managed_local_projection_apply(runtime.clone(), &old_state);
+        let compensate_projection_receipt = managed_local_projection_compensate(runtime);
+        let persist_final_state = managed_local_projection_persist(&state.wal, &final_state)?;
+        let restore_old_state = managed_local_projection_restore(&state.wal, &old_state)?;
+        let set_projection_health = |health| {
+            state.managed_projection_health = health;
+        };
+        execute_managed_local_projection_transaction(
+            &operations,
+            set_projection_health,
+            apply_projection_operation,
+            persist_final_state,
+            compensate_projection_receipt,
+            restore_old_state,
+        )
+        .await
+        .map_err(ManagedLocalProjectionFailure::into_control_plane_error)?;
+        state.state = final_state;
         Ok(())
     }
 
@@ -4642,129 +6271,75 @@ impl ControlPlane {
         proto: u8,
         direction: u8,
     ) -> Result<(), ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let owner_prefix = self.managed_local_owner_prefix_snapshot(instance).await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        match state.managed_acl_publication_mode {
+            ManagedAclPublicationMode::StandaloneCompatibility
+            | ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl => {
+                return self
+                    .delete_mirror_standalone_locked(
+                        &mut state, src_group, dst_group, proto, direction,
+                    )
+                    .await;
+            }
+            ManagedAclPublicationMode::ManagedAcl => {}
+        }
+        managed_local_projection_admission(
+            state.managed_acl_publication_mode,
+            state.managed_projection_health,
+        )?;
+        let owner_prefix = Self::require_managed_local_owner_prefix(instance, owner_prefix)?;
         Self::check_runtime_maps_ready(&state.pin_path)?;
-
-        let src_id = self.resolve_group_id(&state.state, src_group)?;
-        let dst_id = self.resolve_group_id(&state.state, dst_group)?;
-
+        let old_state = state.state.clone();
+        let src_id = self.resolve_group_id(&old_state, src_group)?;
+        let dst_id = self.resolve_group_id(&old_state, dst_group)?;
         let is_global = src_id == 0 && dst_id == 0 && proto == 0;
-
-        let target_directions = Self::requested_directions(direction);
-        let matching_rules: Vec<MirrorRuleInfo> = target_directions
-            .iter()
-            .filter_map(|dir| {
-                state
-                    .state
-                    .mirror_rules
-                    .iter()
-                    .find(|r| {
-                        if is_global {
-                            r.is_global && r.direction == *dir
-                        } else {
-                            !r.is_global
-                                && r.src_group_id == src_id
-                                && r.dst_group_id == dst_id
-                                && r.proto == proto
-                                && r.direction == *dir
-                        }
-                    })
-                    .cloned()
-            })
-            .collect();
-        if matching_rules.is_empty() {
-            return Err(ControlPlaneError::PolicyNotFound(
-                "Mirror rule not found".to_string(),
-            ));
-        }
-
-        let mut deleted_rules: Vec<MirrorRuleInfo> = Vec::new();
-        for rule in &matching_rules {
-            let result = if rule.is_global {
-                aria_core::mirror_ops::delete_global_mirror(
-                    rule.direction,
-                    state.map_runtime(),
-                    state.state.mirror_enabled,
-                )
-            } else {
-                aria_core::mirror_ops::delete_mirror_rule(
-                    rule.src_group_id,
-                    rule.dst_group_id,
-                    rule.proto,
-                    rule.direction,
-                    state.map_runtime(),
-                    state.state.mirror_enabled,
-                )
-            };
-            if let Err(e) = result {
-                let rollback = Self::rollback_mirror_deletes(
-                    state.map_runtime(),
-                    &deleted_rules,
-                    state.state.mirror_enabled,
-                );
-                let error = match rollback {
-                    Ok(()) => e,
-                    Err(rollback_err) => format!("{}; rollback failed: {}", e, rollback_err),
-                };
-                return Err(ControlPlaneError::KernelError(error));
-            }
-            deleted_rules.push(rule.clone());
-        }
-
-        for rule in &matching_rules {
-            let clear_stats_result = if rule.is_global {
-                aria_core::mirror_ops::clear_global_mirror_stats(
-                    rule.direction,
-                    state.map_runtime(),
-                )
-            } else {
-                aria_core::mirror_ops::clear_mirror_rule_stats(
-                    rule.src_group_id,
-                    rule.dst_group_id,
-                    rule.proto,
-                    rule.direction,
-                    state.map_runtime(),
-                )
-            };
-            if let Err(e) = clear_stats_result {
-                warn!(
-                    instance,
-                    src_group_id = rule.src_group_id,
-                    dst_group_id = rule.dst_group_id,
-                    proto = rule.proto,
-                    direction = rule.direction,
-                    is_global = rule.is_global,
-                    error = %e,
-                    "failed to clear mirror stats after delete"
-                );
-            }
-
-            if rule.is_global {
-                state
-                    .state
-                    .mirror_rules
-                    .retain(|r| !(r.is_global && r.direction == rule.direction));
-            } else {
-                state.state.mirror_rules.retain(|r| {
-                    !(r.src_group_id == rule.src_group_id
-                        && r.dst_group_id == rule.dst_group_id
-                        && r.proto == rule.proto
-                        && r.direction == rule.direction
-                        && !r.is_global)
-                });
-            }
-
-            state
-                .wal_append(&WalEntry::DeleteMirror {
-                    src_group_id: rule.src_group_id,
-                    dst_group_id: rule.dst_group_id,
-                    proto: rule.proto,
-                    direction: rule.direction,
-                    is_global: rule.is_global,
-                })
-                .await;
-        }
+        let directions = requested_directions(direction)?;
+        let domain_operations =
+            plan_managed_local_mirror_delete(&old_state, src_id, dst_id, proto, &directions)?;
+        let mut final_state =
+            managed_local_state_after_domain_operations(&old_state, &domain_operations)?;
+        let removed_retained_group_ids =
+            reconcile_retained_owned_groups(&old_state, &mut final_state, &owner_prefix)?;
+        let general_mutations = managed_general_state_mutations(&old_state, &final_state)?;
+        let projection_order = ManagedLocalProjectionOrder::DomainThenGeneral;
+        let operations = merge_managed_local_projection_operations(
+            projection_order,
+            general_mutations,
+            domain_operations,
+        );
+        let runtime = self.managed_local_projection_runtime(instance, &state);
+        let apply_projection_operation =
+            managed_local_projection_apply(runtime.clone(), &old_state);
+        let compensate_projection_receipt = managed_local_projection_compensate(runtime);
+        let persist_final_state = managed_local_projection_persist(&state.wal, &final_state)?;
+        let restore_old_state = managed_local_projection_restore(&state.wal, &old_state)?;
+        let set_projection_health = |health| {
+            state.managed_projection_health = health;
+        };
+        execute_managed_local_projection_transaction(
+            &operations,
+            set_projection_health,
+            apply_projection_operation,
+            persist_final_state,
+            compensate_projection_receipt,
+            restore_old_state,
+        )
+        .await
+        .map_err(ManagedLocalProjectionFailure::into_control_plane_error)?;
+        state.state = final_state;
+        clear_removed_retained_owned_group_stats(&removed_retained_group_ids, state.map_runtime());
+        clear_managed_mirror_stats_after_delete(
+            instance,
+            src_id,
+            dst_id,
+            proto,
+            is_global,
+            &directions,
+            state.map_runtime(),
+        );
         Ok(())
     }
 
@@ -4827,10 +6402,7 @@ impl ControlPlane {
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
-    pub async fn flush_conntrack_strict(
-        &self,
-        instance: &str,
-    ) -> Result<u64, ControlPlaneError> {
+    pub async fn flush_conntrack_strict(&self, instance: &str) -> Result<u64, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
         aria_core::ct_ops::scrub_ct_tables_strict(state.map_runtime())
@@ -5054,9 +6626,7 @@ impl ControlPlane {
                             Some(safe_state.monitoring_enabled),
                             Some(safe_state.acl_enabled),
                             Some(safe_state.qos_enabled && !safe_state.qos_rules.is_empty()),
-                            Some(
-                                safe_state.mirror_enabled && !safe_state.mirror_rules.is_empty(),
-                            ),
+                            Some(safe_state.mirror_enabled && !safe_state.mirror_rules.is_empty()),
                             Some(safe_state.tcprt_enabled),
                             None,
                         )
@@ -5486,10 +7056,7 @@ mod tests {
         );
         assert!(lost.changed);
         assert!(!lost.next.acl_ready);
-        assert_eq!(
-            lost.next.acl_error.as_deref(),
-            Some("missing_tc_egress")
-        );
+        assert_eq!(lost.next.acl_error.as_deref(), Some("missing_tc_egress"));
 
         let repeated = apply_tc_health_observation(
             lost.next.clone(),
@@ -5549,10 +7116,8 @@ mod tests {
             missing_retry.next.acl_error.as_deref(),
             Some("missing_tc_ingress")
         );
-        let (missing_failed_again, quiesced) = apply_tc_health_quiesce_result(
-            missing_retry.next,
-            Err("map unavailable".to_string()),
-        );
+        let (missing_failed_again, quiesced) =
+            apply_tc_health_quiesce_result(missing_retry.next, Err("map unavailable".to_string()));
         assert!(!quiesced);
         assert_eq!(missing_failed_again, failed_state);
 
@@ -5639,14 +7204,18 @@ mod tests {
             true
         });
 
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiter)
-            .await
-            .is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiter)
+                .await
+                .is_err()
+        );
         drop(held);
-        assert!(tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
-            .await
-            .unwrap()
-            .unwrap());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+                .await
+                .unwrap()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -6062,10 +7631,15 @@ mod tests {
         let mut kernel_writes = Vec::new();
 
         let error = state
-            .recover_gate_persistence_failure(true, true, "forced persistence failure", |ct, acl| {
-                kernel_writes.push((ct, acl));
-                Ok(())
-            })
+            .recover_gate_persistence_failure(
+                true,
+                true,
+                "forced persistence failure",
+                |ct, acl| {
+                    kernel_writes.push((ct, acl));
+                    Ok(())
+                },
+            )
             .await;
 
         assert_eq!(kernel_writes, vec![(false, false)]);
@@ -6152,7 +7726,9 @@ mod tests {
         assert!(!state.state.acl_enabled);
         assert!(state.state.monitoring_enabled);
         assert_eq!(error.status_code(), 503);
-        assert!(error.to_string().contains("forced local persistence failure"));
+        assert!(error
+            .to_string()
+            .contains("forced local persistence failure"));
         assert!(error.to_string().contains("compact fallback failed"));
     }
 
@@ -6182,10 +7758,7 @@ mod tests {
         })
         .unwrap_err();
 
-        assert_eq!(
-            attempted,
-            vec![mutations[1].clone(), mutations[0].clone()]
-        );
+        assert_eq!(attempted, vec![mutations[1].clone(), mutations[0].clone()]);
         assert!(error.contains("forced first rollback failure"));
     }
 
@@ -6327,8 +7900,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_general_delta_persistence_failure_restores_old_snapshot_without_created_port_sets()
-    {
+    fn managed_general_delta_persistence_failure_restores_old_snapshot_without_created_port_sets() {
         let mut old_state = FirewallState::default();
         old_state.next_group_id = 41;
         old_state.conntrack_enabled = true;
@@ -6626,13 +8198,8 @@ mod tests {
     #[tokio::test]
     async fn domain_authority_blocks_conntrack_as_acl_dependency() {
         let cp = test_control_plane();
-        cp.mark_neutron_port_authority(
-            "tap-vm",
-            "port-vm",
-            &["acl".to_string()],
-            7,
-        )
-        .await;
+        cp.mark_neutron_port_authority("tap-vm", "port-vm", &["acl".to_string()], 7)
+            .await;
 
         let error = cp
             .ensure_local_write_allowed("tap-vm", LocalWriteDomain::Conntrack)
@@ -6725,10 +8292,7 @@ mod tests {
     fn managed_replacement_compensations(
         mutations: &[SharedNetworkMutation],
     ) -> Vec<ManagedAclPublicationCompensation> {
-        managed_acl_publication_compensations(
-            mutations,
-            ManagedAclPublicationFailurePhase::General,
-        )
+        managed_acl_publication_compensations(mutations, ManagedAclPublicationFailurePhase::General)
     }
 
     fn managed_expected_restore(direction: &'static str) -> SharedNetworkMutation {
@@ -7502,8 +9066,10 @@ mod tests {
         let mut after_acl_remove = old.clone();
         after_acl_remove.rules.clear();
         after_acl_remove.groups.remove(owned_name);
-        reconcile_retained_owned_groups(&old, &mut after_acl_remove, owner_prefix)
-            .expect("external references must retain removed owned group data");
+        let removed_after_acl =
+            reconcile_retained_owned_groups(&old, &mut after_acl_remove, owner_prefix)
+                .expect("external references must retain removed owned group data");
+        assert!(removed_after_acl.is_empty());
         let retained = after_acl_remove
             .groups
             .get(owned_name)
@@ -7520,14 +9086,18 @@ mod tests {
 
         let mut one_reference = after_acl_remove.clone();
         one_reference.qos_rules.clear();
-        reconcile_retained_owned_groups(&after_acl_remove, &mut one_reference, owner_prefix)
-            .expect("one remaining external reference must retain the group");
+        let removed_with_one_reference =
+            reconcile_retained_owned_groups(&after_acl_remove, &mut one_reference, owner_prefix)
+                .expect("one remaining external reference must retain the group");
+        assert!(removed_with_one_reference.is_empty());
         assert!(one_reference.groups.contains_key(owned_name));
 
         let mut no_references = one_reference.clone();
         no_references.mirror_rules.clear();
-        reconcile_retained_owned_groups(&one_reference, &mut no_references, owner_prefix)
-            .expect("last external reference removal must garbage-collect retained group");
+        let removed_after_final_reference =
+            reconcile_retained_owned_groups(&one_reference, &mut no_references, owner_prefix)
+                .expect("last external reference removal must garbage-collect retained group");
+        assert_eq!(removed_after_final_reference, vec![30]);
         assert!(!no_references.groups.contains_key(owned_name));
         assert_eq!(
             managed_general_state_mutations(&one_reference, &no_references)
@@ -7556,8 +9126,10 @@ mod tests {
         let mut after_acl_remove = dual_used.clone();
         after_acl_remove.rules.clear();
         after_acl_remove.groups.remove(owned_name);
-        reconcile_retained_owned_groups(&dual_used, &mut after_acl_remove, owner_prefix)
-            .expect("a destination-only Mirror reference must retain removed owned data");
+        let removed_group_ids =
+            reconcile_retained_owned_groups(&dual_used, &mut after_acl_remove, owner_prefix)
+                .expect("a destination-only Mirror reference must retain removed owned data");
+        assert!(removed_group_ids.is_empty());
 
         assert_eq!(after_acl_remove.groups[owned_name].id, 30);
         assert!(managed_cross_domain_has_projection_entry(
@@ -7580,8 +9152,10 @@ mod tests {
         let mut final_state = old.clone();
         final_state.qos_rules.clear();
 
-        reconcile_retained_owned_groups(&old, &mut final_state, "neutron:port-1:")
-            .expect("removing the last explicit reference must preserve an ACL-owned group");
+        let removed_group_ids =
+            reconcile_retained_owned_groups(&old, &mut final_state, "neutron:port-1:")
+                .expect("removing the last explicit reference must preserve an ACL-owned group");
+        assert!(removed_group_ids.is_empty());
 
         assert!(final_state.groups.contains_key(owned_name));
         assert!(final_state
@@ -7610,8 +9184,10 @@ mod tests {
             .get_mut(owned_name)
             .expect("owned fixture group exists")
             .cidrs = vec!["10.0.1.0/24".to_string()];
-        reconcile_retained_owned_groups(&old, &mut updated, "neutron:port-1:")
-            .expect("dual-use CIDR update must preserve shared identity");
+        let removed_group_ids =
+            reconcile_retained_owned_groups(&old, &mut updated, "neutron:port-1:")
+                .expect("dual-use CIDR update must preserve shared identity");
+        assert!(removed_group_ids.is_empty());
 
         assert_eq!(updated.groups[owned_name].id, 30);
         assert_eq!(

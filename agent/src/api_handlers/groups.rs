@@ -61,6 +61,8 @@ pub async fn list_groups(
         (status = 201, description = "Group created or updated", body = AddGroupResponse),
         (status = 400, description = "Validation error", body = aria_api::ApiError),
         (status = 404, description = "Instance not found", body = aria_api::ApiError),
+        (status = 409, description = "Write conflicts with managed state", body = aria_api::ApiError),
+        (status = 503, description = "Managed mutation is temporarily unavailable", body = aria_api::ApiError),
         (status = 500, description = "Internal server error", body = aria_api::ApiError)
     )
 )]
@@ -98,6 +100,8 @@ pub async fn add_group(
     responses(
         (status = 200, description = "Group deleted", body = MessageResponse),
         (status = 404, description = "Instance or group not found", body = aria_api::ApiError),
+        (status = 409, description = "Write conflicts with managed state or group usage", body = aria_api::ApiError),
+        (status = 503, description = "Managed mutation is temporarily unavailable", body = aria_api::ApiError),
         (status = 500, description = "Internal server error", body = aria_api::ApiError)
     )
 )]

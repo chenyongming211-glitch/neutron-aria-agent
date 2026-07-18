@@ -3013,6 +3013,127 @@ def _managed_cross_domain_group_mutation_contract_errors(
                     % helper
                 )
 
+    def standalone_prior_rollback_is_safe(
+        helper_body, kernel_deletes, wal_delete, require_mirror_branches=False
+    ):
+        loop = re.search(
+            r"\bfor\s+\w+\s+in\s+applied\s*\.\s*iter\s*\(\s*\)"
+            r"\s*\.\s*rev\s*\(\s*\)\s*\{",
+            helper_body or "",
+        )
+        if loop is None:
+            return False
+        loop_body = _rust_braced_body_at(
+            helper_body, helper_body.find("{", loop.start())
+        )
+        failure = re.search(
+            r"\bif\s+let\s+Err\s*\(\s*(?P<error>\w+)\s*\)\s*="
+            r"\s*[^;{]+\{",
+            loop_body or "",
+        )
+        if failure is None:
+            return False
+        failure_body = _rust_braced_body_at(
+            loop_body, loop_body.find("{", failure.start())
+        )
+        failure_opening = loop_body.find("{", failure.start())
+        failure_end = (
+            failure_opening + len(failure_body) + 2
+            if failure_body is not None
+            else -1
+        )
+        kernel_positions = [loop_body.find(marker) for marker in kernel_deletes]
+        retain = loop_body.find("retain")
+        wal = loop_body.find(wal_delete)
+        mirror_branch_ordered = True
+        if require_mirror_branches:
+            global_branch = loop_body.find("previous.is_global")
+            else_branch = loop_body.find("else", global_branch)
+            mirror_branch_ordered = (
+                0 <= global_branch
+                < kernel_positions[0]
+                < else_branch
+                < kernel_positions[1]
+                < failure_opening
+            )
+        return (
+            failure_body is not None
+            and all(0 <= position < failure_opening for position in kernel_positions)
+            and mirror_branch_ordered
+            and 0 <= failure_end < retain < wal
+            and re.search(r"\berrors\s*\.\s*push\s*\(", failure_body)
+            and failure.group("error") in failure_body
+            and re.search(r"\bcontinue\s*;", failure_body)
+            and not re.search(r"\breturn\s+Err\s*\(", failure_body)
+            and "errors.join" in helper_body
+        )
+
+    for helper, kernel_deletes, wal_delete, label, mirror_branches in (
+        (
+            "add_qos_standalone_locked",
+            ("delete_qos_rule",),
+            "WalEntry::DeleteQos",
+            "add_qos",
+            False,
+        ),
+        (
+            "add_mirror_standalone_locked",
+            ("delete_global_mirror", "delete_mirror_rule"),
+            "WalEntry::DeleteMirror",
+            "add_mirror",
+            True,
+        ),
+    ):
+        if not standalone_prior_rollback_is_safe(
+            _rust_function_body_from_blanked(control_code, helper),
+            kernel_deletes,
+            wal_delete,
+            mirror_branches,
+        ):
+            errors.append(
+                "standalone %s prior-direction rollback must retain RAM/WAL on "
+                "kernel delete failure and aggregate the error" % label
+            )
+
+    def is_direct_function_body_statement(body, position):
+        depth = 0
+        for character in body[:position]:
+            if character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+        return depth == 0
+
+    add_qos_body = bodies.get("add_qos") or ""
+    add_qos_executor = add_qos_body.find("execute_managed_local_projection_transaction")
+    add_qos_publish = add_qos_body.find("state.state = final_state")
+    add_qos_fq_cleanups = list(
+        re.finditer(r"\bcleanup_owned_fq_qdisc_if_unused\s*\(", add_qos_body)
+    )
+    add_qos_fq_cleanup = (
+        add_qos_fq_cleanups[0].start() if len(add_qos_fq_cleanups) == 1 else -1
+    )
+    add_qos_fq_args = (
+        _rust_parenthesized_body_at(
+            add_qos_body, add_qos_body.find("(", add_qos_fq_cleanup)
+        )
+        if add_qos_fq_cleanup >= 0
+        else None
+    )
+    if (
+        not 0 <= add_qos_executor < add_qos_publish < add_qos_fq_cleanup
+        or not is_direct_function_body_statement(add_qos_body, add_qos_fq_cleanup)
+        or [
+            re.sub(r"\s+", "", item)
+            for item in _rust_split_top_level_arguments(add_qos_fq_args or "")
+        ]
+        != ["instance", "&state"]
+    ):
+        errors.append(
+            "managed add_qos must clean an owned FQ qdisc after successful "
+            "shaping-to-policing replacement"
+        )
+
     executor_body = _rust_function_body_from_blanked(
         control_code, "execute_managed_local_projection_transaction"
     )
@@ -3502,6 +3623,139 @@ def _managed_cross_domain_group_mutation_contract_errors(
         errors.append(
             "retained owned groups must follow ACL, QoS, and both Mirror references"
         )
+    removed_ids = re.search(
+        r"\blet\s+mut\s+(?P<ids>\w+)\s*=\s*Vec\s*::\s*new\s*\(\s*\)\s*;",
+        retained_body or "",
+    )
+    removal_branch = re.search(
+        r"\bif\b[^;{]*final_state\s*\.\s*groups\s*\.\s*remove\s*"
+        r"\(\s*&\s*old_group\s*\.\s*name\s*\)\s*\.\s*is_some\s*"
+        r"\(\s*\)\s*\{",
+        retained_body or "",
+    )
+    removal_body = (
+        _rust_braced_body_at(
+            retained_body, retained_body.find("{", removal_branch.start())
+        )
+        if removal_branch is not None
+        else None
+    )
+    removed_push_pattern = (
+        r"\b%s\s*\.\s*push\s*\(\s*old_group\s*\.\s*id\s*\)"
+        % re.escape(removed_ids.group("ids") if removed_ids else "")
+    )
+    if (
+        removed_ids is None
+        or removal_body is None
+        or not re.search(removed_push_pattern, removal_body)
+        or len(re.findall(removed_push_pattern, retained_body or "")) != 1
+        or not re.search(
+            r"\bOk\s*\(\s*%s\s*\)"
+            % re.escape(removed_ids.group("ids") if removed_ids else ""),
+            retained_body or "",
+        )
+    ):
+        errors.append(
+            "retained owned-group reconciliation must report removed group IDs"
+        )
+
+    removed_stats_helper = "clear_removed_retained_owned_group_stats"
+    removed_stats_body = _rust_function_body_from_blanked(
+        control_code, removed_stats_helper
+    )
+    removed_stats_calls = list(
+        re.finditer(r"\bclear_group_stats_for_id\s*\(", removed_stats_body or "")
+    )
+    removed_stats_loop = re.search(
+        r"\bfor\s+group_id\s+in\s+removed_group_ids\s*\{",
+        removed_stats_body or "",
+    )
+    removed_stats_loop_body = (
+        _rust_braced_body_at(
+            removed_stats_body,
+            removed_stats_body.find("{", removed_stats_loop.start()),
+        )
+        if removed_stats_loop is not None
+        else None
+    )
+    removed_stats_error = re.search(
+        r"\bif\s+let\s+Err\s*\(\s*\w+\s*\)\s*="
+        r"\s*[^;{]*clear_group_stats_for_id\s*\([^;{]*\)\s*\{",
+        removed_stats_loop_body or "",
+    )
+    removed_stats_error_body = (
+        _rust_braced_body_at(
+            removed_stats_loop_body,
+            removed_stats_loop_body.find("{", removed_stats_error.start()),
+        )
+        if removed_stats_error is not None
+        else None
+    )
+    removed_stats_args = (
+        _rust_parenthesized_body_at(
+            removed_stats_body,
+            removed_stats_body.find("(", removed_stats_calls[0].start()),
+        )
+        if len(removed_stats_calls) == 1
+        else None
+    )
+    if (
+        removed_stats_body is None
+        or "removed_group_ids" not in removed_stats_body
+        or len(removed_stats_calls) != 1
+        or removed_stats_loop_body is None
+        or removed_stats_error_body is None
+        or len(
+            re.findall(
+                r"\bclear_group_stats_for_id\s*\(", removed_stats_loop_body
+            )
+        )
+        != 1
+        or [
+            re.sub(r"\s+", "", item)
+            for item in _rust_split_top_level_arguments(removed_stats_args or "")
+        ]
+        != ["runtime", "*group_id"]
+        or "warn!" not in removed_stats_body
+        or re.search(r"clear_group_stats_for_id\s*\([^;]+\)\s*\?", removed_stats_body)
+        or re.search(r"\breturn\s+Err\s*\(", removed_stats_body)
+        or re.search(r"\b(?:break|return)\b|\?", removed_stats_loop_body)
+        or re.search(r"\b(?:break|return)\b|\?", removed_stats_error_body)
+    ):
+        errors.append("removed retained-owned GROUP_STATS cleanup must be best-effort")
+
+    for name in ("delete_qos", "delete_mirror"):
+        body = bodies.get(name) or ""
+        receipt = re.search(
+            r"\blet\s+(?P<ids>\w+)\s*=\s*"
+            r"reconcile_retained_owned_groups\s*\(",
+            body,
+        )
+        publish = body.find("state.state = final_state")
+        cleanup_calls = list(
+            re.finditer(r"\b%s\s*\(" % removed_stats_helper, body)
+        )
+        cleanup = cleanup_calls[0].start() if len(cleanup_calls) == 1 else -1
+        cleanup_args = (
+            _rust_parenthesized_body_at(body, body.find("(", cleanup))
+            if cleanup >= 0
+            else None
+        )
+        normalized_cleanup_args = [
+            re.sub(r"\s+", "", item)
+            for item in _rust_split_top_level_arguments(cleanup_args or "")
+        ]
+        if (
+            receipt is None
+            or not 0 <= publish < cleanup
+            or not is_direct_function_body_statement(body, cleanup)
+            or normalized_cleanup_args
+            != ["&" + receipt.group("ids"), "state.map_runtime()"]
+        ):
+            errors.append(
+                "managed %s must best-effort clear GROUP_STATS for retained-owned "
+                "groups removed after commit" % name
+            )
     replace_body = _rust_function_body_from_blanked(control_code, "replace_owned_acl")
     if replace_body is None:
         errors.append("owned ACL replace function is missing")
@@ -3618,7 +3872,7 @@ def _managed_cross_domain_group_mutation_contract_errors(
 
 
 def _run_managed_cross_domain_group_mutation_self_tests():
-    def wrapper(name, standalone, parameters, order, planning):
+    def wrapper(name, standalone, parameters, order, planning, post_success=""):
         return r"""
         pub async fn %s(&self, instance: &str%s) {
             let _lifecycle_guard = self.lock_runtime_lifecycle().await;
@@ -3665,9 +3919,10 @@ def _run_managed_cross_domain_group_mutation_self_tests():
                 restore_old_state,
             ).await?;
             state.state = final_state;
+%s
             Ok(())
         }
-        """ % (name, parameters, standalone, planning, order)
+        """ % (name, parameters, standalone, planning, order, post_success)
 
     shared = r"""
         fn managed_local_projection_admission(
@@ -3990,18 +4245,31 @@ def _run_managed_cross_domain_group_mutation_self_tests():
         }
 
         fn reconcile_retained_owned_groups(old_state: &State, final_state: &mut State) {
-            let _ = (
-                &old_state.groups,
-                &final_state.groups,
-                &final_state.rules,
-                &final_state.qos_rules,
-                &final_state.mirror_rules,
-            );
-            let referenced = final_state.rules.iter().any(|rule| {
-                rule.src_group_id == group_id || rule.dst_group_id == group_id
-            }) || final_state.mirror_rules.iter().any(|rule| {
-                rule.src_group_id == group_id || rule.dst_group_id == group_id
-            });
+            let mut removed_group_ids = Vec::new();
+            for old_group in old_state.groups.values() {
+                let referenced = final_state.rules.iter().any(|rule| {
+                    rule.src_group_id == old_group.id || rule.dst_group_id == old_group.id
+                }) || final_state.qos_rules.iter().any(|rule| {
+                    rule.group_id == old_group.id
+                }) || final_state.mirror_rules.iter().any(|rule| {
+                    rule.src_group_id == old_group.id || rule.dst_group_id == old_group.id
+                });
+                if !referenced && final_state.groups.remove(&old_group.name).is_some() {
+                    removed_group_ids.push(old_group.id);
+                }
+            }
+            Ok(removed_group_ids)
+        }
+
+        fn clear_removed_retained_owned_group_stats(
+            removed_group_ids: &[u32],
+            runtime: Runtime,
+        ) {
+            for group_id in removed_group_ids {
+                if let Err(error) = clear_group_stats_for_id(runtime, *group_id) {
+                    warn!(error = %error, group_id, "failed to clear retained-owned group stats");
+                }
+            }
         }
 
         async fn add_group_standalone_locked(state: &mut State) {
@@ -4016,6 +4284,18 @@ def _run_managed_cross_domain_group_mutation_self_tests():
         }
         async fn add_qos_standalone_locked(state: &mut State) {
             aria_core::qos_ops::add_qos_rule();
+            let mut errors = Vec::new();
+            for previous in applied.iter().rev() {
+                if let Err(rollback_error) = aria_core::qos_ops::delete_qos_rule(previous) {
+                    errors.push(format!("rollback QoS direction: {}", rollback_error));
+                    continue;
+                }
+                state.state.qos_rules.retain(|rule| rule != previous);
+                state.wal_append(WalEntry::DeleteQos(previous)).await;
+            }
+            if !errors.is_empty() {
+                return Err(errors.join("; "));
+            }
             state.wal_append(entry).await;
         }
         async fn delete_qos_standalone_locked(state: &mut State) {
@@ -4024,6 +4304,23 @@ def _run_managed_cross_domain_group_mutation_self_tests():
         }
         async fn add_mirror_standalone_locked(state: &mut State) {
             aria_core::mirror_ops::add_mirror_rule();
+            let mut errors = Vec::new();
+            for previous in applied.iter().rev() {
+                let rollback = if previous.is_global {
+                    aria_core::mirror_ops::delete_global_mirror(previous)
+                } else {
+                    aria_core::mirror_ops::delete_mirror_rule(previous)
+                };
+                if let Err(rollback_error) = rollback {
+                    errors.push(format!("rollback Mirror direction: {}", rollback_error));
+                    continue;
+                }
+                state.state.mirror_rules.retain(|rule| rule != previous);
+                state.wal_append(WalEntry::DeleteMirror(previous)).await;
+            }
+            if !errors.is_empty() {
+                return Err(errors.join("; "));
+            }
             state.wal_append(entry).await;
         }
         async fn delete_mirror_standalone_locked(state: &mut State) {
@@ -4060,6 +4357,7 @@ def _run_managed_cross_domain_group_mutation_self_tests():
                 &old_state, group_id, rate_bps, burst_bytes, priority, &direction_plans,
             )?;
             let final_state = proposed_qos_add(&old_state, &domain_operations)?;""",
+            "            Self::cleanup_owned_fq_qdisc_if_unused(instance, &state);",
         )
         + wrapper(
             "delete_qos",
@@ -4071,7 +4369,9 @@ def _run_managed_cross_domain_group_mutation_self_tests():
                 &old_state, group_id, &directions,
             )?;
             let mut final_state = proposed_qos_delete(&old_state, &domain_operations)?;
-            reconcile_retained_owned_groups(&old_state, &mut final_state);""",
+            let removed_retained_qos_group_ids =
+                reconcile_retained_owned_groups(&old_state, &mut final_state)?;""",
+            "            clear_removed_retained_owned_group_stats(&removed_retained_qos_group_ids, state.map_runtime());",
         )
         + wrapper(
             "add_mirror",
@@ -4094,7 +4394,9 @@ def _run_managed_cross_domain_group_mutation_self_tests():
                 &old_state, src_id, dst_id, proto, &directions,
             )?;
             let mut final_state = proposed_mirror_delete(&old_state, &domain_operations)?;
-            reconcile_retained_owned_groups(&old_state, &mut final_state);""",
+            let removed_retained_mirror_group_ids =
+                reconcile_retained_owned_groups(&old_state, &mut final_state)?;""",
+            "            clear_removed_retained_owned_group_stats(&removed_retained_mirror_group_ids, state.map_runtime());",
         )
     )
     tail = r"""
@@ -4320,6 +4622,145 @@ def _run_managed_cross_domain_group_mutation_self_tests():
             "standalone helper add_group_standalone_locked must not use the managed executor",
             "            aria_core::ebpf_ops::add_network();",
             "            execute_managed_local_projection_transaction(state).await;",
+        ),
+        control_case(
+            "standalone QoS rollback deletes RAM/WAL after kernel cleanup failure",
+            "standalone add_qos prior-direction rollback must retain RAM/WAL on "
+            "kernel delete failure and aggregate the error",
+            """                    errors.push(format!("rollback QoS direction: {}", rollback_error));
+                    continue;""",
+            """                    errors.push(format!("rollback QoS direction: {}", rollback_error));""",
+        ),
+        control_case(
+            "standalone Mirror rollback deletes RAM/WAL after kernel cleanup failure",
+            "standalone add_mirror prior-direction rollback must retain RAM/WAL on "
+            "kernel delete failure and aggregate the error",
+            """                    errors.push(format!("rollback Mirror direction: {}", rollback_error));
+                    continue;""",
+            """                    errors.push(format!("rollback Mirror direction: {}", rollback_error));""",
+        ),
+        control_case(
+            "standalone QoS rollback mutates RAM/WAL before kernel outcome",
+            "standalone add_qos prior-direction rollback must retain RAM/WAL on "
+            "kernel delete failure and aggregate the error",
+            """                if let Err(rollback_error) = aria_core::qos_ops::delete_qos_rule(previous) {
+                    errors.push(format!("rollback QoS direction: {}", rollback_error));
+                    continue;
+                }
+                state.state.qos_rules.retain(|rule| rule != previous);
+                state.wal_append(WalEntry::DeleteQos(previous)).await;""",
+            """                state.state.qos_rules.retain(|rule| rule != previous);
+                state.wal_append(WalEntry::DeleteQos(previous)).await;
+                if let Err(rollback_error) = aria_core::qos_ops::delete_qos_rule(previous) {
+                    errors.push(format!("rollback QoS direction: {}", rollback_error));
+                    continue;
+                }""",
+        ),
+        control_case(
+            "standalone Mirror rollback omits global kernel delete",
+            "standalone add_mirror prior-direction rollback must retain RAM/WAL on "
+            "kernel delete failure and aggregate the error",
+            "                    aria_core::mirror_ops::delete_global_mirror(previous)",
+            "                    aria_core::mirror_ops::delete_mirror_rule(previous)",
+        ),
+        control_case(
+            "managed QoS replacement leaves owned FQ qdisc behind",
+            "managed add_qos must clean an owned FQ qdisc after successful "
+            "shaping-to-policing replacement",
+            "            Self::cleanup_owned_fq_qdisc_if_unused(instance, &state);",
+            "",
+        ),
+        control_case(
+            "managed QoS replacement hides FQ cleanup in a dead branch",
+            "managed add_qos must clean an owned FQ qdisc after successful "
+            "shaping-to-policing replacement",
+            "            Self::cleanup_owned_fq_qdisc_if_unused(instance, &state);",
+            """            if false {
+                Self::cleanup_owned_fq_qdisc_if_unused(instance, &state);
+            }""",
+        ),
+        control_case(
+            "retained reconciliation drops removed group IDs",
+            "retained owned-group reconciliation must report removed group IDs",
+            "                    removed_group_ids.push(old_group.id);",
+            "                    let _ = old_group.id;",
+        ),
+        control_case(
+            "retained reconciliation reports IDs without a successful removal",
+            "retained owned-group reconciliation must report removed group IDs",
+            """                if !referenced && final_state.groups.remove(&old_group.name).is_some() {
+                    removed_group_ids.push(old_group.id);
+                }""",
+            """                if !referenced && final_state.groups.remove(&old_group.name).is_some() {
+                }
+                removed_group_ids.push(old_group.id);""",
+        ),
+        control_case(
+            "retained group stats cleanup becomes fallible",
+            "removed retained-owned GROUP_STATS cleanup must be best-effort",
+            """                if let Err(error) = clear_group_stats_for_id(runtime, *group_id) {
+                    warn!(error = %error, group_id, "failed to clear retained-owned group stats");
+                }""",
+            "                clear_group_stats_for_id(runtime, *group_id)?;",
+        ),
+        control_case(
+            "retained group stats cleanup clears the wrong ID",
+            "removed retained-owned GROUP_STATS cleanup must be best-effort",
+            "clear_group_stats_for_id(runtime, *group_id)",
+            "clear_group_stats_for_id(runtime, 0)",
+        ),
+        control_case(
+            "retained group stats cleanup only visits the first ID",
+            "removed retained-owned GROUP_STATS cleanup must be best-effort",
+            "            for group_id in removed_group_ids {",
+            "            if let Some(group_id) = removed_group_ids.first() {",
+        ),
+        control_case(
+            "retained group stats cleanup stops after the first failure",
+            "removed retained-owned GROUP_STATS cleanup must be best-effort",
+            """                    warn!(error = %error, group_id, "failed to clear retained-owned group stats");""",
+            """                    warn!(error = %error, group_id, "failed to clear retained-owned group stats");
+                    break;""",
+        ),
+        control_case(
+            "managed QoS delete skips retained group stats cleanup",
+            "managed delete_qos must best-effort clear GROUP_STATS for retained-owned "
+            "groups removed after commit",
+            "            clear_removed_retained_owned_group_stats(&removed_retained_qos_group_ids, state.map_runtime());",
+            "",
+        ),
+        control_case(
+            "managed QoS delete hides retained stats cleanup in a dead branch",
+            "managed delete_qos must best-effort clear GROUP_STATS for retained-owned "
+            "groups removed after commit",
+            "            clear_removed_retained_owned_group_stats(&removed_retained_qos_group_ids, state.map_runtime());",
+            """            if false {
+                clear_removed_retained_owned_group_stats(
+                    &removed_retained_qos_group_ids,
+                    state.map_runtime(),
+                );
+            }""",
+        ),
+        control_case(
+            "managed QoS delete passes retained IDs by value",
+            "managed delete_qos must best-effort clear GROUP_STATS for retained-owned "
+            "groups removed after commit",
+            "clear_removed_retained_owned_group_stats(&removed_retained_qos_group_ids, state.map_runtime())",
+            "clear_removed_retained_owned_group_stats(removed_retained_qos_group_ids, state.map_runtime())",
+        ),
+        control_case(
+            "managed Mirror delete skips retained group stats cleanup",
+            "managed delete_mirror must best-effort clear GROUP_STATS for retained-owned "
+            "groups removed after commit",
+            "            clear_removed_retained_owned_group_stats(&removed_retained_mirror_group_ids, state.map_runtime());",
+            "",
+        ),
+        control_case(
+            "managed Mirror delete passes the wrong stats runtime",
+            "managed delete_mirror must best-effort clear GROUP_STATS for retained-owned "
+            "groups removed after commit",
+            "clear_removed_retained_owned_group_stats(&removed_retained_mirror_group_ids, state.map_runtime())",
+            "clear_removed_retained_owned_group_stats(&removed_retained_mirror_group_ids, old_state.map_runtime())",
         ),
         control_case(
             "QoS delete bypasses direction expansion",
@@ -5967,7 +6408,11 @@ def check_rust_stage_one_tests_present():
         (policy_source, "delete_policy_in_bank", "classify_map_delete"),
         (policy_source, "delete_port_set", "execute_map_delete_batch"),
         (policy_source, "add_policy_in_bank", "cleanup_error"),
-        (control_plane_source, "add_group", "cleanup_error"),
+        (
+            control_plane_source,
+            "add_group_standalone_locked",
+            "cleanup_error",
+        ),
     )
     delete_semantics_errors = []
     for source, function_name, required_seam in delete_semantics_contracts:
