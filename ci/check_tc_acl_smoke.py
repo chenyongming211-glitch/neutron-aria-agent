@@ -627,6 +627,27 @@ SELECTOR_FIXTURE_FUNCTIONS = (
     "run_legacy_selector_repair_fixture",
 )
 
+SELECTOR_FIXTURE_STATUS_CONTRACTS = (
+    (
+        "run_exact_selector_isolation_fixture",
+        "EXACT_SELECTOR_FIXTURE_STATUS",
+        "exact",
+        "reverify_selector_deny_baseline exact-cleanup",
+    ),
+    (
+        "run_more_specific_selector_isolation_fixture",
+        "MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS",
+        "more_specific",
+        "reverify_selector_deny_baseline more-specific-cleanup",
+    ),
+    (
+        "run_legacy_selector_repair_fixture",
+        "LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS",
+        "legacy_repair",
+        "reverify_selector_deny_baseline legacy-cleanup",
+    ),
+)
+
 
 def _has_ipv4_only_guard(body):
     pattern = re.compile(
@@ -745,6 +766,311 @@ def _selector_fixture_invocation_errors(source, bodies, definition_counts):
     ):
         errors.append(
             "managed selector fixtures must be invoked directly or through one orchestration wrapper by one depth-zero bare call after deny evidence"
+        )
+    return errors
+
+
+def _literal_shell_assignments(body, variable):
+    """Return literal status assignments with their shell-control depth."""
+    assignments = []
+    pattern = re.compile(
+        r'^\s*%s\s*=\s*(["\'])([^"\']+)\1\s*$'
+        % re.escape(variable)
+    )
+    for line, depth in _shell_lines_with_depth(body):
+        match = pattern.match(_strip_shell_comment(line))
+        if match:
+            assignments.append((match.group(2), depth))
+    return assignments
+
+
+def _top_level_assignment(tree, name):
+    matches = []
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
+            matches.append(node.value)
+    return matches
+
+
+def _literal_dict(node):
+    if not isinstance(node, ast.Dict):
+        return None
+    entries = {}
+    for key, value in zip(node.keys, node.values):
+        if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+            return None
+        if key.value in entries:
+            return None
+        entries[key.value] = value
+    return entries
+
+
+def _environment_lookup_name(node):
+    if not isinstance(node, ast.Subscript):
+        return None
+    owner = node.value
+    if not (
+        isinstance(owner, ast.Attribute)
+        and isinstance(owner.value, ast.Name)
+        and owner.value.id == "os"
+        and owner.attr == "environ"
+    ):
+        return None
+    key = node.slice
+    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+        return key.value
+    return None
+
+
+def _selector_fixture_status_contract_errors(source, bodies=None):
+    """Require honest per-fixture lifecycle state and closure-safe summary."""
+    errors = []
+    bodies = {} if bodies is None else dict(bodies)
+    for helper, _variable, _key, _anchor in SELECTOR_FIXTURE_STATUS_CONTRACTS:
+        if helper not in bodies:
+            try:
+                bodies[helper] = function_body(source, helper)
+            except (KeyError, ValueError) as exc:
+                errors.append(
+                    "selector fixture status contract missing %s (%s)"
+                    % (helper, exc)
+                )
+    if "write_summary" not in bodies:
+        try:
+            bodies["write_summary"] = function_body(source, "write_summary")
+        except (KeyError, ValueError) as exc:
+            errors.append(
+                "selector fixture status contract missing write_summary (%s)" % exc
+            )
+    if errors:
+        return errors
+
+    top_level = top_level_shell(source)
+    expected_fixture_env = {}
+    for helper, variable, key, completion_anchor in SELECTOR_FIXTURE_STATUS_CONTRACTS:
+        expected_fixture_env[key] = variable
+        initializers = _literal_shell_assignments(top_level, variable)
+        if initializers != [("not_run", 0)]:
+            errors.append(
+                "%s global status must initialize exactly once to not_run"
+                % helper
+            )
+
+        body = bodies.get(helper, "")
+        assignments = _literal_shell_assignments(body, variable)
+        if assignments != [
+            ("skipped_ipv6", 1),
+            ("failed", 0),
+            ("pass", 0),
+        ]:
+            errors.append(
+                "%s status must transition through conditional skipped_ipv6 or fail-closed failed before pass"
+                % helper
+            )
+        if not ordered(
+            body,
+            (
+                'if [ "${IP_FAMILY}" = ipv6 ]; then',
+                '%s="skipped_ipv6"' % variable,
+                "fi",
+                '[ "${IP_FAMILY}" = ipv4 ] || return 0',
+                '%s="failed"' % variable,
+                completion_anchor,
+                '%s="pass"' % variable,
+            ),
+        ):
+            errors.append(
+                "%s status must preserve the explicit IPv4 guard and mark pass only after its final proof"
+                % helper
+            )
+        completion_commands = [
+            (_strip_shell_comment(line).strip(), depth)
+            for line, depth in _shell_lines_with_depth(body)
+            if _strip_shell_comment(line).strip() == completion_anchor
+        ]
+        if completion_commands != [(completion_anchor, 0)]:
+            errors.append(
+                "%s final proof must be one depth-zero exact command"
+                % helper
+            )
+        logical = list(_logical_shell_lines(body))
+        if not logical or logical[-1].strip() != '%s="pass"' % variable:
+            errors.append(
+                "%s pass status must be the final successful fixture command"
+                % helper
+            )
+
+    summary = bodies.get("write_summary", "")
+    for variable in expected_fixture_env.values():
+        binding = '%s="${%s}"' % (variable, variable)
+        assignments = re.findall(
+            r"(?<![A-Za-z0-9_])%s\s*=" % re.escape(variable), summary
+        )
+        if (
+            summary.count(binding) != 1
+            or len(assignments) != 1
+            or summary.count(variable) != 3
+        ):
+            errors.append(
+                "write_summary must export only the real %s value exactly once"
+                % variable
+            )
+
+    try:
+        payloads = _python_heredocs(summary)
+    except ValueError as exc:
+        errors.append("selector isolation summary Python is malformed: %s" % exc)
+        return errors
+    summary_trees = []
+    for payload in payloads:
+        try:
+            tree = ast.parse(payload)
+        except SyntaxError:
+            continue
+        if _top_level_assignment(tree, "out"):
+            summary_trees.append(tree)
+    if len(summary_trees) != 1:
+        errors.append(
+            "write_summary must contain one Python summary payload with selector isolation state"
+        )
+        return errors
+    tree = summary_trees[0]
+
+    imports = [node for node in tree.body if isinstance(node, ast.Import)]
+    assignments = [node for node in tree.body if isinstance(node, ast.Assign)]
+    expressions = [node for node in tree.body if isinstance(node, ast.Expr)]
+    allowed_assignment_names = {
+        "keys",
+        "cleanup_errors",
+        "selector_fixtures",
+        "selector_isolation",
+        "out",
+    }
+    assignment_names = []
+    assignment_shape_ok = True
+    for assignment in assignments:
+        if (
+            len(assignment.targets) != 1
+            or not isinstance(assignment.targets[0], ast.Name)
+        ):
+            assignment_shape_ok = False
+            continue
+        assignment_names.append(assignment.targets[0].id)
+    import_shape_ok = bool(
+        len(imports) == 1
+        and [(alias.name, alias.asname) for alias in imports[0].names]
+        == [("json", None), ("os", None)]
+    )
+    if (
+        any(
+            not isinstance(node, (ast.Import, ast.Assign, ast.Expr))
+            for node in tree.body
+        )
+        or not import_shape_ok
+        or any(isinstance(node, ast.NamedExpr) for node in ast.walk(tree))
+        or not assignment_shape_ok
+        or len(assignment_names) != len(set(assignment_names))
+        or not {"selector_fixtures", "selector_isolation", "out"}.issubset(
+            assignment_names
+        )
+        or not set(assignment_names).issubset(allowed_assignment_names)
+        or len(expressions) != 1
+    ):
+        errors.append(
+            "selector isolation summary Python must use one json/os import, unique allowed assignments, and one output expression"
+        )
+
+    fixture_assignments = _top_level_assignment(tree, "selector_fixtures")
+    fixture_entries = (
+        _literal_dict(fixture_assignments[0])
+        if len(fixture_assignments) == 1
+        else None
+    )
+    if fixture_entries is None or set(fixture_entries) != set(expected_fixture_env):
+        errors.append(
+            "selector_isolation.fixtures must contain exact, more_specific, and legacy_repair"
+        )
+    else:
+        for key, variable in expected_fixture_env.items():
+            if _environment_lookup_name(fixture_entries[key]) != variable:
+                errors.append(
+                    "selector_isolation fixture %s must come from real env status %s"
+                    % (key, variable)
+                )
+
+    isolation_assignments = _top_level_assignment(tree, "selector_isolation")
+    isolation_entries = (
+        _literal_dict(isolation_assignments[0])
+        if len(isolation_assignments) == 1
+        else None
+    )
+    if isolation_entries is None or set(isolation_entries) != {"fixtures", "complete"}:
+        errors.append(
+            "selector_isolation summary must contain fixtures and complete"
+        )
+    else:
+        fixtures_value = isolation_entries["fixtures"]
+        if not (
+            isinstance(fixtures_value, ast.Name)
+            and fixtures_value.id == "selector_fixtures"
+        ):
+            errors.append(
+                "selector_isolation.fixtures must use the three real fixture statuses"
+            )
+        expected_complete = ast.dump(
+            ast.parse(
+                'all(status == "pass" for status in selector_fixtures.values())',
+                mode="eval",
+            ).body,
+            include_attributes=False,
+        )
+        if ast.dump(
+            isolation_entries["complete"], include_attributes=False
+        ) != expected_complete:
+            errors.append(
+                "selector_isolation.complete must be all(status == 'pass') over real fixture statuses"
+            )
+
+    out_assignments = _top_level_assignment(tree, "out")
+    out_entries = (
+        _literal_dict(out_assignments[0]) if len(out_assignments) == 1 else None
+    )
+    isolation_value = (
+        out_entries.get("selector_isolation") if out_entries is not None else None
+    )
+    if not (
+        isinstance(isolation_value, ast.Name)
+        and isolation_value.id == "selector_isolation"
+    ):
+        errors.append(
+            "summary.json must publish selector_isolation from the validated fixture state"
+        )
+    expected_print = ast.dump(
+        ast.parse(
+            "print(json.dumps(out, sort_keys=True, indent=2))"
+        ).body[0],
+        include_attributes=False,
+    )
+    print_statements = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "print"
+    ]
+    if (
+        len(print_statements) != 1
+        or ast.dump(print_statements[0], include_attributes=False)
+        != expected_print
+    ):
+        errors.append(
+            "summary writer must print json.dumps(out) exactly once"
         )
     return errors
 
@@ -2102,6 +2428,9 @@ selector_group_id=""
 selector_local_group_ids=()
 SELECTOR_FIXTURES_STARTED=false
 LEGACY_POLLUTION_INJECTED=false
+EXACT_SELECTOR_FIXTURE_STATUS="not_run"
+MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="not_run"
+LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="not_run"
 
 capture() {
     local label="$1"
@@ -2907,7 +3236,11 @@ cleanup_selector_fixture_state() {
 }
 
 run_exact_selector_isolation_fixture() {
+    if [ "${IP_FAMILY}" = ipv6 ]; then
+        EXACT_SELECTOR_FIXTURE_STATUS="skipped_ipv6"
+    fi
     [ "${IP_FAMILY}" = ipv4 ] || return 0
+    EXACT_SELECTOR_FIXTURE_STATUS="failed"
     reverify_selector_deny_baseline exact-baseline
     selector_group_id="$(resolve_selector_group_id exact-baseline-deny-after)" || return 1
     [ -n "${selector_group_id}" ] || return 1
@@ -2924,10 +3257,15 @@ run_exact_selector_isolation_fixture() {
     assert_exact_selector_state
     exact_local_group_id=""
     reverify_selector_deny_baseline exact-cleanup
+    EXACT_SELECTOR_FIXTURE_STATUS="pass"
 }
 
 run_more_specific_selector_isolation_fixture() {
+    if [ "${IP_FAMILY}" = ipv6 ]; then
+        MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="skipped_ipv6"
+    fi
     [ "${IP_FAMILY}" = ipv4 ] || return 0
+    MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="failed"
     reverify_selector_deny_baseline more-specific-baseline
     selector_group_id="$(resolve_selector_group_id more-specific-baseline-deny-after)" || return 1
     [ -n "${selector_group_id}" ] || return 1
@@ -2950,10 +3288,15 @@ run_more_specific_selector_isolation_fixture() {
     run_full_resync >"${WORK_DIR}/more-specific-cleanup-resync.log"
     capture_selector_projection more-specific-cleanup
     reverify_selector_deny_baseline more-specific-cleanup
+    MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="pass"
 }
 
 run_legacy_selector_repair_fixture() {
+    if [ "${IP_FAMILY}" = ipv6 ]; then
+        LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="skipped_ipv6"
+    fi
     [ "${IP_FAMILY}" = ipv4 ] || return 0
+    LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="failed"
     reverify_selector_deny_baseline legacy-baseline
     selector_group_id="$(resolve_selector_group_id legacy-baseline-deny-after)" || return 1
     [ -n "${selector_group_id}" ] || return 1
@@ -2995,6 +3338,27 @@ run_legacy_selector_repair_fixture() {
     run_full_resync >"${WORK_DIR}/legacy-cleanup-resync.log"
     capture_selector_projection legacy-cleanup
     reverify_selector_deny_baseline legacy-cleanup
+    LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="pass"
+}
+
+write_summary() {
+    EXACT_SELECTOR_FIXTURE_STATUS="${EXACT_SELECTOR_FIXTURE_STATUS}" \
+    MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="${MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS}" \
+    LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="${LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS}" \
+        python3 <<'PY'
+import json,os
+selector_fixtures={
+    "exact":os.environ["EXACT_SELECTOR_FIXTURE_STATUS"],
+    "more_specific":os.environ["MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS"],
+    "legacy_repair":os.environ["LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS"],
+}
+selector_isolation={
+    "fixtures":selector_fixtures,
+    "complete":all(status=="pass" for status in selector_fixtures.values()),
+}
+out={"selector_isolation":selector_isolation}
+print(json.dumps(out,sort_keys=True,indent=2))
+PY
 }
 
 cleanup() {
@@ -3026,6 +3390,156 @@ run_legacy_selector_repair_fixture
             "managed selector fixture checker rejected direct safe fixture: %s"
             % direct_errors
         )
+    status_errors = _selector_fixture_status_contract_errors(safe)
+    if status_errors:
+        failures.append(
+            "selector fixture status checker rejected synthetic safe fixture: %s"
+            % status_errors
+        )
+    status_specs = (
+        (
+            "exact status initialization missing",
+            'EXACT_SELECTOR_FIXTURE_STATUS="not_run"\n',
+            "",
+            "global status must initialize exactly once to not_run",
+        ),
+        (
+            "more-specific skipped state missing",
+            '        MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="skipped_ipv6"\n',
+            "",
+            "status must transition through conditional skipped_ipv6",
+        ),
+        (
+            "legacy failed state missing",
+            '    LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="failed"\n',
+            "",
+            "status must transition through conditional skipped_ipv6",
+        ),
+        (
+            "exact pass state missing",
+            '    EXACT_SELECTOR_FIXTURE_STATUS="pass"\n',
+            "",
+            "status must transition through conditional skipped_ipv6",
+        ),
+        (
+            "IPv6 skip fabricated outside guard",
+            '    if [ "${IP_FAMILY}" = ipv6 ]; then\n'
+            '        EXACT_SELECTOR_FIXTURE_STATUS="skipped_ipv6"\n'
+            '    fi\n',
+            '    EXACT_SELECTOR_FIXTURE_STATUS="skipped_ipv6"\n',
+            "status must transition through conditional skipped_ipv6",
+        ),
+        (
+            "exact pass before final proof",
+            '    reverify_selector_deny_baseline exact-cleanup\n'
+            '    EXACT_SELECTOR_FIXTURE_STATUS="pass"\n',
+            '    EXACT_SELECTOR_FIXTURE_STATUS="pass"\n'
+            '    reverify_selector_deny_baseline exact-cleanup\n',
+            "mark pass only after its final proof",
+        ),
+        (
+            "exact final proof failure masked",
+            '    reverify_selector_deny_baseline exact-cleanup\n',
+            '    reverify_selector_deny_baseline exact-cleanup || true\n',
+            "final proof must be one depth-zero exact command",
+        ),
+        (
+            "summary env status fabricated",
+            'EXACT_SELECTOR_FIXTURE_STATUS="${EXACT_SELECTOR_FIXTURE_STATUS}"',
+            'EXACT_SELECTOR_FIXTURE_STATUS="pass"',
+            "must export only the real EXACT_SELECTOR_FIXTURE_STATUS",
+        ),
+        (
+            "summary env status overridden",
+            'EXACT_SELECTOR_FIXTURE_STATUS="${EXACT_SELECTOR_FIXTURE_STATUS}" \\\n',
+            'EXACT_SELECTOR_FIXTURE_STATUS="${EXACT_SELECTOR_FIXTURE_STATUS}" \\\n'
+            'EXACT_SELECTOR_FIXTURE_STATUS="pass" \\\n',
+            "must export only the real EXACT_SELECTOR_FIXTURE_STATUS",
+        ),
+        (
+            "summary env command override",
+            "        python3 <<'PY'",
+            '        env EXACT_SELECTOR_FIXTURE_STATUS="pass" python3 <<\'PY\'',
+            "must export only the real EXACT_SELECTOR_FIXTURE_STATUS",
+        ),
+        (
+            "summary exported status override",
+            "write_summary() {\n",
+            'write_summary() {\n    export EXACT_SELECTOR_FIXTURE_STATUS="pass"\n',
+            "must export only the real EXACT_SELECTOR_FIXTURE_STATUS",
+        ),
+        (
+            "summary printf status override",
+            "write_summary() {\n",
+            'write_summary() {\n    printf -v EXACT_SELECTOR_FIXTURE_STATUS %s pass\n',
+            "must export only the real EXACT_SELECTOR_FIXTURE_STATUS",
+        ),
+        (
+            "summary fixture status fabricated",
+            'os.environ["MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS"]',
+            '"pass"',
+            "fixture more_specific must come from real env status",
+        ),
+        (
+            "summary fixture status missing",
+            '    "legacy_repair":os.environ["LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS"],\n',
+            "",
+            "fixtures must contain exact, more_specific, and legacy_repair",
+        ),
+        (
+            "summary complete fabricated",
+            'all(status=="pass" for status in selector_fixtures.values())',
+            "True",
+            "complete must be all(status == 'pass')",
+        ),
+        (
+            "summary complete overwritten",
+            'out={"selector_isolation":selector_isolation}',
+            'selector_isolation["complete"]=True\n'
+            'out={"selector_isolation":selector_isolation}',
+            "must use one json/os import, unique allowed assignments",
+        ),
+        (
+            "summary all builtin shadowed",
+            'selector_isolation={\n',
+            'all=lambda values: True\nselector_isolation={\n',
+            "must use one json/os import, unique allowed assignments",
+        ),
+        (
+            "summary all builtin shadowed by named expression",
+            "selector_fixtures={\n",
+            "keys=(all:=lambda values: True) and ()\nselector_fixtures={\n",
+            "must use one json/os import, unique allowed assignments",
+        ),
+        (
+            "summary selector isolation detached",
+            'out={"selector_isolation":selector_isolation}',
+            'out={"selector_isolation":{}}',
+            "must publish selector_isolation from the validated fixture state",
+        ),
+        (
+            "summary printed payload fabricated",
+            'print(json.dumps(out,sort_keys=True,indent=2))',
+            'print(json.dumps({},sort_keys=True,indent=2))',
+            "must print json.dumps(out) exactly once",
+        ),
+    )
+    for label, needle, replacement, expected in status_specs:
+        if safe.count(needle) != 1:
+            failures.append(
+                "selector fixture status mutation anchor %s is not unique" % label
+            )
+            continue
+        mutant = safe.replace(needle, replacement, 1)
+        mutant_errors = _selector_fixture_status_contract_errors(mutant)
+        if not any(expected in error for error in mutant_errors):
+            failures.append(
+                "selector fixture status mutation %s was accepted" % label
+            )
+        elif verbose:
+            print(
+                "PASS: rejected selector fixture status mutation %s" % label
+            )
 
     wrapper_main = """
 run_selector_fixture_suite() {
@@ -4152,7 +4666,7 @@ selector_fixture_runner=run_selector_fixture_suite
     return failures
 
 
-def check_source(source):
+def check_source(source, require_selector_fixture_status=True):
     errors = []
 
     required_functions = (
@@ -4243,6 +4757,8 @@ def check_source(source):
         or summary.count("|| return 1") < 4
     ):
         errors.append("summary.json must contain cleanup_errors")
+    if require_selector_fixture_status:
+        errors.extend(_selector_fixture_status_contract_errors(source, bodies))
     restore = bodies["verify_cleanup_restored"]
     if (
         "run_controlled_traffic" in restore
@@ -4395,7 +4911,9 @@ def mutate_add_hook_selector_proof(source, _needle, label):
     return source.replace(anchor, anchor + '    if row.get("hook") not in observed: return 1\n', 1)
 
 
-def run_mutation_self_tests(source, verbose=False):
+def run_mutation_self_tests(
+    source, verbose=False, require_selector_fixture_status=True
+):
     specs = [
         ("cleanup error false-pass", mutate_remove, 'record_cleanup_error "cleanup-full-resync', "cleanup must"),
         ("cleanup restore early exit", mutate_remove, "capture cleanup-restored || return 1", "cleanup restore checks"),
@@ -4421,7 +4939,10 @@ def run_mutation_self_tests(source, verbose=False):
         except ValueError as exc:
             failures.append(str(exc))
             continue
-        mutant_errors = check_source(mutant)
+        mutant_errors = check_source(
+            mutant,
+            require_selector_fixture_status=require_selector_fixture_status,
+        )
         if not any(expected in error for error in mutant_errors):
             failures.append("mutation %s was accepted" % label)
         elif verbose:
@@ -4434,15 +4955,21 @@ def main():
     if any(arg != "--self-test" for arg in args):
         print("usage: %s [--self-test]" % sys.argv[0])
         return 2
+    self_test = "--self-test" in args
     errors = _parser_self_test_errors()
     errors.extend(
         _run_managed_selector_fixture_mutation_self_tests(
-            verbose="--self-test" in args
+            verbose=self_test
         )
     )
     with open(SMOKE, "r", encoding="utf-8") as handle:
         source = handle.read()
-    errors.extend(check_source(source))
+    errors.extend(
+        check_source(
+            source,
+            require_selector_fixture_status=not self_test,
+        )
+    )
     with open(BACKLOG, "r", encoding="utf-8") as handle:
         backlog = handle.read()
     if "unique tracking-item total remains 69" in backlog:
@@ -4456,7 +4983,13 @@ def main():
     if "REVIEW-OPS-036" not in backlog:
         errors.append("backlog must retain the independent XDP hook-health defect")
     if not errors:
-        errors.extend(run_mutation_self_tests(source, verbose="--self-test" in args))
+        errors.extend(
+            run_mutation_self_tests(
+                source,
+                verbose=self_test,
+                require_selector_fixture_status=not self_test,
+            )
+        )
     if errors:
         for error in errors:
             print("ERROR: %s" % error)

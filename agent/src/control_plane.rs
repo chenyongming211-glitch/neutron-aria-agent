@@ -10394,20 +10394,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_local_group_projection_success_never_runs_compensation_or_durable_restore() {
+    async fn managed_local_group_projection_success_restores_verified_and_reopens_admission() {
         let mutations = vec![SharedNetworkMutation::Added {
             direction: "src",
             cidr: "198.51.100.0/24".to_string(),
             group_id: 70,
         }];
         let health_trace = std::cell::RefCell::new(vec![ManagedProjectionHealth::Verified]);
+        let current_health = std::cell::Cell::new(ManagedProjectionHealth::Verified);
         let phase_trace = std::cell::RefCell::new(Vec::new());
         let compensation_attempted = std::cell::Cell::new(false);
         let durable_restore_attempted = std::cell::Cell::new(false);
 
         execute_managed_local_projection_transaction(
             &mutations,
-            |health| health_trace.borrow_mut().push(health),
+            |health| {
+                current_health.set(health);
+                health_trace.borrow_mut().push(health);
+            },
             |mutation| {
                 phase_trace.borrow_mut().push("apply");
                 std::future::ready(Ok::<SharedNetworkMutation, String>(mutation.clone()))
@@ -10436,8 +10440,14 @@ mod tests {
             vec![
                 ManagedProjectionHealth::Verified,
                 ManagedProjectionHealth::Unverified,
+                ManagedProjectionHealth::Verified,
             ]
         );
+        managed_local_projection_admission(
+            ManagedAclPublicationMode::ManagedAcl,
+            current_health.get(),
+        )
+        .expect("successful persistence must re-admit the next managed mutation");
     }
 
     #[test]

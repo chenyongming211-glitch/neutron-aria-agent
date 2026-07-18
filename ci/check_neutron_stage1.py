@@ -6297,7 +6297,23 @@ def _managed_cross_domain_group_mutation_contract_errors(
     if executor_body is None:
         errors.append("shared managed local projection executor is missing")
     else:
-        health = executor_body.find("ManagedProjectionHealth::Unverified")
+        health_transitions = list(
+            re.finditer(
+                r"\bset_health\s*\(\s*ManagedProjectionHealth\s*::\s*"
+                r"(Unverified|Verified)\s*\)\s*;",
+                executor_body,
+            )
+        )
+        unverified_health = [
+            transition
+            for transition in health_transitions
+            if transition.group(1) == "Unverified"
+        ]
+        verified_health = [
+            transition
+            for transition in health_transitions
+            if transition.group(1) == "Verified"
+        ]
         apply = re.search(r"\bapply\s*\(", executor_body)
         persist = re.search(r"\bpersist\s*\(\s*\)", executor_body)
         receipt_journal = re.search(
@@ -6305,6 +6321,54 @@ def _managed_cross_domain_group_mutation_contract_errors(
             r"applied\s*\.\s*push\s*"
             r"\(\s*\1\s*\)",
             executor_body,
+        )
+        apply_failure = re.search(
+            r"\bErr\s*\(\s*\w+\s*\)\s*=>\s*\{",
+            executor_body,
+        )
+        apply_failure_body = None
+        if apply_failure is not None:
+            apply_failure_body = _rust_braced_body_at(
+                executor_body, executor_body.find("{", apply_failure.start())
+            )
+        apply_failure_returns = list(
+            re.finditer(
+                r"\breturn\s+Err\s*\(\s*transaction_failure\s*\(",
+                apply_failure_body or "",
+            )
+        )
+        apply_failure_compensation = re.search(
+            r"\b%s\s*\(" % compensation_name,
+            apply_failure_body or "",
+        )
+        apply_failure_return_is_complete = False
+        if len(apply_failure_returns) == 1:
+            failure_return = apply_failure_returns[0]
+            transaction_failure_open = (apply_failure_body or "").find(
+                "(", failure_return.end() - 1
+            )
+            transaction_failure_arguments = _rust_parenthesized_body_at(
+                apply_failure_body or "", transaction_failure_open
+            )
+            if transaction_failure_arguments is not None:
+                transaction_failure_close = (
+                    transaction_failure_open + len(transaction_failure_arguments) + 1
+                )
+                apply_failure_return_is_complete = bool(
+                    re.match(
+                        r"\s*\)\s*;",
+                        (apply_failure_body or "")[transaction_failure_close + 1:],
+                    )
+                )
+        apply_failure_terminates = (
+            len(apply_failure_returns) == 1
+            and apply_failure_return_is_complete
+            and _rust_brace_depth_at(
+                apply_failure_body or "", apply_failure_returns[0].start()
+            )
+            == 0
+            and apply_failure_compensation is not None
+            and apply_failure_compensation.start() < apply_failure_returns[0].start()
         )
         compensations = list(
             re.finditer(r"\b%s\s*\(" % compensation_name, executor_body)
@@ -6319,6 +6383,14 @@ def _managed_cross_domain_group_mutation_contract_errors(
             persist_failure_body = _rust_braced_body_at(
                 executor_body, executor_body.find("{", persist_failure.start())
             )
+        persist_failure_open = (
+            executor_body.find("{", persist_failure.start())
+            if persist_failure is not None
+            else -1
+        )
+        persist_failure_close = _rust_matching_brace_end(
+            executor_body, persist_failure_open
+        )
         durable_restores = list(
             re.finditer(r"\brestore_durable\s*\(\s*\)", executor_body)
         )
@@ -6327,18 +6399,68 @@ def _managed_cross_domain_group_mutation_contract_errors(
             r"\s*\.\s*await[^;]*;",
             persist_failure_body or "",
         )
-        if (
-            executor_body.count("ManagedProjectionHealth::Unverified") != 1
-            or "ManagedProjectionHealth::Verified" in executor_body
-        ):
-            errors.append(
-                "shared executor must set health exactly once to Unverified and never Verified"
+        persist_failure_returns = list(
+            re.finditer(
+                r"\breturn\s+Err\s*\(\s*transaction_failure\s*\(",
+                persist_failure_body or "",
             )
+        )
+        persist_failure_compensation = re.search(
+            r"\b%s\s*\(" % compensation_name,
+            persist_failure_body or "",
+        )
+        persist_failure_return_is_complete = False
+        if len(persist_failure_returns) == 1:
+            failure_return = persist_failure_returns[0]
+            transaction_failure_open = (persist_failure_body or "").find(
+                "(", failure_return.end() - 1
+            )
+            transaction_failure_arguments = _rust_parenthesized_body_at(
+                persist_failure_body or "", transaction_failure_open
+            )
+            if transaction_failure_arguments is not None:
+                transaction_failure_close = (
+                    transaction_failure_open + len(transaction_failure_arguments) + 1
+                )
+                persist_failure_return_is_complete = bool(
+                    re.match(
+                        r"\s*\)\s*;",
+                        (persist_failure_body or "")[transaction_failure_close + 1:],
+                    )
+                )
+        persist_failure_terminates = (
+            len(persist_failure_returns) == 1
+            and persist_failure_return_is_complete
+            and _rust_brace_depth_at(
+                persist_failure_body or "", persist_failure_returns[0].start()
+            )
+            == 0
+            and persist_failure_compensation is not None
+            and durable_restore is not None
+            and persist_failure_compensation.start()
+            < durable_restore.start()
+            < persist_failure_returns[0].start()
+        )
         if (
-            health < 0
+            len(unverified_health) != 1
+            or len(verified_health) != 1
             or apply is None
             or persist is None
-            or not health < apply.start() < persist.start()
+            or persist_failure_close is None
+            or not unverified_health[0].start() < apply.start() < persist.start()
+            or not persist_failure_close < verified_health[0].start()
+            or _rust_brace_depth_at(executor_body, unverified_health[0].start()) != 0
+            or _rust_brace_depth_at(executor_body, verified_health[0].start()) != 0
+        ):
+            errors.append(
+                "shared executor must set health exactly once to Unverified before apply "
+                "and exactly once to Verified after successful persistence"
+            )
+        if (
+            not unverified_health
+            or apply is None
+            or persist is None
+            or not unverified_health[0].start() < apply.start() < persist.start()
             or not re.search(r"\bfor\s+\w+\s+in\s+operations\b", executor_body)
         ):
             errors.append(
@@ -6356,6 +6478,10 @@ def _managed_cross_domain_group_mutation_contract_errors(
         ):
             errors.append(
                 "kernel partial failure must compensate every applied operation"
+            )
+        if not apply_failure_terminates:
+            errors.append(
+                "kernel apply failure must return its transaction failure before persistence"
             )
         if (
             len(compensations) != 2
@@ -6393,6 +6519,10 @@ def _managed_cross_domain_group_mutation_contract_errors(
             )
         ):
             errors.append("durable restore failure must remain visible to the caller")
+        if not persist_failure_terminates:
+            errors.append(
+                "persistence failure must return its transaction failure before Verified restoration"
+            )
         if direct_managed_write.search(executor_body):
             errors.append("shared executor must not mutate the active ACL bank directly")
 
@@ -7397,6 +7527,7 @@ def _run_managed_cross_domain_group_mutation_self_tests():
                     restore_error,
                 ));
             }
+            set_health(ManagedProjectionHealth::Verified);
             Ok(())
         }
 
@@ -7658,6 +7789,12 @@ def _run_managed_cross_domain_group_mutation_self_tests():
             "                        let compensation_errors = Vec::new();",
         ),
         control_case(
+            "kernel apply failure falls through to persistence",
+            "kernel apply failure must return its transaction failure before persistence",
+            "                        return Err(transaction_failure(error, compensation_errors));",
+            "                        let _ignored = transaction_failure(error, compensation_errors);",
+        ),
+        control_case(
             "all kernel compensation removed",
             kernel_error,
             "execute_managed_local_projection_compensations(\n"
@@ -7689,6 +7826,20 @@ def _run_managed_cross_domain_group_mutation_self_tests():
             "durable restore failure must remain visible to the caller",
             "restore_error,\n                ));",
             "None,\n                ));",
+        ),
+        control_case(
+            "persistence failure falls through to Verified",
+            "persistence failure must return its transaction failure before Verified restoration",
+            """                return Err(transaction_failure(
+                    error,
+                    compensation_errors,
+                    restore_error,
+                ));""",
+            """                let _ignored = transaction_failure(
+                    error,
+                    compensation_errors,
+                    restore_error,
+                );""",
         ),
         control_case(
             "direction two is written directly",
@@ -7768,10 +7919,29 @@ def _run_managed_cross_domain_group_mutation_self_tests():
             executor_call + "\n" + executor_call,
         ),
         control_case(
-            "executor restores Verified",
-            "shared executor must set health exactly once to Unverified and never Verified",
-            "set_health(ManagedProjectionHealth::Unverified);",
-            "set_health(ManagedProjectionHealth::Verified);",
+            "executor omits Verified restoration",
+            "shared executor must set health exactly once to Unverified before apply "
+            "and exactly once to Verified after successful persistence",
+            "            set_health(ManagedProjectionHealth::Verified);\n",
+            "",
+        ),
+        case(
+            "executor restores Verified before persistence",
+            "shared executor must set health exactly once to Unverified before apply "
+            "and exactly once to Verified after successful persistence",
+            control=mutate(
+                mutate(
+                    safe_control,
+                    "            set_health(ManagedProjectionHealth::Verified);\n",
+                    "",
+                ),
+                "            if let Err(error) = persist().await {",
+                "            set_health(ManagedProjectionHealth::Verified);\n"
+                "            if let Err(error) = persist().await {",
+            ),
+            groups=safe_groups,
+            qos=safe_qos,
+            mirror=safe_mirror,
         ),
         control_case(
             "standalone helper uses managed executor",
