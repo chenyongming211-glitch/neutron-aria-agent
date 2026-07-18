@@ -10677,6 +10677,28 @@ def _managed_cross_domain_group_mutation_contract_errors(
 ):
     """Return Task 5 contract violations in stable, user-facing priority order."""
     control_code = _blank_rust_non_code(control_plane_source)
+
+    def without_cfg_test_modules(code):
+        chars = list(code)
+        cursor = 0
+        pattern = re.compile(
+            r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+\w+\s*\{"
+        )
+        while True:
+            module = pattern.search(code, cursor)
+            if module is None:
+                break
+            opening = code.find("{", module.start(), module.end())
+            closing = _rust_matching_brace_end(code, opening)
+            if closing is None:
+                break
+            for index in range(module.start(), closing + 1):
+                if chars[index] != "\n":
+                    chars[index] = " "
+            cursor = closing + 1
+        return "".join(chars)
+
+    control_code = without_cfg_test_modules(control_code)
     handler_codes = {
         "groups": _blank_rust_non_code(groups_handler_source),
         "qos": _blank_rust_non_code(qos_handler_source),
@@ -10751,11 +10773,263 @@ def _managed_cross_domain_group_mutation_contract_errors(
             ),
         },
     }
-    bodies = {
+    public_bodies = {
         name: _rust_function_body_from_blanked(control_code, name)
         for name in wrapper_specs
     }
+    bodies = dict(public_bodies)
     errors = []
+
+    delete_group_wrapper = public_bodies.get("delete_group") or ""
+    delete_group_wrapper_span = _rust_function_body_span_from_blanked(
+        control_code, "delete_group"
+    )
+    delete_group_wrapper_raw = (
+        control_plane_source[
+            delete_group_wrapper_span[0]:delete_group_wrapper_span[1]
+        ]
+        if delete_group_wrapper_span is not None
+        else ""
+    )
+    delete_group_helper_name = "delete_group_locked"
+    delete_group_helper_declarations = list(
+        re.finditer(
+            r"(?m)^[ \t]*(?:(?P<visibility>pub(?:[ \t]*\([^)]*\))?)"
+            r"[ \t\r\n]+)?[ \t]*async\s+fn\s+delete_group_locked\s*\(",
+            control_code,
+        )
+    )
+    delete_group_delegate_calls = list(
+        re.finditer(
+            r"\bself\s*\.\s*delete_group_locked\s*\(",
+            delete_group_wrapper,
+        )
+    )
+    # The purpose-limited Neutron purge path and the public local API must use
+    # one shared effect body.  Keep this delegation mandatory instead of
+    # accepting a duplicated inline transaction as a legacy alternative.
+    delegated_delete_group = True
+    if delegated_delete_group:
+        delete_group_helper_body = _rust_function_body_from_blanked(
+            control_code, delete_group_helper_name
+        )
+        delete_group_wrapper_parameters = _rust_function_parameters_from_blanked(
+            control_code, "delete_group"
+        )
+        normalized_wrapper_parameters = [
+            re.sub(r"\s+", "", item)
+            for item in _rust_split_top_level_arguments(
+                delete_group_wrapper_parameters or ""
+            )
+        ]
+        helper_parameters = None
+        if len(delete_group_helper_declarations) == 1:
+            helper_declaration = delete_group_helper_declarations[0]
+            helper_opening = control_code.find(
+                "(", helper_declaration.start(), helper_declaration.end()
+            )
+            helper_parameters = _rust_parenthesized_body_at(
+                control_code, helper_opening
+            )
+        normalized_helper_parameters = [
+            re.sub(r"\s+", "", item)
+            for item in _rust_split_top_level_arguments(helper_parameters or "")
+        ]
+
+        delegate_arguments = None
+        delegate_suffix = ""
+        delegate_position = -1
+        if len(delete_group_delegate_calls) == 1:
+            delegate = delete_group_delegate_calls[0]
+            delegate_position = delegate.start()
+            delegate_opening = delete_group_wrapper.find("(", delegate.start())
+            delegate_arguments = _rust_parenthesized_body_at(
+                delete_group_wrapper, delegate_opening
+            )
+            if delegate_arguments is not None:
+                delegate_closing = delegate_opening + len(delegate_arguments) + 1
+                delegate_suffix = delete_group_wrapper[delegate_closing + 1:]
+        normalized_delegate_arguments = [
+            re.sub(r"\s+", "", item)
+            for item in _rust_split_top_level_arguments(delegate_arguments or "")
+        ]
+        serialized_admission = delete_group_wrapper.find(
+            "ensure_serialized_local_group_write_allowed"
+        )
+        instance_bindings_valid = (
+            _rust_let_binding_count(delete_group_wrapper, "instance") == 0
+            and _rust_let_binding_count(delete_group_wrapper, "name") == 0
+        )
+        inst_bindings = list(
+            re.finditer(
+                r"\blet\s+inst\s*=\s*self\s*\.\s*get_instance\s*"
+                r"\(\s*instance\s*\)\s*\.\s*await\s*\?\s*;",
+                delete_group_wrapper,
+            )
+        )
+        state_bindings = list(
+            re.finditer(
+                r"\blet\s+mut\s+state\s*=\s*inst\s*\.\s*write\s*"
+                r"\(\s*\)\s*\.\s*await\s*;",
+                delete_group_wrapper,
+            )
+        )
+        lock_bindings_valid = bool(
+            len(inst_bindings) == 1
+            and _rust_let_binding_count(delete_group_wrapper, "inst") == 1
+            and len(state_bindings) == 1
+            and _rust_let_binding_count(delete_group_wrapper, "state") == 1
+            and _rust_brace_depth_at(
+                delete_group_wrapper, inst_bindings[0].start()
+            )
+            == 0
+            and _rust_brace_depth_at(
+                delete_group_wrapper, state_bindings[0].start()
+            )
+            == 0
+            and inst_bindings[0].start()
+            < state_bindings[0].start()
+            < serialized_admission
+        )
+        owner_prefix_bindings = list(
+            re.finditer(r"\blet\s+owner_prefix\s*=", delete_group_wrapper)
+        )
+        owner_prefix_binding_valid = False
+        if len(owner_prefix_bindings) == 1:
+            owner_prefix_start = owner_prefix_bindings[0].start()
+            owner_prefix_end = delete_group_wrapper.find(
+                ";", owner_prefix_bindings[0].end()
+            )
+            owner_prefix_region_raw = (
+                delete_group_wrapper_raw[
+                    owner_prefix_start:owner_prefix_end + 1
+                ]
+                if len(delete_group_wrapper_raw) == len(delete_group_wrapper)
+                and owner_prefix_end >= 0
+                else ""
+            )
+            owner_prefix_binding_valid = bool(
+                serialized_admission < owner_prefix_start < delegate_position
+                and _rust_brace_depth_at(
+                    delete_group_wrapper, owner_prefix_start
+                )
+                == 0
+                and re.fullmatch(
+                    r"\blet\s+owner_prefix\s*=\s*authority\s*"
+                    r"\.\s*as_ref\s*\(\s*\)\s*"
+                    r"\.\s*map\s*\(\s*\|\s*(?P<owner>"
+                    r"[A-Za-z_][A-Za-z0-9_]*)\s*\|\s*"
+                    r"(?P<owner_block>\{)?\s*"
+                    r"format!\s*\(\s*\"neutron:\{\}:\"\s*,\s*"
+                    r"(?P=owner)\s*\.\s*port_id\s*,?\s*\)\s*"
+                    r"(?(owner_block)\})\s*"
+                    r"\)\s*;\s*",
+                    owner_prefix_region_raw,
+                )
+                is not None
+                and len(
+                    re.findall(r"\bowner_prefix\b", delete_group_wrapper)
+                )
+                == 2
+                and _rust_let_binding_count(
+                    delete_group_wrapper, "authority"
+                )
+                == 1
+                and re.search(
+                    r"\blet\s+mut\s+authority\b", delete_group_wrapper
+                )
+                is None
+                and len(
+                    re.findall(
+                        r"\bauthority\s*=(?!=)", delete_group_wrapper
+                    )
+                )
+                == 1
+            )
+        delegate_valid = (
+            len(delete_group_helper_declarations) == 1
+            and delete_group_helper_declarations[0].group("visibility") is None
+            and delete_group_helper_body is not None
+            and normalized_wrapper_parameters
+            == ["&self", "instance:&str", "name:&str"]
+            and normalized_helper_parameters
+            == [
+                "&self",
+                "instance:&str",
+                "state:&mutInstanceState",
+                "name:&str",
+                "owner_prefix:Option<String>",
+            ]
+            and len(delete_group_delegate_calls) == 1
+            and normalized_delegate_arguments
+            == ["instance", "&mutstate", "name", "owner_prefix"]
+            and instance_bindings_valid
+            and lock_bindings_valid
+            and _rust_brace_depth_at(
+                delete_group_wrapper, delegate_position
+            ) == 0
+            and 0 <= serialized_admission < delegate_position
+            and owner_prefix_binding_valid
+            and re.fullmatch(r"\s*\.\s*await\s*", delegate_suffix) is not None
+        )
+        if not delegate_valid:
+            errors.append(
+                "delete_group must tail-delegate exactly once to private "
+                "delete_group_locked after serialized admission"
+            )
+
+        helper_relocks_or_readmits = bool(
+            delete_group_helper_body is None
+            or "lock_runtime_lifecycle" in delete_group_helper_body
+            or "runtime_lifecycle_lock" in delete_group_helper_body
+            or "get_instance" in delete_group_helper_body
+            or re.search(
+                r"\bself\s*\.\s*instances\b", delete_group_helper_body
+            )
+            or re.search(
+                r"\.\s*(?:read|write)\s*\(\s*\)\s*\.\s*await",
+                delete_group_helper_body,
+            )
+            or "neutron_authorities" in delete_group_helper_body
+            or "ensure_serialized_local_group_write_allowed"
+            in delete_group_helper_body
+        )
+        if helper_relocks_or_readmits:
+            errors.append(
+                "delete_group_locked must not reacquire lifecycle, instance, "
+                "or authority admission"
+            )
+
+        helper_shadows_inputs = bool(
+            delete_group_helper_body is not None
+            and any(
+                _rust_let_binding_count(
+                    delete_group_helper_body, parameter
+                )
+                != 0
+                for parameter in (
+                    "instance",
+                    "state",
+                    "name",
+                    "owner_prefix",
+                )
+            )
+        )
+        if helper_shadows_inputs:
+            errors.append(
+                "delete_group_locked must not shadow delegated operation inputs"
+            )
+
+        if (
+            delegate_valid
+            and not helper_relocks_or_readmits
+            and not helper_shadows_inputs
+        ):
+            bodies["delete_group"] = (
+                delete_group_wrapper[:delegate_position]
+                + "\n"
+                + delete_group_helper_body
+            )
     active_acl_access = re.compile(
         r"\b(?:read_acl_active_bank|add_acl_network_in_bank|"
         r"delete_acl_network_in_bank|set_acl_active_bank|stage_acl_shadow_bank)\s*\("
@@ -12692,6 +12966,67 @@ def _run_managed_cross_domain_group_mutation_self_tests():
             state.wal_append(entry).await;
         }
     """
+    direct_delete_group = wrapper(
+        "delete_group",
+        "delete_group_standalone_locked",
+        ", group_id: u32",
+        "GeneralThenDomain",
+        """            let domain_operations = Vec::new();
+            let final_state = proposed_group_delete(&old_state)?;
+            validate_managed_group_mutation(&final_state, group_id)?;""",
+    )
+    direct_delete_group_body = _rust_function_body_from_blanked(
+        _blank_rust_non_code(direct_delete_group), "delete_group"
+    )
+    direct_delete_group_effect_start = (
+        direct_delete_group_body.find("match state.managed_acl_publication_mode")
+        if direct_delete_group_body is not None
+        else -1
+    )
+    if direct_delete_group_effect_start < 0:
+        raise SystemExit(
+            "ERROR: delegated delete_group self-test effect body is missing"
+        )
+    delegated_delete_group_effect_body = direct_delete_group_body[
+        direct_delete_group_effect_start:
+    ].replace("&mut state", "state")
+    delegated_delete_group_wrapper = r"""
+        pub async fn delete_group(&self, instance: &str, name: &str) {
+            let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+            let inst = self.get_instance(instance).await?;
+            let mut state = inst.write().await;
+            let authority = self.neutron_authorities.read().await.get(instance).cloned();
+            ensure_serialized_local_group_write_allowed(
+                instance,
+                name,
+                Some(state.managed_acl_publication_mode),
+                authority.as_ref(),
+            )?;
+            let owner_prefix = authority
+                .as_ref()
+                .map(|authority| format!("neutron:{}:", authority.port_id));
+            self.delete_group_locked(instance, &mut state, name, owner_prefix).await
+        }
+    """
+    delegated_delete_group_helper = (
+        r"""
+        async fn delete_group_locked(
+            &self,
+            instance: &str,
+            state: &mut InstanceState,
+            name: &str,
+            owner_prefix: Option<String>,
+        ) {
+"""
+        + delegated_delete_group_effect_body
+        + r"""
+        }
+"""
+    )
+    delegated_delete_group = (
+        delegated_delete_group_wrapper + delegated_delete_group_helper
+    )
+
     wrappers = (
         wrapper(
             "add_group",
@@ -12702,15 +13037,7 @@ def _run_managed_cross_domain_group_mutation_self_tests():
             let final_state = proposed_group_add(&old_state)?;
             validate_managed_group_mutation(&final_state, group_id)?;""",
         )
-        + wrapper(
-            "delete_group",
-            "delete_group_standalone_locked",
-            ", group_id: u32",
-            "GeneralThenDomain",
-            """            let domain_operations = Vec::new();
-            let final_state = proposed_group_delete(&old_state)?;
-            validate_managed_group_mutation(&final_state, group_id)?;""",
-        )
+        + delegated_delete_group
         + wrapper(
             "add_qos",
             "add_qos_standalone_locked",
@@ -13232,6 +13559,388 @@ def _run_managed_cross_domain_group_mutation_self_tests():
             ),
         ),
     ]
+
+    bridge_error = (
+        "delete_group must tail-delegate exactly once to private "
+        "delete_group_locked after serialized admission"
+    )
+    helper_lock_error = (
+        "delete_group_locked must not reacquire lifecycle, instance, "
+        "or authority admission"
+    )
+    helper_input_error = (
+        "delete_group_locked must not shadow delegated operation inputs"
+    )
+    delegate_call = (
+        "            self.delete_group_locked(instance, &mut state, name, "
+        "owner_prefix).await"
+    )
+    owner_prefix_binding = """            let owner_prefix = authority
+                .as_ref()
+                .map(|authority| format!("neutron:{}:", authority.port_id));"""
+
+    def delegated_case(
+        label,
+        expected,
+        wrapper_source=delegated_delete_group_wrapper,
+        helper_source=delegated_delete_group_helper,
+    ):
+        return case(
+            label,
+            expected,
+            control=mutate(
+                safe_control,
+                delegated_delete_group,
+                wrapper_source + helper_source,
+            ),
+        )
+
+    mutants.extend(
+        [
+            delegated_case(
+                "delete_group shared helper missing",
+                bridge_error,
+                helper_source="",
+            ),
+            delegated_case(
+                "delete_group delegate call missing",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    delegate_call,
+                    "            Ok(())",
+                ),
+            ),
+            delegated_case(
+                "delete_group helper and delegate both removed",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    delegate_call,
+                    "            Ok(())",
+                ),
+                helper_source="",
+            ),
+            delegated_case(
+                "delete_group helper has split-line crate visibility",
+                bridge_error,
+                helper_source=mutate(
+                    delegated_delete_group_helper,
+                    "        async fn delete_group_locked(",
+                    "        pub(crate)\n        async fn delete_group_locked(",
+                ),
+            ),
+            delegated_case(
+                "delete_group delegate is called twice",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    delegate_call,
+                    delegate_call + "?;\n" + delegate_call,
+                ),
+            ),
+            delegated_case(
+                "delete_group delegate receives a different state",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    delegate_call,
+                    delegate_call.replace("&mut state", "&mut other_state"),
+                ),
+            ),
+            delegated_case(
+                "delete_group owner prefix loses authority provenance",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    owner_prefix_binding,
+                    "            let owner_prefix = None;",
+                ),
+            ),
+            delegated_case(
+                "delete_group authority snapshot is shadowed",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    owner_prefix_binding,
+                    "            let (authority,) = (None,);\n"
+                    + owner_prefix_binding,
+                ),
+            ),
+            delegated_case(
+                "delete_group authority snapshot is rebound",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    owner_prefix_binding,
+                    "            let mut authority = authority;\n"
+                    "            authority = None;\n"
+                    + owner_prefix_binding,
+                ),
+            ),
+            delegated_case(
+                "delete_group mutable authority snapshot is consumed",
+                bridge_error,
+                wrapper_source=mutate(
+                    mutate(
+                        delegated_delete_group_wrapper,
+                        "            let authority = self.neutron_authorities",
+                        "            let mut authority = self.neutron_authorities",
+                    ),
+                    owner_prefix_binding,
+                    "            let _ = authority.take();\n"
+                    + owner_prefix_binding,
+                ),
+            ),
+            delegated_case(
+                "delete_group instance argument is shadowed",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    delegate_call,
+                    "            let instance = \"wrong-instance\";\n"
+                    + delegate_call,
+                ),
+            ),
+            delegated_case(
+                "delete_group name argument is shadowed",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    delegate_call,
+                    "            let name = \"wrong-name\";\n"
+                    + delegate_call,
+                ),
+            ),
+            delegated_case(
+                "delete_group state guard is shadowed",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    delegate_call,
+                    "            let mut state = inst.write().await;\n"
+                    + delegate_call,
+                ),
+            ),
+            delegated_case(
+                "delete_group owner prefix is shadowed after validation",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    delegate_call,
+                    "            let (owner_prefix,) = (None,);\n"
+                    + delegate_call,
+                ),
+            ),
+            delegated_case(
+                "delete_group owner prefix expression returns a decoy value",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    owner_prefix_binding,
+                    "            let owner_prefix = {\n"
+                    "                let _proof = authority.as_ref().map(|authority| "
+                    "format!(\"neutron:{}:\", authority.port_id));\n"
+                    "                None\n"
+                    "            };",
+                ),
+            ),
+            delegated_case(
+                "delete_group owner prefix uses a different namespace",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    'format!("neutron:{}:", authority.port_id)',
+                    'format!("foreign:{}:", authority.port_id)',
+                ),
+            ),
+            delegated_case(
+                "delete_group owner prefix is reassigned before delegation",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    delegate_call,
+                    "            let mut owner_prefix = owner_prefix;\n"
+                    "            owner_prefix = None;\n"
+                    + delegate_call,
+                ),
+            ),
+            delegated_case(
+                "delete_group delegate is conditional",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    delegate_call,
+                    "            if should_delete {\n"
+                    "                return self.delete_group_locked("
+                    "instance, &mut state, name, owner_prefix).await;\n"
+                    "            }\n"
+                    "            Ok(())",
+                ),
+            ),
+            delegated_case(
+                "delete_group delegate result is ignored",
+                bridge_error,
+                wrapper_source=mutate(
+                    delegated_delete_group_wrapper,
+                    delegate_call,
+                    "            let _ignored = self.delete_group_locked("
+                    "instance, &mut state, name, owner_prefix).await;\n"
+                    "            Ok(())",
+                ),
+            ),
+            delegated_case(
+                "delete_group helper reacquires lifecycle",
+                helper_lock_error,
+                helper_source=mutate(
+                    delegated_delete_group_helper,
+                    "        ) {\n",
+                    "        ) {\n"
+                    "            let _guard = self.lock_runtime_lifecycle().await;\n",
+                ),
+            ),
+            delegated_case(
+                "delete_group helper directly reacquires lifecycle",
+                helper_lock_error,
+                helper_source=mutate(
+                    delegated_delete_group_helper,
+                    "        ) {\n",
+                    "        ) {\n"
+                    "            let _guard = "
+                    "self.runtime_lifecycle_lock.try_lock()?;\n",
+                ),
+            ),
+            delegated_case(
+                "delete_group helper try-reacquires instance state",
+                helper_lock_error,
+                helper_source=mutate(
+                    delegated_delete_group_helper,
+                    "        ) {\n",
+                    "        ) {\n"
+                    "            let instances = self . instances.try_read()?;\n"
+                    "            let _again = instances.get(instance)"
+                    ".ok_or(\"missing\")?.try_write()?;\n",
+                ),
+            ),
+            delegated_case(
+                "delete_group helper repeats authority admission",
+                helper_lock_error,
+                helper_source=mutate(
+                    delegated_delete_group_helper,
+                    "        ) {\n",
+                    "        ) {\n"
+                    "            ensure_serialized_local_group_write_allowed("
+                    "instance, name, None, None)?;\n",
+                ),
+            ),
+            delegated_case(
+                "delete_group helper omits standalone dispatch",
+                "delete_group must explicitly dispatch both standalone modes "
+                "before managed admission",
+                helper_source=mutate(
+                    delegated_delete_group_helper,
+                    "return self.delete_group_standalone_locked(state).await;",
+                    "return Ok(());",
+                ),
+            ),
+            delegated_case(
+                "delete_group helper plans the same state",
+                "delete_group must plan old_state to final_state before one "
+                "shared executor call",
+                helper_source=mutate(
+                    delegated_delete_group_helper,
+                    "managed_general_state_mutations(&old_state, &final_state)?;",
+                    "managed_general_state_mutations(&old_state, &old_state)?;",
+                ),
+            ),
+            delegated_case(
+                "delete_group helper calls the executor twice",
+                "delete_group must plan old_state to final_state before one "
+                "shared executor call",
+                helper_source=mutate(
+                    delegated_delete_group_helper,
+                    executor_call,
+                    executor_call + "\n" + executor_call,
+                ),
+            ),
+        ]
+    )
+
+    for parameter, shadow in (
+        ("instance", 'let instance = "wrong-instance";'),
+        ("state", "let state = other_state;"),
+        ("name", 'let name = "neutron:other-port:selector";'),
+        ("owner_prefix", "let owner_prefix = None;"),
+    ):
+        mutants.append(
+            delegated_case(
+                "delete_group helper shadows %s" % parameter,
+                helper_input_error,
+                helper_source=mutate(
+                    delegated_delete_group_helper,
+                    "        ) {\n",
+                    "        ) {\n            %s\n" % shadow,
+                ),
+            )
+        )
+
+    cfg_test_duplicate = safe_control + r"""
+        #[cfg(test)]
+        mod tests {
+            pub(crate)
+            async fn delete_group_locked() {}
+        }
+    """
+    cfg_test_errors = _managed_cross_domain_group_mutation_contract_errors(
+        cfg_test_duplicate, safe_groups, safe_qos, safe_mirror
+    )
+    if cfg_test_errors:
+        raise SystemExit(
+            "ERROR: cfg(test) delete_group helper decoy changed production analysis: %s"
+            % cfg_test_errors
+        )
+
+    cfg_test_wrapper_decoy = r"""
+        #[cfg(test)]
+        mod checker_decoy {
+            async fn delete_group() {}
+        }
+    """ + safe_control
+    cfg_test_wrapper_errors = _managed_cross_domain_group_mutation_contract_errors(
+        cfg_test_wrapper_decoy, safe_groups, safe_qos, safe_mirror
+    )
+    if cfg_test_wrapper_errors:
+        raise SystemExit(
+            "ERROR: cfg(test) delete_group wrapper decoy changed production "
+            "analysis: %s" % cfg_test_wrapper_errors
+        )
+
+    formatted_owner_wrapper = mutate(
+        delegated_delete_group_wrapper,
+        ".map(|authority| format!(\"neutron:{}:\", authority.port_id));",
+        ".map(|admitted| {\n"
+        "                    format!(\n"
+        "                        \"neutron:{}:\",\n"
+        "                        admitted.port_id,\n"
+        "                    )\n"
+        "                });",
+    )
+    formatted_owner_errors = _managed_cross_domain_group_mutation_contract_errors(
+        mutate(
+            safe_control,
+            delegated_delete_group,
+            formatted_owner_wrapper + delegated_delete_group_helper,
+        ),
+        safe_groups,
+        safe_qos,
+        safe_mirror,
+    )
+    if formatted_owner_errors:
+        raise SystemExit(
+            "ERROR: harmless delete_group owner-prefix formatting was rejected: %s"
+            % formatted_owner_errors
+        )
+
     for wrapper_name in (
         "add_group",
         "delete_group",
@@ -13240,7 +13949,14 @@ def _run_managed_cross_domain_group_mutation_self_tests():
         "add_mirror",
         "delete_mirror",
     ):
-        wrapper_body = _rust_function_body_raw(safe_control, wrapper_name)
+        analysis_body_name = (
+            "delete_group_locked"
+            if wrapper_name == "delete_group"
+            else wrapper_name
+        )
+        wrapper_body = _rust_function_body_raw(
+            safe_control, analysis_body_name
+        )
         if wrapper_body is None or wrapper_body.count(plan_call) != 1:
             raise SystemExit(
                 "ERROR: Task 7 managed wrapper fixture is missing projection plan: %s"
@@ -13272,7 +13988,7 @@ def _run_managed_cross_domain_group_mutation_self_tests():
             )
     print(
         "Managed cross-domain group mutation self-tests: OK (%d scenarios)"
-        % (len(mutants) + 1)
+        % (len(mutants) + 4)
     )
 
 
