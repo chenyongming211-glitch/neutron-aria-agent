@@ -155,6 +155,7 @@ def top_level_shell(source):
             if heredocs:
                 if line.strip() == heredocs[0]:
                     heredocs.pop(0)
+                    output.append(line)
                 continue
             if not function_start.match(_shell_code(line)):
                 output.append(line)
@@ -428,6 +429,12 @@ def _nested_python_reader_errors(helper, tree):
             "value='selector_repair_performed=false'",
             "id='true_count'", "id='false_count'",
         )
+        required["repair_required_count"] = (
+            "id='open'", "id='root'", "id='label'",
+            "value='-datapath.log'",
+            "value='quiesced repairable preexisting ACL projection pending Neutron resync'",
+            "value='instance='", "id='ifname'", "id='sum'",
+        )
     for name, fragments in required.items():
         node = functions.get(name)
         dumped = ast.dump(node, include_attributes=False) if node is not None else ""
@@ -518,6 +525,42 @@ top_call
     top_level = top_level_shell(fixture)
     if "top_call" not in top_level or "fake_heredoc_call" in top_level:
         errors.append("top-level shell parser retained a function/heredoc payload")
+    main_fixture = r'''if python3 <<'PY'
+first payload
+PY
+then
+    :
+fi
+python3 <<'PY'
+second payload
+PY
+run_deny_evidence
+prepare_owned_selector_fixture
+run_exact_selector_isolation_fixture
+run_more_specific_selector_isolation_fixture
+run_legacy_selector_repair_fixture
+'''
+    main_top_level = top_level_shell(main_fixture)
+    fixture_calls = (
+        "prepare_owned_selector_fixture",
+        "run_exact_selector_isolation_fixture",
+        "run_more_specific_selector_isolation_fixture",
+        "run_legacy_selector_repair_fixture",
+    )
+    deny_positions = _depth_zero_bare_positions(
+        main_top_level, "run_deny_evidence"
+    )
+    direct_positions = _ordered_unique_bare_calls(
+        main_top_level, fixture_calls
+    )
+    if not (
+        len(deny_positions) == 1
+        and direct_positions
+        and deny_positions[0] < direct_positions[0]
+    ):
+        errors.append(
+            "top-level shell parser lost direct calls after queued heredocs"
+        )
     try:
         inline = function_body("inline() { first; second; }", "inline")
     except (KeyError, ValueError) as exc:
@@ -552,6 +595,7 @@ top_call
 
 SELECTOR_FIXTURE_FUNCTIONS = (
     "prepare_owned_selector_fixture",
+    "cleanup_selector_rule_attempt",
     "capture_selector_projection",
     "run_unchecked_selector_traffic",
     "assert_selector_traffic_result",
@@ -790,7 +834,7 @@ def _python_contract_errors(bodies):
                 "equal_before_bank == equal_bank", "repaired_bank == equal_bank",
                 "equal_bank == restart_bank", "repair_true_count == 1",
                 "equal_true_count == 0", "equal_false_count >= 1",
-                "restart_true_count == 0", "restart_false_count >= 1",
+                "restart_true_count == 0", "restart_repair_required_count == 0",
                 "clean_active_entries[selector_cidr] == selector_group_id",
                 "legacy_local_group_id not in clean_general_ids",
                 "legacy_local_group_id not in clean_bank_zero_ids",
@@ -804,7 +848,7 @@ def _python_contract_errors(bodies):
                 "clean_bank_one_ids", "clean_active_entries", "repair_true_count",
                 "repair_false_count",
                 "equal_true_count", "equal_false_count", "restart_true_count",
-                "restart_false_count", "instances", "config", "item",
+                "restart_repair_required_count", "instances", "config", "item",
                 "inventory_clean", "second_repair_switch", "ifname", "port_id",
             ),
         ),
@@ -927,14 +971,18 @@ def _python_contract_errors(bodies):
             "repair_false_count": ("id='repair_counts'", "value='legacy-repair'"),
             "equal_true_count": ("id='repair_counts'", "value='legacy-equal'"),
             "equal_false_count": ("id='repair_counts'", "value='legacy-equal'"),
-            "restart_true_count": ("id='repair_counts'", "value='legacy-clean-restart'"),
-            "restart_false_count": ("id='repair_counts'", "value='legacy-clean-restart'"),
+            "restart_true_count": ("id='repair_counts'", "value='legacy-clean-restart'", "value=0"),
+            "restart_repair_required_count": ("id='repair_required_count'", "value='legacy-clean-restart'"),
             "ifname": ("id='sys'", "value=1"),
             "port_id": ("id='sys'", "value=1"),
             "instances": ("id='json'", "id='open'", "id='root'", "value='legacy-clean-restart-instances.json'"),
             "config": ("id='json'", "id='open'", "id='root'", "value='legacy-clean-restart-config.json'"),
             "item": ("id='instances'", "id='ifname'"),
-            "inventory_clean": ("id='item'", "value='acl_ready'", "id='config'", "value='acl'"),
+            "inventory_clean": (
+                "id='item'", "value='active'", "value='acl_ready'",
+                "value='readiness_reason'", "value=None", "id='config'",
+                "value='acl'",
+            ),
             "second_repair_switch": ("id='equal_bank'", "id='restart_bank'"),
         },
         "assert_selector_cleanup_state": {
@@ -1016,6 +1064,14 @@ def _python_contract_errors(bodies):
                 errors.append(
                     "repair-required readiness reason must be exactly recovery_required"
                 )
+        if helper == "assert_legacy_repair_evidence":
+            clean_restart_assert = _assert_dump(
+                "restart_repair_required_count == 0"
+            )
+            if clean_restart_assert not in reachable:
+                errors.append(
+                    "legacy clean restart must reject target repair-required reason"
+                )
         required_lines = [
             node.lineno
             for node in tree.body
@@ -1082,6 +1138,30 @@ def _managed_selector_semantic_errors(source, bodies):
     repair = bodies["assert_legacy_repair_evidence"]
     if '"direction":"ingress"' not in prepare:
         errors.append("Neutron selector fixture must still create ingress rules")
+    selector_rule_commit = (
+        'created_selector_rule_id="$(curl_body POST aria-acl-rules '
+        '"${selector_rule_body}" | json_field aria_acl_rule.id)" || return 1',
+        '[ -n "${created_selector_rule_id}" ] || return 1',
+        'selector_rule_id="${created_selector_rule_id}"',
+        'rule_ids+=("${selector_rule_id}")',
+        'created_rule_ids+=("${selector_rule_id}")',
+    )
+    direct_global_selector_post = re.search(
+        r'(?m)^\s*selector_rule_id="\$\(curl_body POST aria-acl-rules',
+        prepare,
+    )
+    local_created_selector_id = re.search(
+        r'(?m)^\s*local\b[^\n]*\bcreated_selector_rule_id\b',
+        prepare,
+    )
+    if (
+        local_created_selector_id is None
+        or direct_global_selector_post is not None
+        or not ordered(prepare, selector_rule_commit)
+    ):
+        errors.append(
+            "selector rule create must commit global ID only after successful local parse"
+        )
     if 'row.get("direction")=="egress"' not in resolver or 'row.get("direction")=="ingress"' in resolver:
         errors.append("translated local selector resolver must use egress direction")
     for helper_name, body in (("deny", deny_ct), ("legacy repair", repair)):
@@ -1135,6 +1215,41 @@ def _managed_selector_semantic_errors(source, bodies):
             r"(?m)^\s*return\s+1\s*$", wait_body
         ):
             errors.append("%s must explicitly propagate timeout and sleep failure" % wait_name)
+
+    reattach = bodies["wait_managed_port_reattached"]
+    reattach_curls = _real_command_lines(reattach, "curl")
+    if (
+        len(reattach_curls) != 2
+        or not any(
+            '--unix-socket "${NEUTRON_UDS}"' in line
+            and "/api/v1/neutron/status" in line
+            for line in reattach_curls
+        )
+        or not any(
+            '"${DATAPATH_HTTP}/api/v1/instances"' in line
+            for line in reattach_curls
+        )
+    ):
+        errors.append(
+            "managed port re-attach wait must converge UDS and datapath instance state"
+        )
+    if 'assert len(active_matches)==1' not in reattach:
+        errors.append(
+            "managed port re-attach wait must require unique active instance"
+        )
+    phase_terms = (
+        'expected_phase in ("recovery_required","ready","active")',
+        'if expected_phase=="recovery_required"',
+        'item.get("acl_ready") is False',
+        'item.get("readiness_reason")=="recovery_required"',
+        'elif expected_phase=="ready"',
+        'item.get("acl_ready") is True',
+        'item.get("readiness_reason") is None',
+    )
+    if any(term not in reattach for term in phase_terms):
+        errors.append(
+            "managed port re-attach wait must enforce recovery and ready phases"
+        )
 
     pollution = bodies["inject_legacy_selector_pollution"]
     if len(_real_command_lines(pollution, "bpftool")) != 1:
@@ -1331,7 +1446,7 @@ def _managed_selector_semantic_errors(source, bodies):
         if len(lines) != expected_count or any("cleanup_rc=1" not in line for line in lines):
             errors.append("fail-closed cleanup must explicitly record failure from %s" % command)
     pollution_repair = (
-        "restart_managed_datapath", "run_full_resync", "capture_selector_projection selector-pollution-clean",
+        "restart_managed_datapath active", "run_full_resync", "capture_selector_projection selector-pollution-clean",
         "assert_selector_cleanup_state selector-pollution-clean", "LEGACY_POLLUTION_INJECTED=false",
     )
     if not ordered(cleanup, pollution_repair):
@@ -1412,6 +1527,9 @@ def _managed_selector_field_fixture_errors(source):
         '"protocol":"${CT_PROTOCOL}"',
         '"src_cidr":"${ACL_SELECTOR_CIDR}"',
         "curl_body POST aria-acl-rules",
+        "created_selector_rule_id",
+        '[ -n "${created_selector_rule_id}" ] || return 1',
+        'selector_rule_id="${created_selector_rule_id}"',
         "selector_rule_id",
         'rule_ids+=("${selector_rule_id}")',
         'created_rule_ids+=("${selector_rule_id}")',
@@ -1425,12 +1543,67 @@ def _managed_selector_field_fixture_errors(source):
             "ACL_SELECTOR_CIDR",
             "MORE_SPECIFIC_CIDR",
             "curl_body POST aria-acl-rules",
+            '[ -n "${created_selector_rule_id}" ] || return 1',
+            'selector_rule_id="${created_selector_rule_id}"',
             'rule_ids+=("${selector_rule_id}")',
             'created_rule_ids+=("${selector_rule_id}")',
         ),
     ):
         errors.append(
             "owned selector fixture must replace generic rules with a real selector deny"
+        )
+    if not ordered(
+        prepare_fixture,
+        (
+            'selector_rule_receipt="${WORK_DIR}/selector-rule-create-attempt.json"',
+            "printf '%s\\n'",
+            'mv "${selector_rule_receipt}.tmp" "${selector_rule_receipt}"',
+            "curl_body POST aria-acl-rules",
+            'selector_rule_id="${created_selector_rule_id}"',
+            'rule_ids+=("${selector_rule_id}")',
+            'created_rule_ids+=("${selector_rule_id}")',
+            'rm -f "${selector_rule_receipt}"',
+        ),
+    ):
+        errors.append(
+            "selector rule create must persist its deterministic attempt before POST"
+        )
+
+    selector_rule_cleanup = bodies["cleanup_selector_rule_attempt"].replace(
+        '\\"', '"'
+    )
+    cleanup_terms = (
+        "selector-rule-create-attempt.json",
+        '"direction":"ingress"',
+        '"priority":100',
+        '"action":"drop"',
+        '"protocol":"${CT_PROTOCOL}"',
+        '"src_cidr":"${ACL_SELECTOR_CIDR}"',
+        'receipt_body',
+        '[ -n "${selector_rule_id}" ]',
+        "curl_body GET aria-acl-rules",
+        'assert len(matches)<=1',
+        'curl_body DELETE "aria-acl-rules/${matched}"',
+    )
+    if not all(term in selector_rule_cleanup for term in cleanup_terms):
+        errors.append(
+            "selector rule unknown-response cleanup must query/delete its exact tuple"
+        )
+    selector_cleanup_curls = _real_command_lines(
+        bodies["cleanup_selector_rule_attempt"], "curl_body"
+    )
+    selector_cleanup_rms = _real_command_lines(
+        bodies["cleanup_selector_rule_attempt"], "rm"
+    )
+    if (
+        len(selector_cleanup_curls) != 2
+        or any(not _line_has_fail_return(line) for line in selector_cleanup_curls)
+        or len(selector_cleanup_rms) != 2
+        or any(not _line_has_fail_return(line) for line in selector_cleanup_rms)
+        or bodies["cleanup_selector_rule_attempt"].count(')" || return 1') < 1
+    ):
+        errors.append(
+            "selector rule unknown-response cleanup must preserve its receipt on GET, DELETE, parse, or rm failure"
         )
 
     unchecked_traffic = bodies["run_unchecked_selector_traffic"]
@@ -1577,14 +1750,26 @@ def _managed_selector_field_fixture_errors(source):
         "run_captured_selector_flow exact-deny 2 deny",
         "assert_selector_deny_drop_ct_zero exact-deny",
         'delete_selector_fixture_group "${EXACT_LOCAL_GROUP_NAME}"',
-        'exact_local_group_id=""',
         "capture_selector_projection exact-cleanup",
         "assert_exact_selector_state",
+        'exact_local_group_id=""',
         "reverify_selector_deny_baseline exact-cleanup",
     )
     if not ordered(exact_fixture, exact_sequence):
         errors.append(
             "exact selector fixture must isolate baseline, mutation, deny evidence, and cleanup"
+        )
+    if not ordered(
+        exact_fixture,
+        (
+            'delete_selector_fixture_group "${EXACT_LOCAL_GROUP_NAME}"',
+            "capture_selector_projection exact-cleanup",
+            "assert_exact_selector_state",
+            'exact_local_group_id=""',
+        ),
+    ):
+        errors.append(
+            "exact selector fixture must retain local group ID through cleanup assertion"
         )
 
     more_assert = bodies["assert_more_specific_selector_state"]
@@ -1652,9 +1837,22 @@ def _managed_selector_field_fixture_errors(source):
             errors.append("datapath restart UDS wait missing %s" % term)
     wait_reattach = bodies["wait_managed_port_reattached"]
     for term in (
+        "/api/v1/instances",
+        'payload.get("active_instances")',
         'payload.get("managed_ports")',
-        'row.get("port_id")==sys.argv[2]',
-        'row.get("ifname")==sys.argv[3]',
+        'instances.get("instances")',
+        'row.get("port_id")==port_id',
+        'row.get("ifname")==ifname',
+        'row.get("name")==ifname',
+        'assert len(active_matches)==1',
+        'assert len(managed_matches)==1',
+        'assert len(instance_matches)==1',
+        'item.get("active") is True',
+        'expected_phase in ("recovery_required","ready","active")',
+        'item.get("acl_ready") is False',
+        'item.get("readiness_reason")=="recovery_required"',
+        'item.get("acl_ready") is True',
+        'item.get("readiness_reason") is None',
         "sleep 1",
         "return 1",
     ):
@@ -1663,9 +1861,10 @@ def _managed_selector_field_fixture_errors(source):
     if not ordered(
         restart,
         (
+            'local expected_phase="$1"',
             'docker restart "${DATAPATH_SERVICE_NAME}"',
             "wait_neutron_uds",
-            "wait_managed_port_reattached",
+            'wait_managed_port_reattached "${expected_phase}"',
         ),
     ):
         errors.append(
@@ -1695,6 +1894,16 @@ def _managed_selector_field_fixture_errors(source):
             errors.append("legacy bad PASS/CT proof missing %s" % term)
 
     repair_assert = bodies["assert_legacy_repair_evidence"]
+    final_inventory_terms = (
+        'item["active"] is True',
+        'item["acl_ready"] is True',
+        'item["readiness_reason"] is None',
+        'config["acl"] is True',
+    )
+    if any(term not in repair_assert for term in final_inventory_terms):
+        errors.append(
+            "legacy clean restart final evidence must require active ready state"
+        )
     for term in (
         "assert injected_bank==polluted_bank",
         "assert polluted_bank!=repaired_bank",
@@ -1705,6 +1914,8 @@ def _managed_selector_field_fixture_errors(source):
         "assert equal_before_bank==equal_bank",
         "assert repaired_bank==equal_bank",
         "assert equal_bank==restart_bank",
+        "assert restart_true_count==0",
+        "assert restart_repair_required_count==0",
         "assert inventory_clean is True",
         "assert second_repair_switch is False",
     ):
@@ -1722,7 +1933,7 @@ def _managed_selector_field_fixture_errors(source):
         "run_captured_selector_flow legacy-polluted 2 pass",
         "assert_legacy_pollution_evidence",
         "capture_datapath_log_cursor legacy-repair-required",
-        "restart_managed_datapath",
+        "restart_managed_datapath recovery_required",
         "capture_datapath_logs_since legacy-repair-required",
         "capture_selector_projection legacy-repair-required",
         "assert_projection_repair_required",
@@ -1741,7 +1952,7 @@ def _managed_selector_field_fixture_errors(source):
         'delete_selector_fixture_group "${LEGACY_LOCAL_GROUP_NAME}"',
         "legacy-local-group-cleanup-resync.log",
         "capture_datapath_log_cursor legacy-clean-restart",
-        "restart_managed_datapath",
+        "restart_managed_datapath ready",
         "wait_port_enforced",
         "capture_datapath_logs_since legacy-clean-restart",
         "capture_selector_projection legacy-clean-restart",
@@ -1795,7 +2006,7 @@ def _managed_selector_field_fixture_errors(source):
             "cleanup_rc=0",
             '[ "${SELECTOR_FIXTURES_STARTED}" = true ] || return 0',
             '[ "${LEGACY_POLLUTION_INJECTED}" = true ]',
-            "restart_managed_datapath",
+            "restart_managed_datapath active",
             "selector-cleanup-pollution-repair-resync.log",
             "capture_selector_projection selector-pollution-clean",
             "assert_selector_cleanup_state selector-pollution-clean",
@@ -1833,15 +2044,33 @@ def _managed_selector_field_fixture_errors(source):
         errors.append(
             "top-level cleanup must record managed selector fixture cleanup failure"
         )
+    if not ordered(
+        cleanup_body,
+        (
+            "if ! cleanup_selector_fixture_state",
+            "if ! cleanup_selector_rule_attempt",
+            'record_cleanup_error "cleanup-selector-rule-attempt failed"',
+        ),
+    ):
+        errors.append(
+            "top-level cleanup must invoke selector rule attempt recovery"
+        )
     selector_cleanup_position = cleanup_body.find(
         "if ! cleanup_selector_fixture_state"
+    )
+    selector_rule_cleanup_position = cleanup_body.find(
+        "if ! cleanup_selector_rule_attempt"
     )
     generic_rule_cleanup_position = cleanup_body.find(
         'for id in "${rule_ids[@]:-}"'
     )
     if (
         generic_rule_cleanup_position >= 0
-        and selector_cleanup_position > generic_rule_cleanup_position
+        and (
+            selector_cleanup_position > generic_rule_cleanup_position
+            or selector_rule_cleanup_position < 0
+            or selector_rule_cleanup_position > generic_rule_cleanup_position
+        )
     ):
         errors.append(
             "managed selector cleanup must repair legacy pollution before deleting owned rules"
@@ -1882,7 +2111,7 @@ capture() {
 }
 
 prepare_owned_selector_fixture() {
-    local selector_rule_body
+    local selector_rule_body selector_rule_receipt created_selector_rule_id
     [ "${IP_FAMILY}" = ipv4 ] || return 0
     delete_rules_for_transition || return 1
     read -r ACL_SELECTOR_CIDR MORE_SPECIFIC_CIDR < <(
@@ -1895,10 +2124,44 @@ print(selector,"%s/32" % source)
 PY
     ) || return 1
     selector_rule_body="{\"aria_acl_rule\":{\"policy_id\":\"${policy_id}\",\"direction\":\"ingress\",\"priority\":100,\"action\":\"drop\",\"protocol\":\"${CT_PROTOCOL}\",\"src_cidr\":\"${ACL_SELECTOR_CIDR}\"}}"
-    selector_rule_id="$(curl_body POST aria-acl-rules "${selector_rule_body}" | json_field aria_acl_rule.id)" || return 1
-    [ -n "${selector_rule_id}" ] || return 1
+    selector_rule_receipt="${WORK_DIR}/selector-rule-create-attempt.json"
+    printf '%s\n' "${selector_rule_body}" >"${selector_rule_receipt}.tmp" || return 1
+    mv "${selector_rule_receipt}.tmp" "${selector_rule_receipt}" || return 1
+    created_selector_rule_id="$(curl_body POST aria-acl-rules "${selector_rule_body}" | json_field aria_acl_rule.id)" || return 1
+    [ -n "${created_selector_rule_id}" ] || return 1
+    selector_rule_id="${created_selector_rule_id}"
     rule_ids+=("${selector_rule_id}")
     created_rule_ids+=("${selector_rule_id}")
+    rm -f "${selector_rule_receipt}" || return 1
+}
+
+cleanup_selector_rule_attempt() {
+    local attempt_file expected_body receipt_body lookup_file matched
+    attempt_file="${WORK_DIR}/selector-rule-create-attempt.json"
+    [ -f "${attempt_file}" ] || return 0
+    expected_body="{\"aria_acl_rule\":{\"policy_id\":\"${policy_id}\",\"direction\":\"ingress\",\"priority\":100,\"action\":\"drop\",\"protocol\":\"${CT_PROTOCOL}\",\"src_cidr\":\"${ACL_SELECTOR_CIDR}\"}}"
+    IFS= read -r receipt_body <"${attempt_file}" || return 1
+    [ "${receipt_body}" = "${expected_body}" ] || return 1
+    if [ -n "${selector_rule_id}" ]; then
+        rm -f "${attempt_file}" || return 1
+        return 0
+    fi
+    lookup_file="${WORK_DIR}/selector-rule-cleanup-rules.json"
+    curl_body GET aria-acl-rules >"${lookup_file}" || return 1
+    matched="$(python3 - "${lookup_file}" "${policy_id}" "${ACL_SELECTOR_CIDR}" "${CT_PROTOCOL}" <<'PY'
+import ipaddress,json,sys
+rows=json.load(open(sys.argv[1],encoding="utf-8")).get("aria_acl_rules") or []
+target=str(ipaddress.ip_network(sys.argv[3],strict=False))
+matches=[row for row in rows if row.get("policy_id")==sys.argv[2] and row.get("direction")=="ingress" and row.get("priority")==100 and row.get("action")=="drop" and str(row.get("protocol"))==sys.argv[4] and str(ipaddress.ip_network(row.get("src_cidr"),strict=False))==target]
+assert len(matches)<=1,matches
+print(matches[0]["id"] if matches else "")
+PY
+    )" || return 1
+    if [ -n "${matched}" ]; then
+        curl_body DELETE "aria-acl-rules/${matched}" \
+            >"${WORK_DIR}/selector-rule-cleanup-delete.json" || return 1
+    fi
+    rm -f "${attempt_file}" || return 1
 }
 
 capture_selector_projection() {
@@ -2248,20 +2511,43 @@ wait_neutron_uds() {
 }
 
 wait_managed_port_reattached() {
-    local attempt payload
+    local expected_phase="$1" attempt payload instances_payload
     for attempt in $(seq 1 45); do
         payload="${WORK_DIR}/restart-reattach-${attempt}.json"
+        instances_payload="${WORK_DIR}/restart-reattach-${attempt}-instances.json"
         if ! command curl --fail-with-body -sS --unix-socket "${NEUTRON_UDS}" \
             http://localhost/api/v1/neutron/status >"${payload}"; then
             command sleep 1 || return 1
             continue
         fi
-        if python3 - "${payload}" "${EXPECTED_PORT_ID}" "${EXPECTED_IFNAME}" <<'PY'
+        if ! command curl --fail-with-body -sS \
+            "${DATAPATH_HTTP}/api/v1/instances" >"${instances_payload}"; then
+            command sleep 1 || return 1
+            continue
+        fi
+        if python3 - "${payload}" "${instances_payload}" "${EXPECTED_PORT_ID}" \
+            "${EXPECTED_IFNAME}" "${expected_phase}" <<'PY'
 import json,sys
 payload=json.load(open(sys.argv[1],encoding="utf-8"))
-matched=[row for row in payload.get("managed_ports") or []
-         if row.get("port_id")==sys.argv[2] and row.get("ifname")==sys.argv[3]]
-raise SystemExit(0 if len(matched)==1 else 1)
+instances=json.load(open(sys.argv[2],encoding="utf-8"))
+port_id,ifname,expected_phase=sys.argv[3:]
+active_matches=[value for value in payload.get("active_instances") or [] if value==ifname]
+managed_matches=[row for row in payload.get("managed_ports") or []
+                 if row.get("port_id")==port_id and row.get("ifname")==ifname]
+instance_matches=[row for row in instances.get("instances") or []
+                  if row.get("name")==ifname]
+assert len(active_matches)==1,(ifname,active_matches,payload)
+assert len(managed_matches)==1,(port_id,ifname,managed_matches)
+assert len(instance_matches)==1,(ifname,instance_matches)
+item=instance_matches[0]
+assert item.get("active") is True,item
+assert expected_phase in ("recovery_required","ready","active"),expected_phase
+if expected_phase=="recovery_required":
+    assert item.get("acl_ready") is False,item
+    assert item.get("readiness_reason")=="recovery_required",item
+elif expected_phase=="ready":
+    assert item.get("acl_ready") is True,item
+    assert item.get("readiness_reason") is None,item
 PY
         then
             return 0
@@ -2272,9 +2558,10 @@ PY
 }
 
 restart_managed_datapath() {
+    local expected_phase="$1"
     command docker restart "${DATAPATH_SERVICE_NAME}" || return 1
     wait_neutron_uds || return 1
-    wait_managed_port_reattached || return 1
+    wait_managed_port_reattached "${expected_phase}" || return 1
 }
 
 capture_datapath_log_cursor() {
@@ -2444,6 +2731,11 @@ def repair_counts(label):
     true_count=sum("selector_repair_performed=true" in line for line in profile)
     false_count=sum("selector_repair_performed=false" in line for line in profile)
     return true_count,false_count
+def repair_required_count(label):
+    text=open(os.path.join(root,label+"-datapath.log"),encoding="utf-8").read()
+    reason="quiesced repairable preexisting ACL projection pending Neutron resync"
+    return sum(reason in line and ("instance="+ifname) in line
+        for line in text.splitlines())
 repaired_acl_value=entries("legacy-repaired","acl-src",tap_id*2+repaired_bank).get(selector_cidr)
 clean_general_entries=entries("legacy-clean-restart","general-src",tap_id)
 clean_bank_zero_entries=entries("legacy-clean-restart","acl-src",tap_id*2)
@@ -2454,11 +2746,13 @@ clean_bank_zero_ids=set(clean_bank_zero_entries.values())
 clean_bank_one_ids=set(clean_bank_one_entries.values())
 repair_true_count,repair_false_count=repair_counts("legacy-repair")
 equal_true_count,equal_false_count=repair_counts("legacy-equal")
-restart_true_count,restart_false_count=repair_counts("legacy-clean-restart")
+restart_true_count=repair_counts("legacy-clean-restart")[0]
+restart_repair_required_count=repair_required_count("legacy-clean-restart")
 instances=json.load(open(os.path.join(root,"legacy-clean-restart-instances.json"),encoding="utf-8"))["instances"]
 config=json.load(open(os.path.join(root,"legacy-clean-restart-config.json"),encoding="utf-8"))
 item=next(row for row in instances if row["name"]==ifname)
-inventory_clean=(item["acl_ready"] is True and config["acl"] is True)
+inventory_clean=(item["active"] is True and item["acl_ready"] is True and
+                 item["readiness_reason"] is None and config["acl"] is True)
 second_repair_switch=(equal_bank!=restart_bank)
 assert injected_bank==polluted_bank
 assert polluted_bank!=repaired_bank
@@ -2473,7 +2767,7 @@ assert repair_true_count==1
 assert equal_true_count==0
 assert equal_false_count>=1
 assert restart_true_count==0
-assert restart_false_count>=1
+assert restart_repair_required_count==0
 assert clean_active_entries[selector_cidr]==selector_group_id
 assert legacy_local_group_id not in clean_general_ids
 assert legacy_local_group_id not in clean_bank_zero_ids
@@ -2567,7 +2861,7 @@ cleanup_selector_fixture_state() {
     cleanup_semantic_delta_rule_id="${semantic_delta_rule_id:-}"
     cleanup_local_ids="${selector_local_group_ids[*]:-}"
     if [ "${LEGACY_POLLUTION_INJECTED}" = true ]; then
-        restart_managed_datapath || cleanup_rc=1
+        restart_managed_datapath active || cleanup_rc=1
         if [ "${cleanup_rc}" -eq 0 ]; then
             run_full_resync >"${WORK_DIR}/selector-cleanup-pollution-repair-resync.log" || cleanup_rc=1
         fi
@@ -2626,9 +2920,9 @@ run_exact_selector_isolation_fixture() {
     run_captured_selector_flow exact-deny 2 deny
     assert_selector_deny_drop_ct_zero exact-deny
     delete_selector_fixture_group "${EXACT_LOCAL_GROUP_NAME}"
-    exact_local_group_id=""
     capture_selector_projection exact-cleanup
     assert_exact_selector_state
+    exact_local_group_id=""
     reverify_selector_deny_baseline exact-cleanup
 }
 
@@ -2672,7 +2966,7 @@ run_legacy_selector_repair_fixture() {
     run_captured_selector_flow legacy-polluted 2 pass
     assert_legacy_pollution_evidence
     capture_datapath_log_cursor legacy-repair-required
-    restart_managed_datapath
+    restart_managed_datapath recovery_required
     capture_datapath_logs_since legacy-repair-required
     capture_selector_projection legacy-repair-required
     assert_projection_repair_required
@@ -2691,7 +2985,7 @@ run_legacy_selector_repair_fixture() {
     delete_selector_fixture_group "${LEGACY_LOCAL_GROUP_NAME}"
     run_full_resync >"${WORK_DIR}/legacy-local-group-cleanup-resync.log"
     capture_datapath_log_cursor legacy-clean-restart
-    restart_managed_datapath
+    restart_managed_datapath ready
     wait_port_enforced
     capture_datapath_logs_since legacy-clean-restart
     capture_selector_projection legacy-clean-restart
@@ -2707,6 +3001,9 @@ cleanup() {
     set +e
     if ! cleanup_selector_fixture_state; then
         record_cleanup_error "cleanup-selector-fixture-state failed"
+    fi
+    if ! cleanup_selector_rule_attempt; then
+        record_cleanup_error "cleanup-selector-rule-attempt failed"
     fi
 }
 trap cleanup EXIT
@@ -2833,7 +3130,7 @@ selector_fixture_runner=run_selector_fixture_suite
         (
             "owned selector deny rule",
             safe,
-            '    selector_rule_id="$(curl_body POST aria-acl-rules "${selector_rule_body}" | json_field aria_acl_rule.id)" || return 1\n',
+            '    created_selector_rule_id="$(curl_body POST aria-acl-rules "${selector_rule_body}" | json_field aria_acl_rule.id)" || return 1\n',
             "owned selector fixture preparation",
         ),
         (
@@ -2845,7 +3142,8 @@ selector_fixture_runner=run_selector_fixture_suite
         (
             "owned ACL semantic cleanup",
             safe,
-            'curl_body DELETE "aria-acl-rules/${matched}"',
+            '        curl_body DELETE "aria-acl-rules/${matched}" \\\n'
+            '            >"${WORK_DIR}/semantic-delta-delete-response.json" || return 1\n',
             "semantic delta cleanup",
         ),
         (
@@ -3097,7 +3395,7 @@ selector_fixture_runner=run_selector_fixture_suite
         (
             "legacy clean restart wait",
             safe,
-            '    capture_datapath_log_cursor legacy-clean-restart\n    restart_managed_datapath\n    wait_port_enforced\n    capture_datapath_logs_since legacy-clean-restart\n    capture_selector_projection legacy-clean-restart\n',
+            '    capture_datapath_log_cursor legacy-clean-restart\n    restart_managed_datapath ready\n    wait_port_enforced\n    capture_datapath_logs_since legacy-clean-restart\n    capture_selector_projection legacy-clean-restart\n',
             "legacy selector fixture must capture pollution",
         ),
         (
@@ -3535,6 +3833,102 @@ selector_fixture_runner=run_selector_fixture_suite
         "must bind its exact captured RHS",
     )
     add_replacement(
+        "exact local ID cleared before assertion",
+        safe,
+        '    delete_selector_fixture_group "${EXACT_LOCAL_GROUP_NAME}"\n'
+        '    capture_selector_projection exact-cleanup\n'
+        '    assert_exact_selector_state\n'
+        '    exact_local_group_id=""\n',
+        '    delete_selector_fixture_group "${EXACT_LOCAL_GROUP_NAME}"\n'
+        '    exact_local_group_id=""\n'
+        '    capture_selector_projection exact-cleanup\n'
+        '    assert_exact_selector_state\n',
+        "exact selector fixture must retain local group ID through cleanup assertion",
+    )
+    add_replacement(
+        "clean restart target repair-required reason allowed",
+        safe,
+        "assert restart_repair_required_count==0",
+        "assert restart_repair_required_count>=0",
+        "legacy clean restart must reject target repair-required reason",
+    )
+    add_replacement(
+        "clean restart final state omits active and readiness reason",
+        safe,
+        'inventory_clean=(item["active"] is True and item["acl_ready"] is True and\n'
+        '                 item["readiness_reason"] is None and config["acl"] is True)',
+        'inventory_clean=(item["acl_ready"] is True and config["acl"] is True)',
+        "legacy clean restart final evidence must require active ready state",
+    )
+    add_replacement(
+        "selector rule receipt written after POST",
+        safe,
+        '    printf \'%s\\n\' "${selector_rule_body}" >"${selector_rule_receipt}.tmp" || return 1\n'
+        '    mv "${selector_rule_receipt}.tmp" "${selector_rule_receipt}" || return 1\n'
+        '    created_selector_rule_id="$(curl_body POST aria-acl-rules "${selector_rule_body}" | json_field aria_acl_rule.id)" || return 1\n',
+        '    created_selector_rule_id="$(curl_body POST aria-acl-rules "${selector_rule_body}" | json_field aria_acl_rule.id)" || return 1\n'
+        '    printf \'%s\\n\' "${selector_rule_body}" >"${selector_rule_receipt}.tmp" || return 1\n'
+        '    mv "${selector_rule_receipt}.tmp" "${selector_rule_receipt}" || return 1\n',
+        "selector rule create must persist its deterministic attempt before POST",
+    )
+    add_replacement(
+        "selector rule failed output assigned directly to global ID",
+        safe,
+        '    created_selector_rule_id="$(curl_body POST aria-acl-rules "${selector_rule_body}" | json_field aria_acl_rule.id)" || return 1\n'
+        '    [ -n "${created_selector_rule_id}" ] || return 1\n'
+        '    selector_rule_id="${created_selector_rule_id}"\n',
+        '    selector_rule_id="$(curl_body POST aria-acl-rules "${selector_rule_body}" | json_field aria_acl_rule.id)" || return 1\n'
+        '    [ -n "${selector_rule_id}" ] || return 1\n',
+        "selector rule create must commit global ID only after successful local parse",
+    )
+    add_replacement(
+        "selector rule unknown-response lookup removed",
+        safe,
+        '    curl_body GET aria-acl-rules >"${lookup_file}" || return 1\n',
+        "",
+        "selector rule unknown-response cleanup must query/delete its exact tuple",
+    )
+    add_replacement(
+        "selector rule attempt cleanup invocation removed",
+        safe,
+        '    if ! cleanup_selector_rule_attempt; then\n'
+        '        record_cleanup_error "cleanup-selector-rule-attempt failed"\n'
+        '    fi\n',
+        "",
+        "top-level cleanup must invoke selector rule attempt recovery",
+    )
+    add_replacement(
+        "reattach managed-ports only",
+        safe,
+        '        if ! command curl --fail-with-body -sS \\\n'
+        '            "${DATAPATH_HTTP}/api/v1/instances" >"${instances_payload}"; then\n'
+        '            command sleep 1 || return 1\n'
+        '            continue\n'
+        '        fi\n',
+        "",
+        "managed port re-attach wait must converge UDS and datapath instance state",
+    )
+    add_replacement(
+        "reattach active-instances proof removed",
+        safe,
+        'assert len(active_matches)==1,(ifname,active_matches,payload)\n',
+        "",
+        "managed port re-attach wait must require unique active instance",
+    )
+    add_replacement(
+        "reattach phase readiness proof removed",
+        safe,
+        'assert expected_phase in ("recovery_required","ready","active"),expected_phase\n'
+        'if expected_phase=="recovery_required":\n'
+        '    assert item.get("acl_ready") is False,item\n'
+        '    assert item.get("readiness_reason")=="recovery_required",item\n'
+        'elif expected_phase=="ready":\n'
+        '    assert item.get("acl_ready") is True,item\n'
+        '    assert item.get("readiness_reason") is None,item\n',
+        "",
+        "managed port re-attach wait must enforce recovery and ready phases",
+    )
+    add_replacement(
         "repair reason wrong instance",
         safe,
         'and ("instance="+ifname) in line),None)',
@@ -3661,15 +4055,22 @@ selector_fixture_runner=run_selector_fixture_suite
     add_replacement(
         "semantic lookup failure masked",
         safe,
-        ')" || return 1\n    if [ -n "${matched}" ]; then',
-        ')"\n    if [ -n "${matched}" ]; then',
+        ')" || return 1\n'
+        '    if [ -n "${matched}" ]; then\n'
+        '        curl_body DELETE "aria-acl-rules/${matched}" \\\n'
+        '            >"${WORK_DIR}/semantic-delta-delete-response.json"',
+        ')"\n'
+        '    if [ -n "${matched}" ]; then\n'
+        '        curl_body DELETE "aria-acl-rules/${matched}" \\\n'
+        '            >"${WORK_DIR}/semantic-delta-delete-response.json"',
         "must propagate failure",
     )
     add_replacement(
         "semantic receipt validation bypassed",
         safe,
-        '    [ "${receipt_body}" = "${expected_body}" ] || return 1\n',
-        "",
+        '    [ "${receipt_body}" = "${expected_body}" ] || return 1\n'
+        '    curl_body GET aria-acl-rules >"${lookup_file}" || return 1\n',
+        '    curl_body GET aria-acl-rules >"${lookup_file}" || return 1\n',
         "cleanup must require the attempt",
     )
     add_replacement(

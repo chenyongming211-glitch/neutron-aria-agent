@@ -258,6 +258,9 @@ install_fixture_policy() {
         -d "{\"name\":\"denied\",\"cidr\":\"${DENIED_IP}/32\"}" \
         "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
     curl --fail-with-body -sS -H 'Content-Type: application/json' \
+        -d '{"name":"standalone-unreferenced","cidr":"10.203.0.7/32"}' \
+        "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
+    curl --fail-with-body -sS -H 'Content-Type: application/json' \
         -d '{"src_group":"peer","dst_group":"host","proto":"icmp","action":"allow","direction":"ingress","ports":null}' \
         "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
     curl --fail-with-body -sS -H 'Content-Type: application/json' \
@@ -571,6 +574,86 @@ PY
     INCOMPLETE_PINNED_QUIESCED=true
 }
 
+assert_standalone_all_group_projection() {
+    local label="${1:?projection label is required}" map_root
+    case "${MODE}" in
+        system)
+            map_root="${PIN_ROOT}/system"
+            printf '%s\n' '[]' >"${WORK_DIR}/${label}-tap-config.json"
+            ;;
+        tap)
+            map_root="${PIN_ROOT}/global-v2"
+            bpftool -j map dump pinned "${map_root}/TAP_CONFIG_MAP" >"${WORK_DIR}/${label}-tap-config.json"
+            ;;
+    esac
+    curl -fsS "${HTTP}/api/v1/${INSTANCE}/groups" >"${WORK_DIR}/${label}-groups.json"
+    bpftool -j map dump pinned "${map_root}/SRC_IPV4_TRIE" >"${WORK_DIR}/${label}-general-src.json"
+    bpftool -j map dump pinned "${map_root}/DST_IPV4_TRIE" >"${WORK_DIR}/${label}-general-dst.json"
+    bpftool -j map dump pinned "${map_root}/ACL_SRC_IPV4_TRIE" >"${WORK_DIR}/${label}-acl-src.json"
+    bpftool -j map dump pinned "${map_root}/ACL_DST_IPV4_TRIE" >"${WORK_DIR}/${label}-acl-dst.json"
+    python3 - "${WORK_DIR}/${label}-groups.json" \
+        "${WORK_DIR}/${label}-tap-config.json" \
+        "${WORK_DIR}/${label}-general-src.json" \
+        "${WORK_DIR}/${label}-general-dst.json" \
+        "${WORK_DIR}/${label}-acl-src.json" \
+        "${WORK_DIR}/${label}-acl-dst.json" \
+        "${MODE}" <<'PY'
+import ipaddress,json,sys
+def decode_bytes(values):
+    return bytes(int(value,16) if isinstance(value,str) else value for value in values)
+def decode_u32(values):
+    return int.from_bytes(decode_bytes(values),sys.byteorder)
+def decode_lpm_entries(rows,expected_tap_id):
+    entries=set()
+    for row in rows:
+        key=decode_bytes(row["key"])
+        row_tap_id=int.from_bytes(key[4:8],"big")
+        if row_tap_id!=expected_tap_id:
+            continue
+        prefix_len=decode_u32(key[:4])-32
+        address=key[8:12]
+        group_id=decode_u32(row["value"])
+        entries.add((prefix_len,address,group_id))
+    return entries
+groups=json.load(open(sys.argv[1],encoding="utf-8"))["groups"]
+tap_config_rows=json.load(open(sys.argv[2],encoding="utf-8"))
+general_src_rows=json.load(open(sys.argv[3],encoding="utf-8"))
+general_dst_rows=json.load(open(sys.argv[4],encoding="utf-8"))
+acl_src_rows=json.load(open(sys.argv[5],encoding="utf-8"))
+acl_dst_rows=json.load(open(sys.argv[6],encoding="utf-8"))
+mode=sys.argv[7]
+groups_by_name={row["name"]:row["id"] for row in groups}
+referenced_id=groups_by_name["peer"]
+unreferenced_id=groups_by_name["standalone-unreferenced"]
+assert (mode=="system" and tap_config_rows==[]) or (mode=="tap" and len(tap_config_rows)==1)
+tap_id=0 if mode=="system" else decode_u32(tap_config_rows[0]["key"])
+active_bank=0 if mode=="system" else decode_bytes(tap_config_rows[0]["value"])[6]&1
+active_acl_tap_id=tap_id*2|active_bank
+expected_rows=[
+    (network.version,network.prefixlen,network.network_address.packed,row["id"])
+    for row in groups
+    for cidr in row["cidrs"]
+    for network in (ipaddress.ip_network(cidr,strict=False),)
+]
+assert all(version==4 for version,_,_,_ in expected_rows)
+expected_entries={
+    (prefix_len,address,group_id)
+    for _,prefix_len,address,group_id in expected_rows
+}
+expected_ids={entry[2] for entry in expected_entries}
+actual_general_src=decode_lpm_entries(general_src_rows,tap_id)
+actual_general_dst=decode_lpm_entries(general_dst_rows,tap_id)
+actual_acl_src=decode_lpm_entries(acl_src_rows,active_acl_tap_id)
+actual_acl_dst=decode_lpm_entries(acl_dst_rows,active_acl_tap_id)
+assert referenced_id in expected_ids
+assert unreferenced_id in expected_ids
+assert actual_general_src==expected_entries
+assert actual_general_dst==expected_entries
+assert actual_acl_src==expected_entries
+assert actual_acl_dst==expected_entries
+PY
+}
+
 restart_healthy_pinned_runtime() {
     crash_agent_bounded || die "healthy pinned-runtime crash did not terminate cleanly"
     SYSTEM_STARTED=false
@@ -581,6 +664,7 @@ restart_healthy_pinned_runtime() {
         start_tap_mode
     fi
     assert_dual_tc_ready
+    assert_standalone_all_group_projection after-restart
     run_observed_allowed_flow healthy-restart
     run_denied_flow healthy-restart-denied
     HEALTHY_PINNED_RESTART=true
@@ -806,6 +890,7 @@ else
 fi
 install_fixture_policy
 assert_dual_tc_ready
+assert_standalone_all_group_projection before-restart
 run_observed_allowed_flow allowed
 exercise_legacy_zero_compatibility
 run_denied_flow denied

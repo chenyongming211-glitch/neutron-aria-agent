@@ -331,6 +331,7 @@ def _canonical_projection_python_command():
             '"${WORK_DIR}/${label}-general-dst.json"',
             '"${WORK_DIR}/${label}-acl-src.json"',
             '"${WORK_DIR}/${label}-acl-dst.json"',
+            '"${MODE}"',
             "<<'PY'",
         )
     )
@@ -651,6 +652,31 @@ def _mode_projection_branch_present(body, mode, map_root):
     ) is not None
 
 
+def _mode_tap_config_capture_present(body):
+    arms = {
+        mode: re.findall(r"(?ms)^\s*%s\)(.*?);;" % mode, body)
+        for mode in ("system", "tap")
+    }
+    if any(len(matches) != 1 for matches in arms.values()):
+        return False
+    system_statements = _shell_logical_statements(arms["system"][0])
+    tap_statements = _shell_logical_statements(arms["tap"][0])
+    system_capture = (
+        "printf '%s\\n' '[]' "
+        '>"${WORK_DIR}/${label}-tap-config.json"'
+    )
+    tap_capture = (
+        'bpftool -j map dump pinned "${map_root}/TAP_CONFIG_MAP" '
+        '>"${WORK_DIR}/${label}-tap-config.json"'
+    )
+    return (
+        system_statements.count(system_capture) == 1
+        and tap_statements.count(tap_capture) == 1
+        and tap_capture not in system_statements
+        and system_capture not in tap_statements
+    )
+
+
 def _curl_json_posts(body, endpoint):
     posts = []
     for statement, depth in _shell_logical_commands(body):
@@ -756,11 +782,13 @@ general_src_rows=json.load(open(sys.argv[3],encoding="utf-8"))
 general_dst_rows=json.load(open(sys.argv[4],encoding="utf-8"))
 acl_src_rows=json.load(open(sys.argv[5],encoding="utf-8"))
 acl_dst_rows=json.load(open(sys.argv[6],encoding="utf-8"))
+mode=sys.argv[7]
 groups_by_name={row["name"]:row["id"] for row in groups}
 referenced_id=groups_by_name["peer"]
 unreferenced_id=groups_by_name["standalone-unreferenced"]
-tap_id=decode_u32(tap_config_rows[0]["key"])
-active_bank=decode_bytes(tap_config_rows[0]["value"])[6]&1
+assert (mode=="system" and tap_config_rows==[]) or (mode=="tap" and len(tap_config_rows)==1)
+tap_id=0 if mode=="system" else decode_u32(tap_config_rows[0]["key"])
+active_bank=0 if mode=="system" else decode_bytes(tap_config_rows[0]["value"])[6]&1
 active_acl_tap_id=tap_id*2|active_bank
 expected_rows=[
     (network.version,network.prefixlen,network.network_address.packed,row["id"])
@@ -801,6 +829,7 @@ def _projection_protected_mutation_errors(tree):
         "general_dst_rows",
         "acl_src_rows",
         "acl_dst_rows",
+        "mode",
         "expected_entries",
         "expected_ids",
         "actual_general_src",
@@ -893,8 +922,9 @@ def _projection_python_contract_errors(projection):
         "general_dst_rows": 'json.load(open(sys.argv[4],encoding="utf-8"))',
         "acl_src_rows": 'json.load(open(sys.argv[5],encoding="utf-8"))',
         "acl_dst_rows": 'json.load(open(sys.argv[6],encoding="utf-8"))',
-        "tap_id": 'decode_u32(tap_config_rows[0]["key"])',
-        "active_bank": 'decode_bytes(tap_config_rows[0]["value"])[6]&1',
+        "mode": "sys.argv[7]",
+        "tap_id": '0 if mode=="system" else decode_u32(tap_config_rows[0]["key"])',
+        "active_bank": '0 if mode=="system" else decode_bytes(tap_config_rows[0]["value"])[6]&1',
         "active_acl_tap_id": "tap_id*2|active_bank",
         "expected_entries": "{(prefix_len,address,group_id) for _,prefix_len,address,group_id in expected_rows}",
         "expected_ids": "{entry[2] for entry in expected_entries}",
@@ -997,6 +1027,7 @@ def _projection_python_contract_errors(projection):
         "general_dst_rows",
         "acl_src_rows",
         "acl_dst_rows",
+        "mode",
         "tap_id",
         "active_bank",
         "active_acl_tap_id",
@@ -1025,6 +1056,7 @@ def _projection_python_contract_errors(projection):
         )
 
     required_assertions = (
+        '(mode == "system" and tap_config_rows == []) or (mode == "tap" and len(tap_config_rows) == 1)',
         "referenced_id in expected_ids",
         "unreferenced_id in expected_ids",
         "actual_general_src == expected_entries",
@@ -1476,6 +1508,11 @@ def check_source(source):
             projection, "tap", '${PIN_ROOT}/global-v2'
         ):
             errors.append("standalone all-group projection missing MODE=tap branch")
+        if not _mode_tap_config_capture_present(projection):
+            errors.append(
+                "standalone all-group projection must use an empty MODE=system "
+                "TAP_CONFIG baseline and dump the unique MODE=tap row"
+            )
         for term in (
             "/api/v1/${INSTANCE}/groups",
             'row["name"]',
@@ -1497,7 +1534,6 @@ def check_source(source):
         ]
         capture_commands = (
             'curl -fsS "${HTTP}/api/v1/${INSTANCE}/groups" >"${WORK_DIR}/${label}-groups.json"',
-            'bpftool -j map dump pinned "${map_root}/TAP_CONFIG_MAP" >"${WORK_DIR}/${label}-tap-config.json"',
             'bpftool -j map dump pinned "${map_root}/SRC_IPV4_TRIE" >"${WORK_DIR}/${label}-general-src.json"',
             'bpftool -j map dump pinned "${map_root}/DST_IPV4_TRIE" >"${WORK_DIR}/${label}-general-dst.json"',
             'bpftool -j map dump pinned "${map_root}/ACL_SRC_IPV4_TRIE" >"${WORK_DIR}/${label}-acl-src.json"',
@@ -1547,8 +1583,10 @@ def check_source(source):
             'general_dst_rows=json.load(open(sys.argv[4],encoding="utf-8"))',
             'acl_src_rows=json.load(open(sys.argv[5],encoding="utf-8"))',
             'acl_dst_rows=json.load(open(sys.argv[6],encoding="utf-8"))',
-            'tap_id=decode_u32(tap_config_rows[0]["key"])',
-            'active_bank=decode_bytes(tap_config_rows[0]["value"])[6]&1',
+            "mode=sys.argv[7]",
+            'assert (mode=="system" and tap_config_rows==[]) or (mode=="tap" and len(tap_config_rows)==1)',
+            'tap_id=0 if mode=="system" else decode_u32(tap_config_rows[0]["key"])',
+            'active_bank=0 if mode=="system" else decode_bytes(tap_config_rows[0]["value"])[6]&1',
             "active_acl_tap_id=tap_id*2|active_bank",
             "expected_entries",
             "actual_general_src=decode_lpm_entries(general_src_rows,tap_id)",
@@ -2063,8 +2101,8 @@ def mutate_noop_projection_system_branch(source, _needle, _replacement, label):
     return _mutate_function_once(
         source,
         "assert_standalone_all_group_projection",
-        'system) map_root="${PIN_ROOT}/system" ;;',
-        'system) : \'map_root="${PIN_ROOT}/system"\' ;;',
+        '            map_root="${PIN_ROOT}/system"',
+        '            : \'map_root="${PIN_ROOT}/system"\'',
         label,
     )
 
@@ -2087,7 +2125,7 @@ def mutate_hardcode_projection_bank(source, _needle, _replacement, label):
     return _mutate_function_once(
         source,
         "assert_standalone_all_group_projection",
-        'active_bank=decode_bytes(tap_config_rows[0]["value"])[6]&1',
+        'active_bank=0 if mode=="system" else decode_bytes(tap_config_rows[0]["value"])[6]&1',
         "active_bank=0",
         label,
     )
@@ -2124,7 +2162,10 @@ def mutate_self_equal_acl_projection(source, _needle, _replacement, label):
 
 
 def mutate_alias_overwrite_projection_bank(source, _needle, _replacement, label):
-    assignment = 'active_bank=decode_bytes(tap_config_rows[0]["value"])[6]&1'
+    assignment = (
+        'active_bank=0 if mode=="system" else '
+        'decode_bytes(tap_config_rows[0]["value"])[6]&1'
+    )
     return _mutate_function_once(
         source,
         "assert_standalone_all_group_projection",
@@ -2208,12 +2249,48 @@ def mutate_redefine_lpm_decoder(source, _needle, _replacement, label):
 
 
 def mutate_tap_config_subscript_store(source, _needle, _replacement, label):
-    assignment = 'active_bank=decode_bytes(tap_config_rows[0]["value"])[6]&1'
+    assignment = (
+        'active_bank=0 if mode=="system" else '
+        'decode_bytes(tap_config_rows[0]["value"])[6]&1'
+    )
     return _mutate_function_once(
         source,
         "assert_standalone_all_group_projection",
         assignment,
         assignment + '\ntap_config_rows[0]["value"][6]=0',
+        label,
+    )
+
+
+def mutate_system_tap_id_reads_tap_config(source, _needle, _replacement, label):
+    return _mutate_function_once(
+        source,
+        "assert_standalone_all_group_projection",
+        'tap_id=0 if mode=="system" else decode_u32(tap_config_rows[0]["key"])',
+        'tap_id=decode_u32(tap_config_rows[0]["key"])',
+        label,
+    )
+
+
+def mutate_system_active_bank_reads_tap_config(
+    source, _needle, _replacement, label
+):
+    return _mutate_function_once(
+        source,
+        "assert_standalone_all_group_projection",
+        'active_bank=0 if mode=="system" else decode_bytes(tap_config_rows[0]["value"])[6]&1',
+        'active_bank=decode_bytes(tap_config_rows[0]["value"])[6]&1',
+        label,
+    )
+
+
+def mutate_system_dumps_tap_config(source, _needle, _replacement, label):
+    return _mutate_function_once(
+        source,
+        "assert_standalone_all_group_projection",
+        "printf '%s\\n' '[]' >\"${WORK_DIR}/${label}-tap-config.json\"",
+        'bpftool -j map dump pinned "${map_root}/TAP_CONFIG_MAP" '
+        '>"${WORK_DIR}/${label}-tap-config.json"',
         label,
     )
 
@@ -2730,6 +2807,27 @@ def run_mutation_self_tests(source, verbose=False):
             "hard-coded active bank",
         ),
         (
+            "standalone system tap id reads TAP_CONFIG row",
+            mutate_system_tap_id_reads_tap_config,
+            "",
+            "",
+            "tap_id assignment must decode its artifact",
+        ),
+        (
+            "standalone system active bank reads TAP_CONFIG row",
+            mutate_system_active_bank_reads_tap_config,
+            "",
+            "",
+            "active_bank assignment must decode its artifact",
+        ),
+        (
+            "standalone system dumps TAP_CONFIG row",
+            mutate_system_dumps_tap_config,
+            "",
+            "",
+            "empty MODE=system TAP_CONFIG baseline",
+        ),
+        (
             "standalone projection hard-coded ACL tap id",
             mutate_hardcode_projection_acl_tap_id,
             "",
@@ -3114,11 +3212,16 @@ def _synthetic_projection_green_source(source):
         helper = r'''assert_standalone_all_group_projection() {
     local label="${1:?projection label is required}" map_root
     case "${MODE}" in
-        system) map_root="${PIN_ROOT}/system" ;;
-        tap) map_root="${PIN_ROOT}/global-v2" ;;
+        system)
+            map_root="${PIN_ROOT}/system"
+            printf '%s\n' '[]' >"${WORK_DIR}/${label}-tap-config.json"
+            ;;
+        tap)
+            map_root="${PIN_ROOT}/global-v2"
+            bpftool -j map dump pinned "${map_root}/TAP_CONFIG_MAP" >"${WORK_DIR}/${label}-tap-config.json"
+            ;;
     esac
     curl -fsS "${HTTP}/api/v1/${INSTANCE}/groups" >"${WORK_DIR}/${label}-groups.json"
-    bpftool -j map dump pinned "${map_root}/TAP_CONFIG_MAP" >"${WORK_DIR}/${label}-tap-config.json"
     bpftool -j map dump pinned "${map_root}/SRC_IPV4_TRIE" >"${WORK_DIR}/${label}-general-src.json"
     bpftool -j map dump pinned "${map_root}/DST_IPV4_TRIE" >"${WORK_DIR}/${label}-general-dst.json"
     bpftool -j map dump pinned "${map_root}/ACL_SRC_IPV4_TRIE" >"${WORK_DIR}/${label}-acl-src.json"
@@ -3128,7 +3231,8 @@ def _synthetic_projection_green_source(source):
         "${WORK_DIR}/${label}-general-src.json" \
         "${WORK_DIR}/${label}-general-dst.json" \
         "${WORK_DIR}/${label}-acl-src.json" \
-        "${WORK_DIR}/${label}-acl-dst.json" <<'PY'
+        "${WORK_DIR}/${label}-acl-dst.json" \
+        "${MODE}" <<'PY'
 ''' + _projection_python_safe_model().rstrip() + r'''
 PY
 }
