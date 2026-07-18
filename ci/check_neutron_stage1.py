@@ -5592,6 +5592,2428 @@ def _run_managed_projection_attach_migration_mutation_self_tests():
     )
 
 
+def _managed_authoritative_write_admission_contract_errors(
+    control_plane_source,
+    groups_handler_source,
+):
+    """Return serialized local-write admission violations in stable order."""
+    control_code = _blank_rust_non_code(control_plane_source)
+    groups_code = _blank_rust_non_code(groups_handler_source)
+    errors = []
+
+    def raw_function_body(function_name):
+        declaration = re.search(
+            r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+%s"
+            r"(?:\s*<[^>{}]*>)?\s*\(" % re.escape(function_name),
+            control_code,
+        )
+        if declaration is None:
+            return None
+        opening = control_code.find("{", declaration.end())
+        closing = _rust_matching_brace_end(control_code, opening)
+        if opening < 0 or closing is None:
+            return None
+        return control_plane_source[opening + 1:closing]
+
+    classifier_name = "local_write_block_reason"
+    classifier_parameters = _rust_function_parameters_from_blanked(
+        control_code, classifier_name
+    )
+    classifier_body = _rust_function_body_from_blanked(
+        control_code, classifier_name
+    )
+    classifier_raw = raw_function_body(classifier_name)
+    if classifier_parameters is None or classifier_body is None:
+        errors.append("managed authoritative local-write classifier is missing")
+    else:
+        for pattern, label in (
+            (
+                r"\bdomain\s*:\s*LocalWriteDomain\b",
+                "the requested local-write domain",
+            ),
+            (
+                r"\bpublication_mode\s*:\s*Option\s*<\s*"
+                r"ManagedAclPublicationMode\s*>",
+                "the current optional publication mode",
+            ),
+            (
+                r"\bauthority\s*:\s*Option\s*<\s*&\s*"
+                r"NeutronPortAuthority\s*>",
+                "the current optional authority",
+            ),
+        ):
+            if not re.search(pattern, classifier_parameters):
+                errors.append(
+                    "managed authoritative local-write classifier must accept %s"
+                    % label
+                )
+        if not re.search(
+            r"\(\s*Some\s*\(\s*ManagedAclPublicationMode\s*::\s*ManagedAcl\s*\)\s*,"
+            r"\s*LocalWriteDomain\s*::\s*Acl\s*\)\s*=>\s*Some\s*\(\s*None\s*\)",
+            classifier_body,
+        ):
+            errors.append(
+                "ManagedAcl mode must block ACL writes even before authority commits"
+            )
+        if not re.search(
+            r"\(\s*Some\s*\(\s*ManagedAclPublicationMode\s*::\s*ManagedAcl\s*\)\s*,"
+            r"\s*LocalWriteDomain\s*::\s*Conntrack\s*\)\s*=>"
+            r"\s*(?:\{\s*)?Some\s*\(\s*Some\s*\(",
+            classifier_body,
+        ) or classifier_raw is None or '"acl"' not in classifier_raw:
+            errors.append(
+                "ManagedAcl mode must block conntrack as an ACL dependency before authority commits"
+            )
+        authority_region = (
+            classifier_body[classifier_body.find("authority"):]
+            if "authority" in classifier_body
+            else ""
+        )
+        selected_domain_block = re.search(
+            r"if\s+authority\s*\.\s*managed_domains\s*\.\s*contains\s*"
+            r"\(\s*domain_name\s*\)\s*\{\s*Some\s*\(\s*None\s*\)",
+            authority_region,
+        )
+        conntrack_dependency_block = re.search(
+            r"else\s+if\s+domain\s*==\s*LocalWriteDomain\s*::\s*Conntrack"
+            r"[\s\S]*?managed_domains\s*\.\s*contains\s*\([^)]*\)\s*\{"
+            r"\s*Some\s*\(\s*Some\s*\(",
+            authority_region,
+        )
+        if (
+            "domain.as_str()" not in authority_region
+            or selected_domain_block is None
+            or conntrack_dependency_block is None
+            or classifier_raw is None
+            or 'contains("acl")' not in classifier_raw
+        ):
+            errors.append(
+                "committed authority must still block selected domains and the ACL conntrack dependency"
+            )
+        if not re.search(r"_\s*=>\s*authority\s*\.\s*and_then\s*\(", classifier_body):
+            errors.append(
+                "standalone mode without authority must retain local-write access"
+            )
+        match_expression = re.search(
+            r"\bmatch\s*\(\s*publication_mode\s*,\s*domain\s*\)\s*\{",
+            classifier_body,
+        )
+        match_opening = (
+            classifier_body.find("{", match_expression.start())
+            if match_expression is not None
+            else -1
+        )
+        match_closing = _rust_matching_brace_end(classifier_body, match_opening)
+        if (
+            match_expression is None
+            or match_closing is None
+            or classifier_body[:match_expression.start()].strip()
+            or classifier_body[match_closing + 1:].strip()
+        ):
+            errors.append(
+                "managed authoritative classifier match must be its unique tail expression"
+            )
+
+    admission_name = "ensure_serialized_local_write_allowed"
+    admission_parameters = _rust_function_parameters_from_blanked(
+        control_code, admission_name
+    )
+    admission_body = _rust_function_body_from_blanked(
+        control_code, admission_name
+    )
+    if admission_parameters is None or admission_body is None:
+        errors.append("serialized authoritative local-write admission helper is missing")
+    else:
+        for pattern, label in (
+            (r"\binstance\s*:\s*&\s*str\b", "instance"),
+            (r"\bdomain\s*:\s*LocalWriteDomain\b", "domain"),
+            (
+                r"\bpublication_mode\s*:\s*Option\s*<\s*"
+                r"ManagedAclPublicationMode\s*>",
+                "publication mode",
+            ),
+            (
+                r"\bauthority\s*:\s*Option\s*<\s*&\s*"
+                r"NeutronPortAuthority\s*>",
+                "authority",
+            ),
+        ):
+            if not re.search(pattern, admission_parameters):
+                errors.append(
+                    "serialized local-write admission must accept the exact %s input"
+                    % label
+                )
+        calls = _rust_named_call_arguments(admission_body, classifier_name)
+        normalized = (
+            [re.sub(r"\s+", "", argument) for argument in calls[0][1]]
+            if len(calls) == 1
+            else []
+        )
+        if normalized != ["domain", "publication_mode", "authority"]:
+            errors.append(
+                "serialized local-write admission must use the exact mode and authority classifier inputs"
+            )
+        if not re.search(
+            r"if\s+let\s+Some\s*\(\s*dependency_of\s*\)\s*=\s*"
+            r"local_write_block_reason\s*\(",
+            admission_body,
+        ) or "Ok(())" not in admission_body:
+            errors.append(
+                "serialized local-write admission must reject only the classifier's block reason"
+            )
+        for marker in (
+            "ControlPlaneError::LocalWriteBlocked",
+            "instance: instance.to_string()",
+            "domain: domain.as_str().to_string()",
+            "dependency_of",
+        ):
+            if marker not in admission_body:
+                errors.append(
+                    "serialized local-write admission must return LocalWriteBlocked with complete context"
+                )
+                break
+
+    config_domains_name = "requested_local_config_write_domains"
+    config_domains_body = _rust_function_body_from_blanked(
+        control_code, config_domains_name
+    )
+    config_domain_pairs = (
+        ("conntrack", "Conntrack"),
+        ("monitoring", "Config"),
+        ("acl", "Acl"),
+        ("qos", "Qos"),
+        ("mirror", "Mirror"),
+        ("tcprt", "Tcprt"),
+        ("ssl", "Ssl"),
+    )
+    if config_domains_body is None:
+        errors.append("requested config domains classifier is missing")
+    else:
+        for option, domain in config_domain_pairs:
+            if not re.search(
+                r"\b%s\s*\.\s*is_some\s*\(\s*\)\s*\{[^{}]*"
+                r"LocalWriteDomain\s*::\s*%s\b"
+                % (re.escape(option), re.escape(domain)),
+                config_domains_body,
+            ):
+                errors.append(
+                    "requested config domains must map %s to LocalWriteDomain::%s"
+                    % (option, domain)
+                )
+        pushed_domains = re.findall(
+            r"\bdomains\s*\.\s*push\s*\(\s*"
+            r"LocalWriteDomain\s*::\s*(\w+)\s*\)",
+            config_domains_body,
+        )
+        if pushed_domains != [domain for _, domain in config_domain_pairs] or not re.search(
+            r"\bdomains\s*$", config_domains_body
+        ):
+            errors.append(
+                "requested config domains classifier must contain only the seven conditional mappings"
+            )
+
+    group_classifier_name = "local_group_write_block_reason"
+    group_classifier_parameters = _rust_function_parameters_from_blanked(
+        control_code, group_classifier_name
+    )
+    group_classifier_body = _rust_function_body_from_blanked(
+        control_code, group_classifier_name
+    )
+    group_classifier_raw = raw_function_body(group_classifier_name)
+    if group_classifier_parameters is None or group_classifier_body is None:
+        errors.append("reserved Neutron group namespace classifier is missing")
+    else:
+        for pattern, label in (
+            (r"\bgroup_name\s*:\s*&\s*str\b", "group name"),
+            (
+                r"\bpublication_mode\s*:\s*Option\s*<\s*"
+                r"ManagedAclPublicationMode\s*>",
+                "publication mode",
+            ),
+            (
+                r"\bauthority\s*:\s*Option\s*<\s*&\s*"
+                r"NeutronPortAuthority\s*>",
+                "authority",
+            ),
+        ):
+            if not re.search(pattern, group_classifier_parameters):
+                errors.append(
+                    "reserved group classifier must accept the exact %s input" % label
+                )
+        if (
+            group_classifier_raw is None
+            or 'starts_with("neutron:")' not in group_classifier_raw
+            or "trim()" not in group_classifier_body
+            or "to_ascii_lowercase()" not in group_classifier_body
+        ):
+            errors.append(
+                "reserved group classifier must normalize and match the neutron: namespace"
+            )
+        compact_group_classifier = re.sub(r"\s+", "", group_classifier_body)
+        if not re.search(
+            r"publication_mode==Some\(ManagedAclPublicationMode::ManagedAcl\)"
+            r"\|\|authority\.is_some\(\)",
+            compact_group_classifier,
+        ):
+            errors.append(
+                "reserved neutron: namespace must survive ManagedAcl with no committed authority"
+            )
+        if compact_group_classifier != (
+            "group_name.trim().to_ascii_lowercase().starts_with()"
+            "&&(publication_mode==Some(ManagedAclPublicationMode::ManagedAcl)"
+            "||authority.is_some())"
+        ):
+            errors.append(
+                "reserved group classifier boolean must be its unique tail expression"
+            )
+
+    group_admission_name = "ensure_serialized_local_group_write_allowed"
+    group_admission_parameters = _rust_function_parameters_from_blanked(
+        control_code, group_admission_name
+    )
+    group_admission_body = _rust_function_body_from_blanked(
+        control_code, group_admission_name
+    )
+    if group_admission_parameters is None or group_admission_body is None:
+        errors.append("serialized reserved-group admission helper is missing")
+    else:
+        for pattern, label in (
+            (r"\binstance\s*:\s*&\s*str\b", "instance"),
+            (r"\bgroup_name\s*:\s*&\s*str\b", "group name"),
+            (
+                r"\bpublication_mode\s*:\s*Option\s*<\s*"
+                r"ManagedAclPublicationMode\s*>",
+                "publication mode",
+            ),
+            (
+                r"\bauthority\s*:\s*Option\s*<\s*&\s*"
+                r"NeutronPortAuthority\s*>",
+                "authority",
+            ),
+        ):
+            if not re.search(pattern, group_admission_parameters):
+                errors.append(
+                    "serialized reserved-group admission must accept the exact %s input"
+                    % label
+                )
+        calls = _rust_named_call_arguments(
+            group_admission_body, group_classifier_name
+        )
+        normalized = (
+            [re.sub(r"\s+", "", argument) for argument in calls[0][1]]
+            if len(calls) == 1
+            else []
+        )
+        if normalized != ["group_name", "publication_mode", "authority"]:
+            errors.append(
+                "serialized reserved-group admission must use the exact name, mode, and authority"
+            )
+        if not re.search(
+            r"if\s+local_group_write_block_reason\s*\(", group_admission_body
+        ) or "Ok(())" not in group_admission_body:
+            errors.append(
+                "serialized reserved-group admission must reject only classified reserved names"
+            )
+        if not all(
+            marker in group_admission_body
+            for marker in (
+                "ControlPlaneError::LocalWriteBlocked",
+                "instance: instance.to_string()",
+                "LocalWriteDomain::Acl.as_str().to_string()",
+                "dependency_of: None",
+            )
+        ):
+            errors.append(
+                "serialized reserved-group admission must return an ACL LocalWriteBlocked conflict"
+            )
+
+    lifecycle_pattern = re.compile(
+        r"\blet\s+(?P<guard>_?[A-Za-z][A-Za-z0-9_]*)\s*=\s*"
+        r"self\s*\.\s*lock_runtime_lifecycle\s*\(\s*\)\s*\.\s*await\s*;"
+    )
+    write_lock_pattern = re.compile(r"\.\s*write\s*\(\s*\)\s*\.\s*await\b")
+    authority_binding_pattern = re.compile(r"\blet\s+authority\s*=")
+
+    def authoritative_call(body, function_name):
+        calls = _rust_named_call_arguments(body, function_name)
+        return calls[0] if len(calls) == 1 else None
+
+    def authority_snapshot_is_exact(body, start, end):
+        statement_end = body.find(";", start, end)
+        if statement_end < 0:
+            return False
+        region = body[start:statement_end]
+        return all(
+            re.search(pattern, region)
+            for pattern in (
+                r"\bself\s*\.\s*neutron_authorities\b",
+                r"\.\s*read\s*\(\s*\)\s*\.\s*await",
+                r"\.\s*get\s*\(\s*instance\s*\)",
+                r"\.\s*cloned\s*\(\s*\)",
+            )
+        )
+
+    def check_locked_entry(name, call_name, expected_arguments, effect_markers):
+        body = _rust_function_body_from_blanked(control_code, name)
+        if body is None:
+            errors.append("authoritative write entry %s is missing" % name)
+            return
+        lifecycle = lifecycle_pattern.search(body)
+        instance = re.search(
+            r"\bget_instance\s*\(\s*instance\s*\)\s*\.\s*await", body
+        )
+        write_lock = write_lock_pattern.search(body)
+        authority = authority_binding_pattern.search(body)
+        authority_bindings = list(authority_binding_pattern.finditer(body))
+        call = authoritative_call(body, call_name)
+        call_position = call[0] if call else -1
+        if (
+            lifecycle is None
+            or instance is None
+            or write_lock is None
+            or authority is None
+            or len(authority_bindings) != 1
+            or call is None
+            or not lifecycle.start()
+            < instance.start()
+            < write_lock.start()
+            < authority.start()
+            < call_position
+        ):
+            errors.append(
+                "%s must serialize lifecycle, instance write lock, authority snapshot, then admission"
+                % name
+            )
+            return
+        if any(
+            _rust_brace_depth_at(body, position) != 0
+            for position in (
+                lifecycle.start(),
+                instance.start(),
+                write_lock.start(),
+                authority.start(),
+                call_position,
+            )
+        ):
+            errors.append(
+                "%s lifecycle, lock, authority, and admission must be unconditional top-level steps"
+                % name
+            )
+        if not authority_snapshot_is_exact(body, authority.start(), call_position):
+            errors.append("%s must pass a current authority snapshot" % name)
+        normalized = [re.sub(r"\s+", "", argument) for argument in call[1]]
+        if normalized != expected_arguments:
+            errors.append("%s must pass exact instance, domain, mode, and authority" % name)
+        if not _rust_named_call_result_is_propagated(body, call_name, call_position):
+            errors.append("%s must propagate the admission result" % name)
+        before_admission = body[write_lock.end():call_position]
+        if any(marker in before_admission for marker in effect_markers) or re.search(
+            r"\b(?:state\s*\.\s*state\b|apply_add_rule\s*\(|"
+            r"apply_remove_rule\s*\(|delete_port_set\s*\(|"
+            r"clear_\w+_stats\s*\()",
+            before_admission,
+        ):
+            errors.append("%s must reject before maps, state, WAL, or kernel effects" % name)
+        if any(body.find(marker, call_position) < 0 for marker in effect_markers):
+            errors.append("%s checker fixture is missing its post-admission effect" % name)
+        lifecycle_drop = re.search(
+            r"\b(?:std\s*::\s*mem\s*::\s*)?drop\s*\(\s*%s\s*\)"
+            % re.escape(lifecycle.group("guard")),
+            body[lifecycle.end():],
+        )
+        state_drop = re.search(
+            r"\b(?:std\s*::\s*mem\s*::\s*)?drop\s*\(\s*state\s*\)",
+            body[write_lock.end():],
+        )
+        effects_after_state_drop = state_drop is not None and any(
+            marker in body[write_lock.end() + state_drop.end():]
+            for marker in effect_markers
+        )
+        if lifecycle_drop is not None:
+            errors.append("%s must hold the lifecycle guard to return" % name)
+        if effects_after_state_drop:
+            errors.append("%s must hold the instance guard through transaction effects" % name)
+
+    policy_arguments = [
+        "instance",
+        "LocalWriteDomain::Acl",
+        "Some(state.managed_acl_publication_mode)",
+        "authority.as_ref()",
+    ]
+    for policy_name in ("add_policy", "delete_policy"):
+        check_locked_entry(
+            policy_name,
+            admission_name,
+            policy_arguments,
+            (
+                "check_runtime_maps_ready",
+                "aria_core::ebpf_ops",
+                "wal_append",
+            ),
+        )
+
+    group_arguments = [
+        "instance",
+        "name",
+        "Some(state.managed_acl_publication_mode)",
+        "authority.as_ref()",
+    ]
+    for group_name in ("add_group", "delete_group"):
+        check_locked_entry(
+            group_name,
+            group_admission_name,
+            group_arguments,
+            (
+                "managed_local_projection_admission",
+                "check_runtime_maps_ready",
+            ),
+        )
+
+    config_body = _rust_function_body_from_blanked(control_code, "update_config")
+    if config_body is None:
+        errors.append("authoritative write entry update_config is missing")
+    else:
+        lifecycle = lifecycle_pattern.search(config_body)
+        instance = re.search(
+            r"\bget_instance\s*\(\s*instance\s*\)\s*\.\s*await", config_body
+        )
+        mode_bindings = list(
+            re.finditer(r"\blet\s+publication_mode\s*=", config_body)
+        )
+        mode = mode_bindings[0] if mode_bindings else None
+        authority_bindings = list(authority_binding_pattern.finditer(config_body))
+        authority = authority_bindings[0] if authority_bindings else None
+        requested_call = authoritative_call(config_body, config_domains_name)
+        loop = re.search(r"\bfor\s+domain\s+in\s+requested_domains\s*\{", config_body)
+        admission_call = authoritative_call(config_body, admission_name)
+        admission_position = admission_call[0] if admission_call else -1
+        if (
+            lifecycle is None
+            or instance is None
+            or mode is None
+            or len(mode_bindings) != 1
+            or authority is None
+            or len(authority_bindings) != 1
+            or requested_call is None
+            or loop is None
+            or admission_call is None
+            or not lifecycle.start()
+            < instance.start()
+            < mode.start()
+            < authority.start()
+            < requested_call[0]
+            < loop.start()
+            <= admission_position
+        ):
+            errors.append(
+                "update_config must snapshot mode and authority under lifecycle before all requested-domain admissions"
+            )
+        else:
+            if any(
+                _rust_brace_depth_at(config_body, position) != 0
+                for position in (
+                    lifecycle.start(),
+                    instance.start(),
+                    mode.start(),
+                    authority.start(),
+                    requested_call[0],
+                    loop.start(),
+                )
+            ):
+                errors.append(
+                    "update_config lifecycle, snapshots, and requested-domain loop must be top-level"
+                )
+            mode_region = config_body[mode.start():authority.start()]
+            if not all(
+                re.search(pattern, mode_region)
+                for pattern in (
+                    r"\.\s*read\s*\(\s*\)\s*\.\s*await",
+                    r"\bmanaged_acl_publication_mode\b",
+                )
+            ):
+                errors.append(
+                    "update_config must snapshot the real publication mode before authority"
+                )
+            if not authority_snapshot_is_exact(
+                config_body, authority.start(), requested_call[0]
+            ):
+                errors.append("update_config must pass a current authority snapshot")
+            requested_arguments = [
+                re.sub(r"\s+", "", argument) for argument in requested_call[1]
+            ]
+            if requested_arguments != [
+                "conntrack",
+                "monitoring",
+                "acl",
+                "qos",
+                "mirror",
+                "tcprt",
+                "ssl",
+            ]:
+                errors.append(
+                    "update_config must classify every requested config domain exactly once"
+                )
+            admission_arguments = [
+                re.sub(r"\s+", "", argument) for argument in admission_call[1]
+            ]
+            if admission_arguments != [
+                "instance",
+                "domain",
+                "Some(publication_mode)",
+                "authority.as_ref()",
+            ]:
+                errors.append(
+                    "update_config must admit each domain with exact instance, mode, and authority"
+                )
+            if not _rust_named_call_result_is_propagated(
+                config_body, admission_name, admission_position
+            ):
+                errors.append("update_config must propagate every admission result")
+            loop_body = _rust_named_for_loop_body(
+                config_body, "domain", "requested_domains"
+            )
+            loop_admission_calls = (
+                _rust_named_call_arguments(loop_body, admission_name)
+                if loop_body is not None
+                else []
+            )
+            loop_call_position = (
+                loop_admission_calls[0][0]
+                if len(loop_admission_calls) == 1
+                else -1
+            )
+            loop_call_opening = (
+                loop_body.find("(", loop_call_position)
+                if loop_call_position >= 0
+                else -1
+            )
+            loop_call_arguments = (
+                _rust_parenthesized_body_at(loop_body, loop_call_opening)
+                if loop_call_opening >= 0
+                else None
+            )
+            loop_call_closing = (
+                loop_call_opening + len(loop_call_arguments) + 1
+                if loop_call_arguments is not None
+                else -1
+            )
+            if (
+                loop_body is None
+                or len(loop_admission_calls) != 1
+                or re.search(r"\b(?:break|continue|return)\b", loop_body)
+                or _rust_brace_depth_at(loop_body, loop_call_position) != 0
+                or loop_body[:loop_call_position].strip()
+                or loop_body[loop_call_closing + 1:].strip() != "?;"
+            ):
+                errors.append(
+                    "update_config must admit every requested domain without skipping"
+                )
+            write_effect = write_lock_pattern.search(config_body)
+            first_effects = [
+                position
+                for position in (
+                    config_body.find("set_ssl_global_config"),
+                    write_effect.start() if write_effect is not None else -1,
+                    config_body.find("check_runtime_maps_ready"),
+                    config_body.find("aria_core::ebpf_ops::update_runtime_config"),
+                    config_body.find("wal_append_strict"),
+                )
+                if position >= 0
+            ]
+            if not first_effects or min(first_effects) < admission_position:
+                errors.append(
+                    "update_config must reject every requested domain before SSL, maps, state, WAL, or kernel effects"
+                )
+        if lifecycle is not None and re.search(
+            r"\b(?:std\s*::\s*mem\s*::\s*)?drop\s*\(\s*%s\s*\)"
+            % re.escape(lifecycle.group("guard")),
+            config_body[lifecycle.end():],
+        ):
+            errors.append("update_config must hold the lifecycle guard to return")
+
+    for handler_name in ("add_group", "delete_group"):
+        handler_body = _rust_function_body_from_blanked(groups_code, handler_name)
+        preflight_calls = (
+            _rust_named_call_arguments(
+                handler_body, "ensure_local_group_write_allowed"
+            )
+            if handler_body is not None
+            else []
+        )
+        preflight = preflight_calls[0][0] if len(preflight_calls) == 1 else -1
+        control_call = (
+            handler_body.find("cp.%s" % handler_name)
+            if handler_body is not None
+            else -1
+        )
+        propagated = (
+            _rust_named_call_result_is_propagated(
+                handler_body,
+                "ensure_local_group_write_allowed",
+                preflight,
+            )
+            if preflight >= 0
+            else False
+        )
+        if not propagated and preflight >= 0:
+            prefix = handler_body[max(0, preflight - 180):preflight]
+            binding = re.search(
+                r"\bif\s+let\s+Err\s*\(\s*(\w+)\s*\)\s*=\s*cp\s*\.\s*$",
+                prefix,
+            )
+            call_opening = handler_body.find("(", preflight)
+            call_arguments = _rust_parenthesized_body_at(
+                handler_body, call_opening
+            )
+            call_closing = (
+                call_opening + len(call_arguments) + 1
+                if call_arguments is not None
+                else -1
+            )
+            await_block = (
+                re.match(r"\s*\.\s*await\s*\{", handler_body[call_closing + 1:])
+                if call_closing >= 0
+                else None
+            )
+            if binding is not None and await_block is not None:
+                block_opening = handler_body.find("{", call_closing + 1)
+                error_block = _rust_braced_body_at(handler_body, block_opening) or ""
+                propagated = bool(
+                    re.search(
+                        r"\breturn\s+Err\s*\(\s*err_response\s*\(\s*%s\s*\)\s*\)"
+                        % re.escape(binding.group(1)),
+                        error_block,
+                    )
+                )
+        if not 0 <= preflight < control_call or not propagated:
+            errors.append(
+                "%s handler must propagate its reserved-namespace preflight before the serialized second guard"
+                % handler_name
+            )
+
+    test_specs = {
+        "domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit": {
+            "calls": (
+                (
+                    "add_error",
+                    "add_policy",
+                    'self::assert_local_write_blocked(add_error,instance,"acl",None);',
+                ),
+            ),
+            "raw": (),
+        },
+        "domain_authority_managed_acl_policy_write_delete_blocks_before_authority_commit": {
+            "calls": (
+                (
+                    "delete_error",
+                    "delete_policy",
+                    'self::assert_local_write_blocked(delete_error,instance,"acl",None);',
+                ),
+            ),
+            "raw": (),
+        },
+        "domain_authority_managed_acl_config_acl_blocks_before_authority_commit": {
+            "calls": (
+                (
+                    "error",
+                    "update_config",
+                    'self::assert_local_write_blocked(error,instance,"acl",None);',
+                ),
+            ),
+            "raw": ("Some(false)",),
+        },
+        "domain_authority_managed_acl_config_conntrack_blocks_before_authority_commit": {
+            "calls": (
+                (
+                    "error",
+                    "update_config",
+                    'self::assert_local_write_blocked(error,instance,"conntrack",Some("acl"));',
+                ),
+            ),
+            "raw": ("Some(false)",),
+        },
+        "domain_authority_managed_acl_config_monitoring_remains_local_before_authority_commit": {
+            "calls": (
+                (
+                    "error",
+                    "update_config",
+                    "self::assert_not_local_write_blocked(error,503);",
+                ),
+            ),
+            "raw": ("Some(false)",),
+        },
+        "domain_authority_managed_acl_group_namespace_survives_missing_authority": {
+            "calls": (
+                (
+                    "add_error",
+                    "add_group",
+                    'self::assert_local_write_blocked(add_error,instance,"acl",None);',
+                ),
+                (
+                    "delete_error",
+                    "delete_group",
+                    'self::assert_local_write_blocked(delete_error,instance,"acl",None);',
+                ),
+            ),
+            "raw": ('"neutron:new"', '"neutron:owned"'),
+        },
+        "domain_authority_standalone_without_authority_preserves_policy_and_config_admission": {
+            "calls": (
+                (
+                    "add_error",
+                    "add_policy",
+                    "self::assert_not_local_write_blocked(add_error,503);",
+                ),
+                (
+                    "delete_error",
+                    "delete_policy",
+                    "self::assert_not_local_write_blocked(delete_error,503);",
+                ),
+                (
+                    "acl_error",
+                    "update_config",
+                    "self::assert_not_local_write_blocked(acl_error,503);",
+                ),
+                (
+                    "conntrack_error",
+                    "update_config",
+                    "self::assert_not_local_write_blocked(conntrack_error,503);",
+                ),
+            ),
+            "raw": (
+                "ManagedAclPublicationMode::StandaloneCompatibility",
+                "ManagedProjectionHealth::Unverified",
+            ),
+        },
+        "domain_authority_managed_acl_without_authority_allows_non_reserved_group_name": {
+            "calls": (
+                (
+                    "error",
+                    "add_group",
+                    "self::assert_not_local_write_blocked(error,503);",
+                ),
+            ),
+            "raw": ('"local:qos"',),
+        },
+        "domain_authority_committed_qos_blocks_config_at_real_entry": {
+            "calls": (
+                (
+                    "error",
+                    "update_config",
+                    'self::assert_local_write_blocked(error,instance,"qos",None);',
+                ),
+            ),
+            "raw": (
+                "mark_neutron_port_authority",
+                '"qos"',
+                "Some(false)",
+            ),
+        },
+    }
+    tests_module = re.search(
+        r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+tests\s*\{",
+        control_code,
+    )
+    tests_body = None
+    tests_module_prefix = ""
+    if tests_module is not None:
+        tests_module_prefix = control_code[:tests_module.start()].rstrip()
+        tests_opening = control_code.find("{", tests_module.start())
+        tests_body = _rust_braced_body_at(control_code, tests_opening)
+    if (
+        tests_module is None
+        or not tests_module_prefix
+        or tests_module_prefix[-1] not in "{}"
+        or (tests_body or "").lstrip().startswith("#![")
+    ):
+        errors.append(
+            "managed authoritative regression test module must have only its active cfg(test) gate"
+        )
+
+    blocked_assertion_name = "assert_local_write_blocked"
+    blocked_assertion_parameters = (
+        _rust_function_parameters_from_blanked(tests_body, blocked_assertion_name)
+        if tests_body is not None
+        else None
+    )
+    blocked_assertion_body = (
+        _rust_function_body_from_blanked(tests_body, blocked_assertion_name)
+        if tests_body is not None
+        else None
+    )
+    blocked_status = (
+        re.search(
+            r"assert_eq!\s*\(\s*error\s*\.\s*status_code\s*\(\s*\)\s*,\s*409\s*\)",
+            blocked_assertion_body or "",
+        )
+    )
+    blocked_match = re.search(
+        r"\bmatch\s+error\s*\{", blocked_assertion_body or ""
+    )
+    blocked_parameter_patterns = (
+        r"\berror\s*:\s*ControlPlaneError\b",
+        r"\bexpected_instance\s*:\s*&\s*str\b",
+        r"\bexpected_domain\s*:\s*&\s*str\b",
+        r"\bexpected_dependency\s*:\s*Option\s*<\s*&\s*str\s*>",
+    )
+    blocked_body_patterns = (
+        r"ControlPlaneError\s*::\s*LocalWriteBlocked\s*\{[^}]*"
+        r"\binstance\b[^}]*\bdomain\b[^}]*\bdependency_of\b[^}]*\}",
+        r"assert_eq!\s*\(\s*instance\s*,\s*expected_instance\s*\)",
+        r"assert_eq!\s*\(\s*domain\s*,\s*expected_domain\s*\)",
+        r"assert_eq!\s*\(\s*dependency_of\s*\.\s*as_deref\s*\(\s*\)\s*,"
+        r"\s*expected_dependency\s*\)",
+        r"\bother\s*=>\s*panic!\s*\(",
+    )
+    blocked_variant = re.search(
+        r"ControlPlaneError\s*::\s*LocalWriteBlocked\s*\{[^}]*\}"
+        r"\s*=>\s*\{",
+        blocked_assertion_body or "",
+    )
+    blocked_variant_opening = (
+        (blocked_assertion_body or "").rfind(
+            "{", blocked_variant.start(), blocked_variant.end()
+        )
+        if blocked_variant is not None
+        else -1
+    )
+    blocked_variant_body = (
+        _rust_braced_body_at(blocked_assertion_body, blocked_variant_opening)
+        if blocked_assertion_body is not None and blocked_variant_opening >= 0
+        else None
+    )
+    compact_blocked_variant_body = re.sub(
+        r"\s+", "", blocked_variant_body or ""
+    )
+    expected_blocked_variant_body = (
+        "assert_eq!(instance,expected_instance);"
+        "assert_eq!(domain,expected_domain);"
+        "assert_eq!(dependency_of.as_deref(),expected_dependency);"
+    )
+    if (
+        tests_body is None
+        or len(
+            re.findall(
+                r"\bfn\s+%s\s*\(" % blocked_assertion_name, tests_body
+            )
+        )
+        != 1
+        or blocked_assertion_parameters is None
+        or not all(
+            re.search(pattern, blocked_assertion_parameters)
+            for pattern in blocked_parameter_patterns
+        )
+        or blocked_assertion_body is None
+        or blocked_status is None
+        or blocked_match is None
+        or blocked_status.start() >= blocked_match.start()
+        or _rust_brace_depth_at(blocked_assertion_body, blocked_status.start()) != 0
+        or _rust_brace_depth_at(blocked_assertion_body, blocked_match.start()) != 0
+        or not all(
+            re.search(pattern, blocked_assertion_body)
+            for pattern in blocked_body_patterns
+        )
+        or blocked_variant is None
+        or _rust_brace_depth_at(
+            blocked_assertion_body, blocked_variant.start()
+        )
+        != 1
+        or compact_blocked_variant_body != expected_blocked_variant_body
+        or re.search(r"\b(?:if|return)\b", blocked_assertion_body)
+    ):
+        errors.append(
+            "managed authoritative blocked assertion helper must enforce status and exact LocalWriteBlocked context"
+        )
+
+    allowed_assertion_name = "assert_not_local_write_blocked"
+    allowed_assertion_parameters = (
+        _rust_function_parameters_from_blanked(tests_body, allowed_assertion_name)
+        if tests_body is not None
+        else None
+    )
+    allowed_assertion_body = (
+        _rust_function_body_from_blanked(tests_body, allowed_assertion_name)
+        if tests_body is not None
+        else None
+    )
+    allowed_status = re.search(
+        r"assert_eq!\s*\(\s*error\s*\.\s*status_code\s*\(\s*\)\s*,"
+        r"\s*expected_status\s*\)",
+        allowed_assertion_body or "",
+    )
+    allowed_match = re.search(
+        r"assert!\s*\(\s*!\s*matches!\s*\(\s*error\s*,"
+        r"\s*ControlPlaneError\s*::\s*LocalWriteBlocked\s*\{\s*\.\.\s*\}\s*\)",
+        allowed_assertion_body or "",
+    )
+    if (
+        tests_body is None
+        or len(
+            re.findall(
+                r"\bfn\s+%s\s*\(" % allowed_assertion_name, tests_body
+            )
+        )
+        != 1
+        or allowed_assertion_parameters is None
+        or not re.search(
+            r"\berror\s*:\s*ControlPlaneError\b", allowed_assertion_parameters
+        )
+        or not re.search(
+            r"\bexpected_status\s*:\s*u16\b", allowed_assertion_parameters
+        )
+        or allowed_assertion_body is None
+        or allowed_status is None
+        or allowed_match is None
+        or allowed_status.start() >= allowed_match.start()
+        or _rust_brace_depth_at(allowed_assertion_body, allowed_status.start()) != 0
+        or _rust_brace_depth_at(allowed_assertion_body, allowed_match.start()) != 0
+        or re.search(r"\b(?:if|return)\b|\|\||&&", allowed_assertion_body)
+    ):
+        errors.append(
+            "managed authoritative allowed assertion helper must enforce status and reject LocalWriteBlocked"
+        )
+
+    fixture_name = "install_verified_managed_acl_instance_without_authority"
+    fixture_parameters = (
+        _rust_function_parameters_from_blanked(tests_body, fixture_name)
+        if tests_body is not None
+        else None
+    )
+    fixture_body = (
+        _rust_function_body_from_blanked(tests_body, fixture_name)
+        if tests_body is not None
+        else None
+    )
+    fixture_load = re.search(
+        r"\blet\s+mut\s+state\s*=\s*stopped_wal_instance_state\s*"
+        r"\(\s*test_name\s*\)\s*\.\s*await\s*;",
+        fixture_body or "",
+    )
+    fixture_mode = re.search(
+        r"\bstate\s*\.\s*managed_acl_publication_mode\s*=\s*"
+        r"ManagedAclPublicationMode\s*::\s*ManagedAcl\s*;",
+        fixture_body or "",
+    )
+    fixture_health = re.search(
+        r"\bstate\s*\.\s*managed_projection_health\s*=\s*"
+        r"ManagedProjectionHealth\s*::\s*Verified\s*;",
+        fixture_body or "",
+    )
+    fixture_insert = re.search(
+        r"\bcp\s*\.\s*instances\s*\.\s*write\s*\(\s*\)\s*"
+        r"\.\s*await\s*\.\s*insert\s*\(",
+        fixture_body or "",
+    )
+    fixture_authority_none = re.search(
+        r"assert!\s*\(\s*cp\s*\.\s*get_neutron_port_authority\s*"
+        r"\(\s*instance\s*\)\s*\.\s*await\s*\.\s*is_none\s*\(\s*\)",
+        fixture_body or "",
+    )
+    fixture_assert_calls = list(
+        re.finditer(r"\bassert!\s*\(", fixture_body or "")
+    )
+    fixture_assert_arguments = None
+    fixture_assert_closing = -1
+    if len(fixture_assert_calls) == 1:
+        fixture_assert_opening = (fixture_body or "").find(
+            "(", fixture_assert_calls[0].start()
+        )
+        fixture_assert_arguments = _rust_parenthesized_body_at(
+            fixture_body, fixture_assert_opening
+        )
+        fixture_assert_closing = (
+            fixture_assert_opening + len(fixture_assert_arguments) + 1
+            if fixture_assert_arguments is not None
+            else -1
+        )
+    fixture_assert_items = (
+        _rust_split_top_level_arguments(fixture_assert_arguments)
+        if fixture_assert_arguments is not None
+        else []
+    )
+    fixture_assert_first_argument = (
+        re.sub(r"\s+", "", fixture_assert_items[0])
+        if fixture_assert_items
+        else ""
+    )
+    fixture_positions = (
+        fixture_load,
+        fixture_mode,
+        fixture_health,
+        fixture_insert,
+        fixture_authority_none,
+    )
+    if (
+        tests_body is None
+        or len(re.findall(r"\basync\s+fn\s+%s\s*\(" % fixture_name, tests_body))
+        != 1
+        or fixture_parameters is None
+        or not re.search(
+            r"\bcp\s*:\s*&\s*ControlPlane\b", fixture_parameters
+        )
+        or not re.search(r"\binstance\s*:\s*&\s*str\b", fixture_parameters)
+        or not re.search(r"\btest_name\s*:\s*&\s*str\b", fixture_parameters)
+        or fixture_body is None
+        or any(position is None for position in fixture_positions)
+        or len(fixture_assert_calls) != 1
+        or fixture_assert_first_argument
+        != "cp.get_neutron_port_authority(instance).await.is_none()"
+        or fixture_assert_closing < 0
+        or fixture_body[fixture_assert_closing + 1:].strip() != ";"
+        or not all(
+            left.start() < right.start()
+            for left, right in zip(fixture_positions, fixture_positions[1:])
+        )
+        or any(
+            _rust_brace_depth_at(fixture_body, position.start()) != 0
+            for position in fixture_positions
+            if position is not None
+        )
+        or len(
+            re.findall(
+                r"\bstate\s*\.\s*managed_acl_publication_mode\s*=",
+                fixture_body or "",
+            )
+        )
+        != 1
+        or len(
+            re.findall(
+                r"\bstate\s*\.\s*managed_projection_health\s*=",
+                fixture_body or "",
+            )
+        )
+        != 1
+        or "mark_neutron_port_authority" in (fixture_body or "")
+        or "neutron_authorities" in (fixture_body or "")
+    ):
+        errors.append(
+            "managed authoritative fixture must uniquely install ManagedAcl Verified before proving authority is absent"
+        )
+
+    for test_name, spec in test_specs.items():
+        active_declaration = (
+            re.search(
+            r"#\s*\[\s*tokio\s*::\s*test\s*\]\s*async\s+fn\s+%s\s*\("
+            % re.escape(test_name),
+            tests_body,
+            )
+            if tests_body is not None
+            else None
+        )
+        declaration_prefix = (
+            tests_body[:active_declaration.start()].rstrip()
+            if active_declaration is not None
+            else ""
+        )
+        if (
+            active_declaration is None
+            or not declaration_prefix
+            or declaration_prefix[-1] not in "{}"
+            or _rust_brace_depth_at(tests_body, active_declaration.start()) != 0
+        ):
+            errors.append(
+                "managed authoritative write real-entry regression test must be active in cfg(test): %s"
+                % test_name
+            )
+            continue
+        test_body = _rust_function_body_from_blanked(tests_body, test_name)
+        raw_test_body = raw_function_body(test_name)
+        compact_raw_test = re.sub(r"\s+", "", raw_test_body or "")
+        test_parameters = _rust_function_parameters_from_blanked(
+            tests_body, test_name
+        )
+        cp_binding = re.search(
+            r"\blet\s+cp\s*=\s*test_control_plane\s*\(\s*\)\s*;",
+            test_body or "",
+        )
+        instance_binding = re.search(
+            r'\blet\s+instance\s*=\s*"[^"\n]+"\s*;',
+            raw_test_body or "",
+        )
+
+        def test_binding_count(binding_name):
+            return len(
+                re.findall(
+                    r"\blet\b[^=;{}\n]*\b%s\b[^=;{}\n]*="
+                    % re.escape(binding_name),
+                    test_body or "",
+                )
+            )
+
+        shadowed_test_names = any(
+            test_binding_count(binding_name) != expected_count
+            for binding_name, expected_count in (
+                ("cp", 1),
+                ("instance", 1),
+                ("assert_local_write_blocked", 0),
+                ("assert_not_local_write_blocked", 0),
+                ("install_verified_managed_acl_instance_without_authority", 0),
+            )
+        ) or bool(
+            re.search(
+                r"\|[^|\n]*\b(?:cp|instance|assert_local_write_blocked|"
+                r"assert_not_local_write_blocked|"
+                r"install_verified_managed_acl_instance_without_authority)"
+                r"\b[^|\n]*\|",
+                test_body or "",
+            )
+        ) or bool(
+            re.search(
+                r"\buse\b[^;\n]*\b(?:assert_local_write_blocked|"
+                r"assert_not_local_write_blocked|"
+                r"install_verified_managed_acl_instance_without_authority)\b",
+                test_body or "",
+            )
+        )
+        fixture_call = (
+            re.search(
+                r"\bself\s*::\s*"
+                r"install_verified_managed_acl_instance_without_authority\s*\("
+                r"[\s\S]*?\)\s*\.\s*await\s*;",
+                test_body,
+            )
+            if test_body is not None
+            else None
+        )
+        if (
+            test_parameters is None
+            or test_parameters.strip()
+            or cp_binding is None
+            or instance_binding is None
+            or fixture_call is None
+            or not cp_binding.start() < instance_binding.start() < fixture_call.start()
+            or _rust_brace_depth_at(test_body, cp_binding.start()) != 0
+            or _rust_brace_depth_at(test_body, instance_binding.start()) != 0
+            or shadowed_test_names
+        ):
+            errors.append(
+                "managed authoritative regression test must bind real cp and instance once without shadowing helpers: %s"
+                % test_name
+            )
+        if (
+            test_body is None
+            or raw_test_body is None
+            or fixture_call is None
+            or _rust_brace_depth_at(test_body, fixture_call.start()) != 0
+            or re.search(
+                r"\breturn\b|\bstd\s*::\s*process\s*::\s*exit\s*\(",
+                test_body,
+            )
+        ):
+            errors.append(
+                "managed authoritative regression test must install the real authority-gap fixture and execute without early success: %s"
+                % test_name
+            )
+            continue
+        previous_position = fixture_call.start()
+        for binding, method, assertion in spec["calls"]:
+            result_binding_count = test_binding_count(binding)
+            call = re.search(
+                r"\blet\s+%s\s*=\s*cp\s*\.\s*%s\s*\("
+                % (re.escape(binding), re.escape(method)),
+                test_body,
+            )
+            call_arguments = None
+            if call is not None:
+                call_opening = test_body.find("(", call.start())
+                call_arguments = _rust_parenthesized_body_at(
+                    test_body, call_opening
+                )
+                call_closing = (
+                    call_opening + len(call_arguments) + 1
+                    if call_arguments is not None
+                    else -1
+                )
+                call_suffix = (
+                    test_body[call_closing + 1:]
+                    if call_closing >= 0
+                    else ""
+                )
+            else:
+                call_suffix = ""
+            if call is None or result_binding_count != 1 or not re.match(
+                r"\s*\.\s*await\s*\.\s*expect_err\s*\(", call_suffix
+            ) or (
+                call is not None
+                and (
+                    _rust_brace_depth_at(test_body, call.start()) != 0
+                    or call.start() <= previous_position
+                )
+            ):
+                errors.append(
+                    "managed authoritative regression test must exercise %s through the real entry: %s"
+                    % (method, test_name)
+                )
+            assertion_name = assertion[:assertion.find("(")]
+            assertion_position = -1
+            for assertion_match in re.finditer(
+                r"\b%s\s*\(" % re.escape(assertion_name), raw_test_body
+            ):
+                assertion_opening = raw_test_body.find("(", assertion_match.start())
+                assertion_arguments = _rust_parenthesized_body_at(
+                    raw_test_body, assertion_opening
+                )
+                if assertion_arguments is None:
+                    continue
+                assertion_closing = (
+                    assertion_opening + len(assertion_arguments) + 1
+                )
+                actual_assertion = "%s(%s);" % (
+                    assertion_name,
+                    re.sub(r"\s+", "", assertion_arguments),
+                )
+                if (
+                    actual_assertion == assertion
+                    and re.match(r"\s*;", raw_test_body[assertion_closing + 1:])
+                ):
+                    assertion_position = assertion_match.start()
+                    break
+            if (
+                assertion_position < 0
+                or _rust_brace_depth_at(test_body, assertion_position) != 0
+                or (call is not None and assertion_position <= call.start())
+            ):
+                errors.append(
+                    "managed authoritative regression test must assert the exact %s outcome: %s"
+                    % (method, test_name)
+                )
+            previous_position = max(
+                previous_position,
+                call.start() if call is not None else -1,
+                assertion_position,
+            )
+        for raw_marker in spec["raw"]:
+            if re.sub(r"\s+", "", raw_marker) not in compact_raw_test:
+                errors.append(
+                    "managed authoritative regression test is missing exact fixture marker %s: %s"
+                    % (raw_marker, test_name)
+                )
+    return errors
+
+
+def _run_managed_authoritative_write_admission_self_tests():
+    safe_control = r'''
+        enum ManagedAclPublicationMode { StandaloneCompatibility, ManagedAcl }
+        enum LocalWriteDomain { Acl, Config, Conntrack, Qos, Mirror, Tcprt, Ssl }
+        struct NeutronPortAuthority { managed_domains: Domains }
+
+        fn local_write_block_reason(
+            domain: LocalWriteDomain,
+            publication_mode: Option<ManagedAclPublicationMode>,
+            authority: Option<&NeutronPortAuthority>,
+        ) -> Option<Option<String>> {
+            match (publication_mode, domain) {
+                (Some(ManagedAclPublicationMode::ManagedAcl), LocalWriteDomain::Acl) => Some(None),
+                (Some(ManagedAclPublicationMode::ManagedAcl), LocalWriteDomain::Conntrack) => {
+                    Some(Some("acl".to_string()))
+                }
+                _ => authority.and_then(|authority| {
+                    let domain_name = domain.as_str();
+                    if authority.managed_domains.contains(domain_name) {
+                        Some(None)
+                    } else if domain == LocalWriteDomain::Conntrack
+                        && authority.managed_domains.contains("acl")
+                    {
+                        Some(Some("acl".to_string()))
+                    } else {
+                        None
+                    }
+                }),
+            }
+        }
+
+        fn ensure_serialized_local_write_allowed(
+            instance: &str,
+            domain: LocalWriteDomain,
+            publication_mode: Option<ManagedAclPublicationMode>,
+            authority: Option<&NeutronPortAuthority>,
+        ) -> Result<(), ControlPlaneError> {
+            if let Some(dependency_of) =
+                local_write_block_reason(domain, publication_mode, authority)
+            {
+                return Err(ControlPlaneError::LocalWriteBlocked {
+                    instance: instance.to_string(),
+                    domain: domain.as_str().to_string(),
+                    dependency_of,
+                });
+            }
+            Ok(())
+        }
+
+        fn requested_local_config_write_domains(
+            conntrack: Option<bool>,
+            monitoring: Option<bool>,
+            acl: Option<bool>,
+            qos: Option<bool>,
+            mirror: Option<bool>,
+            tcprt: Option<bool>,
+            ssl: Option<bool>,
+        ) -> Vec<LocalWriteDomain> {
+            let mut domains = Vec::new();
+            if conntrack.is_some() { domains.push(LocalWriteDomain::Conntrack); }
+            if monitoring.is_some() { domains.push(LocalWriteDomain::Config); }
+            if acl.is_some() { domains.push(LocalWriteDomain::Acl); }
+            if qos.is_some() { domains.push(LocalWriteDomain::Qos); }
+            if mirror.is_some() { domains.push(LocalWriteDomain::Mirror); }
+            if tcprt.is_some() { domains.push(LocalWriteDomain::Tcprt); }
+            if ssl.is_some() { domains.push(LocalWriteDomain::Ssl); }
+            domains
+        }
+
+        fn local_group_write_block_reason(
+            group_name: &str,
+            publication_mode: Option<ManagedAclPublicationMode>,
+            authority: Option<&NeutronPortAuthority>,
+        ) -> bool {
+            group_name.trim().to_ascii_lowercase().starts_with("neutron:")
+                && (publication_mode == Some(ManagedAclPublicationMode::ManagedAcl)
+                    || authority.is_some())
+        }
+
+        fn ensure_serialized_local_group_write_allowed(
+            instance: &str,
+            group_name: &str,
+            publication_mode: Option<ManagedAclPublicationMode>,
+            authority: Option<&NeutronPortAuthority>,
+        ) -> Result<(), ControlPlaneError> {
+            if local_group_write_block_reason(group_name, publication_mode, authority) {
+                return Err(ControlPlaneError::LocalWriteBlocked {
+                    instance: instance.to_string(),
+                    domain: LocalWriteDomain::Acl.as_str().to_string(),
+                    dependency_of: None,
+                });
+            }
+            Ok(())
+        }
+
+        impl ControlPlane {
+            async fn add_policy(&self, instance: &str) -> Result<(), ControlPlaneError> {
+                let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+                let inst = self.get_instance(instance).await?;
+                let mut state = inst.write().await;
+                let authority = self.neutron_authorities.read().await
+                    .get(instance).cloned();
+                ensure_serialized_local_write_allowed(
+                    instance,
+                    LocalWriteDomain::Acl,
+                    Some(state.managed_acl_publication_mode),
+                    authority.as_ref(),
+                )?;
+                Self::check_runtime_maps_ready(&state.pin_path)?;
+                aria_core::ebpf_ops::add_policy_in_bank();
+                state.wal_append();
+                Ok(())
+            }
+
+            async fn delete_policy(&self, instance: &str) -> Result<(), ControlPlaneError> {
+                let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+                let inst = self.get_instance(instance).await?;
+                let mut state = inst.write().await;
+                let authority = self.neutron_authorities.read().await
+                    .get(instance).cloned();
+                ensure_serialized_local_write_allowed(
+                    instance,
+                    LocalWriteDomain::Acl,
+                    Some(state.managed_acl_publication_mode),
+                    authority.as_ref(),
+                )?;
+                Self::check_runtime_maps_ready(&state.pin_path)?;
+                aria_core::ebpf_ops::delete_policy_in_bank();
+                state.wal_append();
+                Ok(())
+            }
+
+            async fn add_group(&self, instance: &str, name: &str) -> Result<(), ControlPlaneError> {
+                let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+                let inst = self.get_instance(instance).await?;
+                let mut state = inst.write().await;
+                let authority = self.neutron_authorities.read().await
+                    .get(instance).cloned();
+                ensure_serialized_local_group_write_allowed(
+                    instance,
+                    name,
+                    Some(state.managed_acl_publication_mode),
+                    authority.as_ref(),
+                )?;
+                managed_local_projection_admission();
+                Self::check_runtime_maps_ready(&state.pin_path)?;
+                Ok(())
+            }
+
+            async fn delete_group(&self, instance: &str, name: &str) -> Result<(), ControlPlaneError> {
+                let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+                let inst = self.get_instance(instance).await?;
+                let mut state = inst.write().await;
+                let authority = self.neutron_authorities.read().await
+                    .get(instance).cloned();
+                ensure_serialized_local_group_write_allowed(
+                    instance,
+                    name,
+                    Some(state.managed_acl_publication_mode),
+                    authority.as_ref(),
+                )?;
+                managed_local_projection_admission();
+                Self::check_runtime_maps_ready(&state.pin_path)?;
+                Ok(())
+            }
+
+            async fn update_config(
+                &self,
+                instance: &str,
+                conntrack: Option<bool>,
+                monitoring: Option<bool>,
+                acl: Option<bool>,
+                qos: Option<bool>,
+                mirror: Option<bool>,
+                tcprt: Option<bool>,
+                ssl: Option<bool>,
+            ) -> Result<(), ControlPlaneError> {
+                let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+                let inst = self.get_instance(instance).await?;
+                let publication_mode = {
+                    let state = inst.read().await;
+                    state.managed_acl_publication_mode
+                };
+                let authority = self.neutron_authorities.read().await
+                    .get(instance).cloned();
+                let requested_domains = requested_local_config_write_domains(
+                    conntrack, monitoring, acl, qos, mirror, tcprt, ssl,
+                );
+                for domain in requested_domains {
+                    ensure_serialized_local_write_allowed(
+                        instance,
+                        domain,
+                        Some(publication_mode),
+                        authority.as_ref(),
+                    )?;
+                }
+                self.set_ssl_global_config();
+                let mut state = inst.write().await;
+                Self::check_runtime_maps_ready(&state.pin_path)?;
+                aria_core::ebpf_ops::update_runtime_config();
+                state.wal_append_strict();
+                Ok(())
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            async fn install_verified_managed_acl_instance_without_authority(
+                cp: &ControlPlane,
+                instance: &str,
+                test_name: &str,
+            ) {
+                let mut state = stopped_wal_instance_state(test_name).await;
+                state.managed_acl_publication_mode = ManagedAclPublicationMode::ManagedAcl;
+                state.managed_projection_health = ManagedProjectionHealth::Verified;
+                cp.instances.write().await.insert(
+                    instance.to_string(),
+                    Arc::new(tokio::sync::RwLock::new(state)),
+                );
+                assert!(
+                    cp.get_neutron_port_authority(instance).await.is_none(),
+                    "fixture authority must be absent",
+                );
+            }
+
+            fn assert_local_write_blocked(
+                error: ControlPlaneError,
+                expected_instance: &str,
+                expected_domain: &str,
+                expected_dependency: Option<&str>,
+            ) {
+                assert_eq!(error.status_code(), 409);
+                match error {
+                    ControlPlaneError::LocalWriteBlocked {
+                        instance,
+                        domain,
+                        dependency_of,
+                    } => {
+                        assert_eq!(instance, expected_instance);
+                        assert_eq!(domain, expected_domain);
+                        assert_eq!(dependency_of.as_deref(), expected_dependency);
+                    }
+                    other => panic!("unexpected {other}"),
+                }
+            }
+
+            fn assert_not_local_write_blocked(
+                error: ControlPlaneError,
+                expected_status: u16,
+            ) {
+                assert_eq!(error.status_code(), expected_status);
+                assert!(
+                    !matches!(error, ControlPlaneError::LocalWriteBlocked { .. }),
+                    "must remain allowed",
+                );
+            }
+
+            #[tokio::test]
+            async fn domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit() {
+                let cp = test_control_plane();
+                let instance = "safe-add";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "add").await;
+                let add_error = cp.add_policy(instance).await.expect_err("blocked");
+                self::assert_local_write_blocked(add_error, instance, "acl", None);
+            }
+            #[tokio::test]
+            async fn domain_authority_managed_acl_policy_write_delete_blocks_before_authority_commit() {
+                let cp = test_control_plane();
+                let instance = "safe-delete";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "delete").await;
+                let delete_error = cp.delete_policy(instance).await.expect_err("blocked");
+                self::assert_local_write_blocked(delete_error, instance, "acl", None);
+            }
+            #[tokio::test]
+            async fn domain_authority_managed_acl_config_acl_blocks_before_authority_commit() {
+                let cp = test_control_plane();
+                let instance = "safe-acl";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "acl").await;
+                let error = cp.update_config(instance, Some(false)).await.expect_err("blocked");
+                self::assert_local_write_blocked(error, instance, "acl", None);
+            }
+            #[tokio::test]
+            async fn domain_authority_managed_acl_config_conntrack_blocks_before_authority_commit() {
+                let cp = test_control_plane();
+                let instance = "safe-ct";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "ct").await;
+                let error = cp.update_config(instance, Some(false)).await.expect_err("blocked");
+                self::assert_local_write_blocked(error, instance, "conntrack", Some("acl"));
+            }
+            #[tokio::test]
+            async fn domain_authority_managed_acl_config_monitoring_remains_local_before_authority_commit() {
+                let cp = test_control_plane();
+                let instance = "safe-monitoring";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "monitoring").await;
+                let error = cp.update_config(instance, Some(false)).await.expect_err("maps");
+                self::assert_not_local_write_blocked(error, 503);
+            }
+            #[tokio::test]
+            async fn domain_authority_managed_acl_group_namespace_survives_missing_authority() {
+                let cp = test_control_plane();
+                let instance = "safe-groups";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "groups").await;
+                let add_error = cp.add_group(instance, "neutron:new").await.expect_err("blocked");
+                self::assert_local_write_blocked(add_error, instance, "acl", None);
+                let delete_error = cp.delete_group(instance, "neutron:owned").await.expect_err("blocked");
+                self::assert_local_write_blocked(delete_error, instance, "acl", None);
+            }
+            #[tokio::test]
+            async fn domain_authority_standalone_without_authority_preserves_policy_and_config_admission() {
+                let cp = test_control_plane();
+                let instance = "safe-standalone";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "standalone").await;
+                let mode = ManagedAclPublicationMode::StandaloneCompatibility;
+                let health = ManagedProjectionHealth::Unverified;
+                let add_error = cp.add_policy(instance).await.expect_err("maps");
+                self::assert_not_local_write_blocked(add_error, 503);
+                let delete_error = cp.delete_policy(instance).await.expect_err("maps");
+                self::assert_not_local_write_blocked(delete_error, 503);
+                let acl_error = cp.update_config(instance, Some(false)).await.expect_err("maps");
+                self::assert_not_local_write_blocked(acl_error, 503);
+                let conntrack_error = cp.update_config(instance, Some(false)).await.expect_err("maps");
+                self::assert_not_local_write_blocked(conntrack_error, 503);
+            }
+            #[tokio::test]
+            async fn domain_authority_managed_acl_without_authority_allows_non_reserved_group_name() {
+                let cp = test_control_plane();
+                let instance = "safe-local-group";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "local-group").await;
+                let error = cp.add_group(instance, "local:qos").await.expect_err("authority");
+                self::assert_not_local_write_blocked(error, 503);
+            }
+            #[tokio::test]
+            async fn domain_authority_committed_qos_blocks_config_at_real_entry() {
+                let cp = test_control_plane();
+                let instance = "safe-qos";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "qos").await;
+                cp.mark_neutron_port_authority(instance, "port", &["qos"], 9).await;
+                let error = cp.update_config(instance, Some(false)).await.expect_err("blocked");
+                self::assert_local_write_blocked(error, instance, "qos", None);
+            }
+        }
+    '''
+    safe_groups = r'''
+        async fn add_group(cp: AppState, instance: String, req: Request) {
+            cp.ensure_local_group_write_allowed(&instance, &req.name).await?;
+            cp.add_group(&instance, &req.name).await
+        }
+
+        async fn delete_group(cp: AppState, instance: String, name: String) {
+            cp.ensure_local_group_write_allowed(&instance, &name).await?;
+            cp.delete_group(&instance, &name).await
+        }
+    '''
+
+    safe_errors = _managed_authoritative_write_admission_contract_errors(
+        safe_control, safe_groups
+    )
+    if safe_errors:
+        raise SystemExit(
+            "ERROR: managed authoritative admission checker rejected safe fixture: %s"
+            % safe_errors
+        )
+
+    def mutate(source, old, new, occurrence=0):
+        starts = [match.start() for match in re.finditer(re.escape(old), source)]
+        if occurrence >= len(starts):
+            raise SystemExit(
+                "ERROR: authoritative admission self-test mutation source missing %r[%d]"
+                % (old, occurrence)
+            )
+        start = starts[occurrence]
+        return source[:start] + new + source[start + len(old):]
+
+    def rewrite_function_body(source, function_name, rewrite):
+        code = _blank_rust_non_code(source)
+        declaration = re.search(
+            r"\b(?:async\s+)?fn\s+%s\s*\(" % re.escape(function_name), code
+        )
+        if declaration is None:
+            raise SystemExit(
+                "ERROR: authoritative admission self-test function missing %s"
+                % function_name
+            )
+        opening = code.find("{", declaration.end())
+        closing = _rust_matching_brace_end(code, opening)
+        if opening < 0 or closing is None:
+            raise SystemExit(
+                "ERROR: authoritative admission self-test function is malformed %s"
+                % function_name
+            )
+        body = source[opening + 1:closing]
+        return source[:opening + 1] + rewrite(body) + source[closing:]
+
+    def wrap_test_in_cfg_module(source, test_name):
+        code = _blank_rust_non_code(source)
+        declaration = re.search(
+            r"\basync\s+fn\s+%s\s*\(" % re.escape(test_name), code
+        )
+        if declaration is None:
+            raise SystemExit(
+                "ERROR: authoritative admission self-test declaration missing %s"
+                % test_name
+            )
+        opening = code.find("{", declaration.end())
+        closing = _rust_matching_brace_end(code, opening)
+        attribute = code.rfind("#[tokio::test]", 0, declaration.start())
+        if attribute < 0 or closing is None:
+            raise SystemExit(
+                "ERROR: authoritative admission self-test cannot wrap %s" % test_name
+            )
+        segment = source[attribute:closing + 1]
+        replacement = (
+            "#[cfg(any())]\n            mod hidden {\n"
+            + segment
+            + "\n            }"
+        )
+        return source[:attribute] + replacement + source[closing + 1:]
+
+    commented_group_classifier = mutate(
+        safe_control,
+        "            group_name.trim().to_ascii_lowercase().starts_with(\"neutron:\")",
+        "            // Reserved namespace comparison remains semantic.\n"
+        "            group_name.trim().to_ascii_lowercase().starts_with(\"neutron:\")",
+    )
+    commented_errors = _managed_authoritative_write_admission_contract_errors(
+        commented_group_classifier, safe_groups
+    )
+    if commented_errors:
+        raise SystemExit(
+            "ERROR: managed authoritative admission checker rejected harmless classifier comment: %s"
+            % commented_errors
+        )
+
+    cases = []
+
+    def case(label, expected, control=safe_control, groups=safe_groups):
+        cases.append((label, control, groups, expected))
+
+    case(
+        "ManagedAcl ACL arm removed",
+        "ManagedAcl mode must block ACL writes",
+        mutate(
+            safe_control,
+            "(Some(ManagedAclPublicationMode::ManagedAcl), LocalWriteDomain::Acl) => Some(None),",
+            "(Some(ManagedAclPublicationMode::StandaloneCompatibility), LocalWriteDomain::Acl) => Some(None),",
+        ),
+    )
+    case(
+        "ManagedAcl conntrack dependency removed",
+        "ManagedAcl mode must block conntrack",
+        mutate(
+            safe_control,
+            "(Some(ManagedAclPublicationMode::ManagedAcl), LocalWriteDomain::Conntrack) => {",
+            "(Some(ManagedAclPublicationMode::StandaloneCompatibility), LocalWriteDomain::Conntrack) => {",
+        ),
+    )
+    case(
+        "classifier branches discarded before unconditional block",
+        "classifier match must be its unique tail expression",
+        rewrite_function_body(
+            safe_control,
+            "local_write_block_reason",
+            lambda body: body + ";\n            Some(None)\n        ",
+        ),
+    )
+    case(
+        "add policy lifecycle removed",
+        "add_policy must serialize lifecycle",
+        mutate(
+            safe_control,
+            "                let _lifecycle_guard = self.lock_runtime_lifecycle().await;\n",
+            "",
+            0,
+        ),
+    )
+    moved_lifecycle = mutate(
+        safe_control,
+        "                let _lifecycle_guard = self.lock_runtime_lifecycle().await;\n",
+        "",
+        0,
+    )
+    moved_lifecycle = mutate(
+        moved_lifecycle,
+        "                let mut state = inst.write().await;",
+        "                let mut state = inst.write().await;\n"
+        "                let _lifecycle_guard = self.lock_runtime_lifecycle().await;",
+        0,
+    )
+    case(
+        "add policy lifecycle moved after instance lock",
+        "add_policy must serialize lifecycle",
+        moved_lifecycle,
+    )
+    case(
+        "add policy write lock weakened",
+        "add_policy must serialize lifecycle",
+        mutate(
+            safe_control,
+            "                let mut state = inst.write().await;",
+            "                let state = inst.read().await;",
+            0,
+        ),
+    )
+    case(
+        "add policy authority snapshot after admission",
+        "add_policy must serialize lifecycle",
+        mutate(
+            safe_control,
+            "                let authority = self.neutron_authorities.read().await\n"
+            "                    .get(instance).cloned();\n"
+            "                ensure_serialized_local_write_allowed(\n"
+            "                    instance,\n"
+            "                    LocalWriteDomain::Acl,\n"
+            "                    Some(state.managed_acl_publication_mode),\n"
+            "                    authority.as_ref(),\n"
+            "                )?;",
+            "                let authority = None;\n"
+            "                ensure_serialized_local_write_allowed(\n"
+            "                    instance,\n"
+            "                    LocalWriteDomain::Acl,\n"
+            "                    Some(state.managed_acl_publication_mode),\n"
+            "                    authority.as_ref(),\n"
+            "                )?;\n"
+            "                let authority = self.neutron_authorities.read().await\n"
+            "                    .get(instance).cloned();",
+            0,
+        ),
+    )
+    case(
+        "add policy omits real mode",
+        "add_policy must pass exact instance",
+        mutate(
+            safe_control,
+            "                    Some(state.managed_acl_publication_mode),",
+            "                    None,",
+            0,
+        ),
+    )
+    case(
+        "delete policy omits authority",
+        "delete_policy must pass exact instance",
+        mutate(
+            safe_control,
+            "                    authority.as_ref(),",
+            "                    None,",
+            1,
+        ),
+    )
+    case(
+        "add policy drops admission error",
+        "add_policy must propagate",
+        mutate(safe_control, "                )?;", "                );", 0),
+    )
+    case(
+        "add policy admission nested as a decoy",
+        "unconditional top-level steps",
+        mutate(
+            safe_control,
+            "                ensure_serialized_local_write_allowed(\n"
+            "                    instance,\n"
+            "                    LocalWriteDomain::Acl,\n"
+            "                    Some(state.managed_acl_publication_mode),\n"
+            "                    authority.as_ref(),\n"
+            "                )?;",
+            "                if true {\n"
+            "                    ensure_serialized_local_write_allowed(\n"
+            "                        instance,\n"
+            "                        LocalWriteDomain::Acl,\n"
+            "                        Some(state.managed_acl_publication_mode),\n"
+            "                        authority.as_ref(),\n"
+            "                    )?;\n"
+            "                }",
+            0,
+        ),
+    )
+    case(
+        "add policy state effect before admission",
+        "add_policy must reject before maps",
+        mutate(
+            safe_control,
+            "                ensure_serialized_local_write_allowed(\n",
+            "                state.state.touch();\n"
+            "                ensure_serialized_local_write_allowed(\n",
+            0,
+        ),
+    )
+    case(
+        "delete policy effect before admission",
+        "delete_policy must reject before maps",
+        mutate(
+            safe_control,
+            "                ensure_serialized_local_write_allowed(\n"
+            "                    instance,\n"
+            "                    LocalWriteDomain::Acl,\n"
+            "                    Some(state.managed_acl_publication_mode),\n"
+            "                    authority.as_ref(),\n"
+            "                )?;\n"
+            "                Self::check_runtime_maps_ready(&state.pin_path)?;",
+            "                Self::check_runtime_maps_ready(&state.pin_path)?;\n"
+            "                ensure_serialized_local_write_allowed(\n"
+            "                    instance,\n"
+            "                    LocalWriteDomain::Acl,\n"
+            "                    Some(state.managed_acl_publication_mode),\n"
+            "                    authority.as_ref(),\n"
+            "                )?;",
+            1,
+        ),
+    )
+    case(
+        "delete policy drops lifecycle guard",
+        "delete_policy must hold the lifecycle guard",
+        mutate(
+            safe_control,
+            "                Self::check_runtime_maps_ready(&state.pin_path)?;\n"
+            "                aria_core::ebpf_ops::delete_policy_in_bank();",
+            "                drop(_lifecycle_guard);\n"
+            "                Self::check_runtime_maps_ready(&state.pin_path)?;\n"
+            "                aria_core::ebpf_ops::delete_policy_in_bank();",
+        ),
+    )
+    case(
+        "config monitoring domain omitted",
+        "map monitoring to LocalWriteDomain::Config",
+        mutate(
+            safe_control,
+            "            if monitoring.is_some() { domains.push(LocalWriteDomain::Config); }\n",
+            "",
+        ),
+    )
+    case(
+        "config domains append an unconditional ACL domain",
+        "only the seven conditional mappings",
+        mutate(
+            safe_control,
+            "            domains\n        }\n\n        fn local_group_write_block_reason",
+            "            domains.push(LocalWriteDomain::Acl);\n"
+            "            domains\n        }\n\n        fn local_group_write_block_reason",
+        ),
+    )
+    case(
+        "config authority snapshot is shadowed before admission",
+        "update_config must snapshot mode and authority",
+        mutate(
+            safe_control,
+            "                let requested_domains = requested_local_config_write_domains(\n",
+            "                let authority = None;\n"
+            "                let requested_domains = requested_local_config_write_domains(\n",
+        ),
+    )
+    case(
+        "config admission is conditional inside the domain loop",
+        "update_config must admit every requested domain",
+        mutate(
+            safe_control,
+            "                for domain in requested_domains {\n"
+            "                    ensure_serialized_local_write_allowed(\n"
+            "                        instance,\n"
+            "                        domain,\n"
+            "                        Some(publication_mode),\n"
+            "                        authority.as_ref(),\n"
+            "                    )?;\n"
+            "                }",
+            "                for domain in requested_domains {\n"
+            "                    if matches!(domain, LocalWriteDomain::Acl | LocalWriteDomain::Conntrack) {\n"
+            "                        ensure_serialized_local_write_allowed(\n"
+            "                            instance,\n"
+            "                            domain,\n"
+            "                            Some(publication_mode),\n"
+            "                            authority.as_ref(),\n"
+            "                        )?;\n"
+            "                    }\n"
+            "                }",
+        ),
+    )
+    case(
+        "config SSL effect before admission",
+        "update_config must reject every requested domain before SSL",
+        mutate(
+            safe_control,
+            "                for domain in requested_domains {\n",
+            "                self.set_ssl_global_config();\n"
+            "                for domain in requested_domains {\n",
+        ),
+    )
+    case(
+        "reserved namespace depends only on authority",
+        "reserved neutron: namespace must survive ManagedAcl",
+        mutate(
+            safe_control,
+            "                && (publication_mode == Some(ManagedAclPublicationMode::ManagedAcl)\n"
+            "                    || authority.is_some())",
+            "                && authority.is_some()",
+        ),
+    )
+    case(
+        "reserved namespace requires both mode and authority",
+        "reserved neutron: namespace must survive ManagedAcl",
+        mutate(
+            safe_control,
+            "                    || authority.is_some())",
+            "                    && authority.is_some())",
+        ),
+    )
+    case(
+        "reserved classifier expression discarded before true",
+        "reserved group classifier boolean must be its unique tail expression",
+        rewrite_function_body(
+            safe_control,
+            "local_group_write_block_reason",
+            lambda body: body + ";\n            true\n        ",
+        ),
+    )
+    case(
+        "add group second guard removed",
+        "add_group must serialize lifecycle",
+        mutate(
+            safe_control,
+            "                ensure_serialized_local_group_write_allowed(\n"
+            "                    instance,\n"
+            "                    name,\n"
+            "                    Some(state.managed_acl_publication_mode),\n"
+            "                    authority.as_ref(),\n"
+            "                )?;\n",
+            "",
+            0,
+        ),
+    )
+    case(
+        "delete group second guard removed",
+        "delete_group must serialize lifecycle",
+        mutate(
+            safe_control,
+            "                ensure_serialized_local_group_write_allowed(\n"
+            "                    instance,\n"
+            "                    name,\n"
+            "                    Some(state.managed_acl_publication_mode),\n"
+            "                    authority.as_ref(),\n"
+            "                )?;\n",
+            "",
+            1,
+        ),
+    )
+    case(
+        "add group handler preflight removed",
+        "add_group handler must propagate",
+        groups=mutate(
+            safe_groups,
+            "            cp.ensure_local_group_write_allowed(&instance, &req.name).await?;\n",
+            "",
+        ),
+    )
+    case(
+        "add group handler preflight result swallowed",
+        "add_group handler must propagate",
+        groups=mutate(
+            safe_groups,
+            "            cp.ensure_local_group_write_allowed(&instance, &req.name).await?;",
+            "            let _ = cp.ensure_local_group_write_allowed(&instance, &req.name).await;",
+        ),
+    )
+    case(
+        "policy regression test removed",
+        "real-entry regression test must be active",
+        control=mutate(
+            safe_control,
+            "domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+            "removed_policy_gap_test",
+        ),
+    )
+    regression_test_names = (
+        "domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+        "domain_authority_managed_acl_policy_write_delete_blocks_before_authority_commit",
+        "domain_authority_managed_acl_config_acl_blocks_before_authority_commit",
+        "domain_authority_managed_acl_config_conntrack_blocks_before_authority_commit",
+        "domain_authority_managed_acl_config_monitoring_remains_local_before_authority_commit",
+        "domain_authority_managed_acl_group_namespace_survives_missing_authority",
+        "domain_authority_standalone_without_authority_preserves_policy_and_config_admission",
+        "domain_authority_managed_acl_without_authority_allows_non_reserved_group_name",
+        "domain_authority_committed_qos_blocks_config_at_real_entry",
+    )
+    for test_name in regression_test_names:
+        case(
+            "%s test attribute removed" % test_name,
+            "real-entry regression test must be active",
+            control=mutate(
+                safe_control,
+                "            #[tokio::test]\n            async fn %s" % test_name,
+                "            async fn %s" % test_name,
+            ),
+        )
+        case(
+            "%s test body emptied" % test_name,
+            "must install the real authority-gap fixture",
+            control=rewrite_function_body(
+                safe_control, test_name, lambda body: ""
+            ),
+        )
+
+    case(
+        "exact regression test marked ignored",
+        "real-entry regression test must be active",
+        control=mutate(
+            safe_control,
+            "            #[tokio::test]\n"
+            "            async fn domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+            "            #[ignore]\n"
+            "            #[tokio::test]\n"
+            "            async fn domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+        ),
+    )
+    case(
+        "exact regression test hidden behind cfg",
+        "real-entry regression test must be active",
+        control=mutate(
+            safe_control,
+            "            #[tokio::test]\n"
+            "            async fn domain_authority_managed_acl_policy_write_delete_blocks_before_authority_commit",
+            "            #[cfg(any())]\n"
+            "            #[tokio::test]\n"
+            "            async fn domain_authority_managed_acl_policy_write_delete_blocks_before_authority_commit",
+        ),
+    )
+    case(
+        "blocked assertion helper emptied",
+        "blocked assertion helper must enforce status",
+        control=rewrite_function_body(
+            safe_control, "assert_local_write_blocked", lambda body: ""
+        ),
+    )
+    case(
+        "blocked assertion helper always passes",
+        "blocked assertion helper must enforce status",
+        control=rewrite_function_body(
+            safe_control,
+            "assert_local_write_blocked",
+            lambda body: "\n                let _ = (error, expected_instance, expected_domain, expected_dependency);\n            ",
+        ),
+    )
+    case(
+        "blocked assertion context hidden in unused closure",
+        "blocked assertion helper must enforce status",
+        control=rewrite_function_body(
+            safe_control,
+            "assert_local_write_blocked",
+            lambda body: body.replace(
+                "                        assert_eq!(instance, expected_instance);\n"
+                "                        assert_eq!(domain, expected_domain);\n"
+                "                        assert_eq!(dependency_of.as_deref(), expected_dependency);",
+                "                        let _unused = || {\n"
+                "                            assert_eq!(instance, expected_instance);\n"
+                "                            assert_eq!(domain, expected_domain);\n"
+                "                            assert_eq!(dependency_of.as_deref(), expected_dependency);\n"
+                "                        };",
+            ),
+        ),
+    )
+    case(
+        "allowed assertion helper emptied",
+        "allowed assertion helper must enforce status",
+        control=rewrite_function_body(
+            safe_control, "assert_not_local_write_blocked", lambda body: ""
+        ),
+    )
+    case(
+        "allowed assertion helper always passes",
+        "allowed assertion helper must enforce status",
+        control=rewrite_function_body(
+            safe_control,
+            "assert_not_local_write_blocked",
+            lambda body: "\n                let _ = (error, expected_status);\n            ",
+        ),
+    )
+    case(
+        "authority-gap fixture emptied",
+        "fixture must uniquely install ManagedAcl Verified",
+        control=rewrite_function_body(
+            safe_control,
+            "install_verified_managed_acl_instance_without_authority",
+            lambda body: "",
+        ),
+    )
+    case(
+        "authority-gap fixture uses standalone mode",
+        "fixture must uniquely install ManagedAcl Verified",
+        control=mutate(
+            safe_control,
+            "state.managed_acl_publication_mode = ManagedAclPublicationMode::ManagedAcl;",
+            "state.managed_acl_publication_mode = ManagedAclPublicationMode::StandaloneCompatibility;",
+        ),
+    )
+    case(
+        "authority-gap fixture uses unverified health",
+        "fixture must uniquely install ManagedAcl Verified",
+        control=mutate(
+            safe_control,
+            "state.managed_projection_health = ManagedProjectionHealth::Verified;",
+            "state.managed_projection_health = ManagedProjectionHealth::Unverified;",
+        ),
+    )
+    case(
+        "authority-gap fixture drops authority-none proof",
+        "fixture must uniquely install ManagedAcl Verified",
+        control=mutate(
+            safe_control,
+            "                assert!(\n"
+            "                    cp.get_neutron_port_authority(instance).await.is_none(),\n"
+            "                    \"fixture authority must be absent\",\n"
+            "                );\n",
+            "",
+        ),
+    )
+    case(
+        "authority-gap fixture proof is tautological",
+        "fixture must uniquely install ManagedAcl Verified",
+        control=mutate(
+            safe_control,
+            "cp.get_neutron_port_authority(instance).await.is_none(),",
+            "cp.get_neutron_port_authority(instance).await.is_none() || true,",
+        ),
+    )
+    case(
+        "authority-gap fixture rewrites authority after proof",
+        "fixture must uniquely install ManagedAcl Verified",
+        control=rewrite_function_body(
+            safe_control,
+            "install_verified_managed_acl_instance_without_authority",
+            lambda body: body
+            + "\n                cp.neutron_authorities.write().await.insert(instance.to_string(), authority);\n            ",
+        ),
+    )
+    case(
+        "regression test module hidden by outer cfg",
+        "test module must have only its active cfg(test) gate",
+        control=mutate(
+            safe_control,
+            "        #[cfg(test)]\n        mod tests {",
+            "        #[cfg(any())]\n        #[cfg(test)]\n        mod tests {",
+        ),
+    )
+    case(
+        "regression test module hidden by inner cfg",
+        "test module must have only its active cfg(test) gate",
+        control=mutate(
+            safe_control,
+            "        mod tests {\n",
+            "        mod tests {\n            #![cfg(any())]\n",
+        ),
+    )
+
+    for test_name in (
+        "domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+        "domain_authority_standalone_without_authority_preserves_policy_and_config_admission",
+        "domain_authority_managed_acl_group_namespace_survives_missing_authority",
+    ):
+        case(
+            "%s body hidden behind false" % test_name,
+            "must install the real authority-gap fixture",
+            control=rewrite_function_body(
+                safe_control,
+                test_name,
+                lambda body: "\n                if false {\n%s\n                }\n            "
+                % body,
+            ),
+        )
+
+    case(
+        "blocked regression test returns before fixture",
+        "must install the real authority-gap fixture",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+            lambda body: "\n                return;\n" + body,
+        ),
+    )
+    case(
+        "allowed regression test conditionally returns before fixture",
+        "must install the real authority-gap fixture",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_standalone_without_authority_preserves_policy_and_config_admission",
+            lambda body: "\n                if true { return; }\n" + body,
+        ),
+    )
+    case(
+        "group regression test exits process successfully",
+        "must install the real authority-gap fixture",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_group_namespace_survives_missing_authority",
+            lambda body: "\n                std::process::exit(0);\n" + body,
+        ),
+    )
+    case(
+        "blocked regression shadows assertion helper",
+        "bind real cp and instance once without shadowing helpers",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+            lambda body: body.replace(
+                "                let add_error = cp.add_policy(instance).await.expect_err(\"blocked\");",
+                "                let assert_local_write_blocked = "
+                "|_: ControlPlaneError, _: &str, _: &str, _: Option<&str>| {};\n"
+                "                let add_error = cp.add_policy(instance).await.expect_err(\"blocked\");",
+            ),
+        ),
+    )
+    case(
+        "blocked regression replaces qualified assertion with const function pointer",
+        "must assert the exact add_policy outcome",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+            lambda body: body.replace(
+                "                self::assert_local_write_blocked(add_error, instance, \"acl\", None);",
+                "                fn swallow_blocked(\n"
+                "                    _: ControlPlaneError,\n"
+                "                    _: &str,\n"
+                "                    _: &str,\n"
+                "                    _: Option<&str>,\n"
+                "                ) {}\n"
+                "                const assert_local_write_blocked: fn(\n"
+                "                    ControlPlaneError,\n"
+                "                    &str,\n"
+                "                    &str,\n"
+                "                    Option<&str>,\n"
+                "                ) = swallow_blocked;\n"
+                "                assert_local_write_blocked(add_error, instance, \"acl\", None);",
+            ),
+        ),
+    )
+    case(
+        "blocked regression shadows authority-gap fixture helper",
+        "bind real cp and instance once without shadowing helpers",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+            lambda body: body.replace(
+                "                self::install_verified_managed_acl_instance_without_authority(&cp, instance, \"add\").await;",
+                "                let install_verified_managed_acl_instance_without_authority = "
+                "|_: &ControlPlane, _: &str, _: &str| async {};\n"
+                "                install_verified_managed_acl_instance_without_authority(&cp, instance, \"add\").await;",
+            ),
+        ),
+    )
+    case(
+        "blocked regression rebinds control plane after fixture",
+        "bind real cp and instance once without shadowing helpers",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+            lambda body: body.replace(
+                "                let add_error = cp.add_policy(instance).await.expect_err(\"blocked\");",
+                "                let cp = FakeControlPlane;\n"
+                "                let add_error = cp.add_policy(instance).await.expect_err(\"blocked\");",
+            ),
+        ),
+    )
+    case(
+        "blocked regression fabricates result after real entry",
+        "must exercise add_policy through the real entry",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+            lambda body: body.replace(
+                "                self::assert_local_write_blocked(add_error, instance, \"acl\", None);",
+                "                let add_error = ControlPlaneError::LocalWriteBlocked {\n"
+                "                    instance: instance.to_string(),\n"
+                "                    domain: \"acl\".to_string(),\n"
+                "                    dependency_of: None,\n"
+                "                };\n"
+                "                self::assert_local_write_blocked(add_error, instance, \"acl\", None);",
+            ),
+        ),
+    )
+    case(
+        "exact regression nested in cfg-hidden module",
+        "real-entry regression test must be active",
+        control=wrap_test_in_cfg_module(
+            safe_control,
+            "domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+        ),
+    )
+
+    case(
+        "policy test real entry removed",
+        "must exercise add_policy through the real entry",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+            lambda body: body.replace(
+                '                let add_error = cp.add_policy(instance).await.expect_err("blocked");\n',
+                "",
+            ),
+        ),
+    )
+    case(
+        "policy test exact assertion removed",
+        "must assert the exact add_policy outcome",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit",
+            lambda body: body.replace(
+                '                self::assert_local_write_blocked(add_error, instance, "acl", None);\n',
+                "",
+            ),
+        ),
+    )
+
+    for label, control, groups, expected in cases:
+        errors = _managed_authoritative_write_admission_contract_errors(
+            control, groups
+        )
+        if not any(expected in error for error in errors):
+            raise SystemExit(
+                "ERROR: managed authoritative admission checker accepted %s: %s"
+                % (label, errors)
+            )
+    print(
+        "Managed authoritative write admission self-tests: OK (%d scenarios)"
+        % (len(cases) + 2)
+    )
+
+
 def _managed_cross_domain_group_mutation_contract_errors(
     control_plane_source,
     groups_handler_source,
@@ -11191,6 +13613,17 @@ def check_managed_cross_domain_group_mutation_contract():
         raise SystemExit("ERROR: " + errors[0])
 
 
+def check_managed_authoritative_write_admission_contract():
+    print("==> checking managed authoritative write admission contract")
+    _run_managed_authoritative_write_admission_self_tests()
+    errors = _managed_authoritative_write_admission_contract_errors(
+        _read_repo_text(os.path.join("agent", "src", "control_plane.rs")),
+        _read_repo_text(os.path.join("agent", "src", "api_handlers", "groups.rs")),
+    )
+    if errors:
+        raise SystemExit("ERROR: " + errors[0])
+
+
 def check_managed_projection_attach_migration_contract():
     print("==> checking managed projection attach-migration contract")
     errors = _managed_projection_attach_migration_contract_errors(
@@ -11437,6 +13870,7 @@ def main():
     check_status_v1_contract()
     check_rust_stage_one_tests_present()
     check_managed_acl_publication_transaction_contract()
+    check_managed_authoritative_write_admission_contract()
     check_managed_cross_domain_group_mutation_contract()
     check_managed_projection_attach_migration_contract()
     check_p3_rust_scoped_plan_boundary()

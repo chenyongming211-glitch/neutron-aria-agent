@@ -9647,6 +9647,367 @@ mod tests {
             .is_ok());
     }
 
+    async fn install_verified_managed_acl_instance_without_authority(
+        cp: &ControlPlane,
+        instance: &str,
+        test_name: &str,
+    ) {
+        let mut state = stopped_wal_instance_state(test_name).await;
+        state.managed_acl_publication_mode = ManagedAclPublicationMode::ManagedAcl;
+        state.managed_projection_health = ManagedProjectionHealth::Verified;
+        state.state.groups.insert(
+            "policy-src".to_string(),
+            GroupInfo {
+                id: 41,
+                name: "policy-src".to_string(),
+                cidrs: vec!["10.41.0.0/24".to_string()],
+            },
+        );
+        state.state.groups.insert(
+            "policy-dst".to_string(),
+            GroupInfo {
+                id: 42,
+                name: "policy-dst".to_string(),
+                cidrs: vec!["10.42.0.0/24".to_string()],
+            },
+        );
+        state.state.groups.insert(
+            "neutron:owned".to_string(),
+            GroupInfo {
+                id: 43,
+                name: "neutron:owned".to_string(),
+                cidrs: vec!["10.43.0.0/24".to_string()],
+            },
+        );
+        state.state.rules.push(RuleInfo {
+            name: None,
+            src_group_id: 41,
+            dst_group_id: 42,
+            proto: libc::IPPROTO_TCP as u8,
+            action: 0,
+            ports: None,
+            bitmap_idx: None,
+            direction: 0,
+        });
+        cp.instances.write().await.insert(
+            instance.to_string(),
+            Arc::new(tokio::sync::RwLock::new(state)),
+        );
+
+        assert!(
+            cp.get_neutron_port_authority(instance).await.is_none(),
+            "fixture must exercise the post-promotion/pre-authority window"
+        );
+    }
+
+    fn assert_local_write_blocked(
+        error: ControlPlaneError,
+        expected_instance: &str,
+        expected_domain: &str,
+        expected_dependency: Option<&str>,
+    ) {
+        assert_eq!(error.status_code(), 409);
+        match error {
+            ControlPlaneError::LocalWriteBlocked {
+                instance,
+                domain,
+                dependency_of,
+            } => {
+                assert_eq!(instance, expected_instance);
+                assert_eq!(domain, expected_domain);
+                assert_eq!(dependency_of.as_deref(), expected_dependency);
+            }
+            other => panic!("expected LocalWriteBlocked, got: {other}"),
+        }
+    }
+
+    fn assert_not_local_write_blocked(error: ControlPlaneError, expected_status: u16) {
+        assert_eq!(error.status_code(), expected_status);
+        assert!(
+            !matches!(error, ControlPlaneError::LocalWriteBlocked { .. }),
+            "standalone or non-reserved local write must not be authority-blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit() {
+        let cp = test_control_plane();
+        let instance = "tap-managed-policy-add-gap";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "managed-policy-add-authority-gap",
+        )
+        .await;
+
+        let add_error = cp
+            .add_policy(
+                instance,
+                "policy-src",
+                "policy-dst",
+                libc::IPPROTO_TCP as u8,
+                0,
+                0,
+                None,
+            )
+            .await
+            .expect_err("ManagedAcl must block add_policy before authority commits");
+        self::assert_local_write_blocked(add_error, instance, "acl", None);
+    }
+
+    #[tokio::test]
+    async fn domain_authority_managed_acl_policy_write_delete_blocks_before_authority_commit() {
+        let cp = test_control_plane();
+        let instance = "tap-managed-policy-delete-gap";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "managed-policy-delete-authority-gap",
+        )
+        .await;
+
+        let delete_error = cp
+            .delete_policy(
+                instance,
+                "policy-src",
+                "policy-dst",
+                libc::IPPROTO_TCP as u8,
+                0,
+            )
+            .await
+            .expect_err("ManagedAcl must block delete_policy before authority commits");
+        self::assert_local_write_blocked(delete_error, instance, "acl", None);
+    }
+
+    #[tokio::test]
+    async fn domain_authority_managed_acl_config_acl_blocks_before_authority_commit() {
+        let cp = test_control_plane();
+        let instance = "tap-managed-acl-config-gap";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "managed-acl-config-authority-gap",
+        )
+        .await;
+
+        let error = cp
+            .update_config(
+                instance,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("ManagedAcl must block ACL config before authority commits");
+        self::assert_local_write_blocked(error, instance, "acl", None);
+    }
+
+    #[tokio::test]
+    async fn domain_authority_managed_acl_config_conntrack_blocks_before_authority_commit()
+    {
+        let cp = test_control_plane();
+        let instance = "tap-managed-conntrack-gap";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "managed-conntrack-authority-gap",
+        )
+        .await;
+
+        let error = cp
+            .update_config(
+                instance,
+                Some(false),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("ManagedAcl must protect conntrack as an ACL dependency");
+        self::assert_local_write_blocked(error, instance, "conntrack", Some("acl"));
+    }
+
+    #[tokio::test]
+    async fn domain_authority_managed_acl_config_monitoring_remains_local_before_authority_commit()
+    {
+        let cp = test_control_plane();
+        let instance = "tap-managed-monitoring-gap";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "managed-monitoring-authority-gap",
+        )
+        .await;
+
+        let error = cp
+            .update_config(
+                instance,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("unmanaged monitoring config must continue to the missing-map boundary");
+        self::assert_not_local_write_blocked(error, 503);
+    }
+
+    #[tokio::test]
+    async fn domain_authority_managed_acl_group_namespace_survives_missing_authority() {
+        let cp = test_control_plane();
+        let instance = "tap-managed-group-gap";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "managed-group-authority-gap",
+        )
+        .await;
+
+        let add_error = cp
+            .add_group(instance, "neutron:new", "10.44.0.0/24")
+            .await
+            .expect_err("ManagedAcl must reserve neutron: names on add without authority");
+        self::assert_local_write_blocked(add_error, instance, "acl", None);
+
+        let delete_error = cp
+            .delete_group(instance, "neutron:owned")
+            .await
+            .expect_err("ManagedAcl must reserve neutron: names on delete without authority");
+        self::assert_local_write_blocked(delete_error, instance, "acl", None);
+    }
+
+    #[tokio::test]
+    async fn domain_authority_standalone_without_authority_preserves_policy_and_config_admission() {
+        let cp = test_control_plane();
+        let instance = "tap-standalone-authority-none";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "standalone-authority-none",
+        )
+        .await;
+        {
+            let instance_state = cp.get_instance(instance).await.unwrap();
+            let mut state = instance_state.write().await;
+            state.managed_acl_publication_mode =
+                ManagedAclPublicationMode::StandaloneCompatibility;
+            state.managed_projection_health = ManagedProjectionHealth::Unverified;
+        }
+
+        let add_error = cp
+            .add_policy(
+                instance,
+                "policy-src",
+                "policy-dst",
+                libc::IPPROTO_TCP as u8,
+                0,
+                0,
+                None,
+            )
+            .await
+            .expect_err("missing maps must remain the first standalone add failure");
+        self::assert_not_local_write_blocked(add_error, 503);
+
+        let delete_error = cp
+            .delete_policy(
+                instance,
+                "policy-src",
+                "policy-dst",
+                libc::IPPROTO_TCP as u8,
+                0,
+            )
+            .await
+            .expect_err("missing maps must remain the first standalone delete failure");
+        self::assert_not_local_write_blocked(delete_error, 503);
+
+        let acl_error = cp
+            .update_config(
+                instance,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("missing maps must remain the first standalone ACL config failure");
+        self::assert_not_local_write_blocked(acl_error, 503);
+
+        let conntrack_error = cp
+            .update_config(
+                instance,
+                Some(false),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("missing maps must remain the first standalone CT config failure");
+        self::assert_not_local_write_blocked(conntrack_error, 503);
+    }
+
+    #[tokio::test]
+    async fn domain_authority_managed_acl_without_authority_allows_non_reserved_group_name() {
+        let cp = test_control_plane();
+        let instance = "tap-managed-local-group-gap";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "managed-local-group-authority-gap",
+        )
+        .await;
+
+        let error = cp
+            .add_group(instance, "local:qos", "10.45.0.0/24")
+            .await
+            .expect_err("authority absence must preserve the existing managed 503 path");
+        self::assert_not_local_write_blocked(error, 503);
+    }
+
+    #[tokio::test]
+    async fn domain_authority_committed_qos_blocks_config_at_real_entry() {
+        let cp = test_control_plane();
+        let instance = "tap-managed-qos-authority";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "managed-qos-committed-authority",
+        )
+        .await;
+        cp.mark_neutron_port_authority(instance, "port-qos", &["qos".to_string()], 9)
+            .await;
+
+        let error = cp
+            .update_config(
+                instance,
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("committed QoS authority must block the real config entry");
+        self::assert_local_write_blocked(error, instance, "qos", None);
+    }
+
     fn managed_acl_shadow_fixture() -> aria_core::ebpf_ops::ManagedGroupProjection {
         let mut state = FirewallState::default();
         for (name, id, cidrs) in [
