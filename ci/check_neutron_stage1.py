@@ -38,6 +38,8 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "managed_local_group_projection_"],
     ["test", "--locked", "-p", "aria-agent", "managed_dual_use_group_"],
     ["test", "--locked", "-p", "aria-agent", "managed_acl_ownership_"],
+    ["test", "--locked", "-p", "aria-agent", "managed_projection_attach_repair_"],
+    ["test", "--locked", "-p", "aria-agent", "managed_projection_outer_skip_"],
     ["test", "--locked", "-p", "aria-api", "neutron_contract"],
     ["test", "--locked", "-p", "aria-agent", "neutron_wal"],
     ["test", "--locked", "-p", "aria-agent", "neutron_snapshot_plan"],
@@ -2434,6 +2436,1332 @@ def _rust_position_is_inside_loop(code, position):
         elif char == "}" and stack:
             stack.pop()
     return any(stack)
+
+
+def _rust_brace_depth_at(code, position):
+    """Return lexical brace depth before a position in already blanked Rust."""
+    depth = 0
+    for char in code[:position]:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(0, depth - 1)
+    return depth
+
+
+def _rust_matching_brace_end(code, opening):
+    """Return the closing-brace index for a blanked Rust block."""
+    if opening < 0 or opening >= len(code) or code[opening] != "{":
+        return None
+    depth = 1
+    index = opening + 1
+    while index < len(code) and depth:
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+        index += 1
+    return None if depth else index - 1
+
+
+def _rust_if_else_branch_spans(code):
+    """Yield simple if/else branch spans from already blanked Rust."""
+    spans = []
+    for match in re.finditer(r"\bif\b[^;{}]*\{", code):
+        then_open = code.find("{", match.start())
+        then_close = _rust_matching_brace_end(code, then_open)
+        if then_close is None:
+            continue
+        after_then = then_close + 1
+        while after_then < len(code) and code[after_then].isspace():
+            after_then += 1
+        if not re.match(r"else\s*\{", code[after_then:]):
+            continue
+        else_open = code.find("{", after_then)
+        else_close = _rust_matching_brace_end(code, else_open)
+        if else_close is not None:
+            spans.append((then_open + 1, then_close, else_open + 1, else_close))
+    return spans
+
+
+def _rust_function_parameters_from_blanked(code, function_name):
+    """Return a named Rust function's parameters from already blanked source."""
+    match = re.search(
+        r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+%s"
+        r"(?:\s*<[^>{}]*>)?\s*\(" % re.escape(function_name),
+        code,
+    )
+    if not match:
+        return None
+    opening = code.find("(", match.start())
+    return _rust_parenthesized_body_at(code, opening)
+
+
+def _rust_named_for_loop_body(code, binding, iterable):
+    """Extract a simple `for binding in iterable` body from blanked Rust."""
+    match = re.search(
+        r"\bfor\s+%s\s+in\s+&?\s*%s"
+        r"(?:\s*\.\s*(?:iter|into_iter)\s*\(\s*\))?\s*\{"
+        % (re.escape(binding), re.escape(iterable)),
+        code,
+    )
+    if not match:
+        return None
+    opening = code.find("{", match.start())
+    return _rust_braced_body_at(code, opening)
+
+
+def _rust_named_call_arguments(code, function_name):
+    """Return `(position, arguments)` for calls in an already blanked body."""
+    calls = []
+    for match in re.finditer(r"\b%s\s*\(" % re.escape(function_name), code):
+        opening = code.find("(", match.start())
+        arguments = _rust_parenthesized_body_at(code, opening)
+        if arguments is not None:
+            calls.append((match.start(), _rust_split_top_level_arguments(arguments)))
+    return calls
+
+
+def _rust_named_call_result_is_propagated(code, function_name, position):
+    """Recognize tail, `?`, or explicit-Err propagation for one Rust call."""
+    del function_name
+    opening = code.find("(", position)
+    if opening < 0:
+        return False
+    depth = 1
+    closing = opening + 1
+    while closing < len(code) and depth:
+        if code[closing] == "(":
+            depth += 1
+        elif code[closing] == ")":
+            depth -= 1
+        closing += 1
+    if depth:
+        return False
+    suffix = code[closing:]
+    if re.match(r"^\s*\.\s*await\s*\?\s*(?:;|$)", suffix):
+        return True
+    if re.fullmatch(r"\s*\.\s*await\s*", suffix):
+        return True
+    statement_start = max(
+        code.rfind(";", 0, position),
+        code.rfind("{", 0, position),
+        code.rfind("}", 0, position),
+    )
+    prefix = code[statement_start + 1 : position]
+    if not re.search(r"\bmatch\s*$", prefix):
+        return False
+    match_open = re.match(r"^\s*\.\s*await\s*\{", suffix)
+    if match_open is None:
+        return False
+    opening_brace = suffix.find("{", match_open.start())
+    match_body = _rust_braced_body_at(suffix, opening_brace)
+    return bool(
+        match_body
+        and re.search(
+            r"\bErr\s*\([^)]*\)\s*=>[^}]*\b(?:return\s+)?Err\s*\(",
+            match_body,
+            re.DOTALL,
+        )
+    )
+
+
+def _managed_projection_attach_migration_contract_errors(
+    control_plane_source,
+    tap_registry_source,
+    neutron_api_source,
+):
+    """Return Task 6 production-wiring violations in dependency order."""
+    control_code = _blank_rust_non_code(control_plane_source)
+    tap_code = _blank_rust_non_code(tap_registry_source)
+    neutron_code = _blank_rust_non_code(neutron_api_source)
+    errors = []
+
+    attach_body = _rust_function_body_from_blanked(tap_code, "attach_with_mode")
+    ownership_name = "reconcile_managed_acl_ownership_serialized"
+    ownership_call = (
+        None
+        if attach_body is None
+        else re.search(r"\.\s*%s\s*\(" % ownership_name, attach_body)
+    )
+    ownership_body = _rust_function_body_from_blanked(control_code, ownership_name)
+    if attach_body is None or ownership_call is None or ownership_body is None:
+        errors.append(
+            "attach_with_mode must delegate to the serialized managed ACL ownership reconciler"
+        )
+    else:
+        lifecycle = attach_body.find("lock_runtime_lifecycle")
+        if lifecycle < 0 or ownership_call.start() < lifecycle:
+            errors.append(
+                "managed ACL ownership reconcile must run after the lifecycle lock"
+            )
+        if "lock_runtime_lifecycle" in ownership_body:
+            errors.append(
+                "serialized managed ACL ownership reconcile must not reacquire the lifecycle lock"
+            )
+
+    demotion_body = None
+    demotion_wiring = ""
+    if ownership_body is not None:
+        demote_variant = ownership_body.find("::Demote")
+        demote_call = (
+            None
+            if demote_variant < 0
+            else re.search(
+                r"(?:\bself\s*\.\s*)?"
+                r"(?P<name>[A-Za-z_]\w*demot\w*)\s*\(",
+                ownership_body[demote_variant:],
+            )
+        )
+        if demote_variant < 0 or demote_call is None:
+            errors.append(
+                "serialized managed ACL ownership reconcile must dispatch a Demote transaction"
+            )
+        else:
+            demotion_wiring = ownership_body[demote_variant:]
+            demotion_body = _rust_function_body_from_blanked(
+                control_code, demote_call.group("name")
+            )
+            if demotion_body is None:
+                errors.append("managed ACL demotion production helper is missing")
+
+    if demotion_body is not None:
+        if "lock_runtime_lifecycle" in demotion_body:
+            errors.append(
+                "managed ACL demotion helper must not reacquire the lifecycle lock"
+            )
+        demotion_scope = demotion_wiring + "\n" + demotion_body
+        for pattern, label in (
+            (r"\bpurge_neutron_acl\s*\(", "purge_neutron_acl"),
+            (r"\.\s*detach\s*\(", "detach"),
+            (
+                r"\.\s*clear_neutron_port_authority\s*\(",
+                "clear Neutron authority",
+            ),
+        ):
+            if re.search(pattern, demotion_scope):
+                errors.append("managed ACL demotion must not call %s" % label)
+
+        target_name = "build_managed_acl_demotion_target"
+        target_calls = _rust_named_call_arguments(demotion_body, target_name)
+        executor_name = "execute_managed_acl_demotion_transaction"
+        executor_calls = _rust_named_call_arguments(demotion_body, executor_name)
+        if not target_calls:
+            errors.append(
+                "managed ACL demotion must call build_managed_acl_demotion_target"
+            )
+        if not executor_calls:
+            errors.append(
+                "managed ACL demotion must call execute_managed_acl_demotion_transaction"
+            )
+        elif not all(
+            _rust_named_call_result_is_propagated(
+                demotion_body, executor_name, position
+            )
+            for position, _ in executor_calls
+        ):
+            errors.append(
+                "managed ACL demotion must propagate demotion transaction Result"
+            )
+
+        if target_calls and executor_calls and target_calls[0][0] > executor_calls[0][0]:
+            errors.append(
+                "managed ACL demotion must build its target before transaction execution"
+            )
+
+        if executor_calls:
+            executor_arguments = executor_calls[0][1]
+
+            def demotion_argument_index(predicate):
+                return next(
+                    (
+                        index
+                        for index, argument in enumerate(executor_arguments)
+                        if predicate(re.sub(r"\s+", "", argument).lower())
+                    ),
+                    -1,
+                )
+
+            callback_order = [
+                demotion_argument_index(lambda item: "quiesc" in item),
+                demotion_argument_index(
+                    lambda item: "projection_health" in item
+                ),
+                demotion_argument_index(
+                    lambda item: "publish_acl_projection_locked" in item
+                ),
+                demotion_argument_index(
+                    lambda item: "strict" in item and "flush" in item
+                ),
+                demotion_argument_index(
+                    lambda item: "managed_acl_publication_mode" in item
+                    and "neutronattachownedstandaloneacl" in item
+                ),
+                demotion_argument_index(
+                    lambda item: "compensat" in item or "rollback" in item
+                ),
+                demotion_argument_index(
+                    lambda item: "old_state" in item
+                    and any(
+                        marker in item
+                        for marker in ("restore", "persist", "compact")
+                    )
+                ),
+            ]
+            if (
+                any(index < 0 for index in callback_order)
+                or callback_order != sorted(callback_order)
+            ):
+                errors.append(
+                    "managed ACL demotion must wire quiesce, health, publish, flush, mode, compensation, and restore callbacks"
+                )
+            publish_index = callback_order[2]
+            forced_shared_publish = False
+            if publish_index >= 0:
+                publish_calls = _rust_named_call_arguments(
+                    executor_arguments[publish_index],
+                    "publish_acl_projection_locked",
+                )
+                forced_shared_publish = any(
+                    len(arguments) > 5
+                    and re.sub(r"\s+", "", arguments[5]) == "true"
+                    for _, arguments in publish_calls
+                )
+            if not forced_shared_publish:
+                errors.append(
+                    "managed ACL demotion must force the shared projection publisher"
+                )
+
+    required_mode_body = _rust_function_body_from_blanked(
+        neutron_code, "required_neutron_publication_mode"
+    )
+    required_mode_valid = False
+    if required_mode_body is not None:
+        if_branch = re.search(
+            r"\bif\b[^{}]+\{(?P<managed>[^{}]*)\}\s*else\s*"
+            r"\{(?P<standalone>[^{}]*)\}",
+            required_mode_body,
+            re.DOTALL,
+        )
+        true_arm = re.search(
+            r"\btrue\s*=>\s*(?P<managed>[^,}]+)", required_mode_body
+        )
+        false_arm = re.search(
+            r"\bfalse\s*=>\s*(?P<standalone>[^,}]+)", required_mode_body
+        )
+        if if_branch is not None:
+            managed = if_branch.group("managed")
+            standalone = if_branch.group("standalone")
+        elif true_arm is not None and false_arm is not None:
+            managed = true_arm.group("managed")
+            standalone = false_arm.group("standalone")
+        else:
+            managed = standalone = ""
+        required_mode_valid = bool(
+            managed
+            and standalone
+            and "ManagedAclPublicationMode::ManagedAcl" in managed
+            and "ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl"
+            in standalone
+            and "ManagedAclPublicationMode::StandaloneCompatibility"
+            not in required_mode_body
+        )
+    if not required_mode_valid:
+        errors.append(
+            "required Neutron publication mode must map ACL to ManagedAcl and non-ACL to attach-owned standalone"
+        )
+
+    authority_parameters = _rust_function_parameters_from_blanked(
+        control_code, "mark_neutron_port_authority_if_current"
+    )
+    if authority_parameters is None or not re.search(
+        r"\brequired_publication_mode\s*:\s*(?:Option\s*<\s*)?"
+        r"ManagedAclPublicationMode\b",
+        authority_parameters,
+    ):
+        errors.append(
+            "Neutron authority confirmation must accept the exact required publication mode"
+        )
+
+    restore_body = _rust_function_body_from_blanked(
+        neutron_code, "restore_neutron_authorities"
+    )
+    apply_body = _rust_function_body_from_blanked(
+        neutron_code, "apply_snapshot_runtime_transaction"
+    )
+    update_body = (
+        None
+        if apply_body is None
+        else _rust_named_for_loop_body(apply_body, "port", "update")
+    )
+    attach_loop_body = (
+        None
+        if apply_body is None
+        else _rust_named_for_loop_body(apply_body, "port", "attach")
+    )
+
+    def check_authority_scope(label, body, minimum_calls, require_verified):
+        if body is None or "required_neutron_publication_mode" not in body:
+            errors.append("%s must derive the exact required publication mode" % label)
+            return
+        calls = _rust_named_call_arguments(
+            body, "mark_neutron_port_authority_if_current"
+        )
+        if len(calls) < minimum_calls:
+            errors.append("%s must confirm Neutron authority" % label)
+            return
+        for _, arguments in calls:
+            mode_argument = (
+                "" if len(arguments) < 5 else re.sub(r"\s+", "", arguments[4])
+            )
+            if mode_argument not in (
+                "required_publication_mode",
+                "Some(required_publication_mode)",
+            ):
+                errors.append(
+                    "%s must pass its exact required publication mode" % label
+                )
+                break
+
+        health_arguments = [
+            "" if len(arguments) < 6 else re.sub(r"\s+", "", arguments[5])
+            for _, arguments in calls
+        ]
+        if not require_verified:
+            if any(argument != "None" for argument in health_arguments):
+                errors.append(
+                    "restored authority must remain projection-health agnostic"
+                )
+            return
+
+        derivation = re.search(
+            r"\blet\s+required_projection_health\s*=\s*(?P<value>[^;]+);",
+            body,
+            re.DOTALL,
+        )
+        derivation_value = "" if derivation is None else derivation.group("value")
+        if (
+            "ManagedProjectionHealth::Verified" not in derivation_value
+            or "then_some" not in derivation_value
+            or not re.search(
+                r"(?:manages_acl|managed_acl|port_manages_acl)",
+                derivation_value,
+            )
+        ):
+            errors.append("%s must derive ACL authority as Verified" % label)
+        if any(
+            argument not in (
+                "required_projection_health",
+                "Some(required_projection_health)",
+            )
+            for argument in health_arguments
+        ):
+            errors.append(
+                "%s ACL authority commit must require Verified projection health"
+                % label
+            )
+
+    check_authority_scope("restored authority", restore_body, 1, False)
+    check_authority_scope("updated port", update_body, 2, True)
+    check_authority_scope("attached port", attach_loop_body, 1, True)
+
+    reconcile_body = _rust_function_body_from_blanked(
+        neutron_code, "reconcile_neutron_acl"
+    )
+    completion_name = "execute_managed_acl_post_replace_completion"
+    completion_calls = (
+        []
+        if reconcile_body is None
+        else list(re.finditer(r"\b%s\s*\(" % completion_name, reconcile_body))
+    )
+    if reconcile_body is None or not completion_calls:
+        errors.append(
+            "managed ACL reconcile must call execute_managed_acl_post_replace_completion"
+        )
+    else:
+        if not all(
+            _rust_named_call_result_is_propagated(
+                reconcile_body, completion_name, call.start()
+            )
+            for call in completion_calls
+        ):
+            errors.append(
+                "managed ACL reconcile must propagate post-replace completion Result"
+            )
+        replace = reconcile_body.find("replace_owned_acl")
+        first_completion = completion_calls[0].start()
+        early_return = (
+            None
+            if replace < 0
+            else re.search(
+                r"\breturn\b", reconcile_body[replace:first_completion]
+            )
+        )
+        top_level_completion = any(
+            _rust_brace_depth_at(reconcile_body, call.start()) == 0
+            for call in completion_calls
+        )
+        branch_completion = any(
+            any(start <= call.start() < end for call in completion_calls)
+            and any(
+                else_start <= call.start() < else_end
+                for call in completion_calls
+            )
+            for start, end, else_start, else_end in _rust_if_else_branch_spans(
+                reconcile_body
+            )
+        )
+        if (
+            replace < 0
+            or first_completion < replace
+            or early_return is not None
+            or not (top_level_completion or branch_completion)
+        ):
+            errors.append(
+                "every managed ACL success path must reach post-replace completion"
+            )
+
+        for _, arguments in _rust_named_call_arguments(
+            reconcile_body, completion_name
+        ):
+            compact = [
+                re.sub(r"\s+", "", argument).lower()
+                for argument in arguments
+            ]
+
+            def completion_index(predicate):
+                return next(
+                    (
+                        index
+                        for index, argument in enumerate(compact)
+                        if predicate(argument)
+                    ),
+                    -1,
+                )
+
+            callback_order = [
+                completion_index(
+                    lambda item: ("strict" in item and "flush" in item)
+                    or "flush_neutron_acl_conntrack" in item
+                ),
+                completion_index(
+                    lambda item: ("publish" in item and "gate" in item)
+                    or "update_neutron_acl_runtime_gate" in item
+                ),
+                completion_index(
+                    lambda item: "precommit" in item
+                    or "before_enable" in item
+                ),
+                completion_index(
+                    lambda item: "verify" in item and "mark" in item
+                ),
+                completion_index(
+                    lambda item: "requiesc" in item
+                    or ("quiesc" in item and "gate" in item)
+                ),
+            ]
+            if (
+                any(index < 0 for index in callback_order)
+                or callback_order != sorted(callback_order)
+            ):
+                errors.append(
+                    "post-replace completion must wire flush, gate, precommit, verify, then requiesce"
+                )
+                break
+
+    verify_body = _rust_function_body_from_blanked(
+        control_code, "verify_and_mark_managed_projection"
+    )
+    completion_scope = "" if reconcile_body is None else reconcile_body
+    if (
+        verify_body is None
+        or "verify_and_mark_managed_projection" not in completion_scope
+    ):
+        errors.append(
+            "post-replace completion must call the production verify-and-mark helper"
+        )
+    else:
+        lifecycle = re.search(
+            r"\blet\s+(?P<guard>_?[A-Za-z_]\w*)\s*=\s*"
+            r"self\s*\.\s*lock_runtime_lifecycle\s*\(\s*\)\s*"
+            r"\.\s*await\s*;",
+            verify_body,
+        )
+        instance = re.search(r"\bget_instance\s*\(", verify_body)
+        write_lock = re.search(
+            r"\.\s*write\s*\(\s*\)\s*\.\s*await", verify_body
+        )
+        mode_guard = re.search(
+            r"\bmanaged_acl_publication_mode\b\s*!=\s*"
+            r"ManagedAclPublicationMode\s*::\s*ManagedAcl\b|"
+            r"!\s*matches\s*!\s*\([^)]*managed_acl_publication_mode"
+            r"[^)]*ManagedAclPublicationMode\s*::\s*ManagedAcl\b",
+            verify_body,
+            re.DOTALL,
+        )
+        gate = re.search(r"\b\w*gate\w*\s*\(", verify_body)
+        tc = re.search(r"\b\w*tc\w*\s*\(", verify_body)
+        verified = re.search(
+            r"\bmanaged_projection_health\s*=\s*"
+            r"ManagedProjectionHealth\s*::\s*Verified\b",
+            verify_body,
+        )
+        lock_positions = [
+            -1 if marker is None else marker.start()
+            for marker in (lifecycle, instance, write_lock)
+        ]
+        if (
+            any(position < 0 for position in lock_positions)
+            or lock_positions != sorted(lock_positions)
+        ):
+            errors.append(
+                "verify-and-mark helper must acquire lifecycle then instance write lock"
+            )
+        mode_failure = (
+            ""
+            if mode_guard is None or gate is None
+            else verify_body[mode_guard.start() : gate.start()]
+        )
+        if (
+            mode_guard is None
+            or write_lock is None
+            or mode_guard.start() < write_lock.start()
+            or not re.search(r"\breturn\s+Err\s*\(", mode_failure)
+        ):
+            errors.append(
+                "verify-and-mark helper must require current ManagedAcl mode"
+            )
+        if (
+            mode_guard is None
+            or gate is None
+            or tc is None
+            or verified is None
+            or not (
+                mode_guard.start()
+                < gate.start()
+                < verified.start()
+                and mode_guard.start() < tc.start() < verified.start()
+            )
+        ):
+            errors.append(
+                "verify-and-mark helper must validate gate and TC before Verified"
+            )
+        if lifecycle is not None and verified is not None:
+            before_verified = verify_body[lifecycle.end() : verified.start()]
+            if re.search(
+                r"\b(?:std\s*::\s*mem\s*::\s*)?drop\s*\(\s*%s\s*\)"
+                % re.escape(lifecycle.group("guard")),
+                before_verified,
+            ):
+                errors.append(
+                    "verify-and-mark helper must hold the lifecycle guard through Verified"
+                )
+        if verified is not None:
+            helper_tail = verify_body[verified.end() :]
+            ok = re.search(r"\bOk\s*\(", helper_tail)
+            before_ok = helper_tail if ok is None else helper_tail[: ok.start()]
+            if ok is None or ".await" in before_ok or "?" in before_ok:
+                errors.append(
+                    "verify-and-mark helper must commit Verified as its final infallible action"
+                )
+
+    prepare_body = _rust_function_body_from_blanked(
+        control_code, "prepare_managed_registration"
+    )
+    fresh_name = "persist_fresh_managed_registration_gate_state"
+    fresh_calls = (
+        []
+        if prepare_body is None
+        else _rust_named_call_arguments(prepare_body, fresh_name)
+    )
+    if prepare_body is None or not fresh_calls:
+        errors.append(
+            "fresh registration must call persist_fresh_managed_registration_gate_state"
+        )
+    else:
+        fresh_position, fresh_arguments = fresh_calls[0]
+        prepared = prepare_body.find("PreparedManagedInstance", fresh_position)
+        if prepared < fresh_position:
+            errors.append(
+                "fresh gate persistence must complete before publishing the instance"
+            )
+        if not _rust_named_call_result_is_propagated(
+            prepare_body, fresh_name, fresh_position
+        ):
+            errors.append(
+                "fresh gate persistence Result must be propagated"
+            )
+        compact = [
+            re.sub(r"\s+", "", argument)
+            for argument in fresh_arguments
+        ]
+        fresh_argument = "" if len(compact) < 3 else compact[2]
+        positive_fresh = bool(
+            re.fullmatch(
+                r"[A-Za-z_]\w*(?:fresh|new)\w*"
+                r"(?:\([^()]*\))?",
+                fresh_argument,
+            )
+            and not fresh_argument.startswith("!")
+            and "==false" not in fresh_argument
+        )
+        if (
+            len(compact) < 4
+            or compact[0] != "&mutstate"
+            or "mode" not in compact[1]
+            or not positive_fresh
+            or not any(
+                marker in compact[3].lower()
+                for marker in ("persist", "compact", "wal")
+            )
+        ):
+            errors.append(
+                "fresh helper must receive state, mode, a positive fresh value, and persistence callback"
+            )
+
+    classifier_name = "unsupported_neutron_managed_domains"
+
+    def check_preflight(label, loop_body):
+        if loop_body is None:
+            errors.append(
+                "%s must reject unsupported domains before ownership sync"
+                % label
+            )
+            return
+        attach = re.search(r"\.\s*attach_neutron\s*\(", loop_body)
+        classifier_calls = _rust_named_call_arguments(
+            loop_body, classifier_name
+        )
+        if (
+            attach is None
+            or not classifier_calls
+            or classifier_calls[0][0] > attach.start()
+            or _rust_brace_depth_at(loop_body, classifier_calls[0][0]) != 0
+        ):
+            errors.append(
+                "%s must run the exact classifier at top level before ownership sync"
+                % label
+            )
+            return
+        classifier_position = classifier_calls[0][0]
+        prefix = loop_body[
+            max(0, classifier_position - 240) : classifier_position
+        ]
+        binding = re.search(
+            r"\blet\s+(?P<name>[A-Za-z_]\w*)\s*=\s*$", prefix
+        )
+        between = loop_body[classifier_position : attach.start()]
+        guard = (
+            None
+            if binding is None
+            else re.search(
+                r"\bif\s+!\s*%s\s*\.\s*is_empty\s*\(\s*\)\s*\{"
+                % re.escape(binding.group("name")),
+                between,
+            )
+        )
+        guard_body = None
+        guard_absolute = -1
+        if guard is not None:
+            guard_absolute = classifier_position + guard.start()
+            guard_open = between.find("{", guard.start())
+            guard_body = _rust_braced_body_at(between, guard_open)
+        if (
+            guard is None
+            or guard_absolute < classifier_position
+            or _rust_brace_depth_at(loop_body, guard_absolute) != 0
+            or guard_body is None
+            or not re.search(r"\bcontinue\s*;", guard_body)
+        ):
+            errors.append(
+                "%s must use a top-level nonempty classifier guard with continue"
+                % label
+            )
+
+    check_preflight("updated port", update_body)
+    check_preflight("attached port", attach_loop_body)
+    reconcile_domains = _rust_function_body_from_blanked(
+        neutron_code, "reconcile_neutron_domains"
+    )
+    if (
+        reconcile_domains is None
+        or not _rust_named_call_arguments(
+            reconcile_domains, classifier_name
+        )
+    ):
+        errors.append(
+            "reconcile_neutron_domains must reuse unsupported_neutron_managed_domains"
+        )
+
+    return errors
+
+
+def _run_managed_projection_attach_migration_mutation_self_tests():
+    safe_tap = r"""
+        async fn attach_with_mode(&self, iface: &str, mode: ManagedAttachMode) {
+            let iface_lock = self.get_iface_lock(iface).await;
+            let _guard = iface_lock.lock().await;
+            let _runtime_guard = self.control_plane.lock_runtime_lifecycle().await;
+            if already_attached {
+                return self.control_plane
+                    .reconcile_managed_acl_ownership_serialized(iface, mode)
+                    .await;
+            }
+            self.finish_fresh_attach(iface, mode).await
+        }
+    """
+    safe_control = r"""
+        async fn mark_neutron_port_authority_if_current(
+            &self,
+            instance: &str,
+            port_id: &str,
+            managed_domains: &[String],
+            generation: u64,
+            required_publication_mode: Option<ManagedAclPublicationMode>,
+            required_projection_health: Option<ManagedProjectionHealth>,
+        ) -> bool {
+            self.confirm_authority(required_publication_mode)
+        }
+
+        async fn reconcile_managed_acl_ownership_serialized(
+            &self,
+            instance: &str,
+            requested_mode: ManagedAttachMode,
+        ) -> Result<(), String> {
+            match managed_acl_ownership_transition(requested_mode) {
+                ManagedAclOwnershipTransition::Preserve => Ok(()),
+                ManagedAclOwnershipTransition::Promote => self.promote(instance).await,
+                ManagedAclOwnershipTransition::Demote => {
+                    self.execute_managed_acl_demotion(instance).await
+                }
+            }
+        }
+
+        async fn execute_managed_acl_demotion(&self, instance: &str) {
+            let old_state = state.state.clone();
+            let (proposed_state, proposed_projection) =
+                build_managed_acl_demotion_target(&old_state, owner_prefix)?;
+            execute_managed_acl_demotion_transaction(
+                || async { quiesce_acl_ct(instance).await?; Ok(()) },
+                |health| state.managed_projection_health = health,
+                || async {
+                    self.publish_acl_projection_locked(
+                        instance,
+                        state,
+                        &old_state,
+                        &proposed_state,
+                        &proposed_projection,
+                        true,
+                        false,
+                        mutations,
+                        current_bank,
+                        next_bank,
+                        port_sets,
+                        created_port_sets,
+                        released_port_sets,
+                        report,
+                    ).await
+                },
+                || async { flush_conntrack_strict_locked(instance).await?; Ok(()) },
+                |mode| async {
+                    state.managed_acl_publication_mode =
+                        ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl;
+                    assert_eq!(mode, ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl);
+                    Ok(())
+                },
+                |receipt| async { compensate_shared_mutation(receipt).await },
+                || async { state.compact_and_publish_state(old_state.clone()).await },
+            ).await
+        }
+
+        async fn verify_and_mark_managed_projection(
+            &self,
+            instance_name: &str,
+        ) -> Result<(), String> {
+            let _runtime_guard = self.lock_runtime_lifecycle().await;
+            let instance = self.get_instance(instance_name).await?;
+            let mut state = instance.write().await;
+            if state.managed_acl_publication_mode
+                != ManagedAclPublicationMode::ManagedAcl
+            {
+                return Err("managed ACL mode changed before verification".to_string());
+            }
+            validate_runtime_gate(state)?;
+            require_tc_acl_ready_locked(state)?;
+            state.managed_projection_health = ManagedProjectionHealth::Verified;
+            Ok(())
+        }
+
+        async fn prepare_managed_registration(
+            &self,
+            mode: ManagedAttachMode,
+            pin_state: RuntimePinState,
+        ) -> Result<PreparedManagedInstance, String> {
+            let registration_is_fresh = registration_is_fresh(&pin_state);
+            persist_fresh_managed_registration_gate_state(
+                &mut state,
+                mode,
+                registration_is_fresh,
+                |snapshot| state.compact_and_publish_state(snapshot),
+            ).await?;
+            Ok(PreparedManagedInstance { state })
+        }
+    """
+    safe_neutron = r"""
+        fn required_neutron_publication_mode(
+            manages_acl: bool,
+        ) -> ManagedAclPublicationMode {
+            if manages_acl {
+                ManagedAclPublicationMode::ManagedAcl
+            } else {
+                ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl
+            }
+        }
+
+        fn unsupported_neutron_managed_domains(domains: &[String]) -> Vec<String> {
+            normalize_managed_domains(domains)
+        }
+
+        async fn restore_neutron_authorities(&self) {
+            let required_publication_mode =
+                required_neutron_publication_mode(port_manages_acl(&port));
+            self.control_plane.mark_neutron_port_authority_if_current(
+                &port.ifname,
+                &port.port_id,
+                &port.managed_domains,
+                generation,
+                required_publication_mode,
+                None,
+            ).await;
+        }
+
+        async fn apply_snapshot_runtime_transaction(state: &State) {
+            for port in update {
+                let unsupported =
+                    unsupported_neutron_managed_domains(&port.managed_domains);
+                if !unsupported.is_empty() {
+                    record_unsupported(unsupported);
+                    continue;
+                }
+                state.registry.attach_neutron(
+                    &port.ifname,
+                    port_manages_acl(&port),
+                ).await?;
+                let required_publication_mode =
+                    required_neutron_publication_mode(port_manages_acl(&port));
+                let required_projection_health = port_manages_acl(&port)
+                    .then_some(ManagedProjectionHealth::Verified);
+                if can_skip() {
+                    state.control_plane.mark_neutron_port_authority_if_current(
+                        &managed.ifname,
+                        &managed.port_id,
+                        &managed.managed_domains,
+                        generation,
+                        required_publication_mode,
+                        required_projection_health,
+                    ).await;
+                    continue;
+                }
+                state.control_plane.mark_neutron_port_authority_if_current(
+                    &managed.ifname,
+                    &managed.port_id,
+                    &managed.managed_domains,
+                    generation,
+                    required_publication_mode,
+                    required_projection_health,
+                ).await;
+            }
+            for port in &attach {
+                let unsupported =
+                    unsupported_neutron_managed_domains(&port.managed_domains);
+                if !unsupported.is_empty() {
+                    record_unsupported(unsupported);
+                    continue;
+                }
+                state.registry.attach_neutron(
+                    &port.ifname,
+                    port_manages_acl(port),
+                ).await?;
+                let required_publication_mode =
+                    required_neutron_publication_mode(port_manages_acl(port));
+                let required_projection_health = port_manages_acl(port)
+                    .then_some(ManagedProjectionHealth::Verified);
+                state.control_plane.mark_neutron_port_authority_if_current(
+                    &managed.ifname,
+                    &managed.port_id,
+                    &managed.managed_domains,
+                    generation,
+                    required_publication_mode,
+                    required_projection_health,
+                ).await;
+            }
+        }
+
+        async fn reconcile_neutron_domains(port: &Port) {
+            let unsupported =
+                unsupported_neutron_managed_domains(&port.managed_domains);
+            if !unsupported.is_empty() {
+                return blocked_domains(unsupported);
+            }
+            reconcile_supported_domains(port).await
+        }
+
+        async fn reconcile_neutron_acl(state: &State) {
+            state.control_plane.replace_owned_acl().await?;
+            if plan.policies.is_empty() {
+                record_bypass_outcome(&outcome);
+            } else {
+                record_enforced_outcome(&outcome);
+            }
+            execute_managed_acl_post_replace_completion(
+                state,
+                || strict_flush(),
+                || publish_gate(),
+                || precommit_fault(),
+                || state.control_plane.verify_and_mark_managed_projection(),
+                || requiesce_gate(),
+            ).await?;
+            Ok(outcome)
+        }
+    """
+
+    def mutate(source, old, new, count=1):
+        if source.count(old) < count:
+            raise SystemExit(
+                "ERROR: Task 6 mutation fixture anchor is missing: " + old
+            )
+        return source.replace(old, new, count)
+
+    safe_errors = _managed_projection_attach_migration_contract_errors(
+        safe_control, safe_tap, safe_neutron
+    )
+    if safe_errors:
+        raise SystemExit(
+            "ERROR: managed attach-migration checker rejected safe source: %s"
+            % safe_errors
+        )
+
+    safe_false_first = mutate(
+        safe_neutron,
+        "            if manages_acl {\n"
+        "                ManagedAclPublicationMode::ManagedAcl\n"
+        "            } else {\n"
+        "                ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl\n"
+        "            }",
+        "            match manages_acl {\n"
+        "                false => ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl,\n"
+        "                true => ManagedAclPublicationMode::ManagedAcl,\n"
+        "            }",
+    )
+    false_first_errors = _managed_projection_attach_migration_contract_errors(
+        safe_control, safe_tap, safe_false_first
+    )
+    if false_first_errors:
+        raise SystemExit(
+            "ERROR: checker rejected false-first required-mode mapping: %s"
+            % false_first_errors
+        )
+
+    def case(
+        label,
+        expected,
+        control=safe_control,
+        tap=safe_tap,
+        neutron=safe_neutron,
+    ):
+        return label, control, tap, neutron, expected
+
+    mutants = [
+        case(
+            "Demote dispatch removed",
+            "must dispatch a Demote transaction",
+            control=mutate(
+                safe_control,
+                "ManagedAclOwnershipTransition::Demote",
+                "ManagedAclOwnershipTransition::PreserveAgain",
+            ),
+        ),
+        case(
+            "serialized ownership relocks lifecycle",
+            "must not reacquire the lifecycle lock",
+            control=mutate(
+                safe_control,
+                "            match managed_acl_ownership_transition(requested_mode) {",
+                "            let _again = self.lock_runtime_lifecycle().await;\n"
+                "            match managed_acl_ownership_transition(requested_mode) {",
+            ),
+        ),
+        case(
+            "demotion uses item purge",
+            "must not call purge_neutron_acl",
+            control=mutate(
+                safe_control,
+                "            let old_state = state.state.clone();",
+                "            purge_neutron_acl(instance).await?;\n"
+                "            let old_state = state.state.clone();",
+            ),
+        ),
+        case(
+            "demotion detaches",
+            "must not call detach",
+            control=mutate(
+                safe_control,
+                "            let old_state = state.state.clone();",
+                "            self.registry.detach(instance).await?;\n"
+                "            let old_state = state.state.clone();",
+            ),
+        ),
+        case(
+            "demotion clears authority",
+            "must not call clear Neutron authority",
+            control=mutate(
+                safe_control,
+                "            let old_state = state.state.clone();",
+                "            self.clear_neutron_port_authority(instance).await;\n"
+                "            let old_state = state.state.clone();",
+            ),
+        ),
+        case(
+            "demotion bypasses exact target builder",
+            "must call build_managed_acl_demotion_target",
+            control=mutate(
+                safe_control,
+                "build_managed_acl_demotion_target(",
+                "build_unchecked_demotion_target(",
+            ),
+        ),
+        case(
+            "demotion bypasses exact executor",
+            "must call execute_managed_acl_demotion_transaction",
+            control=mutate(
+                safe_control,
+                "execute_managed_acl_demotion_transaction(",
+                "execute_unchecked_demotion_transaction(",
+            ),
+        ),
+        case(
+            "demotion publisher is not forced",
+            "must force the shared projection publisher",
+            control=mutate(
+                safe_control,
+                "                        &proposed_projection,\n"
+                "                        true,",
+                "                        &proposed_projection,\n"
+                "                        false,",
+            ),
+        ),
+        case(
+            "demotion callback order swapped",
+            "must wire quiesce, health, publish, flush, mode, compensation, and restore callbacks",
+            control=mutate(
+                safe_control,
+                "                || async { quiesce_acl_ct(instance).await?; Ok(()) },\n"
+                "                |health| state.managed_projection_health = health,",
+                "                |health| state.managed_projection_health = health,\n"
+                "                || async { quiesce_acl_ct(instance).await?; Ok(()) },",
+            ),
+        ),
+        case(
+            "demotion Result discarded",
+            "must propagate demotion transaction Result",
+            control=mutate(
+                safe_control,
+                "            ).await\n        }",
+                "            ).await.ok()\n        }",
+            ),
+        ),
+        case(
+            "non-ACL required mode is wrong",
+            "must map ACL to ManagedAcl and non-ACL to attach-owned standalone",
+            neutron=mutate(
+                safe_neutron,
+                "ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl",
+                "ManagedAclPublicationMode::ManagedAcl",
+            ),
+        ),
+        case(
+            "updated authority omits Verified",
+            "updated port ACL authority commit must require Verified projection health",
+            neutron=mutate(
+                safe_neutron,
+                "                    continue;\n"
+                "                }\n"
+                "                state.control_plane.mark_neutron_port_authority_if_current(\n"
+                "                    &managed.ifname,\n"
+                "                    &managed.port_id,\n"
+                "                    &managed.managed_domains,\n"
+                "                    generation,\n"
+                "                    required_publication_mode,\n"
+                "                    required_projection_health,",
+                "                    continue;\n"
+                "                }\n"
+                "                state.control_plane.mark_neutron_port_authority_if_current(\n"
+                "                    &managed.ifname,\n"
+                "                    &managed.port_id,\n"
+                "                    &managed.managed_domains,\n"
+                "                    generation,\n"
+                "                    required_publication_mode,\n"
+                "                    None,",
+            ),
+        ),
+        case(
+            "completion bypass return",
+            "every managed ACL success path must reach post-replace completion",
+            neutron=mutate(
+                safe_neutron,
+                "            state.control_plane.replace_owned_acl().await?;",
+                "            state.control_plane.replace_owned_acl().await?;\n"
+                "            if abort { return Err(rejected()); }",
+            ),
+        ),
+        case(
+            "completion callback order swapped",
+            "must wire flush, gate, precommit, verify, then requiesce",
+            neutron=mutate(
+                safe_neutron,
+                "                || strict_flush(),\n"
+                "                || publish_gate(),",
+                "                || publish_gate(),\n"
+                "                || strict_flush(),",
+            ),
+        ),
+        case(
+            "completion Result discarded",
+            "must propagate post-replace completion Result",
+            neutron=mutate(
+                safe_neutron,
+                "            ).await?;\n            Ok(outcome)",
+                "            ).await.ok();\n            Ok(outcome)",
+            ),
+        ),
+        case(
+            "verify helper omits lifecycle lock",
+            "must acquire lifecycle then instance write lock",
+            control=mutate(
+                safe_control,
+                "            let _runtime_guard = self.lock_runtime_lifecycle().await;\n",
+                "",
+            ),
+        ),
+        case(
+            "verify helper accepts wrong mode",
+            "must require current ManagedAcl mode",
+            control=mutate(
+                safe_control,
+                "                != ManagedAclPublicationMode::ManagedAcl",
+                "                != ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl",
+            ),
+        ),
+        case(
+            "verify helper drops lifecycle early",
+            "must hold the lifecycle guard through Verified",
+            control=mutate(
+                safe_control,
+                "            validate_runtime_gate(state)?;",
+                "            drop(_runtime_guard);\n"
+                "            validate_runtime_gate(state)?;",
+            ),
+        ),
+        case(
+            "fresh exact helper renamed",
+            "must call persist_fresh_managed_registration_gate_state",
+            control=mutate(
+                safe_control,
+                "persist_fresh_managed_registration_gate_state(",
+                "persist_unchecked_registration_gate(",
+            ),
+        ),
+        case(
+            "fresh argument negated",
+            "must receive state, mode, a positive fresh value, and persistence callback",
+            control=mutate(
+                safe_control,
+                "                registration_is_fresh,\n"
+                "                |snapshot|",
+                "                !registration_is_fresh,\n"
+                "                |snapshot|",
+            ),
+        ),
+        case(
+            "fresh Result discarded",
+            "fresh gate persistence Result must be propagated",
+            control=mutate(
+                safe_control,
+                "            ).await?;\n"
+                "            Ok(PreparedManagedInstance",
+                "            ).await.ok();\n"
+                "            Ok(PreparedManagedInstance",
+            ),
+        ),
+        case(
+            "update classifier runs after ownership",
+            "must run the exact classifier at top level before ownership sync",
+            neutron=mutate(
+                safe_neutron,
+                "                let unsupported =\n"
+                "                    unsupported_neutron_managed_domains(&port.managed_domains);\n",
+                "",
+            ),
+        ),
+        case(
+            "update nonempty guard inverted",
+            "must use a top-level nonempty classifier guard with continue",
+            neutron=mutate(
+                safe_neutron,
+                "                if !unsupported.is_empty() {",
+                "                if unsupported.is_empty() {",
+            ),
+        ),
+        case(
+            "attach classifier nested under false",
+            "must run the exact classifier at top level before ownership sync",
+            neutron=mutate(
+                safe_neutron,
+                "            for port in &attach {\n"
+                "                let unsupported =\n"
+                "                    unsupported_neutron_managed_domains(&port.managed_domains);\n"
+                "                if !unsupported.is_empty() {\n"
+                "                    record_unsupported(unsupported);\n"
+                "                    continue;\n"
+                "                }",
+                "            for port in &attach {\n"
+                "                if false {\n"
+                "                    let unsupported =\n"
+                "                        unsupported_neutron_managed_domains(&port.managed_domains);\n"
+                "                    if !unsupported.is_empty() {\n"
+                "                        record_unsupported(unsupported);\n"
+                "                        continue;\n"
+                "                    }\n"
+                "                }",
+            ),
+        ),
+        case(
+            "domain reconcile uses another classifier",
+            "must reuse unsupported_neutron_managed_domains",
+            neutron=mutate(
+                safe_neutron,
+                "        async fn reconcile_neutron_domains(port: &Port) {\n"
+                "            let unsupported =\n"
+                "                unsupported_neutron_managed_domains(&port.managed_domains);",
+                "        async fn reconcile_neutron_domains(port: &Port) {\n"
+                "            let unsupported =\n"
+                "                unsupported_reconcile_domains(&port.managed_domains);",
+            ),
+        ),
+    ]
+    for label, control, tap, neutron, expected in mutants:
+        errors = _managed_projection_attach_migration_contract_errors(
+            control, tap, neutron
+        )
+        if not any(expected in error for error in errors):
+            raise SystemExit(
+                "ERROR: managed attach-migration checker accepted %s: %s"
+                % (label, errors)
+            )
+    print(
+        "Managed projection attach-migration self-tests: OK (%d scenarios)"
+        % (len(mutants) + 2)
+    )
 
 
 def _managed_cross_domain_group_mutation_contract_errors(
@@ -5513,6 +6841,20 @@ def check_rust_stage_one_tests_present():
         ],
         ["test", "--locked", "-p", "aria-agent", "managed_dual_use_group_"],
         ["test", "--locked", "-p", "aria-agent", "managed_acl_ownership_"],
+        [
+            "test",
+            "--locked",
+            "-p",
+            "aria-agent",
+            "managed_projection_attach_repair_",
+        ],
+        [
+            "test",
+            "--locked",
+            "-p",
+            "aria-agent",
+            "managed_projection_outer_skip_",
+        ],
     )
     for projection_test in projection_tests:
         if projection_test not in RUST_TESTS:
@@ -5578,16 +6920,46 @@ def check_rust_stage_one_tests_present():
             "managed_acl_ownership_",
             6,
         ),
+        (
+            (
+                _read_repo_text(os.path.join("agent", "src", "control_plane.rs")),
+                _read_repo_text(os.path.join("agent", "src", "tap_registry.rs")),
+                _read_repo_text(os.path.join("agent", "src", "neutron_api.rs")),
+            ),
+            "managed_projection_attach_repair_",
+            2,
+        ),
+        (
+            (
+                _read_repo_text(os.path.join("agent", "src", "control_plane.rs")),
+                _read_repo_text(os.path.join("agent", "src", "tap_registry.rs")),
+                _read_repo_text(os.path.join("agent", "src", "neutron_api.rs")),
+            ),
+            "managed_projection_outer_skip_",
+            2,
+        ),
     )
+    _run_managed_projection_attach_migration_mutation_self_tests()
+    projection_code_cache = {}
     for projection_test_source, prefix, minimum in projection_test_sources:
-        projection_test_code = _blank_rust_non_code(projection_test_source)
-        count = len(
-            re.findall(
-                r"#\s*\[\s*(?:tokio\s*::\s*)?test\s*\]\s*"
-                r"(?:async\s+)?fn\s+%s" % re.escape(prefix),
-                projection_test_code,
-            )
+        sources = (
+            projection_test_source
+            if isinstance(projection_test_source, tuple)
+            else (projection_test_source,)
         )
+        count = 0
+        for source in sources:
+            projection_test_code = projection_code_cache.get(source)
+            if projection_test_code is None:
+                projection_test_code = _blank_rust_non_code(source)
+                projection_code_cache[source] = projection_test_code
+            count += len(
+                re.findall(
+                    r"#\s*\[\s*(?:tokio\s*::\s*)?test\s*\]\s*"
+                    r"(?:async\s+)?fn\s+%s" % re.escape(prefix),
+                    projection_test_code,
+                )
+            )
         if count < minimum:
             raise SystemExit(
                 "ERROR: Stage 1 Rust filter %s has %d tests, expected at least %d"
@@ -7749,6 +9121,17 @@ def check_managed_cross_domain_group_mutation_contract():
         raise SystemExit("ERROR: " + errors[0])
 
 
+def check_managed_projection_attach_migration_contract():
+    print("==> checking managed projection attach-migration contract")
+    errors = _managed_projection_attach_migration_contract_errors(
+        _read_repo_text(os.path.join("agent", "src", "control_plane.rs")),
+        _read_repo_text(os.path.join("agent", "src", "tap_registry.rs")),
+        _read_repo_text(os.path.join("agent", "src", "neutron_api.rs")),
+    )
+    if errors:
+        raise SystemExit("ERROR: " + errors[0])
+
+
 def check_ebpf_acl_ingress_boundary():
     print("==> checking eBPF ACL ingress boundary")
     _run_acl_ingress_parser_self_tests()
@@ -7985,6 +9368,7 @@ def main():
     check_rust_stage_one_tests_present()
     check_managed_acl_publication_transaction_contract()
     check_managed_cross_domain_group_mutation_contract()
+    check_managed_projection_attach_migration_contract()
     check_p3_rust_scoped_plan_boundary()
     run([sys.executable, os.path.join("ci", "check_tc_acl_datapath.py")])
     check_ebpf_acl_ingress_boundary()

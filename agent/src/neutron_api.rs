@@ -11479,6 +11479,333 @@ mod tests {
         (managed, status)
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ManagedProjectionOuterSkipFailurePoint {
+        Flush,
+        Publish,
+        Precommit,
+        Verify,
+        Compensation,
+    }
+
+    async fn run_managed_projection_outer_skip_completion(
+        plan: &AclApplyPlan,
+        failure: Option<ManagedProjectionOuterSkipFailurePoint>,
+    ) -> (
+        Result<(), NeutronAclReconcileError>,
+        Vec<&'static str>,
+        ManagedProjectionHealth,
+    ) {
+        let trace = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let health = Arc::new(std::sync::Mutex::new(ManagedProjectionHealth::Unverified));
+
+        let flush_trace = Arc::clone(&trace);
+        let publish_trace = Arc::clone(&trace);
+        let precommit_trace = Arc::clone(&trace);
+        let verify_trace = Arc::clone(&trace);
+        let verify_health = Arc::clone(&health);
+        let compensation_trace = Arc::clone(&trace);
+        let compensation_health = Arc::clone(&health);
+
+        let result = execute_managed_acl_post_replace_completion(
+            plan,
+            move || {
+                let trace = Arc::clone(&flush_trace);
+                async move {
+                    trace.lock().expect("flush trace lock").push("flush");
+                    if failure == Some(ManagedProjectionOuterSkipFailurePoint::Flush) {
+                        Err("forced strict flush failure".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            move || {
+                let trace = Arc::clone(&publish_trace);
+                async move {
+                    trace.lock().expect("publish trace lock").push("publish");
+                    if failure == Some(ManagedProjectionOuterSkipFailurePoint::Publish) {
+                        Err("forced gate publish failure".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            move || {
+                let trace = Arc::clone(&precommit_trace);
+                async move {
+                    trace
+                        .lock()
+                        .expect("precommit trace lock")
+                        .push("precommit");
+                    if failure == Some(ManagedProjectionOuterSkipFailurePoint::Precommit) {
+                        Err("forced precommit failure".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            move || {
+                let trace = Arc::clone(&verify_trace);
+                let health = Arc::clone(&verify_health);
+                async move {
+                    trace.lock().expect("verify trace lock").push("verify");
+                    if failure == Some(ManagedProjectionOuterSkipFailurePoint::Verify)
+                        || failure == Some(ManagedProjectionOuterSkipFailurePoint::Compensation)
+                    {
+                        return Err("forced projection verification failure".to_string());
+                    }
+                    *health.lock().expect("verify health lock") = ManagedProjectionHealth::Verified;
+                    Ok(())
+                }
+            },
+            move || {
+                let trace = Arc::clone(&compensation_trace);
+                let health = Arc::clone(&compensation_health);
+                async move {
+                    trace
+                        .lock()
+                        .expect("compensation trace lock")
+                        .push("quiesce");
+                    *health.lock().expect("compensation health lock") =
+                        ManagedProjectionHealth::Unverified;
+                    if failure == Some(ManagedProjectionOuterSkipFailurePoint::Compensation) {
+                        Err("forced quiesce compensation failure".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+        )
+        .await;
+
+        let observed_trace = trace.lock().expect("completion trace lock").clone();
+        let observed_health = *health.lock().expect("completion health lock");
+        (result, observed_trace, observed_health)
+    }
+
+    #[test]
+    fn managed_projection_outer_skip_required_publication_mode_maps_both_ownership_states_exactly()
+    {
+        assert_eq!(
+            required_neutron_publication_mode(true),
+            ManagedAclPublicationMode::ManagedAcl
+        );
+        assert_eq!(
+            required_neutron_publication_mode(false),
+            ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl
+        );
+    }
+
+    #[test]
+    fn managed_projection_outer_skip_non_acl_authority_commit_requires_attach_owned_mode() {
+        let required_mode = Some(required_neutron_publication_mode(false));
+
+        assert!(
+            crate::control_plane::managed_neutron_authority_confirmation_allowed(
+                true,
+                Some(ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl),
+                required_mode,
+                None,
+                None,
+            )
+        );
+        assert!(
+            !crate::control_plane::managed_neutron_authority_confirmation_allowed(
+                true,
+                Some(ManagedAclPublicationMode::ManagedAcl),
+                required_mode,
+                Some(ManagedProjectionHealth::Verified),
+                None,
+            )
+        );
+        assert!(
+            !crate::control_plane::managed_neutron_authority_confirmation_allowed(
+                true,
+                Some(ManagedAclPublicationMode::StandaloneCompatibility),
+                required_mode,
+                None,
+                None,
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_projection_outer_skip_empty_and_nonempty_acl_share_one_completion_executor() {
+        let empty = AclApplyPlan::default();
+        let nonempty = AclApplyPlan {
+            groups: vec![AclGroupPlan {
+                name: "neutron:port-1:src:selector:0".to_string(),
+                cidrs: vec!["10.58.159.2/32".to_string()],
+            }],
+            policies: vec![AclPolicyPlan {
+                src_group: "neutron:port-1:src:selector:0".to_string(),
+                dst_group: "any".to_string(),
+                proto: 6,
+                action: 1,
+                direction: 1,
+                ports: None,
+            }],
+            conntrack_enabled: Some(true),
+            force_bypass_reason: None,
+        };
+
+        for (label, plan) in [("empty", &empty), ("nonempty", &nonempty)] {
+            let (result, trace, health) =
+                run_managed_projection_outer_skip_completion(plan, None).await;
+            assert!(result.is_ok(), "{label} completion must succeed");
+            assert_eq!(
+                trace,
+                vec!["flush", "publish", "precommit", "verify"],
+                "{label} ACL completion must use the same ordered executor"
+            );
+            assert_eq!(
+                health,
+                ManagedProjectionHealth::Verified,
+                "{label} ACL completion may verify only after every prior step"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_projection_outer_skip_completion_failures_requiesce_and_never_verify() {
+        let cases = [
+            (
+                ManagedProjectionOuterSkipFailurePoint::Flush,
+                vec!["flush", "quiesce"],
+                "forced strict flush failure",
+            ),
+            (
+                ManagedProjectionOuterSkipFailurePoint::Publish,
+                vec!["flush", "publish", "quiesce"],
+                "forced gate publish failure",
+            ),
+            (
+                ManagedProjectionOuterSkipFailurePoint::Precommit,
+                vec!["flush", "publish", "precommit", "quiesce"],
+                "forced precommit failure",
+            ),
+            (
+                ManagedProjectionOuterSkipFailurePoint::Verify,
+                vec!["flush", "publish", "precommit", "verify", "quiesce"],
+                "forced projection verification failure",
+            ),
+        ];
+
+        for (failure, expected_trace, expected_error) in cases {
+            let (result, trace, health) = run_managed_projection_outer_skip_completion(
+                &AclApplyPlan::default(),
+                Some(failure),
+            )
+            .await;
+            let error = result.expect_err("injected completion step must fail");
+            assert_eq!(trace, expected_trace, "failure point {failure:?}");
+            assert_eq!(
+                health,
+                ManagedProjectionHealth::Unverified,
+                "failure point {failure:?} must not publish verified health"
+            );
+            assert!(error.details.contains(expected_error));
+            assert_eq!(error.effective_action, "bypass");
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_projection_outer_skip_compensation_failure_stays_unverified_and_visible() {
+        let (result, trace, health) = run_managed_projection_outer_skip_completion(
+            &AclApplyPlan::default(),
+            Some(ManagedProjectionOuterSkipFailurePoint::Compensation),
+        )
+        .await;
+        let error = result.expect_err("failed requiesce must fail completion");
+
+        assert_eq!(
+            trace,
+            vec!["flush", "publish", "precommit", "verify", "quiesce"]
+        );
+        assert_eq!(health, ManagedProjectionHealth::Unverified);
+        assert!(error
+            .details
+            .contains("forced projection verification failure"));
+        assert!(error
+            .details
+            .contains("forced quiesce compensation failure"));
+        assert_eq!(error.effective_action, "enforce");
+    }
+
+    #[test]
+    fn managed_projection_outer_skip_clean_noop_preserves_only_prior_verified_health() {
+        let (managed, status) = managed_projection_health_skip_fixture(vec!["acl".to_string()]);
+        for (health, may_skip) in [
+            (ManagedProjectionHealth::Verified, true),
+            (ManagedProjectionHealth::Unverified, false),
+            (ManagedProjectionHealth::RepairRequired, false),
+        ] {
+            assert_eq!(
+                can_skip_neutron_domain_reconcile(
+                    Some(&managed),
+                    Some(&status),
+                    &managed,
+                    false,
+                    Some(health),
+                ),
+                may_skip,
+                "clean equal ACL reconcile with prior {health:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_projection_attach_repair_supported_domain_aliases_pass_preflight() {
+        let cases = [
+            Vec::<String>::new(),
+            vec!["attach".to_string()],
+            vec!["attach".to_string(), "acl".to_string()],
+            vec![
+                " ACL ".to_string(),
+                "policy".to_string(),
+                "groups".to_string(),
+                "address-sets".to_string(),
+                "aria-acl".to_string(),
+            ],
+        ];
+
+        for domains in cases {
+            assert_eq!(
+                unsupported_neutron_managed_domains(&domains),
+                Vec::<String>::new(),
+                "normalized attach/ACL domains must pass preflight: {domains:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_projection_attach_repair_unsupported_domains_are_deterministic() {
+        let domains = vec![
+            "qos".to_string(),
+            "aria-qos".to_string(),
+            "mirror".to_string(),
+            "aria_mirror".to_string(),
+            "config".to_string(),
+            "conntrack".to_string(),
+            "unknown-domain".to_string(),
+            "QOS".to_string(),
+            "attach".to_string(),
+            "acl".to_string(),
+        ];
+
+        assert_eq!(
+            unsupported_neutron_managed_domains(&domains),
+            vec![
+                "config".to_string(),
+                "conntrack".to_string(),
+                "mirror".to_string(),
+                "qos".to_string(),
+                "unknown_domain".to_string(),
+            ]
+        );
+    }
+
     #[test]
     fn managed_projection_health_verified_acl_may_skip_equal_scoped_reconcile() {
         let (managed, status) = managed_projection_health_skip_fixture(vec!["acl".to_string()]);

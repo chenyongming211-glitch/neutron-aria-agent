@@ -456,6 +456,15 @@ WAL, and standalone tests unchanged.
 
 ## Task 6: Close restart, attach migration, demotion, and outer-skip repair
 
+**Execution note (2026-07-17):** The attach drift classifier and
+projection-health-aware outer-skip behavior expected to provide this task's
+original RED were completed by earlier batches. The remaining RED therefore
+targets `ManagedAcl` to attach-owned standalone demotion, exact required-mode
+confirmation, post-flush `Verified` publication, a durably disabled fresh
+attach-only gate, and unsupported-domain preflight before ownership sync. This
+narrows the execution checkpoint without changing the approved design or
+ordering below.
+
 **Files:**
 
 - Modify: `agent/src/control_plane.rs`
@@ -488,8 +497,11 @@ Use prefixes `managed_projection_attach_repair_` and
 ### Step 2: Push and record RED
 
 Commit as `test: define managed selector restart repair`. Expected failure:
-current preexisting inventory treats explainable projection drift as fatal and
-outer scoped skip has no health input.
+the remaining production path has no managed-to-attach-only demotion
+transaction, exact non-ACL required mode, shared post-replace completion, fresh
+attach-only durable gate, or pre-ownership unsupported-domain preflight. The
+already-landed attach classifier and health-aware skip cases remain regression
+coverage in this test batch.
 
 ### Step 3: Implement one classifier and one repair path
 

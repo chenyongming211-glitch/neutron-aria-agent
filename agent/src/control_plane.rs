@@ -7435,6 +7435,581 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn managed_projection_attach_repair_fresh_neutron_state_restarts_clean() {
+        for acl_managed in [true, false] {
+            let mode = ManagedAttachMode::NeutronResyncRequired { acl_managed };
+            let mut state = FirewallState::default();
+            state.tap_id = 41;
+            assert!(state.conntrack_enabled);
+            assert!(state.acl_enabled);
+            let persisted = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let persisted_capture = persisted.clone();
+
+            persist_fresh_managed_registration_gate_state(
+                &mut state,
+                mode,
+                true,
+                move |snapshot: FirewallState| {
+                    persisted_capture.borrow_mut().push(snapshot);
+                    std::future::ready(Ok::<(), String>(()))
+                },
+            )
+            .await
+            .expect("fresh Neutron registration gate state must persist");
+
+            assert!(!state.conntrack_enabled);
+            assert!(!state.acl_enabled);
+            let persisted_snapshot = {
+                let snapshots = persisted.borrow();
+                assert_eq!(snapshots.len(), 1);
+                snapshots[0].clone()
+            };
+            assert_eq!(
+                serde_json::to_value(&persisted_snapshot).unwrap(),
+                serde_json::to_value(&state).unwrap(),
+                "persistence must receive the exact mutated in-memory snapshot"
+            );
+
+            let reloaded: FirewallState = serde_json::from_slice(
+                &serde_json::to_vec(&persisted_snapshot).expect("snapshot must serialize"),
+            )
+            .expect("persisted snapshot must reload");
+            let projection_mode = managed_group_projection_mode(mode);
+            let gate_disposition = classify_runtime_gate_state(
+                projection_mode,
+                0,
+                0,
+                reloaded.conntrack_enabled as u8,
+                reloaded.acl_enabled as u8,
+            )
+            .expect("false/false replay must validate as the exact desired gate");
+            assert_eq!(
+                gate_disposition,
+                aria_core::ebpf_ops::RuntimeGateDisposition::Desired
+            );
+            let lifecycle = managed_acl_registration_lifecycle(
+                mode,
+                Some(ProjectionDrift::Clean),
+                Some(gate_disposition),
+            )
+            .expect("reloaded fresh state must classify clean");
+            assert_eq!(
+                lifecycle.publication_mode,
+                if acl_managed {
+                    ManagedAclPublicationMode::ManagedAcl
+                } else {
+                    ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl
+                }
+            );
+            assert_eq!(
+                lifecycle.projection_health,
+                ManagedProjectionHealth::Verified
+            );
+            assert_eq!(
+                managed_runtime_activation(
+                    mode,
+                    false,
+                    reloaded.conntrack_enabled,
+                    reloaded.acl_enabled,
+                ),
+                ManagedRuntimeActivation::AwaitNeutronResync {
+                    require_tc_acl_links: acl_managed,
+                },
+                "fresh replay must remain fail-closed until Neutron resync"
+            );
+            assert_eq!(
+                managed_runtime_activation(
+                    mode,
+                    true,
+                    reloaded.conntrack_enabled,
+                    reloaded.acl_enabled,
+                ),
+                ManagedRuntimeActivation::PreserveVerifiedLive,
+                "the next exact restart must not require another repair"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_projection_attach_repair_fresh_state_persistence_is_strict_and_scoped() {
+        for acl_managed in [true, false] {
+            let mut state = FirewallState::default();
+            let captured = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let captured_snapshot = captured.clone();
+
+            let error = persist_fresh_managed_registration_gate_state(
+                &mut state,
+                ManagedAttachMode::NeutronResyncRequired { acl_managed },
+                true,
+                move |snapshot: FirewallState| {
+                    *captured_snapshot.borrow_mut() = Some(snapshot);
+                    std::future::ready(Err("forced fresh gate persistence failure".to_string()))
+                },
+            )
+            .await
+            .expect_err("fresh gate persistence failure must abort registration");
+
+            assert_eq!(error, "forced fresh gate persistence failure");
+            assert!(!state.conntrack_enabled);
+            assert!(!state.acl_enabled);
+            let captured = captured
+                .borrow()
+                .clone()
+                .expect("the fail-closed snapshot must reach persistence");
+            assert!(!captured.conntrack_enabled);
+            assert!(!captured.acl_enabled);
+            assert_eq!(
+                serde_json::to_value(captured).unwrap(),
+                serde_json::to_value(&state).unwrap()
+            );
+        }
+
+        for (mode, fresh_registration) in [
+            (ManagedAttachMode::StandaloneRestoreAfterTcAttach, true),
+            (
+                ManagedAttachMode::NeutronResyncRequired { acl_managed: true },
+                false,
+            ),
+            (
+                ManagedAttachMode::NeutronResyncRequired { acl_managed: false },
+                false,
+            ),
+        ] {
+            let mut state = FirewallState::default();
+            state.conntrack_enabled = true;
+            state.acl_enabled = false;
+            let original = serde_json::to_value(&state).unwrap();
+            let persist_calls = std::rc::Rc::new(std::cell::Cell::new(0));
+            let observed_calls = persist_calls.clone();
+
+            persist_fresh_managed_registration_gate_state(
+                &mut state,
+                mode,
+                fresh_registration,
+                move |_snapshot: FirewallState| {
+                    observed_calls.set(observed_calls.get() + 1);
+                    std::future::ready(Err("unexpected persistence".to_string()))
+                },
+            )
+            .await
+            .expect("standalone restore and non-fresh registration must be no-ops");
+
+            assert_eq!(persist_calls.get(), 0);
+            assert_eq!(serde_json::to_value(&state).unwrap(), original);
+            assert!(state.conntrack_enabled);
+            assert!(!state.acl_enabled);
+        }
+    }
+
+    #[test]
+    fn managed_projection_attach_repair_demotion_target_purges_exclusive_acl_state() {
+        let owner_prefix = "neutron:port-1:";
+        let acl_only_name = "neutron:port-1:src:acl-only";
+        let retained_name = "neutron:port-1:dst:retained";
+        let mut old_state = FirewallState::default();
+        managed_cross_domain_insert_group(&mut old_state, acl_only_name, 30, &["10.0.0.0/24"]);
+        managed_cross_domain_insert_group(&mut old_state, retained_name, 31, &["10.0.1.0/24"]);
+        managed_cross_domain_insert_group(&mut old_state, "local-observer", 40, &["192.0.2.0/24"]);
+        old_state
+            .qos_rules
+            .push(managed_cross_domain_qos_reference(retained_name, 31));
+        old_state
+            .mirror_rules
+            .push(managed_cross_domain_mirror_reference(retained_name, 31));
+        let released_bitmap = old_state
+            .apply_add_rule(30, 31, libc::IPPROTO_TCP as u8, 1, Some("443"), 0)
+            .expect("owned ACL port policy must materialize")
+            .bitmap_idx
+            .expect("port policy must allocate a bitmap");
+        old_state
+            .apply_add_rule(40, 0, libc::IPPROTO_UDP as u8, 0, None, 1)
+            .expect("exclusive ACL-domain fixture must include a non-prefix rule");
+
+        let target = build_managed_acl_demotion_target(&old_state, owner_prefix)
+            .expect("valid managed state must produce a standalone demotion target");
+
+        assert!(target.publication_required);
+        assert!(target.final_state.rules.is_empty());
+        assert_eq!(
+            target
+                .released_port_sets
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![released_bitmap]
+        );
+        assert!(target
+            .final_state
+            .is_bitmap_index_quarantined(released_bitmap));
+        assert!(!target
+            .final_state
+            .free_bitmap_indices
+            .contains(&released_bitmap));
+        assert!(!target.final_state.groups.contains_key(acl_only_name));
+        let retained = &target.final_state.groups[retained_name];
+        assert_eq!(retained.id, 31);
+        assert_eq!(retained.cidrs, vec!["10.0.1.0/24".to_string()]);
+        assert_eq!(target.final_state.qos_rules[0].group_id, 31);
+        assert_eq!(target.final_state.mirror_rules[0].src_group_id, 31);
+        assert_eq!(target.final_state.groups["local-observer"].id, 40);
+        assert!(!target.final_state.conntrack_enabled);
+        assert!(!target.final_state.acl_enabled);
+
+        let expected_shadow = aria_core::ebpf_ops::build_runtime_group_map_entries(
+            &target.final_state,
+            GroupProjectionMode::StandaloneCompatibility,
+        )
+        .expect("the final state must compile as an all-group standalone projection");
+        assert_eq!(target.standalone_shadow_entries, expected_shadow);
+        assert_eq!(
+            target.standalone_shadow_entries.acl_src,
+            target.standalone_shadow_entries.general_src
+        );
+        assert_eq!(
+            target.standalone_shadow_entries.acl_dst,
+            target.standalone_shadow_entries.general_dst
+        );
+        for group_id in [31, 40] {
+            assert!(target
+                .standalone_shadow_entries
+                .acl_src
+                .iter()
+                .any(|entry| entry.group_id == group_id));
+            assert!(target
+                .standalone_shadow_entries
+                .acl_dst
+                .iter()
+                .any(|entry| entry.group_id == group_id));
+        }
+    }
+
+    #[test]
+    fn managed_projection_attach_repair_empty_demotion_target_is_deterministic() {
+        let old_state = FirewallState::default();
+
+        let first = build_managed_acl_demotion_target(&old_state, "neutron:port-1:")
+            .expect("an empty managed ACL must still produce a demotion target");
+        let second = build_managed_acl_demotion_target(&old_state, "neutron:port-1:")
+            .expect("the same empty state must remain valid");
+
+        assert!(first.publication_required);
+        assert!(!first.final_state.conntrack_enabled);
+        assert!(!first.final_state.acl_enabled);
+        assert!(first.final_state.rules.is_empty());
+        assert!(first.released_port_sets.is_empty());
+        assert_eq!(
+            first.standalone_shadow_entries,
+            aria_core::ebpf_ops::build_runtime_group_map_entries(
+                &first.final_state,
+                GroupProjectionMode::StandaloneCompatibility,
+            )
+            .expect("the empty standalone projection must compile")
+        );
+        assert_eq!(
+            serde_json::to_value(&first.final_state).unwrap(),
+            serde_json::to_value(&second.final_state).unwrap()
+        );
+        assert_eq!(
+            first.standalone_shadow_entries,
+            second.standalone_shadow_entries
+        );
+        assert_eq!(first.released_port_sets, second.released_port_sets);
+        assert!(second.publication_required);
+    }
+
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum ManagedAclDemotionInjectedFailure {
+        None,
+        Publish,
+        Persist,
+        StrictFlush,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum ManagedAclDemotionTestEvent {
+        Quiesce,
+        SetHealth(ManagedProjectionHealth),
+        PublishPersistStandaloneProjection,
+        StrictFlush,
+        CommitMode(ManagedAclPublicationMode),
+        Compensate(ManagedAclDemotionTestReceipt),
+        RestoreDurable,
+    }
+
+    #[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    enum ManagedAclDemotionTestReceipt {
+        GeneralSrc,
+        GeneralDst,
+        ActiveBank,
+    }
+
+    impl ManagedAclDemotionTestReceipt {
+        fn label(self) -> &'static str {
+            match self {
+                Self::GeneralSrc => "general-src",
+                Self::GeneralDst => "general-dst",
+                Self::ActiveBank => "active-bank",
+            }
+        }
+    }
+
+    struct ManagedAclDemotionTestOutcome {
+        result: Result<(), String>,
+        events: Vec<ManagedAclDemotionTestEvent>,
+        publication_mode: ManagedAclPublicationMode,
+        projection_health: ManagedProjectionHealth,
+    }
+
+    async fn run_managed_acl_demotion_test(
+        failure: ManagedAclDemotionInjectedFailure,
+        failed_compensations: &[ManagedAclDemotionTestReceipt],
+        fail_durable_restore: bool,
+    ) -> ManagedAclDemotionTestOutcome {
+        // The shared publisher owns staging, bank switch, persistence, and its
+        // internal failure rollback. A successful receipt is retained only so
+        // a later strict-flush failure can restore the pre-demotion projection.
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let publication_mode =
+            std::rc::Rc::new(std::cell::Cell::new(ManagedAclPublicationMode::ManagedAcl));
+        let projection_health =
+            std::rc::Rc::new(std::cell::Cell::new(ManagedProjectionHealth::Verified));
+        let failed_compensations = std::rc::Rc::new(
+            failed_compensations
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+        );
+
+        let quiesce_events = events.clone();
+        let health_events = events.clone();
+        let health_state = projection_health.clone();
+        let publish_events = events.clone();
+        let flush_events = events.clone();
+        let commit_events = events.clone();
+        let committed_mode = publication_mode.clone();
+        let compensation_events = events.clone();
+        let compensation_failures = failed_compensations.clone();
+        let restore_events = events.clone();
+
+        let result = execute_managed_acl_demotion_transaction(
+            move || {
+                quiesce_events
+                    .borrow_mut()
+                    .push(ManagedAclDemotionTestEvent::Quiesce);
+                std::future::ready(Ok::<(), String>(()))
+            },
+            move |health| {
+                health_state.set(health);
+                health_events
+                    .borrow_mut()
+                    .push(ManagedAclDemotionTestEvent::SetHealth(health));
+            },
+            move || {
+                publish_events
+                    .borrow_mut()
+                    .push(ManagedAclDemotionTestEvent::PublishPersistStandaloneProjection);
+                std::future::ready(match failure {
+                    ManagedAclDemotionInjectedFailure::Publish => {
+                        Err("forced shared publication failure".to_string())
+                    }
+                    ManagedAclDemotionInjectedFailure::Persist => {
+                        Err("forced persistence failure".to_string())
+                    }
+                    ManagedAclDemotionInjectedFailure::None
+                    | ManagedAclDemotionInjectedFailure::StrictFlush => Ok(vec![
+                        ManagedAclDemotionTestReceipt::GeneralSrc,
+                        ManagedAclDemotionTestReceipt::GeneralDst,
+                        ManagedAclDemotionTestReceipt::ActiveBank,
+                    ]),
+                })
+            },
+            move || {
+                flush_events
+                    .borrow_mut()
+                    .push(ManagedAclDemotionTestEvent::StrictFlush);
+                std::future::ready(
+                    if failure == ManagedAclDemotionInjectedFailure::StrictFlush {
+                        Err("forced strict flush failure".to_string())
+                    } else {
+                        Ok(())
+                    },
+                )
+            },
+            move |mode| {
+                committed_mode.set(mode);
+                commit_events
+                    .borrow_mut()
+                    .push(ManagedAclDemotionTestEvent::CommitMode(mode));
+            },
+            move |receipt: &ManagedAclDemotionTestReceipt| {
+                compensation_events
+                    .borrow_mut()
+                    .push(ManagedAclDemotionTestEvent::Compensate(*receipt));
+                std::future::ready(if compensation_failures.contains(receipt) {
+                    Err(format!("forced {} compensation failure", receipt.label()))
+                } else {
+                    Ok(())
+                })
+            },
+            move || {
+                restore_events
+                    .borrow_mut()
+                    .push(ManagedAclDemotionTestEvent::RestoreDurable);
+                std::future::ready(if fail_durable_restore {
+                    Err("forced durable restore failure".to_string())
+                } else {
+                    Ok(())
+                })
+            },
+        )
+        .await;
+
+        let events_snapshot = events.borrow().clone();
+        let final_mode = publication_mode.get();
+        let final_health = projection_health.get();
+        ManagedAclDemotionTestOutcome {
+            result,
+            events: events_snapshot,
+            publication_mode: final_mode,
+            projection_health: final_health,
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_projection_attach_repair_demotion_commits_mode_after_strict_flush() {
+        let outcome =
+            run_managed_acl_demotion_test(ManagedAclDemotionInjectedFailure::None, &[], false)
+                .await;
+
+        assert_eq!(outcome.result, Ok(()));
+        assert_eq!(
+            outcome.events,
+            vec![
+                ManagedAclDemotionTestEvent::Quiesce,
+                ManagedAclDemotionTestEvent::SetHealth(ManagedProjectionHealth::Unverified),
+                ManagedAclDemotionTestEvent::PublishPersistStandaloneProjection,
+                ManagedAclDemotionTestEvent::StrictFlush,
+                ManagedAclDemotionTestEvent::CommitMode(
+                    ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl,
+                ),
+            ]
+        );
+        assert_eq!(
+            outcome.publication_mode,
+            ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl
+        );
+        assert_eq!(
+            outcome.projection_health,
+            ManagedProjectionHealth::Unverified
+        );
+        assert!(managed_neutron_authority_confirmation_allowed(
+            true,
+            Some(outcome.publication_mode),
+            None,
+            None,
+            None,
+        ));
+    }
+
+    #[tokio::test]
+    async fn managed_projection_attach_repair_demotion_failure_preserves_mode_and_health() {
+        for (failure, expected_error) in [
+            (
+                ManagedAclDemotionInjectedFailure::Publish,
+                "forced shared publication failure",
+            ),
+            (
+                ManagedAclDemotionInjectedFailure::Persist,
+                "forced persistence failure",
+            ),
+            (
+                ManagedAclDemotionInjectedFailure::StrictFlush,
+                "forced strict flush failure",
+            ),
+        ] {
+            let outcome = run_managed_acl_demotion_test(failure, &[], false).await;
+
+            let error = outcome.result.expect_err("demotion fault must fail closed");
+            assert!(error.contains(expected_error), "{error}");
+            assert_eq!(
+                outcome.publication_mode,
+                ManagedAclPublicationMode::ManagedAcl
+            );
+            assert_eq!(
+                outcome.projection_health,
+                ManagedProjectionHealth::Unverified
+            );
+            assert!(!outcome
+                .events
+                .iter()
+                .any(|event| matches!(event, ManagedAclDemotionTestEvent::CommitMode(_))));
+            assert!(managed_neutron_authority_confirmation_allowed(
+                true,
+                Some(outcome.publication_mode),
+                None,
+                Some(outcome.projection_health),
+                None,
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_projection_attach_repair_demotion_compensation_is_reverse_attempt_all() {
+        let outcome = run_managed_acl_demotion_test(
+            ManagedAclDemotionInjectedFailure::StrictFlush,
+            &[
+                ManagedAclDemotionTestReceipt::ActiveBank,
+                ManagedAclDemotionTestReceipt::GeneralDst,
+            ],
+            true,
+        )
+        .await;
+
+        let error = outcome
+            .result
+            .expect_err("strict flush failure must roll back the demotion publication");
+        assert!(error.contains("forced strict flush failure"), "{error}");
+        assert!(
+            error.contains("forced active-bank compensation failure"),
+            "{error}"
+        );
+        assert!(
+            error.contains("forced general-dst compensation failure"),
+            "{error}"
+        );
+        assert!(error.contains("forced durable restore failure"), "{error}");
+        let compensation_events: Vec<_> = outcome
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    ManagedAclDemotionTestEvent::Compensate(_)
+                        | ManagedAclDemotionTestEvent::RestoreDurable
+                )
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            compensation_events,
+            vec![
+                ManagedAclDemotionTestEvent::Compensate(ManagedAclDemotionTestReceipt::ActiveBank,),
+                ManagedAclDemotionTestEvent::Compensate(ManagedAclDemotionTestReceipt::GeneralDst,),
+                ManagedAclDemotionTestEvent::Compensate(ManagedAclDemotionTestReceipt::GeneralSrc,),
+                ManagedAclDemotionTestEvent::RestoreDurable,
+            ]
+        );
+        assert_eq!(
+            outcome.publication_mode,
+            ManagedAclPublicationMode::ManagedAcl
+        );
+        assert_eq!(
+            outcome.projection_health,
+            ManagedProjectionHealth::Unverified
+        );
+    }
+
     #[test]
     fn neutron_acl_gate_serialization_requires_tc_only_for_enabling_writes() {
         assert!(!neutron_acl_gate_requires_tc(false, false));

@@ -610,6 +610,28 @@ mod tests {
     }
 
     #[test]
+    fn managed_projection_attach_repair_managed_attach_only_requests_explicit_demotion() {
+        for projection_health in [
+            ManagedProjectionHealth::Verified,
+            ManagedProjectionHealth::Unverified,
+            ManagedProjectionHealth::RepairRequired,
+        ] {
+            assert_eq!(
+                managed_acl_promotion_action(
+                    ManagedAclPublicationMode::ManagedAcl,
+                    projection_health,
+                    ManagedAttachMode::NeutronResyncRequired { acl_managed: false },
+                ),
+                ManagedAclPromotionAction::Demote {
+                    next_mode: ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl,
+                    next_health: ManagedProjectionHealth::Unverified,
+                },
+                "managed ACL ownership must not silently preserve when ACL leaves the requested domains"
+            );
+        }
+    }
+
+    #[test]
     fn managed_acl_ownership_repeated_managed_attach_preserves_verified_idempotence() {
         let action = managed_acl_promotion_action(
             ManagedAclPublicationMode::ManagedAcl,
