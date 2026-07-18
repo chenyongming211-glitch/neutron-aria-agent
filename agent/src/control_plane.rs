@@ -2741,6 +2741,109 @@ impl ControlPlaneError {
     }
 }
 
+fn local_write_block_reason(
+    domain: LocalWriteDomain,
+    publication_mode: Option<ManagedAclPublicationMode>,
+    authority: Option<&NeutronPortAuthority>,
+) -> Option<Option<String>> {
+    match (publication_mode, domain) {
+        (Some(ManagedAclPublicationMode::ManagedAcl), LocalWriteDomain::Acl) => Some(None),
+        (Some(ManagedAclPublicationMode::ManagedAcl), LocalWriteDomain::Conntrack) => {
+            Some(Some("acl".to_string()))
+        }
+        _ => authority.and_then(|authority| {
+            let domain_name = domain.as_str();
+            if authority.managed_domains.contains(domain_name) {
+                Some(None)
+            } else if domain == LocalWriteDomain::Conntrack
+                && authority.managed_domains.contains("acl")
+            {
+                Some(Some("acl".to_string()))
+            } else {
+                None
+            }
+        }),
+    }
+}
+
+fn ensure_serialized_local_write_allowed(
+    instance: &str,
+    domain: LocalWriteDomain,
+    publication_mode: Option<ManagedAclPublicationMode>,
+    authority: Option<&NeutronPortAuthority>,
+) -> Result<(), ControlPlaneError> {
+    if let Some(dependency_of) = local_write_block_reason(domain, publication_mode, authority) {
+        return Err(ControlPlaneError::LocalWriteBlocked {
+            instance: instance.to_string(),
+            domain: domain.as_str().to_string(),
+            dependency_of,
+        });
+    }
+    Ok(())
+}
+
+fn requested_local_config_write_domains(
+    conntrack: Option<bool>,
+    monitoring: Option<bool>,
+    acl: Option<bool>,
+    qos: Option<bool>,
+    mirror: Option<bool>,
+    tcprt: Option<bool>,
+    ssl: Option<bool>,
+) -> Vec<LocalWriteDomain> {
+    let mut domains = Vec::new();
+    if conntrack.is_some() {
+        domains.push(LocalWriteDomain::Conntrack);
+    }
+    if monitoring.is_some() {
+        domains.push(LocalWriteDomain::Config);
+    }
+    if acl.is_some() {
+        domains.push(LocalWriteDomain::Acl);
+    }
+    if qos.is_some() {
+        domains.push(LocalWriteDomain::Qos);
+    }
+    if mirror.is_some() {
+        domains.push(LocalWriteDomain::Mirror);
+    }
+    if tcprt.is_some() {
+        domains.push(LocalWriteDomain::Tcprt);
+    }
+    if ssl.is_some() {
+        domains.push(LocalWriteDomain::Ssl);
+    }
+    domains
+}
+
+fn local_group_write_block_reason(
+    group_name: &str,
+    publication_mode: Option<ManagedAclPublicationMode>,
+    authority: Option<&NeutronPortAuthority>,
+) -> bool {
+    group_name
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("neutron:")
+        && (publication_mode == Some(ManagedAclPublicationMode::ManagedAcl) || authority.is_some())
+}
+
+fn ensure_serialized_local_group_write_allowed(
+    instance: &str,
+    group_name: &str,
+    publication_mode: Option<ManagedAclPublicationMode>,
+    authority: Option<&NeutronPortAuthority>,
+) -> Result<(), ControlPlaneError> {
+    if local_group_write_block_reason(group_name, publication_mode, authority) {
+        return Err(ControlPlaneError::LocalWriteBlocked {
+            instance: instance.to_string(),
+            domain: LocalWriteDomain::Acl.as_str().to_string(),
+            dependency_of: None,
+        });
+    }
+    Ok(())
+}
+
 impl ControlPlane {
     fn tc_acl_link_health_locked(
         instance: &str,
@@ -3841,32 +3944,36 @@ impl ControlPlane {
         self.neutron_authorities.read().await.get(instance).cloned()
     }
 
+    async fn local_publication_mode_snapshot(
+        &self,
+        instance: &str,
+    ) -> Option<ManagedAclPublicationMode> {
+        let instance_state = {
+            let instances = self.instances.read().await;
+            instances.get(instance).cloned()
+        }?;
+        let state = instance_state.read().await;
+        Some(state.managed_acl_publication_mode)
+    }
+
     pub async fn ensure_local_write_allowed(
         &self,
         instance: &str,
         domain: LocalWriteDomain,
     ) -> Result<(), ControlPlaneError> {
-        let domain_name = domain.as_str();
-        let authorities = self.neutron_authorities.read().await;
-        let block = authorities.get(instance).and_then(|authority| {
-            if authority.managed_domains.contains(domain_name) {
-                Some(None)
-            } else if domain == LocalWriteDomain::Conntrack
-                && authority.managed_domains.contains("acl")
-            {
-                Some(Some("acl".to_string()))
+        let publication_mode =
+            if matches!(domain, LocalWriteDomain::Acl | LocalWriteDomain::Conntrack) {
+                self.local_publication_mode_snapshot(instance).await
             } else {
                 None
-            }
-        });
-        if let Some(dependency_of) = block {
-            return Err(ControlPlaneError::LocalWriteBlocked {
-                instance: instance.to_string(),
-                domain: domain_name.to_string(),
-                dependency_of,
-            });
-        }
-        Ok(())
+            };
+        let authority = self.neutron_authorities.read().await.get(instance).cloned();
+        ensure_serialized_local_write_allowed(
+            instance,
+            domain,
+            publication_mode,
+            authority.as_ref(),
+        )
     }
 
     pub async fn ensure_local_group_write_allowed(
@@ -3874,21 +3981,14 @@ impl ControlPlane {
         instance: &str,
         group_name: &str,
     ) -> Result<(), ControlPlaneError> {
-        if group_name
-            .trim()
-            .to_ascii_lowercase()
-            .starts_with("neutron:")
-        {
-            let authorities = self.neutron_authorities.read().await;
-            if authorities.contains_key(instance) {
-                return Err(ControlPlaneError::LocalWriteBlocked {
-                    instance: instance.to_string(),
-                    domain: "acl".to_string(),
-                    dependency_of: None,
-                });
-            }
-        }
-        Ok(())
+        let publication_mode = self.local_publication_mode_snapshot(instance).await;
+        let authority = self.neutron_authorities.read().await.get(instance).cloned();
+        ensure_serialized_local_group_write_allowed(
+            instance,
+            group_name,
+            publication_mode,
+            authority.as_ref(),
+        )
     }
 
     pub async fn get_trace_runtime_status(&self) -> HashMap<String, TraceRuntimeStatusSnapshot> {
@@ -5831,9 +5931,18 @@ impl ControlPlane {
         cidr: &str,
     ) -> Result<u32, ControlPlaneError> {
         let _lifecycle_guard = self.lock_runtime_lifecycle().await;
-        let owner_prefix = self.managed_local_owner_prefix_snapshot(instance).await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        let authority = self.neutron_authorities.read().await.get(instance).cloned();
+        ensure_serialized_local_group_write_allowed(
+            instance,
+            name,
+            Some(state.managed_acl_publication_mode),
+            authority.as_ref(),
+        )?;
+        let owner_prefix = authority
+            .as_ref()
+            .map(|authority| format!("neutron:{}:", authority.port_id));
         match state.managed_acl_publication_mode {
             ManagedAclPublicationMode::StandaloneCompatibility
             | ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl => {
@@ -5888,13 +5997,53 @@ impl ControlPlane {
 
     pub async fn delete_group(&self, instance: &str, name: &str) -> Result<(), ControlPlaneError> {
         let _lifecycle_guard = self.lock_runtime_lifecycle().await;
-        let owner_prefix = self.managed_local_owner_prefix_snapshot(instance).await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        let authority = self.neutron_authorities.read().await.get(instance).cloned();
+        ensure_serialized_local_group_write_allowed(
+            instance,
+            name,
+            Some(state.managed_acl_publication_mode),
+            authority.as_ref(),
+        )?;
+        let owner_prefix = authority
+            .as_ref()
+            .map(|authority| format!("neutron:{}:", authority.port_id));
+        self.delete_group_locked(instance, &mut state, name, owner_prefix)
+            .await
+    }
+
+    pub(crate) async fn delete_group_for_neutron_purge(
+        &self,
+        instance: &str,
+        port_id: &str,
+        name: &str,
+    ) -> Result<(), ControlPlaneError> {
+        let owner_prefix = format!("neutron:{}:", port_id);
+        if !name.starts_with(&owner_prefix) {
+            return Err(ControlPlaneError::ValidationError(format!(
+                "Neutron purge expected owner prefix '{}', actual group '{}'",
+                owner_prefix, name
+            )));
+        }
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        self.delete_group_locked(instance, &mut state, name, Some(owner_prefix))
+            .await
+    }
+
+    async fn delete_group_locked(
+        &self,
+        instance: &str,
+        state: &mut InstanceState,
+        name: &str,
+        owner_prefix: Option<String>,
+    ) -> Result<(), ControlPlaneError> {
         match state.managed_acl_publication_mode {
             ManagedAclPublicationMode::StandaloneCompatibility
             | ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl => {
-                return self.delete_group_standalone_locked(&mut state, name).await;
+                return self.delete_group_standalone_locked(state, name).await;
             }
             ManagedAclPublicationMode::ManagedAcl => {}
         }
@@ -5941,7 +6090,7 @@ impl ControlPlane {
             general_mutations,
             domain_operations,
         );
-        let runtime = self.managed_local_projection_runtime(instance, &state);
+        let runtime = self.managed_local_projection_runtime(instance, state);
         let apply_projection_operation =
             managed_local_projection_apply(runtime.clone(), &old_state);
         let compensate_projection_receipt = managed_local_projection_compensate(runtime);
@@ -6007,8 +6156,16 @@ impl ControlPlane {
         direction: u8,
         ports: Option<&str>,
     ) -> Result<(), ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        let authority = self.neutron_authorities.read().await.get(instance).cloned();
+        ensure_serialized_local_write_allowed(
+            instance,
+            LocalWriteDomain::Acl,
+            Some(state.managed_acl_publication_mode),
+            authority.as_ref(),
+        )?;
         Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let src_id = self.resolve_group_id(&state.state, src_group)?;
@@ -6096,8 +6253,43 @@ impl ControlPlane {
         proto: u8,
         direction: u8,
     ) -> Result<(), ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        let authority = self.neutron_authorities.read().await.get(instance).cloned();
+        ensure_serialized_local_write_allowed(
+            instance,
+            LocalWriteDomain::Acl,
+            Some(state.managed_acl_publication_mode),
+            authority.as_ref(),
+        )?;
+        self.delete_policy_locked(&mut state, src_group, dst_group, proto, direction)
+            .await
+    }
+
+    pub(crate) async fn delete_policy_for_neutron_purge(
+        &self,
+        instance: &str,
+        src_group: &str,
+        dst_group: &str,
+        proto: u8,
+        direction: u8,
+    ) -> Result<(), ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        self.delete_policy_locked(&mut state, src_group, dst_group, proto, direction)
+            .await
+    }
+
+    async fn delete_policy_locked(
+        &self,
+        state: &mut InstanceState,
+        src_group: &str,
+        dst_group: &str,
+        proto: u8,
+        direction: u8,
+    ) -> Result<(), ControlPlaneError> {
         Self::check_runtime_maps_ready(&state.pin_path)?;
 
         let src_id = self.resolve_group_id(&state.state, src_group)?;
@@ -7127,13 +7319,25 @@ impl ControlPlane {
     }
 
     pub async fn flush_conntrack(&self, instance: &str) -> Result<u64, ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
+        let authority = self.neutron_authorities.read().await.get(instance).cloned();
+        ensure_serialized_local_write_allowed(
+            instance,
+            LocalWriteDomain::Conntrack,
+            Some(state.managed_acl_publication_mode),
+            authority.as_ref(),
+        )?;
         aria_core::ct_ops::ct_flush(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))
     }
 
-    pub async fn flush_conntrack_strict(&self, instance: &str) -> Result<u64, ControlPlaneError> {
+    pub(crate) async fn flush_conntrack_strict(
+        &self,
+        instance: &str,
+    ) -> Result<u64, ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
         aria_core::ct_ops::scrub_ct_tables_strict(state.map_runtime())
@@ -7276,6 +7480,22 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
+        let publication_mode = {
+            let state = inst.read().await;
+            state.managed_acl_publication_mode
+        };
+        let authority = self.neutron_authorities.read().await.get(instance).cloned();
+        let requested_domains = requested_local_config_write_domains(
+            conntrack, monitoring, acl, qos, mirror, tcprt, ssl,
+        );
+        for domain in requested_domains {
+            ensure_serialized_local_write_allowed(
+                instance,
+                domain,
+                Some(publication_mode),
+                authority.as_ref(),
+            )?;
+        }
         let only_ssl = ssl.is_some()
             && conntrack.is_none()
             && monitoring.is_none()
@@ -10017,9 +10237,7 @@ mod tests {
             ControlPlaneError::KernelError(reason) => {
                 assert!(reason.contains("open CT_TABLE_V4"), "{reason}");
             }
-            ControlPlaneError::LocalWriteBlocked { .. } => {
-                panic!("strict internal CT flush must bypass local-write admission")
-            }
+            ControlPlaneError::LocalWriteBlocked { .. } => panic!("strict CT flush was blocked"),
             other => panic!("expected strict missing-map KernelError, got: {other}"),
         }
     }

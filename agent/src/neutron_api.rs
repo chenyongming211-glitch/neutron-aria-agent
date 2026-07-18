@@ -5319,10 +5319,11 @@ async fn purge_neutron_acl(
 ) -> Result<(), String> {
     let profile_started = Instant::now();
     let list_policies_started = Instant::now();
-    let (rules, groups_by_name) = match state.control_plane.list_policies(ifname).await {
-        Ok(result) => result,
-        Err(e) => return Err(e.to_string()),
-    };
+    let (rules, groups_by_name) = state
+        .control_plane
+        .list_policies(ifname)
+        .await
+        .map_err(|e| e.to_string())?;
     let list_policies_ms = elapsed_ms(list_policies_started);
     let group_names_by_id: BTreeMap<u32, String> = groups_by_name
         .values()
@@ -5336,7 +5337,7 @@ async fn purge_neutron_acl(
     for target in policy_delete_targets {
         state
             .control_plane
-            .delete_policy(
+            .delete_policy_for_neutron_purge(
                 ifname,
                 &target.src_group,
                 &target.dst_group,
@@ -5360,7 +5361,7 @@ async fn purge_neutron_acl(
         if is_neutron_acl_group(port_id, &group.name) {
             state
                 .control_plane
-                .delete_group(ifname, &group.name)
+                .delete_group_for_neutron_purge(ifname, port_id, &group.name)
                 .await
                 .map_err(|e| e.to_string())?;
             group_delete_count += 1;
