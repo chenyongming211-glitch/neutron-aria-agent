@@ -2561,12 +2561,14 @@ fn compensate_managed_acl_demotion_publication(
         } => {
             aria_core::ebpf_ops::set_acl_active_bank(runtime, *previous_bank)
                 .map_err(|error| format!("restore managed demotion ACL bank: {}", error))?;
-            aria_core::ebpf_ops::scrub_acl_bank(runtime, *published_bank).map_err(|error| {
-                format!(
-                    "scrub rolled-back managed demotion bank {}: {}",
-                    published_bank, error
-                )
-            })
+            aria_core::ebpf_ops::scrub_acl_bank(runtime, *published_bank)
+                .map(|_| ())
+                .map_err(|error| {
+                    format!(
+                        "scrub rolled-back managed demotion bank {}: {}",
+                        published_bank, error
+                    )
+                })
         }
     }
 }
