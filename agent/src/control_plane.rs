@@ -9679,6 +9679,14 @@ mod tests {
                 cidrs: vec!["10.43.0.0/24".to_string()],
             },
         );
+        state.state.groups.insert(
+            "neutron:purge-port:src:selector:0".to_string(),
+            GroupInfo {
+                id: 44,
+                name: "neutron:purge-port:src:selector:0".to_string(),
+                cidrs: vec!["10.44.0.0/24".to_string()],
+            },
+        );
         state.state.rules.push(RuleInfo {
             name: None,
             src_group_id: 41,
@@ -9727,6 +9735,16 @@ mod tests {
             !matches!(error, ControlPlaneError::LocalWriteBlocked { .. }),
             "standalone or non-reserved local write must not be authority-blocked"
         );
+    }
+
+    fn assert_missing_runtime_maps(error: ControlPlaneError) {
+        assert_eq!(error.status_code(), 503);
+        match error {
+            ControlPlaneError::InstanceNotReady(reason) => {
+                assert_eq!(reason, "Pinned firewall maps not ready");
+            }
+            other => panic!("expected exact missing-map InstanceNotReady, got: {other}"),
+        }
     }
 
     #[tokio::test]
@@ -9780,6 +9798,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn domain_authority_neutron_purge_policy_uses_privileged_serialized_entry() {
+        let cp = test_control_plane();
+        let instance = "tap-neutron-policy-purge";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "neutron-policy-purge",
+        )
+        .await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            cp.delete_policy_for_neutron_purge(
+                instance,
+                "policy-src",
+                "policy-dst",
+                libc::IPPROTO_TCP as u8,
+                0,
+            ),
+        )
+        .await
+        .expect("Neutron policy purge must not self-deadlock on the lifecycle lock");
+        let error = result.expect_err(
+            "privileged Neutron policy purge must bypass local admission and reach map readiness",
+        );
+        self::assert_missing_runtime_maps(error);
+    }
+
+    #[tokio::test]
+    async fn domain_authority_neutron_purge_group_uses_privileged_serialized_entry() {
+        let cp = test_control_plane();
+        let instance = "tap-neutron-group-purge";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "neutron-group-purge",
+        )
+        .await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            cp.delete_group_for_neutron_purge(
+                instance,
+                "purge-port",
+                "neutron:purge-port:src:selector:0",
+            ),
+        )
+        .await
+        .expect("Neutron group purge must not self-deadlock on the lifecycle lock");
+        let error = result.expect_err(
+            "privileged Neutron group purge must bypass local admission and reach map readiness",
+        );
+        self::assert_missing_runtime_maps(error);
+    }
+
+    #[tokio::test]
+    async fn domain_authority_neutron_purge_group_rejects_foreign_owner_prefix() {
+        let cp = test_control_plane();
+        let instance = "tap-neutron-foreign-group-purge";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "neutron-foreign-group-purge",
+        )
+        .await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            cp.delete_group_for_neutron_purge(
+                instance,
+                "purge-port",
+                "neutron:foreign-port:src:selector:0",
+            ),
+        )
+        .await
+        .expect("foreign-owner validation must not self-deadlock on the lifecycle lock");
+        let error = result.expect_err("Neutron purge must reject a foreign owner prefix");
+
+        assert_eq!(error.status_code(), 400);
+        match error {
+            ControlPlaneError::ValidationError(reason) => {
+                assert!(
+                    reason.contains("expected owner prefix 'neutron:purge-port:'"),
+                    "validation must expose the exact expected owner prefix: {reason}"
+                );
+                assert!(
+                    reason.contains("actual group 'neutron:foreign-port:src:selector:0'"),
+                    "validation must expose the exact actual group: {reason}"
+                );
+            }
+            other => panic!("expected foreign-owner ValidationError, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
     async fn domain_authority_managed_acl_config_acl_blocks_before_authority_commit() {
         let cp = test_control_plane();
         let instance = "tap-managed-acl-config-gap";
@@ -9791,24 +9904,14 @@ mod tests {
         .await;
 
         let error = cp
-            .update_config(
-                instance,
-                None,
-                None,
-                Some(false),
-                None,
-                None,
-                None,
-                None,
-            )
+            .update_config(instance, None, None, Some(false), None, None, None, None)
             .await
             .expect_err("ManagedAcl must block ACL config before authority commits");
         self::assert_local_write_blocked(error, instance, "acl", None);
     }
 
     #[tokio::test]
-    async fn domain_authority_managed_acl_config_conntrack_blocks_before_authority_commit()
-    {
+    async fn domain_authority_managed_acl_config_conntrack_blocks_before_authority_commit() {
         let cp = test_control_plane();
         let instance = "tap-managed-conntrack-gap";
         self::install_verified_managed_acl_instance_without_authority(
@@ -9819,19 +9922,106 @@ mod tests {
         .await;
 
         let error = cp
-            .update_config(
-                instance,
-                Some(false),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            .update_config(instance, Some(false), None, None, None, None, None, None)
             .await
             .expect_err("ManagedAcl must protect conntrack as an ACL dependency");
         self::assert_local_write_blocked(error, instance, "conntrack", Some("acl"));
+    }
+
+    #[tokio::test]
+    async fn domain_authority_managed_acl_public_flush_blocks_before_authority_commit() {
+        let cp = test_control_plane();
+        let instance = "tap-managed-public-ct-flush-gap";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "managed-public-ct-flush-authority-gap",
+        )
+        .await;
+
+        let error = cp
+            .flush_conntrack(instance)
+            .await
+            .expect_err("ManagedAcl must protect public CT flush as an ACL dependency");
+        self::assert_local_write_blocked(error, instance, "conntrack", Some("acl"));
+    }
+
+    #[tokio::test]
+    async fn domain_authority_standalone_public_flush_preserves_lenient_missing_map_behavior() {
+        let cp = test_control_plane();
+        let instance = "tap-standalone-public-ct-flush";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "standalone-public-ct-flush",
+        )
+        .await;
+        {
+            let instance_state = cp.get_instance(instance).await.unwrap();
+            let mut state = instance_state.write().await;
+            state.managed_acl_publication_mode = ManagedAclPublicationMode::StandaloneCompatibility;
+            state.managed_projection_health = ManagedProjectionHealth::Unverified;
+        }
+
+        let flushed = cp
+            .flush_conntrack(instance)
+            .await
+            .expect("standalone public CT flush must retain lenient missing-map behavior");
+        assert_eq!(flushed, 0);
+    }
+
+    #[tokio::test]
+    async fn domain_authority_standalone_public_flush_blocks_committed_acl_dependency() {
+        let cp = test_control_plane();
+        let instance = "tap-standalone-authoritative-ct-flush";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "standalone-authoritative-ct-flush",
+        )
+        .await;
+        {
+            let instance_state = cp.get_instance(instance).await.unwrap();
+            let mut state = instance_state.write().await;
+            state.managed_acl_publication_mode = ManagedAclPublicationMode::StandaloneCompatibility;
+            state.managed_projection_health = ManagedProjectionHealth::Unverified;
+        }
+        cp.mark_neutron_port_authority(instance, "port-ct", &["acl".to_string()], 17)
+            .await;
+
+        let error = cp
+            .flush_conntrack(instance)
+            .await
+            .expect_err("committed ACL authority must protect its public CT dependency");
+        self::assert_local_write_blocked(error, instance, "conntrack", Some("acl"));
+    }
+
+    #[tokio::test]
+    async fn domain_authority_managed_acl_strict_flush_remains_privileged_and_strict() {
+        let cp = test_control_plane();
+        let instance = "tap-managed-strict-ct-flush";
+        self::install_verified_managed_acl_instance_without_authority(
+            &cp,
+            instance,
+            "managed-strict-ct-flush",
+        )
+        .await;
+
+        let error = cp
+            .flush_conntrack_strict(instance)
+            .await
+            .expect_err("strict managed CT flush must fail when required CT maps are absent");
+
+        assert_eq!(error.status_code(), 500);
+        match error {
+            ControlPlaneError::KernelError(reason) => {
+                assert!(reason.contains("open CT_TABLE_V4"), "{reason}");
+            }
+            ControlPlaneError::LocalWriteBlocked { .. } => {
+                panic!("strict internal CT flush must bypass local-write admission")
+            }
+            other => panic!("expected strict missing-map KernelError, got: {other}"),
+        }
     }
 
     #[tokio::test]
@@ -9847,16 +10037,7 @@ mod tests {
         .await;
 
         let error = cp
-            .update_config(
-                instance,
-                None,
-                Some(false),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            .update_config(instance, None, Some(false), None, None, None, None, None)
             .await
             .expect_err("unmanaged monitoring config must continue to the missing-map boundary");
         self::assert_not_local_write_blocked(error, 503);
@@ -9899,8 +10080,7 @@ mod tests {
         {
             let instance_state = cp.get_instance(instance).await.unwrap();
             let mut state = instance_state.write().await;
-            state.managed_acl_publication_mode =
-                ManagedAclPublicationMode::StandaloneCompatibility;
+            state.managed_acl_publication_mode = ManagedAclPublicationMode::StandaloneCompatibility;
             state.managed_projection_health = ManagedProjectionHealth::Unverified;
         }
 
@@ -9931,31 +10111,13 @@ mod tests {
         self::assert_not_local_write_blocked(delete_error, 503);
 
         let acl_error = cp
-            .update_config(
-                instance,
-                None,
-                None,
-                Some(false),
-                None,
-                None,
-                None,
-                None,
-            )
+            .update_config(instance, None, None, Some(false), None, None, None, None)
             .await
             .expect_err("missing maps must remain the first standalone ACL config failure");
         self::assert_not_local_write_blocked(acl_error, 503);
 
         let conntrack_error = cp
-            .update_config(
-                instance,
-                Some(false),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            .update_config(instance, Some(false), None, None, None, None, None, None)
             .await
             .expect_err("missing maps must remain the first standalone CT config failure");
         self::assert_not_local_write_blocked(conntrack_error, 503);
@@ -9993,16 +10155,7 @@ mod tests {
             .await;
 
         let error = cp
-            .update_config(
-                instance,
-                None,
-                None,
-                None,
-                Some(false),
-                None,
-                None,
-                None,
-            )
+            .update_config(instance, None, None, None, Some(false), None, None, None)
             .await
             .expect_err("committed QoS authority must block the real config entry");
         self::assert_local_write_blocked(error, instance, "qos", None);

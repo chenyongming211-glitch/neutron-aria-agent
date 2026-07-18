@@ -5595,34 +5595,125 @@ def _run_managed_projection_attach_migration_mutation_self_tests():
 def _managed_authoritative_write_admission_contract_errors(
     control_plane_source,
     groups_handler_source,
+    neutron_api_source,
+    other_agent_sources="",
 ):
     """Return serialized local-write admission violations in stable order."""
     control_code = _blank_rust_non_code(control_plane_source)
     groups_code = _blank_rust_non_code(groups_handler_source)
+    neutron_code = _blank_rust_non_code(neutron_api_source)
+    other_agent_code = _blank_rust_non_code(other_agent_sources)
     errors = []
 
-    def raw_function_body(function_name):
+    def without_cfg_test_modules(code):
+        """Blank complete cfg(test) modules before production-only scans."""
+        chars = list(code)
+        cursor = 0
+        pattern = re.compile(
+            r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+\w+\s*\{"
+        )
+        while True:
+            module = pattern.search(code, cursor)
+            if module is None:
+                break
+            opening = code.find("{", module.start(), module.end())
+            closing = _rust_matching_brace_end(code, opening)
+            if closing is None:
+                break
+            for index in range(module.start(), closing + 1):
+                if chars[index] != "\n":
+                    chars[index] = " "
+            cursor = closing + 1
+        return "".join(chars)
+
+    control_production_code = without_cfg_test_modules(control_code)
+    neutron_production_code = without_cfg_test_modules(neutron_code)
+    other_production_code = without_cfg_test_modules(other_agent_code)
+
+    # All structural readers below intentionally select one declaration.  A
+    # duplicate production declaration can otherwise act as a cfg-disabled
+    # decoy in front of the real implementation, so reject duplicates before
+    # trusting any extracted body.
+    production_control_functions = (
+        "local_write_block_reason",
+        "ensure_serialized_local_write_allowed",
+        "requested_local_config_write_domains",
+        "local_group_write_block_reason",
+        "ensure_serialized_local_group_write_allowed",
+        "ensure_local_group_write_allowed",
+        "update_config",
+        "add_policy",
+        "delete_policy",
+        "delete_policy_locked",
+        "add_group",
+        "delete_group",
+        "delete_group_locked",
+        "delete_policy_for_neutron_purge",
+        "delete_group_for_neutron_purge",
+        "flush_conntrack",
+        "flush_conntrack_strict",
+    )
+    for function_name in production_control_functions:
+        declarations = re.findall(
+            r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+%s\s*\("
+            % re.escape(function_name),
+            control_production_code,
+        )
+        if len(declarations) > 1:
+            errors.append(
+                "production authoritative function %s must have one declaration without cfg decoys"
+                % function_name
+            )
+    if len(
+        re.findall(
+            r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
+            r"purge_neutron_acl\s*\(",
+            neutron_production_code,
+        )
+    ) > 1:
+        errors.append(
+            "production Neutron purge orchestrator must have one declaration without cfg decoys"
+        )
+
+    def raw_function_body(function_name, code=None):
+        search_code = control_code if code is None else code
         declaration = re.search(
             r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+%s"
             r"(?:\s*<[^>{}]*>)?\s*\(" % re.escape(function_name),
-            control_code,
+            search_code,
         )
         if declaration is None:
             return None
-        opening = control_code.find("{", declaration.end())
-        closing = _rust_matching_brace_end(control_code, opening)
+        opening = search_code.find("{", declaration.end())
+        closing = _rust_matching_brace_end(search_code, opening)
         if opening < 0 or closing is None:
             return None
         return control_plane_source[opening + 1:closing]
 
+    # Check the privileged compatibility boundary first.  The production RED
+    # must fail here before the general classifier so a future GREEN cannot
+    # accidentally route Neutron recovery through a newly blocked local API.
+    for entry_name, label in (
+        (
+            "delete_policy_for_neutron_purge",
+            "purpose-limited Neutron policy purge entry is missing",
+        ),
+        (
+            "delete_group_for_neutron_purge",
+            "purpose-limited Neutron group purge entry is missing",
+        ),
+    ):
+        if raw_function_body(entry_name, control_production_code) is None:
+            errors.append(label)
+
     classifier_name = "local_write_block_reason"
     classifier_parameters = _rust_function_parameters_from_blanked(
-        control_code, classifier_name
+        control_production_code, classifier_name
     )
     classifier_body = _rust_function_body_from_blanked(
-        control_code, classifier_name
+        control_production_code, classifier_name
     )
-    classifier_raw = raw_function_body(classifier_name)
+    classifier_raw = raw_function_body(classifier_name, control_production_code)
     if classifier_parameters is None or classifier_body is None:
         errors.append("managed authoritative local-write classifier is missing")
     else:
@@ -5716,10 +5807,10 @@ def _managed_authoritative_write_admission_contract_errors(
 
     admission_name = "ensure_serialized_local_write_allowed"
     admission_parameters = _rust_function_parameters_from_blanked(
-        control_code, admission_name
+        control_production_code, admission_name
     )
     admission_body = _rust_function_body_from_blanked(
-        control_code, admission_name
+        control_production_code, admission_name
     )
     if admission_parameters is None or admission_body is None:
         errors.append("serialized authoritative local-write admission helper is missing")
@@ -5775,7 +5866,7 @@ def _managed_authoritative_write_admission_contract_errors(
 
     config_domains_name = "requested_local_config_write_domains"
     config_domains_body = _rust_function_body_from_blanked(
-        control_code, config_domains_name
+        control_production_code, config_domains_name
     )
     config_domain_pairs = (
         ("conntrack", "Conntrack"),
@@ -5814,12 +5905,14 @@ def _managed_authoritative_write_admission_contract_errors(
 
     group_classifier_name = "local_group_write_block_reason"
     group_classifier_parameters = _rust_function_parameters_from_blanked(
-        control_code, group_classifier_name
+        control_production_code, group_classifier_name
     )
     group_classifier_body = _rust_function_body_from_blanked(
-        control_code, group_classifier_name
+        control_production_code, group_classifier_name
     )
-    group_classifier_raw = raw_function_body(group_classifier_name)
+    group_classifier_raw = raw_function_body(
+        group_classifier_name, control_production_code
+    )
     if group_classifier_parameters is None or group_classifier_body is None:
         errors.append("reserved Neutron group namespace classifier is missing")
     else:
@@ -5869,10 +5962,10 @@ def _managed_authoritative_write_admission_contract_errors(
 
     group_admission_name = "ensure_serialized_local_group_write_allowed"
     group_admission_parameters = _rust_function_parameters_from_blanked(
-        control_code, group_admission_name
+        control_production_code, group_admission_name
     )
     group_admission_body = _rust_function_body_from_blanked(
-        control_code, group_admission_name
+        control_production_code, group_admission_name
     )
     if group_admission_parameters is None or group_admission_body is None:
         errors.append("serialized reserved-group admission helper is missing")
@@ -5953,8 +6046,15 @@ def _managed_authoritative_write_admission_contract_errors(
             )
         )
 
-    def check_locked_entry(name, call_name, expected_arguments, effect_markers):
-        body = _rust_function_body_from_blanked(control_code, name)
+    def check_locked_entry(
+        name,
+        call_name,
+        expected_arguments,
+        effect_markers,
+        delegate_name=None,
+        expected_delegate_arguments=None,
+    ):
+        body = _rust_function_body_from_blanked(control_production_code, name)
         if body is None:
             errors.append("authoritative write entry %s is missing" % name)
             return
@@ -6014,8 +6114,63 @@ def _managed_authoritative_write_admission_contract_errors(
             before_admission,
         ):
             errors.append("%s must reject before maps, state, WAL, or kernel effects" % name)
-        if any(body.find(marker, call_position) < 0 for marker in effect_markers):
+        effect_body = body
+        effect_boundary = call_position
+        delegate_position = -1
+        if delegate_name is not None:
+            delegate = authoritative_call(body, delegate_name)
+            delegate_position = delegate[0] if delegate else -1
+            effect_body = _rust_function_body_from_blanked(
+                control_production_code, delegate_name
+            )
+            declaration = re.search(
+                r"\b(?P<visibility>pub(?:\s*\([^)]*\))?\s+)?"
+                r"(?:async\s+)?fn\s+%s\s*\(" % re.escape(delegate_name),
+                control_production_code,
+            )
+            if (
+                delegate is None
+                or effect_body is None
+                or declaration is None
+                or declaration.group("visibility") is not None
+                or delegate_position <= call_position
+                or _rust_brace_depth_at(body, delegate_position) != 0
+                or not _rust_named_call_result_is_propagated(
+                    body, delegate_name, delegate_position
+                )
+            ):
+                errors.append(
+                    "%s must delegate after admission to the private shared %s body"
+                    % (name, delegate_name)
+                )
+                effect_body = ""
+            elif [
+                re.sub(r"\s+", "", argument) for argument in delegate[1]
+            ] != expected_delegate_arguments:
+                errors.append(
+                    "%s must pass exact state and operation inputs to %s"
+                    % (name, delegate_name)
+                )
+            elif any(
+                marker in effect_body
+                for marker in (
+                    "lock_runtime_lifecycle",
+                    "neutron_authorities",
+                    "ensure_serialized_local_write_allowed",
+                    "ensure_serialized_local_group_write_allowed",
+                )
+            ):
+                errors.append(
+                    "%s private shared body must not relock or perform local-authority admission"
+                    % name
+                )
+            effect_boundary = delegate_position
+        if any(effect_body.find(marker) < 0 for marker in effect_markers):
             errors.append("%s checker fixture is missing its post-admission effect" % name)
+        if re.search(r"\breturn\s+Ok\s*\(", body[:effect_boundary]):
+            errors.append(
+                "%s must not return success before its admitted transaction effects" % name
+            )
         lifecycle_drop = re.search(
             r"\b(?:std\s*::\s*mem\s*::\s*)?drop\s*\(\s*%s\s*\)"
             % re.escape(lifecycle.group("guard")),
@@ -6025,9 +6180,9 @@ def _managed_authoritative_write_admission_contract_errors(
             r"\b(?:std\s*::\s*mem\s*::\s*)?drop\s*\(\s*state\s*\)",
             body[write_lock.end():],
         )
-        effects_after_state_drop = state_drop is not None and any(
-            marker in body[write_lock.end() + state_drop.end():]
-            for marker in effect_markers
+        effects_after_state_drop = (
+            state_drop is not None
+            and write_lock.end() + state_drop.end() < effect_boundary
         )
         if lifecycle_drop is not None:
             errors.append("%s must hold the lifecycle guard to return" % name)
@@ -6050,6 +6205,12 @@ def _managed_authoritative_write_admission_contract_errors(
                 "aria_core::ebpf_ops",
                 "wal_append",
             ),
+            "delete_policy_locked" if policy_name == "delete_policy" else None,
+            (
+                ["&mutstate", "src_group", "dst_group", "proto", "direction"]
+                if policy_name == "delete_policy"
+                else None
+            ),
         )
 
     group_arguments = [
@@ -6067,9 +6228,739 @@ def _managed_authoritative_write_admission_contract_errors(
                 "managed_local_projection_admission",
                 "check_runtime_maps_ready",
             ),
+            "delete_group_locked" if group_name == "delete_group" else None,
+            (
+                ["instance", "&mutstate", "name", "owner_prefix"]
+                if group_name == "delete_group"
+                else None
+            ),
         )
 
-    config_body = _rust_function_body_from_blanked(control_code, "update_config")
+    def function_visibility(function_name):
+        declaration = re.search(
+            r"\b(?P<visibility>pub(?:\s*\([^)]*\))?\s+)?"
+            r"(?:async\s+)?fn\s+%s\s*\(" % re.escape(function_name),
+            control_production_code,
+        )
+        if declaration is None:
+            return None
+        return (declaration.group("visibility") or "private").strip()
+
+    def check_private_delete_body(function_name, effect_markers, maximum_depths):
+        body = _rust_function_body_from_blanked(
+            control_production_code, function_name
+        )
+        if body is None:
+            errors.append("shared private delete body %s is missing" % function_name)
+            return
+        if function_visibility(function_name) != "private":
+            errors.append("shared delete body %s must remain private" % function_name)
+        for forbidden in (
+            "lock_runtime_lifecycle",
+            "neutron_authorities",
+            "ensure_serialized_local_write_allowed",
+            "ensure_serialized_local_group_write_allowed",
+        ):
+            if forbidden in body:
+                errors.append(
+                    "shared delete body %s must not relock or perform local-authority admission"
+                    % function_name
+                )
+                break
+        call_positions = {}
+        for marker in effect_markers:
+            if marker == "WalEntry::RemoveRule":
+                continue
+            calls = _rust_named_call_arguments(body, marker.rsplit("::", 1)[-1])
+            call_positions[marker] = [call[0] for call in calls]
+        if any(not call_positions.get(marker) for marker in call_positions):
+            errors.append(
+                "shared delete body %s is missing its real state, kernel, or persistence calls"
+                % function_name
+            )
+        for marker, maximum_depth in maximum_depths.items():
+            positions = (
+                [
+                    match.start()
+                    for match in re.finditer(re.escape(marker), body)
+                ]
+                if marker == "WalEntry::RemoveRule"
+                else call_positions.get(marker, [])
+            )
+            if not positions or min(
+                _rust_brace_depth_at(body, position) for position in positions
+            ) > maximum_depth:
+                errors.append(
+                    "shared delete body %s must execute %s on its real control path"
+                    % (function_name, marker)
+                )
+        for fallible_call in (
+            "check_runtime_maps_ready",
+            "resolve_group_id",
+            "requested_directions",
+            "read_acl_active_bank",
+            "apply_remove_rule",
+            "managed_local_projection_admission",
+            "require_managed_local_owner_prefix",
+            "managed_general_state_mutations",
+            "execute_managed_local_projection_transaction",
+        ):
+            calls = _rust_named_call_arguments(body, fallible_call)
+            if calls and not any(
+                _rust_named_call_result_is_propagated(body, fallible_call, call[0])
+                for call in calls
+            ):
+                errors.append(
+                    "shared delete body %s must propagate %s on its real control path"
+                    % (function_name, fallible_call)
+                )
+        if function_name == "delete_policy_locked":
+            wal_calls = _rust_named_call_arguments(body, "wal_append")
+            if not any(
+                any("WalEntry::RemoveRule" in argument for argument in call[1])
+                for call in wal_calls
+            ):
+                errors.append(
+                    "shared delete body delete_policy_locked must persist each real RemoveRule effect"
+                )
+        if re.search(r"\breturn\s+Ok\s*\(", body):
+            errors.append(
+                "shared delete body %s must not return success before its real effects"
+                % function_name
+            )
+        if re.search(r"\bstringify\s*!", body):
+            errors.append(
+                "shared delete body %s must not satisfy effects through token-string decoys"
+                % function_name
+            )
+        if re.search(r"\bif\s+(?:false|0\s*==\s*1|1\s*==\s*0)\b", body):
+            errors.append(
+                "shared delete body %s must not hide effects behind a constant-false branch"
+                % function_name
+            )
+
+    check_private_delete_body(
+        "delete_policy_locked",
+        (
+            "check_runtime_maps_ready",
+            "resolve_group_id",
+            "requested_directions",
+            "read_acl_active_bank",
+            "delete_policy_in_bank",
+            "apply_remove_rule",
+            "WalEntry::RemoveRule",
+        ),
+        {
+            "check_runtime_maps_ready": 0,
+            "resolve_group_id": 0,
+            "requested_directions": 0,
+            "read_acl_active_bank": 0,
+            "delete_policy_in_bank": 1,
+            "apply_remove_rule": 1,
+            "WalEntry::RemoveRule": 1,
+        },
+    )
+    check_private_delete_body(
+        "delete_group_locked",
+        (
+            "managed_local_projection_admission",
+            "require_managed_local_owner_prefix",
+            "check_runtime_maps_ready",
+            "managed_general_state_mutations",
+            "execute_managed_local_projection_transaction",
+        ),
+        {
+            "managed_local_projection_admission": 0,
+            "require_managed_local_owner_prefix": 0,
+            "check_runtime_maps_ready": 0,
+            "managed_general_state_mutations": 0,
+            "execute_managed_local_projection_transaction": 0,
+        },
+    )
+
+    def check_purge_entry(entry_name, delegate_name, expected_arguments):
+        body = _rust_function_body_from_blanked(control_production_code, entry_name)
+        if body is None:
+            return
+        lifecycle = lifecycle_pattern.search(body)
+        instance = re.search(
+            r"\bget_instance\s*\(\s*instance\s*\)\s*\.\s*await", body
+        )
+        write_lock = write_lock_pattern.search(body)
+        delegate = authoritative_call(body, delegate_name)
+        delegate_position = delegate[0] if delegate else -1
+        if function_visibility(entry_name) != "pub(crate)":
+            errors.append("%s must remain crate-private" % entry_name)
+        if (
+            lifecycle is None
+            or instance is None
+            or write_lock is None
+            or delegate is None
+            or not lifecycle.start()
+            < instance.start()
+            < write_lock.start()
+            < delegate_position
+        ):
+            errors.append(
+                "%s must serialize lifecycle, instance write lock, then the shared delete body"
+                % entry_name
+            )
+            return
+        if any(
+            _rust_brace_depth_at(body, position) != 0
+            for position in (
+                lifecycle.start(),
+                instance.start(),
+                write_lock.start(),
+                delegate_position,
+            )
+        ):
+            errors.append("%s serialization steps must be unconditional" % entry_name)
+        normalized = [re.sub(r"\s+", "", argument) for argument in delegate[1]]
+        if normalized != expected_arguments:
+            errors.append("%s must pass exact arguments to %s" % (entry_name, delegate_name))
+        if not _rust_named_call_result_is_propagated(
+            body, delegate_name, delegate_position
+        ):
+            errors.append("%s must propagate its shared delete result" % entry_name)
+        if re.search(r"\breturn\s+Ok\s*\(", body[:delegate_position]):
+            errors.append(
+                "%s must not return success before its shared delete body" % entry_name
+            )
+        for forbidden in (
+            "neutron_authorities",
+            "ensure_serialized_local_write_allowed",
+            "ensure_serialized_local_group_write_allowed",
+            ".delete_policy(",
+            ".delete_group(",
+        ):
+            if forbidden in body:
+                errors.append(
+                    "%s must bypass only through its shared private delete body"
+                    % entry_name
+                )
+                break
+        if re.search(
+            r"\b(?:std\s*::\s*mem\s*::\s*)?drop\s*\(\s*%s\s*\)"
+            % re.escape(lifecycle.group("guard")),
+            body[lifecycle.end():],
+        ):
+            errors.append("%s must hold lifecycle serialization to return" % entry_name)
+
+    check_purge_entry(
+        "delete_policy_for_neutron_purge",
+        "delete_policy_locked",
+        ["&mutstate", "src_group", "dst_group", "proto", "direction"],
+    )
+    check_purge_entry(
+        "delete_group_for_neutron_purge",
+        "delete_group_locked",
+        ["instance", "&mutstate", "name", "Some(owner_prefix)"],
+    )
+
+    purge_group_body = _rust_function_body_from_blanked(
+        control_production_code, "delete_group_for_neutron_purge"
+    )
+    purge_group_raw = raw_function_body(
+        "delete_group_for_neutron_purge", control_production_code
+    )
+    if purge_group_body is not None:
+        owner_bindings = list(
+            re.finditer(r"\blet\s+(?:mut\s+)?owner_prefix\s*=", purge_group_body)
+        )
+        owner_statement_end = (
+            purge_group_body.find(";", owner_bindings[0].end())
+            if len(owner_bindings) == 1
+            else -1
+        )
+        owner_statement_raw = (
+            purge_group_raw[owner_bindings[0].start():owner_statement_end + 1]
+            if purge_group_raw is not None and owner_statement_end >= 0
+            else ""
+        )
+        exact_owner_binding = (
+            re.fullmatch(
+                r"\blet\s+owner_prefix\s*=\s*format!\s*\(\s*"
+                r'"neutron:\{\}:"\s*,\s*port_id\s*\)\s*;\s*',
+                owner_statement_raw,
+            )
+            if owner_statement_raw
+            else None
+        )
+        owner_validation = re.search(
+            r"if\s*!\s*name\s*\.\s*starts_with\s*\(\s*&\s*owner_prefix\s*\)",
+            purge_group_body,
+        )
+        lifecycle = lifecycle_pattern.search(purge_group_body)
+        if (
+            purge_group_raw is None
+            or len(owner_bindings) != 1
+            or exact_owner_binding is None
+            or owner_validation is None
+            or lifecycle is None
+            or not owner_bindings[0].start()
+            < owner_validation.start()
+            < lifecycle.start()
+            or "ControlPlaneError::ValidationError" not in purge_group_body
+            or len(
+                re.findall(
+                    r"(?<!let\s)(?<!mut\s)\bowner_prefix\s*=",
+                    purge_group_body,
+                )
+            )
+            != 0
+        ):
+            errors.append(
+                "Neutron group purge entry must reject every name outside its exact port owner prefix"
+            )
+
+    privileged_callsite_code = (
+        control_production_code
+        + "\n"
+        + neutron_production_code
+        + "\n"
+        + other_production_code
+    )
+    for entry_name in (
+        "delete_policy_for_neutron_purge",
+        "delete_group_for_neutron_purge",
+    ):
+        callsites = re.findall(
+            r"(?:\.|::)\s*%s\b" % re.escape(entry_name),
+            privileged_callsite_code,
+        )
+        if len(callsites) != 1:
+            errors.append(
+                "%s must have exactly one production caller in purge_neutron_acl"
+                % entry_name
+            )
+
+    purge_body = _rust_function_body_from_blanked(
+        neutron_production_code, "purge_neutron_acl"
+    )
+    if purge_body is None:
+        errors.append("Neutron ACL purge orchestrator is missing")
+    else:
+        def top_level_statement_end(body, start):
+            for position in range(start, len(body)):
+                if body[position] == ";" and _rust_brace_depth_at(body, position) == 0:
+                    return position
+            return -1
+
+        policy_targets_binding = re.search(
+            r"\blet\s+policy_delete_targets\s*=", purge_body
+        )
+        policy_targets_statement_end = (
+            top_level_statement_end(purge_body, policy_targets_binding.end())
+            if policy_targets_binding is not None
+            else -1
+        )
+        policy_targets_statement = (
+            purge_body[
+                policy_targets_binding.start():policy_targets_statement_end + 1
+            ]
+            if policy_targets_statement_end >= 0
+            else ""
+        )
+        target_builder_calls = _rust_named_call_arguments(
+            policy_targets_statement,
+            "acl_policy_delete_targets_for_neutron_domain",
+        )
+        target_builder = (
+            target_builder_calls[0] if len(target_builder_calls) == 1 else None
+        )
+        target_builder_opening = (
+            policy_targets_statement.find("(", target_builder[0])
+            if target_builder is not None
+            else -1
+        )
+        target_builder_arguments = (
+            _rust_parenthesized_body_at(
+                policy_targets_statement, target_builder_opening
+            )
+            if target_builder_opening >= 0
+            else None
+        )
+        target_builder_closing = (
+            target_builder_opening + len(target_builder_arguments) + 1
+            if target_builder_arguments is not None
+            else -1
+        )
+        target_builder_tail = (
+            policy_targets_statement[target_builder_closing + 1:].strip()
+            if target_builder_closing >= 0
+            else ""
+        )
+        groups_binding = re.search(r"\blet\s+groups\s*=", purge_body)
+        groups_statement_end = (
+            top_level_statement_end(purge_body, groups_binding.end())
+            if groups_binding is not None
+            else -1
+        )
+        groups_statement = (
+            purge_body[groups_binding.start():groups_statement_end + 1]
+            if groups_statement_end >= 0
+            else ""
+        )
+        list_group_calls = _rust_named_call_arguments(groups_statement, "list_groups")
+        list_group_call = (
+            list_group_calls[0] if len(list_group_calls) == 1 else None
+        )
+        list_group_opening = (
+            groups_statement.find("(", list_group_call[0])
+            if list_group_call is not None
+            else -1
+        )
+        list_group_arguments = (
+            _rust_parenthesized_body_at(groups_statement, list_group_opening)
+            if list_group_opening >= 0
+            else None
+        )
+        list_group_closing = (
+            list_group_opening + len(list_group_arguments) + 1
+            if list_group_arguments is not None
+            else -1
+        )
+        list_group_tail = (
+            groups_statement[list_group_closing + 1:].strip()
+            if list_group_closing >= 0
+            else ""
+        )
+        def exact_named_for_loop(binding_name, iterable_name):
+            matches = list(
+                re.finditer(
+                    r"\bfor\s+%s\s+in\s+%s\s*\{"
+                    % (re.escape(binding_name), re.escape(iterable_name)),
+                    purge_body,
+                )
+            )
+            if len(matches) != 1:
+                return None, -1, None
+            match = matches[0]
+            opening = purge_body.find("{", match.start(), match.end())
+            closing = _rust_matching_brace_end(purge_body, opening)
+            if closing is None:
+                return None, match.start(), None
+            return purge_body[opening + 1:closing], match.start(), closing
+
+        policy_loop, policy_loop_start, policy_loop_end = exact_named_for_loop(
+            "target", "policy_delete_targets"
+        )
+        group_loop, group_loop_start, group_loop_end = exact_named_for_loop(
+            "group", "groups"
+        )
+        policy_loop_calls = (
+            _rust_named_call_arguments(
+                policy_loop, "delete_policy_for_neutron_purge"
+            )
+            if policy_loop is not None
+            else []
+        )
+        group_loop_calls = (
+            _rust_named_call_arguments(
+                group_loop, "delete_group_for_neutron_purge"
+            )
+            if group_loop is not None
+            else []
+        )
+        policy_call = (
+            policy_loop_calls[0] if len(policy_loop_calls) == 1 else None
+        )
+        group_call = group_loop_calls[0] if len(group_loop_calls) == 1 else None
+        global_policy_calls = _rust_named_call_arguments(
+            purge_body, "delete_policy_for_neutron_purge"
+        )
+        global_group_calls = _rust_named_call_arguments(
+            purge_body, "delete_group_for_neutron_purge"
+        )
+        global_policy = (
+            global_policy_calls[0] if len(global_policy_calls) == 1 else None
+        )
+        global_group = (
+            global_group_calls[0] if len(global_group_calls) == 1 else None
+        )
+        list_groups = purge_body.find("list_groups")
+        positive_filter = (
+            re.search(
+                r"\bif\s+is_neutron_acl_group\s*\(\s*port_id\s*,\s*"
+                r"&\s*group\s*\.\s*name\s*\)\s*\{",
+                group_loop,
+            )
+            if group_loop is not None
+            else None
+        )
+        filter_block_opening = (
+            group_loop.find("{", positive_filter.start())
+            if positive_filter is not None
+            else -1
+        )
+        filter_block_closing = (
+            _rust_matching_brace_end(group_loop, filter_block_opening)
+            if filter_block_opening >= 0
+            else None
+        )
+        if (
+            policy_targets_binding is None
+            or len(
+                re.findall(r"\blet\s+policy_delete_targets\s*=", purge_body)
+            )
+            != 1
+            or target_builder is None
+            or [re.sub(r"\s+", "", arg) for arg in target_builder[1]]
+            != ["&rules", "&group_names_by_id"]
+            or target_builder_tail != ";"
+            or re.search(
+                r"\bpolicy_delete_targets\s*\.\s*"
+                r"(?:truncate|retain|pop|remove|drain|clear)\s*\(",
+                purge_body[policy_targets_statement_end + 1:],
+            )
+            or groups_binding is None
+            or len(re.findall(r"\blet\s+groups\s*=", purge_body)) != 1
+            or list_group_call is None
+            or [re.sub(r"\s+", "", arg) for arg in list_group_call[1]]
+            != ["ifname"]
+            or re.fullmatch(
+                r"\.\s*await\s*(?:\.\s*map_err\s*\(\s*"
+                r"\|\s*\w+\s*\|\s*\w+\s*\.\s*to_string\s*\(\s*\)\s*"
+                r"\)\s*)?\?\s*;",
+                list_group_tail,
+            )
+            is None
+            or re.search(
+                r"\.\s*(?:take|filter|truncate|retain|pop|remove|drain|clear)\s*\(",
+                groups_statement,
+            )
+            or re.search(
+                r"\bgroups\s*\.\s*"
+                r"(?:truncate|retain|pop|remove|drain|clear)\s*\(",
+                purge_body[groups_statement_end + 1:],
+            )
+            or policy_loop is None
+            or group_loop is None
+            or policy_loop_end is None
+            or group_loop_end is None
+            or _rust_brace_depth_at(purge_body, policy_loop_start) != 0
+            or _rust_brace_depth_at(purge_body, group_loop_start) != 0
+            or policy_call is None
+            or group_call is None
+            or global_policy is None
+            or global_group is None
+            or positive_filter is None
+            or list_groups < 0
+            or not global_policy[0] < list_groups < global_group[0]
+            or filter_block_closing is None
+            or not filter_block_opening < group_call[0] < filter_block_closing
+            or _rust_brace_depth_at(policy_loop, policy_call[0]) != 0
+            or _rust_brace_depth_at(group_loop, positive_filter.start()) != 0
+            or _rust_brace_depth_at(group_loop, group_call[0]) != 1
+            or re.search(
+                r"\bif\s+(?:false|0\s*==\s*1|1\s*==\s*0)\b",
+                purge_body,
+            )
+            or re.search(r"\breturn\b", purge_body)
+            or re.search(r"\b(?:break|continue)\b", policy_loop)
+            or re.search(r"\b(?:break|continue)\b", group_loop)
+            or [re.sub(r"\s+", "", arg) for arg in policy_call[1]]
+            != [
+                "ifname",
+                "&target.src_group",
+                "&target.dst_group",
+                "target.proto",
+                "target.direction",
+            ]
+            or [re.sub(r"\s+", "", arg) for arg in group_call[1]]
+            != ["ifname", "port_id", "&group.name"]
+            or not _rust_named_call_result_is_propagated(
+                policy_loop,
+                "delete_policy_for_neutron_purge",
+                policy_call[0] if policy_call else -1,
+            )
+            or not _rust_named_call_result_is_propagated(
+                group_loop,
+                "delete_group_for_neutron_purge",
+                group_call[0] if group_call else -1,
+            )
+        ):
+            errors.append(
+                "purge_neutron_acl must preserve policy-first and exact-owner cleanup through privileged entries"
+            )
+        if (
+            re.search(r"\.\s*delete_policy\s*\(", purge_body)
+            or re.search(r"\.\s*delete_group\s*\(", purge_body)
+            or "lock_runtime_lifecycle" in purge_body
+        ):
+            errors.append(
+                "purge_neutron_acl must not call local delete APIs or acquire a reentrant lifecycle lock"
+            )
+
+    def check_conntrack_entry(function_name, strict):
+        body = _rust_function_body_from_blanked(
+            control_production_code, function_name
+        )
+        if body is None:
+            errors.append("conntrack write entry %s is missing" % function_name)
+            return
+        lifecycle = lifecycle_pattern.search(body)
+        instance = re.search(
+            r"\bget_instance\s*\(\s*instance\s*\)\s*\.\s*await", body
+        )
+        instance_lock = re.search(
+            r"\.\s*(?:read|write)\s*\(\s*\)\s*\.\s*await", body
+        )
+        effect_name = "scrub_ct_tables_strict" if strict else "ct_flush"
+        effect = authoritative_call(body, effect_name)
+        effect_position = effect[0] if effect else -1
+        if (
+            lifecycle is None
+            or instance is None
+            or instance_lock is None
+            or effect is None
+        ):
+            errors.append(
+                "%s must serialize lifecycle and instance access around its conntrack effect"
+                % function_name
+            )
+            return
+        effect_opening = body.find("(", effect_position)
+        effect_arguments = _rust_parenthesized_body_at(body, effect_opening)
+        effect_closing = (
+            effect_opening + len(effect_arguments) + 1
+            if effect_arguments is not None
+            else -1
+        )
+        effect_tail = body[effect_closing + 1:].strip() if effect_closing >= 0 else ""
+        propagated_tail = re.fullmatch(
+            r"\.\s*map_err\s*\(\s*(?:"
+            r"ControlPlaneError\s*::\s*KernelError|"
+            r"\|\s*\w+\s*\|\s*ControlPlaneError\s*::\s*KernelError\s*"
+            r"\(\s*\w+\s*\)"
+            r")\s*\)\s*;?",
+            effect_tail,
+        )
+        if [re.sub(r"\s+", "", argument) for argument in effect[1]] != [
+            "state.map_runtime()"
+        ] or propagated_tail is None:
+            errors.append(
+                "%s must propagate the exact tap-scoped conntrack effect"
+                % function_name
+            )
+        if re.search(r"\breturn\s+Ok\s*\(", body[:effect_position]):
+            errors.append(
+                "%s must not return success before its conntrack effect"
+                % function_name
+            )
+        if re.search(
+            r"\bif\s+(?:false|0\s*==\s*1|1\s*==\s*0)\b|\bstringify\s*!",
+            body,
+        ):
+            errors.append(
+                "%s must keep its conntrack effect on the real control path"
+                % function_name
+            )
+        if strict:
+            if function_visibility(function_name) != "pub(crate)":
+                errors.append("strict conntrack flush must remain crate-private")
+            if any(
+                marker in body
+                for marker in (
+                    "neutron_authorities",
+                    "ensure_serialized_local_write_allowed",
+                    "ensure_local_write_allowed",
+                    "ct_flush(",
+                )
+            ):
+                errors.append(
+                    "strict conntrack flush must bypass local admission and use only strict scrub"
+                )
+            ordered = (
+                lifecycle.start()
+                < instance.start()
+                < instance_lock.start()
+                < effect_position
+            )
+        else:
+            authority_bindings = list(authority_binding_pattern.finditer(body))
+            authority = authority_bindings[0] if authority_bindings else None
+            admission = authoritative_call(body, admission_name)
+            admission_position = admission[0] if admission else -1
+            ordered = (
+                authority is not None
+                and len(authority_bindings) == 1
+                and admission is not None
+                and lifecycle.start()
+                < instance.start()
+                < instance_lock.start()
+                < authority.start()
+                < admission_position
+                < effect_position
+            )
+            if admission is not None and [
+                re.sub(r"\s+", "", argument) for argument in admission[1]
+            ] != [
+                "instance",
+                "LocalWriteDomain::Conntrack",
+                "Some(state.managed_acl_publication_mode)",
+                "authority.as_ref()",
+            ]:
+                errors.append(
+                    "public conntrack flush must admit the exact CT dependency with current mode and authority"
+                )
+            if admission is not None and not _rust_named_call_result_is_propagated(
+                body, admission_name, admission_position
+            ):
+                errors.append("public conntrack flush must propagate local admission")
+            if (
+                authority is not None
+                and len(authority_bindings) == 1
+                and admission is not None
+                and not authority_snapshot_is_exact(
+                    body, authority.start(), admission_position
+                )
+            ):
+                errors.append(
+                    "public conntrack flush must pass a current authority snapshot"
+                )
+            if (
+                authority is not None
+                and admission is not None
+                and (
+                    _rust_brace_depth_at(body, authority.start()) != 0
+                    or _rust_brace_depth_at(body, admission_position) != 0
+                )
+            ):
+                errors.append(
+                    "public conntrack flush authority and admission must be unconditional"
+                )
+        if not ordered:
+            errors.append(
+                "%s must perform admission and effects in serialized order" % function_name
+            )
+        elif any(
+            _rust_brace_depth_at(body, position) != 0
+            for position in (
+                lifecycle.start(),
+                instance.start(),
+                instance_lock.start(),
+                effect_position,
+            )
+        ):
+            errors.append(
+                "%s serialization and conntrack effect must be unconditional"
+                % function_name
+            )
+        if re.search(
+            r"\b(?:std\s*::\s*mem\s*::\s*)?drop\s*\(\s*%s\s*\)"
+            % re.escape(lifecycle.group("guard")),
+            body[lifecycle.end():],
+        ):
+            errors.append("%s must hold lifecycle serialization to return" % function_name)
+
+    check_conntrack_entry("flush_conntrack", strict=False)
+    check_conntrack_entry("flush_conntrack_strict", strict=True)
+
+    config_body = _rust_function_body_from_blanked(
+        control_production_code, "update_config"
+    )
     if config_body is None:
         errors.append("authoritative write entry update_config is missing")
     else:
@@ -6888,6 +7779,758 @@ def _managed_authoritative_write_admission_contract_errors(
                     "managed authoritative regression test is missing exact fixture marker %s: %s"
                     % (raw_marker, test_name)
                 )
+
+    amendment_test_specs = {
+        "domain_authority_neutron_purge_policy_uses_privileged_serialized_entry": {
+            "method": "delete_policy_for_neutron_purge",
+            "timeout": True,
+            "outcome": "missing_maps",
+            "arguments": (
+                "instance",
+                '"policy-src"',
+                '"policy-dst"',
+                "libc::IPPROTO_TCPasu8",
+                "0",
+            ),
+            "raw": ('"policy-src"', '"policy-dst"'),
+        },
+        "domain_authority_neutron_purge_group_uses_privileged_serialized_entry": {
+            "method": "delete_group_for_neutron_purge",
+            "timeout": True,
+            "outcome": "missing_maps",
+            "arguments": (
+                "instance",
+                '"purge-port"',
+                '"neutron:purge-port:src:selector:0"',
+            ),
+            "raw": (
+                '"purge-port"',
+                '"neutron:purge-port:src:selector:0"',
+            ),
+        },
+        "domain_authority_neutron_purge_group_rejects_foreign_owner_prefix": {
+            "method": "delete_group_for_neutron_purge",
+            "timeout": True,
+            "outcome": "foreign_owner",
+            "arguments": (
+                "instance",
+                '"purge-port"',
+                '"neutron:foreign-port:src:selector:0"',
+            ),
+            "raw": (
+                '"purge-port"',
+                '"neutron:foreign-port:src:selector:0"',
+                "expected owner prefix 'neutron:purge-port:'",
+                "actual group 'neutron:foreign-port:src:selector:0'",
+            ),
+        },
+        "domain_authority_managed_acl_public_flush_blocks_before_authority_commit": {
+            "method": "flush_conntrack",
+            "timeout": False,
+            "outcome": "blocked",
+            "arguments": ("instance",),
+            "raw": ('"conntrack"', 'Some("acl")'),
+        },
+        "domain_authority_standalone_public_flush_preserves_lenient_missing_map_behavior": {
+            "method": "flush_conntrack",
+            "timeout": False,
+            "outcome": "success_zero",
+            "arguments": ("instance",),
+            "raw": (),
+        },
+        "domain_authority_standalone_public_flush_blocks_committed_acl_dependency": {
+            "method": "flush_conntrack",
+            "timeout": False,
+            "outcome": "blocked_committed",
+            "arguments": ("instance",),
+            "raw": ('"conntrack"', 'Some("acl")', '"acl".to_string()'),
+        },
+        "domain_authority_managed_acl_strict_flush_remains_privileged_and_strict": {
+            "method": "flush_conntrack_strict",
+            "timeout": False,
+            "outcome": "strict_error",
+            "arguments": ("instance",),
+            "raw": ("open CT_TABLE_V4",),
+        },
+    }
+
+    raw_tests_body = None
+    if tests_module is not None:
+        raw_tests_opening = control_code.find("{", tests_module.start())
+        raw_tests_closing = _rust_matching_brace_end(
+            control_code, raw_tests_opening
+        )
+        if raw_tests_opening >= 0 and raw_tests_closing is not None:
+            raw_tests_body = control_plane_source[
+                raw_tests_opening + 1:raw_tests_closing
+            ]
+
+    def amendment_binding_positions(body, binding):
+        return [
+            match.start()
+            for match in re.finditer(
+                r"\blet\s+(?:mut\s+)?%s\b(?:\s*:[^=;{}]+)?\s*="
+                % re.escape(binding),
+                body or "",
+            )
+        ]
+
+    def amendment_statement_end(body, start):
+        if body is None or start < 0:
+            return -1
+        target_depth = _rust_brace_depth_at(body, start)
+        for position in range(start, len(body)):
+            if (
+                body[position] == ";"
+                and _rust_brace_depth_at(body, position) == target_depth
+            ):
+                return position
+        return -1
+
+    def amendment_call_details(body, raw_body, call_name):
+        details = []
+        if body is None or raw_body is None:
+            return details
+        for position, _ in _rust_named_call_arguments(body, call_name):
+            opening = body.find("(", position)
+            blank_arguments = _rust_parenthesized_body_at(body, opening)
+            if blank_arguments is None:
+                continue
+            closing = opening + len(blank_arguments) + 1
+            raw_arguments = raw_body[opening + 1:closing]
+            details.append(
+                (
+                    position,
+                    tuple(
+                        re.sub(r"\s+", "", argument)
+                        for argument in _rust_split_top_level_arguments(
+                            raw_arguments
+                        )
+                    ),
+                    opening,
+                    closing,
+                )
+            )
+        return details
+
+    def amendment_macro_details(body, raw_body, macro_name):
+        details = []
+        if body is None or raw_body is None:
+            return details
+        for match in re.finditer(
+            r"\b%s\s*!\s*\(" % re.escape(macro_name), body
+        ):
+            opening = body.find("(", match.start())
+            blank_arguments = _rust_parenthesized_body_at(body, opening)
+            if blank_arguments is None:
+                continue
+            closing = opening + len(blank_arguments) + 1
+            raw_arguments = raw_body[opening + 1:closing]
+            details.append(
+                (
+                    match.start(),
+                    tuple(
+                        re.sub(r"\s+", "", argument)
+                        for argument in _rust_split_top_level_arguments(
+                            raw_arguments
+                        )
+                    ),
+                    opening,
+                    closing,
+                )
+            )
+        return details
+
+    def amendment_has_receiver(body, position, receiver, separator):
+        prefix = (body or "")[max(0, position - 160):position]
+        if separator == ".":
+            return bool(
+                re.search(
+                    r"(?<![\w.])%s\s*\.\s*$" % re.escape(receiver),
+                    prefix,
+                )
+            )
+        return bool(
+            re.search(
+                r"(?<![\w:])%s\s*::\s*$" % re.escape(receiver),
+                prefix,
+            )
+        )
+
+    def amendment_enclosing_block(body, position):
+        stack = []
+        for index, character in enumerate((body or "")[:position]):
+            if character == "{":
+                stack.append(index)
+            elif character == "}" and stack:
+                stack.pop()
+        if not stack:
+            return None
+        opening = stack[-1]
+        closing = _rust_matching_brace_end(body, opening)
+        return None if closing is None else (opening, closing)
+
+    def amendment_state_setup_is_real(body, raw_body, before_position):
+        instance_state_bindings = amendment_binding_positions(
+            body, "instance_state"
+        )
+        state_bindings = amendment_binding_positions(body, "state")
+        get_calls = amendment_call_details(body, raw_body, "get_instance")
+        write_calls = amendment_call_details(body, raw_body, "write")
+        mode_writes = list(
+            re.finditer(
+                r"\bstate\s*\.\s*managed_acl_publication_mode\s*=\s*"
+                r"ManagedAclPublicationMode\s*::\s*StandaloneCompatibility\s*;",
+                body or "",
+            )
+        )
+        health_writes = list(
+            re.finditer(
+                r"\bstate\s*\.\s*managed_projection_health\s*=\s*"
+                r"ManagedProjectionHealth\s*::\s*Unverified\s*;",
+                body or "",
+            )
+        )
+        if not (
+            len(instance_state_bindings) == 1
+            and len(state_bindings) == 1
+            and len(get_calls) == 1
+            and len(write_calls) == 1
+            and len(mode_writes) == 1
+            and len(health_writes) == 1
+        ):
+            return False
+        instance_state = instance_state_bindings[0]
+        state = state_bindings[0]
+        get_call = get_calls[0]
+        write_call = write_calls[0]
+        block = amendment_enclosing_block(body, instance_state)
+        if block is None:
+            return False
+        block_opening, block_closing = block
+        instance_statement_end = amendment_statement_end(body, instance_state)
+        state_statement_end = amendment_statement_end(body, state)
+        get_suffix = (
+            body[get_call[3] + 1:instance_statement_end]
+            if instance_statement_end >= 0
+            else ""
+        )
+        write_suffix = (
+            body[write_call[3] + 1:state_statement_end]
+            if state_statement_end >= 0
+            else ""
+        )
+        positions = (
+            instance_state,
+            get_call[0],
+            state,
+            write_call[0],
+            mode_writes[0].start(),
+            health_writes[0].start(),
+        )
+        return bool(
+            _rust_brace_depth_at(body, block_opening) == 0
+            and all(
+                block_opening < position < block_closing
+                and _rust_brace_depth_at(body, position) == 1
+                for position in positions
+            )
+            and positions == tuple(sorted(positions))
+            and block_closing < before_position
+            and amendment_has_receiver(body, get_call[0], "cp", ".")
+            and get_call[1] == ("instance",)
+            and amendment_has_receiver(
+                body, write_call[0], "instance_state", "."
+            )
+            and write_call[1] == ()
+            and re.fullmatch(r"\s*\.\s*await\s*\.\s*unwrap\s*\(\s*\)\s*", get_suffix)
+            and re.fullmatch(r"\s*\.\s*await\s*", write_suffix)
+            and re.fullmatch(
+                r"\s*let\s+instance_state\s*=\s*cp\s*\.\s*",
+                body[instance_state:get_call[0]],
+            )
+            and re.fullmatch(
+                r"\s*let\s+mut\s+state\s*=\s*instance_state\s*\.\s*",
+                body[state:write_call[0]],
+            )
+        )
+
+    def amendment_match_parts(body, raw_body, binding):
+        matches = list(
+            re.finditer(r"\bmatch\s+%s\s*\{" % re.escape(binding), body or "")
+        )
+        if len(matches) != 1:
+            return None
+        match = matches[0]
+        opening = body.find("{", match.start())
+        closing = _rust_matching_brace_end(body, opening)
+        if closing is None:
+            return None
+        return (
+            match.start(),
+            body[opening + 1:closing],
+            raw_body[opening + 1:closing],
+        )
+
+    def amendment_arm_parts(match_body, raw_match_body, pattern):
+        arm = re.search(pattern + r"\s*=>\s*\{", match_body or "")
+        if arm is None or _rust_brace_depth_at(match_body, arm.start()) != 0:
+            return None
+        opening = match_body.find("{", arm.start())
+        closing = _rust_matching_brace_end(match_body, opening)
+        if closing is None:
+            return None
+        return (
+            match_body[opening + 1:closing],
+            raw_match_body[opening + 1:closing],
+        )
+
+    def amendment_exact_assert_macro(
+        body, raw_body, macro_name, expected_arguments, depth, after
+    ):
+        matches = [
+            detail
+            for detail in amendment_macro_details(body, raw_body, macro_name)
+            if detail[1][:len(expected_arguments)] == expected_arguments
+            and _rust_brace_depth_at(body, detail[0]) == depth
+            and detail[0] > after
+        ]
+        return len(matches) == 1
+
+    for test_name, spec in amendment_test_specs.items():
+        declarations = (
+            list(
+                re.finditer(
+                    r"\basync\s+fn\s+%s\s*\(" % re.escape(test_name),
+                    tests_body,
+                )
+            )
+            if tests_body is not None
+            else []
+        )
+        declaration = declarations[0] if len(declarations) == 1 else None
+        body = None
+        raw_body = None
+        parameters = None
+        attributes = ""
+        if declaration is not None and raw_tests_body is not None:
+            parameter_opening = tests_body.find("(", declaration.start())
+            parameters = _rust_parenthesized_body_at(
+                tests_body, parameter_opening
+            )
+            opening = tests_body.find("{", declaration.end())
+            closing = _rust_matching_brace_end(tests_body, opening)
+            attribute_match = re.search(
+                r"((?:#\s*\[[^\]]+\]\s*)+)$",
+                tests_body[:declaration.start()],
+            )
+            attributes = (
+                re.sub(r"\s+", "", attribute_match.group(1))
+                if attribute_match is not None
+                else ""
+            )
+            if opening >= 0 and closing is not None:
+                body = tests_body[opening + 1:closing]
+                raw_body = raw_tests_body[opening + 1:closing]
+
+        cp_bindings = amendment_binding_positions(body, "cp")
+        instance_bindings = amendment_binding_positions(body, "instance")
+        cp_binding = cp_bindings[0] if len(cp_bindings) == 1 else -1
+        instance_binding = (
+            instance_bindings[0] if len(instance_bindings) == 1 else -1
+        )
+        fixture_calls = amendment_call_details(
+            body,
+            raw_body,
+            "install_verified_managed_acl_instance_without_authority",
+        )
+        fixture = fixture_calls[0] if len(fixture_calls) == 1 else None
+        method_calls = amendment_call_details(
+            body, raw_body, spec["method"]
+        )
+        method_call = method_calls[0] if len(method_calls) == 1 else None
+        method_position = method_call[0] if method_call is not None else -1
+        key_bindings = (
+            ("result", "error")
+            if spec["timeout"]
+            else (
+                ("flushed",)
+                if spec["outcome"] == "success_zero"
+                else ("error",)
+            )
+        )
+        shadow_names = ("cp", "instance") + key_bindings
+        shadow_pattern = "|".join(re.escape(name) for name in shadow_names)
+        fixture_suffix = (
+            body[fixture[3] + 1:]
+            if fixture is not None and body is not None
+            else ""
+        )
+        structural_error = bool(
+            declaration is None
+            or body is None
+            or raw_body is None
+            or parameters is None
+            or parameters.strip()
+            or attributes != "#[tokio::test]"
+            or _rust_brace_depth_at(tests_body, declaration.start()) != 0
+            or cp_binding < 0
+            or instance_binding < 0
+            or not re.match(
+                r"let\s+cp\s*=\s*test_control_plane\s*\(\s*\)\s*;",
+                body[cp_binding:],
+            )
+            or not re.match(
+                r'let\s+instance\s*=\s*"(?:\\.|[^"\\\n])+"\s*;',
+                raw_body[instance_binding:],
+            )
+            or _rust_brace_depth_at(body, cp_binding) != 0
+            or _rust_brace_depth_at(body, instance_binding) != 0
+            or fixture is None
+            or fixture[1][:2] != ("&cp", "instance")
+            or len(fixture[1]) != 3
+            or re.fullmatch(r'"(?:\\.|[^"\\])*"', fixture[1][2]) is None
+            or not amendment_has_receiver(body, fixture[0], "self", "::")
+            or _rust_brace_depth_at(body, fixture[0]) != 0
+            or not re.match(r"\s*\.\s*await\s*;", fixture_suffix)
+            or method_call is None
+            or method_call[1] != spec["arguments"]
+            or not amendment_has_receiver(body, method_position, "cp", ".")
+            or _rust_brace_depth_at(body, method_position) != 0
+            or not cp_binding
+            < instance_binding
+            < (fixture[0] if fixture is not None else -1)
+            < method_position
+            or any(
+                len(amendment_binding_positions(body, binding)) != 1
+                for binding in key_bindings
+            )
+            or re.search(
+                r"\|[^|\n]*\b(?:%s)\b[^|\n]*\|" % shadow_pattern,
+                body or "",
+            )
+            or re.search(
+                r"\bfor\s+(?:%s)\b|\bfn\s+\w+\s*\([^)]*\b(?:%s)\b"
+                % (shadow_pattern, shadow_pattern),
+                body or "",
+            )
+            or amendment_binding_positions(
+                body,
+                "install_verified_managed_acl_instance_without_authority",
+            )
+            or re.search(
+                r"\breturn\b|\bstd\s*::\s*process\s*::\s*exit\s*\(",
+                body or "",
+            )
+            or re.search(
+                r"\bif\s+(?:false|!\s*true)\s*\{", body or ""
+            )
+        )
+
+        error_binding_position = -1
+        if not structural_error and spec["timeout"]:
+            result_position = amendment_binding_positions(body, "result")[0]
+            error_binding_position = amendment_binding_positions(
+                body, "error"
+            )[0]
+            timeout_calls = amendment_call_details(body, raw_body, "timeout")
+            timeout_call = timeout_calls[0] if len(timeout_calls) == 1 else None
+            result_end = amendment_statement_end(body, result_position)
+            error_end = amendment_statement_end(body, error_binding_position)
+            expect_err_calls = amendment_call_details(
+                body, raw_body, "expect_err"
+            )
+            result_expect_err = [
+                call
+                for call in expect_err_calls
+                if amendment_has_receiver(body, call[0], "result", ".")
+                and error_binding_position < call[0] < error_end
+            ]
+            timeout_suffix = (
+                body[timeout_call[3] + 1:result_end]
+                if timeout_call is not None and result_end >= 0
+                else ""
+            )
+            structural_error = bool(
+                timeout_call is None
+                or not re.search(
+                    r"(?<![\w:])tokio\s*::\s*time\s*::\s*$",
+                    body[max(0, timeout_call[0] - 160):timeout_call[0]],
+                )
+                or _rust_brace_depth_at(body, timeout_call[0]) != 0
+                or not result_position
+                < timeout_call[0]
+                < method_position
+                < timeout_call[3]
+                < result_end
+                < error_binding_position
+                or "std::time::Duration::from_secs(1)"
+                not in timeout_call[1]
+                or not re.fullmatch(
+                    r"\s*\.\s*await\s*\.\s*expect\s*\([^)]*\)\s*",
+                    timeout_suffix,
+                )
+                or not re.fullmatch(
+                    r"\s*let\s+result\s*=\s*tokio\s*::\s*time\s*::\s*",
+                    body[result_position:timeout_call[0]],
+                )
+                or _rust_brace_depth_at(body, result_position) != 0
+                or _rust_brace_depth_at(body, error_binding_position) != 0
+                or len(result_expect_err) != 1
+                or not re.fullmatch(
+                    r"\s*let\s+error\s*=\s*result\s*\.\s*",
+                    body[error_binding_position:result_expect_err[0][0]],
+                )
+            )
+        elif not structural_error:
+            outcome_binding = key_bindings[0]
+            outcome_position = amendment_binding_positions(
+                body, outcome_binding
+            )[0]
+            outcome_end = amendment_statement_end(body, outcome_position)
+            expected_terminal = (
+                "expect" if spec["outcome"] == "success_zero" else "expect_err"
+            )
+            method_suffix = (
+                body[method_call[3] + 1:outcome_end]
+                if outcome_end >= 0
+                else ""
+            )
+            structural_error = bool(
+                _rust_brace_depth_at(body, outcome_position) != 0
+                or not outcome_position < method_position < outcome_end
+                or not re.fullmatch(
+                    r"\s*let\s+%s\s*=\s*cp\s*\.\s*"
+                    % re.escape(outcome_binding),
+                    body[outcome_position:method_position],
+                )
+                or not re.match(
+                    r"\s*\.\s*await\s*\.\s*%s\s*\("
+                    % expected_terminal,
+                    method_suffix,
+                )
+            )
+            if outcome_binding == "error":
+                error_binding_position = outcome_position
+
+        if not structural_error:
+            outcome = spec["outcome"]
+            if outcome == "missing_maps":
+                assertions = amendment_call_details(
+                    body, raw_body, "assert_missing_runtime_maps"
+                )
+                structural_error = not (
+                    len(assertions) == 1
+                    and assertions[0][1] == ("error",)
+                    and amendment_has_receiver(
+                        body, assertions[0][0], "self", "::"
+                    )
+                    and _rust_brace_depth_at(body, assertions[0][0]) == 0
+                    and assertions[0][0] > error_binding_position
+                )
+            elif outcome == "foreign_owner":
+                match_parts = amendment_match_parts(body, raw_body, "error")
+                validation_arm = (
+                    amendment_arm_parts(
+                        match_parts[1],
+                        match_parts[2],
+                        r"ControlPlaneError\s*::\s*ValidationError\s*"
+                        r"\(\s*reason\s*\)",
+                    )
+                    if match_parts is not None
+                    else None
+                )
+                expected_reason_assertions = (
+                    (
+                        'reason.contains("expectedownerprefix\'neutron:purge-port:\'")',
+                        'reason.contains("actualgroup\'neutron:foreign-port:src:selector:0\'")',
+                    )
+                )
+                arm_assertions = (
+                    amendment_macro_details(
+                        validation_arm[0], validation_arm[1], "assert"
+                    )
+                    if validation_arm is not None
+                    else []
+                )
+                actual_reason_assertions = {
+                    assertion[1][0]
+                    for assertion in arm_assertions
+                    if assertion[1]
+                    and _rust_brace_depth_at(
+                        validation_arm[0], assertion[0]
+                    )
+                    == 0
+                }
+                structural_error = bool(
+                    not amendment_exact_assert_macro(
+                        body,
+                        raw_body,
+                        "assert_eq",
+                        ("error.status_code()", "400"),
+                        0,
+                        error_binding_position,
+                    )
+                    or match_parts is None
+                    or match_parts[0] <= error_binding_position
+                    or _rust_brace_depth_at(body, match_parts[0]) != 0
+                    or validation_arm is None
+                    or not set(expected_reason_assertions).issubset(
+                        actual_reason_assertions
+                    )
+                )
+            elif outcome in ("blocked", "blocked_committed"):
+                assertions = amendment_call_details(
+                    body, raw_body, "assert_local_write_blocked"
+                )
+                structural_error = not (
+                    len(assertions) == 1
+                    and assertions[0][1]
+                    == (
+                        "error",
+                        "instance",
+                        '"conntrack"',
+                        'Some("acl")',
+                    )
+                    and amendment_has_receiver(
+                        body, assertions[0][0], "self", "::"
+                    )
+                    and _rust_brace_depth_at(body, assertions[0][0]) == 0
+                    and assertions[0][0] > method_position
+                )
+                if outcome == "blocked_committed" and not structural_error:
+                    authority_calls = amendment_call_details(
+                        body, raw_body, "mark_neutron_port_authority"
+                    )
+                    authority = (
+                        authority_calls[0]
+                        if len(authority_calls) == 1
+                        else None
+                    )
+                    structural_error = bool(
+                        authority is None
+                        or authority[1]
+                        != (
+                            "instance",
+                            '"port-ct"',
+                            '&["acl".to_string()]',
+                            "17",
+                        )
+                        or not amendment_has_receiver(
+                            body, authority[0], "cp", "."
+                        )
+                        or _rust_brace_depth_at(body, authority[0]) != 0
+                        or not fixture[0] < authority[0] < method_position
+                        or not amendment_state_setup_is_real(
+                            body, raw_body, authority[0]
+                        )
+                    )
+            elif outcome == "success_zero":
+                structural_error = bool(
+                    not amendment_state_setup_is_real(
+                        body, raw_body, method_position
+                    )
+                    or not amendment_exact_assert_macro(
+                        body,
+                        raw_body,
+                        "assert_eq",
+                        ("flushed", "0"),
+                        0,
+                        method_position,
+                    )
+                )
+            elif outcome == "strict_error":
+                match_parts = amendment_match_parts(body, raw_body, "error")
+                kernel_arm = (
+                    amendment_arm_parts(
+                        match_parts[1],
+                        match_parts[2],
+                        r"ControlPlaneError\s*::\s*KernelError\s*"
+                        r"\(\s*reason\s*\)",
+                    )
+                    if match_parts is not None
+                    else None
+                )
+                blocked_arm = (
+                    amendment_arm_parts(
+                        match_parts[1],
+                        match_parts[2],
+                        r"ControlPlaneError\s*::\s*LocalWriteBlocked\s*"
+                        r"\{\s*\.\s*\.\s*\}",
+                    )
+                    if match_parts is not None
+                    else None
+                )
+                direct_blocked_panic = (
+                    re.search(
+                        r"ControlPlaneError\s*::\s*LocalWriteBlocked\s*"
+                        r"\{\s*\.\s*\.\s*\}\s*=>\s*panic\s*!\s*\(",
+                        match_parts[1],
+                    )
+                    if match_parts is not None
+                    else None
+                )
+                kernel_assertions = (
+                    amendment_macro_details(
+                        kernel_arm[0], kernel_arm[1], "assert"
+                    )
+                    if kernel_arm is not None
+                    else []
+                )
+                blocked_panics = (
+                    amendment_macro_details(
+                        blocked_arm[0], blocked_arm[1], "panic"
+                    )
+                    if blocked_arm is not None
+                    else []
+                )
+                structural_error = bool(
+                    not amendment_exact_assert_macro(
+                        body,
+                        raw_body,
+                        "assert_eq",
+                        ("error.status_code()", "500"),
+                        0,
+                        error_binding_position,
+                    )
+                    or match_parts is None
+                    or match_parts[0] <= error_binding_position
+                    or _rust_brace_depth_at(body, match_parts[0]) != 0
+                    or kernel_arm is None
+                    or not any(
+                        assertion[1]
+                        and assertion[1][0]
+                        == 'reason.contains("openCT_TABLE_V4")'
+                        and _rust_brace_depth_at(
+                            kernel_arm[0], assertion[0]
+                        )
+                        == 0
+                        for assertion in kernel_assertions
+                    )
+                    or not (
+                        (
+                            blocked_arm is not None
+                            and len(blocked_panics) == 1
+                            and _rust_brace_depth_at(
+                                blocked_arm[0], blocked_panics[0][0]
+                            )
+                            == 0
+                        )
+                        or (
+                            direct_blocked_panic is not None
+                            and _rust_brace_depth_at(
+                                match_parts[1], direct_blocked_panic.start()
+                            )
+                            == 0
+                        )
+                    )
+                )
+
+        if structural_error:
+            errors.append(
+                "managed authoritative amendment regression must actively exercise exact purge/conntrack behavior: %s"
+                % test_name
+            )
     return errors
 
 
@@ -7005,7 +8648,38 @@ def _run_managed_authoritative_write_admission_self_tests():
                 Ok(())
             }
 
-            async fn delete_policy(&self, instance: &str) -> Result<(), ControlPlaneError> {
+            async fn delete_policy_locked(
+                &self,
+                state: &mut InstanceState,
+                src_group: &str,
+                dst_group: &str,
+                proto: u8,
+                direction: u8,
+            ) -> Result<(), ControlPlaneError> {
+                Self::check_runtime_maps_ready(&state.pin_path)?;
+                let src_id = self.resolve_group_id()?;
+                let dst_id = self.resolve_group_id()?;
+                let target_directions = Self::requested_directions()?;
+                let acl_bank = aria_core::ebpf_ops::read_acl_active_bank()?;
+                aria_core::ebpf_ops::delete_policy_in_bank();
+                state.state.apply_remove_rule()?;
+                state.wal_append(&WalEntry::RemoveRule {
+                    src_id,
+                    dst_id,
+                    proto,
+                    direction,
+                }).await;
+                Ok(())
+            }
+
+            async fn delete_policy(
+                &self,
+                instance: &str,
+                src_group: &str,
+                dst_group: &str,
+                proto: u8,
+                direction: u8,
+            ) -> Result<(), ControlPlaneError> {
                 let _lifecycle_guard = self.lock_runtime_lifecycle().await;
                 let inst = self.get_instance(instance).await?;
                 let mut state = inst.write().await;
@@ -7017,10 +8691,33 @@ def _run_managed_authoritative_write_admission_self_tests():
                     Some(state.managed_acl_publication_mode),
                     authority.as_ref(),
                 )?;
-                Self::check_runtime_maps_ready(&state.pin_path)?;
-                aria_core::ebpf_ops::delete_policy_in_bank();
-                state.wal_append();
-                Ok(())
+                self.delete_policy_locked(
+                    &mut state,
+                    src_group,
+                    dst_group,
+                    proto,
+                    direction,
+                ).await
+            }
+
+            pub(crate) async fn delete_policy_for_neutron_purge(
+                &self,
+                instance: &str,
+                src_group: &str,
+                dst_group: &str,
+                proto: u8,
+                direction: u8,
+            ) -> Result<(), ControlPlaneError> {
+                let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+                let inst = self.get_instance(instance).await?;
+                let mut state = inst.write().await;
+                self.delete_policy_locked(
+                    &mut state,
+                    src_group,
+                    dst_group,
+                    proto,
+                    direction,
+                ).await
             }
 
             async fn add_group(&self, instance: &str, name: &str) -> Result<(), ControlPlaneError> {
@@ -7040,6 +8737,21 @@ def _run_managed_authoritative_write_admission_self_tests():
                 Ok(())
             }
 
+            async fn delete_group_locked(
+                &self,
+                instance: &str,
+                state: &mut InstanceState,
+                name: &str,
+                owner_prefix: Option<String>,
+            ) -> Result<(), ControlPlaneError> {
+                managed_local_projection_admission()?;
+                require_managed_local_owner_prefix(instance, owner_prefix)?;
+                Self::check_runtime_maps_ready(&state.pin_path)?;
+                let general_mutations = managed_general_state_mutations()?;
+                execute_managed_local_projection_transaction(&general_mutations).await?;
+                Ok(())
+            }
+
             async fn delete_group(&self, instance: &str, name: &str) -> Result<(), ControlPlaneError> {
                 let _lifecycle_guard = self.lock_runtime_lifecycle().await;
                 let inst = self.get_instance(instance).await?;
@@ -7052,9 +8764,34 @@ def _run_managed_authoritative_write_admission_self_tests():
                     Some(state.managed_acl_publication_mode),
                     authority.as_ref(),
                 )?;
-                managed_local_projection_admission();
-                Self::check_runtime_maps_ready(&state.pin_path)?;
-                Ok(())
+                let owner_prefix = authority
+                    .as_ref()
+                    .map(|authority| format!("neutron:{}:", authority.port_id));
+                self.delete_group_locked(instance, &mut state, name, owner_prefix).await
+            }
+
+            pub(crate) async fn delete_group_for_neutron_purge(
+                &self,
+                instance: &str,
+                port_id: &str,
+                name: &str,
+            ) -> Result<(), ControlPlaneError> {
+                let owner_prefix = format!("neutron:{}:", port_id);
+                if !name.starts_with(&owner_prefix) {
+                    return Err(ControlPlaneError::ValidationError(format!(
+                        "Neutron purge group '{}' is outside expected owner prefix '{}'",
+                        name, owner_prefix,
+                    )));
+                }
+                let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+                let inst = self.get_instance(instance).await?;
+                let mut state = inst.write().await;
+                self.delete_group_locked(
+                    instance,
+                    &mut state,
+                    name,
+                    Some(owner_prefix),
+                ).await
             }
 
             async fn update_config(
@@ -7093,6 +8830,33 @@ def _run_managed_authoritative_write_admission_self_tests():
                 aria_core::ebpf_ops::update_runtime_config();
                 state.wal_append_strict();
                 Ok(())
+            }
+
+            async fn flush_conntrack(&self, instance: &str) -> Result<u64, ControlPlaneError> {
+                let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+                let inst = self.get_instance(instance).await?;
+                let state = inst.read().await;
+                let authority = self.neutron_authorities.read().await
+                    .get(instance).cloned();
+                ensure_serialized_local_write_allowed(
+                    instance,
+                    LocalWriteDomain::Conntrack,
+                    Some(state.managed_acl_publication_mode),
+                    authority.as_ref(),
+                )?;
+                aria_core::ct_ops::ct_flush(state.map_runtime())
+                    .map_err(ControlPlaneError::KernelError)
+            }
+
+            pub(crate) async fn flush_conntrack_strict(
+                &self,
+                instance: &str,
+            ) -> Result<u64, ControlPlaneError> {
+                let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+                let inst = self.get_instance(instance).await?;
+                let state = inst.read().await;
+                aria_core::ct_ops::scrub_ct_tables_strict(state.map_runtime())
+                    .map_err(ControlPlaneError::KernelError)
             }
         }
 
@@ -7146,6 +8910,16 @@ def _run_managed_authoritative_write_admission_self_tests():
                     !matches!(error, ControlPlaneError::LocalWriteBlocked { .. }),
                     "must remain allowed",
                 );
+            }
+
+            fn assert_missing_runtime_maps(error: ControlPlaneError) {
+                assert_eq!(error.status_code(), 503);
+                match error {
+                    ControlPlaneError::InstanceNotReady(reason) => {
+                        assert_eq!(reason, "Pinned firewall maps not ready");
+                    }
+                    other => panic!("unexpected {other}"),
+                }
             }
 
             #[tokio::test]
@@ -7231,6 +9005,111 @@ def _run_managed_authoritative_write_admission_self_tests():
                 let error = cp.update_config(instance, Some(false)).await.expect_err("blocked");
                 self::assert_local_write_blocked(error, instance, "qos", None);
             }
+            #[tokio::test]
+            async fn domain_authority_neutron_purge_policy_uses_privileged_serialized_entry() {
+                let cp = test_control_plane();
+                let instance = "safe-policy-purge";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "policy-purge").await;
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    cp.delete_policy_for_neutron_purge(
+                        instance,
+                        "policy-src",
+                        "policy-dst",
+                        libc::IPPROTO_TCP as u8,
+                        0,
+                    ),
+                ).await.expect("no deadlock");
+                let error = result.expect_err("maps");
+                self::assert_missing_runtime_maps(error);
+            }
+            #[tokio::test]
+            async fn domain_authority_neutron_purge_group_uses_privileged_serialized_entry() {
+                let cp = test_control_plane();
+                let instance = "safe-group-purge";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "group-purge").await;
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    cp.delete_group_for_neutron_purge(instance, "purge-port", "neutron:purge-port:src:selector:0"),
+                ).await.expect("no deadlock");
+                let error = result.expect_err("maps");
+                self::assert_missing_runtime_maps(error);
+            }
+            #[tokio::test]
+            async fn domain_authority_neutron_purge_group_rejects_foreign_owner_prefix() {
+                let cp = test_control_plane();
+                let instance = "safe-foreign-purge";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "foreign-purge").await;
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    cp.delete_group_for_neutron_purge(
+                        instance,
+                        "purge-port",
+                        "neutron:foreign-port:src:selector:0",
+                    ),
+                ).await.expect("no deadlock");
+                let error = result.expect_err("foreign");
+                assert_eq!(error.status_code(), 400);
+                match error {
+                    ControlPlaneError::ValidationError(reason) => {
+                        assert!(reason.contains("expected owner prefix 'neutron:purge-port:'"));
+                        assert!(reason.contains("actual group 'neutron:foreign-port:src:selector:0'"));
+                    }
+                    other => panic!("unexpected {other}"),
+                }
+            }
+            #[tokio::test]
+            async fn domain_authority_managed_acl_public_flush_blocks_before_authority_commit() {
+                let cp = test_control_plane();
+                let instance = "safe-public-flush";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "public-flush").await;
+                let error = cp.flush_conntrack(instance).await.expect_err("blocked");
+                self::assert_local_write_blocked(error, instance, "conntrack", Some("acl"));
+            }
+            #[tokio::test]
+            async fn domain_authority_standalone_public_flush_preserves_lenient_missing_map_behavior() {
+                let cp = test_control_plane();
+                let instance = "safe-standalone-flush";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "standalone-flush").await;
+                {
+                    let instance_state = cp.get_instance(instance).await.unwrap();
+                    let mut state = instance_state.write().await;
+                    state.managed_acl_publication_mode = ManagedAclPublicationMode::StandaloneCompatibility;
+                    state.managed_projection_health = ManagedProjectionHealth::Unverified;
+                }
+                let flushed = cp.flush_conntrack(instance).await.expect("lenient");
+                assert_eq!(flushed, 0);
+            }
+            #[tokio::test]
+            async fn domain_authority_standalone_public_flush_blocks_committed_acl_dependency() {
+                let cp = test_control_plane();
+                let instance = "safe-authoritative-standalone-flush";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "authoritative-standalone-flush").await;
+                {
+                    let instance_state = cp.get_instance(instance).await.unwrap();
+                    let mut state = instance_state.write().await;
+                    state.managed_acl_publication_mode = ManagedAclPublicationMode::StandaloneCompatibility;
+                    state.managed_projection_health = ManagedProjectionHealth::Unverified;
+                }
+                cp.mark_neutron_port_authority(instance, "port-ct", &["acl".to_string()], 17).await;
+                let error = cp.flush_conntrack(instance).await.expect_err("blocked");
+                self::assert_local_write_blocked(error, instance, "conntrack", Some("acl"));
+            }
+            #[tokio::test]
+            async fn domain_authority_managed_acl_strict_flush_remains_privileged_and_strict() {
+                let cp = test_control_plane();
+                let instance = "safe-strict-flush";
+                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "strict-flush").await;
+                let error = cp.flush_conntrack_strict(instance).await.expect_err("strict");
+                assert_eq!(error.status_code(), 500);
+                match error {
+                    ControlPlaneError::KernelError(reason) => {
+                        assert!(reason.contains("open CT_TABLE_V4"));
+                    }
+                    ControlPlaneError::LocalWriteBlocked { .. } => panic!("blocked"),
+                    other => panic!("unexpected {other}"),
+                }
+            }
         }
     '''
     safe_groups = r'''
@@ -7244,9 +9123,41 @@ def _run_managed_authoritative_write_admission_self_tests():
             cp.delete_group(&instance, &name).await
         }
     '''
+    safe_neutron = r'''
+        async fn purge_neutron_acl(
+            state: &NeutronApiState,
+            ifname: &str,
+            port_id: &str,
+        ) -> Result<(), String> {
+            let (rules, groups_by_name) = state.control_plane.list_policies(ifname).await?;
+            let group_names_by_id = groups_by_name;
+            let policy_delete_targets =
+                acl_policy_delete_targets_for_neutron_domain(&rules, &group_names_by_id);
+            for target in policy_delete_targets {
+                state.control_plane.delete_policy_for_neutron_purge(
+                    ifname,
+                    &target.src_group,
+                    &target.dst_group,
+                    target.proto,
+                    target.direction,
+                ).await?;
+            }
+            let groups = state.control_plane.list_groups(ifname).await?;
+            for group in groups {
+                if is_neutron_acl_group(port_id, &group.name) {
+                    state.control_plane.delete_group_for_neutron_purge(
+                        ifname,
+                        port_id,
+                        &group.name,
+                    ).await?;
+                }
+            }
+            Ok(())
+        }
+    '''
 
     safe_errors = _managed_authoritative_write_admission_contract_errors(
-        safe_control, safe_groups
+        safe_control, safe_groups, safe_neutron
     )
     if safe_errors:
         raise SystemExit(
@@ -7316,7 +9227,7 @@ def _run_managed_authoritative_write_admission_self_tests():
         "            group_name.trim().to_ascii_lowercase().starts_with(\"neutron:\")",
     )
     commented_errors = _managed_authoritative_write_admission_contract_errors(
-        commented_group_classifier, safe_groups
+        commented_group_classifier, safe_groups, safe_neutron
     )
     if commented_errors:
         raise SystemExit(
@@ -7326,8 +9237,14 @@ def _run_managed_authoritative_write_admission_self_tests():
 
     cases = []
 
-    def case(label, expected, control=safe_control, groups=safe_groups):
-        cases.append((label, control, groups, expected))
+    def case(
+        label,
+        expected,
+        control=safe_control,
+        groups=safe_groups,
+        neutron=safe_neutron,
+    ):
+        cases.append((label, control, groups, neutron, expected))
 
     case(
         "ManagedAcl ACL arm removed",
@@ -7480,35 +9397,29 @@ def _run_managed_authoritative_write_admission_self_tests():
     case(
         "delete policy effect before admission",
         "delete_policy must reject before maps",
-        mutate(
+        rewrite_function_body(
             safe_control,
-            "                ensure_serialized_local_write_allowed(\n"
-            "                    instance,\n"
-            "                    LocalWriteDomain::Acl,\n"
-            "                    Some(state.managed_acl_publication_mode),\n"
-            "                    authority.as_ref(),\n"
-            "                )?;\n"
-            "                Self::check_runtime_maps_ready(&state.pin_path)?;",
-            "                Self::check_runtime_maps_ready(&state.pin_path)?;\n"
-            "                ensure_serialized_local_write_allowed(\n"
-            "                    instance,\n"
-            "                    LocalWriteDomain::Acl,\n"
-            "                    Some(state.managed_acl_publication_mode),\n"
-            "                    authority.as_ref(),\n"
-            "                )?;",
-            1,
+            "delete_policy",
+            lambda body: body.replace(
+                "                ensure_serialized_local_write_allowed(\n",
+                "                Self::check_runtime_maps_ready(&state.pin_path)?;\n"
+                "                ensure_serialized_local_write_allowed(\n",
+                1,
+            ),
         ),
     )
     case(
         "delete policy drops lifecycle guard",
         "delete_policy must hold the lifecycle guard",
-        mutate(
+        rewrite_function_body(
             safe_control,
-            "                Self::check_runtime_maps_ready(&state.pin_path)?;\n"
-            "                aria_core::ebpf_ops::delete_policy_in_bank();",
-            "                drop(_lifecycle_guard);\n"
-            "                Self::check_runtime_maps_ready(&state.pin_path)?;\n"
-            "                aria_core::ebpf_ops::delete_policy_in_bank();",
+            "delete_policy",
+            lambda body: body.replace(
+                "                self.delete_policy_locked(\n",
+                "                drop(_lifecycle_guard);\n"
+                "                self.delete_policy_locked(\n",
+                1,
+            ),
         ),
     )
     case(
@@ -7649,6 +9560,750 @@ def _run_managed_authoritative_write_admission_self_tests():
             safe_groups,
             "            cp.ensure_local_group_write_allowed(&instance, &req.name).await?;",
             "            let _ = cp.ensure_local_group_write_allowed(&instance, &req.name).await;",
+        ),
+    )
+    case(
+        "purpose-limited policy purge entry removed",
+        "purpose-limited Neutron policy purge entry is missing",
+        control=mutate(
+            safe_control,
+            "delete_policy_for_neutron_purge",
+            "removed_policy_for_neutron_purge",
+            0,
+        ),
+    )
+    case(
+        "policy purge delegates through public local delete",
+        "must serialize lifecycle, instance write lock, then the shared delete body",
+        control=rewrite_function_body(
+            safe_control,
+            "delete_policy_for_neutron_purge",
+            lambda body: body.replace(
+                "self.delete_policy_locked(", "self.delete_policy("
+            ),
+        ),
+    )
+    case(
+        "public group delete drops validated owner prefix",
+        "must pass exact state and operation inputs",
+        control=rewrite_function_body(
+            safe_control,
+            "delete_group",
+            lambda body: body.replace(
+                "self.delete_group_locked(instance, &mut state, name, owner_prefix)",
+                "self.delete_group_locked(instance, &mut state, name, None)",
+            ),
+        ),
+    )
+    case(
+        "shared policy delete body relocks lifecycle",
+        "must not relock or perform local-authority admission",
+        control=rewrite_function_body(
+            safe_control,
+            "delete_policy_locked",
+            lambda body: "\n                let _again = self.lock_runtime_lifecycle().await;"
+            + body,
+        ),
+    )
+    case(
+        "shared group delete effects hidden behind false",
+        "must not hide effects behind a constant-false branch",
+        control=rewrite_function_body(
+            safe_control,
+            "delete_group_locked",
+            lambda body: "\n                if false {\n"
+            + body
+            + "\n                }\n                Ok(())\n            ",
+        ),
+    )
+    case(
+        "shared policy delete returns success before effects",
+        "must not return success before its real effects",
+        control=rewrite_function_body(
+            safe_control,
+            "delete_policy_locked",
+            lambda body: body.replace(
+                "                Self::check_runtime_maps_ready(&state.pin_path)?;",
+                "                Self::check_runtime_maps_ready(&state.pin_path)?;\n"
+                "                return Ok(());",
+                1,
+            ),
+        ),
+    )
+    case(
+        "shared group delete returns success before effects",
+        "must not return success before its real effects",
+        control=rewrite_function_body(
+            safe_control,
+            "delete_group_locked",
+            lambda body: body.replace(
+                "                managed_local_projection_admission()?;",
+                "                managed_local_projection_admission()?;\n"
+                "                return Ok(());",
+                1,
+            ),
+        ),
+    )
+    case(
+        "shared group delete effects are stringify tokens",
+        "must not satisfy effects through token-string decoys",
+        control=rewrite_function_body(
+            safe_control,
+            "delete_group_locked",
+            lambda _body: r'''
+                let _ = (self, instance, state, name, owner_prefix);
+                let _ = stringify!(
+                    managed_local_projection_admission()?;
+                    require_managed_local_owner_prefix(instance, owner_prefix)?;
+                    check_runtime_maps_ready(&state.pin_path)?;
+                    managed_general_state_mutations()?;
+                    execute_managed_local_projection_transaction()?;
+                );
+                Ok(())
+            ''',
+        ),
+    )
+    case(
+        "group purge owner check widened to global namespace",
+        "outside its exact port owner prefix",
+        control=mutate(
+            safe_control,
+            "if !name.starts_with(&owner_prefix)",
+            'if !name.starts_with("neutron:")',
+        ),
+    )
+    case(
+        "group purge exact prefix is only a comment decoy",
+        "outside its exact port owner prefix",
+        control=mutate(
+            safe_control,
+            '                let owner_prefix = format!("neutron:{}:", port_id);',
+            '                // let owner_prefix = format!("neutron:{}:", port_id);\n'
+            '                let owner_prefix = "neutron:".to_string();',
+        ),
+    )
+    case(
+        "Neutron purge calls public policy delete",
+        "must preserve policy-first and exact-owner cleanup",
+        neutron=mutate(
+            safe_neutron,
+            "delete_policy_for_neutron_purge",
+            "delete_policy",
+        ),
+    )
+    case(
+        "Neutron purge negates exact group filter",
+        "must preserve policy-first and exact-owner cleanup",
+        neutron=mutate(
+            safe_neutron,
+            "                if is_neutron_acl_group(port_id, &group.name) {",
+            "                if !is_neutron_acl_group(port_id, &group.name) {",
+        ),
+    )
+    case(
+        "Neutron purge processes only first policy",
+        "must preserve policy-first and exact-owner cleanup",
+        neutron=mutate(
+            safe_neutron,
+            "            for target in policy_delete_targets {",
+            "            if let Some(target) = policy_delete_targets.first() {",
+        ),
+    )
+    case(
+        "Neutron purge hides policy cleanup behind false",
+        "must preserve policy-first and exact-owner cleanup",
+        neutron=mutate(
+            safe_neutron,
+            "            for target in policy_delete_targets {\n"
+            "                state.control_plane.delete_policy_for_neutron_purge(",
+            "            for target in policy_delete_targets {\n"
+            "                if false {\n"
+            "                    state.control_plane.delete_policy_for_neutron_purge(",
+        ).replace(
+            "                ).await?;\n            }\n            let groups",
+            "                    ).await?;\n                }\n            }\n            let groups",
+            1,
+        ),
+    )
+    case(
+        "Neutron purge hides the complete policy loop behind false",
+        "must preserve policy-first and exact-owner cleanup",
+        neutron=mutate(
+            safe_neutron,
+            "            for target in policy_delete_targets {",
+            "            if false {\n"
+            "            for target in policy_delete_targets {",
+        ).replace(
+            "            }\n            let groups",
+            "            }\n            }\n            let groups",
+            1,
+        ),
+    )
+    case(
+        "Neutron purge hides the complete group loop behind false",
+        "must preserve policy-first and exact-owner cleanup",
+        neutron=mutate(
+            safe_neutron,
+            "            for group in groups {",
+            "            if false {\n"
+            "            for group in groups {",
+        ).replace(
+            "            }\n            Ok(())",
+            "            }\n            }\n            Ok(())",
+            1,
+        ),
+    )
+    case(
+        "cfg-test Neutron purge decoy precedes unreachable real loops",
+        "must preserve policy-first and exact-owner cleanup",
+        neutron=r'''
+            #[cfg(test)]
+            mod purge_decoy {
+                use super::*;
+
+                #[cfg(any())]
+                async fn purge_neutron_acl(
+                    state: &NeutronApiState,
+                    ifname: &str,
+                    port_id: &str,
+                ) -> Result<(), String> {
+                    let (rules, groups_by_name) =
+                        state.control_plane.list_policies(ifname).await?;
+                    let group_names_by_id = groups_by_name;
+                    let policy_delete_targets =
+                        acl_policy_delete_targets_for_neutron_domain(
+                            &rules,
+                            &group_names_by_id,
+                        );
+                    for target in policy_delete_targets {
+                        state.control_plane.delete_policy_for_neutron_purge(
+                            ifname,
+                            &target.src_group,
+                            &target.dst_group,
+                            target.proto,
+                            target.direction,
+                        ).await?;
+                    }
+                    let groups = state.control_plane.list_groups(ifname).await?;
+                    for group in groups {
+                        if is_neutron_acl_group(port_id, &group.name) {
+                            state.control_plane.delete_group_for_neutron_purge(
+                                ifname,
+                                port_id,
+                                &group.name,
+                            ).await?;
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        '''
+        + mutate(
+            mutate(
+                safe_neutron,
+                "            for target in policy_delete_targets {",
+                "            if false {\n"
+                "            for target in policy_delete_targets {",
+            ).replace(
+                "            }\n            let groups",
+                "            }\n            }\n            let groups",
+                1,
+            ),
+            "            for group in groups {",
+            "            if false {\n"
+            "            for group in groups {",
+        ).replace(
+            "            }\n            Ok(())",
+            "            }\n            }\n            Ok(())",
+            1,
+        ),
+    )
+    case(
+        "Neutron purge returns before inventory and cleanup",
+        "must preserve policy-first and exact-owner cleanup",
+        neutron=mutate(
+            safe_neutron,
+            "            let (rules, groups_by_name)",
+            "            return Ok(());\n"
+            "            let (rules, groups_by_name)",
+        ),
+    )
+    case(
+        "Neutron purge skips every policy loop item",
+        "must preserve policy-first and exact-owner cleanup",
+        neutron=mutate(
+            safe_neutron,
+            "            for target in policy_delete_targets {",
+            "            for target in policy_delete_targets {\n"
+            "                continue;",
+        ),
+    )
+    case(
+        "Neutron purge skips every group loop item",
+        "must preserve policy-first and exact-owner cleanup",
+        neutron=mutate(
+            safe_neutron,
+            "            for group in groups {",
+            "            for group in groups {\n"
+            "                continue;",
+        ),
+    )
+    case(
+        "Neutron purge truncates policy target collection",
+        "must preserve policy-first and exact-owner cleanup",
+        neutron=mutate(
+            safe_neutron,
+            "acl_policy_delete_targets_for_neutron_domain(&rules, &group_names_by_id);",
+            "acl_policy_delete_targets_for_neutron_domain(&rules, &group_names_by_id)\n"
+            "                    .into_iter().take(1).collect::<Vec<_>>();",
+        ),
+    )
+    case(
+        "Neutron purge shadows group collection with first item",
+        "must preserve policy-first and exact-owner cleanup",
+        neutron=mutate(
+            safe_neutron,
+            "            for group in groups {",
+            "            let groups = groups.into_iter().take(1).collect::<Vec<_>>();\n"
+            "            for group in groups {",
+        ),
+    )
+    case(
+        "Neutron purge discards direct group list result",
+        "must preserve policy-first and exact-owner cleanup",
+        neutron=mutate(
+            safe_neutron,
+            "            let groups = state.control_plane.list_groups(ifname).await?;",
+            "            let groups = {\n"
+            "                let _all = state.control_plane.list_groups(ifname).await?;\n"
+            "                Vec::new()\n"
+            "            };",
+        ),
+    )
+    case(
+        "Neutron purge acquires lifecycle outside privileged entries",
+        "must not call local delete APIs or acquire a reentrant lifecycle lock",
+        neutron=mutate(
+            safe_neutron,
+            "            let (rules, groups_by_name)",
+            "            let _lifecycle_guard = state.control_plane.lock_runtime_lifecycle().await;\n"
+            "            let (rules, groups_by_name)",
+        ),
+    )
+    case(
+        "privileged purge entry gains an unrelated caller",
+        "must have exactly one production caller in purge_neutron_acl",
+        neutron=safe_neutron
+        + r'''
+            async fn unrelated_bypass(cp: &ControlPlane, instance: &str) {
+                cp.delete_policy_for_neutron_purge(instance, "a", "b", 6, 0).await?;
+                cp.delete_group_for_neutron_purge(instance, "port", "neutron:port:g").await?;
+            }
+        ''',
+    )
+    case(
+        "privileged purge entry is captured as a method item",
+        "must have exactly one production caller in purge_neutron_acl",
+        neutron=safe_neutron
+        + r'''
+            fn capture_bypass() {
+                let _bypass = ControlPlane::delete_policy_for_neutron_purge;
+            }
+        ''',
+    )
+    case(
+        "cfg-hidden duplicate production function precedes the real entry",
+        "must have one declaration without cfg decoys",
+        control=mutate(
+            safe_control,
+            "        impl ControlPlane {",
+            "        #[cfg(any())]\n"
+            "        impl ControlPlane {\n"
+            "            async fn flush_conntrack(&self, instance: &str) -> Result<u64, ControlPlaneError> {\n"
+            "                let _ = (self, instance);\n"
+            "                Ok(0)\n"
+            "            }\n"
+            "        }\n\n"
+            "        impl ControlPlane {",
+        ),
+    )
+    case(
+        "cfg-test module decoy precedes a weak real production entry",
+        "must serialize lifecycle and instance access around its conntrack effect",
+        control=mutate(
+            rewrite_function_body(
+                safe_control,
+                "flush_conntrack",
+                lambda _body: r'''
+                let inst = self.get_instance(instance).await?;
+                let state = inst.read().await;
+                aria_core::ct_ops::ct_flush(state.map_runtime())
+                    .map_err(ControlPlaneError::KernelError)
+            ''',
+            ),
+            "        impl ControlPlane {",
+            r'''
+        #[cfg(test)]
+        mod production_decoy {
+            use super::*;
+
+            #[cfg(any())]
+            impl ControlPlane {
+                async fn flush_conntrack(
+                    &self,
+                    instance: &str,
+                ) -> Result<u64, ControlPlaneError> {
+                    let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+                    let inst = self.get_instance(instance).await?;
+                    let state = inst.read().await;
+                    let authority = self.neutron_authorities.read().await
+                        .get(instance).cloned();
+                    ensure_serialized_local_write_allowed(
+                        instance,
+                        LocalWriteDomain::Conntrack,
+                        Some(state.managed_acl_publication_mode),
+                        authority.as_ref(),
+                    )?;
+                    aria_core::ct_ops::ct_flush(state.map_runtime())
+                        .map_err(ControlPlaneError::KernelError)
+                }
+            }
+        }
+
+        impl ControlPlane {''',
+        ),
+    )
+    case(
+        "public conntrack flush runs effect before admission",
+        "must serialize lifecycle and instance access around its conntrack effect",
+        control=rewrite_function_body(
+            safe_control,
+            "flush_conntrack",
+            lambda body: body.replace(
+                "                ensure_serialized_local_write_allowed(\n",
+                "                aria_core::ct_ops::ct_flush(state.map_runtime());\n"
+                "                ensure_serialized_local_write_allowed(\n",
+                1,
+            ),
+        ),
+    )
+    case(
+        "public conntrack flush fabricates authority snapshot",
+        "must pass a current authority snapshot",
+        control=rewrite_function_body(
+            safe_control,
+            "flush_conntrack",
+            lambda body: re.sub(
+                r"let\s+authority\s*=\s*self\.neutron_authorities\.read\(\)\.await\s*"
+                r"\.get\(instance\)\.cloned\(\);",
+                "let authority = None;",
+                body,
+                count=1,
+            ),
+        ),
+    )
+    case(
+        "public conntrack flush shadows exact authority snapshot",
+        "must perform admission and effects in serialized order",
+        control=rewrite_function_body(
+            safe_control,
+            "flush_conntrack",
+            lambda body: body.replace(
+                "                ensure_serialized_local_write_allowed(\n",
+                "                let authority = None;\n"
+                "                ensure_serialized_local_write_allowed(\n",
+                1,
+            ),
+        ),
+    )
+    case(
+        "public conntrack flush swallows kernel result",
+        "must propagate the exact tap-scoped conntrack effect",
+        control=rewrite_function_body(
+            safe_control,
+            "flush_conntrack",
+            lambda body: body.replace(
+                "                aria_core::ct_ops::ct_flush(state.map_runtime())\n"
+                "                    .map_err(ControlPlaneError::KernelError)\n",
+                "                let _ignored = aria_core::ct_ops::ct_flush(state.map_runtime());\n"
+                "                Ok(0)\n",
+            ),
+        ),
+    )
+    case(
+        "public conntrack flush returns success before kernel effect",
+        "must not return success before its conntrack effect",
+        control=rewrite_function_body(
+            safe_control,
+            "flush_conntrack",
+            lambda body: body.replace(
+                "                aria_core::ct_ops::ct_flush(state.map_runtime())",
+                "                return Ok(0);\n"
+                "                aria_core::ct_ops::ct_flush(state.map_runtime())",
+                1,
+            ),
+        ),
+    )
+    case(
+        "strict conntrack flush adds local admission",
+        "must bypass local admission and use only strict scrub",
+        control=rewrite_function_body(
+            safe_control,
+            "flush_conntrack_strict",
+            lambda body: body.replace(
+                "                aria_core::ct_ops::scrub_ct_tables_strict",
+                "                ensure_local_write_allowed(instance)?;\n"
+                "                aria_core::ct_ops::scrub_ct_tables_strict",
+            ),
+        ),
+    )
+    case(
+        "strict conntrack flush uses lenient effect",
+        "must serialize lifecycle and instance access around its conntrack effect",
+        control=rewrite_function_body(
+            safe_control,
+            "flush_conntrack_strict",
+            lambda body: body.replace(
+                "scrub_ct_tables_strict", "ct_flush"
+            ),
+        ),
+    )
+    case(
+        "strict conntrack flush returns success before strict scrub",
+        "must not return success before its conntrack effect",
+        control=rewrite_function_body(
+            safe_control,
+            "flush_conntrack_strict",
+            lambda body: body.replace(
+                "                aria_core::ct_ops::scrub_ct_tables_strict",
+                "                if state.maps_ready() { return Ok(0); }\n"
+                "                aria_core::ct_ops::scrub_ct_tables_strict",
+                1,
+            ),
+        ),
+    )
+    case(
+        "purge amendment test attribute removed",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=mutate(
+            safe_control,
+            "            #[tokio::test]\n"
+            "            async fn domain_authority_neutron_purge_policy_uses_privileged_serialized_entry",
+            "            async fn domain_authority_neutron_purge_policy_uses_privileged_serialized_entry",
+        ),
+    )
+    case(
+        "public flush exact assertion is only a comment",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_public_flush_blocks_before_authority_commit",
+            lambda body: body.replace(
+                '                self::assert_local_write_blocked(error, instance, "conntrack", Some("acl"));',
+                '                // self::assert_local_write_blocked(error, instance, "conntrack", Some("acl"));',
+            ),
+        ),
+    )
+    case(
+        "standalone flush amendment loses compatibility marker",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_standalone_public_flush_preserves_lenient_missing_map_behavior",
+            lambda body: body.replace(
+                "ManagedAclPublicationMode::StandaloneCompatibility",
+                "ManagedAclPublicationMode::ManagedAcl",
+            ),
+        ),
+    )
+    case(
+        "committed-authority flush mutates disconnected state",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_standalone_public_flush_blocks_committed_acl_dependency",
+            lambda body: re.sub(
+                r"\{\s*let\s+instance_state\s*=\s*cp\.get_instance\(instance\)"
+                r"\.await\.unwrap\(\);[\s\S]*?"
+                r"state\.managed_projection_health\s*=\s*"
+                r"ManagedProjectionHealth::Unverified;\s*\}",
+                "{\n"
+                "                    let mut state = disconnected_test_state();\n"
+                "                    state.managed_acl_publication_mode = ManagedAclPublicationMode::StandaloneCompatibility;\n"
+                "                    state.managed_projection_health = ManagedProjectionHealth::Unverified;\n"
+                "                }",
+                body,
+                count=1,
+            ),
+        ),
+    )
+    case(
+        "purge amendment is preceded by a same-name cfg-hidden decoy",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=mutate(
+            safe_control,
+            "            #[tokio::test]\n"
+            "            async fn domain_authority_neutron_purge_policy_uses_privileged_serialized_entry",
+            "            #[cfg(any())]\n"
+            "            #[tokio::test]\n"
+            "            async fn domain_authority_neutron_purge_policy_uses_privileged_serialized_entry() {}\n"
+            "            #[tokio::test]\n"
+            "            async fn domain_authority_neutron_purge_policy_uses_privileged_serialized_entry",
+        ),
+    )
+    case(
+        "purge amendment fixture is hidden behind constant false",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_neutron_purge_policy_uses_privileged_serialized_entry",
+            lambda body: body.replace(
+                "                self::install_verified_managed_acl_instance_without_authority(&cp, instance, \"policy-purge\").await;",
+                "                if false {\n"
+                "                    self::install_verified_managed_acl_instance_without_authority(&cp, instance, \"policy-purge\").await;\n"
+                "                }",
+            ),
+        ),
+    )
+    case(
+        "purge amendment fixture uses other control plane",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_neutron_purge_policy_uses_privileged_serialized_entry",
+            lambda body: body.replace(
+                "(&cp, instance, \"policy-purge\")",
+                "(&other_cp, instance, \"policy-purge\")",
+            ),
+        ),
+    )
+    case(
+        "purge amendment fixture uses other instance",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_neutron_purge_group_uses_privileged_serialized_entry",
+            lambda body: body.replace(
+                "(&cp, instance, \"group-purge\")",
+                "(&cp, other_instance, \"group-purge\")",
+            ),
+        ),
+    )
+    case(
+        "purge amendment returns before fixture",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_neutron_purge_group_uses_privileged_serialized_entry",
+            lambda body: "\n                if true { return; }\n" + body,
+        ),
+    )
+    case(
+        "purge amendment calls FakePurge receiver",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_neutron_purge_policy_uses_privileged_serialized_entry",
+            lambda body: body.replace(
+                "                let result = tokio::time::timeout(",
+                "                let purge = FakePurge;\n"
+                "                let result = tokio::time::timeout(",
+            ).replace(
+                "                    cp.delete_policy_for_neutron_purge(",
+                "                    purge.delete_policy_for_neutron_purge(",
+            ),
+        ),
+    )
+    case(
+        "public flush amendment shadows cp with FakePurge",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_public_flush_blocks_before_authority_commit",
+            lambda body: body.replace(
+                "                let error = cp.flush_conntrack",
+                "                let cp = FakePurge;\n"
+                "                let error = cp.flush_conntrack",
+            ),
+        ),
+    )
+    case(
+        "purge amendment shadows result binding",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_neutron_purge_policy_uses_privileged_serialized_entry",
+            lambda body: body.replace(
+                "                let error = result.expect_err(\"maps\");",
+                "                let result = fake_result;\n"
+                "                let error = result.expect_err(\"maps\");",
+            ),
+        ),
+    )
+    case(
+        "public flush amendment shadows error binding",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_public_flush_blocks_before_authority_commit",
+            lambda body: body.replace(
+                "                self::assert_local_write_blocked(error, instance, \"conntrack\", Some(\"acl\"));",
+                "                let error = fabricated_error;\n"
+                "                self::assert_local_write_blocked(error, instance, \"conntrack\", Some(\"acl\"));",
+            ),
+        ),
+    )
+    case(
+        "standalone flush amendment shadows flushed binding",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_standalone_public_flush_preserves_lenient_missing_map_behavior",
+            lambda body: body.replace(
+                "                assert_eq!(flushed, 0);",
+                "                let flushed = 0;\n"
+                "                assert_eq!(flushed, 0);",
+            ),
+        ),
+    )
+    case(
+        "public flush outcome assertion is hidden behind constant false",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_public_flush_blocks_before_authority_commit",
+            lambda body: body.replace(
+                "                self::assert_local_write_blocked(error, instance, \"conntrack\", Some(\"acl\"));",
+                "                if false {\n"
+                "                    self::assert_local_write_blocked(error, instance, \"conntrack\", Some(\"acl\"));\n"
+                "                }",
+            ),
+        ),
+    )
+    case(
+        "foreign-owner expected strings survive only in comments",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_neutron_purge_group_rejects_foreign_owner_prefix",
+            lambda body: body.replace(
+                "                        assert!(reason.contains(\"expected owner prefix 'neutron:purge-port:'\"));\n"
+                "                        assert!(reason.contains(\"actual group 'neutron:foreign-port:src:selector:0'\"));",
+                "                        // assert!(reason.contains(\"expected owner prefix 'neutron:purge-port:'\"));\n"
+                "                        // assert!(reason.contains(\"actual group 'neutron:foreign-port:src:selector:0'\"));",
+            ),
+        ),
+    )
+    case(
+        "strict expected kernel string survives only in a comment",
+        "amendment regression must actively exercise exact purge/conntrack behavior",
+        control=rewrite_function_body(
+            safe_control,
+            "domain_authority_managed_acl_strict_flush_remains_privileged_and_strict",
+            lambda body: body.replace(
+                "                        assert!(reason.contains(\"open CT_TABLE_V4\"));",
+                "                        // assert!(reason.contains(\"open CT_TABLE_V4\"));",
+            ),
         ),
     )
     case(
@@ -7999,9 +10654,9 @@ def _run_managed_authoritative_write_admission_self_tests():
         ),
     )
 
-    for label, control, groups, expected in cases:
+    for label, control, groups, neutron, expected in cases:
         errors = _managed_authoritative_write_admission_contract_errors(
-            control, groups
+            control, groups, neutron
         )
         if not any(expected in error for error in errors):
             raise SystemExit(
@@ -13616,9 +16271,23 @@ def check_managed_cross_domain_group_mutation_contract():
 def check_managed_authoritative_write_admission_contract():
     print("==> checking managed authoritative write admission contract")
     _run_managed_authoritative_write_admission_self_tests()
+    other_agent_sources = []
+    agent_source_root = os.path.join(ROOT, "agent", "src")
+    excluded = {
+        os.path.join(agent_source_root, "control_plane.rs"),
+        os.path.join(agent_source_root, "neutron_api.rs"),
+    }
+    for current_root, _, files in os.walk(agent_source_root):
+        for filename in sorted(files):
+            path = os.path.join(current_root, filename)
+            if filename.endswith(".rs") and path not in excluded:
+                with open(path, "r", encoding="utf-8") as source_file:
+                    other_agent_sources.append(source_file.read())
     errors = _managed_authoritative_write_admission_contract_errors(
         _read_repo_text(os.path.join("agent", "src", "control_plane.rs")),
         _read_repo_text(os.path.join("agent", "src", "api_handlers", "groups.rs")),
+        _read_repo_text(os.path.join("agent", "src", "neutron_api.rs")),
+        "\n".join(other_agent_sources),
     )
     if errors:
         raise SystemExit("ERROR: " + errors[0])
