@@ -23,7 +23,9 @@ use sha2::{Digest, Sha256};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
+use std::future::Future;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
@@ -558,10 +560,10 @@ impl NeutronApiState {
             )
         };
         for port in ports {
-            let required_publication_mode = normalize_managed_domains(&port.managed_domains)
+            let manages_acl = normalize_managed_domains(&port.managed_domains)
                 .iter()
-                .any(|domain| domain == "acl")
-                .then_some(ManagedAclPublicationMode::ManagedAcl);
+                .any(|domain| domain == "acl");
+            let required_publication_mode = required_neutron_publication_mode(manages_acl);
             self.control_plane
                 .mark_neutron_port_authority_if_current(
                     &port.ifname,
@@ -2814,6 +2816,42 @@ async fn apply_snapshot_runtime_transaction(
     for port in update {
         let port_started = Instant::now();
         let managed = managed_port_from_snapshot(&port);
+        let unsupported_managed_domains =
+            unsupported_neutron_managed_domains(&port.managed_domains);
+        if !unsupported_managed_domains.is_empty() {
+            let reason = blocked_by_unimplemented_domains(&unsupported_managed_domains);
+            next_statuses.insert(
+                managed.port_id.clone(),
+                port_runtime_status(
+                    &managed.port_id,
+                    &managed.ifname,
+                    generation,
+                    requested_hash.clone(),
+                    managed.managed_domains.clone(),
+                    "error",
+                    Some(reason.clone()),
+                    domain_statuses_for(&managed.managed_domains, "error", Some(reason.clone())),
+                ),
+            );
+            results.push(NeutronPortApplyResult {
+                port_id: managed.port_id,
+                ifname: managed.ifname,
+                action: "update".to_string(),
+                status: "error".to_string(),
+                reason: Some(reason),
+            });
+            info!(
+                generation,
+                desired_hash = ?requested_hash,
+                port_id = %port.port_id,
+                ifname = %port.ifname,
+                action = "update",
+                status = "error",
+                total_ms = elapsed_ms(port_started),
+                "neutron_port_apply_profile"
+            );
+            continue;
+        }
         let previous_managed = next_ports.get(&port.port_id).cloned();
         let previous_status = runtime_before_apply.port_statuses.get(&port.port_id);
         if let Err(error) = state
@@ -2861,8 +2899,7 @@ async fn apply_snapshot_runtime_transaction(
         let requires_managed_acl = normalize_managed_domains(&managed.managed_domains)
             .iter()
             .any(|domain| domain == "acl");
-        let required_publication_mode =
-            requires_managed_acl.then_some(ManagedAclPublicationMode::ManagedAcl);
+        let required_publication_mode = required_neutron_publication_mode(requires_managed_acl);
         let required_projection_health =
             requires_managed_acl.then_some(ManagedProjectionHealth::Verified);
         if can_skip_neutron_domain_reconcile(
@@ -2933,7 +2970,7 @@ async fn apply_snapshot_runtime_transaction(
                     &managed.managed_domains,
                     generation,
                     required_publication_mode,
-                    None,
+                    required_projection_health,
                 )
                 .await
         {
@@ -3022,8 +3059,49 @@ async fn apply_snapshot_runtime_transaction(
         let port_started = Instant::now();
         let port_id = port.port_id.clone();
         let ifname = port.ifname.clone();
+        let managed = managed_port_from_snapshot(port);
+        let unsupported_managed_domains =
+            unsupported_neutron_managed_domains(&port.managed_domains);
+        if !unsupported_managed_domains.is_empty() {
+            let reason = blocked_by_unimplemented_domains(&unsupported_managed_domains);
+            next_statuses.insert(
+                managed.port_id.clone(),
+                port_runtime_status(
+                    &managed.port_id,
+                    &managed.ifname,
+                    generation,
+                    requested_hash.clone(),
+                    managed.managed_domains.clone(),
+                    "error",
+                    Some(reason.clone()),
+                    domain_statuses_for(&managed.managed_domains, "error", Some(reason.clone())),
+                ),
+            );
+            results.push(NeutronPortApplyResult {
+                port_id: managed.port_id,
+                ifname: managed.ifname,
+                action: "attach".to_string(),
+                status: "error".to_string(),
+                reason: Some(reason),
+            });
+            info!(
+                generation,
+                desired_hash = ?requested_hash,
+                port_id = %port_id,
+                ifname = %ifname,
+                action = "attach",
+                status = "error",
+                total_ms = elapsed_ms(port_started),
+                "neutron_port_apply_profile"
+            );
+            continue;
+        }
         let attach_started = Instant::now();
-        match state.registry.attach_neutron(&port.ifname, port_manages_acl(port)).await {
+        match state
+            .registry
+            .attach_neutron(&port.ifname, port_manages_acl(port))
+            .await
+        {
             Ok(()) => {
                 let attach_ms = elapsed_ms(attach_started);
                 if let Err(e) = fault_injection::check("neutron.port.after_attach").await {
@@ -3055,9 +3133,10 @@ async fn apply_snapshot_runtime_transaction(
                     );
                     continue;
                 }
-                let managed = managed_port_from_snapshot(port);
-                let required_publication_mode =
-                    port_manages_acl(port).then_some(ManagedAclPublicationMode::ManagedAcl);
+                let manages_acl = port_manages_acl(port);
+                let required_publication_mode = required_neutron_publication_mode(manages_acl);
+                let required_projection_health =
+                    manages_acl.then_some(ManagedProjectionHealth::Verified);
                 let domain_started = Instant::now();
                 let mut domain_result =
                     reconcile_neutron_domains(state, port, &mut acl_validation_cache, full_resync)
@@ -3071,7 +3150,7 @@ async fn apply_snapshot_runtime_transaction(
                             &managed.managed_domains,
                             generation,
                             required_publication_mode,
-                            None,
+                            required_projection_health,
                         )
                         .await
                 {
@@ -3735,11 +3814,7 @@ async fn reconcile_neutron_domains(
         };
     }
 
-    let unimplemented: Vec<String> = domains
-        .iter()
-        .filter(|domain| !matches!(domain.as_str(), "attach" | "acl"))
-        .cloned()
-        .collect();
+    let unimplemented = unsupported_neutron_managed_domains(&port.managed_domains);
     if !unimplemented.is_empty() {
         let blocked_reason = blocked_by_unimplemented_domains(&unimplemented);
         let statuses = domains
@@ -4274,6 +4349,13 @@ fn normalize_managed_domains(domains: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn unsupported_neutron_managed_domains(domains: &[String]) -> Vec<String> {
+    normalize_managed_domains(domains)
+        .into_iter()
+        .filter(|domain| !matches!(domain.as_str(), "attach" | "acl"))
+        .collect()
+}
+
 fn affected_domains_for_ports(ports: &[ManagedNeutronPort]) -> Vec<String> {
     let mut domains = BTreeSet::new();
     if !ports.is_empty() {
@@ -4390,6 +4472,14 @@ fn port_manages_acl(port: &NeutronPortSnapshot) -> bool {
     normalize_managed_domains(&port.managed_domains)
         .iter()
         .any(|domain| domain == "acl")
+}
+
+fn required_neutron_publication_mode(manages_acl: bool) -> ManagedAclPublicationMode {
+    if manages_acl {
+        ManagedAclPublicationMode::ManagedAcl
+    } else {
+        ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl
+    }
 }
 
 #[derive(Serialize)]
@@ -5311,6 +5401,79 @@ async fn flush_neutron_acl_conntrack(
     Ok(())
 }
 
+async fn check_managed_acl_precommit_fault() -> Result<(), String> {
+    fault_injection::check("neutron.acl.after_enable_before_commit").await
+}
+
+async fn requiesce_managed_acl_runtime_gate(
+    state: &NeutronApiState,
+    ifname: &str,
+) -> Result<(), String> {
+    state
+        .registry
+        .update_neutron_acl_runtime_gate(ifname, false, false, false)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn execute_managed_acl_post_replace_completion<
+    StrictFlush,
+    StrictFlushFuture,
+    PublishGate,
+    PublishGateFuture,
+    PrecommitFault,
+    PrecommitFaultFuture,
+    VerifyAndMark,
+    VerifyAndMarkFuture,
+    RequiesceGate,
+    RequiesceGateFuture,
+>(
+    _plan: &AclApplyPlan,
+    strict_flush: StrictFlush,
+    publish_gate: PublishGate,
+    precommit_fault: PrecommitFault,
+    verify_and_mark: VerifyAndMark,
+    requiesce_gate: RequiesceGate,
+) -> Result<(), NeutronAclReconcileError>
+where
+    StrictFlush: FnOnce() -> StrictFlushFuture,
+    StrictFlushFuture: Future<Output = Result<(), String>>,
+    PublishGate: FnOnce() -> PublishGateFuture,
+    PublishGateFuture: Future<Output = Result<(), String>>,
+    PrecommitFault: FnOnce() -> PrecommitFaultFuture,
+    PrecommitFaultFuture: Future<Output = Result<(), String>>,
+    VerifyAndMark: FnOnce() -> VerifyAndMarkFuture,
+    VerifyAndMarkFuture: Future<Output = Result<(), String>>,
+    RequiesceGate: FnOnce() -> RequiesceGateFuture,
+    RequiesceGateFuture: Future<Output = Result<(), String>>,
+{
+    let completion_result = async {
+        strict_flush().await?;
+        publish_gate().await?;
+        precommit_fault().await?;
+        verify_and_mark().await?;
+        Ok::<(), String>(())
+    }
+    .await;
+
+    let Err(error) = completion_result else {
+        return Ok(());
+    };
+    match requiesce_gate().await {
+        Ok(()) => Err(acl_reconcile_error(
+            AclReconcileFailurePhase::AfterQuiesce,
+            error,
+        )),
+        Err(compensation_error) => Err(acl_reconcile_error(
+            AclReconcileFailurePhase::CompensationFailed,
+            format!(
+                "{}; acl_requiesce_compensation_failed:{}",
+                error, compensation_error
+            ),
+        )),
+    }
+}
+
 async fn reconcile_neutron_acl(
     state: &NeutronApiState,
     port: &NeutronPortSnapshot,
@@ -5464,31 +5627,67 @@ async fn reconcile_neutron_acl(
     } else {
         "enforced"
     };
+
+    let flush_ms = Arc::new(AtomicU64::new(0));
+    let flush_timing = Arc::clone(&flush_ms);
+    let flush_state = state;
+    let flush_ifname = port.ifname.clone();
+    let flush_port_id = port.port_id.clone();
+    let publish_ms = Arc::new(AtomicU64::new(0));
+    let publish_timing = Arc::clone(&publish_ms);
+    let publish_state = state;
+    let publish_ifname = port.ifname.clone();
+    let check_before_enable = !plan.policies.is_empty();
+    let verify_state = state;
+    let verify_ifname = port.ifname.clone();
+    let requiesce_state = state;
+    let requiesce_ifname = port.ifname.clone();
+    execute_managed_acl_post_replace_completion(
+        &plan,
+        move || async move {
+            let flush_started = Instant::now();
+            let result =
+                flush_neutron_acl_conntrack(flush_state, &flush_ifname, &flush_port_id).await;
+            flush_timing.store(elapsed_ms(flush_started), Ordering::Relaxed);
+            result
+        },
+        move || async move {
+            let publish_started = Instant::now();
+            let result = async {
+                if check_before_enable {
+                    fault_injection::check("neutron.acl.before_enable").await?;
+                }
+                publish_state
+                    .registry
+                    .update_neutron_acl_runtime_gate(
+                        &publish_ifname,
+                        transition.publish.conntrack_enabled,
+                        transition.publish.acl_enabled,
+                        full_resync,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            .await;
+            publish_timing.store(elapsed_ms(publish_started), Ordering::Relaxed);
+            result
+        },
+        check_managed_acl_precommit_fault,
+        move || async move {
+            verify_state
+                .control_plane
+                .verify_and_mark_managed_projection(&verify_ifname)
+                .await
+        },
+        move || async move {
+            requiesce_managed_acl_runtime_gate(requiesce_state, &requiesce_ifname).await
+        },
+    )
+    .await?;
+    let flush_ms = flush_ms.load(Ordering::Relaxed);
+    let publish_ms = publish_ms.load(Ordering::Relaxed);
+
     if plan.policies.is_empty() {
-        let flush_started = Instant::now();
-        flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id)
-            .await
-            .map_err(|error| {
-                acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
-            })?;
-        let flush_ms = elapsed_ms(flush_started);
-        let publish_started = Instant::now();
-        state
-            .registry
-            .update_neutron_acl_runtime_gate(
-                &port.ifname,
-                transition.publish.conntrack_enabled,
-                transition.publish.acl_enabled,
-                full_resync,
-            )
-            .await
-            .map_err(|error| {
-                acl_reconcile_error(
-                    AclReconcileFailurePhase::AfterQuiesce,
-                    error.to_string(),
-                )
-            })?;
-        let publish_ms = elapsed_ms(publish_started);
         info!(
             port_id = %port.port_id,
             ifname = %port.ifname,
@@ -5514,82 +5713,31 @@ async fn reconcile_neutron_acl(
             total_ms = elapsed_ms(profile_started),
             "neutron_acl_apply_profile"
         );
-        return Ok(outcome);
-    }
-
-    let flush_started = Instant::now();
-    flush_neutron_acl_conntrack(state, &port.ifname, &port.port_id)
-        .await
-        .map_err(|error| {
-            acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
-        })?;
-    let flush_ms = elapsed_ms(flush_started);
-    fault_injection::check("neutron.acl.before_enable")
-        .await
-        .map_err(|error| {
-            acl_reconcile_error(AclReconcileFailurePhase::AfterQuiesce, error)
-        })?;
-    let publish_started = Instant::now();
-    state
-        .registry
-        .update_neutron_acl_runtime_gate(
-            &port.ifname,
-            transition.publish.conntrack_enabled,
-            transition.publish.acl_enabled,
-            full_resync,
-        )
-        .await
-        .map_err(|error| {
-            acl_reconcile_error(
-                AclReconcileFailurePhase::AfterQuiesce,
-                error.to_string(),
-            )
-        })?;
-    let publish_ms = elapsed_ms(publish_started);
-    info!(
-        port_id = %port.port_id,
-        ifname = %port.ifname,
-        status = "enforced",
-        gate_update_mode = gate_update_mode.as_str(),
-        group_count,
-        group_cidr_count,
-        policy_count,
-        group_delete_count = replace_report.group_delete_count,
-        group_add_count = replace_report.group_add_count,
-        group_cidr_add_count = replace_report.group_cidr_add_count,
-        group_cidr_delete_count = replace_report.group_cidr_delete_count,
-        policy_delete_count = replace_report.policy_delete_count,
-        policy_add_count = replace_report.policy_add_count,
-        port_set_delete_count = replace_report.port_set_delete_count,
-        disable_ms,
-        translate_ms,
-        replace_ms,
-        compact_ms = replace_report.compact_ms,
-        flush_ms,
-        publish_ms,
-        total_ms = elapsed_ms(profile_started),
-        "neutron_acl_apply_profile"
-    );
-    if let Err(error) = fault_injection::check("neutron.acl.after_enable_before_commit").await {
-        return match state
-            .registry
-            .update_neutron_acl_runtime_gate(
-                &port.ifname,
-                false,
-                false,
-                false,
-            )
-            .await
-        {
-            Ok(()) => Err(acl_reconcile_error(
-                AclReconcileFailurePhase::AfterQuiesce,
-                error,
-            )),
-            Err(disable_error) => Err(acl_reconcile_error(
-                AclReconcileFailurePhase::CompensationFailed,
-                format!("{}; acl_disable_compensation_failed:{}", error, disable_error),
-            )),
-        };
+    } else {
+        info!(
+            port_id = %port.port_id,
+            ifname = %port.ifname,
+            status = "enforced",
+            gate_update_mode = gate_update_mode.as_str(),
+            group_count,
+            group_cidr_count,
+            policy_count,
+            group_delete_count = replace_report.group_delete_count,
+            group_add_count = replace_report.group_add_count,
+            group_cidr_add_count = replace_report.group_cidr_add_count,
+            group_cidr_delete_count = replace_report.group_cidr_delete_count,
+            policy_delete_count = replace_report.policy_delete_count,
+            policy_add_count = replace_report.policy_add_count,
+            port_set_delete_count = replace_report.port_set_delete_count,
+            disable_ms,
+            translate_ms,
+            replace_ms,
+            compact_ms = replace_report.compact_ms,
+            flush_ms,
+            publish_ms,
+            total_ms = elapsed_ms(profile_started),
+            "neutron_acl_apply_profile"
+        );
     }
     Ok(outcome)
 }
@@ -11497,7 +11645,7 @@ mod tests {
         ManagedProjectionHealth,
     ) {
         let trace = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let health = Arc::new(std::sync::Mutex::new(ManagedProjectionHealth::Unverified));
+        let health = Arc::new(std::sync::Mutex::new(ManagedProjectionHealth::Verified));
 
         let flush_trace = Arc::clone(&trace);
         let publish_trace = Arc::clone(&trace);

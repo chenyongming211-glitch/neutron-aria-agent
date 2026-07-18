@@ -2493,7 +2493,10 @@ def _rust_function_parameters_from_blanked(code, function_name):
     )
     if not match:
         return None
-    opening = code.find("(", match.start())
+    # The signature regex ends at the real parameter-list opener. Starting
+    # from match.start() would mistake the visibility in `pub(crate)` for the
+    # function parameters.
+    opening = match.end() - 1
     return _rust_parenthesized_body_at(code, opening)
 
 
@@ -2542,6 +2545,11 @@ def _rust_named_call_result_is_propagated(code, function_name, position):
     if re.match(r"^\s*\.\s*await\s*\?\s*(?:;|$)", suffix):
         return True
     if re.fullmatch(r"\s*\.\s*await\s*", suffix):
+        return True
+    statement_end = suffix.find(";")
+    if statement_end >= 0 and suffix[:statement_end].rstrip().endswith("?"):
+        return True
+    if re.fullmatch(r"\s*", suffix):
         return True
     statement_start = max(
         code.rfind(";", 0, position),
@@ -2669,6 +2677,22 @@ def _managed_projection_attach_migration_contract_errors(
                 "managed ACL demotion must build its target before transaction execution"
             )
 
+        if target_calls:
+            before_target = demotion_body[: target_calls[0][0]]
+            quiesced = re.search(
+                r"\b(?:update_acl_runtime_gate|\w*quiesc\w*)\s*\(",
+                before_target,
+            )
+            invalidated = re.search(
+                r"\bmanaged_projection_health\s*=\s*"
+                r"ManagedProjectionHealth\s*::\s*Unverified\b",
+                before_target,
+            )
+            if quiesced is None or invalidated is None:
+                errors.append(
+                    "managed ACL demotion must quiesce and invalidate health before target validation"
+                )
+
         if executor_calls:
             executor_arguments = executor_calls[0][1]
 
@@ -2775,8 +2799,7 @@ def _managed_projection_attach_migration_contract_errors(
         control_code, "mark_neutron_port_authority_if_current"
     )
     if authority_parameters is None or not re.search(
-        r"\brequired_publication_mode\s*:\s*(?:Option\s*<\s*)?"
-        r"ManagedAclPublicationMode\b",
+        r"\brequired_publication_mode\s*:\s*ManagedAclPublicationMode\b",
         authority_parameters,
     ):
         errors.append(
@@ -2814,10 +2837,7 @@ def _managed_projection_attach_migration_contract_errors(
             mode_argument = (
                 "" if len(arguments) < 5 else re.sub(r"\s+", "", arguments[4])
             )
-            if mode_argument not in (
-                "required_publication_mode",
-                "Some(required_publication_mode)",
-            ):
+            if mode_argument != "required_publication_mode":
                 errors.append(
                     "%s must pass its exact required publication mode" % label
                 )
@@ -2999,8 +3019,33 @@ def _managed_projection_attach_migration_contract_errors(
             verify_body,
             re.DOTALL,
         )
-        gate = re.search(r"\b\w*gate\w*\s*\(", verify_body)
-        tc = re.search(r"\b\w*tc\w*\s*\(", verify_body)
+        gate = re.search(
+            r"\bvalidate_managed_projection_runtime_gate\s*\(",
+            verify_body,
+        )
+        clean_inventory_calls = _rust_named_call_arguments(
+            verify_body, "require_clean_managed_projection_inventory"
+        )
+        clean_inventory = next(
+            (
+                (position, arguments)
+                for position, arguments in clean_inventory_calls
+                if len(arguments) == 1
+                and re.search(
+                    r"\bvalidate_managed_pinned_runtime_state\s*\(",
+                    arguments[0],
+                )
+            ),
+            None,
+        )
+        inventory = re.search(
+            r"\bvalidate_managed_pinned_runtime_state\s*\(",
+            verify_body,
+        )
+        tc = re.search(
+            r"\b(?:Self\s*::\s*)?require_tc_acl_ready_locked\s*\(",
+            verify_body,
+        )
         verified = re.search(
             r"\bmanaged_projection_health\s*=\s*"
             r"ManagedProjectionHealth\s*::\s*Verified\b",
@@ -3034,17 +3079,45 @@ def _managed_projection_attach_migration_contract_errors(
         if (
             mode_guard is None
             or gate is None
+            or clean_inventory is None
+            or inventory is None
             or tc is None
             or verified is None
             or not (
                 mode_guard.start()
                 < gate.start()
+                < clean_inventory[0]
+                < inventory.start()
+                < tc.start()
                 < verified.start()
-                and mode_guard.start() < tc.start() < verified.start()
             )
         ):
             errors.append(
-                "verify-and-mark helper must validate gate and TC before Verified"
+                "verify-and-mark helper must validate the exact gate, complete inventory, and TC before Verified"
+            )
+        validation_results_propagated = bool(
+            gate is not None
+            and clean_inventory is not None
+            and tc is not None
+            and _rust_named_call_result_is_propagated(
+                verify_body,
+                "validate_managed_projection_runtime_gate",
+                gate.start(),
+            )
+            and _rust_named_call_result_is_propagated(
+                verify_body,
+                "require_clean_managed_projection_inventory",
+                clean_inventory[0],
+            )
+            and _rust_named_call_result_is_propagated(
+                verify_body,
+                "require_tc_acl_ready_locked",
+                tc.start(),
+            )
+        )
+        if not validation_results_propagated:
+            errors.append(
+                "verify-and-mark helper must propagate exact gate, complete inventory, and TC validation failures"
             )
         if lifecycle is not None and verified is not None:
             before_verified = verify_body[lifecycle.end() : verified.start()]
@@ -3118,6 +3191,36 @@ def _managed_projection_attach_migration_contract_errors(
             errors.append(
                 "fresh helper must receive state, mode, a positive fresh value, and persistence callback"
             )
+
+    gate_writer_body = _rust_function_body_from_blanked(
+        control_code, "update_neutron_acl_runtime_gate_serialized"
+    )
+    health_invalidation = (
+        None
+        if gate_writer_body is None
+        else re.search(
+            r"\bstate\s*\.\s*managed_projection_health\s*=\s*"
+            r"managed_projection_health_before_runtime_gate_write\s*\(",
+            gate_writer_body,
+        )
+    )
+    kernel_gate_write = (
+        None
+        if gate_writer_body is None
+        else re.search(
+            r"aria_core\s*::\s*ebpf_ops\s*::\s*"
+            r"update_acl_runtime_gate\s*\(",
+            gate_writer_body,
+        )
+    )
+    if (
+        health_invalidation is None
+        or kernel_gate_write is None
+        or health_invalidation.start() > kernel_gate_write.start()
+    ):
+        errors.append(
+            "managed ACL runtime gate writes must invalidate projection health before kernel publication"
+        )
 
     classifier_name = "unsupported_neutron_managed_domains"
 
@@ -3211,16 +3314,38 @@ def _run_managed_projection_attach_migration_mutation_self_tests():
         }
     """
     safe_control = r"""
-        async fn mark_neutron_port_authority_if_current(
+        pub(crate) async fn mark_neutron_port_authority_if_current(
             &self,
             instance: &str,
             port_id: &str,
             managed_domains: &[String],
             generation: u64,
-            required_publication_mode: Option<ManagedAclPublicationMode>,
+            required_publication_mode: ManagedAclPublicationMode,
             required_projection_health: Option<ManagedProjectionHealth>,
         ) -> bool {
             self.confirm_authority(required_publication_mode)
+        }
+
+        async fn update_neutron_acl_runtime_gate_serialized(
+            &self,
+            instance: &str,
+            conntrack_enabled: bool,
+            acl_enabled: bool,
+        ) -> Result<(), String> {
+            let mut state = self.get_instance(instance).await?.write().await;
+            require_tc_acl_ready_locked(&state)?;
+            state.managed_projection_health =
+                managed_projection_health_before_runtime_gate_write(
+                    state.managed_acl_publication_mode,
+                    state.managed_projection_health,
+                );
+            aria_core::ebpf_ops::update_acl_runtime_gate(
+                state.map_runtime(),
+                conntrack_enabled,
+                acl_enabled,
+                ACL_INGRESS_HOOK_TC,
+            )?;
+            Ok(())
         }
 
         async fn reconcile_managed_acl_ownership_serialized(
@@ -3238,6 +3363,8 @@ def _run_managed_projection_attach_migration_mutation_self_tests():
         }
 
         async fn execute_managed_acl_demotion(&self, instance: &str) {
+            update_acl_runtime_gate(instance, false, false)?;
+            state.managed_projection_health = ManagedProjectionHealth::Unverified;
             let old_state = state.state.clone();
             let (proposed_state, proposed_projection) =
                 build_managed_acl_demotion_target(&old_state, owner_prefix)?;
@@ -3286,7 +3413,11 @@ def _run_managed_projection_attach_migration_mutation_self_tests():
             {
                 return Err("managed ACL mode changed before verification".to_string());
             }
-            validate_runtime_gate(state)?;
+            let actual_gate = read_runtime_config(state)?;
+            validate_managed_projection_runtime_gate(state, &actual_gate)?;
+            require_clean_managed_projection_inventory(
+                validate_managed_pinned_runtime_state(state),
+            )?;
             require_tc_acl_ready_locked(state)?;
             state.managed_projection_health = ManagedProjectionHealth::Verified;
             Ok(())
@@ -3492,6 +3623,16 @@ def _run_managed_projection_attach_migration_mutation_self_tests():
             ),
         ),
         case(
+            "demotion validates target before fail-closed transition",
+            "must quiesce and invalidate health before target validation",
+            control=mutate(
+                safe_control,
+                "            update_acl_runtime_gate(instance, false, false)?;\n"
+                "            state.managed_projection_health = ManagedProjectionHealth::Unverified;\n",
+                "",
+            ),
+        ),
+        case(
             "demotion uses item purge",
             "must not call purge_neutron_acl",
             control=mutate(
@@ -3580,6 +3721,21 @@ def _run_managed_projection_attach_migration_mutation_self_tests():
             ),
         ),
         case(
+            "authority required mode becomes optional",
+            "must accept the exact required publication mode",
+            control=mutate(
+                safe_control,
+                "required_publication_mode: ManagedAclPublicationMode",
+                "required_publication_mode: Option<ManagedAclPublicationMode>",
+            ),
+            neutron=mutate(
+                safe_neutron,
+                "required_publication_mode,\n",
+                "Some(required_publication_mode),\n",
+                count=4,
+            ),
+        ),
+        case(
             "updated authority omits Verified",
             "updated port ACL authority commit must require Verified projection health",
             neutron=mutate(
@@ -3657,9 +3813,69 @@ def _run_managed_projection_attach_migration_mutation_self_tests():
             "must hold the lifecycle guard through Verified",
             control=mutate(
                 safe_control,
-                "            validate_runtime_gate(state)?;",
+                "            validate_managed_projection_runtime_gate(state, &actual_gate)?;",
                 "            drop(_runtime_guard);\n"
-                "            validate_runtime_gate(state)?;",
+                "            validate_managed_projection_runtime_gate(state, &actual_gate)?;",
+            ),
+        ),
+        case(
+            "verify helper bypasses the exact runtime gate validator",
+            "must validate the exact gate, complete inventory, and TC before Verified",
+            control=mutate(
+                safe_control,
+                "validate_managed_projection_runtime_gate(state, &actual_gate)?;",
+                "validate_runtime_gate(state)?;",
+            ),
+        ),
+        case(
+            "verify helper omits complete managed inventory",
+            "must validate the exact gate, complete inventory, and TC before Verified",
+            control=mutate(
+                safe_control,
+                "            require_clean_managed_projection_inventory(\n"
+                "                validate_managed_pinned_runtime_state(state),\n"
+                "            )?;\n",
+                "",
+            ),
+        ),
+        case(
+            "verify helper replaces TC readiness with a name-only sentinel",
+            "must validate the exact gate, complete inventory, and TC before Verified",
+            control=mutate(
+                safe_control,
+                "            require_tc_acl_ready_locked(state)?;",
+                "            if neutron_acl_gate_requires_tc(false, false) {}",
+            ),
+        ),
+        case(
+            "verify helper discards runtime gate validation failure",
+            "must propagate exact gate, complete inventory, and TC validation failures",
+            control=mutate(
+                safe_control,
+                "            validate_managed_projection_runtime_gate(state, &actual_gate)?;",
+                "            drop(validate_managed_projection_runtime_gate(state, &actual_gate));",
+            ),
+        ),
+        case(
+            "verify helper discards complete inventory failure",
+            "must propagate exact gate, complete inventory, and TC validation failures",
+            control=mutate(
+                safe_control,
+                "            require_clean_managed_projection_inventory(\n"
+                "                validate_managed_pinned_runtime_state(state),\n"
+                "            )?;",
+                "            drop(require_clean_managed_projection_inventory(\n"
+                "                validate_managed_pinned_runtime_state(state),\n"
+                "            ));",
+            ),
+        ),
+        case(
+            "verify helper discards TC readiness failure",
+            "must propagate exact gate, complete inventory, and TC validation failures",
+            control=mutate(
+                safe_control,
+                "            require_tc_acl_ready_locked(state)?;",
+                "            drop(require_tc_acl_ready_locked(state));",
             ),
         ),
         case(
@@ -3691,6 +3907,19 @@ def _run_managed_projection_attach_migration_mutation_self_tests():
                 "            Ok(PreparedManagedInstance",
                 "            ).await.ok();\n"
                 "            Ok(PreparedManagedInstance",
+            ),
+        ),
+        case(
+            "runtime gate write preserves stale projection health",
+            "must invalidate projection health before kernel publication",
+            control=mutate(
+                safe_control,
+                "            state.managed_projection_health =\n"
+                "                managed_projection_health_before_runtime_gate_write(\n"
+                "                    state.managed_acl_publication_mode,\n"
+                "                    state.managed_projection_health,\n"
+                "                );\n",
+                "",
             ),
         ),
         case(
@@ -7057,10 +7286,13 @@ def check_rust_stage_one_tests_present():
     lifecycle_lock_index = (
         -1 if attach_body is None else attach_body.find("lock_runtime_lifecycle")
     )
-    promotion_match = (
+    ownership_reconcile_match = (
         None
         if attach_body is None
-        else re.search(r"\b\w*promot\w*_serialized\s*\(", attach_body)
+        else re.search(
+            r"\b(?:promote|reconcile)_managed_acl_ownership_serialized\s*\(",
+            attach_body,
+        )
     )
     if (
         attach_body is None
@@ -7068,11 +7300,11 @@ def check_rust_stage_one_tests_present():
         or iface_guard_index < iface_lock_index
         or lifecycle_lock_index < iface_guard_index
         or "return Ok(())" in attach_body[:iface_lock_index]
-        or promotion_match is None
-        or promotion_match.start() < lifecycle_lock_index
+        or ownership_reconcile_match is None
+        or ownership_reconcile_match.start() < lifecycle_lock_index
     ):
         raise SystemExit(
-            "ERROR: idempotent managed attach must serialize ownership promotion after iface/lifecycle locks"
+            "ERROR: idempotent managed attach must serialize ownership reconciliation after iface/lifecycle locks"
         )
 
     detach_body = _rust_function_body(tap_registry_source, "detach")
@@ -7978,9 +8210,25 @@ def check_rust_stage_one_tests_present():
         raise SystemExit(
             "ERROR: Neutron ACL gate writes must use update_neutron_acl_runtime_gate"
         )
-    if acl_reconcile_body.count(".update_neutron_acl_runtime_gate(") != 4:
+    if acl_reconcile_body.count(".update_neutron_acl_runtime_gate(") != 2:
         raise SystemExit(
-            "ERROR: Neutron ACL quiesce, publish, and compensation must use atomic gate writes"
+            "ERROR: Neutron ACL quiesce and shared publication must use atomic gate writes"
+        )
+
+    requiesce_body = _rust_function_body(
+        neutron_api_source, "requiesce_managed_acl_runtime_gate"
+    )
+    if (
+        requiesce_body is None
+        or requiesce_body.count(".update_neutron_acl_runtime_gate(") != 1
+        or not re.search(
+            r"\.\s*update_neutron_acl_runtime_gate\s*\(\s*"
+            r"ifname\s*,\s*false\s*,\s*false\s*,\s*false\s*\)",
+            requiesce_body,
+        )
+    ):
+        raise SystemExit(
+            "ERROR: Neutron ACL shared compensation must atomically requiesce both gates"
         )
 
     neutron_api_code = _blank_rust_non_code(neutron_api_source)
@@ -7995,9 +8243,9 @@ def check_rust_stage_one_tests_present():
         r"state\s*\.\s*registry\s*\.\s*update_neutron_acl_runtime_gate\s*\(",
         neutron_api_code,
     )
-    if len(registry_gate_calls) != 4:
+    if len(registry_gate_calls) != 3:
         raise SystemExit(
-            "ERROR: all four Neutron ACL gate writes must use TapRegistry lifecycle serialization"
+            "ERROR: all Neutron ACL gate writes must use TapRegistry lifecycle serialization"
         )
 
     registry_gate_body = _rust_function_body(

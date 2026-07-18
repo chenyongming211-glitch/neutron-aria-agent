@@ -21,7 +21,8 @@ use aria_core::ebpf_ops::{
     classify_runtime_gate_state, compile_managed_group_projection, ensure_fq_qdisc,
     replay_managed_state_to_pinned_maps, replay_state_to_pinned_maps,
     validate_managed_pinned_runtime_state, validate_pinned_runtime_state, FqQdiscState,
-    GroupProjectionMode, ProjectionDrift, RuntimeGateDisposition, TraceMapMode,
+    GroupProjectionMode, ProjectionDrift, RuntimeGateDisposition, RuntimeGroupMapEntries,
+    TraceMapMode,
 };
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
 use aria_core::wal::{WalClient, WalEntry};
@@ -62,6 +63,10 @@ pub(crate) enum ManagedAclPromotionAction {
         next_mode: ManagedAclPublicationMode,
         next_health: ManagedProjectionHealth,
         quiesce_acl_ct: bool,
+    },
+    Demote {
+        next_mode: ManagedAclPublicationMode,
+        next_health: ManagedProjectionHealth,
     },
 }
 
@@ -422,6 +427,28 @@ fn managed_group_projection_mode(mode: ManagedAttachMode) -> GroupProjectionMode
     }
 }
 
+async fn persist_fresh_managed_registration_gate_state<Persist, PersistFuture>(
+    state: &mut FirewallState,
+    mode: ManagedAttachMode,
+    fresh_registration: bool,
+    persist: Persist,
+) -> Result<(), String>
+where
+    Persist: FnOnce(FirewallState) -> PersistFuture,
+    PersistFuture: Future<Output = Result<(), String>>,
+{
+    if !fresh_registration || matches!(mode, ManagedAttachMode::StandaloneRestoreAfterTcAttach) {
+        return Ok(());
+    }
+
+    // A freshly created Neutron-owned runtime is always published quiesced.
+    // Persist that exact gate state before replay so the first restart cannot
+    // compare live false/false against stale durable true flags.
+    state.conntrack_enabled = false;
+    state.acl_enabled = false;
+    persist(state.clone()).await
+}
+
 fn preexisting_projection_verification(drift: ProjectionDrift) -> Result<bool, String> {
     match drift {
         ProjectionDrift::Clean => Ok(true),
@@ -480,6 +507,14 @@ pub(crate) fn managed_acl_promotion_action(
             }
         }
         ManagedAttachMode::NeutronResyncRequired { acl_managed: false }
+            if current_mode == ManagedAclPublicationMode::ManagedAcl =>
+        {
+            ManagedAclPromotionAction::Demote {
+                next_mode: ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl,
+                next_health: ManagedProjectionHealth::Unverified,
+            }
+        }
+        ManagedAttachMode::NeutronResyncRequired { acl_managed: false }
             if current_mode == ManagedAclPublicationMode::StandaloneCompatibility =>
         {
             ManagedAclPromotionAction::Promote {
@@ -490,6 +525,24 @@ pub(crate) fn managed_acl_promotion_action(
         }
         _ => ManagedAclPromotionAction::Preserve,
     }
+}
+
+fn quiesce_managed_acl_demotion_before_build<Quiesce>(
+    current_mode: ManagedAclPublicationMode,
+    projection_health: &mut ManagedProjectionHealth,
+    quiesce_acl_ct: Quiesce,
+) -> Result<(), String>
+where
+    Quiesce: FnOnce() -> Result<(), String>,
+{
+    if current_mode != ManagedAclPublicationMode::ManagedAcl {
+        return Err("managed ACL demotion requires current ManagedAcl mode".to_string());
+    }
+    let quiesce_result = quiesce_acl_ct();
+    // Even an uncertain kernel-gate write invalidates skip eligibility. This
+    // assignment intentionally happens for both success and failure.
+    *projection_health = ManagedProjectionHealth::Unverified;
+    quiesce_result
 }
 
 #[cfg(test)]
@@ -562,6 +615,46 @@ fn managed_runtime_activation(
 
 fn neutron_acl_gate_requires_tc(conntrack_enabled: bool, acl_enabled: bool) -> bool {
     conntrack_enabled || acl_enabled
+}
+
+fn managed_projection_health_before_runtime_gate_write(
+    publication_mode: ManagedAclPublicationMode,
+    current_health: ManagedProjectionHealth,
+) -> ManagedProjectionHealth {
+    if publication_mode == ManagedAclPublicationMode::ManagedAcl {
+        ManagedProjectionHealth::Unverified
+    } else {
+        current_health
+    }
+}
+
+fn validate_managed_projection_runtime_gate(
+    state: &FirewallState,
+    actual: &aria_core::common::FirewallConfig,
+) -> Result<(), String> {
+    let expected_conntrack = state.conntrack_enabled as u8;
+    let expected_acl = state.acl_enabled as u8;
+    if actual.conntrack_enabled == expected_conntrack && actual.acl_enabled == expected_acl {
+        Ok(())
+    } else {
+        Err(format!(
+            "managed ACL runtime gate mismatch: actual conntrack={} acl={}, expected conntrack={} acl={}",
+            actual.conntrack_enabled, actual.acl_enabled, expected_conntrack, expected_acl
+        ))
+    }
+}
+
+fn require_clean_managed_projection_inventory(drift: ProjectionDrift) -> Result<(), String> {
+    match drift {
+        ProjectionDrift::Clean => Ok(()),
+        ProjectionDrift::RepairRequired(_) => {
+            Err("managed ACL runtime inventory requires projection repair".to_string())
+        }
+        ProjectionDrift::Fatal(error) => Err(format!(
+            "managed ACL runtime inventory is invalid: {}",
+            error
+        )),
+    }
 }
 
 fn neutron_acl_gate_requires_full_resync(
@@ -918,6 +1011,23 @@ enum SharedNetworkMutation {
         old_group_id: u32,
         new_group_id: u32,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ManagedAclDemotionPublicationReceipt {
+    General(SharedNetworkMutation),
+    ActiveBank {
+        previous_bank: u8,
+        published_bank: u8,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct ManagedAclDemotionTarget {
+    final_state: FirewallState,
+    standalone_shadow_entries: RuntimeGroupMapEntries,
+    released_port_sets: BTreeMap<u32, String>,
+    publication_required: bool,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1492,6 +1602,99 @@ fn reconcile_retained_owned_groups(
         }
     }
     Ok(removed_group_ids)
+}
+
+fn build_managed_acl_demotion_target(
+    old_state: &FirewallState,
+    owner_prefix: &str,
+) -> Result<ManagedAclDemotionTarget, String> {
+    let mut final_state = old_state.clone();
+    let existing_rules = final_state.rules.clone();
+    let mut released_port_sets = BTreeMap::new();
+
+    // Neutron is the exclusive ACL policy owner in ManagedAcl mode. Demotion
+    // removes the complete policy domain, including legacy rules whose group
+    // names do not carry the current port prefix.
+    for rule in existing_rules {
+        let remove_result = final_state.apply_remove_rule(
+            rule.src_group_id,
+            rule.dst_group_id,
+            rule.proto,
+            rule.direction,
+        )?;
+        quarantine_owned_acl_released_port_set(
+            &mut final_state,
+            &mut released_port_sets,
+            remove_result
+                .bitmap_idx
+                .zip(remove_result.port_set_released),
+        )?;
+    }
+
+    final_state
+        .groups
+        .retain(|name, _| !name.starts_with(owner_prefix));
+    let _removed_retained_group_ids =
+        reconcile_retained_owned_groups(old_state, &mut final_state, owner_prefix)
+            .map_err(|error| error.to_string())?;
+    final_state.conntrack_enabled = false;
+    final_state.acl_enabled = false;
+
+    let standalone_shadow_entries = aria_core::ebpf_ops::build_runtime_group_map_entries(
+        &final_state,
+        GroupProjectionMode::StandaloneCompatibility,
+    )?;
+    validate_standalone_demotion_shadow_entries(&standalone_shadow_entries)?;
+
+    Ok(ManagedAclDemotionTarget {
+        final_state,
+        standalone_shadow_entries,
+        released_port_sets,
+        // Even an empty managed policy must rotate through a clean shadow bank
+        // before ownership can enter attach-owned standalone compatibility.
+        publication_required: true,
+    })
+}
+
+fn validate_standalone_demotion_shadow_entries(
+    entries: &RuntimeGroupMapEntries,
+) -> Result<(), String> {
+    for (direction, network_entries) in [
+        ("general_src", entries.general_src.as_slice()),
+        ("general_dst", entries.general_dst.as_slice()),
+        ("acl_src", entries.acl_src.as_slice()),
+        ("acl_dst", entries.acl_dst.as_slice()),
+    ] {
+        let mut owners = BTreeMap::<aria_core::ebpf_ops::CanonicalNetwork, BTreeSet<u32>>::new();
+        for entry in network_entries {
+            let network =
+                aria_core::ebpf_ops::CanonicalNetwork::from_ip(entry.address, entry.prefix_len)?;
+            owners.entry(network).or_default().insert(entry.group_id);
+        }
+        if let Some((network, group_ids)) = owners.iter().find(|(_, group_ids)| group_ids.len() > 1)
+        {
+            return Err(format!(
+                "standalone demotion {} canonical selector {} has conflicting group IDs {:?}",
+                direction,
+                network,
+                group_ids.iter().copied().collect::<Vec<_>>()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn managed_acl_demotion_owner_prefix(authority_port_id: Option<&str>) -> String {
+    authority_port_id
+        .map(str::trim)
+        .filter(|port_id| !port_id.is_empty())
+        .map(|port_id| format!("neutron:{}:", port_id))
+        // A failed first apply may leave a ManagedAcl instance after cleanup
+        // while authority has not committed yet. The neutron: namespace is
+        // reserved from local mutation once managed ownership exists, so the
+        // fallback can recover all Neutron-owned groups without touching local
+        // non-Neutron groups. Dual-use groups remain retained by the target.
+        .unwrap_or_else(|| "neutron:".to_string())
 }
 
 fn clear_removed_retained_owned_group_stats(removed_group_ids: &[u32], runtime: TapMapRuntime<'_>) {
@@ -2261,6 +2464,64 @@ where
     Ok(())
 }
 
+async fn execute_managed_acl_demotion_transaction<
+    Receipt,
+    Quiesce,
+    QuiesceFuture,
+    SetHealth,
+    Publish,
+    PublishFuture,
+    StrictFlush,
+    StrictFlushFuture,
+    CommitMode,
+    Compensate,
+    CompensateFuture,
+    RestoreDurable,
+    RestoreDurableFuture,
+>(
+    mut quiesce_acl_ct: Quiesce,
+    mut set_projection_health: SetHealth,
+    mut publish_and_persist: Publish,
+    mut strict_flush: StrictFlush,
+    mut commit_mode: CommitMode,
+    mut compensate: Compensate,
+    mut restore_durable_old_state: RestoreDurable,
+) -> Result<(), String>
+where
+    Quiesce: FnMut() -> QuiesceFuture,
+    QuiesceFuture: Future<Output = Result<(), String>>,
+    SetHealth: FnMut(ManagedProjectionHealth),
+    Publish: FnMut() -> PublishFuture,
+    PublishFuture: Future<Output = Result<Vec<Receipt>, String>>,
+    StrictFlush: FnMut() -> StrictFlushFuture,
+    StrictFlushFuture: Future<Output = Result<(), String>>,
+    CommitMode: FnMut(ManagedAclPublicationMode),
+    Compensate: FnMut(&Receipt) -> CompensateFuture,
+    CompensateFuture: Future<Output = Result<(), String>>,
+    RestoreDurable: FnMut() -> RestoreDurableFuture,
+    RestoreDurableFuture: Future<Output = Result<(), String>>,
+{
+    quiesce_acl_ct().await?;
+    set_projection_health(ManagedProjectionHealth::Unverified);
+
+    let receipts = publish_and_persist().await?;
+    if let Err(flush_error) = strict_flush().await {
+        let mut errors = vec![flush_error];
+        for receipt in receipts.iter().rev() {
+            if let Err(error) = compensate(receipt).await {
+                errors.push(error);
+            }
+        }
+        if let Err(error) = restore_durable_old_state().await {
+            errors.push(error);
+        }
+        return Err(errors.join("; "));
+    }
+
+    commit_mode(ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl);
+    Ok(())
+}
+
 fn apply_managed_acl_publication_compensation(
     compensation: &ManagedAclPublicationCompensation,
     runtime: TapMapRuntime<'_>,
@@ -2275,6 +2536,37 @@ fn apply_managed_acl_publication_compensation(
         ManagedAclPublicationCompensation::RestoreGeneral(mutation) => {
             apply_shared_network_mutation(mutation, runtime, ebpf_path)
                 .map_err(|error| format!("restore shared selector {:?}: {}", mutation, error))
+        }
+    }
+}
+
+fn compensate_managed_acl_demotion_publication(
+    receipt: &ManagedAclDemotionPublicationReceipt,
+    runtime: TapMapRuntime<'_>,
+    ebpf_path: &str,
+) -> Result<(), String> {
+    match receipt {
+        ManagedAclDemotionPublicationReceipt::General(mutation) => {
+            let compensation = shared_network_compensation(mutation);
+            apply_shared_network_mutation(&compensation, runtime, ebpf_path).map_err(|error| {
+                format!(
+                    "restore managed demotion selector {:?}: {}",
+                    compensation, error
+                )
+            })
+        }
+        ManagedAclDemotionPublicationReceipt::ActiveBank {
+            previous_bank,
+            published_bank,
+        } => {
+            aria_core::ebpf_ops::set_acl_active_bank(runtime, *previous_bank)
+                .map_err(|error| format!("restore managed demotion ACL bank: {}", error))?;
+            aria_core::ebpf_ops::scrub_acl_bank(runtime, *published_bank).map_err(|error| {
+                format!(
+                    "scrub rolled-back managed demotion bank {}: {}",
+                    published_bank, error
+                )
+            })
         }
     }
 }
@@ -2678,6 +2970,49 @@ impl ControlPlane {
         Ok(())
     }
 
+    fn stage_standalone_acl_shadow_bank(
+        state: &FirewallState,
+        entries: &RuntimeGroupMapEntries,
+        runtime: TapMapRuntime<'_>,
+        bank: u8,
+        ebpf_path: &str,
+    ) -> Result<(), ControlPlaneError> {
+        if !state.rules.is_empty() {
+            return Err(ControlPlaneError::ValidationError(
+                "standalone-compatible demotion shadow requires an empty ACL policy domain"
+                    .to_string(),
+            ));
+        }
+
+        aria_core::ebpf_ops::scrub_acl_bank(runtime, bank)
+            .map_err(ControlPlaneError::KernelError)?;
+        let write_entries = |direction: &'static str,
+                             network_entries: &[aria_core::ebpf_ops::RuntimeNetworkEntry]|
+         -> Result<(), ControlPlaneError> {
+            for entry in network_entries {
+                let cidr = format!("{}/{}", entry.address, entry.prefix_len);
+                aria_core::ebpf_ops::add_acl_network_in_bank(
+                    direction,
+                    &cidr,
+                    entry.group_id,
+                    bank,
+                    runtime,
+                    ebpf_path,
+                )
+                .map_err(|error| {
+                    ControlPlaneError::KernelError(format!(
+                        "stage standalone shadow bank {} {} group {} cidr {}: {}",
+                        bank, direction, entry.group_id, cidr, error
+                    ))
+                })?;
+            }
+            Ok(())
+        };
+        write_entries("src", &entries.acl_src)?;
+        write_entries("dst", &entries.acl_dst)?;
+        Ok(())
+    }
+
     fn owned_acl_validate_group_specs(
         owner_prefix: &str,
         groups: &[OwnedAclGroupSpec],
@@ -3015,11 +3350,44 @@ impl ControlPlane {
             .then_some(state.managed_projection_health)
     }
 
-    /// Promote ACL ownership while the caller holds the runtime lifecycle lock.
+    pub(crate) async fn verify_and_mark_managed_projection(
+        &self,
+        instance: &str,
+    ) -> Result<(), String> {
+        let _runtime_guard = self.lock_runtime_lifecycle().await;
+        let instance_state = self
+            .get_instance(instance)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut state = instance_state.write().await;
+        if state.managed_acl_publication_mode != ManagedAclPublicationMode::ManagedAcl {
+            return Err(format!(
+                "managed ACL mode changed before projection verification for '{}'",
+                instance
+            ));
+        }
+
+        let actual_gate = aria_core::ebpf_ops::read_runtime_config(state.map_runtime())
+            .map_err(|error| format!("read managed ACL runtime gate: {}", error))?;
+        validate_managed_projection_runtime_gate(&state.state, &actual_gate)?;
+        require_clean_managed_projection_inventory(validate_managed_pinned_runtime_state(
+            state.map_runtime(),
+            &state.state,
+        ))?;
+        if neutron_acl_gate_requires_tc(state.state.conntrack_enabled, state.state.acl_enabled) {
+            Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())
+                .map_err(|error| error.to_string())?;
+        }
+
+        state.managed_projection_health = ManagedProjectionHealth::Verified;
+        Ok(())
+    }
+
+    /// Reconcile ACL ownership while the caller holds the runtime lifecycle lock.
     ///
     /// This helper must not reacquire that lock. Registry callers additionally
     /// hold the per-interface lock, preserving iface -> lifecycle -> instance.
-    pub(crate) async fn promote_managed_acl_ownership_serialized(
+    pub(crate) async fn reconcile_managed_acl_ownership_serialized(
         &self,
         instance: &str,
         requested_mode: ManagedAttachMode,
@@ -3028,44 +3396,339 @@ impl ControlPlane {
             .get_instance(instance)
             .await
             .map_err(|error| error.to_string())?;
-        let mut state = instance_state.write().await;
-        let action = managed_acl_promotion_action(
-            state.managed_acl_publication_mode,
-            state.managed_projection_health,
-            requested_mode,
-        );
-        let ManagedAclPromotionAction::Promote {
-            next_mode,
-            next_health,
-            quiesce_acl_ct,
-        } = action
-        else {
-            return Ok(());
+        let action = {
+            let state = instance_state.read().await;
+            managed_acl_promotion_action(
+                state.managed_acl_publication_mode,
+                state.managed_projection_health,
+                requested_mode,
+            )
         };
 
-        if quiesce_acl_ct {
-            aria_core::ebpf_ops::update_acl_runtime_gate(
-                state.map_runtime(),
-                false,
-                false,
-                aria_core::common::ACL_INGRESS_HOOK_TC,
-            )
-            .map_err(|error| {
-                format!(
-                    "failed to quiesce ACL/CT while promoting managed ACL ownership for {}: {}",
-                    instance, error
-                )
-            })?;
+        match action {
+            ManagedAclPromotionAction::Preserve => Ok(()),
+            ManagedAclPromotionAction::Promote {
+                next_mode,
+                next_health,
+                quiesce_acl_ct,
+            } => {
+                let mut state = instance_state.write().await;
+                if quiesce_acl_ct {
+                    aria_core::ebpf_ops::update_acl_runtime_gate(
+                        state.map_runtime(),
+                        false,
+                        false,
+                        aria_core::common::ACL_INGRESS_HOOK_TC,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "failed to quiesce ACL/CT while promoting managed ACL ownership for {}: {}",
+                            instance, error
+                        )
+                    })?;
+                }
+
+                state.managed_acl_publication_mode = next_mode;
+                state.managed_projection_health = next_health;
+                info!(
+                    instance = %instance,
+                    publication_mode = ?next_mode,
+                    projection_health = ?next_health,
+                    quiesced = quiesce_acl_ct,
+                    "promoted managed ACL ownership"
+                );
+                Ok(())
+            }
+            ManagedAclPromotionAction::Demote {
+                next_mode,
+                next_health,
+            } => {
+                self.execute_managed_acl_demotion_serialized(instance, next_mode, next_health)
+                    .await
+            }
+        }
+    }
+
+    async fn execute_managed_acl_demotion_serialized(
+        &self,
+        instance: &str,
+        next_mode: ManagedAclPublicationMode,
+        next_health: ManagedProjectionHealth,
+    ) -> Result<(), String> {
+        if next_mode != ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl
+            || next_health != ManagedProjectionHealth::Unverified
+        {
+            return Err("invalid managed ACL demotion target lifecycle".to_string());
         }
 
-        state.managed_acl_publication_mode = next_mode;
-        state.managed_projection_health = next_health;
+        let instance_state = self
+            .get_instance(instance)
+            .await
+            .map_err(|error| error.to_string())?;
+        let old_state = {
+            let mut state = instance_state.write().await;
+            let current_mode = state.managed_acl_publication_mode;
+            let runtime_pin_path = state.pin_path.clone();
+            let runtime_tap_id = state.tap_id;
+            quiesce_managed_acl_demotion_before_build(
+                current_mode,
+                &mut state.managed_projection_health,
+                || {
+                    aria_core::ebpf_ops::update_acl_runtime_gate(
+                        TapMapRuntime::new(&runtime_pin_path, runtime_tap_id),
+                        false,
+                        false,
+                        aria_core::common::ACL_INGRESS_HOOK_TC,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "quiesce managed ACL demotion before target build: {}",
+                            error
+                        )
+                    })
+                },
+            )?;
+            state.managed_projection_health = ManagedProjectionHealth::Unverified;
+            state.state.clone()
+        };
+        let authority_port_id = {
+            let authorities = self.neutron_authorities.read().await;
+            authorities
+                .get(instance)
+                .map(|authority| authority.port_id.clone())
+        };
+        let owner_prefix = managed_acl_demotion_owner_prefix(authority_port_id.as_deref());
+        let target = build_managed_acl_demotion_target(&old_state, &owner_prefix)?;
+        if !target.publication_required {
+            return Err("managed ACL demotion must force projection publication".to_string());
+        }
+        let proposed_projection = compile_managed_group_projection(&target.final_state)?;
+        let clean_semantic_mutations =
+            managed_general_state_mutations(&old_state, &target.final_state)
+                .map_err(|error| error.to_string())?;
+        let mut quiesced_committed_state = old_state.clone();
+        quiesced_committed_state.conntrack_enabled = false;
+        quiesced_committed_state.acl_enabled = false;
+
+        let target = Arc::new(target);
+        let managed_acl_projection_health = Arc::new(std::sync::Mutex::new(next_health));
+        let managed_acl_publication_mode =
+            Arc::new(std::sync::Mutex::new(ManagedAclPublicationMode::ManagedAcl));
+
+        let quiesce_instance = instance_state.clone();
+        let managed_acl_projection_health_update = managed_acl_projection_health.clone();
+        let publish_instance = instance_state.clone();
+        let publish_target = target.clone();
+        let publish_old_state = old_state.clone();
+        let publish_committed_state = quiesced_committed_state.clone();
+        let publish_projection = proposed_projection.clone();
+        let publish_mutations = clean_semantic_mutations.clone();
+        let publish_projection_health = managed_acl_projection_health.clone();
+        let strict_flush_instance = instance_state.clone();
+        let managed_acl_publication_mode_update = managed_acl_publication_mode.clone();
+        let compensate_instance = instance_state.clone();
+        let compensate_ebpf_path = self.ebpf_path.clone();
+        let restore_instance = instance_state.clone();
+        let restore_old_state = old_state.clone();
+
+        execute_managed_acl_demotion_transaction(
+            move || {
+                let quiesce_instance = quiesce_instance.clone();
+                async move {
+                    let state = quiesce_instance.read().await;
+                    aria_core::ebpf_ops::update_acl_runtime_gate(
+                        state.map_runtime(),
+                        false,
+                        false,
+                        aria_core::common::ACL_INGRESS_HOOK_TC,
+                    )
+                    .map_err(|error| format!("quiesce managed ACL demotion gate: {}", error))
+                }
+            },
+            move |health| {
+                *managed_acl_projection_health_update
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = health;
+            },
+            move || {
+                let publish_instance = publish_instance.clone();
+                let publish_target = publish_target.clone();
+                let publish_old_state = publish_old_state.clone();
+                let publish_committed_state = publish_committed_state.clone();
+                let publish_projection = publish_projection.clone();
+                let publish_mutations = publish_mutations.clone();
+                let publish_projection_health = publish_projection_health.clone();
+                async move {
+                    let mut state = publish_instance.write().await;
+                    state.managed_projection_health = *publish_projection_health
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if state.managed_acl_publication_mode != ManagedAclPublicationMode::ManagedAcl {
+                        return Err("managed ACL mode changed during demotion".to_string());
+                    }
+
+                    let current_acl_bank =
+                        aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())?;
+                    let next_acl_bank = aria_core::common::acl_next_bank(current_acl_bank);
+                    let new_port_sets_by_key = BTreeMap::new();
+                    let created_port_sets = Vec::new();
+                    let mut report = OwnedAclReconcileReport::default();
+                    let mut receipts = Vec::new();
+                    let publication_performed = self
+                        .publish_acl_projection_locked(
+                            instance,
+                            &mut state,
+                            &publish_old_state,
+                            &publish_target.final_state,
+                            &publish_projection,
+                            true,
+                            Some(&publish_committed_state),
+                            Some(&publish_target.standalone_shadow_entries),
+                            true,
+                            publish_mutations,
+                            current_acl_bank,
+                            next_acl_bank,
+                            &new_port_sets_by_key,
+                            &created_port_sets,
+                            &publish_target.released_port_sets,
+                            &mut report,
+                            Some(&mut receipts),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    if !publication_performed {
+                        return Err(
+                            "forced managed ACL demotion publication returned no-op".to_string()
+                        );
+                    }
+                    Ok(receipts)
+                }
+            },
+            move || {
+                let strict_flush_instance = strict_flush_instance.clone();
+                async move {
+                    let state = strict_flush_instance.read().await;
+                    aria_core::ct_ops::scrub_ct_tables_strict(state.map_runtime())
+                        .map(|_| ())
+                        .map_err(|error| format!("strict managed ACL demotion CT flush: {}", error))
+                }
+            },
+            move |mode| {
+                debug_assert_eq!(
+                    mode,
+                    ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl
+                );
+                *managed_acl_publication_mode_update
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = mode;
+            },
+            move |receipt| {
+                let compensate_instance = compensate_instance.clone();
+                let compensate_ebpf_path = compensate_ebpf_path.clone();
+                let receipt = receipt.clone();
+                async move {
+                    let state = compensate_instance.read().await;
+                    compensate_managed_acl_demotion_publication(
+                        &receipt,
+                        state.map_runtime(),
+                        &compensate_ebpf_path,
+                    )
+                }
+            },
+            move || {
+                let restore_instance = restore_instance.clone();
+                let restore_old_state = restore_old_state.clone();
+                async move {
+                    let mut state = restore_instance.write().await;
+                    state
+                        .compact_and_publish_state(restore_old_state)
+                        .await
+                        .map_err(|error| {
+                            format!("restore durable old_state after demotion: {}", error)
+                        })
+                }
+            },
+        )
+        .await?;
+
+        let committed_mode = *managed_acl_publication_mode
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let committed_health = *managed_acl_projection_health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = instance_state.write().await;
+        state.managed_acl_publication_mode = committed_mode;
+        state.managed_projection_health = committed_health;
+
+        let runtime_pin_path = state.pin_path.clone();
+        let runtime_tap_id = state.tap_id;
+        let runtime = TapMapRuntime::new(&runtime_pin_path, runtime_tap_id);
+        let released_cleanup_targets = target
+            .released_port_sets
+            .iter()
+            .map(|(bitmap_idx, ports_normalized)| TransactionCreatedPortSet {
+                bitmap_idx: *bitmap_idx,
+                ports_normalized: ports_normalized.clone(),
+            })
+            .collect::<Vec<_>>();
+        let released_cleanup = cleanup_port_sets(
+            &released_cleanup_targets,
+            runtime,
+            &self.ebpf_path,
+            "managed ACL demotion released",
+        );
+        if !released_cleanup.cleaned_bitmap_indices.is_empty() {
+            let mut reusable_state = state.state.clone();
+            match apply_confirmed_port_set_cleanups(&mut reusable_state, &released_cleanup) {
+                Ok(()) => {
+                    if let Err(error) = state.compact_and_publish_state(reusable_state).await {
+                        warn!(
+                            instance = %instance,
+                            error = %error,
+                            "failed to persist managed ACL demotion bitmap cleanup"
+                        );
+                    }
+                }
+                Err(error) => warn!(
+                    instance = %instance,
+                    error = %error,
+                    "failed to release managed ACL demotion bitmap quarantine"
+                ),
+            }
+        }
+        for failure in &released_cleanup.failures {
+            warn!(
+                instance = %instance,
+                bitmap_idx = failure.bitmap_idx,
+                error = %failure.error,
+                "managed ACL demotion port set remains durably quarantined"
+            );
+        }
+        match aria_core::ebpf_ops::read_acl_active_bank(runtime) {
+            Ok(active_bank) => {
+                let previous_bank = aria_core::common::acl_next_bank(active_bank);
+                if let Err(error) = aria_core::ebpf_ops::scrub_acl_bank(runtime, previous_bank) {
+                    warn!(
+                        instance = %instance,
+                        bank = previous_bank,
+                        error = %error,
+                        "failed to scrub previous managed ACL bank after demotion"
+                    );
+                }
+            }
+            Err(error) => warn!(
+                instance = %instance,
+                error = %error,
+                "failed to read active ACL bank after managed demotion"
+            ),
+        }
+
         info!(
             instance = %instance,
-            publication_mode = ?next_mode,
-            projection_health = ?next_health,
-            quiesced = quiesce_acl_ct,
-            "promoted managed ACL ownership"
+            publication_mode = ?committed_mode,
+            projection_health = ?committed_health,
+            "demoted managed ACL ownership to attach-owned standalone compatibility"
         );
         Ok(())
     }
@@ -3124,7 +3787,7 @@ impl ControlPlane {
         port_id: &str,
         managed_domains: &[String],
         generation: u64,
-        required_publication_mode: Option<ManagedAclPublicationMode>,
+        required_publication_mode: ManagedAclPublicationMode,
         required_projection_health: Option<ManagedProjectionHealth>,
     ) -> bool {
         let _lifecycle_guard = self.lock_runtime_lifecycle().await;
@@ -3146,7 +3809,7 @@ impl ControlPlane {
         if !managed_neutron_authority_confirmation_allowed(
             instance_state.is_some(),
             current_publication_mode,
-            required_publication_mode,
+            Some(required_publication_mode),
             current_projection_health,
             required_projection_health,
         ) {
@@ -3285,6 +3948,7 @@ impl ControlPlane {
                 return Err(format!("failed to open WAL for {}: {}", name, e));
             }
         };
+        let registration_is_fresh = !pin_state.preexisting_live_links && !replacing_existing;
 
         // Compact on startup if WAL had replayed entries
         if wal.entry_count() > 0 || ssl_changed || tap_id_assigned {
@@ -3299,6 +3963,39 @@ impl ControlPlane {
                 }
             }
         }
+
+        let fresh_registration_wal = wal.clone();
+        persist_fresh_managed_registration_gate_state(
+            &mut state,
+            mode,
+            registration_is_fresh,
+            move |snapshot: FirewallState| {
+                let wal = fresh_registration_wal.clone();
+                async move {
+                    let json = match serde_json::to_string_pretty(&snapshot) {
+                        Ok(json) => json,
+                        Err(error) => {
+                            wal.shutdown().await;
+                            return Err(format!(
+                                "failed to serialize fresh managed gate state: {}",
+                                error
+                            ));
+                        }
+                    };
+                    match wal.compact(json).await {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            wal.shutdown().await;
+                            Err(format!(
+                                "failed to persist fresh managed gate state: {}",
+                                error
+                            ))
+                        }
+                    }
+                }
+            },
+        )
+        .await?;
 
         let tap_id = state.tap_id;
         let mut preexisting_live_verified = false;
@@ -4243,6 +4940,8 @@ impl ControlPlane {
         final_state: &FirewallState,
         proposed_projection: &aria_core::ebpf_ops::ManagedGroupProjection,
         semantic_changed: bool,
+        committed_projection_state: Option<&FirewallState>,
+        standalone_shadow_entries: Option<&RuntimeGroupMapEntries>,
         require_tc_acl_links: bool,
         clean_semantic_mutations: Vec<SharedNetworkMutation>,
         current_acl_bank: u8,
@@ -4251,13 +4950,16 @@ impl ControlPlane {
         created_port_sets: &[TransactionCreatedPortSet],
         released_port_sets: &BTreeMap<u32, String>,
         report: &mut OwnedAclReconcileReport,
+        publication_receipts: Option<&mut Vec<ManagedAclDemotionPublicationReceipt>>,
     ) -> Result<bool, ControlPlaneError> {
         let runtime_pin_path = state.pin_path.clone();
         let runtime_tap_id = state.tap_id;
         let runtime = TapMapRuntime::new(&runtime_pin_path, runtime_tap_id);
 
-        let projection_drift =
-            proposed_projection.plan_managed_pinned_projection(runtime, old_state);
+        let projection_drift = proposed_projection.plan_managed_pinned_projection(
+            runtime,
+            committed_projection_state.unwrap_or(old_state),
+        );
         if matches!(
             &projection_drift,
             ProjectionDrift::RepairRequired(_) | ProjectionDrift::Fatal(_)
@@ -4335,14 +5037,24 @@ impl ControlPlane {
                     applied_shared_mutations.push(mutation);
                 }
                 ManagedAclPublicationStep::StageShadow => {
-                    if let Err(error) = Self::stage_acl_shadow_bank(
-                        final_state,
-                        proposed_projection,
-                        runtime,
-                        next_acl_bank,
-                        &self.ebpf_path,
-                        new_port_sets_by_key,
-                    ) {
+                    let stage_result = match standalone_shadow_entries {
+                        Some(entries) => Self::stage_standalone_acl_shadow_bank(
+                            final_state,
+                            entries,
+                            runtime,
+                            next_acl_bank,
+                            &self.ebpf_path,
+                        ),
+                        None => Self::stage_acl_shadow_bank(
+                            final_state,
+                            proposed_projection,
+                            runtime,
+                            next_acl_bank,
+                            &self.ebpf_path,
+                            new_port_sets_by_key,
+                        ),
+                    };
+                    if let Err(error) = stage_result {
                         return Err(rollback_owned_acl_prepublication(
                             error,
                             &applied_shared_mutations,
@@ -4474,6 +5186,19 @@ impl ControlPlane {
                     report.compact_ms = compact_started.elapsed().as_millis();
                 }
             }
+        }
+
+        if let Some(receipts) = publication_receipts {
+            receipts.extend(
+                applied_shared_mutations
+                    .iter()
+                    .cloned()
+                    .map(ManagedAclDemotionPublicationReceipt::General),
+            );
+            receipts.push(ManagedAclDemotionPublicationReceipt::ActiveBank {
+                previous_bank: current_acl_bank,
+                published_bank: next_acl_bank,
+            });
         }
 
         Ok(true)
@@ -4740,6 +5465,8 @@ impl ControlPlane {
                 &final_state,
                 &proposed_projection,
                 semantic_changed,
+                None,
+                None,
                 require_tc_acl_links,
                 clean_semantic_mutations,
                 current_acl_bank,
@@ -4748,6 +5475,7 @@ impl ControlPlane {
                 &created_port_sets,
                 &released_port_sets,
                 &mut report,
+                None,
             )
             .await?;
         if !publication_performed {
@@ -6437,6 +7165,10 @@ impl ControlPlane {
                 ));
             }
         }
+        state.managed_projection_health = managed_projection_health_before_runtime_gate_write(
+            state.managed_acl_publication_mode,
+            state.managed_projection_health,
+        );
         aria_core::ebpf_ops::update_acl_runtime_gate(
             state.map_runtime(),
             conntrack_enabled,
@@ -7435,6 +8167,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn managed_projection_attach_repair_demotion_owner_scope_has_reserved_fallback() {
+        assert_eq!(
+            managed_acl_demotion_owner_prefix(Some("port-1")),
+            "neutron:port-1:"
+        );
+        assert_eq!(
+            managed_acl_demotion_owner_prefix(Some(" port-2 ")),
+            "neutron:port-2:"
+        );
+        assert_eq!(managed_acl_demotion_owner_prefix(None), "neutron:");
+        assert_eq!(managed_acl_demotion_owner_prefix(Some("   ")), "neutron:");
+    }
+
+    #[test]
+    fn managed_projection_attach_repair_demotion_quiesces_before_target_build() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let mut health = ManagedProjectionHealth::Verified;
+        quiesce_managed_acl_demotion_before_build(
+            ManagedAclPublicationMode::ManagedAcl,
+            &mut health,
+            || {
+                events.borrow_mut().push("quiesce");
+                Ok(())
+            },
+        )
+        .expect("pre-build quiesce must succeed");
+        assert_eq!(health, ManagedProjectionHealth::Unverified);
+        events.borrow_mut().push("build");
+        assert_eq!(*events.borrow(), vec!["quiesce", "build"]);
+
+        let mut failed_health = ManagedProjectionHealth::Verified;
+        let error = quiesce_managed_acl_demotion_before_build(
+            ManagedAclPublicationMode::ManagedAcl,
+            &mut failed_health,
+            || Err("forced pre-build quiesce failure".to_string()),
+        )
+        .expect_err("uncertain pre-build gate state must fail closed");
+        assert_eq!(error, "forced pre-build quiesce failure");
+        assert_eq!(failed_health, ManagedProjectionHealth::Unverified);
+    }
+
+    #[test]
+    fn managed_projection_attach_repair_verification_requires_clean_inventory() {
+        assert_eq!(
+            require_clean_managed_projection_inventory(ProjectionDrift::Clean),
+            Ok(())
+        );
+
+        let repair_error = require_clean_managed_projection_inventory(
+            ProjectionDrift::RepairRequired(aria_core::ebpf_ops::ProjectionRepairPlan {
+                general_mutations: Vec::new(),
+            }),
+        )
+        .expect_err("repairable drift must not be marked Verified");
+        assert!(repair_error.contains("requires projection repair"));
+
+        let fatal_error = require_clean_managed_projection_inventory(ProjectionDrift::Fatal(
+            "acl ingress hook is not TC".to_string(),
+        ))
+        .expect_err("fatal inventory drift must not be marked Verified");
+        assert!(fatal_error.contains("acl ingress hook is not TC"));
+    }
+
     #[tokio::test]
     async fn managed_projection_attach_repair_fresh_neutron_state_restarts_clean() {
         for acl_managed in [true, false] {
@@ -7716,6 +8512,29 @@ mod tests {
         );
         assert_eq!(first.released_port_sets, second.released_port_sets);
         assert!(second.publication_required);
+    }
+
+    #[test]
+    fn managed_projection_attach_repair_demotion_rejects_canonical_alias() {
+        let mut old_state = FirewallState::default();
+        managed_cross_domain_insert_group(
+            &mut old_state,
+            "local-alias-a",
+            40,
+            &["198.51.100.1/24"],
+        );
+        managed_cross_domain_insert_group(
+            &mut old_state,
+            "local-alias-b",
+            41,
+            &["198.51.100.2/24"],
+        );
+
+        let error = build_managed_acl_demotion_target(&old_state, "neutron:port-1:")
+            .expect_err("one standalone LPM key cannot represent two group IDs");
+        assert!(error.contains("general_src"), "{error}");
+        assert!(error.contains("198.51.100.0/24"), "{error}");
+        assert!(error.contains("[40, 41]"), "{error}");
     }
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -8007,6 +8826,38 @@ mod tests {
         assert_eq!(
             outcome.projection_health,
             ManagedProjectionHealth::Unverified
+        );
+    }
+
+    #[test]
+    fn managed_projection_outer_skip_runtime_gate_writes_invalidate_prior_verified_health() {
+        assert_eq!(
+            managed_projection_health_before_runtime_gate_write(
+                ManagedAclPublicationMode::ManagedAcl,
+                ManagedProjectionHealth::Verified,
+            ),
+            ManagedProjectionHealth::Unverified
+        );
+        assert_eq!(
+            managed_projection_health_before_runtime_gate_write(
+                ManagedAclPublicationMode::ManagedAcl,
+                ManagedProjectionHealth::RepairRequired,
+            ),
+            ManagedProjectionHealth::Unverified
+        );
+        assert_eq!(
+            managed_projection_health_before_runtime_gate_write(
+                ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl,
+                ManagedProjectionHealth::Verified,
+            ),
+            ManagedProjectionHealth::Verified
+        );
+        assert_eq!(
+            managed_projection_health_before_runtime_gate_write(
+                ManagedAclPublicationMode::StandaloneCompatibility,
+                ManagedProjectionHealth::RepairRequired,
+            ),
+            ManagedProjectionHealth::RepairRequired
         );
     }
 

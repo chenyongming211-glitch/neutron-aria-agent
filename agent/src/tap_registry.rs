@@ -290,7 +290,7 @@ impl TapRegistry {
         if already_attached {
             return self
                 .control_plane
-                .promote_managed_acl_ownership_serialized(iface, mode)
+                .reconcile_managed_acl_ownership_serialized(iface, mode)
                 .await;
         }
 
