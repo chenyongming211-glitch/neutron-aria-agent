@@ -2140,7 +2140,7 @@ fn managed_local_projection_persist(
             error
         ))
     })?;
-    Ok(move || {
+    Ok(move || -> ManagedLocalFuture<Result<(), String>> {
         let wal = wal.clone();
         let snapshot = snapshot.clone();
         Box::pin(async move { wal.compact(snapshot).await })
@@ -2158,7 +2158,7 @@ fn managed_local_projection_restore(
             error
         ))
     })?;
-    Ok(move || {
+    Ok(move || -> ManagedLocalFuture<Result<(), String>> {
         let wal = wal.clone();
         let snapshot = snapshot.clone();
         Box::pin(async move { wal.compact(snapshot).await })
