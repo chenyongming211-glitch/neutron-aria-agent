@@ -58,6 +58,9 @@ selector_group_id=""
 selector_local_group_ids=()
 SELECTOR_FIXTURES_STARTED=false
 LEGACY_POLLUTION_INJECTED=false
+EXACT_SELECTOR_FIXTURE_STATUS="not_run"
+MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="not_run"
+LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="not_run"
 
 IP_FAMILY=""
 IP_FAMILY_LABEL=""
@@ -1245,7 +1248,11 @@ cleanup_selector_fixture_state() {
 }
 
 run_exact_selector_isolation_fixture() {
+    if [ "${IP_FAMILY}" = ipv6 ]; then
+        EXACT_SELECTOR_FIXTURE_STATUS="skipped_ipv6"
+    fi
     [ "${IP_FAMILY}" = ipv4 ] || return 0
+    EXACT_SELECTOR_FIXTURE_STATUS="failed"
     reverify_selector_deny_baseline exact-baseline
     selector_group_id="$(resolve_selector_group_id exact-baseline-deny-after)" || return 1
     [ -n "${selector_group_id}" ] || return 1
@@ -1262,10 +1269,15 @@ run_exact_selector_isolation_fixture() {
     assert_exact_selector_state
     exact_local_group_id=""
     reverify_selector_deny_baseline exact-cleanup
+    EXACT_SELECTOR_FIXTURE_STATUS="pass"
 }
 
 run_more_specific_selector_isolation_fixture() {
+    if [ "${IP_FAMILY}" = ipv6 ]; then
+        MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="skipped_ipv6"
+    fi
     [ "${IP_FAMILY}" = ipv4 ] || return 0
+    MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="failed"
     reverify_selector_deny_baseline more-specific-baseline
     selector_group_id="$(resolve_selector_group_id more-specific-baseline-deny-after)" || return 1
     [ -n "${selector_group_id}" ] || return 1
@@ -1288,10 +1300,15 @@ run_more_specific_selector_isolation_fixture() {
     run_full_resync >"${WORK_DIR}/more-specific-cleanup-resync.log"
     capture_selector_projection more-specific-cleanup
     reverify_selector_deny_baseline more-specific-cleanup
+    MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="pass"
 }
 
 run_legacy_selector_repair_fixture() {
+    if [ "${IP_FAMILY}" = ipv6 ]; then
+        LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="skipped_ipv6"
+    fi
     [ "${IP_FAMILY}" = ipv4 ] || return 0
+    LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="failed"
     reverify_selector_deny_baseline legacy-baseline
     selector_group_id="$(resolve_selector_group_id legacy-baseline-deny-after)" || return 1
     [ -n "${selector_group_id}" ] || return 1
@@ -1333,6 +1350,7 @@ run_legacy_selector_repair_fixture() {
     run_full_resync >"${WORK_DIR}/legacy-cleanup-resync.log"
     capture_selector_projection legacy-cleanup
     reverify_selector_deny_baseline legacy-cleanup
+    LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="pass"
 }
 
 verify_cleanup_restored() {
@@ -1377,16 +1395,29 @@ write_summary() {
     STATELESS_ZERO_CT="${STATELESS_ZERO_CT}" NO_INGRESS_DOUBLE_COUNT="${NO_INGRESS_DOUBLE_COUNT}" \
     TC_LINK_REQUIRED="${TC_LINK_REQUIRED}" BANK_REVALIDATED="${BANK_REVALIDATED}" \
     DENY_ZERO_CT="${DENY_ZERO_CT}" IP_FAMILY="${IP_FAMILY}" \
+    EXACT_SELECTOR_FIXTURE_STATUS="${EXACT_SELECTOR_FIXTURE_STATUS}" \
+    MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="${MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS}" \
+    LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="${LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS}" \
         python3 >"${WORK_DIR}/summary.json.tmp" <<'PY' || return 1
 import json,os
 keys=("XDP_NO_ACL_CT","TC_INGRESS_HIT","TC_EGRESS_HIT","STATELESS_ZERO_CT",
       "NO_INGRESS_DOUBLE_COUNT","TC_LINK_REQUIRED","BANK_REVALIDATED","DENY_ZERO_CT")
 cleanup_errors=[line.rstrip("\n") for line in open(os.path.join(os.environ["WORK_DIR"],"cleanup-errors.txt"),encoding="utf-8") if line.rstrip("\n")]
+selector_fixtures={
+    "exact":os.environ["EXACT_SELECTOR_FIXTURE_STATUS"],
+    "more_specific":os.environ["MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS"],
+    "legacy_repair":os.environ["LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS"],
+}
+selector_isolation={
+    "fixtures":selector_fixtures,
+    "complete":all(status=="pass" for status in selector_fixtures.values()),
+}
 out={"result":os.environ["RESULT"],"failure_reason":os.environ["FAILURE_REASON"],
      "body_succeeded":os.environ["BODY_SUCCEEDED"].lower()=="true",
      "cleanup_errors":cleanup_errors,"work_dir":os.environ["WORK_DIR"],
      "real_tap":True,"ip_family":os.environ["IP_FAMILY"],
-     "checks":{k:os.environ[k].lower()=="true" for k in keys}}
+     "checks":{k:os.environ[k].lower()=="true" for k in keys},
+     "selector_isolation":selector_isolation}
 print(json.dumps(out,sort_keys=True,indent=2))
 PY
     mv "${WORK_DIR}/summary.json.tmp" "${WORK_DIR}/summary.json" || return 1

@@ -2461,6 +2461,7 @@ where
             restore_error,
         ));
     }
+    set_health(ManagedProjectionHealth::Verified);
     Ok(())
 }
 
