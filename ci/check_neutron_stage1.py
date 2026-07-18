@@ -1894,14 +1894,26 @@ def _run_owned_acl_release_quarantine_mutation_self_tests():
     print("Owned ACL immediate-quarantine mutation self-tests: OK (4 scenarios)")
 
 
-def _managed_acl_shadow_contract_errors(source):
-    stage_body = _rust_function_body_raw(source, "stage_acl_shadow_bank")
-    plan_body = _rust_function_body_raw(source, "managed_acl_shadow_network_plan")
-    if stage_body is None or plan_body is None:
+def _managed_acl_shadow_contract_errors(source, source_code=None):
+    if source_code is None:
+        stage_body = _rust_function_body_raw(source, "stage_acl_shadow_bank")
+        plan_body = _rust_function_body_raw(
+            source, "managed_acl_shadow_network_plan"
+        )
+        stage_code = (
+            None if stage_body is None else _blank_rust_non_code(stage_body)
+        )
+        plan_code = None if plan_body is None else _blank_rust_non_code(plan_body)
+    else:
+        stage_code = _rust_function_body_from_blanked(
+            source_code, "stage_acl_shadow_bank"
+        )
+        plan_code = _rust_function_body_from_blanked(
+            source_code, "managed_acl_shadow_network_plan"
+        )
+    if stage_code is None or plan_code is None:
         return ["managed ACL shadow staging helper is missing"]
 
-    stage_code = _blank_rust_non_code(stage_body)
-    plan_code = _blank_rust_non_code(plan_body)
     errors = []
     if re.search(r"\bstate\s*\.\s*groups\b", stage_code) or re.search(
         r"\bstate\s*\.\s*groups\b", plan_code
@@ -2366,6 +2378,50 @@ def _rust_function_body_from_blanked(code, function_name):
     return _rust_braced_body_at(code, opening)
 
 
+def _rust_function_body_span_from_blanked(code, function_name):
+    """Return an aligned body span for a Rust function in blanked source."""
+    match = re.search(
+        r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+%s"
+        r"(?:\s*<[^>{}]*>)?\s*\(" % re.escape(function_name),
+        code,
+    )
+    if not match:
+        return None
+    opening = code.find("{", match.end())
+    closing = _rust_matching_brace_end(code, opening)
+    if closing is None:
+        return None
+    return opening + 1, closing
+
+
+def _rust_let_binding_count(code, binding):
+    """Count Rust let patterns that bind a name before their initializer."""
+    if not binding:
+        return 0
+    return len(
+        re.findall(
+            r"\blet\b[^;=]*\b%s\b[^;=]*=" % re.escape(binding),
+            code,
+            re.DOTALL,
+        )
+    )
+
+
+def _rust_item_body_from_blanked(code, item_kind, item_name):
+    """Extract a Rust struct or enum body from source already blanked."""
+    match = re.search(
+        r"\b(?:pub(?:\s*\([^)]*\))?\s+)?%s\s+%s\b"
+        % (re.escape(item_kind), re.escape(item_name)),
+        code,
+    )
+    if not match:
+        return None
+    opening = code.find("{", match.end())
+    if opening < 0:
+        return None
+    return _rust_braced_body_at(code, opening)
+
+
 def _rust_utoipa_attribute_prefix_from_blanked(code, function_name):
     """Return the nearest utoipa::path attribute before a Rust function."""
     function = re.search(
@@ -2571,6 +2627,1549 @@ def _rust_named_call_result_is_propagated(code, function_name, position):
             match_body,
             re.DOTALL,
         )
+    )
+
+
+def _managed_projection_path_contract_errors(replay_source, inventory_source):
+    """Return Task 7 replay/inventory projection-boundary violations."""
+
+    errors = []
+    replay_code = _blank_rust_non_code(replay_source)
+    inventory_code = _blank_rust_non_code(inventory_source)
+    replay_bodies = {}
+    inventory_bodies = {}
+    approved_raw_group_boundaries = {
+        "build_runtime_group_map_entries",
+        "collect_standalone_runtime_group_map_entries",
+    }
+
+    def cached_function_body(code, cache, function_name):
+        if function_name not in cache:
+            cache[function_name] = _rust_function_body_from_blanked(
+                code, function_name
+            )
+        return cache[function_name]
+
+    def delegated_raw_group_helper(
+        code, cache, entry_body, allow_direct_standalone_fallback=False
+    ):
+        pending = [("entry", entry_body)]
+        visited = set()
+        while pending:
+            caller, body = pending.pop()
+            aliases = {
+                match.group("alias"): match.group("target")
+                for match in re.finditer(
+                    r"\blet\s+(?:mut\s+)?(?P<alias>[A-Za-z_]\w*)\s*=\s*"
+                    r"(?P<target>[A-Za-z_]\w*)\s*;",
+                    body,
+                )
+            }
+
+            def resolve_alias(name):
+                seen = set()
+                while name in aliases and name not in seen:
+                    seen.add(name)
+                    name = aliases[name]
+                return name
+
+            calls = set(
+                re.findall(r"(?<![.!])\b([A-Za-z_]\w*)\s*\(", body)
+            )
+            calls = {resolve_alias(callee) for callee in calls}
+            for callee in calls:
+                if callee == "collect_standalone_runtime_group_map_entries":
+                    if allow_direct_standalone_fallback and caller == "entry":
+                        continue
+                    return "%s -> %s" % (caller, callee)
+                if callee in approved_raw_group_boundaries or callee in visited:
+                    continue
+                callee_body = cached_function_body(code, cache, callee)
+                if callee_body is None:
+                    continue
+                visited.add(callee)
+                if re.search(
+                    r"\b[A-Za-z_]\w*\s*\.\s*groups\b", callee_body
+                ):
+                    return "%s -> %s" % (caller, callee)
+                pending.append((callee, callee_body))
+        return None
+
+    path_specs = (
+        (
+            "fresh replay",
+            replay_code,
+            replay_bodies,
+            "replay_state_from_snapshot_with_mode",
+            "write_fresh_runtime_group_entries",
+        ),
+        (
+            "pinned replay",
+            replay_code,
+            replay_bodies,
+            "replay_state_to_pinned_maps_from_snapshot_with_mode",
+            "write_pinned_runtime_group_entries",
+        ),
+        (
+            "managed inventory",
+            inventory_code,
+            inventory_bodies,
+            "validate_pinned_runtime_state_with_mode",
+            None,
+        ),
+    )
+    for label, code, cache, function_name, writer in path_specs:
+        body = cached_function_body(code, cache, function_name)
+        if body is None:
+            errors.append("%s projection entry point is missing" % label)
+            continue
+        builder = re.search(
+            r"\blet\s+(?P<mutable>mut\s+)?(?P<binding>[A-Za-z_]\w*)\s*=\s*"
+            r"(?:match\s+)?build_runtime_group_map_entries\s*"
+            r"\(\s*state\s*,\s*mode\s*,?\s*\)",
+            body,
+        )
+        if builder is None:
+            errors.append(
+                "%s must bind the shared runtime group projection builder" % label
+            )
+        if re.search(r"\b[A-Za-z_]\w*\s*\.\s*groups\b", body):
+            errors.append("%s must not iterate raw state.groups" % label)
+        delegated = delegated_raw_group_helper(
+            code,
+            cache,
+            body,
+            allow_direct_standalone_fallback=writer is not None,
+        )
+        if delegated is not None:
+            errors.append(
+                "%s must not delegate raw state.groups through %s"
+                % (label, delegated)
+            )
+        if writer is not None:
+            standalone_fallback = "collect_standalone_runtime_group_map_entries"
+            standalone_calls = _rust_named_call_arguments(body, standalone_fallback)
+            standalone_guard = re.search(
+                r"\bErr\s*\([^)]*\)\s+if\s+mode\s*==\s*"
+                r"GroupProjectionMode\s*::\s*StandaloneCompatibility\s*=>\s*\{",
+                body,
+            )
+            standalone_guard_body = (
+                None
+                if standalone_guard is None
+                else _rust_braced_body_at(
+                    body, body.find("{", standalone_guard.start())
+                )
+            )
+            aliases_standalone_fallback = re.search(
+                r"\blet\s+(?:mut\s+)?[A-Za-z_]\w*\s*=\s*"
+                r"collect_standalone_runtime_group_map_entries\s*;",
+                body,
+            )
+            if (
+                len(standalone_calls) != 1
+                or standalone_guard_body is None
+                or len(
+                    _rust_named_call_arguments(
+                        standalone_guard_body, standalone_fallback
+                    )
+                )
+                != 1
+                or aliases_standalone_fallback is not None
+            ):
+                errors.append(
+                    "%s must confine raw standalone fallback to StandaloneCompatibility"
+                    % label
+                )
+            calls = _rust_named_call_arguments(body, writer)
+            binding = builder.group("binding") if builder is not None else ""
+            if len(calls) != 1 or not any(
+                re.search(r"&\s*%s\b" % re.escape(binding), argument)
+                for argument in (calls[0][1] if len(calls) == 1 else ())
+            ):
+                errors.append(
+                    "%s must publish only the bound projection through %s"
+                    % (label, writer)
+                )
+            if (
+                builder is not None
+                and len(calls) == 1
+                and (
+                    builder.group("mutable") is not None
+                    or _rust_let_binding_count(body, binding) != 1
+                    or calls[0][0] <= builder.end()
+                    or _rust_brace_depth_at(body, calls[0][0]) != 0
+                )
+            ):
+                errors.append(
+                    "%s must preserve the bound projection until %s"
+                    % (label, writer)
+                )
+
+    shared_builder = cached_function_body(
+        replay_code, replay_bodies, "build_runtime_group_map_entries"
+    )
+    managed_arm = None
+    if shared_builder is not None:
+        managed_marker = re.search(
+            r"GroupProjectionMode\s*::\s*Managed\s*=>\s*\{", shared_builder
+        )
+        if managed_marker is not None:
+            managed_arm = _rust_braced_body_at(
+                shared_builder, shared_builder.find("{", managed_marker.start())
+            )
+    if (
+        managed_arm is None
+        or managed_arm.count("compile_managed_group_projection") != 1
+        or not re.search(
+            r"\bcompile_managed_group_projection\s*\(\s*state\s*\)",
+            managed_arm or "",
+        )
+    ):
+        errors.append(
+            "managed runtime group builder must compile the managed projection"
+        )
+    if managed_arm is not None and (
+        re.search(r"\b[A-Za-z_]\w*\s*\.\s*groups\b", managed_arm)
+        or delegated_raw_group_helper(
+            replay_code, replay_bodies, managed_arm
+        )
+        is not None
+    ):
+        errors.append(
+            "managed runtime group builder must not iterate or delegate raw state.groups"
+        )
+
+    compiled_projection = (
+        None
+        if managed_arm is None
+        else re.search(
+            r"\blet\s+(?:mut\s+)?(?P<binding>[A-Za-z_]\w*)\s*=\s*"
+            r"compile_managed_group_projection\s*\(\s*state\s*\)\s*\?\s*;",
+            managed_arm,
+        )
+    )
+    derived_bindings = {}
+    if compiled_projection is not None:
+        projection_binding = compiled_projection.group("binding")
+        for field in ("general", "acl_src", "acl_dst"):
+            derived = re.search(
+                r"\blet\s+(?:mut\s+)?(?P<binding>[A-Za-z_]\w*)\s*=\s*"
+                r"%s\s*\.\s*%s\s*\.\s*iter\s*\(\s*\)"
+                r"[^;]*\.\s*collect(?:\s*::\s*<[^;]+>)?\s*\(\s*\)\s*;"
+                % (re.escape(projection_binding), field),
+                managed_arm,
+                re.DOTALL,
+            )
+            if derived is not None:
+                derived_bindings[field] = derived.group("binding")
+
+    runtime_entries = (
+        None
+        if managed_arm is None
+        else re.search(
+            r"\bOk\s*\(\s*RuntimeGroupMapEntries\s*\{", managed_arm
+        )
+    )
+    runtime_fields = {}
+    runtime_entries_is_tail = False
+    if runtime_entries is not None:
+        opening = managed_arm.find("{", runtime_entries.start())
+        closing = _rust_matching_brace_end(managed_arm, opening)
+        if closing is not None:
+            for item in _rust_split_top_level_arguments(
+                managed_arm[opening + 1 : closing]
+            ):
+                if ":" in item:
+                    name, value = item.split(":", 1)
+                else:
+                    name = value = item
+                runtime_fields[re.sub(r"\s+", "", name)] = re.sub(
+                    r"\s+", "", value
+                )
+            runtime_entries_is_tail = bool(
+                re.fullmatch(r"\s*\)\s*", managed_arm[closing + 1 :])
+            )
+
+    expected_runtime_fields = {}
+    if len(derived_bindings) == 3:
+        general = derived_bindings["general"]
+        expected_runtime_fields = {
+            "general_src": "%s.clone()" % general,
+            "general_dst": general,
+            "acl_src": derived_bindings["acl_src"],
+            "acl_dst": derived_bindings["acl_dst"],
+        }
+    bindings_are_not_reassigned = compiled_projection is not None
+    if compiled_projection is not None:
+        projection_binding = compiled_projection.group("binding")
+        bindings_are_not_reassigned = not re.search(
+            r"\b(?:let\s+(?:mut\s+)?%s\b|%s\s*=)"
+            % (re.escape(projection_binding), re.escape(projection_binding)),
+            managed_arm[compiled_projection.end() :],
+        )
+    for binding in derived_bindings.values():
+        derived_assignment = re.search(
+            r"\blet\s+(?:mut\s+)?%s\b[^;]*;" % re.escape(binding),
+            managed_arm,
+            re.DOTALL,
+        )
+        if derived_assignment is None or re.search(
+            r"\b(?:let\s+(?:mut\s+)?%s\b|%s\s*=)"
+            % (re.escape(binding), re.escape(binding)),
+            managed_arm[derived_assignment.end() : runtime_entries.start()]
+            if runtime_entries is not None
+            else managed_arm[derived_assignment.end() :],
+        ):
+            bindings_are_not_reassigned = False
+    if (
+        compiled_projection is None
+        or len(derived_bindings) != 3
+        or not runtime_entries_is_tail
+        or runtime_fields != expected_runtime_fields
+        or not bindings_are_not_reassigned
+    ):
+        errors.append(
+            "managed runtime group builder must return entries derived from the compiled managed projection"
+        )
+
+    managed_classifier = cached_function_body(
+        inventory_code, inventory_bodies, "classify_managed_inventory_capture"
+    )
+    compiled = (
+        None
+        if managed_classifier is None
+        else re.search(
+            r"\blet\s+(?P<binding>[A-Za-z_]\w*)\s*=\s*match\s+"
+            r"compile_managed_group_projection\s*\(\s*state\s*\)",
+            managed_classifier,
+        )
+    )
+    if compiled is None:
+        errors.append(
+            "managed inventory classifier must compile the committed managed projection"
+        )
+    drift_calls = (
+        []
+        if managed_classifier is None
+        else _rust_named_call_arguments(managed_classifier, "plan_projection_drift")
+    )
+    compiled_binding = compiled.group("binding") if compiled is not None else ""
+    expected_drift_arguments = [
+        "captured",
+        "&%s" % compiled_binding,
+        "&%s" % compiled_binding,
+    ]
+    if len(drift_calls) != 1 or [
+        re.sub(r"\s+", "", argument) for argument in drift_calls[0][1]
+    ] != expected_drift_arguments:
+        errors.append(
+            "managed inventory classifier must plan drift from the compiled committed projection"
+        )
+    if len(drift_calls) == 1 and not _rust_named_call_result_is_propagated(
+        managed_classifier,
+        "plan_projection_drift",
+        drift_calls[0][0],
+    ):
+        errors.append(
+            "managed inventory classifier must return drift from the compiled committed projection"
+        )
+    if (
+        compiled is not None
+        and len(drift_calls) == 1
+        and (
+            _rust_let_binding_count(managed_classifier, compiled_binding) != 1
+            or drift_calls[0][0] <= compiled.end()
+            or _rust_brace_depth_at(
+                managed_classifier, drift_calls[0][0]
+            )
+            != 0
+        )
+    ):
+        errors.append(
+            "managed inventory classifier must preserve the compiled committed projection until drift planning"
+        )
+    return errors
+
+
+def _run_managed_projection_path_mutation_self_tests():
+    safe_replay = r"""
+        fn collect_standalone_runtime_group_map_entries(state: &State) {
+            for group in state.groups.values() { collect(group); }
+        }
+        fn build_runtime_group_map_entries(state: &State, mode: Mode) {
+            match mode {
+                GroupProjectionMode::StandaloneCompatibility => {
+                    collect_standalone_runtime_group_map_entries(state)
+                }
+                GroupProjectionMode::Managed => {
+                    let projection = compile_managed_group_projection(state)?;
+                    let general = projection.general.iter().cloned().collect::<Vec<_>>();
+                    let acl_src = projection.acl_src.iter().cloned().collect();
+                    let acl_dst = projection.acl_dst.iter().cloned().collect();
+                    Ok(RuntimeGroupMapEntries {
+                        general_src: general.clone(),
+                        general_dst: general,
+                        acl_src,
+                        acl_dst,
+                    })
+                }
+            }
+        }
+        fn write_fresh_runtime_group_entries(entries: &Entries) { publish(entries); }
+        fn write_pinned_runtime_group_entries(entries: &Entries) { publish(entries); }
+
+        fn replay_state_from_snapshot_with_mode(state: &State, mode: Mode) {
+            let fresh_entries = match build_runtime_group_map_entries(state, mode) {
+                Ok(entries) => entries,
+                Err(error) if mode == GroupProjectionMode::StandaloneCompatibility => {
+                    collect_standalone_runtime_group_map_entries(state)
+                }
+                Err(error) => return Err(error),
+            };
+            write_fresh_runtime_group_entries(&fresh_entries);
+        }
+
+        fn replay_state_to_pinned_maps_from_snapshot_with_mode(state: &State, mode: Mode) {
+            let pinned_entries = match build_runtime_group_map_entries(state, mode) {
+                Ok(entries) => entries,
+                Err(error) if mode == GroupProjectionMode::StandaloneCompatibility => {
+                    collect_standalone_runtime_group_map_entries(state)
+                }
+                Err(error) => return Err(error),
+            };
+            write_pinned_runtime_group_entries(&pinned_entries);
+        }
+    """
+    safe_inventory = r"""
+        fn build_runtime_group_map_entries(state: &State, mode: Mode) { compile(state, mode) }
+        fn capture_runtime_group_map_entries() { capture() }
+        fn validate_strict_pinned_runtime_state() { validate() }
+        fn classify_standalone_inventory_capture() { classify() }
+        fn classify_managed_inventory_capture(
+            state: &State,
+            captured: &Captured,
+            strict_result: Result<(), String>,
+        ) {
+            if let Err(error) = strict_result {
+                return ProjectionDrift::Fatal(error);
+            }
+            let committed = match compile_managed_group_projection(state) {
+                Ok(projection) => projection,
+                Err(error) => return ProjectionDrift::Fatal(error),
+            };
+            plan_projection_drift(captured, &committed, &committed)
+        }
+
+        fn validate_pinned_runtime_state_with_mode(state: &State, mode: Mode) {
+            let expected_entries = match build_runtime_group_map_entries(state, mode) {
+                Ok(entries) => entries,
+                Err(error) => return ProjectionDrift::Fatal(error),
+            };
+            let captured = capture_runtime_group_map_entries();
+            let strict_result = validate_strict_pinned_runtime_state();
+            match mode {
+                GroupProjectionMode::StandaloneCompatibility => {
+                    classify_standalone_inventory_capture(&captured, &expected_entries, strict_result)
+                }
+                GroupProjectionMode::Managed => {
+                    classify_managed_inventory_capture(state, &captured, strict_result)
+                }
+            }
+        }
+    """
+    safe_errors = _managed_projection_path_contract_errors(
+        safe_replay, safe_inventory
+    )
+    if safe_errors:
+        raise SystemExit(
+            "ERROR: managed projection path checker rejected safe source: %s"
+            % safe_errors
+        )
+
+    def mutate_body(source, function_name, old, new):
+        body = _rust_function_body_raw(source, function_name)
+        if body is None or body.count(old) != 1:
+            raise SystemExit(
+                "ERROR: Task 7 projection mutation fixture anchor is missing: %s %s"
+                % (function_name, old)
+            )
+        return source.replace(body, body.replace(old, new, 1), 1)
+
+    path_specs = (
+        (
+            "fresh replay",
+            "replay_state_from_snapshot_with_mode",
+            "fresh_entries",
+            "write_fresh_runtime_group_entries(&fresh_entries);",
+            "replay",
+        ),
+        (
+            "pinned replay",
+            "replay_state_to_pinned_maps_from_snapshot_with_mode",
+            "pinned_entries",
+            "write_pinned_runtime_group_entries(&pinned_entries);",
+            "replay",
+        ),
+        (
+            "managed inventory",
+            "validate_pinned_runtime_state_with_mode",
+            "expected_entries",
+            None,
+            "inventory",
+        ),
+    )
+    mutants = []
+    delegated_helpers = r"""
+        fn delegated_raw_group_projection(state: &State) {
+            raw_group_projection(state);
+        }
+        fn raw_group_projection(snapshot: &State) {
+            for group in snapshot.groups.values() { publish(group); }
+        }
+    """
+    for label, function_name, binding, writer_call, source_kind in path_specs:
+        replay = safe_replay
+        inventory = safe_inventory
+        selected = replay if source_kind == "replay" else inventory
+        direct = mutate_body(
+            selected,
+            function_name,
+            "\n            let %s" % binding,
+            "\n            for group in state.groups.values() { publish(group); }"
+            "\n            let %s" % binding,
+        )
+        mutants.append(
+            (
+                "%s direct raw-group" % label,
+                direct if source_kind == "replay" else replay,
+                direct if source_kind == "inventory" else inventory,
+                "%s must not iterate raw state.groups" % label,
+            )
+        )
+        delegated = mutate_body(
+            selected + delegated_helpers,
+            function_name,
+            "\n            let %s" % binding,
+            "\n            let raw_projection = delegated_raw_group_projection;"
+            "\n            raw_projection(state);"
+            "\n            let %s" % binding,
+        )
+        mutants.append(
+            (
+                "%s delegated raw-group alias" % label,
+                delegated if source_kind == "replay" else replay,
+                delegated if source_kind == "inventory" else inventory,
+                "%s must not delegate raw state.groups" % label,
+            )
+        )
+        multi_level_delegated = mutate_body(
+            selected + delegated_helpers,
+            function_name,
+            "\n            let %s" % binding,
+            "\n            let first_projection = delegated_raw_group_projection;"
+            "\n            let second_projection = first_projection;"
+            "\n            second_projection(state);"
+            "\n            let %s" % binding,
+        )
+        mutants.append(
+            (
+                "%s multi-level delegated raw-group alias" % label,
+                multi_level_delegated if source_kind == "replay" else replay,
+                multi_level_delegated if source_kind == "inventory" else inventory,
+                "%s must not delegate raw state.groups" % label,
+            )
+        )
+        missing_builder = mutate_body(
+            selected,
+            function_name,
+            "build_runtime_group_map_entries(state, mode)",
+            "raw_runtime_group_map_entries(state)",
+        )
+        mutants.append(
+            (
+                "%s missing shared builder" % label,
+                missing_builder if source_kind == "replay" else replay,
+                missing_builder if source_kind == "inventory" else inventory,
+                "%s must bind the shared runtime group projection builder" % label,
+            )
+        )
+        if writer_call is not None:
+            unguarded_fallback = mutate_body(
+                selected,
+                function_name,
+                "\n            let %s" % binding,
+                "\n            let raw_projection = "
+                "collect_standalone_runtime_group_map_entries;"
+                "\n            raw_projection(state);"
+                "\n            let %s" % binding,
+            )
+            mutants.append(
+                (
+                    "%s aliases standalone raw fallback" % label,
+                    unguarded_fallback,
+                    inventory,
+                    "%s must confine raw standalone fallback" % label,
+                )
+            )
+            missing_writer = mutate_body(
+                selected, function_name, writer_call, "let _ = &%s;" % binding
+            )
+            mutants.append(
+                (
+                    "%s missing projection writer" % label,
+                    missing_writer,
+                    inventory,
+                    "%s must publish only the bound projection" % label,
+                )
+            )
+            shadowed_writer_projection = mutate_body(
+                selected,
+                function_name,
+                writer_call,
+                "let %s = RuntimeGroupMapEntries::default();\n            %s"
+                % (binding, writer_call),
+            )
+            mutants.append(
+                (
+                    "%s shadows the bound projection before writing" % label,
+                    shadowed_writer_projection,
+                    inventory,
+                    "%s must preserve the bound projection until %s"
+                    % (label, writer_call.split("(", 1)[0]),
+                )
+            )
+
+    delegated_builder = mutate_body(
+        safe_replay + delegated_helpers,
+        "build_runtime_group_map_entries",
+        "compile_managed_group_projection(state)",
+        "delegated_raw_group_projection(state)",
+    )
+    mutants.append(
+        (
+            "managed shared builder delegates raw groups",
+            delegated_builder,
+            safe_inventory,
+            "managed runtime group builder must compile the managed projection",
+        )
+    )
+    discarded_builder_projection = mutate_body(
+        safe_replay,
+        "build_runtime_group_map_entries",
+        """let projection = compile_managed_group_projection(state)?;
+                    let general = projection.general.iter().cloned().collect::<Vec<_>>();
+                    let acl_src = projection.acl_src.iter().cloned().collect();
+                    let acl_dst = projection.acl_dst.iter().cloned().collect();
+                    Ok(RuntimeGroupMapEntries {
+                        general_src: general.clone(),
+                        general_dst: general,
+                        acl_src,
+                        acl_dst,
+                    })""",
+        """let _projection = compile_managed_group_projection(state)?;
+                    Ok(RuntimeGroupMapEntries::default())""",
+    )
+    mutants.append(
+        (
+            "managed shared builder discards compiled projection",
+            discarded_builder_projection,
+            safe_inventory,
+            "managed runtime group builder must return entries derived from the compiled managed projection",
+        )
+    )
+    missing_managed_compile = mutate_body(
+        safe_inventory,
+        "classify_managed_inventory_capture",
+        "compile_managed_group_projection(state)",
+        "raw_managed_projection(state)",
+    )
+    mutants.append(
+        (
+            "managed inventory classifier bypasses projection compiler",
+            safe_replay,
+            missing_managed_compile,
+            "managed inventory classifier must compile the committed managed projection",
+        )
+    )
+    discarded_managed_compile = mutate_body(
+        safe_inventory,
+        "classify_managed_inventory_capture",
+        "plan_projection_drift(captured, &committed, &committed)",
+        "plan_projection_drift(captured, &default_projection(), &default_projection())",
+    )
+    mutants.append(
+        (
+            "managed inventory discards compiled projection",
+            safe_replay,
+            discarded_managed_compile,
+            "managed inventory classifier must plan drift from the compiled committed projection",
+        )
+    )
+    ignored_managed_drift = mutate_body(
+        safe_inventory,
+        "classify_managed_inventory_capture",
+        "plan_projection_drift(captured, &committed, &committed)",
+        "let _drift = plan_projection_drift(captured, &committed, &committed);\n"
+        "            ProjectionDrift::Clean",
+    )
+    mutants.append(
+        (
+            "managed inventory ignores compiled projection drift",
+            safe_replay,
+            ignored_managed_drift,
+            "managed inventory classifier must return drift from the compiled committed projection",
+        )
+    )
+    shadowed_managed_projection = mutate_body(
+        safe_inventory,
+        "classify_managed_inventory_capture",
+        "plan_projection_drift(captured, &committed, &committed)",
+        "let committed = ManagedGroupProjection::default();\n"
+        "            plan_projection_drift(captured, &committed, &committed)",
+    )
+    mutants.append(
+        (
+            "managed inventory shadows the compiled projection",
+            safe_replay,
+            shadowed_managed_projection,
+            "managed inventory classifier must preserve the compiled committed projection until drift planning",
+        )
+    )
+
+    for label, replay, inventory, expected in mutants:
+        errors = _managed_projection_path_contract_errors(replay, inventory)
+        if not any(expected in error for error in errors):
+            raise SystemExit(
+                "ERROR: managed projection path checker accepted %s mutation: %s"
+                % (label, errors)
+            )
+    print(
+        "Managed replay/inventory projection mutation self-tests: OK (%d scenarios)"
+        % (len(mutants) + 1)
+    )
+
+
+def _managed_replaced_compensation_contract_errors(
+    control_plane_source, control_code=None
+):
+    """Return Task 7 complete-Replaced-compensation violations."""
+
+    errors = []
+    if control_code is None:
+        control_code = _blank_rust_non_code(control_plane_source)
+    mutation_body = _rust_item_body_from_blanked(
+        control_code, "enum", "SharedNetworkMutation"
+    )
+    if mutation_body is None or not re.search(
+        r"\bReplaced\s*\{[^{}]*\bold_group_id\s*:[^,}]+,"
+        r"[^{}]*\bnew_group_id\s*:[^,}]+,?[^{}]*\}",
+        mutation_body,
+        re.DOTALL,
+    ):
+        errors.append(
+            "managed general replacement must retain its complete old/new preimage"
+        )
+
+    compensation_body = _rust_function_body_from_blanked(
+        control_code, "shared_network_compensation"
+    )
+    replaced_arm = (
+        None
+        if compensation_body is None
+        else re.search(
+            r"SharedNetworkMutation\s*::\s*Replaced\s*\{"
+            r"(?P<input>[^{}]*)\}\s*=>\s*"
+            r"SharedNetworkMutation\s*::\s*Replaced\s*\{"
+            r"(?P<output>[^{}]*)\}",
+            compensation_body,
+            re.DOTALL,
+        )
+    )
+    input_fields = (
+        []
+        if replaced_arm is None
+        else [
+            re.sub(r"\s+", "", field)
+            for field in _rust_split_top_level_arguments(
+                replaced_arm.group("input")
+            )
+        ]
+    )
+    if input_fields != [
+        "direction",
+        "cidr",
+        "old_group_id",
+        "new_group_id",
+    ]:
+        errors.append("Replaced compensation must bind its old/new preimage")
+    output_fields = (
+        []
+        if replaced_arm is None
+        else [
+            re.sub(r"\s+", "", field)
+            for field in _rust_split_top_level_arguments(
+                replaced_arm.group("output")
+            )
+        ]
+    )
+    if output_fields[:2] != ["direction", "cidr:cidr.clone()"]:
+        errors.append(
+            "Replaced compensation must preserve direction and cidr exactly"
+        )
+    if output_fields[2:] != [
+        "old_group_id:*new_group_id",
+        "new_group_id:*old_group_id",
+    ]:
+        errors.append(
+            "Replaced compensation must swap old_group_id and new_group_id exactly"
+        )
+
+    plan_body = _rust_function_body_from_blanked(
+        control_code, "managed_acl_publication_compensations"
+    )
+    plan_parameters = _rust_function_parameters_from_blanked(
+        control_code, "managed_acl_publication_compensations"
+    )
+    normalized_parameters = (
+        []
+        if plan_parameters is None
+        else [
+            re.sub(r"\s+", "", parameter)
+            for parameter in _rust_split_top_level_arguments(plan_parameters)
+        ]
+    )
+    plan_code = plan_body or ""
+    restore_active_bank = re.search(
+        r"\bif\s+phase\s*==\s*"
+        r"ManagedAclPublicationFailurePhase\s*::\s*Persist\s*\{\s*"
+        r"compensations\s*\.\s*push\s*\(\s*"
+        r"ManagedAclPublicationCompensation\s*::\s*RestoreActiveBank"
+        r"\s*\)\s*;\s*\}",
+        plan_code,
+        re.DOTALL,
+    )
+    parameters_are_original = (
+        normalized_parameters
+        == [
+            "mutations:&[SharedNetworkMutation]",
+            "phase:ManagedAclPublicationFailurePhase",
+        ]
+        and _rust_let_binding_count(plan_code, "mutations") == 0
+        and _rust_let_binding_count(plan_code, "phase") == 0
+        and not re.search(
+            r"\b(?:mutations|phase)\s*=(?!=)", plan_code
+        )
+        and not re.search(r"&\s*mut\s+(?:mutations|phase)\b", plan_code)
+        and restore_active_bank is not None
+    )
+    if not parameters_are_original:
+        errors.append(
+            "managed ACL failure compensation must consume the original mutations and phase parameters"
+        )
+
+    compensation_binding = re.search(
+        r"\blet\s+mut\s+compensations\s*=\s*"
+        r"Vec\s*::\s*new\s*\(\s*\)\s*;",
+        plan_code,
+    )
+    compensation_binding_is_unique = (
+        compensation_binding is not None
+        and _rust_brace_depth_at(plan_code, compensation_binding.start()) == 0
+        and _rust_let_binding_count(plan_code, "compensations") == 1
+        and not re.search(
+            r"\bcompensations\s*=(?!=)",
+            plan_code[compensation_binding.end() :],
+        )
+        and not re.search(r"&\s*mut\s+compensations\b", plan_code)
+    )
+    if not compensation_binding_is_unique:
+        errors.append(
+            "managed ACL failure compensation must preserve one compensation vector through return"
+        )
+
+    general_plan = (
+        None
+        if plan_body is None
+        else re.search(
+            r"\bcompensations\s*\.\s*extend\s*\(\s*"
+            r"mutations\s*\.\s*iter\s*\(\s*\)\s*\.\s*rev\s*\(\s*\)\s*"
+            r"\.\s*map\s*\(\s*\|\s*mutation\s*\|\s*\{?\s*"
+            r"ManagedAclPublicationCompensation\s*::\s*RestoreGeneral\s*\(\s*"
+            r"shared_network_compensation\s*\(\s*mutation\s*\)\s*,?\s*\)\s*,?\s*"
+            r"\}?\s*\)\s*\)\s*;",
+            plan_body,
+            re.DOTALL,
+        )
+    )
+    if (
+        general_plan is None
+        or _rust_brace_depth_at(plan_body, general_plan.start()) != 0
+        or plan_body.count("ManagedAclPublicationCompensation::RestoreGeneral") != 1
+        or plan_body.count("shared_network_compensation") != 1
+    ):
+        errors.append(
+            "managed ACL failure compensation must restore every general preimage in reverse order"
+        )
+    active_bank_is_preserved = False
+    if (
+        compensation_binding is not None
+        and restore_active_bank is not None
+        and general_plan is not None
+        and compensation_binding.end()
+        <= restore_active_bank.start()
+        < restore_active_bank.end()
+        <= general_plan.start()
+    ):
+        bank_prefix = plan_code[
+            compensation_binding.end() : general_plan.start()
+        ]
+        bank_guard_start = (
+            restore_active_bank.start() - compensation_binding.end()
+        )
+        bank_guard_end = restore_active_bank.end() - compensation_binding.end()
+        active_bank_is_preserved = not (
+            bank_prefix[:bank_guard_start] + bank_prefix[bank_guard_end:]
+        ).strip()
+    if not active_bank_is_preserved:
+        errors.append(
+            "managed ACL failure compensation must preserve RestoreActiveBank until general rollback"
+        )
+    if general_plan is not None and not re.fullmatch(
+        r"\s*compensations\s*", plan_body[general_plan.end() :]
+    ):
+        errors.append(
+            "managed ACL failure compensation must return the complete reverse-order plan unchanged"
+        )
+    if general_plan is not None and re.search(
+        r"\b(?:return|break|continue)\b", plan_body[: general_plan.start()]
+    ):
+        errors.append(
+            "managed ACL failure compensation must not bypass the general reverse-order plan"
+        )
+    return errors
+
+
+def _run_managed_replaced_compensation_mutation_self_tests():
+    general_plan = r"""        compensations.extend(mutations.iter().rev().map(|mutation| {
+            ManagedAclPublicationCompensation::RestoreGeneral(
+                shared_network_compensation(mutation),
+            )
+        }));"""
+    safe = r"""
+        enum SharedNetworkMutation {
+            Added { direction: &'static str, cidr: String, group_id: u32 },
+            Deleted { direction: &'static str, cidr: String, group_id: u32 },
+            Replaced {
+                direction: &'static str,
+                cidr: String,
+                old_group_id: u32,
+                new_group_id: u32,
+            },
+        }
+        enum ManagedAclPublicationCompensation {
+            RestoreActiveBank,
+            RestoreGeneral(SharedNetworkMutation),
+        }
+        enum ManagedAclPublicationFailurePhase { General, Persist }
+
+        fn shared_network_compensation(
+            mutation: &SharedNetworkMutation,
+        ) -> SharedNetworkMutation {
+            match mutation {
+                SharedNetworkMutation::Replaced {
+                    direction,
+                    cidr,
+                    old_group_id,
+                    new_group_id,
+                } => SharedNetworkMutation::Replaced {
+                    direction,
+                    cidr: cidr.clone(),
+                    old_group_id: *new_group_id,
+                    new_group_id: *old_group_id,
+                },
+                _ => mutation.clone(),
+            }
+        }
+
+        fn managed_acl_publication_compensations(
+            mutations: &[SharedNetworkMutation],
+            phase: ManagedAclPublicationFailurePhase,
+        ) -> Vec<ManagedAclPublicationCompensation> {
+            let mut compensations = Vec::new();
+            if phase == ManagedAclPublicationFailurePhase::Persist {
+                compensations.push(ManagedAclPublicationCompensation::RestoreActiveBank);
+            }
+%s
+            compensations
+        }
+    """ % general_plan
+    safe_errors = _managed_replaced_compensation_contract_errors(safe)
+    if safe_errors:
+        raise SystemExit(
+            "ERROR: Replaced compensation checker rejected safe source: %s"
+            % safe_errors
+        )
+
+    mutants = (
+        (
+            "Replaced input preimage bindings are omitted",
+            safe.replace(
+                """direction,
+                    cidr,
+                    old_group_id,
+                    new_group_id,""",
+                "..",
+                1,
+            ),
+            "Replaced compensation must bind its old/new preimage",
+        ),
+        (
+            "Replaced direction is replaced with a constant",
+            safe.replace(
+                """direction,
+                    cidr: cidr.clone(),""",
+                """direction: "egress",
+                    cidr: cidr.clone(),""",
+                1,
+            ),
+            "Replaced compensation must preserve direction and cidr exactly",
+        ),
+        (
+            "Replaced cidr is replaced with a constant",
+            safe.replace(
+                "cidr: cidr.clone(),",
+                'cidr: "0.0.0.0/0".to_string(),',
+                1,
+            ),
+            "Replaced compensation must preserve direction and cidr exactly",
+        ),
+        (
+            "Replaced old preimage is not swapped",
+            safe.replace(
+                "old_group_id: *new_group_id,",
+                "old_group_id: *old_group_id,",
+                1,
+            ),
+            "must swap old_group_id and new_group_id",
+        ),
+        (
+            "Replaced new preimage is not swapped",
+            safe.replace(
+                "new_group_id: *old_group_id,",
+                "new_group_id: *new_group_id,",
+                1,
+            ),
+            "must swap old_group_id and new_group_id",
+        ),
+        (
+            "aliased compensation bypass",
+            safe.replace(
+                general_plan,
+                r"""        let _required_marker = shared_network_compensation;
+        let compensation_alias = passthrough_general;
+        compensations.extend(mutations.iter().rev().map(|mutation| {
+            ManagedAclPublicationCompensation::RestoreGeneral(compensation_alias(mutation))
+        }));""",
+                1,
+            )
+            + r"""
+        fn passthrough_general(mutation: &SharedNetworkMutation) -> SharedNetworkMutation {
+            mutation.clone()
+        }
+        """,
+            "must restore every general preimage in reverse order",
+        ),
+        (
+            "general preimage compensation removed",
+            safe.replace(
+                general_plan,
+                "        let _required_marker = shared_network_compensation;\n"
+                "        let _ = mutations;",
+                1,
+            ),
+            "must restore every general preimage in reverse order",
+        ),
+        (
+            "general preimage compensation is cleared before return",
+            safe.replace(
+                general_plan,
+                general_plan + "\n        compensations.clear();",
+                1,
+            ),
+            "managed ACL failure compensation must return the complete reverse-order plan unchanged",
+        ),
+        (
+            "active-bank compensation is cleared before general planning",
+            safe.replace(
+                general_plan,
+                "        compensations.clear();\n" + general_plan,
+                1,
+            ),
+            "managed ACL failure compensation must preserve RestoreActiveBank until general rollback",
+        ),
+        (
+            "active-bank compensation is popped before general planning",
+            safe.replace(
+                general_plan,
+                "        let _ = compensations.pop();\n" + general_plan,
+                1,
+            ),
+            "managed ACL failure compensation must preserve RestoreActiveBank until general rollback",
+        ),
+        (
+            "general preimage compensation can return before planning",
+            safe.replace(
+                general_plan,
+                "        if phase == ManagedAclPublicationFailurePhase::General {\n"
+                "            return compensations;\n"
+                "        }\n"
+                + general_plan,
+                1,
+            ),
+            "managed ACL failure compensation must not bypass the general reverse-order plan",
+        ),
+        (
+            "general preimage mutations parameter is shadowed",
+            safe.replace(
+                general_plan,
+                "        let mutations: &[SharedNetworkMutation] = &[];\n"
+                + general_plan,
+                1,
+            ),
+            "managed ACL failure compensation must consume the original mutations and phase parameters",
+        ),
+        (
+            "general preimage phase parameter is shadowed",
+            safe.replace(
+                "        let mut compensations = Vec::new();",
+                "        let mut compensations = Vec::new();\n"
+                "        let phase = ManagedAclPublicationFailurePhase::General;",
+                1,
+            ),
+            "managed ACL failure compensation must consume the original mutations and phase parameters",
+        ),
+        (
+            "compensation vector is rebuilt before general planning",
+            safe.replace(
+                general_plan,
+                "        let mut compensations = Vec::new();\n" + general_plan,
+                1,
+            ),
+            "managed ACL failure compensation must preserve one compensation vector through return",
+        ),
+    )
+    for label, mutant, expected in mutants:
+        errors = _managed_replaced_compensation_contract_errors(mutant)
+        if not any(expected in error for error in errors):
+            raise SystemExit(
+                "ERROR: Replaced compensation checker accepted %s mutation: %s"
+                % (label, errors)
+            )
+    print(
+        "Managed Replaced compensation mutation self-tests: OK (%d scenarios)"
+        % (len(mutants) + 1)
+    )
+
+
+def _managed_acl_apply_profile_log_contract_errors(neutron_api_source):
+    """Require exact repair evidence in both managed ACL profile logs."""
+
+    code = _blank_rust_non_code(neutron_api_source)
+    apply_span = _rust_function_body_span_from_blanked(
+        code, "reconcile_neutron_acl"
+    )
+    if apply_span is None:
+        return [
+            "managed ACL apply profile logs must bind "
+            "selector_repair_performed from replace_report exactly once "
+            "in both bypass and enforced branches"
+        ]
+    apply_start, apply_end = apply_span
+    apply_code = code[apply_start:apply_end]
+    apply_source = neutron_api_source[apply_start:apply_end]
+    initial_guard = re.match(
+        r"\s*if\s+!\s*port_manages_acl\s*\(\s*port\s*\)\s*\{",
+        apply_code,
+    )
+    initial_guard_end = None
+    initial_guard_is_exact = False
+    if initial_guard is not None:
+        initial_guard_open = apply_code.find("{", initial_guard.start())
+        initial_guard_close = _rust_matching_brace_end(
+            apply_code, initial_guard_open
+        )
+        if initial_guard_close is not None:
+            initial_guard_body = re.sub(
+                r"\s+",
+                "",
+                apply_code[initial_guard_open + 1 : initial_guard_close],
+            )
+            initial_guard_is_exact = initial_guard_body == (
+                "returnOk(NeutronAclReconcileOutcome::default());"
+            )
+            initial_guard_end = initial_guard_close + 1
+
+    def has_top_level_control_exit(region_code):
+        return any(
+            _rust_brace_depth_at(region_code, control.start()) == 0
+            for control in re.finditer(
+                r"\b(?:return|break|continue)\b", region_code
+            )
+        )
+
+    def profile_calls(region_code, region_source, direct_only=False):
+        calls = []
+        for invocation in re.finditer(r"\binfo\s*!\s*\(", region_code):
+            if direct_only and _rust_brace_depth_at(
+                region_code, invocation.start()
+            ) != 0:
+                continue
+            if direct_only:
+                prefix = region_code[: invocation.start()]
+                if has_top_level_control_exit(prefix):
+                    continue
+            opening = region_code.find("(", invocation.start())
+            call_code = _rust_parenthesized_body_at(region_code, opening)
+            if call_code is None:
+                continue
+            closing = opening + 1 + len(call_code)
+            call_source = region_source[opening + 1 : closing]
+            if not re.search(
+                r'(?:^|,)\s*"neutron_acl_apply_profile"\s*,?\s*$',
+                call_source,
+                re.DOTALL,
+            ):
+                continue
+            calls.append((call_code, call_source))
+        return calls
+
+    def valid_profile_call(call, expected_status):
+        call_code, call_source = call
+        statuses = []
+        for status in re.finditer(r"\bstatus\s*=", call_code):
+            value = re.match(
+                r'\s*"(?P<value>bypass|enforced)"\s*,',
+                call_source[status.end() :],
+            )
+            if value is not None:
+                statuses.append(value.group("value"))
+        exact_binding = re.compile(
+            r"\bselector_repair_performed\s*=\s*"
+            r"replace_report\s*\.\s*selector_repair_performed\s*,"
+        )
+        any_binding = re.compile(r"\bselector_repair_performed\s*=")
+        return (
+            statuses == [expected_status]
+            and len(exact_binding.findall(call_code)) == 1
+            and len(any_binding.findall(call_code)) == 1
+        )
+
+    bypass_guards = [
+        guard
+        for guard in re.finditer(
+            r"\bif\s+plan\s*\.\s*policies\s*\.\s*is_empty\s*"
+            r"\(\s*\)\s*\{",
+            apply_code,
+        )
+        if _rust_brace_depth_at(apply_code, guard.start()) == 0
+    ]
+    valid_candidates = []
+    for guard in bypass_guards:
+        if (
+            not initial_guard_is_exact
+            or initial_guard_end is None
+            or guard.start() <= initial_guard_end
+            or re.search(
+                r"\b(?:return|break|continue)\b",
+                apply_code[initial_guard_end : guard.start()],
+            )
+        ):
+            continue
+        if has_top_level_control_exit(apply_code[: guard.start()]):
+            continue
+        bypass_open = apply_code.find("{", guard.start())
+        bypass_close = _rust_matching_brace_end(apply_code, bypass_open)
+        after_bypass = None if bypass_close is None else bypass_close + 1
+        while (
+            after_bypass is not None
+            and after_bypass < len(apply_code)
+            and apply_code[after_bypass].isspace()
+        ):
+            after_bypass += 1
+        enforced_open = (
+            -1
+            if after_bypass is None
+            or re.match(r"else\s*\{", apply_code[after_bypass:]) is None
+            else apply_code.find("{", after_bypass)
+        )
+        enforced_close = _rust_matching_brace_end(apply_code, enforced_open)
+        if bypass_close is None or enforced_close is None:
+            continue
+        bypass_calls = profile_calls(
+            apply_code[bypass_open + 1 : bypass_close],
+            apply_source[bypass_open + 1 : bypass_close],
+            direct_only=True,
+        )
+        enforced_calls = profile_calls(
+            apply_code[enforced_open + 1 : enforced_close],
+            apply_source[enforced_open + 1 : enforced_close],
+            direct_only=True,
+        )
+        if (
+            len(bypass_calls) == 1
+            and len(enforced_calls) == 1
+            and valid_profile_call(bypass_calls[0], "bypass")
+            and valid_profile_call(enforced_calls[0], "enforced")
+        ):
+            valid_candidates.append(guard)
+    all_profile_calls = profile_calls(apply_code, apply_source)
+    valid = len(all_profile_calls) == 2 and len(valid_candidates) == 1
+    source_bindings = list(
+        re.finditer(
+            r"\blet\s+(?P<mutable>mut\s+)?replace_report\s*=\s*"
+            r"state\s*\.\s*control_plane\s*\.\s*replace_owned_acl\s*\(",
+            apply_code,
+        )
+    )
+    source_valid = (
+        initial_guard_is_exact
+        and len(source_bindings) == 1
+        and len(valid_candidates) == 1
+    )
+    if source_valid:
+        source_binding = source_bindings[0]
+        call_open = source_binding.end() - 1
+        call_body = _rust_parenthesized_body_at(apply_code, call_open)
+        call_close = (
+            None if call_body is None else call_open + 1 + len(call_body)
+        )
+        binding_end = None
+        if call_close is not None:
+            after_call = apply_code[call_close + 1 :]
+            await_match = re.match(r"\s*\.\s*await\b", after_call)
+            if await_match is not None:
+                cursor = await_match.end()
+                map_err = re.match(
+                    r"\s*\.\s*map_err\s*\(", after_call[cursor:]
+                )
+                if map_err is not None:
+                    map_err_open = cursor + map_err.end() - 1
+                    map_err_body = _rust_parenthesized_body_at(
+                        after_call, map_err_open
+                    )
+                    if map_err_body is not None:
+                        cursor = map_err_open + 1 + len(map_err_body) + 1
+                tail = re.match(r"\s*\?\s*;", after_call[cursor:])
+                if tail is not None:
+                    binding_end = (
+                        call_close + 1 + cursor + tail.end()
+                    )
+        profile_guard = valid_candidates[0]
+        between_binding_and_profile = (
+            ""
+            if binding_end is None or binding_end > profile_guard.start()
+            else apply_code[binding_end : profile_guard.start()]
+        )
+        source_valid = (
+            source_binding.group("mutable") is None
+            and _rust_brace_depth_at(apply_code, source_binding.start()) == 0
+            and initial_guard_end is not None
+            and source_binding.start() > initial_guard_end
+            and _rust_let_binding_count(apply_code, "replace_report") == 1
+            and binding_end is not None
+            and binding_end < profile_guard.start()
+            and not re.search(
+                r"\breplace_report\s*=(?!=)",
+                between_binding_and_profile,
+            )
+            and not re.search(
+                r"\b(?:return|break|continue)\b",
+                between_binding_and_profile,
+            )
+        )
+    valid = valid and source_valid
+    if valid:
+        return []
+    return [
+        "managed ACL apply profile logs must bind "
+        "selector_repair_performed from replace_report exactly once "
+        "in both bypass and enforced branches"
+    ]
+
+
+def _run_managed_acl_apply_profile_log_mutation_self_tests():
+    checker = globals().get("_managed_acl_apply_profile_log_contract_errors")
+    if checker is None:
+        raise SystemExit(
+            "ERROR: managed ACL apply-profile log contract checker is missing"
+        )
+
+    bypass_log = r'''            info!(
+                status = "bypass",
+                selector_repair_performed = replace_report.selector_repair_performed,
+                "neutron_acl_apply_profile"
+            );'''
+    enforced_log = r'''            info!(
+                status = "enforced",
+                selector_repair_performed = replace_report.selector_repair_performed,
+                "neutron_acl_apply_profile"
+            );'''
+    replace_report_binding = r'''            let replace_report = state
+                .control_plane
+                .replace_owned_acl(&plan)
+                .await?;'''
+    initial_guard = r'''            if !port_manages_acl(port) {
+                return Ok(NeutronAclReconcileOutcome::default());
+            }'''
+    safe = r'''
+        fn reconcile_neutron_acl(state: &State, port: &Port, plan: Plan) {
+%s
+%s
+            let effective_reason = if plan.policies.is_empty() {
+                "no_policies"
+            } else {
+                "policy_present"
+            };
+            let _ = effective_reason;
+            if plan.policies.is_empty() {
+%s
+            } else {
+%s
+            }
+        }
+    ''' % (initial_guard, replace_report_binding, bypass_log, enforced_log)
+    safe_errors = checker(safe)
+    if safe_errors:
+        raise SystemExit(
+            "ERROR: managed ACL apply-profile log checker rejected safe source: %s"
+            % safe_errors
+        )
+
+    exact_binding = (
+        "selector_repair_performed = "
+        "replace_report.selector_repair_performed"
+    )
+    mutants = (
+        (
+            "bypass profile branch is missing",
+            safe.replace(
+                bypass_log,
+                bypass_log.replace(
+                    '"neutron_acl_apply_profile"', '"other_profile"', 1
+                ),
+                1,
+            ),
+        ),
+        (
+            "enforced profile branch is missing",
+            safe.replace(
+                enforced_log,
+                enforced_log.replace(
+                    '"neutron_acl_apply_profile"', '"other_profile"', 1
+                ),
+                1,
+            ),
+        ),
+        (
+            "bypass repair marker is constant",
+            safe.replace(exact_binding, "selector_repair_performed = true", 1),
+        ),
+        (
+            "enforced repair marker is constant",
+            safe.rsplit(exact_binding, 1)[0]
+            + "selector_repair_performed = false"
+            + safe.rsplit(exact_binding, 1)[1],
+        ),
+        (
+            "bypass repair marker uses another report",
+            safe.replace(
+                exact_binding,
+                "selector_repair_performed = "
+                "other_report.selector_repair_performed",
+                1,
+            ),
+        ),
+        (
+            "enforced repair marker uses another field",
+            safe.rsplit(exact_binding, 1)[0]
+            + "selector_repair_performed = replace_report.repair_performed"
+            + safe.rsplit(exact_binding, 1)[1],
+        ),
+        (
+            "bypass repair marker is duplicated",
+            safe.replace(
+                exact_binding + ",",
+                exact_binding + ",\n                " + exact_binding + ",",
+                1,
+            ),
+        ),
+        (
+            "duplicate bypass profile branch",
+            safe.replace(bypass_log, bypass_log + "\n" + bypass_log, 1),
+        ),
+        (
+            "profile logs are unreachable inside false branches",
+            safe.replace(
+                bypass_log,
+                "            if false {\n" + bypass_log + "\n            }",
+                1,
+            ).replace(
+                enforced_log,
+                "            if false {\n" + enforced_log + "\n            }",
+                1,
+            ),
+        ),
+        (
+            "replace report comes from another source",
+            safe.replace(
+                replace_report_binding,
+                "            let replace_report = other_report;",
+                1,
+            ),
+        ),
+        (
+            "replace report is shadowed before profile logs",
+            safe.replace(
+                replace_report_binding,
+                replace_report_binding
+                + "\n            let replace_report = other_report;",
+                1,
+            ),
+        ),
+        (
+            "replace report can return before profile logs",
+            safe.replace(
+                replace_report_binding,
+                replace_report_binding
+                + "\n            if skip { return; }",
+                1,
+            ),
+        ),
+        (
+            "replace report source can be skipped after the initial guard",
+            safe.replace(
+                replace_report_binding,
+                "            if skip { return; }\n" + replace_report_binding,
+                1,
+            ),
+        ),
+    )
+    expected = (
+        "managed ACL apply profile logs must bind "
+        "selector_repair_performed from replace_report exactly once "
+        "in both bypass and enforced branches"
+    )
+    for label, mutant in mutants:
+        errors = checker(mutant)
+        if not any(expected in error for error in errors):
+            raise SystemExit(
+                "ERROR: managed ACL apply-profile log checker accepted %s mutation: %s"
+                % (label, errors)
+            )
+    print(
+        "Managed ACL apply-profile log mutation self-tests: OK (%d scenarios)"
+        % (len(mutants) + 1)
     )
 
 
@@ -6386,6 +7985,35 @@ def _run_managed_cross_domain_group_mutation_self_tests():
             ),
         ),
     ]
+    for wrapper_name in (
+        "add_group",
+        "delete_group",
+        "add_qos",
+        "delete_qos",
+        "add_mirror",
+        "delete_mirror",
+    ):
+        wrapper_body = _rust_function_body_raw(safe_control, wrapper_name)
+        if wrapper_body is None or wrapper_body.count(plan_call) != 1:
+            raise SystemExit(
+                "ERROR: Task 7 managed wrapper fixture is missing projection plan: %s"
+                % wrapper_name
+            )
+        mutants.append(
+            (
+                "%s omits general projection plan" % wrapper_name,
+                safe_control.replace(
+                    wrapper_body,
+                    wrapper_body.replace(plan_call, "", 1),
+                    1,
+                ),
+                safe_groups,
+                safe_qos,
+                safe_mirror,
+                "%s must plan old_state to final_state before one shared executor call"
+                % wrapper_name,
+            )
+        )
     for label, control, groups, qos, mirror, expected in mutants:
         errors = _managed_cross_domain_group_mutation_contract_errors(
             control, groups, qos, mirror
@@ -7199,6 +8827,9 @@ def check_rust_stage_one_tests_present():
     _run_acl_delete_semantics_mutation_self_tests()
     _run_owned_acl_release_quarantine_mutation_self_tests()
     _run_managed_acl_shadow_mutation_self_tests()
+    _run_managed_projection_path_mutation_self_tests()
+    _run_managed_replaced_compensation_mutation_self_tests()
+    _run_managed_acl_apply_profile_log_mutation_self_tests()
     _run_managed_cross_domain_group_mutation_self_tests()
     neutron_api_source = _read_repo_text(RUST_NEUTRON_API_PATH)
     wal_source = _read_repo_text(RUST_NEUTRON_WAL_PATH)
@@ -7225,6 +8856,12 @@ def check_rust_stage_one_tests_present():
     network_source = _read_repo_text(CORE_EBPF_NETWORK_PATH)
     policy_source = _read_repo_text(CORE_EBPF_POLICY_PATH)
     tap_registry_source = _read_repo_text(os.path.join("agent", "src", "tap_registry.rs"))
+
+    apply_profile_log_errors = _managed_acl_apply_profile_log_contract_errors(
+        neutron_api_source
+    )
+    if apply_profile_log_errors:
+        raise SystemExit("ERROR: " + apply_profile_log_errors[0])
 
     instance_state_body = _rust_item_body(
         control_plane_source, "struct", "InstanceState"
@@ -7383,6 +9020,12 @@ def check_rust_stage_one_tests_present():
         raise SystemExit(
             "ERROR: Neutron detach must use the registry's serialized authority cleanup"
         )
+
+    projection_path_errors = _managed_projection_path_contract_errors(
+        replay_source, inventory_source
+    )
+    if projection_path_errors:
+        raise SystemExit("ERROR: " + projection_path_errors[0])
 
     for source, function_name, binding in (
         (replay_source, "replay_state_from_snapshot_with_mode", "group_entries"),
@@ -8949,13 +10592,22 @@ def check_managed_acl_publication_transaction_contract():
     control_plane_source = _read_repo_text(
         os.path.join("agent", "src", "control_plane.rs")
     )
+    control_plane_code = _blank_rust_non_code(control_plane_source)
     inventory_source = _read_repo_text(
         os.path.join("core", "src", "ebpf_ops", "inventory.rs")
     )
 
-    shadow_errors = _managed_acl_shadow_contract_errors(control_plane_source)
+    shadow_errors = _managed_acl_shadow_contract_errors(
+        control_plane_source, source_code=control_plane_code
+    )
     if shadow_errors:
         raise SystemExit("ERROR: " + "; ".join(shadow_errors))
+
+    replaced_errors = _managed_replaced_compensation_contract_errors(
+        control_plane_source, control_code=control_plane_code
+    )
+    if replaced_errors:
+        raise SystemExit("ERROR: " + "; ".join(replaced_errors))
 
     mutation_body = _rust_item_body(
         control_plane_source, "enum", "SharedNetworkMutation"
