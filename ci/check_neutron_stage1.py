@@ -5169,7 +5169,7 @@ def check_managed_acl_publication_transaction_contract():
             "ERROR: persistence failure must restore the old bank and every general preimage"
         )
     if (
-        "fn managed_acl_publication_persistence_failure_restores_old_snapshot_without_created_port_sets("
+        "fn managed_general_delta_persistence_failure_restores_old_snapshot_without_created_port_sets("
         not in control_plane_source
     ):
         raise SystemExit(

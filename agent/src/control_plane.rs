@@ -6327,7 +6327,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_acl_publication_persistence_failure_restores_old_snapshot_without_created_port_sets()
+    fn managed_general_delta_persistence_failure_restores_old_snapshot_without_created_port_sets()
     {
         let mut old_state = FirewallState::default();
         old_state.next_group_id = 41;
