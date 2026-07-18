@@ -256,6 +256,48 @@ pub fn classify_managed_inventory_capture(
     plan_projection_drift(captured, &committed, &committed)
 }
 
+impl ManagedGroupProjection {
+    /// Plan managed projection repair from one live capture directly to this
+    /// proposed projection while validating non-projection runtime state
+    /// against the committed snapshot.
+    pub fn plan_managed_pinned_projection(
+        &self,
+        runtime: TapMapRuntime<'_>,
+        committed_state: &FirewallState,
+    ) -> ProjectionDrift {
+        let proposed = self;
+        if runtime.tap_id == TAP_ID_UNASSIGNED {
+            return ProjectionDrift::Fatal(
+                "managed runtime inventory requires an assigned tap_id".to_string(),
+            );
+        }
+        if committed_state.tap_id != runtime.tap_id {
+            return ProjectionDrift::Fatal(format!(
+                "state tap_id {} does not match runtime tap_id {}",
+                committed_state.tap_id, runtime.tap_id,
+            ));
+        }
+
+        let captured = match capture_runtime_group_map_entries(runtime) {
+            Ok(entries) => entries,
+            Err(error) => return ProjectionDrift::Fatal(error),
+        };
+        if let Err(error) = validate_strict_pinned_runtime_state(
+            runtime,
+            committed_state,
+            GroupProjectionMode::Managed,
+        ) {
+            return ProjectionDrift::Fatal(error);
+        }
+        let committed = match compile_managed_group_projection(committed_state) {
+            Ok(projection) => projection,
+            Err(error) => return ProjectionDrift::Fatal(error),
+        };
+
+        plan_projection_drift(&captured, &committed, proposed)
+    }
+}
+
 fn validate_strict_pinned_runtime_state(
     runtime: TapMapRuntime<'_>,
     state: &FirewallState,

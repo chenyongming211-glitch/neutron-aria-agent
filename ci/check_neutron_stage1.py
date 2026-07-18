@@ -323,6 +323,23 @@ def _rust_function_body(source, function_name):
     return code[opening + 1:index - 1]
 
 
+def _rust_braced_body_at(code, opening):
+    """Extract a braced Rust block from already blanked source code."""
+    if opening < 0 or opening >= len(code) or code[opening] != "{":
+        return None
+    depth = 1
+    index = opening + 1
+    while index < len(code) and depth:
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+        index += 1
+    if depth:
+        return None
+    return code[opening + 1:index - 1]
+
+
 def _rust_item_body(source, item_kind, item_name):
     """Extract a Rust struct or enum body after blanking comments and literals."""
     code = _blank_rust_non_code(source)
@@ -1873,6 +1890,463 @@ def _run_owned_acl_release_quarantine_mutation_self_tests():
     print("Owned ACL immediate-quarantine mutation self-tests: OK (4 scenarios)")
 
 
+def _managed_acl_shadow_contract_errors(source):
+    stage_body = _rust_function_body_raw(source, "stage_acl_shadow_bank")
+    plan_body = _rust_function_body_raw(source, "managed_acl_shadow_network_plan")
+    if stage_body is None or plan_body is None:
+        return ["managed ACL shadow staging helper is missing"]
+
+    stage_code = _blank_rust_non_code(stage_body)
+    plan_code = _blank_rust_non_code(plan_body)
+    errors = []
+    if re.search(r"\bstate\s*\.\s*groups\b", stage_code) or re.search(
+        r"\bstate\s*\.\s*groups\b", plan_code
+    ):
+        errors.append("managed ACL shadow staging still iterates the raw all-group state")
+
+    for direction in ("acl_src", "acl_dst"):
+        if not re.search(
+            r"\bprojection\s*\.\s*%s\b" % direction,
+            plan_code,
+        ):
+            errors.append(
+                "managed ACL shadow plan is missing projection.%s" % direction
+            )
+
+    allowed_projection_fields_removed = re.sub(
+        r"\bprojection\s*\.\s*(?:acl_src|acl_dst)\b",
+        "ACL_DIRECTIONAL_PROJECTION",
+        plan_code,
+    )
+    if re.search(r"\bprojection\b", allowed_projection_fields_removed):
+        errors.append(
+            "managed ACL shadow plan must not alias, delegate, or read non-ACL projection data"
+        )
+    if re.search(
+        r"\.\s*(?:general|legacy_candidates|general_candidates)\b",
+        plan_code,
+    ):
+        errors.append(
+            "managed ACL shadow plan must not consume the general projection"
+        )
+
+    exact_projection_calls = re.findall(
+        r"\bmanaged_acl_shadow_network_plan\s*"
+        r"\(\s*projection\s*\)",
+        stage_code,
+        re.DOTALL,
+    )
+    exact_projection_loop = re.search(
+        r"\bfor\s*\(\s*direction\s*,\s*cidr\s*,\s*group_id\s*\)\s+"
+        r"in\s+managed_acl_shadow_network_plan\s*"
+        r"\(\s*projection\s*\)\s*\{",
+        stage_code,
+        re.DOTALL,
+    )
+    if exact_projection_loop is None or len(exact_projection_calls) != 1:
+        errors.append(
+            "managed ACL shadow network writes must iterate only the compiled projection plan"
+        )
+    elif (
+        stage_code[:exact_projection_loop.start()].count("{")
+        - stage_code[:exact_projection_loop.start()].count("}")
+        != 0
+    ):
+        errors.append(
+            "managed ACL shadow projection loop must remain unconditional at function top level"
+        )
+    elif re.search(
+        r"\b(?:if|match|return|break|continue|while|for|loop)\b",
+        stage_code[:exact_projection_loop.start()],
+    ):
+        errors.append(
+            "managed ACL shadow staging must not bypass the projection loop with pre-loop control flow"
+        )
+    if exact_projection_loop is not None:
+        pre_loop = stage_code[:exact_projection_loop.start()]
+        writer_inputs = r"(?:bank|runtime|ebpf_path)"
+        input_rebound = re.search(
+            r"\blet\b[^;]*\b%s\b" % writer_inputs,
+            pre_loop,
+            re.DOTALL,
+        )
+        input_assigned = re.search(
+            r"\b%s\b\s*(?:(?:<<|>>|[+\-*/%%&|^])?=)(?!=)"
+            % writer_inputs,
+            pre_loop,
+        )
+        input_mutably_borrowed = re.search(
+            r"&\s*mut\s+\b%s\b" % writer_inputs,
+            pre_loop,
+        )
+        if input_rebound or input_assigned or input_mutably_borrowed:
+            errors.append(
+                "managed ACL shadow writer inputs must remain bound to stage parameters"
+            )
+    stage_without_projection_plan = re.sub(
+        r"\bmanaged_acl_shadow_network_plan\s*"
+        r"\(\s*projection\s*\)",
+        "ACL_SHADOW_PLAN",
+        stage_code,
+        flags=re.DOTALL,
+    )
+    if re.search(r"\bprojection\b", stage_without_projection_plan):
+        errors.append(
+            "managed ACL shadow staging must not alias or delegate projection data"
+        )
+    if re.search(
+        r"\.\s*(?:general|legacy_candidates|general_candidates)\b",
+        stage_code,
+    ):
+        errors.append(
+            "managed ACL shadow staging must not consume the general projection"
+        )
+    writer_call = re.compile(
+        r"\baria_core\s*::\s*ebpf_ops\s*::\s*"
+        r"add_acl_network_in_bank\s*\("
+    )
+    entry_writer_call = re.compile(
+        r"\baria_core\s*::\s*ebpf_ops\s*::\s*"
+        r"add_acl_network_in_bank\s*\(\s*"
+        r"direction\s*,\s*&\s*cidr\s*,\s*group_id\s*,\s*"
+        r"bank\s*,\s*runtime\s*,\s*ebpf_path\s*,?\s*\)"
+    )
+    stage_writer_count = len(writer_call.findall(stage_code))
+    loop_body = None
+    if exact_projection_loop is not None:
+        loop_body = _rust_braced_body_at(
+            stage_code, exact_projection_loop.end() - 1
+        )
+    loop_writer_count = (
+        len(writer_call.findall(loop_body)) if loop_body is not None else 0
+    )
+    if stage_writer_count != 1:
+        errors.append(
+            "managed ACL shadow staging must have exactly one direct ACL network writer"
+        )
+    elif loop_writer_count != 1:
+        errors.append(
+            "managed ACL shadow network writer must remain inside the compiled projection loop"
+        )
+    elif len(entry_writer_call.findall(loop_body)) != 1:
+        errors.append(
+            "managed ACL shadow writer must publish the current entry to the requested bank"
+        )
+    else:
+        entry_writer = entry_writer_call.search(loop_body)
+        writer_prefix = loop_body[:entry_writer.start()]
+        writer_depth = writer_prefix.count("{") - writer_prefix.count("}")
+        if writer_prefix.strip() or writer_depth != 0:
+            errors.append(
+                "managed ACL shadow writer must be the unconditional first loop statement"
+            )
+        top_level_semicolons = []
+        depth = 0
+        for index, character in enumerate(loop_body):
+            if character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+            elif character == ";" and depth == 0:
+                top_level_semicolons.append(index)
+        last_token = len(loop_body.rstrip()) - 1
+        if (
+            len(top_level_semicolons) != 1
+            or top_level_semicolons[0] != last_token
+            or not loop_body.rstrip().endswith("?;")
+        ):
+            errors.append(
+                "managed ACL shadow loop must contain only one fallible writer statement"
+            )
+
+    allowed_state_uses_removed = re.sub(
+        r"\bstate\s*\.\s*rules\b",
+        "STATE_RULES",
+        stage_code,
+    )
+    allowed_state_uses_removed = re.sub(
+        r"\bSelf\s*::\s*owned_acl_policy_key_from_rule\s*"
+        r"\(\s*state\s*,\s*rule\s*\)",
+        "POLICY_KEY_FROM_STATE",
+        allowed_state_uses_removed,
+    )
+    if re.search(r"\bstate\b", allowed_state_uses_removed):
+        errors.append(
+            "managed ACL shadow staging must not alias or delegate raw state to a network plan"
+        )
+    return errors
+
+
+def _run_managed_acl_shadow_mutation_self_tests():
+    safe = """
+        fn managed_acl_shadow_network_plan(projection: &Projection) {
+            projection.acl_src.iter();
+            projection.acl_dst.iter();
+        }
+        fn stage_acl_shadow_bank(state: &State, projection: &Projection) {
+            for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {
+                aria_core::ebpf_ops::add_acl_network_in_bank(
+                    direction, &cidr, group_id, bank, runtime, ebpf_path,
+                ).map_err(ControlPlaneError::KernelError)?;
+            }
+            for rule in &state.rules {
+                let key = Self::owned_acl_policy_key_from_rule(state, rule);
+                add_policy_in_bank(key);
+            }
+        }
+    """
+    if _managed_acl_shadow_contract_errors(safe):
+        raise SystemExit("ERROR: managed ACL shadow checker rejected safe projection staging")
+
+    safe_directional_alias = safe.replace(
+        "projection.acl_src.iter();",
+        "let general = &projection.acl_src;\n"
+        "            general.iter();",
+        1,
+    )
+    if _managed_acl_shadow_contract_errors(safe_directional_alias):
+        raise SystemExit(
+            "ERROR: managed ACL shadow checker rejected a safe directional alias"
+        )
+    safe_directional_delegation = safe.replace(
+        "projection.acl_src.iter();\n            projection.acl_dst.iter();",
+        "directional_plan(&projection.acl_src);\n"
+        "            directional_plan(&projection.acl_dst);",
+        1,
+    )
+    if _managed_acl_shadow_contract_errors(safe_directional_delegation):
+        raise SystemExit(
+            "ERROR: managed ACL shadow checker rejected safe directional delegation"
+        )
+
+    mutants = {
+        "direct raw-group": (
+            safe.replace(
+                "managed_acl_shadow_network_plan(projection)",
+                "state.groups.values()",
+                1,
+            ),
+            "raw all-group state",
+        ),
+        "aliased raw-group": (
+            safe.replace(
+                "for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {",
+                "let groups = &state.groups;\n"
+                "            for (direction, cidr, group_id) in groups {",
+                1,
+            ),
+            "raw all-group state",
+        ),
+        "delegated raw-group": (
+            safe.replace(
+                "managed_acl_shadow_network_plan(projection)",
+                "raw_group_shadow_plan(state)",
+                1,
+            ),
+            "raw state",
+        ),
+        "chained raw-group": (
+            safe.replace(
+                "managed_acl_shadow_network_plan(projection)",
+                "managed_acl_shadow_network_plan(projection).chain(raw_group_shadow_plan(state))",
+                1,
+            ),
+            "raw state",
+        ),
+        "plan general projection": (
+            safe.replace(
+                "projection.acl_dst.iter();",
+                "projection.acl_dst.iter().chain(projection.general.iter());",
+                1,
+            ),
+            "non-ACL projection data",
+        ),
+        "plan aliased projection": (
+            safe.replace(
+                "projection.acl_src.iter();",
+                "let projection_alias = projection;\n"
+                "            projection_alias.general.iter();\n"
+                "            projection.acl_src.iter();",
+                1,
+            ),
+            "non-ACL projection data",
+        ),
+        "plan delegated projection": (
+            safe.replace(
+                "projection.acl_dst.iter();",
+                "projection.acl_dst.iter();\n"
+                "            general_shadow_plan(projection);",
+                1,
+            ),
+            "non-ACL projection data",
+        ),
+        "plan delegated general field": (
+            safe.replace(
+                "projection.acl_dst.iter();",
+                "projection.acl_dst.iter();\n"
+                "            general_shadow_plan(&projection.general);",
+                1,
+            ),
+            "non-ACL projection data",
+        ),
+        "supplemental delegated writer": (
+            safe.replace(
+                "            for rule in &state.rules {",
+                "            stage_general_projection(projection);\n"
+                "            for rule in &state.rules {",
+                1,
+            ),
+            "staging must not alias or delegate projection data",
+        ),
+        "stage direct general projection": (
+            safe.replace(
+                "            for rule in &state.rules {",
+                "            for entry in &projection.general { delegated_add(entry); }\n"
+                "            for rule in &state.rules {",
+                1,
+            ),
+            "staging must not alias or delegate projection data",
+        ),
+        "writer moved outside projection loop": (
+            safe.replace(
+                "aria_core::ebpf_ops::add_acl_network_in_bank(\n"
+                "                    direction, &cidr, group_id, bank, runtime, ebpf_path,\n"
+                "                ).map_err(ControlPlaneError::KernelError)?;",
+                "let _ = (direction, cidr, group_id);",
+                1,
+            ).replace(
+                "            for rule in &state.rules {",
+                "            aria_core::ebpf_ops::add_acl_network_in_bank(\n"
+                "                \"src\", &cidr, group_id, bank, runtime, ebpf_path,\n"
+                "            ).map_err(ControlPlaneError::KernelError)?;\n"
+                "            for rule in &state.rules {",
+                1,
+            ),
+            "writer must remain inside the compiled projection loop",
+        ),
+        "writer token spoof": (
+            safe.replace(
+                "aria_core::ebpf_ops::add_acl_network_in_bank(\n"
+                "                    direction, &cidr, group_id, bank, runtime, ebpf_path,\n"
+                "                ).map_err(ControlPlaneError::KernelError)?;",
+                "delegated_writer(direction, cidr, group_id);\n"
+                "                let add_acl_network_in_bank_marker = true;",
+                1,
+            ),
+            "exactly one direct ACL network writer",
+        ),
+        "second direct writer": (
+            safe.replace(
+                "                ).map_err(ControlPlaneError::KernelError)?;",
+                "                ).map_err(ControlPlaneError::KernelError)?;\n"
+                "                aria_core::ebpf_ops::add_acl_network_in_bank(\n"
+                "                    direction, &cidr, group_id, bank, runtime, ebpf_path,\n"
+                "                ).map_err(ControlPlaneError::KernelError)?;",
+                1,
+            ),
+            "exactly one direct ACL network writer",
+        ),
+        "conditional projection loop": (
+            safe.replace(
+                "            for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {",
+                "            if bank == 0 {\n"
+                "                for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {",
+                1,
+            ).replace(
+                "            }\n            for rule in &state.rules {",
+                "                }\n"
+                "            }\n"
+                "            for rule in &state.rules {",
+                1,
+            ),
+            "projection loop must remain unconditional at function top level",
+        ),
+        "pre-loop early return": (
+            safe.replace(
+                "            for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {",
+                "            if bank == 1 { return Ok(()); }\n"
+                "            for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {",
+                1,
+            ),
+            "must not bypass the projection loop with pre-loop control flow",
+        ),
+        "conditional writer": (
+            safe.replace(
+                "                aria_core::ebpf_ops::add_acl_network_in_bank(",
+                "                if bank == 0 {\n"
+                "                    aria_core::ebpf_ops::add_acl_network_in_bank(",
+                1,
+            ).replace(
+                "                ).map_err(ControlPlaneError::KernelError)?;",
+                "                    ).map_err(ControlPlaneError::KernelError)?;\n"
+                "                }",
+                1,
+            ),
+            "writer must be the unconditional first loop statement",
+        ),
+        "writer targets wrong bank": (
+            safe.replace(
+                "direction, &cidr, group_id, bank, runtime, ebpf_path,",
+                "direction, &cidr, group_id, 0, runtime, ebpf_path,",
+                1,
+            ),
+            "writer must publish the current entry to the requested bank",
+        ),
+        "writer result ignored": (
+            safe.replace(
+                ").map_err(ControlPlaneError::KernelError)?;",
+                ");",
+                1,
+            ),
+            "loop must contain only one fallible writer statement",
+        ),
+        "writer followed by break": (
+            safe.replace(
+                "                ).map_err(ControlPlaneError::KernelError)?;",
+                "                ).map_err(ControlPlaneError::KernelError)?;\n"
+                "                break;",
+                1,
+            ),
+            "loop must contain only one fallible writer statement",
+        ),
+        "target bank shadowed": (
+            safe.replace(
+                "            for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {",
+                "            let bank = bank & 0;\n"
+                "            for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {",
+                1,
+            ),
+            "writer inputs must remain bound to stage parameters",
+        ),
+        "runtime shadowed": (
+            safe.replace(
+                "            for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {",
+                "            let runtime = remap(runtime);\n"
+                "            for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {",
+                1,
+            ),
+            "writer inputs must remain bound to stage parameters",
+        ),
+        "target bank mutably borrowed": (
+            safe.replace(
+                "            for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {",
+                "            zero(&mut bank);\n"
+                "            for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {",
+                1,
+            ),
+            "writer inputs must remain bound to stage parameters",
+        ),
+    }
+    for label, (mutant, expected_error) in mutants.items():
+        errors = _managed_acl_shadow_contract_errors(mutant)
+        if not any(expected_error in error for error in errors):
+            raise SystemExit(
+                "ERROR: managed ACL shadow checker accepted %s mutation: %s"
+                % (label, errors)
+            )
+    print("Managed ACL shadow projection mutation self-tests: OK (25 scenarios)")
+
+
 def _run_acl_ingress_parser_self_tests():
     comment_only = """
         // fn acl_ingress_hook(tap_id: u32) -> u8 { 0 }
@@ -2607,6 +3081,7 @@ def check_rust_stage_one_tests_present():
     _run_acl_map_helper_contract_mutation_self_tests()
     _run_acl_delete_semantics_mutation_self_tests()
     _run_owned_acl_release_quarantine_mutation_self_tests()
+    _run_managed_acl_shadow_mutation_self_tests()
     neutron_api_source = _read_repo_text(RUST_NEUTRON_API_PATH)
     wal_source = _read_repo_text(RUST_NEUTRON_WAL_PATH)
     openapi_source = _read_repo_text(RUST_OPENAPI_PATH)
@@ -3469,15 +3944,21 @@ def check_rust_stage_one_tests_present():
     replace_owned_acl_body = _rust_function_body(control_plane_source, "replace_owned_acl")
     if replace_owned_acl_body is None:
         raise SystemExit("ERROR: replace_owned_acl source missing")
+    publication_body = _rust_function_body(
+        control_plane_source, "publish_acl_projection_locked"
+    )
+    if publication_body is None:
+        raise SystemExit("ERROR: publish_acl_projection_locked source missing")
     guard_compact = re.search(
         r"compact_and_publish_state\s*\(\s*allocator_guard_state\s*\)",
-        replace_owned_acl_body,
+        publication_body,
     )
-    first_kernel_mutation = replace_owned_acl_body.find("apply_shared_network_mutation")
+    first_kernel_mutation = publication_body.find("apply_shared_network_mutation")
     durable_final_compact = re.search(
         r"compact_and_publish_state\s*\(\s*durable_final_state\s*\)",
-        replace_owned_acl_body,
+        publication_body,
     )
+    publication_call = replace_owned_acl_body.find(".publish_acl_projection_locked(")
     released_cleanup = replace_owned_acl_body.find("released_cleanup_targets")
     if (
         guard_compact is None
@@ -3487,7 +3968,11 @@ def check_rust_stage_one_tests_present():
         raise SystemExit(
             "ERROR: created bitmap quarantine must be durable before owned ACL kernel mutation"
         )
-    if durable_final_compact is None or released_cleanup < durable_final_compact.end():
+    if (
+        durable_final_compact is None
+        or publication_call < 0
+        or released_cleanup < publication_call
+    ):
         raise SystemExit(
             "ERROR: released bitmap quarantine must be durable before cleanup"
         )
@@ -3584,9 +4069,17 @@ def check_rust_stage_one_tests_present():
         raise SystemExit(
             "ERROR: Neutron TC ACL readiness must be checked before quiesce"
         )
-    if "if !plan.policies.is_empty() {" not in acl_reconcile_body[:readiness]:
+    target_tc_requirement = acl_reconcile_body.find(
+        "let require_tc_acl_links = acl_runtime_feature_requires_tc(transition.publish);"
+    )
+    target_tc_guard = acl_reconcile_body.find(
+        "if require_tc_acl_links {", target_tc_requirement
+    )
+    if not (
+        0 <= target_tc_requirement < target_tc_guard < readiness < first_gate_write
+    ):
         raise SystemExit(
-            "ERROR: Neutron TC ACL readiness must be conditional on non-empty policies"
+            "ERROR: Neutron TC ACL readiness must follow the target publish state"
         )
     if ".update_config(" in acl_reconcile_body:
         raise SystemExit(
@@ -4100,44 +4593,53 @@ def check_rust_stage_one_tests_present():
         if marker not in update_config_body:
             raise SystemExit("ERROR: local config strict lifecycle contract missing %s" % marker)
     replace_acl_body = _rust_function_body(control_plane_source, "replace_owned_acl")
-    shadow_stage = replace_acl_body.find("Self::stage_acl_shadow_bank(")
+    publication_body = _rust_function_body(
+        control_plane_source, "publish_acl_projection_locked"
+    )
+    if replace_acl_body is None or publication_body is None:
+        raise SystemExit("ERROR: ACL replace publication helpers missing")
+    shadow_stage = publication_body.find("Self::stage_acl_shadow_bank(")
     first_bank_readiness = replace_acl_body.find(
         "Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())"
     )
-    shared_mutation = replace_acl_body.find("apply_shared_network_mutation(")
-    bank_readiness = replace_acl_body.find(
-        "Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())",
+    publication_call = replace_acl_body.find(".publish_acl_projection_locked(")
+    shared_mutation = publication_body.find("apply_shared_network_mutation(")
+    bank_readiness = publication_body.find(
+        "Self::require_tc_acl_ready_locked(",
         shadow_stage,
     )
-    bank_publish = replace_acl_body.find("aria_core::ebpf_ops::set_acl_active_bank(")
+    bank_publish = publication_body.find("aria_core::ebpf_ops::set_acl_active_bank(")
     if not (
-        0 <= first_bank_readiness < shared_mutation < shadow_stage < bank_readiness < bank_publish
+        0 <= first_bank_readiness < publication_call
+        and 0 <= shared_mutation < shadow_stage < bank_readiness < bank_publish
     ):
         raise SystemExit(
             "ERROR: ACL replace must preflight TC before shared maps and recheck after staging"
         )
-    readiness_prefix = replace_acl_body[shadow_stage:bank_readiness]
+    readiness_prefix = publication_body[shadow_stage:bank_readiness]
     if not re.search(
-        r"if\s+state\s*\.\s*state\s*\.\s*conntrack_enabled\s*\|\|\s*state\s*\.\s*state\s*\.\s*acl_enabled",
+        r"if\s+require_tc_acl_links\b",
         readiness_prefix,
     ):
         raise SystemExit(
-            "ERROR: ACL bank TC gate must remain conditional while ACL/CT are disabled"
+            "ERROR: ACL bank TC gate must use the target publication requirement"
         )
-    for marker in (
-        "lock_runtime_lifecycle().await",
-        "rollback_owned_acl_prepublication(",
-        "rollback_shared_network_mutations(",
-        "transaction_created_port_sets(",
-        "cleanup_transaction_created_port_sets(",
-    ):
+    for marker in ("lock_runtime_lifecycle().await", "transaction_created_port_sets("):
         if marker not in replace_acl_body:
             raise SystemExit("ERROR: ACL bank rollback/lifecycle contract missing %s" % marker)
-    persistence_cleanup = replace_acl_body.find(
+    for marker in (
+        "rollback_owned_acl_prepublication(",
+        "managed_acl_publication_compensations(",
+        "execute_managed_acl_publication_compensations(",
+        "cleanup_transaction_created_port_sets(",
+    ):
+        if marker not in publication_body:
+            raise SystemExit("ERROR: ACL bank rollback/lifecycle contract missing %s" % marker)
+    persistence_cleanup = publication_body.find(
         "cleanup_transaction_created_port_sets(", bank_publish
     )
-    allocation_restore = replace_acl_body.find(
-        "restore_old_state_after_created_cleanup(", bank_publish
+    allocation_restore = publication_body.find(
+        "restore_durable_old_state_after_failed_persistence(", bank_publish
     )
     if not (bank_publish < persistence_cleanup < allocation_restore):
         raise SystemExit(
@@ -4310,27 +4812,9 @@ def check_managed_acl_publication_transaction_contract():
         os.path.join("core", "src", "ebpf_ops", "inventory.rs")
     )
 
-    shadow_body = _rust_function_body(control_plane_source, "stage_acl_shadow_bank")
-    shadow_plan_body = _rust_function_body(
-        control_plane_source, "managed_acl_shadow_network_plan"
-    )
-    if shadow_body is None:
-        raise SystemExit("ERROR: managed ACL shadow staging helper is missing")
-    if (
-        re.search(r"\bstate\s*\.\s*groups\b", shadow_body)
-        or "managed_acl_shadow_network_plan" not in shadow_body
-        or shadow_plan_body is None
-    ):
-        raise SystemExit(
-            "ERROR: managed ACL shadow staging still iterates the raw all-group state"
-        )
-    if re.search(r"\bstate\s*\.\s*groups\b", shadow_plan_body) or not all(
-        marker in shadow_plan_body
-        for marker in ("projection.acl_src", "projection.acl_dst")
-    ):
-        raise SystemExit(
-            "ERROR: managed ACL shadow staging must consume directional compiled projection entries"
-        )
+    shadow_errors = _managed_acl_shadow_contract_errors(control_plane_source)
+    if shadow_errors:
+        raise SystemExit("ERROR: " + "; ".join(shadow_errors))
 
     mutation_body = _rust_item_body(
         control_plane_source, "enum", "SharedNetworkMutation"
@@ -4633,6 +5117,46 @@ def check_managed_acl_publication_transaction_contract():
                 "ERROR: %s failure must dispatch the pre-switch compensation phase"
                 % label
             )
+    if "require_tc_acl_links" not in verify_arm:
+        raise SystemExit(
+            "ERROR: TC verification must use the target publication requirement after quiesce"
+        )
+    durable_restore_body = _rust_function_body(
+        control_plane_source, "restore_durable_old_state_after_failed_persistence"
+    )
+    if durable_restore_body is None:
+        raise SystemExit(
+            "ERROR: persistence failure must unconditionally restore the old durable snapshot"
+        )
+    if (
+        "created_port_sets" in durable_restore_body
+        or ".is_empty()" in durable_restore_body
+        or "failed_persistence_recovery_state" not in durable_restore_body
+        or "compact_and_publish_state" not in durable_restore_body
+    ):
+        raise SystemExit(
+            "ERROR: failed persistence recovery must not skip an empty created-port-set transaction"
+        )
+    persistence_cleanup = persist_arm.find("cleanup_transaction_created_port_sets")
+    durable_restore = persist_arm.find(
+        "restore_durable_old_state_after_failed_persistence"
+    )
+    if not (0 <= persistence_cleanup < durable_restore):
+        raise SystemExit(
+            "ERROR: persistence compensation must clean created port sets before restoring the old durable snapshot"
+        )
+    cleanup_depth = (
+        persist_arm[:persistence_cleanup].count("{")
+        - persist_arm[:persistence_cleanup].count("}")
+    )
+    restore_depth = (
+        persist_arm[:durable_restore].count("{")
+        - persist_arm[:durable_restore].count("}")
+    )
+    if cleanup_depth != restore_depth:
+        raise SystemExit(
+            "ERROR: old durable snapshot restore must be unconditional after persistence cleanup"
+        )
     if not all(
         marker in persist_arm
         for marker in (
@@ -4644,12 +5168,31 @@ def check_managed_acl_publication_transaction_contract():
         raise SystemExit(
             "ERROR: persistence failure must restore the old bank and every general preimage"
         )
+    if (
+        "fn managed_acl_publication_persistence_failure_restores_old_snapshot_without_created_port_sets("
+        not in control_plane_source
+    ):
+        raise SystemExit(
+            "ERROR: missing empty-created-set persistence compensation regression test"
+        )
 
     neutron_api_source = _read_repo_text(
         os.path.join("agent", "src", "neutron_api.rs")
     )
+    if (
+        "fn managed_projection_repair_quiesced_replace_uses_publish_tc_requirement("
+        not in neutron_api_source
+    ):
+        raise SystemExit(
+            "ERROR: managed ACL publication is missing the quiesced target-TC regression test"
+        )
     reconcile_body = _rust_function_body(neutron_api_source, "reconcile_neutron_acl")
     replace = reconcile_body.find(".replace_owned_acl(") if reconcile_body else -1
+    target_tc_requirement = (
+        reconcile_body.find("acl_runtime_feature_requires_tc(transition.publish)")
+        if reconcile_body
+        else -1
+    )
     strict_flush = (
         reconcile_body.find("flush_neutron_acl_conntrack", replace)
         if reconcile_body else -1
@@ -4658,9 +5201,18 @@ def check_managed_acl_publication_transaction_contract():
         reconcile_body.find(".update_neutron_acl_runtime_gate(", strict_flush)
         if reconcile_body else -1
     )
-    if not (0 <= replace < strict_flush < gate_publish):
+    replace_await = reconcile_body.find(".await", replace) if reconcile_body else -1
+    replace_call = (
+        reconcile_body[replace:replace_await]
+        if 0 <= replace < replace_await
+        else ""
+    )
+    if (
+        not (0 <= target_tc_requirement < replace < strict_flush < gate_publish)
+        or "require_tc_acl_links" not in replace_call
+    ):
         raise SystemExit(
-            "ERROR: managed ACL publication must remain replace then strict flush then gate publish"
+            "ERROR: managed ACL publication must derive target TC readiness before replace, strict flush, and gate publish"
         )
 
 

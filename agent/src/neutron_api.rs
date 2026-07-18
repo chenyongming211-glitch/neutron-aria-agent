@@ -415,6 +415,10 @@ fn acl_runtime_transition(
     }
 }
 
+fn acl_runtime_feature_requires_tc(state: AclRuntimeFeatureState) -> bool {
+    state.conntrack_enabled || state.acl_enabled
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AclPolicyDeleteTarget {
     src_group: String,
@@ -5349,11 +5353,12 @@ async fn reconcile_neutron_acl(
         false
     };
     let transition = acl_runtime_transition(&plan, preserved_conntrack_enabled);
+    let require_tc_acl_links = acl_runtime_feature_requires_tc(transition.publish);
     let group_count = plan.groups.len();
     let group_cidr_count: usize = plan.groups.iter().map(|group| group.cidrs.len()).sum();
     let policy_count = plan.policies.len();
     let gate_update_mode = acl_gate_update_mode(&plan);
-    if !plan.policies.is_empty() {
+    if require_tc_acl_links {
         state
             .control_plane
             .require_tc_acl_ready(&port.ifname)
@@ -5422,6 +5427,7 @@ async fn reconcile_neutron_acl(
             true,
             &group_specs,
             &policy_specs,
+            require_tc_acl_links,
         )
         .await
         .map_err(|error| {
@@ -12695,6 +12701,22 @@ mod tests {
                 acl_ingress_hook: aria_core::common::ACL_INGRESS_HOOK_TC,
             }
         );
+    }
+
+    #[test]
+    fn managed_projection_repair_quiesced_replace_uses_publish_tc_requirement() {
+        let transition = acl_runtime_transition(
+            &AclApplyPlan {
+                groups: Vec::new(),
+                policies: Vec::new(),
+                conntrack_enabled: Some(true),
+                force_bypass_reason: None,
+            },
+            false,
+        );
+
+        assert!(!acl_runtime_feature_requires_tc(transition.quiesce));
+        assert!(acl_runtime_feature_requires_tc(transition.publish));
     }
 
     #[test]

@@ -656,6 +656,7 @@ pub struct OwnedAclReconcileReport {
     pub policy_add_count: usize,
     pub port_set_delete_count: usize,
     pub compact_ms: u128,
+    pub selector_repair_performed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -840,6 +841,13 @@ fn old_state_with_failed_cleanup_quarantines(
     Ok(recovery_state)
 }
 
+fn failed_persistence_recovery_state(
+    old_state: &FirewallState,
+    cleanup: &PortSetCleanupReport,
+) -> Result<FirewallState, String> {
+    old_state_with_failed_cleanup_quarantines(old_state, cleanup)
+}
+
 async fn restore_old_state_after_created_cleanup(
     state: &mut InstanceState,
     old_state: &FirewallState,
@@ -854,6 +862,23 @@ async fn restore_old_state_after_created_cleanup(
         .compact_and_publish_state(recovery_state)
         .await
         .map_err(|error| format!("restore durable old ACL allocator state: {}", error))
+}
+
+async fn restore_durable_old_state_after_failed_persistence(
+    state: &mut InstanceState,
+    old_state: &FirewallState,
+    cleanup: &PortSetCleanupReport,
+) -> Result<(), String> {
+    let recovery_state = failed_persistence_recovery_state(old_state, cleanup)?;
+    state
+        .compact_and_publish_state(recovery_state)
+        .await
+        .map_err(|error| {
+            format!(
+                "restore durable old ACL state after failed persistence: {}",
+                error
+            )
+        })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -889,8 +914,278 @@ enum SharedNetworkMutation {
         cidr: String,
         group_id: u32,
     },
+    Replaced {
+        direction: &'static str,
+        cidr: String,
+        old_group_id: u32,
+        new_group_id: u32,
+    },
 }
 
+fn shared_network_compensation(mutation: &SharedNetworkMutation) -> SharedNetworkMutation {
+    match mutation {
+        SharedNetworkMutation::Added {
+            direction,
+            cidr,
+            group_id,
+        } => SharedNetworkMutation::Deleted {
+            direction,
+            cidr: cidr.clone(),
+            group_id: *group_id,
+        },
+        SharedNetworkMutation::Deleted {
+            direction,
+            cidr,
+            group_id,
+        } => SharedNetworkMutation::Added {
+            direction,
+            cidr: cidr.clone(),
+            group_id: *group_id,
+        },
+        SharedNetworkMutation::Replaced {
+            direction,
+            cidr,
+            old_group_id,
+            new_group_id,
+        } => SharedNetworkMutation::Replaced {
+            direction,
+            cidr: cidr.clone(),
+            old_group_id: *new_group_id,
+            new_group_id: *old_group_id,
+        },
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ManagedAclPublicationFailurePhase {
+    General,
+    Shadow,
+    VerifyTc,
+    SwitchBank,
+    Persist,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ManagedAclPublicationCompensation {
+    RestoreActiveBank,
+    RestoreGeneral(SharedNetworkMutation),
+}
+
+fn managed_acl_publication_compensations(
+    mutations: &[SharedNetworkMutation],
+    phase: ManagedAclPublicationFailurePhase,
+) -> Vec<ManagedAclPublicationCompensation> {
+    let mut compensations = Vec::new();
+    if phase == ManagedAclPublicationFailurePhase::Persist {
+        compensations.push(ManagedAclPublicationCompensation::RestoreActiveBank);
+    }
+    compensations.extend(mutations.iter().rev().map(|mutation| {
+        ManagedAclPublicationCompensation::RestoreGeneral(shared_network_compensation(mutation))
+    }));
+    compensations
+}
+
+fn execute_managed_acl_publication_compensations<F>(
+    compensations: &[ManagedAclPublicationCompensation],
+    mut compensate: F,
+) -> Result<(), String>
+where
+    F: FnMut(&ManagedAclPublicationCompensation) -> Result<(), String>,
+{
+    let mut errors = Vec::new();
+    for compensation in compensations.iter() {
+        if let Err(error) = compensate(compensation) {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ManagedAclPublicationDecision {
+    Noop,
+    Publish {
+        selector_repair_performed: bool,
+        repair_plan: Option<aria_core::ebpf_ops::ProjectionRepairPlan>,
+        pre_mutation_health: ManagedProjectionHealth,
+    },
+}
+
+fn managed_acl_publication_decision(
+    drift: ProjectionDrift,
+    semantic_changed: bool,
+) -> Result<ManagedAclPublicationDecision, String> {
+    match drift {
+        ProjectionDrift::Clean if !semantic_changed => Ok(ManagedAclPublicationDecision::Noop),
+        ProjectionDrift::Clean => Ok(ManagedAclPublicationDecision::Publish {
+            selector_repair_performed: false,
+            repair_plan: None,
+            pre_mutation_health: ManagedProjectionHealth::Unverified,
+        }),
+        ProjectionDrift::RepairRequired(repair_plan) => {
+            Ok(ManagedAclPublicationDecision::Publish {
+                selector_repair_performed: true,
+                repair_plan: Some(repair_plan),
+                pre_mutation_health: ManagedProjectionHealth::Unverified,
+            })
+        }
+        ProjectionDrift::Fatal(error) => Err(error),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ManagedAclPublicationStep {
+    InvalidateProjectionHealth,
+    ApplyGeneral(SharedNetworkMutation),
+    StageShadow,
+    VerifyTc,
+    SwitchBank,
+    Persist,
+}
+
+fn shared_network_mutation_from_projection(
+    mutation: aria_core::ebpf_ops::ProjectionMutation,
+) -> SharedNetworkMutation {
+    use aria_core::ebpf_ops::{ProjectionDirection, ProjectionMutation};
+
+    let direction = |direction| match direction {
+        ProjectionDirection::Src => "src",
+        ProjectionDirection::Dst => "dst",
+    };
+    match mutation {
+        ProjectionMutation::Added {
+            direction: projection_direction,
+            entry,
+        } => SharedNetworkMutation::Added {
+            direction: direction(projection_direction),
+            cidr: entry.network.to_string(),
+            group_id: entry.group_id,
+        },
+        ProjectionMutation::Deleted {
+            direction: projection_direction,
+            entry,
+        } => SharedNetworkMutation::Deleted {
+            direction: direction(projection_direction),
+            cidr: entry.network.to_string(),
+            group_id: entry.group_id,
+        },
+        ProjectionMutation::Replaced {
+            direction: projection_direction,
+            network,
+            old_group_id,
+            new_group_id,
+        } => SharedNetworkMutation::Replaced {
+            direction: direction(projection_direction),
+            cidr: network.to_string(),
+            old_group_id,
+            new_group_id,
+        },
+    }
+}
+
+fn managed_acl_publication_steps(
+    decision: &ManagedAclPublicationDecision,
+    clean_semantic_mutations: Vec<SharedNetworkMutation>,
+) -> Vec<ManagedAclPublicationStep> {
+    let repair_plan = match decision {
+        ManagedAclPublicationDecision::Noop => return Vec::new(),
+        ManagedAclPublicationDecision::Publish { repair_plan, .. } => repair_plan,
+    };
+
+    let general_mutations = repair_plan
+        .as_ref()
+        .map_or(clean_semantic_mutations, |plan| {
+            plan.general_mutations
+                .iter()
+                .cloned()
+                .map(shared_network_mutation_from_projection)
+                .collect()
+        });
+    let mut steps = vec![ManagedAclPublicationStep::InvalidateProjectionHealth];
+    steps.extend(
+        general_mutations
+            .into_iter()
+            .map(ManagedAclPublicationStep::ApplyGeneral),
+    );
+    steps.push(ManagedAclPublicationStep::StageShadow);
+    steps.push(ManagedAclPublicationStep::VerifyTc);
+    steps.push(ManagedAclPublicationStep::SwitchBank);
+    steps.push(ManagedAclPublicationStep::Persist);
+    steps
+}
+
+fn managed_general_projection_mutations(
+    committed: &aria_core::ebpf_ops::ManagedGroupProjection,
+    proposed: &aria_core::ebpf_ops::ManagedGroupProjection,
+) -> Vec<SharedNetworkMutation> {
+    use aria_core::ebpf_ops::CanonicalNetwork;
+
+    let committed: BTreeMap<CanonicalNetwork, u32> = committed
+        .general
+        .iter()
+        .map(|entry| (entry.network, entry.group_id))
+        .collect();
+    let proposed: BTreeMap<CanonicalNetwork, u32> = proposed
+        .general
+        .iter()
+        .map(|entry| (entry.network, entry.group_id))
+        .collect();
+    let mut mutations = Vec::new();
+    for direction in ["src", "dst"] {
+        for (network, new_group_id) in &proposed {
+            match committed.get(network) {
+                Some(old_group_id) if old_group_id != new_group_id => {
+                    mutations.push(SharedNetworkMutation::Replaced {
+                        direction,
+                        cidr: network.to_string(),
+                        old_group_id: *old_group_id,
+                        new_group_id: *new_group_id,
+                    });
+                }
+                None => mutations.push(SharedNetworkMutation::Added {
+                    direction,
+                    cidr: network.to_string(),
+                    group_id: *new_group_id,
+                }),
+                Some(_) => {}
+            }
+        }
+        for (network, old_group_id) in &committed {
+            if !proposed.contains_key(network) {
+                mutations.push(SharedNetworkMutation::Deleted {
+                    direction,
+                    cidr: network.to_string(),
+                    group_id: *old_group_id,
+                });
+            }
+        }
+    }
+    mutations
+}
+
+fn managed_acl_shadow_network_plan(
+    projection: &aria_core::ebpf_ops::ManagedGroupProjection,
+) -> Vec<(&'static str, String, u32)> {
+    let source_entries = projection
+        .acl_src
+        .iter()
+        .map(|entry| ("src", entry.network.to_string(), entry.group_id));
+    let destination_entries = projection
+        .acl_dst
+        .iter()
+        .map(|entry| ("dst", entry.network.to_string(), entry.group_id));
+    source_entries.chain(destination_entries).collect()
+}
+
+fn group_delete_rollback_restores_acl_bank(mode: ManagedAclPublicationMode) -> bool {
+    mode != ManagedAclPublicationMode::ManagedAcl
+}
+
+#[cfg(test)]
 fn execute_shared_network_rollback<F>(
     mutations: &[SharedNetworkMutation],
     mut rollback: F,
@@ -927,52 +1222,57 @@ fn apply_shared_network_mutation(
             cidr,
             group_id,
         } => aria_core::ebpf_ops::delete_network(direction, cidr, *group_id, runtime, ebpf_path),
+        SharedNetworkMutation::Replaced {
+            direction,
+            cidr,
+            new_group_id,
+            ..
+        } => aria_core::ebpf_ops::add_network(direction, cidr, *new_group_id, runtime, ebpf_path),
     }
 }
 
-fn rollback_shared_network_mutations(
-    mutations: &[SharedNetworkMutation],
+fn apply_managed_acl_publication_compensation(
+    compensation: &ManagedAclPublicationCompensation,
     runtime: TapMapRuntime<'_>,
     ebpf_path: &str,
+    previous_active_bank: u8,
 ) -> Result<(), String> {
-    execute_shared_network_rollback(mutations, |mutation| match mutation {
-        SharedNetworkMutation::Added {
-            direction,
-            cidr,
-            group_id,
-        } => aria_core::ebpf_ops::delete_network(direction, cidr, *group_id, runtime, ebpf_path)
-            .map_err(|error| {
-                format!(
-                    "rollback added {} network {} group {}: {}",
-                    direction, cidr, group_id, error
-                )
-            }),
-        SharedNetworkMutation::Deleted {
-            direction,
-            cidr,
-            group_id,
-        } => aria_core::ebpf_ops::add_network(direction, cidr, *group_id, runtime, ebpf_path)
-            .map_err(|error| {
-                format!(
-                    "rollback deleted {} network {} group {}: {}",
-                    direction, cidr, group_id, error
-                )
-            }),
-    })
+    match compensation {
+        ManagedAclPublicationCompensation::RestoreActiveBank => {
+            aria_core::ebpf_ops::set_acl_active_bank(runtime, previous_active_bank)
+                .map_err(|error| format!("restore active ACL bank: {}", error))
+        }
+        ManagedAclPublicationCompensation::RestoreGeneral(mutation) => {
+            apply_shared_network_mutation(mutation, runtime, ebpf_path)
+                .map_err(|error| format!("restore shared selector {:?}: {}", mutation, error))
+        }
+    }
 }
 
 async fn rollback_owned_acl_prepublication(
     original: ControlPlaneError,
     mutations: &[SharedNetworkMutation],
+    failure_phase: ManagedAclPublicationFailurePhase,
     created_port_sets: &[TransactionCreatedPortSet],
     runtime: TapMapRuntime<'_>,
     ebpf_path: &str,
+    previous_active_bank: u8,
     shadow_bank: u8,
     state: &mut InstanceState,
     old_state: &FirewallState,
 ) -> ControlPlaneError {
     let mut rollback_errors = Vec::new();
-    if let Err(error) = rollback_shared_network_mutations(mutations, runtime, ebpf_path) {
+    let compensations = managed_acl_publication_compensations(mutations, failure_phase);
+    if let Err(error) =
+        execute_managed_acl_publication_compensations(&compensations, |compensation| {
+            apply_managed_acl_publication_compensation(
+                compensation,
+                runtime,
+                ebpf_path,
+                previous_active_bank,
+            )
+        })
+    {
         rollback_errors.push(error);
     }
     if let Err(error) = aria_core::ebpf_ops::scrub_acl_bank(runtime, shadow_bank) {
@@ -982,13 +1282,8 @@ async fn rollback_owned_acl_prepublication(
     for failure in &cleanup.failures {
         rollback_errors.push(failure.error.clone());
     }
-    if let Err(error) = restore_old_state_after_created_cleanup(
-        state,
-        old_state,
-        created_port_sets,
-        &cleanup,
-    )
-    .await
+    if let Err(error) =
+        restore_old_state_after_created_cleanup(state, old_state, created_port_sets, &cleanup).await
     {
         rollback_errors.push(error);
     }
@@ -1301,6 +1596,7 @@ impl ControlPlane {
 
     fn stage_acl_shadow_bank(
         state: &FirewallState,
+        projection: &aria_core::ebpf_ops::ManagedGroupProjection,
         runtime: TapMapRuntime<'_>,
         bank: u8,
         ebpf_path: &str,
@@ -1309,27 +1605,16 @@ impl ControlPlane {
         aria_core::ebpf_ops::scrub_acl_bank(runtime, bank)
             .map_err(ControlPlaneError::KernelError)?;
 
-        for group in state.groups.values() {
-            for cidr in &group.cidrs {
-                aria_core::ebpf_ops::add_acl_network_in_bank(
-                    "src", cidr, group.id, bank, runtime, ebpf_path,
-                )
-                .map_err(|e| {
-                    ControlPlaneError::KernelError(format!(
-                        "stage shadow bank {} src group {} cidr {}: {}",
-                        bank, group.name, cidr, e
-                    ))
-                })?;
-                aria_core::ebpf_ops::add_acl_network_in_bank(
-                    "dst", cidr, group.id, bank, runtime, ebpf_path,
-                )
-                .map_err(|e| {
-                    ControlPlaneError::KernelError(format!(
-                        "stage shadow bank {} dst group {} cidr {}: {}",
-                        bank, group.name, cidr, e
-                    ))
-                })?;
-            }
+        for (direction, cidr, group_id) in managed_acl_shadow_network_plan(projection) {
+            aria_core::ebpf_ops::add_acl_network_in_bank(
+                direction, &cidr, group_id, bank, runtime, ebpf_path,
+            )
+            .map_err(|error| {
+                ControlPlaneError::KernelError(format!(
+                    "stage shadow bank {} {} group {} cidr {}: {}",
+                    bank, direction, group_id, cidr, error
+                ))
+            })?;
         }
 
         for rule in &state.rules {
@@ -1578,15 +1863,23 @@ impl ControlPlane {
     fn rollback_group_deletes(
         runtime: TapMapRuntime<'_>,
         ebpf_path: &str,
+        publication_mode: ManagedAclPublicationMode,
         group_id: u32,
         deleted_networks: &[(&'static str, String)],
     ) -> Result<(), String> {
-        let bank = aria_core::ebpf_ops::read_acl_active_bank(runtime).unwrap_or(0);
+        let restore_acl_bank = group_delete_rollback_restores_acl_bank(publication_mode);
+        let bank = if restore_acl_bank {
+            aria_core::ebpf_ops::read_acl_active_bank(runtime).unwrap_or(0)
+        } else {
+            0
+        };
         for (direction, cidr) in deleted_networks.iter().rev() {
             aria_core::ebpf_ops::add_network(direction, cidr, group_id, runtime, ebpf_path)?;
-            aria_core::ebpf_ops::add_acl_network_in_bank(
-                direction, cidr, group_id, bank, runtime, ebpf_path,
-            )?;
+            if restore_acl_bank {
+                aria_core::ebpf_ops::add_acl_network_in_bank(
+                    direction, cidr, group_id, bank, runtime, ebpf_path,
+                )?;
+            }
         }
         Ok(())
     }
@@ -2913,6 +3206,250 @@ impl ControlPlane {
         Ok(())
     }
 
+    async fn publish_acl_projection_locked(
+        &self,
+        instance: &str,
+        state: &mut InstanceState,
+        old_state: &FirewallState,
+        final_state: &FirewallState,
+        proposed_projection: &aria_core::ebpf_ops::ManagedGroupProjection,
+        semantic_changed: bool,
+        require_tc_acl_links: bool,
+        clean_semantic_mutations: Vec<SharedNetworkMutation>,
+        current_acl_bank: u8,
+        next_acl_bank: u8,
+        new_port_sets_by_key: &BTreeMap<OwnedAclPolicyKey, bool>,
+        created_port_sets: &[TransactionCreatedPortSet],
+        released_port_sets: &BTreeMap<u32, String>,
+        report: &mut OwnedAclReconcileReport,
+    ) -> Result<bool, ControlPlaneError> {
+        let runtime_pin_path = state.pin_path.clone();
+        let runtime_tap_id = state.tap_id;
+        let runtime = TapMapRuntime::new(&runtime_pin_path, runtime_tap_id);
+
+        let projection_drift =
+            proposed_projection.plan_managed_pinned_projection(runtime, old_state);
+        if matches!(
+            &projection_drift,
+            ProjectionDrift::RepairRequired(_) | ProjectionDrift::Fatal(_)
+        ) {
+            state.managed_projection_health = ManagedProjectionHealth::Unverified;
+        }
+        let decision = managed_acl_publication_decision(projection_drift, semantic_changed)
+            .map_err(ControlPlaneError::KernelError)?;
+        if decision == ManagedAclPublicationDecision::Noop {
+            return Ok(false);
+        }
+        let steps = managed_acl_publication_steps(&decision, clean_semantic_mutations);
+        let ManagedAclPublicationDecision::Publish {
+            selector_repair_performed,
+            pre_mutation_health,
+            ..
+        } = &decision
+        else {
+            unreachable!("no-op publication returned before step planning");
+        };
+        report.selector_repair_performed = *selector_repair_performed;
+
+        let mut durable_final_state = final_state.clone();
+        for bitmap_idx in released_port_sets.keys() {
+            durable_final_state
+                .quarantine_bitmap_index(*bitmap_idx)
+                .map_err(ControlPlaneError::ValidationError)?;
+        }
+
+        let mut durable_final_state = Some(durable_final_state);
+        let mut applied_shared_mutations = Vec::new();
+        for step in steps {
+            match step {
+                ManagedAclPublicationStep::InvalidateProjectionHealth => {
+                    state.managed_projection_health = *pre_mutation_health;
+                    // Reserve every transaction-created index durably before the first
+                    // kernel mutation. A crash or rollback-cleanup fault can therefore
+                    // never expose a stale bitmap through the old free-list/next cursor.
+                    if !created_port_sets.is_empty() {
+                        let mut allocator_guard_state = old_state.clone();
+                        quarantine_port_set_indices(&mut allocator_guard_state, created_port_sets)
+                            .map_err(ControlPlaneError::ValidationError)?;
+                        state
+                            .compact_and_publish_state(allocator_guard_state)
+                            .await
+                            .map_err(|error| {
+                                ControlPlaneError::PersistenceError(format!(
+                                    "persist transaction-created bitmap quarantine before ACL staging: {}",
+                                    error
+                                ))
+                            })?;
+                    }
+                }
+                ManagedAclPublicationStep::ApplyGeneral(mutation) => {
+                    if let Err(error) =
+                        apply_shared_network_mutation(&mutation, runtime, &self.ebpf_path)
+                    {
+                        return Err(rollback_owned_acl_prepublication(
+                            ControlPlaneError::KernelError(format!(
+                                "apply managed general selector {:?}: {}",
+                                mutation, error
+                            )),
+                            &applied_shared_mutations,
+                            ManagedAclPublicationFailurePhase::General,
+                            created_port_sets,
+                            runtime,
+                            &self.ebpf_path,
+                            current_acl_bank,
+                            next_acl_bank,
+                            state,
+                            old_state,
+                        )
+                        .await);
+                    }
+                    applied_shared_mutations.push(mutation);
+                }
+                ManagedAclPublicationStep::StageShadow => {
+                    if let Err(error) = Self::stage_acl_shadow_bank(
+                        final_state,
+                        proposed_projection,
+                        runtime,
+                        next_acl_bank,
+                        &self.ebpf_path,
+                        new_port_sets_by_key,
+                    ) {
+                        return Err(rollback_owned_acl_prepublication(
+                            error,
+                            &applied_shared_mutations,
+                            ManagedAclPublicationFailurePhase::Shadow,
+                            created_port_sets,
+                            runtime,
+                            &self.ebpf_path,
+                            current_acl_bank,
+                            next_acl_bank,
+                            state,
+                            old_state,
+                        )
+                        .await);
+                    }
+                }
+                ManagedAclPublicationStep::VerifyTc => {
+                    if require_tc_acl_links {
+                        if let Err(error) = Self::require_tc_acl_ready_locked(
+                            instance,
+                            state,
+                            self.trace_map_mode(),
+                        ) {
+                            return Err(rollback_owned_acl_prepublication(
+                                error,
+                                &applied_shared_mutations,
+                                ManagedAclPublicationFailurePhase::VerifyTc,
+                                created_port_sets,
+                                runtime,
+                                &self.ebpf_path,
+                                current_acl_bank,
+                                next_acl_bank,
+                                state,
+                                old_state,
+                            )
+                            .await);
+                        }
+                    }
+                }
+                ManagedAclPublicationStep::SwitchBank => {
+                    if let Err(error) =
+                        aria_core::ebpf_ops::set_acl_active_bank(runtime, next_acl_bank)
+                    {
+                        return Err(rollback_owned_acl_prepublication(
+                            ControlPlaneError::KernelError(error),
+                            &applied_shared_mutations,
+                            ManagedAclPublicationFailurePhase::SwitchBank,
+                            created_port_sets,
+                            runtime,
+                            &self.ebpf_path,
+                            current_acl_bank,
+                            next_acl_bank,
+                            state,
+                            old_state,
+                        )
+                        .await);
+                    }
+                }
+                ManagedAclPublicationStep::Persist => {
+                    let compact_started = Instant::now();
+                    let durable_final_state = durable_final_state
+                        .take()
+                        .expect("publication plan contains exactly one persistence step");
+                    if let Err(error) = state.compact_and_publish_state(durable_final_state).await {
+                        let mut recovery_errors =
+                            vec![format!("owned ACL persistence failed: {}", error)];
+                        let compensations = managed_acl_publication_compensations(
+                            &applied_shared_mutations,
+                            ManagedAclPublicationFailurePhase::Persist,
+                        );
+                        let mut active_bank_restored = true;
+                        if let Err(compensation_error) =
+                            execute_managed_acl_publication_compensations(
+                                &compensations,
+                                |compensation| {
+                                    let result = apply_managed_acl_publication_compensation(
+                                        compensation,
+                                        runtime,
+                                        &self.ebpf_path,
+                                        current_acl_bank,
+                                    );
+                                    if matches!(
+                                        compensation,
+                                        ManagedAclPublicationCompensation::RestoreActiveBank
+                                    ) && result.is_err()
+                                    {
+                                        active_bank_restored = false;
+                                    }
+                                    result
+                                },
+                            )
+                        {
+                            recovery_errors.push(compensation_error);
+                        }
+                        if active_bank_restored {
+                            if let Err(scrub_error) =
+                                aria_core::ebpf_ops::scrub_acl_bank(runtime, next_acl_bank)
+                            {
+                                recovery_errors.push(format!(
+                                    "scrub failed publication bank {}: {}",
+                                    next_acl_bank, scrub_error
+                                ));
+                            }
+                        } else {
+                            recovery_errors.push(format!(
+                                "preserved publication bank {} because active-bank restore failed",
+                                next_acl_bank
+                            ));
+                        }
+                        let cleanup = cleanup_transaction_created_port_sets(
+                            created_port_sets,
+                            runtime,
+                            &self.ebpf_path,
+                        );
+                        for failure in &cleanup.failures {
+                            recovery_errors.push(failure.error.clone());
+                        }
+                        if let Err(recovery_error) =
+                            restore_durable_old_state_after_failed_persistence(
+                                state, old_state, &cleanup,
+                            )
+                            .await
+                        {
+                            recovery_errors.push(recovery_error);
+                        }
+                        return Err(ControlPlaneError::PersistenceError(
+                            recovery_errors.join("; "),
+                        ));
+                    }
+                    report.compact_ms = compact_started.elapsed().as_millis();
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
     // ── Groups ──
 
     pub async fn replace_owned_acl(
@@ -2922,15 +3459,20 @@ impl ControlPlane {
         exclusive_policy_domain: bool,
         groups: &[OwnedAclGroupSpec],
         policies: &[OwnedAclPolicySpec],
+        require_tc_acl_links: bool,
     ) -> Result<OwnedAclReconcileReport, ControlPlaneError> {
-        Self::owned_acl_validate_group_specs(owner_prefix, groups)?;
-        Self::owned_acl_validate_policy_specs(owner_prefix, policies)?;
-
         let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        let previous_projection_health = state.managed_projection_health;
+        // The Neutron caller has already quiesced ACL/CT. Keep every error
+        // after the instance lock fail-closed, then restore the prior health
+        // only when a clean equal reconcile proves that publication is a no-op.
+        state.managed_projection_health = ManagedProjectionHealth::Unverified;
+        Self::owned_acl_validate_group_specs(owner_prefix, groups)?;
+        Self::owned_acl_validate_policy_specs(owner_prefix, policies)?;
         Self::check_runtime_maps_ready(&state.pin_path)?;
-        if state.state.conntrack_enabled || state.state.acl_enabled {
+        if require_tc_acl_links {
             Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
         }
         let current_acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
@@ -3131,6 +3673,7 @@ impl ControlPlane {
             policy_add_count: runtime_adds.len(),
             port_set_delete_count: released_port_sets.len(),
             compact_ms: 0,
+            selector_repair_performed: false,
         };
         let new_port_sets_by_key: BTreeMap<OwnedAclPolicyKey, bool> = runtime_adds
             .iter()
@@ -3142,204 +3685,46 @@ impl ControlPlane {
             })
             .collect();
         let created_port_sets = transaction_created_port_sets(&final_state, &runtime_adds)?;
-
-        if runtime_adds.is_empty()
+        let semantic_changed = !(runtime_adds.is_empty()
             && policy_deletes.is_empty()
             && group_cidr_adds.is_empty()
             && group_cidr_deletes.is_empty()
             && group_deletes.is_empty()
-            && released_port_sets.is_empty()
-        {
+            && released_port_sets.is_empty());
+        let committed_projection =
+            aria_core::ebpf_ops::compile_managed_group_projection(&old_state)
+                .map_err(ControlPlaneError::ValidationError)?;
+        let proposed_projection =
+            aria_core::ebpf_ops::compile_managed_group_projection(&final_state)
+                .map_err(ControlPlaneError::ValidationError)?;
+        let clean_semantic_mutations =
+            managed_general_projection_mutations(&committed_projection, &proposed_projection);
+        let publication_performed = self
+            .publish_acl_projection_locked(
+                instance,
+                &mut state,
+                &old_state,
+                &final_state,
+                &proposed_projection,
+                semantic_changed,
+                require_tc_acl_links,
+                clean_semantic_mutations,
+                current_acl_bank,
+                next_acl_bank,
+                &new_port_sets_by_key,
+                &created_port_sets,
+                &released_port_sets,
+                &mut report,
+            )
+            .await?;
+        if !publication_performed {
+            state.managed_projection_health = previous_projection_health;
             return Ok(report);
-        }
-
-        // Validate the post-publication quarantine snapshot before changing
-        // durable state. This cannot fail after the created-index guard has
-        // already been acknowledged.
-        let mut durable_final_state = final_state.clone();
-        for bitmap_idx in released_port_sets.keys() {
-            durable_final_state
-                .quarantine_bitmap_index(*bitmap_idx)
-                .map_err(ControlPlaneError::ValidationError)?;
-        }
-
-        // Reserve every transaction-created index durably before the first
-        // kernel mutation. A crash or rollback-cleanup fault can therefore
-        // never expose a stale bitmap through the old free-list/next cursor.
-        if !created_port_sets.is_empty() {
-            let mut allocator_guard_state = old_state.clone();
-            quarantine_port_set_indices(&mut allocator_guard_state, &created_port_sets)
-                .map_err(ControlPlaneError::ValidationError)?;
-            state
-                .compact_and_publish_state(allocator_guard_state)
-                .await
-                .map_err(|error| {
-                    ControlPlaneError::PersistenceError(format!(
-                        "persist transaction-created bitmap quarantine before ACL staging: {}",
-                        error
-                    ))
-                })?;
         }
 
         let runtime_pin_path = state.pin_path.clone();
         let runtime_tap_id = state.tap_id;
         let runtime = TapMapRuntime::new(&runtime_pin_path, runtime_tap_id);
-        let mut applied_shared_mutations = Vec::new();
-        for (name, group_id, cidr) in &group_cidr_adds {
-            for direction in ["src", "dst"] {
-                let mutation = SharedNetworkMutation::Added {
-                    direction,
-                    cidr: cidr.clone(),
-                    group_id: *group_id,
-                };
-                if let Err(error) =
-                    apply_shared_network_mutation(&mutation, runtime, &self.ebpf_path)
-                {
-                    return Err(rollback_owned_acl_prepublication(
-                        ControlPlaneError::KernelError(format!(
-                            "{} {}: {}",
-                            direction, name, error
-                        )),
-                        &applied_shared_mutations,
-                        &created_port_sets,
-                        runtime,
-                        &self.ebpf_path,
-                        next_acl_bank,
-                        &mut state,
-                        &old_state,
-                    )
-                    .await);
-                }
-                applied_shared_mutations.push(mutation);
-            }
-        }
-
-        for (name, group_id, cidr) in &group_cidr_deletes {
-            for direction in ["src", "dst"] {
-                let mutation = SharedNetworkMutation::Deleted {
-                    direction,
-                    cidr: cidr.clone(),
-                    group_id: *group_id,
-                };
-                if let Err(error) =
-                    apply_shared_network_mutation(&mutation, runtime, &self.ebpf_path)
-                {
-                    return Err(rollback_owned_acl_prepublication(
-                        ControlPlaneError::KernelError(format!(
-                            "{} {}: {}",
-                            direction, name, error
-                        )),
-                        &applied_shared_mutations,
-                        &created_port_sets,
-                        runtime,
-                        &self.ebpf_path,
-                        next_acl_bank,
-                        &mut state,
-                        &old_state,
-                    )
-                    .await);
-                }
-                applied_shared_mutations.push(mutation);
-            }
-        }
-
-        if let Err(error) = Self::stage_acl_shadow_bank(
-            &final_state,
-            runtime,
-            next_acl_bank,
-            &self.ebpf_path,
-            &new_port_sets_by_key,
-        ) {
-            return Err(rollback_owned_acl_prepublication(
-                error,
-                &applied_shared_mutations,
-                &created_port_sets,
-                runtime,
-                &self.ebpf_path,
-                next_acl_bank,
-                &mut state,
-                &old_state,
-            )
-            .await);
-        }
-        if state.state.conntrack_enabled || state.state.acl_enabled {
-            if let Err(error) =
-                Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())
-            {
-                return Err(rollback_owned_acl_prepublication(
-                    error,
-                    &applied_shared_mutations,
-                    &created_port_sets,
-                    runtime,
-                    &self.ebpf_path,
-                    next_acl_bank,
-                    &mut state,
-                    &old_state,
-                )
-                .await);
-            }
-        }
-        if let Err(error) = aria_core::ebpf_ops::set_acl_active_bank(runtime, next_acl_bank) {
-            return Err(rollback_owned_acl_prepublication(
-                ControlPlaneError::KernelError(error),
-                &applied_shared_mutations,
-                &created_port_sets,
-                runtime,
-                &self.ebpf_path,
-                next_acl_bank,
-                &mut state,
-                &old_state,
-            )
-            .await);
-        }
-
-        let compact_started = Instant::now();
-        if let Err(error) = state
-            .compact_and_publish_state(durable_final_state)
-            .await
-        {
-            let mut recovery_errors = vec![format!("owned ACL persistence failed: {}", error)];
-            if let Err(bank_error) =
-                aria_core::ebpf_ops::set_acl_active_bank(runtime, current_acl_bank)
-            {
-                recovery_errors.push(format!("restore active bank failed: {}", bank_error));
-            }
-            if let Err(rollback_error) = rollback_shared_network_mutations(
-                &applied_shared_mutations,
-                runtime,
-                &self.ebpf_path,
-            ) {
-                recovery_errors.push(rollback_error);
-            }
-            if let Err(scrub_error) = aria_core::ebpf_ops::scrub_acl_bank(runtime, next_acl_bank) {
-                recovery_errors.push(format!(
-                    "scrub failed publication bank {}: {}",
-                    next_acl_bank, scrub_error
-                ));
-            }
-            let cleanup = cleanup_transaction_created_port_sets(
-                &created_port_sets,
-                runtime,
-                &self.ebpf_path,
-            );
-            for failure in &cleanup.failures {
-                recovery_errors.push(failure.error.clone());
-            }
-            if let Err(recovery_error) = restore_old_state_after_created_cleanup(
-                &mut state,
-                &old_state,
-                &created_port_sets,
-                &cleanup,
-            )
-            .await
-            {
-                recovery_errors.push(recovery_error);
-            }
-            return Err(ControlPlaneError::PersistenceError(
-                recovery_errors.join("; "),
-            ));
-        }
-        report.compact_ms = compact_started.elapsed().as_millis();
 
         let released_cleanup_targets = released_port_sets
             .iter()
@@ -3631,6 +4016,7 @@ impl ControlPlane {
             let rollback = Self::rollback_group_deletes(
                 state.map_runtime(),
                 &self.ebpf_path,
+                state.managed_acl_publication_mode,
                 group.id,
                 &deleted_networks,
             );
@@ -5938,6 +6324,23 @@ mod tests {
         assert!(!restarted.is_bitmap_index_quarantined(8));
         assert_eq!(first_retry.bitmap_idx, Some(8));
         assert_eq!(second_retry.bitmap_idx, Some(9));
+    }
+
+    #[test]
+    fn managed_acl_publication_persistence_failure_restores_old_snapshot_without_created_port_sets()
+    {
+        let mut old_state = FirewallState::default();
+        old_state.next_group_id = 41;
+        old_state.conntrack_enabled = true;
+        let cleanup = PortSetCleanupReport::default();
+
+        let recovered = failed_persistence_recovery_state(&old_state, &cleanup)
+            .expect("empty created-port-set cleanup must still produce the old durable snapshot");
+
+        assert_eq!(
+            serde_json::to_value(recovered).unwrap(),
+            serde_json::to_value(old_state).unwrap()
+        );
     }
 
     #[test]
