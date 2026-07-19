@@ -5,7 +5,7 @@ mod common {
 #[path = "../../ebpf/src/parser.rs"]
 mod parser;
 
-use aria_ebpf_abi::{FragmentKind, IPPROTO_UDP};
+use aria_ebpf_abi::{FragmentKind, IPPROTO_TCP, IPPROTO_UDP};
 use core::mem::MaybeUninit;
 
 fn ethernet(ethertype: u16) -> Vec<u8> {
@@ -128,6 +128,17 @@ fn ipv6_extension_then_fragment(
     frame
 }
 
+fn ipv6_fragment_with_destination_options(
+    fragment_id: u32,
+    fragment_offset_units: u16,
+    more_fragments: bool,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut frame = ipv6_fragment(fragment_id, fragment_offset_units, more_fragments, payload);
+    frame[14 + 40] = 60;
+    frame
+}
+
 unsafe fn parse_v4(frame: &[u8]) -> parser::PacketInfo {
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
     assert!(parser::parse_eth_ipv4(
@@ -195,6 +206,53 @@ fn fragment_parser_ipv4_incomplete_udp_datagram_is_rejected() {
 }
 
 #[test]
+fn fragment_parser_ipv4_truncated_tcp_base_header_is_rejected() {
+    let frame = ipv4_fragment(IPPROTO_TCP, 0x1234, 0, true, &[0; 19]);
+    let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
+    let accepted = unsafe {
+        parser::parse_eth_ipv4(
+            frame.as_ptr() as usize,
+            frame.as_ptr() as usize + frame.len(),
+            0,
+            out.as_mut_ptr(),
+        )
+    };
+
+    assert!(!accepted);
+}
+
+#[test]
+fn fragment_parser_ipv4_tcp_data_offset_must_fit_first_fragment() {
+    let mut tcp = [0; 20];
+    tcp[12] = 6 << 4;
+    let frame = ipv4_fragment(IPPROTO_TCP, 0x1234, 0, true, &tcp);
+    let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
+    let accepted = unsafe {
+        parser::parse_eth_ipv4(
+            frame.as_ptr() as usize,
+            frame.as_ptr() as usize + frame.len(),
+            0,
+            out.as_mut_ptr(),
+        )
+    };
+
+    assert!(!accepted);
+}
+
+#[test]
+fn fragment_parser_ipv4_tcp_payload_length_uses_selected_header() {
+    let mut tcp_and_payload = [0; 28];
+    tcp_and_payload[0..2].copy_from_slice(&40000u16.to_be_bytes());
+    tcp_and_payload[2..4].copy_from_slice(&443u16.to_be_bytes());
+    tcp_and_payload[12] = 6 << 4;
+    let frame = ipv4_fragment(IPPROTO_TCP, 0x1234, 0, true, &tcp_and_payload);
+    let info = unsafe { parse_v4(&frame) };
+
+    assert_eq!((info.src_port, info.dst_port), (40000, 443));
+    assert_eq!(info.payload_len, 4);
+}
+
+#[test]
 fn fragment_parser_ipv6_first_udp_keeps_ports_and_identity() {
     let frame = ipv6_fragment(
         0x0102_0304,
@@ -251,4 +309,50 @@ fn fragment_parser_ipv6_extension_chain_preserves_fragment_metadata() {
     assert_eq!(info.fragment_id, 0x0102_0304);
     assert_eq!(info.fragment_offset, 0);
     assert_eq!((info.src_port, info.dst_port), (40000, 53));
+}
+
+#[test]
+fn fragment_parser_ipv6_post_fragment_options_keep_stable_identity() {
+    let first = ipv6_fragment_with_destination_options(
+        0x0102_0304,
+        0,
+        true,
+        &[
+            IPPROTO_UDP,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0x9c,
+            0x40,
+            0x00,
+            0x35,
+            0x00,
+            0x08,
+            0,
+            0,
+        ],
+    );
+    let non_initial = ipv6_fragment_with_destination_options(
+        0x0102_0304,
+        1,
+        false,
+        &[0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0],
+    );
+
+    let first_info = unsafe { parse_v6(&first) };
+    let non_initial_info = unsafe { parse_v6(&non_initial) };
+
+    assert_eq!(first_info.fragment_proto, 60);
+    assert_eq!(non_initial_info.fragment_proto, first_info.fragment_proto);
+    assert_eq!(first_info.proto, IPPROTO_UDP);
+    assert_eq!((first_info.src_port, first_info.dst_port), (40000, 53));
+    assert_eq!(non_initial_info.proto, 60);
+    assert_eq!(
+        (non_initial_info.src_port, non_initial_info.dst_port),
+        (0, 0)
+    );
 }

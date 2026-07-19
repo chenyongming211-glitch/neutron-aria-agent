@@ -12,6 +12,7 @@ fn current_value() -> FragmentContextValue {
         flags: 0,
         version: 1,
         _pad: 0,
+        _reserved: [0; 6],
         epoch: 7,
         expires_at_ns: 30_000_000_000,
     }
@@ -40,6 +41,17 @@ fn fragment_context_key4_has_exact_fragment_identity_layout() {
     assert_eq!(core::mem::offset_of!(FragmentContextKey4, direction), 17);
     assert_eq!(key.fragment_id, 0x1234);
     assert_eq!((key.vlan_id, key.proto, key.direction), (4094, 17, 1));
+}
+
+#[test]
+fn fragment_context_value_has_no_implicit_pod_padding() {
+    let value = current_value();
+
+    assert_eq!(core::mem::size_of::<FragmentContextValue>(), 32);
+    assert_eq!(core::mem::offset_of!(FragmentContextValue, _pad), 9);
+    assert_eq!(core::mem::offset_of!(FragmentContextValue, _reserved), 10);
+    assert_eq!(core::mem::offset_of!(FragmentContextValue, epoch), 16);
+    assert_eq!(value._reserved, [0; 6]);
 }
 
 #[test]
@@ -92,6 +104,7 @@ fn fragment_context_rejects_two_bank_rotation_epoch_reuse() {
         flags: 0,
         version: 1,
         _pad: 0,
+        _reserved: [0; 6],
         epoch: 7,
         expires_at_ns: 30_000_000_000,
     };
