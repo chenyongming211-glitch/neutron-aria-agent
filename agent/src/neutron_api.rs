@@ -11735,6 +11735,77 @@ mod tests {
         (result, observed_trace, observed_health)
     }
 
+    async fn run_neutron_acl_detach_cleanup_test(
+        purge_error: Option<&'static str>,
+    ) -> (Result<(), String>, Vec<&'static str>) {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let quiesce_events = Arc::clone(&events);
+        let purge_events = Arc::clone(&events);
+        let detach_events = Arc::clone(&events);
+
+        let result = execute_neutron_acl_detach_cleanup(
+            move || {
+                let events = Arc::clone(&quiesce_events);
+                async move {
+                    events.lock().expect("quiesce events").push("quiesce");
+                    Ok::<(), String>(())
+                }
+            },
+            move || {
+                let events = Arc::clone(&purge_events);
+                async move {
+                    events
+                        .lock()
+                        .expect("purge events")
+                        .push("replace-empty-and-strict-flush");
+                    match purge_error {
+                        Some(error) => Err(error.to_string()),
+                        None => Ok(()),
+                    }
+                }
+            },
+            move || {
+                let events = Arc::clone(&detach_events);
+                async move {
+                    events.lock().expect("detach events").push("detach");
+                    Ok::<(), String>(())
+                }
+            },
+        )
+        .await;
+
+        let observed = events.lock().expect("ordered detach events").clone();
+        (result, observed)
+    }
+
+    #[tokio::test]
+    async fn neutron_acl_detach_quiesces_before_owned_projection_removal() {
+        let (result, events) = run_neutron_acl_detach_cleanup_test(None).await;
+
+        result.expect("a complete quiesced purge may detach");
+
+        assert_eq!(
+            events,
+            vec!["quiesce", "replace-empty-and-strict-flush", "detach"],
+        );
+    }
+
+    #[tokio::test]
+    async fn neutron_acl_purge_failure_aborts_detach_without_partial_owned_state() {
+        let (result, events) = run_neutron_acl_detach_cleanup_test(Some(
+            "forced atomic owned purge failure",
+        ))
+        .await;
+        let error = result.expect_err("failed owned purge must abort detach");
+
+        assert!(error.contains("forced atomic owned purge failure"), "{error}");
+        assert_eq!(
+            events,
+            vec!["quiesce", "replace-empty-and-strict-flush"],
+            "detach must not run after any owned-purge failure",
+        );
+    }
+
     #[test]
     fn managed_projection_outer_skip_required_publication_mode_maps_both_ownership_states_exactly()
     {

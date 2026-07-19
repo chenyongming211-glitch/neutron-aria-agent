@@ -10550,6 +10550,150 @@ mod tests {
         );
     }
 
+    async fn run_managed_owned_acl_strict_flush_test(
+        fail_bank_restore: bool,
+        fail_durable_restore: bool,
+    ) -> (
+        Result<(), String>,
+        Vec<String>,
+        ManagedProjectionHealth,
+        u8,
+    ) {
+        const BANK_OLD: u8 = 1 << 0;
+        const GENERAL_SRC_OLD: u8 = 1 << 1;
+        const GENERAL_DST_OLD: u8 = 1 << 2;
+        const DURABLE_OLD: u8 = 1 << 3;
+
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let health = std::rc::Rc::new(std::cell::Cell::new(ManagedProjectionHealth::Verified));
+        let restored_preimages = std::rc::Rc::new(std::cell::Cell::new(
+            BANK_OLD | GENERAL_SRC_OLD | GENERAL_DST_OLD | DURABLE_OLD,
+        ));
+        let health_events = events.clone();
+        let health_state = health.clone();
+        let publish_events = events.clone();
+        let publish_preimages = restored_preimages.clone();
+        let flush_events = events.clone();
+        let compensation_events = events.clone();
+        let compensation_preimages = restored_preimages.clone();
+        let restore_events = events.clone();
+        let restore_preimages = restored_preimages.clone();
+
+        let result = execute_managed_owned_acl_publication_transaction(
+            move |next_health| {
+                health_state.set(next_health);
+                health_events
+                    .borrow_mut()
+                    .push(format!("health:{next_health:?}"));
+            },
+            move || {
+                publish_preimages.set(0);
+                publish_events.borrow_mut().push("publish".to_string());
+                std::future::ready(Ok::<_, String>(vec![
+                    ManagedAclDemotionTestReceipt::GeneralSrc,
+                    ManagedAclDemotionTestReceipt::GeneralDst,
+                    ManagedAclDemotionTestReceipt::ActiveBank,
+                ]))
+            },
+            move || {
+                flush_events.borrow_mut().push("strict-flush".to_string());
+                std::future::ready(Err::<(), String>(
+                    "forced strict flush failure".to_string(),
+                ))
+            },
+            move |receipt: &ManagedAclDemotionTestReceipt| {
+                compensation_events
+                    .borrow_mut()
+                    .push(format!("restore:{}", receipt.label()));
+                let bit = match receipt {
+                    ManagedAclDemotionTestReceipt::GeneralSrc => GENERAL_SRC_OLD,
+                    ManagedAclDemotionTestReceipt::GeneralDst => GENERAL_DST_OLD,
+                    ManagedAclDemotionTestReceipt::ActiveBank => BANK_OLD,
+                };
+                if *receipt == ManagedAclDemotionTestReceipt::ActiveBank && fail_bank_restore {
+                    return std::future::ready(Err(
+                        "forced active-bank restore failure".to_string(),
+                    ));
+                }
+                compensation_preimages.set(compensation_preimages.get() | bit);
+                std::future::ready(Ok(()))
+            },
+            move || {
+                restore_events
+                    .borrow_mut()
+                    .push("restore:durable".to_string());
+                if fail_durable_restore {
+                    return std::future::ready(Err(
+                        "forced durable restore failure".to_string(),
+                    ));
+                }
+                restore_preimages.set(restore_preimages.get() | DURABLE_OLD);
+                std::future::ready(Ok(()))
+            },
+        )
+        .await;
+
+        let observed_events = events.borrow().clone();
+        let observed_health = health.get();
+        let observed_preimages = restored_preimages.get();
+        (result, observed_events, observed_health, observed_preimages)
+    }
+
+    #[tokio::test]
+    async fn managed_owned_acl_strict_flush_failure_restores_old_publication() {
+        let (result, events, health, restored_preimages) =
+            run_managed_owned_acl_strict_flush_test(false, false).await;
+        let error = result.expect_err("strict CT flush failure must roll back publication");
+
+        assert!(error.contains("forced strict flush failure"), "{error}");
+        assert_eq!(
+            events,
+            vec![
+                "health:Unverified",
+                "publish",
+                "strict-flush",
+                "restore:active-bank",
+                "restore:general-dst",
+                "restore:general-src",
+                "restore:durable",
+            ]
+        );
+        assert_eq!(health, ManagedProjectionHealth::Unverified);
+        assert_eq!(restored_preimages, 0b1111, "every preimage must be old");
+    }
+
+    #[tokio::test]
+    async fn managed_owned_acl_strict_flush_rollback_failure_stays_unverified() {
+        let (result, events, health, restored_preimages) =
+            run_managed_owned_acl_strict_flush_test(true, true).await;
+        let error = result.expect_err("failed rollback must remain visible");
+
+        assert!(error.contains("forced strict flush failure"), "{error}");
+        assert!(
+            error.contains("forced active-bank restore failure"),
+            "{error}"
+        );
+        assert!(error.contains("forced durable restore failure"), "{error}");
+        assert_eq!(
+            events,
+            vec![
+                "health:Unverified",
+                "publish",
+                "strict-flush",
+                "restore:active-bank",
+                "restore:general-dst",
+                "restore:general-src",
+                "restore:durable",
+            ],
+            "rollback must attempt every compensation after an earlier failure",
+        );
+        assert_eq!(health, ManagedProjectionHealth::Unverified);
+        assert_eq!(
+            restored_preimages, 0b0110,
+            "successful general restores remain visible while failed bank/durable restores stay unresolved",
+        );
+    }
+
     #[test]
     fn managed_general_delta_compensation_failure_attempts_every_preimage() {
         let applied = vec![managed_replacement("src"), managed_replacement("dst")];

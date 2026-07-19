@@ -49,7 +49,7 @@
 - Consumes: current `replace_owned_acl`, `purge_neutron_acl`, `delete_policy_for_neutron_purge`, `delete_group_for_neutron_purge`, and `execute_managed_acl_post_replace_completion` behavior.
 - Produces: four named RED behavior contracts used by Tasks 2 and 3.
 
-- [ ] **Step 1: Record three separate findings**
+- [x] **Step 1: Record three separate findings**
 
 Add backlog entries with these exact scopes:
 
@@ -61,7 +61,7 @@ REVIEW-TXN-030 P1 contract/P2 runtime: strict CT flush occurs after bank/general
 
 Cross-reference `REVIEW-ACL-023` as the older ignored-purge-error symptom; do not merge the new root causes into that P2 item.
 
-- [ ] **Step 2: Add RED publication rollback tests**
+- [x] **Step 2: Add RED publication rollback tests**
 
 Add tests named:
 
@@ -73,9 +73,13 @@ async fn managed_owned_acl_strict_flush_failure_restores_old_publication() { /* 
 async fn managed_owned_acl_strict_flush_rollback_failure_stays_unverified() { /* ... */ }
 ```
 
-The first test must assert old active bank, old general values, old durable state, and non-published gate after injected strict-flush failure. The second must assert combined primary/compensation diagnostics and `ManagedProjectionHealth::Unverified` when restoration itself fails.
+The first test must assert old active bank, old general values, and old durable
+state after injected strict-flush failure. Existing outer-completion coverage
+continues to assert that a failed transaction cannot publish the gate. The
+second test must assert combined primary/compensation diagnostics and
+`ManagedProjectionHealth::Unverified` when restoration itself fails.
 
-- [ ] **Step 3: Add RED detach/purge orchestration tests**
+- [x] **Step 3: Add RED detach/purge orchestration tests**
 
 Add tests named:
 
@@ -91,14 +95,13 @@ Record ordered events and require:
 
 ```text
 quiesce_gate
-replace_owned_acl_with_empty_snapshot
-strict_ct_flush
+replace_owned_acl_with_empty_snapshot_and_strict_flush
 detach_links
 ```
 
 On any purge/publication/flush failure, `detach_links` must be absent and the old owned state must be complete.
 
-- [ ] **Step 4: Register only the test prefixes**
+- [x] **Step 4: Register only the test prefixes**
 
 Add these stable prefixes to `RUST_TESTS`/test discovery:
 
@@ -110,7 +113,7 @@ Add these stable prefixes to `RUST_TESTS`/test discovery:
 
 Do not add source-body parsing or mutation self-tests.
 
-- [ ] **Step 5: Commit and push RED**
+- [x] **Step 5: Commit and push RED**
 
 ```bash
 git add agent/src/control_plane.rs agent/src/neutron_api.rs \
