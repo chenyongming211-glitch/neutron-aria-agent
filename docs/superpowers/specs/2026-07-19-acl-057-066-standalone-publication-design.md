@@ -2,8 +2,8 @@
 
 Date: 2026-07-19
 
-Status: design direction approved; written specification awaiting review;
-implementation and RED evidence not started
+Status: written specification approved on 2026-07-19; implementation and RED
+evidence not started
 
 Analyzed target: `codex/review-acl-057-direct-publication@67b70ab`
 
@@ -333,7 +333,7 @@ cache contents but cannot create an incorrectly current entry.
 | General destination update | Old bank; source and possibly destination may be new | Restore destination then source; scrub shadow; clean created bitmaps; restore old durable state |
 | Bank switch | Switch failed or outcome reported failed | Restore old bank explicitly, restore general maps, scrub shadow when it is not active, clean created bitmaps, restore old durable state |
 | Final-state persistence | New bank may be active | Restore old bank first, restore general maps, scrub failed shadow only after old-bank restoration, clean created bitmaps, restore old durable state |
-| Strict CT scrub | New bank and final state are durable | Restore old bank, restore general maps, restore old durable state, clean transaction-created bitmaps; return strict-flush error |
+| Strict CT scrub | New bank and final state are durable | Restore old bank, restore general maps, scrub the failed shadow only after bank restoration, clean transaction-created bitmaps, then restore old durable state with cleanup failures quarantined; return strict-flush error |
 
 Every compensation is attempted even if an earlier compensation fails. The
 returned error contains the primary failure and all compensation failures.
