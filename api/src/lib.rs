@@ -2417,6 +2417,28 @@ mod tests {
     }
 
     #[test]
+    fn instance_info_reports_bitmap_cleanup_debt_without_lowering_acl_readiness() {
+        let value = serde_json::json!({
+            "name": "system",
+            "active": true,
+            "acl_ready": true,
+            "xdp_ready": true,
+            "readiness_reason": null,
+            "cleanup_pending_count": 1,
+            "maintenance_reason": "bitmap_cleanup_pending"
+        });
+
+        let info: InstanceInfo = serde_json::from_value(value).unwrap();
+
+        assert!(info.acl_ready);
+        assert_eq!(info.cleanup_pending_count, 1);
+        assert_eq!(
+            info.maintenance_reason.as_deref(),
+            Some("bitmap_cleanup_pending")
+        );
+    }
+
+    #[test]
     fn neutron_contract_capabilities_are_stable() {
         let capabilities = NeutronCapabilitiesResponse::current();
         let expected_domains: Vec<String> = NEUTRON_SUPPORTED_DOMAINS

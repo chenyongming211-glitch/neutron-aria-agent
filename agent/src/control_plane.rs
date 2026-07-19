@@ -9533,6 +9533,46 @@ mod tests {
     }
 
     #[test]
+    fn standalone_review_cleanup_failure_is_a_committed_pending_outcome() {
+        let cleanup = PortSetCleanupReport {
+            cleaned_bitmap_indices: Vec::new(),
+            failures: vec![PortSetCleanupFailure {
+                bitmap_idx: 7,
+                ports_normalized: "80:1".to_string(),
+                error: "forced retired bitmap cleanup failure".to_string(),
+            }],
+        };
+
+        let outcome = standalone_cleanup_outcome(&cleanup);
+
+        assert!(outcome.committed);
+        assert_eq!(outcome.cleanup_pending.len(), 1);
+        assert_eq!(outcome.cleanup_pending[0].bitmap_idx, 7);
+        assert_eq!(outcome.cleanup_pending[0].ports_normalized, "80:1");
+        assert!(outcome.cleanup_pending[0]
+            .error
+            .contains("forced retired bitmap cleanup failure"));
+    }
+
+    #[test]
+    fn standalone_review_cleanup_outcome_does_not_mix_item_errors() {
+        let cleanup = PortSetCleanupReport {
+            cleaned_bitmap_indices: vec![8],
+            failures: vec![PortSetCleanupFailure {
+                bitmap_idx: 7,
+                ports_normalized: "80:1".to_string(),
+                error: "cleanup pending".to_string(),
+            }],
+        };
+
+        let outcome = standalone_cleanup_outcome(&cleanup);
+
+        assert!(outcome.committed);
+        assert_eq!(outcome.cleanup_pending.len(), 1);
+        assert!(outcome.item_errors.is_empty());
+    }
+
+    #[test]
     fn standalone_review_rollback_recovery_persists_only_failed_cleanup_quarantine() {
         let mut old_state = FirewallState::default();
         old_state.free_bitmap_indices.extend([7, 8]);

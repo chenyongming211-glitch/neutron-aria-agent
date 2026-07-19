@@ -995,6 +995,42 @@ mod tests {
     }
 
     #[test]
+    fn quarantined_bitmap_preserves_cleanup_target_across_restart() {
+        let mut state = FirewallState::default();
+        state
+            .quarantine_bitmap_cleanup(7, "80:1".to_string())
+            .expect("persist exact retired bitmap cleanup target");
+
+        let json = serde_json::to_string(&state).expect("serialize cleanup intent");
+        let restarted: FirewallState =
+            serde_json::from_str(&json).expect("deserialize cleanup intent");
+
+        assert_eq!(
+            restarted.pending_bitmap_cleanup_targets(),
+            vec![(7, "80:1".to_string())]
+        );
+        assert!(restarted.is_bitmap_index_quarantined(7));
+    }
+
+    #[test]
+    fn quarantined_bitmap_rejects_conflicting_cleanup_target() {
+        let mut state = FirewallState::default();
+        state
+            .quarantine_bitmap_cleanup(7, "80:1".to_string())
+            .unwrap();
+
+        let error = state
+            .quarantine_bitmap_cleanup(7, "443:1".to_string())
+            .expect_err("one bitmap cannot carry two cleanup targets");
+
+        assert!(error.contains("conflicting cleanup target"));
+        assert_eq!(
+            state.pending_bitmap_cleanup_targets(),
+            vec![(7, "80:1".to_string())]
+        );
+    }
+
+    #[test]
     fn quarantined_fresh_bitmap_advances_next_cursor_across_restart() {
         let mut state = FirewallState::default();
         state
