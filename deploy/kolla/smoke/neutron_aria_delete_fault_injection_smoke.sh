@@ -799,12 +799,19 @@ else:
     tap_id=int(load(after,"bank.json")["tap_id"])
     policy_rows=load(after,"POLICY_TABLE.json")
     assert not any(int.from_bytes(bytes(row["key"][:4]),byteorder="little")==tap_id for row in policy_rows),policy_rows
+    def lpm_tap_id(row):
+        key=bytes(row["key"])
+        assert len(key)>=8,key
+        return int.from_bytes(key[4:8],byteorder="big")
+    for name in ("SRC_IPV4_TRIE.json","DST_IPV4_TRIE.json",
+                 "SRC_IPV6_TRIE.json","DST_IPV6_TRIE.json"):
+        rows=load(after,name)
+        assert not any(lpm_tap_id(row)==tap_id for row in rows),name
     banked_tap_ids={tap_id*2,tap_id*2+1}
     for name in ("ACL_SRC_IPV4_TRIE.json","ACL_DST_IPV4_TRIE.json",
                  "ACL_SRC_IPV6_TRIE.json","ACL_DST_IPV6_TRIE.json"):
         rows=load(after,name)
-        assert not any(int.from_bytes(bytes(row["key"][4:8]),byteorder="little") in banked_tap_ids
-                       for row in rows),name
+        assert not any(lpm_tap_id(row) in banked_tap_ids for row in rows),name
 
 print(json.dumps({"fixture":os.environ["FIXTURE"],"detached":False,
                   "links_attached":True,"gate_quiesced":True,
@@ -917,6 +924,9 @@ def int_field(row,name):
     except (TypeError,ValueError):
         return 0
 
+def tc_program_id(row):
+    return int_field(row,"prog_id") or int_field(row,"id")
+
 baseline_prog_ids={}
 for direction in ("ingress","egress"):
     link=load("pre-delete-pinned-%s-link.json"%direction)
@@ -934,7 +944,7 @@ for direction in ("ingress","egress"):
 # are retained in the evidence and do not fail this assertion.
 for direction,prog_id in baseline_prog_ids.items():
     target_tc=load("tc-%s.json"%direction)
-    assert not any(int_field(row,"prog_id")==prog_id or int_field(row,"id")==prog_id
+    assert not any(tc_program_id(row)==prog_id
                    for row in nested_dicts(target_tc)),(direction,prog_id,target_tc)
 
 # TCX link objects carry ifindex, prog_id, and attach direction. Prove that no
@@ -963,7 +973,7 @@ for row in nested_dicts(net_inventory):
 for direction,prog_id in baseline_prog_ids.items():
     matches=[row for row in nested_dicts(tc_inventory)
              if int_field(row,"ifindex")==expected_ifindex and
-                int_field(row,"prog_id")==prog_id]
+                tc_program_id(row)==prog_id]
     assert not matches,(direction,expected_ifindex,prog_id,matches)
 
 def observed_map(name):
@@ -981,14 +991,19 @@ if policy_rows is not None:
     assert not any(int.from_bytes(bytes(row["key"][:4]),byteorder="little")==tap_id
                    for row in policy_rows),policy_rows
 banked_tap_ids={tap_id*2,tap_id*2+1}
+def lpm_tap_id(row):
+    key=bytes(row["key"])
+    assert len(key)>=8,key
+    return int.from_bytes(key[4:8],byteorder="big")
 for name in ("ACL_SRC_IPV4_TRIE","ACL_DST_IPV4_TRIE",
              "ACL_SRC_IPV6_TRIE","ACL_DST_IPV6_TRIE"):
     rows=observed_map(name)
     if rows is not None:
-        assert not any(int.from_bytes(bytes(row["key"][4:8]),byteorder="little") in banked_tap_ids
-                       for row in rows),name
+        assert not any(lpm_tap_id(row) in banked_tap_ids for row in rows),name
 for name in ("SRC_IPV4_TRIE","DST_IPV4_TRIE","SRC_IPV6_TRIE","DST_IPV6_TRIE"):
-    observed_map(name)
+    rows=observed_map(name)
+    if rows is not None:
+        assert not any(lpm_tap_id(row)==tap_id for row in rows),name
 
 for resource in ("groups","policies"):
     code=int(open(os.path.join(root,resource+"-http-status.txt"),encoding="utf-8").read())
@@ -1114,13 +1129,15 @@ PY
 }
 
 cleanup_managed_transaction_smoke() {
-    local body_rc="$1" final_rc=1
+    local body_rc="$1" final_rc=1 pin_restoration_succeeded=true
     trap - EXIT
     set +e
     if ! restore_renamed_pins; then
+        pin_restoration_succeeded=false
         record_cleanup_error "restore-renamed-pins failed"
     fi
-    if [ "${GUARD_REFUSED}" = "false" ] && \
+    if [ "${pin_restoration_succeeded}" = "true" ] && \
+            [ "${GUARD_REFUSED}" = "false" ] && \
             [ "${DEDICATED_GUARD_ESTABLISHED}" = "true" ] && \
             [ "${TARGET_ROLLBACK_ARMED}" = "true" ]; then
         if guard_dedicated_host cleanup-pre-rollback empty_or_target; then
@@ -1133,7 +1150,8 @@ cleanup_managed_transaction_smoke() {
             record_cleanup_error "cleanup rollback guard refused mutation"
         fi
     fi
-    if [ "${GUARD_REFUSED}" = "false" ] && \
+    if [ "${pin_restoration_succeeded}" = "true" ] && \
+            [ "${GUARD_REFUSED}" = "false" ] && \
             [ "${DEDICATED_GUARD_ESTABLISHED}" = "true" ] && \
             [ "${DATAPATH_RESTORE_ARMED}" = "true" ]; then
         if guard_dedicated_host cleanup-pre-restart empty_or_target; then
