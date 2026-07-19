@@ -770,7 +770,7 @@ async fn execute_standalone_publication(
 }
 
 impl ControlPlane {
-    async fn apply_standalone_acl_mutations_locked(
+    pub(super) async fn apply_standalone_acl_mutations_locked(
         &self,
         instance: &str,
         state: &mut InstanceState,
@@ -784,7 +784,7 @@ impl ControlPlane {
         Ok(plan)
     }
 
-    async fn apply_standalone_acl_batch_locked(
+    pub(super) async fn apply_standalone_acl_batch_locked(
         &self,
         instance: &str,
         state: &mut InstanceState,
