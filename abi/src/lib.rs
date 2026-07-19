@@ -1,5 +1,8 @@
 #![no_std]
 
+mod fragment;
+pub use fragment::*;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct PolicyKey {
@@ -739,6 +742,11 @@ mod userspace_pod {
         CtConfig,
         CtContractKey,
         CtContractValue,
+        FragmentContextKey4,
+        FragmentContextKey6,
+        FragmentContextValue,
+        FragmentConfig,
+        FragmentEpochValue,
         RuleStatsValue,
         FlowStatsValue,
         QosKey,
@@ -780,13 +788,15 @@ mod userspace_pod {
 /// are intentionally not re-exported through this module.
 pub mod userspace {
     pub use super::{
-        acl_banked_tap_id, acl_next_bank, normalize_acl_bank, normalize_acl_ingress_hook, CtConfig,
-        CtContractKey, CtContractValue, CtKey4, CtKey6, CtValue, DropKey, DropValue,
-        FirewallConfig, FlowStatsValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue, IfaceCtx,
-        KernelDropConfig, KernelDropFilterValue, KernelDropKey, KernelDropValue, MirrorConfig,
-        MirrorKey, MirrorStatsValue, PolicyKey, PolicyValue, PortKey, QosConfig, QosKey,
-        QosStatsValue, RuleStatsValue, SslConnValue, SslErrorEvent, SslHttpValue, SslScratch,
-        SslWriteScratch, TapConfig, TcpRtValue, TokenBucket, TraceEvent, TraceEventKey,
+        acl_banked_tap_id, acl_next_bank, fragment_context_disposition, normalize_acl_bank,
+        normalize_acl_ingress_hook, CtConfig, CtContractKey, CtContractValue, CtKey4, CtKey6,
+        CtValue, DropKey, DropValue, FirewallConfig, FlowStatsValue, FragmentConfig,
+        FragmentContextDisposition, FragmentContextKey4, FragmentContextKey6, FragmentContextValue,
+        FragmentEpochValue, FragmentKind, GlobalMirrorKey, GroupStatsKey, GroupStatsValue,
+        IfaceCtx, KernelDropConfig, KernelDropFilterValue, KernelDropKey, KernelDropValue,
+        MirrorConfig, MirrorKey, MirrorStatsValue, PolicyKey, PolicyValue, PortKey, QosConfig,
+        QosKey, QosStatsValue, RuleStatsValue, SslConnValue, SslErrorEvent, SslHttpValue,
+        SslScratch, SslWriteScratch, TapConfig, TcpRtValue, TokenBucket, TraceEvent, TraceEventKey,
         TraceEventV6, TraceFilter, TraceStreamEvent, ACL_BANK_PRIMARY, ACL_BANK_SHADOW,
         ACL_INGRESS_HOOK_TC, ACL_INGRESS_HOOK_XDP, CT_CONTRACT_FAMILY_IPV4,
         CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_EGRESS, CT_CONTRACT_HOOK_TC_INGRESS,
@@ -794,8 +804,9 @@ pub mod userspace {
         CT_CONTRACT_REASON_STALE_BANK, CT_ESTABLISHED, CT_FLAG_ACL_EVALUATED, CT_FLAG_POLICY_HIT,
         CT_FLAG_SEEN_REPLY, CT_NEW, DIR_EGRESS, DIR_INGRESS, DROP_ACL_DEFAULT_DENY, DROP_ACL_DENY,
         DROP_ACL_PORT_DENY, DROP_QOS_EGRESS, DROP_QOS_INGRESS, FIRST_MANAGED_TAP_ID,
-        KERNEL_DROP_FLAG_HAS_LOCATION, KERNEL_DROP_FLAG_HAS_PROTOCOL, KERNEL_DROP_FLAG_HAS_REASON,
-        TAP_ID_UNASSIGNED,
+        FRAGMENT_CONFIG_DISABLED, FRAGMENT_CONFIG_ENABLED, FRAGMENT_CONFIG_VERSION,
+        FRAGMENT_CONTEXT_VERSION, KERNEL_DROP_FLAG_HAS_LOCATION, KERNEL_DROP_FLAG_HAS_PROTOCOL,
+        KERNEL_DROP_FLAG_HAS_REASON, TAP_ID_UNASSIGNED,
     };
 }
 
@@ -808,6 +819,8 @@ mod tests {
         assert_eq!(core::mem::size_of::<PolicyKey>(), 16);
         assert_eq!(core::mem::size_of::<TapConfig>(), 8);
         assert_eq!(core::mem::size_of::<CtValue>(), 40);
+        assert_eq!(core::mem::size_of::<FragmentContextKey4>(), 20);
+        assert_eq!(core::mem::size_of::<FragmentContextValue>(), 32);
         assert_eq!(core::mem::size_of::<SslErrorEvent>(), 32);
         assert_eq!(core::mem::size_of::<FirewallConfig>(), 10);
         assert_eq!(core::mem::size_of::<TcpRtValue>(), 168);
@@ -817,6 +830,57 @@ mod tests {
         assert_eq!(core::mem::offset_of!(TcpRtValue, prev_resp_seq), 128);
         assert_eq!(core::mem::offset_of!(TcpRtValue, _pad3), 140);
         assert_eq!(core::mem::offset_of!(TcpRtValue, fin_ts), 144);
+    }
+
+    #[test]
+    fn fragment_map_layouts_are_stable() {
+        assert_eq!(core::mem::size_of::<FragmentKind>(), 1);
+
+        assert_eq!(core::mem::size_of::<FragmentContextKey4>(), 20);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey4, tap_id), 0);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey4, src_ip), 4);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey4, dst_ip), 8);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey4, fragment_id), 12);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey4, vlan_id), 14);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey4, proto), 16);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey4, direction), 17);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey4, _pad), 18);
+
+        assert_eq!(core::mem::size_of::<FragmentContextKey6>(), 44);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey6, tap_id), 0);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey6, src_ip), 4);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey6, dst_ip), 20);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey6, fragment_id), 36);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey6, vlan_id), 40);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey6, proto), 42);
+        assert_eq!(core::mem::offset_of!(FragmentContextKey6, direction), 43);
+
+        assert_eq!(core::mem::size_of::<FragmentContextValue>(), 32);
+        assert_eq!(core::mem::offset_of!(FragmentContextValue, src_port), 0);
+        assert_eq!(core::mem::offset_of!(FragmentContextValue, dst_port), 2);
+        assert_eq!(
+            core::mem::offset_of!(FragmentContextValue, first_payload_end),
+            4
+        );
+        assert_eq!(core::mem::offset_of!(FragmentContextValue, acl_bank), 6);
+        assert_eq!(core::mem::offset_of!(FragmentContextValue, flags), 7);
+        assert_eq!(core::mem::offset_of!(FragmentContextValue, version), 8);
+        assert_eq!(core::mem::offset_of!(FragmentContextValue, _pad), 9);
+        assert_eq!(core::mem::offset_of!(FragmentContextValue, epoch), 16);
+        assert_eq!(
+            core::mem::offset_of!(FragmentContextValue, expires_at_ns),
+            24
+        );
+
+        assert_eq!(core::mem::size_of::<FragmentConfig>(), 24);
+        assert_eq!(core::mem::offset_of!(FragmentConfig, version), 0);
+        assert_eq!(core::mem::offset_of!(FragmentConfig, enabled), 1);
+        assert_eq!(core::mem::offset_of!(FragmentConfig, _pad), 2);
+        assert_eq!(core::mem::offset_of!(FragmentConfig, ipv4_timeout_ns), 8);
+        assert_eq!(core::mem::offset_of!(FragmentConfig, ipv6_timeout_ns), 16);
+
+        assert_eq!(core::mem::size_of::<FragmentEpochValue>(), 8);
+        assert_eq!(core::mem::offset_of!(FragmentEpochValue, epoch), 0);
     }
 
     #[test]

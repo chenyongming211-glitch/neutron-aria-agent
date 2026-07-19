@@ -1,4 +1,5 @@
 use crate::common::{IPPROTO_TCP, IPPROTO_UDP};
+use aria_ebpf_abi::FragmentKind;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -8,13 +9,19 @@ pub struct PacketInfo {
     pub src_ip_v6: [u8; 16],
     pub dst_ip_v6: [u8; 16],
     pub tcp_seq: u32,
+    pub fragment_id: u32,
     pub src_port: u16,
     pub dst_port: u16,
     pub payload_len: u16,
     pub vlan_id: u16,
+    pub fragment_offset: u16,
+    pub l4_offset: u16,
+    pub first_payload_end: u16,
     pub proto: u8,
     pub is_ipv6: bool,
     pub tcp_flags: u8,
+    pub fragment_kind: u8,
+    pub more_fragments: bool,
     pub _pad: [u8; 1],
 }
 
@@ -35,6 +42,46 @@ unsafe fn read_be16(data: usize, offset: usize) -> u16 {
 unsafe fn read_be32(data: usize, offset: usize) -> u32 {
     let ptr = (data as *const u8).add(offset);
     u32::from_be_bytes([*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)])
+}
+
+#[inline(always)]
+unsafe fn parse_transport(
+    proto: u8,
+    transport_offset: usize,
+    packet_end: usize,
+) -> Option<(u16, u16, u8, u32, u16)> {
+    if proto == IPPROTO_TCP {
+        if transport_offset + 20 > packet_end {
+            return None;
+        }
+
+        let data_offset = (read8(transport_offset, 12) >> 4) as usize * 4;
+        if data_offset < 20 || transport_offset + data_offset > packet_end {
+            return None;
+        }
+
+        Some((
+            read_be16(transport_offset, 0),
+            read_be16(transport_offset, 2),
+            read8(transport_offset, 13),
+            read_be32(transport_offset, 4),
+            (packet_end - transport_offset - data_offset) as u16,
+        ))
+    } else if proto == IPPROTO_UDP {
+        if transport_offset + 8 > packet_end {
+            return None;
+        }
+
+        Some((
+            read_be16(transport_offset, 0),
+            read_be16(transport_offset, 2),
+            0,
+            0,
+            0,
+        ))
+    } else {
+        Some((0, 0, 0, 0, 0))
+    }
 }
 
 /// Parse IPv4 packet, writing result directly to `out` pointer (scratch map).
@@ -77,58 +124,56 @@ pub unsafe fn parse_eth_ipv4(
     if ip_offset + ihl > data_end {
         return false;
     }
+
+    let ip_total_len = read_be16(ip_offset, 2) as usize;
+    if ip_total_len < ihl || ip_offset + ip_total_len > data_end {
+        return false;
+    }
+    let packet_end = ip_offset + ip_total_len;
     let proto = read8(ip_offset, 9);
 
     let src_ip = read_be32(ip_offset, 12);
     let dst_ip = read_be32(ip_offset, 16);
-
-    let (src_port, dst_port, tcp_flags, tcp_seq, payload_len) = if proto == IPPROTO_TCP {
-        let transport_offset = ip_offset + ihl;
-        if transport_offset + 14 <= data_end {
-            let sp = read_be16(transport_offset, 0);
-            let dp = read_be16(transport_offset, 2);
-            let seq = read_be32(transport_offset, 4);
-            let flags = read8(transport_offset, 13);
-            let data_off = (read8(transport_offset, 12) >> 4) as usize * 4;
-            let ip_total_len = read_be16(ip_offset, 2) as usize;
-            let pl = if data_off >= 20 && ip_total_len > ihl + data_off {
-                (ip_total_len - ihl - data_off) as u16
-            } else {
-                0
-            };
-            (sp, dp, flags, seq, pl)
-        } else if transport_offset + 4 <= data_end {
-            (
-                read_be16(transport_offset, 0),
-                read_be16(transport_offset, 2),
-                0,
-                0,
-                0,
-            )
-        } else {
-            (0, 0, 0, 0, 0)
-        }
-    } else if proto == IPPROTO_UDP {
-        let transport_offset = ip_offset + ihl;
-        if transport_offset + 4 <= data_end {
-            (
-                read_be16(transport_offset, 0),
-                read_be16(transport_offset, 2),
-                0,
-                0,
-                0,
-            )
-        } else {
-            (0, 0, 0, 0, 0)
-        }
+    let fragment_id = read_be16(ip_offset, 4) as u32;
+    let fragment_bits = read_be16(ip_offset, 6);
+    let fragment_offset = (fragment_bits & 0x1fff) * 8;
+    let more_fragments = fragment_bits & 0x2000 != 0;
+    let fragment_kind = if fragment_offset != 0 {
+        FragmentKind::NonInitial
+    } else if more_fragments {
+        FragmentKind::First
     } else {
-        (0, 0, 0, 0, 0)
+        FragmentKind::Unfragmented
     };
+
+    let transport_offset = ip_offset + ihl;
+    let l4_offset = transport_offset - data;
+    if l4_offset > u16::MAX as usize {
+        return false;
+    }
+    let (src_port, dst_port, tcp_flags, tcp_seq, payload_len) =
+        if fragment_kind == FragmentKind::NonInitial {
+            (0, 0, 0, 0, 0)
+        } else if let Some(parsed) = parse_transport(proto, transport_offset, packet_end) {
+            parsed
+        } else {
+            return false;
+        };
 
     (*out).src_ip = src_ip;
     (*out).dst_ip = dst_ip;
     (*out).src_ip_v6 = [0; 16];
     (*out).dst_ip_v6 = [0; 16];
+    (*out).fragment_id = fragment_id;
+    (*out).fragment_offset = fragment_offset;
+    (*out).fragment_kind = fragment_kind as u8;
+    (*out).more_fragments = more_fragments;
+    (*out).l4_offset = l4_offset as u16;
+    (*out).first_payload_end = if fragment_kind == FragmentKind::First {
+        (ip_total_len - ihl) as u16
+    } else {
+        0
+    };
     (*out).proto = proto;
     (*out).src_port = src_port;
     (*out).dst_port = dst_port;
@@ -189,6 +234,11 @@ pub unsafe fn parse_eth_ipv6(
     if eth_type != 0x86DD {
         return false;
     }
+    let ipv6_payload_len = read_be16(ip_offset, 4) as usize;
+    if ip_offset + 40 + ipv6_payload_len > data_end {
+        return false;
+    }
+    let packet_end = ip_offset + 40 + ipv6_payload_len;
     let mut next_header = read8(ip_offset, 6);
 
     // Write IPv6 addresses directly to output
@@ -199,82 +249,81 @@ pub unsafe fn parse_eth_ipv6(
 
     // 跳过 IPv6 扩展头（最多跳过 4 层，防止 BPF 验证器拒绝无界循环）
     let mut transport_offset = ip_offset + 40;
-    let mut is_fragment = false;
+    let mut fragment_kind = FragmentKind::Unfragmented;
+    let mut fragment_id = 0;
+    let mut fragment_offset = 0;
+    let mut more_fragments = false;
+    let mut fragment_payload_offset = 0;
     let mut i = 0u8;
     while i < 4 && is_ipv6_extension_header(next_header) {
-        if transport_offset + 2 > data_end {
+        if transport_offset + 2 > packet_end {
             return false;
         }
 
         if next_header == IPPROTO_FRAGMENT {
-            if transport_offset + 8 > data_end {
+            if transport_offset + 8 > packet_end {
                 return false;
             }
             let frag_off_flags = read_be16(transport_offset, 2);
-            let frag_offset = frag_off_flags >> 3;
-            if frag_offset != 0 {
-                is_fragment = true;
-            }
+            fragment_offset = ((frag_off_flags & 0xfff8) >> 3) * 8;
+            more_fragments = frag_off_flags & 1 != 0;
+            fragment_id = read_be32(transport_offset, 4);
+            fragment_kind = if fragment_offset != 0 {
+                FragmentKind::NonInitial
+            } else if more_fragments {
+                FragmentKind::First
+            } else {
+                FragmentKind::Atomic
+            };
             next_header = read8(transport_offset, 0);
             transport_offset += 8;
+            fragment_payload_offset = transport_offset;
         } else {
             next_header = read8(transport_offset, 0);
             let ext_len = (read8(transport_offset, 1) as usize + 1) * 8;
+            if transport_offset + ext_len > packet_end {
+                return false;
+            }
             transport_offset += ext_len;
         }
 
-        if transport_offset > data_end {
-            return false;
-        }
         i += 1;
+
+        if fragment_kind == FragmentKind::NonInitial {
+            break;
+        }
     }
 
-    let (src_port, dst_port, tcp_flags, tcp_seq, payload_len) = if is_fragment {
-        (0, 0, 0, 0, 0)
-    } else if next_header == IPPROTO_TCP {
-        if transport_offset + 14 <= data_end {
-            let sp = read_be16(transport_offset, 0);
-            let dp = read_be16(transport_offset, 2);
-            let seq = read_be32(transport_offset, 4);
-            let flags = read8(transport_offset, 13);
-            let data_off = (read8(transport_offset, 12) >> 4) as usize * 4;
-            let ipv6_payload_len = read_be16(ip_offset, 4) as usize;
-            let transport_rel = transport_offset - (ip_offset + 40);
-            let pl = if data_off >= 20 && ipv6_payload_len > transport_rel + data_off {
-                (ipv6_payload_len - transport_rel - data_off) as u16
-            } else {
-                0
-            };
-            (sp, dp, flags, seq, pl)
-        } else if transport_offset + 4 <= data_end {
-            (
-                read_be16(transport_offset, 0),
-                read_be16(transport_offset, 2),
-                0,
-                0,
-                0,
-            )
-        } else {
+    if fragment_kind != FragmentKind::NonInitial && is_ipv6_extension_header(next_header) {
+        return false;
+    }
+
+    let l4_offset = transport_offset - data;
+    if l4_offset > u16::MAX as usize {
+        return false;
+    }
+
+    let (src_port, dst_port, tcp_flags, tcp_seq, payload_len) =
+        if fragment_kind == FragmentKind::NonInitial {
             (0, 0, 0, 0, 0)
-        }
-    } else if next_header == IPPROTO_UDP {
-        if transport_offset + 4 <= data_end {
-            (
-                read_be16(transport_offset, 0),
-                read_be16(transport_offset, 2),
-                0,
-                0,
-                0,
-            )
+        } else if let Some(parsed) = parse_transport(next_header, transport_offset, packet_end) {
+            parsed
         } else {
-            (0, 0, 0, 0, 0)
-        }
-    } else {
-        (0, 0, 0, 0, 0)
-    };
+            return false;
+        };
 
     (*out).src_ip = 0;
     (*out).dst_ip = 0;
+    (*out).fragment_id = fragment_id;
+    (*out).fragment_offset = fragment_offset;
+    (*out).fragment_kind = fragment_kind as u8;
+    (*out).more_fragments = more_fragments;
+    (*out).l4_offset = l4_offset as u16;
+    (*out).first_payload_end = if fragment_kind == FragmentKind::First {
+        (packet_end - fragment_payload_offset) as u16
+    } else {
+        0
+    };
     (*out).proto = next_header;
     (*out).src_port = src_port;
     (*out).dst_port = dst_port;

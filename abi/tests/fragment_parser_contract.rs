@@ -124,10 +124,7 @@ fn ipv6_extension_then_fragment(
     frame[ipv6 + 6] = 0;
     frame[ipv6 + 4] = 0;
     frame[ipv6 + 5] = (16 + payload.len()) as u8;
-    frame.splice(
-        (ipv6 + 40)..(ipv6 + 40),
-        [44, 0, 0, 0, 0, 0, 0, 0],
-    );
+    frame.splice((ipv6 + 40)..(ipv6 + 40), [44, 0, 0, 0, 0, 0, 0, 0]);
     frame
 }
 
@@ -172,13 +169,7 @@ fn fragment_parser_ipv4_first_udp_keeps_ports_and_byte_offset() {
 
 #[test]
 fn fragment_parser_ipv4_non_initial_never_reads_payload_as_ports() {
-    let frame = ipv4_fragment(
-        IPPROTO_UDP,
-        0x1234,
-        1,
-        false,
-        &[0x00, 0x35, 0x13, 0x89],
-    );
+    let frame = ipv4_fragment(IPPROTO_UDP, 0x1234, 1, false, &[0x00, 0x35, 0x13, 0x89]);
     let info = unsafe { parse_v4(&frame) };
     assert_eq!(info.fragment_kind, FragmentKind::NonInitial as u8);
     assert_eq!(info.fragment_id, 0x1234);
@@ -221,12 +212,7 @@ fn fragment_parser_ipv6_first_udp_keeps_ports_and_identity() {
 
 #[test]
 fn fragment_parser_ipv6_non_initial_never_reads_payload_as_ports() {
-    let frame = ipv6_fragment(
-        0x0102_0304,
-        3,
-        false,
-        &[0x00, 0x35, 0x13, 0x89, 0, 0, 0, 0],
-    );
+    let frame = ipv6_fragment(0x0102_0304, 3, false, &[0x00, 0x35, 0x13, 0x89, 0, 0, 0, 0]);
     let info = unsafe { parse_v6(&frame) };
 
     assert_eq!(info.fragment_kind, FragmentKind::NonInitial as u8);
