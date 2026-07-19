@@ -385,11 +385,11 @@ Expected GitHub result: detach ordering and partial-purge RED tests pass; no dea
 - Consumes: Rust behavior-test prefixes and real smoke scripts.
 - Produces: one lightweight static/wiring phase, one Rust behavior phase, and independently executable field smoke.
 
-- [ ] **Step 1: Delete private Rust shape contracts**
+- [x] **Step 1: Delete private Rust shape contracts**
 
 Delete checks and mutants that constrain private helper visibility, exact parameter order/names, tail delegation, local shadowing, or exact internal call spelling. In particular remove the `delete_group -> delete_group_locked` structure contract added by `32bba52`.
 
-- [ ] **Step 2: Delete synthetic green implementations**
+- [x] **Step 2: Delete synthetic green implementations**
 
 Remove embedded full Rust/shell green sources and checker mutation suites that reimplement the production contract. Preserve only:
 
@@ -402,15 +402,15 @@ structured result/evidence schema
 public ABI/map/schema guardrails
 ```
 
-- [ ] **Step 3: Consolidate smoke parsing**
+- [x] **Step 3: Consolidate smoke parsing**
 
 Prefer direct `bash -n` plus small structured-output validation. If shared parsing is still necessary, keep one small shared helper; do not maintain separate managed and standalone heredoc/function parsers.
 
-- [ ] **Step 4: Reduce the legacy audit to public contracts**
+- [x] **Step 4: Reduce the legacy audit to public contracts**
 
 Task 0 has already separated the PR lanes. Remove the remaining second-order audit work until the scheduled/manual audit contains only public contracts, syntax, entrypoint existence, structured result/evidence schema, and public ABI/map/schema guardrails. Keep privileged smoke as separate evidence-producing field work.
 
-- [ ] **Step 5: Commit checker reduction separately**
+- [x] **Step 5: Commit checker reduction separately**
 
 ```bash
 git add ci/check_neutron_stage1.py ci/check_tc_acl_smoke.py \
@@ -422,6 +422,12 @@ gh run watch --exit-status
 ```
 
 Acceptance target: remove or consolidate at least the previously identified 8.9k lines of second-order mutation/synthetic scaffolding; do not add replacement checker code of comparable size.
+
+**Status:** complete in checker/CI commit `65b1dc5`. The change removed 25,302
+lines while retaining the small public-contract and smoke-entrypoint gates.
+Exact-head GitHub Actions run
+[`29670301941`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29670301941)
+completed `fast-contracts`, `rust-behavior`, and `rust-build` successfully.
 
 ---
 
@@ -470,6 +476,16 @@ no local Cargo evidence substituted for GitHub CI
 PR description matches the exact HEAD and commit sequence
 Draft converts to Ready only after field evidence is attached
 ```
+
+**Checkpoint:** transaction implementation commit `49081c6` and checker/CI
+verification head `65b1dc5` have completed hosted verification in GitHub
+Actions run
+[`29670301941`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29670301941):
+`fast-contracts`, `rust-behavior`, and `rust-build` all succeeded. No privileged
+Linux managed/standalone field environment is available, so Steps 1-4 remain
+incomplete. The PR remains Draft, and `REVIEW-ACL-046`, `REVIEW-ACL-064`,
+`REVIEW-ACL-065`, and `REVIEW-TXN-030` must not be marked fixed until the
+required field evidence is attached and the final review gate completes.
 
 ---
 

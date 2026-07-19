@@ -1,8 +1,12 @@
 # ACL Selector Ownership Isolation
 
-Status: implementation design complete and independently reviewed for
-`REVIEW-ACL-046`. The defect and migration path are confirmed; no RED test or
-production code is claimed by this record.
+Status: implementation and hosted CI are complete, but privileged field
+evidence is pending. The transaction repair landed in commit `49081c6`; the
+checker/CI verification head is `65b1dc5`. Exact-head GitHub Actions run
+[`29670301941`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29670301941)
+completed `fast-contracts`, `rust-behavior`, and `rust-build` successfully.
+No privileged Linux managed/standalone field environment is available, so
+`REVIEW-ACL-046` remains not fixed and the PR remains Draft.
 
 Order: after Batch 2C and before `REVIEW-ACL-057` / `REVIEW-ACL-059`.
 
@@ -626,3 +630,12 @@ change and must pause before production code is expanded.
    privileged field evidence;
 8. the exact implementation head passes GitHub Actions with no project
    Rust/eBPF warnings.
+
+Checkpoint 2026-07-19: hosted implementation evidence is complete at
+transaction commit `49081c6` and checker/CI head `65b1dc5`; exact-head Actions
+run
+[`29670301941`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29670301941)
+passed `fast-contracts`, `rust-behavior`, and `rust-build`. Completion condition
+7 still lacks privileged managed and standalone field evidence. No field run,
+environment, command transcript, timestamp, or artifact is claimed by this
+checkpoint; the finding remains not fixed and the PR remains Draft.
