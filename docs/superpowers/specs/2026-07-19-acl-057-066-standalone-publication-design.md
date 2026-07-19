@@ -3,7 +3,8 @@
 Date: 2026-07-19
 
 Status: written specification approved on 2026-07-19; RED and hosted GREEN
-implementation evidence complete; direct `v0.9-neutron-agent` delivery pending
+implementation evidence complete; delivered directly to `v0.9-neutron-agent`
+at `a0861bb` with exact-head Build `29685324204` passing
 
 Analyzed target: `codex/review-acl-057-direct-publication@67b70ab`
 

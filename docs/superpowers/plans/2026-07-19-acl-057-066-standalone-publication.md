@@ -10,10 +10,11 @@
 
 **Execution status:** Tasks 1-4 and Task 5 Steps 1-4 completed on 2026-07-19.
 RED `212828b` / Build `29682513348` and GREEN `a234bb5` / Build
-`29683492746` are recorded in the design and backlog. Task 5 Step 5 now
-consolidates the former PR #5 batch and ACL-057/066 directly onto the sole
-`v0.9-neutron-agent` development branch. After exact-head CI, the temporary
-branches and old PR #5 are closed as superseded.
+`29683492746` are recorded in the design and backlog. Task 5 Step 5 consolidated
+the former PR #5 batch and ACL-057/066 directly onto the sole
+`v0.9-neutron-agent` development branch at `a0861bb`. Exact-head push Build
+`29685324204` passed; the temporary branches and old PR #5 can now be retired
+as superseded.
 
 ## Global Constraints
 
@@ -571,7 +572,7 @@ git commit -m "docs: record standalone ACL publication evidence"
 git push origin codex/review-acl-057-direct-publication
 ```
 
-- [ ] **Step 5: Preserve delivery topology**
+- [x] **Step 5: Preserve delivery topology**
 
 Do not create a stacked, sibling, or replacement PR. Merge the complete former
 PR #5 and ACL-057/066 history into `v0.9-neutron-agent`, rerun exact-head CI on

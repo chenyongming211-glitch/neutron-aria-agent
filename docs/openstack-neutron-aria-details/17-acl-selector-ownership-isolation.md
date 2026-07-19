@@ -9,7 +9,8 @@ completed `fast-contracts`, `rust-behavior`, and `rust-build` successfully.
 `REVIEW-ACL-046` remains not fixed until that deferred evidence exists. Code
 delivery is consolidated with `REVIEW-ACL-057/066` directly on the sole
 `v0.9-neutron-agent` development branch; managed Neutron activation remains
-disabled by default.
+disabled by default. Direct delivery head `a0861bb` passed exact-head push Build
+[`29685324204`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29685324204).
 
 Order: after Batch 2C and before `REVIEW-ACL-057` / `REVIEW-ACL-059`.
 
