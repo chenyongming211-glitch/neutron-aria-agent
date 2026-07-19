@@ -6,10 +6,17 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main, v0.9-neutron-agent]
+  schedule:
+    - cron: '17 3 * * 1'
   workflow_dispatch:
     inputs:
       publish_artifacts:
         description: Upload build artifacts. Only takes effect while the repository is public.
+        required: false
+        default: false
+        type: boolean
+      run_deep_audit:
+        description: Run the complete Stage 1, Stage 2, and Stage 3 static audit.
         required: false
         default: false
         type: boolean
@@ -18,7 +25,97 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  changes:
+    runs-on: ubuntu-22.04
+    outputs:
+      rust_required: ${{ steps.rust_changes.outputs.rust_required }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect Rust build changes
+        id: rust_changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          rust_required=false
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" || "${{ github.ref }}" == refs/tags/v* ]]; then
+            rust_required=true
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            changed_files="$(git diff --name-only --no-renames "origin/${{ github.base_ref }}" "$GITHUB_SHA")"
+          elif [[ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+            if ! changed_files="$(git diff --name-only --no-renames "${{ github.event.before }}" "$GITHUB_SHA")"; then
+              echo "Changed files could not be collected for the full push; requiring Rust/eBPF build as fail-closed."
+              rust_required=true
+            fi
+          else
+            echo "Push base is unavailable; requiring Rust/eBPF build as fail-closed."
+            rust_required=true
+          fi
+
+          if [[ "${rust_required}" != "true" ]]; then
+            echo "Changed files:"
+            printf '%s\n' "${changed_files:-}"
+            if [[ -z "${changed_files:-}" ]]; then
+              echo "Changed files could not be determined; requiring Rust/eBPF build as fail-closed."
+            fi
+            rust_required="$(
+              printf '%s\n' "${changed_files:-}" |
+                python3 ci/rust_build_required.py
+            )"
+          fi
+
+          echo "rust_required=${rust_required}" >> "$GITHUB_OUTPUT"
+          echo "Rust/eBPF build required: ${rust_required}"
+
+  fast-contracts:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check repository text policy and workflow contracts
+        run: |
+          python3 ci/check_blocked_terms.py
+          python3 ci/check_build_workflow_contract.py
+          python3 -m unittest ci.test_ci_lane_contract
+          python3 -m unittest ci.test_rust_build_required
+          python3 -m unittest ci.test_rust_warning_hygiene
+          python3 ci/check_rust_warning_hygiene.py
+
+      - name: Check public Neutron contracts
+        run: python3 ci/check_neutron_stage1.py --fast-contracts
+
+  rust-behavior:
+    needs: changes
+    if: needs.changes.outputs.rust_required == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run selected Rust behavior tests
+        env:
+          RUSTFLAGS: -D warnings
+        run: python3 ci/check_neutron_stage1.py --rust-tests-only --rust-toolchain stable
+
+  rust-build:
+    needs: changes
+    if: needs.changes.outputs.rust_required == 'true'
     runs-on: ubuntu-22.04
     env:
       PUBLISH_BUILD_ARTIFACTS: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_artifacts == true && github.event.repository.private == false) }}
@@ -32,48 +129,102 @@ jobs:
           echo "artifact publishing enabled: ${PUBLISH_BUILD_ARTIFACTS}"
           echo "repository private: ${{ github.event.repository.private }}"
 
-      - name: Check repository text policy
-        run: python3 ci/check_blocked_terms.py
+      - name: Install Rust nightly (eBPF)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-14
+          components: rust-src
 
-      - name: Check build workflow contracts
+      - name: Install Rust stable (userspace)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install system dependencies
         run: |
-          python3 ci/check_build_workflow_contract.py
-          python3 -m unittest ci.test_rust_build_required
-          python3 -m unittest ci.test_rust_warning_hygiene
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev clang libelf-dev libbpf-dev musl-tools zstd
 
-      - name: Check Rust warning hygiene contracts
-        run: python3 ci/check_rust_warning_hygiene.py
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
-      - name: Test neutron-aria Python adapter
+      - name: Install bpf-linker
         run: |
-          PYTHONPATH=openstack/neutron_aria \
-            python3 -m unittest discover \
-              -s openstack/neutron_aria/neutron_aria/tests/unit \
-              -p 'test_*.py'
+          set -euo pipefail
+          version="0.10.4"
+          checksum="4dda77daab6c5f120a468e6d3ede2498f5bd47ece712172cfb7290176d93d015"
+          archive="$(mktemp)"
+          install_dir="${RUNNER_TEMP}/bpf-linker-bin"
+          trap 'rm -f "${archive}"' EXIT
+          curl --fail --location --retry 3 --retry-all-errors \
+            "https://github.com/aya-rs/bpf-linker/releases/download/v${version}/bpf-linker-x86_64-unknown-linux-musl.tar.zst" \
+            --output "${archive}"
+          printf '%s  %s\n' "${checksum}" "${archive}" | sha256sum --check --strict
+          mkdir -p "${install_dir}"
+          tar --zstd --extract --file "${archive}" --directory "${install_dir}"
+          test -x "${install_dir}/bpf-linker"
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+          "${install_dir}/bpf-linker" --version
 
-      - name: Test Neutron stage-one contracts without Rust
-        run: python3 ci/check_neutron_stage1.py
-
-      - name: Test Neutron stage-two ACL contract
-        run: python3 ci/check_neutron_stage2_acl.py
-
-      - name: Test Neutron stage-two field evidence gates
+      - name: Build eBPF
+        env:
+          RUSTFLAGS: -D warnings
         run: |
-          python3 ci/check_n05_discovery_evidence.py
-          python3 ci/check_uds_hardening_evidence.py \
-            --evidence-dir docs/evidence/openstack-n05-lite/20260630131254-ostack2.bj159.net \
-            --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-ostack3.bj159.net \
-            --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-ostack4.bj159.net \
-            --min-hosts 3 \
-            --require-hardened
-          python3 ci/check_stage2_acceptance_evidence.py
+          cd ebpf
+          cargo +nightly-2026-07-14 build --release --target bpfel-unknown-none -Z build-std=core --target-dir target
+          echo "=== eBPF output candidates ==="
+          find target -type f \( -name "libebpf_firewall.so" -o -name "ebpf-firewall" \) \
+            -printf '%s %p\n' 2>/dev/null | sort -nr
+          ebpf_artifact="$(find target -type f \
+            \( -path "*/release/libebpf_firewall.so" -o -path "*/release/ebpf-firewall" \) \
+            -size +0c 2>/dev/null | head -1)"
+          if [ -z "$ebpf_artifact" ]; then
+            echo "non-empty eBPF artifact not found" >&2
+            find target -maxdepth 5 -type f 2>/dev/null | sort | head -200 >&2
+            exit 1
+          fi
+          file "$ebpf_artifact"
+          mkdir -p ../ebpf-artifacts
+          cp "$ebpf_artifact" ../ebpf-artifacts/libebpf_firewall.so
 
-      - name: Test Neutron stage-three readiness plan
+      - name: Find eBPF artifacts
         run: |
-          python3 ci/check_stage3_readiness.py
-          python3 ci/check_stage3_n3_evidence.py
-          python3 ci/check_smoke_python_blocks.py
-          python3 ci/check_standalone_tc_acl_smoke.py --self-test
+          ls -lh ebpf-artifacts/
+          file ebpf-artifacts/libebpf_firewall.so
+
+      - name: Build userspace (static)
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo +stable build --release -p ariactl --target x86_64-unknown-linux-musl
+
+      - name: Build agent (static)
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo +stable build --release -p aria-agent --target x86_64-unknown-linux-musl
+
+      - name: Verify static binaries
+        run: |
+          file target/x86_64-unknown-linux-musl/release/ariactl
+          ldd target/x86_64-unknown-linux-musl/release/ariactl 2>&1 || true
+          file target/x86_64-unknown-linux-musl/release/aria-agent
+          ldd target/x86_64-unknown-linux-musl/release/aria-agent 2>&1 || true
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          cp target/x86_64-unknown-linux-musl/release/ariactl release/
+          cp target/x86_64-unknown-linux-musl/release/aria-agent release/
+          cp ebpf-artifacts/libebpf_firewall.so release/libebpf_firewall.so
+          cp release/libebpf_firewall.so release/libebpf_firewall_perf.so
+          echo "=== release contents ==="
+          ls -la release/
 
       - name: Build Neutron stage-two ACL Kolla bundle
         run: RELEASE_VERSION="${GITHUB_REF_NAME:-stage2-acl-dev}" bash deploy/kolla/package/build_stage2_acl_bundle.sh
@@ -113,189 +264,8 @@ jobs:
           path: dist/kolla/neutron-aria-agent-*-stage2-acl-image.tar
           retention-days: 14
 
-      - name: Detect Rust build changes
-        id: rust_changes
-        shell: bash
-        run: |
-          set -euo pipefail
-          rust_required=false
-
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" || "${{ github.ref }}" == refs/tags/v* ]]; then
-            rust_required=true
-          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
-            changed_files="$(git diff --name-only --no-renames "origin/${{ github.base_ref }}" "$GITHUB_SHA")"
-          elif [[ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
-            if ! changed_files="$(git diff --name-only --no-renames "${{ github.event.before }}" "$GITHUB_SHA")"; then
-              echo "Changed files could not be collected for the full push; requiring Rust/eBPF build as fail-closed."
-              rust_required=true
-            fi
-          else
-            echo "Push base is unavailable; requiring Rust/eBPF build as fail-closed."
-            rust_required=true
-          fi
-
-          if [[ "${rust_required}" != "true" ]]; then
-            echo "Changed files:"
-            printf '%s\n' "${changed_files:-}"
-            if [[ -z "${changed_files:-}" ]]; then
-              echo "Changed files could not be determined; requiring Rust/eBPF build as fail-closed."
-            fi
-            rust_required="$(
-              printf '%s\n' "${changed_files:-}" |
-                python3 ci/rust_build_required.py
-            )"
-          fi
-
-          echo "rust_required=${rust_required}" >> "$GITHUB_OUTPUT"
-          echo "Rust/eBPF build required: ${rust_required}"
-
-      - name: Skip Rust/eBPF build
-        if: steps.rust_changes.outputs.rust_required != 'true'
-        run: echo "Skipping Rust/eBPF/static binary build; changed files only require repository policy and Python adapter checks."
-
-      - name: Install Rust nightly (eBPF)
-        if: steps.rust_changes.outputs.rust_required == 'true'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2026-07-14
-          components: rust-src
-
-      - name: Install Rust stable (userspace)
-        if: steps.rust_changes.outputs.rust_required == 'true'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-
-      - name: Install system dependencies
-        if: steps.rust_changes.outputs.rust_required == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y llvm-dev clang libelf-dev libbpf-dev musl-tools zstd
-
-      - name: Cache cargo
-        if: steps.rust_changes.outputs.rust_required == 'true'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Install bpf-linker
-        if: steps.rust_changes.outputs.rust_required == 'true'
-        run: |
-          set -euo pipefail
-          version="0.10.4"
-          checksum="4dda77daab6c5f120a468e6d3ede2498f5bd47ece712172cfb7290176d93d015"
-          archive="$(mktemp)"
-          install_dir="${RUNNER_TEMP}/bpf-linker-bin"
-          trap 'rm -f "${archive}"' EXIT
-          curl --fail --location --retry 3 --retry-all-errors \
-            "https://github.com/aya-rs/bpf-linker/releases/download/v${version}/bpf-linker-x86_64-unknown-linux-musl.tar.zst" \
-            --output "${archive}"
-          printf '%s  %s\n' "${checksum}" "${archive}" | sha256sum --check --strict
-          mkdir -p "${install_dir}"
-          tar --zstd --extract --file "${archive}" --directory "${install_dir}"
-          test -x "${install_dir}/bpf-linker"
-          echo "${install_dir}" >> "${GITHUB_PATH}"
-          "${install_dir}/bpf-linker" --version
-
-      - name: Test aria-agent Neutron attach authority
-        if: steps.rust_changes.outputs.rust_required == 'true'
-        env:
-          RUSTFLAGS: -D warnings
-        run: |
-          python3 ci/check_neutron_stage1.py --require-rust --rust-toolchain stable
-          cargo +stable test --locked -p aria-ebpf-abi --features aya-pod
-          cargo +stable test --locked -p aria-agent neutron_acl_
-          cargo +stable test --locked -p aria-agent neutron_tc_acl_
-          cargo +stable test --locked -p aria-agent neutron_acl_runtime_transition_is_atomic
-          cargo +stable test --locked -p aria-agent managed_runtime_activation_
-          cargo +stable test --locked -p aria-agent neutron_acl_gate_serialization_
-          cargo +stable test --locked -p aria-agent managed_failure_path_
-          cargo +stable test --locked -p aria-agent standalone_acl_activation_
-          cargo +stable test --locked -p aria-agent standalone_review_
-          cargo +stable test --locked -p aria-agent tc_health_loss_
-          cargo +stable test --locked -p aria-agent tc_health_reconcile_
-          cargo +stable test --locked -p aria-agent tcx_attachment_
-          cargo +stable test --locked -p aria-agent preexisting_acl_runtime_
-          cargo +stable test --locked -p aria-api instance_info_reports_
-          cargo +stable test --locked -p aria-agent tc_ct_contract_metric_labels_are_exact
-          cargo +stable test --locked -p aria-core acl_ingress_hook_
-          cargo +stable test --locked -p aria-core tap_runtime_config_
-          cargo +stable test --locked -p aria-ebpf-abi tc_ct_
-          cargo +stable test --locked -p aria-core map_delete_
-          cargo +stable test --locked -p aria-core quarantined_
-          cargo +stable test --locked -p aria-core confirmed_bitmap_cleanup_
-          cargo +stable test -p aria-agent startup_mode
-          cargo +stable test -p aria-agent domain_authority
-
-      - name: Build eBPF
-        if: steps.rust_changes.outputs.rust_required == 'true'
-        env:
-          RUSTFLAGS: -D warnings
-        run: |
-          cd ebpf
-          cargo +nightly-2026-07-14 build --release --target bpfel-unknown-none -Z build-std=core --target-dir target
-          echo "=== eBPF output candidates ==="
-          find target -type f \( -name "libebpf_firewall.so" -o -name "ebpf-firewall" \) \
-            -printf '%s %p\n' 2>/dev/null | sort -nr
-          ebpf_artifact="$(find target -type f \
-            \( -path "*/release/libebpf_firewall.so" -o -path "*/release/ebpf-firewall" \) \
-            -size +0c 2>/dev/null | head -1)"
-          if [ -z "$ebpf_artifact" ]; then
-            echo "non-empty eBPF artifact not found" >&2
-            find target -maxdepth 5 -type f 2>/dev/null | sort | head -200 >&2
-            exit 1
-          fi
-          file "$ebpf_artifact"
-          mkdir -p ../ebpf-artifacts
-          cp "$ebpf_artifact" ../ebpf-artifacts/libebpf_firewall.so
-
-      - name: Find eBPF artifacts
-        if: steps.rust_changes.outputs.rust_required == 'true'
-        run: |
-          ls -lh ebpf-artifacts/
-          file ebpf-artifacts/libebpf_firewall.so
-
-      - name: Build userspace (static)
-        if: steps.rust_changes.outputs.rust_required == 'true'
-        env:
-          RUSTFLAGS: -D warnings
-        run: cargo +stable build --release -p ariactl --target x86_64-unknown-linux-musl
-
-      - name: Build agent (static)
-        if: steps.rust_changes.outputs.rust_required == 'true'
-        env:
-          RUSTFLAGS: -D warnings
-        run: cargo +stable build --release -p aria-agent --target x86_64-unknown-linux-musl
-
-      - name: Verify static binaries
-        if: steps.rust_changes.outputs.rust_required == 'true'
-        run: |
-          file target/x86_64-unknown-linux-musl/release/ariactl
-          ldd target/x86_64-unknown-linux-musl/release/ariactl 2>&1 || true
-          file target/x86_64-unknown-linux-musl/release/aria-agent
-          ldd target/x86_64-unknown-linux-musl/release/aria-agent 2>&1 || true
-
-      - name: Prepare release files
-        if: steps.rust_changes.outputs.rust_required == 'true'
-        run: |
-          mkdir -p release
-          cp target/x86_64-unknown-linux-musl/release/ariactl release/
-          cp target/x86_64-unknown-linux-musl/release/aria-agent release/
-          cp ebpf-artifacts/libebpf_firewall.so release/libebpf_firewall.so
-          # During the perf-first rollout we publish an explicit _perf sibling so
-          # resolver auto mode can select it without changing the default base path.
-          cp release/libebpf_firewall.so release/libebpf_firewall_perf.so
-          echo "=== release contents ==="
-          ls -la release/
-
       - name: Build optional Aria datapath image tar
-        if: env.PUBLISH_BUILD_ARTIFACTS == 'true' && steps.rust_changes.outputs.rust_required == 'true' && vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != ''
+        if: env.PUBLISH_BUILD_ARTIFACTS == 'true' && vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != ''
         run: |
           image_tag="aria-datapath:${GITHUB_REF_NAME:-stage2-acl-dev}-stage2-acl"
           image_tar="dist/kolla/aria-datapath-${GITHUB_REF_NAME:-stage2-acl-dev}-stage2-acl-image.tar"
@@ -307,11 +277,11 @@ jobs:
             bash deploy/kolla/package/build_aria_datapath_image.sh
 
       - name: Check optional Aria datapath image payload policy
-        if: env.PUBLISH_BUILD_ARTIFACTS == 'true' && steps.rust_changes.outputs.rust_required == 'true' && vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != ''
+        if: env.PUBLISH_BUILD_ARTIFACTS == 'true' && vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != ''
         run: python3 ci/check_payload_terms.py dist/kolla/aria-datapath-*-stage2-acl-image.tar
 
       - name: Upload optional Aria datapath image tar
-        if: env.PUBLISH_BUILD_ARTIFACTS == 'true' && steps.rust_changes.outputs.rust_required == 'true' && vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != ''
+        if: env.PUBLISH_BUILD_ARTIFACTS == 'true' && vars.KOLLA_ARIA_DATAPATH_BASE_IMAGE != ''
         uses: actions/upload-artifact@v4
         with:
           name: aria-datapath-stage2-acl-image-${{ github.sha }}
@@ -319,7 +289,7 @@ jobs:
           retention-days: 14
 
       - name: Create release archive
-        if: env.PUBLISH_BUILD_ARTIFACTS == 'true' && steps.rust_changes.outputs.rust_required == 'true'
+        if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
         run: |
           cd release
           zip -r ../firewall-binaries-x86_64.zip .
@@ -327,11 +297,11 @@ jobs:
           ls -lh firewall-binaries-x86_64.zip
 
       - name: Check Rust binary release payload policy
-        if: env.PUBLISH_BUILD_ARTIFACTS == 'true' && steps.rust_changes.outputs.rust_required == 'true'
+        if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
         run: python3 ci/check_payload_terms.py release firewall-binaries-x86_64.zip
 
       - name: Upload artifacts
-        if: env.PUBLISH_BUILD_ARTIFACTS == 'true' && steps.rust_changes.outputs.rust_required == 'true'
+        if: env.PUBLISH_BUILD_ARTIFACTS == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: firewall-binaries-x86_64
@@ -340,7 +310,7 @@ jobs:
             firewall-binaries-x86_64.zip
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v') && steps.rust_changes.outputs.rust_required == 'true'
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -350,3 +320,31 @@ jobs:
             dist/kolla/aria-datapath-*-stage2-acl-image.tar
           fail_on_unmatched_files: false
           generate_release_notes: true
+
+  deep-audit:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_deep_audit == true)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run complete Stage 1 static audit
+        run: python3 ci/check_neutron_stage1.py
+
+      - name: Run complete Stage 2 static audit
+        run: |
+          python3 ci/check_neutron_stage2_acl.py
+          python3 ci/check_n05_discovery_evidence.py
+          python3 ci/check_uds_hardening_evidence.py \
+            --evidence-dir docs/evidence/openstack-n05-lite/20260630131254-ostack2.bj159.net \
+            --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-ostack3.bj159.net \
+            --evidence-dir docs/evidence/openstack-n05-lite/20260630133213-ostack4.bj159.net \
+            --min-hosts 3 \
+            --require-hardened
+          python3 ci/check_stage2_acceptance_evidence.py
+
+      - name: Run complete Stage 3 static audit
+        run: |
+          python3 ci/check_stage3_readiness.py
+          python3 ci/check_stage3_n3_evidence.py
+          python3 ci/check_smoke_python_blocks.py
+          python3 ci/check_standalone_tc_acl_smoke.py --self-test

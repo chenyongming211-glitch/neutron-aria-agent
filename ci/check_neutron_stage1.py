@@ -55,6 +55,28 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "domain_authority"],
     ["test", "--locked", "-p", "aria-agent", "peercred_policy"],
     ["test", "--locked", "-p", "aria-agent", "openapi_does_not_expose_neutron_uds_paths"],
+    ["test", "--locked", "-p", "aria-ebpf-abi", "--features", "aya-pod"],
+    ["test", "--locked", "-p", "aria-agent", "neutron_acl_"],
+    ["test", "--locked", "-p", "aria-agent", "neutron_tc_acl_"],
+    ["test", "--locked", "-p", "aria-agent", "neutron_acl_runtime_transition_is_atomic"],
+    ["test", "--locked", "-p", "aria-agent", "managed_runtime_activation_"],
+    ["test", "--locked", "-p", "aria-agent", "neutron_acl_gate_serialization_"],
+    ["test", "--locked", "-p", "aria-agent", "managed_failure_path_"],
+    ["test", "--locked", "-p", "aria-agent", "standalone_acl_activation_"],
+    ["test", "--locked", "-p", "aria-agent", "standalone_review_"],
+    ["test", "--locked", "-p", "aria-agent", "tc_health_loss_"],
+    ["test", "--locked", "-p", "aria-agent", "tc_health_reconcile_"],
+    ["test", "--locked", "-p", "aria-agent", "tcx_attachment_"],
+    ["test", "--locked", "-p", "aria-agent", "preexisting_acl_runtime_"],
+    ["test", "--locked", "-p", "aria-api", "instance_info_reports_"],
+    ["test", "--locked", "-p", "aria-agent", "tc_ct_contract_metric_labels_are_exact"],
+    ["test", "--locked", "-p", "aria-core", "acl_ingress_hook_"],
+    ["test", "--locked", "-p", "aria-core", "tap_runtime_config_"],
+    ["test", "--locked", "-p", "aria-ebpf-abi", "tc_ct_"],
+    ["test", "--locked", "-p", "aria-core", "map_delete_"],
+    ["test", "--locked", "-p", "aria-core", "quarantined_"],
+    ["test", "--locked", "-p", "aria-core", "confirmed_bitmap_cleanup_"],
+    ["test", "-p", "aria-agent", "startup_mode"],
 ]
 
 
@@ -14804,7 +14826,7 @@ def check_rust_stage_one_tests_present():
     ebpf_conntrack_source = _read_repo_text(EBPF_CONNTRACK_PATH)
     build_workflow_source = _read_repo_text(BUILD_WORKFLOW_PATH)
     if (
-        "python3 ci/check_neutron_stage1.py --require-rust --rust-toolchain stable"
+        "python3 ci/check_neutron_stage1.py --rust-tests-only --rust-toolchain stable"
         not in build_workflow_source
     ):
         raise SystemExit("ERROR: hosted Stage 1 Rust entry point is missing")
@@ -16040,21 +16062,14 @@ def check_rust_stage_one_tests_present():
                 "ERROR: serialized ACL gate contract missing Rust function %s"
                 % function_name
             )
-    if not re.search(
-        r"cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-agent\s+neutron_acl_gate_serialization_",
-        build_workflow_source,
-    ):
+    if ["test", "--locked", "-p", "aria-agent", "neutron_acl_gate_serialization_"] not in RUST_TESTS:
         raise SystemExit("ERROR: serialized ACL gate Rust test filter missing")
     for test_filter in (
         "tc_health_reconcile_",
         "tcx_attachment_",
         "preexisting_acl_runtime_",
     ):
-        if not re.search(
-            r"cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-agent\s+%s"
-            % re.escape(test_filter),
-            build_workflow_source,
-        ):
+        if ["test", "--locked", "-p", "aria-agent", test_filter] not in RUST_TESTS:
             raise SystemExit(
                 "ERROR: hosted TC health Rust test filter missing %s" % test_filter
             )
@@ -16147,10 +16162,7 @@ def check_rust_stage_one_tests_present():
     ):
         if _rust_function_body(source, function_name) is None:
             raise SystemExit("ERROR: managed failure-path Rust test missing %s" % function_name)
-    if not re.search(
-        r"cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-agent\s+managed_failure_path_",
-        build_workflow_source,
-    ):
+    if ["test", "--locked", "-p", "aria-agent", "managed_failure_path_"] not in RUST_TESTS:
         raise SystemExit("ERROR: managed failure-path Rust test filter missing")
 
     system_activation_body = _rust_function_body(
@@ -16427,26 +16439,16 @@ def check_rust_stage_one_tests_present():
     ):
         if test_name not in system_manager_source + instance_source + control_plane_source:
             raise SystemExit("ERROR: standalone review behavior test missing %s" % test_name)
-    if not re.search(
-        r"cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-agent\s+standalone_review_",
-        build_workflow_source,
-    ):
+    if ["test", "--locked", "-p", "aria-agent", "standalone_review_"] not in RUST_TESTS:
         raise SystemExit("ERROR: standalone review Rust test filter missing")
-    if not re.search(
-        r"cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-agent\s+standalone_acl_activation_",
-        build_workflow_source,
-    ):
+    if ["test", "--locked", "-p", "aria-agent", "standalone_acl_activation_"] not in RUST_TESTS:
         raise SystemExit("ERROR: standalone activation Rust test filter missing")
     for core_filter in (
         "map_delete_",
         "quarantined_",
         "confirmed_bitmap_cleanup_",
     ):
-        if not re.search(
-            r"(?m)^\s*cargo\s+\+stable\s+test\s+--locked\s+-p\s+aria-core\s+%s\s*$"
-            % re.escape(core_filter),
-            build_workflow_source,
-        ):
+        if ["test", "--locked", "-p", "aria-core", core_filter] not in RUST_TESTS:
             raise SystemExit(
                 "ERROR: aria-core ACL allocator Rust test filter missing %s"
                 % core_filter
@@ -16507,10 +16509,8 @@ def check_rust_stage_one_tests_present():
     if re.search(r"\bpriority\s*:", policy_key_match.group("body")):
         raise SystemExit("ERROR: eBPF PolicyKey must not contain priority")
 
-    acl_test_command = "cargo +stable test --locked -p aria-agent neutron_acl_"
-    acl_test_pattern = r"(?m)^[ \t]+%s[ \t]*$" % re.escape(acl_test_command)
-    if not re.search(acl_test_pattern, build_workflow_source):
-        raise SystemExit("ERROR: Build workflow missing active %s" % acl_test_command)
+    if ["test", "--locked", "-p", "aria-agent", "neutron_acl_"] not in RUST_TESTS:
+        raise SystemExit("ERROR: Stage 1 Rust tests must include neutron_acl_")
 
     required_domain_authority_terms = [
         "fn domain_authority_blocks_only_selected_domains(",
@@ -17219,10 +17219,27 @@ def check_tc_acl_datapath_smoke_contract():
             raise SystemExit("ERROR: TC ACL smoke guard must precede WORK_DIR mutation")
 
 
-def run_rust_tests(require_rust, toolchain):
-    if not require_rust:
-        print("SKIP: Rust stage-one contract tests require --require-rust")
-        return
+def check_public_smoke_entrypoints():
+    print("==> checking public smoke entrypoints")
+    for script in (
+        TC_ACL_DATAPATH_SMOKE_PATH,
+        STANDALONE_TC_ACL_SMOKE_PATH,
+    ):
+        path = os.path.join(ROOT, script)
+        if not os.path.isfile(path):
+            raise SystemExit("ERROR: public smoke entrypoint is missing: %s" % script)
+
+
+def run_fast_contracts():
+    run_python_tests()
+    check_packaged_ini_contract()
+    check_documented_ini_contract()
+    check_uds_contract_artifact()
+    check_public_smoke_entrypoints()
+    run_smoke_syntax()
+
+
+def run_rust_tests(toolchain):
     cargo = shutil.which("cargo")
     if not cargo:
         message = "cargo not found; Rust 04/07 contract tests were not executed"
@@ -17241,7 +17258,18 @@ def main():
     parser.add_argument(
         "--require-rust",
         action="store_true",
-        help="run Rust checks and fail when cargo is unavailable",
+        help="also run Rust checks after the complete static audit",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--fast-contracts",
+        action="store_true",
+        help="run public Python, packaged/documented, UDS, and smoke-entrypoint contracts only",
+    )
+    mode.add_argument(
+        "--rust-tests-only",
+        action="store_true",
+        help="run only the selected Rust behavior tests",
     )
     parser.add_argument(
         "--rust-toolchain",
@@ -17249,6 +17277,13 @@ def main():
         help="optional cargo toolchain name, for example stable",
     )
     args = parser.parse_args()
+
+    if args.fast_contracts:
+        run_fast_contracts()
+        return 0
+    if args.rust_tests_only:
+        run_rust_tests(args.rust_toolchain)
+        return 0
 
     run_python_tests()
     check_packaged_ini_contract()
@@ -17269,7 +17304,8 @@ def main():
     check_smoke_timeout_contract()
     check_tc_acl_datapath_smoke_contract()
     run_smoke_syntax()
-    run_rust_tests(args.require_rust, args.rust_toolchain)
+    if args.require_rust:
+        run_rust_tests(args.rust_toolchain)
     return 0
 
 
