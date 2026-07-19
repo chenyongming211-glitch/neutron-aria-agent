@@ -33,7 +33,7 @@ use tracing::{error, info, warn};
 
 use crate::control_plane::{
     ControlPlane, InstanceRuntimeHealthSnapshot, ManagedAclPublicationMode,
-    ManagedProjectionHealth, OwnedAclGroupSpec, OwnedAclPolicySpec,
+    ManagedProjectionHealth, OwnedAclGroupSpec, OwnedAclPolicySpec, OwnedAclReconcileReport,
 };
 use crate::fault_injection;
 use crate::neutron_wal::{NeutronWal, NeutronWalState, PendingNeutronIntent};
@@ -419,14 +419,6 @@ fn acl_runtime_transition(
 
 fn acl_runtime_feature_requires_tc(state: AclRuntimeFeatureState) -> bool {
     state.conntrack_enabled || state.acl_enabled
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AclPolicyDeleteTarget {
-    src_group: String,
-    dst_group: String,
-    proto: u8,
-    direction: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -853,8 +845,8 @@ impl NeutronApiState {
         for domain in domains.iter().filter(|domain| domain.as_str() != "attach") {
             match domain.as_str() {
                 "acl" if errors.is_empty() => {
-                    match purge_neutron_acl(self, &port.ifname, &port.port_id).await {
-                        Ok(()) => statuses.push(domain_status(
+                    match purge_neutron_acl_transactionally(self, &port.ifname, &port.port_id).await {
+                        Ok(_) => statuses.push(domain_status(
                             domain,
                             "recovered",
                             Some("acl_scrubbed_after_incomplete_wal_intent".to_string()),
@@ -880,7 +872,7 @@ impl NeutronApiState {
         }
 
         let should_detach = intent.kind == "delete" || !committed_before_intent;
-        if attached_for_recovery && should_detach {
+        if attached_for_recovery && should_detach && errors.is_empty() {
             match self.registry.detach(&port.ifname).await {
                 Ok(()) => {}
                 Err(e) => {
@@ -2726,17 +2718,33 @@ async fn apply_snapshot_runtime_transaction(
         let port_id = port.port_id.clone();
         let ifname = port.ifname.clone();
         let purge_started = Instant::now();
-        let mut purge_ms = 0;
-        if let Err(e) = purge_neutron_acl(state, &port.ifname, &port.port_id).await {
-            warn!(
-                port_id = %port.port_id,
-                ifname = %port.ifname,
-                error = %e,
-                "failed to purge Neutron ACL before detach"
+        if let Err(e) = purge_neutron_acl_transactionally(state, &port.ifname, &port.port_id).await {
+            let reason = format!("neutron_acl_purge_failed:{}", e);
+            warn!(port_id = %port.port_id, ifname = %port.ifname, error = %e,
+                "keeping attached Neutron interface quiesced after ACL purge failure");
+            next_statuses.insert(
+                port.port_id.clone(),
+                port_runtime_status(
+                    &port.port_id,
+                    &port.ifname,
+                    generation,
+                    requested_hash.clone(),
+                    port.managed_domains.clone(),
+                    "error",
+                    Some(reason.clone()),
+                    domain_statuses_for(&port.managed_domains, "error", Some(reason.clone())),
+                ),
             );
-        } else {
-            purge_ms = elapsed_ms(purge_started);
+            results.push(NeutronPortApplyResult {
+                port_id: port.port_id,
+                ifname: port.ifname,
+                action: "detach".to_string(),
+                status: "error".to_string(),
+                reason: Some(reason),
+            });
+            continue;
         }
+        let purge_ms = elapsed_ms(purge_started);
         let detach_started = Instant::now();
         match state.registry.detach(&port.ifname).await {
             Ok(()) => {
@@ -3202,23 +3210,28 @@ async fn apply_snapshot_runtime_transaction(
                         "neutron_port_apply_profile"
                     );
                 } else {
-                    if let Err(purge_err) =
-                        purge_neutron_acl(state, &port.ifname, &port.port_id).await
+                    let purge_failed = if let Err(purge_err) =
+                        purge_neutron_acl_transactionally(state, &port.ifname, &port.port_id).await
                     {
                         warn!(
                             port_id = %port.port_id,
                             ifname = %port.ifname,
                             error = %purge_err,
-                            "failed to purge Neutron ACL after domain apply failure"
+                            "keeping attached Neutron interface quiesced after ACL purge failure"
                         );
-                    }
-                    if let Err(detach_err) = state.registry.detach(&port.ifname).await {
+                        true
+                    } else {
+                        false
+                    };
+                    if !purge_failed {
+                        if let Err(detach_err) = state.registry.detach(&port.ifname).await {
                         warn!(
                             port_id = %port.port_id,
                             ifname = %port.ifname,
                             error = %detach_err,
                             "failed to detach after Neutron domain apply failure"
                         );
+                        }
                     }
                     next_statuses.insert(
                         managed.port_id.clone(),
@@ -3956,12 +3969,22 @@ async fn apply_delete_neutron_port(
         );
     }
 
-    if let Err(e) = purge_neutron_acl(&state, &port.ifname, &port.port_id).await {
+    if let Err(e) = purge_neutron_acl_transactionally(&state, &port.ifname, &port.port_id).await {
         warn!(
             port_id = %port.port_id,
             ifname = %port.ifname,
             error = %e,
-            "failed to purge Neutron ACL during port delete"
+            "keeping attached Neutron interface quiesced after ACL purge failure"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            NeutronDeleteResponse {
+                port_id: port.port_id,
+                ifname: Some(port.ifname),
+                detached: false,
+                status: "error".to_string(),
+                error: Some(format!("neutron_acl_purge_failed:{}", e)),
+            },
         );
     }
     if let Err(e) = fault_injection::check("neutron.delete.after_acl_purge").await {
@@ -4522,39 +4545,6 @@ fn domain_desired_hashes_from_snapshot(port: &NeutronPortSnapshot) -> BTreeMap<S
 
 fn neutron_acl_prefix(port_id: &str) -> String {
     format!("neutron:{}:", port_id)
-}
-
-fn is_neutron_acl_group(port_id: &str, group_name: &str) -> bool {
-    group_name.starts_with(&neutron_acl_prefix(port_id))
-}
-
-fn acl_group_name_for_delete(
-    group_id: u32,
-    group_names_by_id: &BTreeMap<u32, String>,
-) -> String {
-    if group_id == 0 {
-        "any".to_string()
-    } else {
-        group_names_by_id
-            .get(&group_id)
-            .cloned()
-            .unwrap_or_else(|| format!("id:{}", group_id))
-    }
-}
-
-fn acl_policy_delete_targets_for_neutron_domain(
-    rules: &[aria_core::state::RuleInfo],
-    group_names_by_id: &BTreeMap<u32, String>,
-) -> Vec<AclPolicyDeleteTarget> {
-    rules
-        .iter()
-        .map(|rule| AclPolicyDeleteTarget {
-            src_group: acl_group_name_for_delete(rule.src_group_id, group_names_by_id),
-            dst_group: acl_group_name_for_delete(rule.dst_group_id, group_names_by_id),
-            proto: rule.proto,
-            direction: rule.direction,
-        })
-        .collect()
 }
 
 fn acl_rule_id(rule: &NeutronAclRuleSnapshot, index: usize) -> String {
@@ -5312,94 +5302,54 @@ fn translate_neutron_acl_with_cache(
     }
 }
 
-async fn purge_neutron_acl(
-    state: &NeutronApiState,
-    ifname: &str,
-    port_id: &str,
-) -> Result<(), String> {
-    let profile_started = Instant::now();
-    let list_policies_started = Instant::now();
-    let (rules, groups_by_name) = state
-        .control_plane
-        .list_policies(ifname)
-        .await
-        .map_err(|e| e.to_string())?;
-    let list_policies_ms = elapsed_ms(list_policies_started);
-    let group_names_by_id: BTreeMap<u32, String> = groups_by_name
-        .values()
-        .map(|group| (group.id, group.name.clone()))
-        .collect();
-
-    let policy_delete_targets =
-        acl_policy_delete_targets_for_neutron_domain(&rules, &group_names_by_id);
-
-    let mut policy_delete_count = 0usize;
-    for target in policy_delete_targets {
-        state
-            .control_plane
-            .delete_policy_for_neutron_purge(
-                ifname,
-                &target.src_group,
-                &target.dst_group,
-                target.proto,
-                target.direction,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        policy_delete_count += 1;
-    }
-
-    let list_groups_started = Instant::now();
-    let groups = state
-        .control_plane
-        .list_groups(ifname)
-        .await
-        .map_err(|e| e.to_string())?;
-    let list_groups_ms = elapsed_ms(list_groups_started);
-    let mut group_delete_count = 0usize;
-    for group in groups {
-        if is_neutron_acl_group(port_id, &group.name) {
-            state
-                .control_plane
-                .delete_group_for_neutron_purge(ifname, port_id, &group.name)
-                .await
-                .map_err(|e| e.to_string())?;
-            group_delete_count += 1;
-        }
-    }
-
-    info!(
-        port_id = %port_id,
-        ifname = %ifname,
-        policy_delete_count,
-        group_delete_count,
-        list_policies_ms,
-        list_groups_ms,
-        total_ms = elapsed_ms(profile_started),
-        "neutron_acl_purge_profile"
-    );
-    Ok(())
+#[cfg(test)]
+async fn execute_neutron_acl_detach_cleanup<
+    Quiesce,
+    QuiesceFuture,
+    Purge,
+    PurgeFuture,
+    Detach,
+    DetachFuture,
+>(
+    quiesce: Quiesce,
+    purge: Purge,
+    detach: Detach,
+) -> Result<(), String>
+where
+    Quiesce: FnOnce() -> QuiesceFuture,
+    QuiesceFuture: Future<Output = Result<(), String>>,
+    Purge: FnOnce() -> PurgeFuture,
+    PurgeFuture: Future<Output = Result<(), String>>,
+    Detach: FnOnce() -> DetachFuture,
+    DetachFuture: Future<Output = Result<(), String>>,
+{
+    quiesce().await?;
+    purge().await?;
+    detach().await
 }
 
-async fn flush_neutron_acl_conntrack(
+async fn purge_neutron_acl_transactionally(
     state: &NeutronApiState,
     ifname: &str,
     port_id: &str,
-) -> Result<(), String> {
-    let flushed = state
-        .control_plane
-        .flush_conntrack_strict(ifname)
+) -> Result<OwnedAclReconcileReport, String> {
+    state
+        .registry
+        .update_neutron_acl_runtime_gate(ifname, false, false, false)
         .await
-        .map_err(|e| e.to_string())?;
-    if flushed > 0 {
-        warn!(
-            port_id = %port_id,
-            ifname = %ifname,
-            flushed,
-            "flushed conntrack after Neutron ACL reconcile"
-        );
-    }
-    Ok(())
+        .map_err(|error| error.to_string())?;
+    state
+        .control_plane
+        .replace_owned_acl_and_flush(
+            ifname,
+            &neutron_acl_prefix(port_id),
+            true,
+            &[],
+            &[],
+            false,
+        )
+        .await
+        .map_err(|error| error.to_string())
 }
 
 async fn check_managed_acl_precommit_fault() -> Result<(), String> {
@@ -5418,8 +5368,6 @@ async fn requiesce_managed_acl_runtime_gate(
 }
 
 async fn execute_managed_acl_post_replace_completion<
-    StrictFlush,
-    StrictFlushFuture,
     PublishGate,
     PublishGateFuture,
     PrecommitFault,
@@ -5430,15 +5378,12 @@ async fn execute_managed_acl_post_replace_completion<
     RequiesceGateFuture,
 >(
     _plan: &AclApplyPlan,
-    strict_flush: StrictFlush,
     publish_gate: PublishGate,
     precommit_fault: PrecommitFault,
     verify_and_mark: VerifyAndMark,
     requiesce_gate: RequiesceGate,
 ) -> Result<(), NeutronAclReconcileError>
 where
-    StrictFlush: FnOnce() -> StrictFlushFuture,
-    StrictFlushFuture: Future<Output = Result<(), String>>,
     PublishGate: FnOnce() -> PublishGateFuture,
     PublishGateFuture: Future<Output = Result<(), String>>,
     PrecommitFault: FnOnce() -> PrecommitFaultFuture,
@@ -5449,7 +5394,6 @@ where
     RequiesceGateFuture: Future<Output = Result<(), String>>,
 {
     let completion_result = async {
-        strict_flush().await?;
         publish_gate().await?;
         precommit_fault().await?;
         verify_and_mark().await?;
@@ -5585,7 +5529,7 @@ async fn reconcile_neutron_acl(
     let replace_started = Instant::now();
     let replace_report = state
         .control_plane
-        .replace_owned_acl(
+        .replace_owned_acl_and_flush(
             &port.ifname,
             &neutron_acl_prefix(&port.port_id),
             true,
@@ -5629,11 +5573,10 @@ async fn reconcile_neutron_acl(
         "enforced"
     };
 
-    let flush_ms = Arc::new(AtomicU64::new(0));
-    let flush_timing = Arc::clone(&flush_ms);
-    let flush_state = state;
-    let flush_ifname = port.ifname.clone();
-    let flush_port_id = port.port_id.clone();
+    // Strict CT scrubbing is part of replace_owned_acl_and_flush while the
+    // publication locks and rollback preimages are still owned.  The outer
+    // completion phase only controls gate publication and later compensation.
+    let flush_ms = 0;
     let publish_ms = Arc::new(AtomicU64::new(0));
     let publish_timing = Arc::clone(&publish_ms);
     let publish_state = state;
@@ -5645,13 +5588,6 @@ async fn reconcile_neutron_acl(
     let requiesce_ifname = port.ifname.clone();
     execute_managed_acl_post_replace_completion(
         &plan,
-        move || async move {
-            let flush_started = Instant::now();
-            let result =
-                flush_neutron_acl_conntrack(flush_state, &flush_ifname, &flush_port_id).await;
-            flush_timing.store(elapsed_ms(flush_started), Ordering::Relaxed);
-            result
-        },
         move || async move {
             let publish_started = Instant::now();
             let result = async {
@@ -5685,7 +5621,6 @@ async fn reconcile_neutron_acl(
         },
     )
     .await?;
-    let flush_ms = flush_ms.load(Ordering::Relaxed);
     let publish_ms = publish_ms.load(Ordering::Relaxed);
 
     if plan.policies.is_empty() {
@@ -11632,7 +11567,6 @@ mod tests {
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum ManagedProjectionOuterSkipFailurePoint {
-        Flush,
         Publish,
         Precommit,
         Verify,
@@ -11650,7 +11584,6 @@ mod tests {
         let trace = Arc::new(std::sync::Mutex::new(Vec::new()));
         let health = Arc::new(std::sync::Mutex::new(ManagedProjectionHealth::Verified));
 
-        let flush_trace = Arc::clone(&trace);
         let publish_trace = Arc::clone(&trace);
         let precommit_trace = Arc::clone(&trace);
         let verify_trace = Arc::clone(&trace);
@@ -11660,17 +11593,6 @@ mod tests {
 
         let result = execute_managed_acl_post_replace_completion(
             plan,
-            move || {
-                let trace = Arc::clone(&flush_trace);
-                async move {
-                    trace.lock().expect("flush trace lock").push("flush");
-                    if failure == Some(ManagedProjectionOuterSkipFailurePoint::Flush) {
-                        Err("forced strict flush failure".to_string())
-                    } else {
-                        Ok(())
-                    }
-                }
-            },
             move || {
                 let trace = Arc::clone(&publish_trace);
                 async move {
@@ -11878,7 +11800,7 @@ mod tests {
             assert!(result.is_ok(), "{label} completion must succeed");
             assert_eq!(
                 trace,
-                vec!["flush", "publish", "precommit", "verify"],
+                vec!["publish", "precommit", "verify"],
                 "{label} ACL completion must use the same ordered executor"
             );
             assert_eq!(
@@ -11893,23 +11815,18 @@ mod tests {
     async fn managed_projection_outer_skip_completion_failures_requiesce_and_never_verify() {
         let cases = [
             (
-                ManagedProjectionOuterSkipFailurePoint::Flush,
-                vec!["flush", "quiesce"],
-                "forced strict flush failure",
-            ),
-            (
                 ManagedProjectionOuterSkipFailurePoint::Publish,
-                vec!["flush", "publish", "quiesce"],
+                vec!["publish", "quiesce"],
                 "forced gate publish failure",
             ),
             (
                 ManagedProjectionOuterSkipFailurePoint::Precommit,
-                vec!["flush", "publish", "precommit", "quiesce"],
+                vec!["publish", "precommit", "quiesce"],
                 "forced precommit failure",
             ),
             (
                 ManagedProjectionOuterSkipFailurePoint::Verify,
-                vec!["flush", "publish", "precommit", "verify", "quiesce"],
+                vec!["publish", "precommit", "verify", "quiesce"],
                 "forced projection verification failure",
             ),
         ];
@@ -11943,7 +11860,7 @@ mod tests {
 
         assert_eq!(
             trace,
-            vec!["flush", "publish", "precommit", "verify", "quiesce"]
+            vec!["publish", "precommit", "verify", "quiesce"]
         );
         assert_eq!(health, ManagedProjectionHealth::Unverified);
         assert!(error
@@ -13381,11 +13298,6 @@ mod tests {
     }
 
     #[test]
-    fn neutron_control_plane_exposes_strict_conntrack_flush() {
-        let _strict_flush = ControlPlane::flush_conntrack_strict;
-    }
-
-    #[test]
     fn neutron_acl_reconcile_failure_phase_reports_the_proven_effective_action() {
         let pre_disable = acl_reconcile_error(AclReconcileFailurePhase::BeforeQuiesce, "x");
         assert_eq!(pre_disable.effective_action, "unchanged");
@@ -13412,54 +13324,4 @@ mod tests {
         assert!(error.details.contains("unknown active selector"));
     }
 
-    #[test]
-    fn domain_authority_neutron_acl_purge_includes_foreign_acl_policies() {
-        let mut group_names_by_id = BTreeMap::new();
-        group_names_by_id.insert(
-            42,
-            "neutron:port-1:dst:drop-icmp".to_string(),
-        );
-        let rules = vec![
-            aria_core::state::RuleInfo {
-                name: None,
-                src_group_id: 0,
-                dst_group_id: 0,
-                proto: 1,
-                action: 1,
-                ports: None,
-                bitmap_idx: None,
-                direction: 1,
-            },
-            aria_core::state::RuleInfo {
-                name: None,
-                src_group_id: 0,
-                dst_group_id: 42,
-                proto: 1,
-                action: 1,
-                ports: None,
-                bitmap_idx: None,
-                direction: 1,
-            },
-        ];
-
-        let targets = acl_policy_delete_targets_for_neutron_domain(&rules, &group_names_by_id);
-
-        assert_eq!(
-            targets,
-            vec![
-                AclPolicyDeleteTarget {
-                    src_group: "any".to_string(),
-                    dst_group: "any".to_string(),
-                    proto: 1,
-                    direction: 1,
-                },
-                AclPolicyDeleteTarget {
-                    src_group: "any".to_string(),
-                    dst_group: "neutron:port-1:dst:drop-icmp".to_string(),
-                    proto: 1,
-                    direction: 1,
-                },
-            ]
-        );
-    }
 }

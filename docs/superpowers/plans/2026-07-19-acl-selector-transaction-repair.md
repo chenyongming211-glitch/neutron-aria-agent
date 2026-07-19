@@ -178,6 +178,8 @@ Expected GitHub result: the new Rust tests fail for missing rollback/quiesced-pu
 
 ### Task 2: Put strict CT flush inside the owned publication transaction
 
+**Approved execution boundary:** Task 2 and Task 3 are implemented and committed as one atomic transaction batch. The implementation order remains Task 2 first, then Task 3; the four existing RED tests share one final GREEN verification because Rust compiles both test call sites in the same `aria-agent` test binary.
+
 **Files:**
 
 - Modify: `agent/src/control_plane.rs`

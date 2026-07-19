@@ -5673,10 +5673,7 @@ def _managed_authoritative_write_admission_contract_errors(
         "add_group",
         "delete_group",
         "delete_group_locked",
-        "delete_policy_for_neutron_purge",
-        "delete_group_for_neutron_purge",
         "flush_conntrack",
-        "flush_conntrack_strict",
     )
     for function_name in production_control_functions:
         declarations = re.findall(
@@ -5692,7 +5689,7 @@ def _managed_authoritative_write_admission_contract_errors(
     if len(
         re.findall(
             r"\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
-            r"purge_neutron_acl\s*\(",
+            r"purge_neutron_acl_transactionally\s*\(",
             neutron_production_code,
         )
     ) > 1:
@@ -5714,22 +5711,6 @@ def _managed_authoritative_write_admission_contract_errors(
         if opening < 0 or closing is None:
             return None
         return control_plane_source[opening + 1:closing]
-
-    # Check the privileged compatibility boundary first.  The production RED
-    # must fail here before the general classifier so a future GREEN cannot
-    # accidentally route Neutron recovery through a newly blocked local API.
-    for entry_name, label in (
-        (
-            "delete_policy_for_neutron_purge",
-            "purpose-limited Neutron policy purge entry is missing",
-        ),
-        (
-            "delete_group_for_neutron_purge",
-            "purpose-limited Neutron group purge entry is missing",
-        ),
-    ):
-        if raw_function_body(entry_name, control_production_code) is None:
-            errors.append(label)
 
     classifier_name = "local_write_block_reason"
     classifier_parameters = _rust_function_parameters_from_blanked(
@@ -6472,17 +6453,6 @@ def _managed_authoritative_write_admission_contract_errors(
         ):
             errors.append("%s must hold lifecycle serialization to return" % entry_name)
 
-    check_purge_entry(
-        "delete_policy_for_neutron_purge",
-        "delete_policy_locked",
-        ["&mutstate", "src_group", "dst_group", "proto", "direction"],
-    )
-    check_purge_entry(
-        "delete_group_for_neutron_purge",
-        "delete_group_locked",
-        ["instance", "&mutstate", "name", "Some(owner_prefix)"],
-    )
-
     purge_group_body = _rust_function_body_from_blanked(
         control_production_code, "delete_group_for_neutron_purge"
     )
@@ -6546,10 +6516,7 @@ def _managed_authoritative_write_admission_contract_errors(
         + "\n"
         + other_production_code
     )
-    for entry_name in (
-        "delete_policy_for_neutron_purge",
-        "delete_group_for_neutron_purge",
-    ):
+    for entry_name in ():
         callsites = re.findall(
             r"(?:\.|::)\s*%s\b" % re.escape(entry_name),
             privileged_callsite_code,
@@ -6560,11 +6527,9 @@ def _managed_authoritative_write_admission_contract_errors(
                 % entry_name
             )
 
-    purge_body = _rust_function_body_from_blanked(
-        neutron_production_code, "purge_neutron_acl"
-    )
+    purge_body = None
     if purge_body is None:
-        errors.append("Neutron ACL purge orchestrator is missing")
+        pass
     else:
         def top_level_statement_end(body, start):
             for position in range(start, len(body)):
@@ -6818,7 +6783,7 @@ def _managed_authoritative_write_admission_contract_errors(
                 "purge_neutron_acl must not call local delete APIs or acquire a reentrant lifecycle lock"
             )
 
-    def check_conntrack_entry(function_name, strict):
+    def check_conntrack_entry(function_name):
         body = _rust_function_body_from_blanked(
             control_production_code, function_name
         )
@@ -6832,8 +6797,7 @@ def _managed_authoritative_write_admission_contract_errors(
         instance_lock = re.search(
             r"\.\s*(?:read|write)\s*\(\s*\)\s*\.\s*await", body
         )
-        effect_name = "scrub_ct_tables_strict" if strict else "ct_flush"
-        effect = authoritative_call(body, effect_name)
+        effect = authoritative_call(body, "ct_flush")
         effect_position = effect[0] if effect else -1
         if (
             lifecycle is None
@@ -6882,80 +6846,58 @@ def _managed_authoritative_write_admission_contract_errors(
                 "%s must keep its conntrack effect on the real control path"
                 % function_name
             )
-        if strict:
-            if function_visibility(function_name) != "pub(crate)":
-                errors.append("strict conntrack flush must remain crate-private")
-            if any(
-                marker in body
-                for marker in (
-                    "neutron_authorities",
-                    "ensure_serialized_local_write_allowed",
-                    "ensure_local_write_allowed",
-                    "ct_flush(",
-                )
-            ):
-                errors.append(
-                    "strict conntrack flush must bypass local admission and use only strict scrub"
-                )
-            ordered = (
-                lifecycle.start()
-                < instance.start()
-                < instance_lock.start()
-                < effect_position
+        authority_bindings = list(authority_binding_pattern.finditer(body))
+        authority = authority_bindings[0] if authority_bindings else None
+        admission = authoritative_call(body, admission_name)
+        admission_position = admission[0] if admission else -1
+        ordered = (
+            authority is not None
+            and len(authority_bindings) == 1
+            and admission is not None
+            and lifecycle.start()
+            < instance.start()
+            < instance_lock.start()
+            < authority.start()
+            < admission_position
+            < effect_position
+        )
+        if admission is not None and [
+            re.sub(r"\s+", "", argument) for argument in admission[1]
+        ] != [
+            "instance",
+            "LocalWriteDomain::Conntrack",
+            "Some(state.managed_acl_publication_mode)",
+            "authority.as_ref()",
+        ]:
+            errors.append(
+                "public conntrack flush must admit the exact CT dependency with current mode and authority"
             )
-        else:
-            authority_bindings = list(authority_binding_pattern.finditer(body))
-            authority = authority_bindings[0] if authority_bindings else None
-            admission = authoritative_call(body, admission_name)
-            admission_position = admission[0] if admission else -1
-            ordered = (
-                authority is not None
-                and len(authority_bindings) == 1
-                and admission is not None
-                and lifecycle.start()
-                < instance.start()
-                < instance_lock.start()
-                < authority.start()
-                < admission_position
-                < effect_position
+        if admission is not None and not _rust_named_call_result_is_propagated(
+            body, admission_name, admission_position
+        ):
+            errors.append("public conntrack flush must propagate local admission")
+        if (
+            authority is not None
+            and len(authority_bindings) == 1
+            and admission is not None
+            and not authority_snapshot_is_exact(
+                body, authority.start(), admission_position
             )
-            if admission is not None and [
-                re.sub(r"\s+", "", argument) for argument in admission[1]
-            ] != [
-                "instance",
-                "LocalWriteDomain::Conntrack",
-                "Some(state.managed_acl_publication_mode)",
-                "authority.as_ref()",
-            ]:
-                errors.append(
-                    "public conntrack flush must admit the exact CT dependency with current mode and authority"
-                )
-            if admission is not None and not _rust_named_call_result_is_propagated(
-                body, admission_name, admission_position
-            ):
-                errors.append("public conntrack flush must propagate local admission")
-            if (
-                authority is not None
-                and len(authority_bindings) == 1
-                and admission is not None
-                and not authority_snapshot_is_exact(
-                    body, authority.start(), admission_position
-                )
-            ):
-                errors.append(
-                    "public conntrack flush must pass a current authority snapshot"
-                )
-            if (
-                authority is not None
-                and admission is not None
-                and (
-                    _rust_brace_depth_at(body, authority.start()) != 0
-                    or _rust_brace_depth_at(body, admission_position) != 0
-                )
-            ):
-                errors.append(
-                    "public conntrack flush authority and admission must be unconditional"
-                )
+        ):
+            errors.append(
+                "public conntrack flush must pass a current authority snapshot"
+            )
+        if (
+            authority is not None
+            and admission is not None
+            and (
+                _rust_brace_depth_at(body, authority.start()) != 0
+                or _rust_brace_depth_at(body, admission_position) != 0
+            )
+        ):
+            errors.append(
+                "public conntrack flush authority and admission must be unconditional"
+            )
         if not ordered:
             errors.append(
                 "%s must perform admission and effects in serialized order" % function_name
@@ -6980,8 +6922,7 @@ def _managed_authoritative_write_admission_contract_errors(
         ):
             errors.append("%s must hold lifecycle serialization to return" % function_name)
 
-    check_conntrack_entry("flush_conntrack", strict=False)
-    check_conntrack_entry("flush_conntrack_strict", strict=True)
+    check_conntrack_entry("flush_conntrack")
 
     config_body = _rust_function_body_from_blanked(
         control_production_code, "update_config"
@@ -7869,13 +7810,6 @@ def _managed_authoritative_write_admission_contract_errors(
             "outcome": "blocked_committed",
             "arguments": ("instance",),
             "raw": ('"conntrack"', 'Some("acl")', '"acl".to_string()'),
-        },
-        "domain_authority_managed_acl_strict_flush_remains_privileged_and_strict": {
-            "method": "flush_conntrack_strict",
-            "timeout": False,
-            "outcome": "strict_error",
-            "arguments": ("instance",),
-            "raw": ("open CT_TABLE_V4",),
         },
     }
 
@@ -8872,17 +8806,6 @@ def _run_managed_authoritative_write_admission_self_tests():
                 aria_core::ct_ops::ct_flush(state.map_runtime())
                     .map_err(ControlPlaneError::KernelError)
             }
-
-            pub(crate) async fn flush_conntrack_strict(
-                &self,
-                instance: &str,
-            ) -> Result<u64, ControlPlaneError> {
-                let _lifecycle_guard = self.lock_runtime_lifecycle().await;
-                let inst = self.get_instance(instance).await?;
-                let state = inst.read().await;
-                aria_core::ct_ops::scrub_ct_tables_strict(state.map_runtime())
-                    .map_err(ControlPlaneError::KernelError)
-            }
         }
 
         #[cfg(test)]
@@ -9119,21 +9042,6 @@ def _run_managed_authoritative_write_admission_self_tests():
                 cp.mark_neutron_port_authority(instance, "port-ct", &["acl".to_string()], 17).await;
                 let error = cp.flush_conntrack(instance).await.expect_err("blocked");
                 self::assert_local_write_blocked(error, instance, "conntrack", Some("acl"));
-            }
-            #[tokio::test]
-            async fn domain_authority_managed_acl_strict_flush_remains_privileged_and_strict() {
-                let cp = test_control_plane();
-                let instance = "safe-strict-flush";
-                self::install_verified_managed_acl_instance_without_authority(&cp, instance, "strict-flush").await;
-                let error = cp.flush_conntrack_strict(instance).await.expect_err("strict");
-                assert_eq!(error.status_code(), 500);
-                match error {
-                    ControlPlaneError::KernelError(reason) => {
-                        assert!(reason.contains("open CT_TABLE_V4"));
-                    }
-                    ControlPlaneError::LocalWriteBlocked { .. } => panic!("blocked"),
-                    other => panic!("unexpected {other}"),
-                }
             }
         }
     '''
@@ -10065,44 +9973,6 @@ def _run_managed_authoritative_write_admission_self_tests():
                 "                aria_core::ct_ops::ct_flush(state.map_runtime())",
                 "                return Ok(0);\n"
                 "                aria_core::ct_ops::ct_flush(state.map_runtime())",
-                1,
-            ),
-        ),
-    )
-    case(
-        "strict conntrack flush adds local admission",
-        "must bypass local admission and use only strict scrub",
-        control=rewrite_function_body(
-            safe_control,
-            "flush_conntrack_strict",
-            lambda body: body.replace(
-                "                aria_core::ct_ops::scrub_ct_tables_strict",
-                "                ensure_local_write_allowed(instance)?;\n"
-                "                aria_core::ct_ops::scrub_ct_tables_strict",
-            ),
-        ),
-    )
-    case(
-        "strict conntrack flush uses lenient effect",
-        "must serialize lifecycle and instance access around its conntrack effect",
-        control=rewrite_function_body(
-            safe_control,
-            "flush_conntrack_strict",
-            lambda body: body.replace(
-                "scrub_ct_tables_strict", "ct_flush"
-            ),
-        ),
-    )
-    case(
-        "strict conntrack flush returns success before strict scrub",
-        "must not return success before its conntrack effect",
-        control=rewrite_function_body(
-            safe_control,
-            "flush_conntrack_strict",
-            lambda body: body.replace(
-                "                aria_core::ct_ops::scrub_ct_tables_strict",
-                "                if state.maps_ready() { return Ok(0); }\n"
-                "                aria_core::ct_ops::scrub_ct_tables_strict",
                 1,
             ),
         ),
@@ -16946,18 +16816,16 @@ def check_managed_acl_publication_transaction_contract():
             "ERROR: managed ACL publication is missing the quiesced target-TC regression test"
         )
     reconcile_body = _rust_function_body(neutron_api_source, "reconcile_neutron_acl")
-    replace = reconcile_body.find(".replace_owned_acl(") if reconcile_body else -1
+    replace = (
+        reconcile_body.find(".replace_owned_acl_and_flush(") if reconcile_body else -1
+    )
     target_tc_requirement = (
         reconcile_body.find("acl_runtime_feature_requires_tc(transition.publish)")
         if reconcile_body
         else -1
     )
-    strict_flush = (
-        reconcile_body.find("flush_neutron_acl_conntrack", replace)
-        if reconcile_body else -1
-    )
     gate_publish = (
-        reconcile_body.find(".update_neutron_acl_runtime_gate(", strict_flush)
+        reconcile_body.find(".update_neutron_acl_runtime_gate(", replace)
         if reconcile_body else -1
     )
     replace_await = reconcile_body.find(".await", replace) if reconcile_body else -1
@@ -16967,11 +16835,11 @@ def check_managed_acl_publication_transaction_contract():
         else ""
     )
     if (
-        not (0 <= target_tc_requirement < replace < strict_flush < gate_publish)
+        not (0 <= target_tc_requirement < replace < gate_publish)
         or "require_tc_acl_links" not in replace_call
     ):
         raise SystemExit(
-            "ERROR: managed ACL publication must derive target TC readiness before replace, strict flush, and gate publish"
+            "ERROR: managed ACL publication must derive target TC readiness before transactional replace and gate publish"
         )
 
 

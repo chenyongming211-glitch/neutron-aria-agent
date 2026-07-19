@@ -1014,12 +1014,19 @@ enum SharedNetworkMutation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum ManagedAclDemotionPublicationReceipt {
+enum ManagedAclPublicationReceipt {
     General(SharedNetworkMutation),
     ActiveBank {
         previous_bank: u8,
         published_bank: u8,
     },
+}
+
+#[derive(Clone, Debug)]
+struct ManagedOwnedAclRollbackContext {
+    receipts: Vec<ManagedAclPublicationReceipt>,
+    old_state: FirewallState,
+    created_port_sets: Vec<TransactionCreatedPortSet>,
 }
 
 #[derive(Clone, Debug)]
@@ -2523,6 +2530,56 @@ where
     Ok(())
 }
 
+/// Finish a Neutron-owned publication while its runtime and instance locks are
+/// still held.  Publication receipts are deliberately replayed in reverse: the
+/// bank preimage must be restored before its failed shadow is scrubbed, then
+/// the shared selector preimages and finally the durable snapshot.
+async fn execute_managed_owned_acl_publication_transaction<
+    Receipt,
+    SetHealth,
+    Publish,
+    PublishFuture,
+    StrictFlush,
+    StrictFlushFuture,
+    Compensate,
+    CompensateFuture,
+    RestoreDurable,
+    RestoreDurableFuture,
+>(
+    mut set_projection_health: SetHealth,
+    mut publish_and_persist: Publish,
+    mut strict_flush: StrictFlush,
+    mut compensate: Compensate,
+    mut restore_durable_old_state: RestoreDurable,
+) -> Result<(), String>
+where
+    SetHealth: FnMut(ManagedProjectionHealth),
+    Publish: FnMut() -> PublishFuture,
+    PublishFuture: Future<Output = Result<Vec<Receipt>, String>>,
+    StrictFlush: FnMut() -> StrictFlushFuture,
+    StrictFlushFuture: Future<Output = Result<(), String>>,
+    Compensate: FnMut(&Receipt) -> CompensateFuture,
+    CompensateFuture: Future<Output = Result<(), String>>,
+    RestoreDurable: FnMut() -> RestoreDurableFuture,
+    RestoreDurableFuture: Future<Output = Result<(), String>>,
+{
+    set_projection_health(ManagedProjectionHealth::Unverified);
+    let receipts = publish_and_persist().await?;
+    if let Err(flush_error) = strict_flush().await {
+        let mut errors = vec![flush_error];
+        for receipt in receipts.iter().rev() {
+            if let Err(error) = compensate(receipt).await {
+                errors.push(error);
+            }
+        }
+        if let Err(error) = restore_durable_old_state().await {
+            errors.push(error);
+        }
+        return Err(errors.join("; "));
+    }
+    Ok(())
+}
+
 fn apply_managed_acl_publication_compensation(
     compensation: &ManagedAclPublicationCompensation,
     runtime: TapMapRuntime<'_>,
@@ -2541,13 +2598,13 @@ fn apply_managed_acl_publication_compensation(
     }
 }
 
-fn compensate_managed_acl_demotion_publication(
-    receipt: &ManagedAclDemotionPublicationReceipt,
+fn compensate_managed_acl_publication(
+    receipt: &ManagedAclPublicationReceipt,
     runtime: TapMapRuntime<'_>,
     ebpf_path: &str,
 ) -> Result<(), String> {
     match receipt {
-        ManagedAclDemotionPublicationReceipt::General(mutation) => {
+        ManagedAclPublicationReceipt::General(mutation) => {
             let compensation = shared_network_compensation(mutation);
             apply_shared_network_mutation(&compensation, runtime, ebpf_path).map_err(|error| {
                 format!(
@@ -2556,7 +2613,7 @@ fn compensate_managed_acl_demotion_publication(
                 )
             })
         }
-        ManagedAclDemotionPublicationReceipt::ActiveBank {
+        ManagedAclPublicationReceipt::ActiveBank {
             previous_bank,
             published_bank,
         } => {
@@ -3734,7 +3791,7 @@ impl ControlPlane {
                 let receipt = receipt.clone();
                 async move {
                     let state = compensate_instance.read().await;
-                    compensate_managed_acl_demotion_publication(
+                    compensate_managed_acl_publication(
                         &receipt,
                         state.map_runtime(),
                         &compensate_ebpf_path,
@@ -5053,7 +5110,7 @@ impl ControlPlane {
         created_port_sets: &[TransactionCreatedPortSet],
         released_port_sets: &BTreeMap<u32, String>,
         report: &mut OwnedAclReconcileReport,
-        publication_receipts: Option<&mut Vec<ManagedAclDemotionPublicationReceipt>>,
+        publication_receipts: Option<&mut Vec<ManagedAclPublicationReceipt>>,
     ) -> Result<bool, ControlPlaneError> {
         let runtime_pin_path = state.pin_path.clone();
         let runtime_tap_id = state.tap_id;
@@ -5296,9 +5353,9 @@ impl ControlPlane {
                 applied_shared_mutations
                     .iter()
                     .cloned()
-                    .map(ManagedAclDemotionPublicationReceipt::General),
+                    .map(ManagedAclPublicationReceipt::General),
             );
-            receipts.push(ManagedAclDemotionPublicationReceipt::ActiveBank {
+            receipts.push(ManagedAclPublicationReceipt::ActiveBank {
                 previous_bank: current_acl_bank,
                 published_bank: next_acl_bank,
             });
@@ -5309,18 +5366,16 @@ impl ControlPlane {
 
     // ── Groups ──
 
-    pub async fn replace_owned_acl(
+    async fn replace_owned_acl_locked(
         &self,
         instance: &str,
+        state: &mut InstanceState,
         owner_prefix: &str,
         exclusive_policy_domain: bool,
         groups: &[OwnedAclGroupSpec],
         policies: &[OwnedAclPolicySpec],
         require_tc_acl_links: bool,
-    ) -> Result<OwnedAclReconcileReport, ControlPlaneError> {
-        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
-        let inst = self.get_instance(instance).await?;
-        let mut state = inst.write().await;
+    ) -> Result<(OwnedAclReconcileReport, Option<ManagedOwnedAclRollbackContext>), ControlPlaneError> {
         let previous_projection_health = state.managed_projection_health;
         // The Neutron caller has already quiesced ACL/CT. Keep every error
         // after the instance lock fail-closed, then restore the prior health
@@ -5560,10 +5615,11 @@ impl ControlPlane {
         let clean_semantic_mutations = managed_general_state_mutations(&old_state, &final_state)?;
         let proposed_projection = compile_managed_group_projection(&final_state)
             .map_err(ControlPlaneError::ValidationError)?;
+        let mut receipts = Vec::new();
         let publication_performed = self
             .publish_acl_projection_locked(
                 instance,
-                &mut state,
+                state,
                 &old_state,
                 &final_state,
                 &proposed_projection,
@@ -5578,31 +5634,41 @@ impl ControlPlane {
                 &created_port_sets,
                 &released_port_sets,
                 &mut report,
-                None,
+                Some(&mut receipts),
             )
             .await?;
         if !publication_performed {
             state.managed_projection_health = previous_projection_health;
-            return Ok(report);
+            return Ok((report, None));
         }
+        Ok((
+            report,
+            Some(ManagedOwnedAclRollbackContext {
+                receipts,
+                old_state,
+                created_port_sets,
+            }),
+        ))
+    }
 
+    async fn complete_owned_acl_publication_locked(
+        &self,
+        state: &mut InstanceState,
+        rollback: &ManagedOwnedAclRollbackContext,
+    ) -> Result<(), ControlPlaneError> {
         let runtime_pin_path = state.pin_path.clone();
-        let runtime_tap_id = state.tap_id;
-        let runtime = TapMapRuntime::new(&runtime_pin_path, runtime_tap_id);
-
-        let released_cleanup_targets = released_port_sets
-            .iter()
-            .map(|(bitmap_idx, ports_normalized)| TransactionCreatedPortSet {
-                bitmap_idx: *bitmap_idx,
-                ports_normalized: ports_normalized.clone(),
+        let runtime = TapMapRuntime::new(&runtime_pin_path, state.tap_id);
+        let released = rollback
+            .old_state
+            .port_sets
+            .values()
+            .filter(|port_set| state.state.is_bitmap_index_quarantined(port_set.bitmap_idx))
+            .map(|port_set| TransactionCreatedPortSet {
+                bitmap_idx: port_set.bitmap_idx,
+                ports_normalized: port_set.ports_normalized.clone(),
             })
             .collect::<Vec<_>>();
-        let released_cleanup = cleanup_port_sets(
-            &released_cleanup_targets,
-            runtime,
-            &self.ebpf_path,
-            "released",
-        );
+        let released_cleanup = cleanup_port_sets(&released, runtime, &self.ebpf_path, "released");
         if !released_cleanup.cleaned_bitmap_indices.is_empty() {
             let mut reusable_state = state.state.clone();
             apply_confirmed_port_set_cleanups(&mut reusable_state, &released_cleanup)
@@ -5624,32 +5690,142 @@ impl ControlPlane {
                 "released port set remains durably quarantined after cleanup failure"
             );
         }
-        if let Err(e) = aria_core::ebpf_ops::scrub_acl_bank(runtime, current_acl_bank) {
-            warn!(
-                error = %e,
-                bank = current_acl_bank,
-                "failed to scrub previous ACL shadow bank after switch"
-            );
+
+        if let Ok(active_bank) = aria_core::ebpf_ops::read_acl_active_bank(runtime) {
+            let previous_bank = aria_core::common::acl_next_bank(active_bank);
+            if let Err(error) = aria_core::ebpf_ops::scrub_acl_bank(runtime, previous_bank) {
+                warn!(error = %error, bank = previous_bank,
+                    "failed to scrub previous ACL shadow bank after owned publication");
+            }
         }
 
-        for existing in &policy_deletes {
-            let rule = &existing.rule;
-            if let Err(e) = aria_core::monitoring::clear_rule_stats_for_policy(
+        for rule in rollback.old_state.rules.iter().filter(|old_rule| {
+            !state.state.rules.iter().any(|current_rule| {
+                current_rule.src_group_id == old_rule.src_group_id
+                    && current_rule.dst_group_id == old_rule.dst_group_id
+                    && current_rule.proto == old_rule.proto
+                    && current_rule.direction == old_rule.direction
+            })
+        }) {
+            if let Err(error) = aria_core::monitoring::clear_rule_stats_for_policy(
                 runtime,
                 rule.src_group_id,
                 rule.dst_group_id,
                 rule.proto,
                 rule.direction,
             ) {
-                warn!(error = %e, "failed to clear rule stats after owned ACL diff delete");
+                warn!(error = %error, "failed to clear rule stats after owned ACL diff delete");
             }
         }
-        for group in &group_deletes {
-            if let Err(e) = aria_core::monitoring::clear_group_stats_for_id(runtime, group.id) {
-                warn!(error = %e, group_id = group.id, "failed to clear group stats after owned ACL diff delete");
+        for group in rollback.old_state.groups.values().filter(|old_group| {
+            !state.state.groups.values().any(|current_group| current_group.id == old_group.id)
+        }) {
+            if let Err(error) = aria_core::monitoring::clear_group_stats_for_id(runtime, group.id) {
+                warn!(error = %error, group_id = group.id,
+                    "failed to clear group stats after owned ACL diff delete");
             }
         }
+        Ok(())
+    }
 
+    async fn rollback_owned_acl_after_strict_flush_locked(
+        &self,
+        state: &mut InstanceState,
+        rollback: &ManagedOwnedAclRollbackContext,
+        flush_error: String,
+    ) -> ControlPlaneError {
+        state.managed_projection_health = ManagedProjectionHealth::Unverified;
+        let runtime_pin_path = state.pin_path.clone();
+        let runtime = TapMapRuntime::new(&runtime_pin_path, state.tap_id);
+        let mut errors = vec![flush_error];
+        for receipt in rollback.receipts.iter().rev() {
+            if let Err(error) = compensate_managed_acl_publication(
+                receipt,
+                runtime,
+                &self.ebpf_path,
+            ) {
+                errors.push(error);
+            }
+        }
+        let cleanup = cleanup_transaction_created_port_sets(
+            &rollback.created_port_sets,
+            runtime,
+            &self.ebpf_path,
+        );
+        errors.extend(cleanup.failures.iter().map(|failure| failure.error.clone()));
+        if let Err(error) = restore_durable_old_state_after_failed_persistence(
+            state,
+            &rollback.old_state,
+            &cleanup,
+        )
+        .await
+        {
+            errors.push(error);
+        }
+        ControlPlaneError::KernelError(errors.join("; "))
+    }
+
+    pub async fn replace_owned_acl_and_flush(
+        &self,
+        instance: &str,
+        owner_prefix: &str,
+        exclusive_policy_domain: bool,
+        groups: &[OwnedAclGroupSpec],
+        policies: &[OwnedAclPolicySpec],
+        require_tc_acl_links: bool,
+    ) -> Result<OwnedAclReconcileReport, ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        let (report, rollback) = self
+            .replace_owned_acl_locked(
+                instance,
+                &mut state,
+                owner_prefix,
+                exclusive_policy_domain,
+                groups,
+                policies,
+                require_tc_acl_links,
+            )
+            .await?;
+        let Some(rollback) = rollback else {
+            // A semantically clean owned reconcile still closes the CT epoch.
+            // It has no publication preimages to restore, but it must not let
+            // an empty Neutron purge report success and detach with stale CT.
+            state.managed_projection_health = ManagedProjectionHealth::Unverified;
+            let runtime_pin_path = state.pin_path.clone();
+            let runtime = TapMapRuntime::new(&runtime_pin_path, state.tap_id);
+            execute_managed_owned_acl_publication_transaction(
+                |_| {},
+                || std::future::ready(Ok::<Vec<ManagedAclPublicationReceipt>, String>(Vec::new())),
+                || {
+                    std::future::ready(
+                        aria_core::ct_ops::scrub_ct_tables_strict(runtime)
+                            .map(|_| ())
+                            .map_err(|error| {
+                                format!("strict managed owned ACL CT flush: {}", error)
+                            }),
+                    )
+                },
+                |_| std::future::ready(Ok::<(), String>(())),
+                || std::future::ready(Ok::<(), String>(())),
+            )
+            .await
+            .map_err(ControlPlaneError::KernelError)?;
+            return Ok(report);
+        };
+        if let Err(error) = aria_core::ct_ops::scrub_ct_tables_strict(state.map_runtime()) {
+            return Err(
+                self.rollback_owned_acl_after_strict_flush_locked(
+                    &mut state,
+                    &rollback,
+                    format!("strict managed owned ACL CT flush: {}", error),
+                )
+                .await,
+            );
+        }
+        self.complete_owned_acl_publication_locked(&mut state, &rollback)
+            .await?;
         Ok(report)
     }
 
@@ -6013,26 +6189,6 @@ impl ControlPlane {
             .await
     }
 
-    pub(crate) async fn delete_group_for_neutron_purge(
-        &self,
-        instance: &str,
-        port_id: &str,
-        name: &str,
-    ) -> Result<(), ControlPlaneError> {
-        let owner_prefix = format!("neutron:{}:", port_id);
-        if !name.starts_with(&owner_prefix) {
-            return Err(ControlPlaneError::ValidationError(format!(
-                "Neutron purge expected owner prefix '{}', actual group '{}'",
-                owner_prefix, name
-            )));
-        }
-        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
-        let inst = self.get_instance(instance).await?;
-        let mut state = inst.write().await;
-        self.delete_group_locked(instance, &mut state, name, Some(owner_prefix))
-            .await
-    }
-
     async fn delete_group_locked(
         &self,
         instance: &str,
@@ -6263,21 +6419,6 @@ impl ControlPlane {
             Some(state.managed_acl_publication_mode),
             authority.as_ref(),
         )?;
-        self.delete_policy_locked(&mut state, src_group, dst_group, proto, direction)
-            .await
-    }
-
-    pub(crate) async fn delete_policy_for_neutron_purge(
-        &self,
-        instance: &str,
-        src_group: &str,
-        dst_group: &str,
-        proto: u8,
-        direction: u8,
-    ) -> Result<(), ControlPlaneError> {
-        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
-        let inst = self.get_instance(instance).await?;
-        let mut state = inst.write().await;
         self.delete_policy_locked(&mut state, src_group, dst_group, proto, direction)
             .await
     }
@@ -7331,17 +7472,6 @@ impl ControlPlane {
         )?;
         aria_core::ct_ops::ct_flush(state.map_runtime())
             .map_err(|e| ControlPlaneError::KernelError(e))
-    }
-
-    pub(crate) async fn flush_conntrack_strict(
-        &self,
-        instance: &str,
-    ) -> Result<u64, ControlPlaneError> {
-        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
-        let inst = self.get_instance(instance).await?;
-        let state = inst.read().await;
-        aria_core::ct_ops::scrub_ct_tables_strict(state.map_runtime())
-            .map_err(ControlPlaneError::KernelError)
     }
 
     pub async fn require_tc_acl_ready(&self, instance: &str) -> Result<(), ControlPlaneError> {
@@ -9957,16 +10087,6 @@ mod tests {
         );
     }
 
-    fn assert_missing_runtime_maps(error: ControlPlaneError) {
-        assert_eq!(error.status_code(), 503);
-        match error {
-            ControlPlaneError::InstanceNotReady(reason) => {
-                assert_eq!(reason, "Pinned firewall maps not ready");
-            }
-            other => panic!("expected exact missing-map InstanceNotReady, got: {other}"),
-        }
-    }
-
     #[tokio::test]
     async fn domain_authority_managed_acl_policy_write_add_blocks_before_authority_commit() {
         let cp = test_control_plane();
@@ -10015,101 +10135,6 @@ mod tests {
             .await
             .expect_err("ManagedAcl must block delete_policy before authority commits");
         self::assert_local_write_blocked(delete_error, instance, "acl", None);
-    }
-
-    #[tokio::test]
-    async fn domain_authority_neutron_purge_policy_uses_privileged_serialized_entry() {
-        let cp = test_control_plane();
-        let instance = "tap-neutron-policy-purge";
-        self::install_verified_managed_acl_instance_without_authority(
-            &cp,
-            instance,
-            "neutron-policy-purge",
-        )
-        .await;
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            cp.delete_policy_for_neutron_purge(
-                instance,
-                "policy-src",
-                "policy-dst",
-                libc::IPPROTO_TCP as u8,
-                0,
-            ),
-        )
-        .await
-        .expect("Neutron policy purge must not self-deadlock on the lifecycle lock");
-        let error = result.expect_err(
-            "privileged Neutron policy purge must bypass local admission and reach map readiness",
-        );
-        self::assert_missing_runtime_maps(error);
-    }
-
-    #[tokio::test]
-    async fn domain_authority_neutron_purge_group_uses_privileged_serialized_entry() {
-        let cp = test_control_plane();
-        let instance = "tap-neutron-group-purge";
-        self::install_verified_managed_acl_instance_without_authority(
-            &cp,
-            instance,
-            "neutron-group-purge",
-        )
-        .await;
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            cp.delete_group_for_neutron_purge(
-                instance,
-                "purge-port",
-                "neutron:purge-port:src:selector:0",
-            ),
-        )
-        .await
-        .expect("Neutron group purge must not self-deadlock on the lifecycle lock");
-        let error = result.expect_err(
-            "privileged Neutron group purge must bypass local admission and reach map readiness",
-        );
-        self::assert_missing_runtime_maps(error);
-    }
-
-    #[tokio::test]
-    async fn domain_authority_neutron_purge_group_rejects_foreign_owner_prefix() {
-        let cp = test_control_plane();
-        let instance = "tap-neutron-foreign-group-purge";
-        self::install_verified_managed_acl_instance_without_authority(
-            &cp,
-            instance,
-            "neutron-foreign-group-purge",
-        )
-        .await;
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            cp.delete_group_for_neutron_purge(
-                instance,
-                "purge-port",
-                "neutron:foreign-port:src:selector:0",
-            ),
-        )
-        .await
-        .expect("foreign-owner validation must not self-deadlock on the lifecycle lock");
-        let error = result.expect_err("Neutron purge must reject a foreign owner prefix");
-
-        assert_eq!(error.status_code(), 400);
-        match error {
-            ControlPlaneError::ValidationError(reason) => {
-                assert!(
-                    reason.contains("expected owner prefix 'neutron:purge-port:'"),
-                    "validation must expose the exact expected owner prefix: {reason}"
-                );
-                assert!(
-                    reason.contains("actual group 'neutron:foreign-port:src:selector:0'"),
-                    "validation must expose the exact actual group: {reason}"
-                );
-            }
-            other => panic!("expected foreign-owner ValidationError, got: {other}"),
-        }
     }
 
     #[tokio::test]
@@ -10214,32 +10239,6 @@ mod tests {
             .await
             .expect_err("committed ACL authority must protect its public CT dependency");
         self::assert_local_write_blocked(error, instance, "conntrack", Some("acl"));
-    }
-
-    #[tokio::test]
-    async fn domain_authority_managed_acl_strict_flush_remains_privileged_and_strict() {
-        let cp = test_control_plane();
-        let instance = "tap-managed-strict-ct-flush";
-        self::install_verified_managed_acl_instance_without_authority(
-            &cp,
-            instance,
-            "managed-strict-ct-flush",
-        )
-        .await;
-
-        let error = cp
-            .flush_conntrack_strict(instance)
-            .await
-            .expect_err("strict managed CT flush must fail when required CT maps are absent");
-
-        assert_eq!(error.status_code(), 500);
-        match error {
-            ControlPlaneError::KernelError(reason) => {
-                assert!(reason.contains("open CT_TABLE_V4"), "{reason}");
-            }
-            ControlPlaneError::LocalWriteBlocked { .. } => panic!("strict CT flush was blocked"),
-            other => panic!("expected strict missing-map KernelError, got: {other}"),
-        }
     }
 
     #[tokio::test]
@@ -10637,6 +10636,45 @@ mod tests {
         let observed_health = health.get();
         let observed_preimages = restored_preimages.get();
         (result, observed_events, observed_health, observed_preimages)
+    }
+
+    #[tokio::test]
+    async fn managed_owned_acl_noop_reconcile_still_strictly_flushes_conntrack() {
+        // This is the same transaction executor used by the no-op branch of
+        // replace_owned_acl_and_flush: no publication receipt exists, but CT
+        // scrub remains mandatory and a failure leaves the projection unsafe.
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let health = std::rc::Rc::new(std::cell::Cell::new(ManagedProjectionHealth::Verified));
+        let health_events = events.clone();
+        let health_state = health.clone();
+        let flush_events = events.clone();
+
+        let result = execute_managed_owned_acl_publication_transaction(
+            move |next_health| {
+                health_state.set(next_health);
+                health_events
+                    .borrow_mut()
+                    .push(format!("health:{next_health:?}"));
+            },
+            || std::future::ready(Ok::<Vec<ManagedAclPublicationReceipt>, String>(Vec::new())),
+            move || {
+                flush_events.borrow_mut().push("strict-flush".to_string());
+                std::future::ready(Err::<(), String>(
+                    "forced no-op strict flush failure".to_string(),
+                ))
+            },
+            |_| std::future::ready(Ok::<(), String>(())),
+            || std::future::ready(Ok::<(), String>(())),
+        )
+        .await;
+
+        let error = result.expect_err("no-op owned reconcile must not skip strict CT flush");
+        assert!(error.contains("forced no-op strict flush failure"), "{error}");
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["health:Unverified", "strict-flush"],
+        );
+        assert_eq!(health.get(), ManagedProjectionHealth::Unverified);
     }
 
     #[tokio::test]
