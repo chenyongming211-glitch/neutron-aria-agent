@@ -52,6 +52,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "peercred_policy"],
     ["test", "--locked", "-p", "aria-agent", "openapi_does_not_expose_neutron_uds_paths"],
     ["test", "--locked", "-p", "aria-ebpf-abi", "--features", "aya-pod"],
+    ["test", "--locked", "-p", "aria-ebpf-abi", "--features", "aya-pod", "fragment_"],
     ["test", "--locked", "-p", "aria-agent", "neutron_acl_"],
     ["test", "--locked", "-p", "aria-agent", "neutron_tc_acl_"],
     ["test", "--locked", "-p", "aria-agent", "neutron_acl_runtime_transition_is_atomic"],
