@@ -62,7 +62,7 @@ Run non-Cargo local verification: `python3 -m unittest ci.test_ci_lane_contract 
 
 Expected GitHub result: fast contracts, Rust behavior tests, and Rust/eBPF builds are independent jobs. The first exact-head Rust behavior run supplies the Task 1 RED evidence; its failure is expected until Tasks 2 and 3 land.
 
-**Status:** implementation is `7084cc4`, task review is clean, and local non-Cargo checks passed. Hosted CI is the remaining verification gate.
+**Status:** implementation is `7084cc4`, task review is clean, local non-Cargo checks passed, and exact-head hosted CI is green in Actions run `29669819020`.
 
 ---
 
@@ -172,7 +172,7 @@ git push origin codex/review-acl-046-selector-isolation-design
 
 Expected GitHub result: the new Rust tests fail for missing rollback/quiesced-purge behavior; pre-existing jobs remain green until the Rust test phase.
 
-**Current status:** the RED commit is `640173b`; its original hosted run was intentionally cancelled because the former workflow ran the complete static checker twice. Task 1 is not complete until the Task 0 Rust behavior lane records the expected RED result.
+**Status:** RED commit `640173b` recorded the intended behavior failure in the split Rust-behavior lane (`29668616679`); Task 1 is complete.
 
 ---
 
@@ -190,7 +190,7 @@ Expected GitHub result: the new Rust tests fail for missing rollback/quiesced-pu
 - Consumes: `publish_acl_projection_locked`, existing general-mutation compensation, bank restoration, created-port-set quarantine, and durable old-state restoration.
 - Produces: one Neutron-owned reconcile entrypoint whose success means bank/general/durable state and strict CT flush all succeeded.
 
-- [ ] **Step 1: Reuse the existing publication receipt**
+- [x] **Step 1: Reuse the existing publication receipt**
 
 Rename the existing demotion-specific receipt to the shared concrete name
 `ManagedAclPublicationReceipt` and reuse its existing general/pre-bank
@@ -209,7 +209,7 @@ struct ManagedOwnedAclRollbackContext {
 actually publishes. A clean no-op returns no rollback context. Existing
 demotion tests must continue to exercise the same receipt compensation path.
 
-- [ ] **Step 2: Split lock ownership from publication mechanics**
+- [x] **Step 2: Split lock ownership from publication mechanics**
 
 Refactor to a locked helper with one public transaction entrypoint:
 
@@ -238,7 +238,7 @@ pub async fn replace_owned_acl_and_flush(
 
 The public method acquires `runtime_lifecycle_lock` and the instance write lock once and holds both through strict CT flush and any rollback.
 
-- [ ] **Step 3: Flush before irreversible cleanup**
+- [x] **Step 3: Flush before irreversible cleanup**
 
 Inside `replace_owned_acl_and_flush` use this exact order:
 
@@ -256,7 +256,7 @@ return success
 
 Do not clear released port sets or stats before strict flush succeeds.
 
-- [ ] **Step 4: Restore the old publication on flush failure**
+- [x] **Step 4: Restore the old publication on flush failure**
 
 On strict-flush failure, while locks are still held:
 
@@ -272,11 +272,11 @@ return the flush error plus every compensation error
 
 Reuse the existing compensation/preimage helpers. Do not add a second general-map rollback implementation.
 
-- [ ] **Step 5: Remove the outer strict flush**
+- [x] **Step 5: Remove the outer strict flush**
 
 Change `reconcile_neutron_acl` to call `replace_owned_acl_and_flush`. Remove the separate `flush_neutron_acl_conntrack` step from `execute_managed_acl_post_replace_completion`; that helper should now perform only gate publication, precommit fault handling, verification, and re-quiesce on later failure.
 
-- [ ] **Step 6: Push GREEN and verify exact-head CI**
+- [x] **Step 6: Push GREEN and verify exact-head CI**
 
 ```bash
 git add agent/src/control_plane.rs agent/src/neutron_api.rs
@@ -303,7 +303,7 @@ Expected GitHub result: strict-flush RED tests pass; all existing publication, r
 - Consumes: `replace_owned_acl_and_flush` from Task 2 and the existing serialized runtime-gate update.
 - Produces: `purge_neutron_acl_transactionally`, whose success is required before detach.
 
-- [ ] **Step 1: Replace the purge body**
+- [x] **Step 1: Replace the purge body**
 
 Use this focused orchestration:
 
@@ -333,7 +333,7 @@ async fn purge_neutron_acl_transactionally(
 
 Do not enumerate and delete policies/groups individually.
 
-- [ ] **Step 2: Abort detach on purge failure**
+- [x] **Step 2: Abort detach on purge failure**
 
 For snapshot detach and attach/domain-failure cleanup:
 
@@ -344,7 +344,7 @@ purge failure -> keep interface attached and quiesced -> status error/degraded
 
 Do not log-and-continue. Do not report `detached` or remove the port from committed runtime state when purge fails.
 
-- [ ] **Step 3: Remove obsolete privileged item-delete entrypoints**
+- [x] **Step 3: Remove obsolete privileged item-delete entrypoints**
 
 After all production callers move to the transactional purge, remove:
 
@@ -355,7 +355,9 @@ delete_group_for_neutron_purge
 
 Keep shared private locked helpers only when still used by public standalone/local operations. Remove tests and checker rules that exist solely to prescribe the obsolete delegation shape.
 
-- [ ] **Step 4: Push GREEN and verify exact-head CI**
+- [x] **Step 4: Push GREEN and verify exact-head CI**
+
+**Status:** the approved combined GREEN commit is `49081c6`; exact-head CI is green in Actions run `29669819020` (fast contracts, Rust behavior, and Rust/eBPF build).
 
 ```bash
 git add agent/src/control_plane.rs agent/src/neutron_api.rs agent/src/tap_registry.rs
