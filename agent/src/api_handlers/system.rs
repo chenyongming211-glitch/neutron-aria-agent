@@ -24,6 +24,8 @@ pub async fn list_instances(State(cp): State<AppState>) -> impl IntoResponse {
                 acl_ready: snapshot.acl_ready,
                 xdp_ready: snapshot.xdp_ready,
                 readiness_reason: snapshot.readiness_reason,
+                cleanup_pending_count: snapshot.cleanup_pending_count,
+                maintenance_reason: snapshot.maintenance_reason,
             })
             .collect(),
     })

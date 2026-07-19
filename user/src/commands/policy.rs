@@ -1,5 +1,21 @@
 use crate::{api_client, cli::PolicyCommands};
 
+fn print_bitmap_cleanup_pending(pending: &[aria_api::BitmapCleanupPendingResponse]) {
+    if pending.is_empty() {
+        return;
+    }
+    eprintln!(
+        "Warning: policy committed with {} bitmap cleanup operation(s) pending:",
+        pending.len()
+    );
+    for cleanup in pending {
+        eprintln!(
+            "  bitmap {} ({}): {}",
+            cleanup.bitmap_idx, cleanup.ports_normalized, cleanup.error
+        );
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum PolicyBatchInput {
@@ -46,6 +62,7 @@ pub(crate) async fn handle_action(
             {
                 Ok(resp) => {
                     println!("{}", resp.message);
+                    print_bitmap_cleanup_pending(&resp.cleanup_pending);
                     Ok(())
                 }
                 Err(e) => Err(e),
@@ -71,6 +88,7 @@ pub(crate) async fn handle_action(
             {
                 Ok(resp) => {
                     println!("{}", resp.message);
+                    print_bitmap_cleanup_pending(&resp.cleanup_pending);
                     Ok(())
                 }
                 Err(e) => Err(e),
@@ -115,6 +133,7 @@ pub(crate) async fn handle_action(
                         }
                         std::process::exit(1);
                     }
+                    print_bitmap_cleanup_pending(&resp.cleanup_pending);
                     Ok(())
                 }
                 Err(e) => Err(e),

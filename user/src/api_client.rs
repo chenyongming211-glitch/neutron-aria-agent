@@ -137,7 +137,7 @@ impl ApiClient {
         &self,
         instance: &str,
         req: &AddPolicyRequest,
-    ) -> Result<MessageResponse, String> {
+    ) -> Result<PolicyMutationResponse, String> {
         let resp = self
             .client
             .post(self.url(&format!("/api/v1/{}/policies", instance)))
@@ -152,7 +152,7 @@ impl ApiClient {
         &self,
         instance: &str,
         req: &DeletePolicyRequest,
-    ) -> Result<MessageResponse, String> {
+    ) -> Result<PolicyMutationResponse, String> {
         let resp = self
             .client
             .delete(self.url(&format!("/api/v1/{}/policies", instance)))

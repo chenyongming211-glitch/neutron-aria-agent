@@ -6034,6 +6034,8 @@ mod tests {
             acl_ready: false,
             xdp_ready: true,
             readiness_reason: Some("missing_tc_egress".to_string()),
+            cleanup_pending_count: 0,
+            maintenance_reason: None,
         }];
 
         let recovery_only = vec![InstanceRuntimeHealthSnapshot {
@@ -6131,6 +6133,8 @@ mod tests {
             acl_ready: false,
             xdp_ready: true,
             readiness_reason: Some("missing_tc_ingress".to_string()),
+            cleanup_pending_count: 0,
+            maintenance_reason: None,
         }];
         (runtime, port, health)
     }

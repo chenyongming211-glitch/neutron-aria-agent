@@ -73,6 +73,8 @@ use utoipa::OpenApi;
             aria_api::InstancesResponse,
             aria_api::SystemStartRequest,
             aria_api::MessageResponse,
+            aria_api::BitmapCleanupPendingResponse,
+            aria_api::PolicyMutationResponse,
             aria_api::GroupEntry,
             aria_api::GroupsResponse,
             aria_api::AddGroupRequest,

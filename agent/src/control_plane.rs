@@ -117,6 +117,8 @@ pub struct InstanceRuntimeHealthSnapshot {
     pub acl_ready: bool,
     pub xdp_ready: bool,
     pub readiness_reason: Option<String>,
+    pub cleanup_pending_count: usize,
+    pub maintenance_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -768,6 +770,7 @@ struct TransactionCreatedPortSet {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PortSetCleanupFailure {
     bitmap_idx: u32,
+    ports_normalized: String,
     error: String,
 }
 
@@ -775,6 +778,36 @@ struct PortSetCleanupFailure {
 struct PortSetCleanupReport {
     cleaned_bitmap_indices: Vec<u32>,
     failures: Vec<PortSetCleanupFailure>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StandaloneCleanupPending {
+    pub bitmap_idx: u32,
+    pub ports_normalized: String,
+    pub error: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StandaloneCleanupOutcome {
+    pub committed: bool,
+    pub cleanup_pending: Vec<StandaloneCleanupPending>,
+    pub item_errors: Vec<String>,
+}
+
+fn standalone_cleanup_outcome(cleanup: &PortSetCleanupReport) -> StandaloneCleanupOutcome {
+    StandaloneCleanupOutcome {
+        committed: true,
+        cleanup_pending: cleanup
+            .failures
+            .iter()
+            .map(|failure| StandaloneCleanupPending {
+                bitmap_idx: failure.bitmap_idx,
+                ports_normalized: failure.ports_normalized.clone(),
+                error: failure.error.clone(),
+            })
+            .collect(),
+        item_errors: Vec::new(),
+    }
 }
 
 fn transaction_created_port_sets(
@@ -821,6 +854,7 @@ where
             Ok(()) => report.cleaned_bitmap_indices.push(port_set.bitmap_idx),
             Err(error) => report.failures.push(PortSetCleanupFailure {
                 bitmap_idx: port_set.bitmap_idx,
+                ports_normalized: port_set.ports_normalized.clone(),
                 error,
             }),
         }
@@ -858,13 +892,27 @@ fn cleanup_transaction_created_port_sets(
     cleanup_port_sets(port_sets, runtime, ebpf_path, "transaction-created")
 }
 
+fn pending_bitmap_cleanup_port_sets(state: &FirewallState) -> Vec<TransactionCreatedPortSet> {
+    state
+        .pending_bitmap_cleanup_targets()
+        .into_iter()
+        .map(|(bitmap_idx, ports_normalized)| TransactionCreatedPortSet {
+            bitmap_idx,
+            ports_normalized,
+        })
+        .collect()
+}
+
 fn quarantine_port_set_indices(
     state: &mut FirewallState,
     port_sets: &[TransactionCreatedPortSet],
 ) -> Result<(), String> {
     let mut errors = Vec::new();
     for port_set in port_sets {
-        if let Err(error) = state.quarantine_bitmap_index(port_set.bitmap_idx) {
+        if let Err(error) = state.quarantine_bitmap_cleanup(
+            port_set.bitmap_idx,
+            port_set.ports_normalized.clone(),
+        ) {
             errors.push(format!(
                 "quarantine bitmap index {}: {}",
                 port_set.bitmap_idx, error
@@ -886,7 +934,7 @@ fn quarantine_owned_acl_released_port_set(
     if let Some((bitmap_idx, ports_normalized)) = released {
         // Quarantine before recording the cleanup target. This keeps the
         // released index out of the allocator for the rest of this diff.
-        state.quarantine_bitmap_index(bitmap_idx)?;
+        state.quarantine_bitmap_cleanup(bitmap_idx, ports_normalized.clone())?;
         released_port_sets.insert(bitmap_idx, ports_normalized);
     }
     Ok(())
@@ -924,7 +972,10 @@ fn old_state_with_failed_cleanup_quarantines(
     let mut recovery_state = old_state.clone();
     for failure in &cleanup.failures {
         recovery_state
-            .quarantine_bitmap_index(failure.bitmap_idx)
+            .quarantine_bitmap_cleanup(
+                failure.bitmap_idx,
+                failure.ports_normalized.clone(),
+            )
             .map_err(|error| {
                 format!(
                     "preserve failed bitmap cleanup quarantine {}: {}",
@@ -4772,12 +4823,16 @@ impl ControlPlane {
         let mut snapshots = Vec::with_capacity(instances.len());
         for (name, instance) in instances {
             let state = instance.read().await;
+            let cleanup_pending_count = state.state.pending_bitmap_cleanup_count();
             snapshots.push(InstanceRuntimeHealthSnapshot {
                 name,
                 active: true,
                 acl_ready: state.runtime_health.acl_ready,
                 xdp_ready: state.runtime_health.xdp_ready,
                 readiness_reason: state.runtime_health.readiness_reason(),
+                cleanup_pending_count,
+                maintenance_reason: (cleanup_pending_count > 0)
+                    .then(|| "bitmap_cleanup_pending".to_string()),
             });
         }
         snapshots.sort_by(|left, right| left.name.cmp(&right.name));
@@ -5122,9 +5177,9 @@ impl ControlPlane {
         report.selector_repair_performed = *selector_repair_performed;
 
         let mut durable_final_state = final_state.clone();
-        for bitmap_idx in released_port_sets.keys() {
+        for (bitmap_idx, ports_normalized) in released_port_sets {
             durable_final_state
-                .quarantine_bitmap_index(*bitmap_idx)
+                .quarantine_bitmap_cleanup(*bitmap_idx, ports_normalized.clone())
                 .map_err(ControlPlaneError::ValidationError)?;
         }
 
@@ -5637,16 +5692,7 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let runtime_pin_path = state.pin_path.clone();
         let runtime = TapMapRuntime::new(&runtime_pin_path, state.tap_id);
-        let released = rollback
-            .old_state
-            .port_sets
-            .values()
-            .filter(|port_set| state.state.is_bitmap_index_quarantined(port_set.bitmap_idx))
-            .map(|port_set| TransactionCreatedPortSet {
-                bitmap_idx: port_set.bitmap_idx,
-                ports_normalized: port_set.ports_normalized.clone(),
-            })
-            .collect::<Vec<_>>();
+        let released = pending_bitmap_cleanup_port_sets(&state.state);
         let released_cleanup = cleanup_port_sets(&released, runtime, &self.ebpf_path, "released");
         if !released_cleanup.cleaned_bitmap_indices.is_empty() {
             let mut reusable_state = state.state.clone();
@@ -6313,7 +6359,7 @@ impl ControlPlane {
         action: u8,
         direction: u8,
         ports: Option<&str>,
-    ) -> Result<(), ControlPlaneError> {
+    ) -> Result<Vec<StandaloneCleanupPending>, ControlPlaneError> {
         let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
@@ -6347,14 +6393,14 @@ impl ControlPlane {
         if plan.accepted == 0 {
             return Err(ControlPlaneError::ValidationError(plan.errors.join("; ")));
         }
-        Ok(())
+        Ok(plan.cleanup_pending)
     }
 
     pub async fn batch_add_policies(
         &self,
         instance: &str,
         items: Vec<StandaloneAclBatchItem>,
-    ) -> Result<(usize, Vec<String>), ControlPlaneError> {
+    ) -> Result<(usize, Vec<String>, Vec<StandaloneCleanupPending>), ControlPlaneError> {
         let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
@@ -6368,7 +6414,7 @@ impl ControlPlane {
         let plan = self
             .apply_standalone_acl_batch_locked(instance, &mut state, &items)
             .await?;
-        Ok((plan.accepted, plan.errors))
+        Ok((plan.accepted, plan.errors, plan.cleanup_pending))
     }
 
     pub async fn delete_policy(
@@ -6378,7 +6424,7 @@ impl ControlPlane {
         dst_group: &str,
         proto: u8,
         direction: u8,
-    ) -> Result<(), ControlPlaneError> {
+    ) -> Result<Vec<StandaloneCleanupPending>, ControlPlaneError> {
         let _lifecycle_guard = self.lock_runtime_lifecycle().await;
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
@@ -6401,7 +6447,7 @@ impl ControlPlane {
         dst_group: &str,
         proto: u8,
         direction: u8,
-    ) -> Result<(), ControlPlaneError> {
+    ) -> Result<Vec<StandaloneCleanupPending>, ControlPlaneError> {
         Self::check_runtime_maps_ready(&state.pin_path)?;
         self.resolve_group_id(&state.state, src_group)?;
         self.resolve_group_id(&state.state, dst_group)?;
@@ -6421,7 +6467,7 @@ impl ControlPlane {
         if plan.accepted == 0 {
             return Err(ControlPlaneError::PolicyNotFound(plan.errors.join("; ")));
         }
-        Ok(())
+        Ok(plan.cleanup_pending)
     }
 
     // ── Policies with Stats (Aggregation) ──
@@ -9573,6 +9619,25 @@ mod tests {
     }
 
     #[test]
+    fn standalone_review_pending_cleanup_retry_uses_persisted_exact_target() {
+        let mut state = FirewallState::default();
+        state
+            .quarantine_bitmap_cleanup(7, "80:1".to_string())
+            .unwrap();
+
+        let restarted: FirewallState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+
+        assert_eq!(
+            pending_bitmap_cleanup_port_sets(&restarted),
+            vec![TransactionCreatedPortSet {
+                bitmap_idx: 7,
+                ports_normalized: "80:1".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn standalone_review_rollback_recovery_persists_only_failed_cleanup_quarantine() {
         let mut old_state = FirewallState::default();
         old_state.free_bitmap_indices.extend([7, 8]);
@@ -9581,6 +9646,7 @@ mod tests {
             cleaned_bitmap_indices: vec![8],
             failures: vec![PortSetCleanupFailure {
                 bitmap_idx: 7,
+                ports_normalized: "80:1".to_string(),
                 error: "forced rollback cleanup failure".to_string(),
             }],
         };
@@ -9690,7 +9756,7 @@ mod tests {
 
         let mut durable_final_state = final_state.clone();
         durable_final_state
-            .quarantine_bitmap_index(released_idx)
+            .quarantine_bitmap_cleanup(released_idx, "80:1".to_string())
             .expect("same-index quarantine must be idempotent");
         let cleanup = PortSetCleanupReport {
             cleaned_bitmap_indices: vec![released_idx],

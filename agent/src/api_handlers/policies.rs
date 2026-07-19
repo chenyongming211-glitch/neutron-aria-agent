@@ -13,6 +13,19 @@ use crate::control_plane::{
 };
 use aria_api::*;
 
+fn cleanup_pending_response(
+    pending: Vec<crate::control_plane::StandaloneCleanupPending>,
+) -> Vec<BitmapCleanupPendingResponse> {
+    pending
+        .into_iter()
+        .map(|pending| BitmapCleanupPendingResponse {
+            bitmap_idx: pending.bitmap_idx,
+            ports_normalized: pending.ports_normalized,
+            error: pending.error,
+        })
+        .collect()
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/{instance}/policies",
@@ -75,7 +88,8 @@ pub async fn list_policies(
     ),
     request_body = AddPolicyRequest,
     responses(
-        (status = 201, description = "Policy created", body = MessageResponse),
+        (status = 201, description = "Policy created", body = PolicyMutationResponse),
+        (status = 202, description = "Policy committed with bitmap cleanup pending", body = PolicyMutationResponse),
         (status = 400, description = "Validation error", body = ApiError),
         (status = 404, description = "Instance or group not found", body = ApiError),
         (status = 500, description = "Internal server error", body = ApiError)
@@ -106,7 +120,7 @@ pub async fn add_policy(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
 
-    if let Err(e) = cp
+    let cleanup_pending = match cp
         .add_policy(
             &instance,
             &req.src_group,
@@ -118,21 +132,29 @@ pub async fn add_policy(
         )
         .await
     {
-        return Err(err_response(e));
-    }
+        Ok(cleanup_pending) => cleanup_pending_response(cleanup_pending),
+        Err(error) => return Err(err_response(error)),
+    };
 
     let dir_label = if direction == 2 {
         "both"
     } else {
         &req.direction
     };
+    let status = if cleanup_pending.is_empty() {
+        StatusCode::CREATED
+    } else {
+        StatusCode::ACCEPTED
+    };
     Ok((
-        StatusCode::CREATED,
-        Json(MessageResponse {
+        status,
+        Json(PolicyMutationResponse {
             message: format!(
                 "Added policy: {} -> {} ({})",
                 req.src_group, req.dst_group, dir_label
             ),
+            committed: true,
+            cleanup_pending,
         }),
     ))
 }
@@ -148,7 +170,8 @@ pub async fn add_policy(
     ),
     request_body = DeletePolicyRequest,
     responses(
-        (status = 200, description = "Policy deleted", body = MessageResponse),
+        (status = 200, description = "Policy deleted", body = PolicyMutationResponse),
+        (status = 202, description = "Policy committed with bitmap cleanup pending", body = PolicyMutationResponse),
         (status = 400, description = "Validation error", body = ApiError),
         (status = 404, description = "Instance or policy not found", body = ApiError),
         (status = 500, description = "Internal server error", body = ApiError)
@@ -175,24 +198,35 @@ pub async fn delete_policy(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
 
-    if let Err(e) = cp
+    let cleanup_pending = match cp
         .delete_policy(&instance, &req.src_group, &req.dst_group, proto, direction)
         .await
     {
-        return Err(err_response(e));
-    }
+        Ok(cleanup_pending) => cleanup_pending_response(cleanup_pending),
+        Err(error) => return Err(err_response(error)),
+    };
 
     let dir_label = if direction == 2 {
         "both"
     } else {
         &req.direction
     };
-    Ok(Json(MessageResponse {
-        message: format!(
-            "Deleted policy: {} -> {} ({})",
-            req.src_group, req.dst_group, dir_label
-        ),
-    }))
+    let status = if cleanup_pending.is_empty() {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok((
+        status,
+        Json(PolicyMutationResponse {
+            message: format!(
+                "Deleted policy: {} -> {} ({})",
+                req.src_group, req.dst_group, dir_label
+            ),
+            committed: true,
+            cleanup_pending,
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -284,6 +318,7 @@ pub async fn list_policies_with_stats(
     responses(
         (status = 201, description = "All policies were created", body = BatchPoliciesResponse),
         (status = 200, description = "Request processed with partial failures", body = BatchPoliciesResponse),
+        (status = 202, description = "Accepted policies committed with bitmap cleanup pending", body = BatchPoliciesResponse),
         (status = 404, description = "Instance not found", body = ApiError),
         (status = 500, description = "Internal server error", body = ApiError)
     )
@@ -345,15 +380,26 @@ pub async fn batch_add_policies(
         });
     }
 
-    let (added, errors) = match cp.batch_add_policies(&instance, items).await {
+    let (added, errors, cleanup_pending) = match cp.batch_add_policies(&instance, items).await {
         Ok(result) => result,
         Err(error) => return Err(err_response(error)),
     };
+    let cleanup_pending = cleanup_pending_response(cleanup_pending);
 
-    let status = if errors.is_empty() {
+    let status = if !cleanup_pending.is_empty() {
+        StatusCode::ACCEPTED
+    } else if errors.is_empty() {
         StatusCode::CREATED
     } else {
         StatusCode::OK
     };
-    Ok((status, Json(BatchPoliciesResponse { added, errors })))
+    Ok((
+        status,
+        Json(BatchPoliciesResponse {
+            added,
+            errors,
+            committed: true,
+            cleanup_pending,
+        }),
+    ))
 }

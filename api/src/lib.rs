@@ -734,7 +734,9 @@ pub struct HealthResponse {
     "active": true,
     "acl_ready": true,
     "xdp_ready": false,
-    "readiness_reason": "xdp_ddos_hook_unavailable"
+    "readiness_reason": "xdp_ddos_hook_unavailable",
+    "cleanup_pending_count": 0,
+    "maintenance_reason": null
 }))]
 pub struct InstanceInfo {
     /// Managed instance or tap name.
@@ -754,6 +756,12 @@ pub struct InstanceInfo {
     /// Stable runtime readiness reason when either independent health dimension is degraded.
     #[serde(default)]
     pub readiness_reason: Option<String>,
+    /// Number of retired bitmap indices still awaiting confirmed kernel cleanup.
+    #[serde(default)]
+    pub cleanup_pending_count: usize,
+    /// Maintenance state that does not lower datapath ACL readiness.
+    #[serde(default)]
+    pub maintenance_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -797,6 +805,21 @@ pub struct MessageResponse {
     /// Short operator-facing status message describing the completed action.
     #[schema(example = "Added policy: web -> db (ingress)")]
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct BitmapCleanupPendingResponse {
+    pub bitmap_idx: u32,
+    pub ports_normalized: String,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PolicyMutationResponse {
+    pub message: String,
+    pub committed: bool,
+    #[serde(default)]
+    pub cleanup_pending: Vec<BitmapCleanupPendingResponse>,
 }
 
 // ── Groups ──
@@ -1072,7 +1095,9 @@ pub struct BatchAddPoliciesRequest {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[schema(example = json!({
     "added": 2,
-    "errors": []
+    "errors": [],
+    "committed": true,
+    "cleanup_pending": []
 }))]
 pub struct BatchPoliciesResponse {
     /// Number of policies successfully added.
@@ -1080,6 +1105,12 @@ pub struct BatchPoliciesResponse {
     pub added: usize,
     /// Validation or apply errors for entries that could not be created.
     pub errors: Vec<String>,
+    /// True once every accepted item has been atomically published.
+    #[serde(default)]
+    pub committed: bool,
+    /// Post-commit cleanup debt, separate from per-item validation errors.
+    #[serde(default)]
+    pub cleanup_pending: Vec<BitmapCleanupPendingResponse>,
 }
 
 // ── Policies with Stats (Aggregation) ──
@@ -2403,6 +2434,8 @@ mod tests {
             acl_ready: true,
             xdp_ready: false,
             readiness_reason: Some("xdp_ddos_hook_unavailable".to_string()),
+            cleanup_pending_count: 0,
+            maintenance_reason: None,
         })
         .unwrap();
         assert_eq!(value["acl_ready"], true);

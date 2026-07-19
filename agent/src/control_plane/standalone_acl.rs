@@ -84,6 +84,7 @@ pub(super) struct StandaloneAclPublicationPlan {
     pub general_targets: Vec<StandaloneGeneralTarget>,
     pub created_port_sets: Vec<TransactionCreatedPortSet>,
     pub released_port_sets: BTreeMap<u32, String>,
+    pub cleanup_pending: Vec<StandaloneCleanupPending>,
     pub steps: Vec<StandaloneAclPublicationStep>,
 }
 
@@ -179,8 +180,8 @@ fn apply_mutation(
                     ports.as_deref(),
                     direction,
                 )?;
-                if let Some((bitmap_idx, _)) = result.old_port_set_released {
-                    state.quarantine_bitmap_index(bitmap_idx)?;
+                if let Some((bitmap_idx, ports_normalized)) = result.old_port_set_released {
+                    state.quarantine_bitmap_cleanup(bitmap_idx, ports_normalized)?;
                 }
             }
             Ok(Vec::new())
@@ -213,10 +214,10 @@ fn apply_mutation(
             }
             for direction in matching {
                 let result = state.apply_remove_rule(src_id, dst_id, *proto, direction)?;
-                if result.port_set_released.is_some() {
-                    if let Some(bitmap_idx) = result.bitmap_idx {
-                        state.quarantine_bitmap_index(bitmap_idx)?;
-                    }
+                if let (Some(bitmap_idx), Some(ports_normalized)) =
+                    (result.bitmap_idx, result.port_set_released)
+                {
+                    state.quarantine_bitmap_cleanup(bitmap_idx, ports_normalized)?;
                 }
             }
             Ok(Vec::new())
@@ -291,6 +292,7 @@ fn finish_plan(
         general_targets,
         created_port_sets,
         released_port_sets,
+        cleanup_pending: Vec::new(),
         steps: publication_steps(semantic_changed),
     })
 }
@@ -578,16 +580,90 @@ async fn rollback_standalone_publication(
     }
 }
 
+async fn persist_confirmed_standalone_cleanups(
+    state: &mut InstanceState,
+    mut cleanup: PortSetCleanupReport,
+    targets: &[TransactionCreatedPortSet],
+    context: &str,
+) -> PortSetCleanupReport {
+    if cleanup.cleaned_bitmap_indices.is_empty() {
+        return cleanup;
+    }
+
+    let cleaned = cleanup.cleaned_bitmap_indices.clone();
+    let mut reusable_state = state.state.clone();
+    let persistence_result = apply_confirmed_port_set_cleanups(&mut reusable_state, &cleanup)
+        .map_err(|error| format!("release confirmed {} bitmap cleanup: {}", context, error));
+    let persistence_result = match persistence_result {
+        Ok(()) => state
+            .compact_and_publish_state(reusable_state)
+            .await
+            .map_err(|error| format!("persist confirmed {} bitmap cleanup: {}", context, error)),
+        Err(error) => Err(error),
+    };
+
+    if let Err(error) = persistence_result {
+        cleanup.cleaned_bitmap_indices.clear();
+        for bitmap_idx in cleaned {
+            let ports_normalized = targets
+                .iter()
+                .find(|target| target.bitmap_idx == bitmap_idx)
+                .map(|target| target.ports_normalized.clone())
+                .unwrap_or_default();
+            cleanup.failures.push(PortSetCleanupFailure {
+                bitmap_idx,
+                ports_normalized,
+                error: error.clone(),
+            });
+        }
+    }
+    cleanup
+}
+
+async fn retry_pending_standalone_bitmap_cleanups(
+    state: &mut InstanceState,
+    runtime: TapMapRuntime<'_>,
+    ebpf_path: &str,
+) -> StandaloneCleanupOutcome {
+    let targets = pending_bitmap_cleanup_port_sets(&state.state);
+    if targets.is_empty() {
+        return standalone_cleanup_outcome(&PortSetCleanupReport::default());
+    }
+
+    let cleanup = cleanup_port_sets(&targets, runtime, ebpf_path, "pending standalone");
+    let cleanup = persist_confirmed_standalone_cleanups(
+        state,
+        cleanup,
+        &targets,
+        "pending standalone",
+    )
+    .await;
+    standalone_cleanup_outcome(&cleanup)
+}
+
+fn merge_cleanup_pending(
+    previous: Vec<StandaloneCleanupPending>,
+    current: Vec<StandaloneCleanupPending>,
+) -> Vec<StandaloneCleanupPending> {
+    let mut merged = BTreeMap::new();
+    for pending in previous.into_iter().chain(current) {
+        merged.insert(pending.bitmap_idx, pending);
+    }
+    merged.into_values().collect()
+}
+
 async fn execute_standalone_publication(
     cp: &ControlPlane,
     instance: &str,
     state: &mut InstanceState,
     plan: &StandaloneAclPublicationPlan,
-) -> Result<(), ControlPlaneError> {
+) -> Result<StandaloneCleanupOutcome, ControlPlaneError> {
     debug_assert_eq!(plan.publication_count, usize::from(plan.semantic_changed));
     debug_assert_eq!(plan.steps, publication_steps(plan.semantic_changed));
     if !plan.semantic_changed {
-        return Ok(());
+        return Ok(standalone_cleanup_outcome(
+            &PortSetCleanupReport::default(),
+        ));
     }
 
     let pin_path = state.pin_path.clone();
@@ -673,8 +749,10 @@ async fn execute_standalone_publication(
     }
 
     let mut durable_final_state = plan.final_state.clone();
-    for bitmap_idx in plan.released_port_sets.keys() {
-        if let Err(error) = durable_final_state.quarantine_bitmap_index(*bitmap_idx) {
+    for (bitmap_idx, ports_normalized) in &plan.released_port_sets {
+        if let Err(error) = durable_final_state
+            .quarantine_bitmap_cleanup(*bitmap_idx, ports_normalized.clone())
+        {
             return Err(rollback_standalone_publication(
                 instance,
                 state,
@@ -731,20 +809,14 @@ async fn execute_standalone_publication(
         })
         .collect::<Vec<_>>();
     let released_cleanup = cleanup_port_sets(&released, runtime, &cp.ebpf_path, "released");
-    if !released_cleanup.cleaned_bitmap_indices.is_empty() {
-        let mut reusable_state = state.state.clone();
-        match apply_confirmed_port_set_cleanups(&mut reusable_state, &released_cleanup) {
-            Ok(()) => {
-                if let Err(error) = state.compact_and_publish_state(reusable_state).await {
-                    warn!(error = %error,
-                        "failed to persist confirmed standalone bitmap cleanup; quarantine remains durable");
-                }
-            }
-            Err(error) => warn!(error = %error,
-                "failed to release confirmed standalone bitmap cleanup; quarantine remains durable"),
-        }
-    }
-    for failure in released_cleanup.failures {
+    let released_cleanup = persist_confirmed_standalone_cleanups(
+        state,
+        released_cleanup,
+        &released,
+        "standalone released",
+    )
+    .await;
+    for failure in &released_cleanup.failures {
         warn!(error = %failure.error, bitmap_idx = failure.bitmap_idx,
             "standalone released port set remains durably quarantined");
     }
@@ -766,7 +838,7 @@ async fn execute_standalone_publication(
             }
         }
     }
-    Ok(())
+    Ok(standalone_cleanup_outcome(&released_cleanup))
 }
 
 impl ControlPlane {
@@ -777,10 +849,17 @@ impl ControlPlane {
         mutations: &[StandaloneAclMutation],
     ) -> Result<StandaloneAclPublicationPlan, ControlPlaneError> {
         Self::check_runtime_maps_ready(&state.pin_path)?;
+        let pin_path = state.pin_path.clone();
+        let runtime = TapMapRuntime::new(&pin_path, state.tap_id);
+        let retry = retry_pending_standalone_bitmap_cleanups(state, runtime, &self.ebpf_path).await;
         let old_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
             .map_err(ControlPlaneError::KernelError)?;
-        let plan = build_standalone_acl_publication_plan(&state.state, old_bank, mutations)?;
-        execute_standalone_publication(self, instance, state, &plan).await?;
+        let mut plan = build_standalone_acl_publication_plan(&state.state, old_bank, mutations)?;
+        let publication = execute_standalone_publication(self, instance, state, &plan).await?;
+        debug_assert!(retry.committed && publication.committed);
+        debug_assert!(retry.item_errors.is_empty() && publication.item_errors.is_empty());
+        plan.cleanup_pending =
+            merge_cleanup_pending(retry.cleanup_pending, publication.cleanup_pending);
         Ok(plan)
     }
 
@@ -797,10 +876,17 @@ impl ControlPlane {
             return build_standalone_acl_batch_publication_plan(&state.state, 0, items);
         }
         Self::check_runtime_maps_ready(&state.pin_path)?;
+        let pin_path = state.pin_path.clone();
+        let runtime = TapMapRuntime::new(&pin_path, state.tap_id);
+        let retry = retry_pending_standalone_bitmap_cleanups(state, runtime, &self.ebpf_path).await;
         let old_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
             .map_err(ControlPlaneError::KernelError)?;
-        let plan = build_standalone_acl_batch_publication_plan(&state.state, old_bank, items)?;
-        execute_standalone_publication(self, instance, state, &plan).await?;
+        let mut plan = build_standalone_acl_batch_publication_plan(&state.state, old_bank, items)?;
+        let publication = execute_standalone_publication(self, instance, state, &plan).await?;
+        debug_assert!(retry.committed && publication.committed);
+        debug_assert!(retry.item_errors.is_empty() && publication.item_errors.is_empty());
+        plan.cleanup_pending =
+            merge_cleanup_pending(retry.cleanup_pending, publication.cleanup_pending);
         Ok(plan)
     }
 }
