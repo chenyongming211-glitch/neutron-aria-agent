@@ -28,11 +28,12 @@ use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, Ru
 use aria_core::wal::{WalClient, WalEntry};
 
 mod observability;
-#[cfg(test)]
-mod standalone_acl;
 mod ssl;
+mod standalone_acl;
 mod tcprt;
 mod trace;
+
+pub(crate) use standalone_acl::{StandaloneAclBatchItem, StandaloneAclMutation};
 
 const WAL_COMPACT_THRESHOLD: u64 = 1000;
 pub const MANAGED_SHARED_PIN_NAMESPACE: &str = "global-v2";
@@ -3370,30 +3371,6 @@ impl ControlPlane {
         wal.shutdown().await;
     }
 
-    fn rollback_policy_deletes(
-        runtime: TapMapRuntime<'_>,
-        ebpf_path: &str,
-        deleted_rules: &[RuleInfo],
-    ) -> Result<(), String> {
-        let bank = aria_core::ebpf_ops::read_acl_active_bank(runtime).unwrap_or(0);
-        for rule in deleted_rules {
-            aria_core::ebpf_ops::add_policy_in_bank(
-                rule.src_group_id,
-                rule.dst_group_id,
-                rule.proto,
-                rule.action,
-                rule.ports.as_deref(),
-                rule.bitmap_idx,
-                false,
-                rule.direction,
-                bank,
-                runtime,
-                ebpf_path,
-            )?;
-        }
-        Ok(())
-    }
-
     fn rollback_group_deletes(
         runtime: TapMapRuntime<'_>,
         ebpf_path: &str,
@@ -6124,6 +6101,29 @@ impl ControlPlane {
         match state.managed_acl_publication_mode {
             ManagedAclPublicationMode::StandaloneCompatibility
             | ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl => {
+                if let Some(group) = state.state.groups.get(name) {
+                    let referenced =
+                        state.state.rules.iter().any(|rule| {
+                            rule.src_group_id == group.id || rule.dst_group_id == group.id
+                        });
+                    if referenced && !group.cidrs.iter().any(|existing| existing == cidr) {
+                        let group_id = group.id;
+                        let plan = self
+                            .apply_standalone_acl_mutations_locked(
+                                instance,
+                                &mut state,
+                                &[StandaloneAclMutation::AddReferencedGroupCidr {
+                                    group_name: name.to_string(),
+                                    cidr: cidr.to_string(),
+                                }],
+                            )
+                            .await?;
+                        if plan.accepted == 0 {
+                            return Err(ControlPlaneError::ValidationError(plan.errors.join("; ")));
+                        }
+                        return Ok(group_id);
+                    }
+                }
                 return self
                     .add_group_standalone_locked(&mut state, name, cidr)
                     .await;
@@ -6326,81 +6326,49 @@ impl ControlPlane {
         )?;
         Self::check_runtime_maps_ready(&state.pin_path)?;
 
-        let src_id = self.resolve_group_id(&state.state, src_group)?;
-        let dst_id = self.resolve_group_id(&state.state, dst_group)?;
+        self.resolve_group_id(&state.state, src_group)?;
+        self.resolve_group_id(&state.state, dst_group)?;
         Self::validate_policy_ports(proto, ports)?;
-
-        // Snapshot state for rollback (clone the parts that apply_add_rule mutates)
-        let snapshot_rules = state.state.rules.clone();
-        let snapshot_port_sets = state.state.port_sets.clone();
-        let snapshot_free_indices = state.state.free_bitmap_indices.clone();
-        let snapshot_next_bitmap_idx = state.state.next_bitmap_idx;
-
-        // Operate directly on in-memory state (no StateManager disk round-trip)
-        let add_result = state
-            .state
-            .apply_add_rule(src_id, dst_id, proto, action, ports, direction)
-            .map_err(|e| ControlPlaneError::ValidationError(e))?;
-        let acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
-            .map_err(ControlPlaneError::KernelError)?;
-
-        // Write to kernel
-        if let Err(e) = aria_core::ebpf_ops::add_policy_in_bank(
-            src_id,
-            dst_id,
-            proto,
-            action,
-            ports,
-            add_result.bitmap_idx,
-            add_result.is_new_port_set,
-            direction,
-            acl_bank,
-            state.map_runtime(),
-            &self.ebpf_path,
-        ) {
-            if add_result.is_new_port_set {
-                if let (Some(idx), Some(ports_str)) = (add_result.bitmap_idx, ports) {
-                    if let Err(cleanup_err) = aria_core::ebpf_ops::delete_port_set(
-                        idx,
-                        ports_str,
-                        state.map_runtime(),
-                        &self.ebpf_path,
-                    ) {
-                        warn!(error = %cleanup_err, "failed to clean new port bitmap after add_policy error");
-                    }
-                }
-            }
-            // Rollback: restore snapshotted state
-            state.state.rules = snapshot_rules;
-            state.state.port_sets = snapshot_port_sets;
-            state.state.free_bitmap_indices = snapshot_free_indices;
-            state.state.next_bitmap_idx = snapshot_next_bitmap_idx;
-            return Err(ControlPlaneError::KernelError(e));
+        Self::requested_directions(direction)?;
+        let plan = self
+            .apply_standalone_acl_mutations_locked(
+                instance,
+                &mut state,
+                &[StandaloneAclMutation::UpsertPolicy {
+                    src_group: src_group.to_string(),
+                    dst_group: dst_group.to_string(),
+                    proto,
+                    action,
+                    direction,
+                    ports: ports.map(str::to_string),
+                }],
+            )
+            .await?;
+        if plan.accepted == 0 {
+            return Err(ControlPlaneError::ValidationError(plan.errors.join("; ")));
         }
-
-        // Clean up old port set if replaced
-        if let Some((old_idx, ref ports_normalized)) = add_result.old_port_set_released {
-            if let Err(e) = aria_core::ebpf_ops::delete_port_set(
-                old_idx,
-                ports_normalized,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                warn!(error = %e, "failed to clean old port bitmap");
-            }
-        }
-
-        state
-            .wal_append(&WalEntry::AddRule {
-                src_id,
-                dst_id,
-                proto,
-                action,
-                ports: ports.map(|s| s.to_string()),
-                direction,
-            })
-            .await;
         Ok(())
+    }
+
+    pub async fn batch_add_policies(
+        &self,
+        instance: &str,
+        items: Vec<StandaloneAclBatchItem>,
+    ) -> Result<(usize, Vec<String>), ControlPlaneError> {
+        let _lifecycle_guard = self.lock_runtime_lifecycle().await;
+        let inst = self.get_instance(instance).await?;
+        let mut state = inst.write().await;
+        let authority = self.neutron_authorities.read().await.get(instance).cloned();
+        ensure_serialized_local_write_allowed(
+            instance,
+            LocalWriteDomain::Acl,
+            Some(state.managed_acl_publication_mode),
+            authority.as_ref(),
+        )?;
+        let plan = self
+            .apply_standalone_acl_batch_locked(instance, &mut state, &items)
+            .await?;
+        Ok((plan.accepted, plan.errors))
     }
 
     pub async fn delete_policy(
@@ -6421,12 +6389,13 @@ impl ControlPlane {
             Some(state.managed_acl_publication_mode),
             authority.as_ref(),
         )?;
-        self.delete_policy_locked(&mut state, src_group, dst_group, proto, direction)
+        self.delete_policy_locked(instance, &mut state, src_group, dst_group, proto, direction)
             .await
     }
 
     async fn delete_policy_locked(
         &self,
+        instance: &str,
         state: &mut InstanceState,
         src_group: &str,
         dst_group: &str,
@@ -6434,111 +6403,23 @@ impl ControlPlane {
         direction: u8,
     ) -> Result<(), ControlPlaneError> {
         Self::check_runtime_maps_ready(&state.pin_path)?;
-
-        let src_id = self.resolve_group_id(&state.state, src_group)?;
-        let dst_id = self.resolve_group_id(&state.state, dst_group)?;
-
-        let target_directions = Self::requested_directions(direction)?;
-        let matching_rules: Vec<RuleInfo> = target_directions
-            .iter()
-            .filter_map(|dir| {
-                state
-                    .state
-                    .rules
-                    .iter()
-                    .find(|r| {
-                        r.src_group_id == src_id
-                            && r.dst_group_id == dst_id
-                            && r.proto == proto
-                            && r.direction == *dir
-                    })
-                    .cloned()
-            })
-            .collect();
-        if matching_rules.is_empty() {
-            return Err(ControlPlaneError::PolicyNotFound(format!(
-                "Policy not found: src={}, dst={}, proto={}, direction={}",
-                src_group, dst_group, proto, direction
-            )));
-        }
-
-        let mut deleted_rules: Vec<RuleInfo> = Vec::new();
-        let acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
-            .map_err(ControlPlaneError::KernelError)?;
-        for rule in &matching_rules {
-            if let Err(e) = aria_core::ebpf_ops::delete_policy_in_bank(
-                rule.src_group_id,
-                rule.dst_group_id,
-                rule.proto,
-                rule.direction,
-                acl_bank,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                let rollback = Self::rollback_policy_deletes(
-                    state.map_runtime(),
-                    &self.ebpf_path,
-                    &deleted_rules,
-                );
-                let error = match rollback {
-                    Ok(()) => e,
-                    Err(rollback_err) => format!("{}; rollback failed: {}", e, rollback_err),
-                };
-                return Err(ControlPlaneError::KernelError(error));
-            }
-            deleted_rules.push(rule.clone());
-        }
-
-        let mut released_port_sets: Vec<(u32, String)> = Vec::new();
-        for rule in &matching_rules {
-            let remove_result = state
-                .state
-                .apply_remove_rule(
-                    rule.src_group_id,
-                    rule.dst_group_id,
-                    rule.proto,
-                    rule.direction,
-                )
-                .map_err(|e| ControlPlaneError::PolicyNotFound(e))?;
-
-            if let (Some(idx), Some(ports_normalized)) =
-                (remove_result.bitmap_idx, remove_result.port_set_released)
-            {
-                released_port_sets.push((idx, ports_normalized));
-            }
-
-            state
-                .wal_append(&WalEntry::RemoveRule {
-                    src_id: rule.src_group_id,
-                    dst_id: rule.dst_group_id,
-                    proto: rule.proto,
-                    direction: rule.direction,
-                })
-                .await;
-        }
-
-        for (idx, ports_normalized) in released_port_sets {
-            if let Err(e) = aria_core::ebpf_ops::delete_port_set(
-                idx,
-                &ports_normalized,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                warn!(error = %e, bitmap_idx = idx, "failed to clean port bitmap");
-            }
-        }
-
-        // Clear stale RULE_STATS entries so deleted rules no longer appear in API responses.
-        for rule in &matching_rules {
-            if let Err(e) = aria_core::monitoring::clear_rule_stats_for_policy(
-                state.map_runtime(),
-                rule.src_group_id,
-                rule.dst_group_id,
-                rule.proto,
-                rule.direction,
-            ) {
-                warn!(error = %e, "failed to clear rule stats after policy delete");
-            }
+        self.resolve_group_id(&state.state, src_group)?;
+        self.resolve_group_id(&state.state, dst_group)?;
+        Self::requested_directions(direction)?;
+        let plan = self
+            .apply_standalone_acl_mutations_locked(
+                instance,
+                state,
+                &[StandaloneAclMutation::DeletePolicy {
+                    src_group: src_group.to_string(),
+                    dst_group: dst_group.to_string(),
+                    proto,
+                    direction,
+                }],
+            )
+            .await?;
+        if plan.accepted == 0 {
+            return Err(ControlPlaneError::PolicyNotFound(plan.errors.join("; ")));
         }
         Ok(())
     }

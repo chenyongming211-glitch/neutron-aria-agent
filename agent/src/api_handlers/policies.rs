@@ -8,7 +8,9 @@ use axum::{
 };
 
 use super::common::{err_response, AppState};
-use crate::control_plane::{ControlPlaneError, LocalWriteDomain};
+use crate::control_plane::{
+    ControlPlaneError, LocalWriteDomain, StandaloneAclBatchItem, StandaloneAclMutation,
+};
 use aria_api::*;
 
 #[utoipa::path(
@@ -104,34 +106,19 @@ pub async fn add_policy(
         Err(e) => return Err(err_response(ControlPlaneError::ValidationError(e))),
     };
 
-    let directions: Vec<u8> = if direction == 2 {
-        vec![0, 1]
-    } else {
-        vec![direction]
-    };
-    let mut applied: Vec<u8> = Vec::new();
-
-    for dir in &directions {
-        if let Err(e) = cp
-            .add_policy(
-                &instance,
-                &req.src_group,
-                &req.dst_group,
-                proto,
-                action,
-                *dir,
-                req.ports.as_deref(),
-            )
-            .await
-        {
-            for prev_dir in &applied {
-                let _ = cp
-                    .delete_policy(&instance, &req.src_group, &req.dst_group, proto, *prev_dir)
-                    .await;
-            }
-            return Err(err_response(e));
-        }
-        applied.push(*dir);
+    if let Err(e) = cp
+        .add_policy(
+            &instance,
+            &req.src_group,
+            &req.dst_group,
+            proto,
+            action,
+            direction,
+            req.ports.as_deref(),
+        )
+        .await
+    {
+        return Err(err_response(e));
     }
 
     let dir_label = if direction == 2 {
@@ -313,76 +300,55 @@ pub async fn batch_add_policies(
         return Err(err_response(e));
     }
 
-    let mut added = 0;
-    let mut errors = Vec::new();
-
-    for policy in &req.policies {
+    let mut items = Vec::with_capacity(req.policies.len());
+    for (request_index, policy) in req.policies.into_iter().enumerate() {
         let proto = match proto_from_string(&policy.proto) {
             Ok(p) => p,
             Err(e) => {
-                errors.push(e);
+                items.push(StandaloneAclBatchItem::Rejected {
+                    request_index,
+                    error: e,
+                });
                 continue;
             }
         };
         let action = match action_from_string(&policy.action) {
             Ok(a) => a,
             Err(e) => {
-                errors.push(e);
+                items.push(StandaloneAclBatchItem::Rejected {
+                    request_index,
+                    error: e,
+                });
                 continue;
             }
         };
         let direction = match direction_from_string(&policy.direction) {
             Ok(d) => d,
             Err(e) => {
-                errors.push(e);
+                items.push(StandaloneAclBatchItem::Rejected {
+                    request_index,
+                    error: e,
+                });
                 continue;
             }
         };
-
-        let directions: Vec<u8> = if direction == 2 {
-            vec![0, 1]
-        } else {
-            vec![direction]
-        };
-        let mut applied: Vec<u8> = Vec::new();
-        let mut add_error: Option<String> = None;
-
-        for dir in &directions {
-            if let Err(e) = cp
-                .add_policy(
-                    &instance,
-                    &policy.src_group,
-                    &policy.dst_group,
-                    proto,
-                    action,
-                    *dir,
-                    policy.ports.as_deref(),
-                )
-                .await
-            {
-                add_error = Some(e.to_string());
-                break;
-            }
-            applied.push(*dir);
-        }
-
-        if let Some(err) = add_error {
-            for prev_dir in &applied {
-                let _ = cp
-                    .delete_policy(
-                        &instance,
-                        &policy.src_group,
-                        &policy.dst_group,
-                        proto,
-                        *prev_dir,
-                    )
-                    .await;
-            }
-            errors.push(err);
-        } else {
-            added += 1;
-        }
+        items.push(StandaloneAclBatchItem::Parsed {
+            request_index,
+            mutation: StandaloneAclMutation::UpsertPolicy {
+                src_group: policy.src_group,
+                dst_group: policy.dst_group,
+                proto,
+                action,
+                direction,
+                ports: policy.ports,
+            },
+        });
     }
+
+    let (added, errors) = match cp.batch_add_policies(&instance, items).await {
+        Ok(result) => result,
+        Err(error) => return Err(err_response(error)),
+    };
 
     let status = if errors.is_empty() {
         StatusCode::CREATED

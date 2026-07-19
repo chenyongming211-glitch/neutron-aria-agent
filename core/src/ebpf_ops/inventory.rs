@@ -129,6 +129,33 @@ fn collect_runtime_network_entries(
     Ok(entries)
 }
 
+/// Capture the owner stored at one exact canonical key in a standalone
+/// general selector map. This deliberately performs an exact-key scan rather
+/// than a longest-prefix packet lookup, because publication rollback must
+/// restore the actual overwritten preimage.
+pub fn capture_general_network_owner(
+    runtime: TapMapRuntime<'_>,
+    direction: &str,
+    cidr: &str,
+) -> Result<Option<u32>, String> {
+    let network = CanonicalNetwork::parse(cidr)?;
+    let (ipv4_map_name, ipv6_map_name) = match direction {
+        "src" => ("SRC_IPV4_TRIE", "SRC_IPV6_TRIE"),
+        "dst" => ("DST_IPV4_TRIE", "DST_IPV6_TRIE"),
+        _ => return Err("direction must be 'src' or 'dst'".to_string()),
+    };
+    let entries = collect_runtime_network_entries(
+        runtime.pin_path,
+        ipv4_map_name,
+        ipv6_map_name,
+        runtime.tap_id,
+    )?;
+    Ok(entries
+        .into_iter()
+        .find(|entry| entry.network == network)
+        .map(|entry| entry.group_id))
+}
+
 fn capture_runtime_group_map_entries(
     runtime: TapMapRuntime<'_>,
 ) -> Result<CapturedProjection, String> {
