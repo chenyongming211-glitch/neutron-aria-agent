@@ -22,7 +22,7 @@ pub struct PacketInfo {
     pub tcp_flags: u8,
     pub fragment_kind: u8,
     pub more_fragments: bool,
-    pub _pad: [u8; 1],
+    pub fragment_proto: u8,
 }
 
 const ETH_HLEN: usize = 14;
@@ -168,6 +168,7 @@ pub unsafe fn parse_eth_ipv4(
     (*out).fragment_offset = fragment_offset;
     (*out).fragment_kind = fragment_kind as u8;
     (*out).more_fragments = more_fragments;
+    (*out).fragment_proto = proto;
     (*out).l4_offset = l4_offset as u16;
     (*out).first_payload_end = if fragment_kind == FragmentKind::First {
         (ip_total_len - ihl) as u16
@@ -182,7 +183,6 @@ pub unsafe fn parse_eth_ipv4(
     (*out).tcp_seq = tcp_seq;
     (*out).payload_len = payload_len;
     (*out).vlan_id = vlan_id;
-    (*out)._pad = [0; 1];
 
     true
 }
@@ -253,6 +253,7 @@ pub unsafe fn parse_eth_ipv6(
     let mut fragment_id = 0;
     let mut fragment_offset = 0;
     let mut more_fragments = false;
+    let mut fragment_proto = next_header;
     let mut fragment_payload_offset = 0;
     let mut i = 0u8;
     while i < 4 && is_ipv6_extension_header(next_header) {
@@ -268,6 +269,7 @@ pub unsafe fn parse_eth_ipv6(
             fragment_offset = ((frag_off_flags & 0xfff8) >> 3) * 8;
             more_fragments = frag_off_flags & 1 != 0;
             fragment_id = read_be32(transport_offset, 4);
+            fragment_proto = read8(transport_offset, 0);
             fragment_kind = if fragment_offset != 0 {
                 FragmentKind::NonInitial
             } else if more_fragments {
@@ -280,6 +282,9 @@ pub unsafe fn parse_eth_ipv6(
             fragment_payload_offset = transport_offset;
         } else {
             next_header = read8(transport_offset, 0);
+            if fragment_kind == FragmentKind::Unfragmented {
+                fragment_proto = next_header;
+            }
             let ext_len = (read8(transport_offset, 1) as usize + 1) * 8;
             if transport_offset + ext_len > packet_end {
                 return false;
@@ -297,7 +302,6 @@ pub unsafe fn parse_eth_ipv6(
     if fragment_kind != FragmentKind::NonInitial && is_ipv6_extension_header(next_header) {
         return false;
     }
-
     let l4_offset = transport_offset - data;
     if l4_offset > u16::MAX as usize {
         return false;
@@ -318,6 +322,7 @@ pub unsafe fn parse_eth_ipv6(
     (*out).fragment_offset = fragment_offset;
     (*out).fragment_kind = fragment_kind as u8;
     (*out).more_fragments = more_fragments;
+    (*out).fragment_proto = fragment_proto;
     (*out).l4_offset = l4_offset as u16;
     (*out).first_payload_end = if fragment_kind == FragmentKind::First {
         (packet_end - fragment_payload_offset) as u16
@@ -332,7 +337,6 @@ pub unsafe fn parse_eth_ipv6(
     (*out).tcp_seq = tcp_seq;
     (*out).payload_len = payload_len;
     (*out).vlan_id = vlan_id;
-    (*out)._pad = [0; 1];
 
     true
 }

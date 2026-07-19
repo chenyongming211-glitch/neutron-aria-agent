@@ -47,6 +47,7 @@ pub struct FragmentContextValue {
     pub flags: u8,
     pub version: u8,
     pub _pad: u8,
+    pub _reserved: [u8; 6],
     pub epoch: u64,
     pub expires_at_ns: u64,
 }

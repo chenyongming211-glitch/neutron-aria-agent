@@ -108,6 +108,7 @@ fn fragment_context_rejects_two_bank_rotation_epoch_reuse() {
         flags: 0,
         version: 1,
         _pad: 0,
+        _reserved: [0; 6],
         epoch: 7,
         expires_at_ns: 30_000_000_000,
     };
@@ -173,6 +174,7 @@ pub struct FragmentContextKey4 {
 pub struct FragmentContextValue {
     pub src_port: u16, pub dst_port: u16, pub first_payload_end: u16,
     pub acl_bank: u8, pub flags: u8, pub version: u8, pub _pad: u8,
+    pub _reserved: [u8; 6],
     pub epoch: u64, pub expires_at_ns: u64,
 }
 ```

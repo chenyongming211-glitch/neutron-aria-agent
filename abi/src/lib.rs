@@ -815,7 +815,13 @@ mod tests {
         assert_eq!(core::mem::size_of::<TapConfig>(), 8);
         assert_eq!(core::mem::size_of::<CtValue>(), 40);
         assert_eq!(core::mem::size_of::<FragmentContextKey4>(), 20);
-        assert_eq!(core::mem::size_of::<FragmentContextValue>(), 32);
+        assert_eq!(
+            core::mem::size_of::<FragmentContextValue>(),
+            3 * core::mem::size_of::<u16>()
+                + 4 * core::mem::size_of::<u8>()
+                + core::mem::size_of::<[u8; 6]>()
+                + 2 * core::mem::size_of::<u64>()
+        );
         assert_eq!(core::mem::size_of::<SslErrorEvent>(), 32);
         assert_eq!(core::mem::size_of::<FirewallConfig>(), 10);
         assert_eq!(core::mem::size_of::<TcpRtValue>(), 168);
@@ -861,11 +867,13 @@ mod tests {
         assert_eq!(core::mem::offset_of!(FragmentContextValue, flags), 7);
         assert_eq!(core::mem::offset_of!(FragmentContextValue, version), 8);
         assert_eq!(core::mem::offset_of!(FragmentContextValue, _pad), 9);
+        assert_eq!(core::mem::offset_of!(FragmentContextValue, _reserved), 10);
         assert_eq!(core::mem::offset_of!(FragmentContextValue, epoch), 16);
         assert_eq!(
             core::mem::offset_of!(FragmentContextValue, expires_at_ns),
             24
         );
+        assert_eq!(core::mem::size_of::<FragmentContextValue>(), 32);
 
         assert_eq!(core::mem::size_of::<FragmentConfig>(), 24);
         assert_eq!(core::mem::offset_of!(FragmentConfig, version), 0);
