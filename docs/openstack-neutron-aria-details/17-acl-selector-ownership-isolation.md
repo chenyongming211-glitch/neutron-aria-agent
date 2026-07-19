@@ -1,12 +1,14 @@
 # ACL Selector Ownership Isolation
 
-Status: implementation and hosted CI are complete, but privileged field
-evidence is pending. The transaction repair landed in commit `49081c6`; the
+Status: implementation and hosted CI are complete. No privileged field
+environment exists, so field evidence is explicitly deferred to the production
+activation gate rather than represented as passed. The transaction repair landed in commit `49081c6`; the
 checker/CI verification head is `65b1dc5`. Exact-head GitHub Actions run
 [`29670301941`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29670301941)
 completed `fast-contracts`, `rust-behavior`, and `rust-build` successfully.
-No privileged Linux managed/standalone field environment is available, so
-`REVIEW-ACL-046` remains not fixed and the PR remains Draft.
+`REVIEW-ACL-046` remains not fixed until that deferred evidence exists. Code
+delivery is consolidated with `REVIEW-ACL-057/066` on the single integration
+branch; managed Neutron activation remains disabled by default.
 
 Order: after Batch 2C and before `REVIEW-ACL-057` / `REVIEW-ACL-059`.
 
@@ -638,4 +640,5 @@ run
 passed `fast-contracts`, `rust-behavior`, and `rust-build`. Completion condition
 7 still lacks privileged managed and standalone field evidence. No field run,
 environment, command transcript, timestamp, or artifact is claimed by this
-checkpoint; the finding remains not fixed and the PR remains Draft.
+checkpoint; the finding remains not fixed. The missing evidence blocks
+production activation, not source integration on the unified branch.

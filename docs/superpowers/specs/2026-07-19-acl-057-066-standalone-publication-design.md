@@ -3,7 +3,7 @@
 Date: 2026-07-19
 
 Status: written specification approved on 2026-07-19; RED and hosted GREEN
-implementation evidence complete; post-PR-#5 delivery pending
+implementation evidence complete; unified-branch delivery pending
 
 Analyzed target: `codex/review-acl-057-direct-publication@67b70ab`
 
@@ -389,7 +389,9 @@ Recorded evidence:
   [`29683492746`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29683492746).
 - No local Cargo command was run. `REVIEW-ACL-059`, `REVIEW-ACL-056`, ordinary
   unreferenced-group durability, privileged field evidence, and final delivery
-  remain explicitly outside this completed implementation evidence.
+  remain explicitly outside this completed implementation evidence. Because no
+  privileged environment exists, that evidence is deferred to the production
+  activation gate and is not represented as passed.
 
 ### 13.1 Final-state and API aggregation tests
 
