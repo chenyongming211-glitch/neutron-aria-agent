@@ -39,8 +39,11 @@ PURGE_FAILURE_ATOMICITY_STATUS="not_run"
 STRICT_FLUSH_ROLLBACK_STATUS="not_run"
 RETRY_DETACH_STATUS="not_run"
 cleanup_errors=()
-renamed_pin_sources=()
-renamed_pin_destinations=()
+renamed_pin_records=()
+DEDICATED_GUARD_ESTABLISHED=false
+GUARD_REFUSED=false
+TARGET_ROLLBACK_ARMED=false
+DATAPATH_RESTORE_ARMED=false
 
 die() {
     if [ "${MANAGED_TRANSACTION_SMOKE}" = "true" ]; then
@@ -378,10 +381,16 @@ record_cleanup_error() {
 }
 
 restore_renamed_pins() {
-    local index source destination rc=0
-    for ((index=${#renamed_pin_sources[@]}-1; index>=0; index--)); do
-        source="${renamed_pin_sources[index]}"
-        destination="${renamed_pin_destinations[index]}"
+    local index record source destination rc=0 separator=$'\x1f'
+    for ((index=${#renamed_pin_records[@]}-1; index>=0; index--)); do
+        record="${renamed_pin_records[index]}"
+        source="${record%%${separator}*}"
+        destination="${record#*${separator}}"
+        if [ "${source}" = "${record}" ] || [ -z "${source}" ] || [ -z "${destination}" ]; then
+            echo "invalid pin restoration record" >&2
+            rc=1
+            continue
+        fi
         if [ -e "${destination}" ]; then
             if [ -e "${source}" ]; then
                 echo "pin restoration collision: ${source} and ${destination} both exist" >&2
@@ -395,18 +404,21 @@ restore_renamed_pins() {
             rc=1
         fi
     done
+    if [ "${rc}" -eq 0 ]; then
+        renamed_pin_records=()
+    fi
     return "${rc}"
 }
 
 hold_pin_for_fault() {
-    local map_name="$1" source destination
+    local map_name="$1" label="$2" source destination separator=$'\x1f'
     source="${PIN_ROOT}/${map_name}"
     destination="${PIN_ROOT}/.${map_name}.acl046-transaction-held"
     [ -e "${source}" ] || die "required pin is missing before fault fixture: ${source}"
     [ ! -e "${destination}" ] || die "pin fault destination already exists: ${destination}"
+    guard_dedicated_host "${label}-pre-pin-rename" target
+    renamed_pin_records+=("${source}${separator}${destination}")
     mv -- "${source}" "${destination}" || die "failed to hold pin ${source}"
-    renamed_pin_sources+=("${source}")
-    renamed_pin_destinations+=("${destination}")
 }
 
 capture_wal() {
@@ -588,32 +600,76 @@ PY
     return "${rc}"
 }
 
-assert_sole_managed_target() {
-    local status_file="$1"
-    "${PYTHON_BIN}" - "${status_file}" "${EXPECTED_PORT_ID}" "${EXPECTED_IFNAME}" <<'PY'
+guard_dedicated_host() {
+    local label="$1" mode="$2" directory
+    directory="${WORK_DIR}/guards/${label}"
+    if ! mkdir -p "${directory}"; then
+        GUARD_REFUSED=true
+        return 1
+    fi
+    if ! status_json >"${directory}/status.json"; then
+        GUARD_REFUSED=true
+        return 1
+    fi
+    if ! curl --silent --show-error --fail "${DATAPATH_HTTP}/api/v1/instances" \
+            >"${directory}/instances.json"; then
+        GUARD_REFUSED=true
+        return 1
+    fi
+    if ! "${PYTHON_BIN}" - "${directory}" "${EXPECTED_PORT_ID}" "${EXPECTED_IFNAME}" "${mode}" \
+            >"${directory}/assertion.json" <<'PY'
 from __future__ import print_function
-import json,sys
-payload=json.load(open(sys.argv[1],encoding="utf-8"))
-ports=payload.get("managed_ports") or []
-assert len(ports)==1,ports
-assert ports[0].get("port_id")==sys.argv[2],ports
-assert ports[0].get("ifname")==sys.argv[3],ports
-print("sole_managed_target_ok")
+
+import json
+import os
+import sys
+
+root, port_id, ifname, mode = sys.argv[1:]
+status=json.load(open(os.path.join(root,"status.json"),encoding="utf-8"))
+instances=json.load(open(os.path.join(root,"instances.json"),encoding="utf-8"))
+managed=status.get("managed_ports") or []
+status_active=set(status.get("active_instances") or [])
+api_active={row.get("name") for row in instances.get("instances") or []}
+assert None not in api_active,instances
+assert status_active==api_active,{"uds":sorted(status_active),"api":sorted(api_active)}
+expected_managed=[row for row in managed if row.get("port_id")==port_id and row.get("ifname")==ifname]
+assert len(expected_managed)==len(managed),{"managed_ports":managed}
+assert len(managed)<=1,managed
+assert status_active.issubset({ifname}),sorted(status_active)
+if mode=="empty":
+    assert not managed,managed
+    assert not status_active,sorted(status_active)
+elif mode=="target":
+    assert len(expected_managed)==1,managed
+    assert status_active=={ifname},sorted(status_active)
+elif mode=="empty_or_target":
+    assert len(status_active)<=1,sorted(status_active)
+else:
+    raise AssertionError("unsupported guard mode %s" % mode)
+print(json.dumps({"mode":mode,"managed_ports":managed,
+                  "active_instances":sorted(status_active)},sort_keys=True))
 PY
+    then
+        GUARD_REFUSED=true
+        return 1
+    fi
+    DEDICATED_GUARD_ESTABLISHED=true
 }
 
-assert_no_foreign_managed_ports() {
-    local status_file="$1"
-    "${PYTHON_BIN}" - "${status_file}" "${EXPECTED_PORT_ID}" "${EXPECTED_IFNAME}" <<'PY'
-from __future__ import print_function
-import json,sys
-payload=json.load(open(sys.argv[1],encoding="utf-8"))
-ports=payload.get("managed_ports") or []
-foreign=[row for row in ports if row.get("port_id")!=sys.argv[2] or row.get("ifname")!=sys.argv[3]]
-assert not foreign,{"foreign_managed_ports":foreign,"managed_ports":ports}
-assert len(ports)<=1,ports
-print("dedicated_host_preflight_ok managed_ports=%d" % len(ports))
-PY
+restart_datapath_clean_guarded() {
+    local label="$1" mode="$2" log_file="$3"
+    guard_dedicated_host "${label}-pre-clean-restart" "${mode}"
+    DATAPATH_RESTORE_ARMED=true
+    start_datapath_without_fault >"${log_file}" 2>&1
+    DATAPATH_RESTORE_ARMED=false
+}
+
+restart_datapath_with_fault_guarded() {
+    local label="$1" mode="$2" point="$3" marker="$4" log_file="$5"
+    guard_dedicated_host "${label}-pre-fault-restart" "${mode}"
+    DATAPATH_RESTORE_ARMED=true
+    FAULT_ACTION=return_error start_datapath_with_fault "${point}" "${marker}" \
+        >"${log_file}" 2>&1
 }
 
 assert_ready_enforced_baseline() {
@@ -758,10 +814,30 @@ print(json.dumps({"fixture":os.environ["FIXTURE"],"detached":False,
 PY
 }
 
+capture_optional_map() {
+    local directory="$1" map_name="$2" path="${PIN_ROOT}/${map_name}"
+    if [ -e "${path}" ]; then
+        printf 'present %s\n' "${path}" >"${directory}/${map_name}.observation.txt"
+        bpftool -j map dump pinned "${path}" >"${directory}/${map_name}.json" || return 1
+    else
+        [ ! -e "${path}" ] || return 1
+        printf 'absent %s\n' "${path}" >"${directory}/${map_name}.observation.txt"
+    fi
+}
+
+capture_api_outcome() {
+    local url="$1" body_file="$2" status_file="$3" status
+    status="$(curl --silent --show-error --output "${body_file}" --write-out '%{http_code}' "${url}")" || return 1
+    printf '%s\n' "${status}" >"${status_file}"
+}
+
 capture_detached_state() {
-    local label="$1" directory map_name
+    local label="$1" tap_id="$2" directory map_name ifindex
     directory="${WORK_DIR}/${label}"
     mkdir -p "${directory}" || return 1
+    printf '%s\n' "${tap_id}" >"${directory}/pre-delete-tap-id.txt" || return 1
+    ifindex="$(cat "/sys/class/net/${EXPECTED_IFNAME}/ifindex")" || return 1
+    printf '%s\n' "${ifindex}" >"${directory}/expected-ifindex.txt" || return 1
     status_json >"${directory}/status.json" || return 1
     curl --silent --show-error --fail "${DATAPATH_HTTP}/api/v1/instances" \
         >"${directory}/instances.json" || return 1
@@ -769,89 +845,211 @@ capture_detached_state() {
     tc -j filter show dev "${EXPECTED_IFNAME}" ingress >"${directory}/tc-ingress.json" || return 1
     tc -j filter show dev "${EXPECTED_IFNAME}" egress >"${directory}/tc-egress.json" || return 1
     bpftool -j net show >"${directory}/bpftool-net.json" || return 1
+    bpftool -j link show >"${directory}/bpftool-link.json" || return 1
     for map_name in POLICY_TABLE SRC_IPV4_TRIE DST_IPV4_TRIE SRC_IPV6_TRIE DST_IPV6_TRIE \
             ACL_SRC_IPV4_TRIE ACL_DST_IPV4_TRIE ACL_SRC_IPV6_TRIE ACL_DST_IPV6_TRIE; do
-        printf '{"available":false,"reason":"shared runtime removed after detach"}\n' \
-            >"${directory}/${map_name}.json" || return 1
+        capture_optional_map "${directory}" "${map_name}" || return 1
     done
-    printf '{"available":false,"reason":"tap runtime removed after detach"}\n' \
-        >"${directory}/bank.json" || return 1
-    printf '{"groups":[],"reason":"instance removed after detach"}\n' \
-        >"${directory}/groups.json" || return 1
-    printf '{"policies":[],"reason":"instance removed after detach"}\n' \
-        >"${directory}/policies.json" || return 1
+    capture_api_outcome "${DATAPATH_HTTP}/api/v1/${EXPECTED_IFNAME}/groups" \
+        "${directory}/groups-response.json" "${directory}/groups-http-status.txt" || return 1
+    capture_api_outcome "${DATAPATH_HTTP}/api/v1/${EXPECTED_IFNAME}/policies" \
+        "${directory}/policies-response.json" "${directory}/policies-http-status.txt" || return 1
     capture_wal "${directory}/neutron-snapshot.wal" || return 1
-    capture_instance_state "${directory}/state.json" || return 1
+    docker_agent_exec python - "${NEUTRON_STATE_PATH}/${EXPECTED_IFNAME}/state.json" <<'PY' \
+        >"${directory}/state-observation.json" || return 1
+from __future__ import print_function
+import json,os,sys
+path=sys.argv[1]
+exists=os.path.exists(path)
+content=open(path,encoding="utf-8").read() if exists else None
+print(json.dumps({"path":path,"exists":exists,"content":content},sort_keys=True))
+PY
 }
 
 assert_retry_detached() {
-    local directory="$1"
-    DIRECTORY="${directory}" PORT_ID="${EXPECTED_PORT_ID}" IFNAME="${EXPECTED_IFNAME}" \
-    OWNER_PREFIX="neutron:${EXPECTED_PORT_ID}:" PIN_ROOT="${PIN_ROOT}" \
-        "${PYTHON_BIN}" - <<'PY'
+    local directory="$1" tap_id="$2"
+    DIRECTORY="${directory}" TAP_ID="${tap_id}" PORT_ID="${EXPECTED_PORT_ID}" \
+    IFNAME="${EXPECTED_IFNAME}" OWNER_PREFIX="neutron:${EXPECTED_PORT_ID}:" \
+    PIN_ROOT="${PIN_ROOT}" "${PYTHON_BIN}" - <<'PY'
 from __future__ import print_function
-import json,os
+
+import json
+import os
+
 root=os.environ["DIRECTORY"]
+tap_id=int(os.environ["TAP_ID"])
 port_id=os.environ["PORT_ID"]
 ifname=os.environ["IFNAME"]
-response=json.load(open(os.path.join(root,"response.json"),encoding="utf-8"))
+owner_prefix=os.environ["OWNER_PREFIX"]
+pin_root=os.environ["PIN_ROOT"]
+expected_ifindex=int(open(os.path.join(root,"expected-ifindex.txt"),encoding="utf-8").read())
+
+def load(name):
+    return json.load(open(os.path.join(root,name),encoding="utf-8"))
+
+response=load("response.json")
 body=response.get("body") or {}
 assert response.get("http_status")==200,response
 assert body.get("status")=="ok",response
 assert body.get("detached") is True,response
-status=json.load(open(os.path.join(root,"status.json"),encoding="utf-8"))
+status=load("status.json")
 assert not any(row.get("port_id")==port_id for row in status.get("managed_ports") or []),status
-instances=json.load(open(os.path.join(root,"instances.json"),encoding="utf-8")).get("instances") or []
+assert ifname not in set(status.get("active_instances") or []),status
+instances=load("instances.json").get("instances") or []
 assert not any(row.get("name")==ifname for row in instances),instances
 for direction in ("ingress","egress"):
-    assert not os.path.exists(os.path.join(os.environ["PIN_ROOT"],"%s_tc_%s_link"%(ifname,direction)))
-state=open(os.path.join(root,"state.json"),encoding="utf-8").read()
-assert os.environ["OWNER_PREFIX"] not in state,state
+    assert not os.path.exists(os.path.join(pin_root,"%s_tc_%s_link"%(ifname,direction)))
+
+def nested_dicts(value):
+    if isinstance(value,dict):
+        yield value
+        for child in value.values():
+            for row in nested_dicts(child):
+                yield row
+    elif isinstance(value,list):
+        for child in value:
+            for row in nested_dicts(child):
+                yield row
+
+def int_field(row,name):
+    try:
+        return int(row.get(name) or 0)
+    except (TypeError,ValueError):
+        return 0
+
+baseline_prog_ids={}
+for direction in ("ingress","egress"):
+    link=load("pre-delete-pinned-%s-link.json"%direction)
+    if isinstance(link,list):
+        assert len(link)==1,(direction,link)
+        link=link[0]
+    assert int_field(link,"ifindex")==expected_ifindex,(direction,expected_ifindex,link)
+    prog_id=int_field(link,"prog_id")
+    assert prog_id>0,(direction,link)
+    assert direction in json.dumps(link,sort_keys=True).lower(),(direction,link)
+    baseline_prog_ids[direction]=prog_id
+
+# The direction-specific tc inventory is scoped to the exact target interface.
+# Reject only the pre-delete Aria program for that direction; unrelated filters
+# are retained in the evidence and do not fail this assertion.
+for direction,prog_id in baseline_prog_ids.items():
+    target_tc=load("tc-%s.json"%direction)
+    assert not any(int_field(row,"prog_id")==prog_id or int_field(row,"id")==prog_id
+                   for row in nested_dicts(target_tc)),(direction,prog_id,target_tc)
+
+# TCX link objects carry ifindex, prog_id, and attach direction. Prove that no
+# exact pre-delete target link remains, while allowing other links/programs.
+all_links=load("bpftool-link.json")
+for direction,prog_id in baseline_prog_ids.items():
+    matches=[]
+    for row in nested_dicts(all_links):
+        if int_field(row,"ifindex") != expected_ifindex:
+            continue
+        if int_field(row,"prog_id") != prog_id:
+            continue
+        if direction not in json.dumps(row,sort_keys=True).lower():
+            continue
+        matches.append(row)
+    assert not matches,(direction,expected_ifindex,prog_id,matches)
+
+# bpftool net is a second, independent inventory. Its TC rows do not always
+# expose direction, so match only the exact ifindex plus pre-delete prog_id.
+net_inventory=load("bpftool-net.json")
+tc_inventory=[]
+for row in nested_dicts(net_inventory):
+    tc_rows=row.get("tc")
+    if isinstance(tc_rows,list):
+        tc_inventory.extend(tc_rows)
+for direction,prog_id in baseline_prog_ids.items():
+    matches=[row for row in nested_dicts(tc_inventory)
+             if int_field(row,"ifindex")==expected_ifindex and
+                int_field(row,"prog_id")==prog_id]
+    assert not matches,(direction,expected_ifindex,prog_id,matches)
+
+def observed_map(name):
+    observation=open(os.path.join(root,name+".observation.txt"),encoding="utf-8").read().strip()
+    path=os.path.join(pin_root,name)
+    if observation=="absent "+path:
+        assert not os.path.exists(path),(name,observation)
+        return None
+    assert observation=="present "+path,(name,observation)
+    assert os.path.exists(path),(name,observation)
+    return load(name+".json")
+
+policy_rows=observed_map("POLICY_TABLE")
+if policy_rows is not None:
+    assert not any(int.from_bytes(bytes(row["key"][:4]),byteorder="little")==tap_id
+                   for row in policy_rows),policy_rows
+banked_tap_ids={tap_id*2,tap_id*2+1}
+for name in ("ACL_SRC_IPV4_TRIE","ACL_DST_IPV4_TRIE",
+             "ACL_SRC_IPV6_TRIE","ACL_DST_IPV6_TRIE"):
+    rows=observed_map(name)
+    if rows is not None:
+        assert not any(int.from_bytes(bytes(row["key"][4:8]),byteorder="little") in banked_tap_ids
+                       for row in rows),name
+for name in ("SRC_IPV4_TRIE","DST_IPV4_TRIE","SRC_IPV6_TRIE","DST_IPV6_TRIE"):
+    observed_map(name)
+
+for resource in ("groups","policies"):
+    code=int(open(os.path.join(root,resource+"-http-status.txt"),encoding="utf-8").read())
+    payload=open(os.path.join(root,resource+"-response.json"),encoding="utf-8").read()
+    assert code==404,(resource,code,payload)
+    assert owner_prefix not in payload,(resource,payload)
+state=load("state-observation.json")
+assert owner_prefix not in (state.get("content") or ""),state
 print(json.dumps({"detached":True,"managed_runtime_absent":True,
-                  "owned_projection_absent":True,"pinned_tc_links_absent":True},sort_keys=True))
+                  "owned_projection_absent":True,"pinned_tc_links_absent":True,
+                  "tap_id":tap_id},sort_keys=True))
 PY
 }
 
-prepare_transaction_fixture() {
+apply_and_capture_transaction_fixture() {
     local label="$1"
-    start_datapath_without_fault >"${WORK_DIR}/${label}-start-clean.log" 2>&1
-    wait_for_uds
+    guard_dedicated_host "${label}-pre-snapshot" empty
+    TARGET_ROLLBACK_ARMED=true
     apply_acl_snapshot_without_rollback "${acl_fixture_json}" \
         >"${WORK_DIR}/${label}-apply-snapshot.log" 2>&1
     capture_transaction_state "${label}-before"
-    assert_sole_managed_target "${WORK_DIR}/${label}-before/status.json" \
-        >"${WORK_DIR}/${label}-dedicated-host-assertion.txt"
+    guard_dedicated_host "${label}-ready-baseline" target
     assert_ready_enforced_baseline "${WORK_DIR}/${label}-before" \
         >"${WORK_DIR}/${label}-baseline-assertion.json"
 }
 
 retry_transaction_delete() {
-    local label="$1" before_directory="$2" retry_directory
+    local label="$1" before_directory="$2" retry_directory tap_id retry_rc
     retry_directory="${WORK_DIR}/${label}-retry"
     mkdir -p "${retry_directory}"
-    start_datapath_without_fault >"${retry_directory}/start-clean.log" 2>&1
-    wait_for_uds
+    tap_id="$("${PYTHON_BIN}" - "${WORK_DIR}/${before_directory}/bank.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1],encoding="utf-8"))["tap_id"])
+PY
+    )"
     set +e
     delete_target_port_evidence "${retry_directory}"
-    local retry_rc=$?
+    retry_rc=$?
     set -e
     [ "${retry_rc}" -eq 0 ] || die "${label} retry delete failed rc=${retry_rc}"
-    capture_detached_state "${label}-retry"
-    assert_retry_detached "${retry_directory}" >"${retry_directory}/assertion.json"
+    capture_detached_state "${label}-retry" "${tap_id}"
+    cp "${WORK_DIR}/${before_directory}/pinned-ingress-link.json" \
+        "${retry_directory}/pre-delete-pinned-ingress-link.json"
+    cp "${WORK_DIR}/${before_directory}/pinned-egress-link.json" \
+        "${retry_directory}/pre-delete-pinned-egress-link.json"
+    assert_retry_detached "${retry_directory}" "${tap_id}" >"${retry_directory}/assertion.json"
     cp "${WORK_DIR}/${before_directory}/bank.json" "${retry_directory}/pre-retry-bank.json"
     cp "${WORK_DIR}/${before_directory}/groups.json" "${retry_directory}/pre-retry-groups.json"
     cp "${WORK_DIR}/${before_directory}/policies.json" "${retry_directory}/pre-retry-policies.json"
+    TARGET_ROLLBACK_ARMED=false
 }
 
 run_detach_ordering_fixture() {
     local label="detach-ordering" marker first_rc
-    prepare_transaction_fixture "${label}"
-    mkdir -p "${WORK_DIR}/${label}-after"
     marker="${FAULT_ONCE_DIR}/aria-fault-$(sanitize_point neutron.delete.after_acl_purge).once"
     rm -f "${marker}"
-    FAULT_ACTION=return_error start_datapath_with_fault \
-        neutron.delete.after_acl_purge "${marker}" >"${WORK_DIR}/${label}-fault-start.log" 2>&1
+    restart_datapath_with_fault_guarded "${label}" empty neutron.delete.after_acl_purge \
+        "${marker}" "${WORK_DIR}/${label}-fault-start.log"
     wait_for_uds
+    apply_and_capture_transaction_fixture "${label}"
+    mkdir -p "${WORK_DIR}/${label}-after"
     set +e
     delete_target_port_evidence "${WORK_DIR}/${label}-after"
     first_rc=$?
@@ -866,10 +1064,15 @@ run_detach_ordering_fixture() {
 }
 
 run_pin_failure_fixture() {
-    local label="$1" map_name="$2" fixture_name="$3" first_rc restore_rc
-    prepare_transaction_fixture "${label}"
+    local label="$1" map_name="$2" fixture_name="$3" clean_restart="$4"
+    local first_rc restore_rc
+    if [ "${clean_restart}" = "true" ]; then
+        restart_datapath_clean_guarded "${label}" empty "${WORK_DIR}/${label}-start-clean.log"
+        wait_for_uds
+    fi
+    apply_and_capture_transaction_fixture "${label}"
     mkdir -p "${WORK_DIR}/${label}-after"
-    hold_pin_for_fault "${map_name}"
+    hold_pin_for_fault "${map_name}" "${label}"
     set +e
     delete_target_port_evidence "${WORK_DIR}/${label}-after"
     first_rc=$?
@@ -917,14 +1120,30 @@ cleanup_managed_transaction_smoke() {
     if ! restore_renamed_pins; then
         record_cleanup_error "restore-renamed-pins failed"
     fi
-    if [ "${ROLLBACK_ARMED:-false}" = "true" ]; then
-        if ! rollback_transaction_managed_target >"${WORK_DIR}/cleanup-rollback.log" 2>&1; then
-            record_cleanup_error "rollback-managed-ports failed"
+    if [ "${GUARD_REFUSED}" = "false" ] && \
+            [ "${DEDICATED_GUARD_ESTABLISHED}" = "true" ] && \
+            [ "${TARGET_ROLLBACK_ARMED}" = "true" ]; then
+        if guard_dedicated_host cleanup-pre-rollback empty_or_target; then
+            if rollback_transaction_managed_target >"${WORK_DIR}/cleanup-rollback.log" 2>&1; then
+                TARGET_ROLLBACK_ARMED=false
+            else
+                record_cleanup_error "rollback-managed-target failed"
+            fi
+        else
+            record_cleanup_error "cleanup rollback guard refused mutation"
         fi
     fi
-    if [ "${RESTORE_DATAPATH_ON_EXIT:-true}" = "true" ]; then
-        if ! start_datapath_without_fault >"${WORK_DIR}/cleanup-start-clean.log" 2>&1; then
-            record_cleanup_error "restore-datapath-without-fault failed"
+    if [ "${GUARD_REFUSED}" = "false" ] && \
+            [ "${DEDICATED_GUARD_ESTABLISHED}" = "true" ] && \
+            [ "${DATAPATH_RESTORE_ARMED}" = "true" ]; then
+        if guard_dedicated_host cleanup-pre-restart empty_or_target; then
+            if start_datapath_without_fault >"${WORK_DIR}/cleanup-start-clean.log" 2>&1; then
+                DATAPATH_RESTORE_ARMED=false
+            else
+                record_cleanup_error "restore-datapath-without-fault failed"
+            fi
+        else
+            record_cleanup_error "cleanup restart guard refused mutation"
         fi
     fi
     RESULT="fail"
@@ -955,19 +1174,16 @@ run_managed_transaction_smoke() {
     need_command tc
     ip link show dev "${EXPECTED_IFNAME}" >/dev/null 2>&1 || die "EXPECTED_IFNAME does not exist"
     mkdir -p "${FAULT_ONCE_DIR}"
-    status_json >"${WORK_DIR}/dedicated-host-preflight-status.json"
-    assert_no_foreign_managed_ports "${WORK_DIR}/dedicated-host-preflight-status.json" \
-        >"${WORK_DIR}/dedicated-host-preflight-assertion.txt"
+    guard_dedicated_host initial-preflight empty_or_target
+    TARGET_ROLLBACK_ARMED=true
     rollback_transaction_managed_target >"${WORK_DIR}/initial-rollback.log" 2>&1
-    ROLLBACK_ARMED=true
+    TARGET_ROLLBACK_ARMED=false
     run_detach_ordering_fixture
-    run_pin_failure_fixture purge-failure-atomicity POLICY_TABLE purge_failure_atomicity
+    run_pin_failure_fixture purge-failure-atomicity POLICY_TABLE purge_failure_atomicity true
     PURGE_FAILURE_ATOMICITY_STATUS="pass"
-    run_pin_failure_fixture strict-flush-rollback CT_TABLE_V4 strict_flush_rollback
+    run_pin_failure_fixture strict-flush-rollback CT_TABLE_V4 strict_flush_rollback false
     STRICT_FLUSH_ROLLBACK_STATUS="pass"
     RETRY_DETACH_STATUS="pass"
-    ROLLBACK_ARMED=false
-    RESTORE_DATAPATH_ON_EXIT=false
     TRANSACTION_BODY_SUCCEEDED=true
     FAILURE_REASON=""
     echo "managed ACL transaction smoke wiring passed; evidence is in ${WORK_DIR}/summary.json"
