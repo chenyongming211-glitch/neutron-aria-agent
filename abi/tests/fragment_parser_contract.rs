@@ -188,8 +188,8 @@ fn fragment_parser_ipv4_non_initial_never_reads_payload_as_ports() {
 }
 
 #[test]
-fn fragment_parser_ipv4_first_udp_rejects_four_payload_bytes() {
-    let frame = ipv4_fragment(IPPROTO_UDP, 0x1234, 0, true, &[0x9c, 0x40, 0x00, 0x35]);
+fn fragment_parser_ipv4_incomplete_udp_datagram_is_rejected() {
+    let frame = ipv4_fragment(IPPROTO_UDP, 0x1234, 0, false, &[0x9c, 0x40, 0x00, 0x35]);
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
     let accepted = unsafe {
         parser::parse_eth_ipv4(
