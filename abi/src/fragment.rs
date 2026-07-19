@@ -67,6 +67,25 @@ pub struct FragmentEpochValue {
     pub epoch: u64,
 }
 
+#[cfg(all(feature = "aya-pod", not(target_arch = "bpf")))]
+mod userspace_pod {
+    use super::*;
+
+    macro_rules! impl_aya_pod {
+        ($($type:ty),+ $(,)?) => {
+            $(unsafe impl aya::Pod for $type {})+
+        };
+    }
+
+    impl_aya_pod!(
+        FragmentContextKey4,
+        FragmentContextKey6,
+        FragmentContextValue,
+        FragmentConfig,
+        FragmentEpochValue,
+    );
+}
+
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FragmentContextDisposition {
