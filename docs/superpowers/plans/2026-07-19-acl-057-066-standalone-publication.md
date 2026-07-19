@@ -8,6 +8,12 @@
 
 **Tech Stack:** Rust 2021, Tokio, Aya pinned maps, existing `FirewallState`, `WalClient`, ACL bank helpers, strict CT scrub, GitHub Actions.
 
+**Execution status:** Tasks 1-4 and Task 5 Steps 1-4 completed on 2026-07-19.
+RED `212828b` / Build `29682513348` and GREEN `a234bb5` / Build
+`29683492746` are recorded in the design and backlog. Task 5 Step 5 remains a
+delivery hold: after PR #5 merges, rebase, rerun exact-head CI, and create the
+ordinary Draft PR.
+
 ## Global Constraints
 
 - Do not run local `cargo build`, `cargo check`, or `cargo test`; Rust compilation and behavior evidence must come from GitHub Actions.
@@ -32,7 +38,7 @@
 - Consumes: `FirewallState`, `RuleInfo`, `requested_directions`, `acl_next_bank`.
 - Produces: the required production names `StandaloneAclMutation`, `StandaloneAclBatchItem`, `StandaloneAclPublicationPlan`, `StandaloneAclPublicationStep`, `StandaloneAclFailurePhase`, `build_standalone_acl_publication_plan`, `build_standalone_acl_batch_publication_plan`, and `standalone_acl_rollback_steps`.
 
-- [ ] **Step 1: Register the test-only module before production exists**
+- [x] **Step 1: Register the test-only module before production exists**
 
 Add beside the existing `control_plane` child modules:
 
@@ -44,7 +50,7 @@ mod standalone_acl;
 This keeps normal Rust/eBPF builds unchanged while making the behavior test
 target compile the wished-for transaction API.
 
-- [ ] **Step 2: Add the RED planner and publication tests**
+- [x] **Step 2: Add the RED planner and publication tests**
 
 Create `agent/src/control_plane/standalone_acl.rs` with tests named under the
 `standalone_acl_publication_` prefix. The tests import the planned production
@@ -202,7 +208,7 @@ mod tests {
 The initial CI failure must be unresolved standalone publication symbols, not
 a syntax error or an unrelated existing test failure.
 
-- [ ] **Step 3: Add only the public Rust behavior discovery filter**
+- [x] **Step 3: Add only the public Rust behavior discovery filter**
 
 Append this entry to `RUST_TESTS` in `ci/check_neutron_stage1.py`:
 
@@ -212,7 +218,7 @@ Append this entry to `RUST_TESTS` in `ci/check_neutron_stage1.py`:
 
 Do not add a Python parser, mutation checker, or private source-shape rule.
 
-- [ ] **Step 4: Run allowed non-compiling validation**
+- [x] **Step 4: Run allowed non-compiling validation**
 
 Run:
 
@@ -224,7 +230,7 @@ git diff --check
 Expected: fast contracts pass and `git diff --check` is silent. Do not run any
 Cargo command.
 
-- [ ] **Step 5: Commit and push the RED tests**
+- [x] **Step 5: Commit and push the RED tests**
 
 ```bash
 git add agent/src/control_plane.rs agent/src/control_plane/standalone_acl.rs ci/check_neutron_stage1.py
@@ -232,7 +238,7 @@ git commit -m "test: define standalone ACL publication transaction"
 git push origin codex/review-acl-057-direct-publication
 ```
 
-- [ ] **Step 6: Dispatch and inspect exact-head RED CI**
+- [x] **Step 6: Dispatch and inspect exact-head RED CI**
 
 ```bash
 gh workflow run Build --ref codex/review-acl-057-direct-publication \
@@ -254,7 +260,7 @@ Record the run ID and exact RED commit before production edits.
 - Consumes: the RED names and existing `FirewallState` mutation APIs.
 - Produces: one immutable `StandaloneAclPublicationPlan` consumed by the concrete executor.
 
-- [ ] **Step 1: Make the module part of normal agent builds**
+- [x] **Step 1: Make the module part of normal agent builds**
 
 Replace the test-only declaration with:
 
@@ -262,7 +268,7 @@ Replace the test-only declaration with:
 mod standalone_acl;
 ```
 
-- [ ] **Step 2: Define the concrete mutation and plan types**
+- [x] **Step 2: Define the concrete mutation and plan types**
 
 Implement these domain types in `standalone_acl.rs`:
 
@@ -318,7 +324,7 @@ Re-export `StandaloneAclMutation` and `StandaloneAclBatchItem` from
 `control_plane.rs` with `pub(crate) use` so handlers depend on the domain
 contract, not the child module path.
 
-- [ ] **Step 3: Build each item on a temporary state clone**
+- [x] **Step 3: Build each item on a temporary state clone**
 
 Implement `build_standalone_acl_publication_plan` so that it:
 
@@ -344,7 +350,7 @@ pub(super) fn build_standalone_acl_publication_plan(
 - returns zero publication steps for a semantic no-op;
 - otherwise returns one ordered publication sequence ending in strict CT scrub.
 
-- [ ] **Step 4: Aggregate parsed and rejected batch items without losing order**
+- [x] **Step 4: Aggregate parsed and rejected batch items without losing order**
 
 Implement:
 
@@ -363,7 +369,7 @@ replaces the working state and increments `accepted`. Produce one final plan
 from the accepted working state, then sort indexed errors and project them to
 the unchanged public `Vec<String>` response.
 
-- [ ] **Step 5: Derive rollback order from the reached failure phase**
+- [x] **Step 5: Derive rollback order from the reached failure phase**
 
 Implement `standalone_acl_rollback_steps` with explicit match arms. The strict
 flush arm must restore the active bank before any failed-shadow scrub, and the
@@ -382,7 +388,7 @@ reverse application order.
 - Consumes: `StandaloneAclPublicationPlan`, `TapMapRuntime`, `InstanceState::compact_and_publish_state`, strict CT scrub.
 - Produces: `ControlPlane::apply_standalone_acl_mutations_locked` and exact general-map preimage capture.
 
-- [ ] **Step 1: Add a neutral exact general-map capture primitive**
+- [x] **Step 1: Add a neutral exact general-map capture primitive**
 
 Expose a core helper that captures the exact source/destination canonical key
 owner for one tap from the pinned general maps:
@@ -398,7 +404,7 @@ pub fn capture_general_network_owner(
 It must compare the complete canonical key, not perform longest-prefix packet
 lookup. Export only this behavior from `core/src/ebpf_ops.rs`.
 
-- [ ] **Step 2: Stage the complete standalone shadow projection**
+- [x] **Step 2: Stage the complete standalone shadow projection**
 
 Add a concrete staging function that:
 
@@ -409,7 +415,7 @@ Add a concrete staging function that:
 - writes every final policy into `shadow_bank`;
 - never writes the active bank.
 
-- [ ] **Step 3: Execute the ordered transaction under existing locks**
+- [x] **Step 3: Execute the ordered transaction under existing locks**
 
 Implement a concrete executor, not a generic callback framework:
 
@@ -441,7 +447,7 @@ The executor must:
 11. after success, scrub the old bank and clear removed statistics;
 12. leave retired-bitmap cleanup/reuse semantics unchanged for ACL-059.
 
-- [ ] **Step 4: Preserve crash-safe allocator recovery**
+- [x] **Step 4: Preserve crash-safe allocator recovery**
 
 Use the existing `TransactionCreatedPortSet`,
 `cleanup_transaction_created_port_sets`,
@@ -458,18 +464,18 @@ restore a free list that exposes an index whose kernel cleanup failed.
 - Consumes: `apply_standalone_acl_mutations_locked`.
 - Produces: unchanged HTTP contracts with one publication per semantic request/batch.
 
-- [ ] **Step 1: Replace direct policy add/update mutation**
+- [x] **Step 1: Replace direct policy add/update mutation**
 
 Keep admission and lock order in `ControlPlane::add_policy`, but pass one
 `UpsertPolicy` mutation to the new locked transaction. Remove direct active
 bank writes, best-effort WAL acknowledgement, and handler-side compensation.
 
-- [ ] **Step 2: Replace direct policy delete mutation**
+- [x] **Step 2: Replace direct policy delete mutation**
 
 Pass one `DeletePolicy` mutation to the same transaction. Preserve the rule
 that `direction=both` succeeds when at least one requested direction exists.
 
-- [ ] **Step 3: Add one control-plane batch entry point**
+- [x] **Step 3: Add one control-plane batch entry point**
 
 Expose:
 
@@ -484,7 +490,7 @@ pub async fn batch_add_policies(
 It acquires lifecycle/instance locks once and returns planner `accepted` and
 ordered errors only after the single publication succeeds.
 
-- [ ] **Step 4: Stop handler-side direction and batch loops**
+- [x] **Step 4: Stop handler-side direction and batch loops**
 
 `add_policy` parses one request and calls the control plane once with direction
 0, 1, or 2. `batch_add_policies` converts every input position into either
@@ -492,14 +498,14 @@ ordered errors only after the single publication succeeds.
 submits the complete ordered item list once, and returns parse/semantic errors
 in the original order without changing `BatchPoliciesResponse`.
 
-- [ ] **Step 5: Route only referenced group expansion**
+- [x] **Step 5: Route only referenced group expansion**
 
 In `add_group`, while holding the instance lock, inspect the old state. Route
 an existing ACL-referenced group plus a new CIDR through
 `AddReferencedGroupCidr`. Keep new groups, duplicate CIDRs, and unreferenced
 groups on their existing path. Keep referenced whole-group deletion rejected.
 
-- [ ] **Step 6: Run allowed formatting and non-compiling checks**
+- [x] **Step 6: Run allowed formatting and non-compiling checks**
 
 Run the approved formatter only on changed Rust files, then:
 
@@ -510,7 +516,7 @@ git diff --check
 
 Do not run Cargo locally.
 
-- [ ] **Step 7: Commit the complete GREEN implementation batch**
+- [x] **Step 7: Commit the complete GREEN implementation batch**
 
 ```bash
 git add agent/src/control_plane.rs agent/src/control_plane/standalone_acl.rs \
@@ -528,7 +534,7 @@ git push origin codex/review-acl-057-direct-publication
 - Consumes: exact RED and GREEN commits/runs.
 - Produces: independent closure evidence for `REVIEW-ACL-057` and `REVIEW-ACL-066`.
 
-- [ ] **Step 1: Dispatch exact-head GREEN CI**
+- [x] **Step 1: Dispatch exact-head GREEN CI**
 
 ```bash
 gh workflow run Build --ref codex/review-acl-057-direct-publication \
@@ -539,13 +545,13 @@ gh run list --branch codex/review-acl-057-direct-publication --limit 1
 Expected: `fast-contracts`, `rust-behavior`, and `rust-build` pass with
 `RUSTFLAGS=-D warnings`.
 
-- [ ] **Step 2: Inspect all failing or warning output before claiming GREEN**
+- [x] **Step 2: Inspect all failing or warning output before claiming GREEN**
 
 Use `gh run view <run-id> --log-failed` for any failed job. A green conclusion
 without the `standalone_acl_publication_` filter actually executing is not
 valid evidence.
 
-- [ ] **Step 3: Update backlog with separate stable-ID evidence**
+- [x] **Step 3: Update backlog with separate stable-ID evidence**
 
 Record:
 
@@ -556,7 +562,7 @@ Record:
 - explicit statement that ACL-059, ACL-056, unreferenced-group durability, and
   privileged field evidence remain open.
 
-- [ ] **Step 4: Commit and push evidence**
+- [x] **Step 4: Commit and push evidence**
 
 ```bash
 git add docs/openstack-neutron-aria-details/12-review-bug-backlog.md

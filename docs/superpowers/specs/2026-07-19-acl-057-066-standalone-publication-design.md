@@ -2,8 +2,8 @@
 
 Date: 2026-07-19
 
-Status: written specification approved on 2026-07-19; implementation and RED
-evidence not started
+Status: written specification approved on 2026-07-19; RED and hosted GREEN
+implementation evidence complete; post-PR-#5 delivery pending
 
 Analyzed target: `codex/review-acl-057-direct-publication@67b70ab`
 
@@ -377,6 +377,19 @@ semantics and its own cleanup-fault evidence immediately after ACL-057/066.
 
 Tests live with Rust behavior code. No Python checker may require private
 function names, parameter order, local-variable names, or source layout.
+
+Recorded evidence:
+
+- RED commit `212828b` failed only on the intended missing standalone
+  publication API in GitHub Actions Build
+  [`29682513348`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29682513348).
+- Production commits `10c3c45` and `a234bb5` passed all six focused
+  `standalone_acl_publication_` behaviors plus warning-denied Rust/eBPF builds
+  in exact-head Build
+  [`29683492746`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29683492746).
+- No local Cargo command was run. `REVIEW-ACL-059`, `REVIEW-ACL-056`, ordinary
+  unreferenced-group durability, privileged field evidence, and final delivery
+  remain explicitly outside this completed implementation evidence.
 
 ### 13.1 Final-state and API aggregation tests
 
