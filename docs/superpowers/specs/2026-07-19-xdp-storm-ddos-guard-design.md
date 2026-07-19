@@ -235,6 +235,8 @@ pub struct XdpInterfaceConfig {
 
 `XDP_INTERFACE_CONFIG` is a `HashMap<u32, XdpInterfaceConfig>` keyed by ingress ifindex. The value is 32 bytes with no implicit padding. Interface generation zero is invalid. A domain policy generation is zero only while that domain is disabled. Separate storm and DDoS policy generations preserve domain independence: changing one domain does not force runtime replacement in the other.
 
+The XDP program performs exactly one interface-config lookup per packet and copies the complete 32-byte value into one local snapshot before consulting any generation-scoped map. Storm and DDoS processing use only that snapshot; they do not look up `XDP_INTERFACE_CONFIG` again during the packet. A concurrent userspace update therefore selects either the complete old generation tuple or the complete new generation tuple for that packet, never fields from both.
+
 Class bit `n - 1` corresponds to class constant `n`. Valid storm masks are within `0x1f`; valid DDoS masks are within `0x7f`. An enabled storm domain requires a nonzero mask and one complete policy/runtime pair for every selected class. An enabled DDoS domain requires bit zero for the total class and one complete interface policy/runtime pair for every selected interface class; service and source policies remain optional. A first-milestone `tap_storm` profile requires disabled DDoS mode, zero DDoS generation, and zero DDoS class mask. Reserved mask bits, invalid profile/mode combinations, unknown profiles, and unknown modes fail open for packet availability, increment a bounded configuration-error counter, and make only the affected XDP domain degraded. A selected class with a missing generation-scoped policy is degraded missing state, not an implicit unlimited class.
 
 The eBPF program uses `ctx.ingress_ifindex` directly. Physical interfaces are not assigned synthetic tap IDs.
@@ -303,6 +305,8 @@ pub struct StormRuntime {
 
 `STORM_RUNTIME` is a `HashMap<StormKey, StormRuntime>`. The value is 48 bytes: the lock occupies offset 0 through 3, explicit padding occupies 4 through 7, and the five `u64` fields occupy 8 through 47. The lock is the real top-level BTF `struct bpf_spin_lock`, not a layout-compatible plain `u32`. Runtime types containing kernel synchronization objects are eBPF-owned types, not shared `aya::Pod` types. Userspace does not treat the lock bytes as ordinary mutable state.
 
+Userspace initializes and reads fixed-cardinality runtime entries only through a dedicated locked-runtime map adapter. The adapter uses a separate 48-byte `#[repr(C)]` userspace snapshot whose first four bytes are opaque lock storage, verifies its size and field offsets against the kernel value, and applies `BPF_F_LOCK` to every lookup or update. It never exports that snapshot as the eBPF BTF value type, never reads or writes the opaque lock bytes as state, and never uses Aya's ordinary unlocked typed-map path for a runtime value containing a spin lock. Generation publication read-back compares only token, remainder, and timestamp fields returned through this adapter.
+
 The implementation may use a spin lock only after a privileged load probe proves that the maintained target kernel accepts it for the XDP program and selected map type. Every execution path unlocks before returning, and no helper call, BPF-to-BPF call, packet load, or second lock acquisition occurs while the lock is held. Packet parsing, policy lookup, time acquisition, and statistics updates happen outside the critical section.
 
 A new generation starts with both enabled token dimensions full, both remainders zero, and `last_refill_ns` set to current kernel monotonic time. Runtime token state is pinned for process recovery but is not stored in desired-state WAL.
@@ -313,6 +317,7 @@ A new generation starts with both enabled token dimensions full, both remainders
 #[repr(C)]
 pub struct StormStatsKey {
     pub interface_generation: u64,
+    pub policy_generation: u64,
     pub ifindex: u32,
     pub traffic_class: u8,
     pub verdict: u8,
@@ -328,6 +333,8 @@ pub struct StormStatsValue {
 ```
 
 `STORM_STATS` is a `PerCpuHashMap<StormStatsKey, StormStatsValue>`. Verdict and reason use bounded shared constants, including pass, would-drop in observe mode, enforced drop, missing required policy, invalid configuration, and time anomaly.
+
+Statistics use the storm policy generation selected by the per-packet interface-config snapshot. Old-generation counters remain separately readable until asynchronous cleanup and cannot be reported as evidence for the newly published policy.
 
 Shared rate verdict constants are `XDP_RATE_VERDICT_PASS = 1`, `XDP_RATE_VERDICT_WOULD_DROP = 2`, `XDP_RATE_VERDICT_DROP = 3`, and `XDP_RATE_VERDICT_ERROR_PASS = 4`. Shared rate reasons are none 0, packet limit 1, byte limit 2, both limits 3, missing required state 4, invalid configuration 5, time anomaly 6, and capacity failure 7. Unknown verdict or reason values are never emitted.
 
@@ -582,6 +589,7 @@ Bounded statistics use generation-aware keys and fixed-size values:
 #[repr(C)]
 pub struct DdosStatsKey {
     pub interface_generation: u64,
+    pub policy_generation: u64,
     pub ifindex: u32,
     pub layer: u8,
     pub traffic_class: u8,
@@ -606,6 +614,8 @@ pub struct DdosCapacityStats {
 
 Layer constants are `DDOS_LAYER_INTERFACE = 1`, `DDOS_LAYER_SERVICE = 2`, `DDOS_LAYER_SOURCE = 3`, and `DDOS_LAYER_MITIGATION = 4`. Rate verdicts/reasons reuse the shared constants above; `DDOS_REASON_MITIGATION_MATCH = 8` and `DDOS_REASON_EXPIRED_RULE = 9` are DDoS-specific. Source addresses and service identifiers never enter statistics keys.
 
+DDoS statistics use the DDoS policy generation from the same per-packet interface-config snapshot used for policy and runtime lookup. A policy transition cannot merge old-generation drops or passes into the new generation's readiness or enforcement evidence.
+
 The exact map families are isolated from storm:
 
 ```text
@@ -627,6 +637,8 @@ DDOS_CAPACITY_STATS          PerCpuArray<DdosCapacityStats>
 `DDOS_SOURCE_RUNTIME_V4` and `V6` are LRU hash maps keyed by `DdosSourceKey4` and `DdosSourceKey6`. Maximum entries are immutable map-creation parameters configured at agent start. A capacity change requires a controlled DDoS-domain map rebuild and observe-mode validation before police mode returns.
 
 Source-layer activation additionally requires a privileged probe proving that the exact maintained kernel accepts a top-level `bpf_spin_lock` in an LRU-hash value for the XDP program. Failure disables and degrades only a requested source layer; it does not replace the design with an unsynchronized cross-CPU bucket and does not disable interface or service protection.
+
+The control plane rejects a new source-layer enable request when that capability probe is negative or unavailable. If persisted desired state already requests the source layer, reconciliation reports it degraded while continuing the independently valid interface and service layers. Lazy source-entry creation must be covered by the same verifier/load probe; no implementation may infer support merely because ordinary hash-map runtime locking succeeds.
 
 The architecture does not hard-code unmeasured source capacities. Release defaults are selected from an explicit node memory budget after measuring actual locked memory for both key sizes on the maintained target kernel. The release gate records configured maximum entries, observed locked memory, occupancy high-water mark, lookup/insert latency, and aggregate-protection throughput under source churn.
 
@@ -887,6 +899,9 @@ Local Cargo build, check, and test commands remain prohibited. Rust/eBPF compila
 - zero-limit/zero-burst validation and packet-length charging tests;
 - disabled/observe/police transition tests;
 - tests proving storm and DDoS generations change independently;
+- tests proving one packet uses one immutable interface-config snapshot across both domains;
+- locked-runtime adapter tests proving every userspace lookup/update carries `BPF_F_LOCK` and ignores opaque lock bytes during read-back comparison;
+- statistics tests proving old and new domain policy generations cannot share one counter key;
 - struct size, field-offset, zero-padding, byte-order, and unknown-enum tests for every shared ABI type;
 - desired-hash and read-back tests;
 - map inventory mutation tests proving storm/DDoS absence cannot change ACL readiness;
@@ -904,6 +919,8 @@ Local Cargo build, check, and test commands remain prohibited. Rust/eBPF compila
 - temporary CIDR mitigation and exact expiry;
 - temporary mitigation across agent restart and simulated host-reboot replay;
 - full source-state map, source churn, LRU replacement, and insertion-failure behavior;
+- positive and negative target-kernel probes for a top-level BTF spin lock in the source LRU value, including lazy entry creation;
+- a negative source-layer capability result rejects new enablement while existing desired state reports degraded without disabling interface/service protection;
 - offered-load debit behavior when a later DDoS layer rejects;
 - XDP drop counters are not attributed to TC ACL/QoS;
 - healthy TC ingress/egress survive XDP load, map, and attach failures;
@@ -985,3 +1002,7 @@ The implementation is acceptable only while all of these remain true:
 13. Bond members do not share a limit in the first milestone.
 14. Unknown unicast is not advertised as supported.
 15. Every enforcement transition is generation-identified and read-back verified.
+16. One packet uses one immutable interface-config snapshot for every storm and DDoS lookup.
+17. Userspace accesses spin-locked runtime values only through the `BPF_F_LOCK` adapter and never interprets lock bytes as state.
+18. Statistics from different domain policy generations never share one key.
+19. A source layer is never enabled without an exact target-kernel LRU-value spin-lock capability proof.
