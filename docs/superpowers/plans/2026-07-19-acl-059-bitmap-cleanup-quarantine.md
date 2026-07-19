@@ -30,7 +30,7 @@
 - Consumes: existing `FirewallState`, `PortSetCleanupReport`, `InstanceInfo`, and standalone publication tests.
 - Produces: failing Rust contracts for `BitmapCleanupIntent`, exact cleanup-target recovery, committed cleanup-pending outcomes, and maintenance visibility that does not lower `acl_ready`.
 
-- [ ] **Step 1: Add failing core state tests**
+- [x] **Step 1: Add failing core state tests**
 
 Add focused tests named with the existing CI filters:
 
@@ -52,7 +52,7 @@ fn quarantined_bitmap_preserves_cleanup_target_across_restart() {
 
 Also prove that a pending cleanup survives allocator restart, successful confirmation releases only that index, and a conflicting cleanup target for the same index is rejected.
 
-- [ ] **Step 2: Add failing agent behavior tests**
+- [x] **Step 2: Add failing agent behavior tests**
 
 Add `standalone_review_` tests proving:
 
@@ -64,11 +64,11 @@ assert_eq!(outcome.cleanup_pending[0].bitmap_idx, 7);
 
 The tests must distinguish item-validation errors from post-commit cleanup debt and prove that retry uses the persisted normalized target.
 
-- [ ] **Step 3: Add failing API contract test**
+- [x] **Step 3: Add failing API contract test**
 
 Add an `instance_info_reports_` test asserting `acl_ready == true` while `cleanup_pending_count == 1` and `maintenance_reason == "bitmap_cleanup_pending"`.
 
-- [ ] **Step 4: Commit and push RED**
+- [x] **Step 4: Commit and push RED**
 
 ```bash
 git add core/src/state.rs agent/src/control_plane.rs api/src/lib.rs docs/superpowers/plans/2026-07-19-acl-059-bitmap-cleanup-quarantine.md
@@ -76,7 +76,7 @@ git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "te
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 5: Verify RED in GitHub Actions**
+- [x] **Step 5: Verify RED in GitHub Actions**
 
 Use `gh run list`, `gh run watch`, and `gh run view`. Expected: the Rust behavior job fails only because the new durable cleanup-intent/outcome interfaces are missing. Do not accept unrelated failures as RED evidence.
 
@@ -109,25 +109,26 @@ impl FirewallState {
 }
 ```
 
-- [ ] **Step 1: Add the explicit durable state field**
+- [x] **Step 1: Add the explicit durable state field**
 
 Add a serde-defaulted, deterministically ordered `BTreeMap<u32, BitmapCleanupIntent>` to `FirewallState`. Keep read compatibility for legacy synthetic quarantine entries, but do not write new cleanup debt into `port_sets`.
 
-- [ ] **Step 2: Make allocator admission consult cleanup intent**
+- [x] **Step 2: Make allocator admission consult cleanup intent**
 
 Both free-list and fresh-index allocation must skip live port sets, explicit pending cleanup entries, and legacy synthetic quarantine entries.
 
-- [ ] **Step 3: Preserve exact targets at every quarantine call site**
+- [x] **Step 3: Preserve exact targets at every quarantine call site**
 
 Change created-bitmap guards, retired standalone bitmaps, managed publication rollback, and partial-cleanup recovery to pass the exact normalized port set. Extend `PortSetCleanupFailure` with `ports_normalized` so rollback persistence never loses its cleanup target.
 
-- [ ] **Step 4: Preserve legacy safety**
+- [x] **Step 4: Preserve legacy safety**
 
 Legacy entries without a cleanup target remain unavailable. They may be released only after a successful full tap-scoped scrub proves the bitmap clean; targeted retry must not invent a port set.
 
-- [ ] **Step 5: Format without compiling**
+- [x] **Step 5: Check formatting without compiling or broad source churn**
 
-Run the already approved `rustfmt` binary only on changed Rust files. Do not invoke Cargo.
+Run the already approved `rustfmt --check` binary only on changed Rust files.
+Do not invoke Cargo, and do not apply unrelated whole-file formatting drift.
 
 ---
 
@@ -143,23 +144,23 @@ Run the already approved `rustfmt` binary only on changed Rust files. Do not inv
 - Consumes: `pending_bitmap_cleanup_targets`, `cleanup_port_sets`, `apply_confirmed_port_set_cleanups`, and existing policy endpoints.
 - Produces a concrete standalone outcome containing accepted-item errors separately from pending cleanup failures.
 
-- [ ] **Step 1: Retry durable cleanup before standalone policy planning**
+- [x] **Step 1: Retry durable cleanup before standalone policy planning**
 
 Under the existing lifecycle and instance write locks, load exact cleanup targets, call idempotent `delete_port_set`, durably release only confirmed indices, and leave failed indices pending. A successful kernel delete followed by persistence failure must leave the durable/in-memory allocator quarantined.
 
-- [ ] **Step 2: Report current publication cleanup**
+- [x] **Step 2: Report current publication cleanup**
 
 After bank switch, final-state persistence, and strict CT scrub succeed, attempt retired-bitmap cleanup. Return an `Ok` committed outcome even when cleanup remains pending; never convert it into `ControlPlaneError::KernelError` or roll back the active bank.
 
-- [ ] **Step 3: Preserve batch semantics**
+- [x] **Step 3: Preserve batch semantics**
 
 Keep per-item validation errors in `errors`. Add cleanup debt as a separate response field so a successful atomic batch is not falsely described as partially rejected.
 
-- [ ] **Step 4: Expose maintenance state without changing ACL readiness**
+- [x] **Step 4: Expose maintenance state without changing ACL readiness**
 
 Add `cleanup_pending_count` and optional `maintenance_reason` to instance status. Derive them from durable cleanup intents while preserving the existing TC-derived `acl_ready` value.
 
-- [ ] **Step 5: Return HTTP 202 for committed cleanup debt**
+- [x] **Step 5: Return HTTP 202 for committed cleanup debt**
 
 Single add/update/delete and batch handlers return their normal success status when cleanup is complete. When cleanup remains pending, return `202 Accepted` with `committed: true` and structured cleanup details.
 
@@ -175,11 +176,11 @@ Single add/update/delete and batch handlers return their normal success status w
 - Consumes: completed implementation and exact-head GitHub Actions evidence.
 - Produces: current backlog status and reproducible RED/GREEN evidence.
 
-- [ ] **Step 1: Review the complete diff**
+- [x] **Step 1: Review the complete diff**
 
 Confirm there is no new generic transaction framework, no Python checker, no unrelated API/domain change, and no local Cargo output.
 
-- [ ] **Step 2: Commit and push GREEN**
+- [x] **Step 2: Commit and push GREEN**
 
 ```bash
 git add core/src/state.rs agent/src/control_plane.rs agent/src/control_plane/standalone_acl.rs agent/src/api_handlers/policies.rs api/src/lib.rs
@@ -187,15 +188,15 @@ git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "fi
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 3: Verify exact-head GitHub Actions**
+- [x] **Step 3: Verify exact-head GitHub Actions**
 
 Require `fast-contracts`, `rust-behavior`, and warning-denied Rust/eBPF build jobs to pass at the exact GREEN commit. No local build may substitute for hosted evidence.
 
-- [ ] **Step 4: Record closure evidence**
+- [x] **Step 4: Record closure evidence**
 
 Update `REVIEW-ACL-059` only after exact-head CI is green. Record RED commit/run, GREEN commit/run, durable target recovery, no-reuse proof, post-commit response semantics, and the absence of privileged field evidence where applicable.
 
-- [ ] **Step 5: Commit and push documentation closure**
+- [x] **Step 5: Commit and push documentation closure**
 
 ```bash
 git add docs/openstack-neutron-aria-details/12-review-bug-backlog.md docs/superpowers/plans/2026-07-19-acl-059-bitmap-cleanup-quarantine.md
@@ -208,3 +209,19 @@ git push origin v0.9-neutron-agent
 - Spec coverage: durable exact target, allocator exclusion, post-commit outcome, retry, persistence failure, restart visibility, batch separation, and legacy safety are assigned to Tasks 1-4.
 - Placeholder scan: no deferred implementation placeholder is present; privileged field evidence is not required to prove allocator state transitions and is not claimed.
 - Type consistency: `BitmapCleanupIntent`, `pending_bitmap_cleanup_targets`, and the committed cleanup outcome are introduced in RED before production use.
+
+## Delivery Evidence
+
+- RED commit `724527d` and Build
+  [29690852147](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29690852147):
+  `fast-contracts` passed and `rust-behavior` failed only on the intentionally
+  missing durable cleanup-intent/outcome interfaces; the remaining long build
+  was cancelled after the RED boundary was proven.
+- GREEN commit `65fedfb` and exact-head Build
+  [29691471591](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29691471591):
+  `fast-contracts`, `rust-behavior`, and warning-denied eBPF/userspace/agent
+  static builds passed.
+- No local Cargo command or privileged field execution was used or claimed.
+- `rustfmt --check` was run without mutation. It reported pre-existing
+  whole-file drift, including unrelated sections of the large control-plane
+  modules; no broad formatting rewrite was applied. `git diff --check` passed.
