@@ -28,6 +28,8 @@ use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, Ru
 use aria_core::wal::{WalClient, WalEntry};
 
 mod observability;
+#[cfg(test)]
+mod standalone_acl;
 mod ssl;
 mod tcprt;
 mod trace;
