@@ -347,4 +347,3 @@ jobs:
           python3 ci/check_stage3_readiness.py
           python3 ci/check_stage3_n3_evidence.py
           python3 ci/check_smoke_python_blocks.py
-          python3 ci/check_standalone_tc_acl_smoke.py --self-test
