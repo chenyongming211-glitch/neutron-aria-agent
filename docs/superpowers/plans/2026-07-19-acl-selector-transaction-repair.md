@@ -20,6 +20,52 @@
 
 ---
 
+### Task 0: Split CI lanes before resuming Rust RED/GREEN work
+
+**Files:**
+
+- Modify: `.github/workflows/build.yml`
+- Modify: `ci/check_neutron_stage1.py`
+- Modify: `ci/check_build_workflow_contract.py`
+- Create: `ci/test_ci_lane_contract.py`
+
+**Interfaces:**
+
+- Consumes: `ci/rust_build_required.py` as the single changed-path authority and the existing `RUST_TESTS` Rust behavior-filter list.
+- Produces: one shared `rust_required` job output; a fast public-contract lane; a Rust behavior-test lane; and a Rust/eBPF build-and-release lane that do not invoke one another.
+
+- [x] **Step 1: Write the CI separation RED contracts**
+
+Add `ci/test_ci_lane_contract.py` and first run it against the current workflow. It must fail until all of these are true: `changes` publishes `rust_required` once; `fast-contracts` has no cargo command; `rust-behavior` runs `--rust-tests-only` and cargo test but no cargo build; `rust-build` runs cargo build but no cargo test.
+
+Also run `python3 ci/check_neutron_stage1.py --fast-contracts`. Expected before implementation: argument parsing fails because the fast mode does not exist.
+
+- [x] **Step 2: Add explicit Stage 1 modes**
+
+Keep the default mode as the existing complete static audit for scheduled/manual use. Add `--fast-contracts` for Python adapter tests, packaged/documented public contracts, UDS artifact validation, shell syntax, and public smoke entrypoint checks only. Add `--rust-tests-only --rust-toolchain stable` to run only `RUST_TESTS`, without Python tests, mutation self-tests, source parsers, smoke parsers, or full static checks.
+
+The Rust-only mode must retain `managed_owned_acl_strict_flush_`, `neutron_acl_detach_`, and `neutron_acl_purge_failure_`.
+
+- [x] **Step 3: Partition Build workflow jobs**
+
+Create `changes`, `fast-contracts`, `rust-behavior`, and `rust-build` jobs. `changes` runs path classification once and exports `rust_required`; fast contracts contain no Cargo; rust behavior uses stable Rust/cache and no cargo build/nightly/bpf-linker/musl setup; rust build owns nightly, bpf-linker, static binaries, eBPF artifacts, release/archive/image work and contains no cargo test.
+
+Keep complete Stage 1/Stage 2/Stage 3 static audits outside the PR critical path, reachable only from a `workflow_dispatch` `run_deep_audit` input or scheduled audit. Privileged field smoke remains Task 5 field work.
+
+- [x] **Step 4: Update only stable workflow contracts**
+
+Require `python3 ci/check_neutron_stage1.py --rust-tests-only --rust-toolchain stable` in the existing Stage 1 workflow assertion. Do not add private Rust helper, test-order, or YAML-whitespace contracts.
+
+- [x] **Step 5: Verify and commit Task 0**
+
+Run non-Cargo local verification: `python3 -m unittest ci.test_ci_lane_contract ci.test_rust_build_required ci.test_rust_warning_hygiene`, `python3 ci/check_build_workflow_contract.py`, `python3 ci/check_rust_warning_hygiene.py`, `python3 ci/check_neutron_stage1.py --fast-contracts`, and `git diff --check`. Commit with `ci: split ACL contracts tests and builds`.
+
+Expected GitHub result: fast contracts, Rust behavior tests, and Rust/eBPF builds are independent jobs. The first exact-head Rust behavior run supplies the Task 1 RED evidence; its failure is expected until Tasks 2 and 3 land.
+
+**Status:** implementation is `7084cc4`, task review is clean, and local non-Cargo checks passed. Hosted CI is the remaining verification gate.
+
+---
+
 ## File Responsibility Map
 
 - `agent/src/control_plane.rs`: owns publication, strict CT flush, rollback preimages, durable restoration, and managed projection health.
@@ -125,6 +171,8 @@ git push origin codex/review-acl-046-selector-isolation-design
 ```
 
 Expected GitHub result: the new Rust tests fail for missing rollback/quiesced-purge behavior; pre-existing jobs remain green until the Rust test phase.
+
+**Current status:** the RED commit is `640173b`; its original hosted run was intentionally cancelled because the former workflow ran the complete static checker twice. Task 1 is not complete until the Task 0 Rust behavior lane records the expected RED result.
 
 ---
 
@@ -319,7 +367,7 @@ Expected GitHub result: detach ordering and partial-purge RED tests pass; no dea
 
 ---
 
-### Task 4: Remove checker shape coupling and duplicate execution
+### Task 4: Remove checker shape coupling and reduce legacy audit cost
 
 **Files:**
 
@@ -354,9 +402,9 @@ public ABI/map/schema guardrails
 
 Prefer direct `bash -n` plus small structured-output validation. If shared parsing is still necessary, keep one small shared helper; do not maintain separate managed and standalone heredoc/function parsers.
 
-- [ ] **Step 4: De-duplicate GitHub Actions**
+- [ ] **Step 4: Reduce the legacy audit to public contracts**
 
-Run lightweight Stage 1 static checks once. When Rust changes, run Rust behavior tests without rerunning the complete Python/meta checker tree. Keep privileged smoke as a separate evidence-producing job/environment.
+Task 0 has already separated the PR lanes. Remove the remaining second-order audit work until the scheduled/manual audit contains only public contracts, syntax, entrypoint existence, structured result/evidence schema, and public ABI/map/schema guardrails. Keep privileged smoke as separate evidence-producing field work.
 
 - [ ] **Step 5: Commit checker reduction separately**
 
