@@ -487,6 +487,13 @@ incomplete. The PR remains Draft, and `REVIEW-ACL-046`, `REVIEW-ACL-064`,
 `REVIEW-ACL-065`, and `REVIEW-TXN-030` must not be marked fixed until the
 required field evidence is attached and the final review gate completes.
 
+**Pre-field wiring checkpoint:** the specialized managed delete-fault smoke now
+has opt-in fixtures and atomic structured evidence for detach ordering, purge
+failure atomicity, strict-flush rollback, and successful retry detach. Wiring is
+ready; privileged execution is pending. This checkpoint records no field run or
+field success: Task 5 Steps 1-4 remain incomplete, the four findings above
+remain open pending field evidence, and the PR remains Draft.
+
 ---
 
 ## Self-Review Result

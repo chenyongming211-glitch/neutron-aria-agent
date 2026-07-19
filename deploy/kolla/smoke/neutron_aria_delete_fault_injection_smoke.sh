@@ -26,8 +26,26 @@ ACL_PROTOCOL="${ACL_PROTOCOL:-icmp}"
 PING_COUNT="${PING_COUNT:-2}"
 PING_TIMEOUT="${PING_TIMEOUT:-1}"
 PYTHON_BIN="${PYTHON_BIN:-}"
+PIN_ROOT="${PIN_ROOT:-/sys/fs/bpf/aria/global-v2}"
+NEUTRON_STATE_PATH="${NEUTRON_STATE_PATH:-/var/lib/aria-agent}"
+MANAGED_TRANSACTION_SMOKE="${MANAGED_TRANSACTION_SMOKE:-false}"
+WORK_DIR="${WORK_DIR:-/tmp/neutron-aria-delete-transaction-$(date +%Y%m%d%H%M%S)-$(hostname -s)}"
+
+RESULT="fail"
+FAILURE_REASON="smoke did not complete"
+TRANSACTION_BODY_SUCCEEDED=false
+DETACH_ORDERING_STATUS="not_run"
+PURGE_FAILURE_ATOMICITY_STATUS="not_run"
+STRICT_FLUSH_ROLLBACK_STATUS="not_run"
+RETRY_DETACH_STATUS="not_run"
+cleanup_errors=()
+renamed_pin_sources=()
+renamed_pin_destinations=()
 
 die() {
+    if [ "${MANAGED_TRANSACTION_SMOKE}" = "true" ]; then
+        FAILURE_REASON="$*"
+    fi
     echo "ERROR: $*" >&2
     exit 1
 }
@@ -132,6 +150,11 @@ PY
 }
 
 cleanup() {
+    local body_rc=$?
+    if [ "${MANAGED_TRANSACTION_SMOKE}" = "true" ]; then
+        cleanup_managed_transaction_smoke "${body_rc}"
+        return
+    fi
     if [ "${ROLLBACK_ARMED:-false}" = "true" ]; then
         echo "Cleaning up delete fault-injection smoke managed ports"
         rollback_managed_ports || true
@@ -349,6 +372,607 @@ apply_acl_snapshot_without_rollback() {
         bash "${REPO_ROOT}/deploy/kolla/smoke/neutron_aria_full_resync_smoke.sh"
 }
 
+record_cleanup_error() {
+    cleanup_errors+=("$*")
+    echo "CLEANUP_ERROR: $*" >&2
+}
+
+restore_renamed_pins() {
+    local index source destination rc=0
+    for ((index=${#renamed_pin_sources[@]}-1; index>=0; index--)); do
+        source="${renamed_pin_sources[index]}"
+        destination="${renamed_pin_destinations[index]}"
+        if [ -e "${destination}" ]; then
+            if [ -e "${source}" ]; then
+                echo "pin restoration collision: ${source} and ${destination} both exist" >&2
+                rc=1
+            elif ! mv -- "${destination}" "${source}"; then
+                echo "failed to restore pin ${destination} to ${source}" >&2
+                rc=1
+            fi
+        elif [ ! -e "${source}" ]; then
+            echo "pin restoration lost both ${source} and ${destination}" >&2
+            rc=1
+        fi
+    done
+    return "${rc}"
+}
+
+hold_pin_for_fault() {
+    local map_name="$1" source destination
+    source="${PIN_ROOT}/${map_name}"
+    destination="${PIN_ROOT}/.${map_name}.acl046-transaction-held"
+    [ -e "${source}" ] || die "required pin is missing before fault fixture: ${source}"
+    [ ! -e "${destination}" ] || die "pin fault destination already exists: ${destination}"
+    mv -- "${source}" "${destination}" || die "failed to hold pin ${source}"
+    renamed_pin_sources+=("${source}")
+    renamed_pin_destinations+=("${destination}")
+}
+
+capture_wal() {
+    local output="$1"
+    docker_agent_exec cat "${NEUTRON_STATE_PATH}/neutron-snapshot.wal" >"${output}"
+}
+
+capture_instance_state() {
+    local output="$1"
+    docker_agent_exec cat "${NEUTRON_STATE_PATH}/${EXPECTED_IFNAME}/state.json" >"${output}"
+}
+
+rollback_transaction_managed_target() {
+    docker_agent_exec python - "${SOCKET_PATH}" "${EXPECTED_PORT_ID}" "${EXPECTED_IFNAME}" <<'PY'
+from __future__ import print_function
+
+import sys
+
+from neutron_aria.agent.uds_client import LocalClient
+
+socket_path, expected_port_id, expected_ifname = sys.argv[1:4]
+client = LocalClient(socket_path, timeout=3.0)
+client.capabilities()
+status = client.status()
+managed = status.get("managed_ports") or []
+foreign = [port for port in managed if
+           port.get("port_id") != expected_port_id or port.get("ifname") != expected_ifname]
+if foreign or len(managed) > 1:
+    raise SystemExit("refusing transaction rollback with foreign managed ports: %s" % managed)
+if managed:
+    response = client.delete_port(expected_port_id)
+    print("transaction_rollback status=%s detached=%s" % (
+        response.get("status"), response.get("detached")))
+after = client.status()
+remaining = after.get("managed_ports") or []
+if remaining:
+    raise SystemExit("transaction rollback left managed ports: %s" % remaining)
+PY
+}
+
+capture_tc_identity() {
+    local directory="$1" ifindex
+    ifindex="$(cat "/sys/class/net/${EXPECTED_IFNAME}/ifindex")" || return 1
+    ip -details link show dev "${EXPECTED_IFNAME}" >"${directory}/link.txt" || return 1
+    tc -j filter show dev "${EXPECTED_IFNAME}" ingress >"${directory}/tc-ingress.json" || return 1
+    tc -j filter show dev "${EXPECTED_IFNAME}" egress >"${directory}/tc-egress.json" || return 1
+    bpftool -j net show >"${directory}/bpftool-net.json" || return 1
+    bpftool -j link show pinned "${PIN_ROOT}/${EXPECTED_IFNAME}_tc_ingress_link" \
+        >"${directory}/pinned-ingress-link.json" || return 1
+    bpftool -j link show pinned "${PIN_ROOT}/${EXPECTED_IFNAME}_tc_egress_link" \
+        >"${directory}/pinned-egress-link.json" || return 1
+    "${PYTHON_BIN}" - "${directory}" "${ifindex}" <<'PY'
+from __future__ import print_function
+
+import json
+import os
+import sys
+
+root, expected_ifindex = sys.argv[1], int(sys.argv[2])
+
+def one(name):
+    payload = json.load(open(os.path.join(root, name), encoding="utf-8"))
+    if isinstance(payload, list):
+        if len(payload) != 1:
+            raise AssertionError((name, payload))
+        payload = payload[0]
+    if not isinstance(payload, dict):
+        raise AssertionError((name, payload))
+    return payload
+
+evidence = {}
+for direction in ("ingress", "egress"):
+    link = one("pinned-%s-link.json" % direction)
+    if int(link.get("ifindex") or 0) != expected_ifindex:
+        raise AssertionError((direction, expected_ifindex, link))
+    if int(link.get("prog_id") or 0) <= 0:
+        raise AssertionError((direction, "missing prog_id", link))
+    rendered = json.dumps(link, sort_keys=True).lower()
+    if direction not in rendered:
+        raise AssertionError((direction, "wrong attach type", link))
+    evidence[direction] = {
+        "ifindex": int(link["ifindex"]),
+        "prog_id": int(link["prog_id"]),
+        "attach_type": link.get("attach_type"),
+    }
+print(json.dumps(evidence, sort_keys=True))
+PY
+}
+
+capture_transaction_state() {
+    local label="$1" directory ifindex key_hex tap_id config_hex map_name
+    directory="${WORK_DIR}/${label}"
+    mkdir -p "${directory}" || return 1
+    status_json >"${directory}/status.json" || return 1
+    curl --silent --show-error --fail "${DATAPATH_HTTP}/api/v1/instances" \
+        >"${directory}/instances.json" || return 1
+    curl --silent --show-error --fail "${DATAPATH_HTTP}/api/v1/${EXPECTED_IFNAME}/config" \
+        >"${directory}/config.json" || return 1
+    curl --silent --show-error --fail "${DATAPATH_HTTP}/api/v1/${EXPECTED_IFNAME}/groups" \
+        >"${directory}/groups.json" || return 1
+    curl --silent --show-error --fail "${DATAPATH_HTTP}/api/v1/${EXPECTED_IFNAME}/policies" \
+        >"${directory}/policies.json" || return 1
+    capture_tc_identity "${directory}" >"${directory}/link-identity-assertion.json" || return 1
+    for map_name in POLICY_TABLE SRC_IPV4_TRIE DST_IPV4_TRIE SRC_IPV6_TRIE DST_IPV6_TRIE \
+            ACL_SRC_IPV4_TRIE ACL_DST_IPV4_TRIE ACL_SRC_IPV6_TRIE ACL_DST_IPV6_TRIE; do
+        bpftool -j map dump pinned "${PIN_ROOT}/${map_name}" \
+            >"${directory}/${map_name}.json" || return 1
+    done
+    ifindex="$(cat "/sys/class/net/${EXPECTED_IFNAME}/ifindex")" || return 1
+    key_hex="$("${PYTHON_BIN}" - "${ifindex}" <<'PY'
+from __future__ import print_function
+import struct,sys
+print(" ".join("%02x" % b for b in struct.pack("=I", int(sys.argv[1]))))
+PY
+    )" || return 1
+    bpftool -j map lookup pinned "${PIN_ROOT}/IFACE_CTX_MAP" key hex ${key_hex} \
+        >"${directory}/iface-ctx.json" || return 1
+    tap_id="$("${PYTHON_BIN}" - "${directory}/iface-ctx.json" <<'PY'
+from __future__ import print_function
+import json,struct,sys
+value=json.load(open(sys.argv[1],encoding="utf-8"))["value"]
+print(struct.unpack("=I",bytes(value[:4]))[0])
+PY
+    )" || return 1
+    config_hex="$("${PYTHON_BIN}" - "${tap_id}" <<'PY'
+from __future__ import print_function
+import struct,sys
+print(" ".join("%02x" % b for b in struct.pack("=I", int(sys.argv[1]))))
+PY
+    )" || return 1
+    bpftool -j map lookup pinned "${PIN_ROOT}/TAP_CONFIG_MAP" key hex ${config_hex} \
+        >"${directory}/tap-config.json" || return 1
+    "${PYTHON_BIN}" - "${directory}/tap-config.json" "${tap_id}" >"${directory}/bank.json" <<'PY' || return 1
+from __future__ import print_function
+import json,sys
+value=json.load(open(sys.argv[1],encoding="utf-8"))["value"]
+print(json.dumps({"tap_id":int(sys.argv[2]),"tap_config":value,"active_bank":int(value[6])},sort_keys=True))
+PY
+    capture_wal "${directory}/neutron-snapshot.wal" || return 1
+    capture_instance_state "${directory}/state.json" || return 1
+}
+
+write_delete_request() {
+    local directory="$1"
+    EXPECTED_PORT_ID="${EXPECTED_PORT_ID}" EXPECTED_IFNAME="${EXPECTED_IFNAME}" \
+        "${PYTHON_BIN}" >"${directory}/request.json" <<'PY'
+from __future__ import print_function
+import json,os
+print(json.dumps({"method":"DELETE","port_id":os.environ["EXPECTED_PORT_ID"],
+                  "ifname":os.environ["EXPECTED_IFNAME"]},sort_keys=True))
+PY
+}
+
+delete_target_port_evidence() {
+    local directory="$1"
+    write_delete_request "${directory}" || return 2
+    docker_agent_exec python - "${SOCKET_PATH}" "${EXPECTED_PORT_ID}" <<'PY' \
+        >"${directory}/response.json.tmp"
+from __future__ import print_function
+
+import json
+import sys
+
+from neutron_aria.agent.uds_client import LocalApiResponseError, LocalClient
+
+socket_path, port_id = sys.argv[1:3]
+client = LocalClient(socket_path, timeout=3.0)
+client.capabilities()
+client.status()
+try:
+    body = client.delete_port(port_id)
+except LocalApiResponseError as exc:
+    print(json.dumps({"http_status":exc.status,"reason":exc.reason,"body":exc.body},sort_keys=True))
+    raise SystemExit(1)
+print(json.dumps({"http_status":200,"reason":"OK","body":body},sort_keys=True))
+PY
+    local rc=$?
+    mv "${directory}/response.json.tmp" "${directory}/response.json" || return 2
+    return "${rc}"
+}
+
+assert_sole_managed_target() {
+    local status_file="$1"
+    "${PYTHON_BIN}" - "${status_file}" "${EXPECTED_PORT_ID}" "${EXPECTED_IFNAME}" <<'PY'
+from __future__ import print_function
+import json,sys
+payload=json.load(open(sys.argv[1],encoding="utf-8"))
+ports=payload.get("managed_ports") or []
+assert len(ports)==1,ports
+assert ports[0].get("port_id")==sys.argv[2],ports
+assert ports[0].get("ifname")==sys.argv[3],ports
+print("sole_managed_target_ok")
+PY
+}
+
+assert_no_foreign_managed_ports() {
+    local status_file="$1"
+    "${PYTHON_BIN}" - "${status_file}" "${EXPECTED_PORT_ID}" "${EXPECTED_IFNAME}" <<'PY'
+from __future__ import print_function
+import json,sys
+payload=json.load(open(sys.argv[1],encoding="utf-8"))
+ports=payload.get("managed_ports") or []
+foreign=[row for row in ports if row.get("port_id")!=sys.argv[2] or row.get("ifname")!=sys.argv[3]]
+assert not foreign,{"foreign_managed_ports":foreign,"managed_ports":ports}
+assert len(ports)<=1,ports
+print("dedicated_host_preflight_ok managed_ports=%d" % len(ports))
+PY
+}
+
+assert_ready_enforced_baseline() {
+    local directory="$1"
+    DIRECTORY="${directory}" PORT_ID="${EXPECTED_PORT_ID}" \
+    OWNER_PREFIX="neutron:${EXPECTED_PORT_ID}:" "${PYTHON_BIN}" - <<'PY'
+from __future__ import print_function
+import json,os
+root=os.environ["DIRECTORY"]
+port_id=os.environ["PORT_ID"]
+status=json.load(open(os.path.join(root,"status.json"),encoding="utf-8"))
+rows=[row for row in status.get("port_statuses") or [] if row.get("port_id")==port_id]
+assert len(rows)==1,(port_id,status)
+row=rows[0]
+domains=[domain for domain in row.get("domains") or [] if domain.get("domain")=="acl"]
+assert len(domains)==1,row
+assert domains[0].get("status")=="ready",domains[0]
+assert domains[0].get("effective_action")=="enforce",domains[0]
+tap_config=json.load(open(os.path.join(root,"tap-config.json"),encoding="utf-8"))["value"]
+assert int(tap_config[0])==1,tap_config
+assert int(tap_config[2])==1,tap_config
+prefix=os.environ["OWNER_PREFIX"]
+groups=json.load(open(os.path.join(root,"groups.json"),encoding="utf-8")).get("groups") or []
+owned_groups=[group for group in groups if str(group.get("name") or "").startswith(prefix)]
+assert owned_groups,groups
+policies=json.load(open(os.path.join(root,"policies.json"),encoding="utf-8")).get("policies") or []
+assert any(str(policy.get("src_group") or "").startswith(prefix) or
+           str(policy.get("dst_group") or "").startswith(prefix)
+           for policy in policies),policies
+print(json.dumps({"acl":"ready/enforce","gate":"published",
+                  "owned_groups":len(owned_groups),"owned_policies":len(policies)},sort_keys=True))
+PY
+}
+
+assert_failed_transaction() {
+    local fixture="$1" before="$2" after="$3" expected_error="$4" require_equal="$5"
+    FIXTURE="${fixture}" BEFORE="${WORK_DIR}/${before}" AFTER="${WORK_DIR}/${after}" \
+    PORT_ID="${EXPECTED_PORT_ID}" IFNAME="${EXPECTED_IFNAME}" \
+    OWNER_PREFIX="neutron:${EXPECTED_PORT_ID}:" EXPECTED_ERROR="${expected_error}" \
+    REQUIRE_EQUAL="${require_equal}" "${PYTHON_BIN}" - <<'PY'
+from __future__ import print_function
+
+import json
+import os
+
+before=os.environ["BEFORE"]
+after=os.environ["AFTER"]
+port_id=os.environ["PORT_ID"]
+ifname=os.environ["IFNAME"]
+owner_prefix=os.environ["OWNER_PREFIX"]
+
+def load(root,name):
+    return json.load(open(os.path.join(root,name),encoding="utf-8"))
+
+def canonical(value):
+    if isinstance(value,list):
+        return sorted((canonical(item) for item in value),key=lambda item:json.dumps(item,sort_keys=True))
+    if isinstance(value,dict):
+        return {key:canonical(value[key]) for key in sorted(value)}
+    return value
+
+def target_identity(status):
+    ports=[row for row in status.get("managed_ports") or [] if row.get("port_id")==port_id]
+    statuses=[row for row in status.get("port_statuses") or [] if row.get("port_id")==port_id]
+    assert len(ports)==1,(port_id,status)
+    assert ports[0].get("ifname")==ifname,ports
+    return canonical({"port":ports[0],"port_statuses":statuses})
+
+def committed_identity(path):
+    committed=None
+    entries=[]
+    for line in open(path,encoding="utf-8"):
+        line=line.strip()
+        if not line:
+            continue
+        entry=json.loads(line)
+        entries.append(entry)
+        if isinstance(entry.get("state"),dict):
+            committed=entry["state"]
+    assert committed is not None,path
+    ports=committed.get("ports") or {}
+    statuses=committed.get("port_statuses") or {}
+    assert port_id in ports,(port_id,committed)
+    return canonical({"port":ports[port_id],"port_status":statuses.get(port_id)}),entries
+
+def owned(root):
+    groups=load(root,"groups.json").get("groups") or []
+    policies=load(root,"policies.json").get("policies") or []
+    owned_groups=[row for row in groups if str(row.get("name") or "").startswith(owner_prefix)]
+    owned_ids={row.get("id") for row in owned_groups}
+    owned_policies=[row for row in policies if
+                    str(row.get("src_group") or "").startswith(owner_prefix) or
+                    str(row.get("dst_group") or "").startswith(owner_prefix) or
+                    row.get("src_group_id") in owned_ids or row.get("dst_group_id") in owned_ids]
+    return canonical({"groups":owned_groups,"policies":owned_policies})
+
+response=load(after,"response.json")
+body=response.get("body") or {}
+assert int(response.get("http_status") or 0)>=400,response
+assert body.get("status")=="error",response
+assert body.get("detached") is False,response
+assert os.environ["EXPECTED_ERROR"] in str(body.get("error") or ""),response
+
+before_status=load(before,"status.json")
+after_status=load(after,"status.json")
+assert target_identity(before_status)==target_identity(after_status),(before_status,after_status)
+before_durable,before_entries=committed_identity(os.path.join(before,"neutron-snapshot.wal"))
+after_durable,after_entries=committed_identity(os.path.join(after,"neutron-snapshot.wal"))
+assert before_durable==after_durable,(before_durable,after_durable)
+assert after_entries[-1].get("type")=="delete_intent",after_entries[-1]
+assert after_entries[-1].get("port_id")==port_id,after_entries[-1]
+
+tap_config=load(after,"tap-config.json")["value"]
+assert int(tap_config[0])==0,tap_config
+assert int(tap_config[2])==0,tap_config
+
+after_owned=owned(after)
+if os.environ["REQUIRE_EQUAL"]=="true":
+    assert load(before,"bank.json")["active_bank"]==load(after,"bank.json")["active_bank"]
+    for name in ("POLICY_TABLE.json","SRC_IPV4_TRIE.json","DST_IPV4_TRIE.json",
+                 "SRC_IPV6_TRIE.json","DST_IPV6_TRIE.json","ACL_SRC_IPV4_TRIE.json",
+                 "ACL_DST_IPV4_TRIE.json","ACL_SRC_IPV6_TRIE.json","ACL_DST_IPV6_TRIE.json"):
+        assert canonical(load(before,name))==canonical(load(after,name)),name
+    assert owned(before)==after_owned,(owned(before),after_owned)
+else:
+    assert after_owned=={"groups":[],"policies":[]},after_owned
+    tap_id=int(load(after,"bank.json")["tap_id"])
+    policy_rows=load(after,"POLICY_TABLE.json")
+    assert not any(int.from_bytes(bytes(row["key"][:4]),byteorder="little")==tap_id for row in policy_rows),policy_rows
+    banked_tap_ids={tap_id*2,tap_id*2+1}
+    for name in ("ACL_SRC_IPV4_TRIE.json","ACL_DST_IPV4_TRIE.json",
+                 "ACL_SRC_IPV6_TRIE.json","ACL_DST_IPV6_TRIE.json"):
+        rows=load(after,name)
+        assert not any(int.from_bytes(bytes(row["key"][4:8]),byteorder="little") in banked_tap_ids
+                       for row in rows),name
+
+print(json.dumps({"fixture":os.environ["FIXTURE"],"detached":False,
+                  "links_attached":True,"gate_quiesced":True,
+                  "owned_projection":after_owned,"durable_identity_equal":True,
+                  "managed_identity_equal":True,"publication_equal":os.environ["REQUIRE_EQUAL"]=="true"},
+                 sort_keys=True))
+PY
+}
+
+capture_detached_state() {
+    local label="$1" directory map_name
+    directory="${WORK_DIR}/${label}"
+    mkdir -p "${directory}" || return 1
+    status_json >"${directory}/status.json" || return 1
+    curl --silent --show-error --fail "${DATAPATH_HTTP}/api/v1/instances" \
+        >"${directory}/instances.json" || return 1
+    ip -details link show dev "${EXPECTED_IFNAME}" >"${directory}/link.txt" || return 1
+    tc -j filter show dev "${EXPECTED_IFNAME}" ingress >"${directory}/tc-ingress.json" || return 1
+    tc -j filter show dev "${EXPECTED_IFNAME}" egress >"${directory}/tc-egress.json" || return 1
+    bpftool -j net show >"${directory}/bpftool-net.json" || return 1
+    for map_name in POLICY_TABLE SRC_IPV4_TRIE DST_IPV4_TRIE SRC_IPV6_TRIE DST_IPV6_TRIE \
+            ACL_SRC_IPV4_TRIE ACL_DST_IPV4_TRIE ACL_SRC_IPV6_TRIE ACL_DST_IPV6_TRIE; do
+        printf '{"available":false,"reason":"shared runtime removed after detach"}\n' \
+            >"${directory}/${map_name}.json" || return 1
+    done
+    printf '{"available":false,"reason":"tap runtime removed after detach"}\n' \
+        >"${directory}/bank.json" || return 1
+    printf '{"groups":[],"reason":"instance removed after detach"}\n' \
+        >"${directory}/groups.json" || return 1
+    printf '{"policies":[],"reason":"instance removed after detach"}\n' \
+        >"${directory}/policies.json" || return 1
+    capture_wal "${directory}/neutron-snapshot.wal" || return 1
+    capture_instance_state "${directory}/state.json" || return 1
+}
+
+assert_retry_detached() {
+    local directory="$1"
+    DIRECTORY="${directory}" PORT_ID="${EXPECTED_PORT_ID}" IFNAME="${EXPECTED_IFNAME}" \
+    OWNER_PREFIX="neutron:${EXPECTED_PORT_ID}:" PIN_ROOT="${PIN_ROOT}" \
+        "${PYTHON_BIN}" - <<'PY'
+from __future__ import print_function
+import json,os
+root=os.environ["DIRECTORY"]
+port_id=os.environ["PORT_ID"]
+ifname=os.environ["IFNAME"]
+response=json.load(open(os.path.join(root,"response.json"),encoding="utf-8"))
+body=response.get("body") or {}
+assert response.get("http_status")==200,response
+assert body.get("status")=="ok",response
+assert body.get("detached") is True,response
+status=json.load(open(os.path.join(root,"status.json"),encoding="utf-8"))
+assert not any(row.get("port_id")==port_id for row in status.get("managed_ports") or []),status
+instances=json.load(open(os.path.join(root,"instances.json"),encoding="utf-8")).get("instances") or []
+assert not any(row.get("name")==ifname for row in instances),instances
+for direction in ("ingress","egress"):
+    assert not os.path.exists(os.path.join(os.environ["PIN_ROOT"],"%s_tc_%s_link"%(ifname,direction)))
+state=open(os.path.join(root,"state.json"),encoding="utf-8").read()
+assert os.environ["OWNER_PREFIX"] not in state,state
+print(json.dumps({"detached":True,"managed_runtime_absent":True,
+                  "owned_projection_absent":True,"pinned_tc_links_absent":True},sort_keys=True))
+PY
+}
+
+prepare_transaction_fixture() {
+    local label="$1"
+    start_datapath_without_fault >"${WORK_DIR}/${label}-start-clean.log" 2>&1
+    wait_for_uds
+    apply_acl_snapshot_without_rollback "${acl_fixture_json}" \
+        >"${WORK_DIR}/${label}-apply-snapshot.log" 2>&1
+    capture_transaction_state "${label}-before"
+    assert_sole_managed_target "${WORK_DIR}/${label}-before/status.json" \
+        >"${WORK_DIR}/${label}-dedicated-host-assertion.txt"
+    assert_ready_enforced_baseline "${WORK_DIR}/${label}-before" \
+        >"${WORK_DIR}/${label}-baseline-assertion.json"
+}
+
+retry_transaction_delete() {
+    local label="$1" before_directory="$2" retry_directory
+    retry_directory="${WORK_DIR}/${label}-retry"
+    mkdir -p "${retry_directory}"
+    start_datapath_without_fault >"${retry_directory}/start-clean.log" 2>&1
+    wait_for_uds
+    set +e
+    delete_target_port_evidence "${retry_directory}"
+    local retry_rc=$?
+    set -e
+    [ "${retry_rc}" -eq 0 ] || die "${label} retry delete failed rc=${retry_rc}"
+    capture_detached_state "${label}-retry"
+    assert_retry_detached "${retry_directory}" >"${retry_directory}/assertion.json"
+    cp "${WORK_DIR}/${before_directory}/bank.json" "${retry_directory}/pre-retry-bank.json"
+    cp "${WORK_DIR}/${before_directory}/groups.json" "${retry_directory}/pre-retry-groups.json"
+    cp "${WORK_DIR}/${before_directory}/policies.json" "${retry_directory}/pre-retry-policies.json"
+}
+
+run_detach_ordering_fixture() {
+    local label="detach-ordering" marker first_rc
+    prepare_transaction_fixture "${label}"
+    mkdir -p "${WORK_DIR}/${label}-after"
+    marker="${FAULT_ONCE_DIR}/aria-fault-$(sanitize_point neutron.delete.after_acl_purge).once"
+    rm -f "${marker}"
+    FAULT_ACTION=return_error start_datapath_with_fault \
+        neutron.delete.after_acl_purge "${marker}" >"${WORK_DIR}/${label}-fault-start.log" 2>&1
+    wait_for_uds
+    set +e
+    delete_target_port_evidence "${WORK_DIR}/${label}-after"
+    first_rc=$?
+    set -e
+    [ "${first_rc}" -ne 0 ] || die "detach ordering fault did not fail the first delete"
+    [ -f "${marker}" ] || die "detach ordering one-shot fault marker was not created"
+    capture_transaction_state "${label}-after"
+    assert_failed_transaction detach_ordering "${label}-before" "${label}-after" \
+        neutron.delete.after_acl_purge false >"${WORK_DIR}/${label}-after/assertion.json"
+    DETACH_ORDERING_STATUS="pass"
+    retry_transaction_delete "${label}" "${label}-before"
+}
+
+run_pin_failure_fixture() {
+    local label="$1" map_name="$2" fixture_name="$3" first_rc restore_rc
+    prepare_transaction_fixture "${label}"
+    mkdir -p "${WORK_DIR}/${label}-after"
+    hold_pin_for_fault "${map_name}"
+    set +e
+    delete_target_port_evidence "${WORK_DIR}/${label}-after"
+    first_rc=$?
+    restore_renamed_pins
+    restore_rc=$?
+    set -e
+    [ "${restore_rc}" -eq 0 ] || die "${label} failed to restore ${map_name} immediately"
+    [ "${first_rc}" -ne 0 ] || die "${label} pin fault did not fail the first delete"
+    capture_transaction_state "${label}-after"
+    assert_failed_transaction "${fixture_name}" "${label}-before" "${label}-after" \
+        "${map_name}" true >"${WORK_DIR}/${label}-after/assertion.json"
+    retry_transaction_delete "${label}" "${label}-before"
+}
+
+write_summary() {
+    printf '%s\n' "${cleanup_errors[@]:-}" >"${WORK_DIR}/cleanup-errors.txt" || return 1
+    RESULT="${RESULT}" FAILURE_REASON="${FAILURE_REASON}" WORK_DIR="${WORK_DIR}" \
+    DETACH_ORDERING_STATUS="${DETACH_ORDERING_STATUS}" \
+    PURGE_FAILURE_ATOMICITY_STATUS="${PURGE_FAILURE_ATOMICITY_STATUS}" \
+    STRICT_FLUSH_ROLLBACK_STATUS="${STRICT_FLUSH_ROLLBACK_STATUS}" \
+    RETRY_DETACH_STATUS="${RETRY_DETACH_STATUS}" \
+        "${PYTHON_BIN}" >"${WORK_DIR}/summary.json.tmp" <<'PY' || return 1
+from __future__ import print_function
+import json,os
+cleanup_errors=[line.rstrip("\n") for line in open(os.path.join(os.environ["WORK_DIR"],"cleanup-errors.txt"),encoding="utf-8") if line.rstrip("\n")]
+fixtures={
+    "detach_ordering":os.environ["DETACH_ORDERING_STATUS"],
+    "purge_failure_atomicity":os.environ["PURGE_FAILURE_ATOMICITY_STATUS"],
+    "strict_flush_rollback":os.environ["STRICT_FLUSH_ROLLBACK_STATUS"],
+    "retry_detach":os.environ["RETRY_DETACH_STATUS"],
+}
+out={"result":os.environ["RESULT"],"failure_reason":os.environ["FAILURE_REASON"],
+     "cleanup_errors":cleanup_errors,"work_dir":os.environ["WORK_DIR"],
+     "transaction_boundary":{"fixtures":fixtures,
+                             "complete":all(value=="pass" for value in fixtures.values())}}
+print(json.dumps(out,sort_keys=True,indent=2))
+PY
+    mv "${WORK_DIR}/summary.json.tmp" "${WORK_DIR}/summary.json" || return 1
+}
+
+cleanup_managed_transaction_smoke() {
+    local body_rc="$1" final_rc=1
+    trap - EXIT
+    set +e
+    if ! restore_renamed_pins; then
+        record_cleanup_error "restore-renamed-pins failed"
+    fi
+    if [ "${ROLLBACK_ARMED:-false}" = "true" ]; then
+        if ! rollback_transaction_managed_target >"${WORK_DIR}/cleanup-rollback.log" 2>&1; then
+            record_cleanup_error "rollback-managed-ports failed"
+        fi
+    fi
+    if [ "${RESTORE_DATAPATH_ON_EXIT:-true}" = "true" ]; then
+        if ! start_datapath_without_fault >"${WORK_DIR}/cleanup-start-clean.log" 2>&1; then
+            record_cleanup_error "restore-datapath-without-fault failed"
+        fi
+    fi
+    RESULT="fail"
+    if [ "${body_rc}" -ne 0 ] && [ "${FAILURE_REASON}" = "smoke did not complete" ]; then
+        FAILURE_REASON="body failed rc=${body_rc}"
+    fi
+    if [ "${TRANSACTION_BODY_SUCCEEDED}" = "true" ] && [ "${body_rc}" -eq 0 ] && \
+            [ "${#cleanup_errors[@]}" -eq 0 ]; then
+        RESULT="pass"
+        FAILURE_REASON=""
+        final_rc=0
+    elif [ "${#cleanup_errors[@]}" -gt 0 ]; then
+        FAILURE_REASON="${FAILURE_REASON:-cleanup failed}; cleanup verification failed"
+    fi
+    if ! write_summary; then
+        record_cleanup_error "write_summary failed"
+        RESULT="fail"
+        final_rc=1
+        write_summary || echo "CLEANUP_ERROR: summary retry failed" >&2
+    fi
+    exit "${final_rc}"
+}
+
+run_managed_transaction_smoke() {
+    mkdir -p "${WORK_DIR}"
+    [ "${MANAGED_TRANSACTION_SMOKE}" = "true" ] || die "managed transaction fixtures require MANAGED_TRANSACTION_SMOKE=true"
+    need_command bpftool
+    need_command tc
+    ip link show dev "${EXPECTED_IFNAME}" >/dev/null 2>&1 || die "EXPECTED_IFNAME does not exist"
+    mkdir -p "${FAULT_ONCE_DIR}"
+    status_json >"${WORK_DIR}/dedicated-host-preflight-status.json"
+    assert_no_foreign_managed_ports "${WORK_DIR}/dedicated-host-preflight-status.json" \
+        >"${WORK_DIR}/dedicated-host-preflight-assertion.txt"
+    rollback_transaction_managed_target >"${WORK_DIR}/initial-rollback.log" 2>&1
+    ROLLBACK_ARMED=true
+    run_detach_ordering_fixture
+    run_pin_failure_fixture purge-failure-atomicity POLICY_TABLE purge_failure_atomicity
+    PURGE_FAILURE_ATOMICITY_STATUS="pass"
+    run_pin_failure_fixture strict-flush-rollback CT_TABLE_V4 strict_flush_rollback
+    STRICT_FLUSH_ROLLBACK_STATUS="pass"
+    RETRY_DETACH_STATUS="pass"
+    ROLLBACK_ARMED=false
+    RESTORE_DATAPATH_ON_EXIT=false
+    TRANSACTION_BODY_SUCCEEDED=true
+    FAILURE_REASON=""
+    echo "managed ACL transaction smoke wiring passed; evidence is in ${WORK_DIR}/summary.json"
+}
+
 need_command docker
 need_command curl
 need_command ping
@@ -371,18 +995,23 @@ fi
 
 mkdir -p "${FAULT_ONCE_DIR}"
 
+acl_fixture_json="$(build_acl_fixture \
+    "${EXPECTED_PORT_ID}" \
+    "${BLOCK_SRC_CIDR}" \
+    "${ACL_DIRECTION}" \
+    "${ACL_PROTOCOL}")"
+
+if [ "${MANAGED_TRANSACTION_SMOKE}" = "true" ]; then
+    run_managed_transaction_smoke
+    exit 0
+fi
+
 echo "Cleaning existing managed ports before delete fault-injection smoke"
 rollback_managed_ports
 ROLLBACK_ARMED=true
 
 echo "Pre-check: VM ${VM_IP} must be reachable before delete fault smoke"
 ping -c "${PING_COUNT}" -W "${PING_TIMEOUT}" "${VM_IP}" >/dev/null
-
-acl_fixture_json="$(build_acl_fixture \
-    "${EXPECTED_PORT_ID}" \
-    "${BLOCK_SRC_CIDR}" \
-    "${ACL_DIRECTION}" \
-    "${ACL_PROTOCOL}")"
 
 for point in ${DELETE_FAULT_POINTS}; do
     marker="${FAULT_ONCE_DIR}/aria-fault-$(sanitize_point "${point}").once"
