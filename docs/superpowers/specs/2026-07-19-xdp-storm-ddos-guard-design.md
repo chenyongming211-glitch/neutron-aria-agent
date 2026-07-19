@@ -84,7 +84,7 @@ XDP and TC are verdict-independent, but their current artifact and runtime lifec
 The first milestone does not provide:
 
 - physical-interface egress policing;
-- tap DDoS enforcement by default;
+- tap DDoS enforcement;
 - unknown-unicast detection based on OVS or bridge FDB state;
 - shared rate limits across bond members;
 - shared rate limits across ingress and egress;
@@ -145,7 +145,7 @@ TC behavior remains unchanged. XDP does not read ACL banks, ACL policies, ACL co
 ### 7.1 `tap_storm`
 
 - storm mode: observe or police;
-- DDoS mode: disabled by default;
+- DDoS mode: disabled in the first milestone;
 - identity: ingress `ifindex`, with existing tap identity available only for control-plane attribution;
 - purpose: stop VM-originated broadcast and multicast storms before OVS;
 - attachment mode: explicitly detected and reported; no silent mode claim.
@@ -168,8 +168,7 @@ An interface without `XDP_INTERFACE_CONFIG` is outside the protection domain and
 The existing `PacketInfo` remains the L3/L4 representation. A new bounded L2 representation is added for XDP protection:
 
 ```rust
-#[repr(C)]
-pub struct XdpFrameInfo {
+pub(crate) struct XdpFrameInfo {
     pub src_mac: [u8; 6],
     pub dst_mac: [u8; 6],
     pub ether_type: u16,
@@ -177,9 +176,10 @@ pub struct XdpFrameInfo {
     pub inner_vlan_id: u16,
     pub vlan_depth: u8,
     pub traffic_class: u8,
-    pub _pad: [u8; 2],
 }
 ```
+
+`XdpFrameInfo` is parser-local state, not a map key, map value, event, or userspace ABI. It therefore does not implement `aya::Pod` and has no reserved ABI padding. If a later feature needs to export L2 metadata, it must define a separate versioned shared type with explicit padding rather than turning this parser-local type into an accidental ABI.
 
 Parsing is bounded to:
 
@@ -190,11 +190,13 @@ Parsing is bounded to:
 
 Storm classes are:
 
-1. broadcast;
-2. IPv4 multicast;
-3. IPv6 multicast;
-4. other multicast;
-5. link-local control.
+1. `STORM_CLASS_BROADCAST = 1`;
+2. `STORM_CLASS_IPV4_MULTICAST = 2`;
+3. `STORM_CLASS_IPV6_MULTICAST = 3`;
+4. `STORM_CLASS_OTHER_MULTICAST = 4`;
+5. `STORM_CLASS_LINK_LOCAL_CONTROL = 5`.
+
+Class zero is invalid and is never published as a wildcard.
 
 Unknown unicast is intentionally not classified as storm traffic because packet-local XDP state cannot determine whether a unicast destination is absent from an OVS or bridge FDB.
 
@@ -208,69 +210,126 @@ ARP, DHCP broadcast, and IPv6 ND are not fully exempt. Continuous policing prese
 
 ### 9.1 Interface configuration
 
-```text
-XDP_INTERFACE_CONFIG: HashMap<u32, XdpInterfaceConfig>
-key: ifindex
-value:
-  interface_generation: u64
-  policy_generation: u64
-  profile: u8
-  storm_mode: u8
-  ddos_mode: u8
-  flags: u8
-  reserved padding
+```rust
+pub const XDP_MODE_DISABLED: u8 = 0;
+pub const XDP_MODE_OBSERVE: u8 = 1;
+pub const XDP_MODE_POLICE: u8 = 2;
+
+pub const XDP_PROFILE_NONE: u8 = 0;
+pub const XDP_PROFILE_TAP_STORM: u8 = 1;
+pub const XDP_PROFILE_PHYSICAL_EDGE: u8 = 2;
+
+#[repr(C)]
+pub struct XdpInterfaceConfig {
+    pub interface_generation: u64,
+    pub storm_policy_generation: u64,
+    pub ddos_policy_generation: u64,
+    pub profile: u8,
+    pub storm_mode: u8,
+    pub ddos_mode: u8,
+    pub storm_class_mask: u8,
+    pub ddos_class_mask: u8,
+    pub _pad: [u8; 3],
+}
 ```
+
+`XDP_INTERFACE_CONFIG` is a `HashMap<u32, XdpInterfaceConfig>` keyed by ingress ifindex. The value is 32 bytes with no implicit padding. Interface generation zero is invalid. A domain policy generation is zero only while that domain is disabled. Separate storm and DDoS policy generations preserve domain independence: changing one domain does not force runtime replacement in the other.
+
+Class bit `n - 1` corresponds to class constant `n`. Valid storm masks are within `0x1f`; valid DDoS masks are within `0x7f`. An enabled storm domain requires a nonzero mask and one complete policy/runtime pair for every selected class. An enabled DDoS domain requires bit zero for the total class and one complete interface policy/runtime pair for every selected interface class; service and source policies remain optional. A first-milestone `tap_storm` profile requires disabled DDoS mode, zero DDoS generation, and zero DDoS class mask. Reserved mask bits, invalid profile/mode combinations, unknown profiles, and unknown modes fail open for packet availability, increment a bounded configuration-error counter, and make only the affected XDP domain degraded. A selected class with a missing generation-scoped policy is degraded missing state, not an implicit unlimited class.
 
 The eBPF program uses `ctx.ingress_ifindex` directly. Physical interfaces are not assigned synthetic tap IDs.
 
-`interface_generation` is a userspace-assigned monotonic value created for each successful interface attachment transaction. A deleted and recreated interface receives a new value even when Linux reuses the same ifindex. Runtime values with a different interface generation are invalidated before the domain becomes ready.
+`interface_generation` is allocated from a durable, node-local, monotonically increasing `u64` counter before each interface attachment transaction. A deleted and recreated interface receives a new value even when Linux reuses the same ifindex. Counter exhaustion is a hard configuration error; the counter never wraps to zero.
+
+Every enforcement policy and runtime key includes both interface and domain policy generation. Publication follows this order:
+
+1. remove or disable the old `XDP_INTERFACE_CONFIG[ifindex]` entry so packets pass while a replacement interface identity is prepared;
+2. allocate a nonzero interface generation and nonzero generations for every requested domain;
+3. write every requested policy, fixed-cardinality runtime, and mitigation entry under the new generations; high-cardinality source runtime remains lazy;
+4. read back and validate the complete generation-scoped map set;
+5. write `XDP_INTERFACE_CONFIG[ifindex]` last as the atomic per-interface commit point;
+6. publish readiness, then remove old-generation entries asynchronously.
+
+An ordinary policy update on the same live interface follows steps 3 through 6 with a new generation only for the changed domain. Until the final interface-config write, packets continue using the complete old generation. After that write, old policy and runtime entries for the changed domain are unreachable while the other domain keeps its existing generation and state. There is no mixed old/new effective policy window.
 
 ### 9.2 Storm policy
 
-```text
-STORM_POLICY: HashMap<StormKey, StormPolicy>
-key:
-  ifindex: u32
-  traffic_class: u8
-  aligned padding
-value:
-  pps_limit: u64
-  bytes_per_second: u64
-  burst_packets: u64
-  burst_bytes: u64
-  policy_generation: u64
+```rust
+#[repr(C)]
+pub struct StormKey {
+    pub interface_generation: u64,
+    pub policy_generation: u64,
+    pub ifindex: u32,
+    pub traffic_class: u8,
+    pub _pad: [u8; 3],
+}
+
+#[repr(C)]
+pub struct RatePolicy {
+    pub pps_limit: u64,
+    pub bytes_per_second: u64,
+    pub burst_packets: u64,
+    pub burst_bytes: u64,
+}
 ```
+
+`STORM_POLICY` is a `HashMap<StormKey, RatePolicy>`. `StormKey` is 24 bytes and `RatePolicy` is 32 bytes; neither has implicit padding. All constructors zero explicit padding before a map operation.
 
 The external API may accept bits per second, but the control plane converts it to bytes per second before writing the map. Kernel ABI names always state their units.
 
+For each packet-rate or byte-rate dimension:
+
+- `limit == 0 && burst == 0` disables that dimension;
+- `limit > 0 && burst > 0` enables it;
+- exactly one of limit or burst being zero is invalid and is rejected before map publication;
+- at least one dimension must be enabled for every published rate policy.
+
+A class intentionally outside enforcement is removed from the corresponding interface class mask; it is not represented by a missing required policy.
+
 ### 9.3 Storm runtime
 
-```text
-STORM_RUNTIME: HashMap<StormKey, StormRuntime>
-value:
-  packet_tokens: u64
-  byte_tokens: u64
-  packet_remainder: u64
-  byte_remainder: u64
-  last_refill_ns: u64
-  policy_generation: u64
-  bpf_spin_lock synchronization field
+```rust
+#[repr(C)]
+pub struct StormRuntime {
+    pub lock: aya_ebpf::bindings::bpf_spin_lock,
+    pub _pad: [u8; 4],
+    pub packet_tokens: u64,
+    pub byte_tokens: u64,
+    pub packet_remainder: u64,
+    pub byte_remainder: u64,
+    pub last_refill_ns: u64,
+}
 ```
 
-Policy generation mismatch resets the bucket from the new policy. Runtime token state is pinned for process recovery but is not stored in desired-state WAL.
+`STORM_RUNTIME` is a `HashMap<StormKey, StormRuntime>`. The value is 48 bytes: the lock occupies offset 0 through 3, explicit padding occupies 4 through 7, and the five `u64` fields occupy 8 through 47. The lock is the real top-level BTF `struct bpf_spin_lock`, not a layout-compatible plain `u32`. Runtime types containing kernel synchronization objects are eBPF-owned types, not shared `aya::Pod` types. Userspace does not treat the lock bytes as ordinary mutable state.
+
+The implementation may use a spin lock only after a privileged load probe proves that the maintained target kernel accepts it for the XDP program and selected map type. Every execution path unlocks before returning, and no helper call, BPF-to-BPF call, packet load, or second lock acquisition occurs while the lock is held. Packet parsing, policy lookup, time acquisition, and statistics updates happen outside the critical section.
+
+A new generation starts with both enabled token dimensions full, both remainders zero, and `last_refill_ns` set to current kernel monotonic time. Runtime token state is pinned for process recovery but is not stored in desired-state WAL.
 
 ### 9.4 Storm statistics
 
-```text
-STORM_STATS: PerCpuHashMap<StormStatsKey, StormStatsValue>
-key:
-  ifindex
-  traffic_class
-  verdict or reason
-value:
-  packets
-  bytes
+```rust
+#[repr(C)]
+pub struct StormStatsKey {
+    pub interface_generation: u64,
+    pub ifindex: u32,
+    pub traffic_class: u8,
+    pub verdict: u8,
+    pub reason: u8,
+    pub _pad: u8,
+}
+
+#[repr(C)]
+pub struct StormStatsValue {
+    pub packets: u64,
+    pub bytes: u64,
+}
 ```
+
+`STORM_STATS` is a `PerCpuHashMap<StormStatsKey, StormStatsValue>`. Verdict and reason use bounded shared constants, including pass, would-drop in observe mode, enforced drop, missing required policy, invalid configuration, and time anomaly.
+
+Shared rate verdict constants are `XDP_RATE_VERDICT_PASS = 1`, `XDP_RATE_VERDICT_WOULD_DROP = 2`, `XDP_RATE_VERDICT_DROP = 3`, and `XDP_RATE_VERDICT_ERROR_PASS = 4`. Shared rate reasons are none 0, packet limit 1, byte limit 2, both limits 3, missing required state 4, invalid configuration 5, time anomaly 6, and capacity failure 7. Unknown verdict or reason values are never emitted.
 
 Counters are per-CPU. The agent records sampling time when it reads them instead of making every packet contend on a shared `last_seen_ns`. Enforcement buckets are not per-CPU full-rate buckets because that would multiply the allowed rate by CPU count.
 
@@ -287,7 +346,40 @@ This is a dual PPS/byte-rate policer, not srTCM. It does not implement committed
 
 Refill occurs in XDP using `bpf_ktime_get_ns()`. Userspace never replenishes tokens.
 
-Integer refill preserves fractional remainder so low PPS policies do not starve when packets arrive more frequently than one whole token interval. Arithmetic uses saturating, bounded operations and caps tokens at the configured burst.
+Integer refill preserves fractional remainder so low PPS policies do not starve when packets arrive more frequently than one whole token interval. For one enabled dimension, the mathematical result is:
+
+```text
+N                 = 1_000_000_000
+elapsed_ns        = now_ns.saturating_sub(last_refill_ns)
+credit_numerator  = rate_per_second * elapsed_ns + remainder
+whole_tokens      = floor(credit_numerator / N)
+next_remainder    = credit_numerator % N
+next_tokens       = min(burst, tokens + whole_tokens)
+```
+
+This formula defines semantics, not a requirement to multiply two unbounded `u64` values. The eBPF implementation must not rely on `u128` lowering. It computes the same result with bounded `u64` operations:
+
+```text
+whole_seconds = elapsed_ns / N
+subsecond_ns  = elapsed_ns % N
+rate_hi       = rate_per_second / N
+rate_lo       = rate_per_second % N
+
+second_credit = saturating_mul(rate_per_second, whole_seconds)
+fraction_num  = rate_lo * subsecond_ns + remainder
+fraction      = saturating_add(rate_hi * subsecond_ns,
+                               fraction_num / N)
+next_remainder = fraction_num % N
+next_tokens    = min(burst,
+                     saturating_add(tokens,
+                                    saturating_add(second_credit, fraction)))
+```
+
+Every multiplication shown in the fractional path is bounded below `u64::MAX` by the quotient/remainder decomposition. Once tokens saturate at burst, the implementation sets the corresponding remainder to zero; credit accumulated while a bucket is full is not banked for later. A backwards kernel-time observation produces zero elapsed time and an operational counter rather than a token grant.
+
+The packet dimension charges one token. The byte dimension charges `ctx.data_end - ctx.data`, including the Ethernet header and VLAN tags visible to XDP but excluding wire FCS. A disabled dimension is treated as satisfied and is neither refilled nor debited.
+
+Storm makes one atomic decision under the runtime lock: refill both enabled dimensions, test both costs, and debit both only when both pass. If either dimension is over limit, neither dimension is debited; the refilled state and remainders are retained. `observe` performs the same simulated debit and decision as `police`, but converts a would-drop verdict to pass after accounting it separately.
 
 The initial implementation uses one shared interface/class bucket with kernel-supported synchronization for correctness. A privileged performance gate must measure lock contention under a single hot broadcast class. If that design misses the required packet-rate target, the approved fallback is conservative RX-queue sharding; per-CPU full-rate buckets are not permitted.
 
@@ -297,9 +389,15 @@ Modes behave as follows:
 - `observe`: run lookup, refill, decision, and statistics but return pass;
 - `police`: apply the computed verdict.
 
+Mode-only changes on the same interface and policy generation preserve token and remainder state. `observe -> police` therefore begins enforcement from the state measured in observe mode; `police -> observe` continues an accurate simulation. Enabling a previously disabled domain requires a new policy generation and initializes full bursts. Disabling a domain does not need synchronous runtime deletion, but a later re-enable must use another new generation so stale balances cannot become reachable.
+
+Any rate, burst, traffic-class membership, or exception change requires a new policy generation. The new generation receives a full configured burst. This intentionally grants one new burst at policy publication; it never inherits a larger balance from an older, more permissive policy.
+
 ## 11. DDoS Guard Layers
 
 The first milestone provides deterministic physical-ingress protection in four bounded layers.
+
+The execution order is temporary CIDR mitigation, interface aggregate protection, protected-service policy, then bounded per-source policy. A mitigation drop returns immediately. Rate buckets account offered load: every reached bucket refills, evaluates, and conditionally debits its own state; a later layer's rejection does not roll back an earlier layer's debit. This conservative rule avoids multi-lock transactions and makes overload accounting deterministic. Statistics distinguish the first rejecting layer from other buckets that were reached.
 
 ### 11.1 Interface aggregate protection
 
@@ -315,6 +413,8 @@ Fixed-cardinality policies protect:
 
 These limits protect node capacity even when attackers spoof source addresses.
 
+Every IP packet reaches the mandatory total bucket and, when selected by the DDoS class mask, one protocol bucket: TCP, UDP, ICMP/ICMPv6, or other. It may also reach one selected modifier bucket. Fragment takes precedence over TCP SYN as the modifier, so a packet reaches at most three interface buckets: total, protocol, and fragment-or-SYN. A non-initial fragment has no usable L4 ports and cannot match an exact-port service policy.
+
 ### 11.2 Protected-service policies
 
 Service keys identify:
@@ -325,6 +425,8 @@ ifindex + destination address + protocol + destination port
 
 Each configured service has packet, byte, and burst limits. Exact address/service policies are the first implementation. Prefix-oriented service policies require separate bounded LPM maps and are not part of the first milestone.
 
+TCP and UDP service policies use an exact destination port. ICMP, ICMPv6, and other protocols use a protocol-wide selector with no port. Selector kind is explicit in the key, so port zero remains a real port rather than a wildcard sentinel. If no exact service policy matches, this layer is skipped without degraded state.
+
 ### 11.3 Bounded source policies
 
 Source state uses a capacity-limited LRU map keyed by:
@@ -333,7 +435,9 @@ Source state uses a capacity-limited LRU map keyed by:
 ifindex + address family + source address + protocol
 ```
 
-It is a secondary control, not the node's primary defense. Map eviction, insertion failure, and capacity pressure have explicit counters and degraded evidence. A full source map must not disable aggregate or service protection.
+It is a secondary control, not the node's primary defense. Insertion failure and sampled capacity pressure have explicit evidence; internal LRU replacement is not advertised as an exact counter. A full source map must not disable aggregate or service protection.
+
+Per-source policy is configured per interface, address family, and protocol. It creates rate runtime lazily for observed sources. Failure to create source state fails open for this secondary layer, increments capacity evidence, and leaves the interface and service layers active.
 
 ### 11.4 Temporary CIDR mitigation
 
@@ -347,24 +451,186 @@ Separate IPv4 and IPv6 LPM maps hold explicit mitigation rules with:
 
 Expired rules stop enforcing based on kernel time. The agent removes expired entries asynchronously, so agent delay cannot extend the effective block beyond its declared expiry.
 
+The durable rule stores `expires_at_unix_ns` and the original creation metadata, never the kernel `expiry_ns`. On publication or restart, the agent computes the remaining wall-clock lifetime and converts it to `bpf_ktime_get_ns()` space using saturating addition. A rule already expired in wall-clock time is not published. The XDP program calls `bpf_ktime_get_ns()` once before mitigation lookup processing and treats a matched entry with `now_ns >= expiry_ns` as no match.
+
+The default userspace cleanup interval is 30 seconds and is configurable from 1 through 300 seconds. Cleanup latency affects map occupancy only, not enforcement duration. A large wall-clock correction triggers reconciliation so persisted deadlines are translated again; already published monotonic deadlines are never extended silently.
+
 Trusted exceptions do not bypass the absolute interface safety ceiling. They may bypass selected service or source policies only when the policy explicitly says so.
 
 ## 12. DDoS Map Domains
 
+The DDoS rate-policy value is the shared 32-byte `RatePolicy` from Section 9.2. DDoS runtime values use the same token, remainder, timestamp, padding, and real `bpf_spin_lock` layout and restrictions as `StormRuntime`. Each runtime map has its own Rust type name so storm and DDoS maps cannot be interchanged accidentally. Each individual DDoS bucket makes its packet/byte decision atomically under its own lock, and packet processing holds at most one bucket lock at a time. DDoS mode changes and generation initialization follow the Section 10 transition rules with the independent DDoS policy generation.
+
+Interface aggregate buckets use:
+
+```rust
+#[repr(C)]
+pub struct DdosBucketKey {
+    pub interface_generation: u64,
+    pub policy_generation: u64,
+    pub ifindex: u32,
+    pub traffic_class: u8,
+    pub _pad: [u8; 3],
+}
+```
+
+The fixed class constants are `DDOS_CLASS_TOTAL = 1`, `DDOS_CLASS_TCP = 2`, `DDOS_CLASS_TCP_SYN = 3`, `DDOS_CLASS_UDP = 4`, `DDOS_CLASS_ICMP = 5`, `DDOS_CLASS_FRAGMENT = 6`, and `DDOS_CLASS_OTHER = 7`. Class zero is invalid. Unknown class values are rejected by userspace and treated as degraded no-policy lookups in XDP.
+
+Exact service maps are split by address family rather than storing IPv4 in an invented IPv6 mapping:
+
+```rust
+#[repr(C)]
+pub struct DdosServiceKey4 {
+    pub interface_generation: u64,
+    pub policy_generation: u64,
+    pub ifindex: u32,
+    pub dst_ip: u32,
+    pub dst_port: u16,
+    pub protocol: u8,
+    pub selector_kind: u8,
+    pub _pad: [u8; 4],
+}
+
+#[repr(C)]
+pub struct DdosServiceKey6 {
+    pub interface_generation: u64,
+    pub policy_generation: u64,
+    pub dst_ip: [u8; 16],
+    pub ifindex: u32,
+    pub dst_port: u16,
+    pub protocol: u8,
+    pub selector_kind: u8,
+}
+```
+
+`DDOS_SERVICE_SELECTOR_PROTOCOL = 1` selects destination address plus protocol and requires `dst_port == 0`; `DDOS_SERVICE_SELECTOR_EXACT_PORT = 2` selects destination address, protocol, and the exact port. Selector zero and unknown selectors are invalid. Address-family constants use their IP version numbers: IPv4 is 4 and IPv6 is 6.
+
+IPv4 values use `u32::from_be_bytes(address.octets())`, matching the existing parser representation. IPv6 uses the 16 network-order octets. Ports use the numeric value produced by `u16::from_be_bytes`; userspace performs the same conversion before map operations. Explicit padding is always zero.
+
+Source policy and lazy runtime keys are:
+
+```rust
+#[repr(C)]
+pub struct DdosSourcePolicyKey {
+    pub interface_generation: u64,
+    pub policy_generation: u64,
+    pub ifindex: u32,
+    pub address_family: u8,
+    pub protocol: u8,
+    pub _pad: [u8; 2],
+}
+
+#[repr(C)]
+pub struct DdosSourceKey4 {
+    pub interface_generation: u64,
+    pub policy_generation: u64,
+    pub ifindex: u32,
+    pub src_ip: u32,
+    pub protocol: u8,
+    pub _pad: [u8; 7],
+}
+
+#[repr(C)]
+pub struct DdosSourceKey6 {
+    pub interface_generation: u64,
+    pub policy_generation: u64,
+    pub src_ip: [u8; 16],
+    pub ifindex: u32,
+    pub protocol: u8,
+    pub _pad: [u8; 3],
+}
+```
+
+Temporary mitigation uses generation-scoped LPM keys. Every field after `prefix_len` is stored in network byte order because LPM matching is byte-oriented:
+
+```rust
+#[repr(C)]
+pub struct DdosBlockKey4 {
+    pub prefix_len: u32,
+    pub ifindex_be: u32,
+    pub interface_generation_be: u64,
+    pub policy_generation_be: u64,
+    pub network_addr_be: u32,
+    pub _pad: [u8; 4],
+}
+
+#[repr(C)]
+pub struct DdosBlockKey6 {
+    pub prefix_len: u32,
+    pub ifindex_be: u32,
+    pub interface_generation_be: u64,
+    pub policy_generation_be: u64,
+    pub network_addr: [u8; 16],
+}
+
+#[repr(C)]
+pub struct DdosBlockValue {
+    pub expiry_ns: u64,
+    pub rule_source_id: u64,
+    pub reason_code: u32,
+    pub action: u8,
+    pub flags: u8,
+    pub _pad: [u8; 2],
+}
+```
+
+The LPM prefix length excludes its own four-byte field. A stored rule uses `32 + 64 + 64 + cidr_prefix_len`, covering ifindex, interface generation, policy generation, and the requested address prefix. An XDP lookup uses the full `192` bits for IPv4 or `288` bits for IPv6 after `prefix_len`. Padding is outside the matched prefix and is zero in both stored and lookup keys. First-milestone actions are `DDOS_MITIGATION_DROP = 1` and `DDOS_MITIGATION_TRUST_SERVICE_SOURCE = 2`; action zero and unknown actions are invalid. Neither valid action bypasses the interface aggregate safety ceiling.
+
+Bounded statistics use generation-aware keys and fixed-size values:
+
+```rust
+#[repr(C)]
+pub struct DdosStatsKey {
+    pub interface_generation: u64,
+    pub ifindex: u32,
+    pub layer: u8,
+    pub traffic_class: u8,
+    pub verdict: u8,
+    pub reason: u8,
+}
+
+#[repr(C)]
+pub struct DdosStatsValue {
+    pub packets: u64,
+    pub bytes: u64,
+}
+
+#[repr(C)]
+pub struct DdosCapacityStats {
+    pub source_v4_insert_attempts: u64,
+    pub source_v4_insert_failures: u64,
+    pub source_v6_insert_attempts: u64,
+    pub source_v6_insert_failures: u64,
+}
+```
+
+Layer constants are `DDOS_LAYER_INTERFACE = 1`, `DDOS_LAYER_SERVICE = 2`, `DDOS_LAYER_SOURCE = 3`, and `DDOS_LAYER_MITIGATION = 4`. Rate verdicts/reasons reuse the shared constants above; `DDOS_REASON_MITIGATION_MATCH = 8` and `DDOS_REASON_EXPIRED_RULE = 9` are DDoS-specific. Source addresses and service identifiers never enter statistics keys.
+
 The exact map families are isolated from storm:
 
 ```text
-DDOS_INTERFACE_POLICY
-DDOS_INTERFACE_RUNTIME
-DDOS_SERVICE_POLICY
-DDOS_SERVICE_RUNTIME
-DDOS_SOURCE_RUNTIME_V4
-DDOS_SOURCE_RUNTIME_V6
-DDOS_BLOCKLIST_V4
-DDOS_BLOCKLIST_V6
-DDOS_STATS
-DDOS_CAPACITY_STATS
+DDOS_INTERFACE_POLICY        HashMap<DdosBucketKey, RatePolicy>
+DDOS_INTERFACE_RUNTIME       HashMap<DdosBucketKey, DdosInterfaceRuntime>
+DDOS_SERVICE_POLICY_V4       HashMap<DdosServiceKey4, RatePolicy>
+DDOS_SERVICE_POLICY_V6       HashMap<DdosServiceKey6, RatePolicy>
+DDOS_SERVICE_RUNTIME_V4      HashMap<DdosServiceKey4, DdosServiceRuntime>
+DDOS_SERVICE_RUNTIME_V6      HashMap<DdosServiceKey6, DdosServiceRuntime>
+DDOS_SOURCE_POLICY           HashMap<DdosSourcePolicyKey, RatePolicy>
+DDOS_SOURCE_RUNTIME_V4       LruHashMap<DdosSourceKey4, DdosSourceRuntime>
+DDOS_SOURCE_RUNTIME_V6       LruHashMap<DdosSourceKey6, DdosSourceRuntime>
+DDOS_BLOCKLIST_V4            LpmTrie<DdosBlockKey4, DdosBlockValue>
+DDOS_BLOCKLIST_V6            LpmTrie<DdosBlockKey6, DdosBlockValue>
+DDOS_STATS                   PerCpuHashMap<DdosStatsKey, DdosStatsValue>
+DDOS_CAPACITY_STATS          PerCpuArray<DdosCapacityStats>
 ```
+
+`DDOS_SOURCE_RUNTIME_V4` and `V6` are LRU hash maps keyed by `DdosSourceKey4` and `DdosSourceKey6`. Maximum entries are immutable map-creation parameters configured at agent start. A capacity change requires a controlled DDoS-domain map rebuild and observe-mode validation before police mode returns.
+
+Source-layer activation additionally requires a privileged probe proving that the exact maintained kernel accepts a top-level `bpf_spin_lock` in an LRU-hash value for the XDP program. Failure disables and degrades only a requested source layer; it does not replace the design with an unsynchronized cross-CPU bucket and does not disable interface or service protection.
+
+The architecture does not hard-code unmeasured source capacities. Release defaults are selected from an explicit node memory budget after measuring actual locked memory for both key sizes on the maintained target kernel. The release gate records configured maximum entries, observed locked memory, occupancy high-water mark, lookup/insert latency, and aggregate-protection throughput under source churn.
+
+Kernel LRU replacement can make an insertion succeed without reporting which entry was evicted. `DDOS_CAPACITY_STATS` therefore records insertion attempts and failures only. The agent separately reports configured capacity, sampled occupancy, occupancy high-water mark, and cleanup deletions. The product does not claim an exact internal-eviction count. A later kernel-supported observable may add a separately named approximate or kernel-reported metric without changing this contract.
 
 High-cardinality packet events are not emitted per packet. The agent derives state transitions and alerts from bounded statistics. Source addresses are not Prometheus labels.
 
@@ -411,7 +677,10 @@ Example configuration shape:
 [xdp_protection]
 physical_interfaces = ["eth1"]
 allow_generic_fallback = false
+mitigation_cleanup_interval_seconds = 30
 ```
+
+`ddos_source_v4_max_entries` and `ddos_source_v6_max_entries` are startup-only settings required when bounded source protection is enabled. Zero or absence rejects source-layer activation; it does not disable aggregate/service protection. Product packaging may provide values only after the release memory/performance gate has validated them for the supported host profile.
 
 Bond members remain independently limited and counted. Shared bond capacity is a later design.
 
@@ -459,10 +728,11 @@ A path-only pinned-link check is insufficient. `REVIEW-OPS-036` must be closed b
 
 - storm requested;
 - required storm map schema valid;
-- interface and policy generations matched;
+- active interface and storm policy generations matched;
+- every selected storm class has a complete policy/runtime pair;
 - effective mode equal to requested mode.
 
-`ddos_ready` applies the equivalent independent DDoS requirements.
+`ddos_ready` applies the equivalent independent DDoS requirements, including the mandatory total bucket and every interface class selected in the DDoS class mask. Optional service/source policy absence is not degraded unless desired state declares that policy.
 
 Node-level storm/DDoS status is not added to Neutron `managed_domains` in the first milestone. A physical-interface problem must not block a Neutron tap ACL transaction.
 
@@ -488,12 +758,13 @@ Status includes:
 - interface name, ifindex, and interface generation;
 - program ID and link ID;
 - attach mode;
-- policy generation and applied generation;
+- requested and applied storm policy generation;
+- requested and applied DDoS policy generation;
 - `xdp_hook_ready`, `storm_ready`, and `ddos_ready`;
 - stable degraded reason;
 - last successful reconciliation time.
 
-Policy updates use generation and desired-hash identity. A response is successful only after the map write and read-back verification match the requested generation.
+Policy updates use domain-specific generation and desired-hash identity. A response is successful only after all generation-scoped writes, the final `XDP_INTERFACE_CONFIG` publication, and read-back verification match the requested domain generation. Updating one domain reports no applied-generation change for the other domain.
 
 ## 18. Desired State And Recovery
 
@@ -502,9 +773,12 @@ Durable desired state includes:
 - protected interface selection;
 - interface profile;
 - requested domain modes;
+- selected storm and DDoS interface class masks;
 - storm policies;
 - DDoS aggregate, service, source, and mitigation policies;
-- policy generation and desired hash.
+- mitigation `expires_at_unix_ns`, never a boot-relative kernel timestamp;
+- independent storm/DDoS policy generations and desired hashes;
+- the next durable node-local interface-generation counter.
 
 Ephemeral state excludes:
 
@@ -518,11 +792,14 @@ On restart:
 
 1. validate exact live link/program/interface identity;
 2. open and validate XDP-domain maps;
-3. compare stored and desired generations/hashes;
-4. reset runtime buckets whose policy generation changed;
-5. remove expired mitigation entries;
-6. publish readiness only after read-back verification;
-7. preserve healthy TC ACL/CT regardless of XDP-domain outcome.
+3. compare stored and desired interface/domain generations and hashes;
+4. preserve same-generation token state during a process restart on the same boot;
+5. initialize full buckets for a new policy generation and republish generation-scoped mitigation entries from durable wall-clock deadlines;
+6. remove expired or unreachable old-generation entries asynchronously;
+7. publish readiness only after the active generation is read back and complete;
+8. preserve healthy TC ACL/CT regardless of XDP-domain outcome.
+
+Pinned maps do not survive a host reboot as valid runtime authority. After reboot, the agent reconstructs maps from desired state, allocates or restores the intended interface identity, translates mitigation deadlines into the new monotonic time domain, and publishes interface config last. A stale boot-relative expiry is never accepted merely because a pinned-path-shaped object exists.
 
 ## 19. Observability
 
@@ -545,8 +822,8 @@ Required metric families include:
 - passed and dropped packets/bytes;
 - current effective modes;
 - attach and readiness state;
-- policy generation;
-- map insertion failures and LRU evictions;
+- independent storm and DDoS policy generations;
+- map insertion attempts/failures, configured capacity, sampled occupancy, and occupancy high-water mark;
 - malformed/truncated parse outcomes;
 - mitigation rule count and expiry cleanup;
 - reconciliation failures;
@@ -569,7 +846,9 @@ Events are generated for state transitions and sampled operational evidence, not
 ### Batch 2: Storm enforcement
 
 - implement five L2 classes;
-- implement kernel-refilled packet and byte policer;
+- implement explicit shared ABI and kernel-recognized synchronized runtime;
+- implement overflow-safe kernel-refilled packet and byte policer;
+- implement generation-scoped policy publication and mode-transition semantics;
 - add tap and physical storm policies;
 - add statistics, API, metrics, and state-transition events;
 - promote selected interfaces from observe to police only after baseline review.
@@ -578,9 +857,10 @@ Events are generated for state transitions and sampled operational evidence, not
 
 - implement interface aggregate limits;
 - implement TCP SYN, UDP, ICMP, fragment, and other-protocol classes;
-- implement exact protected-service policies;
+- implement separate IPv4/IPv6 exact protected-service policies;
 - implement bounded per-source LRU limits;
 - implement expiring IPv4/IPv6 CIDR mitigation;
+- validate source-map memory budgets and selected release capacities;
 - deploy observe-first, then explicitly promote validated policies to police.
 
 ### Later enhancements
@@ -603,7 +883,11 @@ Local Cargo build, check, and test commands remain prohibited. Rust/eBPF compila
 - parser tests for untagged, VLAN, QinQ, truncation, and unsupported depth;
 - classification tests for all storm and DDoS classes;
 - token refill, fractional remainder, burst, saturation, and generation-reset tests;
+- token tests at `u64` boundaries proving the bounded decomposition matches the mathematical formula without `u128`;
+- zero-limit/zero-burst validation and packet-length charging tests;
 - disabled/observe/police transition tests;
+- tests proving storm and DDoS generations change independently;
+- struct size, field-offset, zero-padding, byte-order, and unknown-enum tests for every shared ABI type;
 - desired-hash and read-back tests;
 - map inventory mutation tests proving storm/DDoS absence cannot change ACL readiness;
 - static guard proving XDP never reads ACL/CT maps.
@@ -618,11 +902,14 @@ Local Cargo build, check, and test commands remain prohibited. Rust/eBPF compila
 - TCP SYN, UDP, ICMP, fragment, and aggregate interface floods;
 - service policy enforcement;
 - temporary CIDR mitigation and exact expiry;
-- full source-state map and insertion-failure behavior;
+- temporary mitigation across agent restart and simulated host-reboot replay;
+- full source-state map, source churn, LRU replacement, and insertion-failure behavior;
+- offered-load debit behavior when a later DDoS layer rejects;
 - XDP drop counters are not attributed to TC ACL/QoS;
 - healthy TC ingress/egress survive XDP load, map, and attach failures;
 - detached-but-pinned XDP link reports not ready;
 - ifindex reuse cannot inherit stale effective policy;
+- packets see either the complete old generation or complete new generation during policy publication, never a mixed set;
 - agent pause/restart does not stop token refill;
 - policy generation change does not reuse stale tokens.
 
@@ -636,12 +923,25 @@ Local Cargo build, check, and test commands remain prohibited. Rust/eBPF compila
 - verifier acceptance on the maintained minimum kernel and the release kernel;
 - eBPF stack use no greater than the 512-byte verifier limit.
 
+The maintained-minimum gate uses the exact deployed distribution kernel build recorded by the target environment, currently `4.18.0-553.5.1.el8_10.x86_64`, because enterprise BPF backports cannot be inferred from the upstream version number. It must load-probe the selected XDP attach mode, map types, BTF spin-lock value, and every helper used by the critical section. The release-kernel gate runs separately on the kernel shipped or recommended with the release.
+
+The reproducible benchmark matrix is:
+
+- GitHub Actions privileged veth/generic-XDP smoke for functional regression, not a line-rate claim;
+- at least one supported physical NIC/driver in native XDP for the release performance gate;
+- generic fallback on the same physical host when fallback is an advertised configuration;
+- 64-byte wire frames for worst-case PPS and 1500-byte Ethernet frames for byte-rate behavior, explicitly recording whether generator counters include FCS;
+- one RX queue and an RSS multi-queue run with queue count, CPU affinity, IRQ affinity, and CPU count recorded;
+- Linux `pktgen` for repeatable host-local smoke and an external traffic generator such as TRex for physical line-rate evidence;
+- source-cardinality runs below capacity, at configured capacity, and above capacity to measure LRU churn and aggregate-protection stability.
+
 On the same host, NIC mode, queue configuration, packet size, and benchmark tool:
 
 - the disabled fast path must retain at least 95% of the pre-change XDP pass baseline;
 - observe mode must retain at least 90% of that baseline;
 - police mode under a single hot storm class must retain at least 80% of that baseline while enforcing the configured aggregate limit;
 - benchmark output must record packet loss, CPU use, attach mode, queue count, and achieved PPS.
+- benchmark output must also record kernel build, NIC and driver/firmware version, CPU model, frame-size convention, map capacities, locked map memory, policy generations, and generator configuration.
 
 If the shared synchronized storm bucket misses those gates, the only approved fallback is a separately reviewed conservative sharding design.
 
