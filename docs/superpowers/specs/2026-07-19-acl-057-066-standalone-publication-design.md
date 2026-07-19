@@ -3,7 +3,7 @@
 Date: 2026-07-19
 
 Status: written specification approved on 2026-07-19; RED and hosted GREEN
-implementation evidence complete; unified-branch delivery pending
+implementation evidence complete; direct `v0.9-neutron-agent` delivery pending
 
 Analyzed target: `codex/review-acl-057-direct-publication@67b70ab`
 

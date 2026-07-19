@@ -7,8 +7,9 @@ checker/CI verification head is `65b1dc5`. Exact-head GitHub Actions run
 [`29670301941`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29670301941)
 completed `fast-contracts`, `rust-behavior`, and `rust-build` successfully.
 `REVIEW-ACL-046` remains not fixed until that deferred evidence exists. Code
-delivery is consolidated with `REVIEW-ACL-057/066` on the single integration
-branch; managed Neutron activation remains disabled by default.
+delivery is consolidated with `REVIEW-ACL-057/066` directly on the sole
+`v0.9-neutron-agent` development branch; managed Neutron activation remains
+disabled by default.
 
 Order: after Batch 2C and before `REVIEW-ACL-057` / `REVIEW-ACL-059`.
 
@@ -641,4 +642,4 @@ passed `fast-contracts`, `rust-behavior`, and `rust-build`. Completion condition
 7 still lacks privileged managed and standalone field evidence. No field run,
 environment, command transcript, timestamp, or artifact is claimed by this
 checkpoint; the finding remains not fixed. The missing evidence blocks
-production activation, not source integration on the unified branch.
+production activation, not source integration on `v0.9-neutron-agent`.

@@ -10,10 +10,10 @@
 
 **Execution status:** Tasks 1-4 and Task 5 Steps 1-4 completed on 2026-07-19.
 RED `212828b` / Build `29682513348` and GREEN `a234bb5` / Build
-`29683492746` are recorded in the design and backlog. Task 5 Step 5 now uses one
-integration branch containing both the former PR #5 batch and ACL-057/066. The
-latest `v0.9-neutron-agent` baseline must be merged here, followed by exact-head
-CI and one unified PR; the old PR #5 is then closed as superseded.
+`29683492746` are recorded in the design and backlog. Task 5 Step 5 now
+consolidates the former PR #5 batch and ACL-057/066 directly onto the sole
+`v0.9-neutron-agent` development branch. After exact-head CI, the temporary
+branches and old PR #5 are closed as superseded.
 
 ## Global Constraints
 
@@ -573,9 +573,8 @@ git push origin codex/review-acl-057-direct-publication
 
 - [ ] **Step 5: Preserve delivery topology**
 
-Do not create a stacked or sibling PR. This branch is the sole integration
-branch for the former PR #5 batch and ACL-057/066. Merge the latest
-`v0.9-neutron-agent` baseline here without rewriting published history, rerun
-exact-head CI, create one unified PR, and only then close PR #5 as superseded.
-Privileged field evidence remains honestly deferred and gates production
-activation rather than this source-integration step.
+Do not create a stacked, sibling, or replacement PR. Merge the complete former
+PR #5 and ACL-057/066 history into `v0.9-neutron-agent`, rerun exact-head CI on
+that sole development branch, and only then close PR #5 and retire the temporary
+branches as superseded. Privileged field evidence remains honestly deferred and
+gates production activation rather than source integration.
