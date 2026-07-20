@@ -63,7 +63,7 @@ unsafe fn resolve_v6_key(info: &PacketInfo, p: &PipelineCtx) -> FragmentContextK
 #[inline(never)]
 pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveOutcome {
     if info.fragment_kind != FragmentKind::NonInitial as u8
-        || !fragment_tracking_required(info.fragment_kind, info.fragment_proto)
+        || !fragment_tracking_required(info.fragment_kind, info.fragment_proto, false)
     {
         return ResolveOutcome::NotRequired;
     }
@@ -114,7 +114,7 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
 #[inline(never)]
 pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveOutcome {
     if info.fragment_kind != FragmentKind::NonInitial as u8
-        || !fragment_tracking_required(info.fragment_kind, info.fragment_proto)
+        || !fragment_tracking_required(info.fragment_kind, info.fragment_proto, true)
     {
         return ResolveOutcome::NotRequired;
     }
@@ -175,7 +175,7 @@ pub unsafe fn install_allowed_v4(
         Some(flags) => flags,
         None => return FragmentInstallDecision::Pass,
     };
-    if !fragment_tracking_required(info.fragment_kind, info.fragment_proto) {
+    if !fragment_tracking_required(info.fragment_kind, info.fragment_proto, false) {
         return FragmentInstallDecision::Pass;
     }
     record_metric(p, FRAGMENT_FAMILY_V4, FRAGMENT_METRIC_FIRST);
@@ -246,7 +246,7 @@ pub unsafe fn install_allowed_v6(
         Some(flags) => flags,
         None => return FragmentInstallDecision::Pass,
     };
-    if !fragment_tracking_required(info.fragment_kind, info.fragment_proto) {
+    if !fragment_tracking_required(info.fragment_kind, info.fragment_proto, true) {
         return FragmentInstallDecision::Pass;
     }
     record_metric(p, FRAGMENT_FAMILY_V6, FRAGMENT_METRIC_FIRST);

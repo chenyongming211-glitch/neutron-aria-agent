@@ -206,14 +206,16 @@ impl FragmentInstallDecision {
 }
 
 #[inline(always)]
-pub fn fragment_tracking_required(fragment_kind: u8, fragment_proto: u8) -> bool {
+pub fn fragment_tracking_required(fragment_kind: u8, fragment_proto: u8, is_ipv6: bool) -> bool {
     let real_fragment = fragment_kind == FragmentKind::First as u8
         || fragment_kind == FragmentKind::NonInitial as u8;
     real_fragment
-        && matches!(
-            fragment_proto,
-            IPPROTO_TCP | IPPROTO_UDP | IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS
-        )
+        && (matches!(fragment_proto, IPPROTO_TCP | IPPROTO_UDP)
+            || (is_ipv6
+                && matches!(
+                    fragment_proto,
+                    IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS
+                )))
 }
 
 #[inline(always)]
@@ -261,9 +263,7 @@ pub fn fragment_authority_drop_reason(
     } else {
         config.ipv4_timeout_ns
     };
-    if timeout_ns < FRAGMENT_CONFIG_MIN_TIMEOUT_NS
-        || timeout_ns > FRAGMENT_CONFIG_MAX_TIMEOUT_NS
-    {
+    if timeout_ns < FRAGMENT_CONFIG_MIN_TIMEOUT_NS || timeout_ns > FRAGMENT_CONFIG_MAX_TIMEOUT_NS {
         return DROP_FRAGMENT_CONFIG_INVALID;
     }
     if epoch.is_none() {
