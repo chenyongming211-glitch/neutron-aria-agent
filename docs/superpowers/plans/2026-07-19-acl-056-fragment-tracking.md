@@ -207,7 +207,10 @@ Expected: fragment tests and ABI full suite pass; eBPF warning-denied build pass
 ### Task 3: Add Fragment Context Maps And TC Resolution
 
 **Files:**
+- Modify: `abi/src/fragment.rs`
+- Modify: `abi/src/lib.rs`
 - Create: `ebpf/src/fragment.rs`
+- Modify: `ebpf/src/conntrack.rs`
 - Modify: `ebpf/src/maps.rs`
 - Modify: `ebpf/src/lib.rs`
 - Modify: `abi/tests/fragment_context_contract.rs`
@@ -232,6 +235,14 @@ In both TC directions, after runtime flags load and before `CtKey4`/`CtKey6`, ca
 
 After the existing pipeline determines final pass, insert the first-fragment context with current bank/epoch and absolute expiry. If insertion fails, remove a CT entry created by this packet and return the update-failed drop. Do not remove a pre-existing CT hit.
 
+For ownership-safe cleanup, change `ct_create_v4` and `ct_create_v6` to use an
+atomic no-overwrite insert and return only whether this packet successfully
+inserted the entry. A pre-existing/racing entry or any insert failure is not
+owned by this packet. Fragment-context failure removes CT only for that proven
+owned outcome. This intentionally changes concurrent same-key creation from
+last-writer overwrite to first successful insert wins without adding a generic
+transaction framework.
+
 - [ ] **Step 5: Exclude non-initial TCP from TCPRT**
 
 Guard every TCPRT call with `fragment_kind != NonInitial`. Do not synthesize flags, sequence, or payload length from context.
@@ -239,8 +250,8 @@ Guard every TCPRT call with `fragment_kind != NonInitial`. Do not synthesize fla
 - [ ] **Step 6: Commit and push datapath GREEN**
 
 ```bash
-/Users/chen/.cargo/bin/rustfmt --edition 2021 abi/tests/fragment_context_contract.rs ebpf/src/fragment.rs ebpf/src/maps.rs ebpf/src/lib.rs
-git add abi/tests/fragment_context_contract.rs ebpf/src/fragment.rs ebpf/src/maps.rs ebpf/src/lib.rs
+/Users/chen/.cargo/bin/rustfmt --edition 2021 abi/src/fragment.rs abi/src/lib.rs abi/tests/fragment_context_contract.rs ebpf/src/fragment.rs ebpf/src/conntrack.rs ebpf/src/maps.rs ebpf/src/lib.rs
+git add abi/src/fragment.rs abi/src/lib.rs abi/tests/fragment_context_contract.rs ebpf/src/fragment.rs ebpf/src/conntrack.rs ebpf/src/maps.rs ebpf/src/lib.rs docs/superpowers/plans/2026-07-19-acl-056-fragment-tracking.md
 git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "fix: recover fragment ports before ACL conntrack"
 git push origin v0.9-neutron-agent
 ```
