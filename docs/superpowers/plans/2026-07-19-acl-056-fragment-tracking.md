@@ -344,9 +344,14 @@ standalone mode. Generic ABI validation recognizes enabled values `0/1`, but
 Task 4 strict readiness/reuse/replay requires `enabled=0` and rejects a valid
 future enabled config as not ready. Task 4 does not enable tracking or advance
 publication epochs. Managed registration can retain standalone-compatible group
-projection without changing fragment runtime identity: both managed replay
-entrypoints validate `managed`, while only true standalone replay validates
-`standalone`.
+projection without changing fragment runtime identity: its production
+`ManagedAttachMode` selector returns a typed managed replay route whose identity
+is always `managed`. The typed standalone route is fixed to compatibility
+projection plus `standalone` identity and is reachable only through the
+explicitly named standalone replay wrapper. Filtered behavior tests execute the
+production selector and route invariants directly; no source-shape checker is
+used. The managed compatibility route retains its prior `load_with_wal`
+durable-snapshot input, while managed projection retains the prepared snapshot.
 
 - [x] **Step 5: Commit and push userspace GREEN**
 

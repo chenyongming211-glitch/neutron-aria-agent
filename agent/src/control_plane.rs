@@ -19,10 +19,10 @@ use crate::trace_backend::{TraceManager, TraceRuntimeStatusSnapshot};
 use aria_core::common::TapMapRuntime;
 use aria_core::ebpf_ops::{
     classify_runtime_gate_state, compile_managed_group_projection, ensure_fq_qdisc,
-    replay_managed_compatibility_state_to_pinned_maps, replay_managed_state_to_pinned_maps,
+    replay_managed_state_to_pinned_maps,
     validate_managed_pinned_runtime_state, validate_pinned_runtime_state, FqQdiscState,
-    GroupProjectionMode, ProjectionDrift, RuntimeGateDisposition, RuntimeGroupMapEntries,
-    TraceMapMode,
+    GroupProjectionMode, ManagedReplayRoute, ProjectionDrift, RuntimeGateDisposition,
+    RuntimeGroupMapEntries, TraceMapMode,
 };
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
 use aria_core::wal::{WalClient, WalEntry};
@@ -418,8 +418,8 @@ enum ManagedRuntimeActivation {
     AwaitNeutronResync { require_tc_acl_links: bool },
 }
 
-fn managed_group_projection_mode(mode: ManagedAttachMode) -> GroupProjectionMode {
-    match mode {
+fn managed_replay_route(mode: ManagedAttachMode) -> ManagedReplayRoute {
+    let projection_mode = match mode {
         ManagedAttachMode::StandaloneRestoreAfterTcAttach => {
             GroupProjectionMode::StandaloneCompatibility
         }
@@ -429,7 +429,8 @@ fn managed_group_projection_mode(mode: ManagedAttachMode) -> GroupProjectionMode
         ManagedAttachMode::NeutronResyncRequired { acl_managed: false } => {
             GroupProjectionMode::StandaloneCompatibility
         }
-    }
+    };
+    ManagedReplayRoute::new(projection_mode)
 }
 
 async fn persist_fresh_managed_registration_gate_state<Persist, PersistFuture>(
@@ -4091,7 +4092,8 @@ impl ControlPlane {
     ) -> Result<PreparedManagedInstance, String> {
         let pin_path = self.managed_pin_path();
         let state_path = format!("{}/{}", self.base_state_path, name);
-        let projection_mode = managed_group_projection_mode(mode);
+        let replay_route = managed_replay_route(mode);
+        let projection_mode = replay_route.projection_mode();
         let mut managed_acl_lifecycle = managed_acl_registration_lifecycle(mode, None, None)?;
         let ifindex = Self::resolve_ifindex(name)?;
         let global_ssl_enabled = match self.read_ssl_global_config().await {
@@ -4307,14 +4309,12 @@ impl ControlPlane {
             }
             tap_config_written = tap_id != aria_core::common::TAP_ID_UNASSIGNED;
 
-            let replay_result = match projection_mode {
-                GroupProjectionMode::StandaloneCompatibility => {
-                    replay_managed_compatibility_state_to_pinned_maps(&pin_path, &state_path)
-                }
-                GroupProjectionMode::Managed => {
-                    replay_managed_state_to_pinned_maps(&pin_path, &state_path, &state)
-                }
-            };
+            let replay_result = replay_managed_state_to_pinned_maps(
+                &pin_path,
+                &state_path,
+                &state,
+                replay_route,
+            );
             if let Err(e) = replay_result {
                 Self::cleanup_failed_managed_registration(
                     name,
@@ -8559,7 +8559,7 @@ mod tests {
                 &serde_json::to_vec(&persisted_snapshot).expect("snapshot must serialize"),
             )
             .expect("persisted snapshot must reload");
-            let projection_mode = managed_group_projection_mode(mode);
+            let projection_mode = managed_replay_route(mode).projection_mode();
             let gate_disposition = classify_runtime_gate_state(
                 projection_mode,
                 0,

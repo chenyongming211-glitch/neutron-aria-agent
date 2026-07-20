@@ -238,12 +238,23 @@ modes, padding, timeouts, or activation combinations prevent ACL/CT readiness.
 Userspace validation always receives the expected runtime mode, so a managed
 runtime cannot accept a standalone config or vice versa.
 
-Runtime identity and group projection are independent dimensions. Managed
-registration may use `StandaloneCompatibility` group projection while still
-requiring `FRAGMENT_CONFIG.runtime_mode=managed`. Fixed managed replay
-entrypoints always validate managed runtime identity; the true standalone replay
-entrypoint always validates standalone identity. Callers cannot derive fragment
-runtime identity from the selected projection mode.
+Runtime identity and group projection are independent dimensions but are not
+passed as independent raw arguments. Managed registration selects a
+`ManagedReplayRoute` from `ManagedAttachMode`; its constructor always carries
+managed fragment identity while its projection is either `Managed` or
+`StandaloneCompatibility`. `StandaloneReplayRoute` is fixed to
+`StandaloneCompatibility` projection plus standalone fragment identity, and
+only the explicitly named `replay_standalone_state_to_pinned_maps` wrapper uses
+it. The private replay implementation accepts only those typed routes.
+
+Managed compatibility projection continues to reload `state_path` through the
+WAL before replay, preserving the previous durable-snapshot authority; managed
+projection continues to use the prepared in-memory snapshot.
+
+The hosted behavior lane directly executes the production managed-route
+selector for every `ManagedAttachMode` variant and the core route invariants.
+It does not use `include_str!` or source-text matching to prescribe helper
+spelling.
 
 ### 5.6 Capacity and lifetime
 

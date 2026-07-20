@@ -6,6 +6,85 @@ pub enum GroupProjectionMode {
     Managed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FragmentRuntimeIdentity {
+    Managed,
+    Standalone,
+}
+
+impl FragmentRuntimeIdentity {
+    fn runtime_mode(self) -> u8 {
+        match self {
+            Self::Managed => crate::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+            Self::Standalone => crate::common::FRAGMENT_RUNTIME_MODE_STANDALONE,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ManagedReplayRoute {
+    projection_mode: GroupProjectionMode,
+}
+
+impl ManagedReplayRoute {
+    pub const fn new(projection_mode: GroupProjectionMode) -> Self {
+        Self { projection_mode }
+    }
+
+    pub const fn projection_mode(self) -> GroupProjectionMode {
+        self.projection_mode
+    }
+
+    pub const fn fragment_runtime_identity(self) -> FragmentRuntimeIdentity {
+        FragmentRuntimeIdentity::Managed
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StandaloneReplayRoute;
+
+impl StandaloneReplayRoute {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    pub const fn projection_mode(self) -> GroupProjectionMode {
+        GroupProjectionMode::StandaloneCompatibility
+    }
+
+    pub const fn fragment_runtime_identity(self) -> FragmentRuntimeIdentity {
+        FragmentRuntimeIdentity::Standalone
+    }
+}
+
+impl Default for StandaloneReplayRoute {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PinnedReplayRoute {
+    Managed(ManagedReplayRoute),
+    Standalone(StandaloneReplayRoute),
+}
+
+impl PinnedReplayRoute {
+    fn projection_mode(self) -> GroupProjectionMode {
+        match self {
+            Self::Managed(route) => route.projection_mode(),
+            Self::Standalone(route) => route.projection_mode(),
+        }
+    }
+
+    fn fragment_runtime_identity(self) -> FragmentRuntimeIdentity {
+        match self {
+            Self::Managed(route) => route.fragment_runtime_identity(),
+            Self::Standalone(route) => route.fragment_runtime_identity(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RuntimeNetworkEntry {
     pub address: IpAddr,
@@ -629,18 +708,7 @@ fn replay_state_from_snapshot_with_mode(
     Ok(())
 }
 
-pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(), String> {
-    let state = crate::wal::load_with_wal(state_path);
-    replay_state_to_pinned_maps_from_snapshot_with_mode(
-        pin_path,
-        state_path,
-        &state,
-        GroupProjectionMode::StandaloneCompatibility,
-        crate::common::FRAGMENT_RUNTIME_MODE_STANDALONE,
-    )
-}
-
-pub fn replay_managed_compatibility_state_to_pinned_maps(
+pub fn replay_standalone_state_to_pinned_maps(
     pin_path: &str,
     state_path: &str,
 ) -> Result<(), String> {
@@ -649,8 +717,7 @@ pub fn replay_managed_compatibility_state_to_pinned_maps(
         pin_path,
         state_path,
         &state,
-        GroupProjectionMode::StandaloneCompatibility,
-        crate::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+        PinnedReplayRoute::Standalone(StandaloneReplayRoute::new()),
     )
 }
 
@@ -658,13 +725,24 @@ pub fn replay_managed_state_to_pinned_maps(
     pin_path: &str,
     state_path: &str,
     state: &FirewallState,
+    route: ManagedReplayRoute,
 ) -> Result<(), String> {
+    if route.projection_mode() == GroupProjectionMode::StandaloneCompatibility {
+        // Compatibility replay keeps the durable WAL snapshot as its projection
+        // authority, matching the legacy standalone-compatible registration path.
+        let durable_state = crate::wal::load_with_wal(state_path);
+        return replay_state_to_pinned_maps_from_snapshot_with_mode(
+            pin_path,
+            state_path,
+            &durable_state,
+            PinnedReplayRoute::Managed(route),
+        );
+    }
     replay_state_to_pinned_maps_from_snapshot_with_mode(
         pin_path,
         state_path,
         state,
-        GroupProjectionMode::Managed,
-        crate::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+        PinnedReplayRoute::Managed(route),
     )
 }
 
@@ -672,9 +750,9 @@ fn replay_state_to_pinned_maps_from_snapshot_with_mode(
     pin_path: &str,
     state_path: &str,
     state: &FirewallState,
-    mode: GroupProjectionMode,
-    fragment_runtime_mode: u8,
+    route: PinnedReplayRoute,
 ) -> Result<(), String> {
+    let mode = route.projection_mode();
     let mut projection_errors = Vec::new();
     let group_entries = match build_runtime_group_map_entries(state, mode) {
         Ok(entries) => entries,
@@ -691,8 +769,11 @@ fn replay_state_to_pinned_maps_from_snapshot_with_mode(
     };
     let tap_id = state.tap_id;
     let runtime = TapMapRuntime::new(pin_path, tap_id);
-    validate_fragment_tracking_config_strict(pin_path, fragment_runtime_mode)
-        .map_err(|error| format!("FRAGMENT_CONFIG: {}", error))?;
+    validate_fragment_tracking_config_strict(
+        pin_path,
+        route.fragment_runtime_identity().runtime_mode(),
+    )
+    .map_err(|error| format!("FRAGMENT_CONFIG: {}", error))?;
     let has_runtime_objects = !(group_entries.general_src.is_empty()
         && group_entries.general_dst.is_empty()
         && group_entries.acl_src.is_empty()
