@@ -11646,6 +11646,152 @@ mod tests {
     }
 
     #[test]
+    fn neutron_acl_recovery_repairs_quiesced_kernel_gate_without_repersisting_durable_state() {
+        assert_eq!(
+            managed_acl_gate_publication_steps_from_live(
+                false, false, // live kernel gate after health-loss quiesce
+                true, true, // durable desired gate
+                true, true, // requested recovery gate
+                true,
+            ),
+            vec![
+                ManagedAclGatePublicationStep::AdvanceFragmentEpoch,
+                ManagedAclGatePublicationStep::PublishGate,
+                ManagedAclGatePublicationStep::VerifyReadiness,
+            ]
+        );
+    }
+
+    #[test]
+    fn neutron_acl_gate_planning_splits_kernel_durable_and_recovery_changes() {
+        let steps = |actual_conntrack,
+                     actual_acl,
+                     durable_conntrack,
+                     durable_acl,
+                     requested_conntrack,
+                     requested_acl,
+                     recovery| {
+            managed_acl_gate_publication_steps_from_live(
+                actual_conntrack,
+                actual_acl,
+                durable_conntrack,
+                durable_acl,
+                requested_conntrack,
+                requested_acl,
+                recovery,
+            )
+        };
+
+        assert!(steps(false, false, false, false, false, false, false).is_empty());
+        assert_eq!(
+            steps(false, false, false, false, true, true, false),
+            vec![
+                ManagedAclGatePublicationStep::AdvanceFragmentEpoch,
+                ManagedAclGatePublicationStep::PublishGate,
+                ManagedAclGatePublicationStep::Persist,
+            ]
+        );
+        assert_eq!(
+            steps(false, false, true, true, true, true, false),
+            vec![
+                ManagedAclGatePublicationStep::AdvanceFragmentEpoch,
+                ManagedAclGatePublicationStep::PublishGate,
+            ]
+        );
+        assert_eq!(
+            steps(true, true, false, false, true, true, false),
+            vec![
+                ManagedAclGatePublicationStep::AdvanceFragmentEpoch,
+                ManagedAclGatePublicationStep::Persist,
+            ]
+        );
+        assert_eq!(
+            steps(true, true, true, true, true, true, true),
+            vec![
+                ManagedAclGatePublicationStep::AdvanceFragmentEpoch,
+                ManagedAclGatePublicationStep::VerifyReadiness,
+            ]
+        );
+    }
+
+    #[test]
+    fn neutron_acl_recovery_readiness_rechecks_live_gate_immediately_before_commit() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let mut matching_read = || {
+            events.borrow_mut().push("read_live_gate");
+            Ok((true, true))
+        };
+        verify_acl_gate_before_readiness(true, true, &mut matching_read)
+            .expect("matching live gate may publish readiness");
+        assert_eq!(*events.borrow(), vec!["read_live_gate"]);
+
+        let mut drifted_read = || Ok((false, false));
+        let error = verify_acl_gate_before_readiness(true, true, &mut drifted_read)
+            .expect_err("quiesced live gate must not be marked ready");
+        assert!(error.contains("actual conntrack=false acl=false"));
+
+        let mut failed_read = || Err("FIREWALL_CONFIG unavailable".to_string());
+        assert!(verify_acl_gate_before_readiness(true, true, &mut failed_read).is_err());
+    }
+
+    #[test]
+    fn neutron_acl_fragment_epoch_action_is_strict_on_missing_pin_path() {
+        let error = advance_fragment_epoch_action(
+            "/proc/aria-firewall-task5-definitely-missing",
+            u32::MAX,
+        )
+        .expect_err("missing pinned epoch map must fail strictly");
+        assert!(!error.is_empty());
+    }
+
+    #[test]
+    fn neutron_acl_pinned_gate_stops_at_advance_phase_on_missing_pin_path() {
+        let error = execute_pinned_acl_gate_transition(
+            "/proc/aria-firewall-task5-definitely-missing",
+            u32::MAX,
+            FragmentEpochGateTransition::SemanticChange,
+            true,
+            true,
+        )
+        .expect_err("missing pinned epoch map must block the gate write");
+
+        assert_eq!(error.phase(), FragmentEpochPublicationFailurePhase::AdvanceEpoch);
+        assert!(!error.epoch_advanced);
+        assert!(!error.epoch_advanced());
+    }
+
+    #[test]
+    fn neutron_acl_fragment_failure_records_explicit_epoch_ownership() {
+        let failure = |transition, advance_result: Result<(), String>| {
+            let mut advance = || advance_result.clone();
+            let mut fail_gate = || Err("gate unavailable".to_string());
+            execute_fragment_epoch_gate_transition(
+                transition,
+                &mut advance,
+                &mut fail_gate,
+            )
+            .expect_err("fixture gate write must fail")
+        };
+
+        let mut failed_advance = || Err("epoch unavailable".to_string());
+        let mut unreachable_gate = || panic!("gate must not run");
+        let advance_error = execute_fragment_epoch_gate_transition(
+            FragmentEpochGateTransition::SemanticChange,
+            &mut failed_advance,
+            &mut unreachable_gate,
+        )
+        .expect_err("fixture epoch advance must fail");
+
+        assert!(!advance_error.epoch_advanced);
+        assert!(failure(FragmentEpochGateTransition::SemanticChange, Ok(())).epoch_advanced);
+        assert!(failure(FragmentEpochGateTransition::EpochAlreadyAdvanced, Ok(())).epoch_advanced);
+        assert!(!failure(FragmentEpochGateTransition::EqualState, Ok(())).epoch_advanced);
+        assert!(!failure(FragmentEpochGateTransition::FreshInitialization, Ok(())).epoch_advanced);
+    }
+
+    #[test]
     fn neutron_acl_managed_registration_establishes_epoch_before_gate_or_readiness() {
         for activation in [
             ManagedRuntimeActivation::PreserveVerifiedLive,
