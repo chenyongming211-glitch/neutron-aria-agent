@@ -167,6 +167,20 @@ pub(super) fn validate_fragment_config(
     Ok(())
 }
 
+pub(super) fn validate_fragment_config_disabled(
+    config: &FragmentConfig,
+    expected_runtime_mode: u8,
+) -> Result<(), String> {
+    validate_fragment_config(config, expected_runtime_mode)?;
+    if config.enabled != FRAGMENT_CONFIG_DISABLED {
+        return Err(format!(
+            "FRAGMENT_CONFIG enabled {} is not ready for Task 4; expected disabled value {}",
+            config.enabled, FRAGMENT_CONFIG_DISABLED
+        ));
+    }
+    Ok(())
+}
+
 fn fragment_configs_equal(left: &FragmentConfig, right: &FragmentConfig) -> bool {
     left.version == right.version
         && left.enabled == right.enabled
@@ -213,7 +227,7 @@ pub fn validate_fragment_tracking_config_strict(
     let config = map
         .get(&0, 0)
         .map_err(|error| format!("read FRAGMENT_CONFIG key 0: {:?}", error))?;
-    validate_fragment_config(&config, expected_runtime_mode)
+    validate_fragment_config_disabled(&config, expected_runtime_mode)
 }
 
 pub fn read_fragment_epoch(pin_path: &str, tap_id: u32) -> Result<Option<u64>, String> {

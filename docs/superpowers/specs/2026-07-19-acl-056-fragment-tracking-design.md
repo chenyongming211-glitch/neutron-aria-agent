@@ -222,6 +222,11 @@ tap identity. Once guarded activation is implemented, enabled authority applies
 the mode-specific identity rule. Managed and standalone disabled defaults are
 therefore distinct legal configurations rather than padding conventions.
 
+Generic ABI validation recognizes both `enabled=0` and the future `enabled=1`
+state. Task 4 startup, readiness, reuse, and replay are narrower: they require
+`enabled=0`, and must treat an otherwise valid enabled config as not ready until
+Task 6 owns guarded activation.
+
 The activation flag defaults to disabled until privileged field evidence
 passes. The safe disabled behavior is still parser-correct: ambiguous TCP/UDP
 fragments drop explicitly instead of entering CT with invented ports.

@@ -1,8 +1,8 @@
 use super::fragment::{
     advance_fragment_epoch_with, default_fragment_config, fragment_sweep_with,
     fragment_v4_key_matches_tap, fragment_v6_key_matches_tap, recover_fragment_runtime_with,
-    scrub_fragment_families_with, validate_fragment_config, validate_fragment_runtime_maps_with,
-    FragmentRemoveOutcome, FragmentRuntimeMapKind,
+    scrub_fragment_families_with, validate_fragment_config, validate_fragment_config_disabled,
+    validate_fragment_runtime_maps_with, FragmentRemoveOutcome, FragmentRuntimeMapKind,
 };
 use super::{
     advance_fragment_epoch_strict, read_fragment_epoch, ALL_MAP_NAMES, CRITICAL_NETWORK_MAP_NAMES,
@@ -131,6 +131,18 @@ fn fragment_epoch_config_rejects_unknown_mode_and_invalid_values() {
     ] {
         assert!(validate_fragment_config(&invalid, FRAGMENT_RUNTIME_MODE_MANAGED).is_err());
     }
+}
+
+#[test]
+fn fragment_epoch_task4_readiness_rejects_valid_but_enabled_config() {
+    let mut config = default_fragment_config(FRAGMENT_RUNTIME_MODE_MANAGED).unwrap();
+    config.enabled = 1;
+
+    validate_fragment_config(&config, FRAGMENT_RUNTIME_MODE_MANAGED).unwrap();
+    let error =
+        validate_fragment_config_disabled(&config, FRAGMENT_RUNTIME_MODE_MANAGED).unwrap_err();
+    assert!(error.contains("not ready for Task 4"));
+    assert!(error.contains("disabled"));
 }
 
 #[test]

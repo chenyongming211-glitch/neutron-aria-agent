@@ -337,7 +337,10 @@ Set both context map capacities through `EbpfLoader` before load, validate 8192
 default and positive configured values, then initialize version-2
 mode-specific config with activation disabled and 30-second family timeouts.
 Managed new/reused recovery requires managed mode; standalone recovery requires
-standalone mode. Task 4 does not enable tracking or advance publication epochs.
+standalone mode. Generic ABI validation recognizes enabled values `0/1`, but
+Task 4 strict readiness/reuse/replay requires `enabled=0` and rejects a valid
+future enabled config as not ready. Task 4 does not enable tracking or advance
+publication epochs.
 
 - [ ] **Step 5: Commit and push userspace GREEN**
 
