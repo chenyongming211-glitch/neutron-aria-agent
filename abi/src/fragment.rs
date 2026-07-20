@@ -29,6 +29,7 @@ pub const DROP_FRAGMENT_CONTEXT_OVERLAP: u8 = 14;
 pub const DROP_FRAGMENT_CONTEXT_UPDATE_FAILED: u8 = 15;
 pub const DROP_FRAGMENT_TAP_UNASSIGNED: u8 = 16;
 pub const DROP_FRAGMENT_EXPIRY_OVERFLOW: u8 = 17;
+pub const DROP_MALFORMED_IP: u8 = 18;
 
 pub const FRAGMENT_METRIC_FIRST: u8 = 1;
 pub const FRAGMENT_METRIC_NON_INITIAL: u8 = 2;
@@ -170,7 +171,7 @@ impl FragmentResolveDecision {
 
     #[inline(always)]
     pub fn delete_context(self) -> bool {
-        matches!(self, Self::DropExpired)
+        false
     }
 }
 

@@ -1,5 +1,6 @@
 use crate::common::{
     TapMapRuntime, TraceEvent, TraceEventKey, TraceEventV6, TraceFilter, TraceStreamEvent,
+    DROP_MALFORMED_IP,
 };
 use aya::maps::{HashMap, MapData};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -62,6 +63,7 @@ pub fn drop_reason_name(reason: u8) -> String {
         3 => "acl-default-deny".to_string(),
         4 => "qos-ingress".to_string(),
         5 => "qos-egress".to_string(),
+        DROP_MALFORMED_IP => "malformed-ip".to_string(),
         _ => format!("reason:{}", reason),
     }
 }

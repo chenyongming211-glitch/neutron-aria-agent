@@ -31,11 +31,11 @@ use common::{
     CT_CONTRACT_FAMILY_IPV4, CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_EGRESS,
     CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_HIT,
     CT_CONTRACT_REASON_CT_MISS, CT_CONTRACT_REASON_STALE_BANK, DIR_EGRESS, DIR_INGRESS,
-    DROP_QOS_EGRESS, DROP_QOS_INGRESS, FLAG_ACL_ON, FLAG_CT_HIT, FLAG_CT_STALE_BANK,
-    FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_POLICY_HIT, FLAG_QOS_ON, FLAG_TCPRT_ON, FLAG_TRACING,
-    IPPROTO_TCP, TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL, TRACE_RESULT_DROP_ACL_DEFAULT,
-    TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_QOS, TRACE_RESULT_PASS, TRACE_TC_DROP,
-    TRACE_TC_EGRESS, TRACE_TC_INGRESS, XDP_PASS,
+    DROP_MALFORMED_IP, DROP_QOS_EGRESS, DROP_QOS_INGRESS, FLAG_ACL_ON, FLAG_CT_HIT,
+    FLAG_CT_STALE_BANK, FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_POLICY_HIT, FLAG_QOS_ON,
+    FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP, TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL,
+    TRACE_RESULT_DROP_ACL_DEFAULT, TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_QOS,
+    TRACE_RESULT_PASS, TRACE_TC_DROP, TRACE_TC_EGRESS, TRACE_TC_INGRESS, XDP_PASS,
 };
 use conntrack::{CtLookupResult, CtMissReason};
 use maps::{
@@ -105,13 +105,18 @@ unsafe fn try_xdp_firewall(
 pub fn tc_egress(ctx: TcContext) -> i32 {
     let pkt_len = ctx.len();
     unsafe {
+        let family = parser::ethernet_ip_family(ctx.data(), ctx.data_end(), 0);
+        if family == 0 {
+            try_raw_global_mirror_tc(&ctx, DIR_EGRESS, pkt_len);
+            return TC_ACT_OK;
+        }
         let info_ptr = match maps::PKT_SCRATCH.get_ptr_mut(0) {
             Some(p) => p,
             None => return TC_ACT_OK,
         };
-        if !parse_tc_packet(&ctx, info_ptr) {
-            try_raw_global_mirror_tc(&ctx, DIR_EGRESS, pkt_len);
-            return TC_ACT_OK;
+        if !parse_tc_packet(&ctx, info_ptr, family) {
+            record_malformed_ip_drop_tc(&ctx, DIR_EGRESS, pkt_len);
+            return TC_ACT_SHOT;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
             Some(p) => p,
@@ -144,6 +149,7 @@ unsafe fn try_tc_egress(
     p.now = bpf_ktime_get_ns();
     p.proto = info.proto;
     load_runtime_ctx_tc(ctx, p);
+    fragment::snapshot_authority(p);
     load_feature_flags_tc(p, info);
 
     if info.is_ipv6 {
@@ -161,7 +167,10 @@ unsafe fn try_tc_egress_v4(
 ) -> i32 {
     match fragment::resolve_v4(info, p) {
         fragment::ResolveOutcome::NotRequired => {}
-        fragment::ResolveOutcome::Resolved(proto) => p.proto = proto,
+        fragment::ResolveOutcome::Resolved(proto) => {
+            p.proto = proto;
+            refresh_trace_flag_tc(p, info);
+        }
         fragment::ResolveOutcome::Drop => {
             phase_fragment_drop_tc(ctx, info, p);
             return p.action as i32;
@@ -220,7 +229,10 @@ unsafe fn try_tc_egress_v6(
 ) -> i32 {
     match fragment::resolve_v6(info, p) {
         fragment::ResolveOutcome::NotRequired => {}
-        fragment::ResolveOutcome::Resolved(proto) => p.proto = proto,
+        fragment::ResolveOutcome::Resolved(proto) => {
+            p.proto = proto;
+            refresh_trace_flag_tc(p, info);
+        }
         fragment::ResolveOutcome::Drop => {
             phase_fragment_drop_tc(ctx, info, p);
             return p.action as i32;
@@ -277,13 +289,18 @@ unsafe fn try_tc_egress_v6(
 pub fn tc_ingress(ctx: TcContext) -> i32 {
     let pkt_len = ctx.len();
     unsafe {
+        let family = parser::ethernet_ip_family(ctx.data(), ctx.data_end(), 0);
+        if family == 0 {
+            try_raw_global_mirror_tc(&ctx, DIR_INGRESS, pkt_len);
+            return TC_ACT_OK;
+        }
         let info_ptr = match maps::PKT_SCRATCH.get_ptr_mut(0) {
             Some(p) => p,
             None => return TC_ACT_OK,
         };
-        if !parse_tc_packet(&ctx, info_ptr) {
-            try_raw_global_mirror_tc(&ctx, DIR_INGRESS, pkt_len);
-            return TC_ACT_OK;
+        if !parse_tc_packet(&ctx, info_ptr, family) {
+            record_malformed_ip_drop_tc(&ctx, DIR_INGRESS, pkt_len);
+            return TC_ACT_SHOT;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
             Some(p) => p,
@@ -316,6 +333,7 @@ unsafe fn try_tc_ingress(
     p.now = bpf_ktime_get_ns();
     p.proto = info.proto;
     load_runtime_ctx_tc(ctx, p);
+    fragment::snapshot_authority(p);
     load_feature_flags_tc(p, info);
 
     if info.is_ipv6 {
@@ -333,7 +351,10 @@ unsafe fn try_tc_ingress_v4(
 ) -> i32 {
     match fragment::resolve_v4(info, p) {
         fragment::ResolveOutcome::NotRequired => {}
-        fragment::ResolveOutcome::Resolved(proto) => p.proto = proto,
+        fragment::ResolveOutcome::Resolved(proto) => {
+            p.proto = proto;
+            refresh_trace_flag_tc(p, info);
+        }
         fragment::ResolveOutcome::Drop => {
             phase_fragment_drop_tc(ctx, info, p);
             return p.action as i32;
@@ -392,7 +413,10 @@ unsafe fn try_tc_ingress_v6(
 ) -> i32 {
     match fragment::resolve_v6(info, p) {
         fragment::ResolveOutcome::NotRequired => {}
-        fragment::ResolveOutcome::Resolved(proto) => p.proto = proto,
+        fragment::ResolveOutcome::Resolved(proto) => {
+            p.proto = proto;
+            refresh_trace_flag_tc(p, info);
+        }
         fragment::ResolveOutcome::Drop => {
             phase_fragment_drop_tc(ctx, info, p);
             return p.action as i32;
@@ -459,7 +483,13 @@ unsafe fn load_feature_flags_tc(p: &mut PipelineCtx, info: &parser::PacketInfo) 
     if mirror::mirror_enabled(p.tap_id) {
         p.flags |= FLAG_MIRROR_ON;
     }
-    if trace::should_trace(p.tap_id, info) {
+    refresh_trace_flag_tc(p, info);
+}
+
+#[inline(always)]
+unsafe fn refresh_trace_flag_tc(p: &mut PipelineCtx, info: &parser::PacketInfo) {
+    p.flags &= !FLAG_TRACING;
+    if trace::should_trace(p.tap_id, info, p.proto) {
         p.flags |= FLAG_TRACING;
     }
 }
@@ -483,13 +513,20 @@ unsafe fn load_runtime_ctx_tc(ctx: &TcContext, p: &mut PipelineCtx) {
 }
 
 #[inline(always)]
-unsafe fn parse_tc_packet(ctx: &TcContext, out: *mut parser::PacketInfo) -> bool {
+unsafe fn parse_tc_packet(ctx: &TcContext, out: *mut parser::PacketInfo, family: u8) -> bool {
     let mut data = ctx.data();
     let mut data_end = ctx.data_end();
-    let mut parsed = parser::parse_eth_ipv4(data, data_end, 0, out)
-        || parser::parse_eth_ipv6(data, data_end, 0, out);
+    let mut parsed = parse_tc_family(data, data_end, out, family);
     if !parsed {
-        return false;
+        if ctx.pull_data(0).is_err() {
+            return false;
+        }
+        data = ctx.data();
+        data_end = ctx.data_end();
+        parsed = parse_tc_family(data, data_end, out, family);
+        if !parsed {
+            return false;
+        }
     }
 
     let info = &*out;
@@ -501,12 +538,41 @@ unsafe fn parse_tc_packet(ctx: &TcContext, out: *mut parser::PacketInfo) -> bool
         if ctx.pull_data(0).is_ok() {
             data = ctx.data();
             data_end = ctx.data_end();
-            parsed = parser::parse_eth_ipv4(data, data_end, 0, out)
-                || parser::parse_eth_ipv6(data, data_end, 0, out);
+            parsed = parse_tc_family(data, data_end, out, family);
         }
     }
 
     parsed
+}
+
+#[inline(always)]
+unsafe fn parse_tc_family(
+    data: usize,
+    data_end: usize,
+    out: *mut parser::PacketInfo,
+    family: u8,
+) -> bool {
+    if family == 4 {
+        parser::parse_eth_ipv4(data, data_end, 0, out)
+    } else {
+        parser::parse_eth_ipv6(data, data_end, 0, out)
+    }
+}
+
+#[inline(always)]
+unsafe fn record_malformed_ip_drop_tc(ctx: &TcContext, direction: u8, pkt_len: u32) {
+    let skb = ctx.as_ptr() as *const __sk_buff;
+    drops::record_drop(&drops::DropArgs {
+        tap_id: resolve_tap_id_for_ifindex((*skb).ifindex),
+        src_id: 0,
+        dst_id: 0,
+        pkt_len,
+        now: bpf_ktime_get_ns(),
+        reason: DROP_MALFORMED_IP,
+        direction,
+        proto: 0,
+        _pad: 0,
+    });
 }
 
 #[inline(always)]
@@ -564,7 +630,8 @@ unsafe fn do_trace<C: EbpfContext>(
             direction: p.direction,
             ct_state: p.ct_state,
             drop_reason: p.drop_reason,
-            _pad: [0; 3],
+            proto: p.proto,
+            _pad: [0; 2],
             src_id: p.src_id,
             dst_id: p.dst_id,
             pkt_len: p.pkt_len,
@@ -634,7 +701,7 @@ unsafe fn phase_ct_v4(
     ct_key: &CtKey4,
 ) -> Option<CtMissReason> {
     let validate_acl_bank = if (p.flags & FLAG_ACL_ON) != 0 { 1 } else { 0 };
-    let expected_acl_bank = runtime::acl_active_bank(p.tap_id);
+    let expected_acl_bank = p.acl_bank_snapshot;
     match conntrack::ct_lookup_v4(
         ct_key,
         p.now,
@@ -671,7 +738,7 @@ unsafe fn phase_ct_v6(
     ct_key: &CtKey6,
 ) -> Option<CtMissReason> {
     let validate_acl_bank = if (p.flags & FLAG_ACL_ON) != 0 { 1 } else { 0 };
-    let expected_acl_bank = runtime::acl_active_bank(p.tap_id);
+    let expected_acl_bank = p.acl_bank_snapshot;
     match conntrack::ct_lookup_v6(
         ct_key,
         p.now,
@@ -720,7 +787,7 @@ unsafe fn load_packet_ids_v6(info: &parser::PacketInfo, p: &mut PipelineCtx) {
 
 #[inline(always)]
 unsafe fn load_acl_packet_ids_v4(info: &parser::PacketInfo, p: &mut PipelineCtx) {
-    let bank = runtime::acl_active_bank(p.tap_id);
+    let bank = p.acl_bank_snapshot;
     let lpm_tap_id = acl_banked_tap_id(p.tap_id, bank);
     p.matched_bank = bank;
     p.src_id = lookup_ipv4(&ACL_SRC_IPV4_TRIE, lpm_tap_id, info.src_ip).unwrap_or(0);
@@ -729,7 +796,7 @@ unsafe fn load_acl_packet_ids_v4(info: &parser::PacketInfo, p: &mut PipelineCtx)
 
 #[inline(always)]
 unsafe fn load_acl_packet_ids_v6(info: &parser::PacketInfo, p: &mut PipelineCtx) {
-    let bank = runtime::acl_active_bank(p.tap_id);
+    let bank = p.acl_bank_snapshot;
     let lpm_tap_id = acl_banked_tap_id(p.tap_id, bank);
     p.matched_bank = bank;
     p.src_id = lookup_ipv6(&ACL_SRC_IPV6_TRIE, lpm_tap_id, info.src_ip_v6).unwrap_or(0);

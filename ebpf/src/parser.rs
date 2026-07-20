@@ -27,6 +27,28 @@ pub struct PacketInfo {
 
 const ETH_HLEN: usize = 14;
 
+/// Return 4/6 for supported Ethernet IPv4/IPv6 frames, including one 802.1Q tag.
+/// A zero result means that the frame is not a supported IP family.
+#[inline(always)]
+pub unsafe fn ethernet_ip_family(data: usize, data_end: usize, offset: usize) -> u8 {
+    if data + offset + ETH_HLEN > data_end {
+        return 0;
+    }
+    let eth_offset = data + offset;
+    let mut eth_type = read_be16(eth_offset, 12);
+    if eth_type == 0x8100 {
+        if eth_offset + ETH_HLEN + 4 > data_end {
+            return 0;
+        }
+        eth_type = read_be16(eth_offset, 16);
+    }
+    match eth_type {
+        0x0800 => 4,
+        0x86dd => 6,
+        _ => 0,
+    }
+}
+
 #[inline]
 unsafe fn read8(data: usize, offset: usize) -> u8 {
     *(data as *const u8).add(offset)

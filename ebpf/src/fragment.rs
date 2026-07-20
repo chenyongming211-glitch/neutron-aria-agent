@@ -10,6 +10,7 @@ use crate::maps::{
     FRAGMENT_CONFIG, FRAGMENT_EPOCH, FRAGMENT_METRICS, FRAG_CONTEXT_V4, FRAG_CONTEXT_V6,
 };
 use crate::parser::PacketInfo;
+use aria_ebpf_abi::FragmentEpochValue;
 
 const FRAGMENT_CONFIG_KEY: u32 = 0;
 const FRAGMENT_FAMILY_V4: u8 = 4;
@@ -19,6 +20,28 @@ pub enum ResolveOutcome {
     NotRequired,
     Resolved(u8),
     Drop,
+}
+
+#[inline(always)]
+pub unsafe fn snapshot_authority(p: &mut PipelineCtx) {
+    p.acl_bank_snapshot = crate::runtime::acl_active_bank(p.tap_id);
+    p.fragment_epoch_snapshot = 0;
+    p.fragment_epoch_present = 0;
+    if let Some(epoch) = FRAGMENT_EPOCH.get(&p.tap_id) {
+        p.fragment_epoch_snapshot = epoch.epoch;
+        p.fragment_epoch_present = 1;
+    }
+}
+
+#[inline(always)]
+fn packet_epoch(p: &PipelineCtx) -> Option<FragmentEpochValue> {
+    if p.fragment_epoch_present == 0 {
+        None
+    } else {
+        Some(FragmentEpochValue {
+            epoch: p.fragment_epoch_snapshot,
+        })
+    }
 }
 
 #[inline(always)]
@@ -71,7 +94,7 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
 
     let key = resolve_v4_key(info, p);
     let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
-    let epoch = FRAGMENT_EPOCH.get(&p.tap_id).copied();
+    let epoch = packet_epoch(p);
     let value = FRAG_CONTEXT_V4.get(&key).copied();
     let decision = fragment_resolve_decision(
         p.tap_id,
@@ -79,14 +102,11 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
         config.as_ref(),
         epoch.as_ref(),
         value.as_ref(),
-        crate::runtime::acl_active_bank(p.tap_id),
+        p.acl_bank_snapshot,
         p.now,
         info.fragment_offset,
     );
     record_metric(p, FRAGMENT_FAMILY_V4, decision.metric());
-    if decision.delete_context() {
-        let _ = FRAG_CONTEXT_V4.remove(&key);
-    }
     if decision.drop_reason() != 0 {
         p.drop_reason = decision.drop_reason();
         return ResolveOutcome::Drop;
@@ -122,7 +142,7 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
 
     let key = resolve_v6_key(info, p);
     let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
-    let epoch = FRAGMENT_EPOCH.get(&p.tap_id).copied();
+    let epoch = packet_epoch(p);
     let value = FRAG_CONTEXT_V6.get(&key).copied();
     let decision = fragment_resolve_decision(
         p.tap_id,
@@ -130,14 +150,11 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
         config.as_ref(),
         epoch.as_ref(),
         value.as_ref(),
-        crate::runtime::acl_active_bank(p.tap_id),
+        p.acl_bank_snapshot,
         p.now,
         info.fragment_offset,
     );
     record_metric(p, FRAGMENT_FAMILY_V6, decision.metric());
-    if decision.delete_context() {
-        let _ = FRAG_CONTEXT_V6.remove(&key);
-    }
     if decision.drop_reason() != 0 {
         p.drop_reason = decision.drop_reason();
         return ResolveOutcome::Drop;
@@ -181,7 +198,7 @@ pub unsafe fn install_allowed_v4(
     record_metric(p, FRAGMENT_FAMILY_V4, FRAGMENT_METRIC_FIRST);
 
     let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
-    let epoch = FRAGMENT_EPOCH.get(&p.tap_id).copied();
+    let epoch = packet_epoch(p);
     let authority =
         fragment_authority_drop_reason(p.tap_id, false, config.as_ref(), epoch.as_ref());
     if authority != 0 {
@@ -214,7 +231,7 @@ pub unsafe fn install_allowed_v4(
         src_port: info.src_port,
         dst_port: info.dst_port,
         first_payload_end: info.first_payload_end,
-        acl_bank: crate::runtime::acl_active_bank(p.tap_id),
+        acl_bank: p.acl_bank_snapshot,
         flags,
         version: FRAGMENT_CONTEXT_VERSION,
         _pad: 0,
@@ -222,6 +239,7 @@ pub unsafe fn install_allowed_v4(
         epoch: epoch.epoch,
         expires_at_ns,
     };
+    // BPF_ANY: a valid first fragment replaces same-key authority for ID reuse.
     let decision = fragment_install_result(
         FRAG_CONTEXT_V4.insert(&key, &value, 0).is_ok(),
         ct_created_by_packet,
@@ -252,7 +270,7 @@ pub unsafe fn install_allowed_v6(
     record_metric(p, FRAGMENT_FAMILY_V6, FRAGMENT_METRIC_FIRST);
 
     let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
-    let epoch = FRAGMENT_EPOCH.get(&p.tap_id).copied();
+    let epoch = packet_epoch(p);
     let authority = fragment_authority_drop_reason(p.tap_id, true, config.as_ref(), epoch.as_ref());
     if authority != 0 {
         p.drop_reason = authority;
@@ -284,7 +302,7 @@ pub unsafe fn install_allowed_v6(
         src_port: info.src_port,
         dst_port: info.dst_port,
         first_payload_end: info.first_payload_end,
-        acl_bank: crate::runtime::acl_active_bank(p.tap_id),
+        acl_bank: p.acl_bank_snapshot,
         flags,
         version: FRAGMENT_CONTEXT_VERSION,
         _pad: 0,
@@ -292,6 +310,7 @@ pub unsafe fn install_allowed_v6(
         epoch: epoch.epoch,
         expires_at_ns,
     };
+    // BPF_ANY: a valid first fragment replaces same-key authority for ID reuse.
     let decision = fragment_install_result(
         FRAG_CONTEXT_V6.insert(&key, &value, 0).is_ok(),
         ct_created_by_packet,

@@ -213,7 +213,11 @@ Expected: fragment tests and ABI full suite pass; eBPF warning-denied build pass
 - Modify: `ebpf/src/conntrack.rs`
 - Modify: `ebpf/src/maps.rs`
 - Modify: `ebpf/src/lib.rs`
+- Modify: `ebpf/src/parser.rs`
+- Modify: `ebpf/src/trace.rs`
 - Modify: `abi/tests/fragment_context_contract.rs`
+- Create: `abi/tests/fragment_parser_contract.rs`
+- Modify: `docs/superpowers/specs/2026-07-19-acl-056-fragment-tracking-design.md`
 
 **Interfaces:**
 - Consumes: Task 2 ABI and parser metadata.
@@ -221,7 +225,11 @@ Expected: fragment tests and ABI full suite pass; eBPF warning-denied build pass
 
 - [ ] **Step 1: Extend RED for datapath decisions**
 
-Add pure behavior cases for disabled mode, missing context, first-range overlap, exact hit, expired delete classification, and insert-before-pass failure. Use only exported ABI functions so the test does not prescribe private eBPF helpers.
+Add pure behavior cases for disabled mode, missing context, first-range overlap,
+exact hit, expired retain-and-drop classification, one-packet bank/epoch scratch,
+supported Ethernet family recognition, malformed IP parsing, and
+insert-before-pass failure. Keep datapath-only helpers at crate root rather than
+expanding the stable `abi::userspace` surface.
 
 - [ ] **Step 2: Define maps**
 
@@ -229,11 +237,21 @@ Add `FRAG_CONTEXT_V4` and `FRAG_CONTEXT_V6` as `LruHashMap` with 8192 entries, `
 
 - [ ] **Step 3: Resolve non-initial context before CT key construction**
 
-In both TC directions, after runtime flags load and before `CtKey4`/`CtKey6`, call the family resolver. On hit, copy only ports into packet scratch. On miss/expiry/stale/overlap/disabled, set a dedicated drop reason and return `TC_ACT_SHOT`.
+In both TC directions, sample active bank and fragment epoch once after tap
+resolution and before `CtKey4`/`CtKey6`, then call the family resolver. Reuse
+that snapshot for resolve, CT bank validation, banked ACL lookup/policy, and
+first-context install. On hit, copy only ports into packet scratch and retain
+the recovered effective protocol privately. On miss/expiry/stale/overlap/
+disabled, set a dedicated drop reason and return `TC_ACT_SHOT`; expiry does not
+delete from the packet path.
 
 - [ ] **Step 4: Install allowed first context before return pass**
 
-After the existing pipeline determines final pass, insert the first-fragment context with current bank/epoch and absolute expiry. If insertion fails, remove a CT entry created by this packet and return the update-failed drop. Do not remove a pre-existing CT hit.
+After the existing pipeline determines final pass, insert the first-fragment
+context with the packet bank/epoch snapshot and absolute expiry. Use `BPF_ANY`
+so a valid first fragment can replace live/expired/stale authority for fragment
+ID reuse. If insertion fails, remove a CT entry created by this packet and
+return the update-failed drop. Do not remove a pre-existing CT hit.
 
 For ownership-safe cleanup, change `ct_create_v4` and `ct_create_v6` to use an
 atomic no-overwrite insert and return only whether this packet successfully
@@ -246,6 +264,16 @@ transaction framework.
 - [ ] **Step 5: Exclude non-initial TCP from TCPRT**
 
 Guard every TCPRT call with `fragment_kind != NonInitial`. Do not synthesize flags, sequence, or payload length from context.
+
+Re-evaluate protocol-filtered trace after successful fragment resolution using
+the private effective protocol, without mutating parser metadata. Preserve
+tap-only visibility for missing-context drops. For TC supported IPv4/IPv6
+frames, retry malformed/non-linear parsing with safe pull/reparse, then drop and
+account persistent malformed input; leave non-IP Ethernet and XDP neutral.
+
+Keep policy counters, CT attempts/touches, QoS tokens, and skb EDT as attempted-
+packet effects before context insertion. Keep PASS trace/mirror, accepted flow
+and group stats, and TCPRT after successful insertion.
 
 - [ ] **Step 6: Commit and push datapath GREEN**
 

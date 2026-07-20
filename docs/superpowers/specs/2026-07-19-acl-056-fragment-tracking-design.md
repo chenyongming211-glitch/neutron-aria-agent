@@ -214,8 +214,10 @@ exposes it as a pre-load deployment setting, and field evidence reports pressure
 under target traffic.
 
 Lifetime uses `bpf_ktime_get_ns()`, defaults to 30 seconds, and is configurable
-from 1 through 60 seconds. Context is not durable firewall state. Expired entries
-are deleted opportunistically. Eviction, pressure, or update failure may drop a
+from 1 through 60 seconds. Context is not durable firewall state. An expired
+lookup is accounted and dropped without packet-path deletion; a later valid
+first fragment replaces that slot, while LRU eviction or a userspace scrub
+provides eventual cleanup. Eviction, pressure, or update failure may drop a
 datagram but must never fall back to zero or payload-derived ports.
 
 The initial maps are global across taps, so sustained unique-fragment traffic
@@ -253,17 +255,36 @@ full non-initial range-set reassembler.
 
 ## 7. TC Data Flow
 
-Fragment resolution runs after tap, direction, feature flags, active bank, and
-epoch are known, but before `CtKey4`/`CtKey6` construction.
+Fragment resolution runs after tap and direction are resolved, the authority
+snapshot is captured, and feature flags are loaded, but before
+`CtKey4`/`CtKey6` construction.
+
+After tap resolution, each TC packet samples the active ACL bank and fragment
+epoch exactly once into private pipeline scratch. Fragment resolution, CT
+expected-bank validation, banked ACL LPM/policy selection, and first-context
+installation reuse that same packet snapshot. This is one-packet authority
+consistency, not a cross-map atomicity claim. A missing epoch fails closed only
+for participating first or non-initial fragments; ordinary unfragmented and
+IPv6 atomic packets continue without fragment authority.
 
 ### 7.1 First fragment
 
 1. validate complete L4 authority and retain real ports;
-2. read current bank and epoch;
+2. reuse the packet's bank and epoch snapshot;
 3. run normal CT/ACL/QoS/Mirror/trace processing;
 4. do not install an allow context for a final drop;
 5. for final pass, insert context before returning pass;
 6. convert insert failure to an explicit resource drop.
+
+Context insertion deliberately uses `BPF_ANY`: a valid allowed first fragment
+may replace a live, expired, or stale entry for the same key so that fragment-ID
+reuse can make progress. This is distinct from CT creation, which remains
+`BPF_NOEXIST` so failure cleanup can remove only a CT entry proven to be owned
+by this packet. A same-key ID collision while two datagrams overlap remains a
+residual ambiguity: the latest valid first fragment becomes the recovered-port
+authority. The implementation does not claim that this theoretical collision
+is a proven authorization bypass because every later packet still traverses
+current CT/ACL policy with the recovered tuple.
 
 If the existing pipeline created a new CT entry before context insertion and
 the insertion then fails, the error path removes that transaction-created CT
@@ -294,15 +315,32 @@ Non-initial TCP fragments do not contain authoritative flags, sequence, or TCP
 payload boundaries, so they must not create, advance, or refresh TCPRT. A valid
 first TCP fragment may continue through TCPRT.
 
-QoS, mirror, flow/rule accounting, drop profiling, and trace keep their current
-per-packet semantics.
+Policy/rule counters, CT lookup/touch/create attempts, QoS token consumption,
+and skb EDT updates occur while deciding an attempted packet and are not rolled
+back if a later context insert fails. Final PASS trace, mirror, accepted-flow
+and group statistics, and TCPRT remain after successful context installation.
+Documentation and telemetry must distinguish decision/attempt effects from
+final-pass effects.
+
+For a resolved non-initial fragment, protocol-filtered trace selection and
+emitted trace events use the private recovered effective protocol together with
+the recovered ports; `PacketInfo.proto` remains immutable parser metadata.
+Trace selection is re-evaluated after resolution. Tap-only trace filters are
+still evaluated before resolution, so they can observe missing-context drops.
+
+At TC only, an Ethernet frame positively identified as IPv4 or IPv6 (including
+one 802.1Q tag) must not fail open when full parsing fails. The datapath first
+uses the existing safe `pull_data(0)` and reparses with refreshed pointers for a
+possibly non-linear skb. A second failure is `TC_ACT_SHOT` with stable
+`malformed-ip` drop accounting. Non-IP/unsupported Ethernet remains pass, and
+the intentionally neutral XDP parser-failure behavior is unchanged.
 
 ## 8. Failure And Recovery Matrix
 
 | Condition | Required result |
 | --- | --- |
 | non-initial before first | drop: context missing |
-| expired context | delete opportunistically and drop |
+| expired context | retain entry, account expiry, and drop; later valid first may replace |
 | bank or epoch mismatch | drop: stale context |
 | different tap/direction/VLAN | no match and drop |
 | incomplete first L4 header | drop: invalid fragment L4 |
@@ -328,6 +366,11 @@ pressure. Existing drop profiling retains tap, direction, and protocol.
 Trace carries recovered ports only after a successful hit and identifies that
 they came from fragment context. Operators must distinguish ACL deny from
 tracking capacity loss.
+
+Stable map structs, configuration, metrics, and drop identifiers are exported
+through `abi::userspace`. Resolve/install decisions and helper classifiers are
+private datapath/test machinery kept only at crate root; they are not part of
+the supported userspace ABI surface.
 
 ## 10. Activation And Compatibility
 

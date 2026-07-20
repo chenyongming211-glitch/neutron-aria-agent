@@ -10,7 +10,7 @@ use aya_ebpf::EbpfContext;
 /// Check if tracing is enabled and packet matches filter.
 /// Returns false quickly if filter is not set or not matching (zero overhead path).
 #[inline(always)]
-pub unsafe fn should_trace(tap_id: u32, info: &PacketInfo) -> bool {
+pub unsafe fn should_trace(tap_id: u32, info: &PacketInfo, effective_proto: u8) -> bool {
     let filter = match TRACE_FILTER.get(&tap_id) {
         Some(f) => f,
         None => return false,
@@ -47,7 +47,7 @@ pub unsafe fn should_trace(tap_id: u32, info: &PacketInfo) -> bool {
     if filter.dst_port != 0 && filter.dst_port != info.dst_port {
         return false;
     }
-    if filter.proto != 0 && filter.proto != info.proto {
+    if filter.proto != 0 && filter.proto != effective_proto {
         return false;
     }
     true
@@ -75,7 +75,8 @@ pub struct TraceArgs {
     pub direction: u8,
     pub ct_state: u8,
     pub drop_reason: u8,
-    pub _pad: [u8; 3],
+    pub proto: u8,
+    pub _pad: [u8; 2],
     pub src_id: u32,
     pub dst_id: u32,
     pub pkt_len: u32,
@@ -100,7 +101,7 @@ pub unsafe fn trace_event<C: EbpfContext>(
                 (*event).dst_ip = info.dst_ip_v6;
                 (*event).src_port = info.src_port;
                 (*event).dst_port = info.dst_port;
-                (*event).proto = info.proto;
+                (*event).proto = args.proto;
                 (*event).hook = args.hook;
                 (*event).result = args.result;
                 (*event).direction = args.direction;
@@ -118,7 +119,7 @@ pub unsafe fn trace_event<C: EbpfContext>(
             (*event).dst_ip = info.dst_ip;
             (*event).src_port = info.src_port;
             (*event).dst_port = info.dst_port;
-            (*event).proto = info.proto;
+            (*event).proto = args.proto;
             (*event).hook = args.hook;
             (*event).result = args.result;
             (*event).direction = args.direction;
@@ -152,7 +153,7 @@ unsafe fn emit_trace_stream_event<C: EbpfContext>(
         (*event).dst_ip_v6 = info.dst_ip_v6;
         (*event).src_port = info.src_port;
         (*event).dst_port = info.dst_port;
-        (*event).proto = info.proto;
+        (*event).proto = args.proto;
         (*event).hook = args.hook;
         (*event).result = args.result;
         (*event).direction = args.direction;
