@@ -3786,6 +3786,7 @@ impl ControlPlane {
                         transition,
                         &mut || {
                             aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, tap_id)
+                                .map(|_| ())
                                 .map_err(|error| {
                                     format!(
                                         "advance managed ownership fragment epoch for {}: {}",
@@ -3870,6 +3871,7 @@ impl ControlPlane {
                                 &runtime_pin_path,
                                 runtime_tap_id,
                             )
+                            .map(|_| ())
                             .map_err(|error| {
                                 format!(
                                     "advance managed ACL demotion fragment epoch: {}",
@@ -4463,6 +4465,7 @@ impl ControlPlane {
                         transition,
                         &mut || {
                             aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, tap_id)
+                                .map(|_| ())
                                 .map_err(|error| {
                                     format!(
                                         "advance preexisting runtime fragment epoch: {}",
@@ -4521,6 +4524,7 @@ impl ControlPlane {
                     transition,
                     &mut || {
                         aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, tap_id)
+                            .map(|_| ())
                             .map_err(|error| {
                                 format!("advance repairable runtime fragment epoch: {}", error)
                             })
@@ -4682,6 +4686,7 @@ impl ControlPlane {
                     &prepared.pin_path,
                     prepared.tap_id,
                 )
+                .map(|_| ())
                 .map_err(|error| {
                     format!(
                         "advance managed registration fragment epoch for {}: {}",
@@ -4743,6 +4748,7 @@ impl ControlPlane {
                     &prepared.pin_path,
                     prepared.tap_id,
                 )
+                .map(|_| ())
                 .map_err(|error| {
                     format!(
                         "advance managed registration cleanup fragment epoch for {}: {}",
@@ -4942,6 +4948,7 @@ impl ControlPlane {
             FragmentEpochGateTransition::SemanticChange,
             &mut || {
                 aria_core::ebpf_ops::advance_fragment_epoch_strict(pin_path, tap_id)
+                    .map(|_| ())
                     .map_err(|error| format!("advance system fragment recovery epoch: {}", error))
             },
             &mut || {
@@ -5150,6 +5157,7 @@ impl ControlPlane {
             transition,
             &mut || {
                 aria_core::ebpf_ops::advance_fragment_epoch_strict(&state.pin_path, state.tap_id)
+                    .map(|_| ())
                     .map_err(|error| format!("runtime epoch advance failed: {}", error))
             },
             &mut || {
@@ -5655,6 +5663,7 @@ impl ControlPlane {
                                 &runtime_pin_path,
                                 runtime_tap_id,
                             )
+                            .map(|_| ())
                             .map_err(|error| {
                                 format!(
                                     "advance managed fragment publication epoch: {}",
@@ -7835,9 +7844,9 @@ impl ControlPlane {
         execute_fragment_epoch_gate_transition(
             FragmentEpochGateTransition::SemanticChange,
             &mut || {
-                aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, tap_id).map_err(
-                    |error| format!("advance managed gate fragment epoch: {}", error),
-                )
+                aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, tap_id)
+                    .map(|_| ())
+                    .map_err(|error| format!("advance managed gate fragment epoch: {}", error))
             },
             &mut || {
                 if publish_gate {
@@ -8013,6 +8022,7 @@ impl ControlPlane {
             gate_transition,
             &mut || {
                 aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, tap_id)
+                    .map(|_| ())
                     .map_err(|error| format!("advance local config fragment epoch: {}", error))
             },
             &mut || {
