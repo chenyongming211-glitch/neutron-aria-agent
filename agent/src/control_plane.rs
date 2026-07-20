@@ -418,6 +418,7 @@ enum ManagedRuntimeActivation {
     AwaitNeutronResync { require_tc_acl_links: bool },
 }
 
+#[cfg(test)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ManagedRegistrationPublicationStep {
     AdvanceFragmentEpoch,
@@ -425,6 +426,7 @@ enum ManagedRegistrationPublicationStep {
     PublishReadiness,
 }
 
+#[cfg(test)]
 fn managed_registration_publication_steps(
     activation: ManagedRuntimeActivation,
 ) -> Vec<ManagedRegistrationPublicationStep> {
@@ -602,6 +604,7 @@ pub(crate) fn managed_neutron_authority_confirmation_allowed(
 struct PreexistingRuntimeValidation {
     projection_drift: ProjectionDrift,
     gate_disposition: Option<RuntimeGateDisposition>,
+    actual_gate: Option<(bool, bool)>,
 }
 
 impl PreexistingRuntimeValidation {
@@ -609,6 +612,7 @@ impl PreexistingRuntimeValidation {
         Self {
             projection_drift: ProjectionDrift::Fatal(error),
             gate_disposition: None,
+            actual_gate: None,
         }
     }
 }
@@ -647,6 +651,112 @@ enum ManagedAclGatePublicationStep {
     PublishGate,
     Persist,
     VerifyReadiness,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum FragmentEpochGateTransition {
+    SemanticChange,
+    EqualState,
+    FreshInitialization,
+    EpochAlreadyAdvanced,
+}
+
+impl FragmentEpochGateTransition {
+    fn requires_epoch(self) -> bool {
+        self == Self::SemanticChange
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum FragmentEpochPublicationFailurePhase {
+    AdvanceEpoch,
+    Publish,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FragmentEpochPublicationFailure {
+    phase: FragmentEpochPublicationFailurePhase,
+    error: String,
+}
+
+impl FragmentEpochPublicationFailure {
+    fn new(phase: FragmentEpochPublicationFailurePhase, error: String) -> Self {
+        Self { phase, error }
+    }
+
+    fn phase(&self) -> FragmentEpochPublicationFailurePhase {
+        self.phase
+    }
+
+    pub(crate) fn epoch_advanced(&self) -> bool {
+        self.phase == FragmentEpochPublicationFailurePhase::Publish
+    }
+}
+
+impl std::fmt::Display for FragmentEpochPublicationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.error)
+    }
+}
+
+fn execute_fragment_epoch_gate_transition(
+    transition: FragmentEpochGateTransition,
+    advance_epoch: &mut dyn FnMut() -> Result<(), String>,
+    write_gate: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<(), FragmentEpochPublicationFailure> {
+    if transition.requires_epoch() {
+        advance_epoch().map_err(|error| {
+            FragmentEpochPublicationFailure::new(
+                FragmentEpochPublicationFailurePhase::AdvanceEpoch,
+                error,
+            )
+        })?;
+    }
+    write_gate().map_err(|error| {
+        FragmentEpochPublicationFailure::new(
+            FragmentEpochPublicationFailurePhase::Publish,
+            error,
+        )
+    })
+}
+
+fn execute_fragment_epoch_bank_publication(
+    advance_epoch: &mut dyn FnMut() -> Result<(), String>,
+    switch_bank: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<(), FragmentEpochPublicationFailure> {
+    execute_fragment_epoch_gate_transition(
+        FragmentEpochGateTransition::SemanticChange,
+        advance_epoch,
+        switch_bank,
+    )
+}
+
+fn acl_ct_config_gate_transition(
+    current_conntrack: bool,
+    current_acl: bool,
+    requested_conntrack: Option<bool>,
+    requested_acl: Option<bool>,
+) -> FragmentEpochGateTransition {
+    let next_conntrack = requested_conntrack.unwrap_or(current_conntrack);
+    let next_acl = requested_acl.unwrap_or(current_acl);
+    if current_conntrack == next_conntrack && current_acl == next_acl {
+        FragmentEpochGateTransition::EqualState
+    } else {
+        FragmentEpochGateTransition::SemanticChange
+    }
+}
+
+fn managed_registration_cleanup_gate_transition(
+    preserve_existing_runtime: bool,
+    activation_error: Option<&FragmentEpochPublicationFailure>,
+) -> FragmentEpochGateTransition {
+    if activation_error.is_some_and(FragmentEpochPublicationFailure::epoch_advanced) {
+        FragmentEpochGateTransition::EpochAlreadyAdvanced
+    } else if preserve_existing_runtime {
+        FragmentEpochGateTransition::SemanticChange
+    } else {
+        FragmentEpochGateTransition::FreshInitialization
+    }
 }
 
 fn managed_acl_gate_publication_steps(
@@ -3439,6 +3549,10 @@ impl ControlPlane {
         PreexistingRuntimeValidation {
             projection_drift,
             gate_disposition: Some(gate_disposition),
+            actual_gate: Some((
+                actual.conntrack_enabled != 0,
+                actual.acl_enabled != 0,
+            )),
         }
     }
 
@@ -3660,18 +3774,41 @@ impl ControlPlane {
             } => {
                 let mut state = instance_state.write().await;
                 if quiesce_acl_ct {
-                    aria_core::ebpf_ops::update_acl_runtime_gate(
-                        state.map_runtime(),
-                        false,
-                        false,
-                        aria_core::common::ACL_INGRESS_HOOK_TC,
+                    let transition = acl_ct_config_gate_transition(
+                        state.state.conntrack_enabled,
+                        state.state.acl_enabled,
+                        Some(false),
+                        Some(false),
+                    );
+                    let pin_path = state.pin_path.clone();
+                    let tap_id = state.tap_id;
+                    execute_fragment_epoch_gate_transition(
+                        transition,
+                        &mut || {
+                            aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, tap_id)
+                                .map_err(|error| {
+                                    format!(
+                                        "advance managed ownership fragment epoch for {}: {}",
+                                        instance, error
+                                    )
+                                })
+                        },
+                        &mut || {
+                            aria_core::ebpf_ops::update_acl_runtime_gate(
+                                TapMapRuntime::new(&pin_path, tap_id),
+                                false,
+                                false,
+                                aria_core::common::ACL_INGRESS_HOOK_TC,
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "failed to quiesce ACL/CT while promoting managed ACL ownership for {}: {}",
+                                    instance, error
+                                )
+                            })
+                        },
                     )
-                    .map_err(|error| {
-                        format!(
-                            "failed to quiesce ACL/CT while promoting managed ACL ownership for {}: {}",
-                            instance, error
-                        )
-                    })?;
+                    .map_err(|error| error.to_string())?;
                 }
 
                 state.managed_acl_publication_mode = next_mode;
@@ -3711,31 +3848,58 @@ impl ControlPlane {
             .get_instance(instance)
             .await
             .map_err(|error| error.to_string())?;
-        let old_state = {
+        let (old_state, demotion_epoch_advanced) = {
             let mut state = instance_state.write().await;
             let current_mode = state.managed_acl_publication_mode;
             let runtime_pin_path = state.pin_path.clone();
             let runtime_tap_id = state.tap_id;
+            let transition = acl_ct_config_gate_transition(
+                state.state.conntrack_enabled,
+                state.state.acl_enabled,
+                Some(false),
+                Some(false),
+            );
             quiesce_managed_acl_demotion_before_build(
                 current_mode,
                 &mut state.managed_projection_health,
                 || {
-                    aria_core::ebpf_ops::update_acl_runtime_gate(
-                        TapMapRuntime::new(&runtime_pin_path, runtime_tap_id),
-                        false,
-                        false,
-                        aria_core::common::ACL_INGRESS_HOOK_TC,
+                    execute_fragment_epoch_gate_transition(
+                        transition,
+                        &mut || {
+                            aria_core::ebpf_ops::advance_fragment_epoch_strict(
+                                &runtime_pin_path,
+                                runtime_tap_id,
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "advance managed ACL demotion fragment epoch: {}",
+                                    error
+                                )
+                            })
+                        },
+                        &mut || {
+                            aria_core::ebpf_ops::update_acl_runtime_gate(
+                                TapMapRuntime::new(&runtime_pin_path, runtime_tap_id),
+                                false,
+                                false,
+                                aria_core::common::ACL_INGRESS_HOOK_TC,
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "quiesce managed ACL demotion before target build: {}",
+                                    error
+                                )
+                            })
+                        },
                     )
-                    .map_err(|error| {
-                        format!(
-                            "quiesce managed ACL demotion before target build: {}",
-                            error
-                        )
-                    })
+                    .map_err(|error| error.to_string())
                 },
             )?;
             state.managed_projection_health = ManagedProjectionHealth::Unverified;
-            state.state.clone()
+            (
+                state.state.clone(),
+                transition == FragmentEpochGateTransition::SemanticChange,
+            )
         };
         let authority_port_id = {
             let authorities = self.neutron_authorities.read().await;
@@ -3782,13 +3946,29 @@ impl ControlPlane {
                 let quiesce_instance = quiesce_instance.clone();
                 async move {
                     let state = quiesce_instance.read().await;
-                    aria_core::ebpf_ops::update_acl_runtime_gate(
-                        state.map_runtime(),
-                        false,
-                        false,
-                        aria_core::common::ACL_INGRESS_HOOK_TC,
+                    let pin_path = state.pin_path.clone();
+                    let tap_id = state.tap_id;
+                    let transition = if demotion_epoch_advanced {
+                        FragmentEpochGateTransition::EpochAlreadyAdvanced
+                    } else {
+                        FragmentEpochGateTransition::EqualState
+                    };
+                    execute_fragment_epoch_gate_transition(
+                        transition,
+                        &mut || Ok(()),
+                        &mut || {
+                            aria_core::ebpf_ops::update_acl_runtime_gate(
+                                TapMapRuntime::new(&pin_path, tap_id),
+                                false,
+                                false,
+                                aria_core::common::ACL_INGRESS_HOOK_TC,
+                            )
+                            .map_err(|error| {
+                                format!("quiesce managed ACL demotion gate: {}", error)
+                            })
+                        },
                     )
-                    .map_err(|error| format!("quiesce managed ACL demotion gate: {}", error))
+                    .map_err(|error| error.to_string())
                 }
             },
             move |health| {
@@ -4258,6 +4438,7 @@ impl ControlPlane {
                 pin_state,
                 projection_mode,
             );
+            let actual_gate = preexisting_validation.actual_gate;
             let gate_disposition = preexisting_validation.gate_disposition;
             let projection_drift = preexisting_validation.projection_drift;
             let lifecycle_projection_drift = projection_drift.clone();
@@ -4267,11 +4448,36 @@ impl ControlPlane {
                     projection_verified && gate_disposition == Some(RuntimeGateDisposition::Desired)
                 }
                 Err(e) => {
-                    let quiesce_error = aria_core::ebpf_ops::update_acl_runtime_gate(
-                        TapMapRuntime::new(&pin_path, tap_id),
-                        false,
-                        false,
-                        aria_core::common::ACL_INGRESS_HOOK_TC,
+                    let transition = actual_gate.map_or(
+                        FragmentEpochGateTransition::SemanticChange,
+                        |(conntrack, acl)| {
+                            acl_ct_config_gate_transition(
+                                conntrack,
+                                acl,
+                                Some(false),
+                                Some(false),
+                            )
+                        },
+                    );
+                    let quiesce_error = execute_fragment_epoch_gate_transition(
+                        transition,
+                        &mut || {
+                            aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, tap_id)
+                                .map_err(|error| {
+                                    format!(
+                                        "advance preexisting runtime fragment epoch: {}",
+                                        error
+                                    )
+                                })
+                        },
+                        &mut || {
+                            aria_core::ebpf_ops::update_acl_runtime_gate(
+                                TapMapRuntime::new(&pin_path, tap_id),
+                                false,
+                                false,
+                                aria_core::common::ACL_INGRESS_HOOK_TC,
+                            )
+                        },
                     )
                     .err();
                     wal.shutdown().await;
@@ -4300,11 +4506,33 @@ impl ControlPlane {
             })?;
 
             if !preexisting_live_verified {
-                if let Err(e) = aria_core::ebpf_ops::update_acl_runtime_gate(
-                    TapMapRuntime::new(&pin_path, tap_id),
-                    false,
-                    false,
-                    aria_core::common::ACL_INGRESS_HOOK_TC,
+                let transition = actual_gate.map_or(
+                    FragmentEpochGateTransition::SemanticChange,
+                    |(conntrack, acl)| {
+                        acl_ct_config_gate_transition(
+                            conntrack,
+                            acl,
+                            Some(false),
+                            Some(false),
+                        )
+                    },
+                );
+                if let Err(e) = execute_fragment_epoch_gate_transition(
+                    transition,
+                    &mut || {
+                        aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, tap_id)
+                            .map_err(|error| {
+                                format!("advance repairable runtime fragment epoch: {}", error)
+                            })
+                    },
+                    &mut || {
+                        aria_core::ebpf_ops::update_acl_runtime_gate(
+                            TapMapRuntime::new(&pin_path, tap_id),
+                            false,
+                            false,
+                            aria_core::common::ACL_INGRESS_HOOK_TC,
+                        )
+                    },
                 ) {
                     wal.shutdown().await;
                     return Err(format!(
@@ -4442,62 +4670,96 @@ impl ControlPlane {
         })
     }
 
-    pub async fn activate_managed_registration(
+    pub(crate) async fn activate_managed_registration(
         &self,
         prepared: &PreparedManagedInstance,
-    ) -> Result<(), String> {
+    ) -> Result<(), FragmentEpochPublicationFailure> {
         let runtime = TapMapRuntime::new(&prepared.pin_path, prepared.tap_id);
-        for step in managed_registration_publication_steps(prepared.activation) {
-            match step {
-                ManagedRegistrationPublicationStep::AdvanceFragmentEpoch => {
-                    aria_core::ebpf_ops::advance_fragment_epoch_strict(
-                        &prepared.pin_path,
-                        prepared.tap_id,
+        execute_fragment_epoch_gate_transition(
+            FragmentEpochGateTransition::SemanticChange,
+            &mut || {
+                aria_core::ebpf_ops::advance_fragment_epoch_strict(
+                    &prepared.pin_path,
+                    prepared.tap_id,
+                )
+                .map_err(|error| {
+                    format!(
+                        "advance managed registration fragment epoch for {}: {}",
+                        prepared.name, error
                     )
-                    .map_err(|error| {
-                        format!(
-                            "advance managed registration fragment epoch for {}: {}",
-                            prepared.name, error
-                        )
-                    })?;
+                })
+            },
+            &mut || match prepared.activation {
+                ManagedRuntimeActivation::PreserveVerifiedLive => Ok(()),
+                ManagedRuntimeActivation::RestoreStandalone { conntrack, acl } => {
+                    aria_core::ebpf_ops::update_acl_runtime_gate(
+                        runtime,
+                        conntrack,
+                        acl,
+                        aria_core::common::ACL_INGRESS_HOOK_TC,
+                    )
                 }
-                ManagedRegistrationPublicationStep::PublishGate => match prepared.activation {
-                    ManagedRuntimeActivation::PreserveVerifiedLive => unreachable!(
-                        "verified live registration has no runtime gate publication step"
-                    ),
-                    ManagedRuntimeActivation::RestoreStandalone { conntrack, acl } => {
-                        aria_core::ebpf_ops::update_acl_runtime_gate(
-                            runtime,
-                            conntrack,
-                            acl,
-                            aria_core::common::ACL_INGRESS_HOOK_TC,
-                        )?;
-                    }
-                    ManagedRuntimeActivation::AwaitNeutronResync { .. } => {
-                        aria_core::ebpf_ops::update_acl_runtime_gate(
-                            runtime,
-                            false,
-                            false,
-                            aria_core::common::ACL_INGRESS_HOOK_TC,
-                        )?;
-                    }
-                },
-                ManagedRegistrationPublicationStep::PublishReadiness => {}
-            }
-        }
-        Ok(())
+                ManagedRuntimeActivation::AwaitNeutronResync { .. } => {
+                    aria_core::ebpf_ops::update_acl_runtime_gate(
+                        runtime,
+                        false,
+                        false,
+                        aria_core::common::ACL_INGRESS_HOOK_TC,
+                    )
+                }
+            },
+        )
     }
 
     pub fn quiesce_managed_registration(
         &self,
         prepared: &PreparedManagedInstance,
+        activation_error: Option<&FragmentEpochPublicationFailure>,
     ) -> Result<(), String> {
-        aria_core::ebpf_ops::update_acl_runtime_gate(
-            TapMapRuntime::new(&prepared.pin_path, prepared.tap_id),
-            false,
-            false,
-            aria_core::common::ACL_INGRESS_HOOK_TC,
+        let runtime = TapMapRuntime::new(&prepared.pin_path, prepared.tap_id);
+        let base_transition = managed_registration_cleanup_gate_transition(
+            prepared.preserve_existing_runtime,
+            activation_error,
+        );
+        let transition = if base_transition == FragmentEpochGateTransition::SemanticChange {
+            aria_core::ebpf_ops::read_runtime_config(runtime).map_or(
+                FragmentEpochGateTransition::SemanticChange,
+                |actual| {
+                    acl_ct_config_gate_transition(
+                        actual.conntrack_enabled != 0,
+                        actual.acl_enabled != 0,
+                        Some(false),
+                        Some(false),
+                    )
+                },
+            )
+        } else {
+            base_transition
+        };
+        execute_fragment_epoch_gate_transition(
+            transition,
+            &mut || {
+                aria_core::ebpf_ops::advance_fragment_epoch_strict(
+                    &prepared.pin_path,
+                    prepared.tap_id,
+                )
+                .map_err(|error| {
+                    format!(
+                        "advance managed registration cleanup fragment epoch for {}: {}",
+                        prepared.name, error
+                    )
+                })
+            },
+            &mut || {
+                aria_core::ebpf_ops::update_acl_runtime_gate(
+                    runtime,
+                    false,
+                    false,
+                    aria_core::common::ACL_INGRESS_HOOK_TC,
+                )
+            },
         )
+        .map_err(|error| error.to_string())
     }
 
     pub async fn publish_managed_instance(&self, prepared: PreparedManagedInstance) {
@@ -4676,18 +4938,26 @@ impl ControlPlane {
                 system_link_health.missing_tc().join(", ")
             ));
         }
-        aria_core::ebpf_ops::advance_fragment_epoch_strict(pin_path, tap_id)
-            .map_err(|error| format!("advance system fragment recovery epoch: {}", error))?;
-        aria_core::ebpf_ops::update_runtime_config(
-            runtime,
-            Some(state.conntrack_enabled),
-            Some(state.monitoring_enabled),
-            Some(state.acl_enabled),
-            Some(state.qos_enabled && !state.qos_rules.is_empty()),
-            Some(state.mirror_enabled && !state.mirror_rules.is_empty()),
-            Some(state.tcprt_enabled),
-            None,
-        )?;
+        execute_fragment_epoch_gate_transition(
+            FragmentEpochGateTransition::SemanticChange,
+            &mut || {
+                aria_core::ebpf_ops::advance_fragment_epoch_strict(pin_path, tap_id)
+                    .map_err(|error| format!("advance system fragment recovery epoch: {}", error))
+            },
+            &mut || {
+                aria_core::ebpf_ops::update_runtime_config(
+                    runtime,
+                    Some(state.conntrack_enabled),
+                    Some(state.monitoring_enabled),
+                    Some(state.acl_enabled),
+                    Some(state.qos_enabled && !state.qos_rules.is_empty()),
+                    Some(state.mirror_enabled && !state.mirror_rules.is_empty()),
+                    Some(state.tcprt_enabled),
+                    None,
+                )
+            },
+        )
+        .map_err(|error| error.to_string())?;
         let runtime_health = initial_runtime_health(
             state.conntrack_enabled,
             state.acl_enabled,
@@ -4868,28 +5138,44 @@ impl ControlPlane {
 
     fn quiesce_tc_acl_runtime_locked(instance: &str, state: &InstanceState) -> Result<(), String> {
         let runtime = state.map_runtime();
-        aria_core::ebpf_ops::read_runtime_config(runtime)
+        let actual = aria_core::ebpf_ops::read_runtime_config(runtime)
             .map_err(|error| format!("runtime gate read failed: {}", error))?;
-        if instance == "system" {
-            aria_core::ebpf_ops::update_runtime_config(
-                runtime,
-                Some(false),
-                None,
-                Some(false),
-                None,
-                None,
-                None,
-                None,
-            )
-        } else {
-            aria_core::ebpf_ops::update_acl_runtime_gate(
-                runtime,
-                false,
-                false,
-                aria_core::common::ACL_INGRESS_HOOK_TC,
-            )
-        }
-        .map_err(|error| format!("runtime gate write failed: {}", error))
+        let transition = acl_ct_config_gate_transition(
+            actual.conntrack_enabled != 0,
+            actual.acl_enabled != 0,
+            Some(false),
+            Some(false),
+        );
+        execute_fragment_epoch_gate_transition(
+            transition,
+            &mut || {
+                aria_core::ebpf_ops::advance_fragment_epoch_strict(&state.pin_path, state.tap_id)
+                    .map_err(|error| format!("runtime epoch advance failed: {}", error))
+            },
+            &mut || {
+                if instance == "system" {
+                    aria_core::ebpf_ops::update_runtime_config(
+                        runtime,
+                        Some(false),
+                        None,
+                        Some(false),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                } else {
+                    aria_core::ebpf_ops::update_acl_runtime_gate(
+                        runtime,
+                        false,
+                        false,
+                        aria_core::common::ACL_INGRESS_HOOK_TC,
+                    )
+                }
+                .map_err(|error| format!("runtime gate write failed: {}", error))
+            },
+        )
+        .map_err(|error| error.to_string())
     }
 
     pub async fn list_instance_runtime_health(&self) -> Vec<InstanceRuntimeHealthSnapshot> {
@@ -5259,6 +5545,7 @@ impl ControlPlane {
 
         let mut durable_final_state = Some(durable_final_state);
         let mut applied_shared_mutations = Vec::new();
+        let mut bank_committed = false;
         for step in steps {
             match step {
                 ManagedAclPublicationStep::InvalidateProjectionHealth => {
@@ -5362,17 +5649,35 @@ impl ControlPlane {
                     }
                 }
                 ManagedAclPublicationStep::AdvanceFragmentEpoch => {
-                    if let Err(error) = aria_core::ebpf_ops::advance_fragment_epoch_strict(
-                        &runtime_pin_path,
-                        runtime_tap_id,
+                    if let Err(error) = execute_fragment_epoch_bank_publication(
+                        &mut || {
+                            aria_core::ebpf_ops::advance_fragment_epoch_strict(
+                                &runtime_pin_path,
+                                runtime_tap_id,
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "advance managed fragment publication epoch: {}",
+                                    error
+                                )
+                            })
+                        },
+                        &mut || {
+                            aria_core::ebpf_ops::set_acl_active_bank(runtime, next_acl_bank)
+                        },
                     ) {
+                        let failure_phase = match error.phase() {
+                            FragmentEpochPublicationFailurePhase::AdvanceEpoch => {
+                                ManagedAclPublicationFailurePhase::AdvanceFragmentEpoch
+                            }
+                            FragmentEpochPublicationFailurePhase::Publish => {
+                                ManagedAclPublicationFailurePhase::SwitchBank
+                            }
+                        };
                         return Err(rollback_owned_acl_prepublication(
-                            ControlPlaneError::KernelError(format!(
-                                "advance managed fragment publication epoch: {}",
-                                error
-                            )),
+                            ControlPlaneError::KernelError(error.to_string()),
                             &applied_shared_mutations,
-                            ManagedAclPublicationFailurePhase::AdvanceFragmentEpoch,
+                            failure_phase,
                             created_port_sets,
                             runtime,
                             &self.ebpf_path,
@@ -5383,25 +5688,10 @@ impl ControlPlane {
                         )
                         .await);
                     }
+                    bank_committed = true;
                 }
                 ManagedAclPublicationStep::SwitchBank => {
-                    if let Err(error) =
-                        aria_core::ebpf_ops::set_acl_active_bank(runtime, next_acl_bank)
-                    {
-                        return Err(rollback_owned_acl_prepublication(
-                            ControlPlaneError::KernelError(error),
-                            &applied_shared_mutations,
-                            ManagedAclPublicationFailurePhase::SwitchBank,
-                            created_port_sets,
-                            runtime,
-                            &self.ebpf_path,
-                            current_acl_bank,
-                            next_acl_bank,
-                            state,
-                            old_state,
-                        )
-                        .await);
-                    }
+                    debug_assert!(bank_committed, "bank switch must be fenced by fragment epoch");
                 }
                 ManagedAclPublicationStep::Persist => {
                     let compact_started = Instant::now();
@@ -7539,27 +7829,36 @@ impl ControlPlane {
             return Ok(());
         }
 
-        aria_core::ebpf_ops::advance_fragment_epoch_strict(&state.pin_path, state.tap_id).map_err(
-            |error| {
-                ControlPlaneError::KernelError(format!(
-                    "advance managed gate fragment epoch: {}",
-                    error
-                ))
+        let publish_gate = gate_steps.contains(&ManagedAclGatePublicationStep::PublishGate);
+        let pin_path = state.pin_path.clone();
+        let tap_id = state.tap_id;
+        execute_fragment_epoch_gate_transition(
+            FragmentEpochGateTransition::SemanticChange,
+            &mut || {
+                aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, tap_id).map_err(
+                    |error| format!("advance managed gate fragment epoch: {}", error),
+                )
             },
-        )?;
+            &mut || {
+                if publish_gate {
+                    aria_core::ebpf_ops::update_acl_runtime_gate(
+                        TapMapRuntime::new(&pin_path, tap_id),
+                        conntrack_enabled,
+                        acl_enabled,
+                        aria_core::common::ACL_INGRESS_HOOK_TC,
+                    )
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .map_err(|error| ControlPlaneError::KernelError(error.to_string()))?;
 
-        if gate_steps.contains(&ManagedAclGatePublicationStep::PublishGate) {
+        if publish_gate {
             state.managed_projection_health = managed_projection_health_before_runtime_gate_write(
                 state.managed_acl_publication_mode,
                 state.managed_projection_health,
             );
-            aria_core::ebpf_ops::update_acl_runtime_gate(
-                state.map_runtime(),
-                conntrack_enabled,
-                acl_enabled,
-                aria_core::common::ACL_INGRESS_HOOK_TC,
-            )
-            .map_err(ControlPlaneError::KernelError)?;
 
             state.state.conntrack_enabled = conntrack_enabled;
             state.state.acl_enabled = acl_enabled;
@@ -7702,18 +8001,34 @@ impl ControlPlane {
         // For mirror, the kernel flag = user_wants_mirror && has_rules
         let kernel_mirror = mirror.map(|m| m && !state.state.mirror_rules.is_empty());
 
-        if let Err(e) = aria_core::ebpf_ops::update_runtime_config(
-            state.map_runtime(),
+        let gate_transition = acl_ct_config_gate_transition(
+            old_state.conntrack_enabled,
+            old_state.acl_enabled,
             conntrack,
-            monitoring,
             acl,
-            kernel_qos,
-            kernel_mirror,
-            tcprt,
-            None,
-        ) {
-            return Err(ControlPlaneError::KernelError(e));
-        }
+        );
+        let pin_path = state.pin_path.clone();
+        let tap_id = state.tap_id;
+        execute_fragment_epoch_gate_transition(
+            gate_transition,
+            &mut || {
+                aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, tap_id)
+                    .map_err(|error| format!("advance local config fragment epoch: {}", error))
+            },
+            &mut || {
+                aria_core::ebpf_ops::update_runtime_config(
+                    TapMapRuntime::new(&pin_path, tap_id),
+                    conntrack,
+                    monitoring,
+                    acl,
+                    kernel_qos,
+                    kernel_mirror,
+                    tcprt,
+                    None,
+                )
+            },
+        )
+        .map_err(|error| ControlPlaneError::KernelError(error.to_string()))?;
 
         if let Some(ct) = conntrack {
             state.state.conntrack_enabled = ct;
@@ -11218,6 +11533,37 @@ mod tests {
 
             assert_eq!(*events.borrow(), vec!["write_gate"]);
         }
+    }
+
+    #[test]
+    fn neutron_acl_fragment_epoch_gate_executor_demotion_quiesces_twice_but_fences_once() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        for transition in [
+            FragmentEpochGateTransition::SemanticChange,
+            FragmentEpochGateTransition::EpochAlreadyAdvanced,
+        ] {
+            let mut advance = || {
+                events.borrow_mut().push("advance_epoch");
+                Ok(())
+            };
+            let mut write_gate = || {
+                events.borrow_mut().push("write_gate");
+                Ok(())
+            };
+            execute_fragment_epoch_gate_transition(
+                transition,
+                &mut advance,
+                &mut write_gate,
+            )
+            .expect("demotion quiesce must succeed");
+        }
+
+        assert_eq!(
+            *events.borrow(),
+            vec!["advance_epoch", "write_gate", "write_gate"]
+        );
     }
 
     #[test]

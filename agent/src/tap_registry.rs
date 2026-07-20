@@ -23,18 +23,19 @@ pub enum ManagedAttachMode {
 
 async fn complete_managed_registration_transaction<
     T,
+    E,
     Failure,
     FailureFuture,
     Success,
     SuccessFuture,
 >(
-    activation: Result<(), String>,
+    activation: Result<(), E>,
     transaction: T,
     on_failure: Failure,
     on_success: Success,
 ) -> Result<(), String>
 where
-    Failure: FnOnce(T, String) -> FailureFuture,
+    Failure: FnOnce(T, E) -> FailureFuture,
     FailureFuture: std::future::Future<Output = Result<(), String>>,
     Success: FnOnce(T) -> SuccessFuture,
     SuccessFuture: std::future::Future<Output = Result<(), String>>,
@@ -339,7 +340,7 @@ impl TapRegistry {
         if let Err(e) = instance.reserve_persisted_live_iface() {
             let quiesce_error = self
                 .control_plane
-                .quiesce_managed_registration(&prepared)
+                .quiesce_managed_registration(&prepared, None)
                 .err();
             self.control_plane
                 .abort_managed_registration(prepared)
@@ -361,7 +362,7 @@ impl TapRegistry {
             Err(e) => {
                 let quiesce_error = self
                     .control_plane
-                    .quiesce_managed_registration(&prepared)
+                    .quiesce_managed_registration(&prepared, None)
                     .err();
                 if let Err(release_err) = instance.release_persisted_live_iface() {
                     warn!(instance = %iface, error = %release_err, "failed to roll back persisted live runtime state");
@@ -386,7 +387,7 @@ impl TapRegistry {
             if let Err(e) = instance.require_tc_acl_links() {
                 let quiesce_error = self
                     .control_plane
-                    .quiesce_managed_registration(&prepared)
+                    .quiesce_managed_registration(&prepared, None)
                     .err();
                 if let Err(rollback_err) = instance.rollback_attached_links(&attached, false) {
                     warn!(instance = %iface, error = %rollback_err, "failed to roll back links after required TC readiness failure");
@@ -425,7 +426,7 @@ impl TapRegistry {
             |(prepared, instance, attached, created_shared_runtime), error| async move {
                 let quiesce_error = self
                     .control_plane
-                    .quiesce_managed_registration(&prepared)
+                    .quiesce_managed_registration(&prepared, Some(&error))
                     .err();
                 if let Err(rollback_err) = instance.rollback_attached_links(&attached, false) {
                     warn!(instance = %iface, error = %rollback_err, "failed to roll back links after managed runtime activation failure");

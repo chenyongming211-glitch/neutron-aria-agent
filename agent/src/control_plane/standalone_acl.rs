@@ -743,30 +743,31 @@ async fn execute_standalone_publication(
         general_receipts.push(mutation);
     }
 
-    if let Err(error) = aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, state.tap_id)
-    {
+    if let Err(error) = execute_fragment_epoch_bank_publication(
+        &mut || {
+            aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, state.tap_id)
+                .map_err(|error| {
+                    format!("advance standalone fragment publication epoch: {}", error)
+                })
+        },
+        &mut || aria_core::ebpf_ops::set_acl_active_bank(runtime, plan.shadow_bank),
+    ) {
+        let failure_phase = match error.phase() {
+            FragmentEpochPublicationFailurePhase::AdvanceEpoch => {
+                StandaloneAclFailurePhase::AdvanceFragmentEpoch
+            }
+            FragmentEpochPublicationFailurePhase::Publish => {
+                StandaloneAclFailurePhase::SwitchBank
+            }
+        };
         return Err(rollback_standalone_publication(
             instance,
             state,
             plan,
             runtime,
             &cp.ebpf_path,
-            StandaloneAclFailurePhase::AdvanceFragmentEpoch,
-            format!("advance standalone fragment publication epoch: {}", error),
-            &general_receipts,
-        )
-        .await);
-    }
-
-    if let Err(error) = aria_core::ebpf_ops::set_acl_active_bank(runtime, plan.shadow_bank) {
-        return Err(rollback_standalone_publication(
-            instance,
-            state,
-            plan,
-            runtime,
-            &cp.ebpf_path,
-            StandaloneAclFailurePhase::SwitchBank,
-            format!("switch standalone ACL active bank: {}", error),
+            failure_phase,
+            error.to_string(),
             &general_receipts,
         )
         .await);
