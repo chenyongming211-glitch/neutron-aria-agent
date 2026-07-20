@@ -418,26 +418,6 @@ enum ManagedRuntimeActivation {
     AwaitNeutronResync { require_tc_acl_links: bool },
 }
 
-#[cfg(test)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum ManagedRegistrationPublicationStep {
-    AdvanceFragmentEpoch,
-    PublishGate,
-    PublishReadiness,
-}
-
-#[cfg(test)]
-fn managed_registration_publication_steps(
-    activation: ManagedRuntimeActivation,
-) -> Vec<ManagedRegistrationPublicationStep> {
-    let mut steps = vec![ManagedRegistrationPublicationStep::AdvanceFragmentEpoch];
-    if !matches!(activation, ManagedRuntimeActivation::PreserveVerifiedLive) {
-        steps.push(ManagedRegistrationPublicationStep::PublishGate);
-    }
-    steps.push(ManagedRegistrationPublicationStep::PublishReadiness);
-    steps
-}
-
 fn managed_replay_route(mode: ManagedAttachMode) -> ManagedReplayRoute {
     let projection_mode = match mode {
         ManagedAttachMode::StandaloneRestoreAfterTcAttach => {
@@ -676,12 +656,21 @@ enum FragmentEpochPublicationFailurePhase {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FragmentEpochPublicationFailure {
     phase: FragmentEpochPublicationFailurePhase,
+    epoch_advanced: bool,
     error: String,
 }
 
 impl FragmentEpochPublicationFailure {
-    fn new(phase: FragmentEpochPublicationFailurePhase, error: String) -> Self {
-        Self { phase, error }
+    fn new(
+        phase: FragmentEpochPublicationFailurePhase,
+        epoch_advanced: bool,
+        error: String,
+    ) -> Self {
+        Self {
+            phase,
+            epoch_advanced,
+            error,
+        }
     }
 
     fn phase(&self) -> FragmentEpochPublicationFailurePhase {
@@ -689,7 +678,7 @@ impl FragmentEpochPublicationFailure {
     }
 
     pub(crate) fn epoch_advanced(&self) -> bool {
-        self.phase == FragmentEpochPublicationFailurePhase::Publish
+        self.epoch_advanced
     }
 }
 
@@ -704,17 +693,21 @@ fn execute_fragment_epoch_gate_transition(
     advance_epoch: &mut dyn FnMut() -> Result<(), String>,
     write_gate: &mut dyn FnMut() -> Result<(), String>,
 ) -> Result<(), FragmentEpochPublicationFailure> {
+    let mut epoch_advanced = transition == FragmentEpochGateTransition::EpochAlreadyAdvanced;
     if transition.requires_epoch() {
         advance_epoch().map_err(|error| {
             FragmentEpochPublicationFailure::new(
                 FragmentEpochPublicationFailurePhase::AdvanceEpoch,
+                false,
                 error,
             )
         })?;
+        epoch_advanced = true;
     }
     write_gate().map_err(|error| {
         FragmentEpochPublicationFailure::new(
             FragmentEpochPublicationFailurePhase::Publish,
+            epoch_advanced,
             error,
         )
     })
@@ -784,27 +777,49 @@ fn managed_registration_cleanup_gate_transition(
     }
 }
 
-fn managed_acl_gate_publication_steps(
-    current_conntrack: bool,
-    current_acl: bool,
+fn managed_acl_gate_publication_steps_from_live(
+    actual_conntrack: bool,
+    actual_acl: bool,
+    durable_conntrack: bool,
+    durable_acl: bool,
     requested_conntrack: bool,
     requested_acl: bool,
     recovery_publication: bool,
 ) -> Vec<ManagedAclGatePublicationStep> {
-    let changed = current_conntrack != requested_conntrack || current_acl != requested_acl;
-    if !changed && !recovery_publication {
+    let kernel_changed = actual_conntrack != requested_conntrack || actual_acl != requested_acl;
+    let durable_changed =
+        durable_conntrack != requested_conntrack || durable_acl != requested_acl;
+    if !kernel_changed && !durable_changed && !recovery_publication {
         return Vec::new();
     }
 
     let mut steps = vec![ManagedAclGatePublicationStep::AdvanceFragmentEpoch];
-    if changed {
+    if kernel_changed {
         steps.push(ManagedAclGatePublicationStep::PublishGate);
+    }
+    if durable_changed {
         steps.push(ManagedAclGatePublicationStep::Persist);
     }
     if recovery_publication {
         steps.push(ManagedAclGatePublicationStep::VerifyReadiness);
     }
     steps
+}
+
+fn verify_acl_gate_before_readiness(
+    expected_conntrack: bool,
+    expected_acl: bool,
+    read_gate: &mut dyn FnMut() -> Result<(bool, bool), String>,
+) -> Result<(), String> {
+    let (actual_conntrack, actual_acl) = read_gate()?;
+    if actual_conntrack == expected_conntrack && actual_acl == expected_acl {
+        Ok(())
+    } else {
+        Err(format!(
+            "managed ACL runtime gate drifted before readiness: actual conntrack={} acl={}, expected conntrack={} acl={}",
+            actual_conntrack, actual_acl, expected_conntrack, expected_acl
+        ))
+    }
 }
 
 fn managed_projection_health_before_runtime_gate_write(
@@ -7750,7 +7765,11 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
-        let gate_steps = managed_acl_gate_publication_steps(
+        let actual_gate = aria_core::ebpf_ops::read_runtime_config(state.map_runtime())
+            .map_err(ControlPlaneError::KernelError)?;
+        let gate_steps = managed_acl_gate_publication_steps_from_live(
+            actual_gate.conntrack_enabled != 0,
+            actual_gate.acl_enabled != 0,
             state.state.conntrack_enabled,
             state.state.acl_enabled,
             conntrack_enabled,
@@ -7775,6 +7794,7 @@ impl ControlPlane {
         }
 
         let publish_gate = gate_steps.contains(&ManagedAclGatePublicationStep::PublishGate);
+        let persist = gate_steps.contains(&ManagedAclGatePublicationStep::Persist);
         let pin_path = state.pin_path.clone();
         let tap_id = state.tap_id;
         execute_fragment_epoch_gate_transition(
@@ -7803,7 +7823,9 @@ impl ControlPlane {
                 state.managed_acl_publication_mode,
                 state.managed_projection_health,
             );
+        }
 
+        if persist {
             state.state.conntrack_enabled = conntrack_enabled;
             state.state.acl_enabled = acl_enabled;
             let persistence_result = state
@@ -7848,13 +7870,33 @@ impl ControlPlane {
                 state.runtime_health.acl_error = None;
             }
             NeutronGateHealthCommitAction::VerifyRecoveryPublication => {
-                let xdp_ready = self.runtime_xdp_health_locked(instance, &state);
-                if let Err(readiness_error) = Self::mark_tc_acl_runtime_ready_locked(
-                    instance,
-                    &mut state,
-                    xdp_ready,
-                    self.trace_map_mode(),
-                ) {
+                let readiness_result = verify_acl_gate_before_readiness(
+                    conntrack_enabled,
+                    acl_enabled,
+                    &mut || {
+                        aria_core::ebpf_ops::read_runtime_config(state.map_runtime())
+                            .map(|actual| {
+                                (
+                                    actual.conntrack_enabled != 0,
+                                    actual.acl_enabled != 0,
+                                )
+                            })
+                            .map_err(|error| {
+                                format!("read managed recovery runtime gate: {}", error)
+                            })
+                    },
+                )
+                .map_err(ControlPlaneError::KernelError)
+                .and_then(|_| {
+                    let xdp_ready = self.runtime_xdp_health_locked(instance, &state);
+                    Self::mark_tc_acl_runtime_ready_locked(
+                        instance,
+                        &mut state,
+                        xdp_ready,
+                        self.trace_map_mode(),
+                    )
+                });
+                if let Err(readiness_error) = readiness_result {
                     let quiesce_result = Self::quiesce_tc_acl_runtime_locked(instance, &state);
                     let (health, error) = apply_recovery_publication_quiesce_result(
                         state.runtime_health.clone(),
@@ -11353,8 +11395,12 @@ mod tests {
     #[test]
     fn neutron_acl_gate_disable_and_enable_each_fence_once() {
         for steps in [
-            managed_acl_gate_publication_steps(true, true, false, false, false),
-            managed_acl_gate_publication_steps(false, false, true, true, false),
+            managed_acl_gate_publication_steps_from_live(
+                true, true, true, true, false, false, false,
+            ),
+            managed_acl_gate_publication_steps_from_live(
+                false, false, false, false, true, true, false,
+            ),
         ] {
             assert_eq!(
                 steps,
@@ -11369,8 +11415,14 @@ mod tests {
 
     #[test]
     fn neutron_acl_gate_semantic_noop_does_not_advance_epoch() {
-        assert!(managed_acl_gate_publication_steps(false, false, false, false, false).is_empty());
-        assert!(managed_acl_gate_publication_steps(true, true, true, true, false).is_empty());
+        assert!(managed_acl_gate_publication_steps_from_live(
+            false, false, false, false, false, false, false,
+        )
+        .is_empty());
+        assert!(managed_acl_gate_publication_steps_from_live(
+            true, true, true, true, true, true, false,
+        )
+        .is_empty());
     }
 
     #[test]
@@ -11637,7 +11689,9 @@ mod tests {
     #[test]
     fn neutron_acl_recovery_readiness_establishes_epoch_even_when_gate_is_unchanged() {
         assert_eq!(
-            managed_acl_gate_publication_steps(false, false, false, false, true),
+            managed_acl_gate_publication_steps_from_live(
+                false, false, false, false, false, false, true,
+            ),
             vec![
                 ManagedAclGatePublicationStep::AdvanceFragmentEpoch,
                 ManagedAclGatePublicationStep::VerifyReadiness,
@@ -11789,39 +11843,6 @@ mod tests {
         assert!(failure(FragmentEpochGateTransition::EpochAlreadyAdvanced, Ok(())).epoch_advanced);
         assert!(!failure(FragmentEpochGateTransition::EqualState, Ok(())).epoch_advanced);
         assert!(!failure(FragmentEpochGateTransition::FreshInitialization, Ok(())).epoch_advanced);
-    }
-
-    #[test]
-    fn neutron_acl_managed_registration_establishes_epoch_before_gate_or_readiness() {
-        for activation in [
-            ManagedRuntimeActivation::PreserveVerifiedLive,
-            ManagedRuntimeActivation::RestoreStandalone {
-                conntrack: true,
-                acl: true,
-            },
-            ManagedRuntimeActivation::AwaitNeutronResync {
-                require_tc_acl_links: true,
-            },
-        ] {
-            let steps = managed_registration_publication_steps(activation);
-            assert_eq!(
-                steps.first(),
-                Some(&ManagedRegistrationPublicationStep::AdvanceFragmentEpoch)
-            );
-            assert_eq!(
-                steps
-                    .iter()
-                    .filter(|step| {
-                        **step == ManagedRegistrationPublicationStep::AdvanceFragmentEpoch
-                    })
-                    .count(),
-                1
-            );
-            assert_eq!(
-                steps.last(),
-                Some(&ManagedRegistrationPublicationStep::PublishReadiness)
-            );
-        }
     }
 
     #[test]
