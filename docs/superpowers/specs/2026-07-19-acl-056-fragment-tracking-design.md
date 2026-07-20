@@ -157,9 +157,11 @@ FRAG_CONTEXT_V6: FragmentContextKey6 -> FragmentContextValue
 ```
 
 Both keys contain `tap_id`, TC direction, VLAN ID, source/destination address,
-protocol, and fragment Identification. Padding is explicit and zeroed.
-`tap_id=0` cannot create context. VLAN is included because one TC-managed
-interface can observe identical IP fragment tuples in different VLAN domains.
+protocol, and fragment Identification. Padding is explicit and zeroed. Managed
+mode reserves `tap_id=0` and cannot create context with it; standalone mode
+uses `tap_id=0` as its stable identity and must be allowed to create and resolve
+that exact identity. VLAN is included because one TC-managed interface can
+observe identical IP fragment tuples in different VLAN domains.
 
 ### 5.3 Context value
 
@@ -197,14 +199,38 @@ it never silently returns to zero.
 
 ### 5.5 Runtime configuration
 
-A versioned `FRAGMENT_CONFIG` map carries the activation flag and IPv4/IPv6
-timeouts. The activation flag defaults to disabled until privileged field
-evidence passes. The safe disabled behavior is still parser-correct: ambiguous
-TCP/UDP fragments drop explicitly instead of entering CT with invented ports.
+A versioned `FRAGMENT_CONFIG` map carries the activation flag, runtime identity
+mode, and IPv4/IPv6 timeouts. ABI version 2 preserves the 24-byte total size
+and timeout offsets while replacing implicit padding state with explicit
+fields:
+
+```text
+version: u8
+enabled: u8
+runtime_mode: u8
+_pad: [u8; 5]
+ipv4_timeout_ns: u64
+ipv6_timeout_ns: u64
+```
+
+The stable runtime modes are `managed` and `standalone`; zero or any unknown
+mode is invalid. Managed authority rejects `tap_id=0`, while standalone
+authority accepts only its stable `tap_id=0` identity. Configuration validity
+is checked before disabled handling. A valid disabled configuration still
+returns the stable tracking-disabled result, without evaluating enabled-only
+tap identity. Once guarded activation is implemented, enabled authority applies
+the mode-specific identity rule. Managed and standalone disabled defaults are
+therefore distinct legal configurations rather than padding conventions.
+
+The activation flag defaults to disabled until privileged field evidence
+passes. The safe disabled behavior is still parser-correct: ambiguous TCP/UDP
+fragments drop explicitly instead of entering CT with invented ports.
 
 Map maximum entries are selected by the loader before eBPF load because they
 are map properties, not mutable packet-path configuration. Invalid versions,
-timeouts, or activation combinations prevent ACL/CT readiness.
+modes, padding, timeouts, or activation combinations prevent ACL/CT readiness.
+Userspace validation always receives the expected runtime mode, so a managed
+runtime cannot accept a standalone config or vice versa.
 
 ### 5.6 Capacity and lifetime
 
@@ -348,13 +374,25 @@ the intentionally neutral XDP parser-failure behavior is unchanged.
 | context update failure for allowed first | drop: update failed |
 | LRU eviction | later miss/drop; never zero-port fallback |
 | epoch advance failure | abort publication before bank switch |
-| recovery context scrub failure | keep ACL quiesced/not ready |
+| recovery context scrub or final-empty verification failure | keep fragment tracking disabled and runtime not ready |
+| any missing/wrong fragment runtime map | fail readiness; no partial legacy fallback |
 
 Fragment context is ephemeral and not restored from WAL. During attach, agent
 restart, pinned-runtime recovery, or uncertain inventory lineage, lifecycle code
-quiesces ACL, clears both maps, establishes a fresh epoch, then reports TC ACL
-authority ready. Map absence or ABI mismatch is a load/recovery failure and
-cannot fall back to current behavior.
+first validates all five exact runtime maps (V4/V6 LRU context, hash epoch/hash
+config, and per-CPU-array `u64` metrics), writes and reads back the mode-specific
+disabled config, then clears both context maps before readiness. This validates
+map type and ABI shape, not program-to-map identity; Task 7 retains that
+privileged proof.
+
+LRU eviction may race a userspace sweep. A remove-time `KeyNotFound` is treated
+as already clear and the sweep continues; any other iteration/removal error is
+strict. Tap-scoped scrub completes V4 and V6, verifies that neither family has
+a matching key, and only then deletes that tap's epoch. Global recovery verifies
+both maps are empty after the sweep. Because disabled config is established
+before clear, a remaining or concurrently appearing entry is a strict recovery
+failure and readiness is not published. Map absence or ABI mismatch cannot fall
+back to current behavior.
 
 ## 9. Observability
 

@@ -305,19 +305,39 @@ Expected: fragment behavior passes and warning-denied eBPF build accepts bounded
 
 - [ ] **Step 1: Write epoch and recovery RED tests**
 
-Use Aya test maps in the established `core/src/ebpf_ops/runtime.rs` style to prove missing epoch map errors, `u64::MAX` wrap rejection, exact increment, per-tap isolation, strict V4/V6 scrub, and invalid config rejection.
+Use narrow injectable operations and in-memory fakes (not unprivileged fake
+pinned maps) to prove missing epoch map errors, `u64::MAX` wrap rejection,
+exact increment, per-tap isolation, V4/V6 LRU `KeyNotFound` continuation,
+strict non-missing errors, final-empty verification before epoch deletion,
+config-before-clear recovery ordering, and all five map-validator failure paths.
+Add ABI authority tests for version-2 managed/standalone runtime modes: managed
+enabled authority rejects `tap_id=0`, standalone enabled authority accepts its
+`tap_id=0`, unknown modes fail, and their disabled defaults are distinct.
 
 - [ ] **Step 2: Implement pinned operations**
 
-Open maps by exact names and exact key/value types. `advance_fragment_epoch_strict` reads the per-tap entry, rejects max, inserts `current + 1`, and reads back the value to verify it. Missing/invalid maps return errors.
+Open maps by exact names and exact key/value types. `FragmentConfig` version 2
+uses explicit `runtime_mode` plus five zero padding bytes while preserving its
+size and timeout offsets. `advance_fragment_epoch_strict` reads the per-tap
+entry, rejects max, inserts `current + 1`, and reads back the value to verify
+it. Missing/invalid maps return errors.
 
 - [ ] **Step 3: Integrate scrub and inventory**
 
-Add both context maps, epoch, config, and metrics to critical pin inventory. Full tap scrub removes only matching tap contexts/epoch; uncertain shared-runtime recovery strictly clears both global context maps before ready.
+Add both context maps, epoch, config, and metrics to critical pin inventory and
+validate all five exact typed pins before readiness. Full tap scrub removes only
+matching contexts, tolerates remove-time LRU `KeyNotFound`, verifies V4 and V6
+empty, and only then removes the tap epoch. Uncertain shared-runtime recovery
+writes the expected-mode disabled config before strictly clearing and verifying
+both global context maps.
 
 - [ ] **Step 4: Configure load-time capacity and disabled default**
 
-Set both context map capacities through `EbpfLoader` before load, validate 8192 default and positive configured values, then initialize version-1 config with activation disabled and 30-second family timeouts.
+Set both context map capacities through `EbpfLoader` before load, validate 8192
+default and positive configured values, then initialize version-2
+mode-specific config with activation disabled and 30-second family timeouts.
+Managed new/reused recovery requires managed mode; standalone recovery requires
+standalone mode. Task 4 does not enable tracking or advance publication epochs.
 
 - [ ] **Step 5: Commit and push userspace GREEN**
 

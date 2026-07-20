@@ -7,8 +7,9 @@ use aria_ebpf_abi::{
     DROP_FRAGMENT_CONTEXT_UPDATE_FAILED, DROP_FRAGMENT_TRACKING_DISABLED, FRAGMENT_CONFIG_DISABLED,
     FRAGMENT_CONFIG_ENABLED, FRAGMENT_CONFIG_VERSION, FRAGMENT_CONTEXT_FLAG_TCP,
     FRAGMENT_CONTEXT_VERSION, FRAGMENT_METRIC_CONTEXT_EXPIRED, FRAGMENT_METRIC_CONTEXT_MISSING,
-    FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED, FRAGMENT_METRIC_TRACKING_DISABLED, IPPROTO_ICMP,
-    IPPROTO_TCP, IPPROTO_UDP,
+    FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED, FRAGMENT_METRIC_TRACKING_DISABLED,
+    FRAGMENT_RUNTIME_MODE_MANAGED, FRAGMENT_RUNTIME_MODE_STANDALONE, IPPROTO_ICMP, IPPROTO_TCP,
+    IPPROTO_UDP,
 };
 
 const SECOND: u64 = 1_000_000_000;
@@ -17,9 +18,17 @@ fn enabled_config() -> FragmentConfig {
     FragmentConfig {
         version: FRAGMENT_CONFIG_VERSION,
         enabled: FRAGMENT_CONFIG_ENABLED,
-        _pad: [0; 6],
+        runtime_mode: FRAGMENT_RUNTIME_MODE_MANAGED,
+        _pad: [0; 5],
         ipv4_timeout_ns: 30 * SECOND,
         ipv6_timeout_ns: 30 * SECOND,
+    }
+}
+
+fn standalone_enabled_config() -> FragmentConfig {
+    FragmentConfig {
+        runtime_mode: FRAGMENT_RUNTIME_MODE_STANDALONE,
+        ..enabled_config()
     }
 }
 
@@ -359,7 +368,7 @@ fn fragment_resolve_rejects_missing_invalid_and_stale_authority() {
 }
 
 #[test]
-fn fragment_resolve_tap_zero_cannot_use_context() {
+fn fragment_resolve_managed_tap_zero_cannot_use_context() {
     assert_eq!(
         fragment_resolve_decision(
             0,
@@ -373,6 +382,46 @@ fn fragment_resolve_tap_zero_cannot_use_context() {
         ),
         FragmentResolveDecision::DropTapUnassigned,
     );
+}
+
+#[test]
+fn fragment_resolve_standalone_tap_zero_uses_its_stable_identity() {
+    assert_eq!(
+        fragment_resolve_decision(
+            0,
+            false,
+            Some(&standalone_enabled_config()),
+            Some(&current_epoch()),
+            Some(&current_value()),
+            0,
+            1_000,
+            1480,
+        ),
+        FragmentResolveDecision::Hit,
+    );
+}
+
+#[test]
+fn fragment_resolve_unknown_runtime_mode_is_invalid_before_disabled_handling() {
+    let mut config = enabled_config();
+    config.enabled = FRAGMENT_CONFIG_DISABLED;
+    config.runtime_mode = 0xff;
+
+    assert_eq!(
+        fragment_resolve_decision(0, false, Some(&config), None, None, 0, 1_000, 1480,),
+        FragmentResolveDecision::DropConfigInvalid,
+    );
+}
+
+#[test]
+fn fragment_resolve_valid_disabled_config_precedes_enabled_identity_checks() {
+    for mut config in [enabled_config(), standalone_enabled_config()] {
+        config.enabled = FRAGMENT_CONFIG_DISABLED;
+        assert_eq!(
+            fragment_resolve_decision(0, false, Some(&config), None, None, 0, 1_000, 1480),
+            FragmentResolveDecision::DropTrackingDisabled,
+        );
+    }
 }
 
 #[test]

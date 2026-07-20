@@ -897,7 +897,8 @@ mod tests {
         assert_eq!(core::mem::size_of::<FragmentConfig>(), 24);
         assert_eq!(core::mem::offset_of!(FragmentConfig, version), 0);
         assert_eq!(core::mem::offset_of!(FragmentConfig, enabled), 1);
-        assert_eq!(core::mem::offset_of!(FragmentConfig, _pad), 2);
+        assert_eq!(core::mem::offset_of!(FragmentConfig, runtime_mode), 2);
+        assert_eq!(core::mem::offset_of!(FragmentConfig, _pad), 3);
         assert_eq!(core::mem::offset_of!(FragmentConfig, ipv4_timeout_ns), 8);
         assert_eq!(core::mem::offset_of!(FragmentConfig, ipv6_timeout_ns), 16);
 
