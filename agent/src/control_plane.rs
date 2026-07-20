@@ -418,6 +418,24 @@ enum ManagedRuntimeActivation {
     AwaitNeutronResync { require_tc_acl_links: bool },
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ManagedRegistrationPublicationStep {
+    AdvanceFragmentEpoch,
+    PublishGate,
+    PublishReadiness,
+}
+
+fn managed_registration_publication_steps(
+    activation: ManagedRuntimeActivation,
+) -> Vec<ManagedRegistrationPublicationStep> {
+    let mut steps = vec![ManagedRegistrationPublicationStep::AdvanceFragmentEpoch];
+    if !matches!(activation, ManagedRuntimeActivation::PreserveVerifiedLive) {
+        steps.push(ManagedRegistrationPublicationStep::PublishGate);
+    }
+    steps.push(ManagedRegistrationPublicationStep::PublishReadiness);
+    steps
+}
+
 fn managed_replay_route(mode: ManagedAttachMode) -> ManagedReplayRoute {
     let projection_mode = match mode {
         ManagedAttachMode::StandaloneRestoreAfterTcAttach => {
@@ -621,6 +639,37 @@ fn managed_runtime_activation(
 
 fn neutron_acl_gate_requires_tc(conntrack_enabled: bool, acl_enabled: bool) -> bool {
     conntrack_enabled || acl_enabled
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ManagedAclGatePublicationStep {
+    AdvanceFragmentEpoch,
+    PublishGate,
+    Persist,
+    VerifyReadiness,
+}
+
+fn managed_acl_gate_publication_steps(
+    current_conntrack: bool,
+    current_acl: bool,
+    requested_conntrack: bool,
+    requested_acl: bool,
+    recovery_publication: bool,
+) -> Vec<ManagedAclGatePublicationStep> {
+    let changed = current_conntrack != requested_conntrack || current_acl != requested_acl;
+    if !changed && !recovery_publication {
+        return Vec::new();
+    }
+
+    let mut steps = vec![ManagedAclGatePublicationStep::AdvanceFragmentEpoch];
+    if changed {
+        steps.push(ManagedAclGatePublicationStep::PublishGate);
+        steps.push(ManagedAclGatePublicationStep::Persist);
+    }
+    if recovery_publication {
+        steps.push(ManagedAclGatePublicationStep::VerifyReadiness);
+    }
+    steps
 }
 
 fn managed_projection_health_before_runtime_gate_write(
@@ -1258,6 +1307,7 @@ enum ManagedAclPublicationFailurePhase {
     General,
     Shadow,
     VerifyTc,
+    AdvanceFragmentEpoch,
     SwitchBank,
     Persist,
 }
@@ -1340,6 +1390,7 @@ enum ManagedAclPublicationStep {
     ApplyGeneral(SharedNetworkMutation),
     StageShadow,
     VerifyTc,
+    AdvanceFragmentEpoch,
     SwitchBank,
     Persist,
 }
@@ -1410,6 +1461,7 @@ fn managed_acl_publication_steps(
     );
     steps.push(ManagedAclPublicationStep::StageShadow);
     steps.push(ManagedAclPublicationStep::VerifyTc);
+    steps.push(ManagedAclPublicationStep::AdvanceFragmentEpoch);
     steps.push(ManagedAclPublicationStep::SwitchBank);
     steps.push(ManagedAclPublicationStep::Persist);
     steps
@@ -4395,25 +4447,45 @@ impl ControlPlane {
         prepared: &PreparedManagedInstance,
     ) -> Result<(), String> {
         let runtime = TapMapRuntime::new(&prepared.pin_path, prepared.tap_id);
-        match prepared.activation {
-            ManagedRuntimeActivation::PreserveVerifiedLive => Ok(()),
-            ManagedRuntimeActivation::RestoreStandalone { conntrack, acl } => {
-                aria_core::ebpf_ops::update_acl_runtime_gate(
-                    runtime,
-                    conntrack,
-                    acl,
-                    aria_core::common::ACL_INGRESS_HOOK_TC,
-                )
-            }
-            ManagedRuntimeActivation::AwaitNeutronResync { .. } => {
-                aria_core::ebpf_ops::update_acl_runtime_gate(
-                    runtime,
-                    false,
-                    false,
-                    aria_core::common::ACL_INGRESS_HOOK_TC,
-                )
+        for step in managed_registration_publication_steps(prepared.activation) {
+            match step {
+                ManagedRegistrationPublicationStep::AdvanceFragmentEpoch => {
+                    aria_core::ebpf_ops::advance_fragment_epoch_strict(
+                        &prepared.pin_path,
+                        prepared.tap_id,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "advance managed registration fragment epoch for {}: {}",
+                            prepared.name, error
+                        )
+                    })?;
+                }
+                ManagedRegistrationPublicationStep::PublishGate => match prepared.activation {
+                    ManagedRuntimeActivation::PreserveVerifiedLive => unreachable!(
+                        "verified live registration has no runtime gate publication step"
+                    ),
+                    ManagedRuntimeActivation::RestoreStandalone { conntrack, acl } => {
+                        aria_core::ebpf_ops::update_acl_runtime_gate(
+                            runtime,
+                            conntrack,
+                            acl,
+                            aria_core::common::ACL_INGRESS_HOOK_TC,
+                        )?;
+                    }
+                    ManagedRuntimeActivation::AwaitNeutronResync { .. } => {
+                        aria_core::ebpf_ops::update_acl_runtime_gate(
+                            runtime,
+                            false,
+                            false,
+                            aria_core::common::ACL_INGRESS_HOOK_TC,
+                        )?;
+                    }
+                },
+                ManagedRegistrationPublicationStep::PublishReadiness => {}
             }
         }
+        Ok(())
     }
 
     pub fn quiesce_managed_registration(
@@ -4604,6 +4676,8 @@ impl ControlPlane {
                 system_link_health.missing_tc().join(", ")
             ));
         }
+        aria_core::ebpf_ops::advance_fragment_epoch_strict(pin_path, tap_id)
+            .map_err(|error| format!("advance system fragment recovery epoch: {}", error))?;
         aria_core::ebpf_ops::update_runtime_config(
             runtime,
             Some(state.conntrack_enabled),
@@ -5285,6 +5359,29 @@ impl ControlPlane {
                             )
                             .await);
                         }
+                    }
+                }
+                ManagedAclPublicationStep::AdvanceFragmentEpoch => {
+                    if let Err(error) = aria_core::ebpf_ops::advance_fragment_epoch_strict(
+                        &runtime_pin_path,
+                        runtime_tap_id,
+                    ) {
+                        return Err(rollback_owned_acl_prepublication(
+                            ControlPlaneError::KernelError(format!(
+                                "advance managed fragment publication epoch: {}",
+                                error
+                            )),
+                            &applied_shared_mutations,
+                            ManagedAclPublicationFailurePhase::AdvanceFragmentEpoch,
+                            created_port_sets,
+                            runtime,
+                            &self.ebpf_path,
+                            current_acl_bank,
+                            next_acl_bank,
+                            state,
+                            old_state,
+                        )
+                        .await);
                     }
                 }
                 ManagedAclPublicationStep::SwitchBank => {
@@ -7418,6 +7515,13 @@ impl ControlPlane {
     ) -> Result<(), ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let mut state = inst.write().await;
+        let gate_steps = managed_acl_gate_publication_steps(
+            state.state.conntrack_enabled,
+            state.state.acl_enabled,
+            conntrack_enabled,
+            acl_enabled,
+            allow_recovery_publication,
+        );
         if neutron_acl_gate_requires_tc(conntrack_enabled, acl_enabled) {
             Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
             if neutron_acl_gate_requires_full_resync(
@@ -7431,50 +7535,65 @@ impl ControlPlane {
                 ));
             }
         }
-        state.managed_projection_health = managed_projection_health_before_runtime_gate_write(
-            state.managed_acl_publication_mode,
-            state.managed_projection_health,
-        );
-        aria_core::ebpf_ops::update_acl_runtime_gate(
-            state.map_runtime(),
-            conntrack_enabled,
-            acl_enabled,
-            aria_core::common::ACL_INGRESS_HOOK_TC,
-        )
-        .map_err(ControlPlaneError::KernelError)?;
+        if gate_steps.is_empty() {
+            return Ok(());
+        }
 
-        state.state.conntrack_enabled = conntrack_enabled;
-        state.state.acl_enabled = acl_enabled;
-        let persistence_result = state
-            .wal_append_strict(&WalEntry::UpdateConfig {
-                conntrack: Some(conntrack_enabled),
-                monitoring: None,
-                acl: Some(acl_enabled),
-                qos: None,
-                mirror: None,
-                tcprt: None,
-                ssl: None,
-            })
-            .await;
-        if let Err(persistence_error) = persistence_result {
-            let pin_path = state.pin_path.clone();
-            let tap_id = state.tap_id;
-            let recovery_error = state
-                .recover_gate_persistence_failure(
-                    conntrack_enabled,
-                    acl_enabled,
-                    persistence_error,
-                    |safe_conntrack, safe_acl| {
-                        aria_core::ebpf_ops::update_acl_runtime_gate(
-                            TapMapRuntime::new(&pin_path, tap_id),
-                            safe_conntrack,
-                            safe_acl,
-                            aria_core::common::ACL_INGRESS_HOOK_TC,
-                        )
-                    },
-                )
+        aria_core::ebpf_ops::advance_fragment_epoch_strict(&state.pin_path, state.tap_id).map_err(
+            |error| {
+                ControlPlaneError::KernelError(format!(
+                    "advance managed gate fragment epoch: {}",
+                    error
+                ))
+            },
+        )?;
+
+        if gate_steps.contains(&ManagedAclGatePublicationStep::PublishGate) {
+            state.managed_projection_health = managed_projection_health_before_runtime_gate_write(
+                state.managed_acl_publication_mode,
+                state.managed_projection_health,
+            );
+            aria_core::ebpf_ops::update_acl_runtime_gate(
+                state.map_runtime(),
+                conntrack_enabled,
+                acl_enabled,
+                aria_core::common::ACL_INGRESS_HOOK_TC,
+            )
+            .map_err(ControlPlaneError::KernelError)?;
+
+            state.state.conntrack_enabled = conntrack_enabled;
+            state.state.acl_enabled = acl_enabled;
+            let persistence_result = state
+                .wal_append_strict(&WalEntry::UpdateConfig {
+                    conntrack: Some(conntrack_enabled),
+                    monitoring: None,
+                    acl: Some(acl_enabled),
+                    qos: None,
+                    mirror: None,
+                    tcprt: None,
+                    ssl: None,
+                })
                 .await;
-            return Err(recovery_error);
+            if let Err(persistence_error) = persistence_result {
+                let pin_path = state.pin_path.clone();
+                let tap_id = state.tap_id;
+                let recovery_error = state
+                    .recover_gate_persistence_failure(
+                        conntrack_enabled,
+                        acl_enabled,
+                        persistence_error,
+                        |safe_conntrack, safe_acl| {
+                            aria_core::ebpf_ops::update_acl_runtime_gate(
+                                TapMapRuntime::new(&pin_path, tap_id),
+                                safe_conntrack,
+                                safe_acl,
+                                aria_core::common::ACL_INGRESS_HOOK_TC,
+                            )
+                        },
+                    )
+                    .await;
+                return Err(recovery_error);
+            }
         }
         match neutron_gate_health_commit_action(
             conntrack_enabled,

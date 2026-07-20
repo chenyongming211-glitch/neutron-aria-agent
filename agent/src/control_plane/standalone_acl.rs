@@ -41,6 +41,7 @@ pub(super) enum StandaloneAclPublicationStep {
     PersistBitmapGuard,
     StageShadow,
     ApplyGeneral,
+    AdvanceFragmentEpoch,
     SwitchBank,
     PersistFinalState,
     StrictCtScrub,
@@ -50,6 +51,7 @@ pub(super) enum StandaloneAclPublicationStep {
 pub(super) enum StandaloneAclFailurePhase {
     StageShadow,
     ApplyGeneral,
+    AdvanceFragmentEpoch,
     SwitchBank,
     PersistFinalState,
     StrictCtScrub,
@@ -264,6 +266,7 @@ fn publication_steps(semantic_changed: bool) -> Vec<StandaloneAclPublicationStep
         StandaloneAclPublicationStep::PersistBitmapGuard,
         StandaloneAclPublicationStep::StageShadow,
         StandaloneAclPublicationStep::ApplyGeneral,
+        StandaloneAclPublicationStep::AdvanceFragmentEpoch,
         StandaloneAclPublicationStep::SwitchBank,
         StandaloneAclPublicationStep::PersistFinalState,
         StandaloneAclPublicationStep::StrictCtScrub,
@@ -386,6 +389,12 @@ pub(super) fn standalone_acl_rollback_steps(
             RestoreDurableState,
         ],
         ApplyGeneral => vec![
+            RestoreGeneralReverse,
+            ScrubFailedShadow,
+            CleanupCreatedBitmaps,
+            RestoreDurableState,
+        ],
+        AdvanceFragmentEpoch => vec![
             RestoreGeneralReverse,
             ScrubFailedShadow,
             CleanupCreatedBitmaps,
@@ -732,6 +741,21 @@ async fn execute_standalone_publication(
             .await);
         }
         general_receipts.push(mutation);
+    }
+
+    if let Err(error) = aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, state.tap_id)
+    {
+        return Err(rollback_standalone_publication(
+            instance,
+            state,
+            plan,
+            runtime,
+            &cp.ebpf_path,
+            StandaloneAclFailurePhase::AdvanceFragmentEpoch,
+            format!("advance standalone fragment publication epoch: {}", error),
+            &general_receipts,
+        )
+        .await);
     }
 
     if let Err(error) = aria_core::ebpf_ops::set_acl_active_bank(runtime, plan.shadow_bank) {
