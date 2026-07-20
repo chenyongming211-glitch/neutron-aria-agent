@@ -11629,23 +11629,71 @@ mod tests {
     }
 
     #[test]
-    fn neutron_acl_fragment_epoch_gate_transition_classifies_real_state_change_only() {
+    fn neutron_acl_live_gate_classification_ignores_equal_durable_state() {
+        use std::cell::RefCell;
+
+        let durable = (true, true);
+        let requested = (Some(durable.0), Some(durable.1));
+        let events = RefCell::new(Vec::new());
+        let mut read_live = || {
+            events.borrow_mut().push("read_live_gate");
+            Ok((false, false))
+        };
+        let transition = read_live_acl_ct_gate_transition(
+            requested.0,
+            requested.1,
+            &mut read_live,
+        )
+        .expect("live gate classification must succeed");
+        let mut advance = || {
+            events.borrow_mut().push("advance_epoch");
+            Ok(())
+        };
+        let mut write_gate = || {
+            events.borrow_mut().push("write_gate");
+            Ok(())
+        };
+
+        execute_fragment_epoch_gate_transition(transition, &mut advance, &mut write_gate)
+            .expect("live drift must be fenced and repaired");
+
+        assert_eq!(transition, FragmentEpochGateTransition::SemanticChange);
         assert_eq!(
-            acl_ct_config_gate_transition(true, false, Some(false), None),
-            FragmentEpochGateTransition::SemanticChange
+            *events.borrow(),
+            vec!["read_live_gate", "advance_epoch", "write_gate"]
         );
-        assert_eq!(
-            acl_ct_config_gate_transition(false, true, None, Some(false)),
-            FragmentEpochGateTransition::SemanticChange
-        );
-        assert_eq!(
-            acl_ct_config_gate_transition(true, false, Some(true), None),
-            FragmentEpochGateTransition::EqualState
-        );
-        assert_eq!(
-            acl_ct_config_gate_transition(true, false, None, None),
-            FragmentEpochGateTransition::EqualState
-        );
+    }
+
+    #[test]
+    fn neutron_acl_live_gate_read_failure_aborts_before_epoch_or_write() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let result = (|| -> Result<(), String> {
+            let transition = read_live_acl_ct_gate_transition(
+                Some(true),
+                Some(true),
+                &mut || {
+                    events.borrow_mut().push("read_live_gate");
+                    Err("FIREWALL_CONFIG unavailable".to_string())
+                },
+            )?;
+            execute_fragment_epoch_gate_transition(
+                transition,
+                &mut || {
+                    events.borrow_mut().push("advance_epoch");
+                    Ok(())
+                },
+                &mut || {
+                    events.borrow_mut().push("write_gate");
+                    Ok(())
+                },
+            )
+            .map_err(|error| error.to_string())
+        })();
+
+        assert_eq!(result, Err("FIREWALL_CONFIG unavailable".to_string()));
+        assert_eq!(*events.borrow(), vec!["read_live_gate"]);
     }
 
     #[test]
