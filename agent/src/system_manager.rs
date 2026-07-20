@@ -640,7 +640,10 @@ pub async fn system_start(
             &ownership,
         ));
     }
-    if let Err(e) = aria_core::ebpf_ops::recover_fragment_runtime_strict(pin_path) {
+    if let Err(e) = aria_core::ebpf_ops::recover_fragment_runtime_strict(
+        pin_path,
+        aria_core::common::FRAGMENT_RUNTIME_MODE_STANDALONE,
+    ) {
         return Err(start_error_with_cleanup(
             format!("failed to recover standalone fragment runtime: {}", e),
             iface,

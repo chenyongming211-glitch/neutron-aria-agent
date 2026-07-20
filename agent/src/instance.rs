@@ -1029,8 +1029,11 @@ impl FirewallInstance {
         let loaded_optional_programs = self.load_runtime_programs(&mut bpf)?;
         self.pin_runtime_maps(&mut bpf, pin_path_str)
             .map_err(|e| format!("pin runtime maps failed: {}", e))?;
-        aria_core::ebpf_ops::recover_fragment_runtime_strict(pin_path_str)
-            .map_err(|e| format!("recover fragment runtime failed: {}", e))?;
+        aria_core::ebpf_ops::recover_fragment_runtime_strict(
+            pin_path_str,
+            aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+        )
+        .map_err(|e| format!("recover fragment runtime failed: {}", e))?;
         let present_program_pins =
             self.pin_runtime_programs(&mut bpf, pin_path_str, &loaded_optional_programs)?;
         let mut metadata = expected_metadata.clone();
@@ -1200,11 +1203,19 @@ impl FirewallInstance {
                     format!("non-UTF-8 pin path: {}", self.pin_path.display())
                 })?;
                 if fragment_runtime_requires_global_recovery(known_live_runtime) {
-                    aria_core::ebpf_ops::recover_fragment_runtime_strict(pin_path_str).map_err(
-                        |e| format!("fragment runtime global recovery failed: {}", e),
-                    )?;
+                    aria_core::ebpf_ops::recover_fragment_runtime_strict(
+                        pin_path_str,
+                        aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+                    )
+                    .map_err(|e| format!("fragment runtime global recovery failed: {}", e))?;
                 } else {
-                    aria_core::ebpf_ops::validate_fragment_tracking_config_strict(pin_path_str)
+                    aria_core::ebpf_ops::validate_fragment_runtime_maps_strict(pin_path_str)
+                        .and_then(|()| {
+                            aria_core::ebpf_ops::validate_fragment_tracking_config_strict(
+                                pin_path_str,
+                                aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+                            )
+                        })
                         .map_err(|e| {
                             format!("fragment runtime config validation failed: {}", e)
                         })?;

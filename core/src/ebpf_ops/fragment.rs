@@ -1,14 +1,28 @@
 use crate::common::{
     FragmentConfig, FragmentContextKey4, FragmentContextKey6, FragmentContextValue,
-    FragmentEpochValue, TapMapRuntime,
+    FragmentEpochValue, TapMapRuntime, FRAGMENT_CONFIG_DISABLED, FRAGMENT_CONFIG_ENABLED,
+    FRAGMENT_CONFIG_MAX_TIMEOUT_NS, FRAGMENT_CONFIG_MIN_TIMEOUT_NS, FRAGMENT_CONFIG_VERSION,
+    FRAGMENT_RUNTIME_MODE_MANAGED, FRAGMENT_RUNTIME_MODE_STANDALONE,
 };
-use aya::maps::{HashMap, Map, MapData, MapType};
+use aya::maps::{HashMap, Map, MapData, MapType, PerCpuArray};
 use std::cell::RefCell;
 
-const FRAGMENT_CONFIG_VERSION: u8 = 1;
 const FRAGMENT_TIMEOUT_NS: u64 = 30_000_000_000;
-const MIN_FRAGMENT_TIMEOUT_NS: u64 = 1_000_000_000;
-const MAX_FRAGMENT_TIMEOUT_NS: u64 = 60_000_000_000;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) enum FragmentRemoveOutcome {
+    Removed,
+    Missing,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) enum FragmentRuntimeMapKind {
+    ContextV4Lru,
+    ContextV6Lru,
+    EpochHash,
+    ConfigHash,
+    MetricsPerCpuArrayU64,
+}
 
 fn require_fragment_map_type(
     map_data: &MapData,
@@ -70,40 +84,83 @@ fn open_fragment_context_v6(
         .map_err(|error| format!("convert FRAG_CONTEXT_V6 to LruHashMap: {:?}", error))
 }
 
-pub(super) fn default_fragment_config() -> FragmentConfig {
-    FragmentConfig {
-        version: FRAGMENT_CONFIG_VERSION,
-        enabled: 0,
-        _pad: [0; 6],
-        ipv4_timeout_ns: FRAGMENT_TIMEOUT_NS,
-        ipv6_timeout_ns: FRAGMENT_TIMEOUT_NS,
-    }
+fn open_fragment_metrics(pin_path: &str) -> Result<PerCpuArray<MapData, u64>, String> {
+    let map_path = format!("{}/FRAGMENT_METRICS", pin_path);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|error| format!("open pinned FRAGMENT_METRICS: {:?}", error))?;
+    require_fragment_map_type(&map_data, "FRAGMENT_METRICS", MapType::PerCpuArray)?;
+    PerCpuArray::try_from(Map::PerCpuArray(map_data))
+        .map_err(|error| format!("convert FRAGMENT_METRICS to PerCpuArray<u64>: {:?}", error))
 }
 
-pub(super) fn validate_fragment_config(config: &FragmentConfig) -> Result<(), String> {
+fn fragment_runtime_mode_is_valid(runtime_mode: u8) -> bool {
+    runtime_mode == FRAGMENT_RUNTIME_MODE_MANAGED
+        || runtime_mode == FRAGMENT_RUNTIME_MODE_STANDALONE
+}
+
+pub(super) fn default_fragment_config(runtime_mode: u8) -> Result<FragmentConfig, String> {
+    if !fragment_runtime_mode_is_valid(runtime_mode) {
+        return Err(format!(
+            "FRAGMENT_CONFIG runtime mode {} is invalid",
+            runtime_mode
+        ));
+    }
+    Ok(FragmentConfig {
+        version: FRAGMENT_CONFIG_VERSION,
+        enabled: FRAGMENT_CONFIG_DISABLED,
+        runtime_mode,
+        _pad: [0; 5],
+        ipv4_timeout_ns: FRAGMENT_TIMEOUT_NS,
+        ipv6_timeout_ns: FRAGMENT_TIMEOUT_NS,
+    })
+}
+
+pub(super) fn validate_fragment_config(
+    config: &FragmentConfig,
+    expected_runtime_mode: u8,
+) -> Result<(), String> {
+    if !fragment_runtime_mode_is_valid(expected_runtime_mode) {
+        return Err(format!(
+            "expected FRAGMENT_CONFIG runtime mode {} is invalid",
+            expected_runtime_mode
+        ));
+    }
     if config.version != FRAGMENT_CONFIG_VERSION {
         return Err(format!(
             "FRAGMENT_CONFIG version {} is invalid; expected {}",
             config.version, FRAGMENT_CONFIG_VERSION
         ));
     }
-    if config.enabled != 0 {
+    if config.enabled != FRAGMENT_CONFIG_DISABLED && config.enabled != FRAGMENT_CONFIG_ENABLED {
         return Err(format!(
-            "FRAGMENT_CONFIG enabled {} is invalid for Task 4; expected disabled value 0",
+            "FRAGMENT_CONFIG enabled {} is invalid; expected 0 or 1",
             config.enabled
         ));
     }
-    if config._pad != [0; 6] {
+    if !fragment_runtime_mode_is_valid(config.runtime_mode) {
+        return Err(format!(
+            "FRAGMENT_CONFIG runtime mode {} is invalid",
+            config.runtime_mode
+        ));
+    }
+    if config.runtime_mode != expected_runtime_mode {
+        return Err(format!(
+            "FRAGMENT_CONFIG runtime mode {} does not match expected {}",
+            config.runtime_mode, expected_runtime_mode
+        ));
+    }
+    if config._pad != [0; 5] {
         return Err("FRAGMENT_CONFIG padding must be zero".to_string());
     }
     for (family, timeout_ns) in [
         ("IPv4", config.ipv4_timeout_ns),
         ("IPv6", config.ipv6_timeout_ns),
     ] {
-        if !(MIN_FRAGMENT_TIMEOUT_NS..=MAX_FRAGMENT_TIMEOUT_NS).contains(&timeout_ns) {
+        if !(FRAGMENT_CONFIG_MIN_TIMEOUT_NS..=FRAGMENT_CONFIG_MAX_TIMEOUT_NS).contains(&timeout_ns)
+        {
             return Err(format!(
                 "FRAGMENT_CONFIG {} timeout {}ns is invalid; expected {}..={}ns",
-                family, timeout_ns, MIN_FRAGMENT_TIMEOUT_NS, MAX_FRAGMENT_TIMEOUT_NS
+                family, timeout_ns, FRAGMENT_CONFIG_MIN_TIMEOUT_NS, FRAGMENT_CONFIG_MAX_TIMEOUT_NS
             ));
         }
     }
@@ -113,13 +170,18 @@ pub(super) fn validate_fragment_config(config: &FragmentConfig) -> Result<(), St
 fn fragment_configs_equal(left: &FragmentConfig, right: &FragmentConfig) -> bool {
     left.version == right.version
         && left.enabled == right.enabled
+        && left.runtime_mode == right.runtime_mode
         && left._pad == right._pad
         && left.ipv4_timeout_ns == right.ipv4_timeout_ns
         && left.ipv6_timeout_ns == right.ipv6_timeout_ns
 }
 
-pub fn configure_fragment_tracking(pin_path: &str, config: FragmentConfig) -> Result<(), String> {
-    validate_fragment_config(&config)?;
+pub fn configure_fragment_tracking(
+    pin_path: &str,
+    expected_runtime_mode: u8,
+    config: FragmentConfig,
+) -> Result<(), String> {
+    validate_fragment_config(&config, expected_runtime_mode)?;
     let mut map = open_fragment_config(pin_path)?;
     map.insert(&0, &config, 0)
         .map_err(|error| format!("FRAGMENT_CONFIG insert key 0: {:?}", error))?;
@@ -132,16 +194,26 @@ pub fn configure_fragment_tracking(pin_path: &str, config: FragmentConfig) -> Re
     Ok(())
 }
 
-pub fn initialize_fragment_tracking_disabled(pin_path: &str) -> Result<(), String> {
-    configure_fragment_tracking(pin_path, default_fragment_config())
+pub fn initialize_fragment_tracking_disabled(
+    pin_path: &str,
+    runtime_mode: u8,
+) -> Result<(), String> {
+    configure_fragment_tracking(
+        pin_path,
+        runtime_mode,
+        default_fragment_config(runtime_mode)?,
+    )
 }
 
-pub fn validate_fragment_tracking_config_strict(pin_path: &str) -> Result<(), String> {
+pub fn validate_fragment_tracking_config_strict(
+    pin_path: &str,
+    expected_runtime_mode: u8,
+) -> Result<(), String> {
     let map = open_fragment_config(pin_path)?;
     let config = map
         .get(&0, 0)
         .map_err(|error| format!("read FRAGMENT_CONFIG key 0: {:?}", error))?;
-    validate_fragment_config(&config)
+    validate_fragment_config(&config, expected_runtime_mode)
 }
 
 pub fn read_fragment_epoch(pin_path: &str, tap_id: u32) -> Result<Option<u64>, String> {
@@ -219,62 +291,189 @@ pub(super) fn fragment_v6_key_matches_tap(key: &FragmentContextKey6, tap_id: u32
     key.tap_id == tap_id
 }
 
-fn scrub_fragment_context_v4(pin_path: &str, tap_id: Option<u32>) -> Result<u64, String> {
-    let mut map = open_fragment_context_v4(pin_path)?;
-    let mut keys = Vec::new();
-    for item in map.keys() {
-        let key = item.map_err(|error| format!("iterate FRAG_CONTEXT_V4: {:?}", error))?;
-        if tap_id
-            .map(|expected| fragment_v4_key_matches_tap(&key, expected))
-            .unwrap_or(true)
-        {
-            keys.push(key);
+pub(super) fn fragment_sweep_with<K, List, Matches, Remove, Verify>(
+    map_name: &str,
+    list: List,
+    matches: Matches,
+    mut remove: Remove,
+    verify_empty: Verify,
+) -> Result<u64, String>
+where
+    List: FnOnce() -> Result<Vec<K>, String>,
+    Matches: Fn(&K) -> bool,
+    Remove: FnMut(&K) -> Result<FragmentRemoveOutcome, String>,
+    Verify: FnOnce() -> Result<bool, String>,
+{
+    let keys = list()?;
+    let mut removed = 0;
+    for key in keys.iter().filter(|key| matches(key)) {
+        match remove(key).map_err(|error| format!("{} removal failed: {}", map_name, error))? {
+            FragmentRemoveOutcome::Removed => removed += 1,
+            FragmentRemoveOutcome::Missing => {}
         }
     }
-    let removed = keys.len() as u64;
-    for key in keys {
-        map.remove(&key)
-            .map_err(|error| format!("remove FRAG_CONTEXT_V4 entry: {:?}", error))?;
+    if !verify_empty()? {
+        return Err(format!(
+            "{} still contains entries in the requested fragment scope after sweep",
+            map_name
+        ));
     }
     Ok(removed)
+}
+
+pub(super) fn scrub_fragment_families_with<V4, V6, Epoch>(
+    scrub_v4: V4,
+    scrub_v6: V6,
+    remove_epoch: Epoch,
+) -> Result<u64, String>
+where
+    V4: FnOnce() -> Result<u64, String>,
+    V6: FnOnce() -> Result<u64, String>,
+    Epoch: FnOnce() -> Result<FragmentRemoveOutcome, String>,
+{
+    let mut removed = scrub_v4()?;
+    removed += scrub_v6()?;
+    if remove_epoch()? == FragmentRemoveOutcome::Removed {
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+pub(super) fn recover_fragment_runtime_with<Validate, Configure, Scrub>(
+    validate_maps: Validate,
+    configure: Configure,
+    scrub: Scrub,
+) -> Result<u64, String>
+where
+    Validate: FnOnce() -> Result<(), String>,
+    Configure: FnOnce() -> Result<(), String>,
+    Scrub: FnOnce() -> Result<u64, String>,
+{
+    validate_maps()?;
+    configure()?;
+    scrub()
+}
+
+pub(super) fn validate_fragment_runtime_maps_with<Validate>(
+    mut validate: Validate,
+) -> Result<(), String>
+where
+    Validate: FnMut(&'static str, FragmentRuntimeMapKind) -> Result<(), String>,
+{
+    for (name, kind) in [
+        ("FRAG_CONTEXT_V4", FragmentRuntimeMapKind::ContextV4Lru),
+        ("FRAG_CONTEXT_V6", FragmentRuntimeMapKind::ContextV6Lru),
+        ("FRAGMENT_EPOCH", FragmentRuntimeMapKind::EpochHash),
+        ("FRAGMENT_CONFIG", FragmentRuntimeMapKind::ConfigHash),
+        (
+            "FRAGMENT_METRICS",
+            FragmentRuntimeMapKind::MetricsPerCpuArrayU64,
+        ),
+    ] {
+        validate(name, kind)?;
+    }
+    Ok(())
+}
+
+pub fn validate_fragment_runtime_maps_strict(pin_path: &str) -> Result<(), String> {
+    validate_fragment_runtime_maps_with(|_name, kind| {
+        match kind {
+            FragmentRuntimeMapKind::ContextV4Lru => drop(open_fragment_context_v4(pin_path)?),
+            FragmentRuntimeMapKind::ContextV6Lru => drop(open_fragment_context_v6(pin_path)?),
+            FragmentRuntimeMapKind::EpochHash => drop(open_fragment_epoch(pin_path)?),
+            FragmentRuntimeMapKind::ConfigHash => drop(open_fragment_config(pin_path)?),
+            FragmentRuntimeMapKind::MetricsPerCpuArrayU64 => drop(open_fragment_metrics(pin_path)?),
+        }
+        Ok(())
+    })
+}
+
+fn scrub_fragment_context_v4(pin_path: &str, tap_id: Option<u32>) -> Result<u64, String> {
+    let map = RefCell::new(open_fragment_context_v4(pin_path)?);
+    fragment_sweep_with(
+        "FRAG_CONTEXT_V4",
+        || {
+            map.borrow()
+                .keys()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("iterate FRAG_CONTEXT_V4: {:?}", error))
+        },
+        |key| {
+            tap_id
+                .map(|expected| fragment_v4_key_matches_tap(key, expected))
+                .unwrap_or(true)
+        },
+        |key| match map.borrow_mut().remove(key) {
+            Ok(()) => Ok(FragmentRemoveOutcome::Removed),
+            Err(aya::maps::MapError::KeyNotFound) => Ok(FragmentRemoveOutcome::Missing),
+            Err(error) => Err(format!("remove entry: {:?}", error)),
+        },
+        || {
+            for item in map.borrow().keys() {
+                let key = item.map_err(|error| format!("verify FRAG_CONTEXT_V4: {:?}", error))?;
+                if tap_id
+                    .map(|expected| fragment_v4_key_matches_tap(&key, expected))
+                    .unwrap_or(true)
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        },
+    )
 }
 
 fn scrub_fragment_context_v6(pin_path: &str, tap_id: Option<u32>) -> Result<u64, String> {
-    let mut map = open_fragment_context_v6(pin_path)?;
-    let mut keys = Vec::new();
-    for item in map.keys() {
-        let key = item.map_err(|error| format!("iterate FRAG_CONTEXT_V6: {:?}", error))?;
-        if tap_id
-            .map(|expected| fragment_v6_key_matches_tap(&key, expected))
-            .unwrap_or(true)
-        {
-            keys.push(key);
-        }
-    }
-    let removed = keys.len() as u64;
-    for key in keys {
-        map.remove(&key)
-            .map_err(|error| format!("remove FRAG_CONTEXT_V6 entry: {:?}", error))?;
-    }
-    Ok(removed)
+    let map = RefCell::new(open_fragment_context_v6(pin_path)?);
+    fragment_sweep_with(
+        "FRAG_CONTEXT_V6",
+        || {
+            map.borrow()
+                .keys()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("iterate FRAG_CONTEXT_V6: {:?}", error))
+        },
+        |key| {
+            tap_id
+                .map(|expected| fragment_v6_key_matches_tap(key, expected))
+                .unwrap_or(true)
+        },
+        |key| match map.borrow_mut().remove(key) {
+            Ok(()) => Ok(FragmentRemoveOutcome::Removed),
+            Err(aya::maps::MapError::KeyNotFound) => Ok(FragmentRemoveOutcome::Missing),
+            Err(error) => Err(format!("remove entry: {:?}", error)),
+        },
+        || {
+            for item in map.borrow().keys() {
+                let key = item.map_err(|error| format!("verify FRAG_CONTEXT_V6: {:?}", error))?;
+                if tap_id
+                    .map(|expected| fragment_v6_key_matches_tap(&key, expected))
+                    .unwrap_or(true)
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        },
+    )
 }
 
 pub fn scrub_fragment_contexts_strict(runtime: TapMapRuntime<'_>) -> Result<u64, String> {
-    let mut removed = scrub_fragment_context_v4(runtime.pin_path, Some(runtime.tap_id))?;
-    removed += scrub_fragment_context_v6(runtime.pin_path, Some(runtime.tap_id))?;
-
-    let mut epoch_map = open_fragment_epoch(runtime.pin_path)?;
-    match epoch_map.remove(&runtime.tap_id) {
-        Ok(()) => removed += 1,
-        Err(aya::maps::MapError::KeyNotFound) => {}
-        Err(error) => {
-            return Err(format!(
-                "remove FRAGMENT_EPOCH for tap_id {}: {:?}",
-                runtime.tap_id, error
-            ));
-        }
-    }
-    Ok(removed)
+    scrub_fragment_families_with(
+        || scrub_fragment_context_v4(runtime.pin_path, Some(runtime.tap_id)),
+        || scrub_fragment_context_v6(runtime.pin_path, Some(runtime.tap_id)),
+        || {
+            let mut epoch_map = open_fragment_epoch(runtime.pin_path)?;
+            match epoch_map.remove(&runtime.tap_id) {
+                Ok(()) => Ok(FragmentRemoveOutcome::Removed),
+                Err(aya::maps::MapError::KeyNotFound) => Ok(FragmentRemoveOutcome::Missing),
+                Err(error) => Err(format!(
+                    "remove FRAGMENT_EPOCH for tap_id {}: {:?}",
+                    runtime.tap_id, error
+                )),
+            }
+        },
+    )
 }
 
 pub fn clear_fragment_contexts_strict(pin_path: &str) -> Result<u64, String> {
@@ -283,8 +482,10 @@ pub fn clear_fragment_contexts_strict(pin_path: &str) -> Result<u64, String> {
     Ok(removed)
 }
 
-pub fn recover_fragment_runtime_strict(pin_path: &str) -> Result<u64, String> {
-    initialize_fragment_tracking_disabled(pin_path)?;
-    let removed = clear_fragment_contexts_strict(pin_path)?;
-    Ok(removed)
+pub fn recover_fragment_runtime_strict(pin_path: &str, runtime_mode: u8) -> Result<u64, String> {
+    recover_fragment_runtime_with(
+        || validate_fragment_runtime_maps_strict(pin_path),
+        || initialize_fragment_tracking_disabled(pin_path, runtime_mode),
+        || clear_fragment_contexts_strict(pin_path),
+    )
 }

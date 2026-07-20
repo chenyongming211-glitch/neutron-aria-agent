@@ -674,7 +674,11 @@ fn replay_state_to_pinned_maps_from_snapshot_with_mode(
     };
     let tap_id = state.tap_id;
     let runtime = TapMapRuntime::new(pin_path, tap_id);
-    validate_fragment_tracking_config_strict(pin_path)
+    let fragment_runtime_mode = match mode {
+        GroupProjectionMode::StandaloneCompatibility => FRAGMENT_RUNTIME_MODE_STANDALONE,
+        GroupProjectionMode::Managed => FRAGMENT_RUNTIME_MODE_MANAGED,
+    };
+    validate_fragment_tracking_config_strict(pin_path, fragment_runtime_mode)
         .map_err(|error| format!("FRAGMENT_CONFIG: {}", error))?;
     let has_runtime_objects = !(group_entries.general_src.is_empty()
         && group_entries.general_dst.is_empty()

@@ -8,9 +8,11 @@ pub enum FragmentKind {
 }
 
 pub const FRAGMENT_CONTEXT_VERSION: u8 = 1;
-pub const FRAGMENT_CONFIG_VERSION: u8 = 1;
+pub const FRAGMENT_CONFIG_VERSION: u8 = 2;
 pub const FRAGMENT_CONFIG_DISABLED: u8 = 0;
 pub const FRAGMENT_CONFIG_ENABLED: u8 = 1;
+pub const FRAGMENT_RUNTIME_MODE_MANAGED: u8 = 1;
+pub const FRAGMENT_RUNTIME_MODE_STANDALONE: u8 = 2;
 pub const FRAGMENT_CONFIG_MIN_TIMEOUT_NS: u64 = 1_000_000_000;
 pub const FRAGMENT_CONFIG_MAX_TIMEOUT_NS: u64 = 60_000_000_000;
 
@@ -99,7 +101,8 @@ pub struct FragmentContextValue {
 pub struct FragmentConfig {
     pub version: u8,
     pub enabled: u8,
-    pub _pad: [u8; 6],
+    pub runtime_mode: u8,
+    pub _pad: [u8; 5],
     pub ipv4_timeout_ns: u64,
     pub ipv6_timeout_ns: u64,
 }
@@ -244,20 +247,17 @@ pub fn fragment_authority_drop_reason(
     config: Option<&FragmentConfig>,
     epoch: Option<&FragmentEpochValue>,
 ) -> u8 {
-    if tap_id == 0 {
-        return DROP_FRAGMENT_TAP_UNASSIGNED;
-    }
     let config = match config {
         Some(config) => config,
         None => return DROP_FRAGMENT_CONFIG_MISSING,
     };
     if config.version != FRAGMENT_CONFIG_VERSION
         || (config.enabled != FRAGMENT_CONFIG_DISABLED && config.enabled != FRAGMENT_CONFIG_ENABLED)
+        || (config.runtime_mode != FRAGMENT_RUNTIME_MODE_MANAGED
+            && config.runtime_mode != FRAGMENT_RUNTIME_MODE_STANDALONE)
+        || config._pad != [0; 5]
     {
         return DROP_FRAGMENT_CONFIG_INVALID;
-    }
-    if config.enabled == FRAGMENT_CONFIG_DISABLED {
-        return DROP_FRAGMENT_TRACKING_DISABLED;
     }
     let timeout_ns = if is_ipv6 {
         config.ipv6_timeout_ns
@@ -266,6 +266,14 @@ pub fn fragment_authority_drop_reason(
     };
     if timeout_ns < FRAGMENT_CONFIG_MIN_TIMEOUT_NS || timeout_ns > FRAGMENT_CONFIG_MAX_TIMEOUT_NS {
         return DROP_FRAGMENT_CONFIG_INVALID;
+    }
+    if config.enabled == FRAGMENT_CONFIG_DISABLED {
+        return DROP_FRAGMENT_TRACKING_DISABLED;
+    }
+    if (config.runtime_mode == FRAGMENT_RUNTIME_MODE_MANAGED && tap_id == 0)
+        || (config.runtime_mode == FRAGMENT_RUNTIME_MODE_STANDALONE && tap_id != 0)
+    {
+        return DROP_FRAGMENT_TAP_UNASSIGNED;
     }
     if epoch.is_none() {
         return DROP_FRAGMENT_EPOCH_MISSING;
