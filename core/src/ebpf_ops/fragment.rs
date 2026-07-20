@@ -284,7 +284,7 @@ pub fn clear_fragment_contexts_strict(pin_path: &str) -> Result<u64, String> {
 }
 
 pub fn recover_fragment_runtime_strict(pin_path: &str) -> Result<u64, String> {
-    let removed = clear_fragment_contexts_strict(pin_path)?;
     initialize_fragment_tracking_disabled(pin_path)?;
+    let removed = clear_fragment_contexts_strict(pin_path)?;
     Ok(removed)
 }

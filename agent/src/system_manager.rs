@@ -689,19 +689,6 @@ pub async fn system_start(
             &ownership,
         ));
     }
-    if let Err(e) = aria_core::ebpf_ops::advance_fragment_epoch_strict(
-        pin_path,
-        aria_core::common::TAP_ID_UNASSIGNED,
-    ) {
-        return Err(start_error_with_cleanup(
-            format!("failed to establish standalone fragment epoch: {}", e),
-            iface,
-            pin_path,
-            state_path,
-            &ownership,
-        ));
-    }
-
     // Replay desired maps while keeping the live ACL/CT gate quiesced.
     let mut quiesced_desired = desired.clone();
     quiesced_desired.conntrack_enabled = false;

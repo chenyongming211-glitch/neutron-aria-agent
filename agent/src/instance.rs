@@ -32,6 +32,10 @@ pub(crate) fn validate_fragment_context_capacity(capacity: u32) -> Result<u32, S
     Ok(capacity)
 }
 
+fn fragment_runtime_requires_global_recovery(known_live_runtime: bool) -> bool {
+    !known_live_runtime
+}
+
 pub(crate) fn configure_fragment_context_capacity(
     loader: &mut aya::EbpfLoader<'_>,
     capacity: u32,
@@ -1192,12 +1196,19 @@ impl FirewallInstance {
         }
         match self.validate_runtime_inventory(&expected_metadata) {
             RuntimeInventoryStatus::Healthy => {
-                aria_core::ebpf_ops::validate_fragment_tracking_config_strict(
-                    self.pin_path.to_str().ok_or_else(|| {
-                        format!("non-UTF-8 pin path: {}", self.pin_path.display())
-                    })?,
-                )
-                .map_err(|e| format!("fragment runtime config validation failed: {}", e))?;
+                let pin_path_str = self.pin_path.to_str().ok_or_else(|| {
+                    format!("non-UTF-8 pin path: {}", self.pin_path.display())
+                })?;
+                if fragment_runtime_requires_global_recovery(known_live_runtime) {
+                    aria_core::ebpf_ops::recover_fragment_runtime_strict(pin_path_str).map_err(
+                        |e| format!("fragment runtime global recovery failed: {}", e),
+                    )?;
+                } else {
+                    aria_core::ebpf_ops::validate_fragment_tracking_config_strict(pin_path_str)
+                        .map_err(|e| {
+                            format!("fragment runtime config validation failed: {}", e)
+                        })?;
+                }
                 let repaired_optional_pins =
                     self.repair_missing_optional_program_pins(ebpf_path)?;
                 if !repaired_optional_pins.is_empty() {
@@ -1693,6 +1704,12 @@ mod tests {
         assert!(validate_fragment_context_capacity(0)
             .unwrap_err()
             .contains("positive"));
+    }
+
+    #[test]
+    fn fragment_loader_global_recovery_is_first_owner_only() {
+        assert!(fragment_runtime_requires_global_recovery(false));
+        assert!(!fragment_runtime_requires_global_recovery(true));
     }
 
     #[test]
