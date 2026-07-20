@@ -70,6 +70,8 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "tc_ct_contract_metric_labels_are_exact"],
     ["test", "--locked", "-p", "aria-core", "acl_ingress_hook_"],
     ["test", "--locked", "-p", "aria-core", "tap_runtime_config_"],
+    ["test", "--locked", "-p", "aria-core", "fragment_epoch_"],
+    ["test", "--locked", "-p", "aria-agent", "fragment_loader_"],
     ["test", "--locked", "-p", "aria-ebpf-abi", "tc_ct_"],
     ["test", "--locked", "-p", "aria-core", "map_delete_"],
     ["test", "--locked", "-p", "aria-core", "quarantined_"],

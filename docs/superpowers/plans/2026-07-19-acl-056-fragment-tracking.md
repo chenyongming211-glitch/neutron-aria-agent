@@ -290,11 +290,14 @@ Expected: fragment behavior passes and warning-denied eBPF build accepts bounded
 
 **Files:**
 - Create: `core/src/ebpf_ops/fragment.rs`
+- Create: `core/src/ebpf_ops/fragment_tests.rs`
 - Modify: `core/src/ebpf_ops.rs`
 - Modify: `core/src/ebpf_ops/scrub.rs`
 - Modify: `core/src/ebpf_ops/inventory.rs`
 - Modify: `core/src/ebpf_ops/replay.rs`
 - Modify: `agent/src/instance.rs`
+- Modify: `agent/src/system_manager.rs`
+- Modify: `ci/check_neutron_stage1.py`
 
 **Interfaces:**
 - Consumes: pinned map names and ABI from Tasks 2-3.

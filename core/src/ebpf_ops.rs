@@ -13,6 +13,8 @@ use std::net::IpAddr;
 use tracing::{info, warn};
 
 mod attach;
+#[cfg(test)]
+mod fragment_tests;
 mod inventory;
 mod network;
 mod policy;

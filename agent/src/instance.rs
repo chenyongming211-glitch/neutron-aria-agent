@@ -1646,6 +1646,23 @@ mod tests {
     }
 
     #[test]
+    fn fragment_loader_capacity_default_is_exact_and_positive_values_are_accepted() {
+        assert_eq!(DEFAULT_FRAGMENT_CONTEXT_CAPACITY, 8192);
+        assert_eq!(validate_fragment_context_capacity(1).unwrap(), 1);
+        assert_eq!(
+            validate_fragment_context_capacity(DEFAULT_FRAGMENT_CONTEXT_CAPACITY).unwrap(),
+            8192
+        );
+    }
+
+    #[test]
+    fn fragment_loader_capacity_rejects_zero() {
+        assert!(validate_fragment_context_capacity(0)
+            .unwrap_err()
+            .contains("positive"));
+    }
+
+    #[test]
     fn tcx_attachment_query_requires_the_expected_program_id() {
         assert!(tcx_query_contains_expected_program(42, &[7, 42, 99]));
         assert!(!tcx_query_contains_expected_program(42, &[]));
