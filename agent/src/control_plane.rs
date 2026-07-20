@@ -11115,6 +11115,236 @@ mod tests {
     }
 
     #[test]
+    fn neutron_acl_fragment_epoch_gate_executor_orders_live_transition() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let mut advance = || {
+            events.borrow_mut().push("advance_epoch");
+            Ok(())
+        };
+        let mut write_gate = || {
+            events.borrow_mut().push("write_gate");
+            Ok(())
+        };
+
+        execute_fragment_epoch_gate_transition(
+            FragmentEpochGateTransition::SemanticChange,
+            &mut advance,
+            &mut write_gate,
+        )
+        .expect("live ACL/CT transition must publish");
+
+        assert_eq!(*events.borrow(), vec!["advance_epoch", "write_gate"]);
+    }
+
+    #[test]
+    fn neutron_acl_fragment_epoch_gate_executor_stops_on_epoch_failure() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let mut advance = || {
+            events.borrow_mut().push("advance_epoch");
+            Err("epoch unavailable".to_string())
+        };
+        let mut write_gate = || {
+            events.borrow_mut().push("write_gate");
+            Ok(())
+        };
+
+        let error = execute_fragment_epoch_gate_transition(
+            FragmentEpochGateTransition::SemanticChange,
+            &mut advance,
+            &mut write_gate,
+        )
+        .expect_err("gate write must not cross a failed epoch fence");
+
+        assert_eq!(error.phase(), FragmentEpochPublicationFailurePhase::AdvanceEpoch);
+        assert!(!error.epoch_advanced());
+        assert_eq!(*events.borrow(), vec!["advance_epoch"]);
+    }
+
+    #[test]
+    fn neutron_acl_fragment_epoch_gate_executor_does_not_rollback_epoch_on_gate_failure() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let mut advance = || {
+            events.borrow_mut().push("advance_epoch");
+            Ok(())
+        };
+        let mut write_gate = || {
+            events.borrow_mut().push("write_gate");
+            Err("gate unavailable".to_string())
+        };
+
+        let error = execute_fragment_epoch_gate_transition(
+            FragmentEpochGateTransition::SemanticChange,
+            &mut advance,
+            &mut write_gate,
+        )
+        .expect_err("gate failure must be reported");
+
+        assert_eq!(error.phase(), FragmentEpochPublicationFailurePhase::Publish);
+        assert!(error.epoch_advanced());
+        assert_eq!(*events.borrow(), vec!["advance_epoch", "write_gate"]);
+    }
+
+    #[test]
+    fn neutron_acl_fragment_epoch_gate_executor_skips_extra_epoch_for_non_transitions() {
+        use std::cell::RefCell;
+
+        for transition in [
+            FragmentEpochGateTransition::EqualState,
+            FragmentEpochGateTransition::FreshInitialization,
+            FragmentEpochGateTransition::EpochAlreadyAdvanced,
+        ] {
+            let events = RefCell::new(Vec::new());
+            let mut advance = || {
+                events.borrow_mut().push("advance_epoch");
+                Ok(())
+            };
+            let mut write_gate = || {
+                events.borrow_mut().push("write_gate");
+                Ok(())
+            };
+
+            execute_fragment_epoch_gate_transition(
+                transition,
+                &mut advance,
+                &mut write_gate,
+            )
+            .expect("non-transition gate write must remain available");
+
+            assert_eq!(*events.borrow(), vec!["write_gate"]);
+        }
+    }
+
+    #[test]
+    fn neutron_acl_fragment_epoch_bank_executor_enforces_commit_boundary() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let mut advance = || {
+            events.borrow_mut().push("advance_epoch");
+            Ok(())
+        };
+        let mut switch_bank = || {
+            events.borrow_mut().push("switch_bank");
+            Ok(())
+        };
+
+        execute_fragment_epoch_bank_publication(&mut advance, &mut switch_bank)
+            .expect("bank publication must commit");
+        assert_eq!(*events.borrow(), vec!["advance_epoch", "switch_bank"]);
+    }
+
+    #[test]
+    fn neutron_acl_fragment_epoch_bank_executor_preserves_failure_phase() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let mut advance = || {
+            events.borrow_mut().push("advance_epoch");
+            Err("epoch unavailable".to_string())
+        };
+        let mut switch_bank = || {
+            events.borrow_mut().push("switch_bank");
+            Ok(())
+        };
+        let advance_error = execute_fragment_epoch_bank_publication(
+            &mut advance,
+            &mut switch_bank,
+        )
+        .expect_err("failed epoch must prevent bank switch");
+        assert_eq!(
+            advance_error.phase(),
+            FragmentEpochPublicationFailurePhase::AdvanceEpoch
+        );
+        assert!(!advance_error.epoch_advanced());
+        assert_eq!(*events.borrow(), vec!["advance_epoch"]);
+
+        events.borrow_mut().clear();
+        let mut advance = || {
+            events.borrow_mut().push("advance_epoch");
+            Ok(())
+        };
+        let mut switch_bank = || {
+            events.borrow_mut().push("switch_bank");
+            Err("switch unavailable".to_string())
+        };
+        let switch_error = execute_fragment_epoch_bank_publication(
+            &mut advance,
+            &mut switch_bank,
+        )
+        .expect_err("failed bank switch must be reported");
+        assert_eq!(
+            switch_error.phase(),
+            FragmentEpochPublicationFailurePhase::Publish
+        );
+        assert!(switch_error.epoch_advanced());
+        assert_eq!(*events.borrow(), vec!["advance_epoch", "switch_bank"]);
+    }
+
+    #[test]
+    fn neutron_acl_fragment_epoch_gate_transition_classifies_real_state_change_only() {
+        assert_eq!(
+            acl_ct_config_gate_transition(true, false, Some(false), None),
+            FragmentEpochGateTransition::SemanticChange
+        );
+        assert_eq!(
+            acl_ct_config_gate_transition(false, true, None, Some(false)),
+            FragmentEpochGateTransition::SemanticChange
+        );
+        assert_eq!(
+            acl_ct_config_gate_transition(true, false, Some(true), None),
+            FragmentEpochGateTransition::EqualState
+        );
+        assert_eq!(
+            acl_ct_config_gate_transition(true, false, None, None),
+            FragmentEpochGateTransition::EqualState
+        );
+    }
+
+    #[test]
+    fn neutron_acl_managed_registration_cleanup_uses_typed_activation_phase() {
+        let mut failed_advance = || Err("epoch unavailable".to_string());
+        let mut unreachable_gate = || panic!("gate must not run after failed epoch");
+        let advance_error = execute_fragment_epoch_gate_transition(
+            FragmentEpochGateTransition::SemanticChange,
+            &mut failed_advance,
+            &mut unreachable_gate,
+        )
+        .expect_err("advance phase must fail");
+
+        let mut successful_advance = || Ok(());
+        let mut failed_gate = || Err("gate unavailable".to_string());
+        let gate_error = execute_fragment_epoch_gate_transition(
+            FragmentEpochGateTransition::SemanticChange,
+            &mut successful_advance,
+            &mut failed_gate,
+        )
+        .expect_err("gate phase must fail");
+
+        assert_eq!(
+            managed_registration_cleanup_gate_transition(true, Some(&advance_error)),
+            FragmentEpochGateTransition::SemanticChange
+        );
+        assert_eq!(
+            managed_registration_cleanup_gate_transition(true, Some(&gate_error)),
+            FragmentEpochGateTransition::EpochAlreadyAdvanced
+        );
+        assert_eq!(
+            managed_registration_cleanup_gate_transition(false, None),
+            FragmentEpochGateTransition::FreshInitialization
+        );
+        assert_eq!(
+            managed_registration_cleanup_gate_transition(true, None),
+            FragmentEpochGateTransition::SemanticChange
+        );
+    }
+
+    #[test]
     fn neutron_acl_recovery_readiness_establishes_epoch_even_when_gate_is_unchanged() {
         assert_eq!(
             managed_acl_gate_publication_steps(false, false, false, false, true),
