@@ -253,6 +253,13 @@ so a valid first fragment can replace live/expired/stale authority for fragment
 ID reuse. If insertion fails, remove a CT entry created by this packet and
 return the update-failed drop. Do not remove a pre-existing CT hit.
 
+Treat `BPF_ANY` as the required availability contract, not an implementation
+option: the newest valid, finally allowed first fragment wins. Do not replace it
+with permanent `BPF_NOEXIST`, delete-then-insert, or lookup-then-conditionally-
+insert logic. Document the bounded same-key overlap risk, but preserve the hard
+boundary that non-initial fragments without trustworthy context never invent
+ports or pass solely to improve availability.
+
 For ownership-safe cleanup, change `ct_create_v4` and `ct_create_v6` to use an
 atomic no-overwrite insert and return only whether this packet successfully
 inserted the entry. A pre-existing/racing entry or any insert failure is not

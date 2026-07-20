@@ -336,6 +336,27 @@ authority. The implementation does not claim that this theoretical collision
 is a proven authorization bypass because every later packet still traverses
 current CT/ACL policy with the recovered tuple.
 
+This is an explicit availability-first conflict contract, not an accidental
+map-update detail. An accepted first fragment is the freshest trustworthy
+authority, so it wins even when the old value has not yet expired. The packet
+path must not use permanent `BPF_NOEXIST`, delete-then-insert, or a pre-lookup
+followed by a conditional insert: those alternatives either let an expired
+entry block legitimate fragment-ID reuse, create an authority gap, or introduce
+a lookup/update race. `BPF_ANY` also means that overlapping datagrams which
+reuse the complete context key can be classified with the newest accepted
+ports; late fragments from the older datagram may therefore be allowed or
+dropped according to the newer tuple. We accept that bounded ambiguity to
+preserve normal forwarding, while keeping these safety limits:
+
+- only a completely parsed first fragment whose final pipeline action is pass
+  may publish or replace context;
+- a map update failure still drops that first fragment and removes only a CT
+  entry proven to have been created by the same packet;
+- a non-initial fragment never creates authority, guesses ports, or bypasses a
+  missing, expired, stale, overlapping, or otherwise invalid context;
+- expiry remains replace-on-next-valid-first-fragment rather than packet-path
+  deletion, so legal ID reuse is never dependent on a cleanup race.
+
 If the existing pipeline created a new CT entry before context insertion and
 the insertion then fails, the error path removes that transaction-created CT
 entry before returning drop. A pre-existing legitimate CT hit is not deleted.
