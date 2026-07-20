@@ -924,6 +924,29 @@ mod tests {
         assert_eq!(plan.old_bank, ACL_BANK_PRIMARY);
         assert_eq!(plan.shadow_bank, acl_next_bank(ACL_BANK_PRIMARY));
         assert_eq!(plan.publication_count, 1);
+        let stage = plan
+            .steps
+            .iter()
+            .position(|step| *step == StandaloneAclPublicationStep::StageShadow)
+            .unwrap();
+        let general = plan
+            .steps
+            .iter()
+            .position(|step| *step == StandaloneAclPublicationStep::ApplyGeneral)
+            .unwrap();
+        let epoch = plan
+            .steps
+            .iter()
+            .position(|step| *step == StandaloneAclPublicationStep::AdvanceFragmentEpoch)
+            .unwrap();
+        let switch = plan
+            .steps
+            .iter()
+            .position(|step| *step == StandaloneAclPublicationStep::SwitchBank)
+            .unwrap();
+        assert!(stage < epoch);
+        assert!(general < epoch);
+        assert!(epoch < switch);
         assert_eq!(
             plan.steps.last(),
             Some(&StandaloneAclPublicationStep::StrictCtScrub)
@@ -955,6 +978,13 @@ mod tests {
 
         assert_eq!(plan.publication_count, 1);
         assert_eq!(plan.accepted, 1);
+        assert_eq!(
+            plan.steps
+                .iter()
+                .filter(|step| **step == StandaloneAclPublicationStep::AdvanceFragmentEpoch)
+                .count(),
+            1
+        );
         assert!(plan.final_state.rules.iter().all(|rule| rule.action == 1));
     }
 
@@ -979,6 +1009,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.publication_count, 1);
+        assert_eq!(
+            plan.steps
+                .iter()
+                .filter(|step| **step == StandaloneAclPublicationStep::AdvanceFragmentEpoch)
+                .count(),
+            1
+        );
         assert!(plan.final_state.rules.is_empty());
     }
 
@@ -1006,12 +1043,18 @@ mod tests {
             .iter()
             .position(|step| *step == StandaloneAclPublicationStep::ApplyGeneral)
             .unwrap();
+        let epoch = plan
+            .steps
+            .iter()
+            .position(|step| *step == StandaloneAclPublicationStep::AdvanceFragmentEpoch)
+            .unwrap();
         let switch = plan
             .steps
             .iter()
             .position(|step| *step == StandaloneAclPublicationStep::SwitchBank)
             .unwrap();
-        assert!(general < switch);
+        assert!(general < epoch);
+        assert!(epoch < switch);
     }
 
     #[test]
@@ -1047,9 +1090,39 @@ mod tests {
         assert_eq!(
             plan.steps
                 .iter()
+                .filter(|step| **step == StandaloneAclPublicationStep::AdvanceFragmentEpoch)
+                .count(),
+            1
+        );
+        assert_eq!(
+            plan.steps
+                .iter()
                 .filter(|step| **step == StandaloneAclPublicationStep::SwitchBank)
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn standalone_acl_publication_semantic_noop_does_not_advance_fragment_epoch() {
+        let old = state_with_groups();
+        let plan = build_standalone_acl_publication_plan(&old, ACL_BANK_PRIMARY, &[]).unwrap();
+
+        assert!(!plan.semantic_changed);
+        assert_eq!(plan.publication_count, 0);
+        assert!(plan.steps.is_empty());
+    }
+
+    #[test]
+    fn standalone_acl_publication_epoch_failure_is_pre_switch_and_restores_preimages() {
+        assert_eq!(
+            standalone_acl_rollback_steps(StandaloneAclFailurePhase::AdvanceFragmentEpoch),
+            vec![
+                StandaloneAclRollbackStep::RestoreGeneralReverse,
+                StandaloneAclRollbackStep::ScrubFailedShadow,
+                StandaloneAclRollbackStep::CleanupCreatedBitmaps,
+                StandaloneAclRollbackStep::RestoreDurableState,
+            ],
         );
     }
 

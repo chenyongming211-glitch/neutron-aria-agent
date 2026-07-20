@@ -10468,7 +10468,7 @@ mod tests {
     fn managed_publication_step_counts(
         decision: &ManagedAclPublicationDecision,
         general_mutations: Vec<SharedNetworkMutation>,
-    ) -> (usize, usize, usize) {
+    ) -> (usize, usize, usize, usize) {
         let steps = managed_acl_publication_steps(decision, general_mutations);
         let general_writes = steps
             .iter()
@@ -10482,7 +10482,11 @@ mod tests {
             .iter()
             .filter(|step| matches!(step, ManagedAclPublicationStep::SwitchBank))
             .count();
-        (general_writes, shadow_stages, bank_switches)
+        let epoch_advances = steps
+            .iter()
+            .filter(|step| matches!(step, ManagedAclPublicationStep::AdvanceFragmentEpoch))
+            .count();
+        (general_writes, shadow_stages, epoch_advances, bank_switches)
     }
 
     #[test]
@@ -10519,6 +10523,22 @@ mod tests {
             managed_acl_publication_compensations(
                 &applied,
                 ManagedAclPublicationFailurePhase::Shadow,
+            ),
+            vec![
+                managed_expected_general_restore("dst"),
+                managed_expected_general_restore("src")
+            ]
+        );
+    }
+
+    #[test]
+    fn neutron_acl_epoch_failure_is_pre_switch_and_restores_general_preimages() {
+        let applied = vec![managed_replacement("src"), managed_replacement("dst")];
+
+        assert_eq!(
+            managed_acl_publication_compensations(
+                &applied,
+                ManagedAclPublicationFailurePhase::AdvanceFragmentEpoch,
             ),
             vec![
                 managed_expected_general_restore("dst"),
@@ -10826,6 +10846,20 @@ mod tests {
             steps.get(1),
             Some(&ManagedAclPublicationStep::ApplyGeneral(semantic_mutation))
         );
+        let stage = steps
+            .iter()
+            .position(|step| matches!(step, ManagedAclPublicationStep::StageShadow))
+            .unwrap();
+        let epoch = steps
+            .iter()
+            .position(|step| matches!(step, ManagedAclPublicationStep::AdvanceFragmentEpoch))
+            .unwrap();
+        let switch = steps
+            .iter()
+            .position(|step| matches!(step, ManagedAclPublicationStep::SwitchBank))
+            .unwrap();
+        assert!(stage < epoch);
+        assert!(epoch < switch);
     }
 
     #[test]
@@ -10858,7 +10892,7 @@ mod tests {
         );
         assert_eq!(
             managed_publication_step_counts(&decision, Vec::new()),
-            (0, 1, 1)
+            (0, 1, 1, 1)
         );
         assert_eq!(
             managed_acl_publication_decision(ProjectionDrift::Clean, false)
@@ -10910,7 +10944,7 @@ mod tests {
                     group_id: 999,
                 }],
             ),
-            (2, 1, 1)
+            (2, 1, 1, 1)
         );
         let applied: Vec<_> = managed_acl_publication_steps(&decision, Vec::new())
             .into_iter()
@@ -10936,6 +10970,73 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn neutron_acl_gate_disable_and_enable_each_fence_once() {
+        for steps in [
+            managed_acl_gate_publication_steps(true, true, false, false, false),
+            managed_acl_gate_publication_steps(false, false, true, true, false),
+        ] {
+            assert_eq!(
+                steps,
+                vec![
+                    ManagedAclGatePublicationStep::AdvanceFragmentEpoch,
+                    ManagedAclGatePublicationStep::PublishGate,
+                    ManagedAclGatePublicationStep::Persist,
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn neutron_acl_gate_semantic_noop_does_not_advance_epoch() {
+        assert!(managed_acl_gate_publication_steps(false, false, false, false, false).is_empty());
+        assert!(managed_acl_gate_publication_steps(true, true, true, true, false).is_empty());
+    }
+
+    #[test]
+    fn neutron_acl_recovery_readiness_establishes_epoch_even_when_gate_is_unchanged() {
+        assert_eq!(
+            managed_acl_gate_publication_steps(false, false, false, false, true),
+            vec![
+                ManagedAclGatePublicationStep::AdvanceFragmentEpoch,
+                ManagedAclGatePublicationStep::VerifyReadiness,
+            ]
+        );
+    }
+
+    #[test]
+    fn neutron_acl_managed_registration_establishes_epoch_before_gate_or_readiness() {
+        for activation in [
+            ManagedRuntimeActivation::PreserveVerifiedLive,
+            ManagedRuntimeActivation::RestoreStandalone {
+                conntrack: true,
+                acl: true,
+            },
+            ManagedRuntimeActivation::AwaitNeutronResync {
+                require_tc_acl_links: true,
+            },
+        ] {
+            let steps = managed_registration_publication_steps(activation);
+            assert_eq!(
+                steps.first(),
+                Some(&ManagedRegistrationPublicationStep::AdvanceFragmentEpoch)
+            );
+            assert_eq!(
+                steps
+                    .iter()
+                    .filter(|step| {
+                        **step == ManagedRegistrationPublicationStep::AdvanceFragmentEpoch
+                    })
+                    .count(),
+                1
+            );
+            assert_eq!(
+                steps.last(),
+                Some(&ManagedRegistrationPublicationStep::PublishReadiness)
+            );
+        }
     }
 
     #[test]
