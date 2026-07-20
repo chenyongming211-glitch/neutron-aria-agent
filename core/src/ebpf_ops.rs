@@ -58,8 +58,9 @@ pub use projection::{
 };
 pub use replay::{
     build_runtime_group_map_entries, collect_standalone_runtime_group_map_entries,
-    replay_managed_state_to_pinned_maps, replay_state, replay_state_from_snapshot,
-    replay_state_to_pinned_maps, GroupProjectionMode, RuntimeGroupMapEntries, RuntimeNetworkEntry,
+    replay_managed_compatibility_state_to_pinned_maps, replay_managed_state_to_pinned_maps,
+    replay_state, replay_state_from_snapshot, replay_state_to_pinned_maps, GroupProjectionMode,
+    RuntimeGroupMapEntries, RuntimeNetworkEntry,
 };
 pub use runtime::{
     clear_iface_ctx, delete_tap_config, read_acl_active_bank, read_firewall_config, read_iface_ctx,
@@ -67,17 +68,6 @@ pub use runtime::{
     update_firewall_config, update_runtime_config, write_tap_config,
 };
 pub use scrub::{scrub_acl_bank, scrub_managed_runtime_state, scrub_standalone_runtime_state};
-
-/// 加载一个新的 eBPF 对象，并设置 pin 路径以尝试复用已有 map。
-/// 仅用于 standalone/legacy 路径；共享 managed runtime 不能再走这个函数。
-pub fn load_bpf_with_pin(pin_path: &str, ebpf_path: &str) -> Result<aya::Ebpf, String> {
-    let bpf_bytes = std::fs::read(ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
-    let bpf = aya::EbpfLoader::new()
-        .map_pin_path(pin_path)
-        .load(&bpf_bytes)
-        .map_err(|e| format!("load ebpf: {}", e))?;
-    Ok(bpf)
-}
 
 const TAP_LPM_PREFIX_BITS: u32 = 32;
 

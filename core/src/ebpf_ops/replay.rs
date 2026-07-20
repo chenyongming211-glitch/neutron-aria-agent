@@ -636,6 +636,21 @@ pub fn replay_state_to_pinned_maps(pin_path: &str, state_path: &str) -> Result<(
         state_path,
         &state,
         GroupProjectionMode::StandaloneCompatibility,
+        crate::common::FRAGMENT_RUNTIME_MODE_STANDALONE,
+    )
+}
+
+pub fn replay_managed_compatibility_state_to_pinned_maps(
+    pin_path: &str,
+    state_path: &str,
+) -> Result<(), String> {
+    let state = crate::wal::load_with_wal(state_path);
+    replay_state_to_pinned_maps_from_snapshot_with_mode(
+        pin_path,
+        state_path,
+        &state,
+        GroupProjectionMode::StandaloneCompatibility,
+        crate::common::FRAGMENT_RUNTIME_MODE_MANAGED,
     )
 }
 
@@ -649,6 +664,7 @@ pub fn replay_managed_state_to_pinned_maps(
         state_path,
         state,
         GroupProjectionMode::Managed,
+        crate::common::FRAGMENT_RUNTIME_MODE_MANAGED,
     )
 }
 
@@ -657,6 +673,7 @@ fn replay_state_to_pinned_maps_from_snapshot_with_mode(
     state_path: &str,
     state: &FirewallState,
     mode: GroupProjectionMode,
+    fragment_runtime_mode: u8,
 ) -> Result<(), String> {
     let mut projection_errors = Vec::new();
     let group_entries = match build_runtime_group_map_entries(state, mode) {
@@ -674,12 +691,6 @@ fn replay_state_to_pinned_maps_from_snapshot_with_mode(
     };
     let tap_id = state.tap_id;
     let runtime = TapMapRuntime::new(pin_path, tap_id);
-    let fragment_runtime_mode = match mode {
-        GroupProjectionMode::StandaloneCompatibility => {
-            crate::common::FRAGMENT_RUNTIME_MODE_STANDALONE
-        }
-        GroupProjectionMode::Managed => crate::common::FRAGMENT_RUNTIME_MODE_MANAGED,
-    };
     validate_fragment_tracking_config_strict(pin_path, fragment_runtime_mode)
         .map_err(|error| format!("FRAGMENT_CONFIG: {}", error))?;
     let has_runtime_objects = !(group_entries.general_src.is_empty()

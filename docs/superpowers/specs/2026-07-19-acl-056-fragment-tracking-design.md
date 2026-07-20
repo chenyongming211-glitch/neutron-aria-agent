@@ -2,9 +2,9 @@
 
 Date: 2026-07-19
 
-Status: design direction approved and written specification self-reviewed on
-2026-07-19; pending user review; no RED test or production implementation has
-been committed
+Status: design approved; Tasks 1-4 are implemented on `v0.9-neutron-agent`
+with hosted CI evidence. Task 5 publication fencing, Task 6 guarded activation,
+and privileged field evidence remain pending.
 
 Analyzed target: `v0.9-neutron-agent@4e5197b`
 
@@ -215,8 +215,9 @@ ipv6_timeout_ns: u64
 
 The stable runtime modes are `managed` and `standalone`; zero or any unknown
 mode is invalid. Managed authority rejects `tap_id=0`, while standalone
-authority accepts only its stable `tap_id=0` identity. Configuration validity
-is checked before disabled handling. A valid disabled configuration still
+authority accepts only its stable `tap_id=0` identity. Configuration validity,
+including both IPv4 and IPv6 timeouts, is checked before disabled handling
+regardless of the current packet family. A valid disabled configuration still
 returns the stable tracking-disabled result, without evaluating enabled-only
 tap identity. Once guarded activation is implemented, enabled authority applies
 the mode-specific identity rule. Managed and standalone disabled defaults are
@@ -236,6 +237,13 @@ are map properties, not mutable packet-path configuration. Invalid versions,
 modes, padding, timeouts, or activation combinations prevent ACL/CT readiness.
 Userspace validation always receives the expected runtime mode, so a managed
 runtime cannot accept a standalone config or vice versa.
+
+Runtime identity and group projection are independent dimensions. Managed
+registration may use `StandaloneCompatibility` group projection while still
+requiring `FRAGMENT_CONFIG.runtime_mode=managed`. Fixed managed replay
+entrypoints always validate managed runtime identity; the true standalone replay
+entrypoint always validates standalone identity. Callers cannot derive fragment
+runtime identity from the selected projection mode.
 
 ### 5.6 Capacity and lifetime
 

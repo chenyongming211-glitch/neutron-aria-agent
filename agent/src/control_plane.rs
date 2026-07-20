@@ -19,7 +19,7 @@ use crate::trace_backend::{TraceManager, TraceRuntimeStatusSnapshot};
 use aria_core::common::TapMapRuntime;
 use aria_core::ebpf_ops::{
     classify_runtime_gate_state, compile_managed_group_projection, ensure_fq_qdisc,
-    replay_managed_state_to_pinned_maps, replay_state_to_pinned_maps,
+    replay_managed_compatibility_state_to_pinned_maps, replay_managed_state_to_pinned_maps,
     validate_managed_pinned_runtime_state, validate_pinned_runtime_state, FqQdiscState,
     GroupProjectionMode, ProjectionDrift, RuntimeGateDisposition, RuntimeGroupMapEntries,
     TraceMapMode,
@@ -4309,7 +4309,7 @@ impl ControlPlane {
 
             let replay_result = match projection_mode {
                 GroupProjectionMode::StandaloneCompatibility => {
-                    replay_state_to_pinned_maps(&pin_path, &state_path)
+                    replay_managed_compatibility_state_to_pinned_maps(&pin_path, &state_path)
                 }
                 GroupProjectionMode::Managed => {
                     replay_managed_state_to_pinned_maps(&pin_path, &state_path, &state)

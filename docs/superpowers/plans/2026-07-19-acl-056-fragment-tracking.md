@@ -288,6 +288,9 @@ Expected: fragment behavior passes and warning-denied eBPF build accepts bounded
 
 ### Task 4: Add Strict Userspace Epoch And Recovery Operations
 
+Status: implemented on `v0.9-neutron-agent` with hosted CI evidence. Fragment
+tracking remains disabled; Tasks 5-6 and privileged field evidence are pending.
+
 **Files:**
 - Create: `core/src/ebpf_ops/fragment.rs`
 - Create: `core/src/ebpf_ops/fragment_tests.rs`
@@ -303,7 +306,7 @@ Expected: fragment behavior passes and warning-denied eBPF build accepts bounded
 - Consumes: pinned map names and ABI from Tasks 2-3.
 - Produces: `read_fragment_epoch`, `advance_fragment_epoch_strict`, `configure_fragment_tracking`, `scrub_fragment_contexts_strict`, and inventory/recovery proof.
 
-- [ ] **Step 1: Write epoch and recovery RED tests**
+- [x] **Step 1: Write epoch and recovery RED tests**
 
 Use narrow injectable operations and in-memory fakes (not unprivileged fake
 pinned maps) to prove missing epoch map errors, `u64::MAX` wrap rejection,
@@ -314,7 +317,7 @@ Add ABI authority tests for version-2 managed/standalone runtime modes: managed
 enabled authority rejects `tap_id=0`, standalone enabled authority accepts its
 `tap_id=0`, unknown modes fail, and their disabled defaults are distinct.
 
-- [ ] **Step 2: Implement pinned operations**
+- [x] **Step 2: Implement pinned operations**
 
 Open maps by exact names and exact key/value types. `FragmentConfig` version 2
 uses explicit `runtime_mode` plus five zero padding bytes while preserving its
@@ -322,7 +325,7 @@ size and timeout offsets. `advance_fragment_epoch_strict` reads the per-tap
 entry, rejects max, inserts `current + 1`, and reads back the value to verify
 it. Missing/invalid maps return errors.
 
-- [ ] **Step 3: Integrate scrub and inventory**
+- [x] **Step 3: Integrate scrub and inventory**
 
 Add both context maps, epoch, config, and metrics to critical pin inventory and
 validate all five exact typed pins before readiness. Full tap scrub removes only
@@ -331,7 +334,7 @@ empty, and only then removes the tap epoch. Uncertain shared-runtime recovery
 writes the expected-mode disabled config before strictly clearing and verifying
 both global context maps.
 
-- [ ] **Step 4: Configure load-time capacity and disabled default**
+- [x] **Step 4: Configure load-time capacity and disabled default**
 
 Set both context map capacities through `EbpfLoader` before load, validate 8192
 default and positive configured values, then initialize version-2
@@ -340,9 +343,12 @@ Managed new/reused recovery requires managed mode; standalone recovery requires
 standalone mode. Generic ABI validation recognizes enabled values `0/1`, but
 Task 4 strict readiness/reuse/replay requires `enabled=0` and rejects a valid
 future enabled config as not ready. Task 4 does not enable tracking or advance
-publication epochs.
+publication epochs. Managed registration can retain standalone-compatible group
+projection without changing fragment runtime identity: both managed replay
+entrypoints validate `managed`, while only true standalone replay validates
+`standalone`.
 
-- [ ] **Step 5: Commit and push userspace GREEN**
+- [x] **Step 5: Commit and push userspace GREEN**
 
 ```bash
 /Users/chen/.cargo/bin/rustfmt --edition 2021 core/src/ebpf_ops.rs core/src/ebpf_ops/fragment.rs core/src/ebpf_ops/scrub.rs core/src/ebpf_ops/inventory.rs core/src/ebpf_ops/replay.rs agent/src/instance.rs

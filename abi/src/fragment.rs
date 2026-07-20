@@ -243,7 +243,7 @@ pub fn fragment_context_l4_proto(value: &FragmentContextValue) -> Option<u8> {
 #[inline(always)]
 pub fn fragment_authority_drop_reason(
     tap_id: u32,
-    is_ipv6: bool,
+    _is_ipv6: bool,
     config: Option<&FragmentConfig>,
     epoch: Option<&FragmentEpochValue>,
 ) -> u8 {
@@ -259,12 +259,11 @@ pub fn fragment_authority_drop_reason(
     {
         return DROP_FRAGMENT_CONFIG_INVALID;
     }
-    let timeout_ns = if is_ipv6 {
-        config.ipv6_timeout_ns
-    } else {
-        config.ipv4_timeout_ns
-    };
-    if timeout_ns < FRAGMENT_CONFIG_MIN_TIMEOUT_NS || timeout_ns > FRAGMENT_CONFIG_MAX_TIMEOUT_NS {
+    if config.ipv4_timeout_ns < FRAGMENT_CONFIG_MIN_TIMEOUT_NS
+        || config.ipv4_timeout_ns > FRAGMENT_CONFIG_MAX_TIMEOUT_NS
+        || config.ipv6_timeout_ns < FRAGMENT_CONFIG_MIN_TIMEOUT_NS
+        || config.ipv6_timeout_ns > FRAGMENT_CONFIG_MAX_TIMEOUT_NS
+    {
         return DROP_FRAGMENT_CONFIG_INVALID;
     }
     if config.enabled == FRAGMENT_CONFIG_DISABLED {
