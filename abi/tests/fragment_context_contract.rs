@@ -2,11 +2,11 @@ use aria_ebpf_abi::{
     fragment_context_disposition, fragment_context_flags_for_l4, fragment_context_l4_proto,
     fragment_install_result, fragment_resolve_decision, fragment_tracking_required, FragmentConfig,
     FragmentContextDisposition, FragmentContextKey4, FragmentContextValue, FragmentEpochValue,
-    FragmentInstallDecision, FragmentKind, FragmentResolveDecision, DROP_FRAGMENT_CONTEXT_EXPIRED,
-    DROP_FRAGMENT_CONTEXT_MISSING, DROP_FRAGMENT_CONTEXT_UPDATE_FAILED,
-    DROP_FRAGMENT_TRACKING_DISABLED, FRAGMENT_CONFIG_DISABLED, FRAGMENT_CONFIG_ENABLED,
-    FRAGMENT_CONFIG_VERSION, FRAGMENT_CONTEXT_FLAG_TCP, FRAGMENT_CONTEXT_VERSION,
-    FRAGMENT_METRIC_CONTEXT_EXPIRED, FRAGMENT_METRIC_CONTEXT_MISSING,
+    FragmentInstallDecision, FragmentKind, FragmentResolveDecision, PipelineCtx,
+    DROP_FRAGMENT_CONTEXT_EXPIRED, DROP_FRAGMENT_CONTEXT_MISSING,
+    DROP_FRAGMENT_CONTEXT_UPDATE_FAILED, DROP_FRAGMENT_TRACKING_DISABLED, FRAGMENT_CONFIG_DISABLED,
+    FRAGMENT_CONFIG_ENABLED, FRAGMENT_CONFIG_VERSION, FRAGMENT_CONTEXT_FLAG_TCP,
+    FRAGMENT_CONTEXT_VERSION, FRAGMENT_METRIC_CONTEXT_EXPIRED, FRAGMENT_METRIC_CONTEXT_MISSING,
     FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED, FRAGMENT_METRIC_TRACKING_DISABLED, IPPROTO_ICMP,
     IPPROTO_TCP, IPPROTO_UDP,
 };
@@ -265,7 +265,7 @@ fn fragment_resolve_exact_context_hit_returns_authoritative_ports() {
 }
 
 #[test]
-fn fragment_resolve_expired_context_requests_opportunistic_delete() {
+fn fragment_resolve_expired_context_drops_without_packet_path_delete() {
     let value = current_value();
     let decision = fragment_resolve_decision(
         77,
@@ -281,7 +281,19 @@ fn fragment_resolve_expired_context_requests_opportunistic_delete() {
     assert_eq!(decision, FragmentResolveDecision::DropExpired);
     assert_eq!(decision.drop_reason(), DROP_FRAGMENT_CONTEXT_EXPIRED);
     assert_eq!(decision.metric(), FRAGMENT_METRIC_CONTEXT_EXPIRED);
-    assert!(decision.delete_context());
+    assert!(!decision.delete_context());
+}
+
+#[test]
+fn pipeline_ctx_carries_one_packet_fragment_authority_snapshot() {
+    let mut pipeline = unsafe { core::mem::zeroed::<PipelineCtx>() };
+    pipeline.acl_bank_snapshot = 1;
+    pipeline.fragment_epoch_present = 1;
+    pipeline.fragment_epoch_snapshot = 19;
+
+    assert_eq!(pipeline.acl_bank_snapshot, 1);
+    assert_eq!(pipeline.fragment_epoch_present, 1);
+    assert_eq!(pipeline.fragment_epoch_snapshot, 19);
 }
 
 #[test]

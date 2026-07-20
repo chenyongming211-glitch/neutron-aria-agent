@@ -161,6 +161,62 @@ unsafe fn parse_v6(frame: &[u8]) -> parser::PacketInfo {
     out.assume_init()
 }
 
+fn classified_ip_family(frame: &[u8]) -> u8 {
+    unsafe {
+        parser::ethernet_ip_family(
+            frame.as_ptr() as usize,
+            frame.as_ptr() as usize + frame.len(),
+            0,
+        )
+    }
+}
+
+#[test]
+fn fragment_parser_non_ip_ethernet_remains_an_unsupported_pass_candidate() {
+    let mut frame = ethernet(0x0806);
+    frame.extend_from_slice(&[0; 28]);
+
+    assert_eq!(classified_ip_family(&frame), 0);
+}
+
+#[test]
+fn fragment_parser_incomplete_supported_ipv4_is_a_malformed_drop_candidate() {
+    let frame = ipv4_fragment(IPPROTO_UDP, 0x1234, 0, false, &[0; 4]);
+    let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
+
+    assert_eq!(classified_ip_family(&frame), 4);
+    assert!(!unsafe {
+        parser::parse_eth_ipv4(
+            frame.as_ptr() as usize,
+            frame.as_ptr() as usize + frame.len(),
+            0,
+            out.as_mut_ptr(),
+        )
+    });
+}
+
+#[test]
+fn fragment_parser_incomplete_vlan_ipv6_is_a_malformed_drop_candidate() {
+    let mut frame = vec![0; 12];
+    frame.extend_from_slice(&0x8100u16.to_be_bytes());
+    frame.extend_from_slice(&0u16.to_be_bytes());
+    frame.extend_from_slice(&0x86ddu16.to_be_bytes());
+    frame.extend_from_slice(&[0x60, 0, 0, 0, 0, 8, IPPROTO_UDP, 64]);
+    frame.extend_from_slice(&[0; 32]);
+    frame.extend_from_slice(&[0; 4]);
+    let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
+
+    assert_eq!(classified_ip_family(&frame), 6);
+    assert!(!unsafe {
+        parser::parse_eth_ipv6(
+            frame.as_ptr() as usize,
+            frame.as_ptr() as usize + frame.len(),
+            0,
+            out.as_mut_ptr(),
+        )
+    });
+}
+
 #[test]
 fn fragment_parser_ipv4_first_udp_keeps_ports_and_byte_offset() {
     let frame = ipv4_fragment(
