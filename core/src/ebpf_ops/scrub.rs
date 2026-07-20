@@ -286,6 +286,7 @@ fn scrub_runtime_state(runtime: TapMapRuntime<'_>, scope: &'static str) -> Resul
 
     removed += scrub_iface_ctx_entries(pin_path, tap_id)?;
     removed += scrub_tap_config_entries(pin_path, tap_id)?;
+    removed += scrub_fragment_contexts_strict(runtime)?;
 
     removed += scrub_lpm_v4_map(pin_path, "SRC_IPV4_TRIE", tap_id)?;
     removed += scrub_lpm_v4_map(pin_path, "DST_IPV4_TRIE", tap_id)?;

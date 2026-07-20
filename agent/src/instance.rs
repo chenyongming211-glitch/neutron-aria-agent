@@ -14,6 +14,7 @@ pub struct FirewallInstance {
     pub state_path: PathBuf,
     pub shared_runtime: bool,
     trace_map_mode: TraceMapMode,
+    fragment_context_capacity: u32,
     /// Whether FQ qdisc (EDT) was successfully configured.
     /// If false, QoS shaping is unavailable — only policing works.
     pub edt_available: bool,
@@ -22,6 +23,25 @@ pub struct FirewallInstance {
 const RUNTIME_METADATA_SCHEMA_VERSION: u32 = 2;
 const PERSISTED_LIVE_IFACES_SCHEMA_VERSION: u32 = 2;
 const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
+pub(crate) const DEFAULT_FRAGMENT_CONTEXT_CAPACITY: u32 = 8192;
+
+pub(crate) fn validate_fragment_context_capacity(capacity: u32) -> Result<u32, String> {
+    if capacity == 0 {
+        return Err("fragment context capacity must be positive".to_string());
+    }
+    Ok(capacity)
+}
+
+pub(crate) fn configure_fragment_context_capacity(
+    loader: &mut aya::EbpfLoader<'_>,
+    capacity: u32,
+) -> Result<(), String> {
+    let capacity = validate_fragment_context_capacity(capacity)?;
+    loader
+        .set_max_entries("FRAG_CONTEXT_V4", capacity)
+        .set_max_entries("FRAG_CONTEXT_V6", capacity);
+    Ok(())
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct RuntimePinState {
@@ -486,6 +506,7 @@ impl FirewallInstance {
             state_path,
             shared_runtime,
             trace_map_mode,
+            fragment_context_capacity: DEFAULT_FRAGMENT_CONTEXT_CAPACITY,
             edt_available: false,
         }
     }
@@ -994,7 +1015,9 @@ impl FirewallInstance {
 
         info!(instance = %self.iface, ebpf_path = %ebpf_path, "loading eBPF");
         let bpf_bytes = std::fs::read(ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
-        let mut bpf = aya::EbpfLoader::new()
+        let mut loader = aya::EbpfLoader::new();
+        configure_fragment_context_capacity(&mut loader, self.fragment_context_capacity)?;
+        let mut bpf = loader
             .map_pin_path(pin_path_str)
             .load(&bpf_bytes)
             .map_err(|e| format!("[{}] load error: {:?}", self.iface, e))?;
@@ -1002,6 +1025,8 @@ impl FirewallInstance {
         let loaded_optional_programs = self.load_runtime_programs(&mut bpf)?;
         self.pin_runtime_maps(&mut bpf, pin_path_str)
             .map_err(|e| format!("pin runtime maps failed: {}", e))?;
+        aria_core::ebpf_ops::recover_fragment_runtime_strict(pin_path_str)
+            .map_err(|e| format!("recover fragment runtime failed: {}", e))?;
         let present_program_pins =
             self.pin_runtime_programs(&mut bpf, pin_path_str, &loaded_optional_programs)?;
         let mut metadata = expected_metadata.clone();
@@ -1032,7 +1057,9 @@ impl FirewallInstance {
             "repairing missing optional runtime program pins"
         );
         let bpf_bytes = std::fs::read(ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
-        let mut bpf = aya::EbpfLoader::new()
+        let mut loader = aya::EbpfLoader::new();
+        configure_fragment_context_capacity(&mut loader, self.fragment_context_capacity)?;
+        let mut bpf = loader
             .map_pin_path(pin_path_str)
             .load(&bpf_bytes)
             .map_err(|e| format!("[{}] load for optional program repair: {:?}", self.iface, e))?;
@@ -1165,6 +1192,12 @@ impl FirewallInstance {
         }
         match self.validate_runtime_inventory(&expected_metadata) {
             RuntimeInventoryStatus::Healthy => {
+                aria_core::ebpf_ops::validate_fragment_tracking_config_strict(
+                    self.pin_path.to_str().ok_or_else(|| {
+                        format!("non-UTF-8 pin path: {}", self.pin_path.display())
+                    })?,
+                )
+                .map_err(|e| format!("fragment runtime config validation failed: {}", e))?;
                 let repaired_optional_pins =
                     self.repair_missing_optional_program_pins(ebpf_path)?;
                 if !repaired_optional_pins.is_empty() {

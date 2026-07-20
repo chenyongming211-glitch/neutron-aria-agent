@@ -13,6 +13,7 @@ use std::net::IpAddr;
 use tracing::{info, warn};
 
 mod attach;
+mod fragment;
 #[cfg(test)]
 mod fragment_tests;
 mod inventory;
@@ -26,6 +27,11 @@ mod scrub;
 pub use attach::{
     attach_tc_egress, attach_tc_ingress, check_fq_qdisc, cleanup_root_qdisc, detach_tc_egress,
     ensure_fq_qdisc, setup_fq_qdisc, FqQdiscState,
+};
+pub use fragment::{
+    advance_fragment_epoch_strict, clear_fragment_contexts_strict, configure_fragment_tracking,
+    initialize_fragment_tracking_disabled, read_fragment_epoch, recover_fragment_runtime_strict,
+    scrub_fragment_contexts_strict, validate_fragment_tracking_config_strict,
 };
 pub use inventory::{
     capture_general_network_owner, classify_managed_inventory_capture, classify_runtime_gate_state,

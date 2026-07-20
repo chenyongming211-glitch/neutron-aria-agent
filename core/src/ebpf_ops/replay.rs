@@ -674,6 +674,10 @@ fn replay_state_to_pinned_maps_from_snapshot_with_mode(
     };
     let tap_id = state.tap_id;
     let runtime = TapMapRuntime::new(pin_path, tap_id);
+    validate_fragment_tracking_config_strict(pin_path)
+        .map_err(|error| format!("FRAGMENT_CONFIG: {}", error))?;
+    advance_fragment_epoch_strict(pin_path, tap_id)
+        .map_err(|error| format!("FRAGMENT_EPOCH tap_id={}: {}", tap_id, error))?;
     let has_runtime_objects = !(group_entries.general_src.is_empty()
         && group_entries.general_dst.is_empty()
         && group_entries.acl_src.is_empty()

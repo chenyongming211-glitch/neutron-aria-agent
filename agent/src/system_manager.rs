@@ -1,6 +1,7 @@
 use crate::control_plane::ControlPlane;
 use crate::instance::{
-    preexisting_tc_acl_runtime_is_healthy, FirewallInstance, TcAclLinkHealth,
+    configure_fragment_context_capacity, preexisting_tc_acl_runtime_is_healthy, FirewallInstance,
+    TcAclLinkHealth, DEFAULT_FRAGMENT_CONTEXT_CAPACITY,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -558,7 +559,11 @@ pub async fn system_start(
             &ownership,
         )
     })?;
-    let mut bpf = aya::EbpfLoader::new()
+    let mut loader = aya::EbpfLoader::new();
+    configure_fragment_context_capacity(&mut loader, DEFAULT_FRAGMENT_CONTEXT_CAPACITY).map_err(
+        |error| start_error_with_cleanup(error, iface, pin_path, state_path, &ownership),
+    )?;
+    let mut bpf = loader
         .map_pin_path(pin_path)
         .load(&bpf_bytes)
         .map_err(|error| {
@@ -635,6 +640,15 @@ pub async fn system_start(
             &ownership,
         ));
     }
+    if let Err(e) = aria_core::ebpf_ops::recover_fragment_runtime_strict(pin_path) {
+        return Err(start_error_with_cleanup(
+            format!("failed to recover standalone fragment runtime: {}", e),
+            iface,
+            pin_path,
+            state_path,
+            &ownership,
+        ));
+    }
     let reuse_preexisting_tc = preexisting_tc_ingress_link
         && preexisting_tc_egress_link
         && preexisting_health.acl_ready();
@@ -669,6 +683,18 @@ pub async fn system_start(
     if let Err(e) = scrub_standalone_runtime_state(pin_path) {
         return Err(start_error_with_cleanup(
             format!("failed to scrub standalone runtime state before replay: {}", e),
+            iface,
+            pin_path,
+            state_path,
+            &ownership,
+        ));
+    }
+    if let Err(e) = aria_core::ebpf_ops::advance_fragment_epoch_strict(
+        pin_path,
+        aria_core::common::TAP_ID_UNASSIGNED,
+    ) {
+        return Err(start_error_with_cleanup(
+            format!("failed to establish standalone fragment epoch: {}", e),
             iface,
             pin_path,
             state_path,
