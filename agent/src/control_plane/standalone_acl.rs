@@ -745,8 +745,7 @@ async fn execute_standalone_publication(
 
     if let Err(error) = execute_fragment_epoch_bank_publication(
         &mut || {
-            aria_core::ebpf_ops::advance_fragment_epoch_strict(&pin_path, state.tap_id)
-                .map(|_| ())
+            advance_fragment_epoch_action(&pin_path, state.tap_id)
                 .map_err(|error| {
                     format!("advance standalone fragment publication epoch: {}", error)
                 })
