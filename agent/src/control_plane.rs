@@ -764,6 +764,35 @@ fn acl_ct_config_gate_transition(
     }
 }
 
+fn read_live_acl_ct_gate_transition(
+    requested_conntrack: Option<bool>,
+    requested_acl: Option<bool>,
+    read_gate: &mut dyn FnMut() -> Result<(bool, bool), String>,
+) -> Result<FragmentEpochGateTransition, String> {
+    let (actual_conntrack, actual_acl) = read_gate()?;
+    Ok(acl_ct_config_gate_transition(
+        actual_conntrack,
+        actual_acl,
+        requested_conntrack,
+        requested_acl,
+    ))
+}
+
+fn read_pinned_acl_ct_gate_transition(
+    runtime: TapMapRuntime<'_>,
+    requested_conntrack: Option<bool>,
+    requested_acl: Option<bool>,
+) -> Result<FragmentEpochGateTransition, String> {
+    read_live_acl_ct_gate_transition(requested_conntrack, requested_acl, &mut || {
+        aria_core::ebpf_ops::read_runtime_config(runtime).map(|actual| {
+            (
+                actual.conntrack_enabled != 0,
+                actual.acl_enabled != 0,
+            )
+        })
+    })
+}
+
 fn managed_registration_cleanup_gate_transition(
     preserve_existing_runtime: bool,
     activation_error: Option<&FragmentEpochPublicationFailure>,
@@ -3814,12 +3843,14 @@ impl ControlPlane {
             } => {
                 let mut state = instance_state.write().await;
                 if quiesce_acl_ct {
-                    let transition = acl_ct_config_gate_transition(
-                        state.state.conntrack_enabled,
-                        state.state.acl_enabled,
+                    let transition = read_pinned_acl_ct_gate_transition(
+                        state.map_runtime(),
                         Some(false),
                         Some(false),
-                    );
+                    )
+                    .map_err(|error| {
+                        format!("read live gate before managed ACL promotion: {}", error)
+                    })?;
                     let pin_path = state.pin_path.clone();
                     let tap_id = state.tap_id;
                     execute_pinned_acl_gate_transition(
@@ -3879,12 +3910,12 @@ impl ControlPlane {
             let current_mode = state.managed_acl_publication_mode;
             let runtime_pin_path = state.pin_path.clone();
             let runtime_tap_id = state.tap_id;
-            let transition = acl_ct_config_gate_transition(
-                state.state.conntrack_enabled,
-                state.state.acl_enabled,
+            let transition = read_pinned_acl_ct_gate_transition(
+                state.map_runtime(),
                 Some(false),
                 Some(false),
-            );
+            )
+            .map_err(|error| format!("read live gate before managed ACL demotion: {}", error))?;
             quiesce_managed_acl_demotion_before_build(
                 current_mode,
                 &mut state.managed_projection_health,
@@ -7976,6 +8007,17 @@ impl ControlPlane {
 
         let mut state = inst.write().await;
         Self::check_runtime_maps_ready(&state.pin_path)?;
+        let gate_transition = read_pinned_acl_ct_gate_transition(
+            state.map_runtime(),
+            conntrack,
+            acl,
+        )
+        .map_err(|error| {
+            ControlPlaneError::KernelError(format!(
+                "read live gate before local config update: {}",
+                error
+            ))
+        })?;
         if config_update_requires_tc(conntrack, acl) {
             Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
         }
@@ -7987,12 +8029,6 @@ impl ControlPlane {
         // For mirror, the kernel flag = user_wants_mirror && has_rules
         let kernel_mirror = mirror.map(|m| m && !state.state.mirror_rules.is_empty());
 
-        let gate_transition = acl_ct_config_gate_transition(
-            old_state.conntrack_enabled,
-            old_state.acl_enabled,
-            conntrack,
-            acl,
-        );
         let pin_path = state.pin_path.clone();
         let tap_id = state.tap_id;
         execute_fragment_epoch_gate_transition(
