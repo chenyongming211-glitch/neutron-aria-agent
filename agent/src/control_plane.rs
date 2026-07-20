@@ -8302,29 +8302,28 @@ mod tests {
 
     #[test]
     fn managed_projection_replay_mode_follows_attach_mode() {
-        assert_eq!(
-            managed_group_projection_mode(ManagedAttachMode::StandaloneRestoreAfterTcAttach),
-            aria_core::ebpf_ops::GroupProjectionMode::StandaloneCompatibility
-        );
-        assert_eq!(
-            managed_group_projection_mode(ManagedAttachMode::NeutronResyncRequired {
-                acl_managed: false,
-            }),
-            aria_core::ebpf_ops::GroupProjectionMode::StandaloneCompatibility
-        );
-        assert_eq!(
-            managed_group_projection_mode(ManagedAttachMode::NeutronResyncRequired {
-                acl_managed: true,
-            }),
-            aria_core::ebpf_ops::GroupProjectionMode::Managed
-        );
-    }
+        use aria_core::ebpf_ops::{FragmentRuntimeIdentity, GroupProjectionMode};
 
-    #[test]
-    fn managed_registration_never_uses_the_standalone_fragment_replay_entrypoint() {
-        let source = include_str!("control_plane.rs");
-        assert!(source.contains("replay_managed_compatibility_state_to_pinned_maps"));
-        assert!(!source.contains("replay_state_to_pinned_maps(&pin_path, &state_path)"));
+        let cases = [
+            (
+                ManagedAttachMode::StandaloneRestoreAfterTcAttach,
+                GroupProjectionMode::StandaloneCompatibility,
+            ),
+            (
+                ManagedAttachMode::NeutronResyncRequired { acl_managed: false },
+                GroupProjectionMode::StandaloneCompatibility,
+            ),
+            (
+                ManagedAttachMode::NeutronResyncRequired { acl_managed: true },
+                GroupProjectionMode::Managed,
+            ),
+        ];
+
+        for (attach_mode, expected_projection) in cases {
+            let route = managed_replay_route(attach_mode);
+            assert_eq!(route.fragment_runtime_identity(), FragmentRuntimeIdentity::Managed);
+            assert_eq!(route.projection_mode(), expected_projection);
+        }
     }
 
     #[test]

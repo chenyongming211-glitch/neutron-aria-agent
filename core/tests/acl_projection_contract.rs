@@ -2,10 +2,11 @@ use aria_core::ebpf_ops::{
     build_runtime_group_map_entries, classify_managed_inventory_capture,
     classify_runtime_gate_state, collect_standalone_runtime_group_map_entries,
     compile_managed_group_projection, plan_projection_drift,
-    replay_managed_compatibility_state_to_pinned_maps, CanonicalNetwork, CapturedProjection,
-    GeneralProjectionDisposition, GeneralProjectionExclusionReason, GroupProjectionMode,
-    ManagedGroupProjection, ProjectionDirection, ProjectionDrift, ProjectionEntry,
-    ProjectionMutation, RuntimeGateDisposition, RuntimeNetworkEntry,
+    replay_standalone_state_to_pinned_maps, CanonicalNetwork, CapturedProjection,
+    FragmentRuntimeIdentity, GeneralProjectionDisposition, GeneralProjectionExclusionReason,
+    GroupProjectionMode, ManagedGroupProjection, ManagedReplayRoute, ProjectionDirection,
+    ProjectionDrift, ProjectionEntry, ProjectionMutation, RuntimeGateDisposition,
+    RuntimeNetworkEntry, StandaloneReplayRoute,
 };
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
 use std::collections::BTreeSet;
@@ -86,8 +87,35 @@ fn entries(entries: &[ProjectionEntry]) -> BTreeSet<(String, u32)> {
 }
 
 #[test]
-fn managed_compatibility_replay_has_a_fixed_runtime_identity_entrypoint() {
-    let _: fn(&str, &str) -> Result<(), String> = replay_managed_compatibility_state_to_pinned_maps;
+fn managed_projection_replay_routes_cannot_mix_runtime_identity() {
+    let compatibility = ManagedReplayRoute::new(GroupProjectionMode::StandaloneCompatibility);
+    assert_eq!(
+        compatibility.fragment_runtime_identity(),
+        FragmentRuntimeIdentity::Managed
+    );
+    assert_eq!(
+        compatibility.projection_mode(),
+        GroupProjectionMode::StandaloneCompatibility
+    );
+
+    let managed = ManagedReplayRoute::new(GroupProjectionMode::Managed);
+    assert_eq!(
+        managed.fragment_runtime_identity(),
+        FragmentRuntimeIdentity::Managed
+    );
+    assert_eq!(managed.projection_mode(), GroupProjectionMode::Managed);
+
+    let standalone = StandaloneReplayRoute::new();
+    assert_eq!(
+        standalone.fragment_runtime_identity(),
+        FragmentRuntimeIdentity::Standalone
+    );
+    assert_eq!(
+        standalone.projection_mode(),
+        GroupProjectionMode::StandaloneCompatibility
+    );
+
+    let _: fn(&str, &str) -> Result<(), String> = replay_standalone_state_to_pinned_maps;
 }
 
 fn runtime_entries(entries: &[RuntimeNetworkEntry]) -> BTreeSet<(String, u8, u32)> {
