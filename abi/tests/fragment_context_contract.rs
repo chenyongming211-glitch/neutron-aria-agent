@@ -143,26 +143,37 @@ fn fragment_tracking_applies_only_to_real_tcp_udp_or_ambiguous_extension_fragmen
     assert!(fragment_tracking_required(
         FragmentKind::First as u8,
         IPPROTO_TCP,
+        false,
     ));
     assert!(fragment_tracking_required(
         FragmentKind::NonInitial as u8,
         IPPROTO_UDP,
+        true,
     ));
     assert!(fragment_tracking_required(
         FragmentKind::NonInitial as u8,
         60,
+        true,
+    ));
+    assert!(!fragment_tracking_required(
+        FragmentKind::NonInitial as u8,
+        60,
+        false,
     ));
     assert!(!fragment_tracking_required(
         FragmentKind::Unfragmented as u8,
         IPPROTO_TCP,
+        false,
     ));
     assert!(!fragment_tracking_required(
         FragmentKind::Atomic as u8,
         IPPROTO_TCP,
+        true,
     ));
     assert!(!fragment_tracking_required(
         FragmentKind::NonInitial as u8,
         IPPROTO_ICMP,
+        false,
     ));
 }
 
