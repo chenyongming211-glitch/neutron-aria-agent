@@ -8321,6 +8321,13 @@ mod tests {
     }
 
     #[test]
+    fn managed_registration_never_uses_the_standalone_fragment_replay_entrypoint() {
+        let source = include_str!("control_plane.rs");
+        assert!(source.contains("replay_managed_compatibility_state_to_pinned_maps"));
+        assert!(!source.contains("replay_state_to_pinned_maps(&pin_path, &state_path)"));
+    }
+
+    #[test]
     fn managed_projection_inventory_handoff_preserves_closed_results() {
         assert_eq!(
             preexisting_projection_verification(aria_core::ebpf_ops::ProjectionDrift::Clean),

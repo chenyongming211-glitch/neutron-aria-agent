@@ -1,7 +1,8 @@
 use aria_core::ebpf_ops::{
     build_runtime_group_map_entries, classify_managed_inventory_capture,
     classify_runtime_gate_state, collect_standalone_runtime_group_map_entries,
-    compile_managed_group_projection, plan_projection_drift, CanonicalNetwork, CapturedProjection,
+    compile_managed_group_projection, plan_projection_drift,
+    replay_managed_compatibility_state_to_pinned_maps, CanonicalNetwork, CapturedProjection,
     GeneralProjectionDisposition, GeneralProjectionExclusionReason, GroupProjectionMode,
     ManagedGroupProjection, ProjectionDirection, ProjectionDrift, ProjectionEntry,
     ProjectionMutation, RuntimeGateDisposition, RuntimeNetworkEntry,
@@ -82,6 +83,11 @@ fn entries(entries: &[ProjectionEntry]) -> BTreeSet<(String, u32)> {
         .iter()
         .map(|entry| (entry.network.to_string(), entry.group_id))
         .collect()
+}
+
+#[test]
+fn managed_compatibility_replay_has_a_fixed_runtime_identity_entrypoint() {
+    let _: fn(&str, &str) -> Result<(), String> = replay_managed_compatibility_state_to_pinned_maps;
 }
 
 fn runtime_entries(entries: &[RuntimeNetworkEntry]) -> BTreeSet<(String, u8, u32)> {

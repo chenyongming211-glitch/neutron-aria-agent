@@ -425,6 +425,28 @@ fn fragment_resolve_valid_disabled_config_precedes_enabled_identity_checks() {
 }
 
 #[test]
+fn fragment_resolve_validates_both_family_timeouts_before_disabled_or_tap_identity() {
+    let mut ipv4_packet_config = enabled_config();
+    ipv4_packet_config.ipv6_timeout_ns = 0;
+    let mut ipv6_packet_config = enabled_config();
+    ipv6_packet_config.ipv4_timeout_ns = 0;
+
+    for (is_ipv6, mut config) in [(false, ipv4_packet_config), (true, ipv6_packet_config)] {
+        config.enabled = FRAGMENT_CONFIG_DISABLED;
+        assert_eq!(
+            fragment_resolve_decision(0, is_ipv6, Some(&config), None, None, 0, 1_000, 1480),
+            FragmentResolveDecision::DropConfigInvalid,
+        );
+
+        config.enabled = FRAGMENT_CONFIG_ENABLED;
+        assert_eq!(
+            fragment_resolve_decision(0, is_ipv6, Some(&config), None, None, 0, 1_000, 1480),
+            FragmentResolveDecision::DropConfigInvalid,
+        );
+    }
+}
+
+#[test]
 fn fragment_insert_failure_drops_before_pass_and_removes_only_owned_ct() {
     let owned = fragment_install_result(false, true);
     assert_eq!(owned, FragmentInstallDecision::DropAndRemoveOwnedCt);
