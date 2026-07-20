@@ -5,12 +5,13 @@ use aya_ebpf::maps::{
 
 pub use crate::common::{
     CtConfig, CtContractKey, CtContractValue, CtKey4, CtKey6, CtValue, DropKey, DropValue,
-    FirewallConfig, FlowStatsValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue, IfaceCtx,
-    KernelDropConfig, KernelDropFilterValue, KernelDropKey, KernelDropValue, MirrorConfig,
-    MirrorKey, MirrorStatsValue, PipelineCtx, PolicyKey, PolicyValue, PortKey, QosConfig, QosKey,
-    QosStatsValue, RuleStatsValue, SslConnValue, SslErrorEvent, SslHttpScratch, SslHttpValue,
-    SslParseBuf, SslReadScratch, SslScratch, SslWriteScratch, TapConfig, TcpRtValue, TokenBucket,
-    TraceEvent, TraceEventKey, TraceEventV6, TraceFilter, TraceStreamEvent,
+    FirewallConfig, FlowStatsValue, FragmentConfig, FragmentContextKey4, FragmentContextKey6,
+    FragmentContextValue, FragmentEpochValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue,
+    IfaceCtx, KernelDropConfig, KernelDropFilterValue, KernelDropKey, KernelDropValue,
+    MirrorConfig, MirrorKey, MirrorStatsValue, PipelineCtx, PolicyKey, PolicyValue, PortKey,
+    QosConfig, QosKey, QosStatsValue, RuleStatsValue, SslConnValue, SslErrorEvent, SslHttpScratch,
+    SslHttpValue, SslParseBuf, SslReadScratch, SslScratch, SslWriteScratch, TapConfig, TcpRtValue,
+    TokenBucket, TraceEvent, TraceEventKey, TraceEventV6, TraceFilter, TraceStreamEvent,
 };
 use crate::parser::PacketInfo;
 
@@ -81,6 +82,25 @@ pub static CT_CONTRACT_STATS: PerCpuHashMap<CtContractKey, CtContractValue> =
 #[map(name = "CT_CONTRACT_VALUE_BUF")]
 pub static CT_CONTRACT_VALUE_BUF: PerCpuArray<CtContractValue> =
     PerCpuArray::with_max_entries(1, 0);
+
+// --- Fragment context ---
+
+#[map(name = "FRAG_CONTEXT_V4")]
+pub static FRAG_CONTEXT_V4: LruHashMap<FragmentContextKey4, FragmentContextValue> =
+    LruHashMap::with_max_entries(8192, 0);
+
+#[map(name = "FRAG_CONTEXT_V6")]
+pub static FRAG_CONTEXT_V6: LruHashMap<FragmentContextKey6, FragmentContextValue> =
+    LruHashMap::with_max_entries(8192, 0);
+
+#[map(name = "FRAGMENT_EPOCH")]
+pub static FRAGMENT_EPOCH: HashMap<u32, FragmentEpochValue> = HashMap::with_max_entries(1024, 0);
+
+#[map(name = "FRAGMENT_CONFIG")]
+pub static FRAGMENT_CONFIG: HashMap<u32, FragmentConfig> = HashMap::with_max_entries(1, 0);
+
+#[map(name = "FRAGMENT_METRICS")]
+pub static FRAGMENT_METRICS: PerCpuArray<u64> = PerCpuArray::with_max_entries(64, 0);
 
 // 全局配置：特性开关等（key=0）
 #[map(name = "FIREWALL_CONFIG")]

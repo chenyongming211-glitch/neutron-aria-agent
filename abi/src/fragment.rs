@@ -11,6 +11,47 @@ pub const FRAGMENT_CONTEXT_VERSION: u8 = 1;
 pub const FRAGMENT_CONFIG_VERSION: u8 = 1;
 pub const FRAGMENT_CONFIG_DISABLED: u8 = 0;
 pub const FRAGMENT_CONFIG_ENABLED: u8 = 1;
+pub const FRAGMENT_CONFIG_MIN_TIMEOUT_NS: u64 = 1_000_000_000;
+pub const FRAGMENT_CONFIG_MAX_TIMEOUT_NS: u64 = 60_000_000_000;
+
+pub const FRAGMENT_CONTEXT_FLAG_UDP: u8 = 0;
+pub const FRAGMENT_CONTEXT_FLAG_TCP: u8 = 1;
+
+pub const DROP_FRAGMENT_CONFIG_MISSING: u8 = 6;
+pub const DROP_FRAGMENT_TRACKING_DISABLED: u8 = 7;
+pub const DROP_FRAGMENT_CONFIG_INVALID: u8 = 8;
+pub const DROP_FRAGMENT_EPOCH_MISSING: u8 = 9;
+pub const DROP_FRAGMENT_CONTEXT_MISSING: u8 = 10;
+pub const DROP_FRAGMENT_CONTEXT_INVALID: u8 = 11;
+pub const DROP_FRAGMENT_CONTEXT_EXPIRED: u8 = 12;
+pub const DROP_FRAGMENT_CONTEXT_STALE: u8 = 13;
+pub const DROP_FRAGMENT_CONTEXT_OVERLAP: u8 = 14;
+pub const DROP_FRAGMENT_CONTEXT_UPDATE_FAILED: u8 = 15;
+pub const DROP_FRAGMENT_TAP_UNASSIGNED: u8 = 16;
+pub const DROP_FRAGMENT_EXPIRY_OVERFLOW: u8 = 17;
+
+pub const FRAGMENT_METRIC_FIRST: u8 = 1;
+pub const FRAGMENT_METRIC_NON_INITIAL: u8 = 2;
+pub const FRAGMENT_METRIC_CONTEXT_HIT: u8 = 3;
+pub const FRAGMENT_METRIC_CONFIG_MISSING: u8 = 4;
+pub const FRAGMENT_METRIC_TRACKING_DISABLED: u8 = 5;
+pub const FRAGMENT_METRIC_CONFIG_INVALID: u8 = 6;
+pub const FRAGMENT_METRIC_EPOCH_MISSING: u8 = 7;
+pub const FRAGMENT_METRIC_CONTEXT_MISSING: u8 = 8;
+pub const FRAGMENT_METRIC_CONTEXT_INVALID: u8 = 9;
+pub const FRAGMENT_METRIC_CONTEXT_EXPIRED: u8 = 10;
+pub const FRAGMENT_METRIC_CONTEXT_STALE: u8 = 11;
+pub const FRAGMENT_METRIC_CONTEXT_OVERLAP: u8 = 12;
+pub const FRAGMENT_METRIC_CONTEXT_INSERTED: u8 = 13;
+pub const FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED: u8 = 14;
+pub const FRAGMENT_METRIC_TAP_UNASSIGNED: u8 = 15;
+pub const FRAGMENT_METRIC_EXPIRY_OVERFLOW: u8 = 16;
+
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const IPPROTO_HOPOPTS: u8 = 0;
+const IPPROTO_ROUTING: u8 = 43;
+const IPPROTO_DSTOPTS: u8 = 60;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -95,6 +136,216 @@ pub enum FragmentContextDisposition {
     Expired = 2,
     Stale = 3,
     Overlap = 4,
+}
+
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FragmentResolveDecision {
+    Hit = 0,
+    DropConfigMissing = DROP_FRAGMENT_CONFIG_MISSING,
+    DropTrackingDisabled = DROP_FRAGMENT_TRACKING_DISABLED,
+    DropConfigInvalid = DROP_FRAGMENT_CONFIG_INVALID,
+    DropEpochMissing = DROP_FRAGMENT_EPOCH_MISSING,
+    DropContextMissing = DROP_FRAGMENT_CONTEXT_MISSING,
+    DropContextInvalid = DROP_FRAGMENT_CONTEXT_INVALID,
+    DropExpired = DROP_FRAGMENT_CONTEXT_EXPIRED,
+    DropContextStale = DROP_FRAGMENT_CONTEXT_STALE,
+    DropOverlap = DROP_FRAGMENT_CONTEXT_OVERLAP,
+    DropTapUnassigned = DROP_FRAGMENT_TAP_UNASSIGNED,
+}
+
+impl FragmentResolveDecision {
+    #[inline(always)]
+    pub fn drop_reason(self) -> u8 {
+        self as u8
+    }
+
+    #[inline(always)]
+    pub fn metric(self) -> u8 {
+        match self {
+            Self::Hit => FRAGMENT_METRIC_CONTEXT_HIT,
+            _ => fragment_metric_for_drop_reason(self.drop_reason()),
+        }
+    }
+
+    #[inline(always)]
+    pub fn delete_context(self) -> bool {
+        matches!(self, Self::DropExpired)
+    }
+}
+
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FragmentInstallDecision {
+    Pass = 0,
+    DropKeepCt = 1,
+    DropAndRemoveOwnedCt = 2,
+}
+
+impl FragmentInstallDecision {
+    #[inline(always)]
+    pub fn drop_reason(self) -> u8 {
+        match self {
+            Self::Pass => 0,
+            Self::DropKeepCt | Self::DropAndRemoveOwnedCt => DROP_FRAGMENT_CONTEXT_UPDATE_FAILED,
+        }
+    }
+
+    #[inline(always)]
+    pub fn metric(self) -> u8 {
+        match self {
+            Self::Pass => FRAGMENT_METRIC_CONTEXT_INSERTED,
+            Self::DropKeepCt | Self::DropAndRemoveOwnedCt => FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED,
+        }
+    }
+
+    #[inline(always)]
+    pub fn remove_created_ct(self) -> bool {
+        matches!(self, Self::DropAndRemoveOwnedCt)
+    }
+}
+
+#[inline(always)]
+pub fn fragment_tracking_required(fragment_kind: u8, fragment_proto: u8) -> bool {
+    let real_fragment = fragment_kind == FragmentKind::First as u8
+        || fragment_kind == FragmentKind::NonInitial as u8;
+    real_fragment
+        && matches!(
+            fragment_proto,
+            IPPROTO_TCP | IPPROTO_UDP | IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS
+        )
+}
+
+#[inline(always)]
+pub fn fragment_context_flags_for_l4(proto: u8) -> Option<u8> {
+    match proto {
+        IPPROTO_UDP => Some(FRAGMENT_CONTEXT_FLAG_UDP),
+        IPPROTO_TCP => Some(FRAGMENT_CONTEXT_FLAG_TCP),
+        _ => None,
+    }
+}
+
+#[inline(always)]
+pub fn fragment_context_l4_proto(value: &FragmentContextValue) -> Option<u8> {
+    match value.flags {
+        FRAGMENT_CONTEXT_FLAG_UDP => Some(IPPROTO_UDP),
+        FRAGMENT_CONTEXT_FLAG_TCP => Some(IPPROTO_TCP),
+        _ => None,
+    }
+}
+
+#[inline(always)]
+pub fn fragment_authority_drop_reason(
+    tap_id: u32,
+    is_ipv6: bool,
+    config: Option<&FragmentConfig>,
+    epoch: Option<&FragmentEpochValue>,
+) -> u8 {
+    if tap_id == 0 {
+        return DROP_FRAGMENT_TAP_UNASSIGNED;
+    }
+    let config = match config {
+        Some(config) => config,
+        None => return DROP_FRAGMENT_CONFIG_MISSING,
+    };
+    if config.version != FRAGMENT_CONFIG_VERSION
+        || (config.enabled != FRAGMENT_CONFIG_DISABLED && config.enabled != FRAGMENT_CONFIG_ENABLED)
+    {
+        return DROP_FRAGMENT_CONFIG_INVALID;
+    }
+    if config.enabled == FRAGMENT_CONFIG_DISABLED {
+        return DROP_FRAGMENT_TRACKING_DISABLED;
+    }
+    let timeout_ns = if is_ipv6 {
+        config.ipv6_timeout_ns
+    } else {
+        config.ipv4_timeout_ns
+    };
+    if timeout_ns < FRAGMENT_CONFIG_MIN_TIMEOUT_NS
+        || timeout_ns > FRAGMENT_CONFIG_MAX_TIMEOUT_NS
+    {
+        return DROP_FRAGMENT_CONFIG_INVALID;
+    }
+    if epoch.is_none() {
+        return DROP_FRAGMENT_EPOCH_MISSING;
+    }
+    0
+}
+
+#[inline(always)]
+pub fn fragment_metric_for_drop_reason(drop_reason: u8) -> u8 {
+    match drop_reason {
+        DROP_FRAGMENT_CONFIG_MISSING => FRAGMENT_METRIC_CONFIG_MISSING,
+        DROP_FRAGMENT_TRACKING_DISABLED => FRAGMENT_METRIC_TRACKING_DISABLED,
+        DROP_FRAGMENT_CONFIG_INVALID => FRAGMENT_METRIC_CONFIG_INVALID,
+        DROP_FRAGMENT_EPOCH_MISSING => FRAGMENT_METRIC_EPOCH_MISSING,
+        DROP_FRAGMENT_CONTEXT_MISSING => FRAGMENT_METRIC_CONTEXT_MISSING,
+        DROP_FRAGMENT_CONTEXT_INVALID => FRAGMENT_METRIC_CONTEXT_INVALID,
+        DROP_FRAGMENT_CONTEXT_EXPIRED => FRAGMENT_METRIC_CONTEXT_EXPIRED,
+        DROP_FRAGMENT_CONTEXT_STALE => FRAGMENT_METRIC_CONTEXT_STALE,
+        DROP_FRAGMENT_CONTEXT_OVERLAP => FRAGMENT_METRIC_CONTEXT_OVERLAP,
+        DROP_FRAGMENT_CONTEXT_UPDATE_FAILED => FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED,
+        DROP_FRAGMENT_TAP_UNASSIGNED => FRAGMENT_METRIC_TAP_UNASSIGNED,
+        DROP_FRAGMENT_EXPIRY_OVERFLOW => FRAGMENT_METRIC_EXPIRY_OVERFLOW,
+        _ => 0,
+    }
+}
+
+#[inline(always)]
+pub fn fragment_resolve_decision(
+    tap_id: u32,
+    is_ipv6: bool,
+    config: Option<&FragmentConfig>,
+    epoch: Option<&FragmentEpochValue>,
+    value: Option<&FragmentContextValue>,
+    active_bank: u8,
+    now_ns: u64,
+    fragment_offset: u16,
+) -> FragmentResolveDecision {
+    match fragment_authority_drop_reason(tap_id, is_ipv6, config, epoch) {
+        0 => {}
+        DROP_FRAGMENT_TAP_UNASSIGNED => return FragmentResolveDecision::DropTapUnassigned,
+        DROP_FRAGMENT_CONFIG_MISSING => return FragmentResolveDecision::DropConfigMissing,
+        DROP_FRAGMENT_TRACKING_DISABLED => {
+            return FragmentResolveDecision::DropTrackingDisabled;
+        }
+        DROP_FRAGMENT_CONFIG_INVALID => return FragmentResolveDecision::DropConfigInvalid,
+        DROP_FRAGMENT_EPOCH_MISSING => return FragmentResolveDecision::DropEpochMissing,
+        _ => return FragmentResolveDecision::DropConfigInvalid,
+    }
+
+    let value = match value {
+        Some(value) => value,
+        None => return FragmentResolveDecision::DropContextMissing,
+    };
+    if fragment_context_l4_proto(value).is_none() {
+        return FragmentResolveDecision::DropContextInvalid;
+    }
+    let active_epoch = match epoch {
+        Some(epoch) => epoch.epoch,
+        None => return FragmentResolveDecision::DropEpochMissing,
+    };
+    match fragment_context_disposition(value, active_bank, active_epoch, now_ns, fragment_offset) {
+        FragmentContextDisposition::Hit => FragmentResolveDecision::Hit,
+        FragmentContextDisposition::InvalidVersion => FragmentResolveDecision::DropContextInvalid,
+        FragmentContextDisposition::Expired => FragmentResolveDecision::DropExpired,
+        FragmentContextDisposition::Stale => FragmentResolveDecision::DropContextStale,
+        FragmentContextDisposition::Overlap => FragmentResolveDecision::DropOverlap,
+    }
+}
+
+#[inline(always)]
+pub fn fragment_install_result(
+    context_insert_succeeded: bool,
+    ct_created_by_packet: bool,
+) -> FragmentInstallDecision {
+    if context_insert_succeeded {
+        FragmentInstallDecision::Pass
+    } else if ct_created_by_packet {
+        FragmentInstallDecision::DropAndRemoveOwnedCt
+    } else {
+        FragmentInstallDecision::DropKeepCt
+    }
 }
 
 #[inline(always)]

@@ -4,6 +4,7 @@ use crate::common::{
     IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP,
 };
 use crate::maps::{CT_CONFIG, CT_TABLE_V4, CT_TABLE_V6};
+use aya_ebpf::bindings::BPF_NOEXIST;
 
 // Default timeouts in nanoseconds
 const DEFAULT_TCP_ESTABLISHED_NS: u64 = 300_000_000_000; // 300s
@@ -267,9 +268,9 @@ pub unsafe fn ct_create_v4(
     pkt_len: u32,
     matched: &MatchedPolicy,
     acl_evaluated: bool,
-) {
+) -> bool {
     if !crate::runtime::conntrack_enabled(key.tap_id) {
-        return;
+        return false;
     }
     let val = CtValue {
         state: CT_NEW,
@@ -292,7 +293,9 @@ pub unsafe fn ct_create_v4(
         pkt_count: 1,
         byte_count: pkt_len as u64,
     };
-    let _ = CT_TABLE_V4.insert(key, &val, 0);
+    // Atomic no-overwrite makes the first successful insert the only packet
+    // allowed to claim ownership for a later fragment-install rollback.
+    CT_TABLE_V4.insert(key, &val, BPF_NOEXIST as u64).is_ok()
 }
 
 /// Create a new CT entry for IPv6 with matched policy info.
@@ -303,9 +306,9 @@ pub unsafe fn ct_create_v6(
     pkt_len: u32,
     matched: &MatchedPolicy,
     acl_evaluated: bool,
-) {
+) -> bool {
     if !crate::runtime::conntrack_enabled(key.tap_id) {
-        return;
+        return false;
     }
     let val = CtValue {
         state: CT_NEW,
@@ -328,5 +331,20 @@ pub unsafe fn ct_create_v6(
         pkt_count: 1,
         byte_count: pkt_len as u64,
     };
-    let _ = CT_TABLE_V6.insert(key, &val, 0);
+    // A racing existing entry is never owned by this packet.
+    CT_TABLE_V6.insert(key, &val, BPF_NOEXIST as u64).is_ok()
+}
+
+#[inline(always)]
+pub unsafe fn ct_remove_created_v4(key: &CtKey4, created_by_packet: bool) {
+    if created_by_packet {
+        let _ = CT_TABLE_V4.remove(key);
+    }
+}
+
+#[inline(always)]
+pub unsafe fn ct_remove_created_v6(key: &CtKey6, created_by_packet: bool) {
+    if created_by_packet {
+        let _ = CT_TABLE_V6.remove(key);
+    }
 }
