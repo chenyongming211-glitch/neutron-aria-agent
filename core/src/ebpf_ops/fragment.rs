@@ -24,6 +24,41 @@ pub(super) enum FragmentRuntimeMapKind {
     MetricsPerCpuArrayU64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FragmentRuntimeRecoveryError {
+    DisabledTerminalStateProven(String),
+    DisabledTerminalStateUnproven(String),
+}
+
+impl FragmentRuntimeRecoveryError {
+    pub fn is_disabled_terminal_state_unproven(&self) -> bool {
+        matches!(self, Self::DisabledTerminalStateUnproven(_))
+    }
+
+    pub fn contains(&self, pattern: &str) -> bool {
+        self.to_string().contains(pattern)
+    }
+}
+
+impl std::fmt::Display for FragmentRuntimeRecoveryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DisabledTerminalStateProven(error) => write!(
+                formatter,
+                "fragment_runtime_recovery_failed_disabled_terminal_state_proven: {}",
+                error
+            ),
+            Self::DisabledTerminalStateUnproven(error) => write!(
+                formatter,
+                "fragment_runtime_disabled_terminal_state_unproven: {}",
+                error
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FragmentRuntimeRecoveryError {}
+
 fn require_fragment_map_type(
     map_data: &MapData,
     map_name: &str,
@@ -429,13 +464,14 @@ pub(super) fn recover_fragment_runtime_configured_with<Validate, Configure, Scru
     validate_maps_and_capacity: Validate,
     mut configure: Configure,
     scrub: Scrub,
-) -> Result<u64, String>
+) -> Result<u64, FragmentRuntimeRecoveryError>
 where
     Validate: FnOnce() -> Result<(), String>,
     Configure: FnMut(FragmentConfig) -> Result<(), String>,
     Scrub: FnOnce() -> Result<u64, String>,
 {
-    validate_maps_and_capacity()?;
+    validate_maps_and_capacity()
+        .map_err(FragmentRuntimeRecoveryError::DisabledTerminalStateUnproven)?;
 
     let mut staging_config = expected_config;
     staging_config.enabled = FRAGMENT_CONFIG_DISABLED;
@@ -444,28 +480,51 @@ where
             "stage disabled FRAGMENT_CONFIG before recovery: {}",
             staging_error
         )];
-        if let Err(compensation_error) = configure(staging_config) {
-            errors.push(format!(
-                "restore disabled FRAGMENT_CONFIG after staging failure: {}",
-                compensation_error
-            ));
-        }
-        return Err(errors.join("; "));
+        return match configure(staging_config) {
+            Ok(()) => Err(FragmentRuntimeRecoveryError::DisabledTerminalStateProven(
+                errors.join("; "),
+            )),
+            Err(compensation_error) => {
+                errors.push(format!(
+                    "restore disabled FRAGMENT_CONFIG after staging failure: {}",
+                    compensation_error
+                ));
+                Err(
+                    FragmentRuntimeRecoveryError::DisabledTerminalStateUnproven(
+                        errors.join("; "),
+                    ),
+                )
+            }
+        };
     }
 
-    let removed = scrub()?;
+    let removed = scrub().map_err(|error| {
+        FragmentRuntimeRecoveryError::DisabledTerminalStateProven(format!(
+            "scrub fragment contexts during recovery: {}",
+            error
+        ))
+    })?;
     if let Err(publication_error) = configure(expected_config) {
         let mut errors = vec![format!(
             "publish final FRAGMENT_CONFIG after recovery: {}",
             publication_error
         )];
-        if let Err(compensation_error) = configure(staging_config) {
-            errors.push(format!(
-                "restore disabled FRAGMENT_CONFIG after publication failure: {}",
-                compensation_error
-            ));
-        }
-        return Err(errors.join("; "));
+        return match configure(staging_config) {
+            Ok(()) => Err(FragmentRuntimeRecoveryError::DisabledTerminalStateProven(
+                errors.join("; "),
+            )),
+            Err(compensation_error) => {
+                errors.push(format!(
+                    "restore disabled FRAGMENT_CONFIG after publication failure: {}",
+                    compensation_error
+                ));
+                Err(
+                    FragmentRuntimeRecoveryError::DisabledTerminalStateUnproven(
+                        errors.join("; "),
+                    ),
+                )
+            }
+        };
     }
 
     Ok(removed)
@@ -611,7 +670,7 @@ pub fn recover_fragment_runtime_configured_strict(
     pin_path: &str,
     expected_config: FragmentConfig,
     expected_max_entries: u32,
-) -> Result<u64, String> {
+) -> Result<u64, FragmentRuntimeRecoveryError> {
     recover_fragment_runtime_configured_with(
         expected_config,
         || {
