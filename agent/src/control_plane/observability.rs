@@ -237,3 +237,28 @@ impl ControlPlane {
         self.kernel_drop_manager.status_snapshot().await
     }
 }
+
+#[cfg(test)]
+mod fragment_metrics_tests {
+    use super::unique_fragment_runtime_paths;
+
+    #[test]
+    fn fragment_loader_metrics_aggregate_each_runtime_pin_path_once() {
+        let paths = unique_fragment_runtime_paths([
+            "/sys/fs/bpf/aria/global-v2",
+            "/sys/fs/bpf/aria/tap-a",
+            "/sys/fs/bpf/aria/global-v2",
+            "/sys/fs/bpf/aria/tap-b",
+            "/sys/fs/bpf/aria/tap-a",
+        ]);
+
+        assert_eq!(
+            paths,
+            vec![
+                "/sys/fs/bpf/aria/global-v2".to_string(),
+                "/sys/fs/bpf/aria/tap-a".to_string(),
+                "/sys/fs/bpf/aria/tap-b".to_string(),
+            ]
+        );
+    }
+}

@@ -664,7 +664,120 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{ct_contract_hook_to_string, ct_contract_reason_to_string};
+    use super::{
+        ct_contract_hook_to_string, ct_contract_reason_to_string, fragment_metric_label,
+        write_fragment_runtime_metrics,
+    };
+
+    #[test]
+    fn fragment_loader_metrics_labels_and_invalid_l4_identifier_are_exact() {
+        use aria_core::common::{
+            fragment_metric_for_drop_reason, DROP_FRAGMENT_CONTEXT_INVALID,
+            DROP_FRAGMENT_INVALID_L4, DROP_MALFORMED_IP, FRAGMENT_METRIC_CONTEXT_EXPIRED,
+            FRAGMENT_METRIC_CONTEXT_HIT, FRAGMENT_METRIC_CONTEXT_MISSING,
+            FRAGMENT_METRIC_CONTEXT_OVERLAP, FRAGMENT_METRIC_CONTEXT_STALE,
+            FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED, FRAGMENT_METRIC_FIRST,
+            FRAGMENT_METRIC_INVALID_L4, FRAGMENT_METRIC_NON_INITIAL,
+        };
+
+        assert_ne!(DROP_FRAGMENT_INVALID_L4, DROP_MALFORMED_IP);
+        assert_ne!(DROP_FRAGMENT_INVALID_L4, DROP_FRAGMENT_CONTEXT_INVALID);
+        assert_eq!(
+            fragment_metric_for_drop_reason(DROP_FRAGMENT_INVALID_L4),
+            FRAGMENT_METRIC_INVALID_L4
+        );
+        assert_eq!(
+            [
+                FRAGMENT_METRIC_FIRST,
+                FRAGMENT_METRIC_NON_INITIAL,
+                FRAGMENT_METRIC_CONTEXT_HIT,
+                FRAGMENT_METRIC_CONTEXT_MISSING,
+                FRAGMENT_METRIC_CONTEXT_EXPIRED,
+                FRAGMENT_METRIC_CONTEXT_STALE,
+                FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED,
+                FRAGMENT_METRIC_INVALID_L4,
+                FRAGMENT_METRIC_CONTEXT_OVERLAP,
+            ]
+            .map(fragment_metric_label),
+            [
+                Some("first"),
+                Some("non_initial"),
+                Some("hit"),
+                Some("miss"),
+                Some("expired"),
+                Some("stale"),
+                Some("update_failed"),
+                Some("invalid_l4"),
+                Some("overlap"),
+            ]
+        );
+    }
+
+    #[test]
+    fn fragment_loader_metrics_index_is_shared_by_family() {
+        use aria_core::common::{
+            fragment_metric_index, FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6,
+            FRAGMENT_METRIC_FIRST, FRAGMENT_METRIC_INVALID_L4,
+        };
+
+        assert_eq!(
+            fragment_metric_index(FRAGMENT_METRIC_FIRST, FRAGMENT_FAMILY_IPV4),
+            Some(2)
+        );
+        assert_eq!(
+            fragment_metric_index(FRAGMENT_METRIC_FIRST, FRAGMENT_FAMILY_IPV6),
+            Some(3)
+        );
+        assert_eq!(
+            fragment_metric_index(FRAGMENT_METRIC_INVALID_L4, FRAGMENT_FAMILY_IPV4),
+            Some(34)
+        );
+        assert_eq!(
+            fragment_metric_index(FRAGMENT_METRIC_INVALID_L4, FRAGMENT_FAMILY_IPV6),
+            Some(35)
+        );
+        assert_eq!(fragment_metric_index(FRAGMENT_METRIC_FIRST, 5), None);
+    }
+
+    #[test]
+    fn fragment_loader_metrics_pressure_uses_occupancy_and_reported_capacity() {
+        assert_eq!(
+            aria_core::monitoring::fragment_pressure_ratio(3, 4),
+            Some(0.75)
+        );
+        assert_eq!(
+            aria_core::monitoring::fragment_pressure_ratio(0, 8192),
+            Some(0.0)
+        );
+        assert_eq!(aria_core::monitoring::fragment_pressure_ratio(3, 0), None);
+    }
+
+    #[test]
+    fn fragment_loader_metrics_omit_failed_family_without_false_zero_or_eviction() {
+        let summary = aria_core::monitoring::FragmentMetricsSummary {
+            counters: vec![aria_core::monitoring::FragmentMetricCounter {
+                family: aria_core::common::FRAGMENT_FAMILY_IPV4,
+                metric: aria_core::common::FRAGMENT_METRIC_FIRST,
+                value: 7,
+            }],
+            pressure: vec![aria_core::monitoring::FragmentPressure {
+                family: aria_core::common::FRAGMENT_FAMILY_IPV4,
+                occupancy: 3,
+                max_entries: 4,
+            }],
+            warnings: vec!["read FRAG_CONTEXT_V6: synthetic failure".to_string()],
+        };
+        let mut out = String::new();
+
+        write_fragment_runtime_metrics(&mut out, "/sys/fs/bpf/aria/global-v2", &summary);
+
+        assert!(out.contains("aria_fragment_events_total{pin_path=\"/sys/fs/bpf/aria/global-v2\",family=\"ipv4\",event=\"first\"} 7"));
+        assert!(out.contains("aria_fragment_context_occupancy{pin_path=\"/sys/fs/bpf/aria/global-v2\",family=\"ipv4\"} 3"));
+        assert!(out.contains("aria_fragment_context_max_entries{pin_path=\"/sys/fs/bpf/aria/global-v2\",family=\"ipv4\"} 4"));
+        assert!(out.contains("aria_fragment_context_pressure{pin_path=\"/sys/fs/bpf/aria/global-v2\",family=\"ipv4\"} 0.75"));
+        assert!(!out.contains("family=\"ipv6\""));
+        assert!(!out.contains("eviction"));
+    }
 
     #[test]
     fn tc_ct_contract_metric_labels_are_exact() {

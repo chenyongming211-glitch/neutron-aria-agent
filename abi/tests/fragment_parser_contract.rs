@@ -262,11 +262,60 @@ fn fragment_parser_ipv4_incomplete_udp_datagram_is_rejected() {
 }
 
 #[test]
+fn fragment_parser_ipv4_incomplete_udp_first_fragment_is_rejected() {
+    let frame = ipv4_fragment(IPPROTO_UDP, 0x1234, 0, true, &[0x9c, 0x40, 0x00, 0x35]);
+    let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
+    let accepted = unsafe {
+        parser::parse_eth_ipv4(
+            frame.as_ptr() as usize,
+            frame.as_ptr() as usize + frame.len(),
+            0,
+            out.as_mut_ptr(),
+        )
+    };
+
+    assert!(!accepted);
+}
+
+#[test]
 fn fragment_parser_ipv4_truncated_tcp_base_header_is_rejected() {
     let frame = ipv4_fragment(IPPROTO_TCP, 0x1234, 0, true, &[0; 19]);
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
     let accepted = unsafe {
         parser::parse_eth_ipv4(
+            frame.as_ptr() as usize,
+            frame.as_ptr() as usize + frame.len(),
+            0,
+            out.as_mut_ptr(),
+        )
+    };
+
+    assert!(!accepted);
+}
+
+#[test]
+fn fragment_parser_ipv6_incomplete_udp_first_fragment_is_rejected() {
+    let frame = ipv6_fragment(0x1234_5678, 0, true, &[0x9c, 0x40, 0x00, 0x35]);
+    let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
+    let accepted = unsafe {
+        parser::parse_eth_ipv6(
+            frame.as_ptr() as usize,
+            frame.as_ptr() as usize + frame.len(),
+            0,
+            out.as_mut_ptr(),
+        )
+    };
+
+    assert!(!accepted);
+}
+
+#[test]
+fn fragment_parser_ipv6_incomplete_tcp_first_fragment_is_rejected() {
+    let mut frame = ipv6_fragment(0x1234_5678, 0, true, &[0; 19]);
+    frame[14 + 40] = IPPROTO_TCP;
+    let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
+    let accepted = unsafe {
+        parser::parse_eth_ipv6(
             frame.as_ptr() as usize,
             frame.as_ptr() as usize + frame.len(),
             0,
