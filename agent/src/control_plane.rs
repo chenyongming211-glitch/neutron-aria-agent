@@ -3776,25 +3776,6 @@ impl ControlPlane {
         Ok(())
     }
 
-    pub fn new(
-        ebpf_path: &str,
-        base_pin_path: &str,
-        base_state_path: &str,
-        ssl_manager: Arc<SslManager>,
-        kernel_drop_manager: Arc<KernelDropManager>,
-        trace_manager: Arc<TraceManager>,
-    ) -> Self {
-        Self::new_with_fragment_tracking(
-            ebpf_path,
-            base_pin_path,
-            base_state_path,
-            ssl_manager,
-            kernel_drop_manager,
-            trace_manager,
-            FragmentTrackingSettings::default(),
-        )
-    }
-
     pub(crate) fn new_with_fragment_tracking(
         ebpf_path: &str,
         base_pin_path: &str,
@@ -8755,7 +8736,7 @@ mod tests {
         let base = base.to_string_lossy().to_string();
         let ebpf_path = "/tmp/libebpf_firewall.so";
 
-        ControlPlane::new(
+        ControlPlane::new_with_fragment_tracking(
             ebpf_path,
             &base,
             &base,
@@ -8766,6 +8747,7 @@ mod tests {
             Arc::new(crate::trace_backend::TraceManager::new(
                 crate::ebpf_binary::TraceBackendKind::LegacyMap,
             )),
+            crate::FragmentTrackingSettings::default(),
         )
     }
 

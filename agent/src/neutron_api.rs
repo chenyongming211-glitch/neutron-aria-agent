@@ -6257,13 +6257,14 @@ mod tests {
         let kernel_drop_manager =
             Arc::new(KernelDropManager::new(&ebpf_path, &pin_path, &state_path));
         let trace_manager = Arc::new(TraceManager::new(TraceBackendKind::LegacyMap));
-        let control_plane = Arc::new(ControlPlane::new(
+        let control_plane = Arc::new(ControlPlane::new_with_fragment_tracking(
             &ebpf_path,
             &pin_path,
             &state_path,
             ssl_manager,
             kernel_drop_manager,
             trace_manager,
+            crate::FragmentTrackingSettings::default(),
         ));
         let registry = Arc::new(TapRegistry::new(
             &ebpf_path,

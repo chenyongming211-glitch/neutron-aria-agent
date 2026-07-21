@@ -24,8 +24,6 @@ pub struct FirewallInstance {
 const RUNTIME_METADATA_SCHEMA_VERSION: u32 = 2;
 const PERSISTED_LIVE_IFACES_SCHEMA_VERSION: u32 = 2;
 const FQ_QDISC_MARKER: &str = ".fq-root-qdisc-owned";
-pub(crate) const DEFAULT_FRAGMENT_CONTEXT_CAPACITY: u32 = 8192;
-
 pub(crate) fn validate_fragment_context_capacity(capacity: u32) -> Result<u32, String> {
     if capacity == 0 {
         return Err("fragment context capacity must be positive".to_string());
@@ -1720,12 +1718,8 @@ mod tests {
 
     #[test]
     fn fragment_loader_capacity_default_is_exact_and_positive_values_are_accepted() {
-        assert_eq!(DEFAULT_FRAGMENT_CONTEXT_CAPACITY, 8192);
         assert_eq!(validate_fragment_context_capacity(1).unwrap(), 1);
-        assert_eq!(
-            validate_fragment_context_capacity(DEFAULT_FRAGMENT_CONTEXT_CAPACITY).unwrap(),
-            8192
-        );
+        assert_eq!(validate_fragment_context_capacity(8192).unwrap(), 8192);
     }
 
     #[test]
