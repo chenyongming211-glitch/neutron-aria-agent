@@ -753,7 +753,8 @@ async fn execute_standalone_publication(
         &mut || aria_core::ebpf_ops::set_acl_active_bank(runtime, plan.shadow_bank),
     ) {
         let failure_phase = match error.phase() {
-            FragmentEpochPublicationFailurePhase::AdvanceEpoch => {
+            FragmentEpochPublicationFailurePhase::Readiness
+            | FragmentEpochPublicationFailurePhase::AdvanceEpoch => {
                 StandaloneAclFailurePhase::AdvanceFragmentEpoch
             }
             FragmentEpochPublicationFailurePhase::Publish => {
