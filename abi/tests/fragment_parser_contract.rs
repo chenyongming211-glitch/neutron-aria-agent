@@ -265,6 +265,11 @@ fn fragment_parser_ipv4_incomplete_udp_datagram_is_rejected() {
 fn fragment_parser_ipv4_incomplete_udp_first_fragment_is_rejected() {
     let frame = ipv4_fragment(IPPROTO_UDP, 0x1234, 0, true, &[0x9c, 0x40, 0x00, 0x35]);
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
+    unsafe {
+        (*out.as_mut_ptr()).src_port = 65000;
+        (*out.as_mut_ptr()).dst_port = 65001;
+        (*out.as_mut_ptr()).fragment_id = u32::MAX;
+    }
     let accepted = unsafe {
         parser::parse_eth_ipv4(
             frame.as_ptr() as usize,
@@ -275,6 +280,10 @@ fn fragment_parser_ipv4_incomplete_udp_first_fragment_is_rejected() {
     };
 
     assert!(!accepted);
+    let info = unsafe { out.assume_init() };
+    assert_eq!(parser::invalid_l4_failure(&info), Some((4, IPPROTO_UDP)));
+    assert_eq!((info.src_port, info.dst_port), (0, 0));
+    assert_eq!(info.fragment_id, 0);
 }
 
 #[test]
@@ -314,6 +323,11 @@ fn fragment_parser_ipv6_incomplete_tcp_first_fragment_is_rejected() {
     let mut frame = ipv6_fragment(0x1234_5678, 0, true, &[0; 19]);
     frame[14 + 40] = IPPROTO_TCP;
     let mut out = MaybeUninit::<parser::PacketInfo>::zeroed();
+    unsafe {
+        (*out.as_mut_ptr()).src_port = 65000;
+        (*out.as_mut_ptr()).dst_port = 65001;
+        (*out.as_mut_ptr()).fragment_id = u32::MAX;
+    }
     let accepted = unsafe {
         parser::parse_eth_ipv6(
             frame.as_ptr() as usize,
@@ -324,6 +338,10 @@ fn fragment_parser_ipv6_incomplete_tcp_first_fragment_is_rejected() {
     };
 
     assert!(!accepted);
+    let info = unsafe { out.assume_init() };
+    assert_eq!(parser::invalid_l4_failure(&info), Some((6, IPPROTO_TCP)));
+    assert_eq!((info.src_port, info.dst_port), (0, 0));
+    assert_eq!(info.fragment_id, 0);
 }
 
 #[test]
