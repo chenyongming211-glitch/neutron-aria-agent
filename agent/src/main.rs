@@ -85,6 +85,96 @@ struct Config {
     log_filter: String,
     #[serde(default = "default_log_file_path")]
     log_file_path: String,
+    #[serde(default)]
+    fragment_tracking_field_verified: bool,
+    #[serde(default)]
+    fragment_tracking: FragmentTrackingConfig,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct FragmentTrackingConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_fragment_context_capacity")]
+    max_entries: u32,
+    #[serde(default = "default_fragment_timeout_seconds")]
+    ipv4_timeout_seconds: u64,
+    #[serde(default = "default_fragment_timeout_seconds")]
+    ipv6_timeout_seconds: u64,
+}
+
+impl Default for FragmentTrackingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_entries: default_fragment_context_capacity(),
+            ipv4_timeout_seconds: default_fragment_timeout_seconds(),
+            ipv6_timeout_seconds: default_fragment_timeout_seconds(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FragmentTrackingSettings {
+    pub(crate) enabled: bool,
+    pub(crate) field_verified: bool,
+    pub(crate) max_entries: u32,
+    pub(crate) ipv4_timeout_seconds: u64,
+    pub(crate) ipv6_timeout_seconds: u64,
+}
+
+impl Default for FragmentTrackingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            field_verified: false,
+            max_entries: default_fragment_context_capacity(),
+            ipv4_timeout_seconds: default_fragment_timeout_seconds(),
+            ipv6_timeout_seconds: default_fragment_timeout_seconds(),
+        }
+    }
+}
+
+impl FragmentTrackingSettings {
+    pub(crate) fn require_acl_ct_ready(
+        self,
+        conntrack_enabled: bool,
+        acl_enabled: bool,
+    ) -> Result<(), String> {
+        if (conntrack_enabled || acl_enabled) && self.field_verified && !self.enabled {
+            return Err(
+                "fragment tracking is explicitly disabled after verified field evidence; ACL/CT activation is blocked"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn runtime_config(
+        self,
+        runtime_mode: u8,
+    ) -> Result<aria_core::common::FragmentConfig, String> {
+        if runtime_mode != aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED
+            && runtime_mode != aria_core::common::FRAGMENT_RUNTIME_MODE_STANDALONE
+        {
+            return Err(format!(
+                "fragment tracking runtime mode {} is invalid",
+                runtime_mode
+            ));
+        }
+        Ok(aria_core::common::FragmentConfig {
+            version: aria_core::common::FRAGMENT_CONFIG_VERSION,
+            enabled: if self.enabled {
+                aria_core::common::FRAGMENT_CONFIG_ENABLED
+            } else {
+                aria_core::common::FRAGMENT_CONFIG_DISABLED
+            },
+            runtime_mode,
+            _pad: [0; 5],
+            ipv4_timeout_ns: self.ipv4_timeout_seconds * 1_000_000_000,
+            ipv6_timeout_ns: self.ipv6_timeout_seconds * 1_000_000_000,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -133,6 +223,14 @@ fn default_iface_pattern() -> String {
 
 fn default_max_port_policies() -> u32 {
     16384
+}
+
+fn default_fragment_context_capacity() -> u32 {
+    8192
+}
+
+fn default_fragment_timeout_seconds() -> u64 {
+    30
 }
 
 fn default_listen_addr() -> String {
@@ -194,6 +292,8 @@ impl Default for Config {
             log_format: default_log_format(),
             log_filter: default_log_filter(),
             log_file_path: default_log_file_path(),
+            fragment_tracking_field_verified: false,
+            fragment_tracking: FragmentTrackingConfig::default(),
         }
     }
 }
@@ -210,6 +310,38 @@ impl Config {
 
     fn neutron_socket_enabled(&self) -> bool {
         self.mode == AgentMode::NeutronManaged
+    }
+
+    fn fragment_tracking_settings(&self) -> Result<FragmentTrackingSettings, String> {
+        if self.fragment_tracking.max_entries == 0 {
+            return Err("fragment_tracking.max_entries must be positive".to_string());
+        }
+        for (field, value) in [
+            (
+                "fragment_tracking.ipv4_timeout_seconds",
+                self.fragment_tracking.ipv4_timeout_seconds,
+            ),
+            (
+                "fragment_tracking.ipv6_timeout_seconds",
+                self.fragment_tracking.ipv6_timeout_seconds,
+            ),
+        ] {
+            if !(1..=60).contains(&value) {
+                return Err(format!("{} must be in 1..=60", field));
+            }
+        }
+        if self.fragment_tracking.enabled && !self.fragment_tracking_field_verified {
+            return Err(
+                "fragment tracking activation requires verified field evidence".to_string(),
+            );
+        }
+        Ok(FragmentTrackingSettings {
+            enabled: self.fragment_tracking.enabled,
+            field_verified: self.fragment_tracking_field_verified,
+            max_entries: self.fragment_tracking.max_entries,
+            ipv4_timeout_seconds: self.fragment_tracking.ipv4_timeout_seconds,
+            ipv6_timeout_seconds: self.fragment_tracking.ipv6_timeout_seconds,
+        })
     }
 }
 
@@ -666,6 +798,13 @@ async fn main() {
 
     let args = Args::parse();
     let config = load_config(&args.config);
+    let fragment_tracking = match config.fragment_tracking_settings() {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("Error: invalid fragment tracking configuration: {}", e);
+            std::process::exit(1);
+        }
+    };
     if let Err(e) = init_tracing(&config) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
@@ -786,13 +925,14 @@ async fn main() {
     }
 
     // Create ControlPlane
-    let control_plane = Arc::new(control_plane::ControlPlane::new(
+    let control_plane = Arc::new(control_plane::ControlPlane::new_with_fragment_tracking(
         &resolved_ebpf.selected_path,
         &config.pin_path,
         &config.state_path,
         ssl_manager.clone(),
         kernel_drop_manager.clone(),
         trace_manager,
+        fragment_tracking,
     ));
 
     // Note: instances are registered by TapRegistry::attach when XDP is actually attached.
@@ -1181,6 +1321,15 @@ enabled = false
                 .unwrap_err();
             assert!(error.contains("fragment tracking"));
             assert!(error.contains("field evidence"));
+        }
+    }
+
+    #[test]
+    fn fragment_loader_config_unverified_disabled_default_preserves_existing_acl_forwarding() {
+        let settings = Config::default().fragment_tracking_settings().unwrap();
+
+        for (conntrack, acl) in [(true, false), (false, true), (true, true)] {
+            settings.require_acl_ct_ready(conntrack, acl).unwrap();
         }
     }
 

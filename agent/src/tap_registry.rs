@@ -306,7 +306,8 @@ impl TapRegistry {
             self.base_state_path.join(iface),
             true,
             self.control_plane.trace_map_mode(),
-        );
+        )
+        .with_fragment_tracking(self.control_plane.fragment_tracking_settings());
 
         // 为该 tap 实例设置端口策略上限（写入对应 state.json）
         let state_dir = self.base_state_path.join(iface);

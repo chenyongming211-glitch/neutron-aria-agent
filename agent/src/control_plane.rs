@@ -16,6 +16,7 @@ use crate::service_chain::{self, ServiceChain};
 use crate::ssl_manager::SslManager;
 use crate::tap_registry::ManagedAttachMode;
 use crate::trace_backend::{TraceManager, TraceRuntimeStatusSnapshot};
+use crate::FragmentTrackingSettings;
 use aria_core::common::TapMapRuntime;
 use aria_core::ebpf_ops::{
     classify_runtime_gate_state, compile_managed_group_projection, ensure_fq_qdisc,
@@ -649,6 +650,7 @@ impl FragmentEpochGateTransition {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum FragmentEpochPublicationFailurePhase {
+    Readiness,
     AdvanceEpoch,
     Publish,
 }
@@ -713,6 +715,25 @@ fn execute_fragment_epoch_gate_transition(
     })
 }
 
+fn execute_guarded_fragment_epoch_gate_transition(
+    enforcement_required: bool,
+    transition: FragmentEpochGateTransition,
+    require_readiness: &mut dyn FnMut() -> Result<(), String>,
+    advance_epoch: &mut dyn FnMut() -> Result<(), String>,
+    write_gate: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<(), FragmentEpochPublicationFailure> {
+    if enforcement_required {
+        require_readiness().map_err(|error| {
+            FragmentEpochPublicationFailure::new(
+                FragmentEpochPublicationFailurePhase::Readiness,
+                false,
+                error,
+            )
+        })?;
+    }
+    execute_fragment_epoch_gate_transition(transition, advance_epoch, write_gate)
+}
+
 fn execute_fragment_epoch_bank_publication(
     advance_epoch: &mut dyn FnMut() -> Result<(), String>,
     switch_bank: &mut dyn FnMut() -> Result<(), String>,
@@ -726,6 +747,29 @@ fn execute_fragment_epoch_bank_publication(
 
 fn advance_fragment_epoch_action(pin_path: &str, tap_id: u32) -> Result<(), String> {
     aria_core::ebpf_ops::advance_fragment_epoch_strict(pin_path, tap_id).map(|_| ())
+}
+
+fn require_fragment_runtime_ready(
+    settings: FragmentTrackingSettings,
+    pin_path: &str,
+    tap_id: u32,
+    conntrack_enabled: bool,
+    acl_enabled: bool,
+) -> Result<(), String> {
+    settings.require_acl_ct_ready(conntrack_enabled, acl_enabled)?;
+    if !neutron_acl_gate_requires_tc(conntrack_enabled, acl_enabled) {
+        return Ok(());
+    }
+    let runtime_mode = if tap_id == aria_core::common::TAP_ID_UNASSIGNED {
+        aria_core::common::FRAGMENT_RUNTIME_MODE_STANDALONE
+    } else {
+        aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED
+    };
+    aria_core::ebpf_ops::validate_fragment_runtime_configured_strict(
+        pin_path,
+        &settings.runtime_config(runtime_mode)?,
+        settings.max_entries,
+    )
 }
 
 fn execute_pinned_acl_gate_transition(
@@ -923,6 +967,7 @@ fn neutron_gate_health_commit_action(
     }
 }
 
+#[cfg(test)]
 fn config_update_requires_tc(conntrack: Option<bool>, acl: Option<bool>) -> bool {
     conntrack == Some(true) || acl == Some(true)
 }
@@ -952,6 +997,7 @@ pub struct ControlPlane {
     ssl_manager: Arc<SslManager>,
     kernel_drop_manager: Arc<KernelDropManager>,
     trace_manager: Arc<TraceManager>,
+    fragment_tracking: FragmentTrackingSettings,
     chains: RwLock<Vec<ServiceChain>>,
 }
 
@@ -3738,6 +3784,26 @@ impl ControlPlane {
         kernel_drop_manager: Arc<KernelDropManager>,
         trace_manager: Arc<TraceManager>,
     ) -> Self {
+        Self::new_with_fragment_tracking(
+            ebpf_path,
+            base_pin_path,
+            base_state_path,
+            ssl_manager,
+            kernel_drop_manager,
+            trace_manager,
+            FragmentTrackingSettings::default(),
+        )
+    }
+
+    pub(crate) fn new_with_fragment_tracking(
+        ebpf_path: &str,
+        base_pin_path: &str,
+        base_state_path: &str,
+        ssl_manager: Arc<SslManager>,
+        kernel_drop_manager: Arc<KernelDropManager>,
+        trace_manager: Arc<TraceManager>,
+        fragment_tracking: FragmentTrackingSettings,
+    ) -> Self {
         let chains = service_chain::load_chains(base_state_path);
         Self {
             instances: RwLock::new(HashMap::new()),
@@ -3750,8 +3816,13 @@ impl ControlPlane {
             ssl_manager,
             kernel_drop_manager,
             trace_manager,
+            fragment_tracking,
             chains: RwLock::new(chains),
         }
+    }
+
+    pub(crate) fn fragment_tracking_settings(&self) -> FragmentTrackingSettings {
+        self.fragment_tracking
     }
 
     pub fn managed_pin_path(&self) -> String {
@@ -4681,8 +4752,26 @@ impl ControlPlane {
         prepared: &PreparedManagedInstance,
     ) -> Result<(), FragmentEpochPublicationFailure> {
         let runtime = TapMapRuntime::new(&prepared.pin_path, prepared.tap_id);
-        execute_fragment_epoch_gate_transition(
+        let (conntrack_enabled, acl_enabled) = match prepared.activation {
+            ManagedRuntimeActivation::PreserveVerifiedLive => (
+                prepared.state.conntrack_enabled,
+                prepared.state.acl_enabled,
+            ),
+            ManagedRuntimeActivation::RestoreStandalone { conntrack, acl } => (conntrack, acl),
+            ManagedRuntimeActivation::AwaitNeutronResync { .. } => (false, false),
+        };
+        execute_guarded_fragment_epoch_gate_transition(
+            neutron_acl_gate_requires_tc(conntrack_enabled, acl_enabled),
             FragmentEpochGateTransition::SemanticChange,
+            &mut || {
+                require_fragment_runtime_ready(
+                    self.fragment_tracking,
+                    &prepared.pin_path,
+                    prepared.tap_id,
+                    conntrack_enabled,
+                    acl_enabled,
+                )
+            },
             &mut || {
                 advance_fragment_epoch_action(&prepared.pin_path, prepared.tap_id).map_err(|error| {
                     format!(
@@ -4929,8 +5018,18 @@ impl ControlPlane {
                 system_link_health.missing_tc().join(", ")
             ));
         }
-        execute_fragment_epoch_gate_transition(
+        execute_guarded_fragment_epoch_gate_transition(
+            enforcement_required,
             FragmentEpochGateTransition::SemanticChange,
+            &mut || {
+                require_fragment_runtime_ready(
+                    self.fragment_tracking,
+                    pin_path,
+                    tap_id,
+                    state.conntrack_enabled,
+                    state.acl_enabled,
+                )
+            },
             &mut || {
                 advance_fragment_epoch_action(pin_path, tap_id)
                     .map_err(|error| format!("advance system fragment recovery epoch: {}", error))
@@ -5658,7 +5757,8 @@ impl ControlPlane {
                         },
                     ) {
                         let failure_phase = match error.phase() {
-                            FragmentEpochPublicationFailurePhase::AdvanceEpoch => {
+                            FragmentEpochPublicationFailurePhase::Readiness
+                            | FragmentEpochPublicationFailurePhase::AdvanceEpoch => {
                                 ManagedAclPublicationFailurePhase::AdvanceFragmentEpoch
                             }
                             FragmentEpochPublicationFailurePhase::Publish => {
@@ -7828,8 +7928,18 @@ impl ControlPlane {
         let persist = gate_steps.contains(&ManagedAclGatePublicationStep::Persist);
         let pin_path = state.pin_path.clone();
         let tap_id = state.tap_id;
-        execute_fragment_epoch_gate_transition(
+        execute_guarded_fragment_epoch_gate_transition(
+            neutron_acl_gate_requires_tc(conntrack_enabled, acl_enabled),
             FragmentEpochGateTransition::SemanticChange,
+            &mut || {
+                require_fragment_runtime_ready(
+                    self.fragment_tracking,
+                    &pin_path,
+                    tap_id,
+                    conntrack_enabled,
+                    acl_enabled,
+                )
+            },
             &mut || {
                 advance_fragment_epoch_action(&pin_path, tap_id)
                     .map_err(|error| format!("advance managed gate fragment epoch: {}", error))
@@ -8018,7 +8128,9 @@ impl ControlPlane {
                 error
             ))
         })?;
-        if config_update_requires_tc(conntrack, acl) {
+        let next_conntrack = conntrack.unwrap_or(state.state.conntrack_enabled);
+        let next_acl = acl.unwrap_or(state.state.acl_enabled);
+        if neutron_acl_gate_requires_tc(next_conntrack, next_acl) {
             Self::require_tc_acl_ready_locked(instance, &state, self.trace_map_mode())?;
         }
         let old_state = state.state.clone();
@@ -8031,8 +8143,18 @@ impl ControlPlane {
 
         let pin_path = state.pin_path.clone();
         let tap_id = state.tap_id;
-        execute_fragment_epoch_gate_transition(
+        execute_guarded_fragment_epoch_gate_transition(
+            neutron_acl_gate_requires_tc(next_conntrack, next_acl),
             gate_transition,
+            &mut || {
+                require_fragment_runtime_ready(
+                    self.fragment_tracking,
+                    &pin_path,
+                    tap_id,
+                    next_conntrack,
+                    next_acl,
+                )
+            },
             &mut || {
                 advance_fragment_epoch_action(&pin_path, tap_id)
                     .map_err(|error| format!("advance local config fragment epoch: {}", error))

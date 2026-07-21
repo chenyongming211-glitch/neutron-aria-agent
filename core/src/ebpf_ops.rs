@@ -31,8 +31,9 @@ pub use attach::{
 pub use fragment::{
     advance_fragment_epoch_strict, clear_fragment_contexts_strict, configure_fragment_tracking,
     initialize_fragment_tracking_disabled, read_fragment_epoch, recover_fragment_runtime_strict,
-    scrub_fragment_contexts_strict, validate_fragment_runtime_maps_strict,
-    validate_fragment_tracking_config_strict,
+    recover_fragment_runtime_configured_strict, scrub_fragment_contexts_strict,
+    validate_fragment_runtime_configured_strict, validate_fragment_runtime_expectation,
+    validate_fragment_runtime_maps_strict, validate_fragment_tracking_config_strict,
 };
 pub use inventory::{
     capture_general_network_owner, classify_managed_inventory_capture, classify_runtime_gate_state,

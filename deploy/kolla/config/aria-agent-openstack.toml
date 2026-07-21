@@ -10,6 +10,9 @@ state_path = "/var/lib/aria-agent"
 iface_pattern = "^tap"
 max_port_policies = 16384
 
+# Fragment tracking stays unavailable until privileged field evidence is recorded.
+fragment_tracking_field_verified = false
+
 listen_addr = "127.0.0.1:8080"
 neutron_socket_path = "/run/aria/aria-agent.sock"
 # Decimal 432 is octal 0660. The neutron-aria-agent container must share the
@@ -26,3 +29,9 @@ ovs_bridge = "br-int"
 log_format = "text"
 log_filter = "info"
 log_file_path = "/var/log/kolla/aria-datapath/aria-datapath.log"
+
+[fragment_tracking]
+enabled = false
+max_entries = 8192
+ipv4_timeout_seconds = 30
+ipv6_timeout_seconds = 30

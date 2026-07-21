@@ -1,3 +1,4 @@
+use crate::FragmentTrackingSettings;
 use aria_core::ebpf_ops::{critical_network_map_names, TraceMapMode, NETWORK_MAP_NAMES};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,7 +15,7 @@ pub struct FirewallInstance {
     pub state_path: PathBuf,
     pub shared_runtime: bool,
     trace_map_mode: TraceMapMode,
-    fragment_context_capacity: u32,
+    fragment_tracking: FragmentTrackingSettings,
     /// Whether FQ qdisc (EDT) was successfully configured.
     /// If false, QoS shaping is unavailable — only policing works.
     pub edt_available: bool,
@@ -510,9 +511,17 @@ impl FirewallInstance {
             state_path,
             shared_runtime,
             trace_map_mode,
-            fragment_context_capacity: DEFAULT_FRAGMENT_CONTEXT_CAPACITY,
+            fragment_tracking: FragmentTrackingSettings::default(),
             edt_available: false,
         }
+    }
+
+    pub(crate) fn with_fragment_tracking(
+        mut self,
+        fragment_tracking: FragmentTrackingSettings,
+    ) -> Self {
+        self.fragment_tracking = fragment_tracking;
+        self
     }
 
     fn runtime_namespace(&self) -> String {
@@ -1020,7 +1029,7 @@ impl FirewallInstance {
         info!(instance = %self.iface, ebpf_path = %ebpf_path, "loading eBPF");
         let bpf_bytes = std::fs::read(ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
         let mut loader = aya::EbpfLoader::new();
-        configure_fragment_context_capacity(&mut loader, self.fragment_context_capacity)?;
+        configure_fragment_context_capacity(&mut loader, self.fragment_tracking.max_entries)?;
         let mut bpf = loader
             .map_pin_path(pin_path_str)
             .load(&bpf_bytes)
@@ -1029,9 +1038,12 @@ impl FirewallInstance {
         let loaded_optional_programs = self.load_runtime_programs(&mut bpf)?;
         self.pin_runtime_maps(&mut bpf, pin_path_str)
             .map_err(|e| format!("pin runtime maps failed: {}", e))?;
-        aria_core::ebpf_ops::recover_fragment_runtime_strict(
+        aria_core::ebpf_ops::recover_fragment_runtime_configured_strict(
             pin_path_str,
-            aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+            self.fragment_tracking.runtime_config(
+                aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+            )?,
+            self.fragment_tracking.max_entries,
         )
         .map_err(|e| format!("recover fragment runtime failed: {}", e))?;
         let present_program_pins =
@@ -1065,7 +1077,7 @@ impl FirewallInstance {
         );
         let bpf_bytes = std::fs::read(ebpf_path).map_err(|e| format!("read ebpf: {}", e))?;
         let mut loader = aya::EbpfLoader::new();
-        configure_fragment_context_capacity(&mut loader, self.fragment_context_capacity)?;
+        configure_fragment_context_capacity(&mut loader, self.fragment_tracking.max_entries)?;
         let mut bpf = loader
             .map_pin_path(pin_path_str)
             .load(&bpf_bytes)
@@ -1203,17 +1215,23 @@ impl FirewallInstance {
                     format!("non-UTF-8 pin path: {}", self.pin_path.display())
                 })?;
                 if fragment_runtime_requires_global_recovery(known_live_runtime) {
-                    aria_core::ebpf_ops::recover_fragment_runtime_strict(
+                    aria_core::ebpf_ops::recover_fragment_runtime_configured_strict(
                         pin_path_str,
-                        aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+                        self.fragment_tracking.runtime_config(
+                            aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+                        )?,
+                        self.fragment_tracking.max_entries,
                     )
                     .map_err(|e| format!("fragment runtime global recovery failed: {}", e))?;
                 } else {
                     aria_core::ebpf_ops::validate_fragment_runtime_maps_strict(pin_path_str)
                         .and_then(|()| {
-                            aria_core::ebpf_ops::validate_fragment_tracking_config_strict(
+                            aria_core::ebpf_ops::validate_fragment_runtime_configured_strict(
                                 pin_path_str,
-                                aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+                                &self.fragment_tracking.runtime_config(
+                                    aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+                                )?,
+                                self.fragment_tracking.max_entries,
                             )
                         })
                         .map_err(|e| {

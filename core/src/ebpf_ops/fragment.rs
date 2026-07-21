@@ -167,6 +167,7 @@ pub(super) fn validate_fragment_config(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn validate_fragment_config_disabled(
     config: &FragmentConfig,
     expected_runtime_mode: u8,
@@ -188,6 +189,42 @@ fn fragment_configs_equal(left: &FragmentConfig, right: &FragmentConfig) -> bool
         && left._pad == right._pad
         && left.ipv4_timeout_ns == right.ipv4_timeout_ns
         && left.ipv6_timeout_ns == right.ipv6_timeout_ns
+}
+
+pub fn validate_fragment_runtime_expectation(
+    actual_config: &FragmentConfig,
+    expected_config: &FragmentConfig,
+    actual_v4_max_entries: u32,
+    actual_v6_max_entries: u32,
+    expected_max_entries: u32,
+) -> Result<(), String> {
+    if !fragment_configs_equal(actual_config, expected_config) {
+        return Err("fragment runtime config does not match the configured contract".to_string());
+    }
+    if actual_v4_max_entries != expected_max_entries {
+        return Err(format!(
+            "FRAG_CONTEXT_V4 capacity {} does not match configured {}",
+            actual_v4_max_entries, expected_max_entries
+        ));
+    }
+    if actual_v6_max_entries != expected_max_entries {
+        return Err(format!(
+            "FRAG_CONTEXT_V6 capacity {} does not match configured {}",
+            actual_v6_max_entries, expected_max_entries
+        ));
+    }
+    Ok(())
+}
+
+fn fragment_context_capacity(pin_path: &str, map_name: &str) -> Result<u32, String> {
+    let map_path = format!("{}/{}", pin_path, map_name);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|error| format!("open pinned {}: {:?}", map_name, error))?;
+    require_fragment_map_type(&map_data, map_name, MapType::LruHash)?;
+    map_data
+        .info()
+        .map(|info| info.max_entries())
+        .map_err(|error| format!("inspect pinned {} capacity: {:?}", map_name, error))
 }
 
 pub fn configure_fragment_tracking(
@@ -227,7 +264,26 @@ pub fn validate_fragment_tracking_config_strict(
     let config = map
         .get(&0, 0)
         .map_err(|error| format!("read FRAGMENT_CONFIG key 0: {:?}", error))?;
-    validate_fragment_config_disabled(&config, expected_runtime_mode)
+    validate_fragment_config(&config, expected_runtime_mode)
+}
+
+pub fn validate_fragment_runtime_configured_strict(
+    pin_path: &str,
+    expected_config: &FragmentConfig,
+    expected_max_entries: u32,
+) -> Result<(), String> {
+    validate_fragment_config(expected_config, expected_config.runtime_mode)?;
+    let config_map = open_fragment_config(pin_path)?;
+    let actual_config = config_map
+        .get(&0, 0)
+        .map_err(|error| format!("read FRAGMENT_CONFIG key 0: {:?}", error))?;
+    validate_fragment_runtime_expectation(
+        &actual_config,
+        expected_config,
+        fragment_context_capacity(pin_path, "FRAG_CONTEXT_V4")?,
+        fragment_context_capacity(pin_path, "FRAG_CONTEXT_V6")?,
+        expected_max_entries,
+    )
 }
 
 pub fn read_fragment_epoch(pin_path: &str, tap_id: u32) -> Result<Option<u64>, String> {
@@ -500,6 +556,32 @@ pub fn recover_fragment_runtime_strict(pin_path: &str, runtime_mode: u8) -> Resu
     recover_fragment_runtime_with(
         || validate_fragment_runtime_maps_strict(pin_path),
         || initialize_fragment_tracking_disabled(pin_path, runtime_mode),
+        || clear_fragment_contexts_strict(pin_path),
+    )
+}
+
+pub fn recover_fragment_runtime_configured_strict(
+    pin_path: &str,
+    expected_config: FragmentConfig,
+    expected_max_entries: u32,
+) -> Result<u64, String> {
+    recover_fragment_runtime_with(
+        || {
+            validate_fragment_runtime_maps_strict(pin_path)?;
+            let actual_v4_max = fragment_context_capacity(pin_path, "FRAG_CONTEXT_V4")?;
+            let actual_v6_max = fragment_context_capacity(pin_path, "FRAG_CONTEXT_V6")?;
+            if actual_v4_max != expected_max_entries || actual_v6_max != expected_max_entries {
+                return validate_fragment_runtime_expectation(
+                    &expected_config,
+                    &expected_config,
+                    actual_v4_max,
+                    actual_v6_max,
+                    expected_max_entries,
+                );
+            }
+            Ok(())
+        },
+        || configure_fragment_tracking(pin_path, expected_config.runtime_mode, expected_config),
         || clear_fragment_contexts_strict(pin_path),
     )
 }

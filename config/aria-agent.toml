@@ -27,5 +27,14 @@ iface_pattern = "^tap"
 # Maximum number of unique port filter combinations per tap instance
 max_port_policies = 16384
 
+# Fragment tracking stays unavailable until privileged field evidence is recorded.
+fragment_tracking_field_verified = false
+
 # Unix socket used only in neutron_managed mode.
 neutron_socket_path = "/run/aria/aria-agent.sock"
+
+[fragment_tracking]
+enabled = false
+max_entries = 8192
+ipv4_timeout_seconds = 30
+ipv6_timeout_seconds = 30

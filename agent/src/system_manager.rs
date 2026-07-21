@@ -1,7 +1,7 @@
 use crate::control_plane::ControlPlane;
 use crate::instance::{
     configure_fragment_context_capacity, preexisting_tc_acl_runtime_is_healthy, FirewallInstance,
-    TcAclLinkHealth, DEFAULT_FRAGMENT_CONTEXT_CAPACITY,
+    TcAclLinkHealth,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -548,6 +548,7 @@ pub async fn system_start(
     let desired = aria_core::wal::load_with_wal(state_path);
     let desired_conntrack = desired.conntrack_enabled;
     let desired_acl = desired.acl_enabled;
+    let fragment_tracking = control_plane.fragment_tracking_settings();
 
     info!(iface = %iface, ebpf_path = %ebpf_path, "loading eBPF for system instance");
     let bpf_bytes = std::fs::read(ebpf_path).map_err(|error| {
@@ -560,7 +561,7 @@ pub async fn system_start(
         )
     })?;
     let mut loader = aya::EbpfLoader::new();
-    configure_fragment_context_capacity(&mut loader, DEFAULT_FRAGMENT_CONTEXT_CAPACITY).map_err(
+    configure_fragment_context_capacity(&mut loader, fragment_tracking.max_entries).map_err(
         |error| start_error_with_cleanup(error, iface, pin_path, state_path, &ownership),
     )?;
     let mut bpf = loader
@@ -640,9 +641,14 @@ pub async fn system_start(
             &ownership,
         ));
     }
-    if let Err(e) = aria_core::ebpf_ops::recover_fragment_runtime_strict(
+    if let Err(e) = aria_core::ebpf_ops::recover_fragment_runtime_configured_strict(
         pin_path,
-        aria_core::common::FRAGMENT_RUNTIME_MODE_STANDALONE,
+        fragment_tracking
+            .runtime_config(aria_core::common::FRAGMENT_RUNTIME_MODE_STANDALONE)
+            .map_err(|error| {
+                start_error_with_cleanup(error, iface, pin_path, state_path, &ownership)
+            })?,
+        fragment_tracking.max_entries,
     ) {
         return Err(start_error_with_cleanup(
             format!("failed to recover standalone fragment runtime: {}", e),
