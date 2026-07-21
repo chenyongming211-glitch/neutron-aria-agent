@@ -450,18 +450,18 @@ delivery segments on `v0.9-neutron-agent`; do not create a parallel branch and
 do not change the Task 3 forwarding decision, `BPF_ANY`, expiry, or fragment-ID
 reuse contracts.
 
-- [ ] **Step 1: Add Task 6A configuration and activation RED tests**
+- [x] **Step 1: Add Task 6A configuration and activation RED tests**
 
 Test default `{enabled:false, max_entries:8192, ipv4_timeout_seconds:30, ipv6_timeout_seconds:30}`, reject zero entries, and reject timeout values outside 1..=60. Test that ACL/CT readiness rejects an explicit disabled setting after the field gate is marked verified.
 
-- [ ] **Step 2: Commit, push, and verify Task 6A RED**
+- [x] **Step 2: Commit, push, and verify Task 6A RED**
 
 Name the agent tests `fragment_loader_config_*` so the existing hosted
 `rust-behavior` selector executes them. Do not add or expand a Python
 source-shape checker. Verify that CI fails only because the configuration,
 capacity propagation, recovery validation, and readiness admission are absent.
 
-- [ ] **Step 3: Implement Task 6A configuration and guarded activation**
+- [x] **Step 3: Implement Task 6A configuration and guarded activation**
 
 Add immutable startup settings for `enabled`, `max_entries`, IPv4/IPv6 timeout,
 and an independent field-evidence gate. Both shipped configuration bundles use
@@ -473,23 +473,23 @@ fragment readiness admission before publishing the gate; once field evidence
 is marked verified, explicitly disabling tracking while ACL/CT is requested is
 rejected.
 
-- [ ] **Step 4: Commit, push, and verify Task 6A GREEN**
+- [x] **Step 4: Commit, push, and verify Task 6A GREEN**
 
 Expected: Task 6A RED tests and existing fast contracts, Rust behavior, and
 static builds pass; production activation remains disabled.
 
-- [ ] **Step 5: Add Task 6B observability RED tests**
+- [x] **Step 5: Add Task 6B observability RED tests**
 
 Assert exact stable labels for first, non-initial, hit, miss, expired, stale, update-failed, invalid-L4, overlap, and pressure. Do not infer LRU eviction count.
 
-- [ ] **Step 6: Commit, push, and verify Task 6B RED**
+- [x] **Step 6: Commit, push, and verify Task 6B RED**
 
 Name the agent metrics tests `fragment_loader_metrics_*` so hosted
 `rust-behavior` executes them. Extend the existing raw parser fixture for an
 incomplete TCP/UDP first fragment. Verify that CI fails only because the exact
 invalid-L4 signal and userspace projection are absent.
 
-- [ ] **Step 7: Implement Task 6B exact metrics and pressure**
+- [x] **Step 7: Implement Task 6B exact metrics and pressure**
 
 Add a distinct shared ABI metric and TC parse-failure signal for incomplete
 first-fragment L4. Do not relabel stored-context invalidity or generic malformed
@@ -502,14 +502,14 @@ the map's `max_entries`; never infer or label an LRU eviction count. On strict
 map-read failure, omit the affected series and warn instead of publishing a
 false zero.
 
-- [ ] **Step 8: Complete activation and observability documentation**
+- [x] **Step 8: Complete activation and observability documentation**
 
 Wire counters and pressure through the existing control-plane accessor and
 metrics handler. Documentation distinguishes implementation availability,
 production activation, and field evidence. Real privileged evidence remains
 `deferred/pending`; no document may claim field execution.
 
-- [ ] **Step 9: Commit, push, and verify Task 6B GREEN**
+- [x] **Step 9: Commit, push, and verify Task 6B GREEN**
 
 ```bash
 /Users/chen/.cargo/bin/rustfmt --edition 2021 agent/src/main.rs agent/src/instance.rs agent/src/tap_registry.rs agent/src/system_manager.rs agent/src/control_plane.rs agent/src/control_plane/observability.rs agent/src/api_handlers/metrics.rs core/src/ebpf_ops.rs core/src/ebpf_ops/fragment.rs core/src/ebpf_ops/replay.rs core/src/monitoring.rs abi/src/fragment.rs abi/src/lib.rs abi/tests/fragment_parser_contract.rs ebpf/src/parser.rs ebpf/src/fragment.rs ebpf/src/lib.rs
