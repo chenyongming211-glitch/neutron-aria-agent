@@ -189,7 +189,11 @@ pub unsafe fn parse_eth_ipv4(
     if eth_type != 0x0800 {
         return false;
     }
-    let ihl = ((read8(ip_offset, 0) & 0x0F) as usize) * 4;
+    let version_ihl = read8(ip_offset, 0);
+    if version_ihl >> 4 != 4 {
+        return false;
+    }
+    let ihl = ((version_ihl & 0x0F) as usize) * 4;
     if ihl < 20 {
         return false;
     }
@@ -308,6 +312,9 @@ pub unsafe fn parse_eth_ipv6(
     }
 
     if eth_type != 0x86DD {
+        return false;
+    }
+    if read8(ip_offset, 0) >> 4 != 6 {
         return false;
     }
     let ipv6_payload_len = read_be16(ip_offset, 4) as usize;

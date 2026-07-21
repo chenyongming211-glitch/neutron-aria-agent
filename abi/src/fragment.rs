@@ -63,7 +63,7 @@ const IPPROTO_ROUTING: u8 = 43;
 const IPPROTO_DSTOPTS: u8 = 60;
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct FragmentContextKey4 {
     pub tap_id: u32,
     pub src_ip: u32,
@@ -76,7 +76,7 @@ pub struct FragmentContextKey4 {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct FragmentContextKey6 {
     pub tap_id: u32,
     pub src_ip: [u8; 16],
@@ -226,6 +226,17 @@ pub fn fragment_tracking_required(fragment_kind: u8, fragment_proto: u8, is_ipv6
                     fragment_proto,
                     IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS
                 )))
+}
+
+#[inline(always)]
+pub const fn fragment_first_observation_metric(fragment_kind: u8, effective_proto: u8) -> u8 {
+    if fragment_kind == FragmentKind::First as u8
+        && (effective_proto == IPPROTO_TCP || effective_proto == IPPROTO_UDP)
+    {
+        FRAGMENT_METRIC_FIRST
+    } else {
+        0
+    }
 }
 
 #[inline(always)]

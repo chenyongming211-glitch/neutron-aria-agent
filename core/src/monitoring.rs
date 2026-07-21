@@ -9,6 +9,8 @@ use crate::common::{
     FRAGMENT_METRIC_INVALID_L4, FRAGMENT_METRIC_NON_INITIAL,
 };
 use aya::maps::{HashMap, Map, MapData, MapType, PerCpuArray, PerCpuHashMap, PerCpuValues};
+use std::collections::HashSet;
+use std::hash::Hash;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
@@ -101,7 +103,41 @@ fn require_map_type(map_data: &MapData, map_name: &str, expected: MapType) -> Re
     Ok(())
 }
 
-fn collect_fragment_counters(pin_path: &str) -> Result<Vec<FragmentMetricCounter>, String> {
+fn collect_fragment_counters_with<F>(mut read_index: F) -> (Vec<FragmentMetricCounter>, Vec<String>)
+where
+    F: FnMut(u32) -> Result<u64, String>,
+{
+    let map_name = "FRAGMENT_METRICS";
+    let mut counters = Vec::with_capacity(EXPORTED_FRAGMENT_METRICS.len() * 2);
+    let mut warnings = Vec::new();
+    for family in [FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6] {
+        for metric in EXPORTED_FRAGMENT_METRICS {
+            let Some(index) = fragment_metric_index(metric, family) else {
+                warnings.push(format!(
+                    "derive {} index for metric {} family {}",
+                    map_name, metric, family
+                ));
+                continue;
+            };
+            match read_index(index) {
+                Ok(value) => counters.push(FragmentMetricCounter {
+                    family,
+                    metric,
+                    value,
+                }),
+                Err(error) => warnings.push(format!(
+                    "read {} metric {} family {} index {}: {}",
+                    map_name, metric, family, index, error
+                )),
+            }
+        }
+    }
+    (counters, warnings)
+}
+
+fn collect_fragment_counters(
+    pin_path: &str,
+) -> Result<(Vec<FragmentMetricCounter>, Vec<String>), String> {
     let map_name = "FRAGMENT_METRICS";
     let map_path = format!("{}/{}", pin_path, map_name);
     let map_data = MapData::from_pin(&map_path)
@@ -110,29 +146,62 @@ fn collect_fragment_counters(pin_path: &str) -> Result<Vec<FragmentMetricCounter
     let map = PerCpuArray::<_, u64>::try_from(Map::PerCpuArray(map_data))
         .map_err(|error| format!("convert {} to PerCpuArray<u64>: {:?}", map_name, error))?;
 
-    let mut counters = Vec::with_capacity(EXPORTED_FRAGMENT_METRICS.len() * 2);
-    for family in [FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6] {
-        for metric in EXPORTED_FRAGMENT_METRICS {
-            let index = fragment_metric_index(metric, family).ok_or_else(|| {
-                format!(
-                    "derive {} index for metric {} family {}",
-                    map_name, metric, family
-                )
-            })?;
-            let values = map.get(&index, 0).map_err(|error| {
-                format!(
-                    "read {} metric {} family {}: {:?}",
-                    map_name, metric, family, error
-                )
-            })?;
-            counters.push(FragmentMetricCounter {
-                family,
-                metric,
-                value: values.iter().copied().sum(),
-            });
+    Ok(collect_fragment_counters_with(|index| {
+        map.get(&index, 0)
+            .map(|values| values.iter().copied().sum())
+            .map_err(|error| format!("{:?}", error))
+    }))
+}
+
+fn collect_fragment_pressure_with<K, I>(
+    map_name: &str,
+    family: u8,
+    max_entries: u32,
+    keys: I,
+) -> Result<FragmentPressure, String>
+where
+    K: Eq + Hash,
+    I: IntoIterator<Item = Result<K, String>>,
+{
+    if max_entries == 0 {
+        return Err(format!("pinned {} reports zero capacity", map_name));
+    }
+
+    let observation_budget = u64::from(max_entries) + 1;
+    let mut keys = keys.into_iter();
+    let mut unique_keys = HashSet::new();
+    for _ in 0..observation_budget {
+        let key = match keys.next() {
+            None => {
+                return Ok(FragmentPressure {
+                    family,
+                    occupancy: unique_keys.len() as u32,
+                    max_entries,
+                });
+            }
+            Some(Ok(key)) => key,
+            Some(Err(error)) => return Err(format!("iterate {}: {}", map_name, error)),
+        };
+        if !unique_keys.insert(key) {
+            return Err(format!(
+                "iterate {} returned duplicate key before natural end",
+                map_name
+            ));
+        }
+        if unique_keys.len() as u64 > u64::from(max_entries) {
+            return Err(format!(
+                "iterate {} unique occupancy {} exceeds max_entries {}",
+                map_name,
+                unique_keys.len(),
+                max_entries
+            ));
         }
     }
-    Ok(counters)
+
+    Err(format!(
+        "iterate {} observation budget exhausted after {} entries",
+        map_name, observation_budget
+    ))
 }
 
 fn collect_fragment_pressure_v4(pin_path: &str) -> Result<FragmentPressure, String> {
@@ -145,22 +214,17 @@ fn collect_fragment_pressure_v4(pin_path: &str) -> Result<FragmentPressure, Stri
         .info()
         .map(|info| info.max_entries())
         .map_err(|error| format!("inspect pinned {} capacity: {:?}", map_name, error))?;
-    if max_entries == 0 {
-        return Err(format!("pinned {} reports zero capacity", map_name));
-    }
     let map = HashMap::<_, FragmentContextKey4, FragmentContextValue>::try_from(Map::LruHashMap(
         map_data,
     ))
     .map_err(|error| format!("convert {} to LruHashMap: {:?}", map_name, error))?;
-    let occupancy = map
-        .iter()
-        .try_fold(0u32, |count, item| item.map(|_| count.saturating_add(1)))
-        .map_err(|error| format!("iterate {}: {:?}", map_name, error))?;
-    Ok(FragmentPressure {
-        family: FRAGMENT_FAMILY_IPV4,
-        occupancy,
+    collect_fragment_pressure_with(
+        map_name,
+        FRAGMENT_FAMILY_IPV4,
         max_entries,
-    })
+        map.keys()
+            .map(|item| item.map_err(|error| format!("{:?}", error))),
+    )
 }
 
 fn collect_fragment_pressure_v6(pin_path: &str) -> Result<FragmentPressure, String> {
@@ -173,38 +237,40 @@ fn collect_fragment_pressure_v6(pin_path: &str) -> Result<FragmentPressure, Stri
         .info()
         .map(|info| info.max_entries())
         .map_err(|error| format!("inspect pinned {} capacity: {:?}", map_name, error))?;
-    if max_entries == 0 {
-        return Err(format!("pinned {} reports zero capacity", map_name));
-    }
     let map = HashMap::<_, FragmentContextKey6, FragmentContextValue>::try_from(Map::LruHashMap(
         map_data,
     ))
     .map_err(|error| format!("convert {} to LruHashMap: {:?}", map_name, error))?;
-    let occupancy = map
-        .iter()
-        .try_fold(0u32, |count, item| item.map(|_| count.saturating_add(1)))
-        .map_err(|error| format!("iterate {}: {:?}", map_name, error))?;
-    Ok(FragmentPressure {
-        family: FRAGMENT_FAMILY_IPV6,
-        occupancy,
+    collect_fragment_pressure_with(
+        map_name,
+        FRAGMENT_FAMILY_IPV6,
         max_entries,
-    })
+        map.keys()
+            .map(|item| item.map_err(|error| format!("{:?}", error))),
+    )
+}
+
+fn record_fragment_pressure_result(
+    summary: &mut FragmentMetricsSummary,
+    result: Result<FragmentPressure, String>,
+) {
+    match result {
+        Ok(pressure) => summary.pressure.push(pressure),
+        Err(error) => summary.warnings.push(error),
+    }
 }
 
 pub fn get_fragment_metrics_summary(pin_path: &str) -> FragmentMetricsSummary {
     let mut summary = FragmentMetricsSummary::default();
     match collect_fragment_counters(pin_path) {
-        Ok(counters) => summary.counters = counters,
+        Ok((counters, warnings)) => {
+            summary.counters = counters;
+            summary.warnings.extend(warnings);
+        }
         Err(error) => summary.warnings.push(error),
     }
-    match collect_fragment_pressure_v4(pin_path) {
-        Ok(pressure) => summary.pressure.push(pressure),
-        Err(error) => summary.warnings.push(error),
-    }
-    match collect_fragment_pressure_v6(pin_path) {
-        Ok(pressure) => summary.pressure.push(pressure),
-        Err(error) => summary.warnings.push(error),
-    }
+    record_fragment_pressure_result(&mut summary, collect_fragment_pressure_v4(pin_path));
+    record_fragment_pressure_result(&mut summary, collect_fragment_pressure_v6(pin_path));
     summary
 }
 

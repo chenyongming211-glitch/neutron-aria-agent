@@ -1,11 +1,11 @@
 use crate::common::{
     fragment_authority_drop_reason, fragment_context_flags_for_l4, fragment_context_l4_proto,
-    fragment_install_result, fragment_metric_for_drop_reason, fragment_metric_index,
-    fragment_resolve_decision, fragment_tracking_required, FragmentContextKey4,
-    FragmentContextKey6, FragmentContextValue, FragmentInstallDecision, FragmentKind, PipelineCtx,
-    DROP_FRAGMENT_CONTEXT_INVALID, DROP_FRAGMENT_EXPIRY_OVERFLOW, FRAGMENT_CONTEXT_VERSION,
-    FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6, FRAGMENT_METRIC_EXPIRY_OVERFLOW,
-    FRAGMENT_METRIC_FIRST, FRAGMENT_METRIC_INVALID_L4, FRAGMENT_METRIC_NON_INITIAL,
+    fragment_first_observation_metric, fragment_install_result, fragment_metric_for_drop_reason,
+    fragment_metric_index, fragment_resolve_decision, fragment_tracking_required,
+    FragmentContextKey4, FragmentContextKey6, FragmentContextValue, FragmentInstallDecision,
+    FragmentKind, PipelineCtx, DROP_FRAGMENT_CONTEXT_INVALID, DROP_FRAGMENT_EXPIRY_OVERFLOW,
+    FRAGMENT_CONTEXT_VERSION, FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6,
+    FRAGMENT_METRIC_EXPIRY_OVERFLOW, FRAGMENT_METRIC_INVALID_L4, FRAGMENT_METRIC_NON_INITIAL,
 };
 use crate::maps::{
     FRAGMENT_CONFIG, FRAGMENT_EPOCH, FRAGMENT_METRICS, FRAG_CONTEXT_V4, FRAG_CONTEXT_V6,
@@ -51,6 +51,20 @@ unsafe fn record_metric(_p: &PipelineCtx, family: u8, metric: u8) {
     if let Some(value) = FRAGMENT_METRICS.get_ptr_mut(index) {
         *value = (*value).wrapping_add(1);
     }
+}
+
+#[inline(always)]
+pub unsafe fn record_first_observation(info: &PacketInfo, p: &PipelineCtx) {
+    let metric = fragment_first_observation_metric(info.fragment_kind, p.proto);
+    if metric == 0 {
+        return;
+    }
+    let family = if info.is_ipv6 {
+        FRAGMENT_FAMILY_IPV6
+    } else {
+        FRAGMENT_FAMILY_IPV4
+    };
+    record_metric(p, family, metric);
 }
 
 #[inline(always)]
@@ -202,8 +216,6 @@ pub unsafe fn install_allowed_v4(
     if !fragment_tracking_required(info.fragment_kind, info.fragment_proto, false) {
         return FragmentInstallDecision::Pass;
     }
-    record_metric(p, FRAGMENT_FAMILY_IPV4, FRAGMENT_METRIC_FIRST);
-
     let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
     let epoch = packet_epoch(p);
     let authority =
@@ -274,8 +286,6 @@ pub unsafe fn install_allowed_v6(
     if !fragment_tracking_required(info.fragment_kind, info.fragment_proto, true) {
         return FragmentInstallDecision::Pass;
     }
-    record_metric(p, FRAGMENT_FAMILY_IPV6, FRAGMENT_METRIC_FIRST);
-
     let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
     let epoch = packet_epoch(p);
     let authority = fragment_authority_drop_reason(p.tap_id, true, config.as_ref(), epoch.as_ref());

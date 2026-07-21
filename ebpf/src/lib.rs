@@ -156,6 +156,7 @@ unsafe fn try_tc_egress(
     load_runtime_ctx_tc(ctx, p);
     fragment::snapshot_authority(p);
     load_feature_flags_tc(p, info);
+    fragment::record_first_observation(info, p);
 
     if info.is_ipv6 {
         return Ok(try_tc_egress_v6(ctx, info, p));
@@ -345,6 +346,7 @@ unsafe fn try_tc_ingress(
     load_runtime_ctx_tc(ctx, p);
     fragment::snapshot_authority(p);
     load_feature_flags_tc(p, info);
+    fragment::record_first_observation(info, p);
 
     if info.is_ipv6 {
         return Ok(try_tc_ingress_v6(ctx, info, p));
