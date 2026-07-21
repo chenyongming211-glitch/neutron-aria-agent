@@ -10006,6 +10006,39 @@ mod tests {
         assert!(error.to_string().contains("compact fallback failed"));
     }
 
+    #[tokio::test]
+    async fn fragment_loader_local_disable_persistence_rollback_failure_persists_fail_closed() {
+        let mut state = stopped_wal_instance_state("local-config-disable-rollback").await;
+        let mut old_state = FirewallState::default();
+        old_state.conntrack_enabled = true;
+        old_state.acl_enabled = true;
+        state.state = old_state.clone();
+        state.state.conntrack_enabled = false;
+        state.state.acl_enabled = false;
+
+        let error = state
+            .recover_local_config_persistence_failure(
+                old_state,
+                false,
+                "forced disabling persistence failure",
+                |restore_state| {
+                    assert!(restore_state.conntrack_enabled);
+                    assert!(restore_state.acl_enabled);
+                    Err("forced guarded rollback failure".to_string())
+                },
+            )
+            .await;
+
+        assert!(!state.state.conntrack_enabled);
+        assert!(!state.state.acl_enabled);
+        assert!(error
+            .to_string()
+            .contains("forced disabling persistence failure"));
+        assert!(error
+            .to_string()
+            .contains("forced guarded rollback failure"));
+    }
+
     #[test]
     fn standalone_review_bank_rollback_attempts_all_shared_mutations() {
         let mutations = vec![
