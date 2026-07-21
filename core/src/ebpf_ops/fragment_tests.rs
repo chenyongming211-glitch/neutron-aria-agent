@@ -466,6 +466,73 @@ fn fragment_epoch_configured_recovery_aggregates_failed_disable_compensation() {
 }
 
 #[test]
+fn fragment_epoch_staging_failure_with_preexisting_enabled_state_is_classified_unproven() {
+    let mut expected = default_fragment_config(FRAGMENT_RUNTIME_MODE_MANAGED).unwrap();
+    expected.enabled = FRAGMENT_CONFIG_ENABLED;
+    let live_config = RefCell::new(expected);
+
+    let error = recover_fragment_runtime_configured_with(
+        expected,
+        || Ok(()),
+        |_config| Err("forced disabled insert failure".to_string()),
+        || Ok(0),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        live_config.borrow().enabled,
+        FRAGMENT_CONFIG_ENABLED,
+        "failed staging and compensation leave the preexisting enabled state live"
+    );
+    assert!(error.is_disabled_terminal_state_unproven());
+    assert!(error
+        .to_string()
+        .contains("fragment_runtime_disabled_terminal_state_unproven"));
+}
+
+#[test]
+fn fragment_epoch_final_readback_and_compensation_failure_is_classified_unproven() {
+    let mut expected = default_fragment_config(FRAGMENT_RUNTIME_MODE_STANDALONE).unwrap();
+    expected.enabled = FRAGMENT_CONFIG_ENABLED;
+    let live_config = RefCell::new(expected);
+    let write_count = RefCell::new(0usize);
+
+    let error = recover_fragment_runtime_configured_with(
+        expected,
+        || Ok(()),
+        |config| {
+            let mut count = write_count.borrow_mut();
+            *count += 1;
+            match *count {
+                1 => {
+                    *live_config.borrow_mut() = config;
+                    Ok(())
+                }
+                2 => {
+                    *live_config.borrow_mut() = config;
+                    Err("forced final enabled read-back failure".to_string())
+                }
+                3 => Err("forced disabled compensation insert failure".to_string()),
+                _ => unreachable!(),
+            }
+        },
+        || Ok(0),
+    )
+    .unwrap_err();
+
+    assert_eq!(*write_count.borrow(), 3);
+    assert_eq!(
+        live_config.borrow().enabled,
+        FRAGMENT_CONFIG_ENABLED,
+        "enabled insert succeeded before read-back and failed compensation"
+    );
+    assert!(error.is_disabled_terminal_state_unproven());
+    assert!(error
+        .to_string()
+        .contains("fragment_runtime_disabled_terminal_state_unproven"));
+}
+
+#[test]
 fn fragment_epoch_runtime_map_validator_covers_all_exact_map_kinds() {
     let expected = [
         ("FRAG_CONTEXT_V4", FragmentRuntimeMapKind::ContextV4Lru),

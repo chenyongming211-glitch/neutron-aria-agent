@@ -1736,6 +1736,117 @@ mod tests {
     }
 
     #[test]
+    fn fragment_loader_unproven_recovery_detaches_tc_and_preserves_xdp() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let error = finalize_fragment_recovery_with_tc_fallback(
+            Err(
+                aria_core::ebpf_ops::FragmentRuntimeRecoveryError::DisabledTerminalStateUnproven(
+                    "forced unproven disabled state".to_string(),
+                ),
+            ),
+            || {
+                events.borrow_mut().push("detach-preexisting-tc");
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(&*events.borrow(), &["detach-preexisting-tc"]);
+        assert!(error.contains("fragment_runtime_disabled_terminal_state_unproven"));
+    }
+
+    #[test]
+    fn fragment_loader_unproven_recovery_aggregates_tc_detach_failure() {
+        let error = finalize_fragment_recovery_with_tc_fallback(
+            Err(
+                aria_core::ebpf_ops::FragmentRuntimeRecoveryError::DisabledTerminalStateUnproven(
+                    "forced unproven disabled state".to_string(),
+                ),
+            ),
+            || Err("forced TC detach failure".to_string()),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("fragment_runtime_disabled_terminal_state_unproven"));
+        assert!(error.contains("forced TC detach failure"));
+    }
+
+    #[test]
+    fn fragment_loader_managed_terminal_fallback_removes_all_tc_links_but_not_xdp() {
+        let pin_path = std::env::temp_dir().join(format!(
+            "aria-managed-fragment-terminal-fallback-{}",
+            std::process::id()
+        ));
+        if pin_path.exists() {
+            std::fs::remove_dir_all(&pin_path).unwrap();
+        }
+        std::fs::create_dir_all(&pin_path).unwrap();
+        for name in [
+            "tap-a_tc_ingress_link",
+            "tap-a_tc_egress_link",
+            "tap-a_xdp_link",
+            "tap-b_tc_ingress_link",
+            "tap-b_tc_egress_link",
+            "tap-b_xdp_link",
+            "tc_ingress",
+            "tc_egress",
+        ] {
+            std::fs::write(pin_path.join(name), b"pin").unwrap();
+        }
+
+        let instance = FirewallInstance::new(
+            "tap-a",
+            pin_path.clone(),
+            pin_path.join("state"),
+            true,
+            TraceMapMode::Legacy,
+        );
+        instance.detach_fragment_tc_links_strict().unwrap();
+
+        for name in [
+            "tap-a_tc_ingress_link",
+            "tap-a_tc_egress_link",
+            "tap-b_tc_ingress_link",
+            "tap-b_tc_egress_link",
+        ] {
+            assert!(!pin_path.join(name).exists(), "{} must be detached", name);
+        }
+        for name in ["tap-a_xdp_link", "tap-b_xdp_link", "tc_ingress", "tc_egress"] {
+            assert!(pin_path.join(name).exists(), "{} must be preserved", name);
+        }
+        std::fs::remove_dir_all(pin_path).unwrap();
+    }
+
+    #[test]
+    fn fragment_loader_standalone_terminal_fallback_removes_only_tc_links() {
+        let pin_path = std::env::temp_dir().join(format!(
+            "aria-standalone-fragment-terminal-fallback-{}",
+            std::process::id()
+        ));
+        if pin_path.exists() {
+            std::fs::remove_dir_all(&pin_path).unwrap();
+        }
+        std::fs::create_dir_all(&pin_path).unwrap();
+        for name in ["tc_ingress_link", "tc_egress_link", "xdp_link"] {
+            std::fs::write(pin_path.join(name), b"pin").unwrap();
+        }
+
+        let instance = FirewallInstance::new(
+            "system-review",
+            pin_path.clone(),
+            pin_path.join("state"),
+            false,
+            TraceMapMode::Legacy,
+        );
+        instance.detach_fragment_tc_links_strict().unwrap();
+
+        assert!(!pin_path.join("tc_ingress_link").exists());
+        assert!(!pin_path.join("tc_egress_link").exists());
+        assert!(pin_path.join("xdp_link").exists());
+        std::fs::remove_dir_all(pin_path).unwrap();
+    }
+
+    #[test]
     fn tcx_attachment_query_requires_the_expected_program_id() {
         assert!(tcx_query_contains_expected_program(42, &[7, 42, 99]));
         assert!(!tcx_query_contains_expected_program(42, &[]));
