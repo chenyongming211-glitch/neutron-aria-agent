@@ -1,7 +1,8 @@
 use super::fragment::{
     advance_fragment_epoch_with, default_fragment_config, fragment_sweep_with,
     fragment_v4_key_matches_tap, fragment_v6_key_matches_tap, recover_fragment_runtime_with,
-    scrub_fragment_families_with, validate_fragment_config, validate_fragment_config_disabled,
+    recover_fragment_runtime_configured_with, scrub_fragment_families_with,
+    validate_fragment_config, validate_fragment_config_disabled,
     validate_fragment_runtime_maps_with, FragmentRemoveOutcome, FragmentRuntimeMapKind,
 };
 use super::{
@@ -332,6 +333,135 @@ fn fragment_epoch_recovery_validates_maps_then_writes_config_before_clear() {
         &*events.borrow(),
         &["validate-five-maps", "write-config", "clear-contexts"]
     );
+}
+
+#[test]
+fn fragment_epoch_configured_recovery_stages_disabled_before_scrub_and_enables_last() {
+    let expected = FragmentConfig {
+        version: FRAGMENT_CONFIG_VERSION,
+        enabled: 1,
+        runtime_mode: FRAGMENT_RUNTIME_MODE_MANAGED,
+        _pad: [0; 5],
+        ipv4_timeout_ns: 17_000_000_000,
+        ipv6_timeout_ns: 23_000_000_000,
+    };
+    let events = RefCell::new(Vec::new());
+
+    let removed = recover_fragment_runtime_configured_with(
+        expected,
+        || {
+            events.borrow_mut().push("validate".to_string());
+            Ok(())
+        },
+        |config| {
+            assert_eq!(config.version, expected.version);
+            assert_eq!(config.runtime_mode, expected.runtime_mode);
+            assert_eq!(config._pad, expected._pad);
+            assert_eq!(config.ipv4_timeout_ns, expected.ipv4_timeout_ns);
+            assert_eq!(config.ipv6_timeout_ns, expected.ipv6_timeout_ns);
+            events
+                .borrow_mut()
+                .push(format!("configure-enabled-{}", config.enabled));
+            Ok(())
+        },
+        || {
+            events.borrow_mut().push("scrub".to_string());
+            Ok(6)
+        },
+    )
+    .unwrap();
+
+    assert_eq!(removed, 6);
+    assert_eq!(
+        &*events.borrow(),
+        &[
+            "validate",
+            "configure-enabled-0",
+            "scrub",
+            "configure-enabled-1",
+        ]
+    );
+}
+
+#[test]
+fn fragment_epoch_configured_recovery_scrub_failure_never_enables() {
+    let mut expected = default_fragment_config(FRAGMENT_RUNTIME_MODE_STANDALONE).unwrap();
+    expected.enabled = 1;
+    let writes = RefCell::new(Vec::new());
+
+    let error = recover_fragment_runtime_configured_with(
+        expected,
+        || Ok(()),
+        |config| {
+            writes.borrow_mut().push(config.enabled);
+            Ok(())
+        },
+        || Err("forced scrub failure".to_string()),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("forced scrub failure"));
+    assert_eq!(&*writes.borrow(), &[FRAGMENT_CONFIG_DISABLED]);
+}
+
+#[test]
+fn fragment_epoch_configured_recovery_final_publish_failure_restores_disabled() {
+    let mut expected = default_fragment_config(FRAGMENT_RUNTIME_MODE_MANAGED).unwrap();
+    expected.enabled = 1;
+    let writes = RefCell::new(Vec::new());
+
+    let error = recover_fragment_runtime_configured_with(
+        expected,
+        || Ok(()),
+        |config| {
+            writes.borrow_mut().push(config.enabled);
+            if config.enabled == FRAGMENT_CONFIG_ENABLED {
+                Err("forced final publication failure".to_string())
+            } else {
+                Ok(())
+            }
+        },
+        || Ok(2),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("forced final publication failure"));
+    assert_eq!(
+        &*writes.borrow(),
+        &[
+            FRAGMENT_CONFIG_DISABLED,
+            FRAGMENT_CONFIG_ENABLED,
+            FRAGMENT_CONFIG_DISABLED,
+        ]
+    );
+}
+
+#[test]
+fn fragment_epoch_configured_recovery_aggregates_failed_disable_compensation() {
+    let mut expected = default_fragment_config(FRAGMENT_RUNTIME_MODE_MANAGED).unwrap();
+    expected.enabled = 1;
+    let write_count = RefCell::new(0usize);
+
+    let error = recover_fragment_runtime_configured_with(
+        expected,
+        || Ok(()),
+        |_config| {
+            let mut count = write_count.borrow_mut();
+            *count += 1;
+            match *count {
+                1 => Ok(()),
+                2 => Err("forced final publication failure".to_string()),
+                3 => Err("forced disabled compensation failure".to_string()),
+                _ => unreachable!(),
+            }
+        },
+        || Ok(0),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("forced final publication failure"));
+    assert!(error.contains("forced disabled compensation failure"));
+    assert_eq!(*write_count.borrow(), 3);
 }
 
 #[test]

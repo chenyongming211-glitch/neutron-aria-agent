@@ -11687,6 +11687,181 @@ mod tests {
     }
 
     #[test]
+    fn fragment_loader_local_persistence_rollback_revalidates_before_restoring_enabled_gate() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        execute_local_config_persistence_gate_rollback(
+            true,
+            true,
+            &mut || {
+                events.borrow_mut().push("read_live_gate");
+                Ok((false, false))
+            },
+            &mut || {
+                events.borrow_mut().push("fragment_readiness");
+                Ok(())
+            },
+            &mut || {
+                events.borrow_mut().push("advance_epoch");
+                Ok(())
+            },
+            &mut |conntrack, acl| {
+                events.borrow_mut().push(if conntrack || acl {
+                    "write_enabled_gate"
+                } else {
+                    "write_disabled_gate"
+                });
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                "read_live_gate",
+                "fragment_readiness",
+                "advance_epoch",
+                "write_enabled_gate",
+            ]
+        );
+    }
+
+    #[test]
+    fn fragment_loader_local_persistence_rollback_readiness_failure_never_writes_enabled() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let error = execute_local_config_persistence_gate_rollback(
+            true,
+            true,
+            &mut || {
+                events.borrow_mut().push("read_live_gate");
+                Ok((false, false))
+            },
+            &mut || {
+                events.borrow_mut().push("fragment_readiness");
+                Err("forced readiness failure".to_string())
+            },
+            &mut || {
+                events.borrow_mut().push("advance_epoch");
+                Ok(())
+            },
+            &mut |conntrack, acl| {
+                events.borrow_mut().push(if conntrack || acl {
+                    "write_enabled_gate"
+                } else {
+                    "write_disabled_gate"
+                });
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("forced readiness failure"));
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                "read_live_gate",
+                "fragment_readiness",
+                "write_disabled_gate",
+            ]
+        );
+    }
+
+    #[test]
+    fn fragment_loader_local_persistence_rollback_epoch_failure_never_writes_enabled() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let error = execute_local_config_persistence_gate_rollback(
+            true,
+            false,
+            &mut || {
+                events.borrow_mut().push("read_live_gate");
+                Ok((false, false))
+            },
+            &mut || {
+                events.borrow_mut().push("fragment_readiness");
+                Ok(())
+            },
+            &mut || {
+                events.borrow_mut().push("advance_epoch");
+                Err("forced epoch failure".to_string())
+            },
+            &mut |conntrack, acl| {
+                events.borrow_mut().push(if conntrack || acl {
+                    "write_enabled_gate"
+                } else {
+                    "write_disabled_gate"
+                });
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("forced epoch failure"));
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                "read_live_gate",
+                "fragment_readiness",
+                "advance_epoch",
+                "write_disabled_gate",
+            ]
+        );
+    }
+
+    #[test]
+    fn fragment_loader_local_persistence_rollback_publish_failure_compensates_disabled() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let error = execute_local_config_persistence_gate_rollback(
+            false,
+            true,
+            &mut || {
+                events.borrow_mut().push("read_live_gate");
+                Ok((false, false))
+            },
+            &mut || {
+                events.borrow_mut().push("fragment_readiness");
+                Ok(())
+            },
+            &mut || {
+                events.borrow_mut().push("advance_epoch");
+                Ok(())
+            },
+            &mut |conntrack, acl| {
+                events.borrow_mut().push(if conntrack || acl {
+                    "write_enabled_gate"
+                } else {
+                    "write_disabled_gate"
+                });
+                if conntrack || acl {
+                    Err("forced enabled gate write failure".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("forced enabled gate write failure"));
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                "read_live_gate",
+                "fragment_readiness",
+                "advance_epoch",
+                "write_enabled_gate",
+                "write_disabled_gate",
+            ]
+        );
+    }
+
+    #[test]
     fn neutron_acl_fragment_epoch_gate_executor_stops_on_epoch_failure() {
         use std::cell::RefCell;
 
