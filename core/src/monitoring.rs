@@ -208,6 +208,129 @@ pub fn get_fragment_metrics_summary(pin_path: &str) -> FragmentMetricsSummary {
     summary
 }
 
+#[cfg(test)]
+mod fragment_observability_tests {
+    use super::{
+        collect_fragment_counters_with, collect_fragment_pressure_with,
+        record_fragment_pressure_result, FragmentMetricsSummary,
+    };
+    use crate::common::{
+        fragment_metric_index, FragmentContextKey4, FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6,
+        FRAGMENT_METRIC_FIRST, FRAGMENT_METRIC_INVALID_L4,
+    };
+
+    fn v4_key(fragment_id: u16) -> FragmentContextKey4 {
+        FragmentContextKey4 {
+            tap_id: 7,
+            src_ip: 0xc000_0201,
+            dst_ip: 0xc633_6401,
+            fragment_id,
+            vlan_id: 9,
+            proto: 17,
+            direction: 1,
+            _pad: [0; 2],
+        }
+    }
+
+    fn pressure_summary(result: Result<super::FragmentPressure, String>) -> FragmentMetricsSummary {
+        let mut summary = FragmentMetricsSummary::default();
+        record_fragment_pressure_result(&mut summary, result);
+        summary
+    }
+
+    #[test]
+    fn fragment_observability_single_counter_read_failure_omits_only_that_series() {
+        let failed_index =
+            fragment_metric_index(FRAGMENT_METRIC_FIRST, FRAGMENT_FAMILY_IPV6).unwrap();
+
+        let (counters, warnings) = collect_fragment_counters_with(|index| {
+            if index == failed_index {
+                Err("synthetic index read failure".to_string())
+            } else {
+                Ok(index as u64)
+            }
+        });
+
+        assert_eq!(counters.len(), 19);
+        assert!(!counters.iter().any(|counter| {
+            counter.family == FRAGMENT_FAMILY_IPV6 && counter.metric == FRAGMENT_METRIC_FIRST
+        }));
+        assert!(counters.iter().any(|counter| {
+            counter.family == FRAGMENT_FAMILY_IPV4
+                && counter.metric == FRAGMENT_METRIC_FIRST
+                && counter.value == 2
+        }));
+        assert!(counters.iter().any(|counter| {
+            counter.family == FRAGMENT_FAMILY_IPV6
+                && counter.metric == FRAGMENT_METRIC_INVALID_L4
+                && counter.value == 35
+        }));
+        assert_eq!(
+            warnings,
+            vec!["read FRAGMENT_METRICS metric 1 family 6 index 3: synthetic index read failure"]
+        );
+    }
+
+    #[test]
+    fn fragment_observability_duplicate_lru_key_omits_pressure_and_warns() {
+        let key = v4_key(1);
+        let summary = pressure_summary(collect_fragment_pressure_with(
+            "FRAG_CONTEXT_V4",
+            FRAGMENT_FAMILY_IPV4,
+            2,
+            vec![Ok(key), Ok(key)],
+        ));
+
+        assert!(summary.pressure.is_empty());
+        assert_eq!(summary.warnings.len(), 1);
+        assert!(summary.warnings[0].contains("duplicate key"));
+    }
+
+    #[test]
+    fn fragment_observability_unique_lru_keys_over_capacity_omit_pressure_and_warn() {
+        let summary = pressure_summary(collect_fragment_pressure_with(
+            "FRAG_CONTEXT_V4",
+            FRAGMENT_FAMILY_IPV4,
+            2,
+            vec![Ok(v4_key(1)), Ok(v4_key(2)), Ok(v4_key(3))],
+        ));
+
+        assert!(summary.pressure.is_empty());
+        assert_eq!(summary.warnings.len(), 1);
+        assert!(summary.warnings[0].contains("exceeds max_entries 2"));
+    }
+
+    #[test]
+    fn fragment_observability_lru_iteration_error_omits_pressure_and_warns() {
+        let summary = pressure_summary(collect_fragment_pressure_with(
+            "FRAG_CONTEXT_V4",
+            FRAGMENT_FAMILY_IPV4,
+            2,
+            vec![Ok(v4_key(1)), Err("synthetic iterator failure".to_string())],
+        ));
+
+        assert!(summary.pressure.is_empty());
+        assert_eq!(summary.warnings.len(), 1);
+        assert!(summary.warnings[0].contains("synthetic iterator failure"));
+    }
+
+    #[test]
+    fn fragment_observability_natural_unique_lru_end_reports_exact_bounded_occupancy() {
+        let summary = pressure_summary(collect_fragment_pressure_with(
+            "FRAG_CONTEXT_V4",
+            FRAGMENT_FAMILY_IPV4,
+            3,
+            vec![Ok(v4_key(1)), Ok(v4_key(2))],
+        ));
+
+        assert!(summary.warnings.is_empty());
+        assert_eq!(summary.pressure.len(), 1);
+        assert_eq!(summary.pressure[0].occupancy, 2);
+        assert_eq!(summary.pressure[0].max_entries, 3);
+        assert!(summary.pressure[0].occupancy <= summary.pressure[0].max_entries);
+    }
+}
+
 fn sum_per_cpu_rule_stats(values: PerCpuValues<RuleStatsValue>) -> (u64, u64, u64, u64) {
     let mut packets = 0u64;
     let mut bytes = 0u64;

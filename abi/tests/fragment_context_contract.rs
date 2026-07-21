@@ -1,15 +1,16 @@
 use aria_ebpf_abi::{
     fragment_context_disposition, fragment_context_flags_for_l4, fragment_context_l4_proto,
-    fragment_install_result, fragment_resolve_decision, fragment_tracking_required, FragmentConfig,
-    FragmentContextDisposition, FragmentContextKey4, FragmentContextValue, FragmentEpochValue,
-    FragmentInstallDecision, FragmentKind, FragmentResolveDecision, PipelineCtx,
-    DROP_FRAGMENT_CONTEXT_EXPIRED, DROP_FRAGMENT_CONTEXT_MISSING,
-    DROP_FRAGMENT_CONTEXT_UPDATE_FAILED, DROP_FRAGMENT_TRACKING_DISABLED, FRAGMENT_CONFIG_DISABLED,
-    FRAGMENT_CONFIG_ENABLED, FRAGMENT_CONFIG_VERSION, FRAGMENT_CONTEXT_FLAG_TCP,
-    FRAGMENT_CONTEXT_VERSION, FRAGMENT_METRIC_CONTEXT_EXPIRED, FRAGMENT_METRIC_CONTEXT_MISSING,
-    FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED, FRAGMENT_METRIC_TRACKING_DISABLED,
-    FRAGMENT_RUNTIME_MODE_MANAGED, FRAGMENT_RUNTIME_MODE_STANDALONE, IPPROTO_ICMP, IPPROTO_TCP,
-    IPPROTO_UDP,
+    fragment_first_observation_metric, fragment_install_result, fragment_resolve_decision,
+    fragment_tracking_required, FragmentConfig, FragmentContextDisposition, FragmentContextKey4,
+    FragmentContextValue, FragmentEpochValue, FragmentInstallDecision, FragmentKind,
+    FragmentResolveDecision, PipelineCtx, DROP_FRAGMENT_CONTEXT_EXPIRED,
+    DROP_FRAGMENT_CONTEXT_MISSING, DROP_FRAGMENT_CONTEXT_UPDATE_FAILED,
+    DROP_FRAGMENT_TRACKING_DISABLED, FRAGMENT_CONFIG_DISABLED, FRAGMENT_CONFIG_ENABLED,
+    FRAGMENT_CONFIG_VERSION, FRAGMENT_CONTEXT_FLAG_TCP, FRAGMENT_CONTEXT_VERSION,
+    FRAGMENT_METRIC_CONTEXT_EXPIRED, FRAGMENT_METRIC_CONTEXT_MISSING,
+    FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED, FRAGMENT_METRIC_FIRST,
+    FRAGMENT_METRIC_TRACKING_DISABLED, FRAGMENT_RUNTIME_MODE_MANAGED,
+    FRAGMENT_RUNTIME_MODE_STANDALONE, IPPROTO_ICMP, IPPROTO_TCP, IPPROTO_UDP,
 };
 
 const SECOND: u64 = 1_000_000_000;
@@ -49,6 +50,26 @@ fn current_value() -> FragmentContextValue {
         epoch: 7,
         expires_at_ns: 30_000_000_000,
     }
+}
+
+#[test]
+fn fragment_observability_first_metric_is_decided_before_acl_or_install_outcome() {
+    for proto in [IPPROTO_TCP, IPPROTO_UDP] {
+        let metric_before_acl = fragment_first_observation_metric(FragmentKind::First as u8, proto);
+        let acl_allows = false;
+
+        assert!(!acl_allows);
+        assert_eq!(metric_before_acl, FRAGMENT_METRIC_FIRST);
+    }
+
+    assert_eq!(
+        fragment_first_observation_metric(FragmentKind::NonInitial as u8, IPPROTO_UDP),
+        0
+    );
+    assert_eq!(
+        fragment_first_observation_metric(FragmentKind::First as u8, IPPROTO_ICMP),
+        0
+    );
 }
 
 #[test]
