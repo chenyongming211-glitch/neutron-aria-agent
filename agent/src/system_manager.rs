@@ -1,7 +1,7 @@
 use crate::control_plane::ControlPlane;
 use crate::instance::{
-    configure_fragment_context_capacity, preexisting_tc_acl_runtime_is_healthy, FirewallInstance,
-    TcAclLinkHealth,
+    configure_fragment_context_capacity, finalize_fragment_recovery_with_tc_fallback,
+    preexisting_tc_acl_runtime_is_healthy, FirewallInstance, TcAclLinkHealth,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -641,7 +641,7 @@ pub async fn system_start(
             &ownership,
         ));
     }
-    if let Err(e) = aria_core::ebpf_ops::recover_fragment_runtime_configured_strict(
+    let fragment_recovery = aria_core::ebpf_ops::recover_fragment_runtime_configured_strict(
         pin_path,
         fragment_tracking
             .runtime_config(aria_core::common::FRAGMENT_RUNTIME_MODE_STANDALONE)
@@ -649,7 +649,10 @@ pub async fn system_start(
                 start_error_with_cleanup(error, iface, pin_path, state_path, &ownership)
             })?,
         fragment_tracking.max_entries,
-    ) {
+    );
+    if let Err(e) = finalize_fragment_recovery_with_tc_fallback(fragment_recovery, || {
+        preexisting_instance.detach_fragment_tc_links_strict()
+    }) {
         return Err(start_error_with_cleanup(
             format!("failed to recover standalone fragment runtime: {}", e),
             iface,

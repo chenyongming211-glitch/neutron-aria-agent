@@ -1,5 +1,7 @@
 use crate::FragmentTrackingSettings;
-use aria_core::ebpf_ops::{critical_network_map_names, TraceMapMode, NETWORK_MAP_NAMES};
+use aria_core::ebpf_ops::{
+    critical_network_map_names, FragmentRuntimeRecoveryError, TraceMapMode, NETWORK_MAP_NAMES,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -33,6 +35,32 @@ pub(crate) fn validate_fragment_context_capacity(capacity: u32) -> Result<u32, S
 
 fn fragment_runtime_requires_global_recovery(known_live_runtime: bool) -> bool {
     !known_live_runtime
+}
+
+pub(crate) fn finalize_fragment_recovery_with_tc_fallback<Detach>(
+    recovery: Result<u64, FragmentRuntimeRecoveryError>,
+    detach_preexisting_tc: Detach,
+) -> Result<u64, String>
+where
+    Detach: FnOnce() -> Result<(), String>,
+{
+    match recovery {
+        Ok(removed) => Ok(removed),
+        Err(error) if error.is_disabled_terminal_state_unproven() => {
+            let recovery_error = error.to_string();
+            match detach_preexisting_tc() {
+                Ok(()) => Err(format!(
+                    "{}; preexisting TC fragment datapath detached",
+                    recovery_error
+                )),
+                Err(detach_error) => Err(format!(
+                    "{}; preexisting TC fragment datapath detach failed: {}",
+                    recovery_error, detach_error
+                )),
+            }
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 pub(crate) fn configure_fragment_context_capacity(
@@ -473,6 +501,61 @@ impl FirewallInstance {
             ),
             self.xdp_link_health(),
         )
+    }
+
+    pub(crate) fn detach_fragment_tc_links_strict(&self) -> Result<(), String> {
+        let candidates = if self.shared_runtime {
+            let entries = std::fs::read_dir(&self.pin_path).map_err(|error| {
+                format!(
+                    "[{}] inspect shared runtime TC link pins in {}: {}",
+                    self.iface,
+                    self.pin_path.display(),
+                    error
+                )
+            })?;
+            let mut paths = BTreeSet::new();
+            for entry in entries {
+                let entry = entry.map_err(|error| {
+                    format!(
+                        "[{}] inspect shared runtime TC link entry: {}",
+                        self.iface, error
+                    )
+                })?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.ends_with("_tc_ingress_link") || name.ends_with("_tc_egress_link") {
+                    paths.insert(entry.path());
+                }
+            }
+            paths
+        } else {
+            BTreeSet::from([
+                self.pin_path.join("tc_ingress_link"),
+                self.pin_path.join("tc_egress_link"),
+            ])
+        };
+
+        let mut errors = Vec::new();
+        for path in &candidates {
+            if path.exists() {
+                if let Err(error) = std::fs::remove_file(path) {
+                    errors.push(format!("remove TC link pin {}: {}", path.display(), error));
+                    continue;
+                }
+            }
+            if path.exists() {
+                errors.push(format!(
+                    "TC link pin {} still exists after detach",
+                    path.display()
+                ));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
     fn pin_runtime_maps(&self, bpf: &mut aya::Ebpf, pin_path: &str) -> Result<(), String> {
@@ -1036,12 +1119,15 @@ impl FirewallInstance {
         let loaded_optional_programs = self.load_runtime_programs(&mut bpf)?;
         self.pin_runtime_maps(&mut bpf, pin_path_str)
             .map_err(|e| format!("pin runtime maps failed: {}", e))?;
-        aria_core::ebpf_ops::recover_fragment_runtime_configured_strict(
-            pin_path_str,
-            self.fragment_tracking.runtime_config(
-                aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
-            )?,
-            self.fragment_tracking.max_entries,
+        finalize_fragment_recovery_with_tc_fallback(
+            aria_core::ebpf_ops::recover_fragment_runtime_configured_strict(
+                pin_path_str,
+                self.fragment_tracking.runtime_config(
+                    aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+                )?,
+                self.fragment_tracking.max_entries,
+            ),
+            || self.detach_fragment_tc_links_strict(),
         )
         .map_err(|e| format!("recover fragment runtime failed: {}", e))?;
         let present_program_pins =
@@ -1213,12 +1299,15 @@ impl FirewallInstance {
                     format!("non-UTF-8 pin path: {}", self.pin_path.display())
                 })?;
                 if fragment_runtime_requires_global_recovery(known_live_runtime) {
-                    aria_core::ebpf_ops::recover_fragment_runtime_configured_strict(
-                        pin_path_str,
-                        self.fragment_tracking.runtime_config(
-                            aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
-                        )?,
-                        self.fragment_tracking.max_entries,
+                    finalize_fragment_recovery_with_tc_fallback(
+                        aria_core::ebpf_ops::recover_fragment_runtime_configured_strict(
+                            pin_path_str,
+                            self.fragment_tracking.runtime_config(
+                                aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+                            )?,
+                            self.fragment_tracking.max_entries,
+                        ),
+                        || self.detach_fragment_tc_links_strict(),
                     )
                     .map_err(|e| format!("fragment runtime global recovery failed: {}", e))?;
                 } else {
