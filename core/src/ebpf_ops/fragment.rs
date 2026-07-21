@@ -424,6 +424,53 @@ where
     scrub()
 }
 
+pub(super) fn recover_fragment_runtime_configured_with<Validate, Configure, Scrub>(
+    expected_config: FragmentConfig,
+    validate_maps_and_capacity: Validate,
+    mut configure: Configure,
+    scrub: Scrub,
+) -> Result<u64, String>
+where
+    Validate: FnOnce() -> Result<(), String>,
+    Configure: FnMut(FragmentConfig) -> Result<(), String>,
+    Scrub: FnOnce() -> Result<u64, String>,
+{
+    validate_maps_and_capacity()?;
+
+    let mut staging_config = expected_config;
+    staging_config.enabled = FRAGMENT_CONFIG_DISABLED;
+    if let Err(staging_error) = configure(staging_config) {
+        let mut errors = vec![format!(
+            "stage disabled FRAGMENT_CONFIG before recovery: {}",
+            staging_error
+        )];
+        if let Err(compensation_error) = configure(staging_config) {
+            errors.push(format!(
+                "restore disabled FRAGMENT_CONFIG after staging failure: {}",
+                compensation_error
+            ));
+        }
+        return Err(errors.join("; "));
+    }
+
+    let removed = scrub()?;
+    if let Err(publication_error) = configure(expected_config) {
+        let mut errors = vec![format!(
+            "publish final FRAGMENT_CONFIG after recovery: {}",
+            publication_error
+        )];
+        if let Err(compensation_error) = configure(staging_config) {
+            errors.push(format!(
+                "restore disabled FRAGMENT_CONFIG after publication failure: {}",
+                compensation_error
+            ));
+        }
+        return Err(errors.join("; "));
+    }
+
+    Ok(removed)
+}
+
 pub(super) fn validate_fragment_runtime_maps_with<Validate>(
     mut validate: Validate,
 ) -> Result<(), String>
@@ -565,7 +612,8 @@ pub fn recover_fragment_runtime_configured_strict(
     expected_config: FragmentConfig,
     expected_max_entries: u32,
 ) -> Result<u64, String> {
-    recover_fragment_runtime_with(
+    recover_fragment_runtime_configured_with(
+        expected_config,
         || {
             validate_fragment_runtime_maps_strict(pin_path)?;
             let actual_v4_max = fragment_context_capacity(pin_path, "FRAG_CONTEXT_V4")?;
@@ -581,7 +629,7 @@ pub fn recover_fragment_runtime_configured_strict(
             }
             Ok(())
         },
-        || configure_fragment_tracking(pin_path, expected_config.runtime_mode, expected_config),
+        |config| configure_fragment_tracking(pin_path, expected_config.runtime_mode, config),
         || clear_fragment_contexts_strict(pin_path),
     )
 }
