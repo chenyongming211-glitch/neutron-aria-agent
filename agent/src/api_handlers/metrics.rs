@@ -58,6 +58,7 @@ fn fragment_metric_label(metric: u8) -> Option<&'static str> {
         aria_core::common::FRAGMENT_METRIC_CONTEXT_MISSING => Some("miss"),
         aria_core::common::FRAGMENT_METRIC_CONTEXT_EXPIRED => Some("expired"),
         aria_core::common::FRAGMENT_METRIC_CONTEXT_STALE => Some("stale"),
+        aria_core::common::FRAGMENT_METRIC_CONTEXT_INSERTED => Some("inserted"),
         aria_core::common::FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED => Some("update_failed"),
         aria_core::common::FRAGMENT_METRIC_INVALID_L4 => Some("invalid_l4"),
         aria_core::common::FRAGMENT_METRIC_CONTEXT_OVERLAP => Some("overlap"),
@@ -769,6 +770,10 @@ mod tests {
 
         assert_ne!(DROP_FRAGMENT_INVALID_L4, DROP_MALFORMED_IP);
         assert_ne!(DROP_FRAGMENT_INVALID_L4, DROP_FRAGMENT_CONTEXT_INVALID);
+        assert_eq!(
+            aria_core::trace_ops::drop_reason_name(DROP_FRAGMENT_INVALID_L4),
+            "fragment-invalid-l4"
+        );
         assert_eq!(
             [
                 FRAGMENT_METRIC_FIRST,

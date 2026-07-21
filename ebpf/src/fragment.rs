@@ -1,10 +1,11 @@
 use crate::common::{
     fragment_authority_drop_reason, fragment_context_flags_for_l4, fragment_context_l4_proto,
-    fragment_install_result, fragment_metric_for_drop_reason, fragment_resolve_decision,
-    fragment_tracking_required, FragmentContextKey4, FragmentContextKey6, FragmentContextValue,
-    FragmentInstallDecision, FragmentKind, PipelineCtx, DROP_FRAGMENT_CONTEXT_INVALID,
-    DROP_FRAGMENT_EXPIRY_OVERFLOW, FRAGMENT_CONTEXT_VERSION, FRAGMENT_METRIC_EXPIRY_OVERFLOW,
-    FRAGMENT_METRIC_FIRST, FRAGMENT_METRIC_NON_INITIAL,
+    fragment_install_result, fragment_metric_for_drop_reason, fragment_metric_index,
+    fragment_resolve_decision, fragment_tracking_required, FragmentContextKey4,
+    FragmentContextKey6, FragmentContextValue, FragmentInstallDecision, FragmentKind, PipelineCtx,
+    DROP_FRAGMENT_CONTEXT_INVALID, DROP_FRAGMENT_EXPIRY_OVERFLOW, FRAGMENT_CONTEXT_VERSION,
+    FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6, FRAGMENT_METRIC_EXPIRY_OVERFLOW,
+    FRAGMENT_METRIC_FIRST, FRAGMENT_METRIC_INVALID_L4, FRAGMENT_METRIC_NON_INITIAL,
 };
 use crate::maps::{
     FRAGMENT_CONFIG, FRAGMENT_EPOCH, FRAGMENT_METRICS, FRAG_CONTEXT_V4, FRAG_CONTEXT_V6,
@@ -13,8 +14,6 @@ use crate::parser::PacketInfo;
 use aria_ebpf_abi::FragmentEpochValue;
 
 const FRAGMENT_CONFIG_KEY: u32 = 0;
-const FRAGMENT_FAMILY_V4: u8 = 4;
-const FRAGMENT_FAMILY_V6: u8 = 6;
 
 pub enum ResolveOutcome {
     NotRequired,
@@ -46,11 +45,19 @@ fn packet_epoch(p: &PipelineCtx) -> Option<FragmentEpochValue> {
 
 #[inline(always)]
 unsafe fn record_metric(_p: &PipelineCtx, family: u8, metric: u8) {
-    if metric == 0 {
+    let Some(index) = fragment_metric_index(metric, family) else {
         return;
+    };
+    if let Some(value) = FRAGMENT_METRICS.get_ptr_mut(index) {
+        *value = (*value).wrapping_add(1);
     }
-    let family_offset = if family == FRAGMENT_FAMILY_V6 { 1 } else { 0 };
-    let index = metric as u32 * 2 + family_offset;
+}
+
+#[inline(always)]
+pub unsafe fn record_invalid_l4(family: u8) {
+    let Some(index) = fragment_metric_index(FRAGMENT_METRIC_INVALID_L4, family) else {
+        return;
+    };
     if let Some(value) = FRAGMENT_METRICS.get_ptr_mut(index) {
         *value = (*value).wrapping_add(1);
     }
@@ -90,7 +97,7 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
     {
         return ResolveOutcome::NotRequired;
     }
-    record_metric(p, FRAGMENT_FAMILY_V4, FRAGMENT_METRIC_NON_INITIAL);
+    record_metric(p, FRAGMENT_FAMILY_IPV4, FRAGMENT_METRIC_NON_INITIAL);
 
     let key = resolve_v4_key(info, p);
     let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
@@ -106,7 +113,7 @@ pub unsafe fn resolve_v4(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
         p.now,
         info.fragment_offset,
     );
-    record_metric(p, FRAGMENT_FAMILY_V4, decision.metric());
+    record_metric(p, FRAGMENT_FAMILY_IPV4, decision.metric());
     if decision.drop_reason() != 0 {
         p.drop_reason = decision.drop_reason();
         return ResolveOutcome::Drop;
@@ -138,7 +145,7 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
     {
         return ResolveOutcome::NotRequired;
     }
-    record_metric(p, FRAGMENT_FAMILY_V6, FRAGMENT_METRIC_NON_INITIAL);
+    record_metric(p, FRAGMENT_FAMILY_IPV6, FRAGMENT_METRIC_NON_INITIAL);
 
     let key = resolve_v6_key(info, p);
     let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
@@ -154,7 +161,7 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
         p.now,
         info.fragment_offset,
     );
-    record_metric(p, FRAGMENT_FAMILY_V6, decision.metric());
+    record_metric(p, FRAGMENT_FAMILY_IPV6, decision.metric());
     if decision.drop_reason() != 0 {
         p.drop_reason = decision.drop_reason();
         return ResolveOutcome::Drop;
@@ -195,7 +202,7 @@ pub unsafe fn install_allowed_v4(
     if !fragment_tracking_required(info.fragment_kind, info.fragment_proto, false) {
         return FragmentInstallDecision::Pass;
     }
-    record_metric(p, FRAGMENT_FAMILY_V4, FRAGMENT_METRIC_FIRST);
+    record_metric(p, FRAGMENT_FAMILY_IPV4, FRAGMENT_METRIC_FIRST);
 
     let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
     let epoch = packet_epoch(p);
@@ -205,7 +212,7 @@ pub unsafe fn install_allowed_v4(
         p.drop_reason = authority;
         record_metric(
             p,
-            FRAGMENT_FAMILY_V4,
+            FRAGMENT_FAMILY_IPV4,
             fragment_metric_for_drop_reason(authority),
         );
         return fragment_install_result(false, ct_created_by_packet);
@@ -222,7 +229,7 @@ pub unsafe fn install_allowed_v4(
         Some(expires_at_ns) => expires_at_ns,
         None => {
             p.drop_reason = DROP_FRAGMENT_EXPIRY_OVERFLOW;
-            record_metric(p, FRAGMENT_FAMILY_V4, FRAGMENT_METRIC_EXPIRY_OVERFLOW);
+            record_metric(p, FRAGMENT_FAMILY_IPV4, FRAGMENT_METRIC_EXPIRY_OVERFLOW);
             return fragment_install_result(false, ct_created_by_packet);
         }
     };
@@ -244,7 +251,7 @@ pub unsafe fn install_allowed_v4(
         FRAG_CONTEXT_V4.insert(&key, &value, 0).is_ok(),
         ct_created_by_packet,
     );
-    record_metric(p, FRAGMENT_FAMILY_V4, decision.metric());
+    record_metric(p, FRAGMENT_FAMILY_IPV4, decision.metric());
     if decision.drop_reason() != 0 {
         p.drop_reason = decision.drop_reason();
     }
@@ -267,7 +274,7 @@ pub unsafe fn install_allowed_v6(
     if !fragment_tracking_required(info.fragment_kind, info.fragment_proto, true) {
         return FragmentInstallDecision::Pass;
     }
-    record_metric(p, FRAGMENT_FAMILY_V6, FRAGMENT_METRIC_FIRST);
+    record_metric(p, FRAGMENT_FAMILY_IPV6, FRAGMENT_METRIC_FIRST);
 
     let config = FRAGMENT_CONFIG.get(&FRAGMENT_CONFIG_KEY).copied();
     let epoch = packet_epoch(p);
@@ -276,7 +283,7 @@ pub unsafe fn install_allowed_v6(
         p.drop_reason = authority;
         record_metric(
             p,
-            FRAGMENT_FAMILY_V6,
+            FRAGMENT_FAMILY_IPV6,
             fragment_metric_for_drop_reason(authority),
         );
         return fragment_install_result(false, ct_created_by_packet);
@@ -293,7 +300,7 @@ pub unsafe fn install_allowed_v6(
         Some(expires_at_ns) => expires_at_ns,
         None => {
             p.drop_reason = DROP_FRAGMENT_EXPIRY_OVERFLOW;
-            record_metric(p, FRAGMENT_FAMILY_V6, FRAGMENT_METRIC_EXPIRY_OVERFLOW);
+            record_metric(p, FRAGMENT_FAMILY_IPV6, FRAGMENT_METRIC_EXPIRY_OVERFLOW);
             return fragment_install_result(false, ct_created_by_packet);
         }
     };
@@ -315,7 +322,7 @@ pub unsafe fn install_allowed_v6(
         FRAG_CONTEXT_V6.insert(&key, &value, 0).is_ok(),
         ct_created_by_packet,
     );
-    record_metric(p, FRAGMENT_FAMILY_V6, decision.metric());
+    record_metric(p, FRAGMENT_FAMILY_IPV6, decision.metric());
     if decision.drop_reason() != 0 {
         p.drop_reason = decision.drop_reason();
     }

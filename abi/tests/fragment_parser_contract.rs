@@ -193,6 +193,8 @@ fn fragment_parser_incomplete_supported_ipv4_is_a_malformed_drop_candidate() {
             out.as_mut_ptr(),
         )
     });
+    let info = unsafe { out.assume_init() };
+    assert_eq!(parser::invalid_l4_failure(&info), None);
 }
 
 #[test]
@@ -215,6 +217,8 @@ fn fragment_parser_incomplete_vlan_ipv6_is_a_malformed_drop_candidate() {
             out.as_mut_ptr(),
         )
     });
+    let info = unsafe { out.assume_init() };
+    assert_eq!(parser::invalid_l4_failure(&info), None);
 }
 
 #[test]

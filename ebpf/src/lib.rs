@@ -31,8 +31,8 @@ use common::{
     CT_CONTRACT_FAMILY_IPV4, CT_CONTRACT_FAMILY_IPV6, CT_CONTRACT_HOOK_TC_EGRESS,
     CT_CONTRACT_HOOK_TC_INGRESS, CT_CONTRACT_REASON_CT_DISABLED, CT_CONTRACT_REASON_CT_HIT,
     CT_CONTRACT_REASON_CT_MISS, CT_CONTRACT_REASON_STALE_BANK, DIR_EGRESS, DIR_INGRESS,
-    DROP_MALFORMED_IP, DROP_QOS_EGRESS, DROP_QOS_INGRESS, FLAG_ACL_ON, FLAG_CT_HIT,
-    FLAG_CT_STALE_BANK, FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_POLICY_HIT, FLAG_QOS_ON,
+    DROP_FRAGMENT_INVALID_L4, DROP_MALFORMED_IP, DROP_QOS_EGRESS, DROP_QOS_INGRESS, FLAG_ACL_ON,
+    FLAG_CT_HIT, FLAG_CT_STALE_BANK, FLAG_IS_FORWARD, FLAG_MIRROR_ON, FLAG_POLICY_HIT, FLAG_QOS_ON,
     FLAG_TCPRT_ON, FLAG_TRACING, IPPROTO_TCP, TAP_ID_UNASSIGNED, TRACE_RESULT_DROP_ACL,
     TRACE_RESULT_DROP_ACL_DEFAULT, TRACE_RESULT_DROP_ACL_PORT, TRACE_RESULT_DROP_QOS,
     TRACE_RESULT_PASS, TRACE_TC_DROP, TRACE_TC_EGRESS, TRACE_TC_INGRESS, XDP_PASS,
@@ -115,7 +115,12 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
             None => return TC_ACT_OK,
         };
         if !parse_tc_packet(&ctx, info_ptr, family) {
-            record_malformed_ip_drop_tc(&ctx, DIR_EGRESS, pkt_len);
+            if let Some((invalid_family, proto)) = parser::invalid_l4_failure(&*info_ptr) {
+                fragment::record_invalid_l4(invalid_family);
+                record_invalid_l4_drop_tc(&ctx, DIR_EGRESS, pkt_len, proto);
+            } else {
+                record_malformed_ip_drop_tc(&ctx, DIR_EGRESS, pkt_len);
+            }
             return TC_ACT_SHOT;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
@@ -299,7 +304,12 @@ pub fn tc_ingress(ctx: TcContext) -> i32 {
             None => return TC_ACT_OK,
         };
         if !parse_tc_packet(&ctx, info_ptr, family) {
-            record_malformed_ip_drop_tc(&ctx, DIR_INGRESS, pkt_len);
+            if let Some((invalid_family, proto)) = parser::invalid_l4_failure(&*info_ptr) {
+                fragment::record_invalid_l4(invalid_family);
+                record_invalid_l4_drop_tc(&ctx, DIR_INGRESS, pkt_len, proto);
+            } else {
+                record_malformed_ip_drop_tc(&ctx, DIR_INGRESS, pkt_len);
+            }
             return TC_ACT_SHOT;
         }
         let pipe = match maps::PIPE_SCRATCH.get_ptr_mut(0) {
@@ -571,6 +581,22 @@ unsafe fn record_malformed_ip_drop_tc(ctx: &TcContext, direction: u8, pkt_len: u
         reason: DROP_MALFORMED_IP,
         direction,
         proto: 0,
+        _pad: 0,
+    });
+}
+
+#[inline(always)]
+unsafe fn record_invalid_l4_drop_tc(ctx: &TcContext, direction: u8, pkt_len: u32, proto: u8) {
+    let skb = ctx.as_ptr() as *const __sk_buff;
+    drops::record_drop(&drops::DropArgs {
+        tap_id: resolve_tap_id_for_ifindex((*skb).ifindex),
+        src_id: 0,
+        dst_id: 0,
+        pkt_len,
+        now: bpf_ktime_get_ns(),
+        reason: DROP_FRAGMENT_INVALID_L4,
+        direction,
+        proto,
         _pad: 0,
     });
 }

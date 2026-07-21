@@ -23,6 +23,55 @@ pub struct PacketInfo {
     pub fragment_kind: u8,
     pub more_fragments: bool,
     pub fragment_proto: u8,
+    invalid_l4_family: u8,
+    invalid_l4_proto: u8,
+    invalid_l4_fragment_kind: u8,
+}
+
+#[inline(always)]
+unsafe fn clear_packet_info(out: *mut PacketInfo) {
+    (*out).src_ip = 0;
+    (*out).dst_ip = 0;
+    (*out).src_ip_v6 = [0; 16];
+    (*out).dst_ip_v6 = [0; 16];
+    (*out).tcp_seq = 0;
+    (*out).fragment_id = 0;
+    (*out).src_port = 0;
+    (*out).dst_port = 0;
+    (*out).payload_len = 0;
+    (*out).vlan_id = 0;
+    (*out).fragment_offset = 0;
+    (*out).l4_offset = 0;
+    (*out).first_payload_end = 0;
+    (*out).proto = 0;
+    (*out).is_ipv6 = false;
+    (*out).tcp_flags = 0;
+    (*out).fragment_kind = 0;
+    (*out).more_fragments = false;
+    (*out).fragment_proto = 0;
+    (*out).invalid_l4_family = 0;
+    (*out).invalid_l4_proto = 0;
+    (*out).invalid_l4_fragment_kind = 0;
+}
+
+#[inline(always)]
+unsafe fn mark_invalid_l4(out: *mut PacketInfo, family: u8, proto: u8) {
+    clear_packet_info(out);
+    (*out).invalid_l4_family = family;
+    (*out).invalid_l4_proto = proto;
+    (*out).invalid_l4_fragment_kind = FragmentKind::First as u8;
+}
+
+#[inline(always)]
+pub fn invalid_l4_failure(info: &PacketInfo) -> Option<(u8, u8)> {
+    if matches!(info.invalid_l4_family, 4 | 6)
+        && matches!(info.invalid_l4_proto, IPPROTO_TCP | IPPROTO_UDP)
+        && info.invalid_l4_fragment_kind == FragmentKind::First as u8
+    {
+        Some((info.invalid_l4_family, info.invalid_l4_proto))
+    } else {
+        None
+    }
 }
 
 const ETH_HLEN: usize = 14;
@@ -115,6 +164,7 @@ pub unsafe fn parse_eth_ipv4(
     offset: usize,
     out: *mut PacketInfo,
 ) -> bool {
+    clear_packet_info(out);
     if data + offset + ETH_HLEN + 20 > data_end {
         return false;
     }
@@ -179,6 +229,9 @@ pub unsafe fn parse_eth_ipv4(
         } else if let Some(parsed) = parse_transport(proto, transport_offset, packet_end) {
             parsed
         } else {
+            if fragment_kind == FragmentKind::First && matches!(proto, IPPROTO_TCP | IPPROTO_UDP) {
+                mark_invalid_l4(out, 4, proto);
+            }
             return false;
         };
 
@@ -232,6 +285,7 @@ pub unsafe fn parse_eth_ipv6(
     offset: usize,
     out: *mut PacketInfo,
 ) -> bool {
+    clear_packet_info(out);
     if data + offset + ETH_HLEN + 40 > data_end {
         return false;
     }
@@ -262,12 +316,6 @@ pub unsafe fn parse_eth_ipv6(
     }
     let packet_end = ip_offset + 40 + ipv6_payload_len;
     let mut next_header = read8(ip_offset, 6);
-
-    // Write IPv6 addresses directly to output
-    for i in 0..16 {
-        (*out).src_ip_v6[i] = read8(ip_offset, 8 + i);
-        (*out).dst_ip_v6[i] = read8(ip_offset, 24 + i);
-    }
 
     // 跳过 IPv6 扩展头（最多跳过 4 层，防止 BPF 验证器拒绝无界循环）
     let mut transport_offset = ip_offset + 40;
@@ -329,17 +377,26 @@ pub unsafe fn parse_eth_ipv6(
         return false;
     }
 
-    let (src_port, dst_port, tcp_flags, tcp_seq, payload_len) =
-        if fragment_kind == FragmentKind::NonInitial {
-            (0, 0, 0, 0, 0)
-        } else if let Some(parsed) = parse_transport(next_header, transport_offset, packet_end) {
-            parsed
-        } else {
-            return false;
-        };
+    let (src_port, dst_port, tcp_flags, tcp_seq, payload_len) = if fragment_kind
+        == FragmentKind::NonInitial
+    {
+        (0, 0, 0, 0, 0)
+    } else if let Some(parsed) = parse_transport(next_header, transport_offset, packet_end) {
+        parsed
+    } else {
+        if fragment_kind == FragmentKind::First && matches!(next_header, IPPROTO_TCP | IPPROTO_UDP)
+        {
+            mark_invalid_l4(out, 6, next_header);
+        }
+        return false;
+    };
 
     (*out).src_ip = 0;
     (*out).dst_ip = 0;
+    for i in 0..16 {
+        (*out).src_ip_v6[i] = read8(ip_offset, 8 + i);
+        (*out).dst_ip_v6[i] = read8(ip_offset, 24 + i);
+    }
     (*out).fragment_id = fragment_id;
     (*out).fragment_offset = fragment_offset;
     (*out).fragment_kind = fragment_kind as u8;

@@ -69,6 +69,34 @@ socket_path = /run/aria/aria-agent.sock
 source = disabled
 ```
 
+Keep the shipped `aria-agent` fragment gate closed as a separate datapath
+configuration boundary:
+
+```toml
+fragment_tracking_field_verified = false
+
+[fragment_tracking]
+enabled = false
+max_entries = 8192
+ipv4_timeout_seconds = 30
+ipv6_timeout_seconds = 30
+```
+
+The implementation exposes `aria_fragment_events_total` plus per-family
+`aria_fragment_context_occupancy`, `aria_fragment_context_max_entries`, and
+`aria_fragment_context_pressure`, aggregated once per unique runtime pin path.
+A pinned-map open/read/info failure omits the affected series and emits a
+warning; it must not be interpreted as a zero. LRU eviction is not observable
+from the update path, so no eviction counter may be inferred. The distinct
+`invalid_l4` event and `fragment-invalid-l4` drop reason apply only to an
+otherwise valid IPv4/IPv6 TCP/UDP first fragment with an incomplete transport
+header; generic malformed IP and stored-context invalidity remain separate.
+
+These metrics are implementation availability, not an activation signal. Both
+production activation and privileged field evidence remain disabled and
+`deferred/pending`; do not set either fragment gate to `true` until the real tap
+smoke and evidence review are complete.
+
 `integration_mode=coexist` is written by `neutron-aria-agent` into snapshot
 bodies only; it must not appear in `neutron-aria-agent.ini`.
 

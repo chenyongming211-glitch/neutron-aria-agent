@@ -1255,6 +1255,30 @@ inert/bypass runtime 的硬边界：
 - apply 必须支持重放。
 - 删除 port 必须清理旧 map entry，避免 orphan。
 
+### 7.3.1 Fragment tracking 观测边界
+
+Fragment tracking 的实现级观测已经接入现有 `/metrics`：
+
+- `aria_fragment_events_total` 按唯一 runtime `pin_path`、`family` 和 `event`
+  输出；稳定 event 为 `first`、`non_initial`、`hit`、`miss`、`expired`、
+  `stale`、`inserted`、`update_failed`、`invalid_l4` 和 `overlap`。共享
+  managed runtime 只聚合一次，不能按 tap 重复累计。
+- `aria_fragment_context_occupancy`、`aria_fragment_context_max_entries` 和
+  `aria_fragment_context_pressure` 分别输出 IPv4/IPv6 LRU 的实际占用、内核
+  报告容量和两者比值。eBPF LRU 不报告逐次淘汰，因此不得推导或发布
+  eviction counter。
+- pinned map open、read 或 info 任一严格读取失败时，受影响的 series 必须
+  省略并写 warning，不能用 `0` 冒充成功采样。
+- `invalid_l4` / `fragment-invalid-l4` 只表示 IP 和首片元数据已经验证、但
+  TCP/UDP 首片 transport header 不完整；stored-context invalidity 与通用
+  `malformed-ip` 保持独立分类。该分类不改变原 TC drop 结果。
+
+以上只表示代码与 hosted CI 中的观测能力已经实现，不表示生产激活或现场
+验证完成。两个发布配置仍保持 `fragment_tracking_field_verified=false`、
+`[fragment_tracking].enabled=false`、每族容量 `8192`、IPv4/IPv6 timeout
+`30/30` 秒；真实 privileged tap/fragment 证据仍是 `deferred/pending`。在
+现场证据完成前，不得把该能力描述为 production ready。
+
 ### 7.4 WAL 语义
 
 新增 WAL entry 类型建议：
