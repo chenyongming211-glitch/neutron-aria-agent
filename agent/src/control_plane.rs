@@ -371,6 +371,8 @@ impl InstanceState {
 
         if let Err(error) = restore_kernel_config(&self.state) {
             errors.push(format!("kernel config rollback failed: {}", error));
+            self.state.conntrack_enabled = false;
+            self.state.acl_enabled = false;
         }
 
         if let Err(error) = self
@@ -732,6 +734,43 @@ fn execute_guarded_fragment_epoch_gate_transition(
         })?;
     }
     execute_fragment_epoch_gate_transition(transition, advance_epoch, write_gate)
+}
+
+fn execute_local_config_persistence_gate_rollback(
+    restore_conntrack: bool,
+    restore_acl: bool,
+    read_live_gate: &mut dyn FnMut() -> Result<(bool, bool), String>,
+    require_readiness: &mut dyn FnMut() -> Result<(), String>,
+    advance_epoch: &mut dyn FnMut() -> Result<(), String>,
+    write_config: &mut dyn FnMut(bool, bool) -> Result<(), String>,
+) -> Result<(), String> {
+    if !neutron_acl_gate_requires_tc(restore_conntrack, restore_acl) {
+        return write_config(false, false);
+    }
+
+    let rollback_result = read_live_gate().and_then(|_| {
+        execute_guarded_fragment_epoch_gate_transition(
+            true,
+            FragmentEpochGateTransition::SemanticChange,
+            require_readiness,
+            advance_epoch,
+            &mut || write_config(restore_conntrack, restore_acl),
+        )
+        .map_err(|error| error.to_string())
+    });
+
+    if let Err(rollback_error) = rollback_result {
+        let mut errors = vec![rollback_error];
+        if let Err(quiesce_error) = write_config(false, false) {
+            errors.push(format!(
+                "kernel config fail-closed compensation failed: {}",
+                quiesce_error
+            ));
+        }
+        return Err(errors.join("; "));
+    }
+
+    Ok(())
 }
 
 fn execute_fragment_epoch_bank_publication(
@@ -8193,15 +8232,60 @@ impl ControlPlane {
                     attempted_enable,
                     persistence_error,
                     |safe_state| {
-                        aria_core::ebpf_ops::update_runtime_config(
-                            TapMapRuntime::new(&pin_path, tap_id),
-                            Some(safe_state.conntrack_enabled),
-                            Some(safe_state.monitoring_enabled),
-                            Some(safe_state.acl_enabled),
-                            Some(safe_state.qos_enabled && !safe_state.qos_rules.is_empty()),
-                            Some(safe_state.mirror_enabled && !safe_state.mirror_rules.is_empty()),
-                            Some(safe_state.tcprt_enabled),
-                            None,
+                        execute_local_config_persistence_gate_rollback(
+                            safe_state.conntrack_enabled,
+                            safe_state.acl_enabled,
+                            &mut || {
+                                aria_core::ebpf_ops::read_runtime_config(TapMapRuntime::new(
+                                    &pin_path, tap_id,
+                                ))
+                                .map(|actual| {
+                                    (
+                                        actual.conntrack_enabled != 0,
+                                        actual.acl_enabled != 0,
+                                    )
+                                })
+                                .map_err(|error| {
+                                    format!(
+                                        "read live gate before local config rollback: {}",
+                                        error
+                                    )
+                                })
+                            },
+                            &mut || {
+                                require_fragment_runtime_ready(
+                                    self.fragment_tracking,
+                                    &pin_path,
+                                    tap_id,
+                                    safe_state.conntrack_enabled,
+                                    safe_state.acl_enabled,
+                                )
+                            },
+                            &mut || {
+                                advance_fragment_epoch_action(&pin_path, tap_id).map_err(|error| {
+                                    format!(
+                                        "advance local config rollback fragment epoch: {}",
+                                        error
+                                    )
+                                })
+                            },
+                            &mut |safe_conntrack, safe_acl| {
+                                aria_core::ebpf_ops::update_runtime_config(
+                                    TapMapRuntime::new(&pin_path, tap_id),
+                                    Some(safe_conntrack),
+                                    Some(safe_state.monitoring_enabled),
+                                    Some(safe_acl),
+                                    Some(
+                                        safe_state.qos_enabled && !safe_state.qos_rules.is_empty(),
+                                    ),
+                                    Some(
+                                        safe_state.mirror_enabled
+                                            && !safe_state.mirror_rules.is_empty(),
+                                    ),
+                                    Some(safe_state.tcprt_enabled),
+                                    None,
+                                )
+                            },
                         )
                     },
                 )
