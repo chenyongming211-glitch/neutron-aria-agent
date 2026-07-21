@@ -11486,6 +11486,103 @@ mod tests {
     }
 
     #[test]
+    fn fragment_loader_config_guarded_gate_admits_before_epoch_and_publish() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let mut require_ready = || {
+            events.borrow_mut().push("fragment_readiness");
+            Ok(())
+        };
+        let mut advance = || {
+            events.borrow_mut().push("advance_epoch");
+            Ok(())
+        };
+        let mut write_gate = || {
+            events.borrow_mut().push("write_gate");
+            Ok(())
+        };
+
+        execute_guarded_fragment_epoch_gate_transition(
+            true,
+            FragmentEpochGateTransition::SemanticChange,
+            &mut require_ready,
+            &mut advance,
+            &mut write_gate,
+        )
+        .expect("verified fragment readiness must allow the ACL/CT gate");
+
+        assert_eq!(
+            *events.borrow(),
+            vec!["fragment_readiness", "advance_epoch", "write_gate"]
+        );
+    }
+
+    #[test]
+    fn fragment_loader_config_guarded_gate_rejects_before_epoch_and_publish() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let mut require_ready = || {
+            events.borrow_mut().push("fragment_readiness");
+            Err("fragment tracking disabled after field evidence".to_string())
+        };
+        let mut advance = || {
+            events.borrow_mut().push("advance_epoch");
+            Ok(())
+        };
+        let mut write_gate = || {
+            events.borrow_mut().push("write_gate");
+            Ok(())
+        };
+
+        let error = execute_guarded_fragment_epoch_gate_transition(
+            true,
+            FragmentEpochGateTransition::SemanticChange,
+            &mut require_ready,
+            &mut advance,
+            &mut write_gate,
+        )
+        .expect_err("ACL/CT gate must not cross failed fragment readiness");
+
+        assert_eq!(
+            error.phase(),
+            FragmentEpochPublicationFailurePhase::Readiness
+        );
+        assert!(!error.epoch_advanced());
+        assert_eq!(*events.borrow(), vec!["fragment_readiness"]);
+    }
+
+    #[test]
+    fn fragment_loader_config_guarded_gate_allows_quiesce_without_activation_admission() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        let mut require_ready = || -> Result<(), String> {
+            panic!("quiescing ACL/CT must not require enabled fragment tracking")
+        };
+        let mut advance = || {
+            events.borrow_mut().push("advance_epoch");
+            Ok(())
+        };
+        let mut write_gate = || {
+            events.borrow_mut().push("write_gate");
+            Ok(())
+        };
+
+        execute_guarded_fragment_epoch_gate_transition(
+            false,
+            FragmentEpochGateTransition::SemanticChange,
+            &mut require_ready,
+            &mut advance,
+            &mut write_gate,
+        )
+        .expect("quiesce must remain available when tracking is disabled");
+
+        assert_eq!(*events.borrow(), vec!["advance_epoch", "write_gate"]);
+    }
+
+    #[test]
     fn neutron_acl_fragment_epoch_gate_executor_stops_on_epoch_failure() {
         use std::cell::RefCell;
 

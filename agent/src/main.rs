@@ -1115,4 +1115,156 @@ auto_attach = true
         assert!(!config.requested_auto_attach());
         assert!(!config.effective_auto_attach());
     }
+
+    #[test]
+    fn fragment_loader_config_defaults_are_safe_and_exact() {
+        let settings = Config::default().fragment_tracking_settings().unwrap();
+
+        assert!(!settings.enabled);
+        assert!(!settings.field_verified);
+        assert_eq!(settings.max_entries, 8192);
+        assert_eq!(settings.ipv4_timeout_seconds, 30);
+        assert_eq!(settings.ipv6_timeout_seconds, 30);
+    }
+
+    #[test]
+    fn fragment_loader_config_rejects_zero_capacity() {
+        let config: Config = toml::from_str(
+            r#"
+[fragment_tracking]
+max_entries = 0
+"#,
+        )
+        .unwrap();
+
+        let error = config.fragment_tracking_settings().unwrap_err();
+        assert!(error.contains("max_entries"));
+        assert!(error.contains("positive"));
+    }
+
+    #[test]
+    fn fragment_loader_config_rejects_timeouts_outside_one_to_sixty_seconds() {
+        for (field, value) in [
+            ("ipv4_timeout_seconds", 0),
+            ("ipv4_timeout_seconds", 61),
+            ("ipv6_timeout_seconds", 0),
+            ("ipv6_timeout_seconds", 61),
+        ] {
+            let config: Config = toml::from_str(&format!(
+                "[fragment_tracking]\n{field} = {value}\n"
+            ))
+            .unwrap();
+
+            let error = config.fragment_tracking_settings().unwrap_err();
+            assert!(error.contains(field));
+            assert!(error.contains("1..=60"));
+        }
+    }
+
+    #[test]
+    fn fragment_loader_config_field_verified_requires_tracking_for_acl_or_ct() {
+        let config: Config = toml::from_str(
+            r#"
+fragment_tracking_field_verified = true
+
+[fragment_tracking]
+enabled = false
+"#,
+        )
+        .unwrap();
+        let settings = config.fragment_tracking_settings().unwrap();
+
+        settings.require_acl_ct_ready(false, false).unwrap();
+        for (conntrack, acl) in [(true, false), (false, true), (true, true)] {
+            let error = settings
+                .require_acl_ct_ready(conntrack, acl)
+                .unwrap_err();
+            assert!(error.contains("fragment tracking"));
+            assert!(error.contains("field evidence"));
+        }
+    }
+
+    #[test]
+    fn fragment_loader_config_rejects_unverified_activation() {
+        let config: Config = toml::from_str(
+            r#"
+[fragment_tracking]
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        let error = config.fragment_tracking_settings().unwrap_err();
+        assert!(error.contains("field evidence"));
+    }
+
+    #[test]
+    fn fragment_loader_config_builds_exact_mode_specific_runtime_contracts() {
+        let config: Config = toml::from_str(
+            r#"
+fragment_tracking_field_verified = true
+
+[fragment_tracking]
+enabled = true
+max_entries = 4096
+ipv4_timeout_seconds = 17
+ipv6_timeout_seconds = 43
+"#,
+        )
+        .unwrap();
+        let settings = config.fragment_tracking_settings().unwrap();
+
+        for mode in [
+            aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED,
+            aria_core::common::FRAGMENT_RUNTIME_MODE_STANDALONE,
+        ] {
+            let expected = settings.runtime_config(mode).unwrap();
+            assert_eq!(expected.version, aria_core::common::FRAGMENT_CONFIG_VERSION);
+            assert_eq!(expected.enabled, aria_core::common::FRAGMENT_CONFIG_ENABLED);
+            assert_eq!(expected.runtime_mode, mode);
+            assert_eq!(expected._pad, [0; 5]);
+            assert_eq!(expected.ipv4_timeout_ns, 17_000_000_000);
+            assert_eq!(expected.ipv6_timeout_ns, 43_000_000_000);
+        }
+        assert!(settings.runtime_config(0xff).is_err());
+    }
+
+    #[test]
+    fn fragment_loader_config_runtime_reuse_requires_exact_config_and_capacity() {
+        let settings = Config::default().fragment_tracking_settings().unwrap();
+        let expected = settings
+            .runtime_config(aria_core::common::FRAGMENT_RUNTIME_MODE_MANAGED)
+            .unwrap();
+
+        aria_core::ebpf_ops::validate_fragment_runtime_expectation(
+            &expected,
+            &expected,
+            8192,
+            8192,
+            settings.max_entries,
+        )
+        .unwrap();
+
+        let mut wrong_timeout = expected;
+        wrong_timeout.ipv4_timeout_ns += 1_000_000_000;
+        assert!(aria_core::ebpf_ops::validate_fragment_runtime_expectation(
+            &wrong_timeout,
+            &expected,
+            8192,
+            8192,
+            settings.max_entries,
+        )
+        .unwrap_err()
+        .contains("config"));
+
+        assert!(aria_core::ebpf_ops::validate_fragment_runtime_expectation(
+            &expected,
+            &expected,
+            4096,
+            8192,
+            settings.max_entries,
+        )
+        .unwrap_err()
+        .contains("FRAG_CONTEXT_V4"));
+    }
 }
