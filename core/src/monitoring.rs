@@ -1,9 +1,14 @@
 use crate::common::{
-    CtKey4, CtKey6, CtValue, FlowStatsValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue,
+    fragment_metric_index, CtKey4, CtKey6, CtValue, FlowStatsValue, FragmentContextKey4,
+    FragmentContextKey6, FragmentContextValue, GlobalMirrorKey, GroupStatsKey, GroupStatsValue,
     MirrorKey, MirrorStatsValue, PolicyKey, QosKey, QosStatsValue, RuleStatsValue, TapMapRuntime,
-    TcpRtValue, CT_ESTABLISHED, CT_NEW,
+    TcpRtValue, CT_ESTABLISHED, CT_NEW, FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6,
+    FRAGMENT_METRIC_CONTEXT_EXPIRED, FRAGMENT_METRIC_CONTEXT_HIT, FRAGMENT_METRIC_CONTEXT_MISSING,
+    FRAGMENT_METRIC_CONTEXT_OVERLAP, FRAGMENT_METRIC_CONTEXT_STALE,
+    FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED, FRAGMENT_METRIC_FIRST, FRAGMENT_METRIC_INVALID_L4,
+    FRAGMENT_METRIC_NON_INITIAL,
 };
-use aya::maps::{HashMap, MapData, PerCpuHashMap, PerCpuValues};
+use aya::maps::{HashMap, Map, MapData, MapType, PerCpuArray, PerCpuHashMap, PerCpuValues};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
@@ -42,6 +47,164 @@ pub struct ConntrackSummary {
     pub total_v6: u64,
     pub new_count: u64,
     pub established_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FragmentMetricCounter {
+    pub family: u8,
+    pub metric: u8,
+    pub value: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FragmentPressure {
+    pub family: u8,
+    pub occupancy: u32,
+    pub max_entries: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FragmentMetricsSummary {
+    pub counters: Vec<FragmentMetricCounter>,
+    pub pressure: Vec<FragmentPressure>,
+    pub warnings: Vec<String>,
+}
+
+const EXPORTED_FRAGMENT_METRICS: [u8; 9] = [
+    FRAGMENT_METRIC_FIRST,
+    FRAGMENT_METRIC_NON_INITIAL,
+    FRAGMENT_METRIC_CONTEXT_HIT,
+    FRAGMENT_METRIC_CONTEXT_MISSING,
+    FRAGMENT_METRIC_CONTEXT_EXPIRED,
+    FRAGMENT_METRIC_CONTEXT_STALE,
+    FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED,
+    FRAGMENT_METRIC_INVALID_L4,
+    FRAGMENT_METRIC_CONTEXT_OVERLAP,
+];
+
+pub fn fragment_pressure_ratio(occupancy: u32, max_entries: u32) -> Option<f64> {
+    (max_entries != 0).then(|| occupancy as f64 / max_entries as f64)
+}
+
+fn require_map_type(map_data: &MapData, map_name: &str, expected: MapType) -> Result<(), String> {
+    let actual = map_data
+        .info()
+        .and_then(|info| info.map_type())
+        .map_err(|error| format!("inspect pinned {} type: {:?}", map_name, error))?;
+    if actual != expected {
+        return Err(format!(
+            "pinned {} has map type {:?}; expected {:?}",
+            map_name, actual, expected
+        ));
+    }
+    Ok(())
+}
+
+fn collect_fragment_counters(pin_path: &str) -> Result<Vec<FragmentMetricCounter>, String> {
+    let map_name = "FRAGMENT_METRICS";
+    let map_path = format!("{}/{}", pin_path, map_name);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|error| format!("open pinned {}: {:?}", map_name, error))?;
+    require_map_type(&map_data, map_name, MapType::PerCpuArray)?;
+    let map = PerCpuArray::<_, u64>::try_from(Map::PerCpuArray(map_data))
+        .map_err(|error| format!("convert {} to PerCpuArray<u64>: {:?}", map_name, error))?;
+
+    let mut counters = Vec::with_capacity(EXPORTED_FRAGMENT_METRICS.len() * 2);
+    for family in [FRAGMENT_FAMILY_IPV4, FRAGMENT_FAMILY_IPV6] {
+        for metric in EXPORTED_FRAGMENT_METRICS {
+            let index = fragment_metric_index(metric, family).ok_or_else(|| {
+                format!(
+                    "derive {} index for metric {} family {}",
+                    map_name, metric, family
+                )
+            })?;
+            let values = map.get(&index, 0).map_err(|error| {
+                format!(
+                    "read {} metric {} family {}: {:?}",
+                    map_name, metric, family, error
+                )
+            })?;
+            counters.push(FragmentMetricCounter {
+                family,
+                metric,
+                value: values.iter().copied().sum(),
+            });
+        }
+    }
+    Ok(counters)
+}
+
+fn collect_fragment_pressure_v4(pin_path: &str) -> Result<FragmentPressure, String> {
+    let map_name = "FRAG_CONTEXT_V4";
+    let map_path = format!("{}/{}", pin_path, map_name);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|error| format!("open pinned {}: {:?}", map_name, error))?;
+    require_map_type(&map_data, map_name, MapType::LruHash)?;
+    let max_entries = map_data
+        .info()
+        .map(|info| info.max_entries())
+        .map_err(|error| format!("inspect pinned {} capacity: {:?}", map_name, error))?;
+    if max_entries == 0 {
+        return Err(format!("pinned {} reports zero capacity", map_name));
+    }
+    let map = HashMap::<_, FragmentContextKey4, FragmentContextValue>::try_from(Map::LruHashMap(
+        map_data,
+    ))
+    .map_err(|error| format!("convert {} to LruHashMap: {:?}", map_name, error))?;
+    let occupancy = map
+        .iter()
+        .try_fold(0u32, |count, item| item.map(|_| count.saturating_add(1)))
+        .map_err(|error| format!("iterate {}: {:?}", map_name, error))?;
+    Ok(FragmentPressure {
+        family: FRAGMENT_FAMILY_IPV4,
+        occupancy,
+        max_entries,
+    })
+}
+
+fn collect_fragment_pressure_v6(pin_path: &str) -> Result<FragmentPressure, String> {
+    let map_name = "FRAG_CONTEXT_V6";
+    let map_path = format!("{}/{}", pin_path, map_name);
+    let map_data = MapData::from_pin(&map_path)
+        .map_err(|error| format!("open pinned {}: {:?}", map_name, error))?;
+    require_map_type(&map_data, map_name, MapType::LruHash)?;
+    let max_entries = map_data
+        .info()
+        .map(|info| info.max_entries())
+        .map_err(|error| format!("inspect pinned {} capacity: {:?}", map_name, error))?;
+    if max_entries == 0 {
+        return Err(format!("pinned {} reports zero capacity", map_name));
+    }
+    let map = HashMap::<_, FragmentContextKey6, FragmentContextValue>::try_from(Map::LruHashMap(
+        map_data,
+    ))
+    .map_err(|error| format!("convert {} to LruHashMap: {:?}", map_name, error))?;
+    let occupancy = map
+        .iter()
+        .try_fold(0u32, |count, item| item.map(|_| count.saturating_add(1)))
+        .map_err(|error| format!("iterate {}: {:?}", map_name, error))?;
+    Ok(FragmentPressure {
+        family: FRAGMENT_FAMILY_IPV6,
+        occupancy,
+        max_entries,
+    })
+}
+
+pub fn get_fragment_metrics_summary(pin_path: &str) -> FragmentMetricsSummary {
+    let mut summary = FragmentMetricsSummary::default();
+    match collect_fragment_counters(pin_path) {
+        Ok(counters) => summary.counters = counters,
+        Err(error) => summary.warnings.push(error),
+    }
+    match collect_fragment_pressure_v4(pin_path) {
+        Ok(pressure) => summary.pressure.push(pressure),
+        Err(error) => summary.warnings.push(error),
+    }
+    match collect_fragment_pressure_v6(pin_path) {
+        Ok(pressure) => summary.pressure.push(pressure),
+        Err(error) => summary.warnings.push(error),
+    }
+    summary
 }
 
 fn sum_per_cpu_rule_stats(values: PerCpuValues<RuleStatsValue>) -> (u64, u64, u64, u64) {

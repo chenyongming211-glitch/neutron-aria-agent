@@ -1,5 +1,18 @@
 use super::*;
 
+fn unique_fragment_runtime_paths<I, S>(paths: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    paths
+        .into_iter()
+        .map(Into::into)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 impl ControlPlane {
     // ── Stats ──
 
@@ -235,6 +248,34 @@ impl ControlPlane {
 
     pub async fn get_kernel_drop_status(&self) -> KernelDropStatusSnapshot {
         self.kernel_drop_manager.status_snapshot().await
+    }
+
+    pub async fn get_fragment_metrics(
+        &self,
+    ) -> Vec<(String, aria_core::monitoring::FragmentMetricsSummary)> {
+        let instances: Vec<_> = {
+            let instances = self.instances.read().await;
+            instances.values().cloned().collect()
+        };
+        let mut runtime_paths = Vec::with_capacity(instances.len());
+        for instance in instances {
+            runtime_paths.push(instance.read().await.pin_path.clone());
+        }
+
+        unique_fragment_runtime_paths(runtime_paths)
+            .into_iter()
+            .map(|pin_path| {
+                let summary = aria_core::monitoring::get_fragment_metrics_summary(&pin_path);
+                for error in &summary.warnings {
+                    warn!(
+                        pin_path = %pin_path,
+                        error = %error,
+                        "omitting unavailable fragment metric series"
+                    );
+                }
+                (pin_path, summary)
+            })
+            .collect()
     }
 }
 

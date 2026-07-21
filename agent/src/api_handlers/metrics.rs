@@ -50,6 +50,75 @@ fn ct_contract_reason_to_string(reason: u8) -> &'static str {
     }
 }
 
+fn fragment_metric_label(metric: u8) -> Option<&'static str> {
+    match metric {
+        aria_core::common::FRAGMENT_METRIC_FIRST => Some("first"),
+        aria_core::common::FRAGMENT_METRIC_NON_INITIAL => Some("non_initial"),
+        aria_core::common::FRAGMENT_METRIC_CONTEXT_HIT => Some("hit"),
+        aria_core::common::FRAGMENT_METRIC_CONTEXT_MISSING => Some("miss"),
+        aria_core::common::FRAGMENT_METRIC_CONTEXT_EXPIRED => Some("expired"),
+        aria_core::common::FRAGMENT_METRIC_CONTEXT_STALE => Some("stale"),
+        aria_core::common::FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED => Some("update_failed"),
+        aria_core::common::FRAGMENT_METRIC_INVALID_L4 => Some("invalid_l4"),
+        aria_core::common::FRAGMENT_METRIC_CONTEXT_OVERLAP => Some("overlap"),
+        _ => None,
+    }
+}
+
+fn fragment_family_label(family: u8) -> Option<&'static str> {
+    match family {
+        aria_core::common::FRAGMENT_FAMILY_IPV4 => Some("ipv4"),
+        aria_core::common::FRAGMENT_FAMILY_IPV6 => Some("ipv6"),
+        _ => None,
+    }
+}
+
+fn write_fragment_runtime_metrics(
+    out: &mut String,
+    pin_path: &str,
+    summary: &aria_core::monitoring::FragmentMetricsSummary,
+) {
+    let pin_path = prom_escape(pin_path);
+    for counter in &summary.counters {
+        let (Some(family), Some(event)) = (
+            fragment_family_label(counter.family),
+            fragment_metric_label(counter.metric),
+        ) else {
+            continue;
+        };
+        let _ = writeln!(
+            out,
+            "aria_fragment_events_total{{pin_path=\"{pin_path}\",family=\"{family}\",event=\"{event}\"}} {}",
+            counter.value
+        );
+    }
+    for pressure in &summary.pressure {
+        let Some(family) = fragment_family_label(pressure.family) else {
+            continue;
+        };
+        let Some(ratio) = aria_core::monitoring::fragment_pressure_ratio(
+            pressure.occupancy,
+            pressure.max_entries,
+        ) else {
+            continue;
+        };
+        let _ = writeln!(
+            out,
+            "aria_fragment_context_occupancy{{pin_path=\"{pin_path}\",family=\"{family}\"}} {}",
+            pressure.occupancy
+        );
+        let _ = writeln!(
+            out,
+            "aria_fragment_context_max_entries{{pin_path=\"{pin_path}\",family=\"{family}\"}} {}",
+            pressure.max_entries
+        );
+        let _ = writeln!(
+            out,
+            "aria_fragment_context_pressure{{pin_path=\"{pin_path}\",family=\"{family}\"}} {ratio}"
+        );
+    }
+}
+
 fn flush_metrics_chunk(buf: &mut String, force: bool) -> Option<Bytes> {
     if buf.is_empty() || (!force && buf.len() < METRICS_CHUNK_SIZE) {
         return None;
@@ -215,6 +284,7 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
     let trace_mode = prom_escape(trace_map_mode_name(cp.trace_map_mode()));
     let mut trace_runtime: Vec<_> = cp.get_trace_runtime_status().await.into_iter().collect();
     trace_runtime.sort_by(|a, b| a.0.cmp(&b.0));
+    let fragment_metrics = cp.get_fragment_metrics().await;
 
     let stream = stream! {
         let mut out = String::with_capacity(METRICS_CHUNK_SIZE * 2);
@@ -286,6 +356,24 @@ pub async fn metrics(State(cp): State<AppState>) -> impl IntoResponse {
                     }
                 }
                 Err(e) => warn!("Failed to collect kernel drop metrics: {}", e),
+            }
+        }
+        if let Some(chunk) = flush_metrics_chunk(&mut out, true) {
+            yield Ok::<_, std::convert::Infallible>(chunk);
+        }
+
+        let _ = writeln!(out, "# HELP aria_fragment_events_total Fragment datapath events by runtime, family, and event");
+        let _ = writeln!(out, "# TYPE aria_fragment_events_total counter");
+        let _ = writeln!(out, "# HELP aria_fragment_context_occupancy Current fragment context map occupancy");
+        let _ = writeln!(out, "# TYPE aria_fragment_context_occupancy gauge");
+        let _ = writeln!(out, "# HELP aria_fragment_context_max_entries Kernel-reported fragment context map capacity");
+        let _ = writeln!(out, "# TYPE aria_fragment_context_max_entries gauge");
+        let _ = writeln!(out, "# HELP aria_fragment_context_pressure Fragment context occupancy divided by kernel-reported capacity");
+        let _ = writeln!(out, "# TYPE aria_fragment_context_pressure gauge");
+        for (pin_path, summary) in &fragment_metrics {
+            write_fragment_runtime_metrics(&mut out, pin_path, summary);
+            if let Some(chunk) = flush_metrics_chunk(&mut out, false) {
+                yield Ok::<_, std::convert::Infallible>(chunk);
             }
         }
         if let Some(chunk) = flush_metrics_chunk(&mut out, true) {

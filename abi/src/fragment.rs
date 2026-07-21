@@ -32,6 +32,10 @@ pub const DROP_FRAGMENT_CONTEXT_UPDATE_FAILED: u8 = 15;
 pub const DROP_FRAGMENT_TAP_UNASSIGNED: u8 = 16;
 pub const DROP_FRAGMENT_EXPIRY_OVERFLOW: u8 = 17;
 pub const DROP_MALFORMED_IP: u8 = 18;
+pub const DROP_FRAGMENT_INVALID_L4: u8 = 19;
+
+pub const FRAGMENT_FAMILY_IPV4: u8 = 4;
+pub const FRAGMENT_FAMILY_IPV6: u8 = 6;
 
 pub const FRAGMENT_METRIC_FIRST: u8 = 1;
 pub const FRAGMENT_METRIC_NON_INITIAL: u8 = 2;
@@ -49,6 +53,8 @@ pub const FRAGMENT_METRIC_CONTEXT_INSERTED: u8 = 13;
 pub const FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED: u8 = 14;
 pub const FRAGMENT_METRIC_TAP_UNASSIGNED: u8 = 15;
 pub const FRAGMENT_METRIC_EXPIRY_OVERFLOW: u8 = 16;
+pub const FRAGMENT_METRIC_INVALID_L4: u8 = 17;
+pub const FRAGMENT_METRIC_MAX: u8 = FRAGMENT_METRIC_INVALID_L4;
 
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
@@ -295,7 +301,20 @@ pub fn fragment_metric_for_drop_reason(drop_reason: u8) -> u8 {
         DROP_FRAGMENT_CONTEXT_UPDATE_FAILED => FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED,
         DROP_FRAGMENT_TAP_UNASSIGNED => FRAGMENT_METRIC_TAP_UNASSIGNED,
         DROP_FRAGMENT_EXPIRY_OVERFLOW => FRAGMENT_METRIC_EXPIRY_OVERFLOW,
+        DROP_FRAGMENT_INVALID_L4 => FRAGMENT_METRIC_INVALID_L4,
         _ => 0,
+    }
+}
+
+#[inline(always)]
+pub const fn fragment_metric_index(metric: u8, family: u8) -> Option<u32> {
+    if metric == 0 || metric > FRAGMENT_METRIC_MAX {
+        return None;
+    }
+    match family {
+        FRAGMENT_FAMILY_IPV4 => Some(metric as u32 * 2),
+        FRAGMENT_FAMILY_IPV6 => Some(metric as u32 * 2 + 1),
+        _ => None,
     }
 }
 
