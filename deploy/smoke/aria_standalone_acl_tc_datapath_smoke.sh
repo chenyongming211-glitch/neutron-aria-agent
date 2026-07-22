@@ -390,8 +390,11 @@ run_fragment_tracking_field_smoke() {
     fragment_driver fragment-restart-establish ipv4 host-to-peer "${FRAGMENT_VLAN_A}" \
         establish "${token}" "${ident}" ""
     stop_agent_bounded || die "fragment restart pre-stop failed"
+    SYSTEM_STARTED=false
     restart_agent_preserving_bpffs || die "fragment preserving-pins restart failed"
-    if [ "${MODE}" = tap ]; then
+    if [ "${MODE}" = system ]; then
+        start_system_mode || die "fragment restart system readiness failed"
+    else
         start_tap_mode || die "fragment restart tap readiness failed"
     fi
     assert_dual_tc_ready
