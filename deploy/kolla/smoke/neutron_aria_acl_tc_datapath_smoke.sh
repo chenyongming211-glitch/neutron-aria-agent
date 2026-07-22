@@ -915,7 +915,7 @@ restart_managed_datapath() {
 }
 
 run_fragment_tracking_field_smoke() {
-    local family source destination peer_mac scenario
+    local family source destination peer_mac host_mac scenario
     if [ "${FRAGMENT_TRACKING_SMOKE}" != 1 ]; then
         echo "SKIP: fragment tracking field smoke disabled"
         return 0
@@ -925,10 +925,12 @@ run_fragment_tracking_field_smoke() {
     done
     ip netns exec "${FRAGMENT_PEER_NETNS}" ip link show dev "${FRAGMENT_PEER_IFNAME}" >/dev/null 2>&1 || die "fragment peer interface is unavailable"
     peer_mac="$(ip netns exec "${FRAGMENT_PEER_NETNS}" cat "/sys/class/net/${FRAGMENT_PEER_IFNAME}/address")"
+    host_mac="$(cat "/sys/class/net/${EXPECTED_IFNAME}/address")"
     for family in ipv4 ipv6; do
         if [ "${family}" = ipv4 ]; then source="${FRAGMENT_IPV4_HOST}"; destination="${FRAGMENT_IPV4_PEER}"; else source="${FRAGMENT_IPV6_HOST}"; destination="${FRAGMENT_IPV6_PEER}"; fi
         for scenario in ordered post-first-reorder later-before-first; do
-            python3 "${FRAGMENT_DRIVER}" --run --iface "${EXPECTED_IFNAME}" --source "${source}" --destination "${destination}" --destination-mac "${peer_mac}" --family "${family}" --vlan "${FRAGMENT_VLAN}" --metrics-url "${DATAPATH_HTTP}/metrics" --scenario "${scenario}" >"${WORK_DIR}/fragment-${family}-${scenario}.log"
+            python3 "${FRAGMENT_DRIVER}" --run --iface "${EXPECTED_IFNAME}" --source "${source}" --destination "${destination}" --destination-mac "${peer_mac}" --family "${family}" --vlan "${FRAGMENT_VLAN}" --metrics-url "${DATAPATH_HTTP}/metrics" --pin-path "${PIN_ROOT}" --receiver-netns "${FRAGMENT_PEER_NETNS}" --scenario "${scenario}" >"${WORK_DIR}/fragment-${family}-${scenario}.log"
+            python3 "${FRAGMENT_DRIVER}" --run --iface "${FRAGMENT_PEER_IFNAME}" --send-netns "${FRAGMENT_PEER_NETNS}" --source "${destination}" --destination "${source}" --source-mac "${peer_mac}" --destination-mac "${host_mac}" --family "${family}" --vlan "${FRAGMENT_VLAN}" --metrics-url "${DATAPATH_HTTP}/metrics" --pin-path "${PIN_ROOT}" --scenario "${scenario}" >"${WORK_DIR}/fragment-${family}-${scenario}-reverse.log"
         done
     done
     run_full_resync >"${WORK_DIR}/fragment-epoch-full-resync.log"

@@ -138,12 +138,20 @@ create_netns_fixture() {
     VETH_CREATED=true
     ip link set "${PEER_IF}" netns "${NETNS}"
     ip addr add "${HOST_IP}/30" dev "${HOST_IF}"
+    ip -6 addr add "${FRAGMENT_IPV6_HOST}/64" dev "${HOST_IF}"
     ip link set "${HOST_IF}" up
     ip netns exec "${NETNS}" ip addr add "${PEER_IP}/30" dev "${PEER_IF}"
+    ip netns exec "${NETNS}" ip -6 addr add "${FRAGMENT_IPV6_PEER}/64" dev "${PEER_IF}"
     ip netns exec "${NETNS}" ip addr add "${DENIED_IP}/32" dev "${PEER_IF}"
     ip route add "${DENIED_IP}/32" dev "${HOST_IF}"
     ip netns exec "${NETNS}" ip link set lo up
     ip netns exec "${NETNS}" ip link set "${PEER_IF}" up
+    if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ]; then
+        ip link add link "${HOST_IF}" name "${HOST_IF}.${FRAGMENT_VLAN}" type vlan id "${FRAGMENT_VLAN}"
+        ip link set "${HOST_IF}.${FRAGMENT_VLAN}" up
+        ip netns exec "${NETNS}" ip link add link "${PEER_IF}" name "${PEER_IF}.${FRAGMENT_VLAN}" type vlan id "${FRAGMENT_VLAN}"
+        ip netns exec "${NETNS}" ip link set "${PEER_IF}.${FRAGMENT_VLAN}" up
+    fi
     if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ] && [ "${MODE}" = tap ]; then
         ip link add "${SECOND_HOST_IF}" type veth peer name "${SECOND_PEER_IF}"
         SECOND_VETH_CREATED=true
@@ -204,7 +212,7 @@ EOF
 }
 
 run_fragment_tracking_field_smoke() {
-    local family source destination peer_mac scenario
+    local family source destination peer_mac host_mac scenario pin_path
     if [ "${FRAGMENT_TRACKING_SMOKE}" != 1 ]; then
         echo "SKIP: fragment tracking field smoke disabled"
         return 0
@@ -212,13 +220,20 @@ run_fragment_tracking_field_smoke() {
     [ -r "${FRAGMENT_DRIVER}" ] || die "fragment tracking field driver is missing"
     case "${FRAGMENT_VLAN}" in ''|*[!0-9]*) die "FRAGMENT_VLAN must be numeric" ;; esac
     peer_mac="$(ip netns exec "${NETNS}" cat "/sys/class/net/${PEER_IF}/address")"
+    host_mac="$(cat "/sys/class/net/${HOST_IF}/address")"
+    pin_path="${PIN_ROOT}/system"
+    [ "${MODE}" = tap ] && pin_path="${PIN_ROOT}/global-v2"
     for family in ipv4 ipv6; do
         if [ "${family}" = ipv4 ]; then source="${FRAGMENT_IPV4_HOST}"; destination="${FRAGMENT_IPV4_PEER}"; else source="${FRAGMENT_IPV6_HOST}"; destination="${FRAGMENT_IPV6_PEER}"; fi
         for scenario in ordered post-first-reorder later-before-first; do
             python3 "${FRAGMENT_DRIVER}" --run --iface "${HOST_IF}" --source "${source}" \
                 --destination "${destination}" --destination-mac "${peer_mac}" --family "${family}" \
-                --vlan "${FRAGMENT_VLAN}" --metrics-url "${HTTP}/metrics" --scenario "${scenario}" \
+                --vlan "${FRAGMENT_VLAN}" --metrics-url "${HTTP}/metrics" --pin-path "${pin_path}" --receiver-netns "${NETNS}" --scenario "${scenario}" \
                 >"${WORK_DIR}/fragment-${family}-${scenario}.log"
+            python3 "${FRAGMENT_DRIVER}" --run --iface "${PEER_IF}" --send-netns "${NETNS}" --source "${destination}" \
+                --destination "${source}" --source-mac "${peer_mac}" --destination-mac "${host_mac}" --family "${family}" \
+                --vlan "${FRAGMENT_VLAN}" --metrics-url "${HTTP}/metrics" --pin-path "${pin_path}" --scenario "${scenario}" \
+                >"${WORK_DIR}/fragment-${family}-${scenario}-reverse.log"
         done
     done
     curl --fail-with-body -sS -H 'Content-Type: application/json' -X PUT \
