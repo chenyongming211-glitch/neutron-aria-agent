@@ -93,6 +93,7 @@ KOLLA_AGENT_INI_PATH = os.path.join("deploy", "kolla", "config", "neutron-aria-a
 KOLLA_DATAPATH_CONFIG_PATH = os.path.join("deploy", "kolla", "config", "aria-agent-openstack.toml")
 TC_ACL_DATAPATH_SMOKE_PATH = os.path.join("deploy", "kolla", "smoke", "neutron_aria_acl_tc_datapath_smoke.sh")
 STANDALONE_TC_ACL_SMOKE_PATH = os.path.join("deploy", "smoke", "aria_standalone_acl_tc_datapath_smoke.sh")
+FRAGMENT_TRACKING_FIELD_DRIVER_PATH = os.path.join("deploy", "smoke", "lib", "fragment_tracking_field_driver.py")
 SMOKE_DIR = os.path.join("deploy", "kolla", "smoke")
 DOC_INI_CONTRACT_PATHS = (
     "README.md", os.path.join("docs", "openstack-neutron-agent-mode.md"),
@@ -415,6 +416,10 @@ def run_smoke_syntax():
     for path in smoke_scripts():
         run([bash, "-n", path])
 
+def run_fragment_tracking_field_driver_self_test():
+    print("==> checking fragment tracking field driver")
+    run([sys.executable, FRAGMENT_TRACKING_FIELD_DRIVER_PATH, "--self-test"])
+
 
 def run_fast_contracts():
     run_python_tests()
@@ -423,6 +428,7 @@ def run_fast_contracts():
     check_uds_contract_artifact()
     check_public_smoke_entrypoints()
     run_smoke_syntax()
+    run_fragment_tracking_field_driver_self_test()
 
 
 def run_rust_tests(toolchain):

@@ -20,6 +20,15 @@ EXPECTED_PORT_ID="${EXPECTED_PORT_ID:-}"
 PING_PAYLOAD_BYTES="${PING_PAYLOAD_BYTES:-56}"
 RUN_ID="${RUN_ID:-acl-tc-datapath-$(date +%Y%m%d%H%M%S)-$(hostname -s)}"
 DATAPATH_SERVICE_NAME="${DATAPATH_SERVICE_NAME:-aria_datapath}"
+FRAGMENT_TRACKING_SMOKE="${FRAGMENT_TRACKING_SMOKE:-0}"
+FRAGMENT_DRIVER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../smoke/lib" 2>/dev/null && pwd)/fragment_tracking_field_driver.py"
+FRAGMENT_PEER_NETNS="${FRAGMENT_PEER_NETNS:-}"
+FRAGMENT_PEER_IFNAME="${FRAGMENT_PEER_IFNAME:-}"
+FRAGMENT_IPV4_HOST="${FRAGMENT_IPV4_HOST:-}"
+FRAGMENT_IPV4_PEER="${FRAGMENT_IPV4_PEER:-}"
+FRAGMENT_IPV6_HOST="${FRAGMENT_IPV6_HOST:-}"
+FRAGMENT_IPV6_PEER="${FRAGMENT_IPV6_PEER:-}"
+FRAGMENT_VLAN="${FRAGMENT_VLAN:-}"
 
 ACL_INGRESS_HOOK_TC=1
 TRACE_FILTER="controlled_icmp_flow"
@@ -905,6 +914,27 @@ restart_managed_datapath() {
     wait_managed_port_reattached "${expected_phase}" || return 1
 }
 
+run_fragment_tracking_field_smoke() {
+    local family source destination peer_mac scenario
+    if [ "${FRAGMENT_TRACKING_SMOKE}" != 1 ]; then
+        echo "SKIP: fragment tracking field smoke disabled"
+        return 0
+    fi
+    for value in FRAGMENT_PEER_NETNS FRAGMENT_PEER_IFNAME FRAGMENT_IPV4_HOST FRAGMENT_IPV4_PEER FRAGMENT_IPV6_HOST FRAGMENT_IPV6_PEER FRAGMENT_VLAN; do
+        [ -n "${!value}" ] || die "${value} is required when FRAGMENT_TRACKING_SMOKE=1"
+    done
+    ip netns exec "${FRAGMENT_PEER_NETNS}" ip link show dev "${FRAGMENT_PEER_IFNAME}" >/dev/null 2>&1 || die "fragment peer interface is unavailable"
+    peer_mac="$(ip netns exec "${FRAGMENT_PEER_NETNS}" cat "/sys/class/net/${FRAGMENT_PEER_IFNAME}/address")"
+    for family in ipv4 ipv6; do
+        if [ "${family}" = ipv4 ]; then source="${FRAGMENT_IPV4_HOST}"; destination="${FRAGMENT_IPV4_PEER}"; else source="${FRAGMENT_IPV6_HOST}"; destination="${FRAGMENT_IPV6_PEER}"; fi
+        for scenario in ordered post-first-reorder later-before-first; do
+            python3 "${FRAGMENT_DRIVER}" --run --iface "${EXPECTED_IFNAME}" --source "${source}" --destination "${destination}" --destination-mac "${peer_mac}" --family "${family}" --vlan "${FRAGMENT_VLAN}" --metrics-url "${DATAPATH_HTTP}/metrics" --scenario "${scenario}" >"${WORK_DIR}/fragment-${family}-${scenario}.log"
+        done
+    done
+    run_full_resync >"${WORK_DIR}/fragment-epoch-full-resync.log"
+    restart_managed_datapath ready >"${WORK_DIR}/fragment-restart.log"
+}
+
 capture_datapath_log_cursor() {
     local label="$1"
     command docker logs --timestamps --tail 1 "${DATAPATH_SERVICE_NAME}" \
@@ -1579,6 +1609,7 @@ prepare_owned_selector_fixture
 run_exact_selector_isolation_fixture
 run_more_specific_selector_isolation_fixture
 run_legacy_selector_repair_fixture
+run_fragment_tracking_field_smoke
 
 BODY_SUCCEEDED=true
 FAILURE_REASON=""

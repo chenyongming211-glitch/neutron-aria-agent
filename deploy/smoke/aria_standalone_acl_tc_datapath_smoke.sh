@@ -17,6 +17,8 @@ FIXTURE_TOKEN=""
 NETNS="${NETNS:-}"
 HOST_IF="${HOST_IF:-}"
 PEER_IF="${PEER_IF:-}"
+SECOND_HOST_IF="${SECOND_HOST_IF:-}"
+SECOND_PEER_IF="${SECOND_PEER_IF:-}"
 HOST_IP="10.203.0.1"
 PEER_IP="10.203.0.2"
 DENIED_IP="10.203.0.6"
@@ -27,6 +29,13 @@ ALLOWED_PACKETS="${ALLOWED_PACKETS:-4}"
 DENIED_PACKETS="${DENIED_PACKETS:-2}"
 PING_PAYLOAD_BYTES="${PING_PAYLOAD_BYTES:-56}"
 PACKET_BYTES=$((PING_PAYLOAD_BYTES + 42))
+FRAGMENT_TRACKING_SMOKE="${FRAGMENT_TRACKING_SMOKE:-0}"
+FRAGMENT_DRIVER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/fragment_tracking_field_driver.py"
+FRAGMENT_VLAN="${FRAGMENT_VLAN:-203}"
+FRAGMENT_IPV4_HOST="${FRAGMENT_IPV4_HOST:-10.203.0.1}"
+FRAGMENT_IPV4_PEER="${FRAGMENT_IPV4_PEER:-10.203.0.2}"
+FRAGMENT_IPV6_HOST="${FRAGMENT_IPV6_HOST:-2001:db8:203::1}"
+FRAGMENT_IPV6_PEER="${FRAGMENT_IPV6_PEER:-2001:db8:203::2}"
 
 INSTANCE=""
 AGENT_PID=""
@@ -38,6 +47,7 @@ PRIVATE_BPFFS_MOUNTED=false
 PIN_ROOT_CREATED=false
 NETNS_CREATED=false
 VETH_CREATED=false
+SECOND_VETH_CREATED=false
 SYSTEM_STARTED=false
 TRACE_ARMED=false
 BODY_SUCCEEDED=false
@@ -71,6 +81,8 @@ derive_fixture_identity() {
     FIXTURE_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(5))')"
     [ -n "${HOST_IF}" ] || HOST_IF="ah${FIXTURE_TOKEN}"
     [ -n "${PEER_IF}" ] || PEER_IF="ap${FIXTURE_TOKEN}"
+    [ -n "${SECOND_HOST_IF}" ] || SECOND_HOST_IF="bh${FIXTURE_TOKEN}"
+    [ -n "${SECOND_PEER_IF}" ] || SECOND_PEER_IF="bp${FIXTURE_TOKEN}"
     [ -n "${NETNS}" ] || NETNS="aria-tc-${FIXTURE_TOKEN}"
 }
 
@@ -90,6 +102,8 @@ PY
 preflight_fixture() {
     [ "${#HOST_IF}" -le 15 ] || die "HOST_IF exceeds Linux interface-name limit: ${HOST_IF}"
     [ "${#PEER_IF}" -le 15 ] || die "PEER_IF exceeds Linux interface-name limit: ${PEER_IF}"
+    [ "${#SECOND_HOST_IF}" -le 15 ] || die "SECOND_HOST_IF exceeds Linux interface-name limit"
+    [ "${#SECOND_PEER_IF}" -le 15 ] || die "SECOND_PEER_IF exceeds Linux interface-name limit"
     [ ! -e "${WORK_DIR}" ] || die "work directory already exists: ${WORK_DIR}"
     if ip netns list | awk '{print $1}' | grep -Fx "${NETNS}" >/dev/null; then
         die "network namespace already exists: ${NETNS}"
@@ -130,6 +144,17 @@ create_netns_fixture() {
     ip route add "${DENIED_IP}/32" dev "${HOST_IF}"
     ip netns exec "${NETNS}" ip link set lo up
     ip netns exec "${NETNS}" ip link set "${PEER_IF}" up
+    if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ] && [ "${MODE}" = tap ]; then
+        ip link add "${SECOND_HOST_IF}" type veth peer name "${SECOND_PEER_IF}"
+        SECOND_VETH_CREATED=true
+        ip link set "${SECOND_PEER_IF}" netns "${NETNS}"
+        ip addr add "10.203.1.1/30" dev "${SECOND_HOST_IF}"
+        ip -6 addr add "2001:db8:204::1/64" dev "${SECOND_HOST_IF}"
+        ip link set "${SECOND_HOST_IF}" up
+        ip netns exec "${NETNS}" ip addr add "10.203.1.2/30" dev "${SECOND_PEER_IF}"
+        ip netns exec "${NETNS}" ip -6 addr add "2001:db8:204::2/64" dev "${SECOND_PEER_IF}"
+        ip netns exec "${NETNS}" ip link set "${SECOND_PEER_IF}" up
+    fi
 }
 
 start_agent_process() {
@@ -152,18 +177,58 @@ start_agent() {
     mkdir -p "${STATE_ROOT}"
     mount -t bpf bpf "${PIN_ROOT}"
     PRIVATE_BPFFS_MOUNTED=true
+    local fixture_pattern="^${HOST_IF}$"
+    if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ] && [ "${MODE}" = tap ]; then fixture_pattern="^(${HOST_IF}|${SECOND_HOST_IF})$"; fi
     cat >"${CONFIG_FILE}" <<EOF
 mode = "standalone"
 auto_attach = ${auto_attach}
 ebpf_path = "${EBPF_OBJECT}"
 pin_path = "${PIN_ROOT}"
 state_path = "${STATE_ROOT}"
-iface_pattern = "^${HOST_IF}$"
+iface_pattern = "${fixture_pattern}"
 listen_addr = "${HTTP_ADDR}"
 trace_backend = "legacy-map"
 log_file_path = "${WORK_DIR}/agent.log"
 EOF
+    if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ]; then
+        cat >>"${CONFIG_FILE}" <<'EOF'
+fragment_tracking_field_verified = true
+[fragment_tracking]
+enabled = true
+max_entries = 8192
+ipv4_timeout_seconds = 30
+ipv6_timeout_seconds = 30
+EOF
+    fi
     start_agent_process
+}
+
+run_fragment_tracking_field_smoke() {
+    local family source destination peer_mac scenario
+    if [ "${FRAGMENT_TRACKING_SMOKE}" != 1 ]; then
+        echo "SKIP: fragment tracking field smoke disabled"
+        return 0
+    fi
+    [ -r "${FRAGMENT_DRIVER}" ] || die "fragment tracking field driver is missing"
+    case "${FRAGMENT_VLAN}" in ''|*[!0-9]*) die "FRAGMENT_VLAN must be numeric" ;; esac
+    peer_mac="$(ip netns exec "${NETNS}" cat "/sys/class/net/${PEER_IF}/address")"
+    for family in ipv4 ipv6; do
+        if [ "${family}" = ipv4 ]; then source="${FRAGMENT_IPV4_HOST}"; destination="${FRAGMENT_IPV4_PEER}"; else source="${FRAGMENT_IPV6_HOST}"; destination="${FRAGMENT_IPV6_PEER}"; fi
+        for scenario in ordered post-first-reorder later-before-first; do
+            python3 "${FRAGMENT_DRIVER}" --run --iface "${HOST_IF}" --source "${source}" \
+                --destination "${destination}" --destination-mac "${peer_mac}" --family "${family}" \
+                --vlan "${FRAGMENT_VLAN}" --metrics-url "${HTTP}/metrics" --scenario "${scenario}" \
+                >"${WORK_DIR}/fragment-${family}-${scenario}.log"
+        done
+    done
+    curl --fail-with-body -sS -H 'Content-Type: application/json' -X PUT \
+        -d '{"conntrack":true,"monitoring":true,"acl":true,"qos":null,"mirror":null,"tcprt":null,"ssl":null}' \
+        "${HTTP}/api/v1/${INSTANCE}/config" >"${WORK_DIR}/fragment-epoch-policy-update.json"
+    curl --fail-with-body -sS -X DELETE "${HTTP}/api/v1/${INSTANCE}/conntrack" >"${WORK_DIR}/fragment-epoch-scrub.json"
+    if [ "${MODE}" = tap ]; then
+        peer_mac="$(ip netns exec "${NETNS}" cat "/sys/class/net/${SECOND_PEER_IF}/address")"
+        python3 "${FRAGMENT_DRIVER}" --run --iface "${SECOND_HOST_IF}" --source 10.203.1.1 --destination 10.203.1.2 --destination-mac "${peer_mac}" --family ipv4 --vlan "${FRAGMENT_VLAN}" --metrics-url "${HTTP}/metrics" --scenario later-before-first >"${WORK_DIR}/fragment-cross-tap.log"
+    fi
 }
 
 restart_agent_preserving_bpffs() {
@@ -831,6 +896,9 @@ cleanup() {
             record_cleanup_error "fixture veth removal failed"
         fi
     fi
+    if [ "${SECOND_VETH_CREATED}" = true ]; then
+        if ip link del "${SECOND_HOST_IF}"; then SECOND_VETH_CREATED=false; else record_cleanup_error "second fixture veth removal failed"; fi
+    fi
     if [ "${NETNS_CREATED}" = true ]; then
         if ip netns del "${NETNS}"; then
             NETNS_CREATED=false
@@ -898,6 +966,7 @@ restart_healthy_pinned_runtime
 assert_health_poll_degrades
 assert_missing_tc_rejected
 recover_incomplete_pinned_runtime
+run_fragment_tracking_field_smoke
 
 BODY_SUCCEEDED=true
 FAILURE_REASON=""
