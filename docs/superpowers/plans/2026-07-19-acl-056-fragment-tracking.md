@@ -52,7 +52,7 @@
 - Consumes: current `ebpf/src/parser.rs` through `#[path = "../../ebpf/src/parser.rs"]`.
 - Produces: tests named `fragment_parser_*` and `fragment_context_*`; later tasks implement `FragmentKind`, `FragmentContextKey4`, `FragmentContextValue`, `fragment_context_disposition`, and parser fields used here.
 
-- [ ] **Step 1: Add raw-frame parser RED tests**
+- [x] **Step 1: Add raw-frame parser RED tests**
 
 Create a root `common` shim so the real parser compiles in a host integration test, then construct Ethernet/IP bytes directly:
 
@@ -90,7 +90,7 @@ fn fragment_parser_ipv4_non_initial_never_reads_payload_as_ports() {
 
 Add equivalent cases for IPv4 first UDP, IPv4 four-byte-only UDP rejection, IPv6 first/non-initial, IPv6 atomic, offset bytes, and an IPv6 extension chain.
 
-- [ ] **Step 2: Add fragment-context RED tests**
+- [x] **Step 2: Add fragment-context RED tests**
 
 ```rust
 use aria_ebpf_abi::{
@@ -121,7 +121,7 @@ fn fragment_context_rejects_two_bank_rotation_epoch_reuse() {
 
 Cover exact identity layout, current hit, expiry boundary, overlap, and bank mismatch.
 
-- [ ] **Step 3: Register the behavior filter**
+- [x] **Step 3: Register the behavior filter**
 
 Add the following command once to `RUST_TESTS`:
 
@@ -131,7 +131,7 @@ Add the following command once to `RUST_TESTS`:
 
 Do not add a source parser to the Python checker.
 
-- [ ] **Step 4: Commit and push RED**
+- [x] **Step 4: Commit and push RED**
 
 ```bash
 git add abi/tests/fragment_parser_contract.rs abi/tests/fragment_context_contract.rs ci/check_neutron_stage1.py
@@ -152,7 +152,7 @@ Expected GitHub result: `fast-contracts` passes; `rust-behavior` fails only beca
 - Consumes: Task 1 test names and raw frames.
 - Produces: `FragmentKind`, `FragmentContextKey4`, `FragmentContextKey6`, `FragmentContextValue`, `FragmentConfig`, `FragmentEpochValue`, `FragmentContextDisposition`, and `fragment_context_disposition`; complete `PacketInfo` fragment fields.
 
-- [ ] **Step 1: Add stable fragment ABI**
+- [x] **Step 1: Add stable fragment ABI**
 
 Implement explicit `repr(C)` types in `abi/src/fragment.rs`:
 
@@ -181,19 +181,19 @@ pub struct FragmentContextValue {
 
 Define the IPv6 key with `[u8; 16]` addresses and `u32 fragment_id`. Define config version 1, disabled flag, two timeout fields, and epoch value. Implement disposition ordering: version, expiry, bank/epoch, overlap, then hit.
 
-- [ ] **Step 2: Export ABI and add layout assertions**
+- [x] **Step 2: Export ABI and add layout assertions**
 
 Add `mod fragment; pub use fragment::*;`, include new map types in the `aya::Pod` implementation list, and assert exact sizes/offsets in `critical_map_layouts_remain_stable` plus new `fragment_map_layouts_are_stable`.
 
-- [ ] **Step 3: Implement IPv4 classification and complete first L4 validation**
+- [x] **Step 3: Implement IPv4 classification and complete first L4 validation**
 
 Read total length, ID, flags/offset, normalize offset by multiplying the 13-bit value by eight, and never enter TCP/UDP parsing for `NonInitial`. Require the complete eight-byte UDP header and complete TCP data-offset-selected header for `First`.
 
-- [ ] **Step 4: Implement IPv6 classification and atomic normalization**
+- [x] **Step 4: Implement IPv6 classification and atomic normalization**
 
 Read the Fragment header ID/offset/M fields during bounded extension traversal. Preserve `Atomic` metadata for tests but allow ordinary L4 parsing. Do not parse L4 for `NonInitial`.
 
-- [ ] **Step 5: Push parser/ABI GREEN**
+- [x] **Step 5: Push parser/ABI GREEN**
 
 ```bash
 /Users/chen/.cargo/bin/rustfmt --edition 2021 abi/src/lib.rs abi/src/fragment.rs abi/tests/fragment_parser_contract.rs abi/tests/fragment_context_contract.rs ebpf/src/parser.rs
@@ -223,7 +223,7 @@ Expected: fragment tests and ABI full suite pass; eBPF warning-denied build pass
 - Consumes: Task 2 ABI and parser metadata.
 - Produces: `resolve_v4`, `resolve_v6`, `install_allowed_v4`, and `install_allowed_v6` behavior; V4/V6 context maps, config, epoch, and counters.
 
-- [ ] **Step 1: Extend RED for datapath decisions**
+- [x] **Step 1: Extend RED for datapath decisions**
 
 Add pure behavior cases for disabled mode, missing context, first-range overlap,
 exact hit, expired retain-and-drop classification, one-packet bank/epoch scratch,
@@ -231,11 +231,11 @@ supported Ethernet family recognition, malformed IP parsing, and
 insert-before-pass failure. Keep datapath-only helpers at crate root rather than
 expanding the stable `abi::userspace` surface.
 
-- [ ] **Step 2: Define maps**
+- [x] **Step 2: Define maps**
 
 Add `FRAG_CONTEXT_V4` and `FRAG_CONTEXT_V6` as `LruHashMap` with 8192 entries, `FRAGMENT_EPOCH` and `FRAGMENT_CONFIG` as `HashMap`, and a bounded per-CPU fragment metric map. Do not use per-eviction counters because LRU eviction is not reported to the updating eBPF program.
 
-- [ ] **Step 3: Resolve non-initial context before CT key construction**
+- [x] **Step 3: Resolve non-initial context before CT key construction**
 
 In both TC directions, sample active bank and fragment epoch once after tap
 resolution and before `CtKey4`/`CtKey6`, then call the family resolver. Reuse
@@ -245,13 +245,14 @@ the recovered effective protocol privately. On miss/expiry/stale/overlap/
 disabled, set a dedicated drop reason and return `TC_ACT_SHOT`; expiry does not
 delete from the packet path.
 
-- [ ] **Step 4: Install allowed first context before return pass**
+- [x] **Step 4: Install allowed first context before return pass**
 
 After the existing pipeline determines final pass, insert the first-fragment
 context with the packet bank/epoch snapshot and absolute expiry. Use `BPF_ANY`
 so a valid first fragment can replace live/expired/stale authority for fragment
-ID reuse. If insertion fails, remove a CT entry created by this packet and
-return the update-failed drop. Do not remove a pre-existing CT hit.
+ID reuse. On a CT miss, defer CT creation until this context insertion succeeds.
+If insertion fails, return the update-failed drop without deleting any CT entry.
+A pre-existing CT hit is preserved.
 
 Treat `BPF_ANY` as the required availability contract, not an implementation
 option: the newest valid, finally allowed first fragment wins. Do not replace it
@@ -260,15 +261,14 @@ insert logic. Document the bounded same-key overlap risk, but preserve the hard
 boundary that non-initial fragments without trustworthy context never invent
 ports or pass solely to improve availability.
 
-For ownership-safe cleanup, change `ct_create_v4` and `ct_create_v6` to use an
-atomic no-overwrite insert and return only whether this packet successfully
-inserted the entry. A pre-existing/racing entry or any insert failure is not
-owned by this packet. Fragment-context failure removes CT only for that proven
-owned outcome. This intentionally changes concurrent same-key creation from
-last-writer overwrite to first successful insert wins without adding a generic
-transaction framework.
+Keep `ct_create_v4` and `ct_create_v6` on atomic no-overwrite insertion. The
+final-review correction removes the historical create-then-delete rollback:
+ownership at insertion time cannot authorize a later unconditional key delete
+after another CPU has replaced the entry. Tracked first fragments therefore
+publish context before attempting CT creation. Ordinary unfragmented, atomic,
+and resolved non-initial CT-miss behavior remains after policy/QoS acceptance.
 
-- [ ] **Step 5: Exclude non-initial TCP from TCPRT**
+- [x] **Step 5: Exclude non-initial TCP from TCPRT**
 
 Guard every TCPRT call with `fragment_kind != NonInitial`. Do not synthesize flags, sequence, or payload length from context.
 
@@ -278,11 +278,12 @@ tap-only visibility for missing-context drops. For TC supported IPv4/IPv6
 frames, retry malformed/non-linear parsing with safe pull/reparse, then drop and
 account persistent malformed input; leave non-IP Ethernet and XDP neutral.
 
-Keep policy counters, CT attempts/touches, QoS tokens, and skb EDT as attempted-
-packet effects before context insertion. Keep PASS trace/mirror, accepted flow
-and group stats, and TCPRT after successful insertion.
+Keep policy counters, QoS tokens, and skb EDT as attempted-packet effects before
+context insertion. For a tracked first CT miss, create CT only after successful
+context insertion. Keep PASS trace/mirror, accepted flow and group stats, and
+TCPRT after successful insertion.
 
-- [ ] **Step 6: Commit and push datapath GREEN**
+- [x] **Step 6: Commit and push datapath GREEN**
 
 ```bash
 /Users/chen/.cargo/bin/rustfmt --edition 2021 abi/src/fragment.rs abi/src/lib.rs abi/tests/fragment_context_contract.rs ebpf/src/fragment.rs ebpf/src/conntrack.rs ebpf/src/maps.rs ebpf/src/lib.rs
@@ -296,7 +297,7 @@ Expected: fragment behavior passes and warning-denied eBPF build accepts bounded
 ### Task 4: Add Strict Userspace Epoch And Recovery Operations
 
 Status: implemented on `v0.9-neutron-agent` with hosted CI evidence. Fragment
-tracking remains disabled; Tasks 5-6 and privileged field evidence are pending.
+tracking remains production-disabled; privileged field evidence is pending.
 
 **Files:**
 - Create: `core/src/ebpf_ops/fragment.rs`
@@ -382,7 +383,7 @@ Expected: core fragment tests, existing replay/inventory tests, and static agent
 - Consumes: `advance_fragment_epoch_strict` from Task 4.
 - Produces: one `AdvanceFragmentEpoch` plan phase after staging/general changes and before `SwitchBank` for every semantic ACL publication and gate transition.
 
-- [ ] **Step 1: Add publication-order RED tests**
+- [x] **Step 1: Add publication-order RED tests**
 
 Extend standalone plan tests to assert:
 
@@ -395,15 +396,15 @@ assert!(position(StandaloneAclPublicationStep::AdvanceFragmentEpoch)
 
 Add managed replacement, purge, gate disable/enable, and recovery cases under the existing `neutron_acl_` filters. Assert epoch failure leaves active bank and acknowledged state unchanged.
 
-- [ ] **Step 2: Execute the epoch fence in standalone publication**
+- [x] **Step 2: Execute the epoch fence in standalone publication**
 
 After shadow/general preparation and before active switch, call the strict operation. Do not roll epoch back during compensation. Add epoch failure as a pre-switch failure phase that scrubs the failed shadow and restores general-map mutations.
 
-- [ ] **Step 3: Execute the same fence in managed publication and purge**
+- [x] **Step 3: Execute the same fence in managed publication and purge**
 
 Place the call inside the existing lifecycle/instance lock and transaction boundary. Gate transitions and recovery establish a new epoch before reporting ACL ready.
 
-- [ ] **Step 4: Commit and push publication GREEN**
+- [x] **Step 4: Commit and push publication GREEN**
 
 ```bash
 /Users/chen/.cargo/bin/rustfmt --edition 2021 agent/src/control_plane/standalone_acl.rs agent/src/control_plane.rs agent/src/neutron_api.rs
@@ -616,7 +617,7 @@ Expected backlog state: implementation and hosted CI complete; privileged field 
 - Consumes: exact commit SHAs and GitHub run IDs from Tasks 1-7.
 - Produces: reviewable implementation/CI evidence without false field claims.
 
-- [ ] **Step 1: Verify exact-head GitHub checks**
+- [x] **Step 1: Verify exact-head GitHub checks**
 
 ```bash
 head_sha="$(git rev-parse HEAD)"
@@ -627,15 +628,15 @@ gh run view "${run_id}" --json headSha,status,conclusion,jobs,url
 
 Expected: the selected run is for exact HEAD; `fast-contracts`, `rust-behavior`, and `rust-build` are successful. Record both run ID and head SHA in the docs.
 
-- [ ] **Step 2: Perform final static review**
+- [x] **Step 2: Perform final static review**
 
 Inspect parser length/offset arithmetic, every fragment-map key initialization, epoch ordering, first-pass insertion error cleanup, non-initial TCPRT guards, pin inventory, recovery, and metrics. Run `git diff --check`; do not run local Cargo.
 
-- [ ] **Step 3: Close hosted evidence only**
+- [x] **Step 3: Close hosted evidence only**
 
 Update the design status and backlog with RED and GREEN commits and exact CI URL. Keep `REVIEW-ACL-056` at `implementation and hosted CI complete; privileged field evidence deferred` until real smoke evidence exists.
 
-- [ ] **Step 4: Commit and push documentation closure**
+- [x] **Step 4: Commit and push documentation closure**
 
 ```bash
 git add docs/superpowers/specs/2026-07-19-acl-056-fragment-tracking-design.md docs/openstack-neutron-aria-details/12-review-bug-backlog.md docs/superpowers/plans/2026-07-19-acl-056-fragment-tracking.md

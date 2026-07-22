@@ -2,11 +2,11 @@
 
 Date: 2026-07-19
 
-Status: design approved; Tasks 1-4 are implemented on `v0.9-neutron-agent`
-with hosted CI evidence. Task 5 publication fencing, Task 6 guarded activation,
-and privileged field evidence remain pending.
+Status: implementation and hosted CI complete on `v0.9-neutron-agent`;
+privileged field evidence remains `deferred/pending`, and production activation
+remains disabled.
 
-Analyzed target: `v0.9-neutron-agent@4e5197b`
+Analyzed implementation target: `v0.9-neutron-agent@43e0e2a`
 
 Tracked finding: `REVIEW-ACL-056`
 
@@ -321,16 +321,19 @@ IPv6 atomic packets continue without fragment authority.
 
 1. validate complete L4 authority and retain real ports;
 2. reuse the packet's bank and epoch snapshot;
-3. run normal CT/ACL/QoS/Mirror/trace processing;
+3. run CT lookup plus normal ACL/QoS/Mirror/trace processing, but defer a CT
+   miss insertion for a tracked first fragment;
 4. do not install an allow context for a final drop;
-5. for final pass, insert context before returning pass;
-6. convert insert failure to an explicit resource drop.
+5. for final pass, insert context before creating a new CT entry;
+6. convert insert failure to an explicit resource drop without a CT delete;
+7. after successful context installation, create the CT entry with
+   `BPF_NOEXIST` and continue the accepted path.
 
 Context insertion deliberately uses `BPF_ANY`: a valid allowed first fragment
 may replace a live, expired, or stale entry for the same key so that fragment-ID
 reuse can make progress. This is distinct from CT creation, which remains
-`BPF_NOEXIST` so failure cleanup can remove only a CT entry proven to be owned
-by this packet. A same-key ID collision while two datagrams overlap remains a
+`BPF_NOEXIST` and occurs only after a tracked first fragment has installed its
+context. A same-key ID collision while two datagrams overlap remains a
 residual ambiguity: the latest valid first fragment becomes the recovered-port
 authority. The implementation does not claim that this theoretical collision
 is a proven authorization bypass because every later packet still traverses
@@ -350,16 +353,17 @@ preserve normal forwarding, while keeping these safety limits:
 
 - only a completely parsed first fragment whose final pipeline action is pass
   may publish or replace context;
-- a map update failure still drops that first fragment and removes only a CT
-  entry proven to have been created by the same packet;
+- a map update failure drops that first fragment before it creates a CT entry,
+  and never deletes a same-key CT entry that another packet may have replaced;
 - a non-initial fragment never creates authority, guesses ports, or bypasses a
   missing, expired, stale, overlapping, or otherwise invalid context;
 - expiry remains replace-on-next-valid-first-fragment rather than packet-path
   deletion, so legal ID reuse is never dependent on a cleanup race.
 
-If the existing pipeline created a new CT entry before context insertion and
-the insertion then fails, the error path removes that transaction-created CT
-entry before returning drop. A pre-existing legitimate CT hit is not deleted.
+For unfragmented, atomic, and resolved non-initial packets, CT-miss creation
+remains immediately after policy/QoS acceptance. Only a tracked first fragment
+moves CT creation after context installation. A pre-existing legitimate CT hit
+is never deleted when context installation fails.
 
 ### 7.2 Non-initial fragment
 
@@ -512,10 +516,42 @@ eBPF builds. No local Cargo command is run.
 Privileged evidence stays `deferred/pending` until a real environment exists.
 It must use real pinned maps and raw IPv4/IPv6 fragments in both TC directions,
 including ordered, post-first reordered, later-before-first, tap/VLAN isolation,
-publication invalidation, pressure/update failure, and restart recovery.
+publication invalidation, restart recovery, and bounded pressure/eviction in
+the temporary standalone capacity-8 fixture. Managed smoke preserves deployed
+capacity. `update_failed` remains a hosted Rust/eBPF contract because the LRU
+map and public configuration expose no safe deterministic field trigger.
 
 Hosted CI is not a substitute for field evidence and cannot activate the
 capability by itself.
+
+### 11.4 Hosted implementation evidence
+
+- Parser/context RED: commits `ec5e6ce..bdbbdc0`, Builds
+  [29694226731](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29694226731)
+  and [29694579684](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29694579684);
+  parser/ABI GREEN: `e97ea7c`, Build
+  [29696020281](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29696020281).
+- Datapath GREEN: `99292d0`, final Build
+  [29727166995](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29727166995);
+  lifecycle/recovery GREEN: `e3d2543`, Build
+  [29735595296](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29735595296).
+- Publication-fence RED: Build
+  [29741601036](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29741601036);
+  GREEN: `e98ce03`, Build
+  [29742110581](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29742110581).
+- Guarded activation/recovery GREEN: `32bd37f`, Build
+  [29822186960](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29822186960);
+  observability GREEN: `5af1ac0`, Build
+  [29827817509](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29827817509).
+- Guarded field wiring head `e4bac0c` passed Build
+  [29941244612](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29941244612);
+  no privileged packet execution is claimed.
+- Final-review RED `dd35fb2` failed only on the missing CT-create ordering and
+  per-packet reset contracts in Build
+  [29942509813](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29942509813).
+  GREEN `43e0e2a` passed `fast-contracts`, `rust-behavior`, and warning-denied
+  Rust/eBPF/static builds in Build
+  [29943612716](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29943612716).
 
 ## 12. Scope Boundaries
 
