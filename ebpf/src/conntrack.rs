@@ -293,8 +293,7 @@ pub unsafe fn ct_create_v4(
         pkt_count: 1,
         byte_count: pkt_len as u64,
     };
-    // Atomic no-overwrite makes the first successful insert the only packet
-    // allowed to claim ownership for a later fragment-install rollback.
+    // Atomic no-overwrite preserves an entry created by a racing packet.
     CT_TABLE_V4.insert(key, &val, BPF_NOEXIST as u64).is_ok()
 }
 
@@ -331,20 +330,6 @@ pub unsafe fn ct_create_v6(
         pkt_count: 1,
         byte_count: pkt_len as u64,
     };
-    // A racing existing entry is never owned by this packet.
+    // A racing existing entry is preserved.
     CT_TABLE_V6.insert(key, &val, BPF_NOEXIST as u64).is_ok()
-}
-
-#[inline(always)]
-pub unsafe fn ct_remove_created_v4(key: &CtKey4, created_by_packet: bool) {
-    if created_by_packet {
-        let _ = CT_TABLE_V4.remove(key);
-    }
-}
-
-#[inline(always)]
-pub unsafe fn ct_remove_created_v6(key: &CtKey6, created_by_packet: bool) {
-    if created_by_packet {
-        let _ = CT_TABLE_V6.remove(key);
-    }
 }

@@ -7,6 +7,13 @@ pub enum FragmentKind {
     Atomic = 3,
 }
 
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FragmentCtCreatePoint {
+    AfterPolicyQos = 0,
+    AfterContextInstall = 1,
+}
+
 pub const FRAGMENT_CONTEXT_VERSION: u8 = 1;
 pub const FRAGMENT_CONFIG_VERSION: u8 = 2;
 pub const FRAGMENT_CONFIG_DISABLED: u8 = 0;
@@ -189,7 +196,6 @@ impl FragmentResolveDecision {
 pub enum FragmentInstallDecision {
     Pass = 0,
     DropKeepCt = 1,
-    DropAndRemoveOwnedCt = 2,
 }
 
 impl FragmentInstallDecision {
@@ -197,7 +203,7 @@ impl FragmentInstallDecision {
     pub fn drop_reason(self) -> u8 {
         match self {
             Self::Pass => 0,
-            Self::DropKeepCt | Self::DropAndRemoveOwnedCt => DROP_FRAGMENT_CONTEXT_UPDATE_FAILED,
+            Self::DropKeepCt => DROP_FRAGMENT_CONTEXT_UPDATE_FAILED,
         }
     }
 
@@ -205,13 +211,22 @@ impl FragmentInstallDecision {
     pub fn metric(self) -> u8 {
         match self {
             Self::Pass => FRAGMENT_METRIC_CONTEXT_INSERTED,
-            Self::DropKeepCt | Self::DropAndRemoveOwnedCt => FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED,
+            Self::DropKeepCt => FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED,
         }
     }
 
     #[inline(always)]
     pub fn remove_created_ct(self) -> bool {
-        matches!(self, Self::DropAndRemoveOwnedCt)
+        false
+    }
+}
+
+#[inline(always)]
+pub const fn fragment_ct_create_point(fragment_kind: u8) -> FragmentCtCreatePoint {
+    if fragment_kind == FragmentKind::First as u8 {
+        FragmentCtCreatePoint::AfterContextInstall
+    } else {
+        FragmentCtCreatePoint::AfterPolicyQos
     }
 }
 
@@ -373,14 +388,9 @@ pub fn fragment_resolve_decision(
 }
 
 #[inline(always)]
-pub fn fragment_install_result(
-    context_insert_succeeded: bool,
-    ct_created_by_packet: bool,
-) -> FragmentInstallDecision {
+pub fn fragment_install_result(context_insert_succeeded: bool) -> FragmentInstallDecision {
     if context_insert_succeeded {
         FragmentInstallDecision::Pass
-    } else if ct_created_by_packet {
-        FragmentInstallDecision::DropAndRemoveOwnedCt
     } else {
         FragmentInstallDecision::DropKeepCt
     }

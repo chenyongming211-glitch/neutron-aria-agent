@@ -204,7 +204,6 @@ pub unsafe fn resolve_v6(info: &mut PacketInfo, p: &mut PipelineCtx) -> ResolveO
 pub unsafe fn install_allowed_v4(
     info: &PacketInfo,
     p: &mut PipelineCtx,
-    ct_created_by_packet: bool,
 ) -> FragmentInstallDecision {
     if info.fragment_kind != FragmentKind::First as u8 {
         return FragmentInstallDecision::Pass;
@@ -227,22 +226,22 @@ pub unsafe fn install_allowed_v4(
             FRAGMENT_FAMILY_IPV4,
             fragment_metric_for_drop_reason(authority),
         );
-        return fragment_install_result(false, ct_created_by_packet);
+        return fragment_install_result(false);
     }
     let config = match config {
         Some(config) => config,
-        None => return fragment_install_result(false, ct_created_by_packet),
+        None => return fragment_install_result(false),
     };
     let epoch = match epoch {
         Some(epoch) => epoch,
-        None => return fragment_install_result(false, ct_created_by_packet),
+        None => return fragment_install_result(false),
     };
     let expires_at_ns = match p.now.checked_add(config.ipv4_timeout_ns) {
         Some(expires_at_ns) => expires_at_ns,
         None => {
             p.drop_reason = DROP_FRAGMENT_EXPIRY_OVERFLOW;
             record_metric(p, FRAGMENT_FAMILY_IPV4, FRAGMENT_METRIC_EXPIRY_OVERFLOW);
-            return fragment_install_result(false, ct_created_by_packet);
+            return fragment_install_result(false);
         }
     };
     let key = resolve_v4_key(info, p);
@@ -259,10 +258,7 @@ pub unsafe fn install_allowed_v4(
         expires_at_ns,
     };
     // BPF_ANY: a valid first fragment replaces same-key authority for ID reuse.
-    let decision = fragment_install_result(
-        FRAG_CONTEXT_V4.insert(&key, &value, 0).is_ok(),
-        ct_created_by_packet,
-    );
+    let decision = fragment_install_result(FRAG_CONTEXT_V4.insert(&key, &value, 0).is_ok());
     record_metric(p, FRAGMENT_FAMILY_IPV4, decision.metric());
     if decision.drop_reason() != 0 {
         p.drop_reason = decision.drop_reason();
@@ -274,7 +270,6 @@ pub unsafe fn install_allowed_v4(
 pub unsafe fn install_allowed_v6(
     info: &PacketInfo,
     p: &mut PipelineCtx,
-    ct_created_by_packet: bool,
 ) -> FragmentInstallDecision {
     if info.fragment_kind != FragmentKind::First as u8 {
         return FragmentInstallDecision::Pass;
@@ -296,22 +291,22 @@ pub unsafe fn install_allowed_v6(
             FRAGMENT_FAMILY_IPV6,
             fragment_metric_for_drop_reason(authority),
         );
-        return fragment_install_result(false, ct_created_by_packet);
+        return fragment_install_result(false);
     }
     let config = match config {
         Some(config) => config,
-        None => return fragment_install_result(false, ct_created_by_packet),
+        None => return fragment_install_result(false),
     };
     let epoch = match epoch {
         Some(epoch) => epoch,
-        None => return fragment_install_result(false, ct_created_by_packet),
+        None => return fragment_install_result(false),
     };
     let expires_at_ns = match p.now.checked_add(config.ipv6_timeout_ns) {
         Some(expires_at_ns) => expires_at_ns,
         None => {
             p.drop_reason = DROP_FRAGMENT_EXPIRY_OVERFLOW;
             record_metric(p, FRAGMENT_FAMILY_IPV6, FRAGMENT_METRIC_EXPIRY_OVERFLOW);
-            return fragment_install_result(false, ct_created_by_packet);
+            return fragment_install_result(false);
         }
     };
     let key = resolve_v6_key(info, p);
@@ -328,10 +323,7 @@ pub unsafe fn install_allowed_v6(
         expires_at_ns,
     };
     // BPF_ANY: a valid first fragment replaces same-key authority for ID reuse.
-    let decision = fragment_install_result(
-        FRAG_CONTEXT_V6.insert(&key, &value, 0).is_ok(),
-        ct_created_by_packet,
-    );
+    let decision = fragment_install_result(FRAG_CONTEXT_V6.insert(&key, &value, 0).is_ok());
     record_metric(p, FRAGMENT_FAMILY_IPV6, decision.metric());
     if decision.drop_reason() != 0 {
         p.drop_reason = decision.drop_reason();

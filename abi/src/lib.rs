@@ -581,6 +581,34 @@ pub struct PipelineCtx {
     pub _pad3: [u8; 6],
 }
 
+impl PipelineCtx {
+    #[inline(always)]
+    pub fn reset_for_tc_packet(&mut self, pkt_len: u32, direction: u8) {
+        self.tap_id = TAP_ID_UNASSIGNED;
+        self.src_id = 0;
+        self.dst_id = 0;
+        self.pkt_len = pkt_len;
+        self.now = 0;
+        self.proto = 0;
+        self.direction = direction;
+        self.flags = 0;
+        self.ct_state = 0;
+        self.drop_reason = 0;
+        self._pad = [0; 2];
+        self.action = 0;
+        self.matched_src_id = 0;
+        self.matched_dst_id = 0;
+        self.matched_proto = 0;
+        self.matched_direction = 0;
+        self.matched_bank = 0;
+        self._pad2 = [0; 1];
+        self.fragment_epoch_snapshot = 0;
+        self.acl_bank_snapshot = 0;
+        self.fragment_epoch_present = 0;
+        self._pad3 = [0; 6];
+    }
+}
+
 // --- Global firewall config (feature switches) ---
 
 #[repr(C)]
