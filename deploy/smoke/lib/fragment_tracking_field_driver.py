@@ -358,7 +358,15 @@ def run_pressure(args, family, source_mac):
                    vector(non_initial=1, miss=1))
     require_pressure(probed, args.pin_path, args.family, args.capacity, args.capacity)
     print("fragment pressure fill-and-evict observation complete")
+def run_observe(args):
+    snapshot = fetch_metrics(args.metrics_url)
+    require_pressure(snapshot, args.pin_path, args.family,
+                     args.expected_occupancy, args.expected_capacity)
+    print("fragment occupancy observation complete")
 def run_fixture(args):
+    if args.operation == "observe":
+        run_observe(args)
+        return
     family = 4 if args.family == "ipv4" else 6
     validate_identity(family, args.token, args.ident)
     if args.source_mac:
@@ -487,8 +495,13 @@ def self_test():
     accepted = (
         common + ["--operation", "pressure", "--capacity", "2", "--reuse-reason", "eviction"],
         common + ["--operation", "probe-old", "--expected-probe-event", "miss", "--reuse-reason", "restart"],
+        ["--run", "--operation", "observe", "--family", "ipv4", "--metrics-url",
+         "http://127.0.0.1/metrics", "--pin-path", "/p", "--expected-occupancy",
+         "0", "--expected-capacity", "4"],
     )
-    assert [parse_arguments(value).reuse_reason for value in accepted] == ["eviction", "restart"]
+    parsed = [parse_arguments(value) for value in accepted]
+    assert [value.operation for value in parsed] == ["pressure", "probe-old", "observe"]
+    assert [value.reuse_reason for value in parsed] == ["eviction", "restart", None]
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
         probe.bind(("127.0.0.1", 0)); port = probe.getsockname()[1]
     with receiver(None, "ipv4", "127.0.0.1", token, port, 0.5) as handle:
@@ -528,11 +541,13 @@ def build_parser():
     parser.add_argument("--receiver-timeout", type=float)
     parser.add_argument("--ident", type=int)
     parser.add_argument("--operation", choices=("complete", "establish", "continue",
-                                                 "probe-old", "pressure"))
+                                                 "probe-old", "pressure", "observe"))
     parser.add_argument("--scenario", choices=("ordered", "reordered",
                                                 "post-first-reorder", "later-before-first"))
     parser.add_argument("--expected-probe-event", choices=("miss", "stale"))
     parser.add_argument("--capacity", type=int)
+    parser.add_argument("--expected-occupancy", type=int)
+    parser.add_argument("--expected-capacity", type=int)
     parser.add_argument("--reuse-reason", choices=("isolation", "epoch", "restart", "eviction"))
     return parser
 def parse_arguments(argv=None):
@@ -552,6 +567,21 @@ def parse_arguments(argv=None):
         return args
     if args.frame is not None:
         parser.error("--run does not accept --frame")
+    operation = args.operation or "complete"
+    if operation == "observe":
+        needed = ("family", "metrics_url", "pin_path", "expected_occupancy",
+                  "expected_capacity")
+        if any(getattr(args, key) is None for key in needed):
+            parser.error("observe requires family, metrics, pin path, occupancy, and capacity")
+        allowed = {"run", "operation", *needed}
+        if not provided <= allowed:
+            parser.error("observe accepts only family, metrics, pin path, occupancy, and capacity")
+        if (args.expected_occupancy < 0 or args.expected_capacity <= 0 or
+                args.expected_occupancy > args.expected_capacity):
+            parser.error("observe occupancy/capacity bounds are invalid")
+        return args
+    if args.expected_occupancy is not None or args.expected_capacity is not None:
+        parser.error("observation bounds are valid only with --operation observe")
     needed = ("iface", "source", "destination", "destination_mac", "family",
               "metrics_url", "pin_path", "token", "ident")
     if any(getattr(args, key) is None for key in needed):
@@ -560,7 +590,6 @@ def parse_arguments(argv=None):
         validate_identity(4 if args.family == "ipv4" else 6, args.token, args.ident)
     except ValueError as error:
         parser.error(str(error))
-    operation = args.operation or "complete"
     scoped = ((args.scenario, "complete", "--scenario"),
               (args.capacity, "pressure", "--capacity"),
               (args.expected_probe_event, "probe-old", "--expected-probe-event"))

@@ -31,11 +31,19 @@ PING_PAYLOAD_BYTES="${PING_PAYLOAD_BYTES:-56}"
 PACKET_BYTES=$((PING_PAYLOAD_BYTES + 42))
 FRAGMENT_TRACKING_SMOKE="${FRAGMENT_TRACKING_SMOKE:-0}"
 FRAGMENT_DRIVER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/fragment_tracking_field_driver.py"
-FRAGMENT_VLAN="${FRAGMENT_VLAN:-203}"
-FRAGMENT_IPV4_HOST="${FRAGMENT_IPV4_HOST:-10.203.0.1}"
-FRAGMENT_IPV4_PEER="${FRAGMENT_IPV4_PEER:-10.203.0.2}"
-FRAGMENT_IPV6_HOST="${FRAGMENT_IPV6_HOST:-2001:db8:203::1}"
-FRAGMENT_IPV6_PEER="${FRAGMENT_IPV6_PEER:-2001:db8:203::2}"
+FRAGMENT_VLAN_A="${FRAGMENT_VLAN_A:-203}"
+FRAGMENT_VLAN_B="${FRAGMENT_VLAN_B:-204}"
+FRAGMENT_IPV4_HOST="${FRAGMENT_IPV4_HOST:-10.203.2.1}"
+FRAGMENT_IPV4_PEER="${FRAGMENT_IPV4_PEER:-10.203.2.2}"
+FRAGMENT_IPV6_HOST="${FRAGMENT_IPV6_HOST:-2001:db8:205::1}"
+FRAGMENT_IPV6_PEER="${FRAGMENT_IPV6_PEER:-2001:db8:205::2}"
+FRAGMENT_BASE_IPV6_HOST="${FRAGMENT_BASE_IPV6_HOST:-2001:db8:203::1}"
+FRAGMENT_BASE_IPV6_PEER="${FRAGMENT_BASE_IPV6_PEER:-2001:db8:203::2}"
+FRAGMENT_CAPACITY=8
+HOST_VLAN_A_IF=""
+PEER_VLAN_A_IF=""
+HOST_VLAN_B_IF=""
+PEER_VLAN_B_IF=""
 
 INSTANCE=""
 AGENT_PID=""
@@ -48,6 +56,10 @@ PIN_ROOT_CREATED=false
 NETNS_CREATED=false
 VETH_CREATED=false
 SECOND_VETH_CREATED=false
+HOST_VLAN_A_CREATED=false
+PEER_VLAN_A_CREATED=false
+HOST_VLAN_B_CREATED=false
+PEER_VLAN_B_CREATED=false
 SYSTEM_STARTED=false
 TRACE_ARMED=false
 BODY_SUCCEEDED=false
@@ -60,6 +72,8 @@ HEALTH_POLL_DEGRADED=false
 RECOVERY_VERIFIED=false
 HEALTHY_PINNED_RESTART=false
 INCOMPLETE_PINNED_QUIESCED=false
+FRAGMENT_BODY_SUCCEEDED=false
+FRAGMENT_TRANSITIONS_VERIFIED=false
 cleanup_errors=()
 
 die() {
@@ -84,6 +98,10 @@ derive_fixture_identity() {
     [ -n "${SECOND_HOST_IF}" ] || SECOND_HOST_IF="bh${FIXTURE_TOKEN}"
     [ -n "${SECOND_PEER_IF}" ] || SECOND_PEER_IF="bp${FIXTURE_TOKEN}"
     [ -n "${NETNS}" ] || NETNS="aria-tc-${FIXTURE_TOKEN}"
+    HOST_VLAN_A_IF="vha${FIXTURE_TOKEN}"
+    PEER_VLAN_A_IF="vpa${FIXTURE_TOKEN}"
+    HOST_VLAN_B_IF="vhb${FIXTURE_TOKEN}"
+    PEER_VLAN_B_IF="vpb${FIXTURE_TOKEN}"
 }
 
 select_http_addr() {
@@ -104,6 +122,10 @@ preflight_fixture() {
     [ "${#PEER_IF}" -le 15 ] || die "PEER_IF exceeds Linux interface-name limit: ${PEER_IF}"
     [ "${#SECOND_HOST_IF}" -le 15 ] || die "SECOND_HOST_IF exceeds Linux interface-name limit"
     [ "${#SECOND_PEER_IF}" -le 15 ] || die "SECOND_PEER_IF exceeds Linux interface-name limit"
+    for vlan_if in "${HOST_VLAN_A_IF}" "${PEER_VLAN_A_IF}" "${HOST_VLAN_B_IF}" "${PEER_VLAN_B_IF}"; do
+        [ "${#vlan_if}" -le 15 ] || die "generated VLAN interface name exceeds Linux limit: ${vlan_if}"
+        ip link show dev "${vlan_if}" >/dev/null 2>&1 && die "generated VLAN interface already exists: ${vlan_if}"
+    done
     [ ! -e "${WORK_DIR}" ] || die "work directory already exists: ${WORK_DIR}"
     if ip netns list | awk '{print $1}' | grep -Fx "${NETNS}" >/dev/null; then
         die "network namespace already exists: ${NETNS}"
@@ -113,6 +135,21 @@ preflight_fixture() {
     fi
     if ip link show dev "${PEER_IF}" >/dev/null 2>&1; then
         die "peer fixture interface already exists: ${PEER_IF}"
+    fi
+    if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ]; then
+        [ -r "${FRAGMENT_DRIVER}" ] || die "fragment tracking field driver is missing"
+        python3 - "${FRAGMENT_VLAN_A}" "${FRAGMENT_VLAN_B}" \
+            "${FRAGMENT_IPV4_HOST}" "${FRAGMENT_IPV4_PEER}" \
+            "${FRAGMENT_IPV6_HOST}" "${FRAGMENT_IPV6_PEER}" \
+            "${FRAGMENT_BASE_IPV6_HOST}" "${FRAGMENT_BASE_IPV6_PEER}" <<'PY' \
+            || die "invalid fragment fixture VLAN/address contract"
+import ipaddress,sys
+vlan_a,vlan_b=map(int,sys.argv[1:3])
+assert 1 <= vlan_a <= 4094 and 1 <= vlan_b <= 4094 and vlan_a != vlan_b
+addresses=[ipaddress.ip_address(value) for value in sys.argv[3:]]
+assert [value.version for value in addresses] == [4,4,6,6,6,6]
+assert len(set(addresses)) == len(addresses)
+PY
     fi
     python3 - "${AGENT_STOP_TIMEOUT_SECS}" <<'PY' || die "AGENT_STOP_TIMEOUT_SECS must be a finite positive number"
 import math,re,sys
@@ -131,28 +168,26 @@ with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as sock:
 PY
 }
 
-create_netns_fixture() {
-    ip netns add "${NETNS}"
-    NETNS_CREATED=true
-    ip link add "${HOST_IF}" type veth peer name "${PEER_IF}"
-    VETH_CREATED=true
-    ip link set "${PEER_IF}" netns "${NETNS}"
-    ip addr add "${HOST_IP}/30" dev "${HOST_IF}"
-    ip -6 addr add "${FRAGMENT_IPV6_HOST}/64" dev "${HOST_IF}"
-    ip link set "${HOST_IF}" up
-    ip netns exec "${NETNS}" ip addr add "${PEER_IP}/30" dev "${PEER_IF}"
-    ip netns exec "${NETNS}" ip -6 addr add "${FRAGMENT_IPV6_PEER}/64" dev "${PEER_IF}"
-    ip netns exec "${NETNS}" ip addr add "${DENIED_IP}/32" dev "${PEER_IF}"
-    ip route add "${DENIED_IP}/32" dev "${HOST_IF}"
-    ip netns exec "${NETNS}" ip link set lo up
-    ip netns exec "${NETNS}" ip link set "${PEER_IF}" up
-    if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ]; then
-        ip link add link "${HOST_IF}" name "${HOST_IF}.${FRAGMENT_VLAN}" type vlan id "${FRAGMENT_VLAN}"
-        ip link set "${HOST_IF}.${FRAGMENT_VLAN}" up
-        ip netns exec "${NETNS}" ip link add link "${PEER_IF}" name "${PEER_IF}.${FRAGMENT_VLAN}" type vlan id "${FRAGMENT_VLAN}"
-        ip netns exec "${NETNS}" ip link set "${PEER_IF}.${FRAGMENT_VLAN}" up
-    fi
-    if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ] && [ "${MODE}" = tap ]; then
+create_fragment_vlan_fixture() {
+        ip link add link "${HOST_IF}" name "${HOST_VLAN_A_IF}" type vlan id "${FRAGMENT_VLAN_A}"
+        HOST_VLAN_A_CREATED=true
+        ip addr add "${FRAGMENT_IPV4_HOST}/30" dev "${HOST_VLAN_A_IF}"
+        ip -6 addr add "${FRAGMENT_IPV6_HOST}/64" dev "${HOST_VLAN_A_IF}"
+        ip link set "${HOST_VLAN_A_IF}" up
+        ip netns exec "${NETNS}" ip link add link "${PEER_IF}" name "${PEER_VLAN_A_IF}" type vlan id "${FRAGMENT_VLAN_A}"
+        PEER_VLAN_A_CREATED=true
+        ip netns exec "${NETNS}" ip addr add "${FRAGMENT_IPV4_PEER}/30" dev "${PEER_VLAN_A_IF}"
+        ip netns exec "${NETNS}" ip -6 addr add "${FRAGMENT_IPV6_PEER}/64" dev "${PEER_VLAN_A_IF}"
+        ip netns exec "${NETNS}" ip link set "${PEER_VLAN_A_IF}" up
+        ip link add link "${HOST_IF}" name "${HOST_VLAN_B_IF}" type vlan id "${FRAGMENT_VLAN_B}"
+        HOST_VLAN_B_CREATED=true
+        ip link set "${HOST_VLAN_B_IF}" up
+        ip netns exec "${NETNS}" ip link add link "${PEER_IF}" name "${PEER_VLAN_B_IF}" type vlan id "${FRAGMENT_VLAN_B}"
+        PEER_VLAN_B_CREATED=true
+        ip netns exec "${NETNS}" ip link set "${PEER_VLAN_B_IF}" up
+}
+
+create_second_tap_fixture() {
         ip link add "${SECOND_HOST_IF}" type veth peer name "${SECOND_PEER_IF}"
         SECOND_VETH_CREATED=true
         ip link set "${SECOND_PEER_IF}" netns "${NETNS}"
@@ -162,6 +197,36 @@ create_netns_fixture() {
         ip netns exec "${NETNS}" ip addr add "10.203.1.2/30" dev "${SECOND_PEER_IF}"
         ip netns exec "${NETNS}" ip -6 addr add "2001:db8:204::2/64" dev "${SECOND_PEER_IF}"
         ip netns exec "${NETNS}" ip link set "${SECOND_PEER_IF}" up
+}
+
+create_primary_veth_fixture() {
+    ip link add "${HOST_IF}" type veth peer name "${PEER_IF}"
+    VETH_CREATED=true
+    ip link set "${PEER_IF}" netns "${NETNS}"
+    ip addr add "${HOST_IP}/30" dev "${HOST_IF}"
+    if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ]; then
+        ip -6 addr add "${FRAGMENT_BASE_IPV6_HOST}/64" dev "${HOST_IF}"
+    fi
+    ip link set "${HOST_IF}" up
+    ip netns exec "${NETNS}" ip addr add "${PEER_IP}/30" dev "${PEER_IF}"
+    if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ]; then
+        ip netns exec "${NETNS}" ip -6 addr add "${FRAGMENT_BASE_IPV6_PEER}/64" dev "${PEER_IF}"
+    fi
+    ip netns exec "${NETNS}" ip addr add "${DENIED_IP}/32" dev "${PEER_IF}"
+    ip route add "${DENIED_IP}/32" dev "${HOST_IF}"
+    ip netns exec "${NETNS}" ip link set "${PEER_IF}" up
+}
+
+create_netns_fixture() {
+    ip netns add "${NETNS}"
+    NETNS_CREATED=true
+    ip netns exec "${NETNS}" ip link set lo up
+    create_primary_veth_fixture
+    if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ]; then
+        create_fragment_vlan_fixture
+    fi
+    if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ] && [ "${MODE}" = tap ]; then
+        create_second_tap_fixture
     fi
 }
 
@@ -199,11 +264,11 @@ trace_backend = "legacy-map"
 log_file_path = "${WORK_DIR}/agent.log"
 EOF
     if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ]; then
-        cat >>"${CONFIG_FILE}" <<'EOF'
+        cat >>"${CONFIG_FILE}" <<EOF
 fragment_tracking_field_verified = true
 [fragment_tracking]
 enabled = true
-max_entries = 8192
+max_entries = ${FRAGMENT_CAPACITY}
 ipv4_timeout_seconds = 30
 ipv6_timeout_seconds = 30
 EOF
@@ -211,39 +276,136 @@ EOF
     start_agent_process
 }
 
+next_fragment_identity() {
+    FRAGMENT_ID_COUNTER=$((FRAGMENT_ID_COUNTER + 1))
+    FRAGMENT_TOKEN="aria-fragment-${FIXTURE_TOKEN}-${FRAGMENT_ID_COUNTER}-0123456789"
+    FRAGMENT_IDENT=$((1000 + FRAGMENT_ID_COUNTER))
+}
+
+fragment_driver() {
+    local label="$1" family="$2" direction="$3" vlan="$4" operation="$5"
+    local token="$6" ident="$7" iface_override="$8" source destination iface
+    shift 8
+    if [ "${family}" = ipv4 ]; then
+        source="${FRAGMENT_IPV4_HOST}"
+        destination="${FRAGMENT_IPV4_PEER}"
+    else
+        source="${FRAGMENT_IPV6_HOST}"
+        destination="${FRAGMENT_IPV6_PEER}"
+    fi
+    if [ "${direction}" = host-to-peer ]; then
+        iface="${iface_override:-${HOST_IF}}"
+        FRAGMENT_ARGS=(--run --operation "${operation}" --iface "${iface}"
+            --source "${source}" --destination "${destination}"
+            --destination-mac "${FRAGMENT_PEER_MAC}" --family "${family}"
+            --vlan "${vlan}" --metrics-url "${HTTP}/metrics"
+            --pin-path "${FRAGMENT_PIN_PATH}" --receiver-netns "${NETNS}"
+            --token "${token}" --ident "${ident}")
+    else
+        FRAGMENT_ARGS=(--run --operation "${operation}" --iface "${PEER_IF}"
+            --send-netns "${NETNS}" --source "${destination}" --destination "${source}"
+            --source-mac "${FRAGMENT_PEER_MAC}" --destination-mac "${FRAGMENT_HOST_MAC}"
+            --family "${family}" --vlan "${vlan}" --metrics-url "${HTTP}/metrics"
+            --pin-path "${FRAGMENT_PIN_PATH}" --token "${token}" --ident "${ident}")
+    fi
+    FRAGMENT_ARGS+=("$@")
+    python3 "${FRAGMENT_DRIVER}" "${FRAGMENT_ARGS[@]}" >"${WORK_DIR}/${label}.log"
+}
+
+observe_fragment_occupancy() {
+    local family="$1" label="$2"
+    python3 "${FRAGMENT_DRIVER}" --run --operation observe --family "${family}" \
+        --metrics-url "${HTTP}/metrics" --pin-path "${FRAGMENT_PIN_PATH}" \
+        --expected-occupancy 0 --expected-capacity "${FRAGMENT_CAPACITY}" \
+        >"${WORK_DIR}/${label}.log"
+}
+
+publish_fragment_epoch_policy() {
+    curl --fail-with-body -sS -H 'Content-Type: application/json' \
+        -d '{"src_group":"standalone-unreferenced","dst_group":"fragment-host-v4","proto":"udp","action":"allow","direction":"ingress","ports":"54"}' \
+        "${HTTP}/api/v1/${INSTANCE}/policies" >"${WORK_DIR}/fragment-epoch-policy-update.json"
+}
+
 run_fragment_tracking_field_smoke() {
-    local family source destination peer_mac host_mac scenario pin_path
+    local family direction scenario token ident
     if [ "${FRAGMENT_TRACKING_SMOKE}" != 1 ]; then
         echo "SKIP: fragment tracking field smoke disabled"
         return 0
     fi
-    [ -r "${FRAGMENT_DRIVER}" ] || die "fragment tracking field driver is missing"
-    case "${FRAGMENT_VLAN}" in ''|*[!0-9]*) die "FRAGMENT_VLAN must be numeric" ;; esac
-    peer_mac="$(ip netns exec "${NETNS}" cat "/sys/class/net/${PEER_IF}/address")"
-    host_mac="$(cat "/sys/class/net/${HOST_IF}/address")"
-    pin_path="${PIN_ROOT}/system"
-    [ "${MODE}" = tap ] && pin_path="${PIN_ROOT}/global-v2"
+    FRAGMENT_PEER_MAC="$(ip netns exec "${NETNS}" cat "/sys/class/net/${PEER_IF}/address")"
+    FRAGMENT_HOST_MAC="$(cat "/sys/class/net/${HOST_IF}/address")"
+    FRAGMENT_PIN_PATH="${PIN_ROOT}/system"
+    [ "${MODE}" = tap ] && FRAGMENT_PIN_PATH="${PIN_ROOT}/global-v2"
+    FRAGMENT_ID_COUNTER=0
     for family in ipv4 ipv6; do
-        if [ "${family}" = ipv4 ]; then source="${FRAGMENT_IPV4_HOST}"; destination="${FRAGMENT_IPV4_PEER}"; else source="${FRAGMENT_IPV6_HOST}"; destination="${FRAGMENT_IPV6_PEER}"; fi
-        for scenario in ordered post-first-reorder later-before-first; do
-            python3 "${FRAGMENT_DRIVER}" --run --iface "${HOST_IF}" --source "${source}" \
-                --destination "${destination}" --destination-mac "${peer_mac}" --family "${family}" \
-                --vlan "${FRAGMENT_VLAN}" --metrics-url "${HTTP}/metrics" --pin-path "${pin_path}" --receiver-netns "${NETNS}" --scenario "${scenario}" \
-                >"${WORK_DIR}/fragment-${family}-${scenario}.log"
-            python3 "${FRAGMENT_DRIVER}" --run --iface "${PEER_IF}" --send-netns "${NETNS}" --source "${destination}" \
-                --destination "${source}" --source-mac "${peer_mac}" --destination-mac "${host_mac}" --family "${family}" \
-                --vlan "${FRAGMENT_VLAN}" --metrics-url "${HTTP}/metrics" --pin-path "${pin_path}" --scenario "${scenario}" \
-                >"${WORK_DIR}/fragment-${family}-${scenario}-reverse.log"
+        for scenario in ordered post-first-reorder; do
+            for direction in host-to-peer peer-to-host; do
+                next_fragment_identity
+                token="${FRAGMENT_TOKEN}"; ident="${FRAGMENT_IDENT}"
+                fragment_driver "fragment-${family}-${direction}-${scenario}" "${family}" \
+                    "${direction}" "${FRAGMENT_VLAN_A}" complete "${token}" "${ident}" "" \
+                    --scenario "${scenario}"
+            done
+        done
+        for direction in host-to-peer peer-to-host; do
+            next_fragment_identity
+            token="${FRAGMENT_TOKEN}"; ident="${FRAGMENT_IDENT}"
+            fragment_driver "fragment-${family}-${direction}-later-before-first" "${family}" \
+                "${direction}" "${FRAGMENT_VLAN_A}" complete "${token}" "${ident}" "" \
+                --scenario later-before-first
         done
     done
-    curl --fail-with-body -sS -H 'Content-Type: application/json' -X PUT \
-        -d '{"conntrack":true,"monitoring":true,"acl":true,"qos":null,"mirror":null,"tcprt":null,"ssl":null}' \
-        "${HTTP}/api/v1/${INSTANCE}/config" >"${WORK_DIR}/fragment-epoch-policy-update.json"
-    curl --fail-with-body -sS -X DELETE "${HTTP}/api/v1/${INSTANCE}/conntrack" >"${WORK_DIR}/fragment-epoch-scrub.json"
+
+    next_fragment_identity
+    token="${FRAGMENT_TOKEN}"; ident="${FRAGMENT_IDENT}"
+    fragment_driver fragment-vlan-establish ipv4 host-to-peer "${FRAGMENT_VLAN_A}" \
+        establish "${token}" "${ident}" ""
+    fragment_driver fragment-vlan-isolation-probe ipv4 host-to-peer "${FRAGMENT_VLAN_B}" \
+        probe-old "${token}" "${ident}" "" --expected-probe-event miss --reuse-reason isolation
+    fragment_driver fragment-vlan-continue ipv4 host-to-peer "${FRAGMENT_VLAN_A}" \
+        continue "${token}" "${ident}" ""
+
     if [ "${MODE}" = tap ]; then
-        peer_mac="$(ip netns exec "${NETNS}" cat "/sys/class/net/${SECOND_PEER_IF}/address")"
-        python3 "${FRAGMENT_DRIVER}" --run --iface "${SECOND_HOST_IF}" --source 10.203.1.1 --destination 10.203.1.2 --destination-mac "${peer_mac}" --family ipv4 --vlan "${FRAGMENT_VLAN}" --metrics-url "${HTTP}/metrics" --scenario later-before-first >"${WORK_DIR}/fragment-cross-tap.log"
+        next_fragment_identity
+        token="${FRAGMENT_TOKEN}"; ident="${FRAGMENT_IDENT}"
+        fragment_driver fragment-tap-establish ipv4 host-to-peer "${FRAGMENT_VLAN_A}" \
+            establish "${token}" "${ident}" ""
+        fragment_driver fragment-tap-isolation-probe ipv4 host-to-peer "${FRAGMENT_VLAN_A}" \
+            probe-old "${token}" "${ident}" "${SECOND_HOST_IF}" \
+            --expected-probe-event miss --reuse-reason isolation
+        fragment_driver fragment-tap-continue ipv4 host-to-peer "${FRAGMENT_VLAN_A}" \
+            continue "${token}" "${ident}" ""
     fi
+
+    next_fragment_identity
+    token="${FRAGMENT_TOKEN}"; ident="${FRAGMENT_IDENT}"
+    fragment_driver fragment-epoch-establish ipv4 host-to-peer "${FRAGMENT_VLAN_A}" \
+        establish "${token}" "${ident}" ""
+    publish_fragment_epoch_policy
+    fragment_driver fragment-epoch-stale-probe ipv4 host-to-peer "${FRAGMENT_VLAN_A}" \
+        probe-old "${token}" "${ident}" "" --expected-probe-event stale --reuse-reason epoch
+
+    next_fragment_identity
+    token="${FRAGMENT_TOKEN}"; ident="${FRAGMENT_IDENT}"
+    fragment_driver fragment-restart-establish ipv4 host-to-peer "${FRAGMENT_VLAN_A}" \
+        establish "${token}" "${ident}" ""
+    stop_agent_bounded || die "fragment restart pre-stop failed"
+    restart_agent_preserving_bpffs || die "fragment preserving-pins restart failed"
+    if [ "${MODE}" = tap ]; then
+        start_tap_mode || die "fragment restart tap readiness failed"
+    fi
+    assert_dual_tc_ready
+    observe_fragment_occupancy ipv4 fragment-restart-ipv4-empty
+    observe_fragment_occupancy ipv6 fragment-restart-ipv6-empty
+    fragment_driver fragment-restart-miss-probe ipv4 host-to-peer "${FRAGMENT_VLAN_A}" \
+        probe-old "${token}" "${ident}" "" --expected-probe-event miss --reuse-reason restart
+
+    next_fragment_identity
+    fragment_driver fragment-pressure ipv4 host-to-peer "${FRAGMENT_VLAN_A}" pressure \
+        "${FRAGMENT_TOKEN}" "${FRAGMENT_IDENT}" "" --capacity "${FRAGMENT_CAPACITY}" \
+        --reuse-reason eviction
+    FRAGMENT_TRANSITIONS_VERIFIED=true
+    FRAGMENT_BODY_SUCCEEDED=true
 }
 
 restart_agent_preserving_bpffs() {
@@ -312,19 +474,27 @@ start_system_mode() {
     TC_EGRESS_PROG="${PIN_ROOT}/system/tc_egress"
 }
 
+wait_tap_instance() {
+    local name="$1"
+    for _ in $(seq 1 100); do
+        curl -fsS "${HTTP}/api/v1/instances" | \
+            python3 -c 'import json,sys; n=sys.argv[1]; p=json.load(sys.stdin); raise SystemExit(0 if any(i["name"]==n for i in p["instances"]) else 1)' \
+            "${name}" && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
 start_tap_mode() {
     INSTANCE="${HOST_IF}"
     TC_INGRESS_LINK="${PIN_ROOT}/global-v2/${HOST_IF}_tc_ingress_link"
     TC_EGRESS_LINK="${PIN_ROOT}/global-v2/${HOST_IF}_tc_egress_link"
     TC_INGRESS_PROG="${PIN_ROOT}/global-v2/tc_ingress"
     TC_EGRESS_PROG="${PIN_ROOT}/global-v2/tc_egress"
-    for _ in $(seq 1 100); do
-        curl -fsS "${HTTP}/api/v1/instances" | \
-            python3 -c 'import json,sys; n=sys.argv[1]; p=json.load(sys.stdin); raise SystemExit(0 if any(i["name"]==n for i in p["instances"]) else 1)' \
-            "${INSTANCE}" && return 0
-        sleep 0.1
-    done
-    return 1
+    wait_tap_instance "${INSTANCE}" || return 1
+    if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ]; then
+        wait_tap_instance "${SECOND_HOST_IF}" || return 1
+    fi
 }
 
 install_fixture_policy() {
@@ -352,6 +522,32 @@ install_fixture_policy() {
     curl --fail-with-body -sS -H 'Content-Type: application/json' \
         -d '{"src_group":"host","dst_group":"denied","proto":"icmp","action":"drop","direction":"egress","ports":null}' \
         "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
+    if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ]; then
+        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+            -d "{\"name\":\"fragment-host-v4\",\"cidr\":\"${FRAGMENT_IPV4_HOST}/32\"}" \
+            "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
+        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+            -d "{\"name\":\"fragment-peer-v4\",\"cidr\":\"${FRAGMENT_IPV4_PEER}/32\"}" \
+            "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
+        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+            -d "{\"name\":\"fragment-host-v6\",\"cidr\":\"${FRAGMENT_IPV6_HOST}/128\"}" \
+            "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
+        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+            -d "{\"name\":\"fragment-peer-v6\",\"cidr\":\"${FRAGMENT_IPV6_PEER}/128\"}" \
+            "${HTTP}/api/v1/${INSTANCE}/groups" >/dev/null
+        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+            -d '{"src_group":"fragment-peer-v4","dst_group":"fragment-host-v4","proto":"udp","action":"allow","direction":"ingress","ports":"53"}' \
+            "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
+        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+            -d '{"src_group":"fragment-host-v4","dst_group":"fragment-peer-v4","proto":"udp","action":"allow","direction":"egress","ports":"53"}' \
+            "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
+        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+            -d '{"src_group":"fragment-peer-v6","dst_group":"fragment-host-v6","proto":"udp","action":"allow","direction":"ingress","ports":"53"}' \
+            "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
+        curl --fail-with-body -sS -H 'Content-Type: application/json' \
+            -d '{"src_group":"fragment-host-v6","dst_group":"fragment-peer-v6","proto":"udp","action":"allow","direction":"egress","ports":"53"}' \
+            "${HTTP}/api/v1/${INSTANCE}/policies" >/dev/null
+    fi
     curl --fail-with-body -sS -H 'Content-Type: application/json' -X PUT \
         -d '{"conntrack":true,"monitoring":true,"acl":true,"qos":null,"mirror":null,"tcprt":null,"ssl":null}' \
         "${HTTP}/api/v1/${INSTANCE}/config" >/dev/null
@@ -655,7 +851,7 @@ PY
 }
 
 assert_standalone_all_group_projection() {
-    local label="${1:?projection label is required}" map_root
+    local label="${1:?projection label is required}" map_root expected_tap_id=0 ifindex ifindex_key
     case "${MODE}" in
         system)
             map_root="${PIN_ROOT}/system"
@@ -664,6 +860,10 @@ assert_standalone_all_group_projection() {
         tap)
             map_root="${PIN_ROOT}/global-v2"
             bpftool -j map dump pinned "${map_root}/TAP_CONFIG_MAP" >"${WORK_DIR}/${label}-tap-config.json"
+            ifindex="$(cat "/sys/class/net/${HOST_IF}/ifindex")"
+            ifindex_key="$(python3 -c 'import struct,sys; print(" ".join("%02x"%b for b in struct.pack("=I",int(sys.argv[1]))))' "${ifindex}")"
+            expected_tap_id="$(bpftool -j map lookup pinned "${map_root}/IFACE_CTX_MAP" \
+                key hex ${ifindex_key} | python3 -c 'import json,struct,sys; v=json.load(sys.stdin)["value"]; print(struct.unpack("=I",bytes(v[:4]))[0])')"
             ;;
     esac
     curl -fsS "${HTTP}/api/v1/${INSTANCE}/groups" >"${WORK_DIR}/${label}-groups.json"
@@ -677,7 +877,7 @@ assert_standalone_all_group_projection() {
         "${WORK_DIR}/${label}-general-dst.json" \
         "${WORK_DIR}/${label}-acl-src.json" \
         "${WORK_DIR}/${label}-acl-dst.json" \
-        "${MODE}" <<'PY'
+        "${MODE}" "${expected_tap_id}" <<'PY'
 import ipaddress,json,sys
 def decode_bytes(values):
     return bytes(int(value,16) if isinstance(value,str) else value for value in values)
@@ -702,20 +902,26 @@ general_dst_rows=json.load(open(sys.argv[4],encoding="utf-8"))
 acl_src_rows=json.load(open(sys.argv[5],encoding="utf-8"))
 acl_dst_rows=json.load(open(sys.argv[6],encoding="utf-8"))
 mode=sys.argv[7]
+expected_tap_id=int(sys.argv[8])
 groups_by_name={row["name"]:row["id"] for row in groups}
 referenced_id=groups_by_name["peer"]
 unreferenced_id=groups_by_name["standalone-unreferenced"]
-assert (mode=="system" and tap_config_rows==[]) or (mode=="tap" and len(tap_config_rows)==1)
-tap_id=0 if mode=="system" else decode_u32(tap_config_rows[0]["key"])
-active_bank=0 if mode=="system" else decode_bytes(tap_config_rows[0]["value"])[6]&1
+if mode=="system":
+    assert tap_config_rows==[],tap_config_rows
+    tap_id=0; active_bank=0
+else:
+    rows=[row for row in tap_config_rows if decode_u32(row["key"])==expected_tap_id]
+    assert len(rows)==1,(expected_tap_id,tap_config_rows)
+    tap_id=expected_tap_id
+    active_bank=decode_bytes(rows[0]["value"])[6]&1
 active_acl_tap_id=tap_id*2|active_bank
 expected_rows=[
     (network.version,network.prefixlen,network.network_address.packed,row["id"])
     for row in groups
     for cidr in row["cidrs"]
     for network in (ipaddress.ip_network(cidr,strict=False),)
+    if network.version==4
 ]
-assert all(version==4 for version,_,_,_ in expected_rows)
 expected_entries={
     (prefix_len,address,group_id)
     for _,prefix_len,address,group_id in expected_rows
@@ -755,7 +961,7 @@ assert_recovery_verified() {
     curl -fsS "${HTTP}/api/v1/${INSTANCE}/groups" >"${WORK_DIR}/recovery-groups.json"
     curl -fsS "${HTTP}/api/v1/${INSTANCE}/policies" >"${WORK_DIR}/recovery-policies.json"
     python3 - "${WORK_DIR}/recovery-config.json" "${WORK_DIR}/recovery-groups.json" \
-        "${WORK_DIR}/recovery-policies.json" <<'PY'
+        "${WORK_DIR}/recovery-policies.json" "${FRAGMENT_TRACKING_SMOKE}" <<'PY'
 import json,sys
 config=json.load(open(sys.argv[1],encoding="utf-8"))
 groups=json.load(open(sys.argv[2],encoding="utf-8"))["groups"]
@@ -763,9 +969,17 @@ policies=json.load(open(sys.argv[3],encoding="utf-8"))["policies"]
 assert config["acl"] is True,config
 assert config["conntrack"] is True,config
 assert {"peer","host","denied"}.issubset({row["name"] for row in groups}),groups
-assert len(policies)==4,policies
 expected={("peer","host","allow","ingress"),("host","peer","allow","egress"),
           ("denied","host","drop","ingress"),("host","denied","drop","egress")}
+if sys.argv[4]=="1":
+    assert {"fragment-host-v4","fragment-peer-v4","fragment-host-v6","fragment-peer-v6"}.issubset(
+        {row["name"] for row in groups}),groups
+    expected.update({
+        ("fragment-peer-v4","fragment-host-v4","allow","ingress"),
+        ("fragment-host-v4","fragment-peer-v4","allow","egress"),
+        ("fragment-peer-v6","fragment-host-v6","allow","ingress"),
+        ("fragment-host-v6","fragment-peer-v6","allow","egress"),
+    })
 actual={(row["src_group"],row["dst_group"],row["action"],row["direction"]) for row in policies}
 assert actual==expected,(actual,expected)
 PY
@@ -807,6 +1021,18 @@ recover_incomplete_pinned_runtime() {
             >"${WORK_DIR}/incomplete-system-stop.json"
         start_system_mode
     else
+        if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ]; then
+            ip netns exec "${NETNS}" ip link del "${PEER_VLAN_B_IF}" || die "incomplete recovery peer VLAN B removal failed"
+            PEER_VLAN_B_CREATED=false
+            ip link del "${HOST_VLAN_B_IF}" || die "incomplete recovery host VLAN B removal failed"
+            HOST_VLAN_B_CREATED=false
+            ip netns exec "${NETNS}" ip link del "${PEER_VLAN_A_IF}" || die "incomplete recovery peer VLAN A removal failed"
+            PEER_VLAN_A_CREATED=false
+            ip link del "${HOST_VLAN_A_IF}" || die "incomplete recovery host VLAN A removal failed"
+            HOST_VLAN_A_CREATED=false
+            ip link del "${SECOND_HOST_IF}" || die "incomplete recovery second tap removal failed"
+            SECOND_VETH_CREATED=false
+        fi
         ip link del "${HOST_IF}"
         VETH_CREATED=false
         for _ in $(seq 1 100); do
@@ -814,15 +1040,11 @@ recover_incomplete_pinned_runtime() {
             sleep 0.1
         done
         [ ! -e "${PIN_ROOT}/global-v2" ] || die "tap delete did not clean incomplete shared runtime"
-        ip link add "${HOST_IF}" type veth peer name "${PEER_IF}"
-        VETH_CREATED=true
-        ip link set "${PEER_IF}" netns "${NETNS}"
-        ip addr add "${HOST_IP}/30" dev "${HOST_IF}"
-        ip link set "${HOST_IF}" up
-        ip netns exec "${NETNS}" ip addr add "${PEER_IP}/30" dev "${PEER_IF}"
-        ip netns exec "${NETNS}" ip addr add "${DENIED_IP}/32" dev "${PEER_IF}"
-        ip route add "${DENIED_IP}/32" dev "${HOST_IF}"
-        ip netns exec "${NETNS}" ip link set "${PEER_IF}" up
+        create_primary_veth_fixture
+        if [ "${FRAGMENT_TRACKING_SMOKE}" = 1 ]; then
+            create_fragment_vlan_fixture
+            create_second_tap_fixture
+        fi
         start_tap_mode
     fi
     assert_dual_tc_ready
@@ -836,10 +1058,18 @@ verify_cleanup() {
     [ "${PRIVATE_BPFFS_MOUNTED}" = false ] || return 1
     [ "${PIN_ROOT_CREATED}" = false ] || return 1
     [ "${VETH_CREATED}" = false ] || return 1
+    [ "${SECOND_VETH_CREATED}" = false ] || return 1
+    [ "${HOST_VLAN_A_CREATED}" = false ] || return 1
+    [ "${PEER_VLAN_A_CREATED}" = false ] || return 1
+    [ "${HOST_VLAN_B_CREATED}" = false ] || return 1
+    [ "${PEER_VLAN_B_CREATED}" = false ] || return 1
     [ "${NETNS_CREATED}" = false ] || return 1
     mountpoint -q "${PIN_ROOT}" && return 1
     ip netns list | awk '{print $1}' | grep -Fx "${NETNS}" >/dev/null && return 1
     ip link show dev "${HOST_IF}" >/dev/null 2>&1 && return 1
+    ip link show dev "${SECOND_HOST_IF}" >/dev/null 2>&1 && return 1
+    ip link show dev "${HOST_VLAN_A_IF}" >/dev/null 2>&1 && return 1
+    ip link show dev "${HOST_VLAN_B_IF}" >/dev/null 2>&1 && return 1
     tc qdisc show dev "${HOST_IF}" >/dev/null 2>&1 && return 1
     [ ! -e "${PIN_ROOT}" ] || return 1
     return 0
@@ -853,10 +1083,21 @@ write_summary() {
     HEALTH_POLL_DEGRADED="${HEALTH_POLL_DEGRADED}" RECOVERY_VERIFIED="${RECOVERY_VERIFIED}" \
     HEALTHY_PINNED_RESTART="${HEALTHY_PINNED_RESTART}" \
     INCOMPLETE_PINNED_QUIESCED="${INCOMPLETE_PINNED_QUIESCED}" \
+    FRAGMENT_TRACKING_SMOKE="${FRAGMENT_TRACKING_SMOKE}" \
+    FRAGMENT_BODY_SUCCEEDED="${FRAGMENT_BODY_SUCCEEDED}" \
+    FRAGMENT_TRANSITIONS_VERIFIED="${FRAGMENT_TRANSITIONS_VERIFIED}" \
     RUN_ID="${RUN_ID}" HOST_IF="${HOST_IF}" NETNS="${NETNS}" HTTP_ADDR="${HTTP_ADDR}" \
         python3 >"${WORK_DIR}/summary.json.tmp" <<'PY' || return 1
 import json,os
 cleanup_errors=[line.rstrip("\n") for line in open(os.path.join(os.environ["WORK_DIR"],"cleanup-errors.txt"),encoding="utf-8") if line.rstrip("\n")]
+if os.environ["FRAGMENT_TRACKING_SMOKE"] != "1":
+    fragment_status="skipped"
+elif (os.environ["FRAGMENT_BODY_SUCCEEDED"].lower()=="true" and
+      os.environ["FRAGMENT_TRANSITIONS_VERIFIED"].lower()=="true" and
+      os.environ["RESULT"]=="pass" and not cleanup_errors):
+    fragment_status="pass"
+else:
+    fragment_status="fail"
 out={"mode":os.environ["MODE"],"dual_tc_ready":os.environ["DUAL_TC_READY"].lower()=="true",
      "xdp_neutral":os.environ["XDP_NEUTRAL"].lower()=="true",
      "missing_tc_rejected":os.environ["MISSING_TC_REJECTED"].lower()=="true",
@@ -864,6 +1105,10 @@ out={"mode":os.environ["MODE"],"dual_tc_ready":os.environ["DUAL_TC_READY"].lower
      "recovery_verified":os.environ["RECOVERY_VERIFIED"].lower()=="true",
      "healthy_pinned_restart":os.environ["HEALTHY_PINNED_RESTART"].lower()=="true",
      "incomplete_pinned_quiesced":os.environ["INCOMPLETE_PINNED_QUIESCED"].lower()=="true",
+     "fragment_tracking":{"status":fragment_status,
+                          "enabled":os.environ["FRAGMENT_TRACKING_SMOKE"]=="1",
+                          "body_succeeded":os.environ["FRAGMENT_BODY_SUCCEEDED"].lower()=="true",
+                          "transitions_verified":os.environ["FRAGMENT_TRANSITIONS_VERIFIED"].lower()=="true"},
      "cleanup_errors":cleanup_errors,"result":os.environ["RESULT"],
      "failure_reason":os.environ["FAILURE_REASON"],"work_dir":os.environ["WORK_DIR"],
      "run_id":os.environ["RUN_ID"],"host_if":os.environ["HOST_IF"],
@@ -903,6 +1148,18 @@ cleanup() {
         else
             record_cleanup_error "temporary pin root removal failed"
         fi
+    fi
+    if [ "${PEER_VLAN_B_CREATED}" = true ]; then
+        if ip netns exec "${NETNS}" ip link del "${PEER_VLAN_B_IF}"; then PEER_VLAN_B_CREATED=false; else record_cleanup_error "peer VLAN B removal failed"; fi
+    fi
+    if [ "${HOST_VLAN_B_CREATED}" = true ]; then
+        if ip link del "${HOST_VLAN_B_IF}"; then HOST_VLAN_B_CREATED=false; else record_cleanup_error "host VLAN B removal failed"; fi
+    fi
+    if [ "${PEER_VLAN_A_CREATED}" = true ]; then
+        if ip netns exec "${NETNS}" ip link del "${PEER_VLAN_A_IF}"; then PEER_VLAN_A_CREATED=false; else record_cleanup_error "peer VLAN A removal failed"; fi
+    fi
+    if [ "${HOST_VLAN_A_CREATED}" = true ]; then
+        if ip link del "${HOST_VLAN_A_IF}"; then HOST_VLAN_A_CREATED=false; else record_cleanup_error "host VLAN A removal failed"; fi
     fi
     if [ "${VETH_CREATED}" = true ]; then
         if ip link del "${HOST_IF}"; then

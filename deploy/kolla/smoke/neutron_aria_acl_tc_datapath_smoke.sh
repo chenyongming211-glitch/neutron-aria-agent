@@ -28,7 +28,13 @@ FRAGMENT_IPV4_HOST="${FRAGMENT_IPV4_HOST:-}"
 FRAGMENT_IPV4_PEER="${FRAGMENT_IPV4_PEER:-}"
 FRAGMENT_IPV6_HOST="${FRAGMENT_IPV6_HOST:-}"
 FRAGMENT_IPV6_PEER="${FRAGMENT_IPV6_PEER:-}"
-FRAGMENT_VLAN="${FRAGMENT_VLAN:-}"
+FRAGMENT_VLAN_A="${FRAGMENT_VLAN_A:-}"
+FRAGMENT_VLAN_B="${FRAGMENT_VLAN_B:-}"
+FRAGMENT_HOST_VLAN_A_IFNAME="${FRAGMENT_HOST_VLAN_A_IFNAME:-}"
+FRAGMENT_PEER_VLAN_A_IFNAME="${FRAGMENT_PEER_VLAN_A_IFNAME:-}"
+FRAGMENT_HOST_VLAN_B_IFNAME="${FRAGMENT_HOST_VLAN_B_IFNAME:-}"
+FRAGMENT_PEER_VLAN_B_IFNAME="${FRAGMENT_PEER_VLAN_B_IFNAME:-}"
+FRAGMENT_EXPECTED_CAPACITY="${FRAGMENT_EXPECTED_CAPACITY:-8192}"
 
 ACL_INGRESS_HOOK_TC=1
 TRACE_FILTER="controlled_icmp_flow"
@@ -70,6 +76,8 @@ LEGACY_POLLUTION_INJECTED=false
 EXACT_SELECTOR_FIXTURE_STATUS="not_run"
 MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="not_run"
 LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="not_run"
+FRAGMENT_BODY_SUCCEEDED=false
+FRAGMENT_TRANSITIONS_VERIFIED=false
 
 IP_FAMILY=""
 IP_FAMILY_LABEL=""
@@ -914,27 +922,188 @@ restart_managed_datapath() {
     wait_managed_port_reattached "${expected_phase}" || return 1
 }
 
+validate_fragment_vlan_endpoint() {
+    local namespace="$1" iface="$2" parent="$3" vlan="$4" payload
+    if [ -n "${namespace}" ]; then
+        payload="$(ip netns exec "${namespace}" ip -d -j link show dev "${iface}")" \
+            || die "fragment peer VLAN endpoint is unavailable: ${iface}"
+    else
+        payload="$(ip -d -j link show dev "${iface}")" \
+            || die "fragment host VLAN endpoint is unavailable: ${iface}"
+    fi
+    python3 -c 'import json,sys
+rows=json.load(sys.stdin); assert len(rows)==1,rows
+info=rows[0].get("linkinfo") or {}
+assert info.get("info_kind")=="vlan",info
+assert rows[0].get("link")==sys.argv[1],rows[0]
+assert int((info.get("info_data") or {}).get("id"))==int(sys.argv[2]),info' \
+        "${parent}" "${vlan}" <<<"${payload}" \
+        || die "fragment VLAN endpoint ${iface} does not match ${parent}/VLAN ${vlan}"
+}
+
+validate_fragment_endpoint_addresses() {
+    local namespace="$1" iface="$2" expected_v4="$3" expected_v6="$4" payload
+    if [ -n "${namespace}" ]; then
+        payload="$(ip netns exec "${namespace}" ip -j addr show dev "${iface}")" \
+            || die "cannot inspect fragment peer addresses on ${iface}"
+    else
+        payload="$(ip -j addr show dev "${iface}")" \
+            || die "cannot inspect fragment host addresses on ${iface}"
+    fi
+    python3 -c 'import ipaddress,json,sys
+rows=json.load(sys.stdin); assert len(rows)==1,rows
+actual={ipaddress.ip_address(item["local"]) for item in rows[0].get("addr_info") or []}
+expected={ipaddress.ip_address(sys.argv[1]),ipaddress.ip_address(sys.argv[2])}
+assert expected <= actual,(expected,actual)' "${expected_v4}" "${expected_v6}" <<<"${payload}" \
+        || die "fragment VLAN A endpoint ${iface} lacks the exact dual-stack contract"
+}
+
+managed_fragment_preflight() {
+    local value candidate
+    [ -r "${FRAGMENT_DRIVER}" ] || die "fragment tracking field driver is missing"
+    for value in FRAGMENT_PEER_NETNS FRAGMENT_PEER_IFNAME FRAGMENT_IPV4_HOST FRAGMENT_IPV4_PEER FRAGMENT_IPV6_HOST FRAGMENT_IPV6_PEER FRAGMENT_VLAN_A FRAGMENT_VLAN_B FRAGMENT_HOST_VLAN_A_IFNAME FRAGMENT_PEER_VLAN_A_IFNAME FRAGMENT_HOST_VLAN_B_IFNAME FRAGMENT_PEER_VLAN_B_IFNAME; do
+        [ -n "${!value}" ] || die "${value} is required when FRAGMENT_TRACKING_SMOKE=1"
+    done
+    for value in FRAGMENT_PEER_IFNAME FRAGMENT_HOST_VLAN_A_IFNAME FRAGMENT_PEER_VLAN_A_IFNAME FRAGMENT_HOST_VLAN_B_IFNAME FRAGMENT_PEER_VLAN_B_IFNAME; do
+        candidate="${!value}"
+        [ "${#candidate}" -le 15 ] || die "${value} exceeds the Linux interface-name limit"
+    done
+    ip netns exec "${FRAGMENT_PEER_NETNS}" ip link show dev "${FRAGMENT_PEER_IFNAME}" >/dev/null 2>&1 \
+        || die "fragment peer interface is unavailable"
+    python3 - "${FRAGMENT_VLAN_A}" "${FRAGMENT_VLAN_B}" "${FRAGMENT_EXPECTED_CAPACITY}" \
+        "${FRAGMENT_IPV4_HOST}" "${FRAGMENT_IPV4_PEER}" \
+        "${FRAGMENT_IPV6_HOST}" "${FRAGMENT_IPV6_PEER}" <<'PY' \
+        || die "invalid managed fragment VLAN/address contract"
+import ipaddress,sys
+vlan_a,vlan_b,capacity=map(int,sys.argv[1:4])
+assert 1 <= vlan_a <= 4094 and 1 <= vlan_b <= 4094 and vlan_a != vlan_b
+assert capacity > 0
+addresses=[ipaddress.ip_address(value) for value in sys.argv[4:]]
+assert [value.version for value in addresses] == [4,4,6,6]
+assert len(set(addresses)) == 4
+PY
+    validate_fragment_vlan_endpoint "" "${FRAGMENT_HOST_VLAN_A_IFNAME}" "${EXPECTED_IFNAME}" "${FRAGMENT_VLAN_A}"
+    validate_fragment_vlan_endpoint "${FRAGMENT_PEER_NETNS}" "${FRAGMENT_PEER_VLAN_A_IFNAME}" "${FRAGMENT_PEER_IFNAME}" "${FRAGMENT_VLAN_A}"
+    validate_fragment_vlan_endpoint "" "${FRAGMENT_HOST_VLAN_B_IFNAME}" "${EXPECTED_IFNAME}" "${FRAGMENT_VLAN_B}"
+    validate_fragment_vlan_endpoint "${FRAGMENT_PEER_NETNS}" "${FRAGMENT_PEER_VLAN_B_IFNAME}" "${FRAGMENT_PEER_IFNAME}" "${FRAGMENT_VLAN_B}"
+    validate_fragment_endpoint_addresses "" "${FRAGMENT_HOST_VLAN_A_IFNAME}" \
+        "${FRAGMENT_IPV4_HOST}" "${FRAGMENT_IPV6_HOST}"
+    validate_fragment_endpoint_addresses "${FRAGMENT_PEER_NETNS}" "${FRAGMENT_PEER_VLAN_A_IFNAME}" \
+        "${FRAGMENT_IPV4_PEER}" "${FRAGMENT_IPV6_PEER}"
+}
+
+create_fragment_rule() {
+    local direction="$1" port="$2" priority="$3" label="$4" body id
+    body="$(printf '{\"aria_acl_rule\":{\"policy_id\":\"%s\",\"direction\":\"%s\",\"priority\":%s,\"action\":\"allow\",\"protocol\":\"udp\",\"dst_port_min\":%s,\"dst_port_max\":%s}}' \
+        "${policy_id}" "${direction}" "${priority}" "${port}" "${port}")"
+    id="$(curl_body POST aria-acl-rules "${body}" | tee "${WORK_DIR}/${label}.json" | json_field aria_acl_rule.id)"
+    [ -n "${id}" ] || die "failed to create fragment ${direction} UDP/${port} rule"
+    rule_ids+=("${id}")
+    created_rule_ids+=("${id}")
+}
+
+next_fragment_identity() {
+    FRAGMENT_ID_COUNTER=$((FRAGMENT_ID_COUNTER + 1))
+    FRAGMENT_TOKEN="aria-fragment-${FRAGMENT_TOKEN_SEED}-${FRAGMENT_ID_COUNTER}-0123456789"
+    FRAGMENT_IDENT=$((1000 + FRAGMENT_ID_COUNTER))
+}
+
+fragment_driver() {
+    local label="$1" family="$2" direction="$3" vlan="$4" operation="$5"
+    local token="$6" ident="$7" source destination
+    shift 7
+    if [ "${family}" = ipv4 ]; then
+        source="${FRAGMENT_IPV4_HOST}"; destination="${FRAGMENT_IPV4_PEER}"
+    else
+        source="${FRAGMENT_IPV6_HOST}"; destination="${FRAGMENT_IPV6_PEER}"
+    fi
+    if [ "${direction}" = host-to-peer ]; then
+        FRAGMENT_ARGS=(--run --operation "${operation}" --iface "${EXPECTED_IFNAME}"
+            --source "${source}" --destination "${destination}"
+            --destination-mac "${FRAGMENT_PEER_MAC}" --family "${family}"
+            --vlan "${vlan}" --metrics-url "${DATAPATH_HTTP}/metrics"
+            --pin-path "${PIN_ROOT}" --receiver-netns "${FRAGMENT_PEER_NETNS}"
+            --token "${token}" --ident "${ident}")
+    else
+        FRAGMENT_ARGS=(--run --operation "${operation}" --iface "${FRAGMENT_PEER_IFNAME}"
+            --send-netns "${FRAGMENT_PEER_NETNS}" --source "${destination}"
+            --destination "${source}" --source-mac "${FRAGMENT_PEER_MAC}"
+            --destination-mac "${FRAGMENT_HOST_MAC}" --family "${family}"
+            --vlan "${vlan}" --metrics-url "${DATAPATH_HTTP}/metrics"
+            --pin-path "${PIN_ROOT}" --token "${token}" --ident "${ident}")
+    fi
+    FRAGMENT_ARGS+=("$@")
+    python3 "${FRAGMENT_DRIVER}" "${FRAGMENT_ARGS[@]}" >"${WORK_DIR}/${label}.log"
+}
+
+observe_fragment_occupancy() {
+    local family="$1" label="$2"
+    python3 "${FRAGMENT_DRIVER}" --run --operation observe --family "${family}" \
+        --metrics-url "${DATAPATH_HTTP}/metrics" --pin-path "${PIN_ROOT}" \
+        --expected-occupancy 0 --expected-capacity "${FRAGMENT_EXPECTED_CAPACITY}" \
+        >"${WORK_DIR}/${label}.log"
+}
+
 run_fragment_tracking_field_smoke() {
-    local family source destination peer_mac host_mac scenario
+    local family direction scenario token ident
     if [ "${FRAGMENT_TRACKING_SMOKE}" != 1 ]; then
         echo "SKIP: fragment tracking field smoke disabled"
         return 0
     fi
-    for value in FRAGMENT_PEER_NETNS FRAGMENT_PEER_IFNAME FRAGMENT_IPV4_HOST FRAGMENT_IPV4_PEER FRAGMENT_IPV6_HOST FRAGMENT_IPV6_PEER FRAGMENT_VLAN; do
-        [ -n "${!value}" ] || die "${value} is required when FRAGMENT_TRACKING_SMOKE=1"
-    done
-    ip netns exec "${FRAGMENT_PEER_NETNS}" ip link show dev "${FRAGMENT_PEER_IFNAME}" >/dev/null 2>&1 || die "fragment peer interface is unavailable"
-    peer_mac="$(ip netns exec "${FRAGMENT_PEER_NETNS}" cat "/sys/class/net/${FRAGMENT_PEER_IFNAME}/address")"
-    host_mac="$(cat "/sys/class/net/${EXPECTED_IFNAME}/address")"
+    managed_fragment_preflight
+    FRAGMENT_PEER_MAC="$(ip netns exec "${FRAGMENT_PEER_NETNS}" cat "/sys/class/net/${FRAGMENT_PEER_IFNAME}/address")"
+    FRAGMENT_HOST_MAC="$(cat "/sys/class/net/${EXPECTED_IFNAME}/address")"
+    FRAGMENT_TOKEN_SEED="$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
+    FRAGMENT_ID_COUNTER=0
+    create_fragment_rule ingress 53 300 fragment-rule-ingress-udp53
+    create_fragment_rule egress 53 300 fragment-rule-egress-udp53
+    run_full_resync >"${WORK_DIR}/fragment-policy-full-resync.log"
+    wait_port_enforced || die "fragment UDP/53 policy did not become enforced"
     for family in ipv4 ipv6; do
-        if [ "${family}" = ipv4 ]; then source="${FRAGMENT_IPV4_HOST}"; destination="${FRAGMENT_IPV4_PEER}"; else source="${FRAGMENT_IPV6_HOST}"; destination="${FRAGMENT_IPV6_PEER}"; fi
-        for scenario in ordered post-first-reorder later-before-first; do
-            python3 "${FRAGMENT_DRIVER}" --run --iface "${EXPECTED_IFNAME}" --source "${source}" --destination "${destination}" --destination-mac "${peer_mac}" --family "${family}" --vlan "${FRAGMENT_VLAN}" --metrics-url "${DATAPATH_HTTP}/metrics" --pin-path "${PIN_ROOT}" --receiver-netns "${FRAGMENT_PEER_NETNS}" --scenario "${scenario}" >"${WORK_DIR}/fragment-${family}-${scenario}.log"
-            python3 "${FRAGMENT_DRIVER}" --run --iface "${FRAGMENT_PEER_IFNAME}" --send-netns "${FRAGMENT_PEER_NETNS}" --source "${destination}" --destination "${source}" --source-mac "${peer_mac}" --destination-mac "${host_mac}" --family "${family}" --vlan "${FRAGMENT_VLAN}" --metrics-url "${DATAPATH_HTTP}/metrics" --pin-path "${PIN_ROOT}" --scenario "${scenario}" >"${WORK_DIR}/fragment-${family}-${scenario}-reverse.log"
+        for scenario in ordered post-first-reorder; do
+            for direction in host-to-peer peer-to-host; do
+                next_fragment_identity
+                token="${FRAGMENT_TOKEN}"; ident="${FRAGMENT_IDENT}"
+                fragment_driver "fragment-${family}-${direction}-${scenario}" "${family}" \
+                    "${direction}" "${FRAGMENT_VLAN_A}" complete "${token}" "${ident}" \
+                    --scenario "${scenario}"
+            done
+        done
+        for direction in host-to-peer peer-to-host; do
+            next_fragment_identity
+            token="${FRAGMENT_TOKEN}"; ident="${FRAGMENT_IDENT}"
+            fragment_driver "fragment-${family}-${direction}-later-before-first" "${family}" \
+                "${direction}" "${FRAGMENT_VLAN_A}" complete "${token}" "${ident}" \
+                --scenario later-before-first
         done
     done
+
+    next_fragment_identity
+    token="${FRAGMENT_TOKEN}"; ident="${FRAGMENT_IDENT}"
+    fragment_driver fragment-vlan-establish ipv4 host-to-peer "${FRAGMENT_VLAN_A}" establish "${token}" "${ident}"
+    fragment_driver fragment-vlan-isolation-probe ipv4 host-to-peer "${FRAGMENT_VLAN_B}" probe-old "${token}" "${ident}" \
+        --expected-probe-event miss --reuse-reason isolation
+    fragment_driver fragment-vlan-continue ipv4 host-to-peer "${FRAGMENT_VLAN_A}" continue "${token}" "${ident}"
+
+    next_fragment_identity
+    token="${FRAGMENT_TOKEN}"; ident="${FRAGMENT_IDENT}"
+    fragment_driver fragment-epoch-establish ipv4 host-to-peer "${FRAGMENT_VLAN_A}" establish "${token}" "${ident}"
+    create_fragment_rule ingress 54 310 fragment-rule-epoch-udp54
     run_full_resync >"${WORK_DIR}/fragment-epoch-full-resync.log"
+    wait_port_enforced || die "fragment epoch policy publication did not become enforced"
+    fragment_driver fragment-epoch-stale-probe ipv4 host-to-peer "${FRAGMENT_VLAN_A}" probe-old "${token}" "${ident}" \
+        --expected-probe-event stale --reuse-reason epoch
+
+    next_fragment_identity
+    token="${FRAGMENT_TOKEN}"; ident="${FRAGMENT_IDENT}"
+    fragment_driver fragment-restart-establish ipv4 host-to-peer "${FRAGMENT_VLAN_A}" establish "${token}" "${ident}"
     restart_managed_datapath ready >"${WORK_DIR}/fragment-restart.log"
+    observe_fragment_occupancy ipv4 fragment-restart-ipv4-empty
+    observe_fragment_occupancy ipv6 fragment-restart-ipv6-empty
+    fragment_driver fragment-restart-miss-probe ipv4 host-to-peer "${FRAGMENT_VLAN_A}" probe-old "${token}" "${ident}" \
+        --expected-probe-event miss --reuse-reason restart
+    FRAGMENT_TRANSITIONS_VERIFIED=true
+    FRAGMENT_BODY_SUCCEEDED=true
 }
 
 capture_datapath_log_cursor() {
@@ -1430,6 +1599,9 @@ write_summary() {
     EXACT_SELECTOR_FIXTURE_STATUS="${EXACT_SELECTOR_FIXTURE_STATUS}" \
     MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS="${MORE_SPECIFIC_SELECTOR_FIXTURE_STATUS}" \
     LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS="${LEGACY_SELECTOR_REPAIR_FIXTURE_STATUS}" \
+    FRAGMENT_TRACKING_SMOKE="${FRAGMENT_TRACKING_SMOKE}" \
+    FRAGMENT_BODY_SUCCEEDED="${FRAGMENT_BODY_SUCCEEDED}" \
+    FRAGMENT_TRANSITIONS_VERIFIED="${FRAGMENT_TRANSITIONS_VERIFIED}" \
         python3 >"${WORK_DIR}/summary.json.tmp" <<'PY' || return 1
 import json,os
 keys=("XDP_NO_ACL_CT","TC_INGRESS_HIT","TC_EGRESS_HIT","STATELESS_ZERO_CT",
@@ -1444,12 +1616,24 @@ selector_isolation={
     "fixtures":selector_fixtures,
     "complete":all(status=="pass" for status in selector_fixtures.values()),
 }
+if os.environ["FRAGMENT_TRACKING_SMOKE"] != "1":
+    fragment_status="skipped"
+elif (os.environ["FRAGMENT_BODY_SUCCEEDED"].lower()=="true" and
+      os.environ["FRAGMENT_TRANSITIONS_VERIFIED"].lower()=="true" and
+      os.environ["RESULT"]=="pass" and not cleanup_errors):
+    fragment_status="pass"
+else:
+    fragment_status="fail"
 out={"result":os.environ["RESULT"],"failure_reason":os.environ["FAILURE_REASON"],
      "body_succeeded":os.environ["BODY_SUCCEEDED"].lower()=="true",
      "cleanup_errors":cleanup_errors,"work_dir":os.environ["WORK_DIR"],
      "real_tap":True,"ip_family":os.environ["IP_FAMILY"],
      "checks":{k:os.environ[k].lower()=="true" for k in keys},
-     "selector_isolation":selector_isolation}
+     "selector_isolation":selector_isolation,
+     "fragment_tracking":{"status":fragment_status,
+                          "enabled":os.environ["FRAGMENT_TRACKING_SMOKE"]=="1",
+                          "body_succeeded":os.environ["FRAGMENT_BODY_SUCCEEDED"].lower()=="true",
+                          "transitions_verified":os.environ["FRAGMENT_TRANSITIONS_VERIFIED"].lower()=="true"}}
 print(json.dumps(out,sort_keys=True,indent=2))
 PY
     mv "${WORK_DIR}/summary.json.tmp" "${WORK_DIR}/summary.json" || return 1
