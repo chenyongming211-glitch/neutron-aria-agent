@@ -19,7 +19,7 @@ import time
 import urllib.request
 
 ETH_ALL, ETH_IP, ETH_V6, ETH_VLAN = 3, 0x0800, 0x86DD, 0x8100
-MAX_TOKEN_BYTES = 65527
+MAX_TOKEN_BYTES = {4: 65507, 6: 65527}
 EVENTS = (
     "first", "non_initial", "hit", "miss", "expired", "stale", "inserted",
     "update_failed", "invalid_l4", "overlap",
@@ -50,8 +50,9 @@ def validate_identity(family, token, ident):
         raise ValueError("token must be ASCII") from error
     if len(payload) <= 24:
         raise ValueError("token must exceed 24 bytes to produce three fragments")
-    if len(payload) > MAX_TOKEN_BYTES:
-        raise ValueError("token exceeds the maximum UDP payload of %d bytes" % MAX_TOKEN_BYTES)
+    if len(payload) > MAX_TOKEN_BYTES[family]:
+        raise ValueError("token exceeds the IPv%d UDP payload limit of %d bytes" %
+                         (family, MAX_TOKEN_BYTES[family]))
     maximum = 0xffff if family == 4 else 0xffffffff
     if ident is None or not 0 <= ident <= maximum:
         raise ValueError("fragment ID must be in 0..%d for IPv%d" % (maximum, family))
@@ -412,6 +413,12 @@ def _expect_error(error_type, callback, message):
     raise AssertionError(message)
 def self_test():
     token = "fragment-self-test-token-0123456789"
+    validate_identity(4, "x" * 65507, 0xffff)
+    validate_identity(6, "x" * 65527, 0xffffffff)
+    _expect_error(ValueError, lambda: validate_identity(4, "x" * 65508, 7),
+                  "oversized IPv4 UDP payload was accepted")
+    _expect_error(ValueError, lambda: validate_identity(6, "x" * 65528, 7),
+                  "oversized IPv6 UDP payload was accepted")
     assert checksum(bytes.fromhex("0001f203f4f5f6f7")) == 0x220d
     v4 = fragments("192.0.2.1", "192.0.2.2", 4, token, 7)
     v6 = fragments("2001:db8::1", "2001:db8::2", 6, token, 8)
@@ -470,7 +477,7 @@ def self_test():
         common + ["--operation", "probe-old", "--expected-probe-event", "stale"],
         common + ["--operation", "probe-old", "--expected-probe-event", "stale", "--reuse-reason", "restart"],
         common + ["--operation", "establish", "--reuse-reason", "isolation"],
-        common[:-4] + ["--token", "x" * (MAX_TOKEN_BYTES + 1), "--ident", "7"],
+        common[:-4] + ["--token", "x" * (MAX_TOKEN_BYTES[4] + 1), "--ident", "7"],
     )
     for arguments in rejected_arguments:
         with redirect_stderr(io.StringIO()):
