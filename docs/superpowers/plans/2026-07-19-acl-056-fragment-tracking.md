@@ -523,6 +523,7 @@ Expected: fast contracts, Rust behavior, and static builds pass; capability rema
 ### Task 7: Wire Guarded Privileged Smoke Without Claiming Execution
 
 **Files:**
+- Create: `deploy/smoke/lib/fragment_tracking_field_driver.py`
 - Modify: `deploy/smoke/aria_standalone_acl_tc_datapath_smoke.sh`
 - Modify: `deploy/kolla/smoke/neutron_aria_acl_tc_datapath_smoke.sh`
 - Modify: `ci/check_neutron_stage1.py`
@@ -532,15 +533,52 @@ Expected: fast contracts, Rust behavior, and static builds pass; capability rema
 - Consumes: public config, drop reasons, pinned maps, and metrics from Tasks 3-6.
 - Produces: `FRAGMENT_TRACKING_SMOKE=1` guarded field entrypoints and truthful pending evidence.
 
-- [ ] **Step 1: Add managed and standalone scenarios**
+- [x] **Step 1: Add managed and standalone scenarios**
 
-Use existing namespace/tap setup, `python3` raw sockets or an already-installed packet utility, and guarded cleanup. Cover ordered IPv4/IPv6 UDP/53, post-first reorder, later-before-first drop, two taps/VLANs, epoch invalidation during policy update, and restart scrub.
+Add one shared stdlib-only field driver instead of duplicating inline Python in
+both shell scripts. It builds valid IPv4/IPv6 UDP/53 fragments (including
+802.1Q), validates allowed delivery with a random-token UDP receiver, and
+strictly compares the public fragment Prometheus series. It must not parse
+Rust or shell source and must not print a field PASS by itself.
 
-- [ ] **Step 2: Keep execution opt-in**
+Reuse the existing standalone namespace/tap setup, extend it with dual-stack
+addresses plus VLAN fixtures, and guard every new process and network object in
+cleanup. `MODE=system` is a deliberately single-interface runtime: it covers
+both families, both TC directions, ordering, VLAN isolation, epoch invalidation,
+and restart scrub, but it must not fabricate a second attached tap. `MODE=tap`
+adds a second auto-attached veth/tap and is the authoritative cross-tap
+isolation scenario. Across the standalone mode matrix, cover ordered IPv4/IPv6
+UDP/53, post-first reorder, later-before-first drop, cross-tap/VLAN isolation,
+epoch invalidation during policy update, and restart scrub.
+
+The managed path remains opt-in and requires an explicit local peer execution
+contract: `FRAGMENT_PEER_NETNS`, `FRAGMENT_PEER_IFNAME`, dual-stack
+`FRAGMENT_IPV4_HOST/PEER` and `FRAGMENT_IPV6_HOST/PEER`, plus the configured
+VLAN pair. Missing or inconsistent inputs fail the enabled subsection; they
+must never downgrade to PASS or silently reduce family/direction coverage.
+Reuse the existing Neutron policy/full-resync/restart operations and the shared
+driver. Do not accept arbitrary shell/eval or add an unreviewed SSH adapter.
+
+- [x] **Step 2: Keep execution opt-in**
 
 If `FRAGMENT_TRACKING_SMOKE` is not `1`, print one stable `SKIP` line and exit the fragment subsection successfully. Never report `PASS` for skipped field work.
 
-- [ ] **Step 3: Syntax and contract verification**
+Only the opt-in temporary standalone fixture may set fragment tracking
+`enabled=true` and `field_verified=true`. Shipped configuration remains
+disabled. Enabled execution reports verified only after packet delivery,
+counter/pressure deltas, epoch invalidation, restart scrub, and cleanup all
+succeed. Current development does not execute privileged packets and records
+field evidence as `deferred/pending`.
+
+Field pressure evidence uses bounded occupancy/eviction behavior. Do not freeze,
+corrupt, chmod, or otherwise destructively modify a pinned context map to force
+an insert failure. The `update_failed` counter remains covered by Rust/eBPF
+behavior tests and the hosted metrics contract because the production LRU map
+and public configuration expose no safe deterministic field trigger. A future
+test-only fault-injection surface, if needed, is a separate reviewed design and
+is not part of Task 7.
+
+- [x] **Step 3: Syntax and contract verification**
 
 Run only non-compiling local checks:
 
@@ -551,12 +589,16 @@ python3 ci/check_neutron_stage1.py --fast-contracts
 git diff --check
 ```
 
-Expected: all commands pass; no privileged packet is sent locally.
+The fast contract may run a stdlib-only driver `--self-test` for frame checksum,
+fragment ordering, receiver fixtures, and metrics parsing. It may also verify
+the public disabled-entrypoint behavior, but must not add substring/source-shape
+checks for private helper names or order. Expected: all commands pass; no
+privileged packet is sent locally.
 
-- [ ] **Step 4: Commit and push smoke wiring**
+- [x] **Step 4: Commit and push smoke wiring**
 
 ```bash
-git add deploy/smoke/aria_standalone_acl_tc_datapath_smoke.sh deploy/kolla/smoke/neutron_aria_acl_tc_datapath_smoke.sh ci/check_neutron_stage1.py docs/openstack-neutron-aria-details/12-review-bug-backlog.md
+git add deploy/smoke/lib/fragment_tracking_field_driver.py deploy/smoke/aria_standalone_acl_tc_datapath_smoke.sh deploy/kolla/smoke/neutron_aria_acl_tc_datapath_smoke.sh ci/check_neutron_stage1.py docs/openstack-neutron-aria-details/12-review-bug-backlog.md
 git -c user.name=netmouser -c user.email=chenyongming211@gmail.com commit -m "test: wire fragment tracking field evidence"
 git push origin v0.9-neutron-agent
 ```
