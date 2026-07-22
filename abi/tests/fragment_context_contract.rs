@@ -1,9 +1,10 @@
 use aria_ebpf_abi::{
     fragment_context_disposition, fragment_context_flags_for_l4, fragment_context_l4_proto,
-    fragment_first_observation_metric, fragment_install_result, fragment_resolve_decision,
-    fragment_tracking_required, FragmentConfig, FragmentContextDisposition, FragmentContextKey4,
-    FragmentContextValue, FragmentEpochValue, FragmentInstallDecision, FragmentKind,
-    FragmentResolveDecision, PipelineCtx, DROP_FRAGMENT_CONTEXT_EXPIRED,
+    fragment_ct_create_point, fragment_first_observation_metric, fragment_install_result,
+    fragment_resolve_decision, fragment_tracking_required, FragmentConfig,
+    FragmentContextDisposition, FragmentContextKey4, FragmentContextValue, FragmentCtCreatePoint,
+    FragmentEpochValue, FragmentInstallDecision, FragmentKind, FragmentResolveDecision,
+    PipelineCtx, DIR_EGRESS, DIR_INGRESS, DROP_FRAGMENT_CONTEXT_EXPIRED,
     DROP_FRAGMENT_CONTEXT_MISSING, DROP_FRAGMENT_CONTEXT_UPDATE_FAILED,
     DROP_FRAGMENT_TRACKING_DISABLED, FRAGMENT_CONFIG_DISABLED, FRAGMENT_CONFIG_ENABLED,
     FRAGMENT_CONFIG_VERSION, FRAGMENT_CONTEXT_FLAG_TCP, FRAGMENT_CONTEXT_VERSION,
@@ -11,6 +12,7 @@ use aria_ebpf_abi::{
     FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED, FRAGMENT_METRIC_FIRST,
     FRAGMENT_METRIC_TRACKING_DISABLED, FRAGMENT_RUNTIME_MODE_MANAGED,
     FRAGMENT_RUNTIME_MODE_STANDALONE, IPPROTO_ICMP, IPPROTO_TCP, IPPROTO_UDP,
+    TAP_ID_UNASSIGNED,
 };
 
 const SECOND: u64 = 1_000_000_000;
@@ -468,18 +470,87 @@ fn fragment_resolve_validates_both_family_timeouts_before_disabled_or_tap_identi
 }
 
 #[test]
-fn fragment_insert_failure_drops_before_pass_and_removes_only_owned_ct() {
-    let owned = fragment_install_result(false, true);
-    assert_eq!(owned, FragmentInstallDecision::DropAndRemoveOwnedCt);
-    assert_eq!(owned.drop_reason(), DROP_FRAGMENT_CONTEXT_UPDATE_FAILED);
-    assert_eq!(owned.metric(), FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED);
-    assert!(owned.remove_created_ct());
-
-    let unowned = fragment_install_result(false, false);
-    assert_eq!(unowned, FragmentInstallDecision::DropKeepCt);
-    assert!(!unowned.remove_created_ct());
+fn fragment_first_ct_create_point_follows_policy_qos_and_context_install() {
     assert_eq!(
-        fragment_install_result(true, true),
-        FragmentInstallDecision::Pass,
+        fragment_ct_create_point(FragmentKind::First as u8),
+        FragmentCtCreatePoint::AfterContextInstall,
     );
+    assert_eq!(
+        fragment_ct_create_point(FragmentKind::Unfragmented as u8),
+        FragmentCtCreatePoint::AfterPolicyQos,
+    );
+}
+
+#[test]
+fn fragment_insert_failure_always_drops_without_ct_cleanup() {
+    let failed = fragment_install_result(false);
+
+    assert_eq!(failed, FragmentInstallDecision::DropKeepCt);
+    assert_eq!(failed.drop_reason(), DROP_FRAGMENT_CONTEXT_UPDATE_FAILED);
+    assert_eq!(failed.metric(), FRAGMENT_METRIC_CONTEXT_UPDATE_FAILED);
+    assert!(!failed.remove_created_ct());
+    assert_eq!(fragment_install_result(true), FragmentInstallDecision::Pass);
+}
+
+#[test]
+fn fragment_failed_old_packet_cannot_delete_same_key_replacement_ct() {
+    let mut ct_generation = Some(1_u64);
+    assert_eq!(ct_generation, Some(1));
+
+    // Packet A created generation 1, external cleanup removed it, and packet B
+    // then installed generation 2 under the same five-tuple key.
+    ct_generation = None;
+    assert_eq!(ct_generation, None);
+    ct_generation = Some(2);
+
+    let packet_a_install = fragment_install_result(false);
+    if packet_a_install.remove_created_ct() {
+        ct_generation = None;
+    }
+
+    assert_eq!(packet_a_install, FragmentInstallDecision::DropKeepCt);
+    assert_eq!(ct_generation, Some(2));
+}
+
+fn assert_pipeline_ctx_reset_for_tc_packet(direction: u8, pkt_len: u32) {
+    let mut pipeline = core::mem::MaybeUninit::<PipelineCtx>::uninit();
+    unsafe {
+        core::ptr::write_bytes(
+            pipeline.as_mut_ptr().cast::<u8>(),
+            0xff,
+            core::mem::size_of::<PipelineCtx>(),
+        );
+    }
+    let mut pipeline = unsafe { pipeline.assume_init() };
+
+    pipeline.reset_for_tc_packet(pkt_len, direction);
+
+    assert_eq!(pipeline.tap_id, TAP_ID_UNASSIGNED);
+    assert_eq!(pipeline.src_id, 0);
+    assert_eq!(pipeline.dst_id, 0);
+    assert_eq!(pipeline.pkt_len, pkt_len);
+    assert_eq!(pipeline.now, 0);
+    assert_eq!(pipeline.proto, 0);
+    assert_eq!(pipeline.direction, direction);
+    assert_eq!(pipeline.flags, 0);
+    assert_eq!(pipeline.ct_state, 0);
+    assert_eq!(pipeline.drop_reason, 0);
+    assert_eq!(pipeline._pad, [0; 2]);
+    assert_eq!(pipeline.action, 0);
+    assert_eq!(pipeline.matched_src_id, 0);
+    assert_eq!(pipeline.matched_dst_id, 0);
+    assert_eq!(pipeline.matched_proto, 0);
+    assert_eq!(pipeline.matched_direction, 0);
+    assert_eq!(pipeline.matched_bank, 0);
+    assert_eq!(pipeline._pad2, [0; 1]);
+    assert_eq!(pipeline.fragment_epoch_snapshot, 0);
+    assert_eq!(pipeline.acl_bank_snapshot, 0);
+    assert_eq!(pipeline.fragment_epoch_present, 0);
+    assert_eq!(pipeline._pad3, [0; 6]);
+}
+
+#[test]
+fn fragment_tc_packet_reset_clears_every_pipeline_field_for_both_directions() {
+    assert_pipeline_ctx_reset_for_tc_packet(DIR_INGRESS, 64);
+    assert_pipeline_ctx_reset_for_tc_packet(DIR_EGRESS, 9_001);
 }
