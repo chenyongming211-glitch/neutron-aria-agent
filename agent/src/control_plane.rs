@@ -1795,10 +1795,6 @@ fn managed_acl_shadow_network_plan(
     source_entries.chain(destination_entries).collect()
 }
 
-fn group_delete_rollback_restores_acl_bank(mode: ManagedAclPublicationMode) -> bool {
-    mode != ManagedAclPublicationMode::ManagedAcl
-}
-
 #[cfg(test)]
 fn execute_shared_network_rollback<F>(
     mutations: &[SharedNetworkMutation],
@@ -3742,30 +3738,6 @@ impl ControlPlane {
             }
         }
         wal.shutdown().await;
-    }
-
-    fn rollback_group_deletes(
-        runtime: TapMapRuntime<'_>,
-        ebpf_path: &str,
-        publication_mode: ManagedAclPublicationMode,
-        group_id: u32,
-        deleted_networks: &[(&'static str, String)],
-    ) -> Result<(), String> {
-        let restore_acl_bank = group_delete_rollback_restores_acl_bank(publication_mode);
-        let bank = if restore_acl_bank {
-            aria_core::ebpf_ops::read_acl_active_bank(runtime).unwrap_or(0)
-        } else {
-            0
-        };
-        for (direction, cidr) in deleted_networks.iter().rev() {
-            aria_core::ebpf_ops::add_network(direction, cidr, group_id, runtime, ebpf_path)?;
-            if restore_acl_bank {
-                aria_core::ebpf_ops::add_acl_network_in_bank(
-                    direction, cidr, group_id, bank, runtime, ebpf_path,
-                )?;
-            }
-        }
-        Ok(())
     }
 
     fn rollback_qos_deletes(
@@ -6413,211 +6385,6 @@ impl ControlPlane {
         }
     }
 
-    async fn add_group_standalone_locked(
-        &self,
-        state: &mut InstanceState,
-        name: &str,
-        cidr: &str,
-    ) -> Result<u32, ControlPlaneError> {
-        Self::check_runtime_maps_ready(&state.pin_path)?;
-        let was_new_group = !state.state.groups.contains_key(name);
-        let id = state
-            .state
-            .add_group(name, cidr)
-            .map_err(ControlPlaneError::ValidationError)?;
-        let acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
-            .map_err(ControlPlaneError::KernelError)?;
-
-        if let Err(error) =
-            aria_core::ebpf_ops::add_network("src", cidr, id, state.map_runtime(), &self.ebpf_path)
-        {
-            state.state.rollback_add_group(name, cidr, was_new_group);
-            return Err(ControlPlaneError::KernelError(format!("src: {}", error)));
-        }
-        if let Err(error) =
-            aria_core::ebpf_ops::add_network("dst", cidr, id, state.map_runtime(), &self.ebpf_path)
-        {
-            let mut errors = vec![format!("dst: {}", error)];
-            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
-                "src",
-                cidr,
-                id,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                errors.push(format!("rollback src network: {}", cleanup_error));
-            }
-            state.state.rollback_add_group(name, cidr, was_new_group);
-            return Err(ControlPlaneError::KernelError(errors.join("; ")));
-        }
-        if let Err(error) = aria_core::ebpf_ops::add_acl_network_in_bank(
-            "src",
-            cidr,
-            id,
-            acl_bank,
-            state.map_runtime(),
-            &self.ebpf_path,
-        ) {
-            let mut errors = vec![format!("acl src: {}", error)];
-            for direction in ["src", "dst"] {
-                if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
-                    direction,
-                    cidr,
-                    id,
-                    state.map_runtime(),
-                    &self.ebpf_path,
-                ) {
-                    errors.push(format!("rollback {} network: {}", direction, cleanup_error));
-                }
-            }
-            state.state.rollback_add_group(name, cidr, was_new_group);
-            return Err(ControlPlaneError::KernelError(errors.join("; ")));
-        }
-        if let Err(error) = aria_core::ebpf_ops::add_acl_network_in_bank(
-            "dst",
-            cidr,
-            id,
-            acl_bank,
-            state.map_runtime(),
-            &self.ebpf_path,
-        ) {
-            let mut errors = vec![format!("acl dst: {}", error)];
-            if let Err(cleanup_error) = aria_core::ebpf_ops::delete_acl_network_in_bank(
-                "src",
-                cidr,
-                id,
-                acl_bank,
-                state.map_runtime(),
-                &self.ebpf_path,
-            ) {
-                errors.push(format!("rollback ACL src network: {}", cleanup_error));
-            }
-            for direction in ["src", "dst"] {
-                if let Err(cleanup_error) = aria_core::ebpf_ops::delete_network(
-                    direction,
-                    cidr,
-                    id,
-                    state.map_runtime(),
-                    &self.ebpf_path,
-                ) {
-                    errors.push(format!("rollback {} network: {}", direction, cleanup_error));
-                }
-            }
-            state.state.rollback_add_group(name, cidr, was_new_group);
-            return Err(ControlPlaneError::KernelError(errors.join("; ")));
-        }
-
-        state
-            .wal_append(&WalEntry::AddGroup {
-                name: name.to_string(),
-                cidr: cidr.to_string(),
-            })
-            .await;
-        Ok(id)
-    }
-
-    async fn delete_group_standalone_locked(
-        &self,
-        state: &mut InstanceState,
-        name: &str,
-    ) -> Result<(), ControlPlaneError> {
-        Self::check_runtime_maps_ready(&state.pin_path)?;
-        let group = state
-            .state
-            .groups
-            .get(name)
-            .ok_or_else(|| ControlPlaneError::GroupNotFound(name.to_string()))?
-            .clone();
-        if state
-            .state
-            .rules
-            .iter()
-            .any(|rule| rule.src_group_id == group.id || rule.dst_group_id == group.id)
-        {
-            return Err(ControlPlaneError::GroupInUse(format!(
-                "Group '{}' is referenced by a policy",
-                name
-            )));
-        }
-        if state
-            .state
-            .qos_rules
-            .iter()
-            .any(|rule| rule.group_id == group.id)
-        {
-            return Err(ControlPlaneError::GroupInUse(format!(
-                "Group '{}' is referenced by a QoS rule",
-                name
-            )));
-        }
-        if state
-            .state
-            .mirror_rules
-            .iter()
-            .any(|rule| rule.src_group_id == group.id || rule.dst_group_id == group.id)
-        {
-            return Err(ControlPlaneError::GroupInUse(format!(
-                "Group '{}' is referenced by a mirror rule",
-                name
-            )));
-        }
-
-        let mut errors = Vec::new();
-        let mut deleted_networks = Vec::new();
-        let acl_bank = aria_core::ebpf_ops::read_acl_active_bank(state.map_runtime())
-            .map_err(ControlPlaneError::KernelError)?;
-        for cidr in &group.cidrs {
-            for direction in ["src", "dst"] {
-                match aria_core::ebpf_ops::delete_network(
-                    direction,
-                    cidr,
-                    group.id,
-                    state.map_runtime(),
-                    &self.ebpf_path,
-                ) {
-                    Ok(()) => deleted_networks.push((direction, cidr.clone())),
-                    Err(error) => errors.push(format!("{} {}: {}", direction, cidr, error)),
-                }
-                if let Err(error) = aria_core::ebpf_ops::delete_acl_network_in_bank(
-                    direction,
-                    cidr,
-                    group.id,
-                    acl_bank,
-                    state.map_runtime(),
-                    &self.ebpf_path,
-                ) {
-                    errors.push(format!("acl {} {}: {}", direction, cidr, error));
-                }
-            }
-        }
-        if !errors.is_empty() {
-            let rollback = Self::rollback_group_deletes(
-                state.map_runtime(),
-                &self.ebpf_path,
-                state.managed_acl_publication_mode,
-                group.id,
-                &deleted_networks,
-            );
-            if let Err(rollback_error) = rollback {
-                errors.push(format!("rollback failed: {}", rollback_error));
-            }
-            return Err(ControlPlaneError::KernelError(errors.join("; ")));
-        }
-
-        state.state.groups.remove(name);
-        state
-            .wal_append(&WalEntry::DeleteGroup {
-                name: name.to_string(),
-            })
-            .await;
-        if let Err(error) =
-            aria_core::monitoring::clear_group_stats_for_id(state.map_runtime(), group.id)
-        {
-            warn!(error = %error, group_id = group.id, "failed to clear group stats after group delete");
-        }
-        Ok(())
-    }
-
     pub async fn list_groups(&self, instance: &str) -> Result<Vec<GroupInfo>, ControlPlaneError> {
         let inst = self.get_instance(instance).await?;
         let state = inst.read().await;
@@ -6670,7 +6437,7 @@ impl ControlPlane {
                     }
                 }
                 return self
-                    .add_group_standalone_locked(&mut state, name, cidr)
+                    .add_group_standalone_locked(instance, &mut state, name, cidr)
                     .await;
             }
             ManagedAclPublicationMode::ManagedAcl => {}
@@ -6746,7 +6513,9 @@ impl ControlPlane {
         match state.managed_acl_publication_mode {
             ManagedAclPublicationMode::StandaloneCompatibility
             | ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl => {
-                return self.delete_group_standalone_locked(state, name).await;
+                return self
+                    .delete_group_standalone_locked(instance, state, name)
+                    .await;
             }
             ManagedAclPublicationMode::ManagedAcl => {}
         }
@@ -11482,19 +11251,6 @@ mod tests {
             ]
         );
         assert!(error.contains("forced destination compensation failure"));
-    }
-
-    #[test]
-    fn managed_general_delta_managed_group_delete_rollback_is_general_only() {
-        assert!(!group_delete_rollback_restores_acl_bank(
-            ManagedAclPublicationMode::ManagedAcl
-        ));
-        assert!(group_delete_rollback_restores_acl_bank(
-            ManagedAclPublicationMode::StandaloneCompatibility
-        ));
-        assert!(group_delete_rollback_restores_acl_bank(
-            ManagedAclPublicationMode::NeutronAttachOwnedStandaloneAcl
-        ));
     }
 
     #[test]

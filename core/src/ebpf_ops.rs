@@ -37,11 +37,11 @@ pub use fragment::{
     validate_fragment_runtime_maps_strict, validate_fragment_tracking_config_strict,
 };
 pub use inventory::{
-    capture_general_network_owner, classify_managed_inventory_capture, classify_runtime_gate_state,
-    critical_network_map_names, show_stats, validate_managed_pinned_runtime_state,
-    validate_pinned_runtime_state, RuntimeGateDisposition, TraceMapMode, ALL_MAP_NAMES,
-    CRITICAL_NETWORK_MAP_NAMES, NETWORK_MAP_NAMES, SSL_MAP_NAMES,
-    STREAM_CRITICAL_NETWORK_MAP_NAMES,
+    capture_general_network_owner, capture_network_owner, classify_managed_inventory_capture,
+    classify_runtime_gate_state, critical_network_map_names, show_stats,
+    validate_managed_pinned_runtime_state, validate_pinned_runtime_state, NetworkOwnerPlane,
+    RuntimeGateDisposition, TraceMapMode, ALL_MAP_NAMES, CRITICAL_NETWORK_MAP_NAMES,
+    NETWORK_MAP_NAMES, SSL_MAP_NAMES, STREAM_CRITICAL_NETWORK_MAP_NAMES,
 };
 pub use network::{
     add_acl_network_in_bank, add_network, delete_acl_network_in_bank, delete_network, parse_cidr,
