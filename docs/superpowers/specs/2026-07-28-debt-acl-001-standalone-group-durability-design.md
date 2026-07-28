@@ -2,8 +2,8 @@
 
 Date: 2026-07-28
 
-Status: design approved; RED behavior contract submitted and verified; no
-production implementation has been submitted
+Status: production implementation and exact-head hosted CI verified; privileged
+field evidence deferred/pending; tracked debt remains open
 
 Analyzed target: `v0.9-neutron-agent@be40edd`
 
@@ -399,6 +399,39 @@ verified the intended split:
   behavior failure was observed.
 
 This is valid expected-RED evidence, not a fix claim. `DEBT-ACL-001` remains
-open. The immediate next task is the concrete GREEN transaction described by
-this specification; it must make these same tests pass without weakening or
-removing them.
+open. The concrete GREEN transaction subsequently made these same tests pass
+without weakening or removing them.
+
+## 17. Verified GREEN Evidence
+
+Production commit
+`2ed4a52010fb398aafbe24af8c62855a3afba8cc` routes ordinary unreferenced
+standalone-group add/delete through the concrete final-state transaction. It:
+
+- constructs the complete final `FirewallState` before publication and
+  preserves the existing group identifier and allocator state;
+- captures exact owner preimages for general source/destination and active
+  compatibility-ACL source/destination map keys before the first write;
+- applies only owned changes, records receipts, and compensates them in reverse
+  order with the exact prior owner;
+- acknowledges only after strict WAL append/compact persistence succeeds;
+- restores memory, durable state, allocator state, and map ownership after a
+  clean failure; and
+- marks ACL recovery-required and quiesces ACL/CT if required compensation
+  itself fails.
+
+Exact-head GitHub Actions run
+[`30378197930`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30378197930)
+completed successfully:
+
+- `fast-contracts` job `90339140197` passed;
+- `rust-behavior` job `90339556818` executed all seven unchanged
+  `standalone_group_transaction_*` tests and passed `7/7`;
+- `rust-build` job `90339556808` passed warning-denied eBPF, userspace, and
+  agent static builds; and
+- no local Cargo command or privileged field execution was used as evidence.
+
+This proves the source transaction and hosted contracts, not behavior against
+real pinned maps on a privileged host. Per the delivery rule and explicit user
+decision, field evidence remains `deferred/pending` and `DEBT-ACL-001` remains
+open. This batch does not enter the subsequent P2 work.

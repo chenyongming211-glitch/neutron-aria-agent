@@ -182,7 +182,7 @@ git diff --check
 
 Expected: all commands exit zero. Do not run Cargo locally.
 
-- [ ] **Step 2: Commit and push the GREEN implementation**
+- [x] **Step 2: Commit and push the GREEN implementation**
 
 ```bash
 git add agent/src/control_plane.rs agent/src/control_plane/standalone_group.rs \
@@ -193,10 +193,10 @@ git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 3: Require exact-head hosted GREEN**
+- [x] **Step 3: Require exact-head hosted GREEN**
 
 The exact implementation SHA must have `fast-contracts`, `rust-behavior`, and `rust-build` success. `rust-behavior` must execute `standalone_group_transaction_`; `rust-build` must retain `RUSTFLAGS=-D warnings` and pass eBPF, userspace, and agent static builds.
 
-- [ ] **Step 4: Record evidence without overstating field readiness**
+- [x] **Step 4: Record evidence without overstating field readiness**
 
-Record the GREEN commit/run/job evidence in the design and `DEBT-ACL-001` backlog entry. Close only the ordinary unreferenced standalone-group durability debt; keep privileged field evidence pending and do not advance into P2 in this batch.
+Record the GREEN commit/run/job evidence in the design and `DEBT-ACL-001` backlog entry. Keep `DEBT-ACL-001` open with privileged field evidence pending, and do not advance into P2 in this batch.
