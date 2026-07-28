@@ -8,6 +8,8 @@ from pathlib import Path
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "build.yml"
 STAGE_ONE = Path(__file__).with_name("check_neutron_stage1.py")
+CHECKOUT_NODE24 = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+CACHE_NODE24 = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 
 
 def job_block(source: str, job: str) -> str:
@@ -39,6 +41,12 @@ class CiLaneContractTests(unittest.TestCase):
 
     def test_fast_contracts_has_no_cargo_commands(self):
         self.assertNotRegex(job_block(self.source, "fast-contracts"), r"\bcargo\b")
+
+    def test_javascript_actions_use_pinned_node24_releases(self):
+        self.assertEqual(self.source.count(CHECKOUT_NODE24), 5)
+        self.assertEqual(self.source.count(CACHE_NODE24), 2)
+        self.assertNotIn("actions/checkout@v4", self.source)
+        self.assertNotIn("actions/cache@v4", self.source)
 
     def test_rust_behavior_runs_only_rust_tests(self):
         behavior = job_block(self.source, "rust-behavior")
