@@ -31,6 +31,7 @@ use aria_core::wal::{WalClient, WalEntry};
 mod observability;
 mod ssl;
 mod standalone_acl;
+mod standalone_group;
 mod tcprt;
 mod trace;
 
