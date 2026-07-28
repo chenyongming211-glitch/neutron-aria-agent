@@ -235,7 +235,7 @@ git diff --check
 
 Expected: Python/static checks pass and test discovery recognizes the new Rust filter. Do not run Cargo locally.
 
-- [ ] **Step 5: Commit and push RED**
+- [x] **Step 5: Commit and push RED**
 
 ```bash
 git add agent/src/control_plane.rs agent/src/control_plane/standalone_group.rs ci/check_neutron_stage1.py docs/superpowers/plans/2026-07-28-debt-acl-001-standalone-group-durability.md
@@ -254,7 +254,7 @@ Expected CI: `fast-contracts` passes; `rust-behavior` fails because the concrete
 - Consumes: the Task 1 commit SHA and GitHub Actions job results.
 - Produces: durable expected-RED evidence and a fresh recommendation for the next implementation step.
 
-- [ ] **Step 1: Inspect the exact-head run**
+- [x] **Step 1: Inspect the exact-head run**
 
 Use `gh run list --branch v0.9-neutron-agent` to identify the run whose
 `headSha` equals the RED commit, then use `gh run view <run-id> --json jobs`.
@@ -268,12 +268,12 @@ Expected classification:
   `#[cfg(test)]` and production compilation remains unchanged;
 - no Python contract, documentation, or unrelated Rust failure.
 
-- [ ] **Step 2: Record only the verified RED result**
+- [x] **Step 2: Record only the verified RED result**
 
 Update the design status with the RED commit and run URL. Do not mark
 `DEBT-ACL-001` fixed and do not add GREEN or field claims.
 
-- [ ] **Step 3: Evaluate the next step from current evidence**
+- [x] **Step 3: Evaluate the next step from current evidence**
 
 Re-read the RED failure and the unchanged production call sites. Recommend
 whether the immediate next task is the concrete GREEN transaction described

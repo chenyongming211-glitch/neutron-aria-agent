@@ -2,8 +2,8 @@
 
 Date: 2026-07-28
 
-Status: written specification awaiting review; no RED test or production
-implementation has been submitted
+Status: design approved; RED behavior contract submitted and verified; no
+production implementation has been submitted
 
 Analyzed target: `v0.9-neutron-agent@be40edd`
 
@@ -375,3 +375,30 @@ compile and behavior evidence.
   unreferenced groups;
 - focused RED evidence exists, followed by exact-head GREEN hosted CI;
 - no local Cargo evidence or field-environment claim is substituted for CI.
+
+## 16. Verified RED Evidence
+
+The approved design was recorded by commit `21a50bc`. The test-only RED
+contract was then submitted by commit
+`5fc720c7de133cbdbf8feb4cb4d7e07f48e79130`.
+
+GitHub Actions run
+[`30376412680`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30376412680)
+verified the intended split:
+
+- `fast-contracts` passed;
+- `rust-build` passed, including eBPF, userspace, and agent static builds;
+- `rust-behavior` failed in job `90333191252` because the seven focused tests
+  reference the missing concrete standalone-group planning, receipt,
+  compensation, persistence-classification, and recovery types/functions;
+- the 31 `E0422`/`E0425`/`E0433` errors are confined to
+  `agent/src/control_plane/standalone_group.rs`; the secondary unused
+  `super::*` import is a direct consequence of none of those parent-module
+  production symbols existing yet;
+- no Python contract, production Rust build, documentation, or unrelated Rust
+  behavior failure was observed.
+
+This is valid expected-RED evidence, not a fix claim. `DEBT-ACL-001` remains
+open. The immediate next task is the concrete GREEN transaction described by
+this specification; it must make these same tests pass without weakening or
+removing them.
