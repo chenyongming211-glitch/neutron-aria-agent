@@ -477,7 +477,7 @@ git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 4: Require exact-head hosted RED**
+- [x] **Step 4: Require exact-head hosted RED**
 
 Use:
 
@@ -495,12 +495,15 @@ Accept RED only when:
 - Rust behavior/build jobs are skipped for the Python-only change; and
 - no unrelated job fails.
 
-- [ ] **Step 5: Record evidence and stop before GREEN**
+- [x] **Step 5: Record evidence and stop before GREEN**
 
 Update the design status with the RED commit, run/job link, failing behavior
 groups, and the statement that no production code was included. Commit and
-push that docs-only evidence update, require its exact-head docs CI to pass,
-then stop.
+push that docs-only evidence update. Because the RED tests remain present on
+the unique development branch, its exact-head `fast-contracts` must reproduce
+the same expected ACL-invariant failure while `changes` passes and Rust jobs
+remain skipped; a green docs run is impossible until the later GREEN
+implementation. Then stop.
 
 Keep `REVIEW-ACL-058` and `REVIEW-ACL-061` open. The next development step is
 a separate GREEN production implementation plan; `REVIEW-OPS-019` remains

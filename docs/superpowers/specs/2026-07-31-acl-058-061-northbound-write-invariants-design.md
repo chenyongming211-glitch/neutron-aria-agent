@@ -2,8 +2,8 @@
 
 Date: 2026-07-31
 
-Status: design approved in conversation; written specification awaiting final
-user review; no RED test or production implementation has been submitted
+Status: design approved; RED behavior contract submitted and verified on
+2026-07-31; production implementation has not started
 
 Analyzed target:
 `v0.9-neutron-agent@b7bdbf61dc7adeb1dfb8c9c561e8cf9410aaab75`
@@ -489,3 +489,38 @@ validation is added.
 No new branch, worktree, PR, local Cargo build, or field-evidence claim is part
 of this design/RED batch.
 
+## 12. Verified RED Evidence
+
+The production-code-free RED checkpoint is:
+
+- commit:
+  `8bc9f49911ef700ce2ada0edce735166c09909b8`;
+- GitHub Actions run:
+  [30597384263](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30597384263);
+- `changes`: success;
+- `fast-contracts`: expected failure in the new ACL write-invariant behavior
+  tests;
+- `rust-behavior`: skipped;
+- `rust-build`: skipped; and
+- privileged field evidence: not applicable to this northbound Python
+  contract batch.
+
+Both local and hosted discovery executed 504 Python tests and reported 87
+failures with no unittest errors. Every failure is in the newly added strict
+CIDR, repository parity, immutable final-state, referenced address-set,
+conflict/409, database uniqueness, old-schema, or additive migration
+contracts. The pre-existing 407-test baseline remains green inside the same
+run.
+
+The RED commit contains only:
+
+- `test_acl_contract.py` additions;
+- `test_aria_acl_write_invariants.py`;
+- `test_aria_acl_write_migration.py`; and
+- this batch's RED plan updates.
+
+It does not contain canonicalization, repository transaction, conflict
+mapping, schema, migration, or any other production implementation.
+`REVIEW-ACL-058` and `REVIEW-ACL-061` therefore remain open. The next step is
+the separate GREEN production implementation; `REVIEW-OPS-019` remains after
+that completed batch.
