@@ -2,7 +2,8 @@
 
 ## Status
 
-Approved repair-order design, ready for RED behavior tests.
+Source implementation and hosted CI complete; privileged field evidence
+deferred.
 
 ## Scope
 
@@ -167,3 +168,22 @@ Source delivery requires:
 - backlog status updated without overstating field readiness.
 
 Final `fixed` status additionally requires the privileged field evidence above.
+
+## Delivery Evidence
+
+- RED commit `a9a536e` added the inventory-union, stable-tap-id,
+  marker-retention, and marker-last behaviors. Build
+  [30613528175](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30613528175)
+  failed in `rust-behavior` only because the four production boundaries were
+  absent; the unrelated long static build was cancelled after RED was proven.
+- GREEN commit `8242c1b` inventories both link pins and persisted markers,
+  reads the stable tap id from strict interface state, keeps link removal
+  separate from marker release, removes kernel-drop bindings by tap id, calls
+  the real full managed-runtime scrub, clears trace/authority/stale registry
+  state, and releases the marker last.
+- Exact-head Build
+  [30613890526](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30613890526)
+  passed `fast-contracts`, `rust-behavior`, warning-denied Rust userspace/agent
+  builds, and the eBPF build.
+- No local Cargo command was used. The privileged pinned-map and real-link
+  matrix remains deferred and is still required before `fixed`.

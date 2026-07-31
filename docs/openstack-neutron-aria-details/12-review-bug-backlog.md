@@ -64,9 +64,10 @@ validation, and CI gates. No local Cargo command was run.
 Existing items `REVIEW-ACL-036` (scoped prepare overwrites unresolved pending),
 `REVIEW-ACL-045` (orphan cleanup does not use the full managed-runtime scrub),
 and `REVIEW-OPS-019` (unbounded Neutron WAL) remain open and were not assigned
-duplicate IDs. The pending overwrite was reproduced directly; orphan residual
-maps still require privileged runtime evidence, so its existing P2 status is
-retained rather than escalated.
+duplicate IDs. This paragraph records the original review snapshot; the
+authoritative Register below now records `REVIEW-OPS-019` fixed and
+`REVIEW-ACL-045` source/hosted-CI complete. ACL-045 remains open only because
+its residual-map proof still requires privileged runtime evidence.
 
 ### Direct evidence and corrected non-findings
 
@@ -483,7 +484,7 @@ verification-only, risk-classified, or closed.
 | REVIEW-ACL-042 | P2 | delete_address_set split transactions | open | Member purge and parent-row delete run in separate `session.begin` blocks. Failure after purge leaves an address-set row with zero members. | One transaction for purge + delete; failure-injection test. Distinct from `REVIEW-ACL-003` update path. |
 | REVIEW-ACL-043 | P3 | priority=0 rejected as missing | fixed | `_require()` uses falsy `not obj.get(field)`, so rule `priority=0` fails validation while effective compile accepts 0. | Use explicit missing checks for numeric fields; add create/update unit tests for priority 0. |
 | REVIEW-ACL-044 | P2 | Metadata-only ACL flips bank without WAL | fixed | Historical finding: metadata-only ACL changes could enter publication even when the compiled group/policy projection was unchanged. Commit `4160f73` computes `semantic_changed` from concrete policy, group-CIDR, group-delete, and released-bitmap deltas; a clean projection with no semantic delta returns `ManagedAclPublicationDecision::Noop` before shadow staging, persistence, fragment epoch advance, or bank switch. Metadata revision still invalidates the outer translation/reconcile cache but cannot publish an unchanged bank. | Fixed by RED contract `d4ce7e8` and production `4160f73`. Rust behaviors `managed_projection_repair_clean_equal_reconcile_is_noop` and `neutron_acl_validation_cache_is_content_safe_and_port_specific` cover the inner no-publication and outer metadata-reconcile boundaries. Manually dispatched exact-head Build [30610771022](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30610771022) at `98034c1` passed `fast-contracts`, `rust-behavior`, and warning-denied `rust-build`. No privileged field evidence applies. |
-| REVIEW-ACL-045 | P2 | Orphan reconcile skips map scrub | open | `TapRegistry::reconcile_neutron_runtime` orphan cleanup only removes link pins / live-iface markers. It does not `detach`, `unregister_instance`, or `scrub_managed_runtime_state`. | Scrub orphaned tap-scoped maps (or full detach path) during orphan reconcile; add residual-map assertion test. Distinct from `REVIEW-ACL-035` hash-skip. |
+| REVIEW-ACL-045 | P2 | Orphan reconcile skips map scrub | implementation and hosted CI complete; privileged field evidence deferred | Commit `8242c1b` derives orphan identity from the union of XDP/TC link pins and persisted live-iface markers, subtracts committed siblings, loads the stable tap id from strict per-interface state, and serializes cleanup with the iface and runtime lifecycle locks. Link removal no longer consumes the retry marker. The concrete control-plane path removes kernel-drop bindings by tap id, unregisters trace state, calls the real full `scrub_managed_runtime_state` across both ACL banks and all tap-scoped runtime families, clears stale authority/registry state, then releases the marker last. Any required failure reports blocked and leaves the marker/state identity for idempotent startup retry. | RED `a9a536e` / Build [30613528175](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30613528175) proved the missing inventory, stable-id, and marker-last boundaries. Exact-head GREEN `8242c1b` / Build [30613890526](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30613890526) passed `fast-contracts`, Rust behavior tests, warning-denied Rust/eBPF build, and static verification. Keep the finding open until privileged evidence verifies every pinned map family, real links, kernel-drop binding, trace state, marker removal, committed-sibling preservation, and failure retry. Distinct from `REVIEW-ACL-035`. |
 | REVIEW-ACL-046 | P1 | Cross-domain ACL selector isolation | implementation and hosted CI complete; privileged field evidence deferred | Reopened 2026-07-15 with a complete enforcement path. The repair derives ACL maps from final direction-specific rule references, uses a conflict-aware general projection, gates ownership/skip on projection health, and repairs legacy pollution through bank publication plus strict CT invalidation while preserving standalone direct publication for `REVIEW-ACL-057`. The transaction implementation is `49081c6`. Pre-field wiring/hardening commits `d1aa523..ad30cad` cover managed detach ordering, purge-failure atomicity, strict-flush rollback, and successful retry detach; independent final review approved the wiring. Exact-head GitHub Actions run [29672271181](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29672271181) at `ad30cad` passed `fast-contracts`, `rust-behavior`, and `rust-build`. | No privileged environment exists. Keep the finding not fixed and record field evidence as deferred, never passed. Source delivery is consolidated with ACL-057/066 directly on `v0.9-neutron-agent`; the missing evidence blocks production activation while `full_resync_enabled` remains disabled by default. |
 | REVIEW-ACL-047 | P2 | Translator ignores rule priority | fixed | Numeric priority remains northbound metadata and is not added to eBPF `PolicyKey`. Python preflight and Rust direct-UDS validation now reject priority-dependent CIDR/specificity overlaps with stable reasons; canonical-equivalent CIDR groups are reused. A classified direct-UDS rejection reports real `degraded/bypass` only after the empty owned-ACL transaction succeeds. | Fixed with Python and Rust overlap/canonicalization/outcome regression tests, persistent Stage 1/2 static guards, and the documented priority-independent acceptance boundary. QoS/Mirror are unchanged. Distinct from `REVIEW-ACL-009`. |
 | REVIEW-TXN-027 | P2 | Delete detach succeeds / WAL commit fails | fixed | Commit `efb113c` makes post-detach publication delete-specific and forward-only. An after-detach fault or `DeleteCommit` failure now reports `detached:false`, retains the last committed port in live authority, exposes a hashless operator-blocked delete identity, and leaves the exact unmatched `DeleteIntent` durable. Startup recovery performs idempotent attach/scrub/detach and removes the port only after a durable `DeleteCommit`; failed runtime recovery or recovery commit preserves the intent for retry instead of clearing it with snapshot rollback. | RED `7bfb88f` / Build [30612312902](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30612312902) proved the missing boundaries. Exact-head `f8b72b8` / Build [30612826096](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30612826096) passed the five delete-forward behaviors, `fast-contracts`, and warning-denied Rust/eBPF build. No WAL schema, UDS API, or snapshot rollback contract changed. Distinct from `REVIEW-ACL-023`. |
@@ -816,7 +817,8 @@ verification before the next batch started.
    conflicts return 409. Exact-head Build
    [`30598232712`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30598232712)
    passed 504 fast contracts and change detection.
-8. **In progress — close transaction and recovery debt:**
+8. **Source complete; privileged ACL-045 evidence deferred — close transaction
+   and recovery debt:**
    `REVIEW-OPS-019` is fixed in `c3d8238`, `REVIEW-ACL-025` is fixed in
    `4dca970`, and the stale `REVIEW-ACL-026` / `REVIEW-ACL-044` Register rows
    are now closed against the concrete publication transaction delivered by
@@ -825,9 +827,11 @@ verification before the next batch started.
    with `REVIEW-ACL-065`. `REVIEW-TXN-024` is fixed in `95c440a`, and
    `REVIEW-TXN-027` is fixed in `efb113c` with exact-head GREEN Build
    [`30612826096`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30612826096).
-   Continue with the independent `REVIEW-ACL-045` full orphan runtime scrub.
-   Do not fold the remaining production defects into one implementation
-   commit.
+   The independent `REVIEW-ACL-045` source repair is delivered in `8242c1b`;
+   exact-head Build
+   [`30613890526`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30613890526)
+   is GREEN. Keep ACL-045 open as privileged field evidence deferred. Do not
+   fold the remaining production defects into one implementation commit.
 9. **Remove apply-loop stalls and pending corruption:** `REVIEW-OPS-037`,
    `REVIEW-ACL-036`, `REVIEW-ACL-037`, `REVIEW-ACL-028`,
    `REVIEW-ACL-008`, and `REVIEW-ACL-033`. Bound OVS subprocesses and make all

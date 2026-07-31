@@ -10,35 +10,44 @@ Follow
 
 ## Task 1: RED orphan inventory and retry tests
 
-- [ ] Add persisted-live marker inventory beside link-pin inventory.
-- [ ] Prove the union is normalized and committed interfaces are excluded.
-- [ ] Prove link removal alone cannot release the retry marker.
-- [ ] Prove a post-link cleanup failure reports blocked and retains the marker.
-- [ ] Prove successful cleanup releases the marker last.
-- [ ] Prove the cleanup identity uses the persisted stable tap id.
-- [ ] Push RED and record exact hosted failure evidence.
+- [x] Add persisted-live marker inventory beside link-pin inventory.
+- [x] Prove the union is normalized and committed interfaces are excluded.
+- [x] Prove link removal alone cannot release the retry marker.
+- [x] Prove a post-link cleanup failure reports blocked and retains the marker.
+- [x] Prove successful cleanup releases the marker last.
+- [x] Prove the cleanup identity uses the persisted stable tap id.
+- [x] Push RED and record exact hosted failure evidence.
 
 ## Task 2: Concrete full orphan cleanup
 
-- [ ] Separate link removal from marker release.
-- [ ] Load the orphan state/WAL and reject missing/unassigned tap ids.
-- [ ] Add a control-plane orphan scrub that clears kernel-drop/trace/tap-scoped
+- [x] Separate link removal from marker release.
+- [x] Load the orphan state/WAL and reject missing/unassigned tap ids.
+- [x] Add a control-plane orphan scrub that clears kernel-drop/trace/tap-scoped
       runtime and Neutron authority.
-- [ ] Remove any stale registry instance and interface lock.
-- [ ] Release the marker only after every required cleanup phase succeeds.
-- [ ] Preserve the marker and return blocked on any required failure.
-- [ ] Keep committed sibling runtime and the shared pin directory intact.
+- [x] Remove any stale registry instance and interface lock.
+- [x] Release the marker only after every required cleanup phase succeeds.
+- [x] Preserve the marker and return blocked on any required failure.
+- [x] Keep committed sibling runtime and the shared pin directory intact.
 
 ## Task 3: Hosted GREEN and source closure
 
-- [ ] Push the production implementation.
-- [ ] Require exact-head `fast-contracts`, `rust-behavior`, and `rust-build`
+- [x] Push the production implementation.
+- [x] Require exact-head `fast-contracts`, `rust-behavior`, and `rust-build`
       success.
-- [ ] Update the design and plan with RED/GREEN commits and build ids.
-- [ ] Update `REVIEW-ACL-045` to
+- [x] Update the design and plan with RED/GREEN commits and build ids.
+- [x] Update `REVIEW-ACL-045` to
       `implementation and hosted CI complete; privileged field evidence
       deferred`.
-- [ ] Commit and push documentation closure.
+- [x] Commit and push documentation closure.
+
+Evidence:
+
+- RED: `a9a536e`, Build
+  [30613528175](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30613528175).
+- GREEN: `8242c1b`, exact-head Build
+  [30613890526](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30613890526).
+- The GREEN run passed `fast-contracts`, `rust-behavior`, warning-denied
+  Rust/eBPF build, and static binary verification.
 
 ## Task 4: Deferred privileged evidence
 
