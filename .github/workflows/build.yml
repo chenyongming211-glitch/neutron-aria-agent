@@ -99,6 +99,8 @@ jobs:
       - name: Run Neutron DB query contracts
         env:
           PYTHONPATH: openstack/neutron_aria
+          PYTHONWARNINGS: error
+          SQLALCHEMY_WARN_20: "1"
         run: python3 -m unittest neutron_aria.tests.unit.test_aria_acl_sql_query
 
   rust-behavior:

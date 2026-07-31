@@ -42,6 +42,11 @@ def _clone(value):
     return copy.deepcopy(value)
 
 
+def _row_dict(row):
+    mapping = getattr(row, "_mapping", None)
+    return dict(mapping if mapping is not None else row)
+
+
 def _new_id():
     return str(uuid.uuid4())
 
@@ -794,7 +799,7 @@ class NeutronDbAriaAclRepository(object):
 
     def delete_address_set(self, address_set_id):
         self._reject_address_set_in_use(address_set_id)
-        with self.session.begin(subtransactions=True):
+        with self._write_transaction():
             self.session.execute(
                 self.tables["address_set_members"].delete().where(
                     self.tables["address_set_members"].c.address_set_id == address_set_id
@@ -876,7 +881,7 @@ class NeutronDbAriaAclRepository(object):
         table = self.tables["port_statuses"]
         existing = self.get_port_status(values["port_id"], host=values["host"])
         db_values = self._db_values("port_statuses", values)
-        with self.session.begin(subtransactions=True):
+        with self._write_transaction():
             if existing:
                 self.session.execute(
                     table.update().where(
@@ -919,7 +924,7 @@ class NeutronDbAriaAclRepository(object):
         clause = table.c.port_id == port_id
         if host is not None:
             clause = clause & (table.c.host == host)
-        with self.session.begin(subtransactions=True):
+        with self._write_transaction():
             result = self.session.execute(table.delete().where(clause))
         if result.rowcount == 0:
             if host is not None:
@@ -984,7 +989,15 @@ class NeutronDbAriaAclRepository(object):
         if session is None:
             yield
             return
-        with session.begin(subtransactions=True):
+        in_transaction = getattr(session, "in_transaction", None)
+        if in_transaction is not None:
+            active = in_transaction()
+        else:
+            active = getattr(session, "transaction", None) is not None
+        if active:
+            yield
+            return
+        with session.begin():
             yield
 
     def _raise_known_constraint(self, exc, constraint_kind):
@@ -1149,12 +1162,12 @@ class NeutronDbAriaAclRepository(object):
         }
 
     def _insert(self, table_name, values):
-        with self.session.begin(subtransactions=True):
+        with self._write_transaction():
             self.session.execute(self.tables[table_name].insert().values(**values))
 
     def _update(self, table_name, object_id, values):
         table = self.tables[table_name]
-        with self.session.begin(subtransactions=True):
+        with self._write_transaction():
             result = self.session.execute(
                 table.update().where(table.c.id == object_id).values(**values)
             )
@@ -1163,7 +1176,7 @@ class NeutronDbAriaAclRepository(object):
 
     def _delete(self, table_name, object_id, object_type):
         table = self.tables[table_name]
-        with self.session.begin(subtransactions=True):
+        with self._write_transaction():
             result = self.session.execute(table.delete().where(table.c.id == object_id))
         if result.rowcount == 0:
             raise AriaAclNotFound("%s %s not found" % (object_type, object_id))
@@ -1227,7 +1240,7 @@ class NeutronDbAriaAclRepository(object):
             raise AriaAclNotFound(
                 "%s marker %s not found" % (table_name, query.marker)
             )
-        return dict(row)
+        return _row_dict(row)
 
     def _get(self, table_name, object_id, object_type, fields=None):
         table = self.tables[table_name]
@@ -1249,7 +1262,7 @@ class NeutronDbAriaAclRepository(object):
     def _replace_members(self, address_set_id, members):
         table = self.tables["address_set_members"]
         now = datetime.datetime.utcnow()
-        with self.session.begin(subtransactions=True):
+        with self._write_transaction():
             self.session.execute(table.delete().where(table.c.address_set_id == address_set_id))
             for member in members or []:
                 address = member.get("address") if isinstance(member, dict) else member
@@ -1281,11 +1294,12 @@ class NeutronDbAriaAclRepository(object):
             )
         ).fetchall()
         for row in rows:
-            grouped[row["address_set_id"]].append({"address": row["address"]})
+            value = _row_dict(row)
+            grouped[value["address_set_id"]].append({"address": value["address"]})
         return grouped
 
     def _row_to_dict(self, table_name, row, include_members=True):
-        value = dict(row)
+        value = _row_dict(row)
         for key in ("created_at", "updated_at"):
             if key in value:
                 value[key] = _format_time(value[key])

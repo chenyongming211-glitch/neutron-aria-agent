@@ -114,8 +114,9 @@ def _expression(sa, table, field, projection):
         return _stale_expression(sa, table, projection)
     if field == "runtime_status":
         stale = _stale_expression(sa, table, projection)
-        return sa.case(
-            [(stale, "stale")],
+        return _case(
+            sa,
+            ((stale, "stale"),),
             else_=sa.func.coalesce(table.c.status, "unknown"),
         )
     try:
@@ -138,10 +139,22 @@ def _stale_expression(sa, table, projection):
 
 
 def _null_rank(sa, expression, ascending):
-    return sa.case(
-        [(expression.is_(None), 0 if ascending else 1)],
+    return _case(
+        sa,
+        ((expression.is_(None), 0 if ascending else 1),),
         else_=1 if ascending else 0,
     )
+
+
+def _case(sa, whens, else_):
+    version = getattr(sa, "__version__", "1.0").split(".")
+    try:
+        modern_call = tuple(int(part) for part in version[:2]) >= (1, 4)
+    except ValueError:
+        modern_call = False
+    if modern_call:
+        return sa.case(*whens, else_=else_)
+    return sa.case(list(whens), else_=else_)
 
 
 def _null_rank_value(value, ascending):
