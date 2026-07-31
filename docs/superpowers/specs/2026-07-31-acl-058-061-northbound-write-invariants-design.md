@@ -524,3 +524,41 @@ mapping, schema, migration, or any other production implementation.
 `REVIEW-ACL-058` and `REVIEW-ACL-061` therefore remain open. The next step is
 the separate GREEN production implementation; `REVIEW-OPS-019` remains after
 that completed batch.
+
+## 13. Verified GREEN Evidence
+
+The production implementation is commit
+`bad673175b226b79728930d7beea5d0b084b9ead`. It implements the approved
+write-invariant boundary without adding a static checker:
+
+- one strict canonical IPv4 parser is shared by repository writes and effective
+  ACL runtime defense in depth;
+- in-memory, SQLite, and Neutron DB create/update paths use the same final-state
+  validation;
+- SQLite uses `BEGIN IMMEDIATE`, explicit INSERT/UPDATE, nullable enabled
+  guards, and named unique indexes;
+- the Neutron repository uses complete write transactions, ordered dependency
+  row locking, matching guard columns/constraints, and named-constraint error
+  translation;
+- the additive `f61a2c4e7b90` migration reports all historical conflicts before
+  DDL, then adds/backfills the guards and unique indexes; and
+- duplicate enabled rule/binding writes return HTTP 409 while malformed input
+  remains HTTP 400 and missing direct resources remain HTTP 404.
+
+Exact-head GitHub Actions
+[30598232712](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30598232712)
+completed successfully:
+
+- [`fast-contracts`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30598232712/job/91055190719):
+  504 tests passed;
+- [`changes`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30598232712/job/91055190747):
+  passed;
+- `rust-behavior` and `rust-build`: correctly skipped for this Python-only
+  production change; and
+- no new warning was introduced. The pre-existing `SafeConfigParser`
+  deprecation notice remains independently tracked and was not suppressed.
+
+Privileged datapath field evidence is not applicable to this northbound
+Python/database contract batch, and no field execution is claimed.
+`REVIEW-ACL-058` and `REVIEW-ACL-061` are fixed. The next recorded batch is
+`REVIEW-OPS-019`; it is not implemented by this change.

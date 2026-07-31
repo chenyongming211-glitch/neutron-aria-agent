@@ -451,7 +451,7 @@ Local GREEN evidence:
   wiring was discovered by the full 504-test run and removes the previous
   duplicate parser without changing forwarding behavior.
 
-- [ ] **Step 3: Commit and push GREEN**
+- [x] **Step 3: Commit and push GREEN**
 
 ```bash
 git add \
@@ -468,7 +468,7 @@ git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 4: Require exact-head hosted GREEN**
+- [x] **Step 4: Require exact-head hosted GREEN**
 
 The exact production SHA must have:
 
@@ -477,7 +477,7 @@ The exact production SHA must have:
 - Rust behavior/build: skipped for Python-only changes; and
 - no new warning or unrelated failure.
 
-- [ ] **Step 5: Record evidence and advance the backlog**
+- [x] **Step 5: Record evidence and advance the backlog**
 
 Record the implementation SHA, hosted run/job links, test count, and no-field
 scope in the design and backlog. Mark `REVIEW-ACL-058` and
