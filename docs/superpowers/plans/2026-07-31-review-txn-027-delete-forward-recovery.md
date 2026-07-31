@@ -17,15 +17,15 @@ exactly.
 
 ## Task 1: Add RED post-detach behavior tests
 
-- [ ] Add a test for the after-detach fault boundary.
-- [ ] Assert the error reports `detached:false`.
-- [ ] Assert the live authoritative runtime retains the port.
-- [ ] Assert the runtime is operator-blocked with the hashless delete pending
+- [x] Add a test for the after-detach fault boundary.
+- [x] Assert the error reports `detached:false`.
+- [x] Assert the live authoritative runtime retains the port.
+- [x] Assert the runtime is operator-blocked with the hashless delete pending
       identity.
-- [ ] Assert WAL replay retains the exact unmatched delete intent.
-- [ ] Add the equivalent delete-commit append failure test.
-- [ ] Add the durable success ordering test.
-- [ ] Push the RED commit and record the exact failing hosted CI evidence.
+- [x] Assert WAL replay retains the exact unmatched delete intent.
+- [x] Add the equivalent delete-commit append failure test.
+- [x] Add the durable success ordering test.
+- [x] Push the RED commit and record the exact failing hosted CI evidence.
 
 The tests may target a concrete delete-finalization helper so they do not need
 privileged TC/eBPF attachment. They must validate runtime and WAL behavior, not
@@ -33,35 +33,48 @@ private source text.
 
 ## Task 2: Implement the post-detach finalization boundary
 
-- [ ] Add a concrete committed-delete runtime builder.
-- [ ] Add a concrete blocked-delete runtime builder.
-- [ ] Route both the after-detach fault and delete-commit append failure through
+- [x] Add a concrete committed-delete runtime builder.
+- [x] Add a concrete blocked-delete runtime builder.
+- [x] Route both the after-detach fault and delete-commit append failure through
       one concrete finalizer.
-- [ ] Publish the port-absent runtime only after `DeleteCommit` succeeds.
-- [ ] Return `detached:true` only on that durable success path.
-- [ ] Keep the unmatched intent and retained-port blocked runtime on failure.
+- [x] Publish the port-absent runtime only after `DeleteCommit` succeeds.
+- [x] Return `detached:true` only on that durable success path.
+- [x] Keep the unmatched intent and retained-port blocked runtime on failure.
 
 ## Task 3: Make startup delete recovery close forward
 
-- [ ] On successful delete runtime recovery, clear pending state, restore the
+- [x] On successful delete runtime recovery, clear pending state, restore the
       applied snapshot hash identity, and append `DeleteCommit`.
-- [ ] Publish the port-absent runtime only after that commit.
-- [ ] On runtime recovery failure, do not append a commit that clears the
+- [x] Publish the port-absent runtime only after that commit.
+- [x] On runtime recovery failure, do not append a commit that clears the
       intent.
-- [ ] On recovery-commit failure, preserve the unmatched intent and publish the
+- [x] On recovery-commit failure, preserve the unmatched intent and publish the
       retained-port blocked runtime.
-- [ ] Add RED/GREEN behavior coverage for all three outcomes.
+- [x] Add RED/GREEN behavior coverage for all three outcomes.
 
 ## Task 4: Hosted verification and closure
 
-- [ ] Push the GREEN production commit.
-- [ ] Require exact-head `fast-contracts`, `rust-behavior`, and `rust-build`
+- [x] Push the GREEN production commit.
+- [x] Require exact-head `fast-contracts`, `rust-behavior`, and `rust-build`
       success.
-- [ ] Update the authoritative backlog row for `REVIEW-TXN-027`.
-- [ ] Record RED/GREEN commit ids and hosted build ids in this plan and design.
-- [ ] Commit and push the documentation closure.
-- [ ] Re-run exact-head hosted CI if the closure commit changes executable
+- [x] Update the authoritative backlog row for `REVIEW-TXN-027`.
+- [x] Record RED/GREEN commit ids and hosted build ids in this plan and design.
+- [x] Commit and push the documentation closure.
+- [x] Re-run exact-head hosted CI if the closure commit changes executable
       detection inputs.
+
+Evidence:
+
+- RED `7bfb88f`, Build
+  [`30612312902`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30612312902):
+  `fast-contracts` passed and `rust-behavior` failed only on the missing
+  `finalize_detached_neutron_delete` /
+  `finalize_recovered_delete_intent` boundaries.
+- GREEN production `efb113c`; exact verified head `f8b72b8`, Build
+  [`30612826096`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30612826096):
+  `fast-contracts`, `rust-behavior`, and warning-denied `rust-build` passed.
+- The closure is documentation-only, so executable change detection does not
+  require another Rust/eBPF build.
 
 ## Exclusions
 

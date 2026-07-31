@@ -2,7 +2,15 @@
 
 ## Status
 
-Approved repair-order design, ready for RED behavior tests.
+Implemented and verified by exact-head hosted CI.
+
+RED commit `7bfb88f` added the five transaction behaviors. Build
+[`30612312902`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30612312902)
+failed only because the two delete-specific finalization boundaries did not
+exist. Production commit `efb113c` implemented those boundaries; test-fixture
+ownership correction `f8b72b8` is the exact verified head. Build
+[`30612826096`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30612826096)
+passed `fast-contracts`, `rust-behavior`, and warning-denied `rust-build`.
 
 ## Scope
 
