@@ -533,11 +533,56 @@ impl TapRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ebpf_binary::TraceBackendKind;
     use crate::control_plane::{
         managed_acl_ownership_after_detach, managed_acl_promotion_action,
         managed_neutron_authority_confirmation_allowed, ManagedAclPromotionAction,
         ManagedAclPublicationMode, ManagedProjectionHealth,
     };
+    use crate::kernel_drop_manager::KernelDropManager;
+    use crate::ssl_manager::SslManager;
+    use crate::trace_backend::TraceManager;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("aria-orphan-{}-{}", name, nanos));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn test_registry(root: &std::path::Path) -> TapRegistry {
+        let ebpf_path = root
+            .join("libebpf_firewall.so")
+            .to_string_lossy()
+            .to_string();
+        let pin_path = root.join("pin").to_string_lossy().to_string();
+        let state_path = root.join("state").to_string_lossy().to_string();
+        let ssl_manager = Arc::new(SslManager::new(&ebpf_path, &pin_path));
+        let kernel_drop_manager =
+            Arc::new(KernelDropManager::new(&ebpf_path, &pin_path, &state_path));
+        let trace_manager = Arc::new(TraceManager::new(TraceBackendKind::LegacyMap));
+        let control_plane = Arc::new(ControlPlane::new_with_fragment_tracking(
+            &ebpf_path,
+            &pin_path,
+            &state_path,
+            ssl_manager,
+            kernel_drop_manager,
+            trace_manager,
+            crate::FragmentTrackingSettings::default(),
+        ));
+        TapRegistry::new(
+            &ebpf_path,
+            &pin_path,
+            &state_path,
+            "^(lo|tap)",
+            4096,
+            control_plane,
+        )
+    }
 
     #[derive(Default)]
     struct TestManagedTransactionState {
@@ -546,6 +591,119 @@ mod tests {
         rollback_count: usize,
         release_count: usize,
         abort_count: usize,
+    }
+
+    #[test]
+    fn neutron_orphan_inventory_unions_links_and_markers_without_committed_siblings() {
+        let links = BTreeSet::from([
+            "tap-link-only".to_string(),
+            "tap-shared".to_string(),
+        ]);
+        let markers = BTreeSet::from([
+            "tap-marker-only".to_string(),
+            "tap-shared".to_string(),
+            "tap-committed".to_string(),
+        ]);
+        let committed = BTreeSet::from(["tap-committed".to_string()]);
+
+        assert_eq!(
+            orphaned_managed_ifaces(&links, &markers, &committed),
+            BTreeSet::from([
+                "tap-link-only".to_string(),
+                "tap-marker-only".to_string(),
+                "tap-shared".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn neutron_orphan_cleanup_releases_marker_only_after_scrub_success() {
+        let root = temp_root("marker-last");
+        let registry = test_registry(&root);
+        let instance = FirewallInstance::new(
+            "lo",
+            PathBuf::from(registry.control_plane.managed_pin_path()),
+            registry.base_state_path.join("lo"),
+            true,
+            registry.control_plane.trace_map_mode(),
+        );
+        instance
+            .reserve_persisted_live_iface()
+            .expect("loopback marker reservation should be writable");
+        assert!(instance
+            .persisted_live_iface_names()
+            .unwrap()
+            .contains("lo"));
+
+        let error = finish_orphan_cleanup(
+            &instance,
+            Err("forced tap-scoped map scrub failure".to_string()),
+        )
+        .expect_err("failed scrub must keep its retry marker");
+        assert!(error.contains("forced tap-scoped map scrub failure"));
+        assert!(instance
+            .persisted_live_iface_names()
+            .unwrap()
+            .contains("lo"));
+
+        assert_eq!(finish_orphan_cleanup(&instance, Ok(17)).unwrap(), 17);
+        assert!(!instance
+            .persisted_live_iface_names()
+            .unwrap()
+            .contains("lo"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_orphan_link_cleanup_does_not_consume_retry_marker() {
+        let root = temp_root("link-marker-separation");
+        let registry = test_registry(&root);
+        let shared_pin = registry.base_pin_path.join(MANAGED_SHARED_PIN_NAMESPACE);
+        std::fs::create_dir_all(&shared_pin).unwrap();
+        for suffix in ["xdp", "tc_egress", "tc_ingress"] {
+            std::fs::write(shared_pin.join(format!("lo_{}_link", suffix)), b"pin").unwrap();
+        }
+        let instance = FirewallInstance::new(
+            "lo",
+            PathBuf::from(registry.control_plane.managed_pin_path()),
+            registry.base_state_path.join("lo"),
+            true,
+            registry.control_plane.trace_map_mode(),
+        );
+        instance.reserve_persisted_live_iface().unwrap();
+
+        registry
+            .remove_orphaned_managed_link_pins("lo")
+            .expect("link-only phase should remove test pins");
+
+        assert!(instance
+            .persisted_live_iface_names()
+            .unwrap()
+            .contains("lo"));
+        assert!(registry.managed_link_pin_ifaces().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_orphan_cleanup_loads_stable_tap_id_from_interface_state() {
+        let root = temp_root("stable-tap-id");
+        let state_root = root.join("state");
+        let iface_state = state_root.join("tap-orphan");
+        let manager = aria_core::state::StateManager::new(
+            iface_state.to_string_lossy().as_ref(),
+        );
+        manager
+            .set_tap_id(37)
+            .expect("test tap id should persist");
+
+        assert_eq!(
+            load_orphan_tap_id(&state_root, "tap-orphan").unwrap(),
+            37
+        );
+        assert!(load_orphan_tap_id(&state_root, "tap-missing")
+            .unwrap_err()
+            .contains("unassigned"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
