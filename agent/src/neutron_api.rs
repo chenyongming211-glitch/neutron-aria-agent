@@ -11039,6 +11039,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn neutron_snapshot_after_intent_failure_is_durable_across_restart() {
+        let root = temp_root("after-intent-durable");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(40);
+        state
+            .wal
+            .append_snapshot_commit(previous.to_wal_state())
+            .unwrap();
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = previous.clone();
+            runtime.pending_generation = Some(41);
+            runtime.desired_hash = Some("hash-41".to_string());
+            runtime.authority_state = "applying".to_string();
+            runtime.wal_status = "intent_written".to_string();
+        }
+        let intent = PendingNeutronIntent {
+            kind: "snapshot".to_string(),
+            generation: 41,
+            desired_hash: Some("hash-41".to_string()),
+            ..PendingNeutronIntent::default()
+        };
+        state
+            .wal
+            .append_snapshot_intent(
+                intent.generation,
+                intent.desired_hash.clone(),
+                intent.port_ids.clone(),
+                intent.affected_domains.clone(),
+                intent.affected_ports.clone(),
+                intent.recovery_cause.clone(),
+            )
+            .unwrap();
+
+        let error = handle_snapshot_after_intent_fault(
+            &state,
+            &intent,
+            &previous,
+            Err("forced after-intent failure".to_string()),
+        )
+        .await
+        .expect_err("after-intent failure must be returned");
+        assert_eq!(error.code, "fault_injection");
+
+        let replay = state.wal.replay();
+        assert!(replay.pending_intent.is_none());
+        assert_eq!(replay.state.applied_generation, 40);
+        assert_eq!(replay.state.pending_generation, Some(41));
+        assert_eq!(
+            replay.state.authority_state,
+            "blocked_recovery_required"
+        );
+
+        let restarted = test_neutron_state(&root);
+        {
+            let runtime = restarted.runtime.read().await;
+            assert_eq!(runtime.applied_generation, 40);
+            assert_eq!(runtime.pending_generation, Some(41));
+            assert_eq!(runtime.authority_state, "blocked_recovery_required");
+        }
+        let recovered = recover_pending_snapshot(
+            restarted.clone(),
+            NeutronRecoverPendingRequest {
+                expected_pending_generation: 41,
+                expected_desired_hash: Some("hash-41".to_string()),
+                mode: Some("rollback_to_last_applied".to_string()),
+            },
+        )
+        .await
+        .expect("durable blocked failure must be recoverable");
+        assert_eq!(recovered.status, "recovered");
+        assert_eq!(recovered.applied_generation, 40);
+
+        let runtime = restarted.runtime.read().await;
+        assert_eq!(runtime.pending_generation, None);
+        assert_eq!(runtime.accepted_generation, 40);
+        assert_eq!(runtime.applied_generation, 40);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_snapshot_after_intent_blocked_commit_failure_retains_intent() {
+        let root = temp_root("after-intent-commit-failed");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(50);
+        state
+            .wal
+            .append_snapshot_commit(previous.to_wal_state())
+            .unwrap();
+        let intent = PendingNeutronIntent {
+            kind: "snapshot".to_string(),
+            generation: 51,
+            desired_hash: Some("hash-51".to_string()),
+            ..PendingNeutronIntent::default()
+        };
+        state
+            .wal
+            .append_snapshot_intent(
+                intent.generation,
+                intent.desired_hash.clone(),
+                intent.port_ids.clone(),
+                intent.affected_domains.clone(),
+                intent.affected_ports.clone(),
+                intent.recovery_cause.clone(),
+            )
+            .unwrap();
+        let backup = root.join("after-intent-state-backup");
+        let mut replacement =
+            WalParentReplacement::install(&state.registry.base_state_path, &backup);
+
+        let error = handle_snapshot_after_intent_fault(
+            &state,
+            &intent,
+            &previous,
+            Err("forced after-intent failure".to_string()),
+        )
+        .await
+        .expect_err("primary failure must remain visible");
+        replacement.restore();
+
+        assert_eq!(error.code, "fault_injection");
+        {
+            let runtime = state.runtime.read().await;
+            assert_eq!(runtime.pending_generation, Some(51));
+            assert_eq!(
+                runtime.authority_state,
+                "pending_recovery_commit_failed"
+            );
+            assert_eq!(runtime.wal_status, "commit_failed");
+        }
+        let replay = state.wal.replay();
+        assert_eq!(
+            replay
+                .pending_intent
+                .as_ref()
+                .map(|pending| pending.generation),
+            Some(51)
+        );
+        assert_eq!(replay.state.applied_generation, 50);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn neutron_snapshot_post_commit_error_keeps_durable_runtime() {
         let root = temp_root("post-commit-final");
         let state = test_neutron_state(&root);
