@@ -75,7 +75,7 @@
 - Consumes: current repository/plugin public methods and the approved design at `docs/superpowers/specs/2026-07-31-acl-060-pagination-query-design.md`.
 - Produces: executable RED contracts for `normalize_query`, `apply_memory_query`, `PortStatusProjection`, `encode_port_status_id`, `decode_port_status_id`, full repository list signatures, SQL query budgets, and the `neutron-db-contracts` CI lane.
 
-- [ ] **Step 1: Add storage-independent RED tests**
+- [x] **Step 1: Add storage-independent RED tests**
 
 Create `test_aria_acl_query.py` with imports that name the exact future API and table-driven cases that do not depend on dictionary order:
 
@@ -200,7 +200,7 @@ def test_status_id_rejects_every_noncanonical_form(self):
 Define test-local `_b64(payload)` with `base64.urlsafe_b64encode(payload)`,
 ASCII decoding, and stripped `=` padding.
 
-- [ ] **Step 2: Add plugin/repository RED integration tests**
+- [x] **Step 2: Add plugin/repository RED integration tests**
 
 In `test_aria_acl_plugin.py`, add a recording repository and tests that prove every argument and one immutable status projection reach the repository:
 
@@ -268,7 +268,7 @@ def test_all_public_collections_declare_one_primary_id(self):
         self.assertEqual(["id"], primary, collection)
 ```
 
-- [ ] **Step 3: Add real SQLAlchemy RED query-count tests**
+- [x] **Step 3: Add real SQLAlchemy RED query-count tests**
 
 Create `test_aria_acl_sql_query.py`. Keep module import safe when SQLAlchemy is
 absent and run the real cases only in the DB lane:
@@ -337,7 +337,7 @@ asserts exactly two statements: marker lookup plus page select. Use the same
 typed-filter values `enabled=["true"]` and `revision_number=["1", "3"]` as
 the storage-independent test.
 
-- [ ] **Step 4: Add the separate DB-contract CI lane and lane tests**
+- [x] **Step 4: Add the separate DB-contract CI lane and lane tests**
 
 Create `ci/requirements-neutron-db-contracts.txt` containing exactly:
 
@@ -374,7 +374,7 @@ def test_neutron_db_contracts_are_independent_and_cargo_free(self):
     self.assertNotIn("needs: rust-build", db_contracts)
 ```
 
-- [ ] **Step 5: Run only safe local RED checks**
+- [x] **Step 5: Run only safe local RED checks**
 
 Run:
 
@@ -389,7 +389,7 @@ Expected: query tests fail because `neutron_aria.db.aria_acl.query` does not
 exist; plugin tests fail on discarded arguments/ambiguous status; CI lane
 contract passes. Do not install SQLAlchemy locally and do not run Cargo.
 
-- [ ] **Step 6: Commit, push, and record hosted RED**
+- [x] **Step 6: Commit, push, and record hosted RED**
 
 ```bash
 git add .github/workflows/build.yml \
@@ -406,6 +406,17 @@ Use `gh run list --workflow Build --branch v0.9-neutron-agent` and
 query/plugin/DB contracts fail for missing behavior; unrelated existing
 contracts do not regress. Record the exact commit and run ID in the plan before
 starting Task 2.
+
+Task 1 evidence (2026-07-31): RED commit `b3e7b91`; Build `30641892897`.
+Local query/plugin execution produced 10 intentional assertion failures and no
+test errors; the CI lane contract passed 6 tests; the local SQLAlchemy module
+skipped all 4 DB-only tests because the dependency is intentionally absent.
+Hosted `fast-contracts` failed in the new public query/status contracts and the
+independent `neutron-db-contracts` job installed SQLAlchemy 1.4.54 successfully
+before all 4 new repository query contracts failed on the missing full list
+signature. The complete fast suite ran 529 tests and reported exactly the 10
+new intentional failures, with 4 DB-only skips. Both independent
+`rust-behavior` and `rust-build` jobs completed successfully.
 
 ---
 

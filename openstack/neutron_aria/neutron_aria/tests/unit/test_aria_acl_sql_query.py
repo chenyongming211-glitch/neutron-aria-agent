@@ -44,7 +44,10 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
         self.statements.append(statement)
 
     def _require_list_contract(self, method):
-        parameters = inspect.signature(method).parameters
+        if hasattr(inspect, "signature"):
+            parameters = inspect.signature(method).parameters
+        else:
+            parameters = inspect.getargspec(method).args
         for name in (
             "filters",
             "fields",
