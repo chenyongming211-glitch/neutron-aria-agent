@@ -6540,7 +6540,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ovs_inventory_command_timeout_is_bounded_and_stops_command_sequence() {
+    async fn neutron_snapshot_ovs_inventory_command_timeout_is_bounded_and_stops_command_sequence() {
         let root = temp_root("ovs-command-timeout");
         let marker = root.join("command-finished");
         let script = format!(
@@ -6571,7 +6571,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_admission_identity_detects_intervening_runtime_change() {
+    fn neutron_snapshot_admission_identity_detects_intervening_runtime_change() {
         let mut runtime = NeutronRuntimeState {
             accepted_generation: 40,
             applied_generation: 40,
