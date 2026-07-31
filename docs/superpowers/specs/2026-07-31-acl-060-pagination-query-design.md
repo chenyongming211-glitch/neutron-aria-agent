@@ -152,6 +152,13 @@ statuses. Plugin list methods forward every argument unchanged after basic
 normalization. Desired-state show methods and status show apply `fields` to the
 final public response.
 
+Port-status list additionally accepts an internal optional `projection`
+keyword containing one immutable request-scoped timestamp and stale threshold.
+The plugin constructs it once and the repositories use it to translate
+`stale`, `runtime_status`, and `last_reported_at` before marker/limit. It is not
+a public Neutron query parameter and does not change the standard six list
+arguments.
+
 `fields is None` or an empty list preserves the existing full-object response.
 Otherwise the response contains only requested visible fields, after internal
 identity, authorization, sort, and pagination fields have served their
