@@ -293,8 +293,10 @@ class AriaAclPlugin(object):
             status = repository.get_port_status(port_id, host=host)
         else:
             status = repository.get_port_status_resource(port_id)
+        if status is None:
+            return None
         return project_fields(
-            self._port_status_projection().project(status),
+            self._project_port_status(status),
             fields,
         )
 

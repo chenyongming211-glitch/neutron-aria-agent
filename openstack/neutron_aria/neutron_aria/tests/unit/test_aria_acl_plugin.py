@@ -401,6 +401,17 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertIsNotNone(status)
         self.assertEqual("ostack3", status["host"])
 
+    def test_missing_status_for_explicit_host_remains_none(self):
+        plugin = AriaAclPlugin(now=lambda: 200.0)
+
+        self.assertIsNone(
+            plugin.get_aria_acl_port_status(
+                None,
+                "port-missing",
+                host="ostack2",
+            )
+        )
+
     def test_derived_status_id_delete_removes_only_exact_host(self):
         from neutron_aria.db.aria_acl.query import encode_port_status_id
 
