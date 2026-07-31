@@ -24,10 +24,10 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 use std::future::Future;
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::process::Command;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use tracing::{error, info, warn};
 
@@ -41,6 +41,8 @@ use crate::tap_registry::TapRegistry;
 
 const NEUTRON_TC_ACL_HEALTH_INTERVAL_SECS: u64 = 10;
 const INVENTORY_UNAVAILABLE_RECOVERY_CAUSE: &str = "inventory_unavailable";
+const OVS_INVENTORY_TIMEOUT: Duration = Duration::from_secs(3);
+const SNAPSHOT_ADMISSION_REVALIDATION_ATTEMPTS: usize = 3;
 
 #[derive(Clone)]
 pub(crate) struct NeutronApiState {
@@ -66,6 +68,37 @@ struct NeutronRuntimeState {
     wal_status: String,
     recovery_cause: Option<String>,
     wal_replay_failures: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotAdmissionIdentity {
+    accepted_generation: u64,
+    applied_generation: u64,
+    pending_generation: Option<u64>,
+    desired_hash: Option<String>,
+    applied_desired_hash: Option<String>,
+    authority_state: String,
+    ports: BTreeMap<String, ManagedNeutronPort>,
+    wal_status: String,
+    recovery_cause: Option<String>,
+    wal_replay_failures: u64,
+}
+
+impl SnapshotAdmissionIdentity {
+    fn capture(runtime: &NeutronRuntimeState) -> Self {
+        Self {
+            accepted_generation: runtime.accepted_generation,
+            applied_generation: runtime.applied_generation,
+            pending_generation: runtime.pending_generation,
+            desired_hash: runtime.desired_hash.clone(),
+            applied_desired_hash: runtime.applied_desired_hash.clone(),
+            authority_state: runtime.authority_state.clone(),
+            ports: runtime.ports.clone(),
+            wal_status: runtime.wal_status.clone(),
+            recovery_cause: runtime.recovery_cause.clone(),
+            wal_replay_failures: runtime.wal_replay_failures,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -2239,12 +2272,49 @@ async fn accept_neutron_snapshot_submit(
         });
     }
 
-    let lock_started = Instant::now();
-    let apply_guard = state.apply_lock.clone().lock_owned().await;
-    let lock_wait_ms = elapsed_ms(lock_started);
+    let mut lock_wait_ms = 0;
+    let mut admission_attempt = 0;
+    let (apply_guard, local_inventory, runtime_before_apply) = loop {
+        admission_attempt += 1;
+        let lock_started = Instant::now();
+        let observation_guard = state.apply_lock.clone().lock_owned().await;
+        lock_wait_ms += elapsed_ms(lock_started);
+        let observed_runtime = state.runtime.read().await.clone();
+        if let Some(mut response) =
+            pending_snapshot_submit_response(&observed_runtime, snapshot, &requested_hash)?
+        {
+            drop(observation_guard);
+            response.active_instances = state.registry.list().await;
+            return Ok(SnapshotSubmitDecision {
+                response,
+                prepared: None,
+            });
+        }
+        let observed_identity = SnapshotAdmissionIdentity::capture(&observed_runtime);
+        drop(observation_guard);
+
+        let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge).await;
+
+        let lock_started = Instant::now();
+        let apply_guard = state.apply_lock.clone().lock_owned().await;
+        lock_wait_ms += elapsed_ms(lock_started);
+        let runtime_before_apply = state.runtime.read().await.clone();
+        if SnapshotAdmissionIdentity::capture(&runtime_before_apply) == observed_identity {
+            break (apply_guard, local_inventory, runtime_before_apply);
+        }
+        drop(apply_guard);
+        if admission_attempt >= SNAPSHOT_ADMISSION_REVALIDATION_ATTEMPTS {
+            return Err(SnapshotApplyError {
+                status: StatusCode::CONFLICT,
+                code: "snapshot_admission_changed",
+                details: format!(
+                    "snapshot admission changed during OVS discovery after {} attempts",
+                    admission_attempt
+                ),
+            });
+        }
+    };
     let preflight_started = Instant::now();
-    let local_inventory = LocalInterfaceInventory::load(&state.ovs_bridge);
-    let runtime_before_apply = state.runtime.read().await.clone();
 
     if let Some(mut response) =
         pending_snapshot_submit_response(&runtime_before_apply, snapshot, &requested_hash)?
@@ -4238,8 +4308,8 @@ struct LocalInterfaceInventory {
 }
 
 impl LocalInterfaceInventory {
-    fn load(ovs_bridge: &str) -> Self {
-        match Self::try_load(ovs_bridge) {
+    async fn load(ovs_bridge: &str) -> Self {
+        match Self::try_load(ovs_bridge, Instant::now() + OVS_INVENTORY_TIMEOUT).await {
             Ok(inventory) => inventory,
             Err(error) => Self {
                 ovs_bridge: ovs_bridge.to_string(),
@@ -4250,17 +4320,20 @@ impl LocalInterfaceInventory {
         }
     }
 
-    fn try_load(ovs_bridge: &str) -> Result<Self, String> {
-        let bridge_ports = Self::list_bridge_ports(ovs_bridge)?;
-        let output = Command::new("ovs-vsctl")
-            .args([
-                "--format=json",
-                "--columns=name,external_ids",
-                "list",
-                "Interface",
-            ])
-            .output()
-            .map_err(|e| format!("run ovs-vsctl list Interface: {}", e))?;
+    async fn try_load(ovs_bridge: &str, deadline: Instant) -> Result<Self, String> {
+        let bridge_ports = Self::list_bridge_ports(ovs_bridge, deadline).await?;
+        let args = [
+            "--format=json",
+            "--columns=name,external_ids",
+            "list",
+            "Interface",
+        ];
+        let output = run_bounded_process(
+            "ovs-vsctl",
+            &args,
+            remaining_ovs_inventory_time(deadline, "list Interface")?,
+        )
+        .await?;
         if !output.status.success() {
             return Err(format!(
                 "ovs-vsctl list Interface failed: {}",
@@ -4271,11 +4344,17 @@ impl LocalInterfaceInventory {
         Self::from_ovs_json(ovs_bridge, &bridge_ports, &payload)
     }
 
-    fn list_bridge_ports(ovs_bridge: &str) -> Result<BTreeSet<String>, String> {
-        let output = Command::new("ovs-vsctl")
-            .args(["list-ports", ovs_bridge])
-            .output()
-            .map_err(|e| format!("run ovs-vsctl list-ports {}: {}", ovs_bridge, e))?;
+    async fn list_bridge_ports(
+        ovs_bridge: &str,
+        deadline: Instant,
+    ) -> Result<BTreeSet<String>, String> {
+        let args = ["list-ports", ovs_bridge];
+        let output = run_bounded_process(
+            "ovs-vsctl",
+            &args,
+            remaining_ovs_inventory_time(deadline, "list-ports")?,
+        )
+        .await?;
         if !output.status.success() {
             return Err(format!(
                 "ovs-vsctl list-ports {} failed: {}",
@@ -4357,6 +4436,35 @@ impl LocalInterfaceInventory {
     fn is_authoritative(&self) -> bool {
         self.ovs_error.is_none()
     }
+}
+
+fn remaining_ovs_inventory_time(deadline: Instant, command: &str) -> Result<Duration, String> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| format!("ovs-vsctl {} timed out", command))
+}
+
+async fn run_bounded_process(
+    program: &str,
+    args: &[&str],
+    timeout_duration: Duration,
+) -> Result<std::process::Output, String> {
+    let mut command = Command::new(program);
+    command.args(args).kill_on_drop(true);
+    let child = command
+        .spawn()
+        .map_err(|error| format!("run {}: {}", program, error))?;
+    tokio::time::timeout(timeout_duration, child.wait_with_output())
+        .await
+        .map_err(|_| {
+            format!(
+                "{} timed out after {} ms",
+                program,
+                timeout_duration.as_millis()
+            )
+        })?
+        .map_err(|error| format!("wait for {}: {}", program, error))
 }
 
 fn parse_ovs_external_ids(value: &Value) -> BTreeMap<String, String> {
