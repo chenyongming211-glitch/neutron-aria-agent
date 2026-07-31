@@ -159,7 +159,7 @@ git diff -- docs/openstack-neutron-aria-details/12-review-bug-backlog.md \
 
 Confirm no Rust, Python, eBPF, workflow, configuration, or API file changed.
 
-- [ ] **Step 3: Commit and push**
+- [x] **Step 3: Commit and push**
 
 Run:
 
@@ -187,7 +187,7 @@ git push origin v0.9-neutron-agent
 - Produces: exact-head full GitHub Actions evidence and the handoff to
   `REVIEW-TXN-024`.
 
-- [ ] **Step 1: Dispatch the full build**
+- [x] **Step 1: Dispatch the full build**
 
 Run:
 
@@ -200,7 +200,7 @@ Find the `workflow_dispatch` run whose `headSha` equals `${head_sha}`. The
 manual dispatch is required because a documentation-only push intentionally
 skips Rust jobs.
 
-- [ ] **Step 2: Verify hosted behavior and compilation**
+- [x] **Step 2: Verify hosted behavior and compilation**
 
 Run:
 
@@ -219,14 +219,14 @@ Expected:
 - `rust-build`: success; and
 - no warning-denied Rust/eBPF compilation failure.
 
-- [ ] **Step 3: Record exact-head evidence**
+- [x] **Step 3: Record exact-head evidence**
 
 Add the run URL and exact commit to the three Register rows and this plan.
 Commit and push the evidence-only update. The push may skip Rust jobs because
 the referenced manually dispatched run already proves the immediately prior
 source-identical documentation head.
 
-- [ ] **Step 4: Begin the next independent batch**
+- [x] **Step 4: Begin the next independent batch**
 
 Create the formal `REVIEW-TXN-024`/`REVIEW-TXN-027` WAL recovery design. Keep
 `REVIEW-TXN-024` first and do not modify `REVIEW-TXN-027` production behavior
@@ -242,4 +242,10 @@ until the first transaction has its own RED/GREEN cycle.
 - `REVIEW-ACL-023` transactional purge evidence:
   [Build 29672271181](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/29672271181)
   at `ad30cad` passed `fast-contracts`, `rust-behavior`, and `rust-build`.
-- Exact-head closure dispatch: pending.
+- Exact-head closure dispatch:
+  [Build 30610771022](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30610771022)
+  at `98034c1` passed `fast-contracts`, `rust-behavior`, and warning-denied
+  `rust-build`.
+- Next independent batch:
+  `REVIEW-TXN-024` design and RED implementation plan are recorded separately;
+  no `REVIEW-TXN-027` production behavior has been changed.
