@@ -67,7 +67,12 @@ PORT_READONLY_ATTRIBUTES = {
 
 RESOURCE_ATTRIBUTE_MAP = {
     RESOURCE_COLLECTIONS["policies"]: {
-        "id": {"allow_post": False, "allow_put": False, "is_visible": True},
+        "id": {
+            "allow_post": False,
+            "allow_put": False,
+            "is_visible": True,
+            "primary_key": True,
+        },
         "tenant_id": {"allow_post": True, "allow_put": False, "is_visible": True},
         "project_id": {"allow_post": True, "allow_put": False, "is_visible": True, "default": None},
         "name": {"allow_post": True, "allow_put": True, "is_visible": True, "default": ""},
@@ -77,7 +82,12 @@ RESOURCE_ATTRIBUTE_MAP = {
         "revision_number": {"allow_post": False, "allow_put": False, "is_visible": True},
     },
     RESOURCE_COLLECTIONS["rules"]: {
-        "id": {"allow_post": False, "allow_put": False, "is_visible": True},
+        "id": {
+            "allow_post": False,
+            "allow_put": False,
+            "is_visible": True,
+            "primary_key": True,
+        },
         "tenant_id": {"allow_post": True, "allow_put": False, "is_visible": True},
         "project_id": {"allow_post": True, "allow_put": False, "is_visible": True, "default": None},
         "policy_id": {"allow_post": True, "allow_put": False, "is_visible": True},
@@ -98,7 +108,12 @@ RESOURCE_ATTRIBUTE_MAP = {
         "revision_number": {"allow_post": False, "allow_put": False, "is_visible": True},
     },
     RESOURCE_COLLECTIONS["address_sets"]: {
-        "id": {"allow_post": False, "allow_put": False, "is_visible": True},
+        "id": {
+            "allow_post": False,
+            "allow_put": False,
+            "is_visible": True,
+            "primary_key": True,
+        },
         "tenant_id": {"allow_post": True, "allow_put": False, "is_visible": True},
         "project_id": {"allow_post": True, "allow_put": False, "is_visible": True, "default": None},
         "name": {"allow_post": True, "allow_put": True, "is_visible": True, "default": ""},
@@ -107,7 +122,12 @@ RESOURCE_ATTRIBUTE_MAP = {
         "revision_number": {"allow_post": False, "allow_put": False, "is_visible": True},
     },
     RESOURCE_COLLECTIONS["bindings"]: {
-        "id": {"allow_post": False, "allow_put": False, "is_visible": True},
+        "id": {
+            "allow_post": False,
+            "allow_put": False,
+            "is_visible": True,
+            "primary_key": True,
+        },
         "tenant_id": {"allow_post": True, "allow_put": False, "is_visible": True},
         "project_id": {"allow_post": True, "allow_put": False, "is_visible": True, "default": None},
         "policy_id": {"allow_post": True, "allow_put": False, "is_visible": True},
@@ -117,6 +137,12 @@ RESOURCE_ATTRIBUTE_MAP = {
         "revision_number": {"allow_post": False, "allow_put": False, "is_visible": True},
     },
     RESOURCE_COLLECTIONS["port_statuses"]: {
+        "id": {
+            "allow_post": False,
+            "allow_put": False,
+            "is_visible": True,
+            "primary_key": True,
+        },
         "port_id": {"allow_post": True, "allow_put": False, "is_visible": True},
         "tenant_id": {"allow_post": True, "allow_put": False, "is_visible": True},
         "host": {"allow_post": True, "allow_put": False, "is_visible": True},

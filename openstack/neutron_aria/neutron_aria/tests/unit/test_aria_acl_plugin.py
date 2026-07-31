@@ -269,6 +269,21 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertFalse(extended["ports"]["aria_acl_enabled"]["allow_post"])
         self.assertFalse(extended["ports"]["aria_acl_enabled"]["allow_put"])
 
+    def test_plugin_advertises_native_sorting_and_pagination(self):
+        plugin = AriaAclPlugin()
+        self.assertTrue(
+            hasattr(plugin, "_AriaAclPlugin__native_sorting_support")
+        )
+        self.assertTrue(
+            hasattr(plugin, "_AriaAclPlugin__native_pagination_support")
+        )
+        self.assertTrue(
+            getattr(plugin, "_AriaAclPlugin__native_sorting_support")
+        )
+        self.assertTrue(
+            getattr(plugin, "_AriaAclPlugin__native_pagination_support")
+        )
+
     def test_all_public_collections_declare_one_primary_id(self):
         for collection in aria_acl.RESOURCE_COLLECTIONS.values():
             attributes = aria_acl.API_RESOURCE_ATTRIBUTE_MAP[collection]

@@ -20,6 +20,8 @@ DEFAULT_PORT_STATUS_STALE_SECONDS = 90
 
 
 class AriaAclPlugin(object):
+    __native_sorting_support = True
+    __native_pagination_support = True
     supported_extension_aliases = ["aria-acl"]
 
     def __init__(
@@ -58,10 +60,17 @@ class AriaAclPlugin(object):
         marker=None,
         page_reverse=False,
     ):
-        return self._repo(context).list_policies(filters=filters)
+        return self._repo(context).list_policies(
+            filters=filters,
+            fields=fields,
+            sorts=sorts,
+            limit=limit,
+            marker=marker,
+            page_reverse=page_reverse,
+        )
 
     def get_aria_acl_policy(self, context, policy_id, fields=None):
-        return self._repo(context).get_policy(policy_id)
+        return self._repo(context).get_policy(policy_id, fields=fields)
 
     def update_aria_acl_policy(self, context, policy_id, aria_acl_policy):
         policy = self._repo(context).update_policy(
@@ -100,10 +109,17 @@ class AriaAclPlugin(object):
         marker=None,
         page_reverse=False,
     ):
-        return self._repo(context).list_rules(filters=filters)
+        return self._repo(context).list_rules(
+            filters=filters,
+            fields=fields,
+            sorts=sorts,
+            limit=limit,
+            marker=marker,
+            page_reverse=page_reverse,
+        )
 
     def get_aria_acl_rule(self, context, rule_id, fields=None):
-        return self._repo(context).get_rule(rule_id)
+        return self._repo(context).get_rule(rule_id, fields=fields)
 
     def update_aria_acl_rule(self, context, rule_id, aria_acl_rule):
         rule = self._repo(context).update_rule(
@@ -147,10 +163,20 @@ class AriaAclPlugin(object):
         marker=None,
         page_reverse=False,
     ):
-        return self._repo(context).list_address_sets(filters=filters)
+        return self._repo(context).list_address_sets(
+            filters=filters,
+            fields=fields,
+            sorts=sorts,
+            limit=limit,
+            marker=marker,
+            page_reverse=page_reverse,
+        )
 
     def get_aria_acl_address_set(self, context, address_set_id, fields=None):
-        return self._repo(context).get_address_set(address_set_id)
+        return self._repo(context).get_address_set(
+            address_set_id,
+            fields=fields,
+        )
 
     def update_aria_acl_address_set(self, context, address_set_id, aria_acl_address_set):
         address_set = self._repo(context).update_address_set(
@@ -194,10 +220,17 @@ class AriaAclPlugin(object):
         marker=None,
         page_reverse=False,
     ):
-        return self._repo(context).list_bindings(filters=filters)
+        return self._repo(context).list_bindings(
+            filters=filters,
+            fields=fields,
+            sorts=sorts,
+            limit=limit,
+            marker=marker,
+            page_reverse=page_reverse,
+        )
 
     def get_aria_acl_binding(self, context, binding_id, fields=None):
-        return self._repo(context).get_binding(binding_id)
+        return self._repo(context).get_binding(binding_id, fields=fields)
 
     def update_aria_acl_binding(self, context, binding_id, aria_acl_binding):
         binding = self._repo(context).update_binding(
@@ -244,10 +277,15 @@ class AriaAclPlugin(object):
         marker=None,
         page_reverse=False,
     ):
-        return [
-            self._project_port_status(status)
-            for status in self._repo(context).list_port_statuses(filters=filters)
-        ]
+        return self._repo(context).list_port_statuses(
+            filters=filters,
+            fields=fields,
+            sorts=sorts,
+            limit=limit,
+            marker=marker,
+            page_reverse=page_reverse,
+            projection=self._port_status_projection(),
+        )
 
     def get_aria_acl_port_status(self, context, port_id, host=None, fields=None):
         repository = self._repo(context)
