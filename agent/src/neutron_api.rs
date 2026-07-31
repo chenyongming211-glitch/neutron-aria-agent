@@ -11392,7 +11392,7 @@ mod tests {
             .pending_intent
             .expect("after-detach failure must retain the delete intent");
         assert_eq!(pending.kind, "delete");
-        assert_eq!(pending.port_ids, vec![port.port_id]);
+        assert_eq!(pending.port_ids, vec![port.port_id.clone()]);
         assert_eq!(pending.affected_ports, vec![port]);
         let _ = std::fs::remove_dir_all(root);
     }
