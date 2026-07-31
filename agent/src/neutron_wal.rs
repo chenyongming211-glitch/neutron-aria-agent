@@ -5,8 +5,11 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 const WAL_FILE: &str = "neutron-snapshot.wal";
+const NEUTRON_WAL_SOFT_BYTES: u64 = 16 * 1024 * 1024;
+const NEUTRON_WAL_HARD_BYTES: u64 = 64 * 1024 * 1024;
 const INVENTORY_UNAVAILABLE_RECOVERY_CAUSE: &str = "inventory_unavailable";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -16,6 +19,14 @@ pub(crate) struct NeutronWalReplay {
     pub(crate) replayed: u64,
     pub(crate) failures: u64,
     pub(crate) pending_intent: Option<PendingNeutronIntent>,
+}
+
+#[derive(Clone, Debug)]
+struct NeutronWalScan {
+    last_committed_state: Option<NeutronWalState>,
+    pending_intent: Option<PendingNeutronIntent>,
+    replayed: u64,
+    failures: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +203,13 @@ fn protected_inventory_snapshot_commit_valid(
         && state.port_statuses == baseline.port_statuses)
 }
 
+fn empty_neutron_wal_state() -> NeutronWalState {
+    NeutronWalState {
+        authority_state: "idle".to_string(),
+        ..NeutronWalState::default()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum NeutronWalEntry {
@@ -225,38 +243,76 @@ enum NeutronWalEntry {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+struct NeutronWalLimits {
+    soft_bytes: u64,
+    hard_bytes: u64,
+}
+
+impl Default for NeutronWalLimits {
+    fn default() -> Self {
+        Self {
+            soft_bytes: NEUTRON_WAL_SOFT_BYTES,
+            hard_bytes: NEUTRON_WAL_HARD_BYTES,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum CheckpointInstallError {
+    BeforeRename(String),
+    AfterRename(String),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct NeutronWal {
     path: PathBuf,
+    limits: NeutronWalLimits,
 }
 
 impl NeutronWal {
     pub(crate) fn new(base_state_path: impl AsRef<Path>) -> Self {
         Self {
             path: base_state_path.as_ref().join(WAL_FILE),
+            limits: NeutronWalLimits::default(),
         }
     }
 
-    pub(crate) fn replay(&self) -> NeutronWalReplay {
-        let mut replay = NeutronWalReplay {
-            state: NeutronWalState {
-                authority_state: "idle".to_string(),
-                ..NeutronWalState::default()
-            },
-            status: "empty".to_string(),
+    #[cfg(test)]
+    fn with_limits(
+        base_state_path: impl AsRef<Path>,
+        limits: NeutronWalLimits,
+    ) -> Self {
+        assert!(
+            limits.soft_bytes <= limits.hard_bytes,
+            "Neutron WAL soft limit must not exceed hard limit"
+        );
+        Self {
+            path: base_state_path.as_ref().join(WAL_FILE),
+            limits,
+        }
+    }
+
+    fn scan(&self) -> NeutronWalScan {
+        let mut scan = NeutronWalScan {
+            last_committed_state: None,
+            pending_intent: None,
             replayed: 0,
             failures: 0,
-            pending_intent: None,
         };
 
-        let Ok(file) = File::open(&self.path) else {
-            return replay;
+        let file = match File::open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return scan,
+            Err(_) => {
+                scan.failures = 1;
+                return scan;
+            }
         };
 
-        let mut pending_intent: Option<PendingNeutronIntent> = None;
         for line in BufReader::new(file).lines() {
             let Ok(line) = line else {
-                replay.failures += 1;
+                scan.failures += 1;
                 break;
             };
             let line = line.trim();
@@ -266,11 +322,11 @@ impl NeutronWal {
             let entry = match serde_json::from_str::<NeutronWalEntry>(line) {
                 Ok(entry) => entry,
                 Err(_) => {
-                    replay.failures += 1;
+                    scan.failures += 1;
                     continue;
                 }
             };
-            replay.replayed += 1;
+            scan.replayed += 1;
             match entry {
                 NeutronWalEntry::SnapshotIntent {
                     generation,
@@ -292,7 +348,7 @@ impl NeutronWal {
                     ) {
                         Ok(true) => {}
                         Ok(false) | Err(_) => {
-                            replay.failures += 1;
+                            scan.failures += 1;
                             continue;
                         }
                     }
@@ -302,7 +358,7 @@ impl NeutronWal {
                             .map(|port| port.port_id.clone())
                             .collect();
                     }
-                    pending_intent = Some(PendingNeutronIntent {
+                    scan.pending_intent = Some(PendingNeutronIntent {
                         kind: "snapshot".to_string(),
                         generation,
                         desired_hash,
@@ -319,7 +375,7 @@ impl NeutronWal {
                     port,
                 } => {
                     let affected_ports = port.into_iter().collect();
-                    pending_intent = Some(PendingNeutronIntent {
+                    scan.pending_intent = Some(PendingNeutronIntent {
                         kind: "delete".to_string(),
                         generation,
                         desired_hash: None,
@@ -330,52 +386,73 @@ impl NeutronWal {
                     });
                 }
                 NeutronWalEntry::SnapshotCommit { state }
-                    if pending_intent
+                    if scan
+                        .pending_intent
                         .as_ref()
                         .map_or(false, is_protected_inventory_intent) =>
                 {
-                    let intent = pending_intent
+                    let intent = scan
+                        .pending_intent
                         .as_ref()
                         .expect("protected inventory intent guard requires a pending intent");
-                    match protected_inventory_snapshot_commit_valid(&state, intent, &replay.state) {
+                    let baseline = scan
+                        .last_committed_state
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_else(empty_neutron_wal_state);
+                    match protected_inventory_snapshot_commit_valid(&state, intent, &baseline) {
                         Ok(true) => {
-                            replay.state = state;
-                            pending_intent = None;
+                            scan.last_committed_state = Some(state);
+                            scan.pending_intent = None;
                         }
                         Ok(false) | Err(_) => {
-                            replay.failures += 1;
+                            scan.failures += 1;
                         }
                     }
                 }
                 NeutronWalEntry::DeleteCommit { .. }
-                    if pending_intent
+                    if scan
+                        .pending_intent
                         .as_ref()
                         .map_or(false, is_protected_inventory_intent) =>
                 {
-                    replay.failures += 1;
+                    scan.failures += 1;
                 }
                 NeutronWalEntry::SnapshotCommit { state }
                 | NeutronWalEntry::DeleteCommit { state } => {
                     match state.status_hash_valid() {
                         Ok(true) => {}
                         Ok(false) => {
-                            replay.failures += 1;
-                            pending_intent = None;
+                            scan.failures += 1;
+                            scan.pending_intent = None;
                             continue;
                         }
                         Err(_) => {
-                            replay.failures += 1;
-                            pending_intent = None;
+                            scan.failures += 1;
+                            scan.pending_intent = None;
                             continue;
                         }
                     }
-                    replay.state = state;
-                    pending_intent = None;
+                    scan.last_committed_state = Some(state);
+                    scan.pending_intent = None;
                 }
             }
         }
+        scan
+    }
 
-        if let Some(intent) = pending_intent {
+    fn replay_from_scan(scan: NeutronWalScan) -> NeutronWalReplay {
+        let mut replay = NeutronWalReplay {
+            state: scan
+                .last_committed_state
+                .unwrap_or_else(empty_neutron_wal_state),
+            status: "empty".to_string(),
+            replayed: scan.replayed,
+            failures: scan.failures,
+            pending_intent: None,
+        };
+
+        if let Some(intent) = scan.pending_intent {
             replay.state.pending_generation = Some(intent.generation);
             replay.state.desired_hash = intent.desired_hash.clone();
             replay.state.authority_state = "wal_intent_without_commit".to_string();
@@ -390,6 +467,109 @@ impl NeutronWal {
         }
 
         replay
+    }
+
+    pub(crate) fn replay(&self) -> NeutronWalReplay {
+        Self::replay_from_scan(self.scan())
+    }
+
+    fn entry_for_pending_intent(
+        intent: &PendingNeutronIntent,
+    ) -> Result<NeutronWalEntry, String> {
+        match intent.kind.as_str() {
+            "snapshot" => {
+                let intent_hash = match intent.recovery_cause.as_deref() {
+                    None => None,
+                    Some(cause)
+                        if cause == INVENTORY_UNAVAILABLE_RECOVERY_CAUSE
+                            && intent.port_ids.is_empty()
+                            && intent.affected_ports.is_empty() =>
+                    {
+                        Some(compute_snapshot_intent_hash(
+                            intent.generation,
+                            &intent.desired_hash,
+                            &intent.port_ids,
+                            &intent.affected_domains,
+                            &intent.affected_ports,
+                            cause,
+                        )?)
+                    }
+                    Some(cause) => {
+                        return Err(format!(
+                            "cannot checkpoint Neutron snapshot intent with recovery cause {}",
+                            cause
+                        ));
+                    }
+                };
+                Ok(NeutronWalEntry::SnapshotIntent {
+                    generation: intent.generation,
+                    desired_hash: intent.desired_hash.clone(),
+                    port_ids: intent.port_ids.clone(),
+                    affected_domains: intent.affected_domains.clone(),
+                    affected_ports: intent.affected_ports.clone(),
+                    recovery_cause: intent.recovery_cause.clone(),
+                    intent_hash,
+                })
+            }
+            "delete" => {
+                if intent.recovery_cause.is_some() || intent.desired_hash.is_some() {
+                    return Err(
+                        "cannot checkpoint Neutron delete intent with snapshot-only fields"
+                            .to_string(),
+                    );
+                }
+                let [port_id] = intent.port_ids.as_slice() else {
+                    return Err(format!(
+                        "cannot checkpoint Neutron delete intent with {} port IDs",
+                        intent.port_ids.len()
+                    ));
+                };
+                if intent.affected_ports.len() > 1 {
+                    return Err(format!(
+                        "cannot checkpoint Neutron delete intent with {} affected ports",
+                        intent.affected_ports.len()
+                    ));
+                }
+                Ok(NeutronWalEntry::DeleteIntent {
+                    port_id: port_id.clone(),
+                    generation: intent.generation,
+                    affected_domains: intent.affected_domains.clone(),
+                    port: intent.affected_ports.first().cloned(),
+                })
+            }
+            kind => Err(format!(
+                "cannot checkpoint unknown Neutron WAL intent kind {}",
+                kind
+            )),
+        }
+    }
+
+    fn canonical_checkpoint_bytes(&self) -> Result<Vec<u8>, String> {
+        let scan = self.scan();
+        if scan.failures != 0 {
+            return Err(format!(
+                "cannot compact Neutron WAL with {} replay failures",
+                scan.failures
+            ));
+        }
+
+        let mut entries = Vec::new();
+        if let Some(state) = scan.last_committed_state {
+            entries.push(NeutronWalEntry::SnapshotCommit { state });
+        }
+        if let Some(intent) = scan.pending_intent.as_ref() {
+            entries.push(Self::entry_for_pending_intent(intent)?);
+        }
+
+        let mut bytes = Vec::new();
+        for entry in entries {
+            bytes.extend_from_slice(
+                &serde_json::to_vec(&entry)
+                    .map_err(|error| format!("serialize Neutron WAL checkpoint: {}", error))?,
+            );
+            bytes.push(b'\n');
+        }
+        Ok(bytes)
     }
 
     pub(crate) fn append_snapshot_intent(
@@ -547,7 +727,248 @@ impl NeutronWal {
         })
     }
 
+    fn checkpoint_temp_path(&self) -> PathBuf {
+        let mut path = self.path.as_os_str().to_os_string();
+        path.push(".compact.tmp");
+        PathBuf::from(path)
+    }
+
+    #[cfg(test)]
+    fn checkpoint_temp_path_for_test(&self) -> PathBuf {
+        self.checkpoint_temp_path()
+    }
+
+    fn install_checkpoint(
+        &self,
+        checkpoint: &[u8],
+    ) -> Result<(), CheckpointInstallError> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                CheckpointInstallError::BeforeRename(format!(
+                    "create Neutron WAL directory {}: {}",
+                    parent.display(),
+                    error
+                ))
+            })?;
+        }
+
+        let temp_path = self.checkpoint_temp_path();
+        match fs::symlink_metadata(&temp_path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                fs::remove_file(&temp_path).map_err(|error| {
+                    CheckpointInstallError::BeforeRename(format!(
+                        "remove stale Neutron WAL checkpoint {}: {}",
+                        temp_path.display(),
+                        error
+                    ))
+                })?;
+            }
+            Ok(_) => {
+                return Err(CheckpointInstallError::BeforeRename(format!(
+                    "stale Neutron WAL checkpoint path is not a regular file: {}",
+                    temp_path.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CheckpointInstallError::BeforeRename(format!(
+                    "inspect Neutron WAL checkpoint {}: {}",
+                    temp_path.display(),
+                    error
+                )));
+            }
+        }
+
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .map_err(|error| {
+                CheckpointInstallError::BeforeRename(format!(
+                    "create Neutron WAL checkpoint {}: {}",
+                    temp_path.display(),
+                    error
+                ))
+            })?;
+        let mut writer = BufWriter::new(file);
+        writer
+            .write_all(checkpoint)
+            .map_err(|error| {
+                CheckpointInstallError::BeforeRename(format!(
+                    "write Neutron WAL checkpoint {}: {}",
+                    temp_path.display(),
+                    error
+                ))
+            })?;
+        writer
+            .flush()
+            .map_err(|error| {
+                CheckpointInstallError::BeforeRename(format!(
+                    "flush Neutron WAL checkpoint {}: {}",
+                    temp_path.display(),
+                    error
+                ))
+            })?;
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|error| {
+                CheckpointInstallError::BeforeRename(format!(
+                    "fsync Neutron WAL checkpoint {}: {}",
+                    temp_path.display(),
+                    error
+                ))
+            })?;
+        drop(writer);
+
+        fs::rename(&temp_path, &self.path).map_err(|error| {
+            CheckpointInstallError::BeforeRename(format!(
+                "replace Neutron WAL {} from checkpoint {}: {}",
+                self.path.display(),
+                temp_path.display(),
+                error
+            ))
+        })?;
+
+        if let Some(parent) = self.path.parent() {
+            sync_directory(parent).map_err(|error| {
+                CheckpointInstallError::AfterRename(format!(
+                    "fsync Neutron WAL directory {} after checkpoint: {}",
+                    parent.display(),
+                    error
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn compact_now_for_test(&self) -> Result<(), String> {
+        let checkpoint = self.canonical_checkpoint_bytes()?;
+        let checkpoint_len = u64::try_from(checkpoint.len())
+            .map_err(|_| "Neutron WAL checkpoint length does not fit u64".to_string())?;
+        if checkpoint_len > self.limits.hard_bytes {
+            return Err(self.hard_capacity_error(0, 0, Some(checkpoint_len), None));
+        }
+        self.install_checkpoint(&checkpoint)
+            .map_err(|error| match error {
+                CheckpointInstallError::BeforeRename(details) => details,
+                CheckpointInstallError::AfterRename(details) => details,
+            })
+    }
+
+    fn wal_length(&self) -> Result<u64, String> {
+        match fs::metadata(&self.path) {
+            Ok(metadata) => Ok(metadata.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(format!(
+                "inspect Neutron WAL {}: {}",
+                self.path.display(),
+                error
+            )),
+        }
+    }
+
+    fn hard_capacity_error(
+        &self,
+        current_bytes: u64,
+        entry_bytes: u64,
+        checkpoint_bytes: Option<u64>,
+        checkpoint_error: Option<&str>,
+    ) -> String {
+        format!(
+            "neutron WAL hard capacity exceeded: current_bytes={} entry_bytes={} checkpoint_bytes={} hard_bytes={} checkpoint_error={}",
+            current_bytes,
+            entry_bytes,
+            checkpoint_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unavailable".to_string()),
+            self.limits.hard_bytes,
+            checkpoint_error.unwrap_or("none")
+        )
+    }
+
     fn append(&self, entry: &NeutronWalEntry) -> Result<(), String> {
+        let mut bytes = serde_json::to_vec(entry)
+            .map_err(|error| format!("serialize Neutron WAL entry: {}", error))?;
+        bytes.push(b'\n');
+        let entry_bytes = u64::try_from(bytes.len())
+            .map_err(|_| "Neutron WAL entry length does not fit u64".to_string())?;
+        let current_bytes = self.wal_length()?;
+        let projected_bytes = current_bytes
+            .checked_add(entry_bytes)
+            .ok_or_else(|| "Neutron WAL projected length overflow".to_string())?;
+
+        if projected_bytes <= self.limits.soft_bytes {
+            return self.append_serialized(&bytes);
+        }
+
+        let checkpoint = match self.canonical_checkpoint_bytes() {
+            Ok(checkpoint) => checkpoint,
+            Err(error) if projected_bytes <= self.limits.hard_bytes => {
+                warn!(
+                    current_bytes,
+                    entry_bytes,
+                    soft_bytes = self.limits.soft_bytes,
+                    hard_bytes = self.limits.hard_bytes,
+                    error = %error,
+                    "neutron_wal_compaction_deferred"
+                );
+                return self.append_serialized(&bytes);
+            }
+            Err(error) => {
+                return Err(self.hard_capacity_error(
+                    current_bytes,
+                    entry_bytes,
+                    None,
+                    Some(&error),
+                ));
+            }
+        };
+
+        let checkpoint_bytes = u64::try_from(checkpoint.len())
+            .map_err(|_| "Neutron WAL checkpoint length does not fit u64".to_string())?;
+        let compacted_projected_bytes = checkpoint_bytes
+            .checked_add(entry_bytes)
+            .ok_or_else(|| "Neutron WAL compacted length overflow".to_string())?;
+        if compacted_projected_bytes > self.limits.hard_bytes {
+            return Err(self.hard_capacity_error(
+                current_bytes,
+                entry_bytes,
+                Some(checkpoint_bytes),
+                None,
+            ));
+        }
+
+        match self.install_checkpoint(&checkpoint) {
+            Ok(()) => self.append_serialized(&bytes),
+            Err(CheckpointInstallError::BeforeRename(error))
+                if projected_bytes <= self.limits.hard_bytes =>
+            {
+                warn!(
+                    current_bytes,
+                    entry_bytes,
+                    soft_bytes = self.limits.soft_bytes,
+                    hard_bytes = self.limits.hard_bytes,
+                    error = %error,
+                    "neutron_wal_compaction_deferred"
+                );
+                self.append_serialized(&bytes)
+            }
+            Err(CheckpointInstallError::BeforeRename(error)) => Err(self.hard_capacity_error(
+                current_bytes,
+                entry_bytes,
+                Some(checkpoint_bytes),
+                Some(&error),
+            )),
+            Err(CheckpointInstallError::AfterRename(error)) => Err(format!(
+                "Neutron WAL checkpoint durability failed after rename: {}",
+                error
+            )),
+        }
+    }
+
+    fn append_serialized(&self, bytes: &[u8]) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("create Neutron WAL directory {}: {}", parent.display(), e))?;
@@ -559,14 +980,9 @@ impl NeutronWal {
             .open(&self.path)
             .map_err(|e| format!("open Neutron WAL {}: {}", self.path.display(), e))?;
         let mut writer = BufWriter::new(file);
-        let line = serde_json::to_string(entry)
-            .map_err(|e| format!("serialize Neutron WAL entry: {}", e))?;
         writer
-            .write_all(line.as_bytes())
+            .write_all(bytes)
             .map_err(|e| format!("write Neutron WAL entry: {}", e))?;
-        writer
-            .write_all(b"\n")
-            .map_err(|e| format!("write Neutron WAL newline: {}", e))?;
         writer
             .flush()
             .map_err(|e| format!("flush Neutron WAL: {}", e))?;
