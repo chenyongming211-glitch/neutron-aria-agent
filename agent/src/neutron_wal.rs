@@ -615,6 +615,20 @@ mod tests {
         std::env::temp_dir().join(format!("aria-neutron-wal-test-{}", nanos))
     }
 
+    fn lifecycle_wal(root: &Path, soft_bytes: u64, hard_bytes: u64) -> NeutronWal {
+        NeutronWal::with_limits(
+            root,
+            NeutronWalLimits {
+                soft_bytes,
+                hard_bytes,
+            },
+        )
+    }
+
+    fn wal_bytes(root: &Path) -> Vec<u8> {
+        fs::read(root.join(WAL_FILE)).expect("WAL bytes should be readable")
+    }
+
     fn managed(port_id: &str, ifname: &str) -> ManagedNeutronPort {
         ManagedNeutronPort {
             port_id: port_id.to_string(),
@@ -727,6 +741,11 @@ mod tests {
             port_statuses,
             ..NeutronWalState::default()
         }
+    }
+
+    fn append_ready_commit(wal: &NeutronWal, generation: u64) {
+        wal.append_snapshot_commit(neutron_wal_baseline_state(generation))
+            .expect("ready commit should be durable");
     }
 
     fn protected_inventory_resolver_state(
@@ -1847,6 +1866,195 @@ mod tests {
         );
         assert_eq!(1, replay.state.ports.len());
         assert_eq!(1, replay.state.port_statuses.len());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_compaction_bounds_repeated_commits_and_replays_latest_state() {
+        let root = temp_state_path();
+        let wal = lifecycle_wal(&root, 1, 16 * 1024);
+
+        for generation in 1..=40 {
+            append_ready_commit(&wal, generation);
+        }
+
+        let raw = wal_bytes(&root);
+        let replay = wal.replay();
+        assert!(raw.len() <= 16 * 1024);
+        assert_eq!(40, replay.state.applied_generation);
+        assert_eq!(
+            Some("hash-40".to_string()),
+            replay.state.applied_desired_hash
+        );
+        assert_eq!(0, replay.failures);
+        assert!(replay.pending_intent.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_compaction_preserves_snapshot_pending_baseline() {
+        let root = temp_state_path();
+        let wal = lifecycle_wal(&root, 1, 16 * 1024);
+        append_ready_commit(&wal, 10);
+        wal.append_snapshot_intent(
+            11,
+            Some("hash-11".to_string()),
+            vec!["p2".to_string()],
+            vec!["attach".to_string(), "acl".to_string()],
+            vec![managed("p2", "tap-p2")],
+            None,
+        )
+        .unwrap();
+        wal.compact_now_for_test().unwrap();
+
+        let replay = wal.replay();
+        assert_eq!(10, replay.state.applied_generation);
+        assert_eq!(
+            Some("hash-10".to_string()),
+            replay.state.applied_desired_hash
+        );
+        assert_eq!(Some(11), replay.state.pending_generation);
+        assert_eq!("wal_intent_without_commit", replay.state.authority_state);
+        assert_eq!("snapshot", replay.pending_intent.unwrap().kind);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_compaction_preserves_legacy_delete_intent_without_port() {
+        let root = temp_state_path();
+        let wal = lifecycle_wal(&root, 1, 16 * 1024);
+        append_ready_commit(&wal, 20);
+        append_wal_value(
+            &root,
+            &serde_json::json!({
+                "type": "delete_intent",
+                "port_id": "p1",
+                "generation": 21,
+                "affected_domains": ["attach", "acl"]
+            }),
+        );
+        wal.compact_now_for_test().unwrap();
+
+        let replay = wal.replay();
+        let intent = replay.pending_intent.unwrap();
+        assert_eq!("delete", intent.kind);
+        assert_eq!(21, intent.generation);
+        assert_eq!(vec!["p1".to_string()], intent.port_ids);
+        assert!(intent.affected_ports.is_empty());
+        assert_eq!(20, replay.state.applied_generation);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_compaction_preserves_protected_inventory_intent_and_closure() {
+        let root = temp_state_path();
+        let wal = lifecycle_wal(&root, 1, 16 * 1024);
+        let baseline = neutron_wal_baseline_state(30);
+        wal.append_snapshot_commit(baseline.clone()).unwrap();
+        append_protected_inventory_intent(&wal, 31);
+        wal.compact_now_for_test().unwrap();
+
+        let replay = wal.replay();
+        assert_eq!(0, replay.failures);
+        assert_eq!("intent_without_commit", replay.status);
+        let intent = replay.pending_intent.clone().unwrap();
+        assert_eq!(
+            Some(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE),
+            intent.recovery_cause.as_deref()
+        );
+        let blocked = protected_inventory_resolver_state(&baseline, 31);
+        let resolved = wal
+            .append_verified_protected_inventory_commit(&intent, blocked)
+            .unwrap();
+        assert_eq!(INVENTORY_UNAVAILABLE_RECOVERY_CAUSE, resolved.status);
+        assert!(resolved.pending_intent.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_compaction_refuses_uncertain_replay_and_preserves_prefix() {
+        let root = temp_state_path();
+        let wal = lifecycle_wal(&root, 1, 64 * 1024);
+        append_ready_commit(&wal, 40);
+        let path = root.join(WAL_FILE);
+        let mut raw = wal_bytes(&root);
+        raw.extend_from_slice(b"{not-json}\n");
+        fs::write(&path, &raw).unwrap();
+
+        append_ready_commit(&wal, 41);
+
+        let after = wal_bytes(&root);
+        assert!(after.starts_with(&raw));
+        assert_eq!(1, wal.replay().failures);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_hard_capacity_rejection_preserves_live_bytes() {
+        let root = temp_state_path();
+        let seed = NeutronWal::new(&root);
+        append_ready_commit(&seed, 50);
+        let before = wal_bytes(&root);
+        let wal = lifecycle_wal(&root, 1, 1);
+
+        let error = wal
+            .append_snapshot_commit(neutron_wal_baseline_state(51))
+            .unwrap_err();
+
+        assert!(error.starts_with("neutron WAL hard capacity exceeded"));
+        assert_eq!(before, wal_bytes(&root));
+        assert_eq!(50, wal.replay().state.applied_generation);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_ignores_and_replaces_stale_checkpoint_temp_file() {
+        let root = temp_state_path();
+        let wal = lifecycle_wal(&root, 1, 16 * 1024);
+        append_ready_commit(&wal, 60);
+        fs::write(
+            wal.checkpoint_temp_path_for_test(),
+            b"{\"type\":\"snapshot_commit\",\"state\":",
+        )
+        .unwrap();
+
+        append_ready_commit(&wal, 61);
+
+        assert_eq!(61, wal.replay().state.applied_generation);
+        assert!(!wal.checkpoint_temp_path_for_test().exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_pre_rename_compaction_failure_falls_back_below_hard_limit() {
+        let root = temp_state_path();
+        let wal = lifecycle_wal(&root, 1, 64 * 1024);
+        append_ready_commit(&wal, 70);
+        let before = wal_bytes(&root);
+        fs::create_dir_all(wal.checkpoint_temp_path_for_test()).unwrap();
+
+        append_ready_commit(&wal, 71);
+
+        let after = wal_bytes(&root);
+        assert!(after.starts_with(&before));
+        assert_eq!(71, wal.replay().state.applied_generation);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_oversized_legacy_history_compacts_and_accepts_new_commit() {
+        let root = temp_state_path();
+        let seed = NeutronWal::new(&root);
+        for generation in 80..=100 {
+            append_ready_commit(&seed, generation);
+        }
+        let legacy_len = wal_bytes(&root).len();
+        let wal = lifecycle_wal(&root, 1, legacy_len as u64);
+
+        append_ready_commit(&wal, 101);
+
+        assert!(wal_bytes(&root).len() < legacy_len);
+        assert_eq!(101, wal.replay().state.applied_generation);
         let _ = fs::remove_dir_all(root);
     }
 }
