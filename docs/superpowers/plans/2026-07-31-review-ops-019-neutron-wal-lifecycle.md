@@ -651,7 +651,7 @@ checkpointing, unresolved-intent preservation, corruption refusal, atomic
 replacement, fixed thresholds, and hard-cap pre-write rejection. Link exact
 RED/GREEN builds.
 
-- [ ] **Step 4: Commit and push documentation closure**
+- [x] **Step 4: Commit and push documentation closure**
 
 Run:
 
@@ -664,7 +664,7 @@ git commit -m "docs: close bounded Neutron WAL lifecycle"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 5: Verify exact-head documentation CI and repository state**
+- [x] **Step 5: Verify exact-head documentation CI and repository state**
 
 Run:
 
@@ -717,3 +717,9 @@ passed:
 
 The production constants are 16 MiB soft and 64 MiB hard. No privileged field
 evidence applies to this filesystem-only repair.
+
+Documentation closure commit `c7e45e4` updated the design, this plan, and the
+authoritative register. Exact-head Build
+[`30601933087`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601933087)
+passed `fast-contracts` and change detection; Rust jobs correctly skipped
+because the closure changed documentation only.
