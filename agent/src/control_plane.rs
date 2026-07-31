@@ -11006,7 +11006,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_general_delta_persistence_failure_restores_both_preimages() {
+    fn managed_general_delta_persistence_failure_restores_only_general_preimages() {
         let applied = vec![managed_replacement("src"), managed_replacement("dst")];
 
         assert_eq!(
@@ -11015,7 +11015,6 @@ mod tests {
                 ManagedAclPublicationFailurePhase::Persist,
             ),
             vec![
-                ManagedAclPublicationCompensation::RestoreActiveBank,
                 managed_expected_general_restore("dst"),
                 managed_expected_general_restore("src")
             ]
@@ -11023,7 +11022,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_acl_publication_persists_before_epoch_and_bank_switch() {
+    fn managed_general_delta_persists_before_epoch_and_bank_switch() {
         let decision = managed_acl_publication_decision(ProjectionDrift::Clean, true)
             .expect("a semantic ACL change must publish");
         let steps = managed_acl_publication_steps(&decision, Vec::new());
@@ -11044,7 +11043,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_acl_final_persistence_failure_does_not_restore_unpublished_bank() {
+    fn managed_general_delta_persistence_failure_does_not_restore_unpublished_bank() {
         let compensations = managed_acl_publication_compensations(
             &[managed_replacement("src")],
             ManagedAclPublicationFailurePhase::Persist,
@@ -11057,7 +11056,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_acl_uncertain_bank_switch_failure_restores_old_bank_first() {
+    fn managed_general_delta_uncertain_bank_switch_failure_restores_old_bank_first() {
         let compensations = managed_acl_publication_compensations(
             &[managed_replacement("src"), managed_replacement("dst")],
             ManagedAclPublicationFailurePhase::SwitchBank,
@@ -11257,11 +11256,11 @@ mod tests {
     }
 
     #[test]
-    fn managed_general_delta_compensation_failure_attempts_every_preimage() {
+    fn managed_bank_switch_compensation_failure_attempts_every_preimage() {
         let applied = vec![managed_replacement("src"), managed_replacement("dst")];
         let compensations = managed_acl_publication_compensations(
             &applied,
-            ManagedAclPublicationFailurePhase::Persist,
+            ManagedAclPublicationFailurePhase::SwitchBank,
         );
         let mut attempted = Vec::new();
 
