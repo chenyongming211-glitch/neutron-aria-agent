@@ -434,6 +434,34 @@ class AriaAclPluginTestCase(unittest.TestCase):
         )
         self.assertEqual(["ostack3"], [status["host"] for status in statuses])
 
+    def test_derived_status_id_update_changes_only_exact_host(self):
+        from neutron_aria.db.aria_acl.query import encode_port_status_id
+
+        plugin = AriaAclPlugin(now=lambda: 200.0)
+        for host in ("ostack2", "ostack3"):
+            plugin.report_aria_acl_port_status(None, {
+                "port_id": "port-1",
+                "host": host,
+                "status": "ready",
+            })
+
+        updated = plugin.update_aria_acl_port_status(
+            None,
+            encode_port_status_id("port-1", "ostack3"),
+            {"status": "degraded"},
+        )
+
+        self.assertEqual("ostack3", updated["host"])
+        self.assertEqual("degraded", updated["status"])
+        self.assertEqual(
+            "ready",
+            plugin.get_aria_acl_port_status(
+                None,
+                "port-1",
+                host="ostack2",
+            )["status"],
+        )
+
     def test_legacy_status_delete_removes_all_hosts(self):
         plugin = AriaAclPlugin(now=lambda: 200.0)
         for host in ("ostack2", "ostack3"):

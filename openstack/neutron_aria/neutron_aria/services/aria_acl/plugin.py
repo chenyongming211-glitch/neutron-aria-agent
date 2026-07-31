@@ -9,6 +9,7 @@ from neutron_aria.acl_contract import port_contract_eligibility
 from neutron_aria.db.aria_acl.api import InMemoryAriaAclRepository
 from neutron_aria.db.aria_acl.api import NeutronDbAriaAclRepository
 from neutron_aria.db.aria_acl.query import PortStatusProjection
+from neutron_aria.db.aria_acl.query import decode_port_status_id
 from neutron_aria.db.aria_acl.query import project_fields
 from neutron_aria.services.aria_acl.exceptions import ErrorMappingRepositoryProxy
 
@@ -264,8 +265,23 @@ class AriaAclPlugin(object):
 
     def update_aria_acl_port_status(self, context, port_id, aria_acl_port_status):
         values = self._unwrap(aria_acl_port_status, "aria_acl_port_status")
-        values.setdefault("port_id", port_id)
-        return self._project_port_status(self._repo(context).upsert_port_status(values))
+        repository = self._repo(context)
+        if port_id.startswith("aria-status-v1."):
+            exact_port_id, exact_host = decode_port_status_id(port_id)
+            existing = repository.get_port_status(
+                exact_port_id,
+                host=exact_host,
+            )
+            if existing is None:
+                repository.get_port_status_resource(port_id)
+            current = dict(existing)
+            current.update(values)
+            current["port_id"] = exact_port_id
+            current["host"] = exact_host
+            values = current
+        else:
+            values.setdefault("port_id", port_id)
+        return self._project_port_status(repository.upsert_port_status(values))
 
     def get_aria_acl_port_statuses(
         self,
