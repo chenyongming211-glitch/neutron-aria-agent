@@ -2,6 +2,7 @@ from __future__ import absolute_import
 
 import json
 
+from neutron_aria.agent.config import resolved_acl_page_size
 from neutron_aria.agent.effective_acl import EffectiveAclIndex
 
 
@@ -128,7 +129,9 @@ def build_acl_source(config, neutron_client=None):
         if neutron_client is None:
             try:
                 from neutron_aria.agent.neutron_client import build_aria_acl_client_from_env
-                neutron_client = build_aria_acl_client_from_env()
+                neutron_client = build_aria_acl_client_from_env(
+                    page_size=resolved_acl_page_size(config)
+                )
             except Exception as exc:
                 raise AclSourceError(
                     "neutron acl source requires aria_acl Neutron API/DB extension: %s" % exc

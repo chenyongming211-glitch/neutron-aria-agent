@@ -38,6 +38,18 @@ class ConfigError(Exception):
     pass
 
 
+def _optional_positive_int(value, option):
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ConfigError("%s must be a positive integer" % option)
+    if parsed <= 0:
+        raise ConfigError("%s must be a positive integer" % option)
+    return parsed
+
+
 class AgentConfig(object):
     def __init__(
         self,
@@ -53,6 +65,7 @@ class AgentConfig(object):
         full_resync_enabled=False,
         port_source=DEFAULT_PORT_SOURCE,
         port_page_size=None,
+        acl_page_size=None,
         resync_backoff_initial=5,
         resync_backoff_max=300,
         rpc_events_enabled=False,
@@ -76,7 +89,12 @@ class AgentConfig(object):
         self.report_interval = int(report_interval)
         self.full_resync_enabled = bool(full_resync_enabled)
         self.port_source = port_source or DEFAULT_PORT_SOURCE
-        self.port_page_size = int(port_page_size) if port_page_size else None
+        self.port_page_size = _optional_positive_int(
+            port_page_size, "neutron.port_page_size"
+        )
+        self.acl_page_size = _optional_positive_int(
+            acl_page_size, "neutron.acl_page_size"
+        )
         self.resync_backoff_initial = int(resync_backoff_initial)
         self.resync_backoff_max = int(resync_backoff_max)
         self.rpc_events_enabled = bool(rpc_events_enabled)
@@ -228,6 +246,12 @@ def sync_mode(config):
     return SYNC_MODE_RPC_PORT_SCOPED
 
 
+def resolved_acl_page_size(config):
+    if config.acl_page_size is not None:
+        return config.acl_page_size
+    return config.port_page_size
+
+
 def _validate_loaded_config(parser, config):
     if _has_option_anywhere(parser, "integration_mode"):
         raise ConfigError(
@@ -237,8 +261,7 @@ def _validate_loaded_config(parser, config):
 
 
 def load_config(path):
-    parser_class = getattr(configparser, "SafeConfigParser", configparser.ConfigParser)
-    parser = parser_class()
+    parser = configparser.ConfigParser()
     parser.read(path)
     config = AgentConfig(
         host=_get(parser, "agent", "host"),
@@ -273,6 +296,7 @@ def load_config(path):
         ),
         port_source=_get(parser, "neutron", "port_source", DEFAULT_PORT_SOURCE),
         port_page_size=_get(parser, "neutron", "port_page_size"),
+        acl_page_size=_get(parser, "neutron", "acl_page_size"),
         resync_backoff_initial=_get(parser, "agent", "resync_backoff_initial", "5"),
         resync_backoff_max=_get(parser, "agent", "resync_backoff_max", "300"),
         rpc_events_enabled=_parse_bool(

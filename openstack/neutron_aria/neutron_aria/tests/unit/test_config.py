@@ -5,7 +5,9 @@ import tempfile
 import unittest
 
 from neutron_aria.agent.config import ConfigError
+from neutron_aria.agent.config import AgentConfig
 from neutron_aria.agent.config import load_config
+from neutron_aria.agent.config import resolved_acl_page_size
 from neutron_aria.agent.config import sync_mode
 
 
@@ -42,6 +44,7 @@ timeout_convergence_interval = 0.4
 [neutron]
 port_source = neutronclient
 port_page_size = 50
+acl_page_size = 25
 rpc_events_enabled = true
 incremental_rpc_enabled = false
 revisionless_incremental_mode = disabled
@@ -67,6 +70,7 @@ fixture_path = /tmp/aria-acl-fixture.json
             self.assertEqual("/tmp/neutron-aria-state", config.state_dir)
             self.assertEqual("neutronclient", config.port_source)
             self.assertEqual(50, config.port_page_size)
+            self.assertEqual(25, config.acl_page_size)
             self.assertTrue(config.rpc_events_enabled)
             self.assertFalse(config.incremental_rpc_enabled)
             self.assertEqual("disabled", config.revisionless_incremental_mode)
@@ -84,6 +88,28 @@ fixture_path = /tmp/aria-acl-fixture.json
             if fd is not None:
                 os.close(fd)
             os.unlink(path)
+
+    def test_acl_page_size_uses_explicit_value_or_port_page_size_fallback(self):
+        self.assertEqual(25, AgentConfig(acl_page_size=25).acl_page_size)
+        self.assertEqual(
+            50,
+            resolved_acl_page_size(
+                AgentConfig(acl_page_size=None, port_page_size=50)
+            ),
+        )
+
+    def test_rejects_non_positive_page_sizes(self):
+        for option in ("port_page_size", "acl_page_size"):
+            for value in ("0", "-1"):
+                path = self._write_config("""
+[neutron]
+%s = %s
+""" % (option, value))
+                try:
+                    with self.assertRaises(ConfigError):
+                        load_config(path)
+                finally:
+                    os.unlink(path)
 
     def test_defaults_acl_source_to_disabled_without_fixture(self):
         fd, path = tempfile.mkstemp()

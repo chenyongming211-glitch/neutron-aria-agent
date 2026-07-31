@@ -154,6 +154,20 @@ def run_python_tests():
     run([sys.executable, "-m", "unittest", "discover", "-s", PYTHON_TEST_ROOT, "-p", "test_*.py"], env=env)
 
 
+def run_neutronclient_extension_tests():
+    env = os.environ.copy()
+    root = os.path.join(ROOT, "openstack", "neutronclient_aria")
+    env["PYTHONPATH"] = root + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+    )
+    run([
+        sys.executable,
+        "-m",
+        "unittest",
+        "neutronclient_aria.tests.test_aria_acl_cli",
+    ], env=env)
+
+
 def rust_test_filter(command):
     package = command.index("-p") + 2
     tail = command[package:]
@@ -424,6 +438,7 @@ def run_fragment_tracking_field_driver_self_test():
 
 def run_fast_contracts():
     run_python_tests()
+    run_neutronclient_extension_tests()
     check_packaged_ini_contract()
     check_documented_ini_contract()
     check_uds_contract_artifact()

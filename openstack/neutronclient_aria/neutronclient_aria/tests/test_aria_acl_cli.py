@@ -1,4 +1,5 @@
 import argparse
+import io
 import sys
 import types
 import unittest
@@ -14,8 +15,36 @@ except ImportError:
         def __init__(self, *args, **kwargs):
             self.app = args[0] if args else None
 
-    extension.ClientExtensionList = StubCommand
-    extension.ClientExtensionShow = StubCommand
+        def get_client(self):
+            return self.app.client_manager.neutron
+
+        def format_output_data(self, data):
+            return data
+
+    class StubListCommand(StubCommand):
+        def get_parser(self, prog_name):
+            parser = argparse.ArgumentParser(prog=prog_name)
+            parser.add_argument("--request-format", default="json")
+            if self.pagination_support:
+                parser.add_argument("--page-size", type=int)
+            if self.sorting_support:
+                parser.add_argument("--sort-key", action="append", default=[])
+                parser.add_argument("--sort-dir", action="append", default=[])
+            self.add_known_arguments(parser)
+            return parser
+
+        def add_known_arguments(self, parser):
+            return None
+
+    class StubShowCommand(StubCommand):
+        def get_parser(self, prog_name):
+            parser = argparse.ArgumentParser(prog=prog_name)
+            parser.add_argument("--request-format", default="json")
+            parser.add_argument("id")
+            return parser
+
+    extension.ClientExtensionList = StubListCommand
+    extension.ClientExtensionShow = StubShowCommand
     extension.ClientExtensionDelete = StubCommand
     extension.ClientExtensionCreate = StubCommand
     extension.ClientExtensionUpdate = StubCommand
@@ -34,7 +63,75 @@ class FakeParsedArgs(object):
     enabled = None
 
 
+class FakeClientManager(object):
+    def __init__(self, neutron):
+        self.neutron = neutron
+
+
+class FakeApp(object):
+    def __init__(self, neutron):
+        self.client_manager = FakeClientManager(neutron)
+        self.stdout = io.StringIO()
+
+
 class AriaAclCliTest(unittest.TestCase):
+    def test_list_parser_forwards_native_page_and_sort_options(self):
+        class FakeClient(object):
+            def __init__(self):
+                self.calls = []
+
+            def list_ext(self, collection, path, retrieve_all, **kwargs):
+                self.calls.append((collection, path, retrieve_all, kwargs))
+                return {"aria_acl_policies": []}
+
+        client = FakeClient()
+        app = FakeApp(client)
+        command = aria_acl.AriaAclPolicyList(app, None)
+        parser = command.get_parser("aria-acl-policy-list")
+        parsed_args = parser.parse_args([
+            "--page-size", "25",
+            "--sort-key", "name",
+            "--sort-dir", "desc",
+        ])
+
+        command.retrieve_list(parsed_args)
+
+        self.assertTrue(command.pagination_support)
+        self.assertTrue(command.sorting_support)
+        self.assertEqual(
+            ("aria_acl_policies", "/aria-acl-policies", True, {
+                "limit": 25,
+                "sort_key": ["name"],
+                "sort_dir": ["desc"],
+            }),
+            client.calls[0],
+        )
+
+    def test_status_show_forwards_derived_id_unchanged(self):
+        derived_id = "aria-status-v1.cG9ydC0xAG9zdGFjazI"
+
+        class FakeClient(object):
+            def __init__(self):
+                self.calls = []
+
+            def show_ext(self, path, resource_id):
+                self.calls.append((path, resource_id))
+                return {"aria_acl_port_status": {"id": resource_id}}
+
+        client = FakeClient()
+        app = FakeApp(client)
+        command = aria_acl.AriaAclPortStatusShow(app, None)
+        parsed_args = command.get_parser("aria-acl-port-status-show").parse_args([
+            derived_id,
+        ])
+
+        command.execute(parsed_args)
+
+        self.assertEqual(
+            ("/aria-acl-port-statuses/%s", derived_id),
+            client.calls[0],
+        )
+
     def test_policy_parser_rejects_default_deny(self):
         parser = argparse.ArgumentParser()
         aria_acl.AriaAclPolicyCreate(None, None).add_known_arguments(parser)

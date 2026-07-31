@@ -30,8 +30,8 @@ def _protocol(value):
 
 
 class _AriaAclCommandMixin(object):
-    pagination_support = False
-    sorting_support = False
+    pagination_support = True
+    sorting_support = True
     resource = None
     collection = None
     path = None
@@ -74,9 +74,25 @@ class _AriaAclList(_AriaAclCommandMixin, extension.ClientExtensionList):
 
     def retrieve_list(self, parsed_args):
         neutron_client = self._client(parsed_args)
+        search_opts = self.args2search_opts(parsed_args)
+        if self.pagination_support:
+            page_size = getattr(parsed_args, "page_size", None)
+            if page_size:
+                search_opts["limit"] = page_size
+        if self.sorting_support:
+            keys = list(getattr(parsed_args, "sort_key", None) or [])
+            dirs = list(getattr(parsed_args, "sort_dir", None) or [])
+            if keys:
+                search_opts["sort_key"] = keys
+            if len(keys) > len(dirs):
+                dirs.extend(["asc"] * (len(keys) - len(dirs)))
+            elif len(dirs) > len(keys):
+                dirs = dirs[:len(keys)]
+            if dirs:
+                search_opts["sort_dir"] = dirs
         return self.call_server(
             neutron_client,
-            self.args2search_opts(parsed_args),
+            search_opts,
             parsed_args,
         ).get(self.collection, [])
 
@@ -89,7 +105,12 @@ class _AriaAclList(_AriaAclCommandMixin, extension.ClientExtensionList):
         return opts
 
     def call_server(self, neutron_client, search_opts, parsed_args):
-        return neutron_client.list_ext(self.path, **search_opts)
+        return neutron_client.list_ext(
+            self.collection,
+            self.path,
+            True,
+            **search_opts
+        )
 
 
 class _AriaAclShow(_AriaAclCommandMixin, extension.ClientExtensionShow):
@@ -513,7 +534,7 @@ class AriaAclPortStatusList(_AriaAclList):
     path = "/aria-acl-port-statuses"
     object_path = "/aria-acl-port-statuses"
     list_columns = [
-        "port_id", "host", "status", "effective_action",
+        "id", "port_id", "host", "status", "effective_action",
         "effective_policy_id", "binding_id", "generation", "stale",
     ]
 

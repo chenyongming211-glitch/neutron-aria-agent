@@ -14,9 +14,50 @@ from neutron_aria.agent.acl_source import build_acl_source
 from neutron_aria.agent.config import AgentConfig
 from neutron_aria.agent.neutron_client import AriaAclRestClient
 from neutron_aria.agent.neutron_client import NeutronClientFactoryError
+from neutron_aria.agent.neutron_client import build_port_source
 
 
 class AclSourceTestCase(unittest.TestCase):
+    def test_neutron_acl_factory_receives_acl_page_size_only(self):
+        from neutron_aria.agent import neutron_client as neutron_client_module
+
+        calls = []
+        original_acl_factory = neutron_client_module.build_aria_acl_client_from_env
+        original_neutron_factory = neutron_client_module.build_neutronclient_from_env
+
+        class FakeAclClient(object):
+            pass
+
+        class FakeNeutronClient(object):
+            pass
+
+        def fake_acl_factory(env=None, page_size=None):
+            calls.append(("acl", page_size))
+            return FakeAclClient()
+
+        def fake_neutron_factory(env=None):
+            calls.append(("port", None))
+            return FakeNeutronClient()
+
+        neutron_client_module.build_aria_acl_client_from_env = fake_acl_factory
+        neutron_client_module.build_neutronclient_from_env = fake_neutron_factory
+        try:
+            config = AgentConfig(
+                acl_source="neutron",
+                acl_page_size=25,
+                port_source="neutronclient",
+                port_page_size=50,
+            )
+            acl_source = build_acl_source(config)
+            port_source = build_port_source(config, "ostack2")
+        finally:
+            neutron_client_module.build_aria_acl_client_from_env = original_acl_factory
+            neutron_client_module.build_neutronclient_from_env = original_neutron_factory
+
+        self.assertIsInstance(acl_source.neutron_client, FakeAclClient)
+        self.assertEqual(25, calls[0][1])
+        self.assertEqual(50, port_source.page_size)
+
     def test_disabled_source_returns_no_index(self):
         source = build_acl_source(AgentConfig(acl_source="disabled"))
 
@@ -317,6 +358,78 @@ class AclSourceTestCase(unittest.TestCase):
         self.assertEqual({"limit": 1}, client.calls[0][1])
         self.assertEqual({"limit": 1, "marker": "policy-1"}, client.calls[1][1])
 
+    def test_aria_acl_rest_client_pages_status_rows_by_derived_id(self):
+        first_id = "aria-status-v1.cG9ydC0xAG9zdGFjazI"
+        second_id = "aria-status-v1.cG9ydC0yAG9zdGFjazI"
+
+        class FakeNeutronClient(object):
+            def __init__(self):
+                self.calls = []
+
+            def get(self, path, params=None):
+                params = dict(params or {})
+                self.calls.append((path, params))
+                if not params.get("marker"):
+                    return {
+                        "aria_acl_port_statuses": [{
+                            "id": first_id,
+                            "port_id": "port-1",
+                            "host": "ostack2",
+                        }],
+                        "aria_acl_port_statuses_links": [{"rel": "next"}],
+                    }
+                return {
+                    "aria_acl_port_statuses": [{
+                        "id": second_id,
+                        "port_id": "port-2",
+                        "host": "ostack2",
+                    }],
+                    "aria_acl_port_statuses_links": [],
+                }
+
+        client = FakeNeutronClient()
+        result = AriaAclRestClient(
+            client, page_size=1
+        ).list_aria_acl_port_statuses()
+
+        self.assertEqual(2, len(result["aria_acl_port_statuses"]))
+        self.assertEqual(first_id, result["aria_acl_port_statuses"][0]["id"])
+        self.assertEqual(
+            {"limit": 1, "marker": first_id}, client.calls[1][1]
+        )
+
+    def test_neutron_source_does_not_return_partial_index_on_page_failure(self):
+        class FakeNeutronClient(object):
+            def __init__(self):
+                self.policy_pages = 0
+
+            def get(self, path, params=None):
+                params = dict(params or {})
+                if path != "/aria-acl-policies":
+                    collection = dict(
+                        (value, key)
+                        for key, value in AriaAclRestClient.COLLECTIONS.items()
+                    )[path]
+                    return {collection: []}
+                self.policy_pages += 1
+                if self.policy_pages == 3:
+                    raise RuntimeError("page 3 unavailable")
+                policy_id = "policy-%s" % self.policy_pages
+                return {
+                    "aria_acl_policies": [{"id": policy_id}],
+                    "aria_acl_policies_links": [{"rel": "next"}],
+                }
+
+        client = FakeNeutronClient()
+        source = NeutronAclSource(AriaAclRestClient(client, page_size=1))
+        published = []
+
+        with self.assertRaises(AclSourceError):
+            published.append(source.load_index())
+
+        self.assertEqual([], published)
+        self.assertEqual(3, client.policy_pages)
+
     def test_aria_acl_rest_client_rejects_missing_collection_key(self):
         class FakeNeutronClient(object):
             def get(self, path):
@@ -332,6 +445,19 @@ class AclSourceTestCase(unittest.TestCase):
             def get(self, path, params=None):
                 return {
                     "aria_acl_policies": [{"id": "policy-1"}],
+                    "aria_acl_policies_links": [{"rel": "next"}],
+                }
+
+        self.assertRaises(
+            NeutronClientFactoryError,
+            AriaAclRestClient(FakeNeutronClient(), page_size=1).list_aria_acl_policies,
+        )
+
+    def test_aria_acl_rest_client_rejects_missing_pagination_marker(self):
+        class FakeNeutronClient(object):
+            def get(self, path, params=None):
+                return {
+                    "aria_acl_policies": [{"name": "missing-id"}],
                     "aria_acl_policies_links": [{"rel": "next"}],
                 }
 

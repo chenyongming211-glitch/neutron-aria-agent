@@ -140,10 +140,16 @@ class AriaAclRestClient(object):
             if not self._has_next_link(payload.get("%s_links" % collection, [])):
                 break
             if not batch:
-                break
+                raise NeutronClientFactoryError(
+                    "aria_acl response for %s has a next page but no pagination marker"
+                    % self.COLLECTIONS[collection]
+                )
             next_marker = batch[-1].get("id")
             if not next_marker:
-                break
+                raise NeutronClientFactoryError(
+                    "aria_acl response for %s has a next page but no pagination marker"
+                    % self.COLLECTIONS[collection]
+                )
             if next_marker in seen_markers:
                 raise NeutronClientFactoryError(
                     "aria_acl response for %s repeated pagination marker %s"
@@ -265,8 +271,11 @@ def build_neutronclient_from_env(env=None):
     return neutron_client.Client(**neutron_client_kwargs_from_env(env=env))
 
 
-def build_aria_acl_client_from_env(env=None):
-    return AriaAclRestClient(build_neutronclient_from_env(env=env))
+def build_aria_acl_client_from_env(env=None, page_size=None):
+    return AriaAclRestClient(
+        build_neutronclient_from_env(env=env),
+        page_size=page_size,
+    )
 
 
 def build_port_source(config, host, env=None):
