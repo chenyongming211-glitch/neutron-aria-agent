@@ -127,17 +127,33 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
         self.assertEqual(["p1"], scoped_pending.get("affected_port_ids"))
         self.assertEqual(["p1", "p2"], scoped_pending["projected_port_ids"])
 
-    def test_new_desired_state_advances_after_pending_generation(self):
+    def test_new_desired_state_cannot_replace_pending_generation(self):
         store = SnapshotStateStore(self.state_dir)
         first = store.prepare_snapshot(self._snapshot("p1"))
-        second = store.prepare_snapshot(self._snapshot("p2"))
+        pending_before = copy.deepcopy(store.pending_snapshot())
+        state_before = copy.deepcopy(store.to_dict())
 
         self.assertEqual(1, first["generation"])
-        self.assertEqual(2, second["generation"])
+        with self.assertRaises(RuntimeError):
+            store.prepare_snapshot(self._snapshot("p2"))
+        self.assertEqual(pending_before, store.pending_snapshot())
+        self.assertEqual(state_before, store.to_dict())
         self.assertTrue(os.path.exists(os.path.join(
             self.state_dir,
             "snapshot-state.json",
         )))
+
+    def test_scoped_desired_state_cannot_replace_full_pending_generation(self):
+        store = SnapshotStateStore(self.state_dir)
+        store.prepare_snapshot(self._snapshot("p1"))
+        pending_before = copy.deepcopy(store.pending_snapshot())
+        state_before = copy.deepcopy(store.to_dict())
+
+        with self.assertRaises(RuntimeError):
+            store.prepare_scoped_snapshot(self._snapshot("p2"))
+
+        self.assertEqual(pending_before, store.pending_snapshot())
+        self.assertEqual(state_before, store.to_dict())
 
     def test_prepare_advances_beyond_remote_generation_floor(self):
         store = SnapshotStateStore(self.state_dir)

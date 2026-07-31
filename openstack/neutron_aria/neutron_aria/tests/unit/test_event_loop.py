@@ -403,6 +403,27 @@ class DeleteTimeoutNotConvergedLocalClient(FakeLocalClient):
         }
 
 
+class DeleteResponseErrorLocalClient(FakeLocalClient):
+    def delete_port(self, port_id):
+        self.deleted_ports.append(port_id)
+        return {
+            "port_id": port_id,
+            "status": "error",
+            "detached": False,
+            "error": "purge failed",
+        }
+
+
+class DeleteWrongPortLocalClient(FakeLocalClient):
+    def delete_port(self, port_id):
+        self.deleted_ports.append(port_id)
+        return {
+            "port_id": "different-port",
+            "status": "ok",
+            "detached": True,
+        }
+
+
 class StatusAfterApplyLocalClient(FakeLocalClient):
     def status(self):
         return FakeLocalClient.status(self)
@@ -3676,8 +3697,13 @@ class EventLoopTestCase(unittest.TestCase):
         self.assertEqual(1, len(local_client.port_snapshots))
         self.assertEqual(1, sync.runtime_status.last_generation)
         self.assertEqual(7, sync.projection_index.port(port_id).revision_number)
-        self.assertFalse(sync.runtime_status.degraded)
-        self.assertEqual("ready", sync.runtime_status.reason)
+        self.assertTrue(sync.runtime_status.degraded)
+        self.assertFalse(sync.runtime_status.ready)
+        self.assertEqual(
+            "pending_snapshot_unresolved",
+            sync.runtime_status.reason,
+        )
+        self.assertIsNotNone(sync.state_store.pending_snapshot())
 
     def test_scoped_snapshot_keeps_prior_state_when_status_hash_mismatches(self):
         state_dir = tempfile.mkdtemp()
@@ -3725,6 +3751,12 @@ class EventLoopTestCase(unittest.TestCase):
             self.assertEqual(1, sync.runtime_status.last_generation)
             self.assertEqual(baseline_hash, sync.runtime_status.last_desired_hash)
             self.assertEqual(1, sync.runtime_status.accepted_generation)
+            self.assertTrue(sync.runtime_status.degraded)
+            self.assertFalse(sync.runtime_status.ready)
+            self.assertEqual(
+                "pending_snapshot_unresolved",
+                sync.runtime_status.reason,
+            )
         finally:
             shutil.rmtree(state_dir)
 
@@ -3767,7 +3799,12 @@ class EventLoopTestCase(unittest.TestCase):
             self.assertEqual(baseline_hash, state["last_desired_hash"])
             self.assertEqual(7, sync.projection_index.port(port_id).revision_number)
             self.assertEqual(1, sync.runtime_status.last_generation)
-            self.assertTrue(sync.runtime_status.ready)
+            self.assertFalse(sync.runtime_status.ready)
+            self.assertTrue(sync.runtime_status.degraded)
+            self.assertEqual(
+                "pending_snapshot_unresolved",
+                sync.runtime_status.reason,
+            )
         finally:
             shutil.rmtree(state_dir)
 
@@ -4168,6 +4205,109 @@ class EventLoopTestCase(unittest.TestCase):
             self.assertEqual("port-1", pending["port_id"])
         finally:
             shutil.rmtree(state_dir)
+
+    def test_delete_port_rejects_explicit_error_without_committing_projection(self):
+        state_dir = tempfile.mkdtemp()
+        try:
+            store = SnapshotStateStore(state_dir)
+            prepared = store.prepare_snapshot({
+                "host": "ostack2",
+                "ports": [{
+                    "port_id": "port-1",
+                    "ifname": "tap-port-1",
+                    "eligible": True,
+                    "managed_domains": ["acl"],
+                }],
+            })
+            store.commit_snapshot(prepared["generation"], prepared["desired_hash"])
+            sync = SnapshotSynchronizer(
+                "ostack2",
+                StaticPortSource([]),
+                FakeOvsReader(),
+                DeleteResponseErrorLocalClient(),
+                state_store=SnapshotStateStore(state_dir),
+            )
+
+            with self.assertRaises(LocalApiError):
+                sync.delete_port("port-1", reason="explicit-error")
+
+            self.assertTrue(sync.has_projected_port("port-1"))
+            self.assertEqual(
+                "port-1",
+                SnapshotStateStore(state_dir).pending_delete()["port_id"],
+            )
+            self.assertTrue(sync.runtime_status.degraded)
+            self.assertEqual(
+                "pending_delete_unresolved",
+                sync.runtime_status.reason,
+            )
+        finally:
+            shutil.rmtree(state_dir)
+
+    def test_delete_port_rejects_mismatched_response_identity(self):
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            DeleteWrongPortLocalClient(),
+        )
+        sync.projected_port_ids.add("port-1")
+
+        with self.assertRaises(LocalApiError):
+            sync.delete_port("port-1", reason="wrong-response-port")
+
+        self.assertTrue(sync.has_projected_port("port-1"))
+        self.assertEqual("port-1", sync.state_store.pending_delete()["port_id"])
+        self.assertTrue(sync.runtime_status.degraded)
+
+    def test_delete_port_removes_cached_runtime_status_after_commit(self):
+        sync = SnapshotSynchronizer(
+            "ostack2",
+            StaticPortSource([]),
+            FakeOvsReader(),
+            FakeLocalClient(),
+        )
+        sync.runtime_status.mark_ready(
+            generation=4,
+            snapshot_ports=2,
+            managed_ports=2,
+            port_statuses=[{
+                "port_id": "port-1",
+                "status": "ready",
+                "domains": [{
+                    "domain": "acl",
+                    "status": "ready",
+                    "effective_action": "enforce",
+                }],
+            }, {
+                "port_id": "port-2",
+                "status": "ready",
+                "domains": [{
+                    "domain": "acl",
+                    "status": "ready",
+                    "effective_action": "enforce",
+                }],
+            }],
+        )
+        sync.projected_port_ids.update(("port-1", "port-2"))
+
+        sync.delete_port("port-1")
+
+        self.assertEqual(
+            ["port-2"],
+            [
+                status["port_id"]
+                for status in sync.runtime_status.last_port_statuses
+            ],
+        )
+        self.assertEqual(
+            1,
+            sum(
+                item["count"]
+                for item in sync.runtime_status.domain_counts
+                if item["domain"] == "acl" and item["status"] == "ready"
+            ),
+        )
 
     def test_pending_delete_recovered_on_restart(self):
         state_dir = tempfile.mkdtemp()

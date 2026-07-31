@@ -270,6 +270,52 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertEqual("local_api_degraded", agent_state["configurations"]["reason"])
         self.assertIn("socket unavailable", agent_state["configurations"]["last_error"])
 
+    def test_global_degraded_rewrites_cached_acl_rows_to_bypass(self):
+        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status.mark_ready(
+            generation=12,
+            snapshot_ports=1,
+            managed_ports=1,
+            port_statuses=[{
+                "port_id": "port-1",
+                "policy_id": "policy-1",
+                "binding_id": "binding-1",
+                "status": "ready",
+                "effective_action": "enforce",
+                "domains": [{
+                    "domain": "acl",
+                    "status": "ready",
+                    "effective_action": "enforce",
+                    "reason": "ready",
+                }],
+            }],
+        )
+
+        runtime_status.mark_degraded(
+            "local_api_degraded",
+            "socket unavailable",
+        )
+
+        row = runtime_status.last_port_statuses[0]
+        self.assertEqual("port-1", row["port_id"])
+        self.assertEqual("policy-1", row["policy_id"])
+        self.assertEqual("binding-1", row["binding_id"])
+        self.assertEqual("degraded", row["status"])
+        self.assertEqual("bypass", row["effective_action"])
+        self.assertEqual("local_api_degraded", row["reason"])
+        self.assertEqual("degraded", row["domains"][0]["status"])
+        self.assertEqual("bypass", row["domains"][0]["effective_action"])
+        self.assertEqual("local_api_degraded", row["domains"][0]["reason"])
+        self.assertIn(
+            {
+                "domain": "acl",
+                "status": "degraded",
+                "effective_action": "bypass",
+                "count": 1,
+            },
+            runtime_status.domain_counts,
+        )
+
     def test_report_failure_is_explicit(self):
         runtime_status = AgentRuntimeStatus("ostack2")
         reporter = NeutronStatusReporter(
@@ -374,6 +420,131 @@ class StatusReporterTestCase(unittest.TestCase):
         self.assertEqual(2, len(result["results"]))
         self.assertEqual(1, len(report_state.calls))
         self.assertEqual(1, len(aria_acl_api.statuses))
+
+    def test_ready_composite_publishes_port_rows_before_heartbeat(self):
+        order = []
+
+        class OrderedReportStateApi(FakeReportStateApi):
+            def report_state(self, context, agent_state, use_call=False):
+                order.append("heartbeat")
+                return FakeReportStateApi.report_state(
+                    self,
+                    context,
+                    agent_state,
+                    use_call,
+                )
+
+        class OrderedAriaAclApi(FakeAriaAclApi):
+            def report_aria_acl_port_status(self, context, body):
+                order.append("port")
+                return FakeAriaAclApi.report_aria_acl_port_status(
+                    self,
+                    context,
+                    body,
+                )
+
+        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status.mark_ready(
+            generation=3,
+            snapshot_ports=1,
+            managed_ports=1,
+            port_statuses=[{"port_id": "port-1", "status": "ready"}],
+        )
+        reporter = CompositeStatusReporter(
+            NeutronStatusReporter(
+                OrderedReportStateApi(),
+                context="ctx",
+                host="ostack2",
+            ),
+            AriaAclPortStatusReporter(
+                OrderedAriaAclApi(),
+                context="ctx",
+                host="ostack2",
+            ),
+        )
+
+        reporter.report(runtime_status)
+
+        self.assertEqual(["port", "heartbeat"], order)
+
+    def test_ready_port_failure_suppresses_new_heartbeat(self):
+        report_state = FakeReportStateApi()
+
+        class FailingAriaAclApi(object):
+            def report_aria_acl_port_status(self, context, body):
+                raise RuntimeError("status database unavailable")
+
+        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status.mark_ready(
+            generation=3,
+            snapshot_ports=1,
+            managed_ports=1,
+            port_statuses=[{"port_id": "port-1", "status": "ready"}],
+        )
+        reporter = CompositeStatusReporter(
+            NeutronStatusReporter(
+                report_state,
+                context="ctx",
+                host="ostack2",
+            ),
+            AriaAclPortStatusReporter(
+                FailingAriaAclApi(),
+                context="ctx",
+                host="ostack2",
+            ),
+        )
+
+        with self.assertRaises(RuntimeError):
+            reporter.report(runtime_status)
+
+        self.assertEqual([], report_state.calls)
+
+    def test_degraded_composite_publishes_heartbeat_before_port_rows(self):
+        order = []
+
+        class OrderedReportStateApi(FakeReportStateApi):
+            def report_state(self, context, agent_state, use_call=False):
+                order.append("heartbeat")
+                return FakeReportStateApi.report_state(
+                    self,
+                    context,
+                    agent_state,
+                    use_call,
+                )
+
+        class OrderedAriaAclApi(FakeAriaAclApi):
+            def report_aria_acl_port_status(self, context, body):
+                order.append("port")
+                return FakeAriaAclApi.report_aria_acl_port_status(
+                    self,
+                    context,
+                    body,
+                )
+
+        runtime_status = AgentRuntimeStatus("ostack2")
+        runtime_status.mark_ready(
+            generation=3,
+            snapshot_ports=1,
+            managed_ports=1,
+            port_statuses=[{"port_id": "port-1", "status": "ready"}],
+        )
+        runtime_status.mark_degraded("local_api_degraded", "socket unavailable")
+        reporter = CompositeStatusReporter(
+            NeutronStatusReporter(
+                OrderedReportStateApi(),
+                context="ctx",
+                host="ostack2",
+            ),
+            AriaAclPortStatusReporter(
+                OrderedAriaAclApi(),
+                context="ctx",
+                host="ostack2",
+            ),
+        )
+
+        reporter.report(runtime_status)
+
+        self.assertEqual(["heartbeat", "port"], order)
 
     def test_build_reporter_adds_port_status_reporter_for_neutron_acl_source(self):
         report_state = FakeReportStateApi()
