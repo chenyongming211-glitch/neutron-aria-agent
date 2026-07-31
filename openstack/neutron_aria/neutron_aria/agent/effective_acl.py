@@ -4,6 +4,7 @@ import copy
 import heapq
 
 from neutron_aria.acl_contract import AclContractError
+from neutron_aria.acl_contract import normalize_ipv4_cidr
 from neutron_aria.acl_contract import validate_address_set_reference
 from neutron_aria.acl_contract import validate_policy
 from neutron_aria.acl_contract import validate_rule
@@ -99,41 +100,17 @@ def _rule_priority(rule):
 
 
 def _strict_ipv4_cidr(value):
-    text = str(value).strip()
-    pieces = text.split("/")
-    if len(pieces) != 2:
-        raise ValueError("invalid IPv4 CIDR")
-    address, prefix_text = pieces
-    octets = address.split(".")
-    if len(octets) != 4:
-        raise ValueError("invalid IPv4 address")
-    values = []
-    for octet in octets:
-        if (not octet or
-                not all(character in "0123456789" for character in octet) or
-                (len(octet) > 1 and octet.startswith("0"))):
-            raise ValueError("invalid IPv4 octet")
-        number = int(octet, 10)
-        if number > 255:
-            raise ValueError("invalid IPv4 octet")
-        values.append(number)
-    if (not prefix_text or
-            not all(character in "0123456789" for character in prefix_text)):
-        raise ValueError("invalid IPv4 prefix")
-    prefix = int(prefix_text, 10)
-    if prefix > 32:
-        raise ValueError("invalid IPv4 prefix")
-    value = ((values[0] << 24) | (values[1] << 16) |
-             (values[2] << 8) | values[3])
-    mask = 0 if prefix == 0 else ((0xffffffff << (32 - prefix)) & 0xffffffff)
-    network = value & mask
-    canonical = "%s.%s.%s.%s/%s" % (
-        (network >> 24) & 0xff,
-        (network >> 16) & 0xff,
-        (network >> 8) & 0xff,
-        network & 0xff,
-        prefix,
+    try:
+        canonical = normalize_ipv4_cidr(value)
+    except AclContractError as exc:
+        raise ValueError(str(exc))
+    address, prefix_text = canonical.split("/")
+    octets = [int(octet) for octet in address.split(".")]
+    network = (
+        (octets[0] << 24) | (octets[1] << 16) |
+        (octets[2] << 8) | octets[3]
     )
+    prefix = int(prefix_text)
     return network, prefix, canonical
 
 
@@ -604,6 +581,18 @@ class EffectiveAclIndex(object):
         try:
             validate_rule(rule)
         except AclContractError as exc:
+            for side, field in (("src", "src_cidr"), ("dst", "dst_cidr")):
+                raw_value = rule.get(field)
+                if not raw_value:
+                    continue
+                try:
+                    normalize_ipv4_cidr(raw_value)
+                except AclContractError:
+                    return None, "invalid_acl_ipv4_cidr:%s:%s:%s" % (
+                        side,
+                        rule.get("id"),
+                        raw_value,
+                    )
             return None, "unsupported_rule:%s:%s" % (rule.get("id"), exc)
 
         protocol = rule.get("protocol")

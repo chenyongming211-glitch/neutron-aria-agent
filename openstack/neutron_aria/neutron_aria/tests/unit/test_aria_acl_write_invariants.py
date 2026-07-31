@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 
 import copy
+import json
 import os
 import sqlite3
 import tempfile
@@ -123,6 +124,9 @@ class RepositoryWriteInvariantBehavior(object):
 
     def close_repository(self):
         pass
+
+    def seed_legacy_address_set(self, members):
+        raise NotImplementedError
 
     def create_policy(self, policy_id="policy-1", project_id="project-1"):
         return self.repository.create_policy({
@@ -281,7 +285,7 @@ class RepositoryWriteInvariantBehavior(object):
 
     def test_rule_create_rejects_invalid_address_set_member(self):
         self.create_policy()
-        self.create_address_set(members=["10.1/16"])
+        self.seed_legacy_address_set(["10.1/16"])
         self.assert_create_rule_rejected(
             self.rule_values(src_address_set_id="set-1")
         )
@@ -295,7 +299,7 @@ class RepositoryWriteInvariantBehavior(object):
 
     def test_rule_create_rejects_oversized_address_set(self):
         self.create_policy()
-        self.create_address_set(members=self.raw_members(2049))
+        self.seed_legacy_address_set(self.raw_members(2049))
         self.assert_create_rule_rejected(
             self.rule_values(src_address_set_id="set-1")
         )
@@ -500,6 +504,15 @@ class InMemoryWriteInvariantTestCase(
     def make_repository(self):
         return InMemoryAriaAclRepository()
 
+    def seed_legacy_address_set(self, members):
+        self.repository.address_sets["set-1"] = {
+            "id": "set-1",
+            "project_id": "project-1",
+            "enabled": True,
+            "members": copy.deepcopy(members),
+            "revision_number": 1,
+        }
+
 
 class SqliteWriteInvariantTestCase(
     RepositoryWriteInvariantBehavior,
@@ -513,6 +526,21 @@ class SqliteWriteInvariantTestCase(
     def close_repository(self):
         self.repository.close()
         os.unlink(self.path)
+
+    def seed_legacy_address_set(self, members):
+        payload = {
+            "id": "set-1",
+            "project_id": "project-1",
+            "enabled": True,
+            "members": copy.deepcopy(members),
+            "revision_number": 1,
+        }
+        self.repository.connection.execute(
+            "INSERT INTO aria_acl_address_sets (id, project_id, payload) "
+            "VALUES (?, ?, ?)",
+            ("set-1", "project-1", json.dumps(payload, sort_keys=True)),
+        )
+        self.repository.connection.commit()
 
     def test_sqlite_schema_has_enabled_guard_unique_indexes(self):
         rule_columns = [
@@ -600,6 +628,15 @@ class NeutronDbMethodWriteInvariantTestCase(
 ):
     def make_repository(self):
         return NeutronDbMethodAdapter()
+
+    def seed_legacy_address_set(self, members):
+        self.repository.rows["address_sets"]["set-1"] = {
+            "id": "set-1",
+            "project_id": "project-1",
+            "enabled": True,
+            "members": copy.deepcopy(members),
+            "revision_number": 1,
+        }
 
 
 class ConcurrentWriteInvariantTestCase(unittest.TestCase):

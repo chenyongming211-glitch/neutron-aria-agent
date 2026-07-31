@@ -11,6 +11,7 @@ from neutron_aria.db.migration import aria_acl_initial
 from neutron_aria.extensions import aria_acl
 from neutron_aria.policies import aria_acl as aria_acl_policy
 from neutron_aria.services.aria_acl.exceptions import AriaAclBadRequest
+from neutron_aria.services.aria_acl.exceptions import AriaAclConflict
 from neutron_aria.services.aria_acl.exceptions import map_repository_error
 from neutron_aria.services.aria_acl.plugin import AriaAclAgentNotifier
 from neutron_aria.services.aria_acl.plugin import AriaAclPlugin
@@ -160,7 +161,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 "action": "allow",
             }
         })
-        with self.assertRaises(AriaAclBadRequest):
+        with self.assertRaises(AriaAclConflict):
             plugin.create_aria_acl_rule(None, {
                 "aria_acl_rule": {
                     "id": "rule-2",
@@ -191,7 +192,7 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 "target_id": "port-1",
             }
         })
-        with self.assertRaises(AriaAclBadRequest):
+        with self.assertRaises(AriaAclConflict):
             plugin.create_aria_acl_binding(None, {
                 "aria_acl_binding": {
                     "id": "binding-2",

@@ -1,8 +1,5 @@
 from __future__ import absolute_import
 
-import socket
-
-
 class AclContractError(ValueError):
     pass
 
@@ -29,19 +26,47 @@ def _protocol_number(value):
     return number
 
 
-def _validate_ipv4_cidr(value):
-    parts = str(value).strip().split("/")
+def normalize_ipv4_cidr(value):
+    text = str(value).strip()
+    parts = text.split("/")
     if len(parts) != 2 or ":" in parts[0]:
         raise AclContractError("only IPv4 CIDR is supported")
-    try:
-        packed = socket.inet_aton(parts[0])
-    except (socket.error, OSError):
+    octets = parts[0].split(".")
+    if len(octets) != 4:
         raise AclContractError("invalid IPv4 CIDR: %s" % value)
-    if len(packed) != 4:
-        raise AclContractError("invalid IPv4 CIDR: %s" % value)
-    prefix = _integer(parts[1], "IPv4 prefix")
+    numbers = []
+    for octet in octets:
+        if (
+            not octet or not octet.isdigit() or
+            (len(octet) > 1 and octet.startswith("0"))
+        ):
+            raise AclContractError("invalid IPv4 CIDR: %s" % value)
+        number = int(octet)
+        if number < 0 or number > 255:
+            raise AclContractError("invalid IPv4 CIDR: %s" % value)
+        numbers.append(number)
+    if not parts[1] or not parts[1].isdigit():
+        raise AclContractError("invalid IPv4 prefix: %s" % parts[1])
+    prefix = int(parts[1])
     if prefix < 0 or prefix > 32:
         raise AclContractError("invalid IPv4 prefix: %s" % parts[1])
+    address = (
+        (numbers[0] << 24) | (numbers[1] << 16) |
+        (numbers[2] << 8) | numbers[3]
+    )
+    mask = 0 if prefix == 0 else (0xffffffff << (32 - prefix)) & 0xffffffff
+    network = address & mask
+    return "%d.%d.%d.%d/%d" % (
+        (network >> 24) & 0xff,
+        (network >> 16) & 0xff,
+        (network >> 8) & 0xff,
+        network & 0xff,
+        prefix,
+    )
+
+
+def _validate_ipv4_cidr(value):
+    normalize_ipv4_cidr(value)
 
 
 def validate_policy(values):
@@ -101,7 +126,8 @@ def validate_address_set_reference(values):
     if not members:
         raise AclContractError("address set has no members")
     for member in members:
-        _validate_ipv4_cidr(member)
+        address = member.get("address") if isinstance(member, dict) else member
+        _validate_ipv4_cidr(address)
 
 
 def port_contract_eligibility(port):

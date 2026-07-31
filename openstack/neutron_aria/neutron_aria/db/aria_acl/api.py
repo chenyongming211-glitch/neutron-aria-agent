@@ -1,32 +1,32 @@
 from __future__ import absolute_import
 
 import copy
+import contextlib
 import datetime
 import json
 import sqlite3
+import threading
 import uuid
 
-from neutron_aria.acl_contract import AclContractError
-from neutron_aria.acl_contract import validate_policy
-from neutron_aria.acl_contract import validate_rule
+from neutron_aria.db.aria_acl.errors import AriaAclConflictError
+from neutron_aria.db.aria_acl.errors import AriaAclError
+from neutron_aria.db.aria_acl.errors import AriaAclNotFound
+from neutron_aria.db.aria_acl.errors import AriaAclValidationError
+from neutron_aria.db.aria_acl.write_invariants import ADDRESS_SET_IMMUTABLE_FIELDS
+from neutron_aria.db.aria_acl.write_invariants import BINDING_IMMUTABLE_FIELDS
+from neutron_aria.db.aria_acl.write_invariants import POLICY_IMMUTABLE_FIELDS
+from neutron_aria.db.aria_acl.write_invariants import RULE_IMMUTABLE_FIELDS
+from neutron_aria.db.aria_acl.write_invariants import prepare_address_set
+from neutron_aria.db.aria_acl.write_invariants import prepare_binding
+from neutron_aria.db.aria_acl.write_invariants import prepare_policy
+from neutron_aria.db.aria_acl.write_invariants import prepare_rule
+from neutron_aria.db.aria_acl.write_invariants import reject_immutable_changes
 
 
 try:
     STRING_TYPES = (basestring,)
 except NameError:
     STRING_TYPES = (str,)
-
-
-class AriaAclError(Exception):
-    pass
-
-
-class AriaAclNotFound(AriaAclError):
-    pass
-
-
-class AriaAclValidationError(AriaAclError):
-    pass
 
 
 def _clone(value):
@@ -48,49 +48,11 @@ def _require(obj, fields, object_type):
         )
 
 
-def _validate_contract(validator, values):
-    try:
-        validator(values)
-    except AclContractError as exc:
-        raise AriaAclValidationError(str(exc))
-
-
 def _enabled(obj):
     value = (obj or {}).get("enabled", True)
     if isinstance(value, STRING_TYPES):
         return value.strip().lower() not in ("0", "false", "no", "off")
     return value is not False
-
-
-def _reject_duplicate_rule_priority(repository, values, exclude_id=None):
-    if not _enabled(values):
-        return
-    policy_id = values.get("policy_id")
-    direction = values.get("direction")
-    priority = int(values.get("priority"))
-    for rule in repository.list_rules(filters={"policy_id": [policy_id]}):
-        if rule.get("id") == exclude_id or not _enabled(rule):
-            continue
-        if rule.get("direction") == direction and int(rule.get("priority")) == priority:
-            raise AriaAclValidationError(
-                "duplicate enabled rule priority for policy=%s direction=%s priority=%s"
-                % (policy_id, direction, priority)
-            )
-
-
-def _reject_duplicate_binding_target(repository, values, exclude_id=None):
-    if not _enabled(values):
-        return
-    target_type = values.get("target_type")
-    target_id = values.get("target_id")
-    filters = {"target_type": [target_type], "target_id": [target_id]}
-    for binding in repository.list_bindings(filters=filters):
-        if binding.get("id") == exclude_id or not _enabled(binding):
-            continue
-        raise AriaAclValidationError(
-            "duplicate enabled binding for target_type=%s target_id=%s"
-            % (target_type, target_id)
-        )
 
 
 def _next_revision(values):
@@ -166,6 +128,72 @@ def _format_time(value):
     return value
 
 
+def _locked_write(method):
+    def locked(self, *args, **kwargs):
+        with self._write_lock:
+            return method(self, *args, **kwargs)
+    locked.__name__ = method.__name__
+    locked.__doc__ = method.__doc__
+    return locked
+
+
+def _constraint_name(exc):
+    direct = getattr(exc, "constraint_name", None)
+    if direct:
+        return direct
+    original = getattr(exc, "orig", None)
+    diagnostic = getattr(original, "diag", None)
+    diagnostic_name = getattr(diagnostic, "constraint_name", None)
+    if diagnostic_name:
+        return diagnostic_name
+    message = str(exc)
+    for name in (
+        "uq_aria_acl_rules_enabled_priority",
+        "uq_aria_acl_bindings_enabled_target",
+    ):
+        if name in message:
+            return name
+    return None
+
+
+def _neutron_write(constraint_kind=None):
+    def decorate(method):
+        def transactional(self, *args, **kwargs):
+            with self._write_transaction():
+                try:
+                    return method(self, *args, **kwargs)
+                except Exception as exc:
+                    if constraint_kind is not None:
+                        self._raise_known_constraint(exc, constraint_kind)
+                    raise
+        transactional.__name__ = method.__name__
+        transactional.__doc__ = method.__doc__
+        return transactional
+    return decorate
+
+
+def _sqlite_write(constraint_kind=None):
+    def decorate(method):
+        def transactional(self, *args, **kwargs):
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                result = method(self, *args, **kwargs)
+                self.connection.commit()
+                return result
+            except sqlite3.IntegrityError as exc:
+                self.connection.rollback()
+                if constraint_kind is not None:
+                    self._raise_known_constraint(exc, constraint_kind)
+                raise
+            except Exception:
+                self.connection.rollback()
+                raise
+        transactional.__name__ = method.__name__
+        transactional.__doc__ = method.__doc__
+        return transactional
+    return decorate
+
+
 class InMemoryAriaAclRepository(object):
     """Minimal aria_acl repository contract.
 
@@ -175,12 +203,14 @@ class InMemoryAriaAclRepository(object):
     """
 
     def __init__(self):
+        self._write_lock = threading.RLock()
         self.policies = {}
         self.rules = {}
         self.address_sets = {}
         self.bindings = {}
         self.port_statuses = {}
 
+    @_locked_write
     def create_policy(self, values):
         values = _normalize_project_id(_clone(values))
         _require(values, ("project_id",), "aria_acl_policy")
@@ -190,7 +220,7 @@ class InMemoryAriaAclRepository(object):
         values.setdefault("stateful", True)
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
-        _validate_contract(validate_policy, values)
+        values = prepare_policy(values)
         _stamp_create(values)
         self.policies[values["id"]] = values
         return _clone(values)
@@ -201,13 +231,20 @@ class InMemoryAriaAclRepository(object):
     def get_policy(self, policy_id):
         return self._get(self.policies, policy_id, "aria_acl_policy")
 
+    @_locked_write
     def update_policy(self, policy_id, values):
-        current = self._get(self.policies, policy_id, "aria_acl_policy")
+        existing = self._get(self.policies, policy_id, "aria_acl_policy")
+        reject_immutable_changes(
+            existing,
+            values,
+            POLICY_IMMUTABLE_FIELDS,
+            "aria_acl_policy",
+        )
+        current = _clone(existing)
         current.update(_clone(values))
-        current["id"] = policy_id
         _normalize_project_id(current)
         _require(current, ("project_id",), "aria_acl_policy")
-        _validate_contract(validate_policy, current)
+        current = prepare_policy(current)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self.policies[policy_id] = current
@@ -217,17 +254,14 @@ class InMemoryAriaAclRepository(object):
         self._reject_policy_in_use(policy_id)
         self._delete(self.policies, policy_id, "aria_acl_policy")
 
+    @_locked_write
     def create_rule(self, values):
         values = _normalize_project_id(_clone(values))
         _require(values, ("policy_id", "direction", "priority", "action"), "aria_acl_rule")
-        if values["policy_id"] not in self.policies:
-            raise AriaAclValidationError("aria_acl_rule references missing policy")
-        self._validate_policy_project(values)
         values.setdefault("id", _new_id())
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
-        _validate_contract(validate_rule, values)
-        _reject_duplicate_rule_priority(self, values)
+        values = prepare_rule(self, values)
         _stamp_create(values)
         self.rules[values["id"]] = values
         return _clone(values)
@@ -238,16 +272,20 @@ class InMemoryAriaAclRepository(object):
     def get_rule(self, rule_id):
         return self._get(self.rules, rule_id, "aria_acl_rule")
 
+    @_locked_write
     def update_rule(self, rule_id, values):
-        current = self._get(self.rules, rule_id, "aria_acl_rule")
+        existing = self._get(self.rules, rule_id, "aria_acl_rule")
+        reject_immutable_changes(
+            existing,
+            values,
+            RULE_IMMUTABLE_FIELDS,
+            "aria_acl_rule",
+        )
+        current = _clone(existing)
         current.update(_clone(values))
-        current["id"] = rule_id
-        current["policy_id"] = self.rules[rule_id]["policy_id"]
         _normalize_project_id(current)
         _require(current, ("policy_id", "direction", "priority", "action"), "aria_acl_rule")
-        self._validate_policy_project(current)
-        _validate_contract(validate_rule, current)
-        _reject_duplicate_rule_priority(self, current, exclude_id=rule_id)
+        current = prepare_rule(self, current, existing=existing)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self.rules[rule_id] = current
@@ -256,6 +294,7 @@ class InMemoryAriaAclRepository(object):
     def delete_rule(self, rule_id):
         self._delete(self.rules, rule_id, "aria_acl_rule")
 
+    @_locked_write
     def create_address_set(self, values):
         values = _normalize_project_id(_clone(values))
         _require(values, ("project_id",), "aria_acl_address_set")
@@ -264,6 +303,7 @@ class InMemoryAriaAclRepository(object):
         values.setdefault("members", [])
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
+        values = prepare_address_set(self, values)
         _stamp_create(values)
         self.address_sets[values["id"]] = values
         return _clone(values)
@@ -274,12 +314,24 @@ class InMemoryAriaAclRepository(object):
     def get_address_set(self, address_set_id):
         return self._get(self.address_sets, address_set_id, "aria_acl_address_set")
 
+    @_locked_write
     def update_address_set(self, address_set_id, values):
-        current = self._get(self.address_sets, address_set_id, "aria_acl_address_set")
+        existing = self._get(
+            self.address_sets,
+            address_set_id,
+            "aria_acl_address_set",
+        )
+        reject_immutable_changes(
+            existing,
+            values,
+            ADDRESS_SET_IMMUTABLE_FIELDS,
+            "aria_acl_address_set",
+        )
+        current = _clone(existing)
         current.update(_clone(values))
-        current["id"] = address_set_id
         _normalize_project_id(current)
         _require(current, ("project_id",), "aria_acl_address_set")
+        current = prepare_address_set(self, current, existing=existing)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self.address_sets[address_set_id] = current
@@ -289,6 +341,7 @@ class InMemoryAriaAclRepository(object):
         self._reject_address_set_in_use(address_set_id)
         self._delete(self.address_sets, address_set_id, "aria_acl_address_set")
 
+    @_locked_write
     def create_binding(self, values):
         values = _normalize_project_id(_clone(values))
         _require(
@@ -296,15 +349,10 @@ class InMemoryAriaAclRepository(object):
             ("project_id", "policy_id", "target_type", "target_id"),
             "aria_acl_binding",
         )
-        if values["policy_id"] not in self.policies:
-            raise AriaAclValidationError("aria_acl_binding references missing policy")
-        self._validate_policy_project(values)
-        if values["target_type"] not in ("port", "network"):
-            raise AriaAclValidationError("aria_acl_binding target_type must be port or network")
         values.setdefault("id", _new_id())
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
-        _reject_duplicate_binding_target(self, values)
+        values = prepare_binding(self, values)
         _stamp_create(values)
         self.bindings[values["id"]] = values
         return _clone(values)
@@ -315,21 +363,24 @@ class InMemoryAriaAclRepository(object):
     def get_binding(self, binding_id):
         return self._get(self.bindings, binding_id, "aria_acl_binding")
 
+    @_locked_write
     def update_binding(self, binding_id, values):
-        current = self._get(self.bindings, binding_id, "aria_acl_binding")
+        existing = self._get(self.bindings, binding_id, "aria_acl_binding")
+        reject_immutable_changes(
+            existing,
+            values,
+            BINDING_IMMUTABLE_FIELDS,
+            "aria_acl_binding",
+        )
+        current = _clone(existing)
         current.update(_clone(values))
-        current["id"] = binding_id
-        current["policy_id"] = self.bindings[binding_id]["policy_id"]
-        current["target_type"] = self.bindings[binding_id]["target_type"]
-        current["target_id"] = self.bindings[binding_id]["target_id"]
         _normalize_project_id(current)
         _require(
             current,
             ("project_id", "policy_id", "target_type", "target_id"),
             "aria_acl_binding",
         )
-        self._validate_policy_project(current)
-        _reject_duplicate_binding_target(self, current, exclude_id=binding_id)
+        current = prepare_binding(self, current, existing=existing)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self.bindings[binding_id] = current
@@ -416,15 +467,6 @@ class InMemoryAriaAclRepository(object):
             ):
                 raise AriaAclValidationError("aria_acl_address_set is referenced by rule")
 
-    def _validate_policy_project(self, values):
-        project_id = values.get("project_id")
-        if not project_id:
-            return
-        policy = self.policies.get(values.get("policy_id"))
-        if policy and policy.get("project_id") and policy.get("project_id") != project_id:
-            raise AriaAclValidationError("aria_acl object project_id does not match policy")
-
-
 class NeutronDbAriaAclRepository(object):
     """Neutron context/session backed aria_acl repository.
 
@@ -444,6 +486,7 @@ class NeutronDbAriaAclRepository(object):
         if auto_create:
             self.ensure_schema()
 
+    @_neutron_write()
     def create_policy(self, values):
         values = _normalize_project_id(_clone(values))
         _require(values, ("project_id",), "aria_acl_policy")
@@ -453,7 +496,7 @@ class NeutronDbAriaAclRepository(object):
         values.setdefault("stateful", True)
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
-        _validate_contract(validate_policy, values)
+        values = prepare_policy(values)
         _stamp_create(values)
         self._insert("policies", self._db_values("policies", values))
         return _clone(values)
@@ -464,13 +507,21 @@ class NeutronDbAriaAclRepository(object):
     def get_policy(self, policy_id):
         return self._get("policies", policy_id, "aria_acl_policy")
 
+    @_neutron_write()
     def update_policy(self, policy_id, values):
-        current = self.get_policy(policy_id)
+        self._lock_write_rows(policy_id=policy_id)
+        existing = self.get_policy(policy_id)
+        reject_immutable_changes(
+            existing,
+            values,
+            POLICY_IMMUTABLE_FIELDS,
+            "aria_acl_policy",
+        )
+        current = _clone(existing)
         current.update(_clone(values))
-        current["id"] = policy_id
         _normalize_project_id(current)
         _require(current, ("project_id",), "aria_acl_policy")
-        _validate_contract(validate_policy, current)
+        current = prepare_policy(current)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._update("policies", policy_id, self._db_values("policies", current))
@@ -480,15 +531,18 @@ class NeutronDbAriaAclRepository(object):
         self._reject_policy_in_use(policy_id)
         self._delete("policies", policy_id, "aria_acl_policy")
 
+    @_neutron_write("rule")
     def create_rule(self, values):
         values = _normalize_project_id(_clone(values))
         _require(values, ("policy_id", "direction", "priority", "action"), "aria_acl_rule")
-        self._validate_policy_project(values)
         values.setdefault("id", _new_id())
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
-        _validate_contract(validate_rule, values)
-        _reject_duplicate_rule_priority(self, values)
+        self._lock_write_rows(
+            address_set_ids=self._address_set_ids(values),
+            policy_id=values.get("policy_id"),
+        )
+        values = prepare_rule(self, values)
         _stamp_create(values)
         self._insert("rules", self._db_values("rules", values))
         return _clone(values)
@@ -499,17 +553,29 @@ class NeutronDbAriaAclRepository(object):
     def get_rule(self, rule_id):
         return self._get("rules", rule_id, "aria_acl_rule")
 
+    @_neutron_write("rule")
     def update_rule(self, rule_id, values):
+        existing = self.get_rule(rule_id)
+        reject_immutable_changes(
+            existing,
+            values,
+            RULE_IMMUTABLE_FIELDS,
+            "aria_acl_rule",
+        )
+        current = _clone(existing)
+        current.update(_clone(values))
+        self._lock_write_rows(
+            address_set_ids=self._address_set_ids(current),
+            policy_id=current.get("policy_id"),
+            object_table="rules",
+            object_id=rule_id,
+        )
         existing = self.get_rule(rule_id)
         current = _clone(existing)
         current.update(_clone(values))
-        current["id"] = rule_id
-        current["policy_id"] = existing["policy_id"]
         _normalize_project_id(current)
         _require(current, ("policy_id", "direction", "priority", "action"), "aria_acl_rule")
-        self._validate_policy_project(current)
-        _validate_contract(validate_rule, current)
-        _reject_duplicate_rule_priority(self, current, exclude_id=rule_id)
+        current = prepare_rule(self, current, existing=existing)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._update("rules", rule_id, self._db_values("rules", current))
@@ -518,6 +584,7 @@ class NeutronDbAriaAclRepository(object):
     def delete_rule(self, rule_id):
         self._delete("rules", rule_id, "aria_acl_rule")
 
+    @_neutron_write()
     def create_address_set(self, values):
         values = _normalize_project_id(_clone(values))
         _require(values, ("project_id",), "aria_acl_address_set")
@@ -526,6 +593,7 @@ class NeutronDbAriaAclRepository(object):
         values.setdefault("members", [])
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
+        values = prepare_address_set(self, values)
         _stamp_create(values)
         self._insert("address_sets", self._db_values("address_sets", values))
         self._replace_members(values["id"], values.get("members", []))
@@ -537,12 +605,21 @@ class NeutronDbAriaAclRepository(object):
     def get_address_set(self, address_set_id):
         return self._get("address_sets", address_set_id, "aria_acl_address_set")
 
+    @_neutron_write()
     def update_address_set(self, address_set_id, values):
-        current = self.get_address_set(address_set_id)
+        self._lock_write_rows(address_set_ids=(address_set_id,))
+        existing = self.get_address_set(address_set_id)
+        reject_immutable_changes(
+            existing,
+            values,
+            ADDRESS_SET_IMMUTABLE_FIELDS,
+            "aria_acl_address_set",
+        )
+        current = _clone(existing)
         current.update(_clone(values))
-        current["id"] = address_set_id
         _normalize_project_id(current)
         _require(current, ("project_id",), "aria_acl_address_set")
+        current = prepare_address_set(self, current, existing=existing)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._update("address_sets", address_set_id, self._db_values("address_sets", current))
@@ -560,6 +637,7 @@ class NeutronDbAriaAclRepository(object):
             )
         self._delete("address_sets", address_set_id, "aria_acl_address_set")
 
+    @_neutron_write("binding")
     def create_binding(self, values):
         values = _normalize_project_id(_clone(values))
         _require(
@@ -567,13 +645,11 @@ class NeutronDbAriaAclRepository(object):
             ("project_id", "policy_id", "target_type", "target_id"),
             "aria_acl_binding",
         )
-        self._validate_policy_project(values)
-        if values["target_type"] not in ("port", "network"):
-            raise AriaAclValidationError("aria_acl_binding target_type must be port or network")
         values.setdefault("id", _new_id())
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
-        _reject_duplicate_binding_target(self, values)
+        self._lock_write_rows(policy_id=values.get("policy_id"))
+        values = prepare_binding(self, values)
         _stamp_create(values)
         self._insert("bindings", self._db_values("bindings", values))
         return _clone(values)
@@ -584,22 +660,32 @@ class NeutronDbAriaAclRepository(object):
     def get_binding(self, binding_id):
         return self._get("bindings", binding_id, "aria_acl_binding")
 
+    @_neutron_write("binding")
     def update_binding(self, binding_id, values):
+        existing = self.get_binding(binding_id)
+        reject_immutable_changes(
+            existing,
+            values,
+            BINDING_IMMUTABLE_FIELDS,
+            "aria_acl_binding",
+        )
+        current = _clone(existing)
+        current.update(_clone(values))
+        self._lock_write_rows(
+            policy_id=current.get("policy_id"),
+            object_table="bindings",
+            object_id=binding_id,
+        )
         existing = self.get_binding(binding_id)
         current = _clone(existing)
         current.update(_clone(values))
-        current["id"] = binding_id
-        current["policy_id"] = existing["policy_id"]
-        current["target_type"] = existing["target_type"]
-        current["target_id"] = existing["target_id"]
         _normalize_project_id(current)
         _require(
             current,
             ("project_id", "policy_id", "target_type", "target_id"),
             "aria_acl_binding",
         )
-        self._validate_policy_project(current)
-        _reject_duplicate_binding_target(self, current, exclude_id=binding_id)
+        current = prepare_binding(self, current, existing=existing)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._update("bindings", binding_id, self._db_values("bindings", current))
@@ -667,6 +753,77 @@ class NeutronDbAriaAclRepository(object):
         bind = self.session.get_bind()
         for table in self.tables.values():
             table.create(bind=bind, checkfirst=True)
+        inspector = self.sa.inspect(bind)
+        missing = []
+        for table_key in ("rules", "bindings"):
+            table = self.tables.get(table_key)
+            if table is None:
+                continue
+            columns = set(
+                column["name"]
+                for column in inspector.get_columns(table.name)
+            )
+            if "enabled_guard" not in columns:
+                missing.append(table.name)
+        if missing:
+            raise AriaAclValidationError(
+                "aria_acl_schema_migration_required: %s missing enabled_guard"
+                % ",".join(sorted(missing))
+            )
+
+    @contextlib.contextmanager
+    def _write_transaction(self):
+        session = getattr(self, "session", None)
+        if session is None:
+            yield
+            return
+        with session.begin(subtransactions=True):
+            yield
+
+    def _raise_known_constraint(self, exc, constraint_kind):
+        name = _constraint_name(exc)
+        expected = {
+            "rule": "uq_aria_acl_rules_enabled_priority",
+            "binding": "uq_aria_acl_bindings_enabled_target",
+        }.get(constraint_kind)
+        if name != expected:
+            return
+        reason = {
+            "rule": "duplicate_enabled_rule_priority",
+            "binding": "duplicate_enabled_binding_target",
+        }[constraint_kind]
+        raise AriaAclConflictError("%s: %s" % (reason, exc))
+
+    @staticmethod
+    def _address_set_ids(values):
+        return sorted(set(
+            values.get(field)
+            for field in ("src_address_set_id", "dst_address_set_id")
+            if values.get(field)
+        ))
+
+    def _lock_write_rows(
+            self,
+            address_set_ids=(),
+            policy_id=None,
+            object_table=None,
+            object_id=None):
+        if not hasattr(self, "session") or not hasattr(self, "tables"):
+            return
+        ordered = [
+            ("address_sets", address_set_id)
+            for address_set_id in sorted(set(address_set_ids or ()))
+        ]
+        if policy_id:
+            ordered.append(("policies", policy_id))
+        if object_table and object_id:
+            ordered.append((object_table, object_id))
+        for table_name, row_id in ordered:
+            table = self.tables[table_name]
+            query = table.select().where(table.c.id == row_id)
+            if hasattr(query, "with_for_update"):
+                query = query.with_for_update()
+            self.session.execute(query).fetchall()
 
     def _load_sqlalchemy(self):
         try:
@@ -710,9 +867,17 @@ class NeutronDbAriaAclRepository(object):
                 sa.Column("dst_port_max", sa.Integer()),
                 sa.Column("ethertype", sa.String(64)),
                 sa.Column("enabled", sa.Boolean(), nullable=False),
+                sa.Column("enabled_guard", sa.SmallInteger(), nullable=True),
                 sa.Column("revision_number", sa.Integer(), nullable=False),
                 sa.Column("created_at", sa.DateTime()),
                 sa.Column("updated_at", sa.DateTime()),
+                sa.UniqueConstraint(
+                    "policy_id",
+                    "direction",
+                    "priority",
+                    "enabled_guard",
+                    name="uq_aria_acl_rules_enabled_priority",
+                ),
             ),
             "address_sets": sa.Table(
                 "aria_acl_address_sets", md,
@@ -740,9 +905,16 @@ class NeutronDbAriaAclRepository(object):
                 sa.Column("target_type", sa.String(64), nullable=False),
                 sa.Column("target_id", sa.String(36), nullable=False),
                 sa.Column("enabled", sa.Boolean(), nullable=False),
+                sa.Column("enabled_guard", sa.SmallInteger(), nullable=True),
                 sa.Column("revision_number", sa.Integer(), nullable=False),
                 sa.Column("created_at", sa.DateTime()),
                 sa.Column("updated_at", sa.DateTime()),
+                sa.UniqueConstraint(
+                    "target_type",
+                    "target_id",
+                    "enabled_guard",
+                    name="uq_aria_acl_bindings_enabled_target",
+                ),
             ),
             "rbac": sa.Table(
                 "aria_acl_rbac", md,
@@ -841,6 +1013,8 @@ class NeutronDbAriaAclRepository(object):
                     result[column.name] = _parse_time(values[column.name])
                 else:
                     result[column.name] = values[column.name]
+        if table_name in ("rules", "bindings"):
+            result["enabled_guard"] = 1 if _enabled(values) else None
         return result
 
     def _reject_policy_in_use(self, policy_id):
@@ -859,16 +1033,6 @@ class NeutronDbAriaAclRepository(object):
             ):
                 raise AriaAclValidationError("aria_acl_address_set is referenced by rule")
 
-    def _validate_policy_project(self, values):
-        try:
-            policy = self.get_policy(values.get("policy_id"))
-        except AriaAclNotFound:
-            raise AriaAclValidationError("aria_acl object references missing policy")
-        project_id = values.get("project_id")
-        if project_id and policy.get("project_id") and policy.get("project_id") != project_id:
-            raise AriaAclValidationError("aria_acl object project_id does not match policy")
-
-
 class SqliteAriaAclRepository(object):
     """Small persistent repository with the same aria_acl contract.
 
@@ -879,12 +1043,18 @@ class SqliteAriaAclRepository(object):
 
     TABLES = (
         ("aria_acl_policies", "id TEXT PRIMARY KEY, project_id TEXT NOT NULL, payload TEXT NOT NULL"),
-        ("aria_acl_rules", "id TEXT PRIMARY KEY, project_id TEXT, policy_id TEXT NOT NULL, payload TEXT NOT NULL"),
+        (
+            "aria_acl_rules",
+            "id TEXT PRIMARY KEY, project_id TEXT, policy_id TEXT NOT NULL, "
+            "direction TEXT, priority INTEGER, enabled_guard INTEGER, "
+            "payload TEXT NOT NULL",
+        ),
         ("aria_acl_address_sets", "id TEXT PRIMARY KEY, project_id TEXT NOT NULL, payload TEXT NOT NULL"),
         (
             "aria_acl_bindings",
             "id TEXT PRIMARY KEY, project_id TEXT NOT NULL, policy_id TEXT NOT NULL, "
-            "target_type TEXT NOT NULL, target_id TEXT NOT NULL, payload TEXT NOT NULL",
+            "target_type TEXT NOT NULL, target_id TEXT NOT NULL, "
+            "enabled_guard INTEGER, payload TEXT NOT NULL",
         ),
         (
             "aria_acl_port_statuses",
@@ -901,6 +1071,7 @@ class SqliteAriaAclRepository(object):
     def close(self):
         self.connection.close()
 
+    @_sqlite_write()
     def create_policy(self, values):
         values = _normalize_project_id(_clone(values))
         _require(values, ("project_id",), "aria_acl_policy")
@@ -910,7 +1081,7 @@ class SqliteAriaAclRepository(object):
         values.setdefault("stateful", True)
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
-        _validate_contract(validate_policy, values)
+        values = prepare_policy(values)
         _stamp_create(values)
         self._upsert(
             "aria_acl_policies",
@@ -926,13 +1097,20 @@ class SqliteAriaAclRepository(object):
     def get_policy(self, policy_id):
         return self._get("aria_acl_policies", policy_id, "aria_acl_policy")
 
+    @_sqlite_write()
     def update_policy(self, policy_id, values):
-        current = self.get_policy(policy_id)
+        existing = self.get_policy(policy_id)
+        reject_immutable_changes(
+            existing,
+            values,
+            POLICY_IMMUTABLE_FIELDS,
+            "aria_acl_policy",
+        )
+        current = _clone(existing)
         current.update(_clone(values))
-        current["id"] = policy_id
         _normalize_project_id(current)
         _require(current, ("project_id",), "aria_acl_policy")
-        _validate_contract(validate_policy, current)
+        current = prepare_policy(current)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._upsert(
@@ -947,15 +1125,14 @@ class SqliteAriaAclRepository(object):
         self._reject_policy_in_use(policy_id)
         self._delete("aria_acl_policies", policy_id, "aria_acl_policy")
 
+    @_sqlite_write("rule")
     def create_rule(self, values):
         values = _normalize_project_id(_clone(values))
         _require(values, ("policy_id", "direction", "priority", "action"), "aria_acl_rule")
-        self._validate_policy_project(values)
         values.setdefault("id", _new_id())
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
-        _validate_contract(validate_rule, values)
-        _reject_duplicate_rule_priority(self, values)
+        values = prepare_rule(self, values)
         _stamp_create(values)
         self._upsert(
             "aria_acl_rules",
@@ -963,6 +1140,9 @@ class SqliteAriaAclRepository(object):
             values,
             project_id=values.get("project_id"),
             policy_id=values["policy_id"],
+            direction=values["direction"],
+            priority=int(values["priority"]),
+            enabled_guard=1 if _enabled(values) else None,
         )
         return _clone(values)
 
@@ -972,16 +1152,20 @@ class SqliteAriaAclRepository(object):
     def get_rule(self, rule_id):
         return self._get("aria_acl_rules", rule_id, "aria_acl_rule")
 
+    @_sqlite_write("rule")
     def update_rule(self, rule_id, values):
-        current = self.get_rule(rule_id)
+        existing = self.get_rule(rule_id)
+        reject_immutable_changes(
+            existing,
+            values,
+            RULE_IMMUTABLE_FIELDS,
+            "aria_acl_rule",
+        )
+        current = _clone(existing)
         current.update(_clone(values))
-        current["id"] = rule_id
-        current["policy_id"] = self.get_rule(rule_id)["policy_id"]
         _normalize_project_id(current)
         _require(current, ("policy_id", "direction", "priority", "action"), "aria_acl_rule")
-        self._validate_policy_project(current)
-        _validate_contract(validate_rule, current)
-        _reject_duplicate_rule_priority(self, current, exclude_id=rule_id)
+        current = prepare_rule(self, current, existing=existing)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._upsert(
@@ -990,12 +1174,16 @@ class SqliteAriaAclRepository(object):
             current,
             project_id=current.get("project_id"),
             policy_id=current["policy_id"],
+            direction=current["direction"],
+            priority=int(current["priority"]),
+            enabled_guard=1 if _enabled(current) else None,
         )
         return _clone(current)
 
     def delete_rule(self, rule_id):
         self._delete("aria_acl_rules", rule_id, "aria_acl_rule")
 
+    @_sqlite_write()
     def create_address_set(self, values):
         values = _normalize_project_id(_clone(values))
         _require(values, ("project_id",), "aria_acl_address_set")
@@ -1004,6 +1192,7 @@ class SqliteAriaAclRepository(object):
         values.setdefault("members", [])
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
+        values = prepare_address_set(self, values)
         _stamp_create(values)
         self._upsert(
             "aria_acl_address_sets",
@@ -1019,12 +1208,20 @@ class SqliteAriaAclRepository(object):
     def get_address_set(self, address_set_id):
         return self._get("aria_acl_address_sets", address_set_id, "aria_acl_address_set")
 
+    @_sqlite_write()
     def update_address_set(self, address_set_id, values):
-        current = self.get_address_set(address_set_id)
+        existing = self.get_address_set(address_set_id)
+        reject_immutable_changes(
+            existing,
+            values,
+            ADDRESS_SET_IMMUTABLE_FIELDS,
+            "aria_acl_address_set",
+        )
+        current = _clone(existing)
         current.update(_clone(values))
-        current["id"] = address_set_id
         _normalize_project_id(current)
         _require(current, ("project_id",), "aria_acl_address_set")
+        current = prepare_address_set(self, current, existing=existing)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._upsert(
@@ -1039,6 +1236,7 @@ class SqliteAriaAclRepository(object):
         self._reject_address_set_in_use(address_set_id)
         self._delete("aria_acl_address_sets", address_set_id, "aria_acl_address_set")
 
+    @_sqlite_write("binding")
     def create_binding(self, values):
         values = _normalize_project_id(_clone(values))
         _require(
@@ -1046,13 +1244,10 @@ class SqliteAriaAclRepository(object):
             ("project_id", "policy_id", "target_type", "target_id"),
             "aria_acl_binding",
         )
-        self._validate_policy_project(values)
-        if values["target_type"] not in ("port", "network"):
-            raise AriaAclValidationError("aria_acl_binding target_type must be port or network")
         values.setdefault("id", _new_id())
         values.setdefault("enabled", True)
         values.setdefault("revision_number", 1)
-        _reject_duplicate_binding_target(self, values)
+        values = prepare_binding(self, values)
         _stamp_create(values)
         self._upsert(
             "aria_acl_bindings",
@@ -1062,6 +1257,7 @@ class SqliteAriaAclRepository(object):
             policy_id=values["policy_id"],
             target_type=values["target_type"],
             target_id=values["target_id"],
+            enabled_guard=1 if _enabled(values) else None,
         )
         return _clone(values)
 
@@ -1071,22 +1267,24 @@ class SqliteAriaAclRepository(object):
     def get_binding(self, binding_id):
         return self._get("aria_acl_bindings", binding_id, "aria_acl_binding")
 
+    @_sqlite_write("binding")
     def update_binding(self, binding_id, values):
         existing = self.get_binding(binding_id)
+        reject_immutable_changes(
+            existing,
+            values,
+            BINDING_IMMUTABLE_FIELDS,
+            "aria_acl_binding",
+        )
         current = _clone(existing)
         current.update(_clone(values))
-        current["id"] = binding_id
-        current["policy_id"] = existing["policy_id"]
-        current["target_type"] = existing["target_type"]
-        current["target_id"] = existing["target_id"]
         _normalize_project_id(current)
         _require(
             current,
             ("project_id", "policy_id", "target_type", "target_id"),
             "aria_acl_binding",
         )
-        self._validate_policy_project(current)
-        _reject_duplicate_binding_target(self, current, exclude_id=binding_id)
+        current = prepare_binding(self, current, existing=existing)
         current["revision_number"] = _next_revision(current)
         _stamp_update(current)
         self._upsert(
@@ -1097,6 +1295,7 @@ class SqliteAriaAclRepository(object):
             policy_id=current["policy_id"],
             target_type=current["target_type"],
             target_id=current["target_id"],
+            enabled_guard=1 if _enabled(current) else None,
         )
         return _clone(current)
 
@@ -1163,36 +1362,203 @@ class SqliteAriaAclRepository(object):
     def _ensure_schema(self):
         for table, columns in self.TABLES:
             self.connection.execute("CREATE TABLE IF NOT EXISTS %s (%s)" % (table, columns))
+        self._ensure_columns(
+            "aria_acl_rules",
+            (
+                ("direction", "TEXT"),
+                ("priority", "INTEGER"),
+                ("enabled_guard", "INTEGER"),
+            ),
+        )
+        self._ensure_columns(
+            "aria_acl_bindings",
+            (("enabled_guard", "INTEGER"),),
+        )
+        self._backfill_sqlite_guards()
+        conflicts = self._sqlite_historical_conflicts()
+        if conflicts:
+            self.connection.rollback()
+            raise AriaAclValidationError(
+                "aria_acl_schema_conflicts: %s" % "; ".join(conflicts)
+            )
+        self.connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "uq_aria_acl_rules_enabled_priority ON aria_acl_rules "
+            "(policy_id, direction, priority, enabled_guard)"
+        )
+        self.connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "uq_aria_acl_bindings_enabled_target ON aria_acl_bindings "
+            "(target_type, target_id, enabled_guard)"
+        )
         self.connection.commit()
 
     def _upsert(self, table, object_id, values, **columns):
         payload = json.dumps(values, sort_keys=True)
+        exists = self.connection.execute(
+            "SELECT 1 FROM %s WHERE id=?" % table,
+            (object_id,),
+        ).fetchone() is not None
         if table == "aria_acl_bindings":
+            ordered = (
+                columns.get("project_id"),
+                columns.get("policy_id"),
+                columns.get("target_type"),
+                columns.get("target_id"),
+                columns.get("enabled_guard"),
+                payload,
+            )
+            if exists:
+                self.connection.execute(
+                    "UPDATE aria_acl_bindings SET project_id=?, policy_id=?, "
+                    "target_type=?, target_id=?, enabled_guard=?, payload=? "
+                    "WHERE id=?",
+                    ordered + (object_id,),
+                )
+            else:
+                self.connection.execute(
+                    "INSERT INTO aria_acl_bindings "
+                    "(project_id, policy_id, target_type, target_id, "
+                    "enabled_guard, payload, id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ordered + (object_id,),
+                )
+        elif table == "aria_acl_rules":
+            ordered = (
+                columns.get("project_id"),
+                columns.get("policy_id"),
+                columns.get("direction"),
+                columns.get("priority"),
+                columns.get("enabled_guard"),
+                payload,
+            )
+            if exists:
+                self.connection.execute(
+                    "UPDATE aria_acl_rules SET project_id=?, policy_id=?, "
+                    "direction=?, priority=?, enabled_guard=?, payload=? "
+                    "WHERE id=?",
+                    ordered + (object_id,),
+                )
+            else:
+                self.connection.execute(
+                    "INSERT INTO aria_acl_rules "
+                    "(project_id, policy_id, direction, priority, "
+                    "enabled_guard, payload, id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ordered + (object_id,),
+                )
+        else:
+            ordered = (columns.get("project_id"), payload)
+            if exists:
+                self.connection.execute(
+                    "UPDATE %s SET project_id=?, payload=? WHERE id=?" % table,
+                    ordered + (object_id,),
+                )
+            else:
+                self.connection.execute(
+                    "INSERT INTO %s (project_id, payload, id) VALUES (?, ?, ?)" % table,
+                    ordered + (object_id,),
+                )
+
+    def _ensure_columns(self, table, columns):
+        existing = set(
+            row[1]
+            for row in self.connection.execute(
+                "PRAGMA table_info(%s)" % table
+            ).fetchall()
+        )
+        for name, column_type in columns:
+            if name not in existing:
+                self.connection.execute(
+                    "ALTER TABLE %s ADD COLUMN %s %s"
+                    % (table, name, column_type)
+                )
+
+    def _backfill_sqlite_guards(self):
+        for row in self.connection.execute(
+            "SELECT id, payload FROM aria_acl_rules"
+        ).fetchall():
+            values = json.loads(row[1])
             self.connection.execute(
-                "INSERT OR REPLACE INTO aria_acl_bindings "
-                "(id, project_id, policy_id, target_type, target_id, payload) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "UPDATE aria_acl_rules SET project_id=?, policy_id=?, "
+                "direction=?, priority=?, enabled_guard=? WHERE id=?",
                 (
-                    object_id,
-                    columns.get("project_id"),
-                    columns.get("policy_id"),
-                    columns.get("target_type"),
-                    columns.get("target_id"),
-                    payload,
+                    values.get("project_id") or values.get("tenant_id"),
+                    values.get("policy_id"),
+                    values.get("direction"),
+                    values.get("priority"),
+                    1 if _enabled(values) else None,
+                    row[0],
                 ),
             )
-        elif table == "aria_acl_rules":
+        for row in self.connection.execute(
+            "SELECT id, payload FROM aria_acl_bindings"
+        ).fetchall():
+            values = json.loads(row[1])
             self.connection.execute(
-                "INSERT OR REPLACE INTO aria_acl_rules "
-                "(id, project_id, policy_id, payload) VALUES (?, ?, ?, ?)",
-                (object_id, columns.get("project_id"), columns.get("policy_id"), payload),
+                "UPDATE aria_acl_bindings SET project_id=?, policy_id=?, "
+                "target_type=?, target_id=?, enabled_guard=? WHERE id=?",
+                (
+                    values.get("project_id") or values.get("tenant_id"),
+                    values.get("policy_id"),
+                    values.get("target_type"),
+                    values.get("target_id"),
+                    1 if _enabled(values) else None,
+                    row[0],
+                ),
             )
-        else:
-            self.connection.execute(
-                "INSERT OR REPLACE INTO %s (id, project_id, payload) VALUES (?, ?, ?)" % table,
-                (object_id, columns.get("project_id"), payload),
+
+    def _sqlite_historical_conflicts(self):
+        conflicts = []
+        rule_rows = self.connection.execute(
+            "SELECT policy_id, direction, priority, GROUP_CONCAT(id) "
+            "FROM aria_acl_rules WHERE enabled_guard=1 "
+            "GROUP BY policy_id, direction, priority HAVING COUNT(*) > 1"
+        ).fetchall()
+        for policy_id, direction, priority, object_ids in rule_rows:
+            conflicts.append(
+                "rule policy=%s direction=%s priority=%s ids=%s" % (
+                    policy_id,
+                    direction,
+                    priority,
+                    ",".join(sorted((object_ids or "").split(","))),
+                )
             )
-        self.connection.commit()
+        binding_rows = self.connection.execute(
+            "SELECT target_type, target_id, GROUP_CONCAT(id) "
+            "FROM aria_acl_bindings WHERE enabled_guard=1 "
+            "GROUP BY target_type, target_id HAVING COUNT(*) > 1"
+        ).fetchall()
+        for target_type, target_id, object_ids in binding_rows:
+            conflicts.append(
+                "binding target_type=%s target_id=%s ids=%s" % (
+                    target_type,
+                    target_id,
+                    ",".join(sorted((object_ids or "").split(","))),
+                )
+            )
+        return sorted(conflicts)
+
+    def _raise_known_constraint(self, exc, constraint_kind):
+        text = str(exc)
+        signatures = {
+            "rule": (
+                "aria_acl_rules.policy_id",
+                "aria_acl_rules.direction",
+                "aria_acl_rules.priority",
+                "aria_acl_rules.enabled_guard",
+            ),
+            "binding": (
+                "aria_acl_bindings.target_type",
+                "aria_acl_bindings.target_id",
+                "aria_acl_bindings.enabled_guard",
+            ),
+        }
+        if not all(fragment in text for fragment in signatures[constraint_kind]):
+            return
+        reason = {
+            "rule": "duplicate_enabled_rule_priority",
+            "binding": "duplicate_enabled_binding_target",
+        }[constraint_kind]
+        raise AriaAclConflictError("%s: %s" % (reason, exc))
 
     def _list(self, table, filters=None):
         cursor = self.connection.execute("SELECT payload FROM %s" % table)
@@ -1234,12 +1600,3 @@ class SqliteAriaAclRepository(object):
                 rule.get("dst_address_set_id") == address_set_id
             ):
                 raise AriaAclValidationError("aria_acl_address_set is referenced by rule")
-
-    def _validate_policy_project(self, values):
-        try:
-            policy = self.get_policy(values.get("policy_id"))
-        except AriaAclNotFound:
-            raise AriaAclValidationError("aria_acl object references missing policy")
-        project_id = values.get("project_id")
-        if project_id and policy.get("project_id") and policy.get("project_id") != project_id:
-            raise AriaAclValidationError("aria_acl object project_id does not match policy")

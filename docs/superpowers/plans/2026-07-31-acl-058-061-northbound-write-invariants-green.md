@@ -28,6 +28,7 @@
 - Create: `openstack/neutron_aria/neutron_aria/db/aria_acl/errors.py`
 - Create: `openstack/neutron_aria/neutron_aria/db/aria_acl/write_invariants.py`
 - Modify: `openstack/neutron_aria/neutron_aria/acl_contract.py`
+- Modify: `openstack/neutron_aria/neutron_aria/agent/effective_acl.py`
 - Modify: `openstack/neutron_aria/neutron_aria/db/aria_acl/api.py`
 
 **Interfaces:**
@@ -39,7 +40,7 @@
 - Produces: `reject_immutable_changes(existing, patch, fields, object_type)`.
 - Produces: `AriaAclConflictError`, re-exported from `api.py`.
 
-- [ ] **Step 1: Move repository errors without breaking imports**
+- [x] **Step 1: Move repository errors without breaking imports**
 
 Create:
 
@@ -64,7 +65,7 @@ Import these four classes into `api.py` and remove their inline definitions.
 Existing `from neutron_aria.db.aria_acl.api import ...` callers must continue
 to work.
 
-- [ ] **Step 2: Implement strict canonical IPv4 parsing**
+- [x] **Step 2: Implement strict canonical IPv4 parsing**
 
 Replace `_validate_ipv4_cidr` with:
 
@@ -112,7 +113,7 @@ Make `_validate_ipv4_cidr` delegate to it. Update
 `validate_address_set_reference` to accept either a string or
 `{"address": value}` and validate the extracted address.
 
-- [ ] **Step 3: Implement stable member normalization**
+- [x] **Step 3: Implement stable member normalization**
 
 In `write_invariants.py`, enforce the 2048 raw-member limit first. Reject
 non-string objects and mappings without `address`; ignore only empty strings.
@@ -125,7 +126,7 @@ by numeric network then prefix, and return:
 
 Translate `AclContractError` to `AriaAclValidationError`.
 
-- [ ] **Step 4: Implement immutable and final-state preparation**
+- [x] **Step 4: Implement immutable and final-state preparation**
 
 Use these exact immutable sets:
 
@@ -161,7 +162,7 @@ every referencing policy project.
 `AriaAclConflictError` with `duplicate_enabled_binding_target` for an enabled
 duplicate excluding the current ID.
 
-- [ ] **Step 5: Run the pure and in-memory focused suites**
+- [x] **Step 5: Run the pure and in-memory focused suites**
 
 Run:
 
@@ -185,7 +186,7 @@ Expected after Task 1 plus in-memory wiring in Task 2: all selected tests pass.
 - Produces: named database constraint translation without reclassifying unknown
   storage failures.
 
-- [ ] **Step 1: Add in-memory serialization**
+- [x] **Step 1: Add in-memory serialization**
 
 Initialize `self._write_lock = threading.RLock()` and remove the duplicate
 `self.address_sets = {}` assignment. Wrap every policy/rule/address-set/binding
@@ -205,14 +206,14 @@ Only after preparation succeeds may revision/timestamps advance and the store
 be replaced. Apply the equivalent pattern to policies, address sets, and
 bindings.
 
-- [ ] **Step 2: Replace inline duplicate and project checks**
+- [x] **Step 2: Replace inline duplicate and project checks**
 
 Delete `_reject_duplicate_rule_priority` and
 `_reject_duplicate_binding_target` from `api.py` after all three repositories
 delegate to Task 1. Retain `_enabled` only if a storage adapter still needs it;
 do not leave a second semantic implementation.
 
-- [ ] **Step 3: Add one Neutron transaction context**
+- [x] **Step 3: Add one Neutron transaction context**
 
 Add a Python 2-compatible context manager:
 
@@ -233,7 +234,7 @@ and member replacement commit or roll back with the outer transaction. Acquire
 referenced address-set rows in sorted ID order, then policy, then updated object
 using Core `select().with_for_update()` when supported.
 
-- [ ] **Step 4: Translate only the two named DB constraints**
+- [x] **Step 4: Translate only the two named DB constraints**
 
 Add:
 
@@ -256,7 +257,7 @@ uq_aria_acl_bindings_enabled_target -> duplicate_enabled_binding_target
 
 Re-raise every unknown exception unchanged.
 
-- [ ] **Step 5: Add guard columns to SQLAlchemy table definitions**
+- [x] **Step 5: Add guard columns to SQLAlchemy table definitions**
 
 Add nullable `SmallInteger` `enabled_guard` columns to rules and bindings.
 `_db_values` derives `1` for enabled rows and `None` for disabled rows; client
@@ -281,7 +282,7 @@ Do not silently continue against an old Neutron schema.
 - Produces: `BEGIN IMMEDIATE` final-state writes, guard-column backfill, named
   unique indexes, and safe INSERT/UPDATE behavior.
 
-- [ ] **Step 1: Extend new and existing SQLite schemas**
+- [x] **Step 1: Extend new and existing SQLite schemas**
 
 New rule rows contain `direction TEXT`, `priority INTEGER`, and
 `enabled_guard INTEGER`; binding rows contain `enabled_guard INTEGER`.
@@ -296,13 +297,13 @@ For existing files:
 6. abort before creating indexes when conflicts exist; and
 7. create the two exact named unique indexes when clean.
 
-- [ ] **Step 2: Add an explicit write transaction**
+- [x] **Step 2: Add an explicit write transaction**
 
 Use `BEGIN IMMEDIATE` before load/prepare/preflight and commit only after the
 row and any dependent payload update succeed. Roll back on every exception.
 Do not nest this wrapper around port-status operations.
 
-- [ ] **Step 3: Remove `INSERT OR REPLACE` from desired-state writes**
+- [x] **Step 3: Remove `INSERT OR REPLACE` from desired-state writes**
 
 Make `_upsert` check object-ID existence. Use plain `INSERT` for a new ID and
 `UPDATE ... WHERE id=?` for an existing ID. Include rule
@@ -310,14 +311,14 @@ direction/priority/guard and binding guard columns beside the JSON payload.
 The composite unique indexes must therefore raise instead of deleting or
 replacing an existing conflicting row.
 
-- [ ] **Step 4: Map only known SQLite uniqueness errors**
+- [x] **Step 4: Map only known SQLite uniqueness errors**
 
 When a repository rule/binding write raises `sqlite3.IntegrityError`, inspect
 the named indexed column set in the error message and map it to the same stable
 `AriaAclConflictError` prefix. Re-raise primary-key, storage, and unknown
 integrity failures.
 
-- [ ] **Step 5: Run repository parity**
+- [x] **Step 5: Run repository parity**
 
 Run:
 
@@ -341,7 +342,7 @@ pass with no warnings or errors.
 - Produces: fail-closed historical conflict report.
 - Produces: `AriaAclConflict` HTTP exception with status 409.
 
-- [ ] **Step 1: Implement additive migration preflight**
+- [x] **Step 1: Implement additive migration preflight**
 
 Query all enabled rules and bindings before any DDL. Group in Python by:
 
@@ -355,7 +356,7 @@ dependency-free migration test. If conflicts exist, raise one `RuntimeError`
 starting with `aria_acl_write_invariant_conflicts` and include every sorted key
 and sorted ID list. Emit no add/update/index operation before this check.
 
-- [ ] **Step 2: Add guards, backfill, and unique indexes**
+- [x] **Step 2: Add guards, backfill, and unique indexes**
 
 On a clean preflight:
 
@@ -373,13 +374,13 @@ op_handle.add_column(
 Backfill `1` for enabled and `NULL` for disabled, then create the exact two
 named unique indexes. Downgrade drops indexes first, then guard columns.
 
-- [ ] **Step 3: Add the Neutron migration wrapper**
+- [x] **Step 3: Add the Neutron migration wrapper**
 
 The versioned module re-exports `revision`, `down_revision`, `branch_labels`,
 `depends_on`, `upgrade`, and `downgrade` from the implementation module,
 matching the existing initial-migration wrapper style.
 
-- [ ] **Step 4: Map conflicts to HTTP 409**
+- [x] **Step 4: Map conflicts to HTTP 409**
 
 Import `AriaAclConflictError`. When Neutron is installed, define
 `AriaAclConflict(neutron_exc.Conflict)`; otherwise define a fallback with
@@ -387,7 +388,7 @@ Import `AriaAclConflictError`. When Neutron is installed, define
 `map_repository_error`, and make `ErrorMappingRepositoryProxy` catch the
 conflict type along with validation/not-found.
 
-- [ ] **Step 5: Run migration and plugin behavior**
+- [x] **Step 5: Run migration and plugin behavior**
 
 Run:
 
@@ -411,7 +412,7 @@ Expected: all tests pass.
 - Produces: exact-head GREEN evidence and the next-step decision for
   `REVIEW-OPS-019`.
 
-- [ ] **Step 1: Run all allowed local verification**
+- [x] **Step 1: Run all allowed local verification**
 
 Run:
 
@@ -426,7 +427,7 @@ Expected: all commands exit zero. The existing `SafeConfigParser`
 deprecation warning is tracked separately and must not be suppressed in this
 batch. Do not run Cargo.
 
-- [ ] **Step 2: Review implementation size and duplication**
+- [x] **Step 2: Review implementation size and duplication**
 
 Require:
 
@@ -437,6 +438,18 @@ Require:
 - no production edits outside the files listed above; and
 - a net production increase proportional to the shared invariant, transaction,
   schema, and migration code rather than the 97-case test matrix.
+
+Local GREEN evidence:
+
+- `python3 ci/check_build_workflow_contract.py`: passed;
+- `python3 -m unittest ci.test_ci_lane_contract`: 5 passed;
+- `python3 ci/check_neutron_stage1.py --fast-contracts`: 504 passed;
+- `git diff --check`: passed;
+- exactly one `normalize_ipv4_cidr` implementation remains; and
+- `effective_acl.py` now delegates to that canonicalizer while preserving the
+  existing `invalid_acl_ipv4_cidr` runtime reason contract. This compatibility
+  wiring was discovered by the full 504-test run and removes the previous
+  duplicate parser without changing forwarding behavior.
 
 - [ ] **Step 3: Commit and push GREEN**
 

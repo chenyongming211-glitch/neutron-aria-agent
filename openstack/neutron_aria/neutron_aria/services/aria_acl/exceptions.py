@@ -1,7 +1,8 @@
 from __future__ import absolute_import
 
-from neutron_aria.db.aria_acl.api import AriaAclNotFound
-from neutron_aria.db.aria_acl.api import AriaAclValidationError
+from neutron_aria.db.aria_acl.errors import AriaAclConflictError
+from neutron_aria.db.aria_acl.errors import AriaAclNotFound
+from neutron_aria.db.aria_acl.errors import AriaAclValidationError
 
 
 try:
@@ -23,6 +24,13 @@ if neutron_exc is not None:
 
         def __init__(self, reason):
             super(AriaAclResourceNotFound, self).__init__(reason=reason)
+
+
+    class AriaAclConflict(neutron_exc.Conflict):
+        message = "Aria ACL write conflict: %(reason)s"
+
+        def __init__(self, reason):
+            super(AriaAclConflict, self).__init__(reason=reason)
 else:
     class _FallbackHttpError(Exception):
         status_code = 500
@@ -40,7 +48,13 @@ else:
         status_code = 404
 
 
+    class AriaAclConflict(_FallbackHttpError):
+        status_code = 409
+
+
 def map_repository_error(exc):
+    if isinstance(exc, AriaAclConflictError):
+        return AriaAclConflict(str(exc))
     if isinstance(exc, AriaAclValidationError):
         return AriaAclBadRequest(str(exc))
     if isinstance(exc, AriaAclNotFound):
@@ -60,7 +74,11 @@ class ErrorMappingRepositoryProxy(object):
         def mapped_call(*args, **kwargs):
             try:
                 return attribute(*args, **kwargs)
-            except (AriaAclValidationError, AriaAclNotFound) as exc:
+            except (
+                AriaAclConflictError,
+                AriaAclValidationError,
+                AriaAclNotFound,
+            ) as exc:
                 raise map_repository_error(exc)
 
         return mapped_call
