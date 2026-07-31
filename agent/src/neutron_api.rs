@@ -2379,6 +2379,44 @@ fn build_blocked_snapshot_runtime(
     blocked
 }
 
+async fn handle_snapshot_after_intent_fault(
+    state: &NeutronApiState,
+    intent: &PendingNeutronIntent,
+    previous: &NeutronRuntimeState,
+    fault: Result<(), String>,
+) -> Result<(), SnapshotApplyError> {
+    let Err(details) = fault else {
+        return Ok(());
+    };
+
+    let mut blocked = build_blocked_snapshot_runtime(
+        previous,
+        intent,
+        BTreeMap::new(),
+        "background_apply_failed:fault_injection",
+    );
+    if let Err(error) = state.wal.append_snapshot_commit(blocked.to_wal_state()) {
+        blocked.authority_state = "pending_recovery_commit_failed".to_string();
+        blocked.wal_status = "commit_failed".to_string();
+        warn!(
+            generation = intent.generation,
+            desired_hash = ?intent.desired_hash,
+            error = %error,
+            "failed to commit preapply snapshot failure state"
+        );
+    }
+    {
+        let mut runtime = state.runtime.write().await;
+        *runtime = blocked;
+    }
+
+    Err(SnapshotApplyError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "fault_injection",
+        details,
+    })
+}
+
 async fn recover_failed_snapshot_transaction(
     state: &NeutronApiState,
     intent: &PendingNeutronIntent,
@@ -2542,13 +2580,13 @@ async fn apply_neutron_snapshot_for_scope(
         preflight_ms,
         "neutron_snapshot_apply_plan"
     );
-    if let Err(e) = fault_injection::check("neutron.snapshot.after_intent").await {
-        return Err(SnapshotApplyError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "fault_injection",
-            details: e,
-        });
-    }
+    handle_snapshot_after_intent_fault(
+        &state,
+        &intent,
+        &runtime_before_apply,
+        fault_injection::check("neutron.snapshot.after_intent").await,
+    )
+    .await?;
 
     let runtime_apply_started = Instant::now();
     let outcome = apply_snapshot_runtime_transaction(
