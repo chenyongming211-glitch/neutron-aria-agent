@@ -53,7 +53,7 @@ integrity already present in `agent/src/neutron_wal.rs`, GitHub Actions
   - `NeutronWal::compact_now_for_test()`
   - `NeutronWal::checkpoint_temp_path_for_test()`
 
-- [ ] **Step 1: Add test helpers that describe the missing lifecycle interface**
+- [x] **Step 1: Add test helpers that describe the missing lifecycle interface**
 
 Add inside `#[cfg(test)] mod tests`:
 
@@ -78,7 +78,7 @@ Add inside `#[cfg(test)] mod tests`:
     }
 ```
 
-- [ ] **Step 2: Add RED tests for bounded commits and exact replay**
+- [x] **Step 2: Add RED tests for bounded commits and exact replay**
 
 Add:
 
@@ -128,7 +128,7 @@ Add:
     }
 ```
 
-- [ ] **Step 3: Add RED tests for delete and protected pending intents**
+- [x] **Step 3: Add RED tests for delete and protected pending intents**
 
 Add:
 
@@ -186,7 +186,7 @@ Add:
     }
 ```
 
-- [ ] **Step 4: Add RED tests for corruption, hard capacity, and stale temp**
+- [x] **Step 4: Add RED tests for corruption, hard capacity, and stale temp**
 
 Add:
 
@@ -279,7 +279,7 @@ Add:
     }
 ```
 
-- [ ] **Step 5: Commit and push RED without production implementation**
+- [x] **Step 5: Commit and push RED without production implementation**
 
 Run:
 
@@ -298,7 +298,7 @@ Expected hosted result:
   `checkpoint_temp_path_for_test` do not exist;
 - no unrelated Python or workflow failure.
 
-- [ ] **Step 6: Record exact RED evidence before production code**
+- [x] **Step 6: Record exact RED evidence before production code**
 
 Run read-only GitHub inspection:
 
@@ -689,3 +689,15 @@ Expected:
 - divergence is `0 0`;
 - `REVIEW-OPS-019` is fixed;
 - deferred privileged ACL findings remain unchanged.
+
+## Execution Evidence
+
+RED commit `5c79a28` added only the nine lifecycle behavior tests and their
+test helpers. Build
+[`30601218345`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601218345)
+failed in
+[`rust-behavior` job `91064136403`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601218345/job/91064136403)
+with the expected missing `NeutronWalLimits`, `with_limits`,
+`compact_now_for_test`, and `checkpoint_temp_path_for_test` interfaces.
+`changes` and `fast-contracts` passed, and the independent `rust-build` job
+passed, proving the RED did not modify or break the production binary path.
