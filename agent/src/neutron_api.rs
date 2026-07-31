@@ -6431,6 +6431,65 @@ mod tests {
         NeutronApiState::new(registry, control_plane, "br-int".to_string())
     }
 
+    #[tokio::test]
+    async fn ovs_inventory_command_timeout_is_bounded_and_stops_command_sequence() {
+        let root = temp_root("ovs-command-timeout");
+        let marker = root.join("command-finished");
+        let script = format!(
+            "sleep 0.20; printf finished > '{}'",
+            marker.display()
+        );
+        let started = Instant::now();
+
+        let error = run_bounded_process(
+            "sh",
+            &["-c", script.as_str()],
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .expect_err("slow OVS command must time out");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(150),
+            "bounded command exceeded its deadline envelope"
+        );
+        assert!(error.contains("timed out"));
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert!(
+            !marker.exists(),
+            "timed-out command sequence continued after cancellation"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn snapshot_admission_identity_detects_intervening_runtime_change() {
+        let mut runtime = NeutronRuntimeState {
+            accepted_generation: 40,
+            applied_generation: 40,
+            applied_desired_hash: Some("hash-40".to_string()),
+            authority_state: "ready".to_string(),
+            wal_status: "commit_written".to_string(),
+            ..NeutronRuntimeState::default()
+        };
+        runtime
+            .ports
+            .insert("port-a".to_string(), managed("port-a", "tap-a"));
+        let before = SnapshotAdmissionIdentity::capture(&runtime);
+
+        runtime.accepted_generation = 41;
+        runtime.pending_generation = Some(41);
+        runtime.desired_hash = Some("hash-41".to_string());
+        runtime.authority_state = "applying".to_string();
+        runtime.wal_status = "intent_written".to_string();
+        runtime
+            .ports
+            .insert("port-b".to_string(), managed("port-b", "tap-b"));
+        let after = SnapshotAdmissionIdentity::capture(&runtime);
+
+        assert_ne!(before, after);
+    }
+
     struct WalParentReplacement {
         live: std::path::PathBuf,
         backup: std::path::PathBuf,
