@@ -32,7 +32,7 @@
 - Declares for GREEN: `neutron_aria.acl_contract.normalize_ipv4_cidr(value) -> str`.
 - Produces: RED proof for strict four-octet parsing and canonical network output.
 
-- [ ] **Step 1: Import the contract module without importing a missing symbol**
+- [x] **Step 1: Import the contract module without importing a missing symbol**
 
 Add this import while retaining the existing symbol imports:
 
@@ -43,7 +43,7 @@ from neutron_aria import acl_contract
 Using module lookup lets the missing future API fail as an assertion rather
 than aborting test discovery with `ImportError`.
 
-- [ ] **Step 2: Add strict rejection behavior**
+- [x] **Step 2: Add strict rejection behavior**
 
 Add:
 
@@ -71,7 +71,7 @@ Add:
 Expected on the old implementation: at least `10.1/16` and the leading-zero
 form are accepted, so the test fails.
 
-- [ ] **Step 3: Add canonical output behavior**
+- [x] **Step 3: Add canonical output behavior**
 
 Add:
 
@@ -94,7 +94,7 @@ Add:
 Expected on the old implementation: FAIL with
 `strict canonical CIDR API is missing`.
 
-- [ ] **Step 4: Run the focused module and verify correct RED**
+- [x] **Step 4: Run the focused module and verify correct RED**
 
 Run:
 
@@ -120,7 +120,7 @@ failure is not acceptable RED.
 - Produces: the same observable validation, normalization, atomicity, and
   conflict expectations for in-memory, SQLite, and inherited Neutron DB writes.
 
-- [ ] **Step 1: Add dependency-free repository factories**
+- [x] **Step 1: Add dependency-free repository factories**
 
 Create the test module with Python 2-compatible imports, a temporary SQLite
 factory, and this adapter skeleton:
@@ -177,7 +177,7 @@ Add a `RepositoryCase` context manager that yields:
 
 It must close and unlink SQLite resources in `finally`.
 
-- [ ] **Step 2: Add canonical write cases**
+- [x] **Step 2: Add canonical write cases**
 
 For every repository:
 
@@ -219,7 +219,7 @@ Add boundaries proving 2048 raw entries are accepted and 2049 are rejected
 before deduplication. Expected on the old implementation: returned CIDRs and
 members retain their input spelling/order and 2049 members are accepted.
 
-- [ ] **Step 3: Add rule reference validation matrix**
+- [x] **Step 3: Add rule reference validation matrix**
 
 For rule create and update, cover both `src_address_set_id` and
 `dst_address_set_id`. Each write must raise `AriaAclValidationError` for:
@@ -238,7 +238,7 @@ After every failed update, assert the complete original rule and its
 
 Expected on the old implementation: the repository accepts these associations.
 
-- [ ] **Step 4: Add referenced address-set update and immutable-field cases**
+- [x] **Step 4: Add referenced address-set update and immutable-field cases**
 
 Create a valid referenced set and rule, then assert attempts to make the set
 disabled, empty, invalid, oversized, or owned by another project fail while
@@ -251,7 +251,7 @@ pinning behavior.
 Expected on the old implementation: invalid set updates are persisted and
 immutable changes are either accepted or silently discarded.
 
-- [ ] **Step 5: Add sequential conflict semantics**
+- [x] **Step 5: Add sequential conflict semantics**
 
 First assert:
 
@@ -276,23 +276,22 @@ update, assert the old object and revision are unchanged.
 Expected on the old implementation: the named conflict type is missing and
 duplicates raise validation/HTTP-400 semantics.
 
-- [ ] **Step 6: Add deterministic concurrent-writer cases**
+- [x] **Step 6: Add deterministic concurrent-writer cases**
 
-Use two threads and a barrier-controlled subclass/factory so both writers
-complete friendly preflight before either write. Cover:
+Start eight public in-memory repository writers from one barrier and assert
+exactly one `"success"` plus seven `AriaAclConflictError` results. Assert the
+repository contains exactly one enabled row for the key.
 
-- one in-memory repository instance for duplicate enabled rules;
-- two SQLite repository instances pointed at the same file for duplicate
-  enabled bindings.
-
-Collect results and assert exactly one `"success"` and one
-`"duplicate_enabled_*"` conflict. Assert the repository contains exactly one
-enabled row for the key.
+For SQLite, inspect the real repository schema for the two named unique indexes,
+then issue duplicate enabled rule and binding inserts directly through
+`sqlite3`. Assert the second write raises `sqlite3.IntegrityError`. This proves
+database arbitration deterministically without binding the test to a private
+repository preflight hook or relying on thread scheduling.
 
 Expected on the old implementation: both writers succeed because there is no
 lock/unique constraint.
 
-- [ ] **Step 7: Run the focused repository suite**
+- [x] **Step 7: Run the focused repository suite**
 
 Run:
 
@@ -308,7 +307,7 @@ errors and nondeterminism; do not modify production code.
 ### Task 3: Add migration and HTTP RED contracts
 
 **Files:**
-- Modify: `openstack/neutron_aria/neutron_aria/tests/unit/test_aria_acl_plugin.py`
+- Create: `openstack/neutron_aria/neutron_aria/tests/unit/test_aria_acl_write_migration.py`
 
 **Interfaces:**
 - Consumes: `map_repository_error`, plugin notifier behavior, and callable
@@ -321,7 +320,7 @@ errors and nondeterminism; do not modify production code.
 - Produces: RED proof of HTTP 409, post-commit notification, additive schema,
   and fail-closed historical duplicate handling.
 
-- [ ] **Step 1: Extend the fake Alembic operations**
+- [x] **Step 1: Extend the fake Alembic operations**
 
 Add recorded `added_columns`, `dropped_columns`, and an injectable bind to
 `FakeAlembicOp`, with:
@@ -340,7 +339,7 @@ Add recorded `added_columns`, `dropped_columns`, and an injectable bind to
 The fake bind returns configured rule/binding rows to the migration's
 preflight queries.
 
-- [ ] **Step 2: Add conflict-to-HTTP behavior**
+- [x] **Step 2: Add conflict-to-HTTP behavior**
 
 Import the DB module rather than a missing symbol, assert
 `AriaAclConflictError` exists, instantiate it with
@@ -354,14 +353,14 @@ self.assertIn("duplicate_enabled_rule_priority", str(mapped))
 
 Retain existing 400 and 404 cases.
 
-- [ ] **Step 3: Prove failed writes do not notify**
+- [x] **Step 3: Prove failed writes do not notify**
 
 Use `AriaAclPlugin(repository=..., notifier=FakeNotifier())`, create valid
 baseline state, clear the notifier, then attempt a duplicate enabled rule and
 binding. Assert the error is HTTP 409, `notifier.events == []`, and baseline
 objects/revisions are unchanged.
 
-- [ ] **Step 4: Prove database race errors retain conflict semantics**
+- [x] **Step 4: Prove database race errors retain conflict semantics**
 
 Use a fake repository whose `create_rule` and `create_binding` raise the same
 named constraint failures that the Neutron repository will receive from the
@@ -370,7 +369,7 @@ the matching stable reason prefix, and the plugin maps it to HTTP 409 without
 notifying. Also inject an unknown integrity/storage failure and assert it
 remains on the existing 500 path rather than being misclassified.
 
-- [ ] **Step 5: Add additive migration behavior**
+- [x] **Step 5: Add additive migration behavior**
 
 Load the exact migration module through `importlib`. If absent, call
 `self.fail("ACL write-invariant migration is missing")` so RED is a normal
@@ -396,7 +395,7 @@ self.assertIn(
 
 Call `downgrade` and assert both indexes and both guard columns are removed.
 
-- [ ] **Step 6: Add historical-conflict fail-closed behavior**
+- [x] **Step 6: Add historical-conflict fail-closed behavior**
 
 Configure the fake bind with multiple duplicate enabled rule and binding keys.
 Assert `upgrade` raises a migration exception whose message contains every
@@ -404,7 +403,7 @@ conflicting key and every sorted object ID. Assert no column/index operation
 was emitted. This proves the migration does not choose a winner, delete, or
 disable desired state.
 
-- [ ] **Step 7: Add old-schema startup rejection**
+- [x] **Step 7: Add old-schema startup rejection**
 
 Construct the Neutron DB repository against a fake reflected schema without
 either `enabled_guard` column. Assert initialization fails with
@@ -416,7 +415,7 @@ aria_acl_schema_migration_required
 
 Do not accept fallback execution without the database constraints.
 
-- [ ] **Step 8: Run focused plugin/migration tests**
+- [x] **Step 8: Run focused plugin/migration tests**
 
 Run:
 
@@ -438,7 +437,7 @@ mapping and the additive migration are absent.
 - Consumes: focused RED results and exact-head GitHub Actions jobs.
 - Produces: durable RED evidence without marking either backlog item fixed.
 
-- [ ] **Step 1: Run the complete allowed local test command**
+- [x] **Step 1: Run the complete allowed local test command**
 
 Run:
 
@@ -453,7 +452,7 @@ Expected: workflow/static checks and `git diff --check` pass.
 `--fast-contracts` fails only in the new ACL-058/061 tests for the intended
 missing behavior. Do not suppress the failure and do not run Cargo.
 
-- [ ] **Step 2: Self-review the RED diff**
+- [x] **Step 2: Self-review the RED diff**
 
 Verify:
 
@@ -465,13 +464,13 @@ Verify:
 - existing unrelated tests remain green when the new failing cases are
   excluded.
 
-- [ ] **Step 3: Commit and push the RED checkpoint**
+- [x] **Step 3: Commit and push the RED checkpoint**
 
 ```bash
 git add \
   openstack/neutron_aria/neutron_aria/tests/unit/test_acl_contract.py \
   openstack/neutron_aria/neutron_aria/tests/unit/test_aria_acl_write_invariants.py \
-  openstack/neutron_aria/neutron_aria/tests/unit/test_aria_acl_plugin.py \
+  openstack/neutron_aria/neutron_aria/tests/unit/test_aria_acl_write_migration.py \
   docs/superpowers/plans/2026-07-31-acl-058-061-northbound-write-invariants-red.md
 git -c user.name=netmouser -c user.email=chenyongming211@gmail.com \
   commit -m "test: expose ACL northbound write invariant gaps"

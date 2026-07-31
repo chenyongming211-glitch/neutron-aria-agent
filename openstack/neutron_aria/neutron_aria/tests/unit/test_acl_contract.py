@@ -2,6 +2,7 @@ from __future__ import absolute_import
 
 import unittest
 
+from neutron_aria import acl_contract
 from neutron_aria.acl_contract import AclContractError
 from neutron_aria.acl_contract import port_contract_eligibility
 from neutron_aria.acl_contract import validate_address_set_reference
@@ -93,6 +94,39 @@ class AclContractTestCase(unittest.TestCase):
         ):
             with self.assertRaises(AclContractError):
                 validate_rule(values)
+
+    def test_rule_rejects_non_strict_ipv4_cidr_spellings(self):
+        for field in ("src_cidr", "dst_cidr"):
+            for cidr in (
+                "10.1/16",
+                "010.1.2.0/24",
+                "10.1.2.0 /24",
+                "10.1.2.0/ 24",
+                "10.1.2.0/33",
+                "2001:db8::/64",
+            ):
+                values = {
+                    "direction": "ingress",
+                    "priority": 1,
+                    "action": "allow",
+                    field: cidr,
+                }
+                with self.assertRaises(AclContractError):
+                    validate_rule(values)
+
+    def test_ipv4_cidr_normalization_trims_outer_space_and_networks_host_bits(self):
+        self.assertTrue(
+            hasattr(acl_contract, "normalize_ipv4_cidr"),
+            "strict canonical CIDR API is missing",
+        )
+        self.assertEqual(
+            "10.1.2.0/24",
+            acl_contract.normalize_ipv4_cidr(" 10.1.2.3/24 "),
+        )
+        self.assertEqual(
+            "0.0.0.0/0",
+            acl_contract.normalize_ipv4_cidr("255.255.255.255/0"),
+        )
 
     def test_address_set_reference_requires_enabled_ipv4_members(self):
         validate_address_set_reference({
