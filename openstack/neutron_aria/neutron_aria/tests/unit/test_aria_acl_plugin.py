@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+import inspect
 import os
 import tempfile
 import unittest
@@ -1066,6 +1067,92 @@ class AriaAclPluginTestCase(unittest.TestCase):
                     )
                 ],
             )
+            repository.close()
+        finally:
+            os.unlink(path)
+
+    def test_sqlite_repository_uses_native_query_contract(self):
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            repository = SqliteAriaAclRepository(path)
+            if hasattr(inspect, "signature"):
+                parameters = inspect.signature(
+                    repository.list_policies
+                ).parameters
+            else:
+                parameters = inspect.getargspec(repository.list_policies).args
+            self.assertIn("sorts", parameters)
+            for policy_id, name, revision in (
+                ("p3", "same", 3),
+                ("p1", "same", 1),
+                ("p2", "", 2),
+            ):
+                repository.create_policy({
+                    "id": policy_id,
+                    "project_id": "project-1",
+                    "name": name,
+                    "revision_number": revision,
+                })
+
+            first = repository.list_policies(
+                sorts=[("name", True)],
+                limit=2,
+                fields=["id", "name"],
+            )
+            self.assertEqual(["p2", "p1"], [row["id"] for row in first])
+            reverse = repository.list_policies(
+                sorts=[("name", True)],
+                limit=2,
+                marker="p3",
+                page_reverse=True,
+                fields=["id"],
+            )
+            self.assertEqual([{"id": "p2"}, {"id": "p1"}], reverse)
+            self.assertEqual(
+                {"id": "p1"},
+                repository.get_policy("p1", fields=["id"]),
+            )
+            self.assertEqual(
+                [{"id": "p1"}, {"id": "p3"}],
+                repository.list_policies(
+                    filters={
+                        "enabled": ["true"],
+                        "revision_number": ["1", "3"],
+                    },
+                    fields=["id"],
+                ),
+            )
+
+            from neutron_aria.db.aria_acl.query import PortStatusProjection
+            for port_id, host in (
+                ("port-1", "ostack2"),
+                ("port-1", "ostack3"),
+                ("port-2", "ostack2"),
+            ):
+                repository.upsert_port_status({
+                    "port_id": port_id,
+                    "host": host,
+                    "status": "ready",
+                })
+            projection = PortStatusProjection(200.0, -1)
+            marker = None
+            status_ids = []
+            while True:
+                page = repository.list_port_statuses(
+                    filters={"runtime_status": ["ready"]},
+                    fields=["id"],
+                    sorts=[("id", True)],
+                    limit=1,
+                    marker=marker,
+                    projection=projection,
+                )
+                if not page:
+                    break
+                marker = page[0]["id"]
+                self.assertNotIn(marker, status_ids)
+                status_ids.append(marker)
+            self.assertEqual(3, len(status_ids))
             repository.close()
         finally:
             os.unlink(path)

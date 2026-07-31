@@ -13,8 +13,11 @@ from neutron_aria.db.aria_acl.errors import AriaAclError
 from neutron_aria.db.aria_acl.errors import AriaAclNotFound
 from neutron_aria.db.aria_acl.errors import AriaAclValidationError
 from neutron_aria.db.aria_acl.query import apply_memory_query
+from neutron_aria.db.aria_acl.query import decode_port_status_id
 from neutron_aria.db.aria_acl.query import normalize_query
 from neutron_aria.db.aria_acl.query import project_fields
+from neutron_aria.db.aria_acl.sql_query import build_select
+from neutron_aria.db.aria_acl.sql_query import build_sqlite_select
 from neutron_aria.db.aria_acl.write_invariants import ADDRESS_SET_IMMUTABLE_FIELDS
 from neutron_aria.db.aria_acl.write_invariants import BINDING_IMMUTABLE_FIELDS
 from neutron_aria.db.aria_acl.write_invariants import POLICY_IMMUTABLE_FIELDS
@@ -28,8 +31,10 @@ from neutron_aria.db.aria_acl.write_invariants import reject_immutable_changes
 
 try:
     STRING_TYPES = (basestring,)
+    INTEGER_TYPES = (int, long)
 except NameError:
     STRING_TYPES = (str,)
+    INTEGER_TYPES = (int,)
 
 
 def _clone(value):
@@ -82,6 +87,21 @@ def _matches_filters(value, filters):
         elif actual != expected:
                 return False
     return True
+
+
+def _sqlite_json_scalar(payload, field):
+    try:
+        value = json.loads(payload).get(field)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if value is None or isinstance(
+        value,
+        INTEGER_TYPES + (float,) + STRING_TYPES,
+    ):
+        return value
+    return None
 
 
 def _utcnow():
@@ -586,11 +606,21 @@ class NeutronDbAriaAclRepository(object):
         self._insert("policies", self._db_values("policies", values))
         return _clone(values)
 
-    def list_policies(self, filters=None):
-        return self._list("policies", filters=filters)
+    def list_policies(
+        self, filters=None, fields=None, sorts=None, limit=None,
+        marker=None, page_reverse=False,
+    ):
+        return self._list_query(
+            "policies", filters, fields, sorts, limit, marker, page_reverse
+        )
 
-    def get_policy(self, policy_id):
-        return self._get("policies", policy_id, "aria_acl_policy")
+    def get_policy(self, policy_id, fields=None):
+        if not hasattr(self, "tables"):
+            return project_fields(
+                self._get("policies", policy_id, "aria_acl_policy"),
+                fields,
+            )
+        return self._get("policies", policy_id, "aria_acl_policy", fields)
 
     @_neutron_write()
     def update_policy(self, policy_id, values):
@@ -632,11 +662,21 @@ class NeutronDbAriaAclRepository(object):
         self._insert("rules", self._db_values("rules", values))
         return _clone(values)
 
-    def list_rules(self, filters=None):
-        return self._list("rules", filters=filters)
+    def list_rules(
+        self, filters=None, fields=None, sorts=None, limit=None,
+        marker=None, page_reverse=False,
+    ):
+        return self._list_query(
+            "rules", filters, fields, sorts, limit, marker, page_reverse
+        )
 
-    def get_rule(self, rule_id):
-        return self._get("rules", rule_id, "aria_acl_rule")
+    def get_rule(self, rule_id, fields=None):
+        if not hasattr(self, "tables"):
+            return project_fields(
+                self._get("rules", rule_id, "aria_acl_rule"),
+                fields,
+            )
+        return self._get("rules", rule_id, "aria_acl_rule", fields)
 
     @_neutron_write("rule")
     def update_rule(self, rule_id, values):
@@ -684,11 +724,30 @@ class NeutronDbAriaAclRepository(object):
         self._replace_members(values["id"], values.get("members", []))
         return _clone(values)
 
-    def list_address_sets(self, filters=None):
-        return self._list("address_sets", filters=filters)
+    def list_address_sets(
+        self, filters=None, fields=None, sorts=None, limit=None,
+        marker=None, page_reverse=False,
+    ):
+        return self._list_query(
+            "address_sets", filters, fields, sorts, limit, marker, page_reverse
+        )
 
-    def get_address_set(self, address_set_id):
-        return self._get("address_sets", address_set_id, "aria_acl_address_set")
+    def get_address_set(self, address_set_id, fields=None):
+        if not hasattr(self, "tables"):
+            return project_fields(
+                self._get(
+                    "address_sets",
+                    address_set_id,
+                    "aria_acl_address_set",
+                ),
+                fields,
+            )
+        return self._get(
+            "address_sets",
+            address_set_id,
+            "aria_acl_address_set",
+            fields,
+        )
 
     @_neutron_write()
     def update_address_set(self, address_set_id, values):
@@ -739,11 +798,21 @@ class NeutronDbAriaAclRepository(object):
         self._insert("bindings", self._db_values("bindings", values))
         return _clone(values)
 
-    def list_bindings(self, filters=None):
-        return self._list("bindings", filters=filters)
+    def list_bindings(
+        self, filters=None, fields=None, sorts=None, limit=None,
+        marker=None, page_reverse=False,
+    ):
+        return self._list_query(
+            "bindings", filters, fields, sorts, limit, marker, page_reverse
+        )
 
-    def get_binding(self, binding_id):
-        return self._get("bindings", binding_id, "aria_acl_binding")
+    def get_binding(self, binding_id, fields=None):
+        if not hasattr(self, "tables"):
+            return project_fields(
+                self._get("bindings", binding_id, "aria_acl_binding"),
+                fields,
+            )
+        return self._get("bindings", binding_id, "aria_acl_binding", fields)
 
     @_neutron_write("binding")
     def update_binding(self, binding_id, values):
@@ -809,8 +878,20 @@ class NeutronDbAriaAclRepository(object):
             return values[0] if values else None
         return values
 
-    def list_port_statuses(self, filters=None):
-        return self._list("port_statuses", filters=filters)
+    def list_port_statuses(
+        self, filters=None, fields=None, sorts=None, limit=None,
+        marker=None, page_reverse=False, projection=None,
+    ):
+        return self._list_query(
+            "port_statuses",
+            filters,
+            fields,
+            sorts,
+            limit,
+            marker,
+            page_reverse,
+            projection=projection,
+        )
 
     def delete_port_status(self, port_id, host=None):
         table = self.tables["port_statuses"]
@@ -1046,17 +1127,83 @@ class NeutronDbAriaAclRepository(object):
         if result.rowcount == 0:
             raise AriaAclNotFound("%s %s not found" % (object_type, object_id))
 
-    def _list(self, table_name, filters=None):
-        rows = self.session.execute(self.tables[table_name].select()).fetchall()
-        values = [self._row_to_dict(table_name, row) for row in rows]
-        return [value for value in values if _matches_filters(value, filters or {})]
+    def _list_query(
+        self,
+        table_name,
+        filters=None,
+        fields=None,
+        sorts=None,
+        limit=None,
+        marker=None,
+        page_reverse=False,
+        projection=None,
+    ):
+        query = normalize_query(
+            table_name, filters, fields, sorts, limit, marker, page_reverse
+        )
+        if not hasattr(self, "tables"):
+            return apply_memory_query(self._list(table_name), query)
+        table = self.tables[table_name]
+        marker_row = self._query_marker_row(table_name, query)
+        statement = build_select(
+            self.sa,
+            table,
+            query,
+            marker_row=marker_row,
+            projection=projection,
+        )
+        rows = self.session.execute(statement).fetchall()
+        if query.page_reverse:
+            rows = list(reversed(rows))
+        values = [
+            self._row_to_dict(table_name, row, include_members=False)
+            for row in rows
+        ]
+        if table_name == "port_statuses" and projection is not None:
+            values = [projection.project(value) for value in values]
+        if table_name == "address_sets" and (
+            not query.fields or "members" in query.fields
+        ):
+            grouped = self._members_for_sets([value["id"] for value in values])
+            for value in values:
+                value["members"] = grouped[value["id"]]
+        return [project_fields(value, query.fields) for value in values]
 
-    def _get(self, table_name, object_id, object_type):
+    def _query_marker_row(self, table_name, query):
+        if query.marker is None:
+            return None
+        table = self.tables[table_name]
+        if table_name == "port_statuses":
+            port_id, host = decode_port_status_id(query.marker)
+            clause = (
+                (table.c.port_id == port_id) &
+                (table.c.host == host)
+            )
+        else:
+            clause = table.c.id == query.marker
+        row = self.session.execute(table.select().where(clause)).fetchone()
+        if not row:
+            raise AriaAclNotFound(
+                "%s marker %s not found" % (table_name, query.marker)
+            )
+        return dict(row)
+
+    def _get(self, table_name, object_id, object_type, fields=None):
         table = self.tables[table_name]
         row = self.session.execute(table.select().where(table.c.id == object_id)).fetchone()
         if not row:
             raise AriaAclNotFound("%s %s not found" % (object_type, object_id))
-        return self._row_to_dict(table_name, row)
+        include_members = table_name != "address_sets" or (
+            not fields or "members" in fields
+        )
+        return project_fields(
+            self._row_to_dict(
+                table_name,
+                row,
+                include_members=include_members,
+            ),
+            fields,
+        )
 
     def _replace_members(self, address_set_id, members):
         table = self.tables["address_set_members"]
@@ -1074,18 +1221,34 @@ class NeutronDbAriaAclRepository(object):
                 ))
 
     def _members_for_set(self, address_set_id):
+        return self._members_for_sets((address_set_id,))[address_set_id]
+
+    def _members_for_sets(self, address_set_ids):
+        grouped = dict(
+            (address_set_id, []) for address_set_id in address_set_ids
+        )
+        if not address_set_ids:
+            return grouped
         table = self.tables["address_set_members"]
         rows = self.session.execute(
-            table.select().where(table.c.address_set_id == address_set_id)
+            table.select().where(
+                table.c.address_set_id.in_(address_set_ids)
+            ).order_by(
+                table.c.address_set_id.asc(),
+                table.c.address.asc(),
+                table.c.id.asc(),
+            )
         ).fetchall()
-        return [{"address": row["address"]} for row in rows]
+        for row in rows:
+            grouped[row["address_set_id"]].append({"address": row["address"]})
+        return grouped
 
-    def _row_to_dict(self, table_name, row):
+    def _row_to_dict(self, table_name, row, include_members=True):
         value = dict(row)
         for key in ("created_at", "updated_at"):
             if key in value:
                 value[key] = _format_time(value[key])
-        if table_name == "address_sets":
+        if table_name == "address_sets" and include_members:
             value["members"] = self._members_for_set(value["id"])
         return value
 
@@ -1151,6 +1314,11 @@ class SqliteAriaAclRepository(object):
     def __init__(self, path):
         self.path = path
         self.connection = sqlite3.connect(path)
+        self.connection.create_function(
+            "aria_json_scalar",
+            2,
+            _sqlite_json_scalar,
+        )
         self._ensure_schema()
 
     def close(self):
@@ -1176,11 +1344,18 @@ class SqliteAriaAclRepository(object):
         )
         return _clone(values)
 
-    def list_policies(self, filters=None):
-        return self._list("aria_acl_policies", filters=filters)
+    def list_policies(
+        self, filters=None, fields=None, sorts=None, limit=None,
+        marker=None, page_reverse=False,
+    ):
+        return self._list_query(
+            "policies", filters, fields, sorts, limit, marker, page_reverse
+        )
 
-    def get_policy(self, policy_id):
-        return self._get("aria_acl_policies", policy_id, "aria_acl_policy")
+    def get_policy(self, policy_id, fields=None):
+        return self._get(
+            "aria_acl_policies", policy_id, "aria_acl_policy", fields
+        )
 
     @_sqlite_write()
     def update_policy(self, policy_id, values):
@@ -1231,11 +1406,16 @@ class SqliteAriaAclRepository(object):
         )
         return _clone(values)
 
-    def list_rules(self, filters=None):
-        return self._list("aria_acl_rules", filters=filters)
+    def list_rules(
+        self, filters=None, fields=None, sorts=None, limit=None,
+        marker=None, page_reverse=False,
+    ):
+        return self._list_query(
+            "rules", filters, fields, sorts, limit, marker, page_reverse
+        )
 
-    def get_rule(self, rule_id):
-        return self._get("aria_acl_rules", rule_id, "aria_acl_rule")
+    def get_rule(self, rule_id, fields=None):
+        return self._get("aria_acl_rules", rule_id, "aria_acl_rule", fields)
 
     @_sqlite_write("rule")
     def update_rule(self, rule_id, values):
@@ -1287,11 +1467,21 @@ class SqliteAriaAclRepository(object):
         )
         return _clone(values)
 
-    def list_address_sets(self, filters=None):
-        return self._list("aria_acl_address_sets", filters=filters)
+    def list_address_sets(
+        self, filters=None, fields=None, sorts=None, limit=None,
+        marker=None, page_reverse=False,
+    ):
+        return self._list_query(
+            "address_sets", filters, fields, sorts, limit, marker, page_reverse
+        )
 
-    def get_address_set(self, address_set_id):
-        return self._get("aria_acl_address_sets", address_set_id, "aria_acl_address_set")
+    def get_address_set(self, address_set_id, fields=None):
+        return self._get(
+            "aria_acl_address_sets",
+            address_set_id,
+            "aria_acl_address_set",
+            fields,
+        )
 
     @_sqlite_write()
     def update_address_set(self, address_set_id, values):
@@ -1346,11 +1536,18 @@ class SqliteAriaAclRepository(object):
         )
         return _clone(values)
 
-    def list_bindings(self, filters=None):
-        return self._list("aria_acl_bindings", filters=filters)
+    def list_bindings(
+        self, filters=None, fields=None, sorts=None, limit=None,
+        marker=None, page_reverse=False,
+    ):
+        return self._list_query(
+            "bindings", filters, fields, sorts, limit, marker, page_reverse
+        )
 
-    def get_binding(self, binding_id):
-        return self._get("aria_acl_bindings", binding_id, "aria_acl_binding")
+    def get_binding(self, binding_id, fields=None):
+        return self._get(
+            "aria_acl_bindings", binding_id, "aria_acl_binding", fields
+        )
 
     @_sqlite_write("binding")
     def update_binding(self, binding_id, values):
@@ -1414,8 +1611,20 @@ class SqliteAriaAclRepository(object):
         )
         return [json.loads(row[0]) for row in cursor.fetchall()]
 
-    def list_port_statuses(self, filters=None):
-        return self._list("aria_acl_port_statuses", filters=filters)
+    def list_port_statuses(
+        self, filters=None, fields=None, sorts=None, limit=None,
+        marker=None, page_reverse=False, projection=None,
+    ):
+        return self._list_query(
+            "port_statuses",
+            filters,
+            fields,
+            sorts,
+            limit,
+            marker,
+            page_reverse,
+            projection=projection,
+        )
 
     def delete_port_status(self, port_id, host=None):
         if host is not None:
@@ -1645,16 +1854,64 @@ class SqliteAriaAclRepository(object):
         }[constraint_kind]
         raise AriaAclConflictError("%s: %s" % (reason, exc))
 
-    def _list(self, table, filters=None):
-        cursor = self.connection.execute("SELECT payload FROM %s" % table)
-        values = [json.loads(row[0]) for row in cursor.fetchall()]
-        filters = filters or {}
-        return [
-            value for value in values
-            if _matches_filters(value, filters)
-        ]
+    def _list_query(
+        self,
+        resource,
+        filters=None,
+        fields=None,
+        sorts=None,
+        limit=None,
+        marker=None,
+        page_reverse=False,
+        projection=None,
+    ):
+        query = normalize_query(
+            resource, filters, fields, sorts, limit, marker, page_reverse
+        )
+        table = {
+            "policies": "aria_acl_policies",
+            "rules": "aria_acl_rules",
+            "address_sets": "aria_acl_address_sets",
+            "bindings": "aria_acl_bindings",
+            "port_statuses": "aria_acl_port_statuses",
+        }[resource]
+        marker_row = self._sqlite_marker_row(table, resource, query)
+        sql, parameters = build_sqlite_select(
+            table,
+            query,
+            marker_row=marker_row,
+            projection=projection,
+        )
+        rows = self.connection.execute(sql, parameters).fetchall()
+        if query.page_reverse:
+            rows = list(reversed(rows))
+        values = [json.loads(row[0]) for row in rows]
+        if resource == "port_statuses" and projection is not None:
+            values = [projection.project(value) for value in values]
+        return [project_fields(value, query.fields) for value in values]
 
-    def _get(self, table, object_id, object_type):
+    def _sqlite_marker_row(self, table, resource, query):
+        if query.marker is None:
+            return None
+        if resource == "port_statuses":
+            port_id, host = decode_port_status_id(query.marker)
+            row = self.connection.execute(
+                "SELECT payload FROM aria_acl_port_statuses "
+                "WHERE port_id=? AND host=?",
+                (port_id, host),
+            ).fetchone()
+        else:
+            row = self.connection.execute(
+                "SELECT payload FROM %s WHERE id=?" % table,
+                (query.marker,),
+            ).fetchone()
+        if not row:
+            raise AriaAclNotFound(
+                "%s marker %s not found" % (resource, query.marker)
+            )
+        return json.loads(row[0])
+
+    def _get(self, table, object_id, object_type, fields=None):
         cursor = self.connection.execute(
             "SELECT payload FROM %s WHERE id=?" % table,
             (object_id,),
@@ -1662,7 +1919,7 @@ class SqliteAriaAclRepository(object):
         row = cursor.fetchone()
         if not row:
             raise AriaAclNotFound("%s %s not found" % (object_type, object_id))
-        return json.loads(row[0])
+        return project_fields(json.loads(row[0]), fields)
 
     def _delete(self, table, object_id, object_type):
         cursor = self.connection.execute("DELETE FROM %s WHERE id=?" % table, (object_id,))
