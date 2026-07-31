@@ -11220,6 +11220,290 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn neutron_delete_after_detach_fault_retains_forward_recovery_intent() {
+        let root = temp_root("delete-after-detach-fault");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(60);
+        let port = previous.ports["committed-port"].clone();
+        state
+            .wal
+            .append_snapshot_commit(previous.to_wal_state())
+            .unwrap();
+        state
+            .wal
+            .append_delete_intent(
+                port.port_id.clone(),
+                previous.accepted_generation,
+                vec!["acl".to_string(), "attach".to_string()],
+                port.clone(),
+            )
+            .unwrap();
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = previous.clone();
+        }
+
+        let (status, response) = finalize_detached_neutron_delete(
+            &state,
+            &previous,
+            &port,
+            previous.accepted_generation,
+            Err("fault injection triggered after detach".to_string()),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.detached);
+        assert_eq!(response.status, "error");
+        {
+            let runtime = state.runtime.read().await;
+            assert!(runtime.ports.contains_key(&port.port_id));
+            assert_eq!(
+                runtime.pending_generation,
+                Some(previous.accepted_generation)
+            );
+            assert_eq!(runtime.desired_hash, None);
+            assert_eq!(runtime.authority_state, "blocked_recovery_required");
+            assert_eq!(runtime.wal_status, "delete_after_detach_failed");
+            let projected = project_neutron_status_v1(&runtime);
+            assert_eq!(
+                projected.required_action,
+                NeutronStatusRequiredAction::Operator
+            );
+        }
+        let replay = state.wal.replay();
+        let pending = replay
+            .pending_intent
+            .expect("after-detach failure must retain the delete intent");
+        assert_eq!(pending.kind, "delete");
+        assert_eq!(pending.port_ids, vec![port.port_id]);
+        assert_eq!(pending.affected_ports, vec![port]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_delete_commit_failure_retains_forward_recovery_intent() {
+        let root = temp_root("delete-commit-failed");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(61);
+        let port = previous.ports["committed-port"].clone();
+        state
+            .wal
+            .append_snapshot_commit(previous.to_wal_state())
+            .unwrap();
+        state
+            .wal
+            .append_delete_intent(
+                port.port_id.clone(),
+                previous.accepted_generation,
+                vec!["acl".to_string(), "attach".to_string()],
+                port.clone(),
+            )
+            .unwrap();
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = previous.clone();
+        }
+        let backup = root.join("delete-commit-state-backup");
+        let mut replacement =
+            WalParentReplacement::install(&state.registry.base_state_path, &backup);
+
+        let (status, response) = finalize_detached_neutron_delete(
+            &state,
+            &previous,
+            &port,
+            previous.accepted_generation,
+            Ok(()),
+        )
+        .await;
+        replacement.restore();
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.detached);
+        assert!(response
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("wal_commit_failed:")));
+        {
+            let runtime = state.runtime.read().await;
+            assert!(runtime.ports.contains_key(&port.port_id));
+            assert_eq!(
+                runtime.pending_generation,
+                Some(previous.accepted_generation)
+            );
+            assert_eq!(runtime.desired_hash, None);
+            assert_eq!(runtime.authority_state, "blocked_recovery_required");
+            assert_eq!(runtime.wal_status, "delete_commit_failed");
+        }
+        let replay = state.wal.replay();
+        assert_eq!(
+            replay
+                .pending_intent
+                .as_ref()
+                .map(|pending| pending.kind.as_str()),
+            Some("delete")
+        );
+        assert!(replay.state.ports.contains_key(&port.port_id));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn neutron_delete_publishes_absence_only_after_durable_commit() {
+        let root = temp_root("delete-durable-success");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(62);
+        let port = previous.ports["committed-port"].clone();
+        state
+            .wal
+            .append_snapshot_commit(previous.to_wal_state())
+            .unwrap();
+        state
+            .wal
+            .append_delete_intent(
+                port.port_id.clone(),
+                previous.accepted_generation,
+                vec!["acl".to_string(), "attach".to_string()],
+                port.clone(),
+            )
+            .unwrap();
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = previous.clone();
+        }
+
+        let (status, response) = finalize_detached_neutron_delete(
+            &state,
+            &previous,
+            &port,
+            previous.accepted_generation,
+            Ok(()),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(response.detached);
+        assert_eq!(response.status, "ok");
+        let runtime = state.runtime.read().await;
+        assert!(!runtime.ports.contains_key(&port.port_id));
+        assert!(!runtime.port_statuses.contains_key(&port.port_id));
+        assert_eq!(runtime.pending_generation, None);
+        drop(runtime);
+        let replay = state.wal.replay();
+        assert!(replay.pending_intent.is_none());
+        assert!(!replay.state.ports.contains_key(&port.port_id));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_delete_startup_recovery_closes_forward_with_delete_commit() {
+        let root = temp_root("delete-recovery-forward-commit");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(63);
+        let port = previous.ports["committed-port"].clone();
+        state
+            .wal
+            .append_snapshot_commit(previous.to_wal_state())
+            .unwrap();
+        state
+            .wal
+            .append_delete_intent(
+                port.port_id.clone(),
+                previous.accepted_generation,
+                vec!["acl".to_string(), "attach".to_string()],
+                port.clone(),
+            )
+            .unwrap();
+        let intent = state
+            .wal
+            .replay()
+            .pending_intent
+            .expect("delete intent should be pending before recovery");
+        let mut recovered = previous.clone();
+        recovered.ports.remove(&port.port_id);
+        recovered.port_statuses.remove(&port.port_id);
+
+        let finalized =
+            finalize_recovered_delete_intent(&state, &intent, &previous, recovered, false);
+
+        assert!(!finalized.ports.contains_key(&port.port_id));
+        assert_eq!(finalized.pending_generation, None);
+        assert_eq!(finalized.desired_hash, previous.applied_desired_hash);
+        assert_eq!(finalized.authority_state, "ready");
+        let replay = state.wal.replay();
+        assert!(replay.pending_intent.is_none());
+        assert!(!replay.state.ports.contains_key(&port.port_id));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_delete_startup_recovery_failure_preserves_delete_intent() {
+        let root = temp_root("delete-recovery-remains-pending");
+        let state = test_neutron_state(&root);
+        let previous = committed_runtime(64);
+        let port = previous.ports["committed-port"].clone();
+        state
+            .wal
+            .append_snapshot_commit(previous.to_wal_state())
+            .unwrap();
+        state
+            .wal
+            .append_delete_intent(
+                port.port_id.clone(),
+                previous.accepted_generation,
+                vec!["acl".to_string(), "attach".to_string()],
+                port.clone(),
+            )
+            .unwrap();
+        let intent = state
+            .wal
+            .replay()
+            .pending_intent
+            .expect("delete intent should be pending before recovery");
+        let mut failed_recovery = previous.clone();
+        failed_recovery.port_statuses.insert(
+            port.port_id.clone(),
+            port_runtime_status(
+                &port.port_id,
+                &port.ifname,
+                intent.generation,
+                None,
+                port.managed_domains.clone(),
+                "blocked",
+                Some("detach_recovery_failed".to_string()),
+                vec![domain_status(
+                    "attach",
+                    "blocked",
+                    Some("detach_recovery_failed".to_string()),
+                )],
+            ),
+        );
+
+        let finalized = finalize_recovered_delete_intent(
+            &state,
+            &intent,
+            &previous,
+            failed_recovery,
+            true,
+        );
+
+        assert!(finalized.ports.contains_key(&port.port_id));
+        assert_eq!(finalized.pending_generation, Some(intent.generation));
+        assert_eq!(finalized.desired_hash, None);
+        assert_eq!(finalized.authority_state, "blocked_recovery_required");
+        assert_eq!(finalized.wal_status, "intent_recovery_blocked");
+        assert_eq!(
+            state
+                .wal
+                .replay()
+                .pending_intent
+                .as_ref()
+                .map(|pending| pending.kind.as_str()),
+            Some("delete")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn neutron_snapshot_post_commit_error_keeps_durable_runtime() {
         let root = temp_root("post-commit-final");
         let state = test_neutron_state(&root);
