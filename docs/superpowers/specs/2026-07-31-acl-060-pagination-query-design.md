@@ -2,8 +2,13 @@
 
 Date: 2026-07-31
 
-Status: design approved; production implementation and RED behavior tests have
-not started
+Status: source implementation and hosted CI complete; target Neutron 9.0,
+Python 2, and SQLAlchemy 1.0 field evidence deferred/pending
+
+Delivered implementation head: `3999e4926296bd52a4272396983e0b370b458c66`
+
+Exact-head hosted Build:
+[`30644674860`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30644674860)
 
 Analyzed target:
 `v0.9-neutron-agent@ebd0b758a2244b294cc6aec38377d868278748d3`
@@ -645,3 +650,43 @@ repository, plugin, and CLI tests.
 Production validation remains separate from source completion. Target
 Neutron/Python 2/database smoke evidence is required before the feature is
 described as field-validated or production-ready.
+
+## 14. Delivered Evidence
+
+The implementation followed the approved layer order. RED commit `b3e7b91`
+failed only in the intended new query, status identity, and DB contracts in
+Build
+[`30641892897`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30641892897).
+Shared query, native SQL/SQLite execution, exact status identity, plugin flags,
+and agent/CLI consumption were delivered by `a46c11d`, `0087e7d`, `9ba57c1`,
+`0dbd476`, and `f9da01e`.
+
+Exact-head self-review then fixed four contract gaps without changing the
+approved feature boundary: missing explicit-host status lookup (`f333169`),
+deprecated nested SQLAlchemy APIs and row/case access (`5a7845b`), exact-ID
+status update (`22463ed`), and timestamp/nullable filter parity (`3999e49`).
+The DB lane now treats all Python and SQLAlchemy 2.0 deprecation warnings as
+errors instead of suppressing them.
+
+Build
+[`30644674860`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30644674860)
+passed the
+[`fast-contracts` job](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30644674860/job/91202997064)
+with 543 agent tests (4 DB-only skips) plus 9 legacy CLI tests, the
+[`neutron-db-contracts` job](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30644674860/job/91202997004)
+with all 4 SQLAlchemy 1.4.54 query contracts, and the
+[`changes` job](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30644674860/job/91202996954).
+Rust jobs were correctly skipped for that Python-only head. The earlier full
+implementation Build
+[`30643846107`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30643846107)
+passed both `rust-behavior` and `rust-build` as well as both Python lanes.
+
+Measured SQL query budgets are constant with page cardinality: one statement
+for a normal scalar page, two for a custom-marker page, one for an address-set
+page whose field projection excludes `members`, and two when members are
+requested. Status custom-marker pages use one exact marker lookup plus one page
+query. No per-address-set member query remains.
+
+Source implementation and hosted CI are complete. Target Neutron 9.0/Python
+2/SQLAlchemy 1.0 field evidence is `deferred/pending`; no field validation or
+production-readiness claim is made.

@@ -434,7 +434,7 @@ new intentional failures, with 4 DB-only skips. Both independent
 - Consumes: `AriaAclValidationError`, `AriaAclNotFound`, dictionaries returned by existing repositories.
 - Produces: `QuerySpec`, `NormalizedQuery`, `PortStatusProjection`, `normalize_query()`, `apply_memory_query()`, `project_fields()`, field-aware repository get methods, `encode_port_status_id()`, and `decode_port_status_id()`.
 
-- [ ] **Step 1: Define exact resource specifications and normalized types**
+- [x] **Step 1: Define exact resource specifications and normalized types**
 
 Implement Python 2-compatible immutable-by-convention objects:
 
@@ -474,7 +474,7 @@ direction and avoiding duplicate columns. Reject address-set `members`, status
 include every visible attribute even when that attribute is intentionally not
 filterable/sortable.
 
-- [ ] **Step 2: Implement strict normalization and the status codec**
+- [x] **Step 2: Implement strict normalization and the status codec**
 
 Implement these exact call signatures:
 
@@ -539,7 +539,7 @@ case-insensitive `true`/`false`/`1`/`0`. It aliases desired `tenant_id` to
 match-none sentinel. It raises `AriaAclValidationError` with resource and field
 in every invalid message.
 
-- [ ] **Step 3: Implement one request-scoped status projection**
+- [x] **Step 3: Implement one request-scoped status projection**
 
 ```python
 class PortStatusProjection(object):
@@ -562,7 +562,7 @@ Reuse the existing accepted timestamp grammar. Missing or malformed
 `updated_at` is stale. A negative stale threshold disables staleness. Do not
 read the clock inside `project()`.
 
-- [ ] **Step 4: Implement deterministic memory execution**
+- [x] **Step 4: Implement deterministic memory execution**
 
 `apply_memory_query(rows, query, projection=None)` must execute in this exact
 order: clone/project, filter, stable comparator sort, marker lookup, directional
@@ -580,7 +580,7 @@ def project_fields(row, fields):
     return dict((field, row[field]) for field in fields if field in row)
 ```
 
-- [ ] **Step 5: Route the in-memory repository through the shared executor**
+- [x] **Step 5: Route the in-memory repository through the shared executor**
 
 Change all five in-memory list signatures to the complete contract. Each
 desired method calls `normalize_query()` plus `apply_memory_query()`. Status
@@ -603,7 +603,7 @@ apply `project_fields()` after their existing not-found check. Internal write
 paths continue calling them without fields and therefore receive complete
 objects.
 
-- [ ] **Step 6: Verify the common and in-memory GREEN subset**
+- [x] **Step 6: Verify the common and in-memory GREEN subset**
 
 Run:
 
@@ -617,7 +617,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=openstack/neutron_aria \
 Expected: storage-independent and in-memory repository cases pass. SQLAlchemy
 and plugin forwarding/native cases may remain RED until later tasks.
 
-- [ ] **Step 7: Commit the bounded shared contract**
+- [x] **Step 7: Commit the bounded shared contract**
 
 ```bash
 git add openstack/neutron_aria/neutron_aria/db/aria_acl/query.py \
@@ -642,7 +642,7 @@ git commit -m "feat: add deterministic ACL query contract"
 - Consumes: `NormalizedQuery`, resource specs, and optional `PortStatusProjection` from Task 2.
 - Produces: `build_select(sa, table, query, marker_row=None, projection=None)`, bounded SQL repository list methods, SQLite SQL paging, and `_members_for_sets(address_set_ids)`.
 
-- [ ] **Step 1: Implement SQLAlchemy Core expression building**
+- [x] **Step 1: Implement SQLAlchemy Core expression building**
 
 Create `sql_query.py` without a module-level SQLAlchemy import. Implement:
 
@@ -668,7 +668,7 @@ comparison per sort component. Resolve NULL rank with `CASE` expressions so
 SQLite/MySQL dialect defaults cannot differ. Reverse the fetched row list only
 when `page_reverse` and `limit` are active.
 
-- [ ] **Step 2: Replace SQLAlchemy full-table `_list()`**
+- [x] **Step 2: Replace SQLAlchemy full-table `_list()`**
 
 Give every SQL repository list method the full signature. Resolve marker rows
 by primary identity before building custom-sort boundaries. Desired marker
@@ -678,7 +678,7 @@ Convert only selected page rows. Pass `include_members=False` into row
 conversion during page selection so address-set conversion never performs a
 per-row member query.
 
-- [ ] **Step 3: Batch-load address-set members**
+- [x] **Step 3: Batch-load address-set members**
 
 Replace `_members_for_set()` calls from list conversion with:
 
@@ -709,7 +709,7 @@ Make every SQLAlchemy and SQLite desired-resource get method accept
 conversion. Internal write paths omit fields and retain their existing
 complete-object behavior.
 
-- [ ] **Step 4: Implement SQLite SQL paging without a Python full-table fallback**
+- [x] **Step 4: Implement SQLite SQL paging without a Python full-table fallback**
 
 Register `aria_json_scalar(payload, field)` on the SQLite connection. The
 function JSON-decodes one payload and returns only a scalar field. Use indexed
@@ -720,7 +720,7 @@ Build parameterized WHERE, keyset, ORDER BY, and LIMIT clauses. Never
 interpolate field names unless they came from the fixed resource specification.
 Decode payloads only from selected rows, then apply exact field projection.
 
-- [ ] **Step 5: Run hosted DB contracts and focused local stdlib tests**
+- [x] **Step 5: Run hosted DB contracts and focused local stdlib tests**
 
 Do not install SQLAlchemy locally. Run the SQLite/common subset:
 
@@ -760,7 +760,7 @@ unrelated lane may regress.
 - Consumes: `PortStatusProjection`, `encode_port_status_id()`, and `decode_port_status_id()` from Task 2.
 - Produces: `get_port_status_resource(resource_id)`, `delete_port_status_resource(resource_id)`, exact derived-ID show/delete, and legacy multi-host HTTP 409.
 
-- [ ] **Step 1: Add exact status accessors to all repositories**
+- [x] **Step 1: Add exact status accessors to all repositories**
 
 Add this shared resolver to `query.py` so all repositories classify legacy
 ambiguity identically:
@@ -805,7 +805,7 @@ def delete_port_status_resource(self, resource_id):
 
 Do not add a database column or migration.
 
-- [ ] **Step 2: Make status show deterministic**
+- [x] **Step 2: Make status show deterministic**
 
 In the plugin, call `get_port_status_resource(resource_id)` through
 `ErrorMappingRepositoryProxy`. The repository resolver emits
@@ -823,7 +823,7 @@ many legacy matches -> AriaAclConflictError -> HTTP 409
 Project the selected row with one `PortStatusProjection`, then apply fields.
 Map the existing conflict error to HTTP 409 through the existing proxy.
 
-- [ ] **Step 3: Preserve delete compatibility explicitly**
+- [x] **Step 3: Preserve delete compatibility explicitly**
 
 The plugin calls `delete_port_status_resource(resource_id)` through the proxy.
 Derived status ID deletes only the decoded row. A legacy port ID continues to
@@ -831,7 +831,7 @@ call `delete_port_status(port_id, host=None)` and removes all host rows. Add
 tests for both behaviors so a future refactor cannot accidentally reinterpret
 legacy delete as arbitrary single-row deletion.
 
-- [ ] **Step 4: Verify status identity GREEN**
+- [x] **Step 4: Verify status identity GREEN**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=openstack/neutron_aria \
@@ -843,7 +843,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=openstack/neutron_aria \
 Expected: derived-ID round trips, exact show/delete, unique legacy show, and
 ambiguous legacy 409 all pass across memory and SQLite fixtures.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add openstack/neutron_aria/neutron_aria/db/aria_acl/api.py \
@@ -868,7 +868,7 @@ git commit -m "fix: give ACL port status an exact identity"
 - Consumes: full repository signatures and status identity from Tasks 2-4.
 - Produces: complete list/show field behavior and Neutron-recognized `__native_sorting_support`/`__native_pagination_support` flags.
 
-- [ ] **Step 1: Forward the standard arguments through every list method**
+- [x] **Step 1: Forward the standard arguments through every list method**
 
 Use one explicit call shape rather than `**locals()`:
 
@@ -894,7 +894,7 @@ projection = PortStatusProjection(
 
 and passes it as `projection=projection` with the six standard arguments.
 
-- [ ] **Step 2: Apply show fields without hiding not-found semantics**
+- [x] **Step 2: Apply show fields without hiding not-found semantics**
 
 For all desired show methods, pass `fields=fields` into the repository get
 method. The controller already adds authorization-required fields before
@@ -902,7 +902,7 @@ calling the plugin, so the repository returns them and the controller strips
 only temporary additions afterward. Do not turn `None` into `{}` and do not
 perform a second plugin-side projection.
 
-- [ ] **Step 3: Declare explicit primary keys**
+- [x] **Step 3: Declare explicit primary keys**
 
 In `extensions/aria_acl.py`, change every desired resource ID descriptor to:
 
@@ -918,7 +918,7 @@ In `extensions/aria_acl.py`, change every desired resource ID descriptor to:
 Add the same descriptor to port statuses. Do not mark `port_id` or `host` as a
 second primary key because Neutron 9.0 selects only one scalar marker field.
 
-- [ ] **Step 4: Enable native capabilities only after all tests pass**
+- [x] **Step 4: Enable native capabilities only after all tests pass**
 
 Add class-private flags to `AriaAclPlugin`:
 
@@ -932,7 +932,7 @@ class AriaAclPlugin(object):
 Test both mangled attributes through the legacy helper naming convention and
 verify every list method accepts a controller-appended ID sort.
 
-- [ ] **Step 5: Run plugin and complete repository behavior tests**
+- [x] **Step 5: Run plugin and complete repository behavior tests**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=openstack/neutron_aria \
@@ -943,7 +943,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=openstack/neutron_aria \
 Expected: all named tests pass locally except SQLAlchemy cases skipped due to
 the intentionally absent dependency.
 
-- [ ] **Step 6: Commit and push the server GREEN boundary**
+- [x] **Step 6: Commit and push the server GREEN boundary**
 
 ```bash
 git add openstack/neutron_aria/neutron_aria/services/aria_acl/plugin.py \
@@ -977,7 +977,7 @@ Client/config/CLI tests may remain RED until Task 6.
 - Consumes: server next links and stable `id` values from Task 5.
 - Produces: `AgentConfig.acl_page_size`, `resolved_acl_page_size()`, a page-size-aware ACL client factory, and CLI `--page-size`/`--sort-key`/`--sort-dir` support.
 
-- [ ] **Step 1: Add explicit ACL page-size configuration**
+- [x] **Step 1: Add explicit ACL page-size configuration**
 
 Add `acl_page_size=None` to `AgentConfig`. Validate configured page sizes as
 positive integers; zero and negative values raise `ConfigError`.
@@ -999,7 +999,7 @@ acl_page_size = 100
 
 Do not route `acl_page_size` into `NeutronPortSource`.
 
-- [ ] **Step 2: Pass the resolved size only to ACL reads**
+- [x] **Step 2: Pass the resolved size only to ACL reads**
 
 Change the factory to:
 
@@ -1016,7 +1016,7 @@ In `build_acl_source()`, call it with
 without a page size because it writes only. Preserve the current repeated-marker
 guard and missing-ID stop/error behavior.
 
-- [ ] **Step 3: Add agent tests for explicit, fallback, and partial failure**
+- [x] **Step 3: Add agent tests for explicit, fallback, and partial failure**
 
 Add tests that assert:
 
@@ -1033,7 +1033,7 @@ multi-page REST-client test to status rows carrying derived IDs. Add a
 three-page desired-state load where page 3 raises and assert no
 `EffectiveAclIndex` is returned or published.
 
-- [ ] **Step 4: Enable pagination and sorting in the CLI mixin**
+- [x] **Step 4: Enable pagination and sorting in the CLI mixin**
 
 Set:
 
@@ -1053,7 +1053,7 @@ whose positional ID is
 `aria-status-v1.cG9ydC0xAG9zdGFjazI` and assert the same value reaches
 `show_ext()`.
 
-- [ ] **Step 5: Put CLI tests in fast-contracts**
+- [x] **Step 5: Put CLI tests in fast-contracts**
 
 Add a separate function to `ci/check_neutron_stage1.py`:
 
@@ -1075,7 +1075,7 @@ def run_neutronclient_extension_tests():
 Call it from `run_fast_contracts()` immediately after the Neutron agent Python
 tests.
 
-- [ ] **Step 6: Run focused and full fast contracts**
+- [x] **Step 6: Run focused and full fast contracts**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=openstack/neutron_aria \
@@ -1089,7 +1089,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 ci/check_neutron_stage1.py --fast-contracts
 Expected: all commands pass. The known `SafeConfigParser` deprecation warning
 may appear; no new warning is accepted.
 
-- [ ] **Step 7: Commit and push the complete GREEN implementation**
+- [x] **Step 7: Commit and push the complete GREEN implementation**
 
 ```bash
 git add openstack/neutron_aria/neutron_aria/agent/config.py \
@@ -1123,7 +1123,7 @@ remain separate jobs and no local Cargo command is used.
 - Consumes: all production commits and exact-head hosted Build evidence.
 - Produces: source-fixed ACL-060/004 records with field evidence explicitly pending.
 
-- [ ] **Step 1: Review the complete diff against the design**
+- [x] **Step 1: Review the complete diff against the design**
 
 Run read-only checks:
 
@@ -1143,7 +1143,7 @@ Review every changed function call and confirm:
 - no static checker binds private helper shape; and
 - no Cargo command was added to fast or DB contract jobs.
 
-- [ ] **Step 2: Run the complete safe local verification set**
+- [x] **Step 2: Run the complete safe local verification set**
 
 ```bash
 git diff --check
@@ -1155,7 +1155,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 ci/check_neutron_stage1.py --fast-contracts
 
 Expected: all pass. SQLAlchemy tests remain hosted in their dedicated lane.
 
-- [ ] **Step 3: Require one exact-head hosted GREEN Build**
+- [x] **Step 3: Require one exact-head hosted GREEN Build**
 
 Push any review corrections, then identify the run whose head SHA exactly
 matches `git rev-parse HEAD`:
@@ -1174,7 +1174,7 @@ Required jobs:
 - `rust-behavior`/`rust-build`: success when the detector requires them,
   otherwise GitHub's explicit skipped result is acceptable.
 
-- [ ] **Step 4: Update design, plan, and backlog evidence truthfully**
+- [x] **Step 4: Update design, plan, and backlog evidence truthfully**
 
 Update ACL-060 to `fixed` only after exact-head hosted GREEN. Update ACL-004 to
 `fixed` only after exact/legacy status tests and CLI tests pass. Record:
@@ -1188,7 +1188,7 @@ Do not write `field validated`, `production ready`, or `PASS` for the absent
 target smoke. Add commit IDs, run URL, job URLs, test counts, and the exact
 query budgets.
 
-- [ ] **Step 5: Commit and push documentation closure**
+- [x] **Step 5: Commit and push documentation closure**
 
 ```bash
 git add docs/superpowers/specs/2026-07-31-acl-060-pagination-query-design.md \
@@ -1201,6 +1201,18 @@ git push origin v0.9-neutron-agent
 Require a final exact-head Build for the documentation closure commit because
 the branch gate applies to every delivered head. Record that run without
 changing the field-evidence status.
+
+Task 2-7 implementation evidence (2026-07-31): shared-query commit `a46c11d`,
+native repository commit `0087e7d`, status identity commit `9ba57c1`, plugin
+native-capability commit `0dbd476`, and agent/CLI commit `f9da01e`. Exact-head
+self-review fixes are `f333169`, `5a7845b`, `22463ed`, and `3999e49`.
+Build
+[`30644674860`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30644674860)
+passed 543 fast contracts with 4 DB-only skips, 9 legacy CLI tests, all 4
+warning-as-error SQLAlchemy 1.4.54 DB contracts, and change detection. The
+normal/custom-marker/address-set-without-members/address-set-with-members SQL
+budgets are respectively 1/2/1/2 statements. Target Neutron 9.0/Python
+2/SQLAlchemy 1.0 field evidence remains `deferred/pending`.
 
 ---
 
