@@ -2,8 +2,8 @@
 
 Date: 2026-07-31
 
-Status: design and formal written specification approved on 2026-07-31;
-implementation has not started
+Status: fixed on 2026-07-31; RED behavior contract, production implementation,
+and exact-head hosted Rust/eBPF CI complete
 
 Analyzed target:
 `v0.9-neutron-agent@f8baf4aa1557ec9395d34fd1adf5628cd101144d`
@@ -413,6 +413,36 @@ All Rust compilation and behavior evidence comes from GitHub Actions.
 `REVIEW-OPS-019` becomes `fixed` only after exact-head hosted CI proves the
 bounded-growth, replay, corruption, and crash-safety contracts. Privileged
 field evidence is not applicable to this filesystem-only lifecycle repair.
+
+### Delivered evidence
+
+RED commit `5c79a28` added nine lifecycle behavior tests without production
+implementation. Exact-head Build
+[`30601218345`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601218345)
+failed only in
+[`rust-behavior` job `91064136403`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601218345/job/91064136403)
+on the intentionally missing `NeutronWalLimits`, `with_limits`,
+`compact_now_for_test`, and `checkpoint_temp_path_for_test` interfaces. The
+independent `rust-build` job passed.
+
+GREEN commit `c3d8238` implements the approved synchronous lifecycle in
+`agent/src/neutron_wal.rs`: canonical checkpointing preserves the last valid
+commit and at most one unresolved intent, uncertain replay refuses compaction,
+same-directory replacement follows file-fsync/rename/directory-fsync ordering,
+and an append that cannot fit below the 64 MiB hard limit is rejected before
+the live WAL changes. Production thresholds remain fixed at 16 MiB soft and
+64 MiB hard.
+
+Exact-head Build
+[`30601633217`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601633217)
+passed. The
+[`rust-behavior` job `91065427370`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601633217/job/91065427370)
+passed all 47 focused `neutron_wal` behaviors, including the nine new lifecycle
+cases. The independent
+[`rust-build` job `91065427305`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601633217/job/91065427305)
+passed the warning-denied Rust/eBPF, userspace-static, and agent-static builds.
+No privileged field evidence is required because this repair changes only the
+filesystem WAL lifecycle.
 
 ## 13. Explicit Exclusions
 

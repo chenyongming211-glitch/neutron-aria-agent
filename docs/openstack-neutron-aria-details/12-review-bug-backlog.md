@@ -15,6 +15,9 @@ status defect remains open. A full-code independent re-verification at
 merge-gate and truthful-readiness batches closed 2026-07-17.
 Standalone bitmap cleanup quarantine and recovery (`REVIEW-ACL-059`) closed
 2026-07-19 with exact-head hosted Rust/eBPF evidence.
+Bounded Neutron WAL checkpointing and capacity enforcement
+(`REVIEW-OPS-019`) closed 2026-07-31 with exact-head hosted Rust/eBPF
+evidence; no privileged field evidence applies to that filesystem-only repair.
 
 Scope rule:
 
@@ -450,7 +453,7 @@ verification-only, risk-classified, or closed.
 | REVIEW-ACL-016 | P2 | Agent config safety | fixed | Boolean config parsing accepted only known true values and treated every other non-empty string as `false`. A typo such as `full_resync_enabled = ture` silently disabled ACL submit and left the agent in heartbeat-only/degraded mode instead of failing fast with a config error. | Fixed in `agent/config.py`: `full_resync_enabled`, `rpc_events_enabled`, and `incremental_rpc_enabled` now use strict boolean parsing and raise `ConfigError` with section/option/value on invalid values. Unit tests cover typo cases. |
 | REVIEW-ACL-017 | P3 | Legacy CLI package smoke | open | `install_neutronclient_aria_cli.sh` hard-codes `/etc/kolla/.adminrc` during command-discovery smoke, while other ACL smokes allow `ADMIN_RC_FILE` override. Sites with a different Kolla/adminrc location can install the CLI package but fail the built-in smoke for an avoidable path assumption. | Add `ADMIN_RC_FILE="${ADMIN_RC_FILE:-/etc/kolla/.adminrc}"` to the installer and use it in smoke, with a clear error if the file is missing. Add a shell smoke/syntax check that exercises a custom adminrc path. |
 | REVIEW-ACL-018 | P2 | Root install script | fixed | Earlier review found CRLF line endings that broke `bash -n install.sh` on Linux. Current tracked `install.sh` is LF-only and `bash -n install.sh` passes. | Keep the implementation item closed. Track the missing root-installer regression gate under CI verification debt. |
-| REVIEW-OPS-019 | P1 | Neutron WAL lifecycle | open | `agent/src/neutron_wal.rs` appends snapshot/delete intent and full-state commit records and replays every valid line, but has no checkpoint, compaction, truncation, size bound, or rotation. Repeated full resync and scoped apply make the WAL grow without bound and increase restart replay cost. | Add atomic checkpoint/compaction with directory fsync, retain enough intent/commit information for crash recovery, define size/time thresholds, and add tests for compacted replay, crash during compaction, tampered latest records, and bounded file growth. |
+| REVIEW-OPS-019 | P1 | Neutron WAL lifecycle | fixed | RED commit `5c79a28` and Build [`30601218345`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601218345) proved the missing lifecycle interface. GREEN commit `c3d8238` adds synchronous canonical checkpointing at 16 MiB soft, retains the last valid commit plus at most one unresolved intent, refuses uncertain/corrupt replay, installs with file-fsync/rename/directory-fsync ordering, and rejects pre-write when neither current nor compacted state can fit below 64 MiB. Exact-head Build [`30601633217`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601633217) passed 47 focused WAL behaviors and warning-denied Rust/eBPF/static builds. | Fixed. No privileged field evidence is applicable to this filesystem-only lifecycle repair. |
 | REVIEW-DOC-020 | P3 | Domain status documentation | open | `docs/openstack-neutron-aria-details/05-domain-status-heartbeat.md` lists rich Rust fields including `effective_action` as still planned, but `agent/src/neutron_api.rs` already emits `effective_action` and `agent/status.py` projects it into heartbeat summaries. | Refresh the detail document to distinguish implemented fields from remaining status work, and add a lightweight documentation/contract check for the current status DTO fields. |
 | REVIEW-TXN-021 | P1 | Snapshot accept before WAL | fixed | Historical finding: snapshot admission returned accepted semantics before durable intent. Admission now fsyncs intent while holding the apply lock, returns `pending`, and leaves accepted/applied on the committed baseline. | Fixed with durable-intent and WAL-intent-failure Rust regression tests plus the permanent `neutron_snapshot*` CI test gate. |
 | REVIEW-TXN-022 | P1 | Apply/commit metadata split | fixed | Historical finding: datapath could mutate before a failed commit while RAM/WAL retained the old classification. Commit failure now restores attach where possible, scrubs ACL to bypass, retains the failed pending generation, and enters blocked recovery. | Fixed with blocked-runtime/background-preservation tests and shared pre-commit/commit-failure recovery. |
@@ -811,11 +814,13 @@ verification before the next batch started.
    conflicts return 409. Exact-head Build
    [`30598232712`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30598232712)
    passed 504 fast contracts and change detection.
-8. **Close transaction and recovery debt:** `REVIEW-OPS-019`,
+8. **In progress — close transaction and recovery debt:**
+   `REVIEW-OPS-019` is fixed in `c3d8238`; continue with
    `REVIEW-ACL-025`, `REVIEW-ACL-026`, `REVIEW-ACL-044`,
    `REVIEW-ACL-023`, `REVIEW-TXN-024`, `REVIEW-TXN-027`, and
-   `REVIEW-ACL-045`. Add bounded WAL checkpoint/compaction, durable ACL bank
-   ordering, rollback, and full orphan scrub before lower-severity API work.
+   `REVIEW-ACL-045`. The completed WAL item supplies bounded
+   checkpoint/compaction; add durable ACL bank ordering, rollback, and full
+   orphan scrub before lower-severity API work.
 9. **Remove apply-loop stalls and pending corruption:** `REVIEW-OPS-037`,
    `REVIEW-ACL-036`, `REVIEW-ACL-037`, `REVIEW-ACL-028`,
    `REVIEW-ACL-008`, and `REVIEW-ACL-033`. Bound OVS subprocesses and make all

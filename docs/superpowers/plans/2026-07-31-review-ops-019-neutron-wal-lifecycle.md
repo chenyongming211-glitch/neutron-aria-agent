@@ -336,7 +336,7 @@ plan progress section before changing production code.
   - `NeutronWalEntry::from_pending_intent(intent)`
   - `NeutronWal::canonical_checkpoint_bytes()`
 
-- [ ] **Step 1: Add the scan result and default committed baseline helper**
+- [x] **Step 1: Add the scan result and default committed baseline helper**
 
 Implement:
 
@@ -357,7 +357,7 @@ fn empty_neutron_wal_state() -> NeutronWalState {
 }
 ```
 
-- [ ] **Step 2: Move the current line loop into `scan()` without changing its rules**
+- [x] **Step 2: Move the current line loop into `scan()` without changing its rules**
 
 `scan()` must:
 
@@ -371,7 +371,7 @@ fn empty_neutron_wal_state() -> NeutronWalState {
 - store a valid commit in `last_committed_state` without adding public
   pending-presentation fields.
 
-- [ ] **Step 3: Project the existing public replay from the scan**
+- [x] **Step 3: Project the existing public replay from the scan**
 
 Implement public projection equivalent to:
 
@@ -403,7 +403,7 @@ fn replay_from_scan(scan: NeutronWalScan) -> NeutronWalReplay {
 }
 ```
 
-- [ ] **Step 4: Reconstruct the exact pending entry**
+- [x] **Step 4: Reconstruct the exact pending entry**
 
 Implement a conversion that:
 
@@ -414,7 +414,7 @@ Implement a conversion that:
 - rejects unknown intent kinds, unsupported recovery causes, and delete
   intents containing more than one affected port.
 
-- [ ] **Step 5: Build canonical checkpoint bytes only from certain scans**
+- [x] **Step 5: Build canonical checkpoint bytes only from certain scans**
 
 Implement:
 
@@ -450,7 +450,7 @@ the RED suite GREEN.
   - capacity-aware `append`
   - test-only constructor and checkpoint hooks required by Task 1
 
-- [ ] **Step 1: Add fixed production limits**
+- [x] **Step 1: Add fixed production limits**
 
 Implement:
 
@@ -478,7 +478,7 @@ Add `limits` to `NeutronWal`. `new()` uses defaults. A `#[cfg(test)]`
 `with_limits()` constructor rejects no values at runtime but tests must use
 `soft_bytes <= hard_bytes` except when explicitly proving hard rejection.
 
-- [ ] **Step 2: Split serialization from ordinary durable append**
+- [x] **Step 2: Split serialization from ordinary durable append**
 
 Serialize the entry and newline once. Add:
 
@@ -495,7 +495,7 @@ This helper retains the existing behavior:
 - file `sync_all`;
 - parent-directory `sync_all`.
 
-- [ ] **Step 3: Add same-directory atomic checkpoint replacement**
+- [x] **Step 3: Add same-directory atomic checkpoint replacement**
 
 Use a deterministic owned path derived from the live file:
 
@@ -517,7 +517,7 @@ creates a fresh file, writes checkpoint bytes, flushes, and fsyncs. A
 non-regular temp path is an error. After successful rename it fsyncs the
 directory. It never replays the temp path.
 
-- [ ] **Step 4: Enforce the threshold before changing the live file**
+- [x] **Step 4: Enforce the threshold before changing the live file**
 
 `append()` must:
 
@@ -538,7 +538,7 @@ directory. It never replays the temp path.
 Use `tracing::warn!` for the soft maintenance fallback. Include current,
 entry, soft, hard, and error fields.
 
-- [ ] **Step 5: Add test-only lifecycle hooks**
+- [x] **Step 5: Add test-only lifecycle hooks**
 
 Implement under `#[cfg(test)]`:
 
@@ -551,7 +551,7 @@ fn checkpoint_temp_path_for_test(&self) -> PathBuf
 `compact_now_for_test()` prepares and installs only the canonical checkpoint;
 it does not append a record.
 
-- [ ] **Step 6: Review the full diff without running local Cargo**
+- [x] **Step 6: Review the full diff without running local Cargo**
 
 Run:
 
@@ -570,7 +570,7 @@ Confirm:
 - public replay status strings are unchanged;
 - test-only thresholds cannot affect production defaults.
 
-- [ ] **Step 7: Commit and push GREEN**
+- [x] **Step 7: Commit and push GREEN**
 
 Run:
 
@@ -587,7 +587,7 @@ Expected hosted result:
 - `rust-behavior`: all `neutron_wal` tests pass with `-D warnings`;
 - `rust-build`: userspace and eBPF warning-denied builds pass.
 
-- [ ] **Step 8: Inspect failures and make only in-scope corrections**
+- [x] **Step 8: Inspect failures and make only in-scope corrections**
 
 Run:
 
@@ -626,7 +626,7 @@ the forwarding path is a design deviation and must be reported before editing.
   results.
 - Produces: authoritative `REVIEW-OPS-019=fixed` register evidence.
 
-- [ ] **Step 1: Update the design status**
+- [x] **Step 1: Update the design status**
 
 Record:
 
@@ -636,7 +636,7 @@ Record:
 - fixed 16 MiB/64 MiB values;
 - no privileged field evidence required.
 
-- [ ] **Step 2: Complete the plan checkboxes and evidence section**
+- [x] **Step 2: Complete the plan checkboxes and evidence section**
 
 Add an evidence section containing the exact observed RED commit and Build,
 the exact missing-interface RED error, the exact GREEN commit and Build, and
@@ -644,7 +644,7 @@ direct `rust-behavior` and `rust-build` job links. Do not insert labels whose
 values are not yet known and do not infer a result from a workflow still
 running.
 
-- [ ] **Step 3: Update the authoritative backlog row**
+- [x] **Step 3: Update the authoritative backlog row**
 
 Change only `REVIEW-OPS-019` from `open` to `fixed`. Describe canonical
 checkpointing, unresolved-intent preservation, corruption refusal, atomic
@@ -701,3 +701,19 @@ with the expected missing `NeutronWalLimits`, `with_limits`,
 `compact_now_for_test`, and `checkpoint_temp_path_for_test` interfaces.
 `changes` and `fast-contracts` passed, and the independent `rust-build` job
 passed, proving the RED did not modify or break the production binary path.
+
+GREEN commit `c3d8238` implemented the approved lifecycle only in
+`agent/src/neutron_wal.rs`. Exact-head Build
+[`30601633217`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601633217)
+passed:
+
+- [`rust-behavior` job `91065427370`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601633217/job/91065427370)
+  passed all 47 focused `neutron_wal` behaviors, including all nine lifecycle
+  tests;
+- [`rust-build` job `91065427305`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30601633217/job/91065427305)
+  passed the warning-denied Rust/eBPF, userspace-static, and agent-static
+  builds;
+- `changes` and `fast-contracts` also passed.
+
+The production constants are 16 MiB soft and 64 MiB hard. No privileged field
+evidence applies to this filesystem-only repair.
