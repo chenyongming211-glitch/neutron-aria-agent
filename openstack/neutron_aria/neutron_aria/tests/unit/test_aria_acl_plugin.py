@@ -121,6 +121,32 @@ class FakePreparedClient(object):
         self.casts.append((context, method, payload))
 
 
+class RecordingListRepository(object):
+    def __init__(self):
+        self.calls = []
+
+    def _record(self, collection, values):
+        self.calls.append((collection, values))
+        if collection == "policies":
+            return [{"id": "policy-1"}]
+        return []
+
+    def list_policies(self, **kwargs):
+        return self._record("policies", kwargs)
+
+    def list_rules(self, **kwargs):
+        return self._record("rules", kwargs)
+
+    def list_address_sets(self, **kwargs):
+        return self._record("address_sets", kwargs)
+
+    def list_bindings(self, **kwargs):
+        return self._record("bindings", kwargs)
+
+    def list_port_statuses(self, **kwargs):
+        return self._record("port_statuses", kwargs)
+
+
 class AriaAclPluginTestCase(unittest.TestCase):
     def test_repository_errors_map_to_legacy_http_semantics(self):
         bad_request = map_repository_error(AriaAclValidationError("invalid"))
@@ -241,6 +267,123 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertIn("aria_acl_enabled", extended["ports"])
         self.assertFalse(extended["ports"]["aria_acl_enabled"]["allow_post"])
         self.assertFalse(extended["ports"]["aria_acl_enabled"]["allow_put"])
+
+    def test_all_public_collections_declare_one_primary_id(self):
+        for collection in aria_acl.RESOURCE_COLLECTIONS.values():
+            attributes = aria_acl.API_RESOURCE_ATTRIBUTE_MAP[collection]
+            primary = sorted(
+                name for name, descriptor in attributes.items()
+                if descriptor.get("primary_key")
+            )
+            self.assertEqual(["id"], primary, collection)
+
+    def test_plugin_forwards_complete_list_contract(self):
+        repository = RecordingListRepository()
+        plugin = AriaAclPlugin(repository=repository, now=lambda: 200.0)
+        list_methods = (
+            ("policies", plugin.get_aria_acl_policies),
+            ("rules", plugin.get_aria_acl_rules),
+            ("address_sets", plugin.get_aria_acl_address_sets),
+            ("bindings", plugin.get_aria_acl_bindings),
+        )
+        expected = {
+            "filters": {"enabled": ["true"]},
+            "fields": ["id"],
+            "sorts": [("name", False)],
+            "limit": 10,
+            "marker": "policy-2",
+            "page_reverse": True,
+        }
+
+        for collection, method in list_methods:
+            method(
+                None,
+                filters=expected["filters"],
+                fields=expected["fields"],
+                sorts=expected["sorts"],
+                limit=expected["limit"],
+                marker=expected["marker"],
+                page_reverse=expected["page_reverse"],
+            )
+            self.assertEqual(collection, repository.calls[-1][0])
+            self.assertEqual(expected, repository.calls[-1][1])
+
+    def test_plugin_forwards_one_immutable_status_projection(self):
+        repository = RecordingListRepository()
+        plugin = AriaAclPlugin(
+            repository=repository,
+            port_status_stale_seconds=90,
+            now=lambda: 200.0,
+        )
+        plugin.get_aria_acl_port_statuses(
+            None,
+            filters={"stale": ["true"]},
+            fields=["id", "runtime_status"],
+            sorts=[("id", True)],
+            limit=10,
+            marker="status-1",
+            page_reverse=True,
+        )
+
+        collection, kwargs = repository.calls[-1]
+        self.assertEqual("port_statuses", collection)
+        self.assertEqual(
+            {
+                "filters",
+                "fields",
+                "sorts",
+                "limit",
+                "marker",
+                "page_reverse",
+                "projection",
+            },
+            set(kwargs),
+        )
+        self.assertEqual({"stale": ["true"]}, kwargs["filters"])
+        self.assertEqual(["id", "runtime_status"], kwargs["fields"])
+        self.assertEqual([("id", True)], kwargs["sorts"])
+        self.assertEqual(10, kwargs["limit"])
+        self.assertEqual("status-1", kwargs["marker"])
+        self.assertTrue(kwargs["page_reverse"])
+        self.assertEqual(200.0, kwargs["projection"].now_epoch)
+        self.assertEqual(90, kwargs["projection"].stale_seconds)
+
+    def test_multi_host_legacy_status_show_is_conflict(self):
+        plugin = AriaAclPlugin(now=lambda: 200.0)
+        for host in ("ostack2", "ostack3"):
+            plugin.report_aria_acl_port_status(None, {
+                "aria_acl_port_status": {
+                    "port_id": "port-1",
+                    "host": host,
+                    "status": "ready",
+                }
+            })
+
+        with self.assertRaises(AriaAclConflict):
+            plugin.get_aria_acl_port_status(None, "port-1")
+
+    def test_derived_status_id_show_is_exact(self):
+        try:
+            from neutron_aria.db.aria_acl import query as query_contract
+        except ImportError:
+            query_contract = None
+        self.assertIsNotNone(
+            query_contract,
+            "the versioned status identity contract must exist",
+        )
+        plugin = AriaAclPlugin(now=lambda: 200.0)
+        for host in ("ostack2", "ostack3"):
+            plugin.report_aria_acl_port_status(None, {
+                "aria_acl_port_status": {
+                    "port_id": "port-1",
+                    "host": host,
+                    "status": "ready",
+                }
+            })
+        exact_id = query_contract.encode_port_status_id("port-1", "ostack3")
+        status = plugin.get_aria_acl_port_status(None, exact_id)
+        self.assertIsNotNone(status)
+        self.assertEqual("ostack3", status["host"])
 
     def test_resource_helper_does_not_create_ports_resource(self):
         original_helper = aria_acl.resource_helper

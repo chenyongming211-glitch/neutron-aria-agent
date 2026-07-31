@@ -88,6 +88,19 @@ jobs:
       - name: Check public Neutron contracts
         run: python3 ci/check_neutron_stage1.py --fast-contracts
 
+  neutron-db-contracts:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Neutron DB contract dependencies
+        run: python3 -m pip install --requirement ci/requirements-neutron-db-contracts.txt
+
+      - name: Run Neutron DB query contracts
+        env:
+          PYTHONPATH: openstack/neutron_aria
+        run: python3 -m unittest neutron_aria.tests.unit.test_aria_acl_sql_query
+
   rust-behavior:
     needs: changes
     if: needs.changes.outputs.rust_required == 'true'

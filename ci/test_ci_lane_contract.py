@@ -43,10 +43,17 @@ class CiLaneContractTests(unittest.TestCase):
         self.assertNotRegex(job_block(self.source, "fast-contracts"), r"\bcargo\b")
 
     def test_javascript_actions_use_pinned_node24_releases(self):
-        self.assertEqual(self.source.count(CHECKOUT_NODE24), 5)
+        self.assertEqual(self.source.count(CHECKOUT_NODE24), 6)
         self.assertEqual(self.source.count(CACHE_NODE24), 2)
         self.assertNotIn("actions/checkout@v4", self.source)
         self.assertNotIn("actions/cache@v4", self.source)
+
+    def test_neutron_db_contracts_are_independent_and_cargo_free(self):
+        db_contracts = job_block(self.source, "neutron-db-contracts")
+        self.assertIn("ci/requirements-neutron-db-contracts.txt", db_contracts)
+        self.assertIn("test_aria_acl_sql_query", db_contracts)
+        self.assertNotRegex(db_contracts, r"\bcargo\b")
+        self.assertNotIn("needs: rust-build", db_contracts)
 
     def test_rust_behavior_runs_only_rust_tests(self):
         behavior = job_block(self.source, "rust-behavior")
