@@ -2,8 +2,8 @@
 
 Date: 2026-07-31
 
-Status: approved sequence; source design complete; RED and production
-implementation pending
+Status: fixed in `95c440a`; hosted RED, behavior, and warning-denied build
+evidence complete
 
 Analyzed target:
 `v0.9-neutron-agent@98034c15ee344ec2d9d035dfb233d6e971e05278`
@@ -187,9 +187,12 @@ This batch does not:
 ## 9. Verification
 
 - Local: `git diff --check`, documentation/static fast contracts only.
-- Hosted RED: `rust-behavior` fails on the missing concrete after-intent
-  durability helper while `rust-build` remains independently observable.
-- Hosted GREEN: `fast-contracts`, `rust-behavior`, and warning-denied
-  `rust-build` all pass on the exact production commit.
+- Hosted RED: commit `b5661c5` failed only on the two missing
+  `handle_snapshot_after_intent_fault` references while independent
+  warning-denied Rust/eBPF build passed in
+  [Build 30611148868](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30611148868).
+- Hosted GREEN: production commit `95c440a` passed `fast-contracts`,
+  `rust-behavior`, and warning-denied `rust-build` in
+  [Build 30611534447](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30611534447).
 - Privileged environment: not required because this prefix deliberately
   performs no datapath mutation.

@@ -49,7 +49,7 @@ intent/commit format, existing recover-pending API, GitHub Actions
 - Produces: the required concrete interface
   `handle_snapshot_after_intent_fault`.
 
-- [ ] **Step 1: Add the durable restart and recover-pending RED**
+- [x] **Step 1: Add the durable restart and recover-pending RED**
 
 Add to the existing `neutron_api.rs` test module:
 
@@ -139,7 +139,7 @@ async fn neutron_snapshot_after_intent_failure_is_durable_across_restart() {
 }
 ```
 
-- [ ] **Step 2: Add the blocked-commit-failure RED**
+- [x] **Step 2: Add the blocked-commit-failure RED**
 
 Use the existing `WalParentReplacement` fixture to make the blocked commit
 fail after the original intent has already been written:
@@ -205,7 +205,7 @@ async fn neutron_snapshot_after_intent_blocked_commit_failure_retains_intent() {
 }
 ```
 
-- [ ] **Step 3: Review and submit RED without local Cargo**
+- [x] **Step 3: Review and submit RED without local Cargo**
 
 Run:
 
@@ -226,7 +226,7 @@ git commit -m "test: expose snapshot background durability gap"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 4: Record hosted RED**
+- [x] **Step 4: Record hosted RED**
 
 Find the push Build at the exact RED commit and wait for completion.
 
@@ -264,7 +264,7 @@ async fn handle_snapshot_after_intent_fault(
   - `NeutronWal::append_snapshot_commit`
   - `mark_snapshot_background_error` preservation states.
 
-- [ ] **Step 1: Add the minimal handler**
+- [x] **Step 1: Add the minimal handler**
 
 Implement:
 
@@ -307,7 +307,7 @@ async fn handle_snapshot_after_intent_fault(
 This helper must not call `recover_intent_port`, attach, purge, detach, or any
 eBPF operation.
 
-- [ ] **Step 2: Route the concrete after-intent check**
+- [x] **Step 2: Route the concrete after-intent check**
 
 Replace the direct early return with:
 
@@ -323,7 +323,7 @@ handle_snapshot_after_intent_fault(
 
 Do not change the existing before-commit or snapshot-commit recovery blocks.
 
-- [ ] **Step 3: Confirm background preservation**
+- [x] **Step 3: Confirm background preservation**
 
 Keep `mark_snapshot_background_error` preserving:
 
@@ -337,7 +337,7 @@ The existing
 `neutron_snapshot_background_error_preserves_blocked_recovery` test remains
 part of the GREEN contract.
 
-- [ ] **Step 4: Review and submit GREEN**
+- [x] **Step 4: Review and submit GREEN**
 
 Run:
 
@@ -358,7 +358,7 @@ git commit -m "fix: persist snapshot background failure state"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 5: Verify hosted GREEN**
+- [x] **Step 5: Verify hosted GREEN**
 
 At the exact production commit require:
 
@@ -387,7 +387,7 @@ At the exact production commit require:
 - Produces: fixed `REVIEW-TXN-024` and the next design target
   `REVIEW-TXN-027`.
 
-- [ ] **Step 1: Record exact evidence**
+- [x] **Step 1: Record exact evidence**
 
 Record:
 
@@ -397,12 +397,12 @@ Record:
 - failure prefix covered; and
 - the no-datapath-mutation boundary.
 
-- [ ] **Step 2: Update the Register**
+- [x] **Step 2: Update the Register**
 
 Mark `REVIEW-TXN-024` fixed only after exact-head GREEN. Keep
 `REVIEW-TXN-027` and `REVIEW-ACL-045` open.
 
-- [ ] **Step 3: Commit and push documentation closure**
+- [x] **Step 3: Commit and push documentation closure**
 
 Run documentation validation and commit:
 
@@ -415,3 +415,17 @@ git push origin v0.9-neutron-agent
 ```
 
 Then begin the independent `REVIEW-TXN-027` design and RED cycle.
+
+## Execution Evidence
+
+- RED commit: `b5661c5`
+- RED Build:
+  [30611148868](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30611148868)
+  (`fast-contracts` passed, `rust-behavior` failed only on the two intentionally
+  missing helper references, independent `rust-build` passed).
+- Production commit: `95c440a`
+- GREEN Build:
+  [30611534447](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30611534447)
+  (`fast-contracts`, `rust-behavior`, and warning-denied `rust-build` passed).
+- Privileged field evidence: not applicable; the repaired prefix occurs before
+  datapath mutation.
