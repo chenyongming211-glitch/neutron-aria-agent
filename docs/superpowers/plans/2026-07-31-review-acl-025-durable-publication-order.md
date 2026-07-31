@@ -583,7 +583,7 @@ git commit -m "docs: close durable ACL publication order"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 5: Verify exact-head documentation CI and repository state**
+- [x] **Step 5: Verify exact-head documentation CI and repository state**
 
 Run:
 
@@ -650,3 +650,16 @@ GREEN evidence:
 - Production scope remained two existing Rust files. No checker, generic
   transaction framework, new WAL format, API change, or privileged field
   claim was added.
+
+Closure evidence:
+
+- `8673d2a docs: close durable ACL publication finding`
+- exact-head documentation Build
+  [`30610151342`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30610151342)
+  passed `fast-contracts` job `91090915246` and change detection job
+  `91090915257`; Rust jobs correctly skipped for the documentation-only
+  closure.
+- After that Build, the worktree was clean and local
+  `v0.9-neutron-agent...origin/v0.9-neutron-agent` divergence was `0 0`.
+- `REVIEW-ACL-026` remains open and is the next recorded transaction-order
+  item. No deferred privileged field-evidence state changed.
