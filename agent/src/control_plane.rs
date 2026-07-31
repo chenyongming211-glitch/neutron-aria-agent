@@ -10891,6 +10891,17 @@ mod tests {
         }
     }
 
+    fn assert_durable_before_bank_publication(persist: usize, epoch: usize, switch: usize) {
+        assert!(
+            persist < epoch,
+            "final state must be durable before fragment epoch advance"
+        );
+        assert!(
+            epoch < switch,
+            "fragment epoch must fence the active-bank switch"
+        );
+    }
+
     fn managed_replacement_compensations(
         mutations: &[SharedNetworkMutation],
     ) -> Vec<ManagedAclPublicationCompensation> {
@@ -11007,6 +11018,57 @@ mod tests {
                 ManagedAclPublicationCompensation::RestoreActiveBank,
                 managed_expected_general_restore("dst"),
                 managed_expected_general_restore("src")
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_acl_publication_persists_before_epoch_and_bank_switch() {
+        let decision = managed_acl_publication_decision(ProjectionDrift::Clean, true)
+            .expect("a semantic ACL change must publish");
+        let steps = managed_acl_publication_steps(&decision, Vec::new());
+        let persist = steps
+            .iter()
+            .position(|step| matches!(step, ManagedAclPublicationStep::Persist))
+            .expect("managed publication must persist");
+        let epoch = steps
+            .iter()
+            .position(|step| matches!(step, ManagedAclPublicationStep::AdvanceFragmentEpoch))
+            .expect("managed publication must advance the fragment epoch");
+        let switch = steps
+            .iter()
+            .position(|step| matches!(step, ManagedAclPublicationStep::SwitchBank))
+            .expect("managed publication must switch bank");
+
+        assert_durable_before_bank_publication(persist, epoch, switch);
+    }
+
+    #[test]
+    fn managed_acl_final_persistence_failure_does_not_restore_unpublished_bank() {
+        let compensations = managed_acl_publication_compensations(
+            &[managed_replacement("src")],
+            ManagedAclPublicationFailurePhase::Persist,
+        );
+
+        assert_eq!(
+            compensations,
+            vec![managed_expected_general_restore("src")]
+        );
+    }
+
+    #[test]
+    fn managed_acl_uncertain_bank_switch_failure_restores_old_bank_first() {
+        let compensations = managed_acl_publication_compensations(
+            &[managed_replacement("src"), managed_replacement("dst")],
+            ManagedAclPublicationFailurePhase::SwitchBank,
+        );
+
+        assert_eq!(
+            compensations,
+            vec![
+                ManagedAclPublicationCompensation::RestoreActiveBank,
+                managed_expected_general_restore("dst"),
+                managed_expected_general_restore("src"),
             ]
         );
     }

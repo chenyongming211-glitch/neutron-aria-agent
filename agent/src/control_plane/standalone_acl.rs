@@ -930,6 +930,17 @@ mod tests {
         state
     }
 
+    fn assert_durable_before_bank_publication(persist: usize, epoch: usize, switch: usize) {
+        assert!(
+            persist < epoch,
+            "final state must be durable before fragment epoch advance"
+        );
+        assert!(
+            epoch < switch,
+            "fragment epoch must fence the active-bank switch"
+        );
+    }
+
     #[test]
     fn standalone_acl_publication_add_deny_rotates_bank_and_strictly_flushes_ct() {
         let old = state_with_groups();
@@ -978,6 +989,38 @@ mod tests {
             Some(&StandaloneAclPublicationStep::StrictCtScrub)
         );
         assert_eq!(plan.final_state.rules.len(), 1);
+    }
+
+    #[test]
+    fn standalone_acl_publication_persists_before_epoch_and_bank_switch() {
+        let steps = publication_steps(true);
+        let persist = steps
+            .iter()
+            .position(|step| *step == StandaloneAclPublicationStep::PersistFinalState)
+            .expect("standalone publication must persist");
+        let epoch = steps
+            .iter()
+            .position(|step| *step == StandaloneAclPublicationStep::AdvanceFragmentEpoch)
+            .expect("standalone publication must advance the fragment epoch");
+        let switch = steps
+            .iter()
+            .position(|step| *step == StandaloneAclPublicationStep::SwitchBank)
+            .expect("standalone publication must switch bank");
+
+        assert_durable_before_bank_publication(persist, epoch, switch);
+    }
+
+    #[test]
+    fn standalone_acl_final_persistence_failure_never_restores_unpublished_bank() {
+        assert_eq!(
+            standalone_acl_rollback_steps(StandaloneAclFailurePhase::PersistFinalState),
+            vec![
+                StandaloneAclRollbackStep::RestoreGeneralReverse,
+                StandaloneAclRollbackStep::ScrubFailedShadow,
+                StandaloneAclRollbackStep::CleanupCreatedBitmaps,
+                StandaloneAclRollbackStep::RestoreDurableState,
+            ]
+        );
     }
 
     #[test]
