@@ -1588,7 +1588,7 @@ fn managed_acl_publication_compensations(
     phase: ManagedAclPublicationFailurePhase,
 ) -> Vec<ManagedAclPublicationCompensation> {
     let mut compensations = Vec::new();
-    if phase == ManagedAclPublicationFailurePhase::Persist {
+    if phase == ManagedAclPublicationFailurePhase::SwitchBank {
         compensations.push(ManagedAclPublicationCompensation::RestoreActiveBank);
     }
     compensations.extend(mutations.iter().rev().map(|mutation| {
@@ -1726,9 +1726,9 @@ fn managed_acl_publication_steps(
     );
     steps.push(ManagedAclPublicationStep::StageShadow);
     steps.push(ManagedAclPublicationStep::VerifyTc);
+    steps.push(ManagedAclPublicationStep::Persist);
     steps.push(ManagedAclPublicationStep::AdvanceFragmentEpoch);
     steps.push(ManagedAclPublicationStep::SwitchBank);
-    steps.push(ManagedAclPublicationStep::Persist);
     steps
 }
 
@@ -3045,6 +3045,78 @@ async fn rollback_owned_acl_prepublication(
             original,
             rollback_errors.join("; ")
         ))
+    }
+}
+
+async fn rollback_owned_acl_after_durable_commit(
+    original: ControlPlaneError,
+    mutations: &[SharedNetworkMutation],
+    failure_phase: ManagedAclPublicationFailurePhase,
+    created_port_sets: &[TransactionCreatedPortSet],
+    runtime: TapMapRuntime<'_>,
+    ebpf_path: &str,
+    previous_active_bank: u8,
+    shadow_bank: u8,
+    state: &mut InstanceState,
+    old_state: &FirewallState,
+) -> ControlPlaneError {
+    state.managed_projection_health = ManagedProjectionHealth::Unverified;
+    let persistence_failure = matches!(&original, ControlPlaneError::PersistenceError(_));
+    let mut rollback_errors = Vec::new();
+    let compensations = managed_acl_publication_compensations(mutations, failure_phase);
+    let mut active_bank_restored = true;
+    if let Err(error) =
+        execute_managed_acl_publication_compensations(&compensations, |compensation| {
+            let result = apply_managed_acl_publication_compensation(
+                compensation,
+                runtime,
+                ebpf_path,
+                previous_active_bank,
+            );
+            if matches!(
+                compensation,
+                ManagedAclPublicationCompensation::RestoreActiveBank
+            ) && result.is_err()
+            {
+                active_bank_restored = false;
+            }
+            result
+        })
+    {
+        rollback_errors.push(error);
+    }
+    if active_bank_restored {
+        if let Err(error) = aria_core::ebpf_ops::scrub_acl_bank(runtime, shadow_bank) {
+            rollback_errors.push(format!("scrub shadow bank {}: {}", shadow_bank, error));
+        }
+    } else {
+        rollback_errors.push(format!(
+            "preserved publication bank {} because active-bank restore failed",
+            shadow_bank
+        ));
+    }
+    let cleanup = cleanup_transaction_created_port_sets(created_port_sets, runtime, ebpf_path);
+    for failure in &cleanup.failures {
+        rollback_errors.push(failure.error.clone());
+    }
+    if let Err(error) =
+        restore_durable_old_state_after_failed_persistence(state, old_state, &cleanup).await
+    {
+        rollback_errors.push(error);
+    }
+    if rollback_errors.is_empty() {
+        original
+    } else {
+        let message = format!(
+            "{}; owned ACL rollback failed: {}",
+            original,
+            rollback_errors.join("; ")
+        );
+        if persistence_failure {
+            ControlPlaneError::PersistenceError(message)
+        } else {
+            ControlPlaneError::KernelError(message)
+        }
     }
 }
 
@@ -5731,6 +5803,31 @@ impl ControlPlane {
                         }
                     }
                 }
+                ManagedAclPublicationStep::Persist => {
+                    let compact_started = Instant::now();
+                    let durable_final_state = durable_final_state
+                        .take()
+                        .expect("publication plan contains exactly one persistence step");
+                    if let Err(error) = state.compact_and_publish_state(durable_final_state).await {
+                        return Err(rollback_owned_acl_after_durable_commit(
+                            ControlPlaneError::PersistenceError(format!(
+                                "owned ACL persistence failed: {}",
+                                error
+                            )),
+                            &applied_shared_mutations,
+                            ManagedAclPublicationFailurePhase::Persist,
+                            created_port_sets,
+                            runtime,
+                            &self.ebpf_path,
+                            current_acl_bank,
+                            next_acl_bank,
+                            state,
+                            old_state,
+                        )
+                        .await);
+                    }
+                    report.compact_ms = compact_started.elapsed().as_millis();
+                }
                 ManagedAclPublicationStep::AdvanceFragmentEpoch => {
                     if let Err(error) = execute_fragment_epoch_bank_publication(
                         &mut || {
@@ -5758,7 +5855,7 @@ impl ControlPlane {
                                 ManagedAclPublicationFailurePhase::SwitchBank
                             }
                         };
-                        return Err(rollback_owned_acl_prepublication(
+                        return Err(rollback_owned_acl_after_durable_commit(
                             ControlPlaneError::KernelError(error.to_string()),
                             &applied_shared_mutations,
                             failure_phase,
@@ -5776,79 +5873,6 @@ impl ControlPlane {
                 }
                 ManagedAclPublicationStep::SwitchBank => {
                     debug_assert!(bank_committed, "bank switch must be fenced by fragment epoch");
-                }
-                ManagedAclPublicationStep::Persist => {
-                    let compact_started = Instant::now();
-                    let durable_final_state = durable_final_state
-                        .take()
-                        .expect("publication plan contains exactly one persistence step");
-                    if let Err(error) = state.compact_and_publish_state(durable_final_state).await {
-                        let mut recovery_errors =
-                            vec![format!("owned ACL persistence failed: {}", error)];
-                        let compensations = managed_acl_publication_compensations(
-                            &applied_shared_mutations,
-                            ManagedAclPublicationFailurePhase::Persist,
-                        );
-                        let mut active_bank_restored = true;
-                        if let Err(compensation_error) =
-                            execute_managed_acl_publication_compensations(
-                                &compensations,
-                                |compensation| {
-                                    let result = apply_managed_acl_publication_compensation(
-                                        compensation,
-                                        runtime,
-                                        &self.ebpf_path,
-                                        current_acl_bank,
-                                    );
-                                    if matches!(
-                                        compensation,
-                                        ManagedAclPublicationCompensation::RestoreActiveBank
-                                    ) && result.is_err()
-                                    {
-                                        active_bank_restored = false;
-                                    }
-                                    result
-                                },
-                            )
-                        {
-                            recovery_errors.push(compensation_error);
-                        }
-                        if active_bank_restored {
-                            if let Err(scrub_error) =
-                                aria_core::ebpf_ops::scrub_acl_bank(runtime, next_acl_bank)
-                            {
-                                recovery_errors.push(format!(
-                                    "scrub failed publication bank {}: {}",
-                                    next_acl_bank, scrub_error
-                                ));
-                            }
-                        } else {
-                            recovery_errors.push(format!(
-                                "preserved publication bank {} because active-bank restore failed",
-                                next_acl_bank
-                            ));
-                        }
-                        let cleanup = cleanup_transaction_created_port_sets(
-                            created_port_sets,
-                            runtime,
-                            &self.ebpf_path,
-                        );
-                        for failure in &cleanup.failures {
-                            recovery_errors.push(failure.error.clone());
-                        }
-                        if let Err(recovery_error) =
-                            restore_durable_old_state_after_failed_persistence(
-                                state, old_state, &cleanup,
-                            )
-                            .await
-                        {
-                            recovery_errors.push(recovery_error);
-                        }
-                        return Err(ControlPlaneError::PersistenceError(
-                            recovery_errors.join("; "),
-                        ));
-                    }
-                    report.compact_ms = compact_started.elapsed().as_millis();
                 }
             }
         }
