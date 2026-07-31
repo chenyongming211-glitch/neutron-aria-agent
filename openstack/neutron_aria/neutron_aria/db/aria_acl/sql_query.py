@@ -48,7 +48,14 @@ def _apply_filters(sa, statement, table, query, projection):
             ]))
             continue
         expression = _expression(sa, table, field, projection)
-        clauses.append(expression.in_(values))
+        bound_values = _sql_filter_values(query, field, values)
+        choices = []
+        non_null = tuple(value for value in bound_values if value is not None)
+        if non_null:
+            choices.append(expression.in_(non_null))
+        if None in bound_values:
+            choices.append(expression.is_(None))
+        clauses.append(sa.or_(*choices))
     if clauses:
         statement = statement.where(sa.and_(*clauses))
     return statement
@@ -123,6 +130,16 @@ def _expression(sa, table, field, projection):
         return table.c[field]
     except KeyError:
         raise AriaAclValidationError("field %s has no SQL expression" % field)
+
+
+def _sql_filter_values(query, field, values):
+    if query.spec.name != "port_statuses" or field != "updated_at":
+        return values
+    return tuple(
+        datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+        if value is not None else None
+        for value in values
+    )
 
 
 def _stale_expression(sa, table, projection):

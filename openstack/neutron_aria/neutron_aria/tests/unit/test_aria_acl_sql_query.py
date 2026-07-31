@@ -183,6 +183,29 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
 
         self.assertEqual(3, len(seen))
 
+        exact_timestamp = self.repository.get_port_status(
+            "port-1", host="ostack2"
+        )["updated_at"]
+        exact = self.repository.list_port_statuses(
+            filters={"last_reported_at": [exact_timestamp]},
+            projection=PortStatusProjection(
+                now_epoch=200.0,
+                stale_seconds=-1,
+            ),
+        )
+        self.assertEqual(
+            [("port-1", "ostack2")],
+            [(row["port_id"], row["host"]) for row in exact],
+        )
+        null_policy = self.repository.list_port_statuses(
+            filters={"effective_policy_id": [None]},
+            projection=PortStatusProjection(
+                now_epoch=200.0,
+                stale_seconds=-1,
+            ),
+        )
+        self.assertEqual(3, len(null_policy))
+
 
 if __name__ == "__main__":
     unittest.main()

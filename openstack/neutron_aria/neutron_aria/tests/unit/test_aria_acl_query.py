@@ -156,6 +156,12 @@ class AriaAclQueryTestCase(unittest.TestCase):
             "port-1",
             "h" * 256,
         )
+        self.assertRaises(
+            AriaAclValidationError,
+            contract.normalize_query,
+            "port_statuses",
+            filters={"updated_at": ["not-a-timestamp"]},
+        )
 
     def test_in_memory_repository_uses_the_shared_query_contract(self):
         contract = self._query_contract()
@@ -187,6 +193,10 @@ class AriaAclQueryTestCase(unittest.TestCase):
         self.assertEqual(
             {"id": "p1"},
             repository.get_policy("p1", fields=["id"]),
+        )
+        self.assertEqual(
+            {"tenant_id": "project-1"},
+            repository.get_policy("p1", fields=["tenant_id"]),
         )
 
         repository.upsert_port_status({

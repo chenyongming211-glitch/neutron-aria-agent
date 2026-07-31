@@ -178,7 +178,12 @@ QUERY_SPECS["port_statuses"] = QuerySpec(
     public_identity_field="id",
     identity_fields=("port_id", "host"),
     aliases={"last_reported_at": "updated_at"},
-    field_types={"generation": int, "stale": bool},
+    field_types={
+        "generation": int,
+        "stale": bool,
+        "updated_at": "timestamp",
+        "last_reported_at": "timestamp",
+    },
     visible_fields=_STATUS_VISIBLE,
     filterable_fields=_STATUS_FILTERABLE,
     sortable_fields=_STATUS_SORTABLE,
@@ -303,7 +308,15 @@ def apply_memory_query(rows, query, projection=None):
 def project_fields(row, fields):
     if not fields:
         return dict(row)
-    return dict((field, row[field]) for field in fields if field in row)
+    projected = {}
+    for field in fields:
+        if field in row:
+            projected[field] = row[field]
+        elif field == "tenant_id" and "project_id" in row:
+            projected[field] = row["project_id"]
+        elif field == "project_id" and "tenant_id" in row:
+            projected[field] = row["tenant_id"]
+    return projected
 
 
 def _normalize_filters(spec, filters):
@@ -395,6 +408,8 @@ def _typed_value(spec, field, value):
             return _integer_value(value, "%s filter %s" % (spec.name, field))
         except AriaAclValidationError:
             raise
+    if value_type == "timestamp":
+        return _canonical_timestamp(value, spec.name, field)
     if not isinstance(value, STRING_TYPES):
         raise AriaAclValidationError(
             "%s filter %s requires text" % (spec.name, field)
@@ -412,6 +427,29 @@ def _integer_value(value, label):
     ):
         return int(value)
     raise AriaAclValidationError("%s requires a canonical integer" % label)
+
+
+def _canonical_timestamp(value, resource, field):
+    if not isinstance(value, STRING_TYPES):
+        raise AriaAclValidationError(
+            "%s filter %s requires an ISO timestamp" % (resource, field)
+        )
+    text = value.rstrip("Z")
+    parsed = None
+    for pattern in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            parsed = datetime.datetime.strptime(text, pattern)
+            break
+        except ValueError:
+            pass
+    if parsed is None:
+        raise AriaAclValidationError(
+            "%s filter %s requires an ISO timestamp" % (resource, field)
+        )
+    return "%s.%06dZ" % (
+        parsed.strftime("%Y-%m-%dT%H:%M:%S"),
+        parsed.microsecond,
+    )
 
 
 def _identity_utf8(value, field, maximum):
