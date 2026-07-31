@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use aria_core::common::{KernelDropConfig, KernelDropFilterValue, KERNEL_DROP_FLAG_HAS_REASON};
@@ -369,6 +369,74 @@ impl KernelDropManager {
             "removed managed interface from kernel drop manager"
         );
         Ok(())
+    }
+
+    pub async fn remove_managed_tap(&self, tap_id: u32) -> Result<u64, String> {
+        let mut state = self.state.lock().await;
+        let map_path = self.managed_ifindex_filter_path();
+        let in_memory_ifindices: Vec<u32> = state
+            .managed_ifaces
+            .iter()
+            .filter_map(|(ifindex, current_tap_id)| {
+                (*current_tap_id == tap_id).then_some(*ifindex)
+            })
+            .collect();
+
+        if !Path::new(&map_path).exists() {
+            for ifindex in &in_memory_ifindices {
+                state.managed_ifaces.remove(ifindex);
+            }
+            state.last_error = None;
+            return Ok(in_memory_ifindices.len() as u64);
+        }
+
+        let mut map = match self.open_managed_ifindex_filter() {
+            Ok(map) => map,
+            Err(error) => {
+                state.last_error = Some(error.clone());
+                return Err(error);
+            }
+        };
+        let mut ifindices = BTreeSet::new();
+        for item in map.iter() {
+            let (ifindex, value) = match item {
+                Ok(item) => item,
+                Err(error) => {
+                    let error = format!(
+                        "iterate MANAGED_IFINDEX_FILTER for tap_id {}: {:?}",
+                        tap_id, error
+                    );
+                    state.last_error = Some(error.clone());
+                    return Err(error);
+                }
+            };
+            if value.tap_id == tap_id {
+                ifindices.insert(ifindex);
+            }
+        }
+        ifindices.extend(in_memory_ifindices);
+
+        for ifindex in &ifindices {
+            if map.get(ifindex, 0).is_ok() {
+                if let Err(error) = map.remove(ifindex) {
+                    let error = format!(
+                        "remove MANAGED_IFINDEX_FILTER {} for tap_id {}: {:?}",
+                        ifindex, tap_id, error
+                    );
+                    state.last_error = Some(error.clone());
+                    return Err(error);
+                }
+            }
+            state.managed_ifaces.remove(ifindex);
+        }
+        state.last_error = None;
+        info!(
+            tap_id,
+            removed_ifindices = ifindices.len(),
+            managed_ifaces = state.managed_ifaces.len(),
+            "removed managed tap from kernel drop manager"
+        );
+        Ok(ifindices.len() as u64)
     }
 
     pub async fn status_snapshot(&self) -> KernelDropStatusSnapshot {

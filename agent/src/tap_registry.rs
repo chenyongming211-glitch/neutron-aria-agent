@@ -7,6 +7,52 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
+fn orphaned_managed_ifaces(
+    link_ifaces: &BTreeSet<String>,
+    persisted_ifaces: &BTreeSet<String>,
+    committed_ifaces: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    link_ifaces
+        .union(persisted_ifaces)
+        .filter(|ifname| !committed_ifaces.contains(*ifname))
+        .cloned()
+        .collect()
+}
+
+fn load_orphan_tap_id(base_state_path: &std::path::Path, ifname: &str) -> Result<u32, String> {
+    let state_path = base_state_path.join(ifname);
+    let state_file = state_path.join("state.json");
+    if !state_file.exists() {
+        return Err(format!(
+            "orphan runtime {} is missing persisted state {}; tap_id is unassigned",
+            ifname,
+            state_file.display()
+        ));
+    }
+    let state_path = state_path
+        .to_str()
+        .ok_or_else(|| format!("non-UTF-8 orphan state path: {}", state_path.display()))?;
+    let tap_id = aria_core::state::StateManager::new(state_path).get_tap_id()?;
+    if tap_id == aria_core::common::TAP_ID_UNASSIGNED {
+        return Err(format!(
+            "orphan runtime {} has an unassigned persisted tap_id",
+            ifname
+        ));
+    }
+    Ok(tap_id)
+}
+
+fn finish_orphan_cleanup(
+    instance: &FirewallInstance,
+    scrub_result: Result<u64, String>,
+) -> Result<u64, String> {
+    let removed = scrub_result?;
+    instance
+        .release_persisted_live_iface()
+        .map_err(|error| format!("release_marker:{}", error))?;
+    Ok(removed)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeReconcileResult {
     pub ifname: String,
@@ -138,6 +184,17 @@ impl TapRegistry {
         Ok(ifaces)
     }
 
+    fn persisted_managed_ifaces(&self) -> Result<BTreeSet<String>, String> {
+        FirewallInstance::new(
+            "managed-runtime-inventory",
+            PathBuf::from(self.control_plane.managed_pin_path()),
+            self.base_state_path.join("managed-runtime-inventory"),
+            true,
+            self.control_plane.trace_map_mode(),
+        )
+        .persisted_live_iface_names()
+    }
+
     fn remove_orphaned_managed_link_pins(&self, ifname: &str) -> Result<(), String> {
         let shared_pin_path = self.base_pin_path.join(MANAGED_SHARED_PIN_NAMESPACE);
         let mut errors = Vec::new();
@@ -149,17 +206,6 @@ impl TapRegistry {
             if let Err(e) = std::fs::remove_file(&path) {
                 errors.push(format!("remove {}: {}", path.display(), e));
             }
-        }
-
-        let instance = FirewallInstance::new(
-            ifname,
-            PathBuf::from(self.control_plane.managed_pin_path()),
-            self.base_state_path.join(ifname),
-            true,
-            self.control_plane.trace_map_mode(),
-        );
-        if let Err(e) = instance.release_persisted_live_iface() {
-            errors.push(format!("release persisted live iface: {}", e));
         }
 
         if errors.is_empty() {
@@ -199,6 +245,19 @@ impl TapRegistry {
                 }];
             }
         };
+        let persisted_ifaces = match self.persisted_managed_ifaces() {
+            Ok(ifaces) => ifaces,
+            Err(e) => {
+                return vec![RuntimeReconcileResult {
+                    ifname: String::new(),
+                    action: "inventory".to_string(),
+                    status: "blocked".to_string(),
+                    reason: Some(e),
+                }];
+            }
+        };
+        let orphaned_ifaces =
+            orphaned_managed_ifaces(&pinned_ifaces, &persisted_ifaces, &committed_names);
 
         let mut results = Vec::new();
         for (ifname, acl_managed) in &committed {
@@ -218,15 +277,51 @@ impl TapRegistry {
             }
         }
 
-        for ifname in pinned_ifaces.difference(&committed_names) {
+        for ifname in orphaned_ifaces {
+            let iface_lock = self.get_iface_lock(&ifname).await;
+            let iface_guard = iface_lock.lock().await;
             let _runtime_guard = self.control_plane.lock_runtime_lifecycle().await;
-            match self.remove_orphaned_managed_link_pins(ifname) {
-                Ok(()) => results.push(RuntimeReconcileResult {
-                    ifname: ifname.clone(),
-                    action: "cleanup_orphan".to_string(),
-                    status: "cleaned".to_string(),
-                    reason: Some("orphaned_pinned_links_removed".to_string()),
-                }),
+            let instance = FirewallInstance::new(
+                &ifname,
+                PathBuf::from(self.control_plane.managed_pin_path()),
+                self.base_state_path.join(&ifname),
+                true,
+                self.control_plane.trace_map_mode(),
+            );
+            let cleanup = (|| {
+                let tap_id = load_orphan_tap_id(&self.base_state_path, &ifname)
+                    .map_err(|error| format!("load_tap_id:{}", error))?;
+                self.remove_orphaned_managed_link_pins(&ifname)
+                    .map_err(|error| format!("detach_links:{}", error))?;
+                Ok(tap_id)
+            })();
+            let cleanup = match cleanup {
+                Ok(tap_id) => finish_orphan_cleanup(
+                    &instance,
+                    self.control_plane
+                        .scrub_orphaned_managed_runtime_serialized(&ifname, tap_id)
+                        .await,
+                )
+                .map(|removed| (tap_id, removed)),
+                Err(error) => Err(error),
+            };
+            drop(_runtime_guard);
+            drop(iface_guard);
+
+            match cleanup {
+                Ok((tap_id, removed)) => {
+                    self.instances.write().await.remove(&ifname);
+                    self.iface_locks.write().await.remove(&ifname);
+                    results.push(RuntimeReconcileResult {
+                        ifname: ifname.clone(),
+                        action: "cleanup_orphan".to_string(),
+                        status: "cleaned".to_string(),
+                        reason: Some(format!(
+                            "orphan_runtime_scrubbed:tap_id={},removed={}",
+                            tap_id, removed
+                        )),
+                    })
+                }
                 Err(e) => results.push(RuntimeReconcileResult {
                     ifname: ifname.clone(),
                     action: "cleanup_orphan".to_string(),

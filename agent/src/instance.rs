@@ -866,6 +866,18 @@ impl FirewallInstance {
         self.store_persisted_live_ifaces_atomically(&state)
     }
 
+    pub(crate) fn persisted_live_iface_names(&self) -> Result<BTreeSet<String>, String> {
+        if !self.shared_runtime {
+            return Ok(BTreeSet::new());
+        }
+        Ok(self
+            .load_persisted_live_ifaces()?
+            .ifaces
+            .into_iter()
+            .map(|entry| entry.iface)
+            .collect())
+    }
+
     pub fn cleanup_stale_shared_runtime_reservations(&self) -> Result<Vec<String>, String> {
         if !self.shared_runtime {
             return Ok(Vec::new());

@@ -5241,6 +5241,70 @@ impl ControlPlane {
         self.clear_neutron_port_authority(name).await;
     }
 
+    pub(crate) async fn scrub_orphaned_managed_runtime_serialized(
+        &self,
+        name: &str,
+        tap_id: u32,
+    ) -> Result<u64, String> {
+        if tap_id == aria_core::common::TAP_ID_UNASSIGNED {
+            return Err(format!(
+                "orphan runtime cleanup for {} requires an assigned tap_id",
+                name
+            ));
+        }
+
+        let stale_instance = {
+            let instances = self.instances.read().await;
+            instances.get(name).cloned()
+        };
+        if let Some(instance) = &stale_instance {
+            let state = instance.read().await;
+            if state.tap_id != tap_id {
+                return Err(format!(
+                    "orphan runtime identity mismatch for {}: registered tap_id {}, persisted tap_id {}",
+                    name, state.tap_id, tap_id
+                ));
+            }
+        }
+
+        let mut removed = self
+            .kernel_drop_manager
+            .remove_managed_tap(tap_id)
+            .await
+            .map_err(|error| format!("kernel_drop:{}", error))?;
+
+        let pin_path = self.managed_pin_path();
+        self.trace_manager.unregister_tap(&pin_path, tap_id).await;
+        if Path::new(&pin_path).exists() {
+            removed += aria_core::ebpf_ops::scrub_managed_runtime_state(TapMapRuntime::new(
+                &pin_path, tap_id,
+            ))
+            .map_err(|error| format!("managed_maps:{}", error))?;
+        }
+
+        if let Some(instance) = stale_instance {
+            let removed_instance = {
+                let mut instances = self.instances.write().await;
+                instances.remove(name)
+            };
+            if let Some(removed_instance) = removed_instance {
+                let mut state = removed_instance.write().await;
+                state.shutdown_wal().await;
+            } else {
+                let mut state = instance.write().await;
+                state.shutdown_wal().await;
+            }
+        }
+        self.clear_neutron_port_authority(name).await;
+        info!(
+            instance = %name,
+            tap_id,
+            removed_entries = removed,
+            "scrubbed orphaned managed runtime"
+        );
+        Ok(removed)
+    }
+
     /// List all registered instance names
     pub async fn list_instances(&self) -> Vec<String> {
         let instances = self.instances.read().await;
