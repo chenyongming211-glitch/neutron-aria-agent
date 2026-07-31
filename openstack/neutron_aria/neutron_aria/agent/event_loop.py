@@ -573,15 +573,33 @@ class SnapshotSynchronizer(object):
         )
         if pending_action.get("action") == "force_full_resync":
             return self.safe_full_resync()
-        self.state_store.prepare_delete(port_id, reason=reason)
+        try:
+            self.state_store.prepare_delete(port_id, reason=reason)
+        except RuntimeError as exc:
+            self.runtime_status.mark_degraded(
+                "pending_delete_unresolved",
+                exc,
+            )
+            raise LocalApiError(str(exc))
         try:
             response = self.local_client.delete_port(port_id)
         except LocalApiTimeoutError as exc:
             response = self._recover_delete_timeout(port_id, exc)
-        self.projection_index.remove(port_id)
-        self.projected_port_ids.discard(port_id)
-        self.runtime_status.update_projection_summary(self.projection_summary())
-        self.state_store.commit_delete(port_id)
+        try:
+            self._validate_delete_response(port_id, response)
+            self.projection_index.remove(port_id)
+            self.projected_port_ids.discard(port_id)
+            self.runtime_status.update_projection_summary(
+                self.projection_summary()
+            )
+            self.state_store.commit_delete(port_id)
+            self.runtime_status.remove_port_status(port_id)
+        except Exception as exc:
+            self.runtime_status.mark_degraded(
+                "pending_delete_unresolved",
+                exc,
+            )
+            raise
         LOG.info(
             "delete_port_complete host=%s port_id=%s reason=%s projected_ports=%s",
             self.host,
@@ -898,10 +916,14 @@ class SnapshotSynchronizer(object):
         generation_floor = self._generation_floor_from_status(remote_status)
 
         phase_started = time.time()
-        prepared = self.state_store.prepare_scoped_snapshot(
-            snapshot,
-            minimum_generation=generation_floor,
-        )
+        try:
+            prepared = self.state_store.prepare_scoped_snapshot(
+                snapshot,
+                minimum_generation=generation_floor,
+            )
+        except RuntimeError as exc:
+            self._mark_pending_snapshot_unresolved(exc)
+            raise LocalApiError(str(exc))
         snapshot["generation"] = prepared["generation"]
         snapshot["desired_hash"] = prepared["desired_hash"]
         pending_snapshot = self.state_store.pending_snapshot()
@@ -937,22 +959,49 @@ class SnapshotSynchronizer(object):
         except LocalApiTimeoutError as exc:
             uds_submit_ms = _elapsed_ms(phase_started)
             phase_started = time.time()
-            response = self._recover_snapshot_timeout(snapshot, projected_port_ids, exc)
+            try:
+                response = self._recover_snapshot_timeout(
+                    snapshot,
+                    projected_port_ids,
+                    exc,
+                )
+            except Exception as recovery_exc:
+                self._mark_pending_snapshot_unresolved(recovery_exc)
+                raise
             timeout_recovery_ms = _elapsed_ms(phase_started)
             submit_mode = "timeout_recovered"
+        except Exception as exc:
+            self._mark_pending_snapshot_unresolved(exc)
+            raise
 
-        self._raise_if_response_failed(response)
+        try:
+            self._raise_if_response_failed(response)
+        except Exception as exc:
+            self._mark_pending_snapshot_unresolved(exc)
+            raise
         phase_started = time.time()
-        apply_status = self._status_after_apply(snapshot, projected_port_ids, response)
+        try:
+            apply_status = self._status_after_apply(
+                snapshot,
+                projected_port_ids,
+                response,
+            )
+        except Exception as exc:
+            self._mark_pending_snapshot_unresolved(exc)
+            raise
         post_apply_status_ms = _elapsed_ms(phase_started)
-        managed_ports = self._finalize_snapshot_classification(
-            snapshot,
-            projected_port_ids,
-            apply_status,
-            response,
-            scope="port",
-            port_id=port_id,
-        )
+        try:
+            managed_ports = self._finalize_snapshot_classification(
+                snapshot,
+                projected_port_ids,
+                apply_status,
+                response,
+                scope="port",
+                port_id=port_id,
+            )
+        except Exception as exc:
+            self._mark_pending_snapshot_unresolved(exc)
+            raise
         phase_started = time.time()
         heartbeat = self.report_status()
         heartbeat_ms = _elapsed_ms(phase_started)
@@ -1305,6 +1354,36 @@ class SnapshotSynchronizer(object):
         if errors:
             raise LocalApiError(
                 "snapshot apply returned port errors: %s" % errors
+            )
+
+    def _mark_pending_snapshot_unresolved(self, error):
+        if self.state_store.pending_snapshot() is None:
+            return
+        self.runtime_status.mark_degraded(
+            "pending_snapshot_unresolved",
+            error,
+        )
+
+    def _validate_delete_response(self, port_id, response):
+        if not isinstance(response, dict):
+            raise LocalApiError("delete response is not an object")
+        if response.get("port_id") != port_id:
+            raise LocalApiError(
+                "delete response port_id %r does not match %r" %
+                (response.get("port_id"), port_id)
+            )
+        status = response.get("status")
+        if status not in ("ok", "deleted", "not_found"):
+            raise LocalApiError(
+                "delete response is not successful: %s" % response
+            )
+        if response.get("error"):
+            raise LocalApiError(
+                "delete response contains error: %s" % response["error"]
+            )
+        if status == "ok" and response.get("detached") is False:
+            raise LocalApiError(
+                "delete response reports ok without detach"
             )
 
     def _maybe_recover_pending_before_submit(self, snapshot, projected_port_ids):

@@ -46,20 +46,23 @@ port from `last_port_statuses`.
 
 State stores enforce the invariant, not only callers:
 
-- no prepare operation may replace a different unresolved pending snapshot;
-- an exact generation/hash/scope/affected-port match may be reused;
+- no prepare operation may replace an unresolved pending snapshot with a
+  different desired hash;
+- the same desired hash may be realigned to the generation required by the
+  existing remote recovery protocol;
 - a different pending snapshot raises an explicit local transaction conflict
   without writing any state;
 - a pending delete and pending snapshot are both resolved through
   `recover_pending_state` before a new mutating event proceeds;
 - direct state-store callers receive the same protection as the event loop.
 
-`apply_port_scoped_snapshot` runs recovery before its dry run and remote
-pre-submit gate. If recovery leaves any pending snapshot or delete unresolved,
-the scoped write is blocked without UDS mutation or local prepare.
+`apply_port_scoped_snapshot` keeps the existing remote pre-submit recovery
+ordering. The state-store guard is the final boundary: if that protocol has not
+resolved a different local pending hash, scoped prepare is rejected without
+overwriting it or issuing the scoped UDS mutation.
 
-Full-host behavior keeps its existing recovery entry and uses the same
-state-store guard as defense in depth.
+Full-host behavior keeps its existing recovery entry and remote barrier
+ordering, with the same state-store guard as defense in depth.
 
 ## Scoped Failure Contract
 
@@ -81,7 +84,8 @@ A direct delete commits only when the response:
 
 - is a mapping;
 - identifies the requested `port_id`;
-- reports `status=ok` or the existing timeout-recovery `status=deleted`;
+- reports `status=ok`, idempotent `status=not_found`, or the existing
+  timeout-recovery `status=deleted`;
 - does not contain a non-empty error;
 - for a direct `ok` response, reports a successful detach/no-op outcome
   compatible with the existing Rust contract.
@@ -118,4 +122,3 @@ Python behavior tests must prove:
 - one concrete state-machine implementation turns them GREEN;
 - all Python fast contracts pass;
 - backlog rows are updated only after exact-head hosted CI evidence.
-

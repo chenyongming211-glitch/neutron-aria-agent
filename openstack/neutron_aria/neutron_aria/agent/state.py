@@ -178,6 +178,7 @@ class SnapshotStateStore(object):
             minimum_generation,
             force_new_generation=force_new_generation,
         )
+        self._require_pending_snapshot_match(desired_hash)
         reused_pending = bool(
             not force_new_generation and
             pending_generation and
@@ -206,6 +207,7 @@ class SnapshotStateStore(object):
         if generation <= 0:
             generation = 1
         desired_hash = desired_hash or desired_snapshot_hash(snapshot)
+        self._require_pending_snapshot_match(desired_hash)
         pending_generation = _int_value(self._state.get("pending_generation"))
         pending_hash = self._state.get("pending_desired_hash")
         reused_pending = bool(
@@ -255,6 +257,7 @@ class SnapshotStateStore(object):
             snapshot,
             self._state.get("last_classified_projected_port_ids") or [],
         )
+        self._require_pending_snapshot_match(desired_hash)
         self._state["pending_generation"] = generation
         self._state["pending_desired_hash"] = desired_hash
         self._state["pending_snapshot_ports"] = (
@@ -272,6 +275,23 @@ class SnapshotStateStore(object):
             "desired_hash": desired_hash,
             "reused_pending": reused_pending,
         }
+
+    def _require_pending_snapshot_match(self, desired_hash):
+        pending_delete = self.pending_delete()
+        if pending_delete is not None:
+            raise RuntimeError(
+                "pending delete for port %s blocks snapshot prepare" %
+                pending_delete["port_id"]
+            )
+        pending = self.pending_snapshot()
+        if pending is None:
+            return
+        if pending["desired_hash"] == desired_hash:
+            return
+        raise RuntimeError(
+            "unresolved pending snapshot generation %s cannot be replaced" %
+            pending["generation"]
+        )
 
     def _pending_matches(self, generation, desired_hash):
         return bool(
@@ -526,6 +546,20 @@ class SnapshotStateStore(object):
         })
 
     def prepare_delete(self, port_id, reason=None):
+        pending_snapshot = self.pending_snapshot()
+        if pending_snapshot is not None:
+            raise RuntimeError(
+                "pending snapshot generation %s blocks delete prepare" %
+                pending_snapshot["generation"]
+            )
+        pending_delete = self.pending_delete()
+        if pending_delete is not None:
+            if pending_delete["port_id"] == port_id:
+                return pending_delete
+            raise RuntimeError(
+                "pending delete for port %s cannot be replaced" %
+                pending_delete["port_id"]
+            )
         self._state["pending_delete_port_id"] = port_id
         self._state["pending_delete_reason"] = reason
         self._state["pending_delete_since"] = _now()

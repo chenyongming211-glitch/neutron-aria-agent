@@ -247,8 +247,31 @@ class CompositeStatusReporter(object):
         self.reporters = [reporter for reporter in reporters if reporter is not None]
 
     def report(self, runtime_status):
+        reporters = list(self.reporters)
+        if runtime_status.ready and not runtime_status.degraded:
+            port_reporters = [
+                reporter for reporter in reporters
+                if isinstance(reporter, AriaAclPortStatusReporter)
+            ]
+            heartbeat_reporters = [
+                reporter for reporter in reporters
+                if isinstance(reporter, NeutronStatusReporter)
+            ]
+            other_reporters = [
+                reporter for reporter in reporters
+                if (
+                    not isinstance(reporter, AriaAclPortStatusReporter) and
+                    not isinstance(reporter, NeutronStatusReporter)
+                )
+            ]
+            if port_reporters and heartbeat_reporters:
+                reporters = (
+                    port_reporters +
+                    other_reporters +
+                    heartbeat_reporters
+                )
         results = []
-        for reporter in self.reporters:
+        for reporter in reporters:
             results.append(reporter.report(runtime_status))
         if len(results) == 1:
             return results[0]

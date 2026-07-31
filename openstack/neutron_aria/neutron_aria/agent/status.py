@@ -152,8 +152,55 @@ class AgentRuntimeStatus(object):
             int(self.last_submitted_generation or self.last_generation or 0) -
             int(self.applied_generation or 0),
         )
-        self.degraded_reasons = [{"reason": reason, "count": 1}]
+        self.last_port_statuses = [
+            self._degraded_port_status(status, reason)
+            for status in self.last_port_statuses
+        ]
+        self.domain_counts = self._domain_counts(self.last_port_statuses)
+        self.degraded_reasons = (
+            self._degraded_reasons(self.last_port_statuses) or
+            [{"reason": reason, "count": 1}]
+        )
         self.updated_at = time.time()
+
+    def remove_port_status(self, port_id):
+        removed = sum(
+            1 for status in self.last_port_statuses
+            if status.get("port_id") == port_id
+        )
+        self.last_port_statuses = [
+            status for status in self.last_port_statuses
+            if status.get("port_id") != port_id
+        ]
+        self.last_managed_ports_detail = [
+            port for port in self.last_managed_ports_detail
+            if port.get("port_id") != port_id
+        ]
+        self.last_managed_ports = max(
+            0,
+            int(self.last_managed_ports or 0) - removed,
+        )
+        self.domain_counts = self._domain_counts(self.last_port_statuses)
+        self.degraded_reasons = self._degraded_reasons(
+            self.last_port_statuses
+        )
+        self.updated_at = time.time()
+
+    def _degraded_port_status(self, status, reason):
+        degraded = dict(status or {})
+        degraded["status"] = "degraded"
+        degraded["effective_action"] = "bypass"
+        degraded["reason"] = reason
+        degraded["domains"] = [
+            dict(
+                domain_status,
+                status="degraded",
+                effective_action="bypass",
+                reason=reason,
+            )
+            for domain_status in degraded.get("domains") or []
+        ]
+        return degraded
 
     def update_projection_summary(self, summary):
         payload = dict(summary or {})

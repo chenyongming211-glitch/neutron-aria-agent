@@ -215,6 +215,42 @@ class SnapshotStateStoreTestCase(unittest.TestCase):
         self.assertEqual([], committed.last_projected_port_ids())
         self.assertEqual("p1", committed.to_dict()["last_deleted_port_id"])
 
+    def test_delete_prepare_cannot_replace_different_pending_delete(self):
+        store = SnapshotStateStore(self.state_dir)
+        store.prepare_delete("p1", reason="first-delete")
+        pending_before = copy.deepcopy(store.pending_delete())
+        state_before = copy.deepcopy(store.to_dict())
+
+        with self.assertRaises(RuntimeError):
+            store.prepare_delete("p2", reason="second-delete")
+
+        self.assertEqual(pending_before, store.pending_delete())
+        self.assertEqual(state_before, store.to_dict())
+
+    def test_delete_prepare_cannot_overlap_pending_snapshot(self):
+        store = SnapshotStateStore(self.state_dir)
+        store.prepare_snapshot(self._snapshot("p1"))
+        pending_before = copy.deepcopy(store.pending_snapshot())
+        state_before = copy.deepcopy(store.to_dict())
+
+        with self.assertRaises(RuntimeError):
+            store.prepare_delete("p1", reason="overlap-snapshot")
+
+        self.assertEqual(pending_before, store.pending_snapshot())
+        self.assertEqual(state_before, store.to_dict())
+
+    def test_snapshot_prepare_cannot_overlap_pending_delete(self):
+        store = SnapshotStateStore(self.state_dir)
+        store.prepare_delete("p1", reason="overlap-delete")
+        pending_before = copy.deepcopy(store.pending_delete())
+        state_before = copy.deepcopy(store.to_dict())
+
+        with self.assertRaises(RuntimeError):
+            store.prepare_snapshot(self._snapshot("p1"))
+
+        self.assertEqual(pending_before, store.pending_delete())
+        self.assertEqual(state_before, store.to_dict())
+
     def test_commit_delete_for_different_port_preserves_pending_delete(self):
         store = SnapshotStateStore(self.state_dir)
         prepared = store.prepare_snapshot(self._snapshot("p1"))
