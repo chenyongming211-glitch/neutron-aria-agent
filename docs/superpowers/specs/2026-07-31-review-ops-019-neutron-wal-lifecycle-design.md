@@ -2,7 +2,8 @@
 
 Date: 2026-07-31
 
-Status: design approved in chat; formal written review pending
+Status: design and formal written specification approved on 2026-07-31;
+implementation has not started
 
 Analyzed target:
 `v0.9-neutron-agent@f8baf4aa1557ec9395d34fd1adf5628cd101144d`
