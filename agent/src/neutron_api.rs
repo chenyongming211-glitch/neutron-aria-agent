@@ -710,12 +710,25 @@ impl NeutronApiState {
             }
             return;
         }
-        let current_ports = {
+        let previous_runtime = {
             let runtime = self.runtime.read().await;
-            runtime.ports.clone()
+            runtime.clone()
         };
+        let current_ports = previous_runtime.ports.clone();
         let affected_ports = affected_ports_for_intent(&intent, &current_ports);
         if affected_ports.is_empty() {
+            if intent.kind == "delete" {
+                let next_runtime = finalize_recovered_delete_intent(
+                    self,
+                    &intent,
+                    &previous_runtime,
+                    previous_runtime.clone(),
+                    true,
+                );
+                let mut runtime = self.runtime.write().await;
+                *runtime = next_runtime;
+                return;
+            }
             let mut next_runtime = {
                 let runtime = self.runtime.read().await;
                 runtime.clone()
@@ -733,10 +746,7 @@ impl NeutronApiState {
             return;
         }
 
-        let mut next_runtime = {
-            let runtime = self.runtime.read().await;
-            runtime.clone()
-        };
+        let mut next_runtime = previous_runtime.clone();
         let mut recovery_failed = false;
 
         for port in affected_ports {
@@ -763,6 +773,19 @@ impl NeutronApiState {
                     recovery.domains,
                 ),
             );
+        }
+
+        if intent.kind == "delete" {
+            let next_runtime = finalize_recovered_delete_intent(
+                self,
+                &intent,
+                &previous_runtime,
+                next_runtime,
+                recovery_failed,
+            );
+            let mut runtime = self.runtime.write().await;
+            *runtime = next_runtime;
+            return;
         }
 
         next_runtime.pending_generation = Some(intent.generation);
@@ -3953,15 +3976,151 @@ async fn delete_neutron_port(
     }
 }
 
+fn build_committed_delete_runtime(
+    previous: &NeutronRuntimeState,
+    port_id: &str,
+) -> NeutronRuntimeState {
+    let mut committed = previous.clone();
+    committed.ports.remove(port_id);
+    committed.port_statuses.remove(port_id);
+    committed.pending_generation = None;
+    committed.desired_hash = committed.applied_desired_hash.clone();
+    committed.wal_status = "commit_written".to_string();
+    committed.recovery_cause = None;
+    committed
+}
+
+fn build_blocked_delete_runtime(
+    previous: &NeutronRuntimeState,
+    generation: u64,
+    wal_status: &str,
+) -> NeutronRuntimeState {
+    let mut blocked = previous.clone();
+    blocked.pending_generation = Some(generation);
+    blocked.desired_hash = None;
+    blocked.authority_state = "blocked_recovery_required".to_string();
+    blocked.wal_status = wal_status.to_string();
+    blocked.recovery_cause = None;
+    blocked
+}
+
+async fn finalize_detached_neutron_delete(
+    state: &NeutronApiState,
+    previous: &NeutronRuntimeState,
+    port: &ManagedNeutronPort,
+    generation: u64,
+    precommit: Result<(), String>,
+) -> (StatusCode, NeutronDeleteResponse) {
+    if let Err(error) = precommit {
+        let blocked =
+            build_blocked_delete_runtime(previous, generation, "delete_after_detach_failed");
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = blocked;
+        }
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            NeutronDeleteResponse {
+                port_id: port.port_id.clone(),
+                ifname: Some(port.ifname.clone()),
+                detached: false,
+                status: "error".to_string(),
+                error: Some(error),
+            },
+        );
+    }
+
+    let committed = build_committed_delete_runtime(previous, &port.port_id);
+    if let Err(error) = state.wal.append_delete_commit(committed.to_wal_state()) {
+        let blocked =
+            build_blocked_delete_runtime(previous, generation, "delete_commit_failed");
+        {
+            let mut runtime = state.runtime.write().await;
+            *runtime = blocked;
+        }
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            NeutronDeleteResponse {
+                port_id: port.port_id.clone(),
+                ifname: Some(port.ifname.clone()),
+                detached: false,
+                status: "error".to_string(),
+                error: Some(format!("wal_commit_failed:{}", error)),
+            },
+        );
+    }
+
+    {
+        let mut runtime = state.runtime.write().await;
+        *runtime = committed;
+    }
+    (
+        StatusCode::OK,
+        NeutronDeleteResponse {
+            port_id: port.port_id.clone(),
+            ifname: Some(port.ifname.clone()),
+            detached: true,
+            status: "ok".to_string(),
+            error: None,
+        },
+    )
+}
+
+fn finalize_recovered_delete_intent(
+    state: &NeutronApiState,
+    intent: &PendingNeutronIntent,
+    previous: &NeutronRuntimeState,
+    recovered: NeutronRuntimeState,
+    recovery_failed: bool,
+) -> NeutronRuntimeState {
+    let recovered_statuses = recovered.port_statuses;
+    let blocked = |wal_status: &str| {
+        let mut blocked =
+            build_blocked_delete_runtime(previous, intent.generation, wal_status);
+        for port_id in &intent.port_ids {
+            if let Some(status) = recovered_statuses.get(port_id) {
+                blocked.port_statuses.insert(port_id.clone(), status.clone());
+            }
+        }
+        blocked
+    };
+
+    if recovery_failed {
+        return blocked("intent_recovery_blocked");
+    }
+
+    let mut committed = previous.clone();
+    for port_id in &intent.port_ids {
+        committed.ports.remove(port_id);
+        committed.port_statuses.remove(port_id);
+    }
+    committed.pending_generation = None;
+    committed.desired_hash = committed.applied_desired_hash.clone();
+    committed.wal_status = "commit_written".to_string();
+    committed.recovery_cause = None;
+
+    if let Err(error) = state.wal.append_delete_commit(committed.to_wal_state()) {
+        warn!(
+            generation = intent.generation,
+            port_ids = ?intent.port_ids,
+            error = %error,
+            "failed to commit recovered Neutron delete intent"
+        );
+        return blocked("delete_recovery_commit_failed");
+    }
+    committed
+}
+
 async fn apply_delete_neutron_port(
     state: NeutronApiState,
     port_id: String,
 ) -> (StatusCode, NeutronDeleteResponse) {
     let _guard = state.apply_lock.lock().await;
-    let port = {
+    let previous = {
         let runtime = state.runtime.read().await;
-        runtime.ports.get(&port_id).cloned()
+        runtime.clone()
     };
+    let port = previous.ports.get(&port_id).cloned();
 
     let Some(port) = port else {
         return (
@@ -3976,7 +4135,7 @@ async fn apply_delete_neutron_port(
         );
     };
 
-    let generation = state.runtime.read().await.accepted_generation;
+    let generation = previous.accepted_generation;
     if let Err(e) = state.wal.append_delete_intent(
         port_id.clone(),
         generation,
@@ -4040,57 +4199,14 @@ async fn apply_delete_neutron_port(
 
     match state.registry.detach(&port.ifname).await {
         Ok(()) => {
-            let mut next_runtime = {
-                let runtime = state.runtime.read().await;
-                runtime.clone()
-            };
-            next_runtime.ports.remove(&port_id);
-            next_runtime.port_statuses.remove(&port_id);
-            next_runtime.wal_status = "commit_written".to_string();
-            if let Err(e) =
-                fault_injection::check("neutron.delete.after_detach_before_commit").await
-            {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    NeutronDeleteResponse {
-                        port_id: port.port_id,
-                        ifname: Some(port.ifname),
-                        detached: true,
-                        status: "error".to_string(),
-                        error: Some(e),
-                    },
-                );
-            }
-            if let Err(e) = state.wal.append_delete_commit(next_runtime.to_wal_state()) {
-                let mut runtime = state.runtime.write().await;
-                runtime.pending_generation = Some(generation);
-                runtime.authority_state = "wal_commit_failed".to_string();
-                runtime.wal_status = "commit_failed".to_string();
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    NeutronDeleteResponse {
-                        port_id: port.port_id,
-                        ifname: Some(port.ifname),
-                        detached: true,
-                        status: "error".to_string(),
-                        error: Some(format!("wal_commit_failed:{}", e)),
-                    },
-                );
-            }
-            {
-                let mut runtime = state.runtime.write().await;
-                *runtime = next_runtime;
-            }
-            (
-                StatusCode::OK,
-                NeutronDeleteResponse {
-                    port_id: port.port_id,
-                    ifname: Some(port.ifname),
-                    detached: true,
-                    status: "ok".to_string(),
-                    error: None,
-                },
+            finalize_detached_neutron_delete(
+                &state,
+                &previous,
+                &port,
+                generation,
+                fault_injection::check("neutron.delete.after_detach_before_commit").await,
             )
+            .await
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
