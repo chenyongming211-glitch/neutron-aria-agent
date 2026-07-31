@@ -12,6 +12,9 @@ from neutron_aria.db.aria_acl.errors import AriaAclConflictError
 from neutron_aria.db.aria_acl.errors import AriaAclError
 from neutron_aria.db.aria_acl.errors import AriaAclNotFound
 from neutron_aria.db.aria_acl.errors import AriaAclValidationError
+from neutron_aria.db.aria_acl.query import apply_memory_query
+from neutron_aria.db.aria_acl.query import normalize_query
+from neutron_aria.db.aria_acl.query import project_fields
 from neutron_aria.db.aria_acl.write_invariants import ADDRESS_SET_IMMUTABLE_FIELDS
 from neutron_aria.db.aria_acl.write_invariants import BINDING_IMMUTABLE_FIELDS
 from neutron_aria.db.aria_acl.write_invariants import POLICY_IMMUTABLE_FIELDS
@@ -225,11 +228,25 @@ class InMemoryAriaAclRepository(object):
         self.policies[values["id"]] = values
         return _clone(values)
 
-    def list_policies(self, filters=None):
-        return self._list(self.policies, filters)
+    def list_policies(
+        self,
+        filters=None,
+        fields=None,
+        sorts=None,
+        limit=None,
+        marker=None,
+        page_reverse=False,
+    ):
+        query = normalize_query(
+            "policies", filters, fields, sorts, limit, marker, page_reverse
+        )
+        return apply_memory_query(self.policies.values(), query)
 
-    def get_policy(self, policy_id):
-        return self._get(self.policies, policy_id, "aria_acl_policy")
+    def get_policy(self, policy_id, fields=None):
+        return project_fields(
+            self._get(self.policies, policy_id, "aria_acl_policy"),
+            fields,
+        )
 
     @_locked_write
     def update_policy(self, policy_id, values):
@@ -266,11 +283,25 @@ class InMemoryAriaAclRepository(object):
         self.rules[values["id"]] = values
         return _clone(values)
 
-    def list_rules(self, filters=None):
-        return self._list(self.rules, filters)
+    def list_rules(
+        self,
+        filters=None,
+        fields=None,
+        sorts=None,
+        limit=None,
+        marker=None,
+        page_reverse=False,
+    ):
+        query = normalize_query(
+            "rules", filters, fields, sorts, limit, marker, page_reverse
+        )
+        return apply_memory_query(self.rules.values(), query)
 
-    def get_rule(self, rule_id):
-        return self._get(self.rules, rule_id, "aria_acl_rule")
+    def get_rule(self, rule_id, fields=None):
+        return project_fields(
+            self._get(self.rules, rule_id, "aria_acl_rule"),
+            fields,
+        )
 
     @_locked_write
     def update_rule(self, rule_id, values):
@@ -308,11 +339,29 @@ class InMemoryAriaAclRepository(object):
         self.address_sets[values["id"]] = values
         return _clone(values)
 
-    def list_address_sets(self, filters=None):
-        return self._list(self.address_sets, filters)
+    def list_address_sets(
+        self,
+        filters=None,
+        fields=None,
+        sorts=None,
+        limit=None,
+        marker=None,
+        page_reverse=False,
+    ):
+        query = normalize_query(
+            "address_sets", filters, fields, sorts, limit, marker, page_reverse
+        )
+        return apply_memory_query(self.address_sets.values(), query)
 
-    def get_address_set(self, address_set_id):
-        return self._get(self.address_sets, address_set_id, "aria_acl_address_set")
+    def get_address_set(self, address_set_id, fields=None):
+        return project_fields(
+            self._get(
+                self.address_sets,
+                address_set_id,
+                "aria_acl_address_set",
+            ),
+            fields,
+        )
 
     @_locked_write
     def update_address_set(self, address_set_id, values):
@@ -357,11 +406,25 @@ class InMemoryAriaAclRepository(object):
         self.bindings[values["id"]] = values
         return _clone(values)
 
-    def list_bindings(self, filters=None):
-        return self._list(self.bindings, filters)
+    def list_bindings(
+        self,
+        filters=None,
+        fields=None,
+        sorts=None,
+        limit=None,
+        marker=None,
+        page_reverse=False,
+    ):
+        query = normalize_query(
+            "bindings", filters, fields, sorts, limit, marker, page_reverse
+        )
+        return apply_memory_query(self.bindings.values(), query)
 
-    def get_binding(self, binding_id):
-        return self._get(self.bindings, binding_id, "aria_acl_binding")
+    def get_binding(self, binding_id, fields=None):
+        return project_fields(
+            self._get(self.bindings, binding_id, "aria_acl_binding"),
+            fields,
+        )
 
     @_locked_write
     def update_binding(self, binding_id, values):
@@ -406,8 +469,30 @@ class InMemoryAriaAclRepository(object):
         ]
         return _clone(statuses)
 
-    def list_port_statuses(self, filters=None):
-        return self._list(self.port_statuses, filters)
+    def list_port_statuses(
+        self,
+        filters=None,
+        fields=None,
+        sorts=None,
+        limit=None,
+        marker=None,
+        page_reverse=False,
+        projection=None,
+    ):
+        query = normalize_query(
+            "port_statuses",
+            filters,
+            fields,
+            sorts,
+            limit,
+            marker,
+            page_reverse,
+        )
+        return apply_memory_query(
+            self.port_statuses.values(),
+            query,
+            projection=projection,
+        )
 
     def delete_port_status(self, port_id, host=None):
         if host is not None:

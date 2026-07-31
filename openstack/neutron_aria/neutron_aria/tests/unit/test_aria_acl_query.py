@@ -157,6 +157,57 @@ class AriaAclQueryTestCase(unittest.TestCase):
             "h" * 256,
         )
 
+    def test_in_memory_repository_uses_the_shared_query_contract(self):
+        contract = self._query_contract()
+        from neutron_aria.db.aria_acl.api import InMemoryAriaAclRepository
+
+        repository = InMemoryAriaAclRepository()
+        for policy_id, name, revision in (
+            ("p3", "same", 3),
+            ("p1", "same", 1),
+            ("p2", "", 2),
+        ):
+            repository.create_policy({
+                "id": policy_id,
+                "project_id": "project-1",
+                "name": name,
+                "revision_number": revision,
+            })
+
+        page = repository.list_policies(
+            filters={"enabled": ["true"]},
+            fields=["id", "name"],
+            sorts=[("name", True)],
+            limit=2,
+        )
+        self.assertEqual(
+            [{"id": "p2", "name": ""}, {"id": "p1", "name": "same"}],
+            page,
+        )
+        self.assertEqual(
+            {"id": "p1"},
+            repository.get_policy("p1", fields=["id"]),
+        )
+
+        repository.upsert_port_status({
+            "port_id": "port-1",
+            "host": "ostack2",
+            "status": "ready",
+            "updated_at": "1970-01-01T00:01:00.000000Z",
+        })
+        statuses = repository.list_port_statuses(
+            filters={"stale": ["true"]},
+            fields=["id", "runtime_status"],
+            projection=contract.PortStatusProjection(9999999999.0, 90),
+        )
+        self.assertEqual(
+            [{
+                "id": contract.encode_port_status_id("port-1", "ostack2"),
+                "runtime_status": "stale",
+            }],
+            statuses,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
