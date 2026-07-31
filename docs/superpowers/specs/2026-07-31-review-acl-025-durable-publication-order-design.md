@@ -2,8 +2,8 @@
 
 Date: 2026-07-31
 
-Status: formal written specification approved on 2026-07-31;
-implementation has not started
+Status: fixed in `4dca970`; hosted behavior and Rust/eBPF build evidence
+complete on 2026-07-31
 
 Analyzed target:
 `v0.9-neutron-agent@afb122748850eb23c21afaa18a33a89e21c15cf1`

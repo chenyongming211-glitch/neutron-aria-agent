@@ -283,8 +283,10 @@ in this pass; findings are recorded only.
 - `REVIEW-TXN-024`: background apply failure only flips in-memory
   `authority_state=degraded`; no WAL record and pending generation can wedge
   later submits.
-- `REVIEW-ACL-025`: `replace_owned_acl` switches the active ACL bank before
-  instance WAL compact; compact failure diverges live maps from disk state.
+- `REVIEW-ACL-025`: managed and standalone publishers could switch the active
+  ACL bank before final-state compact. Synchronous compact failures had
+  immediate compensation, but process exit in the switch-before-durable
+  window could leave a new pinned bank with old disk state.
 - `REVIEW-ACL-026`: `replace_owned_acl` CIDR add/delete loops can fail mid-flight
   with no kernel rollback.
 - `REVIEW-OPS-027`: Neutron WAL replay breaks on I/O read errors and skips later
@@ -459,7 +461,7 @@ verification-only, risk-classified, or closed.
 | REVIEW-TXN-022 | P1 | Apply/commit metadata split | fixed | Historical finding: datapath could mutate before a failed commit while RAM/WAL retained the old classification. Commit failure now restores attach where possible, scrubs ACL to bypass, retains the failed pending generation, and enters blocked recovery. | Fixed with blocked-runtime/background-preservation tests and shared pre-commit/commit-failure recovery. |
 | REVIEW-ACL-023 | P2 | Detach/delete ignores ACL purge failure | open | Snapshot detach and port-delete paths log `purge_neutron_acl` errors and continue, still returning `status=ok` / detached success. | Fail the detach/delete result (or mark port `degraded` with residual-ACL reason) when purge fails; add regression coverage for residual `neutron:{port_id}:*` objects. |
 | REVIEW-TXN-024 | P2 | Background apply error non-durable | open | `mark_snapshot_background_error` only updates in-memory `authority_state`/`wal_status` when pending generation/hash still match. It does not append WAL, clear or converge pending, or roll back datapath. Restart loses the degraded classification; pending can wedge later snapshots with `409 snapshot_apply_in_progress`. | Persist failure/blocked state, define recover-pending behavior after background failure, and add tests for restart and subsequent submit. |
-| REVIEW-ACL-025 | P2 | ACL bank switch before instance WAL compact | open | `ControlPlane::replace_owned_acl` calls `set_acl_active_bank` and updates in-memory `state.state` before `wal.compact`. Compact failure returns error after live enforcement already switched. | Reorder to durable compact (or dual-write intent) before activating the new bank, or activate only after compact success with compensating scrub. Add crash/compact-failure tests. |
+| REVIEW-ACL-025 | P2 | ACL bank switch before final-state compact | fixed | Historical finding: managed and standalone publishers staged the complete shadow/general projection, then advanced the fragment epoch and switched the active bank before compacting the matching final state. Synchronous compact errors already attempted compensation, but process exit in that ordering window could leave `active_bank=new` with `durable_state=old`. Both concrete publishers now compact the complete final state before epoch/bank publication. Persistence and epoch failures never restore an unpublished bank; an uncertain switch failure restores the old bank before shadow scrub; strict CT rollback remains after publication. | Fixed by RED `7f6ec55` / `89762da` and production `4dca970`. Builds [30609104910](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30609104910) and [30609535549](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30609535549) proved the standalone and managed contracts RED while independent Rust/eBPF builds passed. GREEN Build [30609828584](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30609828584) passed `fast-contracts`, `rust-behavior`, and `rust-build`. This is a hosted ordering/compensation repair; no privileged field evidence applies. |
 | REVIEW-ACL-026 | P2 | Partial CIDR kernel writes without rollback | open | In `replace_owned_acl`, `add_network`/`delete_network` loops can return mid-flight via `?` before bank switch and before `state.state` update, leaving kernel maps partially mutated. | Stage CIDR mutations into the shadow bank only, or roll back partial network map writes on failure. Add mid-loop fault tests. |
 | REVIEW-OPS-027 | P3 | WAL replay aborts on read I/O error | open | `NeutronWal::replay` breaks the line loop on `BufReader` read errors, skipping any later valid commits. JSON parse errors continue, so behavior is inconsistent. | Prefer continue/skip with `replayed_with_errors` for recoverable line errors, or hard-fail startup with an explicit blocked recovery state; never silently ignore the WAL tail. Add truncated-file and mid-file read-error tests. |
 | REVIEW-ACL-028 | P2 | delete_port commits without response validation | open | `SnapshotSynchronizer.delete_port` does not call `_raise_if_response_failed`, always discards projection state, and `commit_delete`s after any non-timeout return. Runtime port statuses are not refreshed, so deleted ports can remain visible as ready/enforce until the next full resync. | Validate UDS delete outcome before local commit; on soft failure keep projection or mark degraded; clear/update `last_port_statuses`. Add unit coverage for failed delete bodies. |
@@ -815,12 +817,13 @@ verification before the next batch started.
    [`30598232712`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30598232712)
    passed 504 fast contracts and change detection.
 8. **In progress — close transaction and recovery debt:**
-   `REVIEW-OPS-019` is fixed in `c3d8238`; continue with
-   `REVIEW-ACL-025`, `REVIEW-ACL-026`, `REVIEW-ACL-044`,
+   `REVIEW-OPS-019` is fixed in `c3d8238` and `REVIEW-ACL-025` is fixed in
+   `4dca970`; continue with `REVIEW-ACL-026`, `REVIEW-ACL-044`,
    `REVIEW-ACL-023`, `REVIEW-TXN-024`, `REVIEW-TXN-027`, and
    `REVIEW-ACL-045`. The completed WAL item supplies bounded
-   checkpoint/compaction; add durable ACL bank ordering, rollback, and full
-   orphan scrub before lower-severity API work.
+   checkpoint/compaction and ACL-025 supplies durable-before-bank ordering;
+   continue partial-write rollback and full orphan scrub before
+   lower-severity API work.
 9. **Remove apply-loop stalls and pending corruption:** `REVIEW-OPS-037`,
    `REVIEW-ACL-036`, `REVIEW-ACL-037`, `REVIEW-ACL-028`,
    `REVIEW-ACL-008`, and `REVIEW-ACL-033`. Bound OVS subprocesses and make all

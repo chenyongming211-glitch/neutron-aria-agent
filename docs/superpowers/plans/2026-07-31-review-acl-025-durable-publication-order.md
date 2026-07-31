@@ -59,7 +59,7 @@ warning-denied `rust-build`.
 - Produces: behavior-only requirements for the existing private planners; no
   production interface.
 
-- [ ] **Step 1: Add a test-only order assertion in each existing Rust test module**
+- [x] **Step 1: Add a test-only order assertion in each existing Rust test module**
 
 Add this helper independently to the `#[cfg(test)]` module in each file, using
 the concrete step type of that module:
@@ -84,13 +84,13 @@ fn assert_durable_before_bank_publication(
 The helper is test-local. Do not add a production helper solely for this
 assertion.
 
-- [ ] **Step 2: Add managed RED tests**
+- [x] **Step 2: Add managed RED tests**
 
 Add beside the existing managed publication planner tests:
 
 ```rust
 #[test]
-fn managed_acl_publication_persists_before_epoch_and_bank_switch() {
+fn managed_general_delta_persists_before_epoch_and_bank_switch() {
     let decision = managed_acl_publication_decision(ProjectionDrift::Clean, true)
         .expect("a semantic ACL change must publish");
     let steps = managed_acl_publication_steps(&decision, Vec::new());
@@ -111,7 +111,7 @@ fn managed_acl_publication_persists_before_epoch_and_bank_switch() {
 }
 
 #[test]
-fn managed_acl_final_persistence_failure_does_not_restore_unpublished_bank() {
+fn managed_general_delta_persistence_failure_does_not_restore_unpublished_bank() {
     let compensations = managed_acl_publication_compensations(
         &[managed_replacement("src")],
         ManagedAclPublicationFailurePhase::Persist,
@@ -124,7 +124,7 @@ fn managed_acl_final_persistence_failure_does_not_restore_unpublished_bank() {
 }
 
 #[test]
-fn managed_acl_uncertain_bank_switch_failure_restores_old_bank_first() {
+fn managed_general_delta_uncertain_bank_switch_failure_restores_old_bank_first() {
     let compensations = managed_acl_publication_compensations(
         &[managed_replacement("src"), managed_replacement("dst")],
         ManagedAclPublicationFailurePhase::SwitchBank,
@@ -144,7 +144,7 @@ fn managed_acl_uncertain_bank_switch_failure_restores_old_bank_first() {
 These tests use the existing concrete planner and compensation types. They do
 not prescribe function source layout.
 
-- [ ] **Step 3: Add standalone RED tests**
+- [x] **Step 3: Add standalone RED tests**
 
 Add to `control_plane::standalone_acl::tests`:
 
@@ -185,7 +185,7 @@ fn standalone_acl_final_persistence_failure_never_restores_unpublished_bank() {
 Do not change the existing strict-CT rollback test; it must continue requiring
 old-bank restoration.
 
-- [ ] **Step 4: Review the RED diff without running local Cargo**
+- [x] **Step 4: Review the RED diff without running local Cargo**
 
 Run:
 
@@ -203,7 +203,7 @@ Confirm:
 - all five new tests describe public durability/failure behavior;
 - no static checker or inline Rust source copy is added.
 
-- [ ] **Step 5: Commit and push RED**
+- [x] **Step 5: Commit and push RED**
 
 Run:
 
@@ -214,7 +214,7 @@ git commit -m "test: expose ACL publication durability window"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 6: Record exact hosted RED evidence**
+- [x] **Step 6: Record exact hosted RED evidence**
 
 Run:
 
@@ -268,7 +268,7 @@ execution-evidence section before production changes.
   - a concrete post-durable rollback path for persistence, epoch, and switch
     failures.
 
-- [ ] **Step 1: Reorder the managed planner**
+- [x] **Step 1: Reorder the managed planner**
 
 Change only the tail of `managed_acl_publication_steps`:
 
@@ -283,7 +283,7 @@ steps.push(ManagedAclPublicationStep::SwitchBank);
 Keep `InvalidateProjectionHealth` and every `ApplyGeneral` step in their
 existing positions.
 
-- [ ] **Step 2: Correct phase-specific bank compensation**
+- [x] **Step 2: Correct phase-specific bank compensation**
 
 Change `managed_acl_publication_compensations` so only an uncertain bank
 publication failure requests active-bank restoration:
@@ -301,7 +301,7 @@ compensations.extend(mutations.iter().rev().map(|mutation| {
 `Persist` and `AdvanceFragmentEpoch` occur while the old bank remains active,
 so neither phase restores the bank.
 
-- [ ] **Step 3: Add one concrete post-durable rollback helper**
+- [x] **Step 3: Add one concrete post-durable rollback helper**
 
 Add an async helper beside `rollback_owned_acl_prepublication` with this
 signature:
@@ -337,7 +337,7 @@ Its concrete order is:
 Do not implement this as a generic future/closure executor. It is a concrete
 managed ACL rollback using the current map and WAL primitives.
 
-- [ ] **Step 4: Move managed final-state compact before epoch publication**
+- [x] **Step 4: Move managed final-state compact before epoch publication**
 
 In `publish_acl_projection_locked`, retain `durable_final_state` construction
 and released-bitmap quarantine exactly as currently implemented.
@@ -358,7 +358,7 @@ After persistence succeeds:
 Delete the old inline persistence rollback block after its behavior has moved
 to the concrete helper.
 
-- [ ] **Step 5: Preserve managed success receipts and strict CT rollback**
+- [x] **Step 5: Preserve managed success receipts and strict CT rollback**
 
 Do not change:
 
@@ -389,7 +389,7 @@ maps, clean created bitmaps, and restore the old durable state.
 - Produces: standalone order
   `PersistFinalState -> AdvanceFragmentEpoch -> SwitchBank -> StrictCtScrub`.
 
-- [ ] **Step 1: Reorder the standalone step plan**
+- [x] **Step 1: Reorder the standalone step plan**
 
 Change `publication_steps(true)` to:
 
@@ -405,7 +405,7 @@ vec![
 ]
 ```
 
-- [ ] **Step 2: Correct final-persistence rollback steps**
+- [x] **Step 2: Correct final-persistence rollback steps**
 
 Change only the `PersistFinalState` rollback arm:
 
@@ -422,7 +422,7 @@ Keep `StrictCtScrub` with `RestoreActiveBank` first. Keep
 `AdvanceFragmentEpoch` without a bank restore and `SwitchBank` with a bank
 restore.
 
-- [ ] **Step 3: Move final snapshot preparation and compact**
+- [x] **Step 3: Move final snapshot preparation and compact**
 
 In `execute_standalone_publication`, move:
 
@@ -438,7 +438,7 @@ On persistence failure, invoke `rollback_standalone_publication` with
 the existing rollback planner now restores the already-committed old durable
 snapshot for both phases.
 
-- [ ] **Step 4: Preserve strict CT and cleanup order**
+- [x] **Step 4: Preserve strict CT and cleanup order**
 
 After successful epoch/bank publication:
 
@@ -465,7 +465,7 @@ response shapes.
 - Consumes: Tasks 1-3.
 - Produces: one GREEN production commit and exact hosted evidence.
 
-- [ ] **Step 1: Review the full RED-to-GREEN diff without local Cargo**
+- [x] **Step 1: Review the full RED-to-GREEN diff without local Cargo**
 
 Run:
 
@@ -491,7 +491,7 @@ Confirm:
 - no excluded file changed; and
 - no warning suppression or checker expansion was added.
 
-- [ ] **Step 2: Commit and push GREEN**
+- [x] **Step 2: Commit and push GREEN**
 
 Run:
 
@@ -502,7 +502,7 @@ git commit -m "fix: persist ACL state before bank publication"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 3: Verify the exact GREEN Build**
+- [x] **Step 3: Verify the exact GREEN Build**
 
 Run:
 
@@ -548,13 +548,13 @@ excluded area is a design deviation and must be reported before editing.
   results.
 - Produces: authoritative `REVIEW-ACL-025=fixed` evidence.
 
-- [ ] **Step 1: Correct the historical finding wording in the current row**
+- [x] **Step 1: Correct the historical finding wording in the current row**
 
 Record that synchronous compact failures already had immediate compensation,
 while the remaining real defect was the process-crash window shared by managed
 and standalone switch-before-durable ordering.
 
-- [ ] **Step 2: Record exact RED and GREEN evidence**
+- [x] **Step 2: Record exact RED and GREEN evidence**
 
 Add:
 
@@ -565,12 +565,12 @@ Add:
 - confirmation that no privileged field evidence applies to this ordering
   repair.
 
-- [ ] **Step 3: Mark only REVIEW-ACL-025 fixed**
+- [x] **Step 3: Mark only REVIEW-ACL-025 fixed**
 
 Do not change the status of `REVIEW-ACL-026`, `REVIEW-ACL-044`, or any deferred
 field-evidence item.
 
-- [ ] **Step 4: Commit and push closure**
+- [x] **Step 4: Commit and push closure**
 
 Run:
 
@@ -620,5 +620,33 @@ Design commit:
   passed `fast-contracts` and change detection; Rust jobs correctly skipped for
   the documentation-only change.
 
-RED and GREEN evidence will be appended only after the corresponding hosted
-jobs reach terminal states.
+RED evidence:
+
+- `7f6ec55 test: expose ACL publication durability window`
+- Build
+  [`30609104910`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30609104910):
+  `rust-build` job `91087741325` passed, while `rust-behavior` job
+  `91087741336` failed on
+  `standalone_acl_publication_persists_before_epoch_and_bank_switch` with
+  `final state must be durable before fragment epoch advance`.
+- `89762da test: route managed ACL durability RED through CI`
+- Build
+  [`30609535549`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30609535549):
+  `rust-build` job `91089058607` passed, while `rust-behavior` job
+  `91089058584` failed four managed durability/compensation contracts under
+  the permanent `managed_general_delta_` selector. This second RED proves the
+  managed tests were executed rather than merely compiled.
+
+GREEN evidence:
+
+- `4dca970 fix: persist ACL state before bank publication`
+- Build
+  [`30609828584`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30609828584)
+  passed:
+  - `fast-contracts` job `91089938179`;
+  - `rust-behavior` job `91089985579`; and
+  - `rust-build` job `91089985575`, including Rust/eBPF builds and static
+    binary verification.
+- Production scope remained two existing Rust files. No checker, generic
+  transaction framework, new WAL format, API change, or privileged field
+  claim was added.
