@@ -2,7 +2,8 @@
 
 Date: 2026-07-31
 
-Status: approved design direction; formal written specification awaiting review
+Status: formal written specification approved on 2026-07-31;
+implementation has not started
 
 Analyzed target:
 `v0.9-neutron-agent@afb122748850eb23c21afaa18a33a89e21c15cf1`
