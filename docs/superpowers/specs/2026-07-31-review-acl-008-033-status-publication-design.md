@@ -2,8 +2,8 @@
 
 ## Status
 
-Design confirmed against current source; RED tests and production implementation
-pending.
+Fixed in production and verified by exact-head hosted CI. This is a fail-safe
+ordering contract, not a claim of distributed RabbitMQ/SQL atomicity.
 
 ## Scope
 
@@ -102,6 +102,22 @@ Python behavior tests must prove:
 8. successful reports retain both result payloads and existing factory
    behavior.
 
+## Delivery Evidence
+
+- RED commit `c847761` and Build
+  [`30615481157`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30615481157)
+  proved stale cached ready rows and unsafe reporter ordering as part of the 11
+  intended Python failures.
+- GREEN commit `2bd1726` projects all cached rows conservatively during global
+  degradation and gives ready publication a per-port-first/heartbeat-last
+  commit point while degraded publication closes heartbeat readiness first.
+- Build
+  [`30615746741`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30615746741)
+  passed 176 targeted tests and the complete 515-test fast-contract path;
+  combined exact-head Build
+  [`30616520693`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30616520693)
+  remained GREEN.
+
 ## Acceptance
 
 - targeted RED tests fail on current ordering/transformation;
@@ -109,4 +125,3 @@ Python behavior tests must prove:
 - all Python fast contracts pass;
 - `REVIEW-ACL-008` and `REVIEW-ACL-033` are marked fixed only after exact-head
   hosted CI.
-

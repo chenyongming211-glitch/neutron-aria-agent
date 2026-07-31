@@ -2,8 +2,8 @@
 
 ## Status
 
-Design confirmed against current source; RED tests and production implementation
-pending.
+Fixed in production and verified by exact-head hosted CI. No privileged field
+evidence applies to this unprivileged admission/process-boundary repair.
 
 ## Scope
 
@@ -102,6 +102,24 @@ Unprivileged Rust behavior tests must prove:
 Tests may use a narrow inventory-command seam. They must not add a Python
 source-shape checker or a generic transaction framework.
 
+## Delivery Evidence
+
+- RED commit `b127807` added the bounded-child and admission-identity
+  behaviors. Build
+  [`30615820795`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30615820795)
+  failed in `rust-behavior` only on the absent `run_bounded_process` and
+  `SnapshotAdmissionIdentity` boundaries; the unrelated static build was
+  cancelled after RED was established.
+- GREEN commit `f6e0f9b` moved both OVS commands to one bounded Tokio deadline
+  outside the apply mutex, added final identity revalidation with bounded
+  retry, and preserved the existing `inventory_unavailable` recovery path.
+- Commit `4b02277` made both new tests part of the maintained
+  `neutron_snapshot` hosted filter. Exact-head Build
+  [`30616520693`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30616520693)
+  ran both named behaviors successfully and passed `fast-contracts`,
+  `rust-behavior`, and warning-denied Rust/eBPF/static builds.
+- No local Cargo command was run.
+
 ## Acceptance
 
 - RED fails only on the absent bounded async discovery/revalidation boundary;
@@ -109,4 +127,3 @@ source-shape checker or a generic transaction framework.
 - exact-head `rust-behavior` and warning-denied Rust/eBPF builds pass in CI;
 - no local Cargo command is run;
 - `REVIEW-OPS-037` is marked fixed only after exact-head hosted GREEN evidence.
-

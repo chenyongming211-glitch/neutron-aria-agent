@@ -2,8 +2,8 @@
 
 ## Status
 
-Design confirmed against current source; RED tests and production implementation
-pending.
+Fixed in production and verified by exact-head hosted CI. No privileged field
+evidence applies to this Python state-machine repair.
 
 ## Scope
 
@@ -115,6 +115,23 @@ Python behavior tests must prove:
 6. delete failure retains pending/projection and marks runtime degraded;
 7. valid direct and timeout-recovered deletes commit;
 8. valid delete removes the cached port status and recomputes summaries.
+
+## Delivery Evidence
+
+- RED commit `c847761` added the pending-conflict, scoped-failure, strict-delete,
+  cached-status, degradation, and reporter-ordering regressions. Build
+  [`30615481157`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30615481157)
+  failed with exactly 11 intended test failures and no unittest errors.
+- GREEN commit `2bd1726` added store-level pending conflict protection,
+  retained the existing remote recovery/barrier ordering, degraded unresolved
+  scoped/delete transactions, strictly validated delete outcomes, and removed
+  committed deleted ports from cached status.
+- Build
+  [`30615746741`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30615746741)
+  passed the 176 targeted Python tests and the complete 515-test fast-contract
+  path. Exact-head Build
+  [`30616520693`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30616520693)
+  retained GREEN after the Rust half of the batch landed.
 
 ## Acceptance
 
