@@ -1,7 +1,5 @@
 from __future__ import absolute_import
 
-import calendar
-import datetime
 import logging
 import os
 import time
@@ -10,6 +8,8 @@ from neutron_aria.agent.effective_acl import EffectiveAclIndex
 from neutron_aria.acl_contract import port_contract_eligibility
 from neutron_aria.db.aria_acl.api import InMemoryAriaAclRepository
 from neutron_aria.db.aria_acl.api import NeutronDbAriaAclRepository
+from neutron_aria.db.aria_acl.query import PortStatusProjection
+from neutron_aria.db.aria_acl.query import project_fields
 from neutron_aria.services.aria_acl.exceptions import ErrorMappingRepositoryProxy
 
 
@@ -250,15 +250,23 @@ class AriaAclPlugin(object):
         ]
 
     def get_aria_acl_port_status(self, context, port_id, host=None, fields=None):
-        status = self._repo(context).get_port_status(port_id, host=host)
-        if host is None and isinstance(status, list):
-            return self._project_port_status(status[0]) if status else None
-        return self._project_port_status(status)
+        repository = self._repo(context)
+        if host is not None:
+            status = repository.get_port_status(port_id, host=host)
+        else:
+            status = repository.get_port_status_resource(port_id)
+        return project_fields(
+            self._port_status_projection().project(status),
+            fields,
+        )
 
     def delete_aria_acl_port_status(self, context, port_id, host=None):
-        status = self.get_aria_acl_port_status(context, port_id, host=host)
-        self._repo(context).delete_port_status(port_id, host=host)
-        return status or {}
+        repository = self._repo(context)
+        if host is not None:
+            repository.delete_port_status(port_id, host=host)
+        else:
+            repository.delete_port_status_resource(port_id)
+        return {}
 
     def get_aria_acl_effective_payload(self, context):
         return self._repo(context).to_effective_payload()
@@ -332,26 +340,13 @@ class AriaAclPlugin(object):
     def _project_port_status(self, status):
         if status is None:
             return None
-        result = dict(status)
-        result.setdefault("last_reported_at", result.get("updated_at"))
-        stale = self._port_status_is_stale(result)
-        result["stale"] = stale
-        result["runtime_status"] = "stale" if stale else (
-            result.get("status") or "unknown"
-        )
-        return result
+        return self._port_status_projection().project(status)
 
-    def _port_status_is_stale(self, status):
-        stale_seconds = self._port_status_stale_seconds()
-        if stale_seconds < 0:
-            return False
-        updated_at = status.get("updated_at")
-        if not updated_at:
-            return True
-        updated_ts = _timestamp_seconds(updated_at)
-        if updated_ts is None:
-            return True
-        return (float(self.now()) - updated_ts) > stale_seconds
+    def _port_status_projection(self):
+        return PortStatusProjection(
+            now_epoch=float(self.now()),
+            stale_seconds=self._port_status_stale_seconds(),
+        )
 
     def _port_status_stale_seconds(self):
         if self.port_status_stale_seconds is not None:
@@ -423,22 +418,3 @@ def _env_int(name, default):
         return int(value)
     except (TypeError, ValueError):
         return int(default)
-
-
-def _timestamp_seconds(value):
-    if isinstance(value, datetime.datetime):
-        dt = value
-    else:
-        if value is None:
-            return None
-        value = str(value).rstrip("Z")
-        dt = None
-        for pattern in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
-            try:
-                dt = datetime.datetime.strptime(value, pattern)
-                break
-            except ValueError:
-                pass
-        if dt is None:
-            return None
-    return calendar.timegm(dt.timetuple()) + (dt.microsecond / 1000000.0)

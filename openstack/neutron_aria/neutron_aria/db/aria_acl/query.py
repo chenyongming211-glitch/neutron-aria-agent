@@ -8,6 +8,7 @@ import functools
 import re
 
 from neutron_aria.db.aria_acl.errors import AriaAclNotFound
+from neutron_aria.db.aria_acl.errors import AriaAclConflictError
 from neutron_aria.db.aria_acl.errors import AriaAclValidationError
 
 
@@ -250,6 +251,20 @@ def decode_port_status_id(value):
     if encode_port_status_id(port_id, host) != value:
         raise AriaAclValidationError("noncanonical aria_acl_port_status id")
     return port_id, host
+
+
+def require_one_legacy_port_status(port_id, statuses):
+    if not statuses:
+        raise AriaAclNotFound("aria_acl_port_status %s not found" % port_id)
+    if len(statuses) > 1:
+        hosts = sorted(status.get("host") or "" for status in statuses)
+        raise AriaAclConflictError(
+            "ambiguous_port_status port_id=%s hosts=%s" % (
+                port_id,
+                ",".join(hosts),
+            )
+        )
+    return statuses[0]
 
 
 def apply_memory_query(rows, query, projection=None):

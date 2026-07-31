@@ -386,6 +386,47 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertIsNotNone(status)
         self.assertEqual("ostack3", status["host"])
 
+    def test_derived_status_id_delete_removes_only_exact_host(self):
+        from neutron_aria.db.aria_acl.query import encode_port_status_id
+
+        plugin = AriaAclPlugin(now=lambda: 200.0)
+        for host in ("ostack2", "ostack3"):
+            plugin.report_aria_acl_port_status(None, {
+                "port_id": "port-1",
+                "host": host,
+                "status": "ready",
+            })
+
+        plugin.delete_aria_acl_port_status(
+            None,
+            encode_port_status_id("port-1", "ostack2"),
+        )
+
+        statuses = plugin.get_aria_acl_port_statuses(
+            None,
+            filters={"port_id": ["port-1"]},
+        )
+        self.assertEqual(["ostack3"], [status["host"] for status in statuses])
+
+    def test_legacy_status_delete_removes_all_hosts(self):
+        plugin = AriaAclPlugin(now=lambda: 200.0)
+        for host in ("ostack2", "ostack3"):
+            plugin.report_aria_acl_port_status(None, {
+                "port_id": "port-1",
+                "host": host,
+                "status": "ready",
+            })
+
+        plugin.delete_aria_acl_port_status(None, "port-1")
+
+        self.assertEqual(
+            [],
+            plugin.get_aria_acl_port_statuses(
+                None,
+                filters={"port_id": ["port-1"]},
+            ),
+        )
+
     def test_resource_helper_does_not_create_ports_resource(self):
         original_helper = aria_acl.resource_helper
         fake_helper = FakeResourceHelper()
@@ -1153,6 +1194,37 @@ class AriaAclPluginTestCase(unittest.TestCase):
                 self.assertNotIn(marker, status_ids)
                 status_ids.append(marker)
             self.assertEqual(3, len(status_ids))
+            repository.close()
+        finally:
+            os.unlink(path)
+
+    def test_sqlite_status_resource_identity_is_exact(self):
+        from neutron_aria.db.aria_acl.query import encode_port_status_id
+
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            repository = SqliteAriaAclRepository(path)
+            plugin = AriaAclPlugin(repository=repository, now=lambda: 200.0)
+            for host in ("ostack2", "ostack3"):
+                plugin.report_aria_acl_port_status(None, {
+                    "port_id": "port-1",
+                    "host": host,
+                    "status": "ready",
+                })
+
+            with self.assertRaises(AriaAclConflict):
+                plugin.get_aria_acl_port_status(None, "port-1")
+            exact_id = encode_port_status_id("port-1", "ostack3")
+            self.assertEqual(
+                "ostack3",
+                plugin.get_aria_acl_port_status(None, exact_id)["host"],
+            )
+            plugin.delete_aria_acl_port_status(None, exact_id)
+            self.assertEqual(
+                "ostack2",
+                plugin.get_aria_acl_port_status(None, "port-1")["host"],
+            )
             repository.close()
         finally:
             os.unlink(path)
