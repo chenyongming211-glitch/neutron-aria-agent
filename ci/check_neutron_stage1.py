@@ -551,6 +551,8 @@ def run_db_crud_adminrc_test():
         return
     print("==> checking DB CRUD adminrc routing")
     run([bash, os.path.join("ci", "test_neutron_acl_db_crud_adminrc.sh")])
+    print("==> checking neutronclient CLI adminrc routing")
+    run([bash, os.path.join("ci", "test_neutronclient_aria_cli_adminrc.sh")])
 
 
 def run_fast_contracts():
