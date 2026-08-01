@@ -1,6 +1,8 @@
 # REVIEW-CI-001 Trusted Automated Gates Design
 
-**Status:** approved for implementation by the request to continue `REVIEW-CI-001`
+**Status:** implemented in `5d7fcfc`; exact implementation-head Build
+[30704906357](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30704906357)
+passed all required hosted lanes.  No target runtime evidence is claimed.
 
 ## Problem
 

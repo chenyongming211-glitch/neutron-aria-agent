@@ -8,6 +8,14 @@
 
 **Tech Stack:** Python 3 `unittest`, Rust unit tests, Cargo test harness, GitHub Actions YAML, Markdown evidence records.
 
+**Status:** Tasks 1-5 complete. RED `e6c1fe8` / Build
+[30704754808](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30704754808)
+failed the required fast-contract wiring and was cancelled after the RED evidence
+was captured. GREEN `5d7fcfc` / Build
+[30704906357](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30704906357)
+passed fast contracts, database contracts, clean-container install, Rust
+behavior, and warning-denied Rust/eBPF builds.
+
 ## Global Constraints
 
 - Work only on `v0.9-neutron-agent`; do not create a branch or worktree.
@@ -30,13 +38,13 @@
 - Produces: failing contracts for required Python inventory, evidence labels,
   domain parity, Cargo zero-test rejection, and required workflow wiring.
 
-- [ ] Add Python tests that require the new public CI helpers and scoped output.
-- [ ] Add a workflow contract requiring the focused CI-001 test module.
-- [ ] Add a Rust test named with the existing `domain_authority` filter that
+- [x] Add Python tests that require the new public CI helpers and scoped output.
+- [x] Add a workflow contract requiring the focused CI-001 test module.
+- [x] Add a Rust test named with the existing `domain_authority` filter that
   compares runtime implemented domains with advertised domains.
-- [ ] Run only the Python RED tests locally and verify failures are caused by
+- [x] Run only the Python RED tests locally and verify failures are caused by
   the missing interfaces and old labels.
-- [ ] Commit and push the RED tests; record the failing Build.
+- [x] Commit and push the RED tests; record the failing Build.
 
 ### Task 2: Make behavior discovery authoritative
 
@@ -54,14 +62,14 @@
   `validate_python_managed_domain_contract(...)`, and
   `implemented_neutron_domains()`.
 
-- [ ] Implement loader-backed Python test-ID discovery and the focused required
+- [x] Implement loader-backed Python test-ID discovery and the focused required
   behavior inventory.
-- [ ] Invoke the inventory before the existing one-time full Python discovery.
-- [ ] Validate `requested ⊆ Python supported ⊆ advertised` from imported
+- [x] Invoke the inventory before the existing one-time full Python discovery.
+- [x] Validate `requested ⊆ Python supported ⊆ advertised` from imported
   values rather than source strings.
-- [ ] Make runtime unsupported-domain admission consume one explicit Rust
+- [x] Make runtime unsupported-domain admission consume one explicit Rust
   implementation inventory and satisfy the advertised/runtime equality test.
-- [ ] Run focused Python tests; leave Rust verification to hosted CI.
+- [x] Run focused Python tests; leave Rust verification to hosted CI.
 
 ### Task 3: Remove false readiness and duplicate execution
 
@@ -79,13 +87,13 @@
 - Produces: explicit `evidence_class`, `head_bound`, and runtime-evaluation
   output fields.
 
-- [ ] Stop Stage 2 from rerunning its six Python modules.
-- [ ] Remove active source/test-name guards already covered by required behavior
+- [x] Stop Stage 2 from rerunning its six Python modules.
+- [x] Remove active source/test-name guards already covered by required behavior
   tests; retain genuine artifact contracts.
-- [ ] Label structural results `static_artifact`.
-- [ ] Label committed evidence `historical_field_evidence` and
+- [x] Label structural results `static_artifact`.
+- [x] Label committed evidence `historical_field_evidence` and
   `head_bound=false`.
-- [ ] Run focused Python tests and the individual non-privileged checkers.
+- [x] Run focused Python tests and the individual non-privileged checkers.
 
 ### Task 4: Use Cargo execution instead of a Rust source parser
 
@@ -98,10 +106,10 @@
 - Produces: `run_rust_behavior_command(command)` that rejects a successful
   command when its test-harness execution count is zero.
 
-- [ ] Remove regex-based Rust source test discovery.
-- [ ] Execute each configured command once, preserve its output, propagate
+- [x] Remove regex-based Rust source test discovery.
+- [x] Execute each configured command once, preserve its output, propagate
   non-zero exits, and reject an aggregate zero-test result.
-- [ ] Verify the runner with mocked Cargo outputs in Python; do not run Cargo
+- [x] Verify the runner with mocked Cargo outputs in Python; do not run Cargo
   locally.
 
 ### Task 5: Wire required CI and close documentation
@@ -116,13 +124,13 @@
 - Consumes: all GREEN contracts from Tasks 2-4.
 - Produces: an every-Build trusted-gate contract and exact-head CI evidence.
 
-- [ ] Run `ci.test_ci001_trusted_gates` in `fast-contracts` without Cargo.
-- [ ] Rename deep-audit steps so static and historical evidence are not called
+- [x] Run `ci.test_ci001_trusted_gates` in `fast-contracts` without Cargo.
+- [x] Rename deep-audit steps so static and historical evidence are not called
   runtime readiness.
-- [ ] Run all non-Cargo focused checks locally.
-- [ ] Commit and push production GREEN.
-- [ ] Wait for `fast-contracts`, `rust-behavior`, and `rust-build` to pass.
-- [ ] Update the REVIEW Register and plan with exact commit and Build evidence,
+- [x] Run all non-Cargo focused checks locally.
+- [x] Commit and push production GREEN.
+- [x] Wait for `fast-contracts`, `rust-behavior`, and `rust-build` to pass.
+- [x] Update the REVIEW Register and plan with exact commit and Build evidence,
   then push the documentation closure.
 
 ## Self-review

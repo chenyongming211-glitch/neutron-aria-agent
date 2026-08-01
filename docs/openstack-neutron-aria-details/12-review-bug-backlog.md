@@ -521,7 +521,7 @@ verification-only, risk-classified, or closed.
 | REVIEW-DOC-021 | P2 | Capabilities advertise unimplemented domains | fixed | `NEUTRON_SUPPORTED_DOMAINS` / `neutron-uds-contract.json` / capabilities response list qos/mirror/config/ct/… while reconcile only implements `attach`+`acl`. Stage-1 CI even requires qos/mirror in supported_domains. | Split advertised vs implemented domains; shrink supported set or mark planned and reject managed_domains that are unimplemented. |
 | REVIEW-OPS-035 | P2 | Transaction smoke can pass with zero ports | fixed | The transaction-state smoke now defaults `MIN_MANAGED_PORTS=1`, rejects explicit zero or non-numeric minimums, and requires a concrete `port_id` both before pending-delete recovery and before migration-source cleanup. None of those missing-coverage states can reach the final `passed` result. | RED commit `1c239de` and Build [30698108346](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30698108346) proved that zero ports and both missing-`port_id` cut points still reported success; the run was cancelled after fast-contracts captured the expected failure. GREEN commit `f19e03f` covers those cases plus an explicit zero override through the public smoke entrypoint. Exact-head Build [30698215982](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30698215982) passed fast/database contracts, selected Rust behaviors, and warning-denied eBPF/userspace/agent builds. This closes the false-success implementation defect; it does not claim a new privileged transaction field run. |
 | REVIEW-OPS-036 | P3 | XDP pinned-path health can false-pass | open | `FirewallInstance::xdp_link_health` currently treats existence of `xdp_link` as ready without proving that the pinned link is still attached to the expected interface/program. A detached-but-still-pinned XDP link can therefore be claimed or reported as `xdp_ready=true`. This does not affect ACL/CT because those paths are TC-only, and no DDoS enforcement is advertised yet. | Before the XDP DDoS domain becomes operational, replace the path-only signal with exact live link/program/interface identity or report unknown/not-ready when exact validation is unavailable. Add detached-but-pinned runtime coverage. Keep this independent from `REVIEW-ACL-055`. |
-| REVIEW-CI-001 | P2 | Stage gates are marker/substring heavy | open | `check_stage3_readiness.py` checks file/marker presence; stage-2 production ACL smoke check greps shell strings; several high-value unit modules are omitted from stage-2 test lists. | Run real smoke with non-zero ports where possible; include omitted unit modules; add implemented-domain ⊆ allowed-domain contract check. |
+| REVIEW-CI-001 | P2 | Stage gates are marker/substring heavy | fixed | The required fast lane now inventories critical behavior through Python `unittest` discovery and still executes the full suite exactly once. Rust filters are accepted only when Cargo reports at least one executed test; the source-regex Rust test parser is removed. Runtime-implemented and advertised domains are equal by Rust behavior, while Python enforces `requested ⊆ Python-supported ⊆ advertised`. Stage 2 no longer reruns six modules or activates private source/test-name guards. Static artifacts report `static_artifact`; committed field summaries report `historical_field_evidence` with `head_bound=false`. | RED `e6c1fe8` / Build [30704754808](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30704754808) failed the missing required wiring and was cancelled after RED capture. GREEN `5d7fcfc` / exact implementation-head Build [30704906357](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30704906357) passed fast/database/clean-install contracts, Rust behavior, and warning-denied Rust/eBPF builds. No privileged or target runtime execution is claimed. Full-workspace quality expansion remains `DEBT-CI-001`. |
 
 ## Verification At Time Of Recording
 
@@ -955,6 +955,19 @@ verification before the next batch started.
     [30703793706](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30703793706)
     do not replace the target smoke; its Neutron 9 execution remains
     `deferred/pending`.
+    `REVIEW-CI-001` is fixed by `5d7fcfc`: required Python behavior is tied to
+    real `unittest` discovery without a second selected suite; every Cargo
+    filter must execute a non-zero test count; the domain contract is checked
+    at Rust runtime/advertisement and Python request boundaries; and static or
+    committed historical evidence can no longer label itself current runtime
+    readiness. RED Build
+    [30704754808](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30704754808)
+    captured the old false-green boundary, while exact implementation-head
+    Build
+    [30704906357](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30704906357)
+    passed every required hosted lane. `RISK-SEC-002` and `RISK-READY-001`
+    remain independent high-priority production-hardening batches; they are not
+    part of this CI closure.
     Also close
     `REVIEW-ACL-055` only after the three privileged summaries pass; retain
     `REVIEW-OPS-036` for XDP hook identity before advertising DDoS. Then handle
