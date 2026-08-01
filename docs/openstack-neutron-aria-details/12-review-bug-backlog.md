@@ -921,6 +921,14 @@ verification before the next batch started.
     [30701143632](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30701143632)
     passed the full hosted build and proved the release job stays skipped on a
     normal branch push. No synthetic tag or release was created.
+    `REVIEW-OPS-027` is fixed by `fa1e326`: replay now separates recoverable
+    malformed record contents from a genuine reader failure, continues to later
+    valid commits with `replayed_with_errors`, and retains the fail-closed unread
+    tail boundary. RED Build
+    [30701699907](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30701699907)
+    exposed the premature stop; exact-head implementation Build
+    [30701829923](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30701829923)
+    passed all selected WAL behaviors and warning-denied builds.
     Also close
     `REVIEW-ACL-055` only after the three privileged summaries pass; retain
     `REVIEW-OPS-036` for XDP hook identity before advertising DDoS. Then handle
