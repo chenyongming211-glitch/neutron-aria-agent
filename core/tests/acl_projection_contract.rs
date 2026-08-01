@@ -153,7 +153,7 @@ fn acl_projection_general_overlap_rejects_exact_and_nested_cross_group_membershi
 
     let mut nested = committed.clone();
     insert_group(&mut nested, "broad", 10, &["2001:db8::1/48"]);
-    insert_group(&mut nested, "narrow", 20, &["2001:db8:1::7/64"]);
+    insert_group(&mut nested, "narrow", 20, &["2001:db8:0:1::7/64"]);
     assert_eq!(
         validate_general_group_overlap_transition(
             &committed,
@@ -161,7 +161,7 @@ fn acl_projection_general_overlap_rejects_exact_and_nested_cross_group_membershi
             GeneralGroupScope::Standalone,
         )
         .expect_err("nested IPv6 general membership must be rejected"),
-        "general_group_overlap:broad:2001:db8::/48:narrow:2001:db8:1::/64"
+        "general_group_overlap:broad:2001:db8::/48:narrow:2001:db8:0:1::/64"
     );
 }
 
