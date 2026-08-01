@@ -59,6 +59,7 @@ backup_current_state() {
     local conf_backup="${STATE_DIR}/neutron.conf.${ts}.bak"
     local package_backup="${STATE_DIR}/neutron_aria.${ts}.tgz"
     local policy_backup="${STATE_DIR}/policy.json.${ts}.bak"
+    local policy_marker="${STATE_DIR}/policy.json.${ts}.none"
 
     cp -a "${NEUTRON_CONF}" "${conf_backup}"
     ln -sfn "${conf_backup}" "${STATE_DIR}/neutron.conf.latest.bak"
@@ -67,7 +68,9 @@ backup_current_state() {
         docker cp "${CONTAINER}:${POLICY_FILE}" "${policy_backup}"
         ln -sfn "${policy_backup}" "${STATE_DIR}/policy.json.latest.bak"
     else
-        rm -f "${STATE_DIR}/policy.json.latest.bak"
+        : > "${policy_marker}"
+        ln -sfn "${policy_marker}" "${STATE_DIR}/policy.json.latest.bak"
+        log "No existing policy file found; rollback will remove the installation"
     fi
 
     if docker exec -u 0 "${CONTAINER}" test -d "${SITE_PACKAGES}/neutron_aria"; then
@@ -254,11 +257,25 @@ rollback() {
         docker exec -u 0 "${CONTAINER}" rm -rf "${SITE_PACKAGES}/neutron_aria"
     fi
 
-    if [ -e "${STATE_DIR}/policy.json.latest.bak" ]; then
-        log "Restoring ${POLICY_FILE}"
-        docker cp "$(readlink -f "${STATE_DIR}/policy.json.latest.bak")" \
-            "${CONTAINER}:${POLICY_FILE}"
-        docker exec -u 0 "${CONTAINER}" chmod 0640 "${POLICY_FILE}" || true
+    local policy_backup="${STATE_DIR}/policy.json.latest.bak"
+    if [ -e "${policy_backup}" ]; then
+        local policy_target
+        policy_target="$(readlink -f "${policy_backup}")"
+        case "${policy_target}" in
+            *.bak)
+                log "Restoring ${POLICY_FILE}"
+                docker cp "${policy_target}" "${CONTAINER}:${POLICY_FILE}"
+                docker exec -u 0 "${CONTAINER}" chmod 0640 "${POLICY_FILE}" || true
+                ;;
+            *.none)
+                log "Removing smoke-installed ${POLICY_FILE}"
+                docker exec -u 0 "${CONTAINER}" rm -f "${POLICY_FILE}"
+                ;;
+            *)
+                echo "Unknown policy rollback marker: ${policy_target}" >&2
+                exit 1
+                ;;
+        esac
     fi
 
     restart_neutron_server
