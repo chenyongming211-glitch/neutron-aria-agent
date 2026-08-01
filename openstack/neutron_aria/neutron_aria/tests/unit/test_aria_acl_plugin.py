@@ -7,6 +7,7 @@ import unittest
 
 from neutron_aria.db.aria_acl.api import AriaAclNotFound
 from neutron_aria.db.aria_acl.api import AriaAclValidationError
+from neutron_aria.db.aria_acl.api import InMemoryAriaAclRepository
 from neutron_aria.db.aria_acl.api import SqliteAriaAclRepository
 from neutron_aria.db.migration import aria_acl_initial
 from neutron_aria.extensions import aria_acl
@@ -16,6 +17,7 @@ from neutron_aria.services.aria_acl.exceptions import AriaAclConflict
 from neutron_aria.services.aria_acl.exceptions import map_repository_error
 from neutron_aria.services.aria_acl.plugin import AriaAclAgentNotifier
 from neutron_aria.services.aria_acl.plugin import AriaAclPlugin
+from neutron_aria.services.aria_acl.port_projection import install_legacy_port_projection
 
 
 class FakeSqlAlchemy(object):
@@ -146,6 +148,60 @@ class RecordingListRepository(object):
 
     def list_port_statuses(self, **kwargs):
         return self._record("port_statuses", kwargs)
+
+
+class RecordingPortProjectionRepository(InMemoryAriaAclRepository):
+    def __init__(self):
+        super(RecordingPortProjectionRepository, self).__init__()
+        self.effective_payload_calls = 0
+        self.port_status_list_calls = []
+
+    def to_effective_payload(self):
+        self.effective_payload_calls += 1
+        return super(RecordingPortProjectionRepository, self).to_effective_payload()
+
+    def list_port_statuses(self, **kwargs):
+        self.port_status_list_calls.append(kwargs)
+        return super(RecordingPortProjectionRepository, self).list_port_statuses(
+            **kwargs
+        )
+
+
+class FailingPortProjectionRepository(InMemoryAriaAclRepository):
+    def list_port_statuses(self, **kwargs):
+        raise RuntimeError("database offline")
+
+
+class FakeCorePlugin(object):
+    def __init__(self, ports):
+        self.ports = dict((port["id"], dict(port)) for port in ports)
+        self.get_port_calls = []
+        self.get_ports_calls = []
+
+    def get_port(self, context, port_id, fields=None):
+        self.get_port_calls.append((context, port_id, fields))
+        return dict(self.ports[port_id])
+
+    def get_ports(
+        self,
+        context,
+        filters=None,
+        fields=None,
+        sorts=None,
+        limit=None,
+        marker=None,
+        page_reverse=False,
+    ):
+        self.get_ports_calls.append({
+            "context": context,
+            "filters": filters,
+            "fields": fields,
+            "sorts": sorts,
+            "limit": limit,
+            "marker": marker,
+            "page_reverse": page_reverse,
+        })
+        return [dict(port) for port in self.ports.values()]
 
 
 class AriaAclPluginTestCase(unittest.TestCase):
@@ -395,6 +451,44 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertEqual("ostack2", port["aria_acl_runtime_host"])
         self.assertEqual("status_stale", port["aria_acl_runtime_reason"])
 
+    def test_port_summary_rejects_runtime_for_previous_effective_policy(self):
+        plugin = AriaAclPlugin(now=lambda: 0.0)
+        plugin.create_aria_acl_policy(None, {
+            "id": "policy-1",
+            "project_id": "project-1",
+        })
+        plugin.create_aria_acl_binding(None, {
+            "id": "binding-1",
+            "project_id": "project-1",
+            "policy_id": "policy-1",
+            "target_type": "port",
+            "target_id": "port-1",
+        })
+        plugin.report_aria_acl_port_status(None, {
+            "port_id": "port-1",
+            "host": "ostack2",
+            "effective_policy_id": "old-policy",
+            "binding_id": "old-binding",
+            "status": "ready",
+        })
+        port = {
+            "id": "port-1",
+            "network_id": "network-1",
+            "device_owner": "compute:nova",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+            "binding:host_id": "ostack2",
+        }
+
+        plugin.extend_aria_acl_port_dict(port)
+
+        self.assertEqual("pending", port["aria_acl_runtime_status"])
+        self.assertEqual("ostack2", port["aria_acl_runtime_host"])
+        self.assertEqual(
+            "status_projection_mismatch",
+            port["aria_acl_runtime_reason"],
+        )
+
     def test_port_summary_has_complete_defaults_without_effective_acl(self):
         plugin = AriaAclPlugin(now=lambda: 0.0)
         port = {
@@ -417,6 +511,131 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertEqual("not_requested", port["aria_acl_runtime_status"])
         self.assertIsNone(port["aria_acl_runtime_host"])
         self.assertEqual("no_enabled_binding", port["aria_acl_runtime_reason"])
+
+    def test_legacy_port_read_wrapper_batches_projection_and_preserves_fields(self):
+        repository = RecordingPortProjectionRepository()
+        plugin = AriaAclPlugin(repository=repository, now=lambda: 0.0)
+        plugin.create_aria_acl_policy(None, {
+            "id": "policy-1",
+            "project_id": "project-1",
+        })
+        plugin.create_aria_acl_binding(None, {
+            "id": "binding-1",
+            "project_id": "project-1",
+            "policy_id": "policy-1",
+            "target_type": "network",
+            "target_id": "network-1",
+        })
+        ports = [
+            {
+                "id": "port-1",
+                "network_id": "network-1",
+                "device_owner": "compute:nova",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+                "binding:host_id": "ostack2",
+            },
+            {
+                "id": "port-2",
+                "network_id": "network-1",
+                "device_owner": "compute:nova",
+                "binding:vif_type": "ovs",
+                "binding:vnic_type": "normal",
+                "binding:host_id": "ostack3",
+            },
+        ]
+        core = FakeCorePlugin(ports)
+        install_legacy_port_projection(plugin, core_plugin=core)
+        install_legacy_port_projection(plugin, core_plugin=core)
+        repository.effective_payload_calls = 0
+        repository.port_status_list_calls = []
+
+        projected = core.get_ports(
+            "ctx",
+            filters={"network_id": ["network-1"]},
+            fields=["id", "aria_acl_enabled", "aria_acl_runtime_status"],
+            sorts=[("id", True)],
+            limit=10,
+            marker="port-0",
+            page_reverse=True,
+        )
+
+        self.assertEqual(1, len(core.get_ports_calls))
+        self.assertIsNone(core.get_ports_calls[0]["fields"])
+        self.assertEqual(1, repository.effective_payload_calls)
+        self.assertEqual(1, len(repository.port_status_list_calls))
+        self.assertEqual(
+            {"port_id": ["port-1", "port-2"]},
+            repository.port_status_list_calls[0]["filters"],
+        )
+        self.assertEqual(
+            [
+                {
+                    "id": "port-1",
+                    "aria_acl_enabled": True,
+                    "aria_acl_runtime_status": "pending",
+                },
+                {
+                    "id": "port-2",
+                    "aria_acl_enabled": True,
+                    "aria_acl_runtime_status": "pending",
+                },
+            ],
+            projected,
+        )
+
+    def test_legacy_port_show_wrapper_projects_before_field_selection(self):
+        plugin = AriaAclPlugin(now=lambda: 0.0)
+        core = FakeCorePlugin([{
+            "id": "port-1",
+            "network_id": "network-1",
+            "device_owner": "compute:nova",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+            "binding:host_id": "ostack2",
+        }])
+        install_legacy_port_projection(plugin, core_plugin=core)
+
+        projected = core.get_port(
+            "ctx",
+            "port-1",
+            fields=["id", "aria_acl_enabled", "aria_acl_runtime_status"],
+        )
+
+        self.assertEqual([("ctx", "port-1", None)], core.get_port_calls)
+        self.assertEqual(
+            {
+                "id": "port-1",
+                "aria_acl_enabled": False,
+                "aria_acl_runtime_status": "not_requested",
+            },
+            projected,
+        )
+
+    def test_port_projection_failure_does_not_break_core_port_show(self):
+        plugin = AriaAclPlugin(
+            repository=FailingPortProjectionRepository(),
+            now=lambda: 0.0,
+        )
+        core = FakeCorePlugin([{
+            "id": "port-1",
+            "network_id": "network-1",
+            "device_owner": "compute:nova",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+            "binding:host_id": "ostack2",
+        }])
+        install_legacy_port_projection(plugin, core_plugin=core)
+
+        projected = core.get_port("ctx", "port-1")
+
+        self.assertIsNone(projected["aria_acl_enabled"])
+        self.assertEqual("unknown", projected["aria_acl_effective_source"])
+        self.assertEqual("unknown", projected["aria_acl_runtime_status"])
+        self.assertEqual(
+            "projection_unavailable",
+            projected["aria_acl_runtime_reason"],
+        )
 
     def test_plugin_advertises_native_sorting_and_pagination(self):
         plugin = AriaAclPlugin()

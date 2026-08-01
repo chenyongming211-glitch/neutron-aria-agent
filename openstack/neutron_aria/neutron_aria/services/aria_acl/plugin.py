@@ -12,6 +12,8 @@ from neutron_aria.db.aria_acl.query import PortStatusProjection
 from neutron_aria.db.aria_acl.query import decode_port_status_id
 from neutron_aria.db.aria_acl.query import project_fields
 from neutron_aria.services.aria_acl.exceptions import ErrorMappingRepositoryProxy
+from neutron_aria.services.aria_acl.port_projection import PortSummarySnapshot
+from neutron_aria.services.aria_acl.port_projection import install_legacy_port_projection
 
 
 LOG = logging.getLogger(__name__)
@@ -37,6 +39,7 @@ class AriaAclPlugin(object):
         self.port_status_stale_seconds = port_status_stale_seconds
         self.now = now or time.time
         self.notifier = notifier if notifier is not None else build_aria_acl_notifier()
+        install_legacy_port_projection(self)
 
     def get_plugin_type(self):
         return PLUGIN_TYPE
@@ -348,6 +351,39 @@ class AriaAclPlugin(object):
         resolved_port = dict(resolved_port or {})
         resolved_port.setdefault("id", port_id)
         return self.get_aria_acl_effective_for_port(context, resolved_port)
+
+    def extend_aria_acl_port_dict(self, port, context=None):
+        return self.extend_aria_acl_port_dicts(context, [port])[0]
+
+    def extend_aria_acl_port_dicts(self, context, ports):
+        ports = list(ports or [])
+        if not ports:
+            return ports
+        try:
+            repository = self._repo(context)
+            port_ids = sorted(set(
+                port.get("id") for port in ports if port.get("id")
+            ))
+            statuses = repository.list_port_statuses(
+                filters={"port_id": port_ids},
+                projection=self._port_status_projection(),
+            ) if port_ids else []
+            snapshot = PortSummarySnapshot(
+                repository.to_effective_payload(),
+                statuses,
+            )
+        except Exception as exc:
+            LOG.warning(
+                "aria_acl_port_projection_unavailable ports=%s error=%s",
+                len(ports),
+                exc,
+            )
+            for port in ports:
+                PortSummarySnapshot.extend_unavailable(port)
+            return ports
+        for port in ports:
+            snapshot.extend(port)
+        return ports
 
     def _unwrap(self, body, key):
         if body is None:
