@@ -84,6 +84,7 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-agent", "standalone_mirror_both_"],
     ["test", "--locked", "-p", "aria-agent", "managed_startup_recovery_"],
     ["test", "--locked", "-p", "aria-agent", "standalone_start_clears_"],
+    ["test", "--locked", "-p", "ariactl", "api_client_path_segment_"],
     ["test", "-p", "aria-agent", "startup_mode"],
 ]
 

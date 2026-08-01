@@ -734,3 +734,99 @@ impl ApiClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+
+    async fn capture_one_request() -> (String, JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let capture = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            loop {
+                let count = stream.read(&mut buffer).await.unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            let body = r#"{"error":"expected test response"}"#;
+            let response = format!(
+                "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap()
+                .to_string()
+        });
+        (format!("http://{}", address), capture)
+    }
+
+    async fn captured_request_line(capture: JoinHandle<String>) -> String {
+        tokio::time::timeout(Duration::from_secs(2), capture)
+            .await
+            .expect("client did not send a request")
+            .expect("request capture task failed")
+    }
+
+    #[tokio::test]
+    async fn api_client_path_segment_group_delete_encodes_instance_and_group() {
+        let (base_url, capture) = capture_one_request().await;
+        let client = ApiClient::new(&base_url);
+        let _ = client
+            .delete_group("tap/blue?mode#tail", "group/red?mode#tail")
+            .await;
+
+        assert_eq!(
+            captured_request_line(capture).await,
+            "DELETE /api/v1/tap%2Fblue%3Fmode%23tail/groups/group%2Fred%3Fmode%23tail HTTP/1.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_client_path_segment_query_stays_outside_encoded_instance() {
+        let (base_url, capture) = capture_one_request().await;
+        let client = ApiClient::new(&base_url);
+        let _ = client.stats_flows("tap/blue?mode#tail", 7).await;
+
+        assert_eq!(
+            captured_request_line(capture).await,
+            "GET /api/v1/tap%2Fblue%3Fmode%23tail/stats/flows?top=7 HTTP/1.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_client_path_segment_chain_get_and_delete_encode_once() {
+        let (get_base_url, get_capture) = capture_one_request().await;
+        let get_client = ApiClient::new(&get_base_url);
+        let _ = get_client.get_chain("chain%2Fblue").await;
+        assert_eq!(
+            captured_request_line(get_capture).await,
+            "GET /api/v1/chains/chain%252Fblue HTTP/1.1"
+        );
+
+        let (delete_base_url, delete_capture) = capture_one_request().await;
+        let delete_client = ApiClient::new(&delete_base_url);
+        let _ = delete_client.delete_chain("chain/red?#tail").await;
+        assert_eq!(
+            captured_request_line(delete_capture).await,
+            "DELETE /api/v1/chains/chain%2Fred%3F%23tail HTTP/1.1"
+        );
+    }
+}
