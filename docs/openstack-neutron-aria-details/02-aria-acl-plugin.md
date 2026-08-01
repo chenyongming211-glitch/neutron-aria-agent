@@ -102,6 +102,13 @@ Runtime status ownership:
   `aria-acl-port-status-show`, and product troubleshooting reads.
 - Server-side plugin code owns storage, stale detection, and read projection; it
   must not infer desired ACL state from runtime status rows.
+- Legacy `get_port()` / `get_ports()` projection builds one desired-state
+  snapshot and one status query filtered to the returned port IDs before final
+  field selection. Runtime rows are selected by the exact current
+  `(port_id, binding:host_id)` identity; old-host or old-policy rows cannot be
+  reported as applied.
+- Projection failure is fail-soft for the core port read: the Aria fields expose
+  `unknown/projection_unavailable` rather than failing the native Neutron API.
 
 ### API Surface
 
@@ -209,7 +216,10 @@ First-stage product mode is admin/operator controlled:
 - extension is visible through the target network extension command.
 - CRUD works with request ids and audit logs.
 - port effective ACL can be read by the agent.
-- `neutron port-show` or equivalent can expose read-only `aria_acl_*` summary.
+- Source behavior and hosted tests prove that `neutron port-show` or equivalent
+  receives the read-only `aria_acl_*` summary without port-list N+1 queries.
+  The target Neutron 9/Python 2 CLI smoke remains `deferred/pending` until a
+  field environment is available.
 
 ## Non-Goals
 

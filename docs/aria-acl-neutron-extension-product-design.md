@@ -708,14 +708,14 @@ aria_acl_runtime_reason
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `aria_acl_enabled` | bool | 是否存在 enabled 的 effective ACL policy |
+| `aria_acl_enabled` | bool/null | 是否存在 enabled 的 effective ACL policy；投影数据源不可用时为 `null`，不得误报为未启用 |
 | `aria_acl_effective_policy_id` | uuid/string | 当前 port 最终命中的 ACL policy |
 | `aria_acl_effective_policy_name` | string | 当前 port 最终命中的 ACL policy 名称 |
-| `aria_acl_effective_source` | enum | `port`、`network` 或 `none` |
+| `aria_acl_effective_source` | enum | `port`、`network`、`none`；投影数据源不可用时为 `unknown` |
 | `aria_acl_binding_id` | uuid/string | 产生 effective policy 的 binding |
 | `aria_acl_effective_revision` | int | policy、rule、address-set、binding 合成后的版本号 |
 | `aria_acl_runtime_status` | enum | `not_requested`、`pending`、`applied`、`degraded`、`unsupported`、`unknown` |
-| `aria_acl_runtime_host` | string | 最近上报该 port Aria 状态的 compute host |
+| `aria_acl_runtime_host` | string | 与当前 `binding:host_id` 精确匹配的上报 compute host；不得复用迁移前 host 的状态 |
 | `aria_acl_runtime_reason` | string | 未生效、降级或跳过的原因 |
 
 示例：
@@ -766,6 +766,28 @@ aria_acl_runtime_status / host / reason:
 binding:vif_type / binding:vnic_type / binding:host_id:
   仍然由 ML2/Open vSwitch mechanism driver 和 Nova binding 流程维护，Aria 不更新这些字段。
 ```
+
+当前 v0.9 实现边界：
+
+- `AriaAclPlugin` 在旧版 neutron-server 中包装 core plugin 的只读
+  `get_port()` / `get_ports()` 入口。原始查询先保留完整 port 字段，Aria
+  使用一次 final desired-state 快照和一次按本页 port ID 集合过滤的 status
+  查询完成投影，最后再执行调用者的 `fields` 选择；因此分页、排序和 marker
+  仍由原 core plugin 处理，同时不会出现逐 port ACL/status 查询。
+- 期望态继续由 policy/rule/address-set/binding 计算，status 表只提供运行态。
+  运行态只选择当前 `binding:host_id` 的 `(port_id, host)` 记录；旧 host、旧
+  policy 或旧 binding 的 `ready` 记录一律投影为 `pending`，不能显示
+  `applied`。
+- 新鲜且身份一致的 `ready` 适配为 legacy 摘要值 `applied`；过期记录投影为
+  `unknown/status_stale`。未绑定 host 或尚未上报分别显示
+  `pending/port_unbound` 和 `pending/status_not_reported`。
+- Aria 查询失败不能破坏原生 port API：九个字段仍返回完整未知态，
+  `aria_acl_enabled=null`、`aria_acl_effective_source=unknown`、
+  `aria_acl_runtime_status=unknown`、reason 为 `projection_unavailable`。
+- 托管测试覆盖上述状态选择、字段过滤和批量查询；现有 CLI consistency
+  smoke 已接入 REST port response 与真实 `neutron port-show` 九字段检查。
+  目标 Python 2/Neutron 9 环境尚未重新执行该 smoke，证据保持
+  `deferred/pending`。
 
 ## 6. DB 模型
 

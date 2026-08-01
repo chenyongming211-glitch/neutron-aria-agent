@@ -225,9 +225,11 @@ separate signals.
 
 ## Remaining Work
 
-- `REVIEW-ACL-013` owns the separate legacy Neutron `port-show` extension-field
-  population decision and implementation. Status V1 and
-  `aria-acl-port-status*` APIs are already the explicit runtime-status surfaces.
+- `REVIEW-ACL-013` source implementation and hosted tests now populate the
+  separate legacy Neutron `port-show` fields through a batch-aware read
+  projection. The target Neutron 9/Python 2 CLI smoke is wired but remains
+  `deferred/pending`; Status V1 and `aria-acl-port-status*` APIs remain the
+  authoritative detailed runtime-status surfaces.
 - Product UI wording and presentation remain product-layer work; they must use
   the typed status vocabulary without inventing new datapath states.
 - Adding a domain to the status vocabulary does not advertise that feature as
