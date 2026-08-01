@@ -2,7 +2,7 @@
 
 Date: 2026-08-01
 
-Status: approved approach; implementation pending
+Status: fixed; exact-head hosted CI complete
 
 Analyzed target:
 `v0.9-neutron-agent@77e97822d170e8bbc4fe93f19109915097f8f1b0`
@@ -170,7 +170,30 @@ The change must not modify server handlers, route definitions, eBPF code,
 Neutron APIs, or unrelated client commands. It must not create a general URL
 DSL or a static checker.
 
-## 9. Acceptance Criteria
+## 9. Implementation Evidence
+
+- Approved design: `af325e1`.
+- Executable plan: `a646f44`.
+- RED tests: `9609518`; hosted Build
+  [30693251050](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30693251050)
+  failed only the three new `api_client_path_segment_` request-line behaviors.
+  The independent fast contracts, database contracts, and warning-denied Rust
+  build passed, proving the failure was behavioral rather than a compile or CI
+  wiring defect.
+- GREEN implementation: `91edc43`; exact-head hosted Build
+  [30693519106](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30693519106)
+  passed all three request-line behaviors, fast contracts, database contracts,
+  and warning-denied eBPF, userspace, and agent builds.
+- The implementation routed all 37 dynamic request sites through the three
+  concrete boundaries, moved the three instance-scoped `top` parameters to
+  `RequestBuilder::query`, and left only two safe global numeric query formats.
+- Production code and dependency metadata added 74 lines and removed 37 lines;
+  the RED behavior tests added 96 lines, and CI wiring added exactly one test
+  selector. No static source checker or generic URL framework was added.
+- No local Cargo command or privileged field run was performed. A field run is
+  not required for this client request-construction repair and is not claimed.
+
+## 10. Acceptance Criteria
 
 `REVIEW-CLI-001` can be marked fixed only when:
 

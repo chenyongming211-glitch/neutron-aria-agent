@@ -41,7 +41,7 @@
 - Consumes: public `ApiClient::delete_group`, `stats_flows`, `get_chain`, and `delete_chain` methods.
 - Produces: named `api_client_path_segment_` behavior tests that observe the real HTTP request line without requiring the production helper shape.
 
-- [ ] **Step 1: Add a bounded real-request capture helper**
+- [x] **Step 1: Add a bounded real-request capture helper**
 
 Append a test module to `user/src/api_client.rs`. It must use Tokio's real TCP
 listener and I/O types already enabled by the workspace dependency:
@@ -102,7 +102,7 @@ mod tests {
 The two-second bound makes malformed-URL failures deterministic instead of
 hanging the hosted test job.
 
-- [ ] **Step 2: Add group and query RED behaviors**
+- [x] **Step 2: Add group and query RED behaviors**
 
 Inside the module add:
 
@@ -134,7 +134,7 @@ async fn api_client_path_segment_query_stays_outside_encoded_instance() {
 }
 ```
 
-- [ ] **Step 3: Add service-chain and literal-percent RED behaviors**
+- [x] **Step 3: Add service-chain and literal-percent RED behaviors**
 
 Add one test covering both chain operations:
 
@@ -159,7 +159,7 @@ async fn api_client_path_segment_chain_get_and_delete_encode_once() {
 }
 ```
 
-- [ ] **Step 4: Wire only the behavior-test selector**
+- [x] **Step 4: Wire only the behavior-test selector**
 
 Add this entry to `RUST_TESTS` in `ci/check_neutron_stage1.py`:
 
@@ -169,7 +169,7 @@ Add this entry to `RUST_TESTS` in `ci/check_neutron_stage1.py`:
 
 Do not inspect `api_client.rs` text or helper names from Python.
 
-- [ ] **Step 5: Run non-compiling hygiene and commit RED**
+- [x] **Step 5: Run non-compiling hygiene and commit RED**
 
 Run:
 
@@ -211,7 +211,7 @@ changing production code.
 - Consumes: Task 1 request-line behaviors.
 - Produces: private `encode_path_segment`, `ApiClient::instance_url`, `ApiClient::group_url`, and `ApiClient::chain_url` boundaries used by all 37 dynamic request sites.
 
-- [ ] **Step 1: Declare the existing encoding dependency directly**
+- [x] **Step 1: Declare the existing encoding dependency directly**
 
 Add to `[workspace.dependencies]` in `Cargo.toml`:
 
@@ -237,7 +237,7 @@ dependencies = [
 
 Do not change any package version or checksum.
 
-- [ ] **Step 2: Add concrete encoding boundaries**
+- [x] **Step 2: Add concrete encoding boundaries**
 
 At the top of `user/src/api_client.rs` import:
 
@@ -286,7 +286,7 @@ fn chain_url(&self, name: &str) -> String {
 The static-lifetime suffix prevents callers from manufacturing route text
 from request data.
 
-- [ ] **Step 3: Migrate instance and group request sites**
+- [x] **Step 3: Migrate instance and group request sites**
 
 Replace each instance-interpolated call with its exact static suffix. Examples:
 
@@ -311,7 +311,7 @@ self.group_url(instance, name)
 Apply the same mapping to groups, policies, QoS, mirror, conntrack, config,
 statistics, TCP-RT, and trace. Do not change global SSL or kernel-drop paths.
 
-- [ ] **Step 4: Separate numeric query parameters**
+- [x] **Step 4: Separate numeric query parameters**
 
 Convert the three instance-scoped query callers:
 
@@ -331,12 +331,12 @@ self.client
 
 Keep the existing response and error path unchanged after `.query(...)`.
 
-- [ ] **Step 5: Migrate both chain callers**
+- [x] **Step 5: Migrate both chain callers**
 
 Change `get_chain` and `delete_chain` to pass `self.chain_url(name)` to
 `reqwest`. Chain list and create remain on their static paths.
 
-- [ ] **Step 6: Prove every dynamic raw interpolation is gone**
+- [x] **Step 6: Prove every dynamic raw interpolation is gone**
 
 Run only non-compiling checks:
 
@@ -351,7 +351,7 @@ git diff --stat
 Expected: `rg` returns no dynamic instance/group/chain URL construction. The
 two safe global `top` query format calls may remain. Do not run Cargo.
 
-- [ ] **Step 7: Commit, push, and require exact-head GREEN**
+- [x] **Step 7: Commit, push, and require exact-head GREEN**
 
 Commit and push:
 
@@ -386,7 +386,7 @@ inside the approved files. Do not weaken an assertion or hide a warning.
 - Consumes: exact RED and GREEN commit/Build IDs.
 - Produces: accurate fixed status and final clean/synchronized branch evidence.
 
-- [ ] **Step 1: Review scope and code volume**
+- [x] **Step 1: Review scope and code volume**
 
 Run:
 
@@ -401,7 +401,7 @@ Confirm the production change is limited to the client and dependency metadata,
 tests dominate any net addition, and the checker change is exactly one behavior
 filter entry.
 
-- [ ] **Step 2: Record durable evidence**
+- [x] **Step 2: Record durable evidence**
 
 Update the design status and evidence with the exact RED and GREEN commits and
 Build URLs. Check off completed plan steps.
