@@ -27,6 +27,10 @@
   [30706732514](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30706732514)
   passed all required lanes and executed all five `management_listener_`
   tests.
+- Documentation closure `dbed756`: Build
+  [30706991370](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30706991370)
+  passed fast, database, and clean-install contracts; Rust jobs correctly
+  skipped for the docs-only change.
 - Local non-Cargo verification passed 557 Python tests with 8 skips, 10 CLI
   tests, shell syntax, installer, and public contract checks.
 - The TCP API remains unauthenticated. No privileged field evidence applies or
@@ -370,7 +374,7 @@ git commit -m "docs: close RISK-SEC-002"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 4: Verify exact docs head and repository state**
+- [x] **Step 4: Verify exact docs head and repository state**
 
 Wait for docs-only required CI, then verify:
 
