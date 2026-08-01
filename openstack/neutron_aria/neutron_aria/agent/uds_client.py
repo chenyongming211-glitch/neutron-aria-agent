@@ -998,11 +998,13 @@ class LocalClient(object):
             raise LocalApiContractError(
                 "local API does not advertise supports_port_scoped_snapshot"
             )
+        request_timeout = self._capability_request_timeout(capabilities)
         encoded = urlquote(port_id, safe="")
         return self._request(
             "PUT",
             "/api/v1/neutron/ports/%s/snapshot" % encoded,
             snapshot,
+            request_timeout=request_timeout,
         )
 
     def delete_port(self, port_id):
@@ -1023,12 +1025,20 @@ class LocalClient(object):
                 "status contract write gate is latched closed"
             )
 
-    def _connection(self):
+    def _connection(self, request_timeout=None):
+        timeout = self.timeout if request_timeout is None else request_timeout
         if self.connection_factory is not None:
-            return self.connection_factory(self.socket_path, self.timeout)
-        return UnixHTTPConnection(self.socket_path, self.timeout)
+            return self.connection_factory(self.socket_path, timeout)
+        return UnixHTTPConnection(self.socket_path, timeout)
 
-    def _request(self, method, path, body=None, contract_response=False):
+    def _request(
+        self,
+        method,
+        path,
+        body=None,
+        contract_response=False,
+        request_timeout=None,
+    ):
         headers = {"Accept": "application/json"}
         payload = None
         if body is not None:
@@ -1041,7 +1051,7 @@ class LocalClient(object):
                 )
             headers["Content-Type"] = "application/json"
 
-        conn = self._connection()
+        conn = self._connection(request_timeout=request_timeout)
         try:
             conn.request(method, path, body=payload, headers=headers)
             response = conn.getresponse()
@@ -1131,13 +1141,7 @@ class LocalClient(object):
         if body_max_bytes is not None:
             self.max_request_bytes = min(self.max_request_bytes, body_max_bytes)
 
-        timeout_ms = body.get("timeout_ms")
-        timeout_ms = _optional_int(timeout_ms, "timeout_ms")
-        if timeout_ms is not None and timeout_ms <= 0:
-            raise LocalApiContractError("invalid timeout_ms %r" % body.get("timeout_ms"))
-        if timeout_ms is not None:
-            timeout = timeout_ms / 1000.0
-            self.timeout = min(self.timeout, timeout) if self.timeout is not None else timeout
+        self._capability_request_timeout(body)
 
         error_codes_hash = body.get("error_codes_hash")
         if error_codes_hash is not None and error_codes_hash != NEUTRON_ERROR_CODES_HASH:
@@ -1154,6 +1158,18 @@ class LocalClient(object):
             raise LocalApiContractError(
                 "unsupported capability_hash %r" % capability_hash
             )
+
+    def _capability_request_timeout(self, body):
+        timeout_ms = body.get("timeout_ms")
+        timeout_ms = _optional_int(timeout_ms, "timeout_ms")
+        if timeout_ms is not None and timeout_ms <= 0:
+            raise LocalApiContractError(
+                "invalid timeout_ms %r" % body.get("timeout_ms")
+            )
+        if timeout_ms is None:
+            return self.timeout
+        timeout = timeout_ms / 1000.0
+        return min(self.timeout, timeout) if self.timeout is not None else timeout
 
     def _validate_port_snapshot_request(self, port_id, snapshot):
         if not isinstance(snapshot, dict):
