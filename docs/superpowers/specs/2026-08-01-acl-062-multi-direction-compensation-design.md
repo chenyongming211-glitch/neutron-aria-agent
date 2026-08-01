@@ -2,7 +2,7 @@
 
 Date: 2026-08-01
 
-Status: written specification pending review
+Status: written specification approved on 2026-08-01; implementation pending
 
 Analyzed target:
 `v0.9-neutron-agent@d729f432217e380c3e3a1e65bff2c4454e1ea5f3`
