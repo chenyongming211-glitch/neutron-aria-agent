@@ -308,6 +308,95 @@ class AriaAclSqlQueryTestCase(unittest.TestCase):
             restored["members"],
         )
 
+    def test_address_set_create_member_failure_rolls_back_parent_and_members(self):
+        from neutron_aria.db.aria_acl.api import AriaAclNotFound
+
+        member_inserts = [0]
+
+        def fail_second_member_insert(
+            _connection,
+            _cursor,
+            statement,
+            _parameters,
+            _context,
+            _executemany,
+        ):
+            if statement.startswith("INSERT INTO aria_acl_address_set_members"):
+                member_inserts[0] += 1
+                if member_inserts[0] == 2:
+                    raise RuntimeError("injected member insert failure")
+
+        event.listen(self.engine, "before_cursor_execute", fail_second_member_insert)
+        try:
+            with self.assertRaises(RuntimeError):
+                self.repository.create_address_set({
+                    "id": "set-create-rollback",
+                    "project_id": "project-1",
+                    "members": [
+                        {"address": "10.0.0.0/24"},
+                        {"address": "10.0.1.0/24"},
+                    ],
+                })
+        finally:
+            event.remove(
+                self.engine,
+                "before_cursor_execute",
+                fail_second_member_insert,
+            )
+
+        with self.assertRaises(AriaAclNotFound):
+            self.repository.get_address_set("set-create-rollback")
+
+    def test_address_set_update_member_failure_restores_complete_preimage(self):
+        self.repository.create_address_set({
+            "id": "set-update-rollback",
+            "project_id": "project-1",
+            "name": "before",
+            "members": [{"address": "10.0.0.0/24"}],
+        })
+        member_inserts = [0]
+
+        def fail_second_member_insert(
+            _connection,
+            _cursor,
+            statement,
+            _parameters,
+            _context,
+            _executemany,
+        ):
+            if statement.startswith("INSERT INTO aria_acl_address_set_members"):
+                member_inserts[0] += 1
+                if member_inserts[0] == 2:
+                    raise RuntimeError("injected member insert failure")
+
+        event.listen(self.engine, "before_cursor_execute", fail_second_member_insert)
+        try:
+            with self.assertRaises(RuntimeError):
+                self.repository.update_address_set(
+                    "set-update-rollback",
+                    {
+                        "name": "after",
+                        "members": [
+                            {"address": "10.0.1.0/24"},
+                            {"address": "10.0.2.0/24"},
+                        ],
+                    },
+                )
+        finally:
+            event.remove(
+                self.engine,
+                "before_cursor_execute",
+                fail_second_member_insert,
+            )
+
+        restored = self.repository.get_address_set("set-update-rollback")
+        self.assertEqual("before", restored["name"])
+        self.assertEqual(1, restored["revision_number"])
+        self.assertEqual(
+            [{"address": "10.0.0.0/24"}],
+            restored["members"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
