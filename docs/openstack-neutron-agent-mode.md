@@ -702,7 +702,7 @@ GET /api/v1/neutron/capabilities
 - Python 侧要求的 mandatory domain 或 required field 如果不在 Rust capability 中，Rust 返回 `UDS_CAPABILITY_MISMATCH`，不接受该 snapshot。
 - enhancement domain 不支持时，Python 侧可以不下发该 feature；如果已下发但 Rust 不支持，相关 domain 必须返回 `DomainStatus=degraded,effective_action=bypass,support_disposition=unsupported`，并在 status 中暴露 `unsupported_features`。
 - optional field 未识别时不能改变 datapath 行为，必须进入 status 的 `ignored_optional_fields` 或等价字段。
-- `body_max_bytes`、`timeout_ms` 是 Python client 的默认运行参数来源；Python 不得另行写死更宽松的默认值。
+- `body_max_bytes` 是 Python client 的请求体上限来源；`timeout_ms` 是能力握手所约束的 mutation 请求级 ceiling，不得通过修改共享 client 默认值影响后续无关请求。
 - `error_codes_hash` 变化时，Python 侧必须重新加载 contract；如果本地 contract 与 Rust 返回不一致，返回 `UDS_CONTRACT_DRIFT` 并停止写路径。
 - `peer_auth_policy.require_peercred = true` 时，Rust 无法读取 peer credential 必须返回 `UDS_PEERCRED_UNAVAILABLE`，不能降级为只看文件权限。
 - `capability_hash` 变化后，Python 侧必须触发 full resync；不能继续增量提交基于旧 capability 的 port-scoped snapshot。
@@ -717,7 +717,7 @@ GET /api/v1/neutron/capabilities
 | `capability_hash` | Rust runtime/domain 能力变化 | 重新握手并 full resync | status 回显新 hash | 无错误；若继续旧增量则 `UDS_CAPABILITY_MISMATCH` |
 | `error_codes_hash` | 错误码集合漂移 | reload contract；仍不一致则停止写路径 | capabilities 回显当前 hash | `UDS_ERROR_CODES_HASH_MISMATCH` |
 | `body_max_bytes` | body 上限变化 | 使用较严格上限；超限先本地拒绝 | 超限时拒绝请求 | `UDS_BODY_TOO_LARGE` |
-| `timeout_ms` | 请求超时策略变化 | 更新 client timeout；超时进入 degraded/status reconcile | 不推进 generation | `UDS_REQUEST_TIMEOUT` |
+| `timeout_ms` | 请求超时策略变化 | 对与本次握手耦合的 mutation 使用 `min(configured, advertised)`；不得永久更新共享 client timeout；超时进入 degraded/status reconcile | 不推进 generation | `UDS_REQUEST_TIMEOUT` |
 | `peer_auth_policy` | 本机调用身份策略变化 | 校验本地运行身份和 group | 拒绝不合规 peer | `UDS_PEER_UNAUTHORIZED` |
 
 ### 5.2 Snapshot 请求结构
@@ -3248,7 +3248,7 @@ neutron-aria-agent/
   - `get_capabilities()`
   - `delete_port(port_id)`
 - `get_capabilities()` 必须在 agent startup、UDS reconnect、`aria-datapath` restart 和 capability hash 变化后调用。
-- local client 必须从 capability/contract 读取 `body_max_bytes` 和 `timeout_ms`，不能在 Python 侧写死更宽松默认值。
+- local client 必须从 capability/contract 读取 `body_max_bytes` 并校验 `timeout_ms`；端口级握手后的 mutation 使用请求级 timeout ceiling，不能永久缩短共享 client 默认值。
 - 连接失败返回 typed error，供 `status.py` 转成 agent degraded。
 
 验收：
@@ -3427,7 +3427,7 @@ CI 工作包必须把 `.github/workflows/build.yml` 拆成三个可见阶段：
    - 运行 Python 单元测试。
    - 使用 `neutron-uds-contract.json` 校验 local client request/response。
    - 覆盖 `get_capabilities()`、startup capability handshake、capability hash 变化 full resync、UDS schema/capability mismatch 降级。
-   - 校验 Python client 使用 contract 中的 body 上限和 timeout，不允许写死更宽松的默认值。
+   - 校验 Python client 使用 contract 中的 body 上限，并把 timeout 作为 mutation 请求级 ceiling，不污染共享 client 默认值。
    - 运行 formatter/linter 检查。
 3. Container packaging：
    - 构建 `aria-datapath` image。
@@ -3736,7 +3736,7 @@ python -m pytest tests/test_generation.py tests/test_local_client.py -q
 - socket 不存在时返回 typed error，供 heartbeat 上报 degraded。
 - `[aria] socket_path` 只接受 Unix socket path，拒绝 TCP/HTTP fallback。
 - `get_capabilities()` 在 startup/reconnect 后先执行，能识别 contract drift、schema mismatch 和 capability mismatch。
-- Python client 使用 contract/capabilities 中的 body 上限和 timeout，超过限制时返回 typed error。
+- Python client 使用 contract/capabilities 中的 body 上限，校验 timeout，并对端口级 mutation 应用请求级 timeout ceiling；超过限制时返回 typed error。
 - generation counter 可从本地 state file 恢复。
 - Python 单元测试不依赖真实 Neutron 或 oslo messaging。
 - 配置包含 `[acl] source = neutron`、可选 `[acl] fixture_path`；生产路径不得要求 `acl_tag_prefix` 或 `acl_policy_mapping_file`。
@@ -4190,7 +4190,7 @@ LOCAL_WRITE_BLOCKED_FOR_NEUTRON_MANAGED_DOMAIN: this domain is managed by Neutro
 9. `local_client.py` 只连接 Unix socket path。
 10. `local_client.py` 拒绝 `http://`、`https://`、裸 host:port 和空地址。
 11. `local_client.py` 实现 `get_capabilities()`，并在 startup/reconnect 后先执行 capability handshake。
-12. `local_client.py` 从 contract/capabilities 读取 body 上限和 timeout，超过 `body_max_bytes` 时返回 typed error。
+12. `local_client.py` 从 contract/capabilities 读取 body 上限并校验 timeout；端口级 mutation 使用请求级 timeout ceiling，超过 `body_max_bytes` 时返回 typed error。
 13. socket 不存在时返回 typed error，不抛未分类异常。
 14. 增加 Python 单元测试，覆盖 `get_capabilities()`、contract drift、body too large、schema/capability mismatch。
 15. 提交：`feat: add neutron aria agent python skeleton`。
