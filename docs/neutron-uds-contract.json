@@ -89,6 +89,81 @@
       "path": "/api/v1/neutron/status"
     },
     {
+      "method": "POST",
+      "path": "/api/v1/neutron/snapshot/recover-pending",
+      "request_schema": {
+        "type": "object",
+        "required": [
+          "expected_pending_generation"
+        ],
+        "properties": {
+          "expected_pending_generation": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 18446744073709551615
+          },
+          "expected_desired_hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "rollback_to_last_applied",
+              null
+            ],
+            "default": "rollback_to_last_applied"
+          }
+        }
+      },
+      "success_schema": {
+        "http_status": 200,
+        "status_values": [
+          "recovered",
+          "already_committed"
+        ],
+        "required": [
+          "status",
+          "recovered_generation",
+          "desired_hash",
+          "applied_generation",
+          "applied_desired_hash",
+          "authority_state",
+          "wal_status"
+        ],
+        "nullable": [
+          "desired_hash",
+          "applied_desired_hash"
+        ]
+      },
+      "error_schema": {
+        "required": [
+          "error",
+          "details"
+        ],
+        "status_by_code": {
+          "unsupported_pending_recovery_mode": 400,
+          "no_applied_snapshot_to_restore": 409,
+          "pending_snapshot_still_active": 409,
+          "no_pending_snapshot": 409,
+          "pending_generation_mismatch": 409,
+          "pending_desired_hash_mismatch": 409,
+          "pending_recovery_commit_failed": 500
+        }
+      },
+      "compatibility": {
+        "mode_omitted_or_null": "rollback_to_last_applied",
+        "identity_guard": "generation and desired hash must match the pending snapshot",
+        "already_committed": "a newer valid WAL commit refreshes runtime without rollback",
+        "versioning": "contract inventory correction; API and contract versions unchanged"
+      }
+    },
+    {
       "method": "PUT",
       "path": "/api/v1/neutron/snapshot"
     },

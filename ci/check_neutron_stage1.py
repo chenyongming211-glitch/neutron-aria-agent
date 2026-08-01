@@ -152,58 +152,18 @@ PUBLIC_UDS_ROUTES = (
         "/api/v1/neutron/ports/%s",
     ),
 )
-RECOVER_PENDING_ROUTE_CONTRACT = {
-    "method": "POST",
-    "path": "/api/v1/neutron/snapshot/recover-pending",
-    "request_schema": {
-        "type": "object",
-        "required": ["expected_pending_generation"],
-        "properties": {
-            "expected_pending_generation": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 18446744073709551615,
-            },
-            "expected_desired_hash": {"type": ["string", "null"]},
-            "mode": {
-                "type": ["string", "null"],
-                "enum": ["rollback_to_last_applied", None],
-                "default": "rollback_to_last_applied",
-            },
-        },
-    },
-    "success_schema": {
-        "http_status": 200,
-        "status_values": ["recovered", "already_committed"],
-        "required": [
-            "status",
-            "recovered_generation",
-            "desired_hash",
-            "applied_generation",
-            "applied_desired_hash",
-            "authority_state",
-            "wal_status",
-        ],
-        "nullable": ["desired_hash", "applied_desired_hash"],
-    },
-    "error_schema": {
-        "required": ["error", "details"],
-        "status_by_code": {
-            "unsupported_pending_recovery_mode": 400,
-            "no_applied_snapshot_to_restore": 409,
-            "pending_snapshot_still_active": 409,
-            "no_pending_snapshot": 409,
-            "pending_generation_mismatch": 409,
-            "pending_desired_hash_mismatch": 409,
-            "pending_recovery_commit_failed": 500,
-        },
-    },
-    "compatibility": {
-        "mode_omitted_or_null": "rollback_to_last_applied",
-        "identity_guard": "generation and desired hash must match the pending snapshot",
-        "already_committed": "a newer valid WAL commit refreshes runtime without rollback",
-        "versioning": "contract inventory correction; API and contract versions unchanged",
-    },
+RECOVER_PENDING_RESPONSE_FIELDS = {
+    "status", "recovered_generation", "desired_hash", "applied_generation",
+    "applied_desired_hash", "authority_state", "wal_status",
+}
+RECOVER_PENDING_ERROR_STATUS = {
+    "unsupported_pending_recovery_mode": 400,
+    "no_applied_snapshot_to_restore": 409,
+    "pending_snapshot_still_active": 409,
+    "no_pending_snapshot": 409,
+    "pending_generation_mismatch": 409,
+    "pending_desired_hash_mismatch": 409,
+    "pending_recovery_commit_failed": 500,
 }
 
 
@@ -322,7 +282,28 @@ def check_uds_contract_artifact():
     if len(route_index) != len(route_rows) or set(route_index) != expected_routes:
         raise SystemExit("ERROR: UDS contract route inventory drifted")
     recover_key = ("POST", "/api/v1/neutron/snapshot/recover-pending")
-    if route_index[recover_key] != RECOVER_PENDING_ROUTE_CONTRACT:
+    recover = route_index[recover_key]
+    request = recover.get("request_schema", {})
+    request_fields = request.get("properties", {})
+    success = recover.get("success_schema", {})
+    error = recover.get("error_schema", {})
+    compatibility = recover.get("compatibility", {})
+    if (
+        request.get("type") != "object"
+        or request.get("required") != ["expected_pending_generation"]
+        or set(request_fields) != {
+            "expected_pending_generation", "expected_desired_hash", "mode",
+        }
+        or request_fields.get("mode", {}).get("default") != "rollback_to_last_applied"
+        or success.get("http_status") != 200
+        or set(success.get("status_values", [])) != {"recovered", "already_committed"}
+        or set(success.get("required", [])) != RECOVER_PENDING_RESPONSE_FIELDS
+        or error.get("required") != ["error", "details"]
+        or error.get("status_by_code") != RECOVER_PENDING_ERROR_STATUS
+        or set(compatibility) != {
+            "mode_omitted_or_null", "identity_guard", "already_committed", "versioning",
+        }
+    ):
         raise SystemExit("ERROR: recover-pending request/response/error contract drifted")
 
     router = read_text(RUST_NEUTRON_API_PATH)
