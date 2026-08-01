@@ -7237,6 +7237,93 @@ mod tests {
         (status, value)
     }
 
+    async fn neutron_readiness_responses_for_runtime(
+        id: &str,
+        runtime: NeutronRuntimeState,
+    ) -> ((StatusCode, Value), (StatusCode, Value)) {
+        let root = temp_root(&format!("readiness-{id}"));
+        let state = test_neutron_state(&root);
+        {
+            let mut stored_runtime = state.runtime.write().await;
+            *stored_runtime = runtime;
+        }
+        let status_response =
+            get_neutron_status(State(state.clone())).await.into_response();
+        let readiness_response = get_neutron_readiness(State(state)).await.into_response();
+        let status = response_json_value(status_response).await;
+        let readiness = response_json_value(readiness_response).await;
+        std::fs::remove_dir_all(&root)
+            .expect("Neutron readiness temporary root should be removable");
+        (status, readiness)
+    }
+
+    #[tokio::test]
+    async fn neutron_readiness_returns_success_only_for_exact_ready() {
+        for (id, expected_status) in [
+            ("full-classified-ready", StatusCode::OK),
+            ("pending-poll", StatusCode::SERVICE_UNAVAILABLE),
+            (
+                "classified-degraded-terminal",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                "blocked-recoverable-inventory",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            ("blocked-operator", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let runtime = runtime_from_status_v1_seed(status_v1_runtime_seed(id));
+            let ((status_code, status_body), (readiness_code, readiness_body)) =
+                neutron_readiness_responses_for_runtime(id, runtime).await;
+
+            assert_eq!(
+                status_code,
+                StatusCode::OK,
+                "Status V1 inspection must remain readable for {id}"
+            );
+            assert_eq!(
+                readiness_code, expected_status,
+                "readiness status must follow overall_readiness for {id}"
+            );
+            assert_eq!(
+                readiness_body, status_body,
+                "readiness and status inspection must share one Status V1 body for {id}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn neutron_readiness_cold_start_requires_full_resync() {
+        let ((status_code, status_body), (readiness_code, readiness_body)) =
+            neutron_readiness_responses_for_runtime(
+                "cold-start",
+                NeutronRuntimeState::default(),
+            )
+            .await;
+
+        assert_eq!(status_code, StatusCode::OK);
+        assert_eq!(readiness_code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(readiness_body, status_body);
+        assert_eq!(
+            readiness_body
+                .get("transaction_state")
+                .and_then(Value::as_str),
+            Some("idle")
+        );
+        assert_eq!(
+            readiness_body
+                .get("overall_readiness")
+                .and_then(Value::as_str),
+            Some("unknown")
+        );
+        assert_eq!(
+            readiness_body
+                .get("required_action")
+                .and_then(Value::as_str),
+            Some("full_resync")
+        );
+    }
+
     #[tokio::test]
     async fn neutron_snapshot_status_v1_runtime_projection_matches_shared_scenarios() {
         let mut mismatches = Vec::new();
