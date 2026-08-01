@@ -27,6 +27,19 @@ control-plane transactions, GitHub Actions hosted Rust behavior/build lanes.
   QoS/Mirror precedence.
 - Do not claim privileged field evidence.
 
+## Execution evidence
+
+- RED: `7e94aed`, Build
+  [30705557669](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30705557669),
+  expected missing validator/scope failure.
+- Production: `9585ed7`, plus test-only IPv6 fixture correction `1871e55`.
+- Exact implementation-head GREEN: Build
+  [30705819827](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30705819827),
+  all required hosted lanes passed.
+- Local non-Cargo verification: 557 Python tests passed with 8 skips, 10 CLI
+  tests passed, and shell/installer smoke contracts passed.
+- No privileged field evidence applies or is claimed.
+
 ---
 
 ### Task 1: Add RED overlap behavior contracts
@@ -46,14 +59,14 @@ control-plane transactions, GitHub Actions hosted Rust behavior/build lanes.
   `validate_general_group_overlap_transition(old, proposed, scope)` and
   `GeneralGroupScope::{Standalone, Managed}` plus HTTP 409 conflict behavior.
 
-- [ ] **Step 1: Add pure projection RED tests**
+- [x] **Step 1: Add pure projection RED tests**
 
 Add `acl_projection_general_overlap_*` tests for exact IPv4 overlap, nested
 IPv4/IPv6 overlap, same-group nesting, disjoint networks, managed ACL-only
 isolation, QoS/Mirror promotion, insertion-order-stable reason, unchanged
 legacy overlap, and overlap removal.
 
-- [ ] **Step 2: Add transaction-boundary RED tests**
+- [x] **Step 2: Add transaction-boundary RED tests**
 
 Add tests under existing hosted filters proving:
 
@@ -74,7 +87,7 @@ fn managed_local_group_projection_overlap_maps_to_conflict() { /* ... */ }
 The planner tests must assert that a rejected batch item contributes no final
 state, general target, allocator, or publication change.
 
-- [ ] **Step 3: Verify non-Rust structure locally**
+- [x] **Step 3: Verify non-Rust structure locally**
 
 Run:
 
@@ -85,7 +98,7 @@ python3 -m unittest ci.test_ci_lane_contract ci.test_ci001_trusted_gates
 
 Expected: Python CI wiring passes; no Cargo command runs locally.
 
-- [ ] **Step 4: Commit and push RED**
+- [x] **Step 4: Commit and push RED**
 
 ```bash
 git add core/tests/acl_projection_contract.rs \
@@ -97,7 +110,7 @@ git commit -m "test: expose general group overlap ambiguity"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 5: Capture hosted RED**
+- [x] **Step 5: Capture hosted RED**
 
 Wait for the exact-head Build. Expected: `rust-behavior` fails because the new
 transition validator/scope or production rejection is absent. Record the run
@@ -131,20 +144,20 @@ pub fn validate_general_group_overlap_transition(
 ) -> Result<(), String>;
 ```
 
-- [ ] **Step 1: Canonicalize candidates**
+- [x] **Step 1: Canonicalize candidates**
 
 Reuse `collect_persisted_groups()`. For `Standalone`, include every non-zero
 group ID. For `Managed`, reuse the existing ACL-only/general classification
 derived from ACL and QoS/Mirror references.
 
-- [ ] **Step 2: Enumerate stable cross-group conflicts**
+- [x] **Step 2: Enumerate stable cross-group conflicts**
 
 Sort canonical candidates deterministically. Treat exact equality and nesting
 as overlap only across different group IDs. Permit same-group nesting and
 different address families. Return the lexicographically first conflict reason
 using canonical CIDR strings and stable persisted group names.
 
-- [ ] **Step 3: Compare committed and proposed conflict sets**
+- [x] **Step 3: Compare committed and proposed conflict sets**
 
 Accept when every proposed conflict already exists in committed state. Reject
 the first newly introduced conflict as:
@@ -156,7 +169,7 @@ general_group_overlap:<left-name>:<left-cidr>:<right-name>:<right-cidr>
 Do not call this validator from `compile_managed_group_projection()`, so replay
 and inventory retain deterministic legacy compatibility.
 
-- [ ] **Step 4: Export the public contract**
+- [x] **Step 4: Export the public contract**
 
 Re-export `GeneralGroupScope` and
 `validate_general_group_overlap_transition` from `core/src/ebpf_ops.rs`.
@@ -176,33 +189,33 @@ Re-export `GeneralGroupScope` and
 - Consumes: Task 2 transition validator.
 - Produces: `ControlPlaneError::GroupConflict(String)` with HTTP 409.
 
-- [ ] **Step 1: Guard standalone group planning**
+- [x] **Step 1: Guard standalone group planning**
 
 After constructing `final_state` but before constructing map targets, validate
 `old_state -> final_state` with `GeneralGroupScope::Standalone`. Convert the
 reason to `ControlPlaneError::GroupConflict` at the control-plane boundary.
 
-- [ ] **Step 2: Preserve standalone ACL batch item semantics**
+- [x] **Step 2: Preserve standalone ACL batch item semantics**
 
 After each parsed mutation builds `item_state`, validate
 `working -> item_state`. On overlap, retain `working`, discard the item's
 general targets and allocator changes, and append the stable item error. Other
 valid items remain eligible for the one atomic publication.
 
-- [ ] **Step 3: Guard managed final-state projection**
+- [x] **Step 3: Guard managed final-state projection**
 
 At the start of `managed_general_state_mutations(old_state, final_state)`, run
 the validator with `GeneralGroupScope::Managed`. Map a new overlap to
 `GroupConflict` before compiling or returning any projection operations. This
 covers group, QoS, Mirror, owned ACL, and demotion final states.
 
-- [ ] **Step 4: Add explicit conflict status**
+- [x] **Step 4: Add explicit conflict status**
 
 Add `GroupConflict(String)` to `ControlPlaneError`; render it as a group
 conflict and map it to HTTP 409. Do not overload `GroupInUse` or return HTTP
 400.
 
-- [ ] **Step 5: Re-run local non-Cargo verification**
+- [x] **Step 5: Re-run local non-Cargo verification**
 
 Run:
 
@@ -214,7 +227,7 @@ python3 ci/check_neutron_stage1.py --fast-contracts
 
 Expected: full Python/CLI/shell fast contracts pass and no Cargo command runs.
 
-- [ ] **Step 6: Commit and push GREEN**
+- [x] **Step 6: Commit and push GREEN**
 
 ```bash
 git add core/src/ebpf_ops/projection.rs core/src/ebpf_ops.rs \
@@ -224,7 +237,7 @@ git commit -m "fix: reject ambiguous general group overlap"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 7: Capture exact-head GREEN**
+- [x] **Step 7: Capture exact-head GREEN**
 
 Wait for `fast-contracts`, `neutron-db-contracts`, `rust-behavior`, and
 `rust-build`. All required jobs must pass at the exact implementation commit,
@@ -245,13 +258,13 @@ including warning-denied userspace, eBPF, and static-agent builds.
 - Consumes: exact RED and GREEN commit IDs and Build URLs.
 - Produces: authoritative ACL-063 `fixed` status without field-evidence claim.
 
-- [ ] **Step 1: Record evidence**
+- [x] **Step 1: Record evidence**
 
 Update design status, plan checkboxes, and the REVIEW register with exact RED
 failure and exact implementation-head GREEN evidence. State explicitly that no
 privileged field evidence applies or is claimed.
 
-- [ ] **Step 2: Verify documentation closure**
+- [x] **Step 2: Verify documentation closure**
 
 Run:
 
@@ -275,7 +288,7 @@ git push origin v0.9-neutron-agent
 Wait for exact-head hosted CI. Then verify clean worktree and local/remote
 divergence `0 0`.
 
-- [ ] **Step 4: Reassess next work**
+- [x] **Step 4: Reassess next work**
 
 Proceed next to `RISK-SEC-002`, then `RISK-READY-001`. Do not mix either risk
 into ACL-063.

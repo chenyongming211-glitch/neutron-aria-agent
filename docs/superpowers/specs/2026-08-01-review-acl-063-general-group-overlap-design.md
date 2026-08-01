@@ -1,7 +1,9 @@
 # REVIEW-ACL-063 General Group Overlap Design
 
-**Status:** proposed; product direction approved, written implementation boundary
-awaiting review. No RED test, production implementation, or field evidence is
+**Status:** implemented by `9585ed7` with corrected IPv6 regression fixture in
+`1871e55`. Exact implementation-head Build
+[30705819827](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30705819827)
+passed all required hosted lanes. No privileged field evidence applies or is
 claimed.
 
 ## Problem
@@ -203,6 +205,24 @@ private-helper spelling guard, or local Cargo invocation is added.
 - Fast Python/static lanes stay separate from compilation.
 - This invariant is fully testable without a privileged field environment. No
   field PASS is claimed or required to close ACL-063.
+
+The executed evidence is:
+
+- RED `7e94aed` added the final-state and transaction-boundary contracts. Build
+  [30705557669](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30705557669)
+  failed in `rust-behavior` on the intentionally missing public validator and
+  was cancelled after RED capture.
+- GREEN `9585ed7` added the pure transition invariant and three control-plane
+  integrations. Its first Build
+  [30705693526](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30705693526)
+  found that the IPv6 test used two disjoint networks: `2001:db8::/48` does not
+  contain `2001:db8:1::/64`.
+- Test-only commit `1871e55` changed the narrow fixture to the genuinely nested
+  `2001:db8:0:1::/64`. Exact-head Build
+  [30705819827](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30705819827)
+  then passed fast contracts, database contracts, clean installation, all
+  selected Rust behaviors, and warning-denied eBPF/userspace/static-agent
+  builds.
 
 ## Exclusions
 
