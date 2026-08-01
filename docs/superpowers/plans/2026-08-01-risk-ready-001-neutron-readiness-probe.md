@@ -41,6 +41,10 @@ lane inventory, Markdown.
   [30707571086](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30707571086)
   passed both `neutron_readiness_` tests, the selected Rust behavior lane in
   2m56s, and warning-denied eBPF/userspace/static builds in 5m20s.
+- Documentation closure `6ed26f5` / Build
+  [30707853328](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30707853328)
+  passed fast, database, and clean-install contracts; Rust jobs correctly
+  skipped for the docs-only change.
 - Local non-Cargo verification passed 557 Python tests with 8 skips, 10 CLI
   tests, shell syntax, installer, UDS route-contract, and CI lane checks.
 - Deployment probe wiring, Neutron RPC heartbeat composition, recovery timing,
@@ -207,7 +211,7 @@ source implementation and hosted CI complete; deployment/field wiring deferred
 Do not mark it fixed. Explicitly retain pending Neutron heartbeat composition,
 target-environment probe wiring, recovery timing, and rollback evidence.
 
-- [ ] **Step 4: Run final non-Cargo checks, commit, push, and verify docs CI**
+- [x] **Step 4: Run final non-Cargo checks, commit, push, and verify docs CI**
 
 Require a clean worktree, local/remote divergence `0 0`, remote SHA equality,
 and a successful exact-head docs Build before reporting completion of the
