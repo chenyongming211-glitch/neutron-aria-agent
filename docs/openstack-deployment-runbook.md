@@ -309,7 +309,7 @@ The gate performs the minimum repeatable delivery sequence:
 | --- | --- |
 | neutron-server plugin install | Backs up `neutron.conf`, copies the `neutron_aria` package, enables `aria_acl`, merges policy rules into `/etc/neutron/policy.json`, and restarts `neutron_server`. |
 | DB migration | Runs `aria_acl` upgrade and schema check for the seven stage-two tables. |
-| agent package install | Backs up the current egg, installs the new `neutron_aria` egg, and restarts `neutron_aria_agent` so heartbeat code is loaded. |
+| agent package install | Backs up the current egg and console entrypoint, installs both transactionally, validates imports/entrypoint, and restarts `neutron_aria_agent` so heartbeat code is loaded. |
 | CRUD smoke | Verifies plugin-level DB CRUD and REST CRUD through local neutron-server. |
 | production ACL source smoke | Verifies `aria_acl` read path, `NeutronAclSource`, full-resync snapshot, UDS rollback, and `aria_acl_port_statuses` reportback. |
 | heartbeat smoke | Verifies Neutron agent heartbeat summary fields: generation lag, accepted/applied generation, domain counts, and degraded reasons. |
