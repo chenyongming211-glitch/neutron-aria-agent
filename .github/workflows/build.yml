@@ -88,6 +88,14 @@ jobs:
       - name: Check public Neutron contracts
         run: python3 ci/check_neutron_stage1.py --fast-contracts
 
+  neutron-agent-clean-install:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify clean-container agent package install
+        run: sudo env "PATH=${PATH}" bash ci/test_neutron_agent_clean_install.sh
+
   neutron-db-contracts:
     runs-on: ubuntu-22.04
     steps:
