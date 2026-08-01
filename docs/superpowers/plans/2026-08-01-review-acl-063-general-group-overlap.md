@@ -36,6 +36,10 @@ control-plane transactions, GitHub Actions hosted Rust behavior/build lanes.
 - Exact implementation-head GREEN: Build
   [30705819827](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30705819827),
   all required hosted lanes passed.
+- Documentation closure `418fcb2`: Build
+  [30706125194](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30706125194)
+  passed fast, database, and clean-install contracts; Rust jobs correctly
+  skipped for the docs-only change.
 - Local non-Cargo verification: 557 Python tests passed with 8 skips, 10 CLI
   tests passed, and shell/installer smoke contracts passed.
 - No privileged field evidence applies or is claimed.
@@ -275,7 +279,7 @@ python3 ci/check_neutron_stage1.py --fast-contracts
 
 Expected: all non-Cargo required contracts pass.
 
-- [ ] **Step 3: Commit, push, and verify exact documentation head**
+- [x] **Step 3: Commit, push, and verify documentation closure**
 
 ```bash
 git add docs/superpowers/specs/2026-08-01-review-acl-063-general-group-overlap-design.md \
