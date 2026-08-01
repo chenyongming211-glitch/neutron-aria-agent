@@ -42,7 +42,7 @@ class TrustedGateContractTests(unittest.TestCase):
 
     def test_stage2_static_audit_does_not_duplicate_python_execution(self):
         output = io.StringIO()
-        with mock.patch.object(check_neutron_stage2_acl.subprocess, "check_call") as run:
+        with mock.patch("subprocess.check_call") as run:
             with contextlib.redirect_stdout(output):
                 self.assertEqual(check_neutron_stage2_acl.main(), 0)
         run.assert_not_called()

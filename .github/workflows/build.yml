@@ -81,6 +81,7 @@ jobs:
           python3 ci/check_blocked_terms.py
           python3 ci/check_build_workflow_contract.py
           python3 -m unittest ci.test_ci_lane_contract
+          python3 -m unittest ci.test_ci001_trusted_gates
           python3 -m unittest ci.test_rust_build_required
           python3 -m unittest ci.test_rust_warning_hygiene
           python3 ci/check_rust_warning_hygiene.py
@@ -362,10 +363,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Run complete Stage 1 static audit
+      - name: Validate Stage 1 static and artifact contracts
         run: python3 ci/check_neutron_stage1.py
 
-      - name: Run complete Stage 2 static audit
+      - name: Validate Stage 2 static artifacts and historical evidence
         run: |
           python3 ci/check_neutron_stage2_acl.py
           python3 ci/check_n05_discovery_evidence.py
@@ -377,7 +378,7 @@ jobs:
             --require-hardened
           python3 ci/check_stage2_acceptance_evidence.py
 
-      - name: Run complete Stage 3 static audit
+      - name: Validate Stage 3 static artifacts and historical evidence
         run: |
           python3 ci/check_stage3_readiness.py
           python3 ci/check_stage3_n3_evidence.py

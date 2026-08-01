@@ -195,7 +195,9 @@ def main():
     _check_markers()
     _check_no_stale_pending_text()
     _check_no_partial_guest_probe_dirs()
-    print("stage-two acceptance evidence accepted")
+    print("stage-two historical field evidence contract passed")
+    print("evidence_class=historical_field_evidence")
+    print("head_bound=false")
     print("checked_files=%d" % len(FILES))
 
 

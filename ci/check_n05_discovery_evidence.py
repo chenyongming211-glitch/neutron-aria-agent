@@ -179,7 +179,9 @@ def check_evidence_dirs(paths, min_hosts):
             "ERROR: no evidence host has both compute ports and OVS iface-id data"
         )
 
-    print("G4 N0.5 discovery evidence accepted")
+    print("G4 N0.5 historical field evidence contract passed")
+    print("evidence_class=historical_field_evidence")
+    print("head_bound=false")
     print("hosts=%d" % len(paths))
     print("hosts_with_compute_iface_id=%s" % ",".join(hosts_with_compute_iface_id))
     print("unsupported=%d" % len(unsupported))

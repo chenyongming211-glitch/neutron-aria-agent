@@ -104,6 +104,7 @@ def verify_workflow_contract(source: str) -> None:
 
     required_commands = (
         "python3 -m unittest ci.test_ci_lane_contract",
+        "python3 -m unittest ci.test_ci001_trusted_gates",
         "python3 -m unittest ci.test_rust_build_required",
         "python3 -m unittest ci.test_rust_warning_hygiene",
         "python3 ci/rust_build_required.py",

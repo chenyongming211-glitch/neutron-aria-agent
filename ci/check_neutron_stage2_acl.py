@@ -2,162 +2,18 @@
 from __future__ import print_function
 
 import os
-import subprocess
-import sys
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-
-PYTHONPATH = os.path.join(ROOT, "openstack", "neutron_aria")
-
-STAGE2_TESTS = [
-    "neutron_aria.tests.unit.test_aria_acl_plugin",
-    "neutron_aria.tests.unit.test_acl_source",
-    "neutron_aria.tests.unit.test_effective_acl",
-    "neutron_aria.tests.unit.test_event_loop",
-    "neutron_aria.tests.unit.test_main",
-    "neutron_aria.tests.unit.test_status_reporter",
-]
-
-BOUNDARY_PATHS = [
-    os.path.join("openstack", "neutron_aria", "neutron_aria", "agent", "acl_source.py"),
-    os.path.join("openstack", "neutron_aria", "neutron_aria", "agent", "neutron_client.py"),
-    os.path.join("openstack", "neutron_aria", "neutron_aria", "services", "aria_acl", "plugin.py"),
-    os.path.join("openstack", "neutron_aria", "neutron_aria", "db", "aria_acl", "api.py"),
-    os.path.join("openstack", "neutron_aria", "neutron_aria", "extensions", "aria_acl.py"),
-    os.path.join("openstack", "neutron_aria", "neutron_aria", "policies", "aria_acl.py"),
-]
-
 
 def _read(path):
     with open(os.path.join(ROOT, path), "r", encoding="utf-8") as handle:
         return handle.read()
 
 
-def run_stage2_tests():
-    env = os.environ.copy()
-    env["PYTHONPATH"] = PYTHONPATH + (
-        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
-    )
-    cmd = [sys.executable, "-m", "unittest"] + STAGE2_TESTS
-    print("==> %s" % " ".join(cmd))
-    subprocess.check_call(cmd, cwd=ROOT, env=env)
-
-
-def check_acl_source_contract():
-    print("==> checking stage-two ACL source contract")
-    source = _read(os.path.join(
-        "openstack", "neutron_aria", "neutron_aria", "agent", "acl_source.py"
-    ))
-    required = [
-        "get_aria_acl_effective_payload",
-        "list_aria_acl_policies",
-        "list_aria_acl_rules",
-        "list_aria_acl_address_sets",
-        "list_aria_acl_bindings",
-        "EffectiveAclIndex.from_payload",
-        "build_aria_acl_client_from_env",
-        "ACL_PAYLOAD_COLLECTIONS",
-        "_validated_payload",
-        "_validate_collection",
-        "missing collection",
-        "neutron acl source failed",
-    ]
-    for term in required:
-        if term not in source:
-            raise SystemExit("ERROR: NeutronAclSource missing %s" % term)
-
-    neutron_client = _read(os.path.join(
-        "openstack", "neutron_aria", "neutron_aria", "agent", "neutron_client.py"
-    ))
-    for term in (
-        "class AriaAclRestClient",
-        "/aria-acl-policies",
-        "/aria-acl-rules",
-        "/aria-acl-address-sets",
-        "/aria-acl-bindings",
-        "/aria-acl-port-statuses",
-        "list_aria_acl_port_statuses",
-        "report_aria_acl_port_status",
-        "_has_next_link",
-        "marker",
-        "missing collection",
-        "repeated pagination marker",
-        "pagination params",
-    ):
-        if term not in neutron_client:
-            raise SystemExit("ERROR: aria_acl REST client missing %s" % term)
-
-
-def check_no_forbidden_production_inputs():
-    print("==> checking stage-two ACL production-input boundaries")
-    forbidden = [
-        "security_group",
-        "security-groups",
-        "remote_group",
-        "allowed_address_pair",
-        "port_security",
-        "tag_mapping",
-        "aria:acl",
-        "aria_qos",
-        "aria_mirror",
-    ]
-    for path in BOUNDARY_PATHS:
-        contents = _read(path).lower()
-        for term in forbidden:
-            if term in contents:
-                raise SystemExit(
-                    "ERROR: forbidden production ACL input %r in %s" % (term, path)
-                )
-
-
-def check_acl_priority_guard():
-    print("==> checking stage-two ACL priority guard")
-    effective_source = _read(os.path.join(
-        "openstack", "neutron_aria", "neutron_aria", "agent", "effective_acl.py"
-    ))
-    effective_tests = _read(os.path.join(
-        "openstack", "neutron_aria", "neutron_aria", "tests", "unit",
-        "test_effective_acl.py",
-    ))
-    required_source_terms = (
-        "MAX_ACL_RULES_PER_POLICY = 1000",
-        "MAX_ACL_SELECTOR_MEMBERS = 2048",
-        "def _strict_ipv4_cidr(",
-        "def _canonical_ipv4_cidrs(",
-        "def _selector_relation(",
-        "def _acl_overlap_reason(",
-        "def _compile_rules_uncached(",
-        "acl_rule_limit_exceeded:",
-        "acl_selector_member_limit_exceeded:",
-        "unsupported_acl_cidr_overlap:",
-        "unsupported_acl_priority_overlap:",
-        "invalid_acl_priority:",
-        "duplicate_acl_priority:",
-    )
-    required_test_terms = (
-        "test_cidr_whitespace_is_canonicalized_in_snapshot",
-        "test_rule_runtime_limit_accepts_1000_and_bypasses_1001",
-        "test_selector_runtime_limit_accepts_2048_and_bypasses_2049",
-        "test_policy_compile_cache_reuses_ready_result",
-        "test_nested_cidrs_degrade_with_stable_overlap_reason",
-        "test_canonical_equivalent_cidrs_are_one_safe_selector",
-        "test_specificity_port_behavior_conflict_degrades",
-    )
-    for term in required_source_terms:
-        if term not in effective_source:
-            raise SystemExit("ERROR: ACL priority source guard missing %s" % term)
-    for term in required_test_terms:
-        if term not in effective_tests:
-            raise SystemExit("ERROR: ACL priority test guard missing %s" % term)
-
-
 def check_plugin_entrypoint():
     print("==> checking aria_acl service plugin entry point")
     setup_py = _read(os.path.join("openstack", "neutron_aria", "setup.py"))
-    plugin = _read(os.path.join(
-        "openstack", "neutron_aria", "neutron_aria", "services", "aria_acl", "plugin.py"
-    ))
     if "neutron.service_plugins" not in setup_py:
         raise SystemExit("ERROR: missing neutron.service_plugins entry point group")
     if "aria_acl=neutron_aria.services.aria_acl.plugin:AriaAclPlugin" not in setup_py:
@@ -166,84 +22,6 @@ def check_plugin_entrypoint():
         raise SystemExit("ERROR: missing neutron.api_extensions entry point group")
     if "aria_acl=neutron_aria.extensions.aria_acl:Aria_acl" not in setup_py:
         raise SystemExit("ERROR: missing aria_acl API extension entry point")
-    main_py = _read(os.path.join(
-        "openstack", "neutron_aria", "neutron_aria", "agent", "main.py"
-    ))
-    for term in (
-        "build_once_status_reporter",
-        'config.acl_source != "neutron"',
-        "status_reporter=build_once_status_reporter",
-        "build_acl_source",
-        "acl_source=build_acl_source",
-    ):
-        if term not in main_py:
-            raise SystemExit("ERROR: neutron --once ACL source path missing %s" % term)
-    event_loop = _read(os.path.join(
-        "openstack", "neutron_aria", "neutron_aria", "agent", "event_loop.py"
-    ))
-    for term in (
-        "acl_source=None",
-        "self.acl_source = acl_source",
-        "def _load_acl_index",
-        "self.acl_source.load_index",
-    ):
-        if term not in event_loop:
-            raise SystemExit("ERROR: neutron ACL source refresh path missing %s" % term)
-    for term in (
-        "get_plugin_type",
-        "get_plugin_description",
-        "supported_extension_aliases",
-        "create_aria_acl_port_status",
-        "update_aria_acl_port_status",
-        "get_aria_acl_port_statuses",
-        "delete_aria_acl_port_status",
-    ):
-        if term not in plugin:
-            raise SystemExit("ERROR: aria_acl service plugin missing %s" % term)
-    if "get_aria_acl_effective_for_port_id" not in plugin:
-        raise SystemExit("ERROR: aria_acl service plugin missing port-id effective ACL read")
-
-    status_reporter = _read(os.path.join(
-        "openstack", "neutron_aria", "neutron_aria", "agent", "status_reporter.py"
-    ))
-    for term in (
-        "class AriaAclPortStatusReporter",
-        "class CompositeStatusReporter",
-        "report_aria_acl_port_status",
-        'acl_source", None) != "neutron"',
-    ):
-        if term not in status_reporter:
-            raise SystemExit("ERROR: aria_acl status reporter missing %s" % term)
-
-
-def check_minimum_db_contract():
-    print("==> checking aria_acl minimum DB contract")
-    db_api = _read(os.path.join(
-        "openstack", "neutron_aria", "neutron_aria", "db", "aria_acl", "api.py"
-    ))
-    required = [
-        "class SqliteAriaAclRepository",
-        "aria_acl_policies",
-        "aria_acl_rules",
-        "aria_acl_address_sets",
-        "aria_acl_bindings",
-        "aria_acl_port_statuses",
-        "update_policy",
-        "update_rule",
-        "update_address_set",
-        "update_binding",
-        "delete_rule",
-        "delete_address_set",
-        "delete_port_status",
-        "_matches_filters",
-        "_stamp_create",
-        "_stamp_update",
-        "_stamp_status",
-        "to_effective_payload",
-    ]
-    for term in required:
-        if term not in db_api:
-            raise SystemExit("ERROR: aria_acl DB contract missing %s" % term)
 
 
 def check_neutron_server_contract_files():
@@ -545,14 +323,15 @@ def check_production_acl_smoke():
 
 
 def main():
-    run_stage2_tests()
-    check_acl_source_contract()
-    check_no_forbidden_production_inputs()
-    check_acl_priority_guard()
+    # Executable behavior is owned by the required full Python discovery in
+    # check_neutron_stage1.py.  This script intentionally checks only artifacts
+    # whose structure is itself the public contract.
     check_plugin_entrypoint()
-    check_minimum_db_contract()
     check_neutron_server_contract_files()
     check_production_acl_smoke()
+    print("stage-two static/artifact contract passed")
+    print("evidence_class=static_artifact")
+    print("runtime_evidence=not_evaluated")
     return 0
 
 

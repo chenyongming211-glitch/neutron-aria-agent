@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unittest
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -87,6 +88,35 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "ariactl", "api_client_path_segment_"],
     ["test", "-p", "aria-agent", "startup_mode"],
 ]
+
+REQUIRED_PYTHON_BEHAVIORS = (
+    "neutron_aria.tests.unit.test_agent_inventory.AgentInventoryTestCase."
+    "test_snapshot_marks_only_regular_ovs_vm_tap_eligible",
+    "neutron_aria.tests.unit.test_config.ConfigTestCase."
+    "test_rejects_unimplemented_qos_and_mirror_managed_domains",
+    "neutron_aria.tests.unit.test_event_loop.EventLoopTestCase."
+    "test_full_resync_builds_and_submits_snapshot",
+    "neutron_aria.tests.unit.test_event_loop.EventLoopTestCase."
+    "test_full_resync_rejects_missing_runtime_acl_status",
+    "neutron_aria.tests.unit.test_event_merge.EventMergerTestCase."
+    "test_aria_acl_domain_update_requests_full_resync",
+    "neutron_aria.tests.unit.test_service.AgentServiceTestCase."
+    "test_heartbeat_only_initialize_reports_degraded_without_resync",
+    "neutron_aria.tests.unit.test_state.SnapshotStateStoreTestCase."
+    "test_pending_generation_survives_restart",
+    "neutron_aria.tests.unit.test_status_reporter.StatusReporterTestCase."
+    "test_global_degraded_rewrites_cached_acl_rows_to_bypass",
+    "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
+    "test_capabilities_validates_required_domains",
+    "neutron_aria.tests.unit.test_uds_client.UdsClientTestCase."
+    "test_capabilities_rejects_missing_domain",
+    "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
+    "test_legacy_port_read_wrapper_batches_projection_and_preserves_fields",
+    "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
+    "test_legacy_port_show_wrapper_projects_before_field_selection",
+    "neutron_aria.tests.unit.test_aria_acl_plugin.AriaAclPluginTestCase."
+    "test_port_projection_failure_does_not_break_core_port_show",
+)
 
 UDS_CONTRACT_PATH = os.path.join("docs", "neutron-uds-contract.json")
 STATUS_FIXTURE_PATH = os.path.join("docs", "neutron-status-contract-v1-scenarios.json")
@@ -222,34 +252,66 @@ def rust_test_filter(command):
     return tail[0]
 
 
-def discovered_rust_test_names():
-    names = set()
-    pattern = re.compile(
-        r"#\s*\[\s*(?:tokio\s*::\s*)?test\s*\]"
-        r"(?:\s*#\s*\[[^\]]+\])*\s*"
-        r"(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)",
-        re.MULTILINE,
+def _iter_test_cases(suite):
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            for nested in _iter_test_cases(item):
+                yield nested
+        else:
+            yield item
+
+
+def discovered_python_test_ids():
+    """Return IDs discovered by the same public test tree used by CI."""
+    top_level = os.path.join(ROOT, "openstack", "neutron_aria")
+    suite = unittest.defaultTestLoader.discover(
+        os.path.join(ROOT, PYTHON_TEST_ROOT),
+        pattern="test_*.py",
+        top_level_dir=top_level,
     )
-    for current, directories, files in os.walk(ROOT):
-        directories[:] = [name for name in directories if name not in {".git", "target", ".downloads"}]
-        for filename in files:
-            if filename.endswith(".rs"):
-                with open(os.path.join(current, filename), encoding="utf-8") as handle:
-                    names.update(pattern.findall(handle.read()))
-    return names
+    return set(test.id() for test in _iter_test_cases(suite))
 
 
-def check_rust_test_discovery():
-    """Ensure every configured Cargo filter selects a real Rust test name."""
-    print("==> checking Rust behavior-test discovery")
-    names = discovered_rust_test_names()
-    missing = []
-    for command in RUST_TESTS:
-        test_filter = rust_test_filter(command)
-        if test_filter and not any(test_filter in name for name in names):
-            missing.append(test_filter)
+def check_required_python_behaviors():
+    print("==> checking required Neutron Python behavior discovery")
+    missing = set(REQUIRED_PYTHON_BEHAVIORS) - discovered_python_test_ids()
     if missing:
-        raise SystemExit("ERROR: Rust behavior filters match no test function: %s" % ", ".join(missing))
+        raise SystemExit(
+            "ERROR: required Python behaviors are absent from full discovery: %s"
+            % ", ".join(sorted(missing))
+        )
+
+
+def _normalized_domain_set(values, label):
+    if not isinstance(values, (list, tuple)):
+        raise SystemExit("ERROR: %s domains must be a list" % label)
+    normalized = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise SystemExit("ERROR: %s contains an invalid domain" % label)
+        domain = value.strip().lower()
+        if domain in normalized:
+            raise SystemExit("ERROR: %s contains duplicate domain %s" % (label, domain))
+        normalized.append(domain)
+    return set(normalized)
+
+
+def validate_python_managed_domain_contract(advertised, python_supported, requested):
+    advertised_set = _normalized_domain_set(advertised, "advertised")
+    python_set = _normalized_domain_set(python_supported, "Python supported")
+    requested_set = _normalized_domain_set(requested, "requested")
+    unsupported_python = python_set - advertised_set
+    if unsupported_python:
+        raise SystemExit(
+            "ERROR: Python managed domains are not advertised: %s"
+            % ", ".join(sorted(unsupported_python))
+        )
+    unsupported_requested = requested_set - python_set
+    if unsupported_requested:
+        raise SystemExit(
+            "ERROR: packaged requested domains are not Python-supported: %s"
+            % ", ".join(sorted(unsupported_requested))
+        )
 
 
 def check_uds_contract_artifact():
@@ -275,6 +337,13 @@ def check_uds_contract_artifact():
             raise SystemExit("ERROR: UDS contract %s expected %r, got %r" % (name, value, contract.get(name)))
     if contract.get("supported_domains") != ["attach", "acl"] or not contract.get("peer_auth_policy"):
         raise SystemExit("ERROR: UDS contract must retain supported attach/acl domains and peer auth policy")
+    from neutron_aria.agent.config import SUPPORTED_MANAGED_DOMAINS, load_config
+    packaged = load_config(os.path.join(ROOT, KOLLA_AGENT_INI_PATH))
+    validate_python_managed_domain_contract(
+        contract.get("supported_domains"),
+        SUPPORTED_MANAGED_DOMAINS,
+        packaged.managed_domains,
+    )
     route_rows = contract.get("routes", [])
     route_index = {
         (item.get("method"), item.get("path")): item
@@ -579,6 +648,7 @@ def run_db_crud_adminrc_test():
 
 
 def run_fast_contracts():
+    check_required_python_behaviors()
     run_python_tests()
     run_neutronclient_extension_tests()
     check_packaged_ini_contract()
@@ -594,19 +664,47 @@ def run_fast_contracts():
     run_db_crud_adminrc_test()
 
 
+def run_rust_behavior_command(command):
+    print("==> %s" % " ".join(command))
+    completed = subprocess.run(
+        command,
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True,
+    )
+    output = completed.stdout or ""
+    sys.stdout.write(output)
+    if completed.returncode:
+        raise subprocess.CalledProcessError(
+            completed.returncode,
+            command,
+            output=output,
+        )
+    executed = sum(
+        int(match)
+        for match in re.findall(r"(?m)^running (\d+) tests?\s*$", output)
+    )
+    if executed == 0:
+        raise SystemExit(
+            "ERROR: Cargo behavior filter executed zero tests: %s"
+            % " ".join(command)
+        )
+    return executed
+
+
 def run_rust_tests(toolchain):
-    check_rust_test_discovery()
     cargo = shutil.which("cargo")
     if not cargo:
         raise SystemExit("ERROR: cargo not found; Rust behavior tests were not executed")
     for cmd in RUST_TESTS:
         prefix = [cargo] + (["+%s" % toolchain] if toolchain else [])
-        run(prefix + cmd)
+        run_rust_behavior_command(prefix + cmd)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run public v0.9 Neutron Stage 1 contracts.")
-    parser.add_argument("--require-rust", action="store_true", help="also run Rust behavior-test discovery")
+    parser.add_argument("--require-rust", action="store_true", help="also run configured Rust behavior tests")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--fast-contracts", action="store_true", help="run public Python, config, UDS, and smoke-entrypoint contracts")
     mode.add_argument("--rust-tests-only", action="store_true", help="run only the configured Rust behavior tests")
@@ -619,7 +717,6 @@ def main():
         run_rust_tests(args.rust_toolchain)
         return 0
     run_fast_contracts()
-    check_rust_test_discovery()
     check_rust_uds_contract_source()
     check_status_v1_contract()
     check_ebpf_abi_contract()

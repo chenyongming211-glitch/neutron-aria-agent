@@ -145,7 +145,9 @@ def check_evidence_dirs(paths, min_hosts, require_hardened):
             elif disposition == "not_applicable":
                 not_applicable.append("%s:%s" % (host, fact))
 
-    print("UDS hardening evidence accepted")
+    print("UDS hardening historical field evidence contract passed")
+    print("evidence_class=historical_field_evidence")
+    print("head_bound=false")
     print("hosts=%d" % len(paths))
     print("require_hardened=%s" % ("true" if require_hardened else "false"))
     print("degraded=%d" % len(degraded))

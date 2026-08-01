@@ -4634,10 +4634,16 @@ fn normalize_managed_domains(domains: &[String]) -> Vec<String> {
         .collect()
 }
 
+const IMPLEMENTED_NEUTRON_DOMAINS: &[&str] = &["attach", "acl"];
+
+fn implemented_neutron_domains() -> &'static [&'static str] {
+    IMPLEMENTED_NEUTRON_DOMAINS
+}
+
 fn unsupported_neutron_managed_domains(domains: &[String]) -> Vec<String> {
     normalize_managed_domains(domains)
         .into_iter()
-        .filter(|domain| !matches!(domain.as_str(), "attach" | "acl"))
+        .filter(|domain| !implemented_neutron_domains().contains(&domain.as_str()))
         .collect()
 }
 

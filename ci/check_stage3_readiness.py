@@ -39,7 +39,6 @@ MARKERS = {
         "check_stage3_n3_evidence.py",
         "check_smoke_python_blocks.py",
         "check_payload_terms.py",
-        "--require-rust --rust-toolchain stable",
         "workflow_dispatch",
         "Check Rust binary release payload policy",
     ],
@@ -116,7 +115,9 @@ def _check_markers():
 def main():
     _check_files()
     _check_markers()
-    print("stage-three readiness plan accepted")
+    print("stage-three static/artifact contract passed")
+    print("evidence_class=static_artifact")
+    print("runtime_evidence=not_evaluated")
     print("checked_files=%d" % len(REQUIRED_FILES))
 
 

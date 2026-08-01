@@ -77,7 +77,8 @@ class CiLaneContractTests(unittest.TestCase):
         )
         stage_one = STAGE_ONE.read_text(encoding="utf-8")
         self.assertIn("for cmd in RUST_TESTS:", stage_one)
-        self.assertIn("run(prefix + cmd)", stage_one)
+        self.assertIn("run_rust_behavior_command(prefix + cmd)", stage_one)
+        self.assertNotIn("discovered_rust_test_names", stage_one)
         self.assertNotRegex(behavior, r"\bcargo\s+\+[^\n]*\bbuild\b")
 
     def test_rust_build_does_not_run_rust_tests(self):

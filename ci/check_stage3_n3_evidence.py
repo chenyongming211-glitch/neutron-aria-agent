@@ -154,7 +154,9 @@ def main(argv=None):
             print("  %s" % error, file=sys.stderr)
         return 1
 
-    print("stage-three N3 evidence accepted")
+    print("stage-three N3 historical field evidence contract passed")
+    print("evidence_class=historical_field_evidence")
+    print("head_bound=false")
     print("checked_gates=%d" % len(REQUIRED_GATES))
     for disposition in sorted(counts):
         print("%s=%d" % (disposition, counts[disposition]))
