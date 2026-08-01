@@ -78,6 +78,12 @@ RUST_TESTS = [
     ["test", "--locked", "-p", "aria-core", "map_delete_"],
     ["test", "--locked", "-p", "aria-core", "quarantined_"],
     ["test", "--locked", "-p", "aria-core", "confirmed_bitmap_cleanup_"],
+    ["test", "--locked", "-p", "aria-core", "local_projection_recovery_"],
+    ["test", "--locked", "-p", "aria-agent", "local_projection_"],
+    ["test", "--locked", "-p", "aria-agent", "standalone_qos_both_"],
+    ["test", "--locked", "-p", "aria-agent", "standalone_mirror_both_"],
+    ["test", "--locked", "-p", "aria-agent", "managed_startup_recovery_"],
+    ["test", "--locked", "-p", "aria-agent", "standalone_start_clears_"],
     ["test", "-p", "aria-agent", "startup_mode"],
 ]
 

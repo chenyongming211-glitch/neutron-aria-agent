@@ -63,6 +63,23 @@ pub struct BitmapCleanupIntent {
     pub ports_normalized: String,
 }
 
+pub const LOCAL_PROJECTION_RECOVERY_VERSION: u8 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalProjectionRecovery {
+    pub version: u8,
+    pub reason: String,
+}
+
+impl LocalProjectionRecovery {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            version: LOCAL_PROJECTION_RECOVERY_VERSION,
+            reason: reason.into(),
+        }
+    }
+}
+
 pub struct AddRuleResult {
     pub bitmap_idx: Option<u32>,
     pub is_new_port_set: bool,
@@ -102,6 +119,8 @@ pub struct FirewallState {
     pub free_bitmap_indices: Vec<u32>,
     #[serde(default)]
     pub pending_bitmap_cleanups: BTreeMap<u32, BitmapCleanupIntent>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub local_projection_recoveries: BTreeMap<String, LocalProjectionRecovery>,
     #[serde(default = "default_max_port_policies")]
     pub max_port_policies: u32,
     /// Stable per-instance namespace id reserved for the future shared data plane.
@@ -144,6 +163,7 @@ impl Default for FirewallState {
             port_sets: HashMap::new(),
             free_bitmap_indices: Vec::new(),
             pending_bitmap_cleanups: BTreeMap::new(),
+            local_projection_recoveries: BTreeMap::new(),
             max_port_policies: default_max_port_policies(),
             tap_id: 0,
             attached_iface: None,
@@ -161,6 +181,28 @@ impl Default for FirewallState {
 }
 
 impl FirewallState {
+    pub fn mark_local_projection_recovery(
+        &mut self,
+        domain: &str,
+        recovery: LocalProjectionRecovery,
+    ) {
+        assert!(!domain.trim().is_empty(), "recovery domain must not be empty");
+        self.local_projection_recoveries
+            .insert(domain.to_string(), recovery);
+    }
+
+    pub fn local_projection_recovery_required(&self, domain: &str) -> bool {
+        self.local_projection_recoveries.contains_key(domain)
+    }
+
+    pub fn clear_local_projection_recovery(&mut self, domain: &str) {
+        self.local_projection_recoveries.remove(domain);
+    }
+
+    pub fn clear_local_projection_recoveries(&mut self) {
+        self.local_projection_recoveries.clear();
+    }
+
     fn has_legacy_bitmap_quarantine(&self, bitmap_idx: u32) -> bool {
         let key = bitmap_quarantine_key(bitmap_idx);
         self.port_sets.get(&key).is_some_and(|port_set| {
