@@ -54,7 +54,7 @@ No public API crate, eBPF crate, map ABI, migration, workflow, or Python checker
 - Consumes: current `ManagedLocalDomainOperation`, `ManagedLocalDomainReceipt`, `managed_local_domain_compensation_operations`, and `execute_managed_local_projection_transaction` behavior.
 - Produces: compile-time RED contracts for `LocalProjectionRecovery`, structured recovery classification, exact both-direction planning, marked-domain admission, managed repair planning, and replay-before-clear startup ordering.
 
-- [ ] **Step 1: Add backward-compatible state RED tests**
+- [x] **Step 1: Add backward-compatible state RED tests**
 
 In `core/src/state.rs`, add tests requiring these exact future interfaces:
 
@@ -94,7 +94,7 @@ fn local_projection_recovery_clear_is_domain_scoped() {
 }
 ```
 
-- [ ] **Step 2: Add transaction failure RED tests**
+- [x] **Step 2: Add transaction failure RED tests**
 
 In the `agent/src/control_plane.rs` test module, extend the existing managed
 local transaction tests with a structured apply failure and assert clean vs
@@ -169,7 +169,7 @@ async fn local_projection_compensation_failure_is_attempt_all_and_recovery_requi
 }
 ```
 
-- [ ] **Step 3: Add both-direction exact-preimage RED tests**
+- [x] **Step 3: Add both-direction exact-preimage RED tests**
 
 Add four behavior tests using the existing operation/receipt types:
 
@@ -231,7 +231,7 @@ The named assertion helpers iterate each operation, call
 `managed_local_domain_compensation_operations`, and compare every concrete
 field against the corresponding rule in `old`.
 
-- [ ] **Step 4: Add durable fence and startup RED tests**
+- [x] **Step 4: Add durable fence and startup RED tests**
 
 Add tests for these pure boundaries:
 
@@ -290,7 +290,7 @@ Keep the existing policy transaction behaviors
 hosted Rust behavior filter. They are the policy regression proof; do not add a
 source-shape assertion for the private ACL implementation.
 
-- [ ] **Step 5: Commit and push RED**
+- [x] **Step 5: Commit and push RED**
 
 Run only non-compiling hygiene:
 
@@ -327,7 +327,7 @@ remain green. Record the exact run before writing production code.
 - Consumes: RED state and transaction tests from Task 1.
 - Produces: `LocalProjectionRecovery`, `FirewallState.local_projection_recoveries`, `ManagedLocalApplyFailure`, `ManagedLocalProjectionFailure::recovery_required`, strict record persistence, and domain-scoped admission.
 
-- [ ] **Step 1: Add the versioned recovery state**
+- [x] **Step 1: Add the versioned recovery state**
 
 Add to `core/src/state.rs`:
 
@@ -383,7 +383,7 @@ pub fn clear_local_projection_recoveries(&mut self) {
 }
 ```
 
-- [ ] **Step 2: Make apply and transaction failure structured**
+- [x] **Step 2: Make apply and transaction failure structured**
 
 Replace string-only current-operation failure with:
 
@@ -428,7 +428,7 @@ Preserve current error kind selection: kernel apply failures remain
 `KernelError`; compact failures remain `PersistenceError` unless recovery is
 required, in which case the caller returns `InstanceNotReady`.
 
-- [ ] **Step 3: Persist and publish recovery records strictly**
+- [x] **Step 3: Persist and publish recovery records strictly**
 
 Add one `InstanceState` method:
 
@@ -462,7 +462,7 @@ Do not lose the RAM fence if compact fails. Add
 call it again under the instance write lock before planning QoS/Mirror writes.
 Update `ensure_local_write_allowed` to provide the same early API result.
 
-- [ ] **Step 4: Run hosted GREEN for this subset only after complete production compilation**
+- [x] **Step 4: Run hosted GREEN for this subset only after complete production compilation**
 
 Do not push an intermediate production commit that cannot compile. Continue
 directly to Tasks 3 and 4, then submit one GREEN implementation commit.
@@ -480,7 +480,7 @@ directly to Tasks 3 and 4, then submit one GREEN implementation commit.
 - Consumes: Task 2 recovery state and current domain planners/receipts.
 - Produces: one concrete locked executor used by all four QoS/Mirror public entry points; no legacy per-direction RAM/WAL loop remains.
 
-- [ ] **Step 1: Add one concrete final-state executor**
+- [x] **Step 1: Add one concrete final-state executor**
 
 Add a method that accepts `LocalWriteDomain`, `old_state`, `final_state`, and
 the already planned `Vec<ManagedLocalProjectionOperation>`. It must create the
@@ -492,7 +492,7 @@ publish final RAM only on success, and call
 Cleanly compensated failures restore the prior projection health and return
 their existing kernel/persistence error without a durable record.
 
-- [ ] **Step 2: Convert QoS add and delete**
+- [x] **Step 2: Convert QoS add and delete**
 
 In `add_qos`, resolve the group and direction plan once for every publication
 mode. Build `domain_operations` with `plan_managed_local_qos_upserts` and
@@ -510,7 +510,7 @@ only after commit. Delete `add_qos_standalone_locked`,
 `delete_qos_standalone_locked`, and `rollback_qos_deletes` after all callers
 are gone.
 
-- [ ] **Step 3: Convert Mirror add and delete**
+- [x] **Step 3: Convert Mirror add and delete**
 
 Resolve target ifindex before any write. Use the current Mirror planners for
 both standalone and managed modes, with an empty general delta in standalone.
@@ -518,7 +518,7 @@ Clear stats only after commit. Delete `add_mirror_standalone_locked`,
 `delete_mirror_standalone_locked`, and `rollback_mirror_deletes` after all
 callers are gone.
 
-- [ ] **Step 4: Preserve policy publication routing**
+- [x] **Step 4: Preserve policy publication routing**
 
 Do not change `add_policy`, `delete_policy`, batch policy planning, or
 `agent/src/control_plane/standalone_acl.rs`. Ensure the RED policy routing test
@@ -538,7 +538,7 @@ continues to pass without production changes.
 - Consumes: durable recovery records and the old desired QoS/Mirror state.
 - Produces: exact managed in-place repair before preexisting-live validation and strict standalone record clearing after replay/registration.
 
-- [ ] **Step 1: Plan exact managed local projection repair**
+- [x] **Step 1: Plan exact managed local projection repair**
 
 Add a pure planner that compares desired QoS/Mirror entries with the captured
 tap-local entries. Its order is:
@@ -551,7 +551,7 @@ Mirror planning covers policy and global maps. Resolve desired target ifindex
 from the durable target name before producing operations. Sort operations by
 domain and key so fault injection and diagnostics are deterministic.
 
-- [ ] **Step 2: Execute repair before preexisting-live preservation**
+- [x] **Step 2: Execute repair before preexisting-live preservation**
 
 In `prepare_managed_registration`, when recovery records are non-empty and
 live pins exist:
@@ -568,7 +568,7 @@ returns registration failure, and preserves the records for retry. Do not call
 `scrub_managed_runtime_state` while links are live because removing
 `TAP_CONFIG_MAP` would create an unguarded interval.
 
-- [ ] **Step 3: Clear standalone records only after successful replay**
+- [x] **Step 3: Clear standalone records only after successful replay**
 
 `system_start` already scrubs and replays the approved durable snapshot before
 `register_system_instance`. Keep that order. In registration, after runtime
@@ -576,7 +576,7 @@ configuration and readiness prerequisites succeed but before the instance is
 published, strictly compact a clone with recovery records cleared. A clear
 failure aborts registration and retains the durable records for retry.
 
-- [ ] **Step 4: Expose stable maintenance state**
+- [x] **Step 4: Expose stable maintenance state**
 
 Extend `InstanceRuntimeHealthSnapshot.maintenance_reason` selection:
 
@@ -608,7 +608,7 @@ reasons in state/logs, not in the stable status reason.
 - Consumes: all RED tests and production work.
 - Produces: one reviewed GREEN implementation commit, exact-head hosted evidence, and an accurate ACL-062 closure.
 
-- [ ] **Step 1: Perform non-compiling local review**
+- [x] **Step 1: Perform non-compiling local review**
 
 Run:
 
@@ -623,7 +623,7 @@ Expected: no whitespace errors; the legacy symbols have no matches; changes
 are limited to the planned Rust and documentation files. Inspect every changed
 caller and compensation edge manually. Do not invoke Cargo.
 
-- [ ] **Step 2: Commit and push GREEN production**
+- [x] **Step 2: Commit and push GREEN production**
 
 ```bash
 git add core/src/state.rs agent/src/control_plane.rs agent/src/system_manager.rs
@@ -633,7 +633,7 @@ git push origin v0.9-neutron-agent
 
 Expected: push starts Build on the exact commit.
 
-- [ ] **Step 3: Require exact-head hosted GREEN**
+- [x] **Step 3: Require exact-head hosted GREEN**
 
 Use GitHub Actions evidence for the pushed commit. Require:
 
@@ -646,7 +646,7 @@ If CI fails, inspect the exact job log, make the smallest in-scope correction,
 commit, push, and require a new exact-head run. Never hide warnings or remove a
 behavior assertion to obtain GREEN.
 
-- [ ] **Step 4: Review scope and code volume**
+- [x] **Step 4: Review scope and code volume**
 
 Run:
 
@@ -660,7 +660,7 @@ Confirm the four old loops and rollback helpers were removed, the net change is
 dominated by Rust behavior/recovery code rather than checkers, and no unrelated
 backlog item entered the diff.
 
-- [ ] **Step 5: Update durable evidence**
+- [x] **Step 5: Update durable evidence**
 
 Update the design status with RED commit/run, GREEN commit/run, and any field
 evidence explicitly `deferred/pending`. Check off this plan with the same IDs.

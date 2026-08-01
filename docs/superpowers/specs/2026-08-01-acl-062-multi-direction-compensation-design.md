@@ -2,12 +2,29 @@
 
 Date: 2026-08-01
 
-Status: written specification approved on 2026-08-01; implementation pending
+Status: fixed in source; exact implementation-head hosted CI complete
 
 Analyzed target:
 `v0.9-neutron-agent@d729f432217e380c3e3a1e65bff2c4454e1ea5f3`
 
 Tracked finding: `REVIEW-ACL-062`
+
+Delivery evidence:
+
+- Approved design: `bba7035`.
+- RED tests: `fb20546`; Build
+  [`30683268154`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30683268154)
+  failed in `rust-behavior` on the intentionally absent recovery model while
+  `fast-contracts`, `neutron-db-contracts`, and the independent warning-denied
+  Rust/eBPF build passed.
+- GREEN implementation: `44743f5`; exact-head Build
+  [`30683913104`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30683913104)
+  passed `fast-contracts`, `neutron-db-contracts`, all selected ACL-062 Rust
+  behaviors, and the warning-denied eBPF/userspace/agent static build.
+- No local Cargo command or privileged field run was performed. The repair is
+  a userspace transaction, durable-state, and startup-replay contract whose
+  closure evidence is fault-injected Rust behavior plus hosted compilation;
+  any later pinned-map field run is supplementary and remains unclaimed.
 
 ## 1. Executive Decision
 
