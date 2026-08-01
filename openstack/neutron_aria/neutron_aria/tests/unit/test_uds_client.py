@@ -30,9 +30,11 @@ class FakeResponse(object):
 class FakeConnection(object):
     requests = []
     responses = []
+    timeouts = []
 
-    def __init__(self, _socket_path, _timeout):
+    def __init__(self, _socket_path, timeout):
         self.closed = False
+        self.timeouts.append(timeout)
 
     def request(self, method, path, body=None, headers=None):
         self.requests.append({
@@ -58,6 +60,7 @@ class UdsClientTestCase(unittest.TestCase):
     def setUp(self):
         FakeConnection.requests = []
         FakeConnection.responses = []
+        FakeConnection.timeouts = []
         self.client = LocalClient(
             "/tmp/aria-agent.sock",
             timeout=1.0,
@@ -155,19 +158,46 @@ class UdsClientTestCase(unittest.TestCase):
 
         self.assertRaises(LocalApiContractError, self.client.capabilities)
 
-    def test_capabilities_tightens_timeout(self):
+    def test_port_capability_timeout_is_request_local(self):
         client = LocalClient(
             "/tmp/aria-agent.sock",
             timeout=5.0,
             connection_factory=FakeConnection,
         )
-        FakeConnection.responses.append(
-            FakeResponse(200, "OK", self._capabilities(timeout_ms=2500))
+        FakeConnection.responses.extend([
+            FakeResponse(200, "OK", self._capabilities(
+                timeout_ms=2500,
+                supports_port_scoped_snapshot=True,
+            )),
+            FakeResponse(200, "OK", {
+                "generation": 13,
+                "results": [],
+                "active_instances": [],
+            }),
+            FakeResponse(200, "OK", {
+                "generation": 14,
+                "results": [],
+                "active_instances": [],
+            }),
+        ])
+
+        client.put_port_snapshot(
+            "target-port",
+            {
+                "generation": 13,
+                "host": "ostack2",
+                "ports": [{"port_id": "target-port", "ifname": "tap1"}],
+            },
+            required_domains=["acl"],
         )
+        client.put_snapshot({
+            "generation": 14,
+            "host": "ostack2",
+            "ports": [],
+        })
 
-        client.capabilities(required_domains=["acl"])
-
-        self.assertEqual(2.5, client.timeout)
+        self.assertEqual([5.0, 2.5, 5.0], FakeConnection.timeouts)
+        self.assertEqual(5.0, client.timeout)
 
     def test_capabilities_rejects_error_hash_mismatch(self):
         FakeConnection.responses.append(
