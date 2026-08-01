@@ -515,6 +515,15 @@ def run_fragment_tracking_field_driver_self_test():
     run([sys.executable, FRAGMENT_TRACKING_FIELD_DRIVER_PATH, "--self-test"])
 
 
+def run_agent_package_installer_test():
+    bash = shutil.which("bash")
+    if not bash:
+        print("SKIP: bash not found; cannot test agent package rollback")
+        return
+    print("==> checking agent package first-install rollback")
+    run([bash, os.path.join("ci", "test_neutron_agent_package_installer.sh")])
+
+
 def run_fast_contracts():
     run_python_tests()
     run_neutronclient_extension_tests()
@@ -524,6 +533,7 @@ def run_fast_contracts():
     check_public_smoke_entrypoints()
     run_smoke_syntax()
     run_fragment_tracking_field_driver_self_test()
+    run_agent_package_installer_test()
 
 
 def run_rust_tests(toolchain):
