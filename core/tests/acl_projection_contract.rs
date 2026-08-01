@@ -2,11 +2,12 @@ use aria_core::ebpf_ops::{
     build_runtime_group_map_entries, classify_managed_inventory_capture,
     classify_runtime_gate_state, collect_standalone_runtime_group_map_entries,
     compile_managed_group_projection, plan_projection_drift,
-    replay_standalone_state_to_pinned_maps, CanonicalNetwork, CapturedProjection,
-    FragmentRuntimeIdentity, GeneralProjectionDisposition, GeneralProjectionExclusionReason,
-    GroupProjectionMode, ManagedGroupProjection, ManagedReplayRoute, ProjectionDirection,
-    ProjectionDrift, ProjectionEntry, ProjectionMutation, RuntimeGateDisposition,
-    RuntimeNetworkEntry, StandaloneReplayRoute,
+    replay_standalone_state_to_pinned_maps, validate_general_group_overlap_transition,
+    CanonicalNetwork, CapturedProjection, FragmentRuntimeIdentity, GeneralGroupScope,
+    GeneralProjectionDisposition, GeneralProjectionExclusionReason, GroupProjectionMode,
+    ManagedGroupProjection, ManagedReplayRoute, ProjectionDirection, ProjectionDrift,
+    ProjectionEntry, ProjectionMutation, RuntimeGateDisposition, RuntimeNetworkEntry,
+    StandaloneReplayRoute,
 };
 use aria_core::state::{FirewallState, GroupInfo, MirrorRuleInfo, QosRuleInfo, RuleInfo};
 use std::collections::BTreeSet;
@@ -130,6 +131,113 @@ fn has_entry(entries: &[ProjectionEntry], cidr: &str, group_id: u32) -> bool {
     entries
         .iter()
         .any(|entry| entry.network == expected && entry.group_id == group_id)
+}
+
+#[test]
+fn acl_projection_general_overlap_rejects_exact_and_nested_cross_group_membership() {
+    let committed = FirewallState::default();
+    let mut exact = committed.clone();
+    insert_group(&mut exact, "zeta", 2, &["10.0.0.1/24"]);
+    insert_group(&mut exact, "alpha", 1, &["10.0.0.254/24"]);
+
+    let exact_error = validate_general_group_overlap_transition(
+        &committed,
+        &exact,
+        GeneralGroupScope::Standalone,
+    )
+    .expect_err("different groups cannot own one canonical general key");
+    assert_eq!(
+        exact_error,
+        "general_group_overlap:alpha:10.0.0.0/24:zeta:10.0.0.0/24"
+    );
+
+    let mut nested = committed.clone();
+    insert_group(&mut nested, "broad", 10, &["2001:db8::1/48"]);
+    insert_group(&mut nested, "narrow", 20, &["2001:db8:1::7/64"]);
+    assert_eq!(
+        validate_general_group_overlap_transition(
+            &committed,
+            &nested,
+            GeneralGroupScope::Standalone,
+        )
+        .expect_err("nested IPv6 general membership must be rejected"),
+        "general_group_overlap:broad:2001:db8::/48:narrow:2001:db8:1::/64"
+    );
+}
+
+#[test]
+fn acl_projection_general_overlap_accepts_same_group_nesting_and_disjoint_groups() {
+    let committed = FirewallState::default();
+    let mut proposed = committed.clone();
+    insert_group(
+        &mut proposed,
+        "same-owner",
+        1,
+        &["10.0.0.0/8", "10.1.0.0/16"],
+    );
+    insert_group(&mut proposed, "disjoint", 2, &["192.0.2.0/24"]);
+
+    validate_general_group_overlap_transition(
+        &committed,
+        &proposed,
+        GeneralGroupScope::Standalone,
+    )
+    .expect("same membership identity and disjoint groups are representable");
+}
+
+#[test]
+fn acl_projection_general_overlap_preserves_managed_acl_only_isolation() {
+    let committed = FirewallState::default();
+    let mut proposed = committed.clone();
+    insert_group(&mut proposed, "general", 1, &["10.0.0.0/8"]);
+    insert_group(&mut proposed, "acl-only", 2, &["10.1.0.0/16"]);
+    proposed.rules.push(acl_rule(2, 0));
+
+    validate_general_group_overlap_transition(
+        &committed,
+        &proposed,
+        GeneralGroupScope::Managed,
+    )
+    .expect("ACL-only selectors remain isolated from the general identity");
+
+    proposed.qos_rules.push(qos_reference("acl-only", 2));
+    assert_eq!(
+        validate_general_group_overlap_transition(
+            &committed,
+            &proposed,
+            GeneralGroupScope::Managed,
+        )
+        .expect_err("QoS use promotes the selector into an ambiguous general identity"),
+        "general_group_overlap:acl-only:10.1.0.0/16:general:10.0.0.0/8"
+    );
+}
+
+#[test]
+fn acl_projection_general_overlap_allows_legacy_replay_and_remediation() {
+    let mut committed = FirewallState::default();
+    insert_group(&mut committed, "broad", 1, &["10.0.0.0/8"]);
+    insert_group(&mut committed, "narrow", 2, &["10.1.0.0/16"]);
+
+    let mut unrelated = committed.clone();
+    insert_group(&mut unrelated, "disjoint", 3, &["192.0.2.0/24"]);
+    validate_general_group_overlap_transition(
+        &committed,
+        &unrelated,
+        GeneralGroupScope::Standalone,
+    )
+    .expect("an unchanged legacy conflict must not block an unrelated write");
+
+    let mut remediated = committed.clone();
+    remediated.groups.remove("narrow");
+    validate_general_group_overlap_transition(
+        &committed,
+        &remediated,
+        GeneralGroupScope::Standalone,
+    )
+    .expect("removing a legacy conflict must remain possible");
+
+    compile_managed_group_projection(&committed)
+        .expect("the deterministic compiler must keep replaying legacy overlap");
 }
 
 #[test]

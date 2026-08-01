@@ -12866,6 +12866,65 @@ mod tests {
     }
 
     #[test]
+    fn managed_local_group_projection_rejects_new_general_overlap_before_operations() {
+        let mut committed = FirewallState::default();
+        managed_cross_domain_insert_group(
+            &mut committed,
+            "broad-general",
+            10,
+            &["10.0.0.0/8"],
+        );
+        let mut proposed = committed.clone();
+        managed_cross_domain_insert_group(
+            &mut proposed,
+            "narrow-general",
+            20,
+            &["10.1.0.0/16"],
+        );
+
+        let error = managed_general_state_mutations(&committed, &proposed)
+            .expect_err("new cross-group general overlap must reject before operations");
+
+        assert!(matches!(error, ControlPlaneError::GroupConflict(_)));
+        assert_eq!(error.status_code(), 409);
+        assert!(error
+            .to_string()
+            .contains("general_group_overlap:broad-general:10.0.0.0/8:narrow-general:10.1.0.0/16"));
+        assert_eq!(committed.next_group_id, 11);
+        assert!(!committed.groups.contains_key("narrow-general"));
+    }
+
+    #[test]
+    fn managed_local_group_projection_rejects_qos_promotion_into_overlap() {
+        let mut committed = FirewallState::default();
+        managed_cross_domain_insert_group(
+            &mut committed,
+            "general",
+            10,
+            &["10.0.0.0/8"],
+        );
+        managed_cross_domain_insert_group(
+            &mut committed,
+            "acl-only",
+            20,
+            &["10.1.0.0/16"],
+        );
+        committed.rules.push(managed_cross_domain_acl_rule(20));
+        managed_general_state_mutations(&FirewallState::default(), &committed)
+            .expect("ACL-only overlap must retain ACL-046 isolation");
+
+        let mut promoted = committed.clone();
+        promoted
+            .qos_rules
+            .push(managed_cross_domain_qos_reference("acl-only", 20));
+        let error = managed_general_state_mutations(&committed, &promoted)
+            .expect_err("QoS promotion must not publish ambiguous membership");
+
+        assert!(matches!(error, ControlPlaneError::GroupConflict(_)));
+        assert_eq!(error.status_code(), 409);
+    }
+
+    #[test]
     fn managed_local_group_projection_exact_winner_uses_replaced_preimages() {
         let mut committed = FirewallState::default();
         managed_cross_domain_insert_group(
@@ -13106,10 +13165,12 @@ mod tests {
         let mut back_to_zero = back_to_one.clone();
         back_to_zero.mirror_rules.clear();
 
-        assert_eq!(
-            managed_general_state_mutations(&zero, &one).expect("0 to 1 must compile"),
-            managed_cross_domain_replacements("10.0.0.0/24", 20, 30)
-        );
+        let promotion_error = managed_general_state_mutations(&zero, &one)
+            .expect_err("0 to 1 exact-alias promotion must reject ambiguous membership");
+        assert!(matches!(
+            promotion_error,
+            ControlPlaneError::GroupConflict(_)
+        ));
         assert!(managed_general_state_mutations(&one, &two)
             .expect("1 to 2 must compile")
             .is_empty());
@@ -13192,11 +13253,12 @@ mod tests {
         destination_reference.dst_group_id = 30;
         dual_used.mirror_rules.push(destination_reference);
 
-        assert_eq!(
-            managed_general_state_mutations(&zero, &dual_used)
-                .expect("a destination-only Mirror reference must promote general identity"),
-            managed_cross_domain_replacements("10.0.0.0/24", 20, 30)
-        );
+        let promotion_error = managed_general_state_mutations(&zero, &dual_used)
+            .expect_err("destination-only Mirror promotion must reject an exact alias");
+        assert!(matches!(
+            promotion_error,
+            ControlPlaneError::GroupConflict(_)
+        ));
 
         let mut after_acl_remove = dual_used.clone();
         after_acl_remove.rules.clear();

@@ -1133,6 +1133,38 @@ mod tests {
     }
 
     #[test]
+    fn standalone_acl_publication_referenced_group_overlap_is_item_error() {
+        let mut old = state_with_groups();
+        let src = old.groups["client"].id;
+        let dst = old.groups["server"].id;
+        old.apply_add_rule(src, dst, 6, 1, None, 0).unwrap();
+        let allocator = old.next_group_id;
+
+        let plan = build_standalone_acl_publication_plan(
+            &old,
+            ACL_BANK_PRIMARY,
+            &[StandaloneAclMutation::AddReferencedGroupCidr {
+                group_name: "server".into(),
+                cidr: "10.0.0.0/25".into(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(plan.accepted, 0);
+        assert_eq!(
+            plan.errors,
+            vec!["general_group_overlap:client:10.0.0.0/24:server:10.0.0.0/25"]
+        );
+        assert_eq!(plan.final_state.next_group_id, allocator);
+        assert_eq!(
+            plan.final_state.groups["server"].cidrs,
+            old.groups["server"].cidrs
+        );
+        assert!(plan.general_targets.is_empty());
+        assert!(plan.steps.is_empty());
+    }
+
+    #[test]
     fn standalone_acl_publication_batch_keeps_item_errors_and_switches_once() {
         let old = state_with_groups();
         let plan = build_standalone_acl_publication_plan(

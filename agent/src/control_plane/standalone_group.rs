@@ -594,6 +594,30 @@ mod tests {
     }
 
     #[test]
+    fn standalone_group_transaction_rejects_new_general_overlap_before_targets() {
+        let mut old = state_with_unreferenced_group();
+        old.add_group("other", "192.0.2.0/24").unwrap();
+        let old_allocator = old.next_group_id;
+
+        let error = build_standalone_group_plan(
+            &old,
+            ACL_BANK_PRIMARY,
+            StandaloneGroupMutation::AddCidr {
+                name: "other".into(),
+                cidr: "10.0.0.0/25".into(),
+            },
+        )
+        .expect_err("a nested CIDR cannot acquire a second general group identity");
+
+        assert_eq!(
+            error.to_string(),
+            "general_group_overlap:client:10.0.0.0/24:other:10.0.0.0/25"
+        );
+        assert_eq!(old.next_group_id, old_allocator);
+        assert_eq!(old.groups["other"].cidrs, vec!["192.0.2.0/24"]);
+    }
+
+    #[test]
     fn standalone_group_transaction_duplicate_cidr_is_zero_work_noop() {
         let old = state_with_unreferenced_group();
         let plan = build_standalone_group_plan(
