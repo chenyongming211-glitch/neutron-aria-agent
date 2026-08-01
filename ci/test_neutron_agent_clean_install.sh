@@ -66,8 +66,37 @@ from __future__ import print_function
 from neutron_aria.agent.acl_source import NeutronAclSource
 from neutron_aria.agent.neutron_client import build_aria_acl_client_from_env
 from neutron_aria.agent.uds_client import LocalClient
+from neutron_aria.services.aria_acl.port_projection import install_legacy_port_projection
+
+
+class FakeCorePlugin(object):
+    def get_port(self, context, port_id, fields=None):
+        return {"id": port_id}
+
+    def get_ports(
+        self, context, filters=None, fields=None, sorts=None, limit=None,
+        marker=None, page_reverse=False,
+    ):
+        return [{"id": "port-1"}]
+
+
+class FakeProjectionPlugin(object):
+    def extend_aria_acl_port_dicts(self, context, ports):
+        for port in ports:
+            port["aria_acl_runtime_status"] = "not_requested"
+        return ports
+
+
+core = FakeCorePlugin()
+assert install_legacy_port_projection(
+    FakeProjectionPlugin(),
+    core_plugin=core,
+)
+assert core.get_port(None, "port-1")["aria_acl_runtime_status"] == "not_requested"
+assert core.get_ports(None)[0]["aria_acl_runtime_status"] == "not_requested"
 
 print("clean_agent_imports=ok")
+print("clean_python27_port_projection=ok")
 PY
 docker exec -u neutron "${SERVICE_NAME}" neutron-aria-agent --help >/dev/null
 
