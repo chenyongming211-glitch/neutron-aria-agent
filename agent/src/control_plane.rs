@@ -1984,6 +1984,12 @@ fn managed_general_state_mutations(
     old_state: &FirewallState,
     final_state: &FirewallState,
 ) -> Result<Vec<SharedNetworkMutation>, ControlPlaneError> {
+    aria_core::ebpf_ops::validate_general_group_overlap_transition(
+        old_state,
+        final_state,
+        aria_core::ebpf_ops::GeneralGroupScope::Managed,
+    )
+    .map_err(ControlPlaneError::GroupConflict)?;
     let committed_projection =
         compile_managed_group_projection(old_state).map_err(ControlPlaneError::ValidationError)?;
     let proposed_projection = compile_managed_group_projection(final_state)
@@ -3485,6 +3491,7 @@ pub enum ControlPlaneError {
     GroupNotFound(String),
     PolicyNotFound(String),
     GroupInUse(String),
+    GroupConflict(String),
     ValidationError(String),
     KernelError(String),
     PersistenceError(String),
@@ -3503,6 +3510,7 @@ impl std::fmt::Display for ControlPlaneError {
             Self::GroupNotFound(s) => write!(f, "Group not found: {}", s),
             Self::PolicyNotFound(s) => write!(f, "Policy not found: {}", s),
             Self::GroupInUse(s) => write!(f, "Group in use: {}", s),
+            Self::GroupConflict(s) => write!(f, "{}", s),
             Self::ValidationError(s) => write!(f, "Validation error: {}", s),
             Self::KernelError(s) => write!(f, "Kernel error: {}", s),
             Self::PersistenceError(s) => write!(f, "Persistence error: {}", s),
@@ -3534,7 +3542,9 @@ impl ControlPlaneError {
         match self {
             Self::ValidationError(_) => 400,
             Self::InstanceNotFound(_) | Self::GroupNotFound(_) | Self::PolicyNotFound(_) => 404,
-            Self::GroupInUse(_) | Self::LocalWriteBlocked { .. } => 409,
+            Self::GroupInUse(_)
+            | Self::GroupConflict(_)
+            | Self::LocalWriteBlocked { .. } => 409,
             Self::KernelError(_) => 500,
             Self::PersistenceError(_) | Self::InstanceNotReady(_) => 503,
         }

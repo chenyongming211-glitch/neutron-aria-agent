@@ -53,7 +53,8 @@ pub use policy::{
     parse_ports, validate_policy_ports,
 };
 pub use projection::{
-    compile_managed_group_projection, plan_projection_drift, CapturedProjection,
+    compile_managed_group_projection, plan_projection_drift,
+    validate_general_group_overlap_transition, CapturedProjection, GeneralGroupScope,
     GeneralProjectionCandidate, GeneralProjectionDisposition, GeneralProjectionExclusionReason,
     ManagedGroupProjection, ProjectionDirection, ProjectionDrift, ProjectionEntry,
     ProjectionMutation, ProjectionRepairPlan,

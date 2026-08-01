@@ -313,9 +313,18 @@ pub(super) fn build_standalone_acl_publication_plan(
         let mut item_state = working.clone();
         match apply_mutation(&mut item_state, mutation) {
             Ok(item_targets) => {
-                working = item_state;
-                general_targets.extend(item_targets);
-                accepted += 1;
+                match aria_core::ebpf_ops::validate_general_group_overlap_transition(
+                    &working,
+                    &item_state,
+                    aria_core::ebpf_ops::GeneralGroupScope::Standalone,
+                ) {
+                    Ok(()) => {
+                        working = item_state;
+                        general_targets.extend(item_targets);
+                        accepted += 1;
+                    }
+                    Err(error) => errors.push(error),
+                }
             }
             Err(error) => errors.push(error),
         }
@@ -357,9 +366,18 @@ pub(super) fn build_standalone_acl_batch_publication_plan(
                 let mut item_state = working.clone();
                 match apply_mutation(&mut item_state, &mutation) {
                     Ok(item_targets) => {
-                        working = item_state;
-                        general_targets.extend(item_targets);
-                        accepted += 1;
+                        match aria_core::ebpf_ops::validate_general_group_overlap_transition(
+                            &working,
+                            &item_state,
+                            aria_core::ebpf_ops::GeneralGroupScope::Standalone,
+                        ) {
+                            Ok(()) => {
+                                working = item_state;
+                                general_targets.extend(item_targets);
+                                accepted += 1;
+                            }
+                            Err(error) => indexed_errors.push((request_index, error)),
+                        }
                     }
                     Err(error) => indexed_errors.push((request_index, error)),
                 }

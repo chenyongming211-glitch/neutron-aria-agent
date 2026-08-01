@@ -45,6 +45,19 @@ pub enum GeneralProjectionExclusionReason {
     ExactKeyLost { winner: ProjectionEntry },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneralGroupScope {
+    Standalone,
+    Managed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct GeneralGroupCandidate {
+    stable_name: String,
+    group_id: u32,
+    network: CanonicalNetwork,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CapturedProjection {
     pub general_src: Vec<ProjectionEntry>,
@@ -156,6 +169,73 @@ pub fn compile_managed_group_projection(
         legacy_candidates,
         general_candidates,
     })
+}
+
+pub fn validate_general_group_overlap_transition(
+    committed: &FirewallState,
+    proposed: &FirewallState,
+    scope: GeneralGroupScope,
+) -> Result<(), String> {
+    let committed_candidates = collect_general_group_candidates(committed, scope)?;
+    let proposed_candidates = collect_general_group_candidates(proposed, scope)?;
+    let proposed_ordered: Vec<_> = proposed_candidates.iter().collect();
+
+    for (index, left) in proposed_ordered.iter().enumerate() {
+        for right in proposed_ordered.iter().skip(index + 1) {
+            if left.group_id == right.group_id || !left.network.overlaps(&right.network) {
+                continue;
+            }
+            if committed_candidates.contains(*left) && committed_candidates.contains(*right) {
+                continue;
+            }
+            return Err(format!(
+                "general_group_overlap:{}:{}:{}:{}",
+                left.stable_name, left.network, right.stable_name, right.network
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn collect_general_group_candidates(
+    state: &FirewallState,
+    scope: GeneralGroupScope,
+) -> Result<BTreeSet<GeneralGroupCandidate>, String> {
+    let groups = collect_persisted_groups(state)?;
+    let group_ids: BTreeSet<u32> = match scope {
+        GeneralGroupScope::Standalone => groups.keys().copied().collect(),
+        GeneralGroupScope::Managed => {
+            let (acl_src_ids, acl_dst_ids, explicit_general_ids) =
+                collect_references(state, &groups)?;
+            let acl_ids: BTreeSet<u32> = acl_src_ids.union(&acl_dst_ids).copied().collect();
+            let acl_only_ids: BTreeSet<u32> = acl_ids
+                .difference(&explicit_general_ids)
+                .copied()
+                .collect();
+            groups
+                .keys()
+                .filter(|group_id| !acl_only_ids.contains(group_id))
+                .copied()
+                .collect()
+        }
+    };
+
+    Ok(group_ids
+        .iter()
+        .flat_map(|group_id| {
+            let group = groups
+                .get(group_id)
+                .expect("selected general group must exist");
+            group
+                .networks
+                .iter()
+                .map(|network| GeneralGroupCandidate {
+                    stable_name: group.stable_name.clone(),
+                    group_id: *group_id,
+                    network: *network,
+                })
+        })
+        .collect())
 }
 
 pub fn plan_projection_drift(

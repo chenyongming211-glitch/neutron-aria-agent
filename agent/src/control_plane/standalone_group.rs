@@ -108,7 +108,7 @@ fn build_standalone_group_plan(
     old_state: &FirewallState,
     acl_bank: u8,
     mutation: StandaloneGroupMutation,
-) -> Result<StandaloneGroupPlan, String> {
+) -> Result<StandaloneGroupPlan, ControlPlaneError> {
     let mut final_state = old_state.clone();
     match &mutation {
         StandaloneGroupMutation::AddCidr { name, cidr } => {
@@ -116,7 +116,15 @@ fn build_standalone_group_plan(
                 .groups
                 .get(name)
                 .is_some_and(|group| group.cidrs.iter().any(|existing| existing == cidr));
-            let group_id = final_state.add_group(name, cidr)?;
+            let group_id = final_state
+                .add_group(name, cidr)
+                .map_err(ControlPlaneError::ValidationError)?;
+            aria_core::ebpf_ops::validate_general_group_overlap_transition(
+                old_state,
+                &final_state,
+                aria_core::ebpf_ops::GeneralGroupScope::Standalone,
+            )
+            .map_err(ControlPlaneError::GroupConflict)?;
             let semantic_changed = !duplicate;
             let map_targets = if semantic_changed {
                 standalone_group_targets(acl_bank, cidr, Some(group_id))
@@ -136,7 +144,7 @@ fn build_standalone_group_plan(
             let group = old_state
                 .groups
                 .get(name)
-                .ok_or_else(|| format!("group '{}' not found", name))?
+                .ok_or_else(|| ControlPlaneError::GroupNotFound(name.to_string()))?
                 .clone();
             final_state.groups.remove(name);
             let map_targets = group
@@ -445,8 +453,7 @@ impl ControlPlane {
                 name: name.to_string(),
                 cidr: cidr.to_string(),
             },
-        )
-        .map_err(ControlPlaneError::ValidationError)?;
+        )?;
         execute_standalone_group_transaction(self, instance, state, &plan).await?;
         Ok(plan.group_id)
     }
@@ -506,8 +513,7 @@ impl ControlPlane {
             StandaloneGroupMutation::DeleteGroup {
                 name: name.to_string(),
             },
-        )
-        .map_err(ControlPlaneError::ValidationError)?;
+        )?;
         execute_standalone_group_transaction(self, instance, state, &plan).await?;
         if let Err(error) =
             aria_core::monitoring::clear_group_stats_for_id(state.map_runtime(), plan.group_id)
