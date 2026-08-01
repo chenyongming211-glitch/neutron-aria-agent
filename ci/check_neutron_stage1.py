@@ -533,6 +533,15 @@ def run_transaction_state_smoke_test():
     run([bash, os.path.join("ci", "test_neutron_transaction_state_smoke.sh")])
 
 
+def run_db_crud_adminrc_test():
+    bash = shutil.which("bash")
+    if not bash:
+        print("SKIP: bash not found; cannot test DB CRUD adminrc routing")
+        return
+    print("==> checking DB CRUD adminrc routing")
+    run([bash, os.path.join("ci", "test_neutron_acl_db_crud_adminrc.sh")])
+
+
 def run_fast_contracts():
     run_python_tests()
     run_neutronclient_extension_tests()
@@ -544,6 +553,7 @@ def run_fast_contracts():
     run_fragment_tracking_field_driver_self_test()
     run_agent_package_installer_test()
     run_transaction_state_smoke_test()
+    run_db_crud_adminrc_test()
 
 
 def run_rust_tests(toolchain):
