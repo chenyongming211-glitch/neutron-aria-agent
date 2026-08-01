@@ -65,6 +65,35 @@ def _patterns_include_branch(patterns: list[str], branch: str) -> bool:
 
 
 def verify_workflow_contract(source: str) -> None:
+    workflow_permissions = "\n".join(_mapping_block(source, "permissions", 0))
+    if not re.search(r"^  contents: read$", workflow_permissions, re.MULTILINE):
+        raise AssertionError("Build workflow must default GITHUB_TOKEN contents to read")
+
+    if source.count("contents: write") != 1:
+        raise AssertionError(
+            "Build workflow must grant contents: write to exactly one release job"
+        )
+
+    release = "\n".join(_mapping_block(source, "release", 2))
+    required_release_contracts = (
+        "needs: rust-build",
+        "github.event_name == 'push'",
+        "startsWith(github.ref, 'refs/tags/v')",
+        "contents: write",
+        "Create GitHub Release",
+    )
+    for contract in required_release_contracts:
+        if contract not in release:
+            raise AssertionError(
+                "Build release job must contain %r" % contract
+            )
+
+    rust_build = "\n".join(_mapping_block(source, "rust-build", 2))
+    if "Create GitHub Release" in rust_build:
+        raise AssertionError(
+            "Rust build job must not hold the GitHub Release publication step"
+        )
+
     pull_request = _mapping_block(source, "pull_request", 2)
     branches = _sequence(pull_request, "branches", 4)
     if not _patterns_include_branch(branches, MAINTAINED_BRANCH):
