@@ -17,6 +17,21 @@
 - Do not claim privileged field evidence; this configuration boundary requires none.
 - Preserve the packaged `127.0.0.1:8080` listener and make the unsafe override default to `false`.
 
+## Execution Evidence
+
+- RED `4316b62`: Build
+  [30706588907](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30706588907)
+  failed on the intentionally missing field and validation method after all
+  non-Rust contracts passed.
+- GREEN `ca5cb88`: exact-head Build
+  [30706732514](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30706732514)
+  passed all required lanes and executed all five `management_listener_`
+  tests.
+- Local non-Cargo verification passed 557 Python tests with 8 skips, 10 CLI
+  tests, shell syntax, installer, and public contract checks.
+- The TCP API remains unauthenticated. No privileged field evidence applies or
+  is claimed.
+
 ---
 
 ### Task 1: Establish the RED management-listener contract
@@ -29,7 +44,7 @@
 - Consumes: existing private `Config` TOML boundary.
 - Produces: `Config::management_listen_addr() -> Result<SocketAddr, String>`, `Config.allow_unauthenticated_non_loopback`, and hosted filter `management_listener_` as intentionally missing RED contracts.
 
-- [ ] **Step 1: Add the configuration behavior tests**
+- [x] **Step 1: Add the configuration behavior tests**
 
 Add these tests to `agent/src/main.rs`:
 
@@ -112,7 +127,7 @@ fn management_listener_explicit_override_allows_only_valid_non_loopback_socket()
 }
 ```
 
-- [ ] **Step 2: Add the hosted Cargo behavior filter**
+- [x] **Step 2: Add the hosted Cargo behavior filter**
 
 Add exactly one entry to `ci/check_neutron_stage1.py::RUST_TESTS`:
 
@@ -122,7 +137,7 @@ Add exactly one entry to `ci/check_neutron_stage1.py::RUST_TESTS`:
 
 The existing zero-test guard must remain authoritative.
 
-- [ ] **Step 3: Run local non-Cargo verification**
+- [x] **Step 3: Run local non-Cargo verification**
 
 Run:
 
@@ -134,7 +149,7 @@ python3 ci/check_neutron_stage1.py --fast-contracts
 
 Expected: all Python/CLI/shell contracts pass. No Cargo command runs locally.
 
-- [ ] **Step 4: Commit and push RED**
+- [x] **Step 4: Commit and push RED**
 
 ```bash
 git add agent/src/main.rs ci/check_neutron_stage1.py
@@ -142,7 +157,7 @@ git commit -m "test: expose unsafe management API binding"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 5: Capture exact hosted RED**
+- [x] **Step 5: Capture exact hosted RED**
 
 Wait for the exact-head Build. Expected: `rust-behavior` fails because
 `allow_unauthenticated_non_loopback` and `management_listen_addr()` do not yet
@@ -160,7 +175,7 @@ remaining expensive jobs after the intended RED is captured.
 - Consumes: Task 1 tests and `std::net::SocketAddr`.
 - Produces: `Config::management_listen_addr() -> Result<SocketAddr, String>` and a validated `SocketAddr` passed directly to Tokio bind.
 
-- [ ] **Step 1: Add the configuration field and default**
+- [x] **Step 1: Add the configuration field and default**
 
 Import `SocketAddr` and add the field/default:
 
@@ -175,7 +190,7 @@ allow_unauthenticated_non_loopback: bool,
 allow_unauthenticated_non_loopback: false,
 ```
 
-- [ ] **Step 2: Implement the pure address validation**
+- [x] **Step 2: Implement the pure address validation**
 
 Add this method inside `impl Config`:
 
@@ -199,7 +214,7 @@ fn management_listen_addr(&self) -> Result<SocketAddr, String> {
 }
 ```
 
-- [ ] **Step 3: Validate before runtime initialization**
+- [x] **Step 3: Validate before runtime initialization**
 
 Immediately after fragment-tracking validation and before `init_tracing`, add:
 
@@ -227,7 +242,7 @@ if !management_listen_addr.ip().is_loopback() {
 
 Include the boolean and validated address in the existing startup `info!` event.
 
-- [ ] **Step 4: Bind only the validated socket**
+- [x] **Step 4: Bind only the validated socket**
 
 Replace the string-based bind boundary with:
 
@@ -244,7 +259,7 @@ let listener = match tokio::net::TcpListener::bind(listen_addr).await {
 
 Do not resolve or bind the original string again.
 
-- [ ] **Step 5: Re-run local non-Cargo verification**
+- [x] **Step 5: Re-run local non-Cargo verification**
 
 Run the same commands from Task 1 Step 3. Expected: all non-Cargo contracts
 pass; no local Rust compilation is attempted.
@@ -262,7 +277,7 @@ pass; no local Rust compilation is attempted.
 - Consumes: Task 2 configuration field.
 - Produces: explicit safe defaults and operator documentation for the unsafe override.
 
-- [ ] **Step 1: Add explicit safe packaged defaults**
+- [x] **Step 1: Add explicit safe packaged defaults**
 
 Immediately after every maintained `listen_addr = "127.0.0.1:8080"`, add:
 
@@ -273,7 +288,7 @@ allow_unauthenticated_non_loopback = false
 Do this in `install.sh`, the Kolla configuration, and the current user-manual
 configuration example. Do not rewrite historical plan snippets.
 
-- [ ] **Step 2: Document the exact operator contract**
+- [x] **Step 2: Document the exact operator contract**
 
 Extend the `listen_addr` section in `docs/user-manual.md` to state:
 
@@ -285,7 +300,7 @@ Extend the `listen_addr` section in `docs/user-manual.md` to state:
   - 该开关不会为 HTTP API 增加认证或加密
 ```
 
-- [ ] **Step 3: Verify shell/config contracts locally**
+- [x] **Step 3: Verify shell/config contracts locally**
 
 Run:
 
@@ -297,7 +312,7 @@ python3 ci/check_neutron_stage1.py --fast-contracts
 
 Expected: installer and maintained configuration contracts pass.
 
-- [ ] **Step 4: Commit and push GREEN**
+- [x] **Step 4: Commit and push GREEN**
 
 ```bash
 git add agent/src/main.rs ci/check_neutron_stage1.py install.sh \
@@ -306,7 +321,7 @@ git commit -m "fix: guard unauthenticated management listener"
 git push origin v0.9-neutron-agent
 ```
 
-- [ ] **Step 5: Capture exact implementation-head GREEN**
+- [x] **Step 5: Capture exact implementation-head GREEN**
 
 Wait for `fast-contracts`, `neutron-db-contracts`, `neutron-agent-clean-install`,
 `rust-behavior`, and `rust-build`. Confirm the `management_listener_` filter
@@ -325,7 +340,7 @@ executes the new tests and all warning-denied userspace/eBPF/static builds pass.
 - Consumes: exact RED/GREEN commit IDs and Build URLs.
 - Produces: an authoritative `RISK-SEC-002` closure without an authentication or field-evidence claim.
 
-- [ ] **Step 1: Record exact execution evidence**
+- [x] **Step 1: Record exact execution evidence**
 
 Update the design status and this plan with:
 
@@ -334,13 +349,13 @@ Update the design status and this plan with:
 - explicit statement that TCP authentication remains absent;
 - explicit statement that no privileged field evidence applies or is claimed.
 
-- [ ] **Step 2: Update the risk register**
+- [x] **Step 2: Update the risk register**
 
 Mark `RISK-SEC-002` fixed only if the exact implementation-head Build is green.
 Describe the loopback default, literal-IP requirement, explicit unsafe override,
 startup warning, direct typed bind, and remaining lack of HTTP authentication.
 
-- [ ] **Step 3: Verify and commit documentation closure**
+- [x] **Step 3: Verify and commit documentation closure**
 
 Run:
 
@@ -367,6 +382,6 @@ git rev-list --left-right --count \
 
 Expected: clean worktree and divergence `0 0`.
 
-- [ ] **Step 5: Reassess next work**
+- [x] **Step 5: Reassess next work**
 
 Proceed to `RISK-READY-001`. Do not mix readiness behavior into this fix.

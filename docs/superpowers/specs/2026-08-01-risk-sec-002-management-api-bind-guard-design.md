@@ -1,7 +1,9 @@
 # RISK-SEC-002 Management API Bind Guard Design
 
-**Status:** product direction approved on 2026-08-01; written design awaiting
-review. No RED test, production implementation, or field evidence is claimed.
+**Status:** implemented by `ca5cb88`. Exact implementation-head Build
+[30706732514](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30706732514)
+passed all required hosted lanes. The TCP API remains unauthenticated; no
+privileged field evidence applies or is claimed.
 
 ## Problem
 
@@ -200,6 +202,28 @@ python3 ci/check_neutron_stage1.py --fast-contracts
 
 GitHub Actions supplies the RED and GREEN Rust behavior evidence and the
 warning-denied userspace/eBPF/static builds.
+
+## Execution Evidence
+
+- RED `4316b62` added the five management-listener behavior tests and the
+  Cargo-discovered hosted filter. Build
+  [30706588907](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30706588907)
+  failed on the intentionally absent
+  `allow_unauthenticated_non_loopback` field and
+  `management_listen_addr()` method; fast, database, and clean-install
+  contracts remained green. Remaining expensive work was cancelled after the
+  RED evidence was captured.
+- GREEN `ca5cb88` added one pure validation method, validated-before-runtime
+  startup wiring, direct typed bind, explicit unsafe warning, and maintained
+  safe configuration/docs. Exact-head Build
+  [30706732514](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30706732514)
+  executed all five `management_listener_` tests and passed fast, database,
+  clean-install, selected Rust behavior, warning-denied eBPF/userspace/static
+  agent, and bundle checks.
+- Local non-Cargo verification passed 557 Python tests with 8 skips, 10 CLI
+  tests, shell syntax, installer, and public contract checks.
+- No HTTP authentication, TLS, or privileged field result is inferred or
+  claimed.
 
 ## Closure Criteria
 
