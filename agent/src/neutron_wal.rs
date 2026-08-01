@@ -1159,6 +1159,14 @@ mod tests {
         }
     }
 
+    fn encoded_snapshot_commit(generation: u64) -> Vec<u8> {
+        let state = neutron_wal_baseline_state(generation)
+            .with_status_hash()
+            .expect("snapshot commit status hash should be computable");
+        serde_json::to_vec(&NeutronWalEntry::SnapshotCommit { state })
+            .expect("snapshot commit should serialize")
+    }
+
     fn append_ready_commit(wal: &NeutronWal, generation: u64) {
         wal.append_snapshot_commit(neutron_wal_baseline_state(generation))
             .expect("ready commit should be durable");
@@ -2144,6 +2152,46 @@ mod tests {
             Some("hash-50".to_string()),
             replay.state.applied_desired_hash
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_replay_continues_after_non_utf8_record() {
+        let root = temp_state_path();
+        fs::create_dir_all(&root).unwrap();
+        let mut raw = encoded_snapshot_commit(52);
+        raw.push(b'\n');
+        raw.extend_from_slice(&[0xff, b'\n']);
+        raw.extend_from_slice(&encoded_snapshot_commit(53));
+        raw.push(b'\n');
+        fs::write(root.join(WAL_FILE), raw).unwrap();
+
+        let replay = NeutronWal::new(&root).replay();
+
+        assert_eq!("replayed_with_errors", replay.status);
+        assert_eq!(1, replay.failures);
+        assert_eq!(2, replay.replayed);
+        assert_eq!(53, replay.state.applied_generation);
+        assert_eq!(Some("hash-53"), replay.state.applied_desired_hash.as_deref());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn neutron_wal_replay_preserves_last_commit_before_truncated_record() {
+        let root = temp_state_path();
+        fs::create_dir_all(&root).unwrap();
+        let mut raw = encoded_snapshot_commit(54);
+        raw.push(b'\n');
+        raw.extend_from_slice(br#"{"type":"snapshot_commit","state":{"accepted_generation":55"#);
+        fs::write(root.join(WAL_FILE), raw).unwrap();
+
+        let replay = NeutronWal::new(&root).replay();
+
+        assert_eq!("replayed_with_errors", replay.status);
+        assert_eq!(1, replay.failures);
+        assert_eq!(1, replay.replayed);
+        assert_eq!(54, replay.state.applied_generation);
+        assert_eq!(Some("hash-54"), replay.state.applied_desired_hash.as_deref());
         let _ = fs::remove_dir_all(root);
     }
 
