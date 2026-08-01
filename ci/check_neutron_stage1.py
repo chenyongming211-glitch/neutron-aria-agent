@@ -524,6 +524,15 @@ def run_agent_package_installer_test():
     run([bash, os.path.join("ci", "test_neutron_agent_package_installer.sh")])
 
 
+def run_transaction_state_smoke_test():
+    bash = shutil.which("bash")
+    if not bash:
+        print("SKIP: bash not found; cannot test transaction smoke coverage")
+        return
+    print("==> checking transaction smoke port coverage")
+    run([bash, os.path.join("ci", "test_neutron_transaction_state_smoke.sh")])
+
+
 def run_fast_contracts():
     run_python_tests()
     run_neutronclient_extension_tests()
@@ -534,6 +543,7 @@ def run_fast_contracts():
     run_smoke_syntax()
     run_fragment_tracking_field_driver_self_test()
     run_agent_package_installer_test()
+    run_transaction_state_smoke_test()
 
 
 def run_rust_tests(toolchain):
