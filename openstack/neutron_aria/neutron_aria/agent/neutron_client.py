@@ -19,14 +19,19 @@ class NeutronPortSource(object):
     smoke scripts independent from the Neutron libraries.
     """
 
-    def __init__(self, neutron_client, host, page_size=None):
+    DEFAULT_MAX_PAGES = 10000
+
+    def __init__(self, neutron_client, host, page_size=None, max_pages=None):
         self.neutron_client = neutron_client
         self.host = host
         self.page_size = page_size
+        self.max_pages = max_pages or self.DEFAULT_MAX_PAGES
 
     def list_ports_for_host(self):
         ports = []
         marker = None
+        seen_markers = set()
+        page_count = 0
 
         while True:
             kwargs = {"binding:host_id": self.host}
@@ -36,14 +41,27 @@ class NeutronPortSource(object):
                 kwargs["marker"] = marker
 
             result = self.neutron_client.list_ports(**kwargs)
+            page_count += 1
             batch, has_next = self._extract_ports_and_next(result)
             ports.extend(batch)
 
             if not has_next or not batch:
                 break
-            marker = batch[-1].get("id")
-            if not marker:
+            next_marker = batch[-1].get("id")
+            if not next_marker:
                 break
+            if next_marker in seen_markers:
+                raise PortSourceUnavailable(
+                    "neutron port response repeated pagination marker %s"
+                    % next_marker
+                )
+            if page_count >= self.max_pages:
+                raise PortSourceUnavailable(
+                    "neutron port pagination exceeded %d pages"
+                    % self.max_pages
+                )
+            seen_markers.add(next_marker)
+            marker = next_marker
 
         return ports
 
