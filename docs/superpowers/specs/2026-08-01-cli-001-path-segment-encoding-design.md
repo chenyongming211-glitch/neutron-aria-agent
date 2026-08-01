@@ -184,6 +184,9 @@ DSL or a static checker.
   [30693519106](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30693519106)
   passed all three request-line behaviors, fast contracts, database contracts,
   and warning-denied eBPF, userspace, and agent builds.
+- Documentation closure: `3752654`; hosted Build
+  [30693729606](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30693729606)
+  passed on the backlog and evidence update.
 - The implementation routed all 37 dynamic request sites through the three
   concrete boundaries, moved the three instance-scoped `top` parameters to
   `RequestBuilder::query`, and left only two safe global numeric query formats.

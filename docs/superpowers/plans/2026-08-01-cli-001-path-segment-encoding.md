@@ -417,7 +417,7 @@ query parameters remain separate and literal percent text is encoded once.
 Mark fixed only after exact-head GREEN. Do not close `REVIEW-DOC-022` or advance
 other API/client items in this batch.
 
-- [ ] **Step 3: Commit, push, and verify the final documentation head**
+- [x] **Step 3: Commit, push, and verify the final documentation head**
 
 Run fast, non-compiling verification, then commit:
 
