@@ -310,16 +310,22 @@ impl NeutronWal {
             }
         };
 
-        for line in BufReader::new(file).lines() {
-            let Ok(line) = line else {
-                scan.failures += 1;
-                break;
-            };
-            let line = line.trim();
-            if line.is_empty() {
+        let mut reader = BufReader::new(file);
+        let mut record = Vec::new();
+        loop {
+            record.clear();
+            match reader.read_until(b'\n', &mut record) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => {
+                    scan.failures += 1;
+                    break;
+                }
+            }
+            if record.iter().all(|byte| byte.is_ascii_whitespace()) {
                 continue;
             }
-            let entry = match serde_json::from_str::<NeutronWalEntry>(line) {
+            let entry = match serde_json::from_slice::<NeutronWalEntry>(&record) {
                 Ok(entry) => entry,
                 Err(_) => {
                     scan.failures += 1;
