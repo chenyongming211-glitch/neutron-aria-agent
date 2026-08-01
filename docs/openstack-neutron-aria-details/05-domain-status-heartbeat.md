@@ -1,221 +1,257 @@
-# 05. Domain Status And Heartbeat Detail Plan
+# 05. Domain Status And Heartbeat Contract
 
-Status: partial implementation; richer Rust/domain DTO remains planned.
+Status: implemented for the v0.9 Status V1 and Neutron heartbeat projection.
+Legacy Neutron port-field projection and product UI wording remain separate work.
 
-## Goal
+## Purpose
 
-Make runtime status explicit enough for Neutron heartbeat, product UI, and
-operations without overloading one string field.
+Runtime status must distinguish agent health, transaction progress, and feature
+readiness. A healthy `neutron-aria-agent` process does not prove that ACL is
+enforcing, and an accepted snapshot does not prove that its generation reached
+the datapath.
 
-## Target Domain Status
+This document describes the implemented Rust-to-Python status contract and its
+bounded projection into Neutron heartbeat and `aria_acl_port_statuses`.
+Generation and WAL semantics remain normative in `07-transaction-wal.md`.
 
-| Field | Values | Meaning |
+## Canonical Sources
+
+| Source | Authority |
+| --- | --- |
+| `api/src/lib.rs` | Public Rust Status V1 DTOs and typed vocabularies. |
+| `agent/src/neutron_api.rs` | Runtime-to-Status V1 projection and fail-closed classification. |
+| `docs/neutron-status-contract-v1-scenarios.json` | Shared Rust-Python scenario and vocabulary source. |
+| `docs/neutron-uds-contract.json` | Negotiated schema range and `status_contract_hash`. |
+| `openstack/neutron_aria/neutron_aria/agent/uds_client.py` | Strict Status V1 decoder and conservative legacy adapter. |
+| `openstack/neutron_aria/neutron_aria/agent/status.py` | Generation lag, domain counts, and degraded-reason aggregation. |
+| `openstack/neutron_aria/neutron_aria/agent/status_reporter.py` | Neutron heartbeat and per-port product projection. |
+
+The shared scenario file is the executable contract. This document explains
+that contract but does not replace it.
+
+## Implemented Status V1 Contract
+
+`GET /api/v1/neutron/status` returns `NeutronStatusV1Response` after successful
+Status V1 negotiation. The response carries three independent kinds of truth:
+
+1. transaction control: `transaction_state`, `required_action`, and optional
+   `recovery_cause`;
+2. aggregate readiness: `overall_readiness`;
+3. concrete runtime evidence: generation identity, WAL diagnostics, managed
+   ports, and per-domain port status.
+
+### Top-Level Control Vocabulary
+
+| Field | Implemented values | Meaning |
 | --- | --- | --- |
-| `domain` | `attach`, `acl`, `qos`, later explicit domains | Feature/runtime domain. |
-| `status` | `ready`, `degraded`, `blocked`, `not_requested`, `detached` | Domain execution result. |
-| `effective_action` | `enforce`, `bypass`, `unchanged`, `cleanup`, `no_op` | Datapath action. |
-| `support_disposition` | `supported`, `unsupported`, `unknown`, `not_applicable` | Capability/support classification. |
-| `reason` | stable error code or null | Why status is not ready. |
-| `details` | optional bounded object | Debug details, not required for normal UI. |
+| `status_schema_version` | `1` | Status response schema, independent from snapshot schema. |
+| `status_contract_hash` | `v0.9-neutron-status-1` | Exact shared vocabulary/scenario identity. |
+| `transaction_state` | `idle`, `pending`, `classified`, `blocked`, `recovery` | Durable transaction state. |
+| `overall_readiness` | `ready`, `degraded`, `blocked`, `unknown` | Aggregate feature-readiness result. |
+| `required_action` | `none`, `poll`, `recover_pending`, `full_resync`, `operator` | The only action Python may take from this response. |
+| `recovery_cause` | null or `inventory_unavailable` | Typed cause for the supported recovery exception. |
+| `last_classified_generation` | unsigned generation | Latest generation with terminal classification. |
 
-## Rules
+The response also contains `generation`, `accepted_generation`,
+`applied_generation`, `pending_generation`, `desired_hash`,
+`applied_desired_hash`, `wal_status`, `wal_replay_failures`, `authority_state`,
+`managed_ports`, `port_statuses`, and `active_instances`.
 
-- `bypass` is never a `DomainStatus`.
-- `alive` is agent health, not feature readiness.
-- ACL ready uses `effective_action=enforce`.
-- ACL missing input uses `status=not_requested,effective_action=bypass`.
-- ACL invalid/apply failed uses `status=degraded,effective_action=bypass`.
-- Missing local attach target uses `status=detached` or
-  `status=degraded,reason=interface_missing`; it must not be reported as ACL
-  ready.
-- WAL/schema/capability uncertainty may use `blocked`.
+`generation` is an alias of `applied_generation` in Status V1. Python rejects a
+response if those values differ. Pending and classified states must carry a
+complete, internally consistent generation/hash identity before Python may poll,
+recover, or finalize them.
 
-## Heartbeat Projection
+### Per-Domain Evidence
 
-`neutron-aria-agent` heartbeat/configurations should include:
+Each Status V1 port row contains `NeutronStatusDomainEvidence` entries:
 
-- `managed_domains`;
-- `managed_ports`;
-- per-domain counts;
-- last submitted generation;
-- accepted/applied generation observed from datapath;
-- degraded reasons summarized by stable error code.
-- P3-1 projection observability: compact projected-port/network index counts
-  and the last RPC decision summary. These fields are debug/operations signals,
-  not proof that port-scoped incremental apply is enabled.
+| Field | Implemented contract |
+| --- | --- |
+| `domain` | Normalized managed-domain name, currently including `attach` and `acl` where requested. |
+| `status` | `ready`, `not_requested`, `degraded`, or `blocked`. |
+| `reason` | Optional stable reason code. |
+| `effective_action` | Optional `enforce`, `bypass`, `unchanged`, `cleanup`, or `no_op`. |
+| `support_disposition` | Required `supported`, `unsupported`, `unknown`, or `not_applicable`. |
 
-Product `aria_acl_port_statuses` should store per-port runtime summary, not user
-desired state.
+`effective_action` is optional because not every domain directly selects a
+datapath action. For example, a ready `attach` domain carries no ACL action.
+`support_disposition` is required in V1 so unsupported and not-applicable input
+cannot be mistaken for feature readiness.
 
-Generation terminology is normative in `07-transaction-wal.md`. This document
-only projects those generation values into heartbeat and product status.
+The legacy `NeutronDomainStatus` DTO still represents internal and legacy wire
+rows with `domain`, `status`, `reason`, and optional `effective_action`. Status
+V1 does not expose that legacy row directly: Rust normalizes it into
+`NeutronStatusDomainEvidence` and adds the typed support disposition.
 
-## Current Gap
+Status V1 has no unbounded `details` object. Adding new required evidence or
+changing enum meaning requires a new status schema/hash and shared scenarios.
 
-Current Rust `NeutronDomainStatus` is still mostly:
+### Domain Rules
+
+- `bypass` is an effective action, never a domain status.
+- ACL ready requires `status=ready`, `effective_action=enforce`, and
+  `support_disposition=supported`.
+- ACL without an enabled binding uses `status=not_requested`,
+  `effective_action=bypass` or `no_op`, and
+  `support_disposition=not_applicable`.
+- A terminal ACL input/application failure may be classified degraded only when
+  the proven action is `bypass` or `unchanged`.
+- Attach ready requires `support_disposition=supported` and no ACL action.
+- Internal legacy states such as `error`, `unsupported`, `detached`, and
+  `recovered` are normalized to the bounded V1 status vocabulary. They are not
+  additional V1 enum values.
+- WAL corruption, incomplete identity, unknown enum values, or contradictory
+  port/domain evidence becomes `blocked/operator`; it never becomes ready.
+- `alive` remains Neutron agent process/control health, not domain readiness.
+
+## Rust-Python Compatibility Boundary
+
+Capabilities advertise `status_schema_version_min`,
+`status_schema_version_max`, and `status_contract_hash`. Python selects one of
+two explicit adapters:
+
+- Status V1 requires the exact schema/hash and all required typed fields. It
+  rejects unknown control triples, enum values, incomplete generations, future
+  port generations, duplicate identities, and managed-domain mismatches.
+- Legacy V0 is accepted only when V1 metadata is absent. Python derives a
+  conservative transaction/readiness/action triple from the legacy authority
+  and generation identity. Ambiguous legacy state becomes `blocked/operator`.
+
+A response cannot mix legacy and V1 metadata, and an unknown V1 contract is not
+downgraded to legacy. This prevents a rolling-upgrade mismatch from being
+interpreted as ready.
+
+## Projection Flow
 
 ```text
-domain/status/reason
+Rust runtime/WAL state
+  -> Status V1 typed control and per-domain evidence
+  -> Python strict decoder or conservative legacy adapter
+  -> snapshot decision and durable classified/feature-ready history
+  -> bounded Neutron heartbeat summaries
+  -> ACL-only per-port rows in aria_acl_port_statuses
 ```
 
-The richer fields are target contract fields and should be introduced with
-backward-compatible decoding/defaults.
+Rust classifies the response after snapshot, port-scoped apply, delete, startup,
+and recovery paths. Python uses the normalized control fields to decide whether
+to finalize, poll, recover, request a full resync, or require an operator.
+Heartbeat reporting is downstream visibility; it does not authorize a state
+transition.
 
-## Implementation Design Package
+## Implemented Heartbeat Projection
 
-This package is detailed to file/field/projection/test level. Do not expand to
-function-call level until the status/heartbeat PR is opened.
-
-### Target Files
-
-| File | Role |
-| --- | --- |
-| `api/src/lib.rs` | Rust DTOs for domain status, generation, effective action, support disposition. |
-| `agent/src/neutron_api.rs` | UDS status route response construction. |
-| `agent/src/control_plane.rs` and `core/src/state.rs` | Current Rust control-plane/runtime state paths related to datapath state. |
-| `openstack/neutron_aria/neutron_aria/agent/uds_client.py` | Python decoding with backward-compatible defaults. |
-| `openstack/neutron_aria/neutron_aria/agent/status.py` | Agent-side generation lag, degraded summary, and heartbeat state. |
-| `openstack/neutron_aria/neutron_aria/agent/event_loop.py` | Heartbeat/configurations update cadence and resync status projection. |
-| `openstack/neutron_aria/neutron_aria/db/aria_acl/api.py` and `services/aria_acl/` | Product `aria_acl_port_status` persistence and API projection after plugin exists. |
-| `openstack/neutron_aria/neutron_aria/tests/unit/` | Unit tests for decoding, projection, and degraded summaries. |
-
-### 2026-06-29 MVP Implementation Evidence
-
-Evidence path:
-`docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md`.
-
-Implemented for stage-two ACL MVP:
-
-- Python heartbeat configurations now include `last_submitted_generation`,
-  `accepted_generation`, `applied_generation`, `generation_lag`,
-  `domain_counts`, and `degraded_reasons`.
-- `aria_acl_port_statuses` read APIs project `last_reported_at`, `stale`, and
-  `runtime_status` without adding DB columns.
-- `neutron-aria-agent` writes runtime summaries after reading UDS status;
-  `aria_acl` stores and serves those summaries.
-- Stage-two gate validates the fields through live Neutron on `ostack2` and
-  `ostack3`.
-
-Still planned:
-
-- Rich Rust per-domain DTO fields such as `effective_action` and
-  `support_disposition` at the datapath API boundary.
-- Product UI wording and full port-show effective field integration.
-
-### Status DTO
-
-Minimum target shape:
-
-```json
-{
-  "port_id": "uuid",
-  "generation": 12,
-  "desired_hash": "sha256:...",
-  "domains": [
-    {
-      "domain": "acl",
-      "status": "ready",
-      "effective_action": "enforce",
-      "support_disposition": "supported",
-      "reason": null,
-      "details": {}
-    }
-  ]
-}
-```
-
-`details` must remain bounded and optional. Product UI and heartbeat must not
-depend on unbounded debug payloads.
-
-### Projection Flow
-
-1. Rust classifies per-port/per-domain status after snapshot/delete/recovery.
-2. Rust exposes the current status through `GET /api/v1/neutron/status`.
-3. Python decodes status with backward-compatible defaults for older datapath
-   fields.
-4. Python computes heartbeat summaries: counts, generation lag, and top degraded
-   reasons.
-5. Python reports Neutron agent health separately from domain readiness.
-6. After `aria_acl` exists, Python or the plugin path persists per-port ACL
-   runtime summary for product read APIs.
-
-Runtime status write/read responsibility:
-
-- `neutron-aria-agent` writes runtime summaries after reading UDS status.
-- `aria_acl` plugin/API stores and serves those summaries.
-- Desired ACL state remains owned by policy/rule/binding tables, not status
-  rows.
-
-### Heartbeat Fields
+`AgentRuntimeStatus` and `NeutronStatusReporter` publish these configuration
+fields through Neutron `report_state`:
 
 | Field | Meaning |
 | --- | --- |
-| `alive` | Agent process/control health only. |
-| `managed_domains` | Current authority domains from config/snapshot. |
-| `managed_ports` | Number of ports under Neutron attach authority. |
+| `ready`, `degraded`, `reason`, `last_error` | Agent-level runtime summary, separate from process liveness. |
+| `last_generation` | Latest generation that reached the feature-ready history. |
+| `last_classified_generation` | Latest terminally classified generation, including terminal degradation. |
+| `last_feature_ready_generation_by_domain` | Per-domain feature-ready history. |
 | `last_submitted_generation` | Latest generation Python attempted. |
-| `accepted_generation` | Latest generation datapath accepted/classified. |
-| `applied_generation` | Latest generation datapath reports as applied/classified. |
-| `domain_counts` | Count by domain/status/effective action. |
-| `degraded_reasons` | Bounded stable reason counts. |
-| `projection_index` | Bounded P3-1 debug summary: projected port count, indexed network count, ports with network metadata, and ports with revision metadata. |
-| `last_event_decision_counts` | Bounded count by RPC decision action/reason for the last processed event batch. |
-| `last_event_decisions` | Bounded debug sample of the last processed event decisions. It is not a durable audit log. |
+| `accepted_generation` | Latest generation accepted/classified by the local runtime. |
+| `applied_generation` | Latest generation reported as applied/classified. |
+| `generation_lag` | `max(0, last_submitted_generation - applied_generation)`. |
+| `last_snapshot_ports`, `last_managed_ports` | Snapshot and managed-port counts. |
+| `domain_counts` | Count grouped by domain, status, and effective action. |
+| `degraded_reasons` | Count grouped by each non-ready reason emitted by current port/domain rows. |
+| `projection_index` | Bounded projected-port/network/revision debug counts. |
+| `last_event_decision_counts` | Count by the last event batch's action and reason. |
+| `last_event_decisions` | Bounded sample, not a durable audit log. |
 
-### Compatibility Rules
+Managed-port, port-status, and event-decision samples are capped at three rows
+and carry explicit truncation flags. Hashes, interface internals, and full
+domain evidence are omitted from the compact heartbeat sample.
 
-- Missing `effective_action` defaults to conservative interpretation:
-  `enforce` only if status is clearly ready and domain semantics allow it;
-  otherwise `bypass` or `unknown`.
-- Missing `support_disposition` defaults to `unknown`.
-- Unknown domains are preserved in details but do not become required product
-  gates.
-- Unknown enum values are treated as degraded/unknown, not ready.
+`domain_counts` preserves an explicit `effective_action` when present. For
+legacy rows without one, the compatibility fallback is `ready -> enforce`,
+non-ready control states -> `bypass`, and otherwise `unknown`.
+`support_disposition` remains available in Status V1 evidence but is not copied
+into the compact heartbeat summary.
 
-### Error And Status Semantics
+## Product Port Status Projection
 
-| Condition | Status Projection |
+When `acl_source=neutron`, `AriaAclPortStatusReporter` writes ACL runtime summary
+rows containing only:
+
+```text
+port_id, host, effective_policy_id, binding_id,
+status, reason, effective_action, generation
+```
+
+The reporter extracts the ACL domain, defaults a clearly ready ACL row to
+`effective_action=enforce` for legacy compatibility, and never writes desired
+policy/rule state through the status path. Ready publication writes port rows
+before the ready heartbeat; degraded publication closes heartbeat readiness
+before publishing conservative rows.
+
+Product read APIs derive `last_reported_at`, `stale`, and `runtime_status` from
+these rows. Those read-only projections do not transfer desired-state ownership
+away from policy, rule, binding, and address-set tables.
+
+## Error And Status Semantics
+
+| Condition | Implemented projection |
 | --- | --- |
-| ACL ready | `status=ready,effective_action=enforce,support_disposition=supported`. |
-| ACL not bound | `status=not_requested,effective_action=bypass`. |
-| ACL invalid input | `status=degraded,effective_action=bypass,reason=<stable code>`. |
-| Tap missing for a Neutron-managed local port | `status=detached` or `status=degraded,reason=interface_missing`; no ACL ready. |
-| OVS forwarding interrupted while tap/XDP/map state is healthy | ACL status remains based on attach health; do not mark ACL degraded solely from VM ping failure during OVS restart. |
-| Capability unsupported | `status=degraded` or `blocked`, `support_disposition=unsupported`. |
-| WAL/recovery uncertainty | `status=blocked` or `degraded`, never ready. |
-| Agent cannot reach UDS | Agent alive may be true, domain readiness degraded/unknown. |
+| ACL ready | `classified/ready/none` with ACL `ready/enforce/supported`. |
+| ACL not bound | Terminal classification with ACL `not_requested/bypass/not_applicable`. |
+| ACL invalid or unsupported | Degraded or blocked according to the proven action and support disposition. |
+| Full-resync-required ACL state | `classified/degraded/full_resync`. |
+| Snapshot still applying | `pending/unknown/poll` with complete pending identity. |
+| Supported pending recovery | `blocked/blocked/recover_pending`; inventory-unavailable carries the typed cause. |
+| WAL/identity/contract uncertainty | `blocked/blocked/operator`. |
+| Agent cannot reach UDS | Agent runtime status becomes degraded; cached ACL rows are rewritten to bypass. |
 
-### Test Matrix
+OVS forwarding interruption alone does not redefine ACL domain evidence when
+the attach/TC runtime remains healthy. Connectivity smoke and feature status are
+separate signals.
 
-| Test | Expected Result |
-| --- | --- |
-| Ready ACL status from Rust | Heartbeat counts ready/enforce ACL. |
-| ACL invalid input | Heartbeat reports degraded/bypass reason. |
-| Older datapath status without rich fields | Python decodes safely with defaults. |
-| Unknown enum value | Classified as degraded/unknown, not ready. |
-| Generation lag | Heartbeat exposes submitted vs accepted/applied gap. |
-| P3-1 event decision observability | Heartbeat exposes projection index summary and last event decision counts without enabling incremental apply. |
-| UDS unavailable | Agent health and domain readiness are reported separately. |
-| Product port status read | Runtime summary does not mutate desired ACL state. |
+## Verification Evidence
 
-### Anti-Overengineering Guardrails
+- `docs/neutron-status-contract-v1-scenarios.json` defines 14 shared positive,
+  legacy, recovery, and invalid-evidence scenarios.
+- Rust API serialization and runtime projection tests consume the same scenario
+  inventory.
+- Python UDS decoder and event-loop tests consume that inventory and exercise
+  strict V1, conservative legacy, and contract-error behavior.
+- `test_status_reporter.py` verifies generation lag, domain/action counts,
+  degraded reasons, bounded heartbeat samples, and ACL port-status projection.
+- `ci/check_neutron_stage1.py` checks the public enums, shared scenario inventory,
+  Rust producer inventory, and this document's implemented-contract declaration.
+- Stage-two live evidence remains at
+  `docs/evidence/openstack-n05-lite/2026-06-29-stage2-acl/summary.md`.
 
-- Do not expose internal WAL records as required product API fields.
-- Do not build UI-specific wording into the datapath DTO.
-- Do not mark a whole agent unhealthy only because one domain is degraded.
-- Do not invent per-rule runtime status unless a product gate requires it.
-- Do not turn decision observability into a durable event journal.
+## Remaining Work
+
+- `REVIEW-ACL-013` owns the separate legacy Neutron `port-show` extension-field
+  population decision and implementation. Status V1 and
+  `aria-acl-port-status*` APIs are already the explicit runtime-status surfaces.
+- Product UI wording and presentation remain product-layer work; they must use
+  the typed status vocabulary without inventing new datapath states.
+- Adding a domain to the status vocabulary does not advertise that feature as
+  implemented. Capabilities and deployment configuration remain authoritative.
+- A future bounded per-domain debug object would require an explicit versioned
+  contract change; it is not part of Status V1.
 
 ## Acceptance
 
-- Status responses include per-domain status for requested managed domains.
-- ACL degraded with bypass is visible without implying OVS connectivity failure.
-- Heartbeat reports enough information to alert on generation lag and degraded
-  ACL ports.
-- Unknown optional fields are ignored safely.
+- Status V1 responses expose complete typed transaction, readiness, action,
+  support, generation, and WAL evidence.
+- Python rejects incomplete or contradictory V1 state and handles legacy status
+  through a separate conservative adapter.
+- ACL degraded/bypass is visible without implying that the agent process or OVS
+  connectivity is down.
+- Heartbeat exposes generation lag plus aggregated domain/action and
+  degraded-reason counts. Only row samples are explicitly bounded, so the
+  heartbeat does not carry full per-port runtime evidence.
+- Product status writes never mutate desired ACL state.
 
 ## Non-Goals
 
-- Do not build a UI-only status vocabulary.
-- Do not expose internal WAL implementation details as required product fields.
-- Do not mark all domains ready just because snapshot was accepted.
+- Do not expose internal WAL records as public status fields.
+- Do not make heartbeat delivery a transaction commit point.
+- Do not treat an accepted snapshot as feature-ready.
+- Do not build UI-specific wording into Rust or Python status DTOs.
+- Do not add per-rule runtime status without a separately approved product gate.

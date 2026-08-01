@@ -1,7 +1,7 @@
 # OpenStack Neutron Aria Detail Plans
 
-Status: first refinement pass. These files break the large v0.9 design into
-smaller plans. They are design records, not implementation claims.
+Status: maintained detail index. These files include both design records and
+implemented contracts; the status line in each file is authoritative.
 
 Current refinement depth:
 
@@ -29,7 +29,7 @@ or an explicitly approved later phase.
 | `02-aria-acl-plugin.md` | Detail the minimum `aria_acl` Neutron service plugin/API/DB plan. |
 | `03-neutron-acl-source.md` | Detail how `neutron-aria-agent` reads `aria_acl` and builds effective ACL input. |
 | `04-uds-contract-security.md` | Detail UDS contract, body limits, error hash, peer auth, and audit. |
-| `05-domain-status-heartbeat.md` | Detail rich domain status and Neutron heartbeat/status projection. |
+| `05-domain-status-heartbeat.md` | Document the implemented Status V1 contract and its Neutron heartbeat/product-status projections. |
 | `06-deployment-n05-runbook.md` | Detail deployment enablement, N0.5 evidence, smoke, and rollback. |
 | `07-transaction-wal.md` | Detail snapshot apply transaction, WAL intent/commit, replay, timeout, and idempotency. |
 | `08-stage3-acl-production-hardening.md` | Detail Stage-Three ACL Production Hardening, release/CI, persistent UDS rollout, and N3 fault/lifecycle gates. |
