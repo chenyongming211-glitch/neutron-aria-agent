@@ -129,6 +129,82 @@ STATUS_SCENARIOS = (
     "ready-invalid-evidence", "restart-classified-routing",
 )
 STATUS_PRODUCER_SCENARIOS = STATUS_SCENARIOS[:9] + ("restart-classified-routing",)
+PUBLIC_UDS_ROUTES = (
+    ("GET", "/api/v1/neutron/capabilities", "get", "/api/v1/neutron/capabilities"),
+    ("GET", "/api/v1/neutron/status", "get", "/api/v1/neutron/status"),
+    (
+        "POST",
+        "/api/v1/neutron/snapshot/recover-pending",
+        "post",
+        "/api/v1/neutron/snapshot/recover-pending",
+    ),
+    ("PUT", "/api/v1/neutron/snapshot", "put", "/api/v1/neutron/snapshot"),
+    (
+        "PUT",
+        "/api/v1/neutron/ports/{port_id}/snapshot",
+        "put",
+        "/api/v1/neutron/ports/%s/snapshot",
+    ),
+    (
+        "DELETE",
+        "/api/v1/neutron/ports/{port_id}",
+        "delete",
+        "/api/v1/neutron/ports/%s",
+    ),
+)
+RECOVER_PENDING_ROUTE_CONTRACT = {
+    "method": "POST",
+    "path": "/api/v1/neutron/snapshot/recover-pending",
+    "request_schema": {
+        "type": "object",
+        "required": ["expected_pending_generation"],
+        "properties": {
+            "expected_pending_generation": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615,
+            },
+            "expected_desired_hash": {"type": ["string", "null"]},
+            "mode": {
+                "type": ["string", "null"],
+                "enum": ["rollback_to_last_applied", None],
+                "default": "rollback_to_last_applied",
+            },
+        },
+    },
+    "success_schema": {
+        "http_status": 200,
+        "status_values": ["recovered", "already_committed"],
+        "required": [
+            "status",
+            "recovered_generation",
+            "desired_hash",
+            "applied_generation",
+            "applied_desired_hash",
+            "authority_state",
+            "wal_status",
+        ],
+        "nullable": ["desired_hash", "applied_desired_hash"],
+    },
+    "error_schema": {
+        "required": ["error", "details"],
+        "status_by_code": {
+            "unsupported_pending_recovery_mode": 400,
+            "no_applied_snapshot_to_restore": 409,
+            "pending_snapshot_still_active": 409,
+            "no_pending_snapshot": 409,
+            "pending_generation_mismatch": 409,
+            "pending_desired_hash_mismatch": 409,
+            "pending_recovery_commit_failed": 500,
+        },
+    },
+    "compatibility": {
+        "mode_omitted_or_null": "rollback_to_last_applied",
+        "identity_guard": "generation and desired hash must match the pending snapshot",
+        "already_committed": "a newer valid WAL commit refreshes runtime without rollback",
+        "versioning": "contract inventory correction; API and contract versions unchanged",
+    },
+}
 
 
 def read_text(path):
@@ -236,14 +312,36 @@ def check_uds_contract_artifact():
             raise SystemExit("ERROR: UDS contract %s expected %r, got %r" % (name, value, contract.get(name)))
     if contract.get("supported_domains") != ["attach", "acl"] or not contract.get("peer_auth_policy"):
         raise SystemExit("ERROR: UDS contract must retain supported attach/acl domains and peer auth policy")
-    routes = {(item.get("method"), item.get("path")) for item in contract.get("routes", [])}
-    required_routes = {
-        ("GET", "/api/v1/neutron/capabilities"), ("GET", "/api/v1/neutron/status"),
-        ("PUT", "/api/v1/neutron/snapshot"), ("PUT", "/api/v1/neutron/ports/{port_id}/snapshot"),
-        ("DELETE", "/api/v1/neutron/ports/{port_id}"),
+    route_rows = contract.get("routes", [])
+    route_index = {
+        (item.get("method"), item.get("path")): item
+        for item in route_rows
+        if isinstance(item, dict)
     }
-    if not required_routes.issubset(routes):
-        raise SystemExit("ERROR: UDS contract routes are incomplete")
+    expected_routes = {(method, path) for method, path, _verb, _client in PUBLIC_UDS_ROUTES}
+    if len(route_index) != len(route_rows) or set(route_index) != expected_routes:
+        raise SystemExit("ERROR: UDS contract route inventory drifted")
+    recover_key = ("POST", "/api/v1/neutron/snapshot/recover-pending")
+    if route_index[recover_key] != RECOVER_PENDING_ROUTE_CONTRACT:
+        raise SystemExit("ERROR: recover-pending request/response/error contract drifted")
+
+    router = read_text(RUST_NEUTRON_API_PATH)
+    client = read_text(
+        os.path.join("openstack", "neutron_aria", "neutron_aria", "agent", "uds_client.py")
+    )
+    for method, path, rust_verb, client_path in PUBLIC_UDS_ROUTES:
+        rust_route = re.compile(
+            r'\.route\(\s*"%s"\s*,\s*%s\('
+            % (re.escape(path), rust_verb)
+        )
+        python_route = re.compile(
+            r'_request\(\s*"%s"\s*,\s*"%s"'
+            % (method, re.escape(client_path))
+        )
+        if not rust_route.search(router) or not python_route.search(client):
+            raise SystemExit(
+                "ERROR: public UDS route parity drifted for %s %s" % (method, path)
+            )
     errors = {item.get("code"): item for item in contract.get("error_codes", [])}
     for code in ("UDS_SCHEMA_MISMATCH", "UDS_BODY_TOO_LARGE", "generation_hash_conflict", "stale_generation"):
         if errors.get(code, {}).get("phase") != "implemented":
@@ -279,13 +377,6 @@ def check_rust_uds_contract_source():
     if contract.get("supported_domains") != ["attach", "acl"]:
         raise SystemExit("ERROR: public UDS domain schema drifted")
     router = read_text(RUST_NEUTRON_API_PATH)
-    for route in (
-        '"/api/v1/neutron/capabilities"', '"/api/v1/neutron/status"',
-        '"/api/v1/neutron/snapshot/recover-pending"', '"/api/v1/neutron/snapshot"',
-        '"/api/v1/neutron/ports/{port_id}/snapshot"', '"/api/v1/neutron/ports/{port_id}"',
-    ):
-        if route not in router:
-            raise SystemExit("ERROR: public Neutron UDS route is missing: %s" % route)
     for wire_term in (
         "DefaultBodyLimit::max(NEUTRON_UDS_BODY_MAX_BYTES as usize)",
         "UDS_SCHEMA_MISMATCH", "supports_port_scoped_snapshot: bool",
