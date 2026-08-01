@@ -40,7 +40,12 @@ class CiLaneContractTests(unittest.TestCase):
         )
 
     def test_fast_contracts_has_no_cargo_commands(self):
-        self.assertNotRegex(job_block(self.source, "fast-contracts"), r"\bcargo\b")
+        fast_contracts = job_block(self.source, "fast-contracts")
+        self.assertNotRegex(fast_contracts, r"\bcargo\b")
+        self.assertIn(
+            "python3 -m unittest ci.test_ci001_trusted_gates",
+            fast_contracts,
+        )
 
     def test_javascript_actions_use_pinned_node24_releases(self):
         self.assertEqual(self.source.count(CHECKOUT_NODE24), 7)

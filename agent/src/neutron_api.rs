@@ -12718,6 +12718,15 @@ mod tests {
     }
 
     #[test]
+    fn domain_authority_implemented_domains_match_advertised_capabilities() {
+        assert_eq!(
+            implemented_neutron_domains(),
+            aria_api::NEUTRON_SUPPORTED_DOMAINS,
+            "capabilities must advertise exactly the domains implemented by runtime reconcile",
+        );
+    }
+
+    #[test]
     fn managed_projection_attach_repair_unsupported_domains_are_deterministic() {
         let domains = vec![
             "qos".to_string(),
