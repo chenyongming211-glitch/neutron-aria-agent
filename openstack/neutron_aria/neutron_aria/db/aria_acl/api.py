@@ -797,6 +797,7 @@ class NeutronDbAriaAclRepository(object):
             self._replace_members(address_set_id, current.get("members", []))
         return _clone(current)
 
+    @_neutron_write()
     def delete_address_set(self, address_set_id):
         self._reject_address_set_in_use(address_set_id)
         with self._write_transaction():
