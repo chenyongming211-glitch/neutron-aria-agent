@@ -1,4 +1,9 @@
 use aria_api::*;
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+
+fn encode_path_segment(value: &str) -> String {
+    utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
+}
 
 pub struct ApiClient {
     base_url: String,
@@ -18,6 +23,32 @@ impl ApiClient {
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
+    }
+
+    fn instance_url(&self, instance: &str, suffix: &'static str) -> String {
+        debug_assert!(suffix.is_empty() || suffix.starts_with('/'));
+        format!(
+            "{}/api/v1/{}{}",
+            self.base_url,
+            encode_path_segment(instance),
+            suffix
+        )
+    }
+
+    fn group_url(&self, instance: &str, name: &str) -> String {
+        format!(
+            "{}/groups/{}",
+            self.instance_url(instance, ""),
+            encode_path_segment(name)
+        )
+    }
+
+    fn chain_url(&self, name: &str) -> String {
+        format!(
+            "{}/api/v1/chains/{}",
+            self.base_url,
+            encode_path_segment(name)
+        )
     }
 
     // ── Health ──
@@ -72,7 +103,7 @@ impl ApiClient {
     pub async fn list_groups(&self, instance: &str) -> Result<GroupsResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/groups", instance)))
+            .get(self.instance_url(instance, "/groups"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -86,7 +117,7 @@ impl ApiClient {
     ) -> Result<AddGroupResponse, String> {
         let resp = self
             .client
-            .post(self.url(&format!("/api/v1/{}/groups", instance)))
+            .post(self.instance_url(instance, "/groups"))
             .json(req)
             .send()
             .await
@@ -101,7 +132,7 @@ impl ApiClient {
     ) -> Result<MessageResponse, String> {
         let resp = self
             .client
-            .delete(self.url(&format!("/api/v1/{}/groups/{}", instance, name)))
+            .delete(self.group_url(instance, name))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -114,7 +145,7 @@ impl ApiClient {
     ) -> Result<GroupsWithStatsResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/groups/with_stats", instance)))
+            .get(self.instance_url(instance, "/groups/with_stats"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -126,7 +157,7 @@ impl ApiClient {
     pub async fn list_policies(&self, instance: &str) -> Result<PoliciesResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/policies", instance)))
+            .get(self.instance_url(instance, "/policies"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -140,7 +171,7 @@ impl ApiClient {
     ) -> Result<PolicyMutationResponse, String> {
         let resp = self
             .client
-            .post(self.url(&format!("/api/v1/{}/policies", instance)))
+            .post(self.instance_url(instance, "/policies"))
             .json(req)
             .send()
             .await
@@ -155,7 +186,7 @@ impl ApiClient {
     ) -> Result<PolicyMutationResponse, String> {
         let resp = self
             .client
-            .delete(self.url(&format!("/api/v1/{}/policies", instance)))
+            .delete(self.instance_url(instance, "/policies"))
             .json(req)
             .send()
             .await
@@ -170,7 +201,7 @@ impl ApiClient {
     ) -> Result<BatchPoliciesResponse, String> {
         let resp = self
             .client
-            .post(self.url(&format!("/api/v1/{}/policies/batch", instance)))
+            .post(self.instance_url(instance, "/policies/batch"))
             .json(req)
             .send()
             .await
@@ -184,7 +215,7 @@ impl ApiClient {
     ) -> Result<PoliciesWithStatsResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/policies/with_stats", instance)))
+            .get(self.instance_url(instance, "/policies/with_stats"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -196,7 +227,7 @@ impl ApiClient {
     pub async fn list_qos(&self, instance: &str) -> Result<QosListResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/qos", instance)))
+            .get(self.instance_url(instance, "/qos"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -210,7 +241,7 @@ impl ApiClient {
     ) -> Result<MessageResponse, String> {
         let resp = self
             .client
-            .post(self.url(&format!("/api/v1/{}/qos", instance)))
+            .post(self.instance_url(instance, "/qos"))
             .json(req)
             .send()
             .await
@@ -225,7 +256,7 @@ impl ApiClient {
     ) -> Result<MessageResponse, String> {
         let resp = self
             .client
-            .delete(self.url(&format!("/api/v1/{}/qos", instance)))
+            .delete(self.instance_url(instance, "/qos"))
             .json(req)
             .send()
             .await
@@ -239,7 +270,7 @@ impl ApiClient {
     ) -> Result<QosWithStatsResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/qos/with_stats", instance)))
+            .get(self.instance_url(instance, "/qos/with_stats"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -251,7 +282,7 @@ impl ApiClient {
     pub async fn list_mirror(&self, instance: &str) -> Result<MirrorListResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/mirror", instance)))
+            .get(self.instance_url(instance, "/mirror"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -265,7 +296,7 @@ impl ApiClient {
     ) -> Result<MessageResponse, String> {
         let resp = self
             .client
-            .post(self.url(&format!("/api/v1/{}/mirror", instance)))
+            .post(self.instance_url(instance, "/mirror"))
             .json(req)
             .send()
             .await
@@ -280,7 +311,7 @@ impl ApiClient {
     ) -> Result<MessageResponse, String> {
         let resp = self
             .client
-            .delete(self.url(&format!("/api/v1/{}/mirror", instance)))
+            .delete(self.instance_url(instance, "/mirror"))
             .json(req)
             .send()
             .await
@@ -291,7 +322,7 @@ impl ApiClient {
     pub async fn stats_mirror(&self, instance: &str) -> Result<MirrorStatsResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/stats/mirror", instance)))
+            .get(self.instance_url(instance, "/stats/mirror"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -304,7 +335,7 @@ impl ApiClient {
     ) -> Result<MirrorWithStatsResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/mirror/with_stats", instance)))
+            .get(self.instance_url(instance, "/mirror/with_stats"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -316,7 +347,7 @@ impl ApiClient {
     pub async fn list_conntrack(&self, instance: &str) -> Result<ConntrackResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/conntrack", instance)))
+            .get(self.instance_url(instance, "/conntrack"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -326,7 +357,7 @@ impl ApiClient {
     pub async fn flush_conntrack(&self, instance: &str) -> Result<ConntrackFlushResponse, String> {
         let resp = self
             .client
-            .delete(self.url(&format!("/api/v1/{}/conntrack", instance)))
+            .delete(self.instance_url(instance, "/conntrack"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -338,7 +369,7 @@ impl ApiClient {
     pub async fn get_config(&self, instance: &str) -> Result<ConfigResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/config", instance)))
+            .get(self.instance_url(instance, "/config"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -352,7 +383,7 @@ impl ApiClient {
     ) -> Result<MessageResponse, String> {
         let resp = self
             .client
-            .put(self.url(&format!("/api/v1/{}/config", instance)))
+            .put(self.instance_url(instance, "/config"))
             .json(req)
             .send()
             .await
@@ -365,7 +396,7 @@ impl ApiClient {
     pub async fn stats_overview(&self, instance: &str) -> Result<StatsOverview, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/stats", instance)))
+            .get(self.instance_url(instance, "/stats"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -375,7 +406,7 @@ impl ApiClient {
     pub async fn stats_rules(&self, instance: &str) -> Result<RuleStatsResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/stats/rules", instance)))
+            .get(self.instance_url(instance, "/stats/rules"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -389,7 +420,8 @@ impl ApiClient {
     ) -> Result<FlowStatsResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/stats/flows?top={}", instance, top)))
+            .get(self.instance_url(instance, "/stats/flows"))
+            .query(&[("top", top)])
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -399,7 +431,7 @@ impl ApiClient {
     pub async fn stats_qos(&self, instance: &str) -> Result<QosStatsResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/stats/qos", instance)))
+            .get(self.instance_url(instance, "/stats/qos"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -409,7 +441,7 @@ impl ApiClient {
     pub async fn stats_groups(&self, instance: &str) -> Result<GroupStatsResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/stats/groups", instance)))
+            .get(self.instance_url(instance, "/stats/groups"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -421,7 +453,8 @@ impl ApiClient {
     pub async fn list_tcprt(&self, instance: &str, top: usize) -> Result<TcpRtResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/tcprt?top={}", instance, top)))
+            .get(self.instance_url(instance, "/tcprt"))
+            .query(&[("top", top)])
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -431,7 +464,7 @@ impl ApiClient {
     pub async fn flush_tcprt(&self, instance: &str) -> Result<TcpRtFlushResponse, String> {
         let resp = self
             .client
-            .delete(self.url(&format!("/api/v1/{}/tcprt", instance)))
+            .delete(self.instance_url(instance, "/tcprt"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -470,7 +503,7 @@ impl ApiClient {
     pub async fn tcprt_histogram(&self, instance: &str) -> Result<TcpRtHistogramResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/tcprt/histogram", instance)))
+            .get(self.instance_url(instance, "/tcprt/histogram"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -480,7 +513,7 @@ impl ApiClient {
     pub async fn tcprt_states(&self, instance: &str) -> Result<TcpRtStatesResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/tcprt/states", instance)))
+            .get(self.instance_url(instance, "/tcprt/states"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -596,7 +629,7 @@ impl ApiClient {
     pub async fn get_chain(&self, name: &str) -> Result<ServiceChainEntry, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/chains/{}", name)))
+            .get(self.chain_url(name))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -620,7 +653,7 @@ impl ApiClient {
     pub async fn delete_chain(&self, name: &str) -> Result<MessageResponse, String> {
         let resp = self
             .client
-            .delete(self.url(&format!("/api/v1/chains/{}", name)))
+            .delete(self.chain_url(name))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -666,7 +699,7 @@ impl ApiClient {
     ) -> Result<MessageResponse, String> {
         let resp = self
             .client
-            .post(self.url(&format!("/api/v1/{}/trace", instance)))
+            .post(self.instance_url(instance, "/trace"))
             .json(req)
             .send()
             .await
@@ -677,7 +710,7 @@ impl ApiClient {
     pub async fn stop_trace(&self, instance: &str) -> Result<MessageResponse, String> {
         let resp = self
             .client
-            .delete(self.url(&format!("/api/v1/{}/trace", instance)))
+            .delete(self.instance_url(instance, "/trace"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -687,7 +720,8 @@ impl ApiClient {
     pub async fn list_trace(&self, instance: &str, top: usize) -> Result<TraceResponse, String> {
         let resp = self
             .client
-            .get(self.url(&format!("/api/v1/{}/trace?top={}", instance, top)))
+            .get(self.instance_url(instance, "/trace"))
+            .query(&[("top", top)])
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;
@@ -697,7 +731,7 @@ impl ApiClient {
     pub async fn flush_trace(&self, instance: &str) -> Result<TraceFlushResponse, String> {
         let resp = self
             .client
-            .delete(self.url(&format!("/api/v1/{}/trace/flush", instance)))
+            .delete(self.instance_url(instance, "/trace/flush"))
             .send()
             .await
             .map_err(|e| self.connection_error(e))?;

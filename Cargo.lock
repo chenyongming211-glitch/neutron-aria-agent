@@ -156,6 +156,7 @@ version = "0.1.0"
 dependencies = [
  "aria-api",
  "clap",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
