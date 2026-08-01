@@ -19,7 +19,8 @@ install   Build or use an egg, backup current agent egg, copy it into
           and validate imports/entrypoint.
 smoke     Validate the current ${SERVICE_NAME} egg can import production ACL
           source code and run the neutron-aria-agent console entry point.
-rollback  Restore the latest backed-up agent egg.
+rollback  Restore the latest backed-up agent egg, or remove the agent egg if
+          no previous installation existed.
 EOF
 }
 
@@ -74,13 +75,18 @@ resolve_egg() {
 
 backup_current_egg() {
     mkdir -p "${STATE_DIR}"
-    local ts backup
+    local ts backup marker
     ts="$(timestamp)"
+    marker="${STATE_DIR}/${EGG_NAME}.${ts}.none"
     backup="${STATE_DIR}/${EGG_NAME}.${ts}.bak"
     if docker exec -u 0 "${SERVICE_NAME}" test -f "$(container_egg_path)"; then
         docker cp "${SERVICE_NAME}:$(container_egg_path)" "${backup}"
         ln -sfn "${backup}" "${STATE_DIR}/${EGG_NAME}.latest.bak"
         log "Backed up current agent egg to ${backup}"
+    else
+        : > "${marker}"
+        ln -sfn "${marker}" "${STATE_DIR}/${EGG_NAME}.latest.bak"
+        log "No existing agent egg found; rollback will remove the installation"
     fi
 }
 
@@ -159,14 +165,24 @@ rollback() {
     require_root_host
     local backup="${STATE_DIR}/${EGG_NAME}.latest.bak"
     if [ ! -e "${backup}" ]; then
-        echo "No agent egg backup found at ${backup}" >&2
+        echo "No agent egg backup marker found at ${backup}" >&2
         exit 1
     fi
-    log "Restoring agent egg from ${backup}"
-    docker cp "$(readlink -f "${backup}")" "${SERVICE_NAME}:$(container_egg_path)"
-    docker exec -u 0 "${SERVICE_NAME}" chmod 0644 "$(container_egg_path)"
-    restart_agent_if_requested "${RESTART_AGENT_AFTER_ROLLBACK}"
-    smoke
+    local target
+    target="$(readlink -f "${backup}")"
+    if [ -f "${target}" ] && [ "${target##*.}" = "bak" ]; then
+        log "Restoring agent egg from ${backup}"
+        docker cp "${target}" "${SERVICE_NAME}:$(container_egg_path)"
+        docker exec -u 0 "${SERVICE_NAME}" chmod 0644 "$(container_egg_path)"
+        restart_agent_if_requested "${RESTART_AGENT_AFTER_ROLLBACK}"
+        smoke
+    else
+        log "Removing agent egg from ${SERVICE_NAME}"
+        docker exec -u 0 "${SERVICE_NAME}" rm -f "$(container_egg_path)"
+        docker exec -u 0 "${SERVICE_NAME}" \
+            sed -i "\\|${EGG_NAME}|d" "${SITE_PACKAGES}/easy-install.pth" || true
+        restart_agent_if_requested "${RESTART_AGENT_AFTER_ROLLBACK}"
+    fi
     log "agent egg rollback complete"
 }
 
