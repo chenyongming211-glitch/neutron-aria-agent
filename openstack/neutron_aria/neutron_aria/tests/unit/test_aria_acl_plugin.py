@@ -269,6 +269,155 @@ class AriaAclPluginTestCase(unittest.TestCase):
         self.assertFalse(extended["ports"]["aria_acl_enabled"]["allow_post"])
         self.assertFalse(extended["ports"]["aria_acl_enabled"]["allow_put"])
 
+    def test_port_summary_projects_effective_acl_and_exact_host_runtime(self):
+        plugin = AriaAclPlugin(now=lambda: 0.0)
+        plugin.create_aria_acl_policy(None, {
+            "id": "policy-1",
+            "project_id": "project-1",
+            "name": "web",
+        })
+        plugin.create_aria_acl_binding(None, {
+            "id": "binding-1",
+            "project_id": "project-1",
+            "policy_id": "policy-1",
+            "target_type": "port",
+            "target_id": "port-1",
+        })
+        plugin.report_aria_acl_port_status(None, {
+            "port_id": "port-1",
+            "host": "old-host",
+            "effective_policy_id": "policy-1",
+            "binding_id": "binding-1",
+            "status": "degraded",
+            "reason": "old-host-state",
+        })
+        plugin.report_aria_acl_port_status(None, {
+            "port_id": "port-1",
+            "host": "ostack2",
+            "effective_policy_id": "policy-1",
+            "binding_id": "binding-1",
+            "status": "ready",
+            "reason": "ready",
+        })
+        port = {
+            "id": "port-1",
+            "network_id": "network-1",
+            "device_owner": "compute:nova",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+            "binding:host_id": "ostack2",
+        }
+
+        projected = plugin.extend_aria_acl_port_dict(port)
+
+        self.assertIs(port, projected)
+        self.assertTrue(projected["aria_acl_enabled"])
+        self.assertEqual("policy-1", projected["aria_acl_effective_policy_id"])
+        self.assertEqual("web", projected["aria_acl_effective_policy_name"])
+        self.assertEqual("port", projected["aria_acl_effective_source"])
+        self.assertEqual("binding-1", projected["aria_acl_binding_id"])
+        self.assertEqual(1, projected["aria_acl_effective_revision"])
+        self.assertEqual("applied", projected["aria_acl_runtime_status"])
+        self.assertEqual("ostack2", projected["aria_acl_runtime_host"])
+        self.assertEqual("ready", projected["aria_acl_runtime_reason"])
+
+    def test_port_summary_does_not_reuse_runtime_from_previous_host(self):
+        plugin = AriaAclPlugin(now=lambda: 0.0)
+        plugin.create_aria_acl_policy(None, {
+            "id": "policy-1",
+            "project_id": "project-1",
+        })
+        plugin.create_aria_acl_binding(None, {
+            "id": "binding-1",
+            "project_id": "project-1",
+            "policy_id": "policy-1",
+            "target_type": "port",
+            "target_id": "port-1",
+        })
+        plugin.report_aria_acl_port_status(None, {
+            "port_id": "port-1",
+            "host": "old-host",
+            "effective_policy_id": "policy-1",
+            "binding_id": "binding-1",
+            "status": "ready",
+        })
+        port = {
+            "id": "port-1",
+            "network_id": "network-1",
+            "device_owner": "compute:nova",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+            "binding:host_id": "new-host",
+        }
+
+        plugin.extend_aria_acl_port_dict(port)
+
+        self.assertEqual("pending", port["aria_acl_runtime_status"])
+        self.assertIsNone(port["aria_acl_runtime_host"])
+        self.assertEqual("status_not_reported", port["aria_acl_runtime_reason"])
+
+    def test_port_summary_degrades_stale_runtime_to_unknown(self):
+        plugin = AriaAclPlugin(
+            now=lambda: 4102444800.0,
+            port_status_stale_seconds=1,
+        )
+        plugin.create_aria_acl_policy(None, {
+            "id": "policy-1",
+            "project_id": "project-1",
+        })
+        plugin.create_aria_acl_binding(None, {
+            "id": "binding-1",
+            "project_id": "project-1",
+            "policy_id": "policy-1",
+            "target_type": "port",
+            "target_id": "port-1",
+        })
+        plugin.report_aria_acl_port_status(None, {
+            "port_id": "port-1",
+            "host": "ostack2",
+            "effective_policy_id": "policy-1",
+            "binding_id": "binding-1",
+            "status": "ready",
+            "reason": "ready",
+        })
+        port = {
+            "id": "port-1",
+            "network_id": "network-1",
+            "device_owner": "compute:nova",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+            "binding:host_id": "ostack2",
+        }
+
+        plugin.extend_aria_acl_port_dict(port)
+
+        self.assertEqual("unknown", port["aria_acl_runtime_status"])
+        self.assertEqual("ostack2", port["aria_acl_runtime_host"])
+        self.assertEqual("status_stale", port["aria_acl_runtime_reason"])
+
+    def test_port_summary_has_complete_defaults_without_effective_acl(self):
+        plugin = AriaAclPlugin(now=lambda: 0.0)
+        port = {
+            "id": "port-1",
+            "network_id": "network-1",
+            "device_owner": "compute:nova",
+            "binding:vif_type": "ovs",
+            "binding:vnic_type": "normal",
+            "binding:host_id": "ostack2",
+        }
+
+        plugin.extend_aria_acl_port_dict(port)
+
+        self.assertFalse(port["aria_acl_enabled"])
+        self.assertIsNone(port["aria_acl_effective_policy_id"])
+        self.assertIsNone(port["aria_acl_effective_policy_name"])
+        self.assertEqual("none", port["aria_acl_effective_source"])
+        self.assertIsNone(port["aria_acl_binding_id"])
+        self.assertIsNone(port["aria_acl_effective_revision"])
+        self.assertEqual("not_requested", port["aria_acl_runtime_status"])
+        self.assertIsNone(port["aria_acl_runtime_host"])
+        self.assertEqual("no_enabled_binding", port["aria_acl_runtime_reason"])
+
     def test_plugin_advertises_native_sorting_and_pagination(self):
         plugin = AriaAclPlugin()
         self.assertTrue(
