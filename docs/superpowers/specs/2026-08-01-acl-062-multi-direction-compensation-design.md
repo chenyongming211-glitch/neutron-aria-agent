@@ -21,6 +21,9 @@ Delivery evidence:
   [`30683913104`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30683913104)
   passed `fast-contracts`, `neutron-db-contracts`, all selected ACL-062 Rust
   behaviors, and the warning-denied eBPF/userspace/agent static build.
+- Documentation closure: `ca21d51`; Build
+  [`30684151881`](https://github.com/chenyongming211-glitch/aria-firewall/actions/runs/30684151881)
+  passed the exact documentation head.
 - No local Cargo command or privileged field run was performed. The repair is
   a userspace transaction, durable-state, and startup-replay contract whose
   closure evidence is fault-injected Rust behavior plus hosted compilation;

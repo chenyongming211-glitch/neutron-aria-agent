@@ -677,7 +677,7 @@ all compensation failures, and durably fence incomplete recovery.
 Mark `REVIEW-ACL-062` fixed only after exact-head hosted GREEN. Do not close
 ACL-063 or advance the recorded order beyond ACL-062.
 
-- [ ] **Step 6: Commit, push, and verify documentation head**
+- [x] **Step 6: Commit, push, and verify documentation head**
 
 ```bash
 git add docs/superpowers/specs/2026-08-01-acl-062-multi-direction-compensation-design.md \
