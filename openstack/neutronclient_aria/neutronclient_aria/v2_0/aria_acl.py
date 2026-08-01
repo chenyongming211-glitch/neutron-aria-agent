@@ -415,7 +415,15 @@ class AriaAclAddressSetUpdate(_AriaAclUpdate):
 
     def add_known_arguments(self, parser):
         parser.add_argument("--name")
-        parser.add_argument("--member", dest="members", action="append")
+        parser.add_argument(
+            "--replace-member",
+            dest="members",
+            action="append",
+            help=(
+                "Replace the complete address-set membership with the repeated "
+                "CIDR values; omit this option to preserve existing members."
+            ),
+        )
         self._add_enabled(parser)
 
     def args2body(self, parsed_args):

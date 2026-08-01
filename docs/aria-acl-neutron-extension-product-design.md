@@ -630,10 +630,18 @@ neutron aria-acl-address-set-create \
   --description "database subnets" \
   --member 10.10.20.0/24 \
   --member 10.10.21.15/32
+neutron aria-acl-address-set-update <address-set-id> \
+  --replace-member 10.10.20.0/24 \
+  --replace-member 10.10.22.0/24
 neutron aria-acl-address-set-member-add <address-set-id> 10.10.22.0/24
 neutron aria-acl-address-set-member-remove <address-set-id> 10.10.21.15/32
 neutron aria-acl-address-set-delete <address-set-id>
 ```
+
+`aria-acl-address-set-update` 的 `--replace-member` 是显式全量替换操作：
+命令中重复提供的 CIDR 共同组成最终成员集合。省略该选项时保留现有成员。
+更新命令不接受创建阶段使用的 `--member`，避免单个成员参数被误解为增量追加、
+实际却覆盖完整集合。
 
 binding 命令：
 
