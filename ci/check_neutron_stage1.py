@@ -524,6 +524,17 @@ def run_agent_package_installer_test():
     run([bash, os.path.join("ci", "test_neutron_agent_package_installer.sh")])
 
 
+def run_plugin_policy_rollback_test():
+    bash = shutil.which("bash")
+    if not bash:
+        print("SKIP: bash not found; cannot test plugin policy rollback")
+        return
+    print("==> checking plugin policy first-install rollback")
+    run([bash, os.path.join(
+        "ci", "test_neutron_acl_plugin_policy_rollback.sh"
+    )])
+
+
 def run_transaction_state_smoke_test():
     bash = shutil.which("bash")
     if not bash:
@@ -552,6 +563,7 @@ def run_fast_contracts():
     run_smoke_syntax()
     run_fragment_tracking_field_driver_self_test()
     run_agent_package_installer_test()
+    run_plugin_policy_rollback_test()
     run_transaction_state_smoke_test()
     run_db_crud_adminrc_test()
 
