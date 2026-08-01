@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::net::SocketAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -65,6 +66,8 @@ struct Config {
     max_port_policies: u32,
     #[serde(default = "default_listen_addr")]
     listen_addr: String,
+    #[serde(default)]
+    allow_unauthenticated_non_loopback: bool,
     #[serde(default = "default_neutron_socket_path")]
     neutron_socket_path: String,
     #[serde(default = "default_neutron_socket_mode")]
@@ -282,6 +285,7 @@ impl Default for Config {
             iface_pattern: default_iface_pattern(),
             max_port_policies: default_max_port_policies(),
             listen_addr: default_listen_addr(),
+            allow_unauthenticated_non_loopback: false,
             neutron_socket_path: default_neutron_socket_path(),
             neutron_socket_mode: default_neutron_socket_mode(),
             neutron_peercred_enforce: default_neutron_peercred_enforce(),
@@ -310,6 +314,24 @@ impl Config {
 
     fn neutron_socket_enabled(&self) -> bool {
         self.mode == AgentMode::NeutronManaged
+    }
+
+    fn management_listen_addr(&self) -> Result<SocketAddr, String> {
+        let listen_addr = self.listen_addr.parse::<SocketAddr>().map_err(|_| {
+            format!(
+                "invalid listen_addr '{}': expected an explicit IP socket such as 127.0.0.1:8080 or [::1]:8080",
+                self.listen_addr
+            )
+        })?;
+
+        if listen_addr.ip().is_loopback() || self.allow_unauthenticated_non_loopback {
+            return Ok(listen_addr);
+        }
+
+        Err(format!(
+            "listen_addr '{}' is not loopback; set allow_unauthenticated_non_loopback = true only when an external security boundary protects the unauthenticated root management API",
+            self.listen_addr
+        ))
     }
 
     fn fragment_tracking_settings(&self) -> Result<FragmentTrackingSettings, String> {
@@ -805,9 +827,26 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let management_listen_addr = match config.management_listen_addr() {
+        Ok(listen_addr) => listen_addr,
+        Err(e) => {
+            eprintln!(
+                "Error: invalid management API listener configuration: {}",
+                e
+            );
+            std::process::exit(1);
+        }
+    };
     if let Err(e) = init_tracing(&config) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
+    }
+    if !management_listen_addr.ip().is_loopback() {
+        warn!(
+            listen_addr = %management_listen_addr,
+            allow_unauthenticated_non_loopback = config.allow_unauthenticated_non_loopback,
+            "unauthenticated root HTTP management API exposed on non-loopback address"
+        );
     }
     if config.mode == AgentMode::NeutronManaged && config.requested_auto_attach() {
         warn!(
@@ -862,7 +901,8 @@ async fn main() {
         state_path = %config.state_path,
         iface_pattern = %config.iface_pattern,
         max_port_policies = config.max_port_policies,
-        listen_addr = %config.listen_addr,
+        listen_addr = %management_listen_addr,
+        allow_unauthenticated_non_loopback = config.allow_unauthenticated_non_loopback,
         neutron_socket_path = %config.neutron_socket_path,
         neutron_socket_mode = format_args!("{:o}", config.neutron_socket_mode),
         neutron_peercred_enforce = config.neutron_peercred_enforce,
@@ -948,9 +988,9 @@ async fn main() {
     ));
 
     let router = api_routes::build_router(control_plane.clone());
-    let listen_addr = config.listen_addr.clone();
-    let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
-        Ok(l) => l,
+    let listen_addr = management_listen_addr;
+    let listener = match tokio::net::TcpListener::bind(listen_addr).await {
+        Ok(listener) => listener,
         Err(e) => {
             error!(listen_addr = %listen_addr, error = %e, "failed to bind HTTP server");
             std::process::exit(1);

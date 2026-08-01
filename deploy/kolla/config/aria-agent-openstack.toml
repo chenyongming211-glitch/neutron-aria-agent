@@ -14,6 +14,7 @@ max_port_policies = 16384
 fragment_tracking_field_verified = false
 
 listen_addr = "127.0.0.1:8080"
+allow_unauthenticated_non_loopback = false
 neutron_socket_path = "/run/aria/aria-agent.sock"
 # Decimal 432 is octal 0660. The neutron-aria-agent container must share the
 # neutron-aria group instead of relying on a world-writable control socket.

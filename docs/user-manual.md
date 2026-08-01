@@ -77,6 +77,7 @@ state_path = "/var/lib/aria-agent"
 iface_pattern = "^(eth|tap)"
 max_port_policies = 16384
 listen_addr = "127.0.0.1:8080"
+allow_unauthenticated_non_loopback = false
 log_file_path = "/var/log/aria-agent/aria-agent.log"
 EOF
 ```
@@ -105,6 +106,11 @@ EOF
   - 端口 bitmap 上限
 - `listen_addr`
   - HTTP API 监听地址
+  - 必须是明确的 IP 和端口；默认只允许 IPv4/IPv6 loopback，不解析 hostname
+- `allow_unauthenticated_non_loopback`
+  - 默认 `false`
+  - 仅在外部安全边界已经保护 root HTTP 管理面时才可显式设为 `true`
+  - 该开关不会为 HTTP API 增加认证或加密
 - `log_file_path`
   - 文件日志路径
   - 留空表示禁用文件日志，仅保留 `journald`

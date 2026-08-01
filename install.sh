@@ -281,6 +281,7 @@ state_path = "/var/lib/aria-agent"
 iface_pattern = "^(eth|tap)"
 max_port_policies = 16384
 listen_addr = "127.0.0.1:8080"
+allow_unauthenticated_non_loopback = false
 log_format = "text"
 log_filter = "info"
 log_file_path = "/var/log/aria-agent/aria-agent.log"
